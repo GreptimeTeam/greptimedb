@@ -16,18 +16,20 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use catalog::kvbackend::MetaKvBackend;
+use common_meta::cache::{new_table_route_cache, TableRouteCacheRef};
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{Region, RegionRoute};
-use common_query::prelude::Expr;
+use datafusion_expr::expr::Expr;
 use datafusion_expr::expr_fn::{and, binary_expr, col, or};
 use datafusion_expr::{lit, Operator};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder};
 use meta_client::client::MetaClient;
+use moka::future::CacheBuilder;
 use partition::columns::RangeColumnsPartitionRule;
 use partition::expr::{Operand, PartitionExpr, RestrictedOp};
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
@@ -81,6 +83,15 @@ fn new_test_region_wal_options(regions: Vec<RegionNumber>) -> HashMap<RegionNumb
     HashMap::default()
 }
 
+fn test_new_table_route_cache(kv_backend: KvBackendRef) -> TableRouteCacheRef {
+    let cache = CacheBuilder::new(128).build();
+    Arc::new(new_table_route_cache(
+        "table_route_cache".to_string(),
+        cache,
+        kv_backend.clone(),
+    ))
+}
+
 /// Create a partition rule manager with two tables, one is partitioned by single column, and
 /// the other one is two. The tables are under default catalog and schema.
 ///
@@ -101,7 +112,8 @@ pub(crate) async fn create_partition_rule_manager(
     kv_backend: KvBackendRef,
 ) -> PartitionRuleManagerRef {
     let table_metadata_manager = TableMetadataManager::new(kv_backend.clone());
-    let partition_manager = Arc::new(PartitionRuleManager::new(kv_backend));
+    let table_route_cache = test_new_table_route_cache(kv_backend.clone());
+    let partition_manager = Arc::new(PartitionRuleManager::new(kv_backend, table_route_cache));
 
     let regions = vec![1u32, 2, 3];
     let region_wal_options = new_test_region_wal_options(regions.clone());
@@ -130,7 +142,7 @@ pub(crate) async fn create_partition_rule_manager(
                     },
                     leader_peer: Some(Peer::new(3, "")),
                     follower_peers: vec![],
-                    leader_status: None,
+                    leader_state: None,
                     leader_down_since: None,
                 },
                 RegionRoute {
@@ -161,7 +173,7 @@ pub(crate) async fn create_partition_rule_manager(
                     },
                     leader_peer: Some(Peer::new(2, "")),
                     follower_peers: vec![],
-                    leader_status: None,
+                    leader_state: None,
                     leader_down_since: None,
                 },
                 RegionRoute {
@@ -184,7 +196,7 @@ pub(crate) async fn create_partition_rule_manager(
                     },
                     leader_peer: Some(Peer::new(1, "")),
                     follower_peers: vec![],
-                    leader_status: None,
+                    leader_state: None,
                     leader_down_since: None,
                 },
             ]),
@@ -244,10 +256,11 @@ async fn test_find_partition_rule() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_find_regions() {
-    let kv_backend = MetaKvBackend {
+    let kv_backend = Arc::new(MetaKvBackend {
         client: Arc::new(MetaClient::default()),
-    };
-    let partition_manager = Arc::new(PartitionRuleManager::new(Arc::new(kv_backend)));
+    });
+    let table_route_cache = test_new_table_route_cache(kv_backend.clone());
+    let partition_manager = Arc::new(PartitionRuleManager::new(kv_backend, table_route_cache));
 
     // PARTITION BY RANGE (a) (
     //   PARTITION r1 VALUES LESS THAN (10),
@@ -272,50 +285,50 @@ async fn test_find_regions() {
 
     // test simple filter
     test(
-        vec![binary_expr(col("a"), Operator::Lt, lit(10)).into()], // a < 10
+        vec![binary_expr(col("a"), Operator::Lt, lit(10))], // a < 10
         vec![0],
     );
     test(
-        vec![binary_expr(col("a"), Operator::LtEq, lit(10)).into()], // a <= 10
+        vec![binary_expr(col("a"), Operator::LtEq, lit(10))], // a <= 10
         vec![0, 1],
     );
     test(
-        vec![binary_expr(lit(20), Operator::Gt, col("a")).into()], // 20 > a
+        vec![binary_expr(lit(20), Operator::Gt, col("a"))], // 20 > a
         vec![0, 1],
     );
     test(
-        vec![binary_expr(lit(20), Operator::GtEq, col("a")).into()], // 20 >= a
+        vec![binary_expr(lit(20), Operator::GtEq, col("a"))], // 20 >= a
         vec![0, 1, 2],
     );
     test(
-        vec![binary_expr(lit(45), Operator::Eq, col("a")).into()], // 45 == a
+        vec![binary_expr(lit(45), Operator::Eq, col("a"))], // 45 == a
         vec![2],
     );
     test(
-        vec![binary_expr(col("a"), Operator::NotEq, lit(45)).into()], // a != 45
+        vec![binary_expr(col("a"), Operator::NotEq, lit(45))], // a != 45
         vec![0, 1, 2, 3],
     );
     test(
-        vec![binary_expr(col("a"), Operator::Gt, lit(50)).into()], // a > 50
+        vec![binary_expr(col("a"), Operator::Gt, lit(50))], // a > 50
         vec![3],
     );
 
     // test multiple filters
     test(
         vec![
-            binary_expr(col("a"), Operator::Gt, lit(10)).into(),
-            binary_expr(col("a"), Operator::Gt, lit(50)).into(),
+            binary_expr(col("a"), Operator::Gt, lit(10)),
+            binary_expr(col("a"), Operator::Gt, lit(50)),
         ], // [a > 10, a > 50]
         vec![3],
     );
 
     // test finding all regions when provided with not supported filters or not partition column
     test(
-        vec![binary_expr(col("row_id"), Operator::LtEq, lit(123)).into()], // row_id <= 123
+        vec![binary_expr(col("row_id"), Operator::LtEq, lit(123))], // row_id <= 123
         vec![0, 1, 2, 3],
     );
     test(
-        vec![binary_expr(col("c"), Operator::Gt, lit(123)).into()], // c > 789
+        vec![binary_expr(col("c"), Operator::Gt, lit(123))], // c > 789
         vec![0, 1, 2, 3],
     );
 
@@ -327,24 +340,21 @@ async fn test_find_regions() {
                 binary_expr(col("row_id"), Operator::Lt, lit(1)),
                 binary_expr(col("a"), Operator::Lt, lit(1)),
             ),
-        )
-        .into()], // row_id < 1 OR (row_id < 1 AND a > 1)
+        )], // row_id < 1 OR (row_id < 1 AND a > 1)
         vec![0, 1, 2, 3],
     );
     test(
         vec![or(
             binary_expr(col("a"), Operator::Lt, lit(20)),
             binary_expr(col("a"), Operator::GtEq, lit(20)),
-        )
-        .into()], // a < 20 OR a >= 20
+        )], // a < 20 OR a >= 20
         vec![0, 1, 2, 3],
     );
     test(
         vec![and(
             binary_expr(col("a"), Operator::Lt, lit(20)),
             binary_expr(col("a"), Operator::Lt, lit(50)),
-        )
-        .into()], // a < 20 AND a < 50
+        )], // a < 20 AND a < 50
         vec![0, 1],
     );
 
@@ -354,8 +364,7 @@ async fn test_find_regions() {
         vec![and(
             binary_expr(col("a"), Operator::Lt, lit(20)),
             binary_expr(col("a"), Operator::GtEq, lit(20)),
-        )
-        .into()]
+        )]
         .as_slice(),
     ); // a < 20 AND a >= 20
     assert!(matches!(

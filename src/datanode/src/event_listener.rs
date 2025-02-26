@@ -41,19 +41,13 @@ pub struct RegionServerEventSender(pub(crate) UnboundedSender<RegionServerEvent>
 impl RegionServerEventListener for RegionServerEventSender {
     fn on_region_registered(&self, region_id: RegionId) {
         if let Err(e) = self.0.send(RegionServerEvent::Registered(region_id)) {
-            error!(
-                "Failed to send registering region: {region_id} event, source: {}",
-                e
-            );
+            error!(e; "Failed to send registering region: {region_id} event");
         }
     }
 
     fn on_region_deregistered(&self, region_id: RegionId) {
         if let Err(e) = self.0.send(RegionServerEvent::Deregistered(region_id)) {
-            error!(
-                "Failed to send deregistering region: {region_id} event, source: {}",
-                e
-            );
+            error!(e; "Failed to send deregistering region: {region_id} event");
         }
     }
 }

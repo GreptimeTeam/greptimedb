@@ -165,6 +165,10 @@ tql eval (3000, 3000, '1s') http_requests AND ON (dummy) vector(1);
 -- SQLNESS SORT_RESULT 3 1
 tql eval (3000, 3000, '1s') http_requests AND IGNORING (g, instance, job) vector(1);
 
+-- https://github.com/GreptimeTeam/greptimedb/issues/5392
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3000, 3000, '1s') vector(1) * http_requests;
+
 drop table http_requests;
 
 drop table cpu_count;
@@ -199,6 +203,95 @@ tql eval (0, 2000, '400') t2 or on () t1;
 -- SQLNESS SORT_RESULT 3 1
 tql eval (0, 2000, '400') t2 or on(job) t1;
 
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') sum(t1{job="a"});
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') sum(t1{job="a"}) - sum(t1{job="e"} or vector(1));
+
 drop table t1;
 
 drop table t2;
+
+create table stats_used_bytes (
+    ts timestamp time index,
+    namespace string,
+    greptime_value double,
+    primary key (namespace)
+);
+
+create table stats_capacity_bytes (
+    ts timestamp time index,
+    namespace string,
+    greptime_value double,
+    primary key (namespace)
+);
+
+insert into stats_used_bytes values
+    (0, "namespace1", 1.0),
+    (0, "namespace2", 2.0),
+    (500000, "namespace1", 10.0),
+    (500000, "namespace2", 20.0),
+    (1000000, "namespace1", 25.0),
+    (1000000, "namespace2", 26.0);
+
+insert into stats_capacity_bytes values
+    (0, "namespace1", 30.0),
+    (0, "namespace2", 30.0),
+    (500000, "namespace1", 30.0),
+    (500000, "namespace2", 30.0),
+    (1000000, "namespace1", 30.0),
+    (1000000, "namespace2", 30.0);
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') max by (namespace) (stats_used_bytes{namespace=~".+"}) / max by (namespace) (stats_capacity_bytes{namespace=~".+"}) >= (80 / 100);
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') max by (namespace) (stats_used_bytes{namespace=~".+"}) and (max by (namespace) (stats_used_bytes{namespace=~".+"}) / (max by (namespace) (stats_capacity_bytes{namespace=~".+"})) >= (80 / 100));
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') count(max by (namespace) (stats_used_bytes{namespace=~".+"}) and (max by (namespace) (stats_used_bytes{namespace=~".+"}) / (max by (namespace) (stats_capacity_bytes{namespace=~".+"})) >= (80 / 100))) or vector(0);
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') count(max by (namespace) (stats_used_bytes{namespace=~".+"}) and (max by (namespace) (stats_used_bytes{namespace=~".+"}) / (max by (namespace) (stats_capacity_bytes{namespace=~".+"})) >= (80 / 100)));
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') count(max by (namespace) (stats_used_bytes{namespace=~".+"}) unless (max by (namespace) (stats_used_bytes{namespace=~".+"}) / (max by (namespace) (stats_capacity_bytes{namespace=~".+"})) >= (80 / 100)));
+
+drop table stats_used_bytes;
+
+drop table stats_capacity_bytes;
+
+
+create table cache_hit (
+    ts timestamp time index,
+    job string,
+    greptime_value double,
+    primary key (job)
+);
+
+create table cache_miss (
+    ts timestamp time index,
+    job string,
+    greptime_value double,
+    primary key (job)
+);
+
+insert into cache_hit values
+    (3000, "read", 1.0),
+    (3000, "write", 2.0),
+    (4000, "read", 3.0),
+    (4000, "write", 4.0);
+
+insert into cache_miss values
+    (3000, "read", 1.0),
+    (3000, "write", 2.0),
+    (4000, "read", 1.0),
+    (4000, "write", 2.0);
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3, 4, '1s') cache_hit / (cache_miss + cache_hit);
+
+drop table cache_hit;
+
+drop table cache_miss;

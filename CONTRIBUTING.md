@@ -2,7 +2,11 @@
 
 Thanks a lot for considering contributing to GreptimeDB. We believe people like you would make GreptimeDB a great product. We intend to build a community where individuals can have open talks, show respect for one another, and speak with true ❤️. Meanwhile, we are to keep transparency and make your effort count here.
 
-Please read the guidelines, and they can help you get started. Communicate with respect to developers maintaining and developing the project. In return, they should reciprocate that respect by addressing your issue, reviewing changes, as well as helping finalize and merge your pull requests.
+You can find our contributors at https://github.com/GreptimeTeam/greptimedb/graphs/contributors. When you dedicate to GreptimeDB for a few months and keep bringing high-quality contributions (code, docs, advocate, etc.), you will be a candidate of a committer.
+
+A committer will be granted both read & write access to GreptimeDB repos. Check the [AUTHOR.md](AUTHOR.md) file for all current individual committers.
+
+Please read the guidelines, and they can help you get started. Communicate respectfully with the developers maintaining and developing the project. In return, they should reciprocate that respect by addressing your issue, reviewing changes, as well as helping finalize and merge your pull requests.
 
 Follow our [README](https://github.com/GreptimeTeam/greptimedb#readme) to get the whole picture of the project. To learn about the design of GreptimeDB, please refer to the [design docs](https://github.com/GrepTimeTeam/docs).
 
@@ -10,7 +14,7 @@ Follow our [README](https://github.com/GreptimeTeam/greptimedb#readme) to get th
 
 It can feel intimidating to contribute to a complex project, but it can also be exciting and fun. These general notes will help everyone participate in this communal activity.
 
-- Follow the [Code of Conduct](https://github.com/GreptimeTeam/greptimedb/blob/main/CODE_OF_CONDUCT.md)
+- Follow the [Code of Conduct](https://github.com/GreptimeTeam/.github/blob/main/.github/CODE_OF_CONDUCT.md)
 - Small changes make huge differences. We will happily accept a PR making a single character change if it helps move forward. Don't wait to have everything working.
 - Check the closed issues before opening your issue.
 - Try to follow the existing style of the code.
@@ -26,7 +30,7 @@ Pull requests are great, but we accept all kinds of other help if you like. Such
 
 ## Code of Conduct
 
-Also, there are things that we are not looking for because they don't match the goals of the product or benefit the community. Please read [Code of Conduct](https://github.com/GreptimeTeam/greptimedb/blob/main/CODE_OF_CONDUCT.md); we hope everyone can keep good manners and become an honored member.
+Also, there are things that we are not looking for because they don't match the goals of the product or benefit the community. Please read [Code of Conduct](https://github.com/GreptimeTeam/.github/blob/main/.github/CODE_OF_CONDUCT.md); we hope everyone can keep good manners and become an honored member.
 
 ## License
 
@@ -50,8 +54,8 @@ GreptimeDB uses the [Apache 2.0 license](https://github.com/GreptimeTeam/greptim
 
 - To ensure that community is free and confident in its ability to use your contributions, please sign the Contributor License Agreement (CLA) which will be incorporated in the pull request process.
 - Make sure all files have proper license header (running `docker run --rm -v $(pwd):/github/workspace ghcr.io/korandoru/hawkeye-native:v3 format` from the project root).
-- Make sure all your codes are formatted and follow the [coding style](https://pingcap.github.io/style-guide/rust/).
-- Make sure all unit tests are passed (using `cargo test --workspace` or [nextest](https://nexte.st/index.html) `cargo nextest run`).
+- Make sure all your codes are formatted and follow the [coding style](https://pingcap.github.io/style-guide/rust/) and [style guide](docs/style-guide.md).
+- Make sure all unit tests are passed using [nextest](https://nexte.st/index.html) `cargo nextest run`.
 - Make sure all clippy warnings are fixed (you can check it locally by running `cargo clippy --workspace --all-targets -- -D warnings`).
 
 #### `pre-commit` Hooks

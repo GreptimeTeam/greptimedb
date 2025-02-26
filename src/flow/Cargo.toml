@@ -9,22 +9,74 @@ workspace = true
 
 [dependencies]
 api.workspace = true
+arrow.workspace = true
+arrow-schema.workspace = true
+async-recursion = "1.0"
+async-trait.workspace = true
+bytes.workspace = true
+cache.workspace = true
+catalog.workspace = true
+client.workspace = true
+common-base.workspace = true
+common-config.workspace = true
 common-decimal.workspace = true
 common-error.workspace = true
+common-frontend.workspace = true
+common-function.workspace = true
+common-grpc.workspace = true
 common-macro.workspace = true
+common-meta.workspace = true
+common-query.workspace = true
+common-recordbatch.workspace = true
+common-runtime.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
+common-version.workspace = true
+config.workspace = true
+datafusion.workspace = true
+datafusion-common.workspace = true
+datafusion-expr.workspace = true
+datafusion-physical-expr.workspace = true
+datafusion-substrait.workspace = true
 datatypes.workspace = true
+enum-as-inner = "0.6.0"
 enum_dispatch = "0.3"
-hydroflow = "0.5.0"
+futures.workspace = true
+get-size2 = "0.1.2"
+greptime-proto.workspace = true
+# This fork of hydroflow is simply for keeping our dependency in our org, and pin the version
+# otherwise it is the same with upstream repo
+http.workspace = true
+hydroflow = { git = "https://github.com/GreptimeTeam/hydroflow.git", branch = "main" }
 itertools.workspace = true
+lazy_static.workspace = true
+meta-client.workspace = true
+nom = "7.1.3"
 num-traits = "0.2"
+num_cpus.workspace = true
+operator.workspace = true
+partition.workspace = true
+prometheus.workspace = true
+prost.workspace = true
+query.workspace = true
 serde.workspace = true
 servers.workspace = true
+session.workspace = true
 smallvec.workspace = true
 snafu.workspace = true
+store-api.workspace = true
+strum.workspace = true
+substrait.workspace = true
+table.workspace = true
 tokio.workspace = true
 tonic.workspace = true
 
 [dev-dependencies]
+catalog.workspace = true
+common-catalog.workspace = true
+pretty_assertions = "1.4.0"
+prost.workspace = true
+query.workspace = true
 serde_json = "1.0"
+session.workspace = true
+table.workspace = true

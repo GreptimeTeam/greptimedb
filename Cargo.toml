@@ -1,24 +1,29 @@
 [workspace]
 members = [
-    "benchmarks",
     "src/api",
     "src/auth",
+    "src/cache",
     "src/catalog",
+    "src/cli",
     "src/client",
     "src/cmd",
     "src/common/base",
     "src/common/catalog",
     "src/common/config",
     "src/common/datasource",
+    "src/common/decimal",
     "src/common/error",
+    "src/common/frontend",
     "src/common/function",
-    "src/common/macro",
     "src/common/greptimedb-telemetry",
     "src/common/grpc",
     "src/common/grpc-expr",
+    "src/common/macro",
     "src/common/mem-prof",
     "src/common/meta",
+    "src/common/options",
     "src/common/plugins",
+    "src/common/pprof",
     "src/common/procedure",
     "src/common/procedure-test",
     "src/common/query",
@@ -28,7 +33,6 @@ members = [
     "src/common/telemetry",
     "src/common/test-util",
     "src/common/time",
-    "src/common/decimal",
     "src/common/version",
     "src/common/wal",
     "src/datanode",
@@ -36,6 +40,8 @@ members = [
     "src/file-engine",
     "src/flow",
     "src/frontend",
+    "src/index",
+    "src/log-query",
     "src/log-store",
     "src/meta-client",
     "src/meta-srv",
@@ -44,17 +50,16 @@ members = [
     "src/object-store",
     "src/operator",
     "src/partition",
+    "src/pipeline",
     "src/plugins",
     "src/promql",
     "src/puffin",
     "src/query",
-    "src/script",
     "src/servers",
     "src/session",
     "src/sql",
     "src/store-api",
     "src/table",
-    "src/index",
     "tests-fuzz",
     "tests-integration",
     "tests/runner",
@@ -62,110 +67,167 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.7.1"
+version = "0.12.0"
 edition = "2021"
 license = "Apache-2.0"
 
 [workspace.lints]
 clippy.print_stdout = "warn"
 clippy.print_stderr = "warn"
+clippy.dbg_macro = "warn"
 clippy.implicit_clone = "warn"
+clippy.readonly_write_lock = "allow"
 rust.unknown_lints = "deny"
+rust.unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
 
 [workspace.dependencies]
+# DO_NOT_REMOVE_THIS: BEGIN_OF_EXTERNAL_DEPENDENCIES
+# We turn off default-features for some dependencies here so the workspaces which inherit them can
+# selectively turn them on if needed, since we can override default-features = true (from false)
+# for the inherited dependency but cannot do the reverse (override from true to false).
+#
+# See for more detaiils: https://github.com/rust-lang/cargo/issues/11329
 ahash = { version = "0.8", features = ["compile-time-rng"] }
 aquamarine = "0.3"
-arrow = { version = "47.0" }
-arrow-array = "47.0"
-arrow-flight = "47.0"
-arrow-ipc = { version = "47.0", features = ["lz4"] }
-arrow-schema = { version = "47.0", features = ["serde"] }
+arrow = { version = "53.0.0", features = ["prettyprint"] }
+arrow-array = { version = "53.0.0", default-features = false, features = ["chrono-tz"] }
+arrow-flight = "53.0"
+arrow-ipc = { version = "53.0.0", default-features = false, features = ["lz4", "zstd"] }
+arrow-schema = { version = "53.0", features = ["serde"] }
 async-stream = "0.3"
 async-trait = "0.1"
-axum = { version = "0.6", features = ["headers"] }
+# Remember to update axum-extra, axum-macros when updating axum
+axum = "0.8"
+axum-extra = "0.10"
+axum-macros = "0.4"
+backon = "1"
 base64 = "0.21"
 bigdecimal = "0.4.2"
 bitflags = "2.4.1"
 bytemuck = "1.12"
-bytes = { version = "1.5", features = ["serde"] }
+bytes = { version = "1.7", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10.1"
 clap = { version = "4.4", features = ["derive"] }
+config = "0.13.0"
+crossbeam-utils = "0.8"
 dashmap = "5.4"
-datafusion = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
-datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
-datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
-datafusion-optimizer = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
-datafusion-physical-expr = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
-datafusion-sql = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
-datafusion-substrait = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
+datafusion = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
+datafusion-common = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
+datafusion-expr = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
+datafusion-functions = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
+datafusion-optimizer = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
+datafusion-physical-expr = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
+datafusion-physical-plan = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
+datafusion-sql = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
+datafusion-substrait = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
+deadpool = "0.10"
+deadpool-postgres = "0.12"
 derive_builder = "0.12"
-etcd-client = "0.12"
+dotenv = "0.15"
+etcd-client = "0.14"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "06f6297ff3cab578a1589741b504342fbad70453" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "072ce580502e015df1a6b03a185b60309a7c2a7a" }
+hex = "0.4"
+http = "1"
+humantime = "2.1"
 humantime-serde = "1.1"
+hyper = "1.1"
+hyper-util = "0.1"
 itertools = "0.10"
+jsonb = { git = "https://github.com/databendlabs/jsonb.git", rev = "8c8d2fc294a39f3ff08909d60f718639cfba3875", default-features = false }
 lazy_static = "1.4"
-meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "80b72716dcde47ec4161478416a5c6c21343364d" }
+local-ip-address = "0.6"
+loki-proto = { git = "https://github.com/GreptimeTeam/loki-proto.git", rev = "1434ecf23a2654025d86188fb5205e7a74b225d3" }
+meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "5618e779cf2bb4755b499c630fba4c35e91898cb" }
 mockall = "0.11.4"
 moka = "0.12"
+nalgebra = "0.33"
 notify = "6.1"
 num_cpus = "1.16"
 once_cell = "1.18"
-opentelemetry-proto = { git = "https://github.com/waynexia/opentelemetry-rust.git", rev = "33841b38dda79b15f2024952be5f32533325ca02", features = [
+opentelemetry-proto = { version = "0.27", features = [
     "gen-tonic",
     "metrics",
     "trace",
+    "with-serde",
+    "logs",
 ] }
-parquet = "47.0"
+parking_lot = "0.12"
+parquet = { version = "53.0.0", default-features = false, features = ["arrow", "async", "object_store"] }
 paste = "1.0"
 pin-project = "1.0"
 prometheus = { version = "0.13.3", features = ["process"] }
-prost = "0.12"
+promql-parser = { git = "https://github.com/GreptimeTeam/promql-parser.git", features = [
+    "ser",
+], rev = "27abb8e16003a50c720f00d6c85f41f5fa2a2a8e" }
+prost = "0.13"
 raft-engine = { version = "0.4.1", default-features = false }
 rand = "0.8"
+ratelimit = "0.9"
 regex = "1.8"
-regex-automata = { version = "0.4" }
-reqwest = { version = "0.11", default-features = false, features = [
+regex-automata = "0.4"
+reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "rustls-tls-native-roots",
     "stream",
+    "multipart",
 ] }
-rskafka = "0.5"
+rskafka = { git = "https://github.com/influxdata/rskafka.git", rev = "75535b5ad9bae4a5dbb582c82e44dfd81ec10105", features = [
+    "transport-tls",
+] }
+rstest = "0.21"
+rstest_reuse = "0.7"
 rust_decimal = "1.33"
-schemars = "0.8"
+rustc-hash = "2.0"
+rustls = { version = "0.23.20", default-features = false } # override by patch, see [patch.crates-io]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
 serde_with = "3"
+shadow-rs = "0.38"
+similar-asserts = "1.6.0"
 smallvec = { version = "1", features = ["serde"] }
-snafu = "0.7"
+snafu = "0.8"
 sysinfo = "0.30"
-# on branch v0.38.x
-sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "6a93567ae38d42be5c8d08b13c8ff4dde26502ef", features = [
+# on branch v0.52.x
+sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "71dd86058d2af97b9925093d40c4e03360403170", features = [
     "visitor",
-] }
+    "serde",
+] } # on branch v0.44.x
 strum = { version = "0.25", features = ["derive"] }
 tempfile = "3"
-tokio = { version = "1.28", features = ["full"] }
-tokio-stream = { version = "0.1" }
+tokio = { version = "1.40", features = ["full"] }
+tokio-postgres = "0.7"
+tokio-rustls = { version = "0.26.0", default-features = false } # override by patch, see [patch.crates-io]
+tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["io-util", "compat"] }
 toml = "0.8.8"
-tonic = { version = "0.10", features = ["tls"] }
-uuid = { version = "1", features = ["serde", "v4", "fast-rng"] }
+tonic = { version = "0.12", features = ["tls", "gzip", "zstd"] }
+tower = "0.5"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
+typetag = "0.2"
+uuid = { version = "1.7", features = ["serde", "v4", "fast-rng"] }
+zstd = "0.13"
+# DO_NOT_REMOVE_THIS: END_OF_EXTERNAL_DEPENDENCIES
 
 ## workspaces members
 api = { path = "src/api" }
 auth = { path = "src/auth" }
+cache = { path = "src/cache" }
 catalog = { path = "src/catalog" }
+cli = { path = "src/cli" }
 client = { path = "src/client" }
-cmd = { path = "src/cmd" }
+cmd = { path = "src/cmd", default-features = false }
 common-base = { path = "src/common/base" }
 common-catalog = { path = "src/common/catalog" }
 common-config = { path = "src/common/config" }
 common-datasource = { path = "src/common/datasource" }
 common-decimal = { path = "src/common/decimal" }
 common-error = { path = "src/common/error" }
+common-frontend = { path = "src/common/frontend" }
 common-function = { path = "src/common/function" }
 common-greptimedb-telemetry = { path = "src/common/greptimedb-telemetry" }
 common-grpc = { path = "src/common/grpc" }
@@ -173,7 +235,9 @@ common-grpc-expr = { path = "src/common/grpc-expr" }
 common-macro = { path = "src/common/macro" }
 common-mem-prof = { path = "src/common/mem-prof" }
 common-meta = { path = "src/common/meta" }
+common-options = { path = "src/common/options" }
 common-plugins = { path = "src/common/plugins" }
+common-pprof = { path = "src/common/pprof" }
 common-procedure = { path = "src/common/procedure" }
 common-procedure-test = { path = "src/common/procedure-test" }
 common-query = { path = "src/common/query" }
@@ -187,8 +251,10 @@ common-wal = { path = "src/common/wal" }
 datanode = { path = "src/datanode" }
 datatypes = { path = "src/datatypes" }
 file-engine = { path = "src/file-engine" }
-frontend = { path = "src/frontend" }
+flow = { path = "src/flow" }
+frontend = { path = "src/frontend", default-features = false }
 index = { path = "src/index" }
+log-query = { path = "src/log-query" }
 log-store = { path = "src/log-store" }
 meta-client = { path = "src/meta-client" }
 meta-srv = { path = "src/meta-srv" }
@@ -197,11 +263,11 @@ mito2 = { path = "src/mito2" }
 object-store = { path = "src/object-store" }
 operator = { path = "src/operator" }
 partition = { path = "src/partition" }
+pipeline = { path = "src/pipeline" }
 plugins = { path = "src/plugins" }
 promql = { path = "src/promql" }
 puffin = { path = "src/puffin" }
 query = { path = "src/query" }
-script = { path = "src/script" }
 servers = { path = "src/servers" }
 session = { path = "src/session" }
 sql = { path = "src/sql" }
@@ -209,16 +275,37 @@ store-api = { path = "src/store-api" }
 substrait = { path = "src/common/substrait" }
 table = { path = "src/table" }
 
+[patch.crates-io]
+# change all rustls dependencies to use our fork to default to `ring` to make it "just work"
+hyper-rustls = { git = "https://github.com/GreptimeTeam/hyper-rustls", rev = "a951e03" } # version = "0.27.5" with ring patch
+rustls = { git = "https://github.com/GreptimeTeam/rustls", rev = "34fd0c6" }             # version = "0.23.20" with ring patch
+tokio-rustls = { git = "https://github.com/GreptimeTeam/tokio-rustls", rev = "4604ca6" } # version = "0.26.0" with ring patch
+# This is commented, since we are not using aws-lc-sys, if we need to use it, we need to uncomment this line or use a release after this commit, or it wouldn't compile with gcc < 8.1
+# see https://github.com/aws/aws-lc-rs/pull/526
+# aws-lc-sys = { git ="https://github.com/aws/aws-lc-rs", rev = "556558441e3494af4b156ae95ebc07ebc2fd38aa" }
+
 [workspace.dependencies.meter-macros]
 git = "https://github.com/GreptimeTeam/greptime-meter.git"
-rev = "80b72716dcde47ec4161478416a5c6c21343364d"
+rev = "5618e779cf2bb4755b499c630fba4c35e91898cb"
 
 [profile.release]
 debug = 1
 
 [profile.nightly]
 inherits = "release"
-strip = true
+strip = "debuginfo"
 lto = "thin"
 debug = false
 incremental = false
+
+[profile.ci]
+inherits = "dev"
+strip = true
+
+[profile.dev.package.sqlness-runner]
+debug = false
+strip = true
+
+[profile.dev.package.tests-fuzz]
+debug = false
+strip = true

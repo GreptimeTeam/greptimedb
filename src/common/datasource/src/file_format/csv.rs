@@ -17,8 +17,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use arrow::csv;
-#[allow(deprecated)]
-use arrow::csv::reader::infer_reader_schema as infer_csv_schema;
+use arrow::csv::reader::Format;
 use arrow::record_batch::RecordBatch;
 use arrow_schema::{Schema, SchemaRef};
 use async_trait::async_trait;
@@ -29,6 +28,7 @@ use datafusion::physical_plan::SendableRecordBatchStream;
 use derive_builder::Builder;
 use object_store::ObjectStore;
 use snafu::ResultExt;
+use tokio_util::compat::FuturesAsyncReadCompatExt;
 use tokio_util::io::SyncIoBridge;
 
 use super::stream_to_file;
@@ -117,7 +117,7 @@ impl CsvConfig {
         let mut builder = csv::ReaderBuilder::new(self.file_schema.clone())
             .with_delimiter(self.delimiter)
             .with_batch_size(self.batch_size)
-            .has_header(self.has_header);
+            .with_header(self.has_header);
 
         if let Some(proj) = &self.file_projection {
             builder = builder.with_projection(proj.clone());
@@ -160,14 +160,22 @@ impl FileOpener for CsvOpener {
     }
 }
 
-#[allow(deprecated)]
 #[async_trait]
 impl FileFormat for CsvFormat {
     async fn infer_schema(&self, store: &ObjectStore, path: &str) -> Result<Schema> {
+        let meta = store
+            .stat(path)
+            .await
+            .context(error::ReadObjectSnafu { path })?;
+
         let reader = store
             .reader(path)
             .await
-            .context(error::ReadObjectSnafu { path })?;
+            .context(error::ReadObjectSnafu { path })?
+            .into_futures_async_read(0..meta.content_length())
+            .await
+            .context(error::ReadObjectSnafu { path })?
+            .compat();
 
         let decoded = self.compression_type.convert_async_read(reader);
 
@@ -175,12 +183,15 @@ impl FileFormat for CsvFormat {
         let schema_infer_max_record = self.schema_infer_max_record;
         let has_header = self.has_header;
 
-        common_runtime::spawn_blocking_read(move || {
+        common_runtime::spawn_blocking_global(move || {
             let reader = SyncIoBridge::new(decoded);
 
-            let (schema, _records_read) =
-                infer_csv_schema(reader, delimiter, schema_infer_max_record, has_header)
-                    .context(error::InferSchemaSnafu)?;
+            let format = Format::default()
+                .with_delimiter(delimiter)
+                .with_header(has_header);
+            let (schema, _records_read) = format
+                .infer_schema(reader, schema_infer_max_record)
+                .context(error::InferSchemaSnafu)?;
             Ok(schema)
         })
         .await
@@ -243,7 +254,7 @@ mod tests {
                 "c7: Int64: NULL",
                 "c8: Int64: NULL",
                 "c9: Int64: NULL",
-                "c10: Int64: NULL",
+                "c10: Utf8: NULL",
                 "c11: Float64: NULL",
                 "c12: Float64: NULL",
                 "c13: Utf8: NULL"

@@ -19,6 +19,7 @@ use std::time::Duration;
 use auth::tests::{DatabaseAuthInfo, MockUserProvider};
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_recordbatch::RecordBatch;
+use common_runtime::runtime::BuilderBuild;
 use common_runtime::Builder as RuntimeBuilder;
 use datatypes::prelude::VectorRef;
 use datatypes::schema::{ColumnSchema, Schema};
@@ -28,6 +29,7 @@ use mysql_async::{Conn, Row, SslOpts};
 use rand::rngs::StdRng;
 use rand::Rng;
 use servers::error::Result;
+use servers::install_ring_crypto_provider;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
 use servers::server::Server;
 use servers::tls::{ReloadableTlsServerConfig, TlsOption};
@@ -45,14 +47,13 @@ struct MysqlOpts<'a> {
 }
 
 fn create_mysql_server(table: TableRef, opts: MysqlOpts<'_>) -> Result<Box<dyn Server>> {
+    let _ = install_ring_crypto_provider();
     let query_handler = create_testing_sql_query_handler(table);
-    let io_runtime = Arc::new(
-        RuntimeBuilder::default()
-            .worker_threads(4)
-            .thread_name("mysql-io-handlers")
-            .build()
-            .unwrap(),
-    );
+    let io_runtime = RuntimeBuilder::default()
+        .worker_threads(4)
+        .thread_name("mysql-io-handlers")
+        .build()
+        .unwrap();
 
     let mut provider = MockUserProvider::default();
     if let Some(auth_info) = opts.auth_info {
@@ -70,6 +71,7 @@ fn create_mysql_server(table: TableRef, opts: MysqlOpts<'_>) -> Result<Box<dyn S
         Arc::new(MysqlSpawnConfig::new(
             opts.tls.should_force_tls(),
             tls_server_config,
+            0,
             opts.reject_no_database,
         )),
     ))

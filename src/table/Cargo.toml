@@ -11,7 +11,8 @@ testing = []
 workspace = true
 
 [dependencies]
-async-trait = "0.1"
+api.workspace = true
+async-trait.workspace = true
 chrono.workspace = true
 common-base.workspace = true
 common-catalog.workspace = true
@@ -29,9 +30,11 @@ datafusion-physical-expr.workspace = true
 datatypes.workspace = true
 derive_builder.workspace = true
 futures.workspace = true
-humantime = "2.1"
+greptime-proto.workspace = true
+humantime.workspace = true
 humantime-serde.workspace = true
-paste = "1.0"
+lazy_static.workspace = true
+paste.workspace = true
 serde.workspace = true
 snafu.workspace = true
 store-api.workspace = true

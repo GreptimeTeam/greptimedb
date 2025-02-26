@@ -22,8 +22,8 @@ inputs:
     required: true
   push-latest-tag:
     description: Whether to push the latest tag
-    required: false
-    default: 'true'
+    required: true
+    default: 'false'
   dev-mode:
     description: Enable dev mode, only build standard greptime
     required: false
@@ -41,8 +41,8 @@ runs:
         image-name: ${{ inputs.image-name }}
         image-tag: ${{ inputs.version }}
         docker-file: docker/ci/ubuntu/Dockerfile
-        amd64-artifact-name: greptime-linux-amd64-pyo3-${{ inputs.version }}
-        arm64-artifact-name: greptime-linux-arm64-pyo3-${{ inputs.version }}
+        amd64-artifact-name: greptime-linux-amd64-${{ inputs.version }}
+        arm64-artifact-name: greptime-linux-arm64-${{ inputs.version }}
         platforms: linux/amd64,linux/arm64
         push-latest-tag: ${{ inputs.push-latest-tag }}
 

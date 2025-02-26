@@ -25,11 +25,11 @@ SELECT DISTINCT i%2 FROM integers ORDER BY 1;
 --  +-----------------------+
 SELECT DISTINCT i % 2 FROM integers WHERE i<3 ORDER BY i;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: For SELECT DISTINCT, ORDER BY expressions i must appear in select list
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: For SELECT DISTINCT, ORDER BY expressions integers.i must appear in select list
 
 SELECT DISTINCT ON (1) i % 2, i FROM integers WHERE i<3 ORDER BY i;
 
-Error: 3000(PlanQuery), Failed to plan SQL: This feature is not implemented: DISTINCT ON Exprs not supported
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: SELECT DISTINCT ON expressions must match initial ORDER BY expressions
 
 SELECT DISTINCT integers.i FROM integers ORDER BY i DESC;
 

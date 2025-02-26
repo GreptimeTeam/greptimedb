@@ -9,6 +9,24 @@ workspace = true
 
 [dependencies]
 common-base.workspace = true
+common-error.workspace = true
+common-macro.workspace = true
+config.workspace = true
+humantime-serde.workspace = true
 num_cpus.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+serde_with.workspace = true
+snafu.workspace = true
 sysinfo.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+common-telemetry.workspace = true
+common-test-util.workspace = true
+common-wal.workspace = true
+datanode.workspace = true
+meta-client.workspace = true
+serde.workspace = true
+temp-env = "0.3"
+tempfile.workspace = true

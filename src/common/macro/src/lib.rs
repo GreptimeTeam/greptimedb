@@ -35,7 +35,9 @@ pub fn aggr_func_type_store_derive(input: TokenStream) -> TokenStream {
 }
 
 /// A struct can be used as a creator for aggregate function if it has been annotated with this
-/// attribute first. This attribute add a necessary field which is intended to store the input
+/// attribute first.
+///
+/// This attribute add a necessary field which is intended to store the input
 /// data's types to the struct.
 /// This attribute is expected to be used along with derive macro [AggrFuncTypeStore].
 #[proc_macro_attribute]
@@ -44,9 +46,10 @@ pub fn as_aggr_func_creator(args: TokenStream, input: TokenStream) -> TokenStrea
 }
 
 /// Attribute macro to convert an arithimetic function to a range function. The annotated function
-/// should accept servaral arrays as input and return a single value as output. This procedure
-/// macro can works on any number of input parameters. Return type can be either primitive type
-/// or wrapped in `Option`.
+/// should accept servaral arrays as input and return a single value as output.
+///
+/// This procedure macro can works on any number of input parameters. Return type can be either
+/// primitive type or wrapped in `Option`.
 ///
 /// # Example
 /// Take `count_over_time()` in PromQL as an example:
@@ -73,9 +76,10 @@ pub fn range_fn(args: TokenStream, input: TokenStream) -> TokenStream {
 
 /// Attribute macro to convert a normal function to SQL administration function. The annotated function
 /// should accept:
-///    - `&ProcedureServiceHandlerRef` or `&TableMutationHandlerRef` as the first argument,
+///    - `&ProcedureServiceHandlerRef` or `&TableMutationHandlerRef` or `FlowServiceHandlerRef` as the first argument,
 ///    - `&QueryContextRef` as the second argument, and
 ///    - `&[ValueRef<'_>]` as the third argument which is SQL function input values in each row.
+///
 /// Return type must be `common_query::error::Result<Value>`.
 ///
 /// # Example see `common/function/src/system/procedure_state.rs`.
@@ -85,6 +89,8 @@ pub fn range_fn(args: TokenStream, input: TokenStream) -> TokenStream {
 /// - `ret`: The return type of the generated SQL function, it will be transformed into `ConcreteDataType::{ret}_datatype()` result.
 /// - `display_name`: The display name of the generated SQL function.
 /// - `sig_fn`: the function to returns `Signature` of generated `Function`.
+///
+/// Note that this macro should only be used in `common-function` crate for now
 #[proc_macro_attribute]
 pub fn admin_fn(args: TokenStream, input: TokenStream) -> TokenStream {
     process_admin_fn(args, input)

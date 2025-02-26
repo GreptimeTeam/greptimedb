@@ -36,9 +36,30 @@ lazy_static! {
         "table operator ingest rows"
     )
     .unwrap();
+    pub static ref DIST_MIRROR_ROW_COUNT: IntCounter = register_int_counter!(
+        "greptime_table_operator_mirror_rows",
+        "table operator mirror rows"
+    )
+    .unwrap();
+    pub static ref DIST_MIRROR_PENDING_ROW_COUNT: IntGauge = register_int_gauge!(
+        "greptime_table_operator_mirror_pending_rows",
+        "table operator mirror pending rows"
+    )
+    .unwrap();
     pub static ref DIST_DELETE_ROW_COUNT: IntCounter = register_int_counter!(
         "greptime_table_operator_delete_rows",
         "table operator delete rows"
+    )
+    .unwrap();
+    pub static ref DIST_CREATE_VIEW: Histogram = register_histogram!(
+        "greptime_ddl_operator_create_view",
+        "DDL operator create view"
+    )
+    .unwrap();
+    pub static ref CREATE_ALTER_ON_DEMAND: HistogramVec = register_histogram_vec!(
+        "greptime_table_operator_create_alter_on_demand",
+        "table operator duration to create or alter tables on demand",
+        &["table_type"]
     )
     .unwrap();
 }

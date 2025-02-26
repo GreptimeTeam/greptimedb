@@ -14,8 +14,8 @@
 
 #![feature(box_patterns)]
 #![feature(assert_matches)]
+#![feature(if_let_guard)]
 #![feature(let_chains)]
-#![feature(lazy_cell)]
 
 pub mod ast;
 pub mod dialect;
@@ -27,4 +27,3 @@ pub mod util;
 
 pub use parsers::create_parser::{ENGINE, MAXVALUE};
 pub use parsers::tql_parser::TQL;
-pub use statements::create::TIME_INDEX;

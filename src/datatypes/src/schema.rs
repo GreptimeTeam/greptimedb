@@ -21,16 +21,26 @@ use std::fmt;
 use std::sync::Arc;
 
 use arrow::datatypes::{Field, Schema as ArrowSchema};
+use column_schema::ColumnExtType;
 use datafusion_common::DFSchemaRef;
 use snafu::{ensure, ResultExt};
 
 use crate::error::{self, DuplicateColumnSnafu, Error, ProjectArrowSchemaSnafu, Result};
-pub use crate::schema::column_schema::{ColumnSchema, Metadata, COMMENT_KEY, TIME_INDEX_KEY};
+use crate::prelude::ConcreteDataType;
+pub use crate::schema::column_schema::{
+    ColumnSchema, FulltextAnalyzer, FulltextOptions, Metadata, SkippingIndexOptions,
+    SkippingIndexType, COLUMN_FULLTEXT_CHANGE_OPT_KEY_ENABLE, COLUMN_FULLTEXT_OPT_KEY_ANALYZER,
+    COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE, COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY,
+    COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE, COMMENT_KEY, FULLTEXT_KEY, INVERTED_INDEX_KEY,
+    SKIPPING_INDEX_KEY, TIME_INDEX_KEY,
+};
 pub use crate::schema::constraint::ColumnDefaultConstraint;
 pub use crate::schema::raw::RawSchema;
 
 /// Key used to store version number of the schema in metadata.
 pub const VERSION_KEY: &str = "greptime:version";
+/// Key used to store actual column type in field metadata.
+pub const TYPE_KEY: &str = "greptime:type";
 
 /// A common schema, should be immutable.
 #[derive(Clone, PartialEq, Eq)]
@@ -253,7 +263,18 @@ fn collect_fields(column_schemas: &[ColumnSchema]) -> Result<FieldsAndIndices> {
         if column_schema.is_time_index() && timestamp_index.is_none() {
             timestamp_index = Some(index);
         }
-        let field = Field::try_from(column_schema)?;
+        let mut field = Field::try_from(column_schema)?;
+
+        // Column with type Json or Vector performs the same as binary column in Arrow, so we need to mark it
+        let extype = match column_schema.data_type {
+            ConcreteDataType::Json(_) => Some(ColumnExtType::Json),
+            ConcreteDataType::Vector(d) => Some(ColumnExtType::Vector(d.dim)),
+            _ => None,
+        };
+        if let Some(extype) = extype {
+            let metadata = HashMap::from([(TYPE_KEY.to_string(), extype.to_string())]);
+            field = field.with_metadata(metadata);
+        }
         fields.push(field);
         ensure!(
             name_to_index

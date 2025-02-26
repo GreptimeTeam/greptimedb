@@ -12,62 +12,49 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt::{self};
 use std::time::Duration;
 
 use common_macro::admin_fn;
 use common_meta::rpc::procedure::MigrateRegionRequest;
-use common_query::error::Error::ThreadJoin;
 use common_query::error::{InvalidFuncArgsSnafu, MissingProcedureServiceHandlerSnafu, Result};
 use common_query::prelude::{Signature, TypeSignature, Volatility};
-use common_telemetry::logging::error;
-use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::{Value, ValueRef};
-use datatypes::vectors::VectorRef;
 use session::context::QueryContextRef;
-use snafu::{Location, OptionExt};
 
-use crate::ensure_greptime;
-use crate::function::{Function, FunctionContext};
 use crate::handlers::ProcedureServiceHandlerRef;
 use crate::helper::cast_u64;
 
-const DEFAULT_REPLAY_TIMEOUT_SECS: u64 = 10;
+const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
 /// A function to migrate a region from source peer to target peer.
 /// Returns the submitted procedure id if success. Only available in cluster mode.
 ///
-/// - `migrate_region(region_id, from_peer, to_peer)`, with default replay WAL timeout(10 seconds).
-/// - `migrate_region(region_id, from_peer, to_peer, timeout(secs))`
+/// - `migrate_region(region_id, from_peer, to_peer)`, with timeout(30 seconds).
+/// - `migrate_region(region_id, from_peer, to_peer, timeout(secs))`.
 ///
 /// The parameters:
 /// - `region_id`:  the region id
 /// - `from_peer`:  the source peer id
 /// - `to_peer`:  the target peer id
 #[admin_fn(
-    name = "MigrateRegionFunction",
-    display_name = "migrate_region",
-    sig_fn = "signature",
-    ret = "string"
+    name = MigrateRegionFunction,
+    display_name = migrate_region,
+    sig_fn = signature,
+    ret = string
 )]
 pub(crate) async fn migrate_region(
     procedure_service_handler: &ProcedureServiceHandlerRef,
     _ctx: &QueryContextRef,
     params: &[ValueRef<'_>],
 ) -> Result<Value> {
-    let (region_id, from_peer, to_peer, replay_timeout) = match params.len() {
+    let (region_id, from_peer, to_peer, timeout) = match params.len() {
         3 => {
             let region_id = cast_u64(&params[0])?;
             let from_peer = cast_u64(&params[1])?;
             let to_peer = cast_u64(&params[2])?;
 
-            (
-                region_id,
-                from_peer,
-                to_peer,
-                Some(DEFAULT_REPLAY_TIMEOUT_SECS),
-            )
+            (region_id, from_peer, to_peer, Some(DEFAULT_TIMEOUT_SECS))
         }
 
         4 => {
@@ -90,14 +77,14 @@ pub(crate) async fn migrate_region(
         }
     };
 
-    match (region_id, from_peer, to_peer, replay_timeout) {
-        (Some(region_id), Some(from_peer), Some(to_peer), Some(replay_timeout)) => {
+    match (region_id, from_peer, to_peer, timeout) {
+        (Some(region_id), Some(from_peer), Some(to_peer), Some(timeout)) => {
             let pid = procedure_service_handler
                 .migrate_region(MigrateRegionRequest {
                     region_id,
                     from_peer,
                     to_peer,
-                    replay_timeout: Duration::from_secs(replay_timeout),
+                    timeout: Duration::from_secs(timeout),
                 })
                 .await?;
 
@@ -128,9 +115,10 @@ mod tests {
     use std::sync::Arc;
 
     use common_query::prelude::TypeSignature;
-    use datatypes::vectors::{StringVector, UInt64Vector};
+    use datatypes::vectors::{StringVector, UInt64Vector, VectorRef};
 
     use super::*;
+    use crate::function::{AsyncFunction, FunctionContext};
 
     #[test]
     fn test_migrate_region_misc() {
@@ -147,8 +135,8 @@ mod tests {
                          } if sigs.len() == 2));
     }
 
-    #[test]
-    fn test_missing_procedure_service() {
+    #[tokio::test]
+    async fn test_missing_procedure_service() {
         let f = MigrateRegionFunction;
 
         let args = vec![1, 1, 1];
@@ -158,15 +146,15 @@ mod tests {
             .map(|arg| Arc::new(UInt64Vector::from_slice([arg])) as _)
             .collect::<Vec<_>>();
 
-        let result = f.eval(FunctionContext::default(), &args).unwrap_err();
+        let result = f.eval(FunctionContext::default(), &args).await.unwrap_err();
         assert_eq!(
             "Missing ProcedureServiceHandler, not expected",
             result.to_string()
         );
     }
 
-    #[test]
-    fn test_migrate_region() {
+    #[tokio::test]
+    async fn test_migrate_region() {
         let f = MigrateRegionFunction;
 
         let args = vec![1, 1, 1];
@@ -176,7 +164,7 @@ mod tests {
             .map(|arg| Arc::new(UInt64Vector::from_slice([arg])) as _)
             .collect::<Vec<_>>();
 
-        let result = f.eval(FunctionContext::mock(), &args).unwrap();
+        let result = f.eval(FunctionContext::mock(), &args).await.unwrap();
 
         let expect: VectorRef = Arc::new(StringVector::from(vec!["test_pid"]));
         assert_eq!(expect, result);

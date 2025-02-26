@@ -18,8 +18,9 @@ use std::sync::Arc;
 use datafusion::arrow::array::{Float64Array, TimestampMillisecondArray};
 use datafusion::arrow::datatypes::TimeUnit;
 use datafusion::common::DataFusionError;
-use datafusion::logical_expr::{ScalarUDF, Signature, TypeSignature, Volatility};
+use datafusion::logical_expr::{ScalarUDF, Volatility};
 use datafusion::physical_plan::ColumnarValue;
+use datafusion_expr::create_udf;
 use datatypes::arrow::array::Array;
 use datatypes::arrow::datatypes::DataType;
 
@@ -42,15 +43,13 @@ impl<const IS_RATE: bool> IDelta<IS_RATE> {
     }
 
     pub fn scalar_udf() -> ScalarUDF {
-        ScalarUDF {
-            name: Self::name().to_string(),
-            signature: Signature::new(
-                TypeSignature::Exact(Self::input_type()),
-                Volatility::Immutable,
-            ),
-            return_type: Arc::new(|_| Ok(Arc::new(Self::return_type()))),
-            fun: Arc::new(Self::calc),
-        }
+        create_udf(
+            Self::name(),
+            Self::input_type(),
+            Self::return_type(),
+            Volatility::Immutable,
+            Arc::new(Self::calc) as _,
+        )
     }
 
     // time index column and value column

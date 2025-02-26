@@ -17,7 +17,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use api::v1::SemanticType;
+use api::v1::value::ValueData;
+use api::v1::{self, ColumnDataType, Mutation, OpType, Row, Rows, SemanticType};
 use common_time::Timestamp;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
@@ -26,11 +27,12 @@ use store_api::storage::RegionId;
 
 use crate::manifest::action::RegionEdit;
 use crate::memtable::time_partition::TimePartitions;
+use crate::memtable::{KeyValues, MemtableBuilderRef};
 use crate::region::version::{Version, VersionBuilder, VersionControl};
 use crate::sst::file::{FileId, FileMeta};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::test_util::memtable_util::EmptyMemtableBuilder;
-use crate::test_util::new_noop_file_purger;
+use crate::test_util::{new_noop_file_purger, ts_ms_value};
 
 fn new_region_metadata(region_id: RegionId) -> RegionMetadata {
     let mut builder = RegionMetadataBuilder::new(region_id);
@@ -57,7 +59,7 @@ fn new_region_metadata(region_id: RegionId) -> RegionMetadata {
 pub(crate) struct VersionControlBuilder {
     metadata: RegionMetadata,
     file_purger: FilePurgerRef,
-    memtable_builder: Arc<EmptyMemtableBuilder>,
+    memtable_builder: MemtableBuilderRef,
     files: HashMap<FileId, FileMeta>,
 }
 
@@ -79,6 +81,11 @@ impl VersionControlBuilder {
         self.file_purger.clone()
     }
 
+    pub(crate) fn set_memtable_builder(&mut self, builder: MemtableBuilderRef) -> &mut Self {
+        self.memtable_builder = builder;
+        self
+    }
+
     pub(crate) fn push_l0_file(&mut self, start_ms: i64, end_ms: i64) -> &mut Self {
         let file_id = FileId::random();
         self.files.insert(
@@ -94,6 +101,9 @@ impl VersionControlBuilder {
                 file_size: 0, // We don't care file size.
                 available_indexes: Default::default(),
                 index_file_size: 0,
+                num_rows: 0,
+                num_row_groups: 0,
+                sequence: None,
             },
         );
         self
@@ -116,6 +126,49 @@ impl VersionControlBuilder {
         let version = self.build_version();
         VersionControl::new(version)
     }
+}
+
+/// Put rows to the mutable memtable in the version.
+pub(crate) fn write_rows_to_version(
+    version: &Version,
+    tag: &str,
+    start_ts: usize,
+    num_rows: usize,
+) {
+    let mut rows = Vec::with_capacity(num_rows);
+    for idx in 0..num_rows {
+        let ts = (start_ts + idx) as i64;
+        let values = vec![
+            ts_ms_value(ts),
+            v1::Value {
+                value_data: Some(ValueData::StringValue(tag.to_string())),
+            },
+        ];
+        rows.push(Row { values });
+    }
+    let schema = vec![
+        v1::ColumnSchema {
+            column_name: "ts".to_string(),
+            datatype: ColumnDataType::TimestampMillisecond as i32,
+            semantic_type: SemanticType::Timestamp as i32,
+            ..Default::default()
+        },
+        v1::ColumnSchema {
+            column_name: "tag_0".to_string(),
+            datatype: ColumnDataType::String as i32,
+            semantic_type: SemanticType::Tag as i32,
+            ..Default::default()
+        },
+    ];
+    let rows = Rows { rows, schema };
+    let mutation = Mutation {
+        op_type: OpType::Put as i32,
+        sequence: start_ts as u64, // The sequence may be incorrect, but it's fine in test.
+        rows: Some(rows),
+        write_hint: None,
+    };
+    let key_values = KeyValues::new(&version.metadata, mutation).unwrap();
+    version.memtables.mutable.write(&key_values).unwrap();
 }
 
 /// Add mocked l0 files to the version control.
@@ -141,6 +194,9 @@ pub(crate) fn apply_edit(
                 file_size: 0, // We don't care file size.
                 available_indexes: Default::default(),
                 index_file_size: 0,
+                num_rows: 0,
+                num_row_groups: 0,
+                sequence: None,
             }
         })
         .collect();

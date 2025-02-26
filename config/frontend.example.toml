@@ -1,106 +1,259 @@
-# Node running mode, see `standalone.example.toml`.
-mode = "distributed"
-# The default timezone of the server
-# default_timezone = "UTC"
+## The default timezone of the server.
+## @toml2docs:none-default
+default_timezone = "UTC"
 
+## The maximum in-flight write bytes.
+## @toml2docs:none-default
+#+ max_in_flight_write_bytes = "500MB"
+
+## The runtime options.
+#+ [runtime]
+## The number of threads to execute the runtime for global read operations.
+#+ global_rt_size = 8
+## The number of threads to execute the runtime for global write operations.
+#+ compact_rt_size = 4
+
+## The heartbeat options.
 [heartbeat]
-# Interval for sending heartbeat task to the Metasrv, 5 seconds by default.
-interval = "5s"
-# Interval for retry sending heartbeat task, 5 seconds by default.
-retry_interval = "5s"
+## Interval for sending heartbeat messages to the metasrv.
+interval = "18s"
 
-# HTTP server options, see `standalone.example.toml`.
+## Interval for retrying to send heartbeat messages to the metasrv.
+retry_interval = "3s"
+
+## The HTTP server options.
 [http]
+## The address to bind the HTTP server.
 addr = "127.0.0.1:4000"
+## HTTP request timeout. Set to 0 to disable timeout.
 timeout = "30s"
+## HTTP request body limit.
+## The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.
+## Set to 0 to disable limit.
 body_limit = "64MB"
+## HTTP CORS support, it's turned on by default
+## This allows browser to access http APIs without CORS restrictions
+enable_cors = true
+## Customize allowed origins for HTTP CORS.
+## @toml2docs:none-default
+cors_allowed_origins = ["https://example.com"]
 
-# gRPC server options, see `standalone.example.toml`.
+## The gRPC server options.
 [grpc]
-addr = "127.0.0.1:4001"
+## The address to bind the gRPC server.
+bind_addr = "127.0.0.1:4001"
+## The address advertised to the metasrv, and used for connections from outside the host.
+## If left empty or unset, the server will automatically use the IP address of the first network interface
+## on the host, with the same port number as the one specified in `grpc.bind_addr`.
+server_addr = "127.0.0.1:4001"
+## The number of server worker threads.
 runtime_size = 8
 
-# MySQL server options, see `standalone.example.toml`.
+## gRPC server TLS options, see `mysql.tls` section.
+[grpc.tls]
+## TLS mode.
+mode = "disable"
+
+## Certificate file path.
+## @toml2docs:none-default
+cert_path = ""
+
+## Private key file path.
+## @toml2docs:none-default
+key_path = ""
+
+## Watch for Certificate and key file change and auto reload.
+## For now, gRPC tls config does not support auto reload.
+watch = false
+
+## MySQL server options.
 [mysql]
+## Whether to enable.
 enable = true
+## The addr to bind the MySQL server.
 addr = "127.0.0.1:4002"
+## The number of server worker threads.
 runtime_size = 2
+## Server-side keep-alive time.
+## Set to 0 (default) to disable.
+keep_alive = "0s"
 
-# MySQL server TLS options, see `standalone.example.toml`.
+# MySQL server TLS options.
 [mysql.tls]
+
+## TLS mode, refer to https://www.postgresql.org/docs/current/libpq-ssl.html
+## - `disable` (default value)
+## - `prefer`
+## - `require`
+## - `verify-ca`
+## - `verify-full`
 mode = "disable"
+
+## Certificate file path.
+## @toml2docs:none-default
 cert_path = ""
+
+## Private key file path.
+## @toml2docs:none-default
 key_path = ""
+
+## Watch for Certificate and key file change and auto reload
 watch = false
 
-# PostgresSQL server options, see `standalone.example.toml`.
+## PostgresSQL server options.
 [postgres]
+## Whether to enable
 enable = true
+## The addr to bind the PostgresSQL server.
 addr = "127.0.0.1:4003"
+## The number of server worker threads.
 runtime_size = 2
+## Server-side keep-alive time.
+## Set to 0 (default) to disable.
+keep_alive = "0s"
 
-# PostgresSQL server TLS options, see `standalone.example.toml`.
+## PostgresSQL server TLS options, see `mysql.tls` section.
 [postgres.tls]
+## TLS mode.
 mode = "disable"
+
+## Certificate file path.
+## @toml2docs:none-default
 cert_path = ""
+
+## Private key file path.
+## @toml2docs:none-default
 key_path = ""
+
+## Watch for Certificate and key file change and auto reload
 watch = false
 
-# OpenTSDB protocol options, see `standalone.example.toml`.
+## OpenTSDB protocol options.
 [opentsdb]
+## Whether to enable OpenTSDB put in HTTP API.
 enable = true
-addr = "127.0.0.1:4242"
-runtime_size = 2
 
-# InfluxDB protocol options, see `standalone.example.toml`.
+## InfluxDB protocol options.
 [influxdb]
+## Whether to enable InfluxDB protocol in HTTP API.
 enable = true
 
-# Prometheus remote storage options, see `standalone.example.toml`.
-[prom_store]
+## Jaeger protocol options.
+[jaeger]
+## Whether to enable Jaeger protocol in HTTP API.
 enable = true
-# Whether to store the data from Prometheus remote write in metric engine.
-# true by default
+
+## Prometheus remote storage options
+[prom_store]
+## Whether to enable Prometheus remote write and read in HTTP API.
+enable = true
+## Whether to store the data from Prometheus remote write in metric engine.
 with_metric_engine = true
 
-# Metasrv client options, see `datanode.example.toml`.
+## The metasrv client options.
 [meta_client]
+## The addresses of the metasrv.
 metasrv_addrs = ["127.0.0.1:3002"]
+
+## Operation timeout.
 timeout = "3s"
-# DDL timeouts options.
+
+## Heartbeat timeout.
+heartbeat_timeout = "500ms"
+
+## DDL timeout.
 ddl_timeout = "10s"
+
+## Connect server timeout.
 connect_timeout = "1s"
+
+## `TCP_NODELAY` option for accepted connections.
 tcp_nodelay = true
-# The configuration about the cache of the Metadata.
-# default: 100000
+
+## The configuration about the cache of the metadata.
 metadata_cache_max_capacity = 100000
-# default: 10m
+
+## TTL of the metadata cache.
 metadata_cache_ttl = "10m"
-# default: 5m
+
+# TTI of the metadata cache.
 metadata_cache_tti = "5m"
 
-# Log options, see `standalone.example.toml`
-# [logging]
-# dir = "/tmp/greptimedb/logs"
-# level = "info"
-
-# Datanode options.
+## Datanode options.
 [datanode]
-# Datanode client options.
+## Datanode client options.
 [datanode.client]
-timeout = "10s"
 connect_timeout = "10s"
 tcp_nodelay = true
 
-# Frontend export the metrics generated by itself
-# encoded to Prometheus remote-write format
-# and send to Prometheus remote-write compatible receiver (e.g. send to `greptimedb` itself)
-# This is only used for `greptimedb` to export its own metrics internally. It's different from prometheus scrape.
-# [export_metrics]
-# whether enable export metrics, default is false
-# enable = false
-# The interval of export metrics
-# write_interval = "30s"
-# for `frontend`, `self_import` is recommend to collect metrics generated by itself
-# [export_metrics.self_import]
-# db = "information_schema"
+## The logging options.
+[logging]
+## The directory to store the log files. If set to empty, logs will not be written to files.
+dir = "/tmp/greptimedb/logs"
+
+## The log level. Can be `info`/`debug`/`warn`/`error`.
+## @toml2docs:none-default
+level = "info"
+
+## Enable OTLP tracing.
+enable_otlp_tracing = false
+
+## The OTLP tracing endpoint.
+otlp_endpoint = "http://localhost:4317"
+
+## Whether to append logs to stdout.
+append_stdout = true
+
+## The log format. Can be `text`/`json`.
+log_format = "text"
+
+## The maximum amount of log files.
+max_log_files = 720
+
+## The percentage of tracing will be sampled and exported.
+## Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.
+## ratio > 1 are treated as 1. Fractions < 0 are treated as 0
+[logging.tracing_sample_ratio]
+default_ratio = 1.0
+
+## The slow query log options.
+[logging.slow_query]
+## Whether to enable slow query log.
+enable = false
+
+## The threshold of slow query.
+## @toml2docs:none-default
+threshold = "10s"
+
+## The sampling ratio of slow query log. The value should be in the range of (0, 1].
+## @toml2docs:none-default
+sample_ratio = 1.0
+
+## The datanode can export its metrics and send to Prometheus compatible service (e.g. send to `greptimedb` itself) from remote-write API.
+## This is only used for `greptimedb` to export its own metrics internally. It's different from prometheus scrape.
+[export_metrics]
+
+## whether enable export metrics.
+enable = false
+
+## The interval of export metrics.
+write_interval = "30s"
+
+## For `standalone` mode, `self_import` is recommend to collect metrics generated by itself
+## You must create the database before enabling it.
+[export_metrics.self_import]
+## @toml2docs:none-default
+db = "greptime_metrics"
+
+[export_metrics.remote_write]
+## The url the metrics send to. The url example can be: `http://127.0.0.1:4000/v1/prometheus/write?db=greptime_metrics`.
+url = ""
+
+## HTTP headers of Prometheus remote-write carry.
+headers = { }
+
+## The tracing options. Only effect when compiled with `tokio-console` feature.
+#+ [tracing]
+## The tokio console address.
+## @toml2docs:none-default
+#+ tokio_console_addr = "127.0.0.1"

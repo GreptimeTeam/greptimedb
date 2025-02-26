@@ -26,11 +26,11 @@ use common_error::ext::BoxedError;
 use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
-use common_telemetry::{logging, tracing};
+use common_telemetry::{debug, tracing};
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutor;
 use prost::Message;
-use servers::error::{self, AuthSnafu, Result as ServerResult};
+use servers::error::{self, AuthSnafu, InFlightWriteBytesExceededSnafu, Result as ServerResult};
 use servers::http::header::{collect_plan_metrics, CONTENT_ENCODING_SNAPPY, CONTENT_TYPE_PROTOBUF};
 use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
 use servers::interceptor::{PromStoreProtocolInterceptor, PromStoreProtocolInterceptorRef};
@@ -102,7 +102,7 @@ impl Instance {
     ) -> Result<Output> {
         let table = self
             .catalog_manager
-            .table(catalog_name, schema_name, table_name)
+            .table(catalog_name, schema_name, table_name, Some(ctx))
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {
@@ -119,7 +119,7 @@ impl Instance {
         let logical_plan =
             prom_store::query_to_plan(dataframe, query).context(PromStoreRemoteQueryPlanSnafu)?;
 
-        logging::debug!(
+        debug!(
             "Prometheus remote read, table: {}, logical plan: {}",
             table_name,
             logical_plan.display_indent(),
@@ -146,12 +146,10 @@ impl Instance {
             let table_name = prom_store::table_name(query)?;
 
             let output = self
-                .handle_remote_query(&ctx, catalog_name, schema_name, &table_name, query)
+                .handle_remote_query(&ctx, catalog_name, &schema_name, &table_name, query)
                 .await
                 .map_err(BoxedError::new)
-                .with_context(|_| error::ExecuteQuerySnafu {
-                    query: format!("{query:#?}"),
-                })?;
+                .context(error::ExecuteQuerySnafu)?;
 
             results.push((table_name, output));
         }
@@ -172,6 +170,20 @@ impl PromStoreProtocolHandler for Instance {
             .as_ref()
             .check_permission(ctx.current_user(), PermissionReq::PromStoreWrite)
             .context(AuthSnafu)?;
+        let interceptor_ref = self
+            .plugins
+            .get::<PromStoreProtocolInterceptorRef<servers::error::Error>>();
+        interceptor_ref.pre_write(&request, ctx.clone())?;
+
+        let _guard = if let Some(limiter) = &self.limiter {
+            let result = limiter.limit_row_inserts(&request);
+            if result.is_none() {
+                return InFlightWriteBytesExceededSnafu.fail();
+            }
+            result
+        } else {
+            None
+        };
 
         let output = if with_metric_engine {
             let physical_table = ctx
@@ -220,7 +232,7 @@ impl PromStoreProtocolHandler for Instance {
                     let plan = output.meta.plan.clone();
                     query_results.push(to_query_result(&table_name, output).await?);
                     if let Some(ref plan) = plan {
-                        collect_plan_metrics(plan.clone(), &mut [&mut map]);
+                        collect_plan_metrics(plan, &mut [&mut map]);
                     }
                 }
 

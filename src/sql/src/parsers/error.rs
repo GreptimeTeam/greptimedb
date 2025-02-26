@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use common_macro::stack_trace_debug;
-use datafusion_common::DataFusionError;
 use snafu::{Location, Snafu};
 use sqlparser::parser::ParserError;
 
@@ -26,23 +25,18 @@ pub enum TQLError {
     Parser {
         #[snafu(source)]
         error: ParserError,
-        location: Location,
-    },
-
-    #[snafu(display("Failed to convert to logical TQL expression"))]
-    ConvertToLogicalExpression {
-        #[snafu(source)]
-        error: DataFusionError,
-        location: Location,
-    },
-
-    #[snafu(display("Failed to simplify TQL expression"))]
-    Simplification {
-        #[snafu(source)]
-        error: DataFusionError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to evaluate TQL expression: {}", msg))]
     Evaluation { msg: String },
+
+    #[snafu(display("Failed to convert TQL expression to logical expression"))]
+    ConvertToLogicalExpression {
+        #[snafu(source)]
+        error: Box<crate::error::Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }

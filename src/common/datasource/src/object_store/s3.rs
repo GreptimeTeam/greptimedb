@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 
 use object_store::services::S3;
+use object_store::util::DefaultLoggingInterceptor;
 use object_store::ObjectStore;
 use snafu::ResultExt;
 
@@ -44,28 +45,26 @@ pub fn build_s3_backend(
     path: &str,
     connection: &HashMap<String, String>,
 ) -> Result<ObjectStore> {
-    let mut builder = S3::default();
-
-    let _ = builder.root(path).bucket(host);
+    let mut builder = S3::default().root(path).bucket(host);
 
     if let Some(endpoint) = connection.get(ENDPOINT) {
-        let _ = builder.endpoint(endpoint);
+        builder = builder.endpoint(endpoint);
     }
 
     if let Some(region) = connection.get(REGION) {
-        let _ = builder.region(region);
+        builder = builder.region(region);
     }
 
     if let Some(key_id) = connection.get(ACCESS_KEY_ID) {
-        let _ = builder.access_key_id(key_id);
+        builder = builder.access_key_id(key_id);
     }
 
     if let Some(key) = connection.get(SECRET_ACCESS_KEY) {
-        let _ = builder.secret_access_key(key);
+        builder = builder.secret_access_key(key);
     }
 
     if let Some(session_token) = connection.get(SESSION_TOKEN) {
-        let _ = builder.security_token(session_token);
+        builder = builder.session_token(session_token);
     }
 
     if let Some(enable_str) = connection.get(ENABLE_VIRTUAL_HOST_STYLE) {
@@ -79,22 +78,18 @@ pub fn build_s3_backend(
             .build()
         })?;
         if enable {
-            let _ = builder.enable_virtual_host_style();
+            builder = builder.enable_virtual_host_style();
         }
     }
 
     // TODO(weny): Consider finding a better way to eliminate duplicate code.
     Ok(ObjectStore::new(builder)
         .context(error::BuildBackendSnafu)?
-        .layer(
-            object_store::layers::LoggingLayer::default()
-                // Print the expected error only in DEBUG level.
-                // See https://docs.rs/opendal/latest/opendal/layers/struct.LoggingLayer.html#method.with_error_level
-                .with_error_level(Some("debug"))
-                .expect("input error level must be valid"),
-        )
+        .layer(object_store::layers::LoggingLayer::new(
+            DefaultLoggingInterceptor,
+        ))
         .layer(object_store::layers::TracingLayer)
-        .layer(object_store::layers::PrometheusMetricsLayer)
+        .layer(object_store::layers::build_prometheus_metrics_layer(true))
         .finish())
 }
 

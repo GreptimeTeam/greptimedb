@@ -1,0 +1,11 @@
+[package]
+name = "common-frontend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+common-error.workspace = true
+common-macro.workspace = true
+snafu.workspace = true

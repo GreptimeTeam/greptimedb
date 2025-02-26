@@ -17,6 +17,7 @@
 mod cache_size;
 
 pub(crate) mod file_cache;
+pub(crate) mod index;
 #[cfg(test)]
 pub(crate) mod test_util;
 pub(crate) mod write_cache;
@@ -24,27 +25,224 @@ pub(crate) mod write_cache;
 use std::mem;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
+use index::bloom_filter_index::{BloomFilterIndexCache, BloomFilterIndexCacheRef};
+use moka::notification::RemovalCause;
 use moka::sync::Cache;
 use parquet::column::page::Page;
 use parquet::file::metadata::ParquetMetaData;
-use store_api::storage::RegionId;
+use puffin::puffin_manager::cache::{PuffinMetadataCache, PuffinMetadataCacheRef};
+use store_api::storage::{ConcreteDataType, RegionId, TimeSeriesRowSelector};
 
 use crate::cache::cache_size::parquet_meta_size;
 use crate::cache::file_cache::{FileType, IndexKey};
+use crate::cache::index::inverted_index::{InvertedIndexCache, InvertedIndexCacheRef};
 use crate::cache::write_cache::WriteCacheRef;
-use crate::metrics::{CACHE_BYTES, CACHE_HIT, CACHE_MISS};
+use crate::metrics::{CACHE_BYTES, CACHE_EVICTION, CACHE_HIT, CACHE_MISS};
+use crate::read::Batch;
 use crate::sst::file::FileId;
 
-// Metrics type key for sst meta.
+/// Metrics type key for sst meta.
 const SST_META_TYPE: &str = "sst_meta";
-// Metrics type key for vector.
+/// Metrics type key for vector.
 const VECTOR_TYPE: &str = "vector";
-// Metrics type key for pages.
+/// Metrics type key for pages.
 const PAGE_TYPE: &str = "page";
-// Metrics type key for files on the local store.
+/// Metrics type key for files on the local store.
 const FILE_TYPE: &str = "file";
+/// Metrics type key for selector result cache.
+const SELECTOR_RESULT_TYPE: &str = "selector_result";
+
+/// Cache strategies that may only enable a subset of caches.
+#[derive(Clone)]
+pub enum CacheStrategy {
+    /// Strategy for normal operations.
+    /// Doesn't disable any cache.
+    EnableAll(CacheManagerRef),
+    /// Strategy for compaction.
+    /// Disables some caches during compaction to avoid affecting queries.
+    /// Enables the write cache so that the compaction can read files cached
+    /// in the write cache and write the compacted files back to the write cache.
+    Compaction(CacheManagerRef),
+    /// Do not use any cache.
+    Disabled,
+}
+
+impl CacheStrategy {
+    /// Calls [CacheManager::get_parquet_meta_data()].
+    pub async fn get_parquet_meta_data(
+        &self,
+        region_id: RegionId,
+        file_id: FileId,
+    ) -> Option<Arc<ParquetMetaData>> {
+        match self {
+            CacheStrategy::EnableAll(cache_manager) => {
+                cache_manager
+                    .get_parquet_meta_data(region_id, file_id)
+                    .await
+            }
+            CacheStrategy::Compaction(cache_manager) => {
+                cache_manager
+                    .get_parquet_meta_data(region_id, file_id)
+                    .await
+            }
+            CacheStrategy::Disabled => None,
+        }
+    }
+
+    /// Calls [CacheManager::get_parquet_meta_data_from_mem_cache()].
+    pub fn get_parquet_meta_data_from_mem_cache(
+        &self,
+        region_id: RegionId,
+        file_id: FileId,
+    ) -> Option<Arc<ParquetMetaData>> {
+        match self {
+            CacheStrategy::EnableAll(cache_manager) => {
+                cache_manager.get_parquet_meta_data_from_mem_cache(region_id, file_id)
+            }
+            CacheStrategy::Compaction(cache_manager) => {
+                cache_manager.get_parquet_meta_data_from_mem_cache(region_id, file_id)
+            }
+            CacheStrategy::Disabled => None,
+        }
+    }
+
+    /// Calls [CacheManager::put_parquet_meta_data()].
+    pub fn put_parquet_meta_data(
+        &self,
+        region_id: RegionId,
+        file_id: FileId,
+        metadata: Arc<ParquetMetaData>,
+    ) {
+        match self {
+            CacheStrategy::EnableAll(cache_manager) => {
+                cache_manager.put_parquet_meta_data(region_id, file_id, metadata);
+            }
+            CacheStrategy::Compaction(cache_manager) => {
+                cache_manager.put_parquet_meta_data(region_id, file_id, metadata);
+            }
+            CacheStrategy::Disabled => {}
+        }
+    }
+
+    /// Calls [CacheManager::remove_parquet_meta_data()].
+    pub fn remove_parquet_meta_data(&self, region_id: RegionId, file_id: FileId) {
+        match self {
+            CacheStrategy::EnableAll(cache_manager) => {
+                cache_manager.remove_parquet_meta_data(region_id, file_id);
+            }
+            CacheStrategy::Compaction(cache_manager) => {
+                cache_manager.remove_parquet_meta_data(region_id, file_id);
+            }
+            CacheStrategy::Disabled => {}
+        }
+    }
+
+    /// Calls [CacheManager::get_repeated_vector()].
+    /// It returns None if the strategy is [CacheStrategy::Compaction] or [CacheStrategy::Disabled].
+    pub fn get_repeated_vector(
+        &self,
+        data_type: &ConcreteDataType,
+        value: &Value,
+    ) -> Option<VectorRef> {
+        match self {
+            CacheStrategy::EnableAll(cache_manager) => {
+                cache_manager.get_repeated_vector(data_type, value)
+            }
+            CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
+        }
+    }
+
+    /// Calls [CacheManager::put_repeated_vector()].
+    /// It does nothing if the strategy isn't [CacheStrategy::EnableAll].
+    pub fn put_repeated_vector(&self, value: Value, vector: VectorRef) {
+        if let CacheStrategy::EnableAll(cache_manager) = self {
+            cache_manager.put_repeated_vector(value, vector);
+        }
+    }
+
+    /// Calls [CacheManager::get_pages()].
+    /// It returns None if the strategy is [CacheStrategy::Compaction] or [CacheStrategy::Disabled].
+    pub fn get_pages(&self, page_key: &PageKey) -> Option<Arc<PageValue>> {
+        match self {
+            CacheStrategy::EnableAll(cache_manager) => cache_manager.get_pages(page_key),
+            CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
+        }
+    }
+
+    /// Calls [CacheManager::put_pages()].
+    /// It does nothing if the strategy isn't [CacheStrategy::EnableAll].
+    pub fn put_pages(&self, page_key: PageKey, pages: Arc<PageValue>) {
+        if let CacheStrategy::EnableAll(cache_manager) = self {
+            cache_manager.put_pages(page_key, pages);
+        }
+    }
+
+    /// Calls [CacheManager::get_selector_result()].
+    /// It returns None if the strategy is [CacheStrategy::Compaction] or [CacheStrategy::Disabled].
+    pub fn get_selector_result(
+        &self,
+        selector_key: &SelectorResultKey,
+    ) -> Option<Arc<SelectorResultValue>> {
+        match self {
+            CacheStrategy::EnableAll(cache_manager) => {
+                cache_manager.get_selector_result(selector_key)
+            }
+            CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
+        }
+    }
+
+    /// Calls [CacheManager::put_selector_result()].
+    /// It does nothing if the strategy isn't [CacheStrategy::EnableAll].
+    pub fn put_selector_result(
+        &self,
+        selector_key: SelectorResultKey,
+        result: Arc<SelectorResultValue>,
+    ) {
+        if let CacheStrategy::EnableAll(cache_manager) = self {
+            cache_manager.put_selector_result(selector_key, result);
+        }
+    }
+
+    /// Calls [CacheManager::write_cache()].
+    /// It returns None if the strategy is [CacheStrategy::Disabled].
+    pub fn write_cache(&self) -> Option<&WriteCacheRef> {
+        match self {
+            CacheStrategy::EnableAll(cache_manager) => cache_manager.write_cache(),
+            CacheStrategy::Compaction(cache_manager) => cache_manager.write_cache(),
+            CacheStrategy::Disabled => None,
+        }
+    }
+
+    /// Calls [CacheManager::index_cache()].
+    /// It returns None if the strategy is [CacheStrategy::Compaction] or [CacheStrategy::Disabled].
+    pub fn inverted_index_cache(&self) -> Option<&InvertedIndexCacheRef> {
+        match self {
+            CacheStrategy::EnableAll(cache_manager) => cache_manager.inverted_index_cache(),
+            CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
+        }
+    }
+
+    /// Calls [CacheManager::bloom_filter_index_cache()].
+    /// It returns None if the strategy is [CacheStrategy::Compaction] or [CacheStrategy::Disabled].
+    pub fn bloom_filter_index_cache(&self) -> Option<&BloomFilterIndexCacheRef> {
+        match self {
+            CacheStrategy::EnableAll(cache_manager) => cache_manager.bloom_filter_index_cache(),
+            CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
+        }
+    }
+
+    /// Calls [CacheManager::puffin_metadata_cache()].
+    /// It returns None if the strategy is [CacheStrategy::Compaction] or [CacheStrategy::Disabled].
+    pub fn puffin_metadata_cache(&self) -> Option<&PuffinMetadataCacheRef> {
+        match self {
+            CacheStrategy::EnableAll(cache_manager) => cache_manager.puffin_metadata_cache(),
+            CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
+        }
+    }
+}
 
 /// Manages cached data for the engine.
 ///
@@ -59,6 +257,14 @@ pub struct CacheManager {
     page_cache: Option<PageCache>,
     /// A Cache for writing files to object stores.
     write_cache: Option<WriteCacheRef>,
+    /// Cache for inverted index.
+    index_cache: Option<InvertedIndexCacheRef>,
+    /// Cache for bloom filter index.
+    bloom_filter_index_cache: Option<BloomFilterIndexCacheRef>,
+    /// Puffin metadata cache.
+    puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
+    /// Cache for time series selectors.
+    selector_result_cache: Option<SelectorResultCache>,
 }
 
 pub type CacheManagerRef = Arc<CacheManager>;
@@ -69,18 +275,15 @@ impl CacheManager {
         CacheManagerBuilder::default()
     }
 
-    /// Gets cached [ParquetMetaData].
+    /// Gets cached [ParquetMetaData] from in-memory cache first.
+    /// If not found, tries to get it from write cache and fill the in-memory cache.
     pub async fn get_parquet_meta_data(
         &self,
         region_id: RegionId,
         file_id: FileId,
     ) -> Option<Arc<ParquetMetaData>> {
         // Try to get metadata from sst meta cache
-        let metadata = self.sst_meta_cache.as_ref().and_then(|sst_meta_cache| {
-            let value = sst_meta_cache.get(&SstMetaKey(region_id, file_id));
-            update_hit_miss(value, SST_META_TYPE)
-        });
-
+        let metadata = self.get_parquet_meta_data_from_mem_cache(region_id, file_id);
         if metadata.is_some() {
             return metadata;
         }
@@ -97,6 +300,20 @@ impl CacheManager {
         };
 
         None
+    }
+
+    /// Gets cached [ParquetMetaData] from in-memory cache.
+    /// This method does not perform I/O.
+    pub fn get_parquet_meta_data_from_mem_cache(
+        &self,
+        region_id: RegionId,
+        file_id: FileId,
+    ) -> Option<Arc<ParquetMetaData>> {
+        // Try to get metadata from sst meta cache
+        self.sst_meta_cache.as_ref().and_then(|sst_meta_cache| {
+            let value = sst_meta_cache.get(&SstMetaKey(region_id, file_id));
+            update_hit_miss(value, SST_META_TYPE)
+        })
     }
 
     /// Puts [ParquetMetaData] into the cache.
@@ -123,16 +340,21 @@ impl CacheManager {
     }
 
     /// Gets a vector with repeated value for specific `key`.
-    pub fn get_repeated_vector(&self, key: &Value) -> Option<VectorRef> {
+    pub fn get_repeated_vector(
+        &self,
+        data_type: &ConcreteDataType,
+        value: &Value,
+    ) -> Option<VectorRef> {
         self.vector_cache.as_ref().and_then(|vector_cache| {
-            let value = vector_cache.get(key);
+            let value = vector_cache.get(&(data_type.clone(), value.clone()));
             update_hit_miss(value, VECTOR_TYPE)
         })
     }
 
     /// Puts a vector with repeated value into the cache.
-    pub fn put_repeated_vector(&self, key: Value, vector: VectorRef) {
+    pub fn put_repeated_vector(&self, value: Value, vector: VectorRef) {
         if let Some(cache) = &self.vector_cache {
+            let key = (vector.data_type(), value);
             CACHE_BYTES
                 .with_label_values(&[VECTOR_TYPE])
                 .add(vector_cache_weight(&key, &vector).into());
@@ -158,10 +380,56 @@ impl CacheManager {
         }
     }
 
+    /// Gets result of for the selector.
+    pub fn get_selector_result(
+        &self,
+        selector_key: &SelectorResultKey,
+    ) -> Option<Arc<SelectorResultValue>> {
+        self.selector_result_cache
+            .as_ref()
+            .and_then(|selector_result_cache| selector_result_cache.get(selector_key))
+    }
+
+    /// Puts result of the selector into the cache.
+    pub fn put_selector_result(
+        &self,
+        selector_key: SelectorResultKey,
+        result: Arc<SelectorResultValue>,
+    ) {
+        if let Some(cache) = &self.selector_result_cache {
+            CACHE_BYTES
+                .with_label_values(&[SELECTOR_RESULT_TYPE])
+                .add(selector_result_cache_weight(&selector_key, &result).into());
+            cache.insert(selector_key, result);
+        }
+    }
+
     /// Gets the write cache.
     pub(crate) fn write_cache(&self) -> Option<&WriteCacheRef> {
         self.write_cache.as_ref()
     }
+
+    pub(crate) fn inverted_index_cache(&self) -> Option<&InvertedIndexCacheRef> {
+        self.index_cache.as_ref()
+    }
+
+    pub(crate) fn bloom_filter_index_cache(&self) -> Option<&BloomFilterIndexCacheRef> {
+        self.bloom_filter_index_cache.as_ref()
+    }
+
+    pub(crate) fn puffin_metadata_cache(&self) -> Option<&PuffinMetadataCacheRef> {
+        self.puffin_metadata_cache.as_ref()
+    }
+}
+
+/// Increases selector cache miss metrics.
+pub fn selector_result_cache_miss() {
+    CACHE_MISS.with_label_values(&[SELECTOR_RESULT_TYPE]).inc()
+}
+
+/// Increases selector cache hit metrics.
+pub fn selector_result_cache_hit() {
+    CACHE_HIT.with_label_values(&[SELECTOR_RESULT_TYPE]).inc()
 }
 
 /// Builder to construct a [CacheManager].
@@ -170,7 +438,12 @@ pub struct CacheManagerBuilder {
     sst_meta_cache_size: u64,
     vector_cache_size: u64,
     page_cache_size: u64,
+    index_metadata_size: u64,
+    index_content_size: u64,
+    index_content_page_size: u64,
+    puffin_metadata_size: u64,
     write_cache: Option<WriteCacheRef>,
+    selector_result_cache_size: u64,
 }
 
 impl CacheManagerBuilder {
@@ -198,17 +471,59 @@ impl CacheManagerBuilder {
         self
     }
 
+    /// Sets cache size for index metadata.
+    pub fn index_metadata_size(mut self, bytes: u64) -> Self {
+        self.index_metadata_size = bytes;
+        self
+    }
+
+    /// Sets cache size for index content.
+    pub fn index_content_size(mut self, bytes: u64) -> Self {
+        self.index_content_size = bytes;
+        self
+    }
+
+    /// Sets page size for index content.
+    pub fn index_content_page_size(mut self, bytes: u64) -> Self {
+        self.index_content_page_size = bytes;
+        self
+    }
+
+    /// Sets cache size for puffin metadata.
+    pub fn puffin_metadata_size(mut self, bytes: u64) -> Self {
+        self.puffin_metadata_size = bytes;
+        self
+    }
+
+    /// Sets selector result cache size.
+    pub fn selector_result_cache_size(mut self, bytes: u64) -> Self {
+        self.selector_result_cache_size = bytes;
+        self
+    }
+
     /// Builds the [CacheManager].
     pub fn build(self) -> CacheManager {
+        fn to_str(cause: RemovalCause) -> &'static str {
+            match cause {
+                RemovalCause::Expired => "expired",
+                RemovalCause::Explicit => "explicit",
+                RemovalCause::Replaced => "replaced",
+                RemovalCause::Size => "size",
+            }
+        }
+
         let sst_meta_cache = (self.sst_meta_cache_size != 0).then(|| {
             Cache::builder()
                 .max_capacity(self.sst_meta_cache_size)
                 .weigher(meta_cache_weight)
-                .eviction_listener(|k, v, _cause| {
+                .eviction_listener(|k, v, cause| {
                     let size = meta_cache_weight(&k, &v);
                     CACHE_BYTES
                         .with_label_values(&[SST_META_TYPE])
                         .sub(size.into());
+                    CACHE_EVICTION
+                        .with_label_values(&[SST_META_TYPE, to_str(cause)])
+                        .inc();
                 })
                 .build()
         });
@@ -216,11 +531,14 @@ impl CacheManagerBuilder {
             Cache::builder()
                 .max_capacity(self.vector_cache_size)
                 .weigher(vector_cache_weight)
-                .eviction_listener(|k, v, _cause| {
+                .eviction_listener(|k, v, cause| {
                     let size = vector_cache_weight(&k, &v);
                     CACHE_BYTES
                         .with_label_values(&[VECTOR_TYPE])
                         .sub(size.into());
+                    CACHE_EVICTION
+                        .with_label_values(&[VECTOR_TYPE, to_str(cause)])
+                        .inc();
                 })
                 .build()
         });
@@ -228,18 +546,52 @@ impl CacheManagerBuilder {
             Cache::builder()
                 .max_capacity(self.page_cache_size)
                 .weigher(page_cache_weight)
-                .eviction_listener(|k, v, _cause| {
+                .eviction_listener(|k, v, cause| {
                     let size = page_cache_weight(&k, &v);
                     CACHE_BYTES.with_label_values(&[PAGE_TYPE]).sub(size.into());
+                    CACHE_EVICTION
+                        .with_label_values(&[PAGE_TYPE, to_str(cause)])
+                        .inc();
                 })
                 .build()
         });
-
+        let inverted_index_cache = InvertedIndexCache::new(
+            self.index_metadata_size,
+            self.index_content_size,
+            self.index_content_page_size,
+        );
+        // TODO(ruihang): check if it's ok to reuse the same param with inverted index
+        let bloom_filter_index_cache = BloomFilterIndexCache::new(
+            self.index_metadata_size,
+            self.index_content_size,
+            self.index_content_page_size,
+        );
+        let puffin_metadata_cache =
+            PuffinMetadataCache::new(self.puffin_metadata_size, &CACHE_BYTES);
+        let selector_result_cache = (self.selector_result_cache_size != 0).then(|| {
+            Cache::builder()
+                .max_capacity(self.selector_result_cache_size)
+                .weigher(selector_result_cache_weight)
+                .eviction_listener(|k, v, cause| {
+                    let size = selector_result_cache_weight(&k, &v);
+                    CACHE_BYTES
+                        .with_label_values(&[SELECTOR_RESULT_TYPE])
+                        .sub(size.into());
+                    CACHE_EVICTION
+                        .with_label_values(&[SELECTOR_RESULT_TYPE, to_str(cause)])
+                        .inc();
+                })
+                .build()
+        });
         CacheManager {
             sst_meta_cache,
             vector_cache,
             page_cache,
             write_cache: self.write_cache,
+            index_cache: Some(Arc::new(inverted_index_cache)),
+            bloom_filter_index_cache: Some(Arc::new(bloom_filter_index_cache)),
+            puffin_metadata_cache: Some(Arc::new(puffin_metadata_cache)),
+            selector_result_cache,
         }
     }
 }
@@ -249,13 +601,17 @@ fn meta_cache_weight(k: &SstMetaKey, v: &Arc<ParquetMetaData>) -> u32 {
     (k.estimated_size() + parquet_meta_size(v)) as u32
 }
 
-fn vector_cache_weight(_k: &Value, v: &VectorRef) -> u32 {
+fn vector_cache_weight(_k: &(ConcreteDataType, Value), v: &VectorRef) -> u32 {
     // We ignore the heap size of `Value`.
-    (mem::size_of::<Value>() + v.memory_size()) as u32
+    (mem::size_of::<ConcreteDataType>() + mem::size_of::<Value>() + v.memory_size()) as u32
 }
 
 fn page_cache_weight(k: &PageKey, v: &Arc<PageValue>) -> u32 {
     (k.estimated_size() + v.estimated_size()) as u32
+}
+
+fn selector_result_cache_weight(k: &SelectorResultKey, v: &Arc<SelectorResultValue>) -> u32 {
+    (mem::size_of_val(k) + v.estimated_size()) as u32
 }
 
 /// Updates cache hit/miss metrics.
@@ -279,20 +635,59 @@ impl SstMetaKey {
     }
 }
 
+/// Path to column pages in the SST file.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ColumnPagePath {
+    /// Region id of the SST file to cache.
+    region_id: RegionId,
+    /// Id of the SST file to cache.
+    file_id: FileId,
+    /// Index of the row group.
+    row_group_idx: usize,
+    /// Index of the column in the row group.
+    column_idx: usize,
+}
+
 /// Cache key for pages of a SST row group.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct PageKey {
-    /// Region id of the SST file to cache.
-    pub region_id: RegionId,
-    /// Id of the SST file to cache.
-    pub file_id: FileId,
-    /// Index of the row group.
-    pub row_group_idx: usize,
-    /// Index of the column in the row group.
-    pub column_idx: usize,
+pub enum PageKey {
+    /// Cache key for a compressed page in a row group.
+    Compressed(ColumnPagePath),
+    /// Cache key for all uncompressed pages in a row group.
+    Uncompressed(ColumnPagePath),
 }
 
 impl PageKey {
+    /// Creates a key for a compressed page.
+    pub fn new_compressed(
+        region_id: RegionId,
+        file_id: FileId,
+        row_group_idx: usize,
+        column_idx: usize,
+    ) -> PageKey {
+        PageKey::Compressed(ColumnPagePath {
+            region_id,
+            file_id,
+            row_group_idx,
+            column_idx,
+        })
+    }
+
+    /// Creates a key for all uncompressed pages in a row group.
+    pub fn new_uncompressed(
+        region_id: RegionId,
+        file_id: FileId,
+        row_group_idx: usize,
+        column_idx: usize,
+    ) -> PageKey {
+        PageKey::Uncompressed(ColumnPagePath {
+            region_id,
+            file_id,
+            row_group_idx,
+            column_idx,
+        })
+    }
+
     /// Returns memory used by the key (estimated).
     fn estimated_size(&self) -> usize {
         mem::size_of::<Self>()
@@ -300,21 +695,73 @@ impl PageKey {
 }
 
 /// Cached row group pages for a column.
+// We don't use enum here to make it easier to mock and use the struct.
+#[derive(Default)]
 pub struct PageValue {
+    /// Compressed page of the column in the row group.
+    pub compressed: Bytes,
     /// All pages of the column in the row group.
-    pub pages: Vec<Page>,
+    pub row_group: Vec<Page>,
 }
 
 impl PageValue {
-    /// Creates a new page value.
-    pub fn new(pages: Vec<Page>) -> PageValue {
-        PageValue { pages }
+    /// Creates a new value from a compressed page.
+    pub fn new_compressed(bytes: Bytes) -> PageValue {
+        PageValue {
+            compressed: bytes,
+            row_group: vec![],
+        }
+    }
+
+    /// Creates a new value from all pages in a row group.
+    pub fn new_row_group(pages: Vec<Page>) -> PageValue {
+        PageValue {
+            compressed: Bytes::new(),
+            row_group: pages,
+        }
     }
 
     /// Returns memory used by the value (estimated).
     fn estimated_size(&self) -> usize {
-        // We only consider heap size of all pages.
-        self.pages.iter().map(|page| page.buffer().len()).sum()
+        mem::size_of::<Self>()
+            + self.compressed.len()
+            + self
+                .row_group
+                .iter()
+                .map(|page| page.buffer().len())
+                .sum::<usize>()
+    }
+}
+
+/// Cache key for time series row selector result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SelectorResultKey {
+    /// Id of the SST file.
+    pub file_id: FileId,
+    /// Index of the row group.
+    pub row_group_idx: usize,
+    /// Time series row selector.
+    pub selector: TimeSeriesRowSelector,
+}
+
+/// Cached result for time series row selector.
+pub struct SelectorResultValue {
+    /// Batches of rows selected by the selector.
+    pub result: Vec<Batch>,
+    /// Projection of rows.
+    pub projection: Vec<usize>,
+}
+
+impl SelectorResultValue {
+    /// Creates a new selector result value.
+    pub fn new(result: Vec<Batch>, projection: Vec<usize>) -> SelectorResultValue {
+        SelectorResultValue { result, projection }
+    }
+
+    /// Returns memory used by the value (estimated).
+    fn estimated_size(&self) -> usize {
+        // We only consider heap size of all batches.
+        self.result.iter().map(|batch| batch.memory_size()).sum()
     }
 }
 
@@ -323,12 +770,16 @@ type SstMetaCache = Cache<SstMetaKey, Arc<ParquetMetaData>>;
 /// Maps [Value] to a vector that holds this value repeatedly.
 ///
 /// e.g. `"hello" => ["hello", "hello", "hello"]`
-type VectorCache = Cache<Value, VectorRef>;
+type VectorCache = Cache<(ConcreteDataType, Value), VectorRef>;
 /// Maps (region, file, row group, column) to [PageValue].
 type PageCache = Cache<PageKey, Arc<PageValue>>;
+/// Maps (file id, row group id, time series row selector) to [SelectorResultValue].
+type SelectorResultCache = Cache<SelectorResultKey, Arc<SelectorResultValue>>;
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use datatypes::vectors::Int64Vector;
 
     use super::*;
@@ -353,15 +804,12 @@ mod tests {
         let value = Value::Int64(10);
         let vector: VectorRef = Arc::new(Int64Vector::from_slice([10, 10, 10, 10]));
         cache.put_repeated_vector(value.clone(), vector.clone());
-        assert!(cache.get_repeated_vector(&value).is_none());
+        assert!(cache
+            .get_repeated_vector(&ConcreteDataType::int64_datatype(), &value)
+            .is_none());
 
-        let key = PageKey {
-            region_id,
-            file_id,
-            row_group_idx: 0,
-            column_idx: 0,
-        };
-        let pages = Arc::new(PageValue::new(Vec::new()));
+        let key = PageKey::new_uncompressed(region_id, file_id, 0, 0);
+        let pages = Arc::new(PageValue::default());
         cache.put_pages(key.clone(), pages);
         assert!(cache.get_pages(&key).is_none());
 
@@ -394,10 +842,14 @@ mod tests {
     fn test_repeated_vector_cache() {
         let cache = CacheManager::builder().vector_cache_size(4096).build();
         let value = Value::Int64(10);
-        assert!(cache.get_repeated_vector(&value).is_none());
+        assert!(cache
+            .get_repeated_vector(&ConcreteDataType::int64_datatype(), &value)
+            .is_none());
         let vector: VectorRef = Arc::new(Int64Vector::from_slice([10, 10, 10, 10]));
         cache.put_repeated_vector(value.clone(), vector.clone());
-        let cached = cache.get_repeated_vector(&value).unwrap();
+        let cached = cache
+            .get_repeated_vector(&ConcreteDataType::int64_datatype(), &value)
+            .unwrap();
         assert_eq!(vector, cached);
     }
 
@@ -406,15 +858,27 @@ mod tests {
         let cache = CacheManager::builder().page_cache_size(1000).build();
         let region_id = RegionId::new(1, 1);
         let file_id = FileId::random();
-        let key = PageKey {
-            region_id,
-            file_id,
-            row_group_idx: 0,
-            column_idx: 0,
-        };
+        let key = PageKey::new_compressed(region_id, file_id, 0, 0);
         assert!(cache.get_pages(&key).is_none());
-        let pages = Arc::new(PageValue::new(Vec::new()));
+        let pages = Arc::new(PageValue::default());
         cache.put_pages(key.clone(), pages);
         assert!(cache.get_pages(&key).is_some());
+    }
+
+    #[test]
+    fn test_selector_result_cache() {
+        let cache = CacheManager::builder()
+            .selector_result_cache_size(1000)
+            .build();
+        let file_id = FileId::random();
+        let key = SelectorResultKey {
+            file_id,
+            row_group_idx: 0,
+            selector: TimeSeriesRowSelector::LastRow,
+        };
+        assert!(cache.get_selector_result(&key).is_none());
+        let result = Arc::new(SelectorResultValue::new(Vec::new(), Vec::new()));
+        cache.put_selector_result(key, result);
+        assert!(cache.get_selector_result(&key).is_some());
     }
 }

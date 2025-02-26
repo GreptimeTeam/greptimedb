@@ -24,8 +24,12 @@ use store_api::region_request::{
     RegionCloseRequest, RegionOpenRequest, RegionPutRequest, RegionRequest,
 };
 use store_api::storage::{RegionId, ScanRequest};
+use tokio::sync::oneshot;
 
+use crate::compaction::compactor::{open_compaction_region, OpenCompactionRegionRequest};
 use crate::config::MitoConfig;
+use crate::error;
+use crate::region::options::RegionOptions;
 use crate::test_util::{
     build_rows, flush_region, put_rows, reopen_region, rows_schema, CreateRequestBuilder, TestEnv,
 };
@@ -49,7 +53,9 @@ async fn test_engine_open_empty() {
         .await
         .unwrap_err();
     assert_eq!(StatusCode::RegionNotFound, err.status_code());
-    let err = engine.set_writable(region_id, true).unwrap_err();
+    let err = engine
+        .set_region_role(region_id, RegionRole::Leader)
+        .unwrap_err();
     assert_eq!(StatusCode::RegionNotFound, err.status_code());
     let role = engine.role(region_id);
     assert_eq!(role, None);
@@ -123,15 +129,20 @@ async fn test_engine_open_readonly() {
     let err = engine
         .handle_request(
             region_id,
-            RegionRequest::Put(RegionPutRequest { rows: rows.clone() }),
+            RegionRequest::Put(RegionPutRequest {
+                rows: rows.clone(),
+                hint: None,
+            }),
         )
         .await
         .unwrap_err();
-    assert_eq!(StatusCode::RegionReadonly, err.status_code());
+    assert_eq!(StatusCode::RegionNotReady, err.status_code());
 
     assert_eq!(Some(RegionRole::Follower), engine.role(region_id));
-    // Set writable and write.
-    engine.set_writable(region_id, true).unwrap();
+    // Converts region to leader.
+    engine
+        .set_region_role(region_id, RegionRole::Leader)
+        .unwrap();
     assert_eq!(Some(RegionRole::Leader), engine.role(region_id));
 
     put_rows(&engine, region_id, rows).await;
@@ -172,8 +183,8 @@ async fn test_engine_region_open_with_options() {
 
     let region = engine.get_region(region_id).unwrap();
     assert_eq!(
-        Duration::from_secs(3600 * 24 * 4),
-        region.version().options.ttl.unwrap()
+        region.version().options.ttl,
+        Some(Duration::from_secs(3600 * 24 * 4).into())
     );
 }
 
@@ -220,13 +231,13 @@ async fn test_engine_region_open_with_custom_store() {
     let object_store_manager = env.get_object_store_manager().unwrap();
     assert!(!object_store_manager
         .default_object_store()
-        .is_exist(region.access_layer.region_dir())
+        .exists(region.access_layer.region_dir())
         .await
         .unwrap());
     assert!(object_store_manager
         .find("Gcs")
         .unwrap()
-        .is_exist(region.access_layer.region_dir())
+        .exists(region.access_layer.region_dir())
         .await
         .unwrap());
 }
@@ -237,6 +248,17 @@ async fn test_open_region_skip_wal_replay() {
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
     let request = CreateRequestBuilder::new().build();
     let region_dir = request.region_dir.clone();
 
@@ -276,7 +298,7 @@ async fn test_open_region_skip_wal_replay() {
         .unwrap();
 
     let request = ScanRequest::default();
-    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
 +-------+---------+---------------------+
@@ -305,7 +327,7 @@ async fn test_open_region_skip_wal_replay() {
         .unwrap();
 
     let request = ScanRequest::default();
-    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
 +-------+---------+---------------------+
@@ -318,4 +340,144 @@ async fn test_open_region_skip_wal_replay() {
 | 4     | 4.0     | 1970-01-01T00:00:04 |
 +-------+---------+---------------------+";
     assert_eq!(expected, batches.pretty_print().unwrap());
+}
+
+#[tokio::test]
+async fn test_open_region_wait_for_opening_region_ok() {
+    let mut env = TestEnv::with_prefix("wait-for-opening-region-ok");
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let worker = engine.inner.workers.worker(region_id);
+    let (tx, rx) = oneshot::channel();
+    let opening_regions = worker.opening_regions().clone();
+    opening_regions.insert_sender(region_id, tx.into());
+    assert!(engine.is_region_opening(region_id));
+
+    let handle_open = tokio::spawn(async move {
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Open(RegionOpenRequest {
+                    engine: String::new(),
+                    region_dir: "empty".to_string(),
+                    options: HashMap::default(),
+                    skip_wal_replay: false,
+                }),
+            )
+            .await
+    });
+
+    // Wait for conditions
+    while opening_regions.sender_len(region_id) != 2 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let senders = opening_regions.remove_sender(region_id);
+    for sender in senders {
+        sender.send(Ok(0));
+    }
+
+    assert_eq!(handle_open.await.unwrap().unwrap().affected_rows, 0);
+    assert_eq!(rx.await.unwrap().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn test_open_region_wait_for_opening_region_err() {
+    let mut env = TestEnv::with_prefix("wait-for-opening-region-err");
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let worker = engine.inner.workers.worker(region_id);
+    let (tx, rx) = oneshot::channel();
+    let opening_regions = worker.opening_regions().clone();
+    opening_regions.insert_sender(region_id, tx.into());
+    assert!(engine.is_region_opening(region_id));
+
+    let handle_open = tokio::spawn(async move {
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Open(RegionOpenRequest {
+                    engine: String::new(),
+                    region_dir: "empty".to_string(),
+                    options: HashMap::default(),
+                    skip_wal_replay: false,
+                }),
+            )
+            .await
+    });
+
+    // Wait for conditions
+    while opening_regions.sender_len(region_id) != 2 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let senders = opening_regions.remove_sender(region_id);
+    for sender in senders {
+        sender.send(Err(error::RegionNotFoundSnafu { region_id }.build()));
+    }
+
+    assert_eq!(
+        handle_open.await.unwrap().unwrap_err().status_code(),
+        StatusCode::RegionNotFound
+    );
+    assert_eq!(
+        rx.await.unwrap().unwrap_err().status_code(),
+        StatusCode::RegionNotFound
+    );
+}
+
+#[tokio::test]
+async fn test_open_compaction_region() {
+    let mut env = TestEnv::new();
+    let mut mito_config = MitoConfig::default();
+    mito_config
+        .sanitize(&env.data_home().display().to_string())
+        .unwrap();
+
+    let engine = env.create_engine(mito_config.clone()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let schema_metadata_manager = env.get_schema_metadata_manager();
+    schema_metadata_manager
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+    let request = CreateRequestBuilder::new().build();
+    let region_dir = request.region_dir.clone();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Close the region.
+    engine
+        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .await
+        .unwrap();
+
+    let object_store_manager = env.get_object_store_manager().unwrap();
+
+    let req = OpenCompactionRegionRequest {
+        region_id,
+        region_dir: region_dir.clone(),
+        region_options: RegionOptions::default(),
+        max_parallelism: 1,
+    };
+
+    let compaction_region = open_compaction_region(
+        &req,
+        &mito_config,
+        object_store_manager.clone(),
+        schema_metadata_manager,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(region_id, compaction_region.region_id);
 }

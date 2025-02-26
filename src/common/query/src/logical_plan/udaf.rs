@@ -16,15 +16,18 @@
 //!
 //! Modified from DataFusion.
 
+use std::any::Any;
 use std::fmt::{self, Debug, Formatter};
 use std::sync::Arc;
 
+use datafusion::arrow::datatypes::Field;
+use datafusion_common::Result;
+use datafusion_expr::function::{AccumulatorArgs, StateFieldsArgs};
 use datafusion_expr::{
-    AccumulatorFactoryFunction, AggregateUDF as DfAggregateUdf,
-    StateTypeFunction as DfStateTypeFunction,
+    Accumulator, AccumulatorFactoryFunction, AggregateUDF as DfAggregateUdf, AggregateUDFImpl,
 };
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
-use datatypes::prelude::*;
+use datatypes::data_type::DataType;
 
 use crate::function::{
     to_df_return_type, AccumulatorFunctionImpl, ReturnTypeFunction, StateTypeFunction,
@@ -88,15 +91,67 @@ impl AggregateFunction {
     }
 }
 
+struct DfUdafAdapter {
+    name: String,
+    signature: datafusion_expr::Signature,
+    return_type_func: datafusion_expr::ReturnTypeFunction,
+    accumulator: AccumulatorFactoryFunction,
+    creator: AggregateFunctionCreatorRef,
+}
+
+impl Debug for DfUdafAdapter {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DfUdafAdapter")
+            .field("name", &self.name)
+            .field("signature", &self.signature)
+            .finish()
+    }
+}
+
+impl AggregateUDFImpl for DfUdafAdapter {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn signature(&self) -> &datafusion_expr::Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, arg_types: &[ArrowDataType]) -> Result<ArrowDataType> {
+        (self.return_type_func)(arg_types).map(|x| x.as_ref().clone())
+    }
+
+    fn accumulator(&self, acc_args: AccumulatorArgs) -> Result<Box<dyn Accumulator>> {
+        (self.accumulator)(acc_args)
+    }
+
+    fn state_fields(&self, args: StateFieldsArgs) -> Result<Vec<Field>> {
+        let state_types = self.creator.state_types()?;
+        let fields = state_types
+            .into_iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let name = format!("{}_{i}", args.name);
+                Field::new(name, t.as_arrow_type(), true)
+            })
+            .collect::<Vec<_>>();
+        Ok(fields)
+    }
+}
+
 impl From<AggregateFunction> for DfAggregateUdf {
     fn from(udaf: AggregateFunction) -> Self {
-        DfAggregateUdf::new(
-            &udaf.name,
-            &udaf.signature.into(),
-            &to_df_return_type(udaf.return_type),
-            &to_df_accumulator_func(udaf.accumulator, udaf.creator.clone()),
-            &to_df_state_type(udaf.state_type),
-        )
+        DfAggregateUdf::new_from_impl(DfUdafAdapter {
+            name: udaf.name,
+            signature: udaf.signature.into(),
+            return_type_func: to_df_return_type(udaf.return_type),
+            accumulator: to_df_accumulator_func(udaf.accumulator, udaf.creator.clone()),
+            creator: udaf.creator,
+        })
     }
 }
 
@@ -109,20 +164,4 @@ fn to_df_accumulator_func(
         let creator = creator.clone();
         Ok(Box::new(DfAccumulatorAdaptor::new(accumulator, creator)) as _)
     })
-}
-
-fn to_df_state_type(func: StateTypeFunction) -> DfStateTypeFunction {
-    let df_func = move |data_type: &ArrowDataType| {
-        // DataFusion DataType -> ConcreteDataType
-        let concrete_data_type = ConcreteDataType::from_arrow_type(data_type);
-
-        // evaluate ConcreteDataType
-        let eval_result = (func)(&concrete_data_type);
-
-        // ConcreteDataType -> DataFusion DataType
-        eval_result
-            .map(|ts| Arc::new(ts.iter().map(|t| t.as_arrow_type()).collect()))
-            .map_err(|e| e.into())
-    };
-    Arc::new(df_func)
 }

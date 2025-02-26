@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::string::FromUtf8Error;
 use std::sync::Arc;
 
 use common_error::ext::{BoxedError, ErrorExt};
@@ -32,27 +31,37 @@ pub enum Error {
     External { source: BoxedError },
 
     #[snafu(display("Loader {} is already registered", name))]
-    LoaderConflict { name: String, location: Location },
+    LoaderConflict {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Procedure Manager is stopped"))]
-    ManagerNotStart { location: Location },
+    ManagerNotStart {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to serialize to json"))]
     ToJson {
         #[snafu(source)]
         error: serde_json::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Procedure {} already exists", procedure_id))]
     DuplicateProcedure {
         procedure_id: ProcedureId,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to put state, key: '{key}'"))]
     PutState {
         key: String,
+        #[snafu(implicit)]
         location: Location,
         source: BoxedError,
     },
@@ -67,6 +76,7 @@ pub enum Error {
     #[snafu(display("Failed to delete keys: '{keys}'"))]
     DeleteStates {
         keys: String,
+        #[snafu(implicit)]
         location: Location,
         source: BoxedError,
     },
@@ -74,6 +84,7 @@ pub enum Error {
     #[snafu(display("Failed to list state, path: '{path}'"))]
     ListState {
         path: String,
+        #[snafu(implicit)]
         location: Location,
         source: BoxedError,
     },
@@ -82,6 +93,7 @@ pub enum Error {
     FromJson {
         #[snafu(source)]
         error: serde_json::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -95,12 +107,21 @@ pub enum Error {
     WaitWatcher {
         #[snafu(source)]
         error: tokio::sync::watch::error::RecvError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to execute procedure"))]
     ProcedureExec {
         source: Arc<Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Rollback Procedure recovered: {error}"))]
+    RollbackProcedureRecovered {
+        error: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -110,28 +131,48 @@ pub enum Error {
         procedure_id: ProcedureId,
     },
 
-    #[snafu(display("Corrupted data, error: "))]
-    CorruptedData {
-        #[snafu(source)]
-        error: FromUtf8Error,
+    #[snafu(display(
+        "Procedure rollback exceeded max times, procedure_id: {}",
+        procedure_id
+    ))]
+    RollbackTimesExceeded {
+        source: Arc<Error>,
+        procedure_id: ProcedureId,
     },
 
     #[snafu(display("Failed to start the remove_outdated_meta method, error"))]
     StartRemoveOutdatedMetaTask {
         source: common_runtime::error::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to stop the remove_outdated_meta method, error"))]
     StopRemoveOutdatedMetaTask {
         source: common_runtime::error::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
-    #[snafu(display("Subprocedure {} failed", subprocedure_id))]
-    SubprocedureFailed {
-        subprocedure_id: ProcedureId,
-        source: Arc<Error>,
+    #[snafu(display("Failed to parse segment key: {key}"))]
+    ParseSegmentKey {
+        #[snafu(implicit)]
+        location: Location,
+        key: String,
+        #[snafu(source)]
+        error: std::num::ParseIntError,
+    },
+
+    #[snafu(display("Unexpected: {err_msg}"))]
+    Unexpected {
+        #[snafu(implicit)]
+        location: Location,
+        err_msg: String,
+    },
+
+    #[snafu(display("Not support to rollback the procedure"))]
+    RollbackNotSupported {
+        #[snafu(implicit)]
         location: Location,
     },
 }
@@ -149,19 +190,24 @@ impl ErrorExt for Error {
             Error::ToJson { .. }
             | Error::DeleteState { .. }
             | Error::FromJson { .. }
-            | Error::RetryTimesExceeded { .. }
-            | Error::RetryLater { .. }
             | Error::WaitWatcher { .. }
-            | Error::ManagerNotStart { .. } => StatusCode::Internal,
+            | Error::RetryLater { .. }
+            | Error::RollbackProcedureRecovered { .. } => StatusCode::Internal,
+
+            Error::RetryTimesExceeded { .. }
+            | Error::RollbackTimesExceeded { .. }
+            | Error::ManagerNotStart { .. } => StatusCode::IllegalState,
+
+            Error::RollbackNotSupported { .. } => StatusCode::Unsupported,
             Error::LoaderConflict { .. } | Error::DuplicateProcedure { .. } => {
                 StatusCode::InvalidArguments
             }
-            Error::ProcedurePanic { .. } | Error::CorruptedData { .. } => StatusCode::Unexpected,
+            Error::ProcedurePanic { .. }
+            | Error::ParseSegmentKey { .. }
+            | Error::Unexpected { .. } => StatusCode::Unexpected,
             Error::ProcedureExec { source, .. } => source.status_code(),
             Error::StartRemoveOutdatedMetaTask { source, .. }
             | Error::StopRemoveOutdatedMetaTask { source, .. } => source.status_code(),
-
-            Error::SubprocedureFailed { source, .. } => source.status_code(),
         }
     }
 

@@ -13,9 +13,6 @@
 // limitations under the License.
 
 #[cfg(feature = "pprof")]
-pub(crate) mod nix;
-
-#[cfg(feature = "pprof")]
 pub mod handler {
     use std::num::NonZeroI32;
     use std::time::Duration;
@@ -23,16 +20,15 @@ pub mod handler {
     use axum::extract::Query;
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
-    use common_telemetry::logging;
-    use schemars::JsonSchema;
+    use common_pprof::Profiling;
+    use common_telemetry::info;
     use serde::{Deserialize, Serialize};
     use snafu::ResultExt;
 
     use crate::error::{DumpPprofSnafu, Result};
-    use crate::http::pprof::nix::Profiling;
 
     /// Output format.
-    #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+    #[derive(Debug, Serialize, Deserialize)]
     #[serde(rename_all = "snake_case")]
     pub enum Output {
         /// google’s pprof format report in protobuf.
@@ -43,7 +39,7 @@ pub mod handler {
         Flamegraph,
     }
 
-    #[derive(Serialize, Deserialize, Debug, JsonSchema)]
+    #[derive(Serialize, Deserialize, Debug)]
     #[serde(default)]
     pub struct PprofQuery {
         seconds: u64,
@@ -64,19 +60,21 @@ pub mod handler {
 
     #[axum_macros::debug_handler]
     pub async fn pprof_handler(Query(req): Query<PprofQuery>) -> Result<impl IntoResponse> {
-        logging::info!("start pprof, request: {:?}", req);
+        info!("start pprof, request: {:?}", req);
 
         let profiling = Profiling::new(Duration::from_secs(req.seconds), req.frequency.into());
         let body = match req.output {
             Output::Proto => profiling.dump_proto().await.context(DumpPprofSnafu)?,
             Output::Text => {
-                let report = profiling.report().await.context(DumpPprofSnafu)?;
-                format!("{:?}", report).into_bytes()
+                let report = profiling.dump_text().await.context(DumpPprofSnafu)?;
+                report.into_bytes()
             }
             Output::Flamegraph => profiling.dump_flamegraph().await.context(DumpPprofSnafu)?,
         };
 
-        logging::info!("finish pprof");
+        info!("finish pprof");
+
+        info!("Dump data success, size: {}", body.len());
 
         Ok((StatusCode::OK, body))
     }

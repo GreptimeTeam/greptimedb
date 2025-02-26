@@ -14,7 +14,6 @@
 
 //! Handler for Greptime Database service. It's implemented by frontend.
 
-use std::sync::Arc;
 use std::time::Instant;
 
 use api::helper::request_type;
@@ -26,9 +25,10 @@ use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::Output;
+use common_runtime::runtime::RuntimeTrait;
 use common_runtime::Runtime;
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
-use common_telemetry::{logging, tracing};
+use common_telemetry::{debug, error, tracing};
 use common_time::timezone::parse_timezone;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
@@ -42,14 +42,14 @@ use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 pub struct GreptimeRequestHandler {
     handler: ServerGrpcQueryHandlerRef,
     user_provider: Option<UserProviderRef>,
-    runtime: Arc<Runtime>,
+    runtime: Option<Runtime>,
 }
 
 impl GreptimeRequestHandler {
     pub fn new(
         handler: ServerGrpcQueryHandlerRef,
         user_provider: Option<UserProviderRef>,
-        runtime: Arc<Runtime>,
+        runtime: Option<Runtime>,
     ) -> Self {
         Self {
             handler,
@@ -59,13 +59,17 @@ impl GreptimeRequestHandler {
     }
 
     #[tracing::instrument(skip_all, fields(protocol = "grpc", request_type = get_request_type(&request)))]
-    pub(crate) async fn handle_request(&self, request: GreptimeRequest) -> Result<Output> {
+    pub(crate) async fn handle_request(
+        &self,
+        request: GreptimeRequest,
+        hints: Vec<(String, String)>,
+    ) -> Result<Output> {
         let query = request.request.context(InvalidQuerySnafu {
             reason: "Expecting non-empty GreptimeRequest.",
         })?;
 
         let header = request.header.as_ref();
-        let query_ctx = create_query_context(header);
+        let query_ctx = create_query_context(header, hints);
         let user_info = auth(self.user_provider.clone(), header, &query_ctx).await?;
         query_ctx.set_current_user(user_info);
 
@@ -73,16 +77,9 @@ impl GreptimeRequestHandler {
         let request_type = request_type(&query).to_string();
         let db = query_ctx.get_db_string();
         let timer = RequestTimer::new(db.clone(), request_type);
-
-        // Executes requests in another runtime to
-        // 1. prevent the execution from being cancelled unexpected by Tonic runtime;
-        //   - Refer to our blog for the rational behind it:
-        //     https://www.greptime.com/blogs/2023-01-12-hidden-control-flow.html
-        //   - Obtaining a `JoinHandle` to get the panic message (if there's any).
-        //     From its docs, `JoinHandle` is cancel safe. The task keeps running even it's handle been dropped.
-        // 2. avoid the handler blocks the gRPC runtime incidentally.
         let tracing_context = TracingContext::from_current_span();
-        let handle = self.runtime.spawn(async move {
+
+        let result_future = async move {
             handler
                 .do_query(query, query_ctx)
                 .trace(tracing_context.attach(tracing::info_span!(
@@ -91,19 +88,35 @@ impl GreptimeRequestHandler {
                 .await
                 .map_err(|e| {
                     if e.status_code().should_log_error() {
-                        logging::error!(e; "Failed to handle request");
+                        let root_error = e.root_cause().unwrap_or(&e);
+                        error!(e; "Failed to handle request, error: {}", root_error.to_string());
                     } else {
                         // Currently, we still print a debug log.
-                        logging::debug!("Failed to handle request, err: {:?}", e);
+                        debug!("Failed to handle request, err: {:?}", e);
                     }
                     e
                 })
-        });
+        };
 
-        handle.await.context(JoinTaskSnafu).map_err(|e| {
-            timer.record(e.status_code());
-            e
-        })?
+        match &self.runtime {
+            Some(runtime) => {
+                // Executes requests in another runtime to
+                // 1. prevent the execution from being cancelled unexpected by Tonic runtime;
+                //   - Refer to our blog for the rational behind it:
+                //     https://www.greptime.com/blogs/2023-01-12-hidden-control-flow.html
+                //   - Obtaining a `JoinHandle` to get the panic message (if there's any).
+                //     From its docs, `JoinHandle` is cancel safe. The task keeps running even it's handle been dropped.
+                // 2. avoid the handler blocks the gRPC runtime incidentally.
+                runtime
+                    .spawn(result_future)
+                    .await
+                    .context(JoinTaskSnafu)
+                    .inspect_err(|e| {
+                        timer.record(e.status_code());
+                    })?
+            }
+            None => result_future.await,
+        }
     }
 }
 
@@ -119,9 +132,9 @@ pub(crate) async fn auth(
     user_provider: Option<UserProviderRef>,
     header: Option<&RequestHeader>,
     query_ctx: &QueryContextRef,
-) -> Result<Option<UserInfoRef>> {
+) -> Result<UserInfoRef> {
     let Some(user_provider) = user_provider else {
-        return Ok(None);
+        return Ok(auth::userinfo_by_name(None));
     };
 
     let auth_scheme = header
@@ -139,7 +152,7 @@ pub(crate) async fn auth(
                 Identity::UserId(&username, None),
                 Password::PlainText(password.into()),
                 query_ctx.current_catalog(),
-                query_ctx.current_schema(),
+                &query_ctx.current_schema(),
             )
             .await
             .context(AuthSnafu),
@@ -147,16 +160,17 @@ pub(crate) async fn auth(
             name: "Token AuthScheme".to_string(),
         }),
     }
-    .map(Some)
-    .map_err(|e| {
+    .inspect_err(|e| {
         METRIC_AUTH_FAILURE
             .with_label_values(&[e.status_code().as_ref()])
             .inc();
-        e
     })
 }
 
-pub(crate) fn create_query_context(header: Option<&RequestHeader>) -> QueryContextRef {
+pub(crate) fn create_query_context(
+    header: Option<&RequestHeader>,
+    extensions: Vec<(String, String)>,
+) -> QueryContextRef {
     let (catalog, schema) = header
         .map(|header| {
             // We provide dbname field in newer versions of protos/sdks
@@ -185,11 +199,14 @@ pub(crate) fn create_query_context(header: Option<&RequestHeader>) -> QueryConte
             )
         });
     let timezone = parse_timezone(header.map(|h| h.timezone.as_str()));
-    QueryContextBuilder::default()
+    let mut ctx_builder = QueryContextBuilder::default()
         .current_catalog(catalog)
         .current_schema(schema)
-        .timezone(Arc::new(timezone))
-        .build()
+        .timezone(timezone);
+    for (key, value) in extensions {
+        ctx_builder = ctx_builder.set_extension(key, value);
+    }
+    ctx_builder.build().into()
 }
 
 /// Histogram timer for handling gRPC request.

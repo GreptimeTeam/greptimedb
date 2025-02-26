@@ -29,9 +29,10 @@ use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
 use session::Session;
 use snafu::IntoError;
 
-use super::PostgresServerHandler;
+use super::PostgresServerHandlerInner;
 use crate::error::{AuthSnafu, Result};
 use crate::metrics::METRIC_AUTH_FAILURE;
+use crate::postgres::types::PgErrorCode;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
 pub(crate) struct PgLoginVerifier {
@@ -126,7 +127,7 @@ where
 }
 
 #[async_trait]
-impl StartupHandler for PostgresServerHandler {
+impl StartupHandler for PostgresServerHandlerInner {
     async fn on_startup<C>(
         &self,
         client: &mut C,
@@ -141,7 +142,11 @@ impl StartupHandler for PostgresServerHandler {
             PgWireFrontendMessage::Startup(ref startup) => {
                 // check ssl requirement
                 if !client.is_secure() && self.force_tls {
-                    send_error(client, "FATAL", "28000", "No encryption".to_owned()).await?;
+                    send_error(
+                        client,
+                        PgErrorCode::Ec28000.to_err_info("No encryption".to_string()),
+                    )
+                    .await?;
                     return Ok(());
                 }
 
@@ -155,7 +160,7 @@ impl StartupHandler for PostgresServerHandler {
                         let _ = metadata.insert(super::METADATA_SCHEMA.to_owned(), schema);
                     }
                     DbResolution::NotFound(msg) => {
-                        send_error(client, "FATAL", "3D000", msg).await?;
+                        send_error(client, PgErrorCode::Ec3D000.to_err_info(msg)).await?;
                         return Ok(());
                     }
                 }
@@ -172,7 +177,7 @@ impl StartupHandler for PostgresServerHandler {
                         client.metadata().get(super::METADATA_USER).cloned(),
                     ));
                     set_client_info(client, &self.session);
-                    auth::finish_authentication(client, self.param_provider.as_ref()).await;
+                    auth::finish_authentication(client, self.param_provider.as_ref()).await?;
                 }
             }
             PgWireFrontendMessage::PasswordMessageFamily(pwd) => {
@@ -189,13 +194,12 @@ impl StartupHandler for PostgresServerHandler {
                 if let Ok(Some(user_info)) = auth_result {
                     self.session.set_user_info(user_info);
                     set_client_info(client, &self.session);
-                    auth::finish_authentication(client, self.param_provider.as_ref()).await;
+                    auth::finish_authentication(client, self.param_provider.as_ref()).await?;
                 } else {
                     return send_error(
                         client,
-                        "FATAL",
-                        "28P01",
-                        "password authentication failed".to_owned(),
+                        PgErrorCode::Ec28P01
+                            .to_err_info("password authentication failed".to_string()),
                     )
                     .await;
                 }
@@ -206,13 +210,13 @@ impl StartupHandler for PostgresServerHandler {
     }
 }
 
-async fn send_error<C>(client: &mut C, level: &str, code: &str, message: String) -> PgWireResult<()>
+async fn send_error<C>(client: &mut C, err_info: ErrorInfo) -> PgWireResult<()>
 where
     C: ClientInfo + Sink<PgWireBackendMessage> + Unpin + Send,
     C::Error: Debug,
     PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
 {
-    let error = ErrorResponse::from(ErrorInfo::new(level.to_owned(), code.to_owned(), message));
+    let error = ErrorResponse::from(err_info);
     client
         .feed(PgWireBackendMessage::ErrorResponse(error))
         .await?;

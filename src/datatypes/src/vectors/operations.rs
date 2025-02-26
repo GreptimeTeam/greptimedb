@@ -18,6 +18,8 @@ mod find_unique;
 mod replicate;
 mod take;
 
+use std::sync::Arc;
+
 use common_base::BitVec;
 
 use crate::error::{self, Result};
@@ -89,6 +91,19 @@ macro_rules! impl_scalar_vector_op {
             }
 
             fn cast(&self, to_type: &ConcreteDataType) -> Result<VectorRef> {
+                if let Some(vector) = self.as_any().downcast_ref::<BinaryVector>() {
+                    match to_type {
+                        ConcreteDataType::Json(_) => {
+                            let json_vector = vector.convert_binary_to_json()?;
+                            return Ok(Arc::new(json_vector) as VectorRef);
+                        }
+                        ConcreteDataType::Vector(d) => {
+                            let vector = vector.convert_binary_to_vector(d.dim)?;
+                            return Ok(Arc::new(vector) as VectorRef);
+                        }
+                        _ => {}
+                    }
+                }
                 cast::cast_non_constant!(self, to_type)
             }
 
@@ -99,13 +114,30 @@ macro_rules! impl_scalar_vector_op {
     )+};
 }
 
-impl_scalar_vector_op!(
-    BinaryVector,
-    BooleanVector,
-    ListVector,
-    StringVector,
-    Decimal128Vector
-);
+impl_scalar_vector_op!(BinaryVector, BooleanVector, ListVector, StringVector);
+
+impl VectorOp for Decimal128Vector {
+    fn replicate(&self, offsets: &[usize]) -> VectorRef {
+        std::sync::Arc::new(replicate::replicate_decimal128(self, offsets))
+    }
+
+    fn find_unique(&self, selected: &mut BitVec, prev_vector: Option<&dyn Vector>) {
+        let prev_vector = prev_vector.and_then(|pv| pv.as_any().downcast_ref::<Decimal128Vector>());
+        find_unique::find_unique_scalar(self, selected, prev_vector);
+    }
+
+    fn filter(&self, filter: &BooleanVector) -> Result<VectorRef> {
+        filter::filter_non_constant!(self, Decimal128Vector, filter)
+    }
+
+    fn cast(&self, to_type: &ConcreteDataType) -> Result<VectorRef> {
+        cast::cast_non_constant!(self, to_type)
+    }
+
+    fn take(&self, indices: &UInt32Vector) -> Result<VectorRef> {
+        take::take_indices!(self, Decimal128Vector, indices)
+    }
+}
 
 impl<T: LogicalPrimitiveType> VectorOp for PrimitiveVector<T> {
     fn replicate(&self, offsets: &[usize]) -> VectorRef {

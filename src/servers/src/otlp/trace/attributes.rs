@@ -21,6 +21,8 @@ use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue};
 use serde::ser::{SerializeMap, SerializeSeq};
 use serde::Serialize;
 
+use crate::otlp::utils::key_value_to_jsonb;
+
 #[derive(Clone, Debug)]
 pub struct OtlpAnyValue<'a>(&'a AnyValue);
 
@@ -110,6 +112,18 @@ impl Serialize for Attributes {
 impl From<Vec<KeyValue>> for Attributes {
     fn from(attrs: Vec<KeyValue>) -> Self {
         Self(attrs)
+    }
+}
+
+impl From<&[KeyValue]> for Attributes {
+    fn from(attrs: &[KeyValue]) -> Self {
+        Self(attrs.to_vec())
+    }
+}
+
+impl From<Attributes> for jsonb::Value<'static> {
+    fn from(attrs: Attributes) -> jsonb::Value<'static> {
+        key_value_to_jsonb(attrs.0)
     }
 }
 

@@ -17,12 +17,12 @@ use std::fmt::Debug;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use std::usize;
 
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::KvCacheInvalidator;
-use common_meta::error::Error::{CacheNotGet, GetKvCache};
-use common_meta::error::{CacheNotGetSnafu, Error, ExternalSnafu, Result};
+use common_meta::error::Error::CacheNotGet;
+use common_meta::error::{CacheNotGetSnafu, Error, ExternalSnafu, GetKvCacheSnafu, Result};
+use common_meta::kv_backend::txn::{Txn, TxnResponse};
 use common_meta::kv_backend::{KvBackend, KvBackendRef, TxnService};
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
@@ -43,20 +43,20 @@ const DEFAULT_CACHE_MAX_CAPACITY: u64 = 10000;
 const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 const DEFAULT_CACHE_TTI: Duration = Duration::from_secs(5 * 60);
 
-pub struct CachedMetaKvBackendBuilder {
+pub struct CachedKvBackendBuilder {
     cache_max_capacity: Option<u64>,
     cache_ttl: Option<Duration>,
     cache_tti: Option<Duration>,
-    meta_client: Arc<MetaClient>,
+    inner: KvBackendRef,
 }
 
-impl CachedMetaKvBackendBuilder {
-    pub fn new(meta_client: Arc<MetaClient>) -> Self {
+impl CachedKvBackendBuilder {
+    pub fn new(inner: KvBackendRef) -> Self {
         Self {
             cache_max_capacity: None,
             cache_ttl: None,
             cache_tti: None,
-            meta_client,
+            inner,
         }
     }
 
@@ -75,7 +75,7 @@ impl CachedMetaKvBackendBuilder {
         self
     }
 
-    pub fn build(self) -> CachedMetaKvBackend {
+    pub fn build(self) -> CachedKvBackend {
         let cache_max_capacity = self
             .cache_max_capacity
             .unwrap_or(DEFAULT_CACHE_MAX_CAPACITY);
@@ -86,14 +86,11 @@ impl CachedMetaKvBackendBuilder {
             .time_to_live(cache_ttl)
             .time_to_idle(cache_tti)
             .build();
-
-        let kv_backend = Arc::new(MetaKvBackend {
-            client: self.meta_client,
-        });
+        let kv_backend = self.inner;
         let name = format!("CachedKvBackend({})", kv_backend.name());
         let version = AtomicUsize::new(0);
 
-        CachedMetaKvBackend {
+        CachedKvBackend {
             kv_backend,
             cache,
             name,
@@ -113,19 +110,29 @@ pub type CacheBackend = Cache<Vec<u8>, KeyValue>;
 /// Therefore, it is recommended to use CachedMetaKvBackend to only read metadata related
 /// information. Note: If you read other information, you may read expired data, which depends on
 /// TTL and TTI for cache.
-pub struct CachedMetaKvBackend {
+pub struct CachedKvBackend {
     kv_backend: KvBackendRef,
     cache: CacheBackend,
     name: String,
     version: AtomicUsize,
 }
 
-impl TxnService for CachedMetaKvBackend {
+#[async_trait::async_trait]
+impl TxnService for CachedKvBackend {
     type Error = Error;
+
+    async fn txn(&self, txn: Txn) -> std::result::Result<TxnResponse, Self::Error> {
+        // TODO(hl): txn of CachedKvBackend simply pass through to inner backend without invalidating caches.
+        self.kv_backend.txn(txn).await
+    }
+
+    fn max_txn_ops(&self) -> usize {
+        self.kv_backend.max_txn_ops()
+    }
 }
 
 #[async_trait::async_trait]
-impl KvBackend for CachedMetaKvBackend {
+impl KvBackend for CachedKvBackend {
     fn name(&self) -> &str {
         &self.name
     }
@@ -283,8 +290,11 @@ impl KvBackend for CachedMetaKvBackend {
                 _ => Err(e),
             },
         }
-        .map_err(|e| GetKvCache {
-            err_msg: e.to_string(),
+        .map_err(|e| {
+            GetKvCacheSnafu {
+                err_msg: e.to_string(),
+            }
+            .build()
         });
 
         // "cache.invalidate_key" and "cache.try_get_with_by_ref" are not mutually exclusive. So we need
@@ -293,7 +303,7 @@ impl KvBackend for CachedMetaKvBackend {
             .lock()
             .unwrap()
             .as_ref()
-            .map_or(false, |v| !self.validate_version(*v))
+            .is_some_and(|v| !self.validate_version(*v))
         {
             self.cache.invalidate(key).await;
         }
@@ -303,7 +313,7 @@ impl KvBackend for CachedMetaKvBackend {
 }
 
 #[async_trait::async_trait]
-impl KvCacheInvalidator for CachedMetaKvBackend {
+impl KvCacheInvalidator for CachedKvBackend {
     async fn invalidate_key(&self, key: &[u8]) {
         self.create_new_version();
         self.cache.invalidate(key).await;
@@ -311,7 +321,7 @@ impl KvCacheInvalidator for CachedMetaKvBackend {
     }
 }
 
-impl CachedMetaKvBackend {
+impl CachedKvBackend {
     // only for test
     #[cfg(test)]
     fn wrap(kv_backend: KvBackendRef) -> Self {
@@ -351,6 +361,13 @@ pub struct MetaKvBackend {
     pub client: Arc<MetaClient>,
 }
 
+impl MetaKvBackend {
+    /// Constructs a [MetaKvBackend].
+    pub fn new(client: Arc<MetaClient>) -> MetaKvBackend {
+        MetaKvBackend { client }
+    }
+}
+
 impl TxnService for MetaKvBackend {
     type Error = Error;
 }
@@ -364,30 +381,13 @@ impl KvBackend for MetaKvBackend {
         "MetaKvBackend"
     }
 
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
     async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
         self.client
             .range(req)
-            .await
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)
-    }
-
-    async fn get(&self, key: &[u8]) -> Result<Option<KeyValue>> {
-        let mut response = self
-            .client
-            .range(RangeRequest::new().with_key(key))
-            .await
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)?;
-        Ok(response.take_kvs().get_mut(0).map(|kv| KeyValue {
-            key: kv.take_key(),
-            value: kv.take_value(),
-        }))
-    }
-
-    async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
-        self.client
-            .batch_put(req)
             .await
             .map_err(BoxedError::new)
             .context(ExternalSnafu)
@@ -401,17 +401,9 @@ impl KvBackend for MetaKvBackend {
             .context(ExternalSnafu)
     }
 
-    async fn delete_range(&self, req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
+    async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
         self.client
-            .delete_range(req)
-            .await
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)
-    }
-
-    async fn batch_delete(&self, req: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
-        self.client
-            .batch_delete(req)
+            .batch_put(req)
             .await
             .map_err(BoxedError::new)
             .context(ExternalSnafu)
@@ -436,8 +428,33 @@ impl KvBackend for MetaKvBackend {
             .context(ExternalSnafu)
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
+    async fn delete_range(&self, req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
+        self.client
+            .delete_range(req)
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)
+    }
+
+    async fn batch_delete(&self, req: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
+        self.client
+            .batch_delete(req)
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)
+    }
+
+    async fn get(&self, key: &[u8]) -> Result<Option<KeyValue>> {
+        let mut response = self
+            .client
+            .range(RangeRequest::new().with_key(key))
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+        Ok(response.take_kvs().get_mut(0).map(|kv| KeyValue {
+            key: kv.take_key(),
+            value: kv.take_value(),
+        }))
     }
 }
 
@@ -451,14 +468,13 @@ mod tests {
     use common_meta::kv_backend::{KvBackend, TxnService};
     use common_meta::rpc::store::{
         BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse,
-        BatchPutRequest, BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse,
-        DeleteRangeRequest, DeleteRangeResponse, PutRequest, PutResponse, RangeRequest,
-        RangeResponse,
+        BatchPutRequest, BatchPutResponse, DeleteRangeRequest, DeleteRangeResponse, PutRequest,
+        PutResponse, RangeRequest, RangeResponse,
     };
     use common_meta::rpc::KeyValue;
     use dashmap::DashMap;
 
-    use super::CachedMetaKvBackend;
+    use super::CachedKvBackend;
 
     #[derive(Default)]
     pub struct SimpleKvBackend {
@@ -506,32 +522,25 @@ mod tests {
         }
 
         async fn range(&self, _req: RangeRequest) -> Result<RangeResponse, Self::Error> {
-            todo!()
+            unimplemented!()
         }
 
         async fn batch_put(&self, _req: BatchPutRequest) -> Result<BatchPutResponse, Self::Error> {
-            todo!()
-        }
-
-        async fn compare_and_put(
-            &self,
-            _req: CompareAndPutRequest,
-        ) -> Result<CompareAndPutResponse, Self::Error> {
-            todo!()
+            unimplemented!()
         }
 
         async fn delete_range(
             &self,
             _req: DeleteRangeRequest,
         ) -> Result<DeleteRangeResponse, Self::Error> {
-            todo!()
+            unimplemented!()
         }
 
         async fn batch_delete(
             &self,
             _req: BatchDeleteRequest,
         ) -> Result<BatchDeleteResponse, Self::Error> {
-            todo!()
+            unimplemented!()
         }
     }
 
@@ -539,7 +548,7 @@ mod tests {
     async fn test_cached_kv_backend() {
         let simple_kv = Arc::new(SimpleKvBackend::default());
         let get_execute_times = simple_kv.get_execute_times.clone();
-        let cached_kv = CachedMetaKvBackend::wrap(simple_kv);
+        let cached_kv = CachedKvBackend::wrap(simple_kv);
 
         add_some_vals(&cached_kv).await;
 

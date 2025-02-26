@@ -51,12 +51,15 @@
 //! ```
 
 #![feature(let_chains)]
+#![feature(assert_matches)]
 
+pub mod config;
 mod data_region;
 pub mod engine;
 pub mod error;
 mod metadata_region;
 mod metrics;
+mod row_modifier;
 #[cfg(test)]
 mod test_util;
 mod utils;

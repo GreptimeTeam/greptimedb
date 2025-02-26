@@ -17,21 +17,19 @@
 
 mod relation;
 
-use std::borrow::Borrow;
-use std::slice::SliceIndex;
-
 use api::helper::{pb_value_to_value_ref, value_to_grpc_value};
 use api::v1::Row as ProtoRow;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::types::cast;
-use datatypes::types::cast::CastOption;
 use datatypes::value::Value;
+use get_size2::GetSize;
 use itertools::Itertools;
-pub(crate) use relation::{RelationDesc, RelationType};
+pub(crate) use relation::{ColumnType, Key, RelationDesc, RelationType};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
 use crate::expr::error::{CastValueSnafu, EvalError, InvalidArgumentSnafu};
+use crate::utils::get_value_heap_size;
 
 /// System-wide Record count difference type. Useful for capture data change
 ///
@@ -48,10 +46,24 @@ pub type Duration = i64;
 /// Default type for a repr of changes to a collection.
 pub type DiffRow = (Row, Timestamp, Diff);
 
+/// Row with key-value pair, timestamp and diff
 pub type KeyValDiffRow = ((Row, Row), Timestamp, Diff);
 
+/// broadcast channel capacity, can be important to memory consumption, since this influence how many
+/// updates can be buffered in memory in the entire dataflow
+/// TODO(discord9): add config for this, so cpu&mem usage can be balanced and configured by this
+pub const BROADCAST_CAP: usize = 1024;
+
+/// The maximum capacity of the send buffer, to prevent the buffer from growing too large
+pub const SEND_BUF_CAP: usize = BROADCAST_CAP * 2;
+
+/// Flow worker will try to at least accumulate this many rows before processing them(if one second haven't passed)
+pub const BATCH_SIZE: usize = 32 * 16384;
+
 /// Convert a value that is or can be converted to Datetime to internal timestamp
-pub fn value_to_internal_ts(value: Value) -> Result<Timestamp, EvalError> {
+///
+/// support types are: `Date`, `DateTime`, `TimeStamp`, `i64`
+pub fn value_to_internal_ts(value: Value) -> Result<i64, EvalError> {
     let is_supported_time_type = |arg: &Value| {
         let ty = arg.data_type();
         matches!(
@@ -66,14 +78,14 @@ pub fn value_to_internal_ts(value: Value) -> Result<Timestamp, EvalError> {
         Value::Int64(ts) => Ok(ts),
         arg if is_supported_time_type(&arg) => {
             let arg_ty = arg.data_type();
-            let res = cast(arg, &ConcreteDataType::datetime_datatype()).context({
+            let res = cast(arg, &ConcreteDataType::timestamp_millisecond_datatype()).context({
                 CastValueSnafu {
                     from: arg_ty,
-                    to: ConcreteDataType::datetime_datatype(),
+                    to: ConcreteDataType::timestamp_millisecond_datatype(),
                 }
             })?;
-            if let Value::DateTime(ts) = res {
-                Ok(ts.val())
+            if let Value::Timestamp(ts) = res {
+                Ok(ts.value())
             } else {
                 unreachable!()
             }
@@ -91,22 +103,42 @@ pub fn value_to_internal_ts(value: Value) -> Result<Timestamp, EvalError> {
 /// i.e. more compact like raw u8 of \[tag0, value0, tag1, value1, ...\]
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub struct Row {
+    /// The inner vector of values
     pub inner: Vec<Value>,
 }
 
+impl GetSize for Row {
+    fn get_heap_size(&self) -> usize {
+        self.inner.iter().map(get_value_heap_size).sum()
+    }
+}
+
 impl Row {
+    /// Create an empty row
     pub fn empty() -> Self {
         Self { inner: vec![] }
     }
+
+    /// Returns true if the Row contains no elements.
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Create a row from a vector of values
     pub fn new(row: Vec<Value>) -> Self {
         Self { inner: row }
     }
+
+    /// Get the value at the given index
     pub fn get(&self, idx: usize) -> Option<&Value> {
         self.inner.get(idx)
     }
+
+    /// Clear the row
     pub fn clear(&mut self) {
         self.inner.clear();
     }
+
     /// clear and return the inner vector
     ///
     /// useful if you want to reuse the vector as a buffer
@@ -114,6 +146,7 @@ impl Row {
         self.inner.clear();
         &mut self.inner
     }
+
     /// pack a iterator of values into a row
     pub fn pack<I>(iter: I) -> Row
     where
@@ -123,24 +156,39 @@ impl Row {
             inner: iter.into_iter().collect(),
         }
     }
+
     /// unpack a row into a vector of values
     pub fn unpack(self) -> Vec<Value> {
         self.inner
     }
+
+    /// extend the row with values from an iterator
     pub fn extend<I>(&mut self, iter: I)
     where
         I: IntoIterator<Item = Value>,
     {
         self.inner.extend(iter);
     }
+
+    /// Creates a consuming iterator, that is, one that moves each value out of the `Row` (from start to end). The `Row` cannot be used after calling this
     pub fn into_iter(self) -> impl Iterator<Item = Value> {
         self.inner.into_iter()
     }
+
+    /// Returns an iterator over the slice.
     pub fn iter(&self) -> impl Iterator<Item = &Value> {
         self.inner.iter()
     }
+
+    /// Returns the number of elements in the row, also known as its 'length'.
     pub fn len(&self) -> usize {
         self.inner.len()
+    }
+}
+
+impl From<Vec<Value>> for Row {
+    fn from(row: Vec<Value>) -> Self {
+        Row::new(row)
     }
 }
 

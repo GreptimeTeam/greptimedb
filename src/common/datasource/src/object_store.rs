@@ -35,7 +35,7 @@ pub fn parse_url(url: &str) -> Result<(String, Option<String>, String)> {
     #[cfg(windows)]
     {
         // On Windows, the url may start with `C:/`.
-        if let Some(_) = handle_windows_path(url) {
+        if handle_windows_path(url).is_some() {
             return Ok((FS_SCHEMA.to_string(), None, url.to_string()));
         }
     }

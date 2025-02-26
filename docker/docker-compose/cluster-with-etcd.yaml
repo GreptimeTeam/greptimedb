@@ -1,0 +1,142 @@
+x-custom:
+  etcd_initial_cluster_token: &etcd_initial_cluster_token "--initial-cluster-token=etcd-cluster"
+  etcd_common_settings: &etcd_common_settings
+    image: "${ETCD_REGISTRY:-quay.io}/${ETCD_NAMESPACE:-coreos}/etcd:${ETCD_VERSION:-v3.5.10}"
+    entrypoint: /usr/local/bin/etcd
+  greptimedb_image: &greptimedb_image "${GREPTIMEDB_REGISTRY:-docker.io}/${GREPTIMEDB_NAMESPACE:-greptime}/greptimedb:${GREPTIMEDB_VERSION:-latest}"
+
+services:
+  etcd0:
+    <<: *etcd_common_settings
+    container_name: etcd0
+    ports:
+      - 2379:2379
+      - 2380:2380
+    command:
+      - --name=etcd0
+      - --data-dir=/var/lib/etcd
+      - --initial-advertise-peer-urls=http://etcd0:2380
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd0:2379
+      - --heartbeat-interval=250
+      - --election-timeout=1250
+      - --initial-cluster=etcd0=http://etcd0:2380
+      - --initial-cluster-state=new
+      - *etcd_initial_cluster_token
+    volumes:
+      - /tmp/greptimedb-cluster-docker-compose/etcd0:/var/lib/etcd
+    healthcheck:
+      test: [ "CMD", "etcdctl", "--endpoints=http://etcd0:2379", "endpoint", "health" ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - greptimedb
+
+  metasrv:
+    image: *greptimedb_image
+    container_name: metasrv
+    ports:
+      - 3002:3002
+      - 3000:3000
+    command:
+      - metasrv
+      - start
+      - --rpc-bind-addr=0.0.0.0:3002
+      - --rpc-server-addr=metasrv:3002
+      - --store-addrs=etcd0:2379
+      - --http-addr=0.0.0.0:3000
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://metasrv:3000/health" ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    depends_on:
+      etcd0:
+        condition: service_healthy
+    networks:
+      - greptimedb
+
+  datanode0:
+    image: *greptimedb_image
+    container_name: datanode0
+    ports:
+      - 3001:3001
+      - 5000:5000
+    command:
+      - datanode
+      - start
+      - --node-id=0
+      - --rpc-bind-addr=0.0.0.0:3001
+      - --rpc-server-addr=datanode0:3001
+      - --metasrv-addrs=metasrv:3002
+      - --http-addr=0.0.0.0:5000
+    volumes:
+      - /tmp/greptimedb-cluster-docker-compose/datanode0:/tmp/greptimedb
+    healthcheck:
+      test: [ "CMD", "curl", "-fv", "http://datanode0:5000/health" ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    depends_on:
+      metasrv:
+        condition: service_healthy
+    networks:
+      - greptimedb
+
+  frontend0:
+    image: *greptimedb_image
+    container_name: frontend0
+    ports:
+      - 4000:4000
+      - 4001:4001
+      - 4002:4002
+      - 4003:4003
+    command:
+      - frontend
+      - start
+      - --metasrv-addrs=metasrv:3002
+      - --http-addr=0.0.0.0:4000
+      - --rpc-bind-addr=0.0.0.0:4001
+      - --mysql-addr=0.0.0.0:4002
+      - --postgres-addr=0.0.0.0:4003
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://frontend0:4000/health" ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    depends_on:
+      datanode0:
+        condition: service_healthy
+    networks:
+      - greptimedb
+
+  flownode0:
+    image: *greptimedb_image
+    container_name: flownode0
+    ports:
+      - 4004:4004
+      - 4005:4005
+    command:
+      - flownode
+      - start
+      - --node-id=0
+      - --metasrv-addrs=metasrv:3002
+      - --rpc-bind-addr=0.0.0.0:4004
+      - --rpc-server-addr=flownode0:4004
+      - --http-addr=0.0.0.0:4005
+    depends_on:
+      frontend0:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://flownode0:4005/health" ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - greptimedb
+
+networks:
+  greptimedb:
+    name: greptimedb

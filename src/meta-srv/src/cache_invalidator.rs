@@ -44,7 +44,7 @@ impl MetasrvCacheInvalidator {
             .clone()
             .unwrap_or_else(|| DEFAULT_SUBJECT.to_string());
 
-        let msg = &MailboxMessage::json_message(
+        let mut msg = MailboxMessage::json_message(
             subject,
             &format!("Metasrv@{}", self.info.server_addr),
             "Frontend broadcast",
@@ -54,7 +54,21 @@ impl MetasrvCacheInvalidator {
         .with_context(|_| meta_error::SerdeJsonSnafu)?;
 
         self.mailbox
-            .broadcast(&BroadcastChannel::Frontend, msg)
+            .broadcast(&BroadcastChannel::Frontend, &msg)
+            .await
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)?;
+
+        msg.to = "Datanode broadcast".to_string();
+        self.mailbox
+            .broadcast(&BroadcastChannel::Datanode, &msg)
+            .await
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)?;
+
+        msg.to = "Flownode broadcast".to_string();
+        self.mailbox
+            .broadcast(&BroadcastChannel::Flownode, &msg)
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)
@@ -63,8 +77,8 @@ impl MetasrvCacheInvalidator {
 
 #[async_trait]
 impl CacheInvalidator for MetasrvCacheInvalidator {
-    async fn invalidate(&self, ctx: &Context, caches: Vec<CacheIdent>) -> MetaResult<()> {
-        let instruction = Instruction::InvalidateCaches(caches);
+    async fn invalidate(&self, ctx: &Context, caches: &[CacheIdent]) -> MetaResult<()> {
+        let instruction = Instruction::InvalidateCaches(caches.to_vec());
         self.broadcast(ctx, instruction).await
     }
 }

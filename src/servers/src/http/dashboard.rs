@@ -12,11 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use axum::body::{boxed, Full};
+use axum::body::Body;
 use axum::http::{header, StatusCode, Uri};
 use axum::response::Response;
-use axum::routing;
-use axum::routing::Router;
 use common_telemetry::debug;
 use rust_embed::RustEmbed;
 use snafu::ResultExt;
@@ -27,17 +25,11 @@ use crate::error::{BuildHttpResponseSnafu, Result};
 #[folder = "dashboard/dist/"]
 pub struct Assets;
 
-pub(crate) fn dashboard() -> Router {
-    Router::new()
-        .route("/", routing::get(static_handler).post(static_handler))
-        .route("/*x", routing::get(static_handler).post(static_handler))
-}
-
 #[axum_macros::debug_handler]
 pub async fn static_handler(uri: Uri) -> Result<Response> {
     debug!("[dashboard] requesting: {}", uri.path());
 
-    let mut path = uri.path().trim_start_matches('/');
+    let mut path = uri.path().trim_start_matches("/dashboard/");
     if path.is_empty() {
         path = "index.html";
     }
@@ -56,7 +48,7 @@ fn index_page() -> Result<Response> {
 fn get_assets(path: &str) -> Result<Response> {
     match Assets::get(path) {
         Some(content) => {
-            let body = boxed(Full::from(content.data));
+            let body = Body::from(content.data);
             let mime = mime_guess::from_path(path).first_or_octet_stream();
 
             Response::builder()
@@ -65,7 +57,7 @@ fn get_assets(path: &str) -> Result<Response> {
         }
         None => Response::builder()
             .status(StatusCode::NOT_FOUND)
-            .body(boxed(Full::from("404"))),
+            .body(Body::from("404")),
     }
     .context(BuildHttpResponseSnafu)
 }

@@ -10,11 +10,18 @@ workspace = true
 [package.metadata]
 cargo-fuzz = true
 
+[features]
+default = []
+unstable = ["nix"]
+
 [dependencies]
 arbitrary = { version = "1.3.0", features = ["derive"] }
 async-trait = { workspace = true }
+chrono = { workspace = true }
+common-base = { workspace = true }
 common-error = { workspace = true }
 common-macro = { workspace = true }
+common-meta = { workspace = true }
 common-query = { workspace = true }
 common-runtime = { workspace = true }
 common-telemetry = { workspace = true }
@@ -22,29 +29,54 @@ common-time = { workspace = true }
 datatypes = { workspace = true }
 derive_builder = { workspace = true }
 dotenv = "0.15"
+futures = { workspace = true }
+humantime = { workspace = true }
+k8s-openapi = { version = "0.22", features = ["v1_30"] }
+kube = { version = "0.92", features = [
+    "runtime",
+    "derive",
+    "client",
+    "admission",
+] }
 lazy_static = { workspace = true }
 libfuzzer-sys = "0.4"
+nix = { version = "0.28", features = ["process", "signal"], optional = true }
 partition = { workspace = true }
+paste.workspace = true
 rand = { workspace = true }
 rand_chacha = "0.3.1"
+reqwest = { workspace = true }
+schemars = "0.8"
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = "0.9"
 snafu = { workspace = true }
 sql = { workspace = true }
 sqlparser.workspace = true
-sqlx = { version = "0.6", features = [
+sqlx = { version = "0.8", features = [
     "runtime-tokio-rustls",
     "mysql",
     "postgres",
     "chrono",
 ] }
+store-api = { workspace = true }
+strum.workspace = true
+tinytemplate = "1.2"
+tokio = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true }
+dotenv.workspace = true
 
 [[bin]]
 name = "fuzz_create_table"
-path = "targets/fuzz_create_table.rs"
+path = "targets/ddl/fuzz_create_table.rs"
+test = false
+bench = false
+doc = false
+
+[[bin]]
+name = "fuzz_create_logical_table"
+path = "targets/ddl/fuzz_create_logical_table.rs"
 test = false
 bench = false
 doc = false
@@ -57,8 +89,65 @@ bench = false
 doc = false
 
 [[bin]]
+name = "fuzz_insert_logical_table"
+path = "targets/fuzz_insert_logical_table.rs"
+test = false
+bench = false
+doc = false
+
+[[bin]]
 name = "fuzz_alter_table"
-path = "targets/fuzz_alter_table.rs"
+path = "targets/ddl/fuzz_alter_table.rs"
+test = false
+bench = false
+doc = false
+
+[[bin]]
+name = "fuzz_alter_logical_table"
+path = "targets/ddl/fuzz_alter_logical_table.rs"
+test = false
+bench = false
+doc = false
+
+[[bin]]
+name = "fuzz_create_database"
+path = "targets/ddl/fuzz_create_database.rs"
+test = false
+bench = false
+doc = false
+
+[[bin]]
+name = "unstable_fuzz_create_table_standalone"
+path = "targets/unstable/fuzz_create_table_standalone.rs"
+test = false
+bench = false
+doc = false
+required-features = ["unstable"]
+
+[[bin]]
+name = "fuzz_failover_mito_regions"
+path = "targets/failover/fuzz_failover_mito_regions.rs"
+test = false
+bench = false
+doc = false
+
+[[bin]]
+name = "fuzz_failover_metric_regions"
+path = "targets/failover/fuzz_failover_metric_regions.rs"
+test = false
+bench = false
+doc = false
+
+[[bin]]
+name = "fuzz_migrate_mito_regions"
+path = "targets/migration/fuzz_migrate_mito_regions.rs"
+test = false
+bench = false
+doc = false
+
+[[bin]]
+name = "fuzz_migrate_metric_regions"
+path = "targets/migration/fuzz_migrate_metric_regions.rs"
 test = false
 bench = false
 doc = false

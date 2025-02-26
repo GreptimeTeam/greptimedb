@@ -16,7 +16,13 @@ inputs:
   dev-mode:
     description: Enable dev mode, only build standard greptime
     required: false
-    default: 'false'
+    default: "false"
+  image-namespace:
+    description: Image Namespace
+    required: true
+  image-registry:
+    description: Image Registry
+    required: true
   working-dir:
     description: Working directory to build the artifacts
     required: false
@@ -30,7 +36,9 @@ runs:
       # NOTE: If the BUILD_JOBS > 4, it's always OOM in EC2 instance.
       run: |
         cd ${{ inputs.working-dir }} && \
-        make run-it-in-container BUILD_JOBS=4
+        make run-it-in-container BUILD_JOBS=4 \
+        IMAGE_NAMESPACE=${{ inputs.image-namespace }} \
+        IMAGE_REGISTRY=${{ inputs.image-registry }}
 
     - name: Upload sqlness logs
       if: ${{ failure() && inputs.disable-run-tests == 'false' }} # Only upload logs when the integration tests failed.
@@ -40,26 +48,17 @@ runs:
         path: /tmp/greptime-*.log
         retention-days: 3
 
-    - name: Build standard greptime
+    - name: Build greptime # Builds standard greptime binary
       uses: ./.github/actions/build-greptime-binary
       with:
         base-image: ubuntu
-        features: pyo3_backend,servers/dashboard
-        cargo-profile: ${{ inputs.cargo-profile }}
-        artifacts-dir: greptime-linux-${{ inputs.arch }}-pyo3-${{ inputs.version }}
-        version: ${{ inputs.version }}
-        working-dir: ${{ inputs.working-dir }}
-
-    - name: Build greptime without pyo3
-      if: ${{ inputs.dev-mode == 'false' }}
-      uses: ./.github/actions/build-greptime-binary
-      with:
-        base-image: ubuntu
-        features: servers/dashboard
+        features: servers/dashboard,pg_kvbackend
         cargo-profile: ${{ inputs.cargo-profile }}
         artifacts-dir: greptime-linux-${{ inputs.arch }}-${{ inputs.version }}
         version: ${{ inputs.version }}
         working-dir: ${{ inputs.working-dir }}
+        image-registry: ${{ inputs.image-registry }}
+        image-namespace: ${{ inputs.image-namespace }}
 
     - name: Clean up the target directory # Clean up the target directory for the centos7 base image, or it will still use the objects of last build.
       shell: bash
@@ -68,21 +67,25 @@ runs:
 
     - name: Build greptime on centos base image
       uses: ./.github/actions/build-greptime-binary
-      if: ${{ inputs.arch == 'amd64' && inputs.dev-mode == 'false' }} # Only build centos7 base image for amd64.
+      if: ${{ inputs.arch == 'amd64' && inputs.dev-mode == 'false' }} # Builds greptime for centos if the host machine is amd64.
       with:
         base-image: centos
-        features: servers/dashboard
+        features: servers/dashboard,pg_kvbackend
         cargo-profile: ${{ inputs.cargo-profile }}
         artifacts-dir: greptime-linux-${{ inputs.arch }}-centos-${{ inputs.version }}
         version: ${{ inputs.version }}
         working-dir: ${{ inputs.working-dir }}
+        image-registry: ${{ inputs.image-registry }}
+        image-namespace: ${{ inputs.image-namespace }}
 
     - name: Build greptime on android base image
       uses: ./.github/actions/build-greptime-binary
-      if: ${{ inputs.arch == 'amd64' && inputs.dev-mode == 'false' }} # Only build android base image on amd64.
+      if: ${{ inputs.arch == 'amd64' && inputs.dev-mode == 'false' }} # Builds arm64 greptime binary for android if the host machine amd64.
       with:
         base-image: android
         artifacts-dir: greptime-android-arm64-${{ inputs.version }}
         version: ${{ inputs.version }}
         working-dir: ${{ inputs.working-dir }}
         build-android-artifacts: true
+        image-registry: ${{ inputs.image-registry }}
+        image-namespace: ${{ inputs.image-namespace }}

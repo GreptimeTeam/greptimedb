@@ -50,15 +50,50 @@ SELECT a-10 AS k FROM test UNION SELECT a-10 AS l FROM test ORDER BY l;
 SELECT a-10 AS k FROM test UNION SELECT a-10 AS l FROM test ORDER BY 1-k;
 
 -- Not compatible with duckdb, give an error in greptimedb
--- TODO(LFC): Failed to meet the expected error:
--- expected:
---   Error: 3000(PlanQuery), Schema error: No field named 'a'. Valid fields are 'k'.
 SELECT a-10 AS k FROM test UNION SELECT a-10 AS l FROM test ORDER BY a-10;
 
 -- Not compatible with duckdb, give an error in greptimedb
--- TODO(LFC): Failed to meet the expected error:
--- expected:
---   Error: 3000(PlanQuery), Schema error: No field named 'a'. Valid fields are 'k'.
 SELECT a-10 AS k FROM test UNION SELECT a-11 AS l FROM test ORDER BY a-11;
 
 DROP TABLE test;
+
+-- ORDER BY for partition table
+CREATE TABLE IF NOT EXISTS `t` (
+  `tag` STRING NULL,
+  `ts` TIMESTAMP(3) NOT NULL,
+  `num` BIGINT NULL,
+  TIME INDEX (`ts`),
+  PRIMARY KEY (`tag`)
+)
+PARTITION ON COLUMNS (`tag`) (
+  tag <= 'z',
+  tag > 'z'
+);
+
+INSERT INTO t (tag, ts, num) VALUES
+    ('abc', 0, 1),
+    ('abc', 3000, 2),
+    ('abc', 6000, 3),
+    ('abc', 9000, 4),
+    ('abc', 12000, 5),
+    ('zzz', 3000, 6),
+    ('zzz', 6000, 7),
+    ('zzz', 9000, 8),
+    ('zzz', 0, 9),
+    ('zzz', 3000, 10);
+
+select * from t where num > 3 order by ts desc limit 2;
+
+select tag from t where num > 6 order by ts desc limit 2;
+
+select tag from t where num > 6 order by ts;
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+explain analyze select tag from t where num > 6 order by ts desc limit 2;
+
+drop table t;

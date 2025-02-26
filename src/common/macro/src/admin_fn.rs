@@ -16,11 +16,11 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::spanned::Spanned;
 use syn::{
-    parse_macro_input, Attribute, AttributeArgs, Ident, ItemFn, Signature, Type, TypePath,
-    TypeReference, Visibility,
+    parse_macro_input, Attribute, Ident, ItemFn, Signature, Type, TypePath, TypeReference,
+    Visibility,
 };
 
-use crate::utils::{extract_arg_map, extract_input_types, get_ident};
+use crate::utils::extract_input_types;
 
 /// Internal util macro to early return on error.
 macro_rules! ok {
@@ -40,12 +40,31 @@ macro_rules! error {
 }
 
 pub(crate) fn process_admin_fn(args: TokenStream, input: TokenStream) -> TokenStream {
-    let mut result = TokenStream::new();
+    let mut name: Option<Ident> = None;
+    let mut display_name: Option<Ident> = None;
+    let mut sig_fn: Option<Ident> = None;
+    let mut ret: Option<Ident> = None;
+
+    let parser = syn::meta::parser(|meta| {
+        if meta.path.is_ident("name") {
+            name = Some(meta.value()?.parse()?);
+            Ok(())
+        } else if meta.path.is_ident("display_name") {
+            display_name = Some(meta.value()?.parse()?);
+            Ok(())
+        } else if meta.path.is_ident("sig_fn") {
+            sig_fn = Some(meta.value()?.parse()?);
+            Ok(())
+        } else if meta.path.is_ident("ret") {
+            ret = Some(meta.value()?.parse()?);
+            Ok(())
+        } else {
+            Err(meta.error("unsupported property"))
+        }
+    });
 
     // extract arg map
-    let arg_pairs = parse_macro_input!(args as AttributeArgs);
-    let arg_span = arg_pairs[0].span();
-    let arg_map = ok!(extract_arg_map(arg_pairs));
+    parse_macro_input!(args with parser);
 
     // decompose the fn block
     let compute_fn = parse_macro_input!(input as ItemFn);
@@ -72,16 +91,17 @@ pub(crate) fn process_admin_fn(args: TokenStream, input: TokenStream) -> TokenSt
     }
     let handler_type = ok!(extract_handler_type(&arg_types));
 
+    let mut result = TokenStream::new();
     // build the struct and its impl block
     // only do this when `display_name` is specified
-    if let Ok(display_name) = get_ident(&arg_map, "display_name", arg_span) {
+    if let Some(display_name) = display_name {
         let struct_code = build_struct(
             attrs,
             vis,
             fn_name,
-            ok!(get_ident(&arg_map, "name", arg_span)),
-            ok!(get_ident(&arg_map, "sig_fn", arg_span)),
-            ok!(get_ident(&arg_map, "ret", arg_span)),
+            name.expect("name required"),
+            sig_fn.expect("sig_fn required"),
+            ret.expect("ret required"),
             handler_type,
             display_name,
         );
@@ -133,6 +153,7 @@ fn build_struct(
     let ret = Ident::new(&format!("{ret}_datatype"), ret.span());
     let uppcase_display_name = display_name.to_uppercase();
     // Get the handler name in function state by the argument ident
+    // TODO(discord9): consider simple depend injection if more handlers are needed
     let (handler, snafu_type) = match handler_type.to_string().as_str() {
         "ProcedureServiceHandlerRef" => (
             Ident::new("procedure_service_handler", handler_type.span()),
@@ -142,6 +163,11 @@ fn build_struct(
         "TableMutationHandlerRef" => (
             Ident::new("table_mutation_handler", handler_type.span()),
             Ident::new("MissingTableMutationHandlerSnafu", handler_type.span()),
+        ),
+
+        "FlowServiceHandlerRef" => (
+            Ident::new("flow_service_handler", handler_type.span()),
+            Ident::new("MissingFlowServiceHandlerSnafu", handler_type.span()),
         ),
         handler => ok!(error!(
             handler_type.span(),
@@ -154,29 +180,30 @@ fn build_struct(
         #[derive(Debug)]
         #vis struct #name;
 
-        impl fmt::Display for #name {
-            fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        impl std::fmt::Display for #name {
+            fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
                 write!(f, #uppcase_display_name)
             }
         }
 
 
-        impl Function for #name {
+        #[async_trait::async_trait]
+        impl crate::function::AsyncFunction for #name {
             fn name(&self) -> &'static str {
                 #display_name
             }
 
-            fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-                Ok(ConcreteDataType::#ret())
+            fn return_type(&self, _input_types: &[store_api::storage::ConcreteDataType]) -> common_query::error::Result<store_api::storage::ConcreteDataType> {
+                Ok(store_api::storage::ConcreteDataType::#ret())
             }
 
             fn signature(&self) -> Signature {
                 #sig_fn()
             }
 
-            fn eval(&self, func_ctx: FunctionContext, columns: &[VectorRef]) ->  Result<VectorRef> {
+            async fn eval(&self, func_ctx: crate::function::FunctionContext, columns: &[datatypes::vectors::VectorRef]) ->  common_query::error::Result<datatypes::vectors::VectorRef> {
                 // Ensure under the `greptime` catalog for security
-                ensure_greptime!(func_ctx);
+                crate::ensure_greptime!(func_ctx);
 
                 let columns_num = columns.len();
                 let rows_num = if columns.is_empty() {
@@ -186,48 +213,36 @@ fn build_struct(
                 };
                 let columns = Vec::from(columns);
 
-                // TODO(dennis): DataFusion doesn't support async UDF currently
-                std::thread::spawn(move || {
-                    let query_ctx = &func_ctx.query_ctx;
-                    let handler = func_ctx
-                        .state
-                        .#handler
-                        .as_ref()
-                        .context(#snafu_type)?;
+                use snafu::OptionExt;
+                use datatypes::data_type::DataType;
 
-                    let mut builder = ConcreteDataType::#ret()
-                        .create_mutable_vector(rows_num);
+                let query_ctx = &func_ctx.query_ctx;
+                let handler = func_ctx
+                    .state
+                    .#handler
+                    .as_ref()
+                    .context(#snafu_type)?;
 
-                    if columns_num == 0 {
-                        let result = common_runtime::block_on_read(async move {
-                            #fn_name(handler, query_ctx, &[]).await
-                        })?;
+                let mut builder = store_api::storage::ConcreteDataType::#ret()
+                    .create_mutable_vector(rows_num);
+
+                if columns_num == 0 {
+                    let result = #fn_name(handler, query_ctx, &[]).await?;
+
+                    builder.push_value_ref(result.as_value_ref());
+                } else {
+                    for i in 0..rows_num {
+                        let args: Vec<_> = columns.iter()
+                            .map(|vector| vector.get_ref(i))
+                            .collect();
+
+                        let result = #fn_name(handler, query_ctx, &args).await?;
 
                         builder.push_value_ref(result.as_value_ref());
-                    } else {
-                        for i in 0..rows_num {
-                            let args: Vec<_> = columns.iter()
-                                .map(|vector| vector.get_ref(i))
-                                .collect();
-
-                            let result = common_runtime::block_on_read(async move {
-                                #fn_name(handler, query_ctx, &args).await
-                            })?;
-
-                            builder.push_value_ref(result.as_value_ref());
-                        }
                     }
+                }
 
-                    Ok(builder.to_vector())
-                })
-                    .join()
-                    .map_err(|e| {
-                        error!(e; "Join thread error");
-                        ThreadJoin {
-                            location: Location::default(),
-                        }
-                    })?
-
+                Ok(builder.to_vector())
             }
 
         }

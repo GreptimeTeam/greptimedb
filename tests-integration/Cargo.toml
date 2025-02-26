@@ -13,12 +13,14 @@ workspace = true
 [dependencies]
 api.workspace = true
 arrow-flight.workspace = true
-async-trait = "0.1"
+async-stream.workspace = true
+async-trait.workspace = true
 auth.workspace = true
 axum.workspace = true
-axum-test-helper = "0.3.0"
+cache.workspace = true
 catalog.workspace = true
 chrono.workspace = true
+clap.workspace = true
 client = { workspace = true, features = ["testing"] }
 cmd.workspace = true
 common-base.workspace = true
@@ -33,28 +35,38 @@ common-recordbatch.workspace = true
 common-runtime.workspace = true
 common-telemetry.workspace = true
 common-test-util.workspace = true
+common-time.workspace = true
 common-wal.workspace = true
 datanode = { workspace = true }
 datatypes.workspace = true
-dotenv = "0.15"
+dotenv.workspace = true
+flate2 = "1.0"
+flow.workspace = true
 frontend = { workspace = true, features = ["testing"] }
 futures.workspace = true
+futures-util.workspace = true
+hyper-util = { workspace = true, features = ["tokio"] }
+log-query = { workspace = true }
+loki-proto.workspace = true
 meta-client.workspace = true
 meta-srv = { workspace = true, features = ["mock"] }
+moka.workspace = true
 mysql_async = { version = "0.33", default-features = false, features = [
     "default-rustls",
 ] }
 object-store.workspace = true
-operator.workspace = true
+operator = { workspace = true, features = ["testing"] }
+prost.workspace = true
 query.workspace = true
-rstest = "0.17"
-rstest_reuse = "0.5"
-secrecy = "0.8"
+rstest.workspace = true
+rstest_reuse.workspace = true
 serde_json.workspace = true
 servers = { workspace = true, features = ["testing"] }
 session.workspace = true
+similar-asserts.workspace = true
+snafu.workspace = true
 sql.workspace = true
-sqlx = { version = "0.6", features = [
+sqlx = { version = "0.8", features = [
     "runtime-tokio-rustls",
     "mysql",
     "postgres",
@@ -65,20 +77,24 @@ table.workspace = true
 tempfile.workspace = true
 time = "0.3"
 tokio.workspace = true
+tokio-stream = { workspace = true, features = ["net"] }
 tonic.workspace = true
-tower = "0.4"
+tower.workspace = true
 uuid.workspace = true
+zstd.workspace = true
 
 [dev-dependencies]
 datafusion.workspace = true
 datafusion-expr.workspace = true
+hex.workspace = true
+http.workspace = true
 itertools.workspace = true
 opentelemetry-proto.workspace = true
 partition.workspace = true
 paste.workspace = true
 prost.workspace = true
 rand.workspace = true
-script.workspace = true
 session = { workspace = true, features = ["testing"] }
 store-api.workspace = true
-tokio-postgres = "0.7"
+tokio-postgres = { workspace = true }
+url = "2.3"

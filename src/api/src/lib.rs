@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![feature(let_chains)]
+
 pub mod error;
 pub mod helper;
 
@@ -21,6 +23,7 @@ pub mod prom_store {
     }
 }
 
+pub mod region;
 pub mod v1;
 
 pub use greptime_proto;

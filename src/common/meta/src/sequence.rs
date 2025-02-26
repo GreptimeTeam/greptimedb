@@ -172,9 +172,7 @@ impl Inner {
 
             if !res.success {
                 if let Some(kv) = res.prev_kv {
-                    expect = kv.value.clone();
-
-                    let v: [u8; 8] = match kv.value.try_into() {
+                    let v: [u8; 8] = match kv.value.clone().try_into() {
                         Ok(a) => a,
                         Err(v) => {
                             return error::UnexpectedSequenceValueSnafu {
@@ -184,13 +182,12 @@ impl Inner {
                         }
                     };
                     let v = u64::from_le_bytes(v);
-
                     // If the existed value is smaller than the initial, we should start from the initial.
                     start = v.max(self.initial);
+                    expect = kv.value;
                 } else {
-                    expect = vec![];
-
                     start = self.initial;
+                    expect = vec![];
                 }
                 continue;
             }

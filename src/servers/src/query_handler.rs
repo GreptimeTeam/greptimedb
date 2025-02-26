@@ -13,6 +13,7 @@
 // limitations under the License.
 
 //! All query handler traits for various request protocols, like SQL or GRPC.
+//!
 //! Instance that wishes to support certain request protocol, just implement the corresponding
 //! trait, the Server will handle codec for you.
 //!
@@ -33,37 +34,29 @@ use api::v1::RowInsertRequests;
 use async_trait::async_trait;
 use common_query::Output;
 use headers::HeaderValue;
+use log_query::LogQuery;
+use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+use pipeline::{
+    GreptimePipelineParams, GreptimeTransformer, Pipeline, PipelineInfo, PipelineVersion,
+    PipelineWay,
+};
 use serde_json::Value;
-use session::context::QueryContextRef;
+use session::context::{QueryContext, QueryContextRef};
 
 use crate::error::Result;
+use crate::http::jaeger::QueryTraceParams;
 use crate::influxdb::InfluxdbRequest;
 use crate::opentsdb::codec::DataPoint;
 use crate::prom_store::Metrics;
-
 pub type OpentsdbProtocolHandlerRef = Arc<dyn OpentsdbProtocolHandler + Send + Sync>;
 pub type InfluxdbLineProtocolHandlerRef = Arc<dyn InfluxdbLineProtocolHandler + Send + Sync>;
 pub type PromStoreProtocolHandlerRef = Arc<dyn PromStoreProtocolHandler + Send + Sync>;
 pub type OpenTelemetryProtocolHandlerRef = Arc<dyn OpenTelemetryProtocolHandler + Send + Sync>;
-pub type ScriptHandlerRef = Arc<dyn ScriptHandler + Send + Sync>;
-
-#[async_trait]
-pub trait ScriptHandler {
-    async fn insert_script(
-        &self,
-        query_ctx: QueryContextRef,
-        name: &str,
-        script: &str,
-    ) -> Result<()>;
-    async fn execute_script(
-        &self,
-        query_ctx: QueryContextRef,
-        name: &str,
-        params: HashMap<String, String>,
-    ) -> Result<Output>;
-}
+pub type PipelineHandlerRef = Arc<dyn PipelineHandler + Send + Sync>;
+pub type LogQueryHandlerRef = Arc<dyn LogQueryHandler + Send + Sync>;
+pub type JaegerQueryHandlerRef = Arc<dyn JaegerQueryHandler + Send + Sync>;
 
 #[async_trait]
 pub trait InfluxdbLineProtocolHandler {
@@ -103,7 +96,7 @@ pub trait PromStoreProtocolHandler {
 }
 
 #[async_trait]
-pub trait OpenTelemetryProtocolHandler {
+pub trait OpenTelemetryProtocolHandler: PipelineHandler {
     /// Handling opentelemetry metrics request
     async fn metrics(
         &self,
@@ -115,6 +108,91 @@ pub trait OpenTelemetryProtocolHandler {
     async fn traces(
         &self,
         request: ExportTraceServiceRequest,
+        table_name: String,
         ctx: QueryContextRef,
+    ) -> Result<Output>;
+
+    async fn logs(
+        &self,
+        pipeline_handler: PipelineHandlerRef,
+        request: ExportLogsServiceRequest,
+        pipeline: PipelineWay,
+        pipeline_params: GreptimePipelineParams,
+        table_name: String,
+        ctx: QueryContextRef,
+    ) -> Result<Output>;
+}
+
+/// PipelineHandler is responsible for handling pipeline related requests.
+///
+/// The "Pipeline" is a series of transformations that can be applied to unstructured
+/// data like logs. This handler is responsible to manage pipelines and accept data for
+/// processing.
+///
+/// The pipeline is stored in the database and can be retrieved by its name.
+#[async_trait]
+pub trait PipelineHandler {
+    async fn insert(&self, input: RowInsertRequests, ctx: QueryContextRef) -> Result<Output>;
+
+    async fn get_pipeline(
+        &self,
+        name: &str,
+        version: PipelineVersion,
+        query_ctx: QueryContextRef,
+    ) -> Result<Arc<Pipeline<GreptimeTransformer>>>;
+
+    async fn insert_pipeline(
+        &self,
+        name: &str,
+        content_type: &str,
+        pipeline: &str,
+        query_ctx: QueryContextRef,
+    ) -> Result<PipelineInfo>;
+
+    async fn delete_pipeline(
+        &self,
+        name: &str,
+        version: PipelineVersion,
+        query_ctx: QueryContextRef,
+    ) -> Result<Option<()>>;
+
+    async fn get_table(
+        &self,
+        table: &str,
+        query_ctx: &QueryContext,
+    ) -> std::result::Result<Option<Arc<table::Table>>, catalog::error::Error>;
+
+    //// Build a pipeline from a string.
+    fn build_pipeline(&self, pipeline: &str) -> Result<Pipeline<GreptimeTransformer>>;
+}
+
+/// Handle log query requests.
+#[async_trait]
+pub trait LogQueryHandler {
+    async fn query(&self, query: LogQuery, ctx: QueryContextRef) -> Result<Output>;
+}
+
+/// Handle Jaeger query requests.
+#[async_trait]
+pub trait JaegerQueryHandler {
+    /// Get trace services. It's used for `/api/services` API.
+    async fn get_services(&self, ctx: QueryContextRef) -> Result<Output>;
+
+    /// Get Jaeger operations. It's used for `/api/operations` and `/api/services/{service_name}/operations` API.
+    async fn get_operations(
+        &self,
+        ctx: QueryContextRef,
+        service_name: &str,
+        span_kind: Option<&str>,
+    ) -> Result<Output>;
+
+    /// Get trace by trace id. It's used for `/api/traces/{trace_id}` API.
+    async fn get_trace(&self, ctx: QueryContextRef, trace_id: &str) -> Result<Output>;
+
+    /// Find traces by query params. It's used for `/api/traces` API.
+    async fn find_traces(
+        &self,
+        ctx: QueryContextRef,
+        query_params: QueryTraceParams,
     ) -> Result<Output>;
 }

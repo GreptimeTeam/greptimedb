@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub use sqlparser::dialect::{Dialect, MySqlDialect, PostgreSqlDialect};
+pub use sqlparser::dialect::{Dialect, GenericDialect, MySqlDialect, PostgreSqlDialect};
 
 /// GreptimeDb dialect
 #[derive(Debug, Clone)]

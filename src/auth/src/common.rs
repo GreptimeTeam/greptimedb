@@ -14,8 +14,8 @@
 
 use std::sync::Arc;
 
+use common_base::secrets::SecretString;
 use digest::Digest;
-use secrecy::SecretString;
 use sha1::Sha1;
 use snafu::{ensure, OptionExt};
 
@@ -73,6 +73,16 @@ pub enum Password<'a> {
     PlainText(SecretString),
     MysqlNativePassword(HashedPassword<'a>, Salt<'a>),
     PgMD5(HashedPassword<'a>, Salt<'a>),
+}
+
+impl Password<'_> {
+    pub fn r#type(&self) -> &str {
+        match self {
+            Password::PlainText(_) => "plain_text",
+            Password::MysqlNativePassword(_, _) => "mysql_native_password",
+            Password::PgMD5(_, _) => "pg_md5",
+        }
+    }
 }
 
 pub fn auth_mysql(

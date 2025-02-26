@@ -45,6 +45,7 @@ impl From<TestColumnDef> for ColumnDef {
             semantic_type: semantic_type as i32,
             comment,
             datatype_extension: None,
+            options: None,
         }
     }
 }

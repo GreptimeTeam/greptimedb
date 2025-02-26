@@ -9,16 +9,20 @@ RUN cp ${NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/lib64/clang/14.0.7/lib/
 # Install dependencies.
 RUN apt-get update && apt-get install -y \
     libssl-dev \
-    protobuf-compiler \
     curl \
     git \
+    unzip \
     build-essential \
-    pkg-config \
-    python3 \
-    python3-dev \
-    python3-pip \
-    && pip3 install --upgrade pip \
-    && pip3 install pyarrow
+    pkg-config
+
+# Install protoc
+ARG PROTOBUF_VERSION=29.3
+
+RUN curl -OL https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOBUF_VERSION}/protoc-${PROTOBUF_VERSION}-linux-x86_64.zip && \
+    unzip protoc-${PROTOBUF_VERSION}-linux-x86_64.zip -d protoc3;
+    
+RUN mv protoc3/bin/* /usr/local/bin/
+RUN mv protoc3/include/* /usr/local/include/
 
 # Trust workdir
 RUN git config --global --add safe.directory /greptimedb
@@ -34,7 +38,7 @@ RUN rustup toolchain install ${RUST_TOOLCHAIN}
 RUN rustup target add aarch64-linux-android
 
 # Install cargo-ndk
-RUN cargo install cargo-ndk
+RUN cargo install cargo-ndk@3.5.4
 ENV ANDROID_NDK_HOME $NDK_ROOT
 
 # Builder entrypoint.

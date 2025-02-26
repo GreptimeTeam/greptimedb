@@ -18,6 +18,7 @@ mod instant_manipulate;
 mod normalize;
 mod planner;
 mod range_manipulate;
+mod scalar_calculate;
 mod series_divide;
 #[cfg(test)]
 mod test_util;
@@ -30,7 +31,10 @@ pub use instant_manipulate::{InstantManipulate, InstantManipulateExec, InstantMa
 pub use normalize::{SeriesNormalize, SeriesNormalizeExec, SeriesNormalizeStream};
 pub use planner::PromExtensionPlanner;
 pub use range_manipulate::{RangeManipulate, RangeManipulateExec, RangeManipulateStream};
+pub use scalar_calculate::ScalarCalculate;
 pub use series_divide::{SeriesDivide, SeriesDivideExec, SeriesDivideStream};
 pub use union_distinct_on::{UnionDistinctOn, UnionDistinctOnExec, UnionDistinctOnStream};
 
-pub(crate) type Millisecond = <TimestampMillisecondType as ArrowPrimitiveType>::Native;
+pub type Millisecond = <TimestampMillisecondType as ArrowPrimitiveType>::Native;
+
+const METRIC_NUM_SERIES: &str = "num_series";

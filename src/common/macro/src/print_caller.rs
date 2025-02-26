@@ -14,28 +14,24 @@
 
 use proc_macro::TokenStream;
 use quote::{quote, ToTokens};
-use syn::{parse_macro_input, AttributeArgs, ItemFn, Lit, Meta, NestedMeta};
+use syn::{parse_macro_input, ItemFn, LitInt};
 
 pub(crate) fn process_print_caller(args: TokenStream, input: TokenStream) -> TokenStream {
     let mut depth = 1;
-
-    let args = parse_macro_input!(args as AttributeArgs);
-    for meta in args.iter() {
-        if let NestedMeta::Meta(Meta::NameValue(name_value)) = meta {
-            let ident = name_value
-                .path
-                .get_ident()
-                .expect("Expected an ident!")
-                .to_string();
-            if ident == "depth" {
-                let Lit::Int(i) = &name_value.lit else {
-                    panic!("Expected 'depth' to be a valid int!")
-                };
-                depth = i.base10_parse::<usize>().expect("Invalid 'depth' value");
-                break;
-            }
+    let parser = syn::meta::parser(|meta| {
+        if meta.path.is_ident("depth") {
+            depth = meta
+                .value()?
+                .parse::<LitInt>()
+                .and_then(|v| v.base10_parse::<usize>())
+                .expect("Invalid 'depth' value");
+            Ok(())
+        } else {
+            Err(meta.error("unsupported property"))
         }
-    }
+    });
+
+    parse_macro_input!(args with parser);
 
     let tokens: TokenStream = quote! {
         {

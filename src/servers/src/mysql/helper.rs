@@ -17,12 +17,15 @@ use std::time::Duration;
 
 use chrono::NaiveDate;
 use common_query::prelude::ScalarValue;
+use common_time::Timestamp;
 use datatypes::prelude::ConcreteDataType;
+use datatypes::types::TimestampType;
 use datatypes::value::{self, Value};
 use itertools::Itertools;
 use opensrv_mysql::{to_naive_datetime, ParamValue, ValueInner};
 use snafu::ResultExt;
 use sql::ast::{visit_expressions_mut, Expr, Value as ValueExpr, VisitMut};
+use sql::statements::sql_value_to_value;
 use sql::statements::statement::Statement;
 
 use crate::error::{self, Result};
@@ -159,8 +162,8 @@ pub fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> Result<ScalarV
             ConcreteDataType::String(_) => Ok(ScalarValue::Utf8(Some(
                 String::from_utf8_lossy(b).to_string(),
             ))),
-            ConcreteDataType::Binary(_) => Ok(ScalarValue::LargeBinary(Some(b.to_vec()))),
-
+            ConcreteDataType::Binary(_) => Ok(ScalarValue::Binary(Some(b.to_vec()))),
+            ConcreteDataType::Timestamp(ts_type) => covert_bytes_to_timestamp(b, ts_type),
             _ => error::PreparedStmtTypeMismatchSnafu {
                 expected: t,
                 actual: param.coltype,
@@ -179,6 +182,7 @@ pub fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> Result<ScalarV
                     }
                     .build()
                 })?
+                .and_utc()
                 .timestamp_millis();
 
             match t {
@@ -200,8 +204,74 @@ pub fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> Result<ScalarV
     }
 }
 
+pub fn convert_expr_to_scalar_value(param: &Expr, t: &ConcreteDataType) -> Result<ScalarValue> {
+    match param {
+        Expr::Value(v) => {
+            let v = sql_value_to_value("", t, v, None, None);
+            match v {
+                Ok(v) => v
+                    .try_to_scalar_value(t)
+                    .context(error::ConvertScalarValueSnafu),
+                Err(e) => error::InvalidParameterSnafu {
+                    reason: e.to_string(),
+                }
+                .fail(),
+            }
+        }
+        Expr::UnaryOp { op, expr } if let Expr::Value(v) = &**expr => {
+            let v = sql_value_to_value("", t, v, None, Some(*op));
+            match v {
+                Ok(v) => v
+                    .try_to_scalar_value(t)
+                    .context(error::ConvertScalarValueSnafu),
+                Err(e) => error::InvalidParameterSnafu {
+                    reason: e.to_string(),
+                }
+                .fail(),
+            }
+        }
+        _ => error::InvalidParameterSnafu {
+            reason: format!("cannot convert {:?} to scalar value of type {}", param, t),
+        }
+        .fail(),
+    }
+}
+
+fn covert_bytes_to_timestamp(bytes: &[u8], ts_type: &TimestampType) -> Result<ScalarValue> {
+    let ts = Timestamp::from_str_utc(&String::from_utf8_lossy(bytes))
+        .map_err(|e| {
+            error::MysqlValueConversionSnafu {
+                err_msg: e.to_string(),
+            }
+            .build()
+        })?
+        .convert_to(ts_type.unit())
+        .ok_or_else(|| {
+            error::MysqlValueConversionSnafu {
+                err_msg: "Overflow when converting timestamp to target unit".to_string(),
+            }
+            .build()
+        })?;
+    match ts_type {
+        TimestampType::Nanosecond(_) => {
+            Ok(ScalarValue::TimestampNanosecond(Some(ts.value()), None))
+        }
+        TimestampType::Microsecond(_) => {
+            Ok(ScalarValue::TimestampMicrosecond(Some(ts.value()), None))
+        }
+        TimestampType::Millisecond(_) => {
+            Ok(ScalarValue::TimestampMillisecond(Some(ts.value()), None))
+        }
+        TimestampType::Second(_) => Ok(ScalarValue::TimestampSecond(Some(ts.value()), None)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use datatypes::types::{
+        TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
+        TimestampSecondType,
+    };
     use sql::dialect::MySqlDialect;
     use sql::parser::{ParseOptions, ParserContext};
 
@@ -258,10 +328,134 @@ mod tests {
             delete.inner.to_string()
         );
 
-        let select = parse_sql("select from demo where host=? and idc in (select idc from idcs where name=?) and cpu>?");
+        let select = parse_sql("select * from demo where host=? and idc in (select idc from idcs where name=?) and cpu>?");
         let Statement::Query(select) = transform_placeholders(select) else {
             unreachable!()
         };
-        assert_eq!("SELECT from AS demo WHERE host = $1 AND idc IN (SELECT idc FROM idcs WHERE name = $2) AND cpu > $3", select.inner.to_string());
+        assert_eq!("SELECT * FROM demo WHERE host = $1 AND idc IN (SELECT idc FROM idcs WHERE name = $2) AND cpu > $3", select.inner.to_string());
+    }
+
+    #[test]
+    fn test_convert_expr_to_scalar_value() {
+        let expr = Expr::Value(ValueExpr::Number("123".to_string(), false));
+        let t = ConcreteDataType::int32_datatype();
+        let v = convert_expr_to_scalar_value(&expr, &t).unwrap();
+        assert_eq!(ScalarValue::Int32(Some(123)), v);
+
+        let expr = Expr::Value(ValueExpr::Number("123.456789".to_string(), false));
+        let t = ConcreteDataType::float64_datatype();
+        let v = convert_expr_to_scalar_value(&expr, &t).unwrap();
+        assert_eq!(ScalarValue::Float64(Some(123.456789)), v);
+
+        let expr = Expr::Value(ValueExpr::SingleQuotedString("2001-01-02".to_string()));
+        let t = ConcreteDataType::date_datatype();
+        let v = convert_expr_to_scalar_value(&expr, &t).unwrap();
+        let scalar_v = ScalarValue::Utf8(Some("2001-01-02".to_string()))
+            .cast_to(&arrow_schema::DataType::Date32)
+            .unwrap();
+        assert_eq!(scalar_v, v);
+
+        let expr = Expr::Value(ValueExpr::SingleQuotedString(
+            "2001-01-02 03:04:05".to_string(),
+        ));
+        let t = ConcreteDataType::datetime_datatype();
+        let v = convert_expr_to_scalar_value(&expr, &t).unwrap();
+        let scalar_v = ScalarValue::Utf8(Some("2001-01-02 03:04:05".to_string()))
+            .cast_to(&arrow_schema::DataType::Date64)
+            .unwrap();
+        assert_eq!(scalar_v, v);
+
+        let expr = Expr::Value(ValueExpr::SingleQuotedString("hello".to_string()));
+        let t = ConcreteDataType::string_datatype();
+        let v = convert_expr_to_scalar_value(&expr, &t).unwrap();
+        assert_eq!(ScalarValue::Utf8(Some("hello".to_string())), v);
+
+        let expr = Expr::Value(ValueExpr::Null);
+        let t = ConcreteDataType::time_microsecond_datatype();
+        let v = convert_expr_to_scalar_value(&expr, &t).unwrap();
+        assert_eq!(ScalarValue::Time64Microsecond(None), v);
+    }
+
+    #[test]
+    fn test_convert_bytes_to_timestamp() {
+        let test_cases = vec![
+            // input unix timestamp in seconds -> nanosecond.
+            (
+                "2024-12-26 12:00:00",
+                TimestampType::Nanosecond(TimestampNanosecondType),
+                ScalarValue::TimestampNanosecond(Some(1735214400000000000), None),
+            ),
+            // input unix timestamp in seconds -> microsecond.
+            (
+                "2024-12-26 12:00:00",
+                TimestampType::Microsecond(TimestampMicrosecondType),
+                ScalarValue::TimestampMicrosecond(Some(1735214400000000), None),
+            ),
+            // input unix timestamp in seconds -> millisecond.
+            (
+                "2024-12-26 12:00:00",
+                TimestampType::Millisecond(TimestampMillisecondType),
+                ScalarValue::TimestampMillisecond(Some(1735214400000), None),
+            ),
+            // input unix timestamp in seconds -> second.
+            (
+                "2024-12-26 12:00:00",
+                TimestampType::Second(TimestampSecondType),
+                ScalarValue::TimestampSecond(Some(1735214400), None),
+            ),
+            // input unix timestamp in milliseconds -> nanosecond.
+            (
+                "2024-12-26 12:00:00.123",
+                TimestampType::Nanosecond(TimestampNanosecondType),
+                ScalarValue::TimestampNanosecond(Some(1735214400123000000), None),
+            ),
+            // input unix timestamp in milliseconds -> microsecond.
+            (
+                "2024-12-26 12:00:00.123",
+                TimestampType::Microsecond(TimestampMicrosecondType),
+                ScalarValue::TimestampMicrosecond(Some(1735214400123000), None),
+            ),
+            // input unix timestamp in milliseconds -> millisecond.
+            (
+                "2024-12-26 12:00:00.123",
+                TimestampType::Millisecond(TimestampMillisecondType),
+                ScalarValue::TimestampMillisecond(Some(1735214400123), None),
+            ),
+            // input unix timestamp in milliseconds -> second.
+            (
+                "2024-12-26 12:00:00.123",
+                TimestampType::Second(TimestampSecondType),
+                ScalarValue::TimestampSecond(Some(1735214400), None),
+            ),
+            // input unix timestamp in microseconds -> nanosecond.
+            (
+                "2024-12-26 12:00:00.123456",
+                TimestampType::Nanosecond(TimestampNanosecondType),
+                ScalarValue::TimestampNanosecond(Some(1735214400123456000), None),
+            ),
+            // input unix timestamp in microseconds -> microsecond.
+            (
+                "2024-12-26 12:00:00.123456",
+                TimestampType::Microsecond(TimestampMicrosecondType),
+                ScalarValue::TimestampMicrosecond(Some(1735214400123456), None),
+            ),
+            // input unix timestamp in microseconds -> millisecond.
+            (
+                "2024-12-26 12:00:00.123456",
+                TimestampType::Millisecond(TimestampMillisecondType),
+                ScalarValue::TimestampMillisecond(Some(1735214400123), None),
+            ),
+            // input unix timestamp in milliseconds -> second.
+            (
+                "2024-12-26 12:00:00.123456",
+                TimestampType::Second(TimestampSecondType),
+                ScalarValue::TimestampSecond(Some(1735214400), None),
+            ),
+        ];
+
+        for (input, ts_type, expected) in test_cases {
+            let result = covert_bytes_to_timestamp(input.as_bytes(), &ts_type).unwrap();
+            assert_eq!(result, expected);
+        }
     }
 }

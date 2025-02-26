@@ -16,7 +16,7 @@ Affected Rows: 2
 
 select * from system_Metric;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Table not found: greptime.upper_case_table_name.system_metric
+Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.upper_case_table_name.system_metric
 
 select * from "system_Metric";
 
@@ -98,7 +98,15 @@ drop table abcdefge;
 
 Affected Rows: 0
 
+drop database upper_case_table_name;
+
+Error: 1004(InvalidArguments), Schema `upper_case_table_name` is in use
+
 use public;
+
+Affected Rows: 0
+
+drop database upper_case_table_name;
 
 Affected Rows: 0
 

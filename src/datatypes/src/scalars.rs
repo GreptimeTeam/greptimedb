@@ -203,7 +203,7 @@ impl Scalar for bool {
     }
 }
 
-impl<'a> ScalarRef<'a> for bool {
+impl ScalarRef<'_> for bool {
     type ScalarType = bool;
 
     #[inline]
@@ -273,7 +273,7 @@ impl Scalar for Date {
     }
 }
 
-impl<'a> ScalarRef<'a> for Date {
+impl ScalarRef<'_> for Date {
     type ScalarType = Date;
 
     fn to_owned_scalar(&self) -> Self::ScalarType {
@@ -294,7 +294,7 @@ impl Scalar for Decimal128 {
     }
 }
 
-impl<'a> ScalarRef<'a> for Decimal128 {
+impl ScalarRef<'_> for Decimal128 {
     type ScalarType = Decimal128;
 
     fn to_owned_scalar(&self) -> Self::ScalarType {
@@ -315,7 +315,7 @@ impl Scalar for DateTime {
     }
 }
 
-impl<'a> ScalarRef<'a> for DateTime {
+impl ScalarRef<'_> for DateTime {
     type ScalarType = DateTime;
 
     fn to_owned_scalar(&self) -> Self::ScalarType {
@@ -437,10 +437,8 @@ mod tests {
 
     #[test]
     fn test_list_value_scalar() {
-        let list_value = ListValue::new(
-            Some(Box::new(vec![Value::Int32(123)])),
-            ConcreteDataType::int32_datatype(),
-        );
+        let list_value =
+            ListValue::new(vec![Value::Int32(123)], ConcreteDataType::int32_datatype());
         let list_ref = ListValueRef::Ref { val: &list_value };
         assert_eq!(list_ref, list_value.as_scalar_ref());
         assert_eq!(list_value, list_ref.to_owned_scalar());

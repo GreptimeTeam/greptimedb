@@ -1,0 +1,27 @@
+name: Setup Etcd cluster
+description: Deploy Etcd cluster on Kubernetes
+inputs:
+  etcd-replicas:
+    default: 1
+    description: "Etcd replicas"
+  namespace:
+    default: "etcd-cluster"
+
+runs:
+  using: composite
+  steps:
+  - name: Install Etcd cluster
+    shell: bash
+    run: | 
+      helm upgrade \
+        --install etcd oci://registry-1.docker.io/bitnamicharts/etcd \
+        --set replicaCount=${{ inputs.etcd-replicas }} \
+        --set resources.requests.cpu=50m \
+        --set resources.requests.memory=128Mi \
+        --set resources.limits.cpu=1500m \
+        --set resources.limits.memory=2Gi \
+        --set auth.rbac.create=false \
+        --set auth.rbac.token.enabled=false \
+        --set persistence.size=2Gi \
+        --create-namespace \
+        -n ${{ inputs.namespace }}

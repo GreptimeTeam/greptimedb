@@ -13,27 +13,28 @@
 // limitations under the License.
 
 use std::fmt::Display;
-use std::sync::Arc;
 
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use futures::stream::BoxStream;
-use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 
-use crate::error::{self, Error, InvalidTableMetadataSnafu, Result};
-use crate::key::{TableMetaKey, CATALOG_NAME_KEY_PATTERN, CATALOG_NAME_KEY_PREFIX};
+use crate::error::{self, Error, InvalidMetadataSnafu, Result};
+use crate::key::{MetadataKey, CATALOG_NAME_KEY_PATTERN, CATALOG_NAME_KEY_PREFIX};
 use crate::kv_backend::KvBackendRef;
 use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
 use crate::rpc::store::RangeRequest;
 use crate::rpc::KeyValue;
 
+/// The catalog name key, indices all catalog names
+///
+/// The layout: `__catalog_name/{catalog_name}`
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CatalogNameKey<'a> {
     pub catalog: &'a str,
 }
 
-impl<'a> Default for CatalogNameKey<'a> {
+impl Default for CatalogNameKey<'_> {
     fn default() -> Self {
         Self {
             catalog: DEFAULT_CATALOG_NAME,
@@ -54,15 +55,28 @@ impl<'a> CatalogNameKey<'a> {
     }
 }
 
-impl Display for CatalogNameKey<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}/{}", CATALOG_NAME_KEY_PREFIX, self.catalog)
+impl<'a> MetadataKey<'a, CatalogNameKey<'a>> for CatalogNameKey<'_> {
+    fn to_bytes(&self) -> Vec<u8> {
+        self.to_string().into_bytes()
+    }
+
+    fn from_bytes(bytes: &'a [u8]) -> Result<CatalogNameKey<'a>> {
+        let key = std::str::from_utf8(bytes).map_err(|e| {
+            InvalidMetadataSnafu {
+                err_msg: format!(
+                    "CatalogNameKey '{}' is not a valid UTF8 string: {e}",
+                    String::from_utf8_lossy(bytes)
+                ),
+            }
+            .build()
+        })?;
+        CatalogNameKey::try_from(key)
     }
 }
 
-impl TableMetaKey for CatalogNameKey<'_> {
-    fn as_raw_key(&self) -> Vec<u8> {
-        self.to_string().into_bytes()
+impl Display for CatalogNameKey<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", CATALOG_NAME_KEY_PREFIX, self.catalog)
     }
 }
 
@@ -72,7 +86,7 @@ impl<'a> TryFrom<&'a str> for CatalogNameKey<'a> {
     fn try_from(s: &'a str) -> Result<Self> {
         let captures = CATALOG_NAME_KEY_PATTERN
             .captures(s)
-            .context(InvalidTableMetadataSnafu {
+            .context(InvalidMetadataSnafu {
                 err_msg: format!("Illegal CatalogNameKey format: '{s}'"),
             })?;
 
@@ -83,12 +97,12 @@ impl<'a> TryFrom<&'a str> for CatalogNameKey<'a> {
     }
 }
 
-/// Decoder `KeyValue` to ({catalog},())
-pub fn catalog_decoder(kv: KeyValue) -> Result<(String, ())> {
+/// Decoder `KeyValue` to {catalog}
+pub fn catalog_decoder(kv: KeyValue) -> Result<String> {
     let str = std::str::from_utf8(&kv.key).context(error::ConvertRawKeySnafu)?;
     let catalog_name = CatalogNameKey::try_from(str)?;
 
-    Ok((catalog_name.catalog.to_string(), ()))
+    Ok(catalog_name.catalog.to_string())
 }
 
 pub struct CatalogManager {
@@ -104,7 +118,7 @@ impl CatalogManager {
     pub async fn create(&self, catalog: CatalogNameKey<'_>, if_not_exists: bool) -> Result<()> {
         let _timer = crate::metrics::METRIC_META_CREATE_CATALOG.start_timer();
 
-        let raw_key = catalog.as_raw_key();
+        let raw_key = catalog.to_bytes();
         let raw_value = CatalogNameValue.try_as_raw_value()?;
         if self
             .kv_backend
@@ -118,7 +132,7 @@ impl CatalogManager {
     }
 
     pub async fn exists(&self, catalog: CatalogNameKey<'_>) -> Result<bool> {
-        let raw_key = catalog.as_raw_key();
+        let raw_key = catalog.to_bytes();
 
         self.kv_backend.exists(&raw_key).await
     }
@@ -131,15 +145,18 @@ impl CatalogManager {
             self.kv_backend.clone(),
             req,
             DEFAULT_PAGE_SIZE,
-            Arc::new(catalog_decoder),
-        );
+            catalog_decoder,
+        )
+        .into_stream();
 
-        Box::pin(stream.map(|kv| kv.map(|kv| kv.0)))
+        Box::pin(stream)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::kv_backend::memory::MemoryKvBackend;
 
@@ -149,7 +166,7 @@ mod tests {
 
         assert_eq!(key.to_string(), "__catalog_name/my-catalog");
 
-        let parsed: CatalogNameKey = "__catalog_name/my-catalog".try_into().unwrap();
+        let parsed = CatalogNameKey::from_bytes(b"__catalog_name/my-catalog").unwrap();
 
         assert_eq!(key, parsed);
     }

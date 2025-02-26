@@ -32,6 +32,7 @@ use store_api::region_request::{
 };
 use store_api::storage::{ColumnId, RegionId};
 
+use crate::config::EngineConfig;
 use crate::data_region::DataRegion;
 use crate::engine::MetricEngine;
 use crate::metadata_region::MetadataRegion;
@@ -54,7 +55,7 @@ impl TestEnv {
     pub async fn with_prefix(prefix: &str) -> Self {
         let mut mito_env = MitoTestEnv::with_prefix(prefix);
         let mito = mito_env.create_engine(MitoConfig::default()).await;
-        let metric = MetricEngine::new(mito.clone());
+        let metric = MetricEngine::new(mito.clone(), EngineConfig::default());
         Self {
             mito_env,
             mito,
@@ -210,9 +211,9 @@ pub fn create_logical_region_request(
             ),
         },
     ];
-    for tag in tags {
+    for (bias, tag) in tags.iter().enumerate() {
         column_metadatas.push(ColumnMetadata {
-            column_id: 2,
+            column_id: 2 + bias as ColumnId,
             semantic_type: SemanticType::Tag,
             column_schema: ColumnSchema::new(
                 tag.to_string(),
@@ -245,12 +246,14 @@ pub fn row_schema_with_tags(tags: &[&str]) -> Vec<PbColumnSchema> {
             datatype: ColumnDataType::TimestampMillisecond as i32,
             semantic_type: SemanticType::Timestamp as _,
             datatype_extension: None,
+            options: None,
         },
         PbColumnSchema {
             column_name: "greptime_value".to_string(),
             datatype: ColumnDataType::Float64 as i32,
             semantic_type: SemanticType::Field as _,
             datatype_extension: None,
+            options: None,
         },
     ];
     for tag in tags {
@@ -259,6 +262,7 @@ pub fn row_schema_with_tags(tags: &[&str]) -> Vec<PbColumnSchema> {
             datatype: ColumnDataType::String as i32,
             semantic_type: SemanticType::Tag as _,
             datatype_extension: None,
+            options: None,
         });
     }
     schema
@@ -291,7 +295,8 @@ pub fn build_rows(num_tags: usize, num_rows: usize) -> Vec<Row> {
 
 #[cfg(test)]
 mod test {
-
+    use object_store::services::Fs;
+    use object_store::ObjectStore;
     use store_api::metric_engine_consts::{DATA_REGION_SUBDIR, METADATA_REGION_SUBDIR};
 
     use super::*;
@@ -302,21 +307,20 @@ mod test {
         let env = TestEnv::new().await;
         env.init_metric_region().await;
         let region_id = to_metadata_region_id(env.default_physical_region_id());
-        let region_dir = join_dir(&env.data_home(), "test_metric_region");
 
-        // `join_dir` doesn't suit windows path
-        #[cfg(not(target_os = "windows"))]
-        {
-            // assert metadata region's dir
-            let metadata_region_dir = join_dir(&region_dir, METADATA_REGION_SUBDIR);
-            let exist = tokio::fs::try_exists(metadata_region_dir).await.unwrap();
-            assert!(exist);
+        let builder = Fs::default().root(&env.data_home());
+        let object_store = ObjectStore::new(builder).unwrap().finish();
 
-            // assert data region's dir
-            let data_region_dir = join_dir(&region_dir, DATA_REGION_SUBDIR);
-            let exist = tokio::fs::try_exists(data_region_dir).await.unwrap();
-            assert!(exist);
-        }
+        let region_dir = "test_metric_region";
+        // assert metadata region's dir
+        let metadata_region_dir = join_dir(region_dir, METADATA_REGION_SUBDIR);
+        let exist = object_store.exists(&metadata_region_dir).await.unwrap();
+        assert!(exist);
+
+        // assert data region's dir
+        let data_region_dir = join_dir(region_dir, DATA_REGION_SUBDIR);
+        let exist = object_store.exists(&data_region_dir).await.unwrap();
+        assert!(exist);
 
         // check mito engine
         let metadata_region_id = utils::to_metadata_region_id(region_id);

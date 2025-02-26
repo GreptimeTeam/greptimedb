@@ -20,7 +20,7 @@ Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Column count 
 
 insert into demo2(ts) select memory from demo1;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Cannot automatically convert Float64 to Timestamp(Millisecond, None)
+Affected Rows: 2
 
 insert into demo2 select * from demo1;
 
@@ -28,12 +28,14 @@ Affected Rows: 2
 
 select * from demo2 order by ts;
 
-+-------+------+--------+---------------------+
-| host  | cpu  | memory | ts                  |
-+-------+------+--------+---------------------+
-| host1 | 66.6 | 1024.0 | 2022-06-15T07:02:37 |
-| host2 | 88.8 | 333.3  | 2022-06-15T07:02:38 |
-+-------+------+--------+---------------------+
++-------+------+--------+-------------------------+
+| host  | cpu  | memory | ts                      |
++-------+------+--------+-------------------------+
+|       |      |        | 1970-01-01T00:00:00.333 |
+|       |      |        | 1970-01-01T00:00:01.024 |
+| host1 | 66.6 | 1024.0 | 2022-06-15T07:02:37     |
+| host2 | 88.8 | 333.3  | 2022-06-15T07:02:38     |
++-------+------+--------+-------------------------+
 
 drop table demo1;
 

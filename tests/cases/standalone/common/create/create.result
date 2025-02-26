@@ -54,6 +54,39 @@ CREATE TABLE 'N.~' (i TIMESTAMP TIME INDEX);
 
 Error: 1004(InvalidArguments), Invalid table name: N.~
 
+CREATE TABLE `p_perftest001@cc3kvQ_D1D9H9GOZGMIY97TWH20R1LRC8U0SFBA` (i INTEGER, j TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+DROP TABLE `p_perftest001@cc3kvQ_D1D9H9GOZGMIY97TWH20R1LRC8U0SFBA`;
+
+Affected Rows: 0
+
+CREATE TABLE `p_perftest001#cc3kvQ_D1D9H9GOZGMIY97TWH20R1LRC8U0SFBA` (i INTEGER, j TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+DROP TABLE `p_perftest001#cc3kvQ_D1D9H9GOZGMIY97TWH20R1LRC8U0SFBA`;
+
+Affected Rows: 0
+
+CREATE TABLE neg_default_value_min(i TIMESTAMP TIME INDEX, j SMALLINT DEFAULT -32768);
+
+Affected Rows: 0
+
+DESC TABLE neg_default_value_min;
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| i      | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
+| j      | Int16                |     | YES  | -32768  | FIELD         |
++--------+----------------------+-----+------+---------+---------------+
+
+DROP TABLE neg_default_value_min;
+
+Affected Rows: 0
+
 DESC TABLE integers;
 
 +--------+----------------------+-----+------+---------+---------------+
@@ -201,6 +234,39 @@ DROP TABLE test_like_2;
 Affected Rows: 0
 
 DROP table `ExcePTuRi`;
+
+Affected Rows: 0
+
+CREATE TABLE if not exists monitor (
+  host STRING,
+  ts TIMESTAMP(9) DEFAULT CURRENT_TIMESTAMP() TIME INDEX,
+  cpu FLOAT64 DEFAULT 0,
+  memory FLOAT64,
+  PRIMARY KEY(host)) ENGINE=mito WITH(COMMENT='create by human');
+
+Affected Rows: 0
+
+SHOW CREATE TABLE monitor;
+
++---------+-----------------------------------------------------------+
+| Table   | Create Table                                              |
++---------+-----------------------------------------------------------+
+| monitor | CREATE TABLE IF NOT EXISTS "monitor" (                    |
+|         |   "host" STRING NULL,                                     |
+|         |   "ts" TIMESTAMP(9) NOT NULL DEFAULT current_timestamp(), |
+|         |   "cpu" DOUBLE NULL DEFAULT 0,                            |
+|         |   "memory" DOUBLE NULL,                                   |
+|         |   TIME INDEX ("ts"),                                      |
+|         |   PRIMARY KEY ("host")                                    |
+|         | )                                                         |
+|         |                                                           |
+|         | ENGINE=mito                                               |
+|         | WITH(                                                     |
+|         |   comment = 'create by human'                             |
+|         | )                                                         |
++---------+-----------------------------------------------------------+
+
+DROP TABLE monitor;
 
 Affected Rows: 0
 

@@ -16,12 +16,11 @@ EXPLAIN SELECT DISTINCT i%2 FROM integers ORDER BY 1;
 |_|_Aggregate: groupBy=[[integers.i % Int64(2)]], aggr=[[]]_|
 |_|_MergeScan [is_placeholder=false]_|
 | physical_plan | SortPreservingMergeExec: [integers.i % Int64(2)@0 ASC NULLS LAST]_|
-|_|_SortExec: expr=[integers.i % Int64(2)@0 ASC NULLS LAST]_|
+|_|_SortExec: expr=[integers.i % Int64(2)@0 ASC NULLS LAST], preserve_partitioning=[true]_|
 |_|_AggregateExec: mode=FinalPartitioned, gby=[integers.i % Int64(2)@0 as integers.i % Int64(2)], aggr=[] |
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
 |_|_AggregateExec: mode=Partial, gby=[integers.i % Int64(2)@0 as integers.i % Int64(2)], aggr=[]_|
-|_|_RepartitionExec: partitioning=REDACTED
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -62,18 +61,98 @@ EXPLAIN SELECT DISTINCT a, b FROM test ORDER BY a, b;
 | logical_plan_| Sort: test.a ASC NULLS LAST, test.b ASC NULLS LAST_|
 |_|_Aggregate: groupBy=[[test.a, test.b]], aggr=[[]]_|
 |_|_MergeScan [is_placeholder=false]_|
-| physical_plan | SortPreservingMergeExec: [a@0 ASC NULLS LAST,b@1 ASC NULLS LAST]_|
-|_|_SortExec: expr=[a@0 ASC NULLS LAST,b@1 ASC NULLS LAST]_|
+| physical_plan | SortPreservingMergeExec: [a@0 ASC NULLS LAST, b@1 ASC NULLS LAST]_|
+|_|_SortExec: expr=[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST], preserve_partitioning=[true] |
 |_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b], aggr=[]_|
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
 |_|_AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b], aggr=[]_|
-|_|_RepartitionExec: partitioning=REDACTED
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
 
 DROP TABLE test;
+
+Affected Rows: 0
+
+CREATE TABLE test_pk(pk INTEGER PRIMARY KEY, i INTEGER, t TIMESTAMP TIME INDEX) WITH('compaction.type'='twcs', 'compaction.twcs.max_inactive_window_files'='4');
+
+Affected Rows: 0
+
+INSERT INTO test_pk VALUES (1, 1, 1), (2, NULL, 2), (3, 1, 3), (4, 2, 4), (5, 2, 5), (6, NULL, 6);
+
+Affected Rows: 6
+
+-- Test aliasing.
+SELECT i, t AS alias_ts FROM test_pk ORDER BY t DESC LIMIT 5;
+
++---+-------------------------+
+| i | alias_ts                |
++---+-------------------------+
+|   | 1970-01-01T00:00:00.006 |
+| 2 | 1970-01-01T00:00:00.005 |
+| 2 | 1970-01-01T00:00:00.004 |
+| 1 | 1970-01-01T00:00:00.003 |
+|   | 1970-01-01T00:00:00.002 |
++---+-------------------------+
+
+-- Test aliasing.
+SELECT i, t AS alias_ts FROM test_pk ORDER BY alias_ts DESC LIMIT 5;
+
++---+-------------------------+
+| i | alias_ts                |
++---+-------------------------+
+|   | 1970-01-01T00:00:00.006 |
+| 2 | 1970-01-01T00:00:00.005 |
+| 2 | 1970-01-01T00:00:00.004 |
+| 1 | 1970-01-01T00:00:00.003 |
+|   | 1970-01-01T00:00:00.002 |
++---+-------------------------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE SELECT i, t AS alias_ts FROM test_pk ORDER BY t DESC LIMIT 5;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[i@0 as i, t@1 as alias_ts] REDACTED
+|_|_|_SortPreservingMergeExec: [test_pk.t__temp__0@2 DESC] REDACTED
+|_|_|_WindowedSortExec: expr=test_pk.t__temp__0@2 DESC num_ranges=1 fetch=5 REDACTED
+|_|_|_PartSortExec: expr=test_pk.t__temp__0@2 DESC num_ranges=1 limit=5 REDACTED
+|_|_|_ProjectionExec: expr=[i@0 as i, t@1 as t, t@1 as test_pk.t__temp__0] REDACTED
+|_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges) REDACTED
+|_|_|_|
+|_|_| Total rows: 5_|
++-+-+-+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE SELECT i, t AS alias_ts FROM test_pk ORDER BY alias_ts DESC LIMIT 5;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[i@0 as i, t@1 as alias_ts] REDACTED
+|_|_|_SortPreservingMergeExec: [t@1 DESC] REDACTED
+|_|_|_WindowedSortExec: expr=t@1 DESC num_ranges=1 fetch=5 REDACTED
+|_|_|_PartSortExec: expr=t@1 DESC num_ranges=1 limit=5 REDACTED
+|_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges) REDACTED
+|_|_|_|
+|_|_| Total rows: 5_|
++-+-+-+
+
+DROP TABLE test_pk;
 
 Affected Rows: 0
 

@@ -15,24 +15,25 @@
 pub mod builder;
 mod grpc;
 mod influxdb;
+mod jaeger;
+mod log_handler;
+mod logs;
 mod opentsdb;
 mod otlp;
 mod prom_store;
+mod promql;
 mod region_query;
-mod script;
 pub mod standalone;
 
 use std::sync::Arc;
 
-use api::v1::meta::Role;
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use catalog::CatalogManagerRef;
 use client::OutputData;
 use common_base::Plugins;
 use common_config::KvBackendConfig;
-use common_error::ext::BoxedError;
-use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_error::ext::{BoxedError, ErrorExt};
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::state_store::KvStateStore;
@@ -40,22 +41,21 @@ use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_query::Output;
-use common_telemetry::logging::info;
-use common_telemetry::{error, tracing};
+use common_telemetry::{debug, error, info, tracing};
+use datafusion_expr::LogicalPlan;
 use log_store::raft_engine::RaftEngineBackend;
-use meta_client::client::{MetaClient, MetaClientBuilder};
-use meta_client::MetaClientOptions;
 use operator::delete::DeleterRef;
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutor;
+use pipeline::pipeline_operator::PipelineOperator;
 use prometheus::HistogramTimer;
+use promql_parser::label::Matcher;
 use query::metrics::OnDone;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
-use query::plan::LogicalPlan;
 use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
 use query::query_engine::DescribeResult;
+use query::stats::StatementStatistics;
 use query::QueryEngineRef;
-use raft_engine::{Config, ReadableSize, RecoveryMode};
 use servers::error as server_error;
 use servers::error::{AuthSnafu, ExecuteQuerySnafu, ParsePromQLSnafu};
 use servers::export_metrics::ExportMetricsTask;
@@ -66,8 +66,8 @@ use servers::prometheus_handler::PrometheusHandler;
 use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::{
-    InfluxdbLineProtocolHandler, OpenTelemetryProtocolHandler, OpentsdbProtocolHandler,
-    PromStoreProtocolHandler, ScriptHandler,
+    InfluxdbLineProtocolHandler, JaegerQueryHandler, LogQueryHandler, OpenTelemetryProtocolHandler,
+    OpentsdbProtocolHandler, PipelineHandler, PromStoreProtocolHandler,
 };
 use servers::server::ServerHandlers;
 use session::context::QueryContextRef;
@@ -82,13 +82,13 @@ pub use standalone::StandaloneDatanodeManager;
 
 use self::prom_store::ExportMetricHandler;
 use crate::error::{
-    self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu, ParseSqlSnafu,
-    PermissionSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu, StartServerSnafu,
-    TableOperationSnafu,
+    self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu, InvalidSqlSnafu,
+    ParseSqlSnafu, PermissionSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu,
+    StartServerSnafu, TableOperationSnafu,
 };
-use crate::frontend::{FrontendOptions, TomlSerializable};
+use crate::frontend::FrontendOptions;
 use crate::heartbeat::HeartbeatTask;
-use crate::script::ScriptExecutor;
+use crate::limiter::LimiterRef;
 
 #[async_trait]
 pub trait FrontendInstance:
@@ -98,8 +98,10 @@ pub trait FrontendInstance:
     + InfluxdbLineProtocolHandler
     + PromStoreProtocolHandler
     + OpenTelemetryProtocolHandler
-    + ScriptHandler
     + PrometheusHandler
+    + PipelineHandler
+    + LogQueryHandler
+    + JaegerQueryHandler
     + Send
     + Sync
     + 'static
@@ -108,12 +110,12 @@ pub trait FrontendInstance:
 }
 
 pub type FrontendInstanceRef = Arc<dyn FrontendInstance>;
-pub type StatementExecutorRef = Arc<StatementExecutor>;
 
 #[derive(Clone)]
 pub struct Instance {
+    options: FrontendOptions,
     catalog_manager: CatalogManagerRef,
-    script_executor: Arc<ScriptExecutor>,
+    pipeline_operator: Arc<PipelineOperator>,
     statement_executor: Arc<StatementExecutor>,
     query_engine: QueryEngineRef,
     plugins: Plugins,
@@ -123,61 +125,25 @@ pub struct Instance {
     deleter: DeleterRef,
     export_metrics_task: Option<ExportMetricsTask>,
     table_metadata_manager: TableMetadataManagerRef,
+    stats: StatementStatistics,
+    limiter: Option<LimiterRef>,
 }
 
 impl Instance {
-    pub async fn create_meta_client(
-        meta_client_options: &MetaClientOptions,
-    ) -> Result<Arc<MetaClient>> {
-        info!(
-            "Creating Frontend instance in distributed mode with Meta server addr {:?}",
-            meta_client_options.metasrv_addrs
-        );
-
-        let channel_config = ChannelConfig::new()
-            .timeout(meta_client_options.timeout)
-            .connect_timeout(meta_client_options.connect_timeout)
-            .tcp_nodelay(meta_client_options.tcp_nodelay);
-        let ddl_channel_config = channel_config
-            .clone()
-            .timeout(meta_client_options.ddl_timeout);
-        let channel_manager = ChannelManager::with_config(channel_config);
-        let ddl_channel_manager = ChannelManager::with_config(ddl_channel_config);
-
-        let cluster_id = 0; // TODO(jeremy): read from config
-        let mut meta_client = MetaClientBuilder::new(cluster_id, 0, Role::Frontend)
-            .enable_router()
-            .enable_store()
-            .enable_heartbeat()
-            .enable_procedure()
-            .channel_manager(channel_manager)
-            .ddl_channel_manager(ddl_channel_manager)
-            .build();
-        meta_client
-            .start(&meta_client_options.metasrv_addrs)
-            .await
-            .context(error::StartMetaClientSnafu)?;
-        Ok(Arc::new(meta_client))
-    }
-
     pub async fn try_build_standalone_components(
         dir: String,
         kv_backend_config: KvBackendConfig,
         procedure_config: ProcedureConfig,
     ) -> Result<(KvBackendRef, ProcedureManagerRef)> {
-        let kv_backend = Arc::new(
-            RaftEngineBackend::try_open_with_cfg(Config {
-                dir,
-                purge_threshold: ReadableSize(kv_backend_config.purge_threshold.0),
-                recovery_mode: RecoveryMode::TolerateTailCorruption,
-                batch_compression_threshold: ReadableSize::kb(8),
-                target_file_size: ReadableSize(kv_backend_config.file_size.0),
-                ..Default::default()
-            })
-            .map_err(BoxedError::new)
-            .context(error::OpenRaftEngineBackendSnafu)?,
+        info!(
+            "Creating metadata kvbackend with config: {:?}",
+            kv_backend_config
         );
+        let kv_backend = RaftEngineBackend::try_open_with_cfg(dir, &kv_backend_config)
+            .map_err(BoxedError::new)
+            .context(error::OpenRaftEngineBackendSnafu)?;
 
+        let kv_backend = Arc::new(kv_backend);
         let state_store = Arc::new(KvStateStore::new(kv_backend.clone()));
 
         let manager_config = ManagerConfig {
@@ -190,14 +156,9 @@ impl Instance {
         Ok((kv_backend, procedure_manager))
     }
 
-    pub fn build_servers(
-        &mut self,
-        opts: impl Into<FrontendOptions> + TomlSerializable,
-        servers: ServerHandlers,
-    ) -> Result<()> {
-        let opts: FrontendOptions = opts.into();
+    pub fn build_servers(&mut self, servers: ServerHandlers) -> Result<()> {
         self.export_metrics_task =
-            ExportMetricsTask::try_new(&opts.export_metrics, Some(&self.plugins))
+            ExportMetricsTask::try_new(&self.options.export_metrics, Some(&self.plugins))
                 .context(StartServerSnafu)?;
 
         self.servers = servers;
@@ -206,6 +167,10 @@ impl Instance {
 
     pub fn catalog_manager(&self) -> &CatalogManagerRef {
         &self.catalog_manager
+    }
+
+    pub fn query_engine(&self) -> &QueryEngineRef {
+        &self.query_engine
     }
 
     pub fn plugins(&self) -> Plugins {
@@ -239,8 +204,6 @@ impl FrontendInstance for Instance {
             heartbeat_task.start().await?;
         }
 
-        self.script_executor.start(self)?;
-
         if let Some(t) = self.export_metrics_task.as_ref() {
             if t.send_by_handler {
                 let handler = ExportMetricHandler::new_handler(
@@ -265,11 +228,56 @@ impl Instance {
     async fn query_statement(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output> {
         check_permission(self.plugins.clone(), &stmt, &query_ctx)?;
 
-        let stmt = QueryStatement::Sql(stmt);
-        self.statement_executor
-            .execute_stmt(stmt, query_ctx)
-            .await
-            .context(TableOperationSnafu)
+        let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
+        let query_interceptor = query_interceptor.as_ref();
+
+        let _slow_query_timer = self
+            .stats
+            .start_slow_query_timer(QueryStatement::Sql(stmt.clone()));
+
+        let output = match stmt {
+            Statement::Query(_) | Statement::Explain(_) | Statement::Delete(_) => {
+                // TODO: remove this when format is supported in datafusion
+                if let Statement::Explain(explain) = &stmt {
+                    if let Some(format) = explain.format() {
+                        query_ctx.set_explain_format(format.to_string());
+                    }
+                }
+
+                let stmt = QueryStatement::Sql(stmt);
+                let plan = self
+                    .statement_executor
+                    .plan(&stmt, query_ctx.clone())
+                    .await?;
+
+                let QueryStatement::Sql(stmt) = stmt else {
+                    unreachable!()
+                };
+                query_interceptor.pre_execute(&stmt, Some(&plan), query_ctx.clone())?;
+
+                self.statement_executor.exec_plan(plan, query_ctx).await
+            }
+            Statement::Tql(tql) => {
+                let plan = self
+                    .statement_executor
+                    .plan_tql(tql.clone(), &query_ctx)
+                    .await?;
+
+                query_interceptor.pre_execute(
+                    &Statement::Tql(tql),
+                    Some(&plan),
+                    query_ctx.clone(),
+                )?;
+
+                self.statement_executor.exec_plan(plan, query_ctx).await
+            }
+            _ => {
+                query_interceptor.pre_execute(&stmt, None, query_ctx.clone())?;
+
+                self.statement_executor.execute_sql(stmt, query_ctx).await
+            }
+        };
+        output.context(TableOperationSnafu)
     }
 }
 
@@ -295,14 +303,6 @@ impl SqlQueryHandler for Instance {
             Ok(stmts) => {
                 let mut results = Vec::with_capacity(stmts.len());
                 for stmt in stmts {
-                    // TODO(sunng87): figure out at which stage we can call
-                    // this hook after ArrowFlight adoption. We need to provide
-                    // LogicalPlan as to this hook.
-                    if let Err(e) = query_interceptor.pre_execute(&stmt, None, query_ctx.clone()) {
-                        results.push(Err(e));
-                        break;
-                    }
-
                     if let Err(e) = checker
                         .check_permission(
                             query_ctx.current_user(),
@@ -314,16 +314,18 @@ impl SqlQueryHandler for Instance {
                         break;
                     }
 
-                    match self.query_statement(stmt, query_ctx.clone()).await {
+                    match self.query_statement(stmt.clone(), query_ctx.clone()).await {
                         Ok(output) => {
                             let output_result =
                                 query_interceptor.post_execute(output, query_ctx.clone());
                             results.push(output_result);
                         }
                         Err(e) => {
-                            let redacted = sql::util::redact_sql_secrets(query.as_ref());
-                            error!(e; "Failed to execute query: {redacted}");
-
+                            if e.status_code().should_log_error() {
+                                error!(e; "Failed to execute query: {stmt}");
+                            } else {
+                                debug!("Failed to execute query: {stmt}, {e}");
+                            }
                             results.push(Err(e));
                             break;
                         }
@@ -379,7 +381,7 @@ impl SqlQueryHandler for Instance {
             let plan = self
                 .query_engine
                 .planner()
-                .plan(QueryStatement::Sql(stmt), query_ctx.clone())
+                .plan(&QueryStatement::Sql(stmt), query_ctx.clone())
                 .await
                 .context(PlanStatementSnafu)?;
             self.query_engine
@@ -394,7 +396,7 @@ impl SqlQueryHandler for Instance {
 
     async fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
         self.catalog_manager
-            .schema_exists(catalog, schema)
+            .schema_exists(catalog, schema, None)
             .await
             .context(error::CatalogSnafu)
     }
@@ -424,7 +426,6 @@ impl PrometheusHandler for Instance {
         let interceptor = self
             .plugins
             .get::<PromQueryInterceptorRef<server_error::Error>>();
-        interceptor.pre_execute(query, query_ctx.clone())?;
 
         self.plugins
             .get::<PermissionCheckerRef>()
@@ -438,21 +439,52 @@ impl PrometheusHandler for Instance {
             }
         })?;
 
-        let output = self
+        let _slow_query_timer = self.stats.start_slow_query_timer(stmt.clone());
+
+        let plan = self
             .statement_executor
-            .execute_stmt(stmt, query_ctx.clone())
+            .plan(&stmt, query_ctx.clone())
             .await
             .map_err(BoxedError::new)
-            .with_context(|_| ExecuteQuerySnafu {
-                query: format!("{query:?}"),
-            })?;
+            .context(ExecuteQuerySnafu)?;
+
+        interceptor.pre_execute(query, Some(&plan), query_ctx.clone())?;
+
+        let output = self
+            .statement_executor
+            .exec_plan(plan, query_ctx.clone())
+            .await
+            .map_err(BoxedError::new)
+            .context(ExecuteQuerySnafu)?;
 
         Ok(interceptor.post_execute(output, query_ctx)?)
+    }
+
+    async fn query_metric_names(
+        &self,
+        matchers: Vec<Matcher>,
+        ctx: &QueryContextRef,
+    ) -> server_error::Result<Vec<String>> {
+        self.handle_query_metric_names(matchers, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(ExecuteQuerySnafu)
     }
 
     fn catalog_manager(&self) -> CatalogManagerRef {
         self.catalog_manager.clone()
     }
+}
+
+/// Validate `stmt.database` permission if it's presented.
+macro_rules! validate_db_permission {
+    ($stmt: expr, $query_ctx: expr) => {
+        if let Some(database) = &$stmt.database {
+            validate_catalog_and_schema($query_ctx.current_catalog(), database, $query_ctx)
+                .map_err(BoxedError::new)
+                .context(SqlExecInterceptedSnafu)?;
+        }
+    };
 }
 
 pub fn check_permission(
@@ -470,16 +502,52 @@ pub fn check_permission(
     }
 
     match stmt {
+        // Will be checked in execution.
+        // TODO(dennis): add a hook for admin commands.
+        Statement::Admin(_) => {}
         // These are executed by query engine, and will be checked there.
-        Statement::Query(_) | Statement::Explain(_) | Statement::Tql(_) | Statement::Delete(_) => {}
+        Statement::Query(_)
+        | Statement::Explain(_)
+        | Statement::Tql(_)
+        | Statement::Delete(_)
+        | Statement::DeclareCursor(_)
+        | Statement::Copy(sql::statements::copy::Copy::CopyQueryTo(_)) => {}
         // database ops won't be checked
-        Statement::CreateDatabase(_) | Statement::ShowDatabases(_) | Statement::DropDatabase(_) => {
+        Statement::CreateDatabase(_)
+        | Statement::ShowDatabases(_)
+        | Statement::DropDatabase(_)
+        | Statement::AlterDatabase(_)
+        | Statement::DropFlow(_)
+        | Statement::Use(_) => {}
+        Statement::ShowCreateDatabase(stmt) => {
+            validate_database(&stmt.database_name, query_ctx)?;
         }
-        // show create table and alter are not supported yet
-        Statement::ShowCreateTable(_) | Statement::CreateExternalTable(_) | Statement::Alter(_) => {
+        Statement::ShowCreateTable(stmt) => {
+            validate_param(&stmt.table_name, query_ctx)?;
+        }
+        Statement::ShowCreateFlow(stmt) => {
+            validate_param(&stmt.flow_name, query_ctx)?;
+        }
+        Statement::ShowCreateView(stmt) => {
+            validate_param(&stmt.view_name, query_ctx)?;
+        }
+        Statement::CreateExternalTable(stmt) => {
+            validate_param(&stmt.name, query_ctx)?;
+        }
+        Statement::CreateFlow(stmt) => {
+            // TODO: should also validate source table name here?
+            validate_param(&stmt.sink_table_name, query_ctx)?;
+        }
+        Statement::CreateView(stmt) => {
+            validate_param(&stmt.name, query_ctx)?;
+        }
+        Statement::AlterTable(stmt) => {
+            validate_param(stmt.table_name(), query_ctx)?;
         }
         // set/show variable now only alter/show variable in session
         Statement::SetVariables(_) | Statement::ShowVariables(_) => {}
+        // show charset and show collation won't be checked
+        Statement::ShowCharset(_) | Statement::ShowCollation(_) => {}
 
         Statement::Insert(insert) => {
             validate_param(insert.table_name(), query_ctx)?;
@@ -492,15 +560,33 @@ pub fn check_permission(
             validate_param(&stmt.source_name, query_ctx)?;
         }
         Statement::DropTable(drop_stmt) => {
-            validate_param(drop_stmt.table_name(), query_ctx)?;
-        }
-        Statement::ShowTables(stmt) => {
-            if let Some(database) = &stmt.database {
-                validate_catalog_and_schema(query_ctx.current_catalog(), database, query_ctx)
-                    .map_err(BoxedError::new)
-                    .context(SqlExecInterceptedSnafu)?;
+            for table_name in drop_stmt.table_names() {
+                validate_param(table_name, query_ctx)?;
             }
         }
+        Statement::DropView(stmt) => {
+            validate_param(&stmt.view_name, query_ctx)?;
+        }
+        Statement::ShowTables(stmt) => {
+            validate_db_permission!(stmt, query_ctx);
+        }
+        Statement::ShowTableStatus(stmt) => {
+            validate_db_permission!(stmt, query_ctx);
+        }
+        Statement::ShowColumns(stmt) => {
+            validate_db_permission!(stmt, query_ctx);
+        }
+        Statement::ShowIndex(stmt) => {
+            validate_db_permission!(stmt, query_ctx);
+        }
+        Statement::ShowViews(stmt) => {
+            validate_db_permission!(stmt, query_ctx);
+        }
+        Statement::ShowFlows(stmt) => {
+            validate_db_permission!(stmt, query_ctx);
+        }
+        Statement::ShowStatus(_stmt) => {}
+        Statement::ShowSearchPath(_stmt) => {}
         Statement::DescribeTable(stmt) => {
             validate_param(stmt.name(), query_ctx)?;
         }
@@ -512,13 +598,15 @@ pub fn check_permission(
         },
         Statement::Copy(sql::statements::copy::Copy::CopyDatabase(copy_database)) => {
             match copy_database {
-                CopyDatabase::To(stmt) => validate_param(&stmt.database_name, query_ctx)?,
-                CopyDatabase::From(stmt) => validate_param(&stmt.database_name, query_ctx)?,
+                CopyDatabase::To(stmt) => validate_database(&stmt.database_name, query_ctx)?,
+                CopyDatabase::From(stmt) => validate_database(&stmt.database_name, query_ctx)?,
             }
         }
         Statement::TruncateTable(stmt) => {
             validate_param(stmt.table_name(), query_ctx)?;
         }
+        // cursor operations are always allowed once it's created
+        Statement::FetchCursor(_) | Statement::CloseCursor(_) => {}
     }
     Ok(())
 }
@@ -527,6 +615,26 @@ fn validate_param(name: &ObjectName, query_ctx: &QueryContextRef) -> Result<()> 
     let (catalog, schema, _) = table_idents_to_full_name(name, query_ctx)
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
+
+    validate_catalog_and_schema(&catalog, &schema, query_ctx)
+        .map_err(BoxedError::new)
+        .context(SqlExecInterceptedSnafu)
+}
+
+fn validate_database(name: &ObjectName, query_ctx: &QueryContextRef) -> Result<()> {
+    let (catalog, schema) = match &name.0[..] {
+        [schema] => (
+            query_ctx.current_catalog().to_string(),
+            schema.value.clone(),
+        ),
+        [catalog, schema] => (catalog.value.clone(), schema.value.clone()),
+        _ => InvalidSqlSnafu {
+            err_msg: format!(
+                "expect database name to be <catalog>.<schema> or <schema>, actual: {name}",
+            ),
+        }
+        .fail()?,
+    };
 
     validate_catalog_and_schema(&catalog, &schema, query_ctx)
         .map_err(BoxedError::new)
@@ -623,7 +731,7 @@ mod tests {
                             ts TIMESTAMP,
                             TIME INDEX (ts),
                             PRIMARY KEY(host)
-                        ) engine=mito with(regions=1);"#;
+                        ) engine=mito;"#;
         replace_test(sql, plugins.clone(), &query_ctx);
 
         // test drop table

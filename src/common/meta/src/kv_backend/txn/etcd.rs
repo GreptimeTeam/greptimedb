@@ -20,6 +20,7 @@ use etcd_client::{
 use super::{Compare, CompareOp, Txn, TxnOp, TxnOpResponse, TxnResponse};
 use crate::error::{self, Result};
 use crate::rpc::store::{DeleteRangeResponse, PutResponse, RangeResponse};
+use crate::rpc::KeyValue;
 
 impl From<Txn> for EtcdTxn {
     fn from(txn: Txn) -> Self {
@@ -65,7 +66,7 @@ impl From<Compare> for EtcdCompare {
         };
         match cmp.target {
             Some(target) => EtcdCompare::value(cmp.key, etcd_cmp, target),
-            // create revision 0 means key was not exist
+            // create revision 0 means key does not exist
             None => EtcdCompare::create_revision(cmp.key, etcd_cmp, 0),
         }
     }
@@ -86,28 +87,28 @@ impl TryFrom<EtcdTxnOpResponse> for TxnOpResponse {
 
     fn try_from(op_resp: EtcdTxnOpResponse) -> Result<Self> {
         match op_resp {
-            EtcdTxnOpResponse::Put(res) => {
-                let prev_kv = res.prev_key().cloned().map(Into::into);
-                let put_res = PutResponse { prev_kv };
-                Ok(TxnOpResponse::ResponsePut(put_res))
+            EtcdTxnOpResponse::Put(mut res) => {
+                let prev_kv = res.take_prev_key().map(KeyValue::from);
+                Ok(TxnOpResponse::ResponsePut(PutResponse { prev_kv }))
             }
-            EtcdTxnOpResponse::Get(res) => {
-                let kvs = res.kvs().iter().cloned().map(Into::into).collect();
-                let range_res = RangeResponse { kvs, more: false };
-                Ok(TxnOpResponse::ResponseGet(range_res))
+            EtcdTxnOpResponse::Get(mut res) => {
+                let kvs = res.take_kvs().into_iter().map(KeyValue::from).collect();
+                Ok(TxnOpResponse::ResponseGet(RangeResponse {
+                    kvs,
+                    more: false,
+                }))
             }
-            EtcdTxnOpResponse::Delete(res) => {
+            EtcdTxnOpResponse::Delete(mut res) => {
+                let deleted = res.deleted();
                 let prev_kvs = res
-                    .prev_kvs()
-                    .iter()
-                    .cloned()
-                    .map(Into::into)
+                    .take_prev_kvs()
+                    .into_iter()
+                    .map(KeyValue::from)
                     .collect::<Vec<_>>();
-                let delete_res = DeleteRangeResponse {
+                Ok(TxnOpResponse::ResponseDelete(DeleteRangeResponse {
+                    deleted,
                     prev_kvs,
-                    deleted: res.deleted(),
-                };
-                Ok(TxnOpResponse::ResponseDelete(delete_res))
+                }))
             }
             EtcdTxnOpResponse::Txn(_) => error::EtcdTxnOpResponseSnafu {
                 err_msg: "nested txn is not supported",

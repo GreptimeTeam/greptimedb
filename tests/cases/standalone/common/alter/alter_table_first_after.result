@@ -108,6 +108,7 @@ DESC TABLE t;
 | m      | Int32                |     | YES  |         | FIELD         |
 +--------+----------------------+-----+------+---------+---------------+
 
+-- SQLNESS SORT_RESULT 3 1
 SELECT * FROM t;
 
 +---+---+-------------------------+---+---+---+
@@ -155,6 +156,7 @@ DESC TABLE t;
 | m      | Int32                |     | YES  |         | FIELD         |
 +--------+----------------------+-----+------+---------+---------------+
 
+-- SQLNESS SORT_RESULT 3 1
 SELECT * FROM t;
 
 +---+---+---+-------------------------+---+---+---+---+
@@ -166,7 +168,7 @@ SELECT * FROM t;
 
 ALTER TABLE t ADD COLUMN x int xxx;
 
-Error: 1001(Unsupported), SQL statement is not supported: ALTER TABLE t ADD COLUMN x int xxx;, keyword: xxx
+Error: 1001(Unsupported), SQL statement is not supported, keyword: xxx
 
 DROP TABLE t;
 

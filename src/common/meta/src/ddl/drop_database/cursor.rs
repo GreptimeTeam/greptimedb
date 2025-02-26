@@ -14,19 +14,23 @@
 
 use std::any::Any;
 
+use common_catalog::format_full_table_name;
 use common_procedure::Status;
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
-use table::metadata::TableId;
+use snafu::OptionExt;
+use table::metadata::{TableId, TableType};
+use table::table_name::TableName;
 
 use super::executor::DropDatabaseExecutor;
 use super::metadata::DropDatabaseRemoveMetadata;
 use super::DropTableTarget;
+use crate::cache_invalidator::Context;
 use crate::ddl::drop_database::{DropDatabaseContext, State};
 use crate::ddl::DdlContext;
-use crate::error::Result;
+use crate::error::{Result, TableInfoNotFoundSnafu};
+use crate::instruction::CacheIdent;
 use crate::key::table_route::TableRouteValue;
-use crate::table_name::TableName;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct DropDatabaseCursor {
@@ -77,6 +81,7 @@ impl DropDatabaseCursor {
                 Ok((
                     Box::new(DropDatabaseExecutor::new(
                         table_id,
+                        table_id,
                         TableName::new(&ctx.catalog, &ctx.schema, &table_name),
                         table_route.region_routes,
                         self.target,
@@ -86,6 +91,7 @@ impl DropDatabaseCursor {
             }
             (DropTableTarget::Physical, TableRouteValue::Physical(table_route)) => Ok((
                 Box::new(DropDatabaseExecutor::new(
+                    table_id,
                     table_id,
                     TableName::new(&ctx.catalog, &ctx.schema, &table_name),
                     table_route.region_routes,
@@ -98,6 +104,40 @@ impl DropDatabaseCursor {
                 Status::executing(false),
             )),
         }
+    }
+
+    async fn handle_view(
+        &self,
+        ddl_ctx: &DdlContext,
+        ctx: &mut DropDatabaseContext,
+        table_name: String,
+        table_id: TableId,
+    ) -> Result<(Box<dyn State>, Status)> {
+        let view_name = TableName::new(&ctx.catalog, &ctx.schema, &table_name);
+        ddl_ctx
+            .table_metadata_manager
+            .destroy_view_info(table_id, &view_name)
+            .await?;
+
+        let cache_invalidator = &ddl_ctx.cache_invalidator;
+        let ctx = Context {
+            subject: Some("Invalidate table cache by dropping table".to_string()),
+        };
+
+        cache_invalidator
+            .invalidate(
+                &ctx,
+                &[
+                    CacheIdent::TableName(view_name),
+                    CacheIdent::TableId(table_id),
+                ],
+            )
+            .await?;
+
+        Ok((
+            Box::new(DropDatabaseCursor::new(self.target)),
+            Status::executing(false),
+        ))
     }
 }
 
@@ -120,6 +160,20 @@ impl State for DropDatabaseCursor {
         match ctx.tables.as_mut().unwrap().try_next().await? {
             Some((table_name, table_name_value)) => {
                 let table_id = table_name_value.table_id();
+
+                let table_info_value = ddl_ctx
+                    .table_metadata_manager
+                    .table_info_manager()
+                    .get(table_id)
+                    .await?
+                    .with_context(|| TableInfoNotFoundSnafu {
+                        table: format_full_table_name(&ctx.catalog, &ctx.schema, &table_name),
+                    })?;
+
+                if table_info_value.table_info.table_type == TableType::View {
+                    return self.handle_view(ddl_ctx, ctx, table_name, table_id).await;
+                }
+
                 match ddl_ctx
                     .table_metadata_manager
                     .table_route_manager()
@@ -161,12 +215,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_next_without_logical_tables() {
-        let datanode_manager = Arc::new(MockDatanodeManager::new(()));
-        let ddl_context = new_ddl_context(datanode_manager);
-        create_physical_table(ddl_context.clone(), 0, "phy").await;
+        let node_manager = Arc::new(MockDatanodeManager::new(()));
+        let ddl_context = new_ddl_context(node_manager);
+        create_physical_table(&ddl_context, 0, "phy").await;
         // It always starts from Logical
         let mut state = DropDatabaseCursor::new(DropTableTarget::Logical);
         let mut ctx = DropDatabaseContext {
+            cluster_id: 0,
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             drop_if_exists: false,
@@ -195,13 +250,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_next_with_logical_tables() {
-        let datanode_manager = Arc::new(MockDatanodeManager::new(()));
-        let ddl_context = new_ddl_context(datanode_manager);
-        let physical_table_id = create_physical_table(ddl_context.clone(), 0, "phy").await;
+        let node_manager = Arc::new(MockDatanodeManager::new(()));
+        let ddl_context = new_ddl_context(node_manager);
+        let physical_table_id = create_physical_table(&ddl_context, 0, "phy").await;
         create_logical_table(ddl_context.clone(), 0, physical_table_id, "metric_0").await;
         // It always starts from Logical
         let mut state = DropDatabaseCursor::new(DropTableTarget::Logical);
         let mut ctx = DropDatabaseContext {
+            cluster_id: 0,
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             drop_if_exists: false,
@@ -220,16 +276,17 @@ mod tests {
             .get_physical_table_route(physical_table_id)
             .await
             .unwrap();
-        assert_eq!(table_route.region_routes, executor.region_routes);
+        assert_eq!(table_route.region_routes, executor.physical_region_routes);
         assert_eq!(executor.target, DropTableTarget::Logical);
     }
 
     #[tokio::test]
     async fn test_reach_the_end() {
-        let datanode_manager = Arc::new(MockDatanodeManager::new(()));
-        let ddl_context = new_ddl_context(datanode_manager);
+        let node_manager = Arc::new(MockDatanodeManager::new(()));
+        let ddl_context = new_ddl_context(node_manager);
         let mut state = DropDatabaseCursor::new(DropTableTarget::Physical);
         let mut ctx = DropDatabaseContext {
+            cluster_id: 0,
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             drop_if_exists: false,

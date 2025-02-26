@@ -1,0 +1,55 @@
+CREATE TABLE IF NOT EXISTS `test_table` (
+  `bytes` BIGINT NULL,
+  `http_version` STRING NULL,
+  `ip` STRING NULL,
+  `method` STRING NULL,
+  `path` STRING NULL,
+  `status` SMALLINT UNSIGNED NULL,
+  `user` STRING NULL,
+  `timestamp` TIMESTAMP(3) NOT NULL,
+  TIME INDEX (`timestamp`),
+  PRIMARY KEY (`user`, `path`, `status`)
+)
+ENGINE=mito
+WITH(
+  append_mode = 'true'
+);
+
+Affected Rows: 0
+
+INSERT INTO `test_table` (`bytes`, `http_version`, `ip`, `method`, `path`, `status`, `user`, `timestamp`)
+VALUES (1024, 'HTTP/1.1', '192.168.1.1', 'GET', '/index.html', 200, 'user1', 1667446797450);
+
+Affected Rows: 1
+
+SELECT count(*) FROM test_table;
+
++----------+
+| count(*) |
++----------+
+| 1        |
++----------+
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE SELECT count(*) FROM test_table;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[1 as count(*)] REDACTED
+|_|_|_common_recordbatch::adapter::MetricCollector REDACTED
+|_|_|_|
+|_|_| Total rows: 1_|
++-+-+-+
+
+DROP TABLE test_table;
+
+Affected Rows: 0
+

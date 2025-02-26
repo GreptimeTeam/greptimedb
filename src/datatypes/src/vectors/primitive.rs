@@ -80,10 +80,12 @@ impl<T: LogicalPrimitiveType> PrimitiveVector<T> {
         }
     }
 
-    pub fn from_vec(array: Vec<T::Native>) -> Self {
-        Self {
-            array: PrimitiveArray::from_iter_values(array),
-        }
+    pub fn from_vec(vector: Vec<T::Native>) -> Self {
+        let mutable_buffer = arrow::buffer::MutableBuffer::from(vector);
+        let mut primitive_builder =
+            PrimitiveBuilder::<T::ArrowPrimitive>::new_from_buffer(mutable_buffer, None);
+        let array = primitive_builder.finish();
+        Self { array }
     }
 
     pub fn from_iter_values<I: IntoIterator<Item = T::Native>>(iter: I) -> Self {
@@ -207,7 +209,7 @@ pub struct PrimitiveIter<'a, T: LogicalPrimitiveType> {
     iter: ArrayIter<&'a PrimitiveArray<T::ArrowPrimitive>>,
 }
 
-impl<'a, T: LogicalPrimitiveType> Iterator for PrimitiveIter<'a, T> {
+impl<T: LogicalPrimitiveType> Iterator for PrimitiveIter<'_, T> {
     type Item = Option<T::Wrapper>;
 
     fn next(&mut self) -> Option<Option<T::Wrapper>> {
@@ -406,7 +408,7 @@ mod tests {
         Int32Array, Time32MillisecondArray, Time32SecondArray, Time64MicrosecondArray,
         Time64NanosecondArray,
     };
-    use arrow::datatypes::DataType as ArrowDataType;
+    use arrow::datatypes::{DataType as ArrowDataType, IntervalDayTime};
     use arrow_array::{
         DurationMicrosecondArray, DurationMillisecondArray, DurationNanosecondArray,
         DurationSecondArray, IntervalDayTimeArray, IntervalYearMonthArray,
@@ -531,9 +533,9 @@ mod tests {
     #[test]
     fn test_memory_size() {
         let v = Int32Vector::from_slice((0..5).collect::<Vec<i32>>());
-        assert_eq!(64, v.memory_size());
+        assert_eq!(20, v.memory_size());
         let v = Int64Vector::from(vec![Some(0i64), Some(1i64), Some(2i64), None, None]);
-        assert_eq!(128, v.memory_size());
+        assert_eq!(144, v.memory_size());
     }
 
     #[test]
@@ -650,10 +652,18 @@ mod tests {
             vector
         );
 
-        let array: ArrayRef = Arc::new(IntervalDayTimeArray::from(vec![1000, 2000, 3000]));
+        let array: ArrayRef = Arc::new(IntervalDayTimeArray::from(vec![
+            IntervalDayTime::new(1, 1000),
+            IntervalDayTime::new(1, 2000),
+            IntervalDayTime::new(1, 3000),
+        ]));
         let vector = IntervalDayTimeVector::try_from_arrow_array(array).unwrap();
         assert_eq!(
-            IntervalDayTimeVector::from_values(vec![1000, 2000, 3000]),
+            IntervalDayTimeVector::from_values(vec![
+                IntervalDayTime::new(1, 1000),
+                IntervalDayTime::new(1, 2000),
+                IntervalDayTime::new(1, 3000),
+            ]),
             vector
         );
 

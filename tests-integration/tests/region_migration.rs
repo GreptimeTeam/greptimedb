@@ -23,8 +23,9 @@ use common_recordbatch::RecordBatches;
 use common_telemetry::info;
 use common_test_util::recordbatch::check_output_stream;
 use common_test_util::temp_dir::create_temp_dir;
-use common_wal::config::kafka::{DatanodeKafkaConfig, MetaSrvKafkaConfig};
-use common_wal::config::{DatanodeWalConfig, MetaSrvWalConfig};
+use common_wal::config::kafka::common::{KafkaConnectionConfig, KafkaTopicConfig};
+use common_wal::config::kafka::{DatanodeKafkaConfig, MetasrvKafkaConfig};
+use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use datatypes::prelude::ScalarVector;
 use datatypes::value::Value;
 use datatypes::vectors::{Helper, UInt64Vector};
@@ -85,6 +86,7 @@ macro_rules! region_migration_tests {
                 test_region_migration_all_regions,
                 test_region_migration_incorrect_from_peer,
                 test_region_migration_incorrect_region_id,
+                test_metric_table_region_migration_by_sql,
             );
         )*
     };
@@ -112,14 +114,22 @@ pub async fn test_region_migration(store_type: StorageType, endpoints: Vec<Strin
         .with_datanodes(datanodes as u32)
         .with_store_config(store_config)
         .with_datanode_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
-            broker_endpoints: endpoints.clone(),
-            linger: Duration::from_millis(25),
+            connection: KafkaConnectionConfig {
+                broker_endpoints: endpoints.clone(),
+                ..Default::default()
+            },
             ..Default::default()
         }))
-        .with_metasrv_wal_config(MetaSrvWalConfig::Kafka(MetaSrvKafkaConfig {
-            broker_endpoints: endpoints,
-            num_topics: 3,
-            topic_name_prefix: Uuid::new_v4().to_string(),
+        .with_metasrv_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
+            connection: KafkaConnectionConfig {
+                broker_endpoints: endpoints,
+                ..Default::default()
+            },
+            kafka_topic: KafkaTopicConfig {
+                num_topics: 3,
+                topic_name_prefix: Uuid::new_v4().to_string(),
+                ..Default::default()
+            },
             ..Default::default()
         }))
         .with_shared_home_dir(Arc::new(home_dir))
@@ -127,7 +137,7 @@ pub async fn test_region_migration(store_type: StorageType, endpoints: Vec<Strin
         .build()
         .await;
     let mut logical_timer = 1685508715000;
-    let table_metadata_manager = cluster.meta_srv.table_metadata_manager().clone();
+    let table_metadata_manager = cluster.metasrv.table_metadata_manager().clone();
 
     // Prepares test table.
     let table_id = prepare_testing_table(&cluster).await;
@@ -143,7 +153,7 @@ pub async fn test_region_migration(store_type: StorageType, endpoints: Vec<Strin
     let mut distribution = find_region_distribution(&table_metadata_manager, table_id).await;
 
     // Selecting target of region migration.
-    let region_migration_manager = cluster.meta_srv.region_migration_manager();
+    let region_migration_manager = cluster.metasrv.region_migration_manager();
     let (from_peer_id, from_regions) = distribution.pop_first().unwrap();
     info!(
         "Selecting from peer: {from_peer_id}, and regions: {:?}",
@@ -217,6 +227,140 @@ pub async fn test_region_migration(store_type: StorageType, endpoints: Vec<Strin
     assert!(procedure.is_none());
 }
 
+/// A naive metric table region migration test by SQL function
+pub async fn test_metric_table_region_migration_by_sql(
+    store_type: StorageType,
+    endpoints: Vec<String>,
+) {
+    let cluster_name = "test_region_migration";
+    let peer_factory = |id| Peer {
+        id,
+        addr: PEER_PLACEHOLDER_ADDR.to_string(),
+    };
+
+    // Prepares test cluster.
+    let (store_config, _guard) = get_test_store_config(&store_type);
+    let home_dir = create_temp_dir("test_migration_data_home");
+    let datanodes = 5u64;
+    let builder = GreptimeDbClusterBuilder::new(cluster_name).await;
+    let const_selector = Arc::new(ConstNodeSelector::new(vec![
+        peer_factory(1),
+        peer_factory(2),
+        peer_factory(3),
+    ]));
+    let cluster = builder
+        .with_datanodes(datanodes as u32)
+        .with_store_config(store_config)
+        .with_datanode_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
+            connection: KafkaConnectionConfig {
+                broker_endpoints: endpoints.clone(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }))
+        .with_metasrv_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
+            connection: KafkaConnectionConfig {
+                broker_endpoints: endpoints,
+                ..Default::default()
+            },
+            kafka_topic: KafkaTopicConfig {
+                num_topics: 3,
+                topic_name_prefix: Uuid::new_v4().to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }))
+        .with_shared_home_dir(Arc::new(home_dir))
+        .with_meta_selector(const_selector.clone())
+        .build()
+        .await;
+    // Prepares test metric tables.
+    let table_id = prepare_testing_metric_table(&cluster).await;
+    let query_ctx = QueryContext::arc();
+
+    // Inserts values
+    run_sql(
+        &cluster.frontend,
+        r#"INSERT INTO t1 VALUES ('host1',0, 0), ('host2', 1, 1);"#,
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+
+    run_sql(
+        &cluster.frontend,
+        r#"INSERT INTO t2 VALUES ('job1', 0, 0), ('job2', 1, 1);"#,
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+
+    // The region distribution
+    let mut distribution = find_region_distribution_by_sql(&cluster, "phy").await;
+    // Selecting target of region migration.
+    let (from_peer_id, from_regions) = distribution.pop_first().unwrap();
+    info!(
+        "Selecting from peer: {from_peer_id}, and regions: {:?}",
+        from_regions[0]
+    );
+    let to_peer_id = (from_peer_id + 1) % 3;
+    let region_id = RegionId::new(table_id, from_regions[0]);
+    // Trigger region migration.
+    let procedure_id =
+        trigger_migration_by_sql(&cluster, region_id.as_u64(), from_peer_id, to_peer_id).await;
+
+    info!("Started region procedure: {}!", procedure_id);
+
+    // Waits condition by checking procedure state
+    let frontend = cluster.frontend.clone();
+    wait_condition(
+        Duration::from_secs(10),
+        Box::pin(async move {
+            loop {
+                let state = query_procedure_by_sql(&frontend, &procedure_id).await;
+                if state == "{\"status\":\"Done\"}" {
+                    info!("Migration done: {state}");
+                    break;
+                } else {
+                    info!("Migration not finished: {state}");
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            }
+        }),
+    )
+    .await;
+
+    let result = cluster
+        .frontend
+        .do_query("select * from t1", query_ctx.clone())
+        .await
+        .remove(0);
+
+    let expected = "\
++-------+-------------------------+-----+
+| host  | ts                      | val |
++-------+-------------------------+-----+
+| host2 | 1970-01-01T00:00:00.001 | 1.0 |
+| host1 | 1970-01-01T00:00:00     | 0.0 |
++-------+-------------------------+-----+";
+    check_output_stream(result.unwrap().data, expected).await;
+
+    let result = cluster
+        .frontend
+        .do_query("select * from t2", query_ctx)
+        .await
+        .remove(0);
+
+    let expected = "\
++------+-------------------------+-----+
+| job  | ts                      | val |
++------+-------------------------+-----+
+| job2 | 1970-01-01T00:00:00.001 | 1.0 |
+| job1 | 1970-01-01T00:00:00     | 0.0 |
++------+-------------------------+-----+";
+    check_output_stream(result.unwrap().data, expected).await;
+}
+
 /// A naive region migration test by SQL function
 pub async fn test_region_migration_by_sql(store_type: StorageType, endpoints: Vec<String>) {
     let cluster_name = "test_region_migration";
@@ -239,14 +383,22 @@ pub async fn test_region_migration_by_sql(store_type: StorageType, endpoints: Ve
         .with_datanodes(datanodes as u32)
         .with_store_config(store_config)
         .with_datanode_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
-            broker_endpoints: endpoints.clone(),
-            linger: Duration::from_millis(25),
+            connection: KafkaConnectionConfig {
+                broker_endpoints: endpoints.clone(),
+                ..Default::default()
+            },
             ..Default::default()
         }))
-        .with_metasrv_wal_config(MetaSrvWalConfig::Kafka(MetaSrvKafkaConfig {
-            broker_endpoints: endpoints,
-            num_topics: 3,
-            topic_name_prefix: Uuid::new_v4().to_string(),
+        .with_metasrv_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
+            connection: KafkaConnectionConfig {
+                broker_endpoints: endpoints,
+                ..Default::default()
+            },
+            kafka_topic: KafkaTopicConfig {
+                num_topics: 3,
+                topic_name_prefix: Uuid::new_v4().to_string(),
+                ..Default::default()
+            },
             ..Default::default()
         }))
         .with_shared_home_dir(Arc::new(home_dir))
@@ -266,12 +418,12 @@ pub async fn test_region_migration_by_sql(store_type: StorageType, endpoints: Ve
     }
 
     // The region distribution
-    let mut distribution = find_region_distribution_by_sql(&cluster).await;
+    let mut distribution = find_region_distribution_by_sql(&cluster, TEST_TABLE_NAME).await;
 
     let old_distribution = distribution.clone();
 
     // Selecting target of region migration.
-    let region_migration_manager = cluster.meta_srv.region_migration_manager();
+    let region_migration_manager = cluster.metasrv.region_migration_manager();
     let (from_peer_id, from_regions) = distribution.pop_first().unwrap();
     info!(
         "Selecting from peer: {from_peer_id}, and regions: {:?}",
@@ -331,7 +483,7 @@ pub async fn test_region_migration_by_sql(store_type: StorageType, endpoints: Ve
         .unwrap();
     assert!(procedure.is_none());
 
-    let new_distribution = find_region_distribution_by_sql(&cluster).await;
+    let new_distribution = find_region_distribution_by_sql(&cluster, TEST_TABLE_NAME).await;
 
     assert_ne!(old_distribution, new_distribution);
 }
@@ -361,14 +513,22 @@ pub async fn test_region_migration_multiple_regions(
         .with_datanodes(datanodes as u32)
         .with_store_config(store_config)
         .with_datanode_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
-            broker_endpoints: endpoints.clone(),
-            linger: Duration::from_millis(25),
+            connection: KafkaConnectionConfig {
+                broker_endpoints: endpoints.clone(),
+                ..Default::default()
+            },
             ..Default::default()
         }))
-        .with_metasrv_wal_config(MetaSrvWalConfig::Kafka(MetaSrvKafkaConfig {
-            broker_endpoints: endpoints,
-            num_topics: 3,
-            topic_name_prefix: Uuid::new_v4().to_string(),
+        .with_metasrv_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
+            connection: KafkaConnectionConfig {
+                broker_endpoints: endpoints,
+                ..Default::default()
+            },
+            kafka_topic: KafkaTopicConfig {
+                num_topics: 3,
+                topic_name_prefix: Uuid::new_v4().to_string(),
+                ..Default::default()
+            },
             ..Default::default()
         }))
         .with_shared_home_dir(Arc::new(home_dir))
@@ -376,7 +536,7 @@ pub async fn test_region_migration_multiple_regions(
         .build()
         .await;
     let mut logical_timer = 1685508715000;
-    let table_metadata_manager = cluster.meta_srv.table_metadata_manager().clone();
+    let table_metadata_manager = cluster.metasrv.table_metadata_manager().clone();
 
     // Prepares test table.
     let table_id = prepare_testing_table(&cluster).await;
@@ -393,7 +553,7 @@ pub async fn test_region_migration_multiple_regions(
     assert_eq!(distribution.len(), 2);
 
     // Selecting target of region migration.
-    let region_migration_manager = cluster.meta_srv.region_migration_manager();
+    let region_migration_manager = cluster.metasrv.region_migration_manager();
     let (peer_1, peer_1_regions) = distribution.pop_first().unwrap();
     let (peer_2, peer_2_regions) = distribution.pop_first().unwrap();
 
@@ -498,14 +658,22 @@ pub async fn test_region_migration_all_regions(store_type: StorageType, endpoint
         .with_datanodes(datanodes as u32)
         .with_store_config(store_config)
         .with_datanode_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
-            broker_endpoints: endpoints.clone(),
-            linger: Duration::from_millis(25),
+            connection: KafkaConnectionConfig {
+                broker_endpoints: endpoints.clone(),
+                ..Default::default()
+            },
             ..Default::default()
         }))
-        .with_metasrv_wal_config(MetaSrvWalConfig::Kafka(MetaSrvKafkaConfig {
-            broker_endpoints: endpoints,
-            num_topics: 3,
-            topic_name_prefix: Uuid::new_v4().to_string(),
+        .with_metasrv_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
+            connection: KafkaConnectionConfig {
+                broker_endpoints: endpoints,
+                ..Default::default()
+            },
+            kafka_topic: KafkaTopicConfig {
+                num_topics: 3,
+                topic_name_prefix: Uuid::new_v4().to_string(),
+                ..Default::default()
+            },
             ..Default::default()
         }))
         .with_shared_home_dir(Arc::new(home_dir))
@@ -513,7 +681,7 @@ pub async fn test_region_migration_all_regions(store_type: StorageType, endpoint
         .build()
         .await;
     let mut logical_timer = 1685508715000;
-    let table_metadata_manager = cluster.meta_srv.table_metadata_manager().clone();
+    let table_metadata_manager = cluster.metasrv.table_metadata_manager().clone();
 
     // Prepares test table.
     let table_id = prepare_testing_table(&cluster).await;
@@ -530,7 +698,7 @@ pub async fn test_region_migration_all_regions(store_type: StorageType, endpoint
     assert_eq!(distribution.len(), 1);
 
     // Selecting target of region migration.
-    let region_migration_manager = cluster.meta_srv.region_migration_manager();
+    let region_migration_manager = cluster.metasrv.region_migration_manager();
     let (from_peer_id, mut from_regions) = distribution.pop_first().unwrap();
     let to_peer_id = 1;
     let mut to_regions = Vec::new();
@@ -630,14 +798,22 @@ pub async fn test_region_migration_incorrect_from_peer(
         .with_datanodes(datanodes as u32)
         .with_store_config(store_config)
         .with_datanode_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
-            broker_endpoints: endpoints.clone(),
-            linger: Duration::from_millis(25),
+            connection: KafkaConnectionConfig {
+                broker_endpoints: endpoints.clone(),
+                ..Default::default()
+            },
             ..Default::default()
         }))
-        .with_metasrv_wal_config(MetaSrvWalConfig::Kafka(MetaSrvKafkaConfig {
-            broker_endpoints: endpoints,
-            num_topics: 3,
-            topic_name_prefix: Uuid::new_v4().to_string(),
+        .with_metasrv_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
+            connection: KafkaConnectionConfig {
+                broker_endpoints: endpoints,
+                ..Default::default()
+            },
+            kafka_topic: KafkaTopicConfig {
+                num_topics: 3,
+                topic_name_prefix: Uuid::new_v4().to_string(),
+                ..Default::default()
+            },
             ..Default::default()
         }))
         .with_shared_home_dir(Arc::new(home_dir))
@@ -645,7 +821,7 @@ pub async fn test_region_migration_incorrect_from_peer(
         .build()
         .await;
     let logical_timer = 1685508715000;
-    let table_metadata_manager = cluster.meta_srv.table_metadata_manager().clone();
+    let table_metadata_manager = cluster.metasrv.table_metadata_manager().clone();
 
     // Prepares test table.
     let table_id = prepare_testing_table(&cluster).await;
@@ -659,7 +835,7 @@ pub async fn test_region_migration_incorrect_from_peer(
     // The region distribution
     let distribution = find_region_distribution(&table_metadata_manager, table_id).await;
     assert_eq!(distribution.len(), 3);
-    let region_migration_manager = cluster.meta_srv.region_migration_manager();
+    let region_migration_manager = cluster.metasrv.region_migration_manager();
 
     let region_id = RegionId::new(table_id, 1);
 
@@ -705,14 +881,22 @@ pub async fn test_region_migration_incorrect_region_id(
         .with_datanodes(datanodes as u32)
         .with_store_config(store_config)
         .with_datanode_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
-            broker_endpoints: endpoints.clone(),
-            linger: Duration::from_millis(25),
+            connection: KafkaConnectionConfig {
+                broker_endpoints: endpoints.clone(),
+                ..Default::default()
+            },
             ..Default::default()
         }))
-        .with_metasrv_wal_config(MetaSrvWalConfig::Kafka(MetaSrvKafkaConfig {
-            broker_endpoints: endpoints,
-            num_topics: 3,
-            topic_name_prefix: Uuid::new_v4().to_string(),
+        .with_metasrv_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
+            connection: KafkaConnectionConfig {
+                broker_endpoints: endpoints,
+                ..Default::default()
+            },
+            kafka_topic: KafkaTopicConfig {
+                num_topics: 3,
+                topic_name_prefix: Uuid::new_v4().to_string(),
+                ..Default::default()
+            },
             ..Default::default()
         }))
         .with_shared_home_dir(Arc::new(home_dir))
@@ -720,7 +904,7 @@ pub async fn test_region_migration_incorrect_region_id(
         .build()
         .await;
     let logical_timer = 1685508715000;
-    let table_metadata_manager = cluster.meta_srv.table_metadata_manager().clone();
+    let table_metadata_manager = cluster.metasrv.table_metadata_manager().clone();
 
     // Prepares test table.
     let table_id = prepare_testing_table(&cluster).await;
@@ -734,7 +918,7 @@ pub async fn test_region_migration_incorrect_region_id(
     // The region distribution
     let distribution = find_region_distribution(&table_metadata_manager, table_id).await;
     assert_eq!(distribution.len(), 3);
-    let region_migration_manager = cluster.meta_srv.region_migration_manager();
+    let region_migration_manager = cluster.metasrv.region_migration_manager();
 
     let region_id = RegionId::new(table_id, 5);
 
@@ -810,6 +994,32 @@ async fn assert_values(instance: &Arc<Instance>) {
     check_output_stream(result.unwrap().data, expected).await;
 }
 
+async fn prepare_testing_metric_table(cluster: &GreptimeDbCluster) -> TableId {
+    let sql = r#"CREATE TABLE phy (ts timestamp time index, val double) engine=metric with ("physical_metric_table" = "");"#;
+    let mut result = cluster.frontend.do_query(sql, QueryContext::arc()).await;
+    let output = result.remove(0).unwrap();
+    assert!(matches!(output.data, OutputData::AffectedRows(0)));
+
+    let sql = r#"CREATE TABLE t1 (ts timestamp time index, val double, host string primary key) engine = metric with ("on_physical_table" = "phy");"#;
+    let mut result = cluster.frontend.do_query(sql, QueryContext::arc()).await;
+    let output = result.remove(0).unwrap();
+    assert!(matches!(output.data, OutputData::AffectedRows(0)));
+
+    let sql = r#"CREATE TABLE t2 (ts timestamp time index, job string primary key, val double) engine = metric with ("on_physical_table" = "phy");"#;
+    let mut result = cluster.frontend.do_query(sql, QueryContext::arc()).await;
+    let output = result.remove(0).unwrap();
+    assert!(matches!(output.data, OutputData::AffectedRows(0)));
+
+    let table = cluster
+        .frontend
+        .catalog_manager()
+        .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "phy", None)
+        .await
+        .unwrap()
+        .unwrap();
+    table.table_info().table_id()
+}
+
 async fn prepare_testing_table(cluster: &GreptimeDbCluster) -> TableId {
     let sql = format!(
         r"
@@ -829,7 +1039,12 @@ async fn prepare_testing_table(cluster: &GreptimeDbCluster) -> TableId {
     let table = cluster
         .frontend
         .catalog_manager()
-        .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, TEST_TABLE_NAME)
+        .table(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+            TEST_TABLE_NAME,
+            None,
+        )
         .await
         .unwrap()
         .unwrap();
@@ -849,22 +1064,29 @@ async fn find_region_distribution(
 }
 
 /// Find region distribution by SQL query
-async fn find_region_distribution_by_sql(cluster: &GreptimeDbCluster) -> RegionDistribution {
+async fn find_region_distribution_by_sql(
+    cluster: &GreptimeDbCluster,
+    table: &str,
+) -> RegionDistribution {
     let query_ctx = QueryContext::arc();
 
     let OutputData::Stream(stream) = run_sql(
         &cluster.frontend,
-        &format!(r#"select b.peer_id as datanode_id,
+        &format!(
+            r#"select b.peer_id as datanode_id,
                            a.greptime_partition_id as region_id
-                    from information_schema.partitions a left join information_schema.greptime_region_peers b
+                    from information_schema.partitions a left join information_schema.region_peers b
                     on a.greptime_partition_id = b.region_id
-                    where a.table_name='{TEST_TABLE_NAME}' order by datanode_id asc"#
+                    where a.table_name='{table}' order by datanode_id asc"#
         ),
         query_ctx.clone(),
     )
-        .await.unwrap().data else {
-            unreachable!();
-        };
+    .await
+    .unwrap()
+    .data
+    else {
+        unreachable!();
+    };
 
     let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
 
@@ -901,9 +1123,9 @@ async fn trigger_migration_by_sql(
     from_peer_id: u64,
     to_peer_id: u64,
 ) -> String {
-    let OutputData::Stream(stream) = run_sql(
+    let OutputData::RecordBatches(recordbatches) = run_sql(
         &cluster.frontend,
-        &format!("select migrate_region({region_id}, {from_peer_id}, {to_peer_id})"),
+        &format!("admin migrate_region({region_id}, {from_peer_id}, {to_peer_id})"),
         QueryContext::arc(),
     )
     .await
@@ -912,8 +1134,6 @@ async fn trigger_migration_by_sql(
     else {
         unreachable!();
     };
-
-    let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
 
     info!("SQL result:\n {}", recordbatches.pretty_print().unwrap());
 
@@ -926,9 +1146,9 @@ async fn trigger_migration_by_sql(
 
 /// Query procedure state by SQL.
 async fn query_procedure_by_sql(instance: &Arc<Instance>, pid: &str) -> String {
-    let OutputData::Stream(stream) = run_sql(
+    let OutputData::RecordBatches(recordbatches) = run_sql(
         instance,
-        &format!("select procedure_state('{pid}')"),
+        &format!("admin procedure_state('{pid}')"),
         QueryContext::arc(),
     )
     .await
@@ -937,8 +1157,6 @@ async fn query_procedure_by_sql(instance: &Arc<Instance>, pid: &str) -> String {
     else {
         unreachable!();
     };
-
-    let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
 
     info!("SQL result:\n {}", recordbatches.pretty_print().unwrap());
 

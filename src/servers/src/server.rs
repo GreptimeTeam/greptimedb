@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_runtime::Runtime;
-use common_telemetry::logging::{error, info};
+use common_telemetry::{error, info};
 use futures::future::{try_join_all, AbortHandle, AbortRegistration, Abortable};
 use snafu::{ensure, ResultExt};
 use tokio::sync::{Mutex, RwLock};
@@ -125,7 +125,7 @@ impl AcceptTask {
                 if let Err(error) = join_handle.await {
                     // Couldn't use `error!(e; xxx)` because JoinError doesn't implement ErrorExt.
                     error!(
-                        "Unexpected error during shutdown {} server, error: {}",
+                        "Unexpected error during shutdown {} server, error: {:?}",
                         name, error
                     );
                 } else {
@@ -144,6 +144,7 @@ impl AcceptTask {
         &mut self,
         addr: SocketAddr,
         name: &str,
+        keep_alive_secs: u64,
     ) -> Result<(Abortable<TcpListenerStream>, SocketAddr)> {
         match self.abort_registration.take() {
             Some(registration) => {
@@ -156,6 +157,15 @@ impl AcceptTask {
                 // get actually bond addr in case input addr use port 0
                 let addr = listener.local_addr()?;
                 info!("{name} server started at {addr}");
+
+                // set keep-alive
+                if keep_alive_secs > 0 {
+                    let socket_ref = socket2::SockRef::from(&listener);
+                    let keep_alive = socket2::TcpKeepalive::new()
+                        .with_time(std::time::Duration::from_secs(keep_alive_secs))
+                        .with_interval(std::time::Duration::from_secs(keep_alive_secs));
+                    socket_ref.set_tcp_keepalive(&keep_alive)?;
+                }
 
                 let stream = TcpListenerStream::new(listener);
                 let stream = Abortable::new(stream, registration);
@@ -183,11 +193,11 @@ impl AcceptTask {
 pub(crate) struct BaseTcpServer {
     name: String,
     accept_task: Mutex<AcceptTask>,
-    io_runtime: Arc<Runtime>,
+    io_runtime: Runtime,
 }
 
 impl BaseTcpServer {
-    pub(crate) fn create_server(name: impl Into<String>, io_runtime: Arc<Runtime>) -> Self {
+    pub(crate) fn create_server(name: impl Into<String>, io_runtime: Runtime) -> Self {
         let (abort_handle, registration) = AbortHandle::new_pair();
         Self {
             name: name.into(),
@@ -205,12 +215,16 @@ impl BaseTcpServer {
         task.shutdown(&self.name).await
     }
 
+    /// Bind the server to the given address and set the keep-alive time.
+    ///
+    /// If `keep_alive_secs` is 0, the keep-alive will not be set.
     pub(crate) async fn bind(
         &self,
         addr: SocketAddr,
+        keep_alive_secs: u64,
     ) -> Result<(Abortable<TcpListenerStream>, SocketAddr)> {
         let mut task = self.accept_task.lock().await;
-        task.bind(addr, &self.name).await
+        task.bind(addr, &self.name, keep_alive_secs).await
     }
 
     pub(crate) async fn start_with(&self, join_handle: JoinHandle<()>) -> Result<()> {
@@ -218,7 +232,7 @@ impl BaseTcpServer {
         task.start_with(join_handle, &self.name)
     }
 
-    pub(crate) fn io_runtime(&self) -> Arc<Runtime> {
+    pub(crate) fn io_runtime(&self) -> Runtime {
         self.io_runtime.clone()
     }
 }

@@ -14,11 +14,15 @@
 
 pub const SYSTEM_CATALOG_NAME: &str = "system";
 pub const INFORMATION_SCHEMA_NAME: &str = "information_schema";
+pub const PG_CATALOG_NAME: &str = "pg_catalog";
 pub const SYSTEM_CATALOG_TABLE_NAME: &str = "system_catalog";
 pub const DEFAULT_CATALOG_NAME: &str = "greptime";
 pub const DEFAULT_SCHEMA_NAME: &str = "public";
 pub const DEFAULT_PRIVATE_SCHEMA_NAME: &str = "greptime_private";
 
+/// Reserves [0,MIN_USER_FLOW_ID) for internal usage.
+/// User defined table id starts from this value.
+pub const MIN_USER_FLOW_ID: u32 = 1024;
 /// Reserves [0,MIN_USER_TABLE_ID) for internal usage.
 /// User defined table id starts from this value.
 pub const MIN_USER_TABLE_ID: u32 = 1024;
@@ -86,7 +90,28 @@ pub const INFORMATION_SCHEMA_RUNTIME_METRICS_TABLE_ID: u32 = 27;
 pub const INFORMATION_SCHEMA_PARTITIONS_TABLE_ID: u32 = 28;
 /// id for information_schema.REGION_PEERS
 pub const INFORMATION_SCHEMA_REGION_PEERS_TABLE_ID: u32 = 29;
-/// ----- End of information_schema tables -----
+/// id for information_schema.columns
+pub const INFORMATION_SCHEMA_TABLE_CONSTRAINTS_TABLE_ID: u32 = 30;
+/// id for information_schema.cluster_info
+pub const INFORMATION_SCHEMA_CLUSTER_INFO_TABLE_ID: u32 = 31;
+/// id for information_schema.VIEWS
+pub const INFORMATION_SCHEMA_VIEW_TABLE_ID: u32 = 32;
+/// id for information_schema.FLOWS
+pub const INFORMATION_SCHEMA_FLOW_TABLE_ID: u32 = 33;
+/// id for information_schema.procedure_info
+pub const INFORMATION_SCHEMA_PROCEDURE_INFO_TABLE_ID: u32 = 34;
+/// id for information_schema.region_statistics
+pub const INFORMATION_SCHEMA_REGION_STATISTICS_TABLE_ID: u32 = 35;
+
+// ----- End of information_schema tables -----
+
+/// ----- Begin of pg_catalog tables -----
+pub const PG_CATALOG_PG_CLASS_TABLE_ID: u32 = 256;
+pub const PG_CATALOG_PG_TYPE_TABLE_ID: u32 = 257;
+pub const PG_CATALOG_PG_NAMESPACE_TABLE_ID: u32 = 258;
+pub const PG_CATALOG_PG_DATABASE_TABLE_ID: u32 = 259;
+
+// ----- End of pg_catalog tables -----
 
 pub const MITO_ENGINE: &str = "mito";
 pub const MITO2_ENGINE: &str = "mito2";
@@ -101,3 +126,7 @@ pub const FILE_ENGINE: &str = "file";
 pub const SEMANTIC_TYPE_PRIMARY_KEY: &str = "TAG";
 pub const SEMANTIC_TYPE_FIELD: &str = "FIELD";
 pub const SEMANTIC_TYPE_TIME_INDEX: &str = "TIMESTAMP";
+
+pub fn is_readonly_schema(schema: &str) -> bool {
+    matches!(schema, INFORMATION_SCHEMA_NAME)
+}

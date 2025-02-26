@@ -14,10 +14,10 @@
 
 use std::collections::HashMap;
 
+use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue};
 use common_meta::peer::Peer;
 use itertools::{Itertools, MinMaxResult};
 
-use crate::keys::{StatKey, StatValue};
 use crate::selector::weighted_choose::WeightedItem;
 
 /// The [`WeightCompute`] trait is used to compute the weight array by heartbeats.
@@ -37,9 +37,12 @@ pub trait WeightCompute: Send + Sync {
 pub struct RegionNumsBasedWeightCompute;
 
 impl WeightCompute for RegionNumsBasedWeightCompute {
-    type Source = HashMap<StatKey, StatValue>;
+    type Source = HashMap<DatanodeStatKey, DatanodeStatValue>;
 
-    fn compute(&self, stat_kvs: &HashMap<StatKey, StatValue>) -> Vec<WeightedItem<Peer>> {
+    fn compute(
+        &self,
+        stat_kvs: &HashMap<DatanodeStatKey, DatanodeStatValue>,
+    ) -> Vec<WeightedItem<Peer>> {
         let mut region_nums = Vec::with_capacity(stat_kvs.len());
         let mut peers = Vec::with_capacity(stat_kvs.len());
 
@@ -82,7 +85,6 @@ impl WeightCompute for RegionNumsBasedWeightCompute {
             .map(|(peer, region_num)| WeightedItem {
                 item: peer,
                 weight: (max_weight - region_num + base_weight) as usize,
-                reverse_weight: (region_num - min_weight + base_weight) as usize,
             })
             .collect()
     }
@@ -92,38 +94,37 @@ impl WeightCompute for RegionNumsBasedWeightCompute {
 mod tests {
     use std::collections::HashMap;
 
+    use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue, RegionStat, Stat};
     use common_meta::peer::Peer;
     use store_api::region_engine::RegionRole;
     use store_api::storage::RegionId;
 
     use super::{RegionNumsBasedWeightCompute, WeightCompute};
-    use crate::handler::node_stat::{RegionStat, Stat};
-    use crate::keys::{StatKey, StatValue};
 
     #[test]
     fn test_weight_compute() {
-        let mut stat_kvs: HashMap<StatKey, StatValue> = HashMap::default();
-        let stat_key = StatKey {
+        let mut stat_kvs: HashMap<DatanodeStatKey, DatanodeStatValue> = HashMap::default();
+        let stat_key = DatanodeStatKey {
             cluster_id: 1,
             node_id: 1,
         };
-        let stat_val = StatValue {
+        let stat_val = DatanodeStatValue {
             stats: vec![mock_stat_1()],
         };
         stat_kvs.insert(stat_key, stat_val);
-        let stat_key = StatKey {
+        let stat_key = DatanodeStatKey {
             cluster_id: 1,
             node_id: 2,
         };
-        let stat_val = StatValue {
+        let stat_val = DatanodeStatValue {
             stats: vec![mock_stat_2()],
         };
         stat_kvs.insert(stat_key, stat_val);
-        let stat_key = StatKey {
+        let stat_key = DatanodeStatKey {
             cluster_id: 1,
             node_id: 3,
         };
-        let stat_val = StatValue {
+        let stat_val = DatanodeStatValue {
             stats: vec![mock_stat_3()],
         };
         stat_kvs.insert(stat_key, stat_val);
@@ -179,10 +180,6 @@ mod tests {
             },
             4,
         );
-
-        for weight in weight_array.iter() {
-            assert_eq!(weight.reverse_weight, *expected.get(&weight.item).unwrap());
-        }
     }
 
     fn mock_stat_1() -> Stat {
@@ -194,9 +191,13 @@ mod tests {
                 rcus: 1,
                 wcus: 1,
                 approximate_bytes: 1,
-                approximate_rows: 1,
                 engine: "mito2".to_string(),
                 role: RegionRole::Leader,
+                num_rows: 0,
+                memtable_size: 0,
+                manifest_size: 0,
+                sst_size: 0,
+                index_size: 0,
             }],
             ..Default::default()
         }
@@ -211,9 +212,13 @@ mod tests {
                 rcus: 1,
                 wcus: 1,
                 approximate_bytes: 1,
-                approximate_rows: 1,
                 engine: "mito2".to_string(),
                 role: RegionRole::Leader,
+                num_rows: 0,
+                memtable_size: 0,
+                manifest_size: 0,
+                sst_size: 0,
+                index_size: 0,
             }],
             ..Default::default()
         }
@@ -228,9 +233,13 @@ mod tests {
                 rcus: 1,
                 wcus: 1,
                 approximate_bytes: 1,
-                approximate_rows: 1,
                 engine: "mito2".to_string(),
                 role: RegionRole::Leader,
+                num_rows: 0,
+                memtable_size: 0,
+                manifest_size: 0,
+                sst_size: 0,
+                index_size: 0,
             }],
             ..Default::default()
         }

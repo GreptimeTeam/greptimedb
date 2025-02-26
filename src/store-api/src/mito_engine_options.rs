@@ -17,22 +17,73 @@
 
 use common_wal::options::WAL_OPTIONS_KEY;
 
+/// Option key for append mode.
+pub const APPEND_MODE_KEY: &str = "append_mode";
+/// Option key for merge mode.
+pub const MERGE_MODE_KEY: &str = "merge_mode";
+/// Option key for TTL(time-to-live)
+pub const TTL_KEY: &str = "ttl";
+/// Option key for snapshot read.
+pub const SNAPSHOT_READ: &str = "snapshot_read";
+/// Option key for compaction type.
+pub const COMPACTION_TYPE: &str = "compaction.type";
+/// TWCS compaction strategy.
+pub const COMPACTION_TYPE_TWCS: &str = "twcs";
+/// Option key for twcs max active window runs.
+pub const TWCS_MAX_ACTIVE_WINDOW_RUNS: &str = "compaction.twcs.max_active_window_runs";
+/// Option key for twcs max active window files.
+pub const TWCS_MAX_ACTIVE_WINDOW_FILES: &str = "compaction.twcs.max_active_window_files";
+/// Option key for twcs max inactive window runs.
+pub const TWCS_MAX_INACTIVE_WINDOW_RUNS: &str = "compaction.twcs.max_inactive_window_runs";
+/// Option key for twcs max inactive window files.
+pub const TWCS_MAX_INACTIVE_WINDOW_FILES: &str = "compaction.twcs.max_inactive_window_files";
+/// Option key for twcs max output file size.
+pub const TWCS_MAX_OUTPUT_FILE_SIZE: &str = "compaction.twcs.max_output_file_size";
+/// Option key for twcs time window.
+pub const TWCS_TIME_WINDOW: &str = "compaction.twcs.time_window";
+/// Option key for twcs remote compaction.
+pub const REMOTE_COMPACTION: &str = "compaction.twcs.remote_compaction";
+/// Option key for twcs fallback to local.
+pub const TWCS_FALLBACK_TO_LOCAL: &str = "compaction.twcs.fallback_to_local";
+/// Option key for memtable type.
+pub const MEMTABLE_TYPE: &str = "memtable.type";
+/// Option key for memtable partition tree primary key encoding.
+pub const MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING: &str =
+    "memtable.partition_tree.primary_key_encoding";
+/// Option key for memtable partition tree index max keys per shard.
+pub const MEMTABLE_PARTITION_TREE_INDEX_MAX_KEYS_PER_SHARD: &str =
+    "memtable.partition_tree.index_max_keys_per_shard";
+/// Option key for memtable partition tree data freeze threshold.
+pub const MEMTABLE_PARTITION_TREE_DATA_FREEZE_THRESHOLD: &str =
+    "memtable.partition_tree.data_freeze_threshold";
+/// Option key for memtable partition tree fork dictionary bytes.
+pub const MEMTABLE_PARTITION_TREE_FORK_DICTIONARY_BYTES: &str =
+    "memtable.partition_tree.fork_dictionary_bytes";
+
 /// Returns true if the `key` is a valid option key for the mito engine.
 pub fn is_mito_engine_option_key(key: &str) -> bool {
     [
         "ttl",
-        "compaction.type",
-        "compaction.twcs.max_active_window_files",
-        "compaction.twcs.max_inactive_window_files",
-        "compaction.twcs.time_window",
+        COMPACTION_TYPE,
+        TWCS_MAX_ACTIVE_WINDOW_RUNS,
+        TWCS_MAX_ACTIVE_WINDOW_FILES,
+        TWCS_MAX_INACTIVE_WINDOW_RUNS,
+        TWCS_MAX_INACTIVE_WINDOW_FILES,
+        TWCS_MAX_OUTPUT_FILE_SIZE,
+        TWCS_TIME_WINDOW,
+        REMOTE_COMPACTION,
+        TWCS_FALLBACK_TO_LOCAL,
         "storage",
         "index.inverted_index.ignore_column_ids",
         "index.inverted_index.segment_row_count",
         WAL_OPTIONS_KEY,
-        "memtable.type",
-        "memtable.partition_tree.index_max_keys_per_shard",
-        "memtable.partition_tree.data_freeze_threshold",
-        "memtable.partition_tree.fork_dictionary_bytes",
+        MEMTABLE_TYPE,
+        MEMTABLE_PARTITION_TREE_INDEX_MAX_KEYS_PER_SHARD,
+        MEMTABLE_PARTITION_TREE_DATA_FREEZE_THRESHOLD,
+        MEMTABLE_PARTITION_TREE_FORK_DICTIONARY_BYTES,
+        MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING,
+        APPEND_MODE_KEY,
+        MERGE_MODE_KEY,
     ]
     .contains(&key)
 }
@@ -46,10 +97,10 @@ mod tests {
         assert!(is_mito_engine_option_key("ttl"));
         assert!(is_mito_engine_option_key("compaction.type"));
         assert!(is_mito_engine_option_key(
-            "compaction.twcs.max_active_window_files"
+            "compaction.twcs.max_active_window_runs"
         ));
         assert!(is_mito_engine_option_key(
-            "compaction.twcs.max_inactive_window_files"
+            "compaction.twcs.max_inactive_window_runs"
         ));
         assert!(is_mito_engine_option_key("compaction.twcs.time_window"));
         assert!(is_mito_engine_option_key("storage"));
@@ -70,6 +121,7 @@ mod tests {
         assert!(is_mito_engine_option_key(
             "memtable.partition_tree.fork_dictionary_bytes"
         ));
+        assert!(is_mito_engine_option_key("append_mode"));
         assert!(!is_mito_engine_option_key("foo"));
     }
 }

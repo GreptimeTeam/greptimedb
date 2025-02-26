@@ -17,10 +17,9 @@ use std::result::Result as StdResult;
 use std::task::{Context, Poll};
 
 use auth::UserProviderRef;
-use hyper::Body;
-use session::context::QueryContext;
+use session::context::{Channel, QueryContext};
 use tonic::body::BoxBody;
-use tonic::transport::NamedService;
+use tonic::server::NamedService;
 use tower::{Layer, Service};
 
 use crate::http::authorize::{extract_catalog_and_schema, extract_username_and_password};
@@ -67,9 +66,9 @@ where
 
 type BoxFuture<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
-impl<S> Service<hyper::Request<Body>> for AuthMiddleware<S>
+impl<S> Service<http::Request<BoxBody>> for AuthMiddleware<S>
 where
-    S: Service<hyper::Request<Body>, Response = hyper::Response<BoxBody>> + Clone + Send + 'static,
+    S: Service<http::Request<BoxBody>, Response = http::Response<BoxBody>> + Clone + Send + 'static,
     S::Future: Send + 'static,
 {
     type Response = S::Response;
@@ -80,7 +79,7 @@ where
         self.inner.poll_ready(cx)
     }
 
-    fn call(&mut self, mut req: hyper::Request<Body>) -> Self::Future {
+    fn call(&mut self, mut req: http::Request<BoxBody>) -> Self::Future {
         // This is necessary because tonic internally uses `tower::buffer::Buffer`.
         // See https://github.com/tower-rs/tower/issues/547#issuecomment-767629149
         // for details on why this is necessary.
@@ -91,7 +90,7 @@ where
 
         Box::pin(async move {
             if let Err(status) = do_auth(&mut req, user_provider).await {
-                return Ok(status.to_http());
+                return Ok(status.into_http());
             }
             inner.call(req).await
         })
@@ -99,15 +98,15 @@ where
 }
 
 async fn do_auth<T>(
-    req: &mut hyper::Request<T>,
+    req: &mut http::Request<T>,
     user_provider: Option<UserProviderRef>,
 ) -> Result<(), tonic::Status> {
     let (catalog, schema) = extract_catalog_and_schema(req);
 
-    let query_ctx = QueryContext::with(&catalog, &schema);
+    let query_ctx = QueryContext::with_channel(&catalog, &schema, Channel::Grpc);
 
     let Some(user_provider) = user_provider else {
-        query_ctx.set_current_user(Some(auth::userinfo_by_name(None)));
+        query_ctx.set_current_user(auth::userinfo_by_name(None));
         let _ = req.extensions_mut().insert(query_ctx);
         return Ok(());
     };
@@ -123,7 +122,7 @@ async fn do_auth<T>(
         .await
         .map_err(|e| tonic::Status::unauthenticated(e.to_string()))?;
 
-    query_ctx.set_current_user(Some(user_info));
+    query_ctx.set_current_user(user_info);
     let _ = req.extensions_mut().insert(query_ctx);
 
     Ok(())
@@ -137,8 +136,8 @@ mod tests {
     use base64::engine::general_purpose::STANDARD;
     use base64::Engine;
     use headers::Header;
-    use hyper::{Body, Request};
-    use session::context::QueryContextRef;
+    use hyper::Request;
+    use session::context::QueryContext;
 
     use crate::grpc::authorize::do_auth;
     use crate::http::header::GreptimeDbName;
@@ -149,7 +148,7 @@ mod tests {
 
         // auth success
         let authorization_val = format!("Basic {}", STANDARD.encode("greptime:greptime"));
-        let mut req = Request::new(Body::empty());
+        let mut req = Request::new(());
         req.headers_mut()
             .insert("authorization", authorization_val.parse().unwrap());
 
@@ -160,7 +159,7 @@ mod tests {
 
         // auth failed, err: user not exist.
         let authorization_val = format!("Basic {}", STANDARD.encode("greptime2:greptime2"));
-        let mut req = Request::new(Body::empty());
+        let mut req = Request::new(());
         req.headers_mut()
             .insert("authorization", authorization_val.parse().unwrap());
 
@@ -170,19 +169,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_do_auth_without_user_provider() {
-        let mut req = Request::new(Body::empty());
+        let mut req = Request::new(());
         req.headers_mut()
             .insert("authentication", "pwd".parse().unwrap());
         let auth_result = do_auth(&mut req, None).await;
         assert!(auth_result.is_ok());
         check_req(&req, "greptime", "public", "greptime");
 
-        let mut req = Request::new(Body::empty());
+        let mut req = Request::new(());
         let auth_result = do_auth(&mut req, None).await;
         assert!(auth_result.is_ok());
         check_req(&req, "greptime", "public", "greptime");
 
-        let mut req = Request::new(Body::empty());
+        let mut req = Request::new(());
         req.headers_mut()
             .insert(GreptimeDbName::name(), "catalog-schema".parse().unwrap());
         let auth_result = do_auth(&mut req, None).await;
@@ -196,11 +195,11 @@ mod tests {
         expected_schema: &str,
         expected_user_name: &str,
     ) {
-        let ctx = req.extensions().get::<QueryContextRef>().unwrap();
+        let ctx = req.extensions().get::<QueryContext>().unwrap();
         assert_eq!(expected_catalog, ctx.current_catalog());
         assert_eq!(expected_schema, ctx.current_schema());
 
-        let user_info = ctx.current_user().unwrap();
+        let user_info = ctx.current_user();
         assert_eq!(expected_user_name, user_info.username());
     }
 }

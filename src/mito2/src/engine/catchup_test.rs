@@ -19,34 +19,48 @@ use api::v1::Rows;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
-use store_api::region_engine::{RegionEngine, SetReadonlyResponse};
+use common_wal::options::{KafkaWalOptions, WalOptions, WAL_OPTIONS_KEY};
+use rstest::rstest;
+use rstest_reuse::{self, apply};
+use store_api::region_engine::{RegionEngine, RegionRole, SetRegionRoleStateResponse};
 use store_api::region_request::{RegionCatchupRequest, RegionOpenRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
 use crate::error::{self, Error};
 use crate::test_util::{
-    build_rows, flush_region, put_rows, rows_schema, CreateRequestBuilder, TestEnv,
+    build_rows, flush_region, kafka_log_store_factory, prepare_test_for_kafka_log_store, put_rows,
+    rows_schema, single_kafka_log_store_factory, CreateRequestBuilder, LogStoreFactory, TestEnv,
 };
 use crate::wal::EntryId;
 
-fn get_last_entry_id(resp: SetReadonlyResponse) -> Option<EntryId> {
-    if let SetReadonlyResponse::Success { last_entry_id } = resp {
+fn get_last_entry_id(resp: SetRegionRoleStateResponse) -> Option<EntryId> {
+    if let SetRegionRoleStateResponse::Success { last_entry_id } = resp {
         last_entry_id
     } else {
         unreachable!();
     }
 }
 
-#[tokio::test]
-async fn test_catchup_with_last_entry_id() {
+#[apply(single_kafka_log_store_factory)]
+
+async fn test_catchup_with_last_entry_id(factory: Option<LogStoreFactory>) {
+    use store_api::region_engine::SettableRegionRoleState;
+
     common_telemetry::init_default_ut_logging();
-    let mut env = TestEnv::with_prefix("last_entry_id");
+    let Some(factory) = factory else {
+        return;
+    };
+
+    let mut env = TestEnv::with_prefix("last_entry_id").with_log_store_factory(factory.clone());
+    let topic = prepare_test_for_kafka_log_store(&factory).await;
     let leader_engine = env.create_engine(MitoConfig::default()).await;
     let follower_engine = env.create_follower_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
-    let request = CreateRequestBuilder::new().build();
+    let request = CreateRequestBuilder::new()
+        .kafka_topic(topic.clone())
+        .build();
     let region_dir = request.region_dir.clone();
 
     let column_schemas = rows_schema(&request);
@@ -55,13 +69,23 @@ async fn test_catchup_with_last_entry_id() {
         .await
         .unwrap();
 
+    let mut options = HashMap::new();
+    if let Some(topic) = &topic {
+        options.insert(
+            WAL_OPTIONS_KEY.to_string(),
+            serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
+                topic: topic.to_string(),
+            }))
+            .unwrap(),
+        );
+    };
     follower_engine
         .handle_request(
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
                 region_dir,
-                options: HashMap::default(),
+                options,
                 skip_wal_replay: false,
             }),
         )
@@ -80,7 +104,7 @@ async fn test_catchup_with_last_entry_id() {
     put_rows(&leader_engine, region_id, rows).await;
 
     let resp = leader_engine
-        .set_readonly_gracefully(region_id)
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Follower)
         .await
         .unwrap();
 
@@ -94,6 +118,7 @@ async fn test_catchup_with_last_entry_id() {
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: false,
                 entry_id: last_entry_id,
+                location_id: None,
             }),
         )
         .await;
@@ -104,7 +129,7 @@ async fn test_catchup_with_last_entry_id() {
     // Scans
     let request = ScanRequest::default();
     let stream = follower_engine
-        .handle_query(region_id, request)
+        .scan_to_stream(region_id, request)
         .await
         .unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
@@ -125,6 +150,7 @@ async fn test_catchup_with_last_entry_id() {
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: true,
                 entry_id: last_entry_id,
+                location_id: None,
             }),
         )
         .await;
@@ -133,15 +159,25 @@ async fn test_catchup_with_last_entry_id() {
     assert!(resp.is_ok());
 }
 
-#[tokio::test]
-async fn test_catchup_with_incorrect_last_entry_id() {
+#[apply(single_kafka_log_store_factory)]
+async fn test_catchup_with_incorrect_last_entry_id(factory: Option<LogStoreFactory>) {
+    use store_api::region_engine::SettableRegionRoleState;
+
     common_telemetry::init_default_ut_logging();
-    let mut env = TestEnv::with_prefix("incorrect_last_entry_id");
+    let Some(factory) = factory else {
+        return;
+    };
+
+    let mut env =
+        TestEnv::with_prefix("incorrect_last_entry_id").with_log_store_factory(factory.clone());
+    let topic = prepare_test_for_kafka_log_store(&factory).await;
     let leader_engine = env.create_engine(MitoConfig::default()).await;
     let follower_engine = env.create_follower_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
-    let request = CreateRequestBuilder::new().build();
+    let request = CreateRequestBuilder::new()
+        .kafka_topic(topic.clone())
+        .build();
     let region_dir = request.region_dir.clone();
 
     let column_schemas = rows_schema(&request);
@@ -150,13 +186,23 @@ async fn test_catchup_with_incorrect_last_entry_id() {
         .await
         .unwrap();
 
+    let mut options = HashMap::new();
+    if let Some(topic) = &topic {
+        options.insert(
+            WAL_OPTIONS_KEY.to_string(),
+            serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
+                topic: topic.to_string(),
+            }))
+            .unwrap(),
+        );
+    };
     follower_engine
         .handle_request(
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
                 region_dir,
-                options: HashMap::default(),
+                options,
                 skip_wal_replay: false,
             }),
         )
@@ -175,7 +221,7 @@ async fn test_catchup_with_incorrect_last_entry_id() {
     put_rows(&leader_engine, region_id, rows).await;
 
     let resp = leader_engine
-        .set_readonly_gracefully(region_id)
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Follower)
         .await
         .unwrap();
 
@@ -191,6 +237,7 @@ async fn test_catchup_with_incorrect_last_entry_id() {
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: false,
                 entry_id: incorrect_last_entry_id,
+                location_id: None,
             }),
         )
         .await
@@ -200,27 +247,37 @@ async fn test_catchup_with_incorrect_last_entry_id() {
     assert_matches!(err, error::Error::UnexpectedReplay { .. });
 
     // It should ignore requests to writable regions.
-    region.set_writable(true);
+    region.set_role(RegionRole::Leader);
     let resp = follower_engine
         .handle_request(
             region_id,
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: false,
                 entry_id: incorrect_last_entry_id,
+                location_id: None,
             }),
         )
         .await;
     assert!(resp.is_ok());
 }
 
-#[tokio::test]
-async fn test_catchup_without_last_entry_id() {
-    let mut env = TestEnv::with_prefix("without_last_entry_id");
+#[apply(single_kafka_log_store_factory)]
+async fn test_catchup_without_last_entry_id(factory: Option<LogStoreFactory>) {
+    common_telemetry::init_default_ut_logging();
+    let Some(factory) = factory else {
+        return;
+    };
+
+    let mut env =
+        TestEnv::with_prefix("without_last_entry_id").with_log_store_factory(factory.clone());
+    let topic = prepare_test_for_kafka_log_store(&factory).await;
     let leader_engine = env.create_engine(MitoConfig::default()).await;
     let follower_engine = env.create_follower_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
-    let request = CreateRequestBuilder::new().build();
+    let request = CreateRequestBuilder::new()
+        .kafka_topic(topic.clone())
+        .build();
     let region_dir = request.region_dir.clone();
 
     let column_schemas = rows_schema(&request);
@@ -229,13 +286,23 @@ async fn test_catchup_without_last_entry_id() {
         .await
         .unwrap();
 
+    let mut options = HashMap::new();
+    if let Some(topic) = &topic {
+        options.insert(
+            WAL_OPTIONS_KEY.to_string(),
+            serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
+                topic: topic.to_string(),
+            }))
+            .unwrap(),
+        );
+    };
     follower_engine
         .handle_request(
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
                 region_dir,
-                options: HashMap::default(),
+                options,
                 skip_wal_replay: false,
             }),
         )
@@ -255,6 +322,7 @@ async fn test_catchup_without_last_entry_id() {
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: false,
                 entry_id: None,
+                location_id: None,
             }),
         )
         .await;
@@ -264,7 +332,7 @@ async fn test_catchup_without_last_entry_id() {
 
     let request = ScanRequest::default();
     let stream = follower_engine
-        .handle_query(region_id, request)
+        .scan_to_stream(region_id, request)
         .await
         .unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
@@ -285,6 +353,7 @@ async fn test_catchup_without_last_entry_id() {
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: true,
                 entry_id: None,
+                location_id: None,
             }),
         )
         .await;
@@ -293,14 +362,23 @@ async fn test_catchup_without_last_entry_id() {
     assert!(region.is_writable());
 }
 
-#[tokio::test]
-async fn test_catchup_with_manifest_update() {
-    let mut env = TestEnv::with_prefix("without_manifest_update");
+#[apply(single_kafka_log_store_factory)]
+async fn test_catchup_with_manifest_update(factory: Option<LogStoreFactory>) {
+    common_telemetry::init_default_ut_logging();
+    let Some(factory) = factory else {
+        return;
+    };
+
+    let mut env =
+        TestEnv::with_prefix("without_manifest_update").with_log_store_factory(factory.clone());
+    let topic = prepare_test_for_kafka_log_store(&factory).await;
     let leader_engine = env.create_engine(MitoConfig::default()).await;
     let follower_engine = env.create_follower_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
-    let request = CreateRequestBuilder::new().build();
+    let request = CreateRequestBuilder::new()
+        .kafka_topic(topic.clone())
+        .build();
     let region_dir = request.region_dir.clone();
 
     let column_schemas = rows_schema(&request);
@@ -309,13 +387,23 @@ async fn test_catchup_with_manifest_update() {
         .await
         .unwrap();
 
+    let mut options = HashMap::new();
+    if let Some(topic) = &topic {
+        options.insert(
+            WAL_OPTIONS_KEY.to_string(),
+            serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
+                topic: topic.to_string(),
+            }))
+            .unwrap(),
+        );
+    };
     follower_engine
         .handle_request(
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
                 region_dir,
-                options: HashMap::default(),
+                options,
                 skip_wal_replay: false,
             }),
         )
@@ -345,7 +433,7 @@ async fn test_catchup_with_manifest_update() {
     // Ensures the mutable is empty.
     assert!(region.version().memtables.mutable.is_empty());
 
-    let manifest = region.manifest_manager.manifest().await;
+    let manifest = region.manifest_ctx.manifest().await;
     assert_eq!(manifest.manifest_version, 0);
 
     let resp = follower_engine
@@ -354,6 +442,7 @@ async fn test_catchup_with_manifest_update() {
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: false,
                 entry_id: None,
+                location_id: None,
             }),
         )
         .await;
@@ -361,13 +450,13 @@ async fn test_catchup_with_manifest_update() {
 
     // The inner region was replaced. We must get it again.
     let region = follower_engine.get_region(region_id).unwrap();
-    let manifest = region.manifest_manager.manifest().await;
+    let manifest = region.manifest_ctx.manifest().await;
     assert_eq!(manifest.manifest_version, 2);
     assert!(!region.is_writable());
 
     let request = ScanRequest::default();
     let stream = follower_engine
-        .handle_query(region_id, request)
+        .scan_to_stream(region_id, request)
         .await
         .unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
@@ -390,6 +479,7 @@ async fn test_catchup_with_manifest_update() {
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: true,
                 entry_id: None,
+                location_id: None,
             }),
         )
         .await;
@@ -411,6 +501,7 @@ async fn test_catchup_not_exist() {
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: true,
                 entry_id: None,
+                location_id: None,
             }),
         )
         .await

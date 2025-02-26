@@ -76,6 +76,10 @@ impl<F> OnDone<F> {
 }
 
 impl<F: FnOnce() + Unpin> RecordBatchStream for OnDone<F> {
+    fn name(&self) -> &str {
+        self.stream.name()
+    }
+
     fn schema(&self) -> SchemaRef {
         self.stream.schema()
     }

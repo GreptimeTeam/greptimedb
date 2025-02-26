@@ -42,13 +42,15 @@ pub fn validate_catalog_and_schema(
 #[cfg(test)]
 mod tests {
 
+    use std::sync::Arc;
+
     use session::context::QueryContext;
 
     use super::*;
 
     #[test]
     fn test_validate_catalog_and_schema() {
-        let context = QueryContext::with("greptime", "public");
+        let context = Arc::new(QueryContext::with("greptime", "public"));
 
         validate_catalog_and_schema("greptime", "public", &context).unwrap();
         let re = validate_catalog_and_schema("greptime", "private_schema", &context);

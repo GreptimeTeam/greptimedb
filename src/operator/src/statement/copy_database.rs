@@ -24,7 +24,9 @@ use object_store::Entry;
 use regex::Regex;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
+use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
 use table::requests::{CopyDatabaseRequest, CopyDirection, CopyTableRequest};
+use table::table_reference::TableReference;
 
 use crate::error;
 use crate::error::{CatalogSnafu, InvalidCopyDatabasePathSnafu};
@@ -55,7 +57,7 @@ impl StatementExecutor {
         );
         let table_names = self
             .catalog_manager
-            .table_names(&req.catalog_name, &req.schema_name)
+            .table_names(&req.catalog_name, &req.schema_name, Some(&ctx))
             .await
             .context(CatalogSnafu)?;
 
@@ -65,9 +67,26 @@ impl StatementExecutor {
 
         let mut exported_rows = 0;
         for table_name in table_names {
-            // TODO(hl): also handles tables with metric engine.
-            // TODO(hl): remove this hardcode once we've removed numbers table.
-            if table_name == "numbers" {
+            let table = self
+                .get_table(&TableReference {
+                    catalog: &req.catalog_name,
+                    schema: &req.schema_name,
+                    table: &table_name,
+                })
+                .await?;
+            // Only base tables, ignores views and temporary tables.
+            if table.table_type() != table::metadata::TableType::Base {
+                continue;
+            }
+            // Ignores physical tables of metric engine.
+            if table.table_info().meta.engine == METRIC_ENGINE_NAME
+                && !table
+                    .table_info()
+                    .meta
+                    .options
+                    .extra_options
+                    .contains_key(LOGICAL_TABLE_METADATA_KEY)
+            {
                 continue;
             }
             let mut table_file = req.location.clone();
@@ -90,6 +109,7 @@ impl StatementExecutor {
                         pattern: None,
                         direction: CopyDirection::Export,
                         timestamp_range: req.time_range,
+                        limit: None,
                     },
                     ctx.clone(),
                 )
@@ -155,6 +175,7 @@ impl StatementExecutor {
                 pattern: None,
                 direction: CopyDirection::Import,
                 timestamp_range: None,
+                limit: None,
             };
             debug!("Copy table, arg: {:?}", req);
             match self.copy_table_from(req, ctx.clone()).await {
@@ -222,8 +243,7 @@ mod tests {
     async fn test_list_files_and_parse_table_name() {
         let dir = common_test_util::temp_dir::create_temp_dir("test_list_files_to_copy");
         let store_dir = normalize_dir(dir.path().to_str().unwrap());
-        let mut builder = Fs::default();
-        let _ = builder.root(&store_dir);
+        let builder = Fs::default().root(&store_dir);
         let object_store = ObjectStore::new(builder).unwrap().finish();
         object_store.write("a.parquet", "").await.unwrap();
         object_store.write("b.parquet", "").await.unwrap();

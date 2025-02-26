@@ -20,10 +20,14 @@ pub(crate) mod insert_expr;
 pub(crate) mod select_expr;
 
 use core::fmt;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-pub use alter_expr::AlterTableExpr;
+pub use alter_expr::{AlterTableExpr, AlterTableOption};
+use common_time::timestamp::TimeUnit;
 use common_time::{Date, DateTime, Timestamp};
-pub use create_expr::CreateTableExpr;
+pub use create_expr::{CreateDatabaseExpr, CreateTableExpr};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::types::TimestampType;
 use datatypes::value::Value;
@@ -34,7 +38,10 @@ use rand::seq::SliceRandom;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
-use crate::generator::Random;
+use self::insert_expr::{RowValue, RowValues};
+use crate::context::TableContextRef;
+use crate::fake::WordGenerator;
+use crate::generator::{Random, TsValueGenerator};
 use crate::impl_random;
 use crate::ir::create_expr::ColumnOption;
 
@@ -60,8 +67,14 @@ lazy_static! {
         ConcreteDataType::float32_datatype(),
         ConcreteDataType::float64_datatype(),
         ConcreteDataType::string_datatype(),
-        ConcreteDataType::date_datatype(),
-        ConcreteDataType::datetime_datatype(),
+    ];
+    pub static ref STRING_DATA_TYPES: Vec<ConcreteDataType> =
+        vec![ConcreteDataType::string_datatype()];
+    pub static ref MYSQL_TS_DATA_TYPES: Vec<ConcreteDataType> = vec![
+        // MySQL only permits fractional seconds with up to microseconds (6 digits) precision.
+        ConcreteDataType::timestamp_microsecond_datatype(),
+        ConcreteDataType::timestamp_millisecond_datatype(),
+        ConcreteDataType::timestamp_second_datatype(),
     ];
 }
 
@@ -69,13 +82,62 @@ impl_random!(ConcreteDataType, ColumnTypeGenerator, DATA_TYPES);
 impl_random!(ConcreteDataType, TsColumnTypeGenerator, TS_DATA_TYPES);
 impl_random!(
     ConcreteDataType,
+    MySQLTsColumnTypeGenerator,
+    MYSQL_TS_DATA_TYPES
+);
+impl_random!(
+    ConcreteDataType,
     PartibleColumnTypeGenerator,
     PARTIBLE_DATA_TYPES
+);
+impl_random!(
+    ConcreteDataType,
+    StringColumnTypeGenerator,
+    STRING_DATA_TYPES
 );
 
 pub struct ColumnTypeGenerator;
 pub struct TsColumnTypeGenerator;
+pub struct MySQLTsColumnTypeGenerator;
 pub struct PartibleColumnTypeGenerator;
+pub struct StringColumnTypeGenerator;
+
+/// FIXME(weny): Waits for https://github.com/GreptimeTeam/greptimedb/issues/4247
+macro_rules! generate_values {
+    ($data_type:ty, $bounds:expr) => {{
+        let base = 0 as $data_type;
+        let step = <$data_type>::MAX / ($bounds as $data_type + 1 as $data_type) as $data_type;
+        (1..=$bounds)
+            .map(|i| Value::from(base + step * i as $data_type as $data_type))
+            .collect::<Vec<Value>>()
+    }};
+}
+
+/// Generates partition bounds.
+pub fn generate_partition_bounds(datatype: &ConcreteDataType, bounds: usize) -> Vec<Value> {
+    match datatype {
+        ConcreteDataType::Int16(_) => generate_values!(i16, bounds),
+        ConcreteDataType::Int32(_) => generate_values!(i32, bounds),
+        ConcreteDataType::Int64(_) => generate_values!(i64, bounds),
+        ConcreteDataType::Float32(_) => generate_values!(f32, bounds),
+        ConcreteDataType::Float64(_) => generate_values!(f64, bounds),
+        ConcreteDataType::String(_) => {
+            let base = b'A';
+            let range = b'z' - b'A';
+            let step = range / (bounds as u8 + 1);
+            (1..=bounds)
+                .map(|i| {
+                    Value::from(
+                        char::from(base + step * i as u8)
+                            .escape_default()
+                            .to_string(),
+                    )
+                })
+                .collect()
+        }
+        _ => unimplemented!("unsupported type: {datatype}"),
+    }
+}
 
 /// Generates a random [Value].
 pub fn generate_random_value<R: Rng>(
@@ -96,13 +158,33 @@ pub fn generate_random_value<R: Rng>(
         },
         ConcreteDataType::Date(_) => generate_random_date(rng),
         ConcreteDataType::DateTime(_) => generate_random_datetime(rng),
-        &ConcreteDataType::Timestamp(ts_type) => generate_random_timestamp(rng, ts_type),
 
         _ => unimplemented!("unsupported type: {datatype}"),
     }
 }
 
-fn generate_random_timestamp<R: Rng>(rng: &mut R, ts_type: TimestampType) -> Value {
+/// Generate monotonically increasing timestamps for MySQL.
+pub fn generate_unique_timestamp_for_mysql<R: Rng>(base: i64) -> TsValueGenerator<R> {
+    let base = Timestamp::new_millisecond(base);
+    let clock = Arc::new(Mutex::new(base));
+
+    Box::new(move |_rng, ts_type| -> Value {
+        let mut clock = clock.lock().unwrap();
+        let ts = clock.add_duration(Duration::from_secs(1)).unwrap();
+        *clock = ts;
+
+        let v = match ts_type {
+            TimestampType::Second(_) => ts.convert_to(TimeUnit::Second).unwrap(),
+            TimestampType::Millisecond(_) => ts.convert_to(TimeUnit::Millisecond).unwrap(),
+            TimestampType::Microsecond(_) => ts.convert_to(TimeUnit::Microsecond).unwrap(),
+            TimestampType::Nanosecond(_) => ts.convert_to(TimeUnit::Nanosecond).unwrap(),
+        };
+        Value::from(v)
+    })
+}
+
+/// Generate random timestamps.
+pub fn generate_random_timestamp<R: Rng>(rng: &mut R, ts_type: TimestampType) -> Value {
     let v = match ts_type {
         TimestampType::Second(_) => {
             let min = i64::from(Timestamp::MIN_SECOND);
@@ -125,6 +207,37 @@ fn generate_random_timestamp<R: Rng>(rng: &mut R, ts_type: TimestampType) -> Val
         TimestampType::Nanosecond(_) => {
             let min = i64::from(Timestamp::MIN_NANOSECOND);
             let max = i64::from(Timestamp::MAX_NANOSECOND);
+            let value = rng.gen_range(min..=max);
+            Timestamp::new_nanosecond(value)
+        }
+    };
+    Value::from(v)
+}
+
+// MySQL supports timestamp from '1970-01-01 00:00:01.000000' to '2038-01-19 03:14:07.499999'
+pub fn generate_random_timestamp_for_mysql<R: Rng>(rng: &mut R, ts_type: TimestampType) -> Value {
+    let v = match ts_type {
+        TimestampType::Second(_) => {
+            let min = 1;
+            let max = 2_147_483_647;
+            let value = rng.gen_range(min..=max);
+            Timestamp::new_second(value)
+        }
+        TimestampType::Millisecond(_) => {
+            let min = 1000;
+            let max = 2_147_483_647_499;
+            let value = rng.gen_range(min..=max);
+            Timestamp::new_millisecond(value)
+        }
+        TimestampType::Microsecond(_) => {
+            let min = 1_000_000;
+            let max = 2_147_483_647_499_999;
+            let value = rng.gen_range(min..=max);
+            Timestamp::new_microsecond(value)
+        }
+        TimestampType::Nanosecond(_) => {
+            let min = 1_000_000_000;
+            let max = 2_147_483_647_499_999_000;
             let value = rng.gen_range(min..=max);
             Timestamp::new_nanosecond(value)
         }
@@ -179,6 +292,10 @@ impl Ident {
             quote_style: Some(quote),
         }
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.value.is_empty()
+    }
 }
 
 impl From<&str> for Ident {
@@ -219,6 +336,15 @@ pub struct Column {
 }
 
 impl Column {
+    /// Returns [TimestampType] if it's [ColumnOption::TimeIndex] [Column].
+    pub fn timestamp_type(&self) -> Option<TimestampType> {
+        if let ConcreteDataType::Timestamp(ts_type) = self.column_type {
+            Some(ts_type)
+        } else {
+            None
+        }
+    }
+
     /// Returns true if it's [ColumnOption::TimeIndex] [Column].
     pub fn is_time_index(&self) -> bool {
         self.options
@@ -250,6 +376,14 @@ impl Column {
             )
         })
     }
+
+    // Returns default value if it has.
+    pub fn default_value(&self) -> Option<&Value> {
+        self.options.iter().find_map(|opt| match opt {
+            ColumnOption::DefaultValue(value) => Some(value),
+            _ => None,
+        })
+    }
 }
 
 /// Returns droppable columns. i.e., non-primary key columns, non-ts columns.
@@ -259,6 +393,20 @@ pub fn droppable_columns(columns: &[Column]) -> Vec<&Column> {
         .filter(|column| {
             !column.options.iter().any(|option| {
                 option == &ColumnOption::PrimaryKey || option == &ColumnOption::TimeIndex
+            })
+        })
+        .collect::<Vec<_>>()
+}
+
+/// Returns columns that can use the alter table modify command
+pub fn modifiable_columns(columns: &[Column]) -> Vec<&Column> {
+    columns
+        .iter()
+        .filter(|column| {
+            !column.options.iter().any(|option| {
+                option == &ColumnOption::PrimaryKey
+                    || option == &ColumnOption::TimeIndex
+                    || option == &ColumnOption::NotNull
             })
         })
         .collect::<Vec<_>>()
@@ -303,7 +451,11 @@ pub fn partible_column_options_generator<R: Rng + 'static>(
         1 => vec![ColumnOption::PrimaryKey, ColumnOption::NotNull],
         2 => vec![
             ColumnOption::PrimaryKey,
-            ColumnOption::DefaultValue(generate_random_value(rng, column_type, None)),
+            ColumnOption::DefaultValue(generate_random_value(
+                rng,
+                column_type,
+                Some(&WordGenerator),
+            )),
         ],
         3 => vec![ColumnOption::PrimaryKey],
         _ => unreachable!(),
@@ -316,6 +468,20 @@ pub fn ts_column_options_generator<R: Rng + 'static>(
     _: &ConcreteDataType,
 ) -> Vec<ColumnOption> {
     vec![ColumnOption::TimeIndex]
+}
+
+pub fn primary_key_and_not_null_column_options_generator<R: Rng + 'static>(
+    _: &mut R,
+    _: &ConcreteDataType,
+) -> Vec<ColumnOption> {
+    vec![ColumnOption::PrimaryKey, ColumnOption::NotNull]
+}
+
+pub fn primary_key_options_generator<R: Rng + 'static>(
+    _: &mut R,
+    _: &ConcreteDataType,
+) -> Vec<ColumnOption> {
+    vec![ColumnOption::PrimaryKey]
 }
 
 /// Generates columns with given `names`.
@@ -337,6 +503,67 @@ pub fn generate_columns<R: Rng + 'static>(
             }
         })
         .collect()
+}
+
+/// Replace Value::Default with the corresponding default value in the rows for comparison.
+pub fn replace_default(
+    rows: &[RowValues],
+    table_ctx_ref: &TableContextRef,
+    insert_expr: &InsertIntoExpr,
+) -> Vec<RowValues> {
+    let index_map: HashMap<usize, usize> = insert_expr
+        .columns
+        .iter()
+        .enumerate()
+        .map(|(insert_idx, insert_column)| {
+            let create_idx = table_ctx_ref
+                .columns
+                .iter()
+                .position(|create_column| create_column.name == insert_column.name)
+                .expect("Column not found in create_expr");
+            (insert_idx, create_idx)
+        })
+        .collect();
+
+    let mut new_rows = Vec::new();
+    for row in rows {
+        let mut new_row = Vec::new();
+        for (idx, value) in row.iter().enumerate() {
+            if let RowValue::Default = value {
+                let column = &table_ctx_ref.columns[index_map[&idx]];
+                new_row.push(RowValue::Value(column.default_value().unwrap().clone()));
+            } else {
+                new_row.push(value.clone());
+            }
+        }
+        new_rows.push(new_row);
+    }
+    new_rows
+}
+
+/// Sorts a vector of rows based on the values in the specified primary key columns.
+pub fn sort_by_primary_keys(rows: &mut [RowValues], primary_keys_idx: Vec<usize>) {
+    rows.sort_by(|a, b| {
+        let a_keys: Vec<_> = primary_keys_idx.iter().map(|&i| &a[i]).collect();
+        let b_keys: Vec<_> = primary_keys_idx.iter().map(|&i| &b[i]).collect();
+        for (a_key, b_key) in a_keys.iter().zip(b_keys.iter()) {
+            match a_key.cmp(b_key) {
+                Some(std::cmp::Ordering::Equal) => continue,
+                non_eq => return non_eq.unwrap(),
+            }
+        }
+        std::cmp::Ordering::Equal
+    });
+}
+
+/// Formats a slice of columns into a comma-separated string of column names.
+pub fn format_columns(columns: &[Column]) -> String {
+    columns
+        .iter()
+        .map(|c| c.name.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+        .to_string()
 }
 
 #[cfg(test)]

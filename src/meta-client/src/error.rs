@@ -24,19 +24,28 @@ use tonic::Status;
 #[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Illegal GRPC client state: {}", err_msg))]
-    IllegalGrpcClientState { err_msg: String, location: Location },
+    IllegalGrpcClientState {
+        err_msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("{}", msg))]
-    MetaServer { code: StatusCode, msg: String },
-
-    #[snafu(display("Failed to ask leader from all endpoints"))]
-    AskLeader { location: Location },
+    MetaServer {
+        code: StatusCode,
+        msg: String,
+        tonic_code: tonic::Code,
+    },
 
     #[snafu(display("No leader, should ask leader first"))]
-    NoLeader { location: Location },
+    NoLeader {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Ask leader timeout"))]
     AskLeaderTimeout {
+        #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: tokio::time::error::Elapsed,
@@ -44,39 +53,68 @@ pub enum Error {
 
     #[snafu(display("Failed to create gRPC channel"))]
     CreateChannel {
+        #[snafu(implicit)]
         location: Location,
         source: common_grpc::error::Error,
     },
 
     #[snafu(display("{} not started", name))]
-    NotStarted { name: String, location: Location },
+    NotStarted {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to send heartbeat: {}", err_msg))]
-    SendHeartbeat { err_msg: String, location: Location },
+    SendHeartbeat {
+        err_msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed create heartbeat stream to server"))]
-    CreateHeartbeatStream { location: Location },
+    CreateHeartbeatStream {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Invalid response header"))]
     InvalidResponseHeader {
+        #[snafu(implicit)]
         location: Location,
         source: common_meta::error::Error,
     },
 
     #[snafu(display("Failed to convert Metasrv request"))]
     ConvertMetaRequest {
+        #[snafu(implicit)]
         location: Location,
         source: common_meta::error::Error,
     },
 
     #[snafu(display("Failed to convert Metasrv response"))]
     ConvertMetaResponse {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Failed to get flow stat"))]
+    GetFlowStat {
+        #[snafu(implicit)]
         location: Location,
         source: common_meta::error::Error,
     },
 
     #[snafu(display("Retry exceeded max times({}), message: {}", times, msg))]
     RetryTimesExceeded { times: usize, msg: String },
+
+    #[snafu(display("Trying to write to a read-only kv backend: {}", name))]
+    ReadOnlyKvBackend {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 #[allow(dead_code)]
@@ -90,21 +128,34 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::IllegalGrpcClientState { .. }
-            | Error::AskLeader { .. }
             | Error::NoLeader { .. }
             | Error::AskLeaderTimeout { .. }
             | Error::NotStarted { .. }
             | Error::SendHeartbeat { .. }
             | Error::CreateHeartbeatStream { .. }
             | Error::CreateChannel { .. }
-            | Error::RetryTimesExceeded { .. } => StatusCode::Internal,
+            | Error::RetryTimesExceeded { .. }
+            | Error::ReadOnlyKvBackend { .. } => StatusCode::Internal,
 
             Error::MetaServer { code, .. } => *code,
 
             Error::InvalidResponseHeader { source, .. }
             | Error::ConvertMetaRequest { source, .. }
-            | Error::ConvertMetaResponse { source, .. } => source.status_code(),
+            | Error::ConvertMetaResponse { source, .. }
+            | Error::GetFlowStat { source, .. } => source.status_code(),
         }
+    }
+}
+
+impl Error {
+    pub fn is_exceeded_size_limit(&self) -> bool {
+        matches!(
+            self,
+            Error::MetaServer {
+                tonic_code: tonic::Code::OutOfRange,
+                ..
+            }
+        )
     }
 }
 
@@ -130,6 +181,10 @@ impl From<Status> for Error {
         let msg = get_metadata_value(&e, GREPTIME_DB_HEADER_ERROR_MSG)
             .unwrap_or_else(|| e.message().to_string());
 
-        Self::MetaServer { code, msg }
+        Self::MetaServer {
+            code,
+            msg,
+            tonic_code: e.code(),
+        }
     }
 }

@@ -1,0 +1,82 @@
+create schema abc;
+
+Affected Rows: 1
+
+use abc;
+
+Affected Rows: 0
+
+create table t (ts timestamp time index);
+
+Affected Rows: 0
+
+create schema abcde;
+
+Affected Rows: 1
+
+use abcde;
+
+Affected Rows: 0
+
+create table t (ts timestamp time index);
+
+Affected Rows: 0
+
+select table_catalog, table_schema, table_name from information_schema.tables where table_schema != 'information_schema';
+
++---------------+--------------+------------+
+| table_catalog | table_schema | table_name |
++---------------+--------------+------------+
+| greptime      | abc          | t          |
+| greptime      | abcde        | t          |
+| greptime      | public       | numbers    |
++---------------+--------------+------------+
+
+use public;
+
+Affected Rows: 0
+
+drop schema abc;
+
+Affected Rows: 0
+
+drop schema abcde;
+
+Affected Rows: 0
+
+drop schema information_schema;
+
+Error: 1001(Unsupported), Schema `information_schema` is read-only
+
+use information_schema;
+
+Affected Rows: 0
+
+create table t (ts timestamp time index);
+
+Error: 1001(Unsupported), Schema `information_schema` is read-only
+
+drop table build_info;
+
+Error: 1001(Unsupported), Schema `information_schema` is read-only
+
+alter table build_info add q string;
+
+Error: 1001(Unsupported), Schema `information_schema` is read-only
+
+truncate table build_info;
+
+Error: 1001(Unsupported), Schema `information_schema` is read-only
+
+insert into build_info values ("", "", "", "", "");
+
+Error: 1001(Unsupported), Schema `information_schema` is read-only
+
+delete from build_info;
+
+Error: 1001(Unsupported), Cannot change read-only table: build_info
+
+use public;
+
+Affected Rows: 0
+

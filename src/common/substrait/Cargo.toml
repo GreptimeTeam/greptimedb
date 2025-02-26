@@ -10,21 +10,20 @@ workspace = true
 [dependencies]
 async-trait.workspace = true
 bytes.workspace = true
-catalog.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
+common-telemetry.workspace = true
 datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
 datafusion-substrait.workspace = true
-datatypes.workspace = true
 promql.workspace = true
 prost.workspace = true
 snafu.workspace = true
 
 [dependencies.substrait_proto]
 package = "substrait"
-version = "0.17"
+version = "0.37"
 
 [dev-dependencies]
 datatypes.workspace = true

@@ -20,14 +20,23 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::AddColumnLocation;
 use datafusion_expr::TableProviderFilterPushDown;
 pub use datatypes::error::{Error as ConvertError, Result as ConvertResult};
-use datatypes::schema::{ColumnSchema, RawSchema, Schema, SchemaBuilder, SchemaRef};
+use datatypes::schema::{
+    ColumnSchema, FulltextOptions, RawSchema, Schema, SchemaBuilder, SchemaRef,
+    SkippingIndexOptions,
+};
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
+use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
+use store_api::mito_engine_options::{COMPACTION_TYPE, COMPACTION_TYPE_TWCS};
+use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId, RegionId};
 
 use crate::error::{self, Result};
-use crate::requests::{AddColumnRequest, AlterKind, TableOptions};
+use crate::requests::{
+    AddColumnRequest, AlterKind, ModifyColumnTypeRequest, SetIndexOptions, TableOptions,
+    UnsetIndexOptions,
+};
 
 pub type TableId = u32;
 pub type TableVersion = u64;
@@ -100,7 +109,8 @@ pub struct TableIdent {
     pub version: TableVersion,
 }
 
-/// The table metadata
+/// The table metadata.
+///
 /// Note: if you add new fields to this struct, please ensure 'new_meta_builder' function works.
 /// TODO(dennis): find a better way to ensure 'new_meta_builder' works when adding new fields.
 #[derive(Clone, Debug, Builder, PartialEq, Eq)]
@@ -188,26 +198,273 @@ impl TableMeta {
         &self,
         table_name: &str,
         alter_kind: &AlterKind,
-        add_if_not_exists: bool,
     ) -> Result<TableMetaBuilder> {
         match alter_kind {
-            AlterKind::AddColumns { columns } => {
-                self.add_columns(table_name, columns, add_if_not_exists)
-            }
+            AlterKind::AddColumns { columns } => self.add_columns(table_name, columns),
             AlterKind::DropColumns { names } => self.remove_columns(table_name, names),
-            // No need to rebuild table meta when renaming tables.
-            AlterKind::RenameTable { .. } => {
-                let mut meta_builder = TableMetaBuilder::default();
-                let _ = meta_builder
-                    .schema(self.schema.clone())
-                    .primary_key_indices(self.primary_key_indices.clone())
-                    .engine(self.engine.clone())
-                    .next_column_id(self.next_column_id);
-                Ok(meta_builder)
+            AlterKind::ModifyColumnTypes { columns } => {
+                self.modify_column_types(table_name, columns)
             }
+            // No need to rebuild table meta when renaming tables.
+            AlterKind::RenameTable { .. } => Ok(self.new_meta_builder()),
+            AlterKind::SetTableOptions { options } => self.set_table_options(options),
+            AlterKind::UnsetTableOptions { keys } => self.unset_table_options(keys),
+            AlterKind::SetIndex { options } => match options {
+                SetIndexOptions::Fulltext {
+                    column_name,
+                    options,
+                } => self.change_column_fulltext_options(
+                    table_name,
+                    column_name,
+                    true,
+                    Some(options),
+                ),
+                SetIndexOptions::Inverted { column_name } => {
+                    self.change_column_modify_inverted_index(table_name, column_name, true)
+                }
+                SetIndexOptions::Skipping {
+                    column_name,
+                    options,
+                } => self.change_column_skipping_index_options(
+                    table_name,
+                    column_name,
+                    Some(options),
+                ),
+            },
+            AlterKind::UnsetIndex { options } => match options {
+                UnsetIndexOptions::Fulltext { column_name } => {
+                    self.change_column_fulltext_options(table_name, column_name, false, None)
+                }
+                UnsetIndexOptions::Inverted { column_name } => {
+                    self.change_column_modify_inverted_index(table_name, column_name, false)
+                }
+                UnsetIndexOptions::Skipping { column_name } => {
+                    self.change_column_skipping_index_options(table_name, column_name, None)
+                }
+            },
         }
     }
 
+    /// Creates a [TableMetaBuilder] with modified table options.
+    fn set_table_options(&self, requests: &[SetRegionOption]) -> Result<TableMetaBuilder> {
+        let mut new_options = self.options.clone();
+
+        for request in requests {
+            match request {
+                SetRegionOption::Ttl(new_ttl) => {
+                    new_options.ttl = *new_ttl;
+                }
+                SetRegionOption::Twsc(key, value) => {
+                    if !value.is_empty() {
+                        new_options
+                            .extra_options
+                            .insert(key.to_string(), value.to_string());
+                        // Ensure node restart correctly.
+                        new_options.extra_options.insert(
+                            COMPACTION_TYPE.to_string(),
+                            COMPACTION_TYPE_TWCS.to_string(),
+                        );
+                    } else {
+                        // Invalidate the previous change option if an empty value has been set.
+                        new_options.extra_options.remove(key.as_str());
+                    }
+                }
+            }
+        }
+        let mut builder = self.new_meta_builder();
+        builder.options(new_options);
+
+        Ok(builder)
+    }
+
+    fn unset_table_options(&self, requests: &[UnsetRegionOption]) -> Result<TableMetaBuilder> {
+        let requests = requests.iter().map(Into::into).collect::<Vec<_>>();
+        self.set_table_options(&requests)
+    }
+
+    /// Creates a [TableMetaBuilder] with modified column inverted index.
+    fn change_column_modify_inverted_index(
+        &self,
+        table_name: &str,
+        column_name: &str,
+        value: bool,
+    ) -> Result<TableMetaBuilder> {
+        let table_schema = &self.schema;
+        let mut meta_builder = self.new_meta_builder();
+
+        let mut columns: Vec<ColumnSchema> =
+            Vec::with_capacity(table_schema.column_schemas().len());
+
+        for column_schema in table_schema.column_schemas().iter() {
+            if column_schema.name == column_name {
+                let mut new_column_schema = column_schema.clone();
+                new_column_schema.set_inverted_index(value);
+                columns.push(new_column_schema);
+            } else {
+                columns.push(column_schema.clone());
+            }
+        }
+
+        // TODO(CookiePieWw): This part for all alter table operations is similar. We can refactor it.
+        let mut builder = SchemaBuilder::try_from_columns(columns)
+            .with_context(|_| error::SchemaBuildSnafu {
+                msg: format!("Failed to convert column schemas into schema for table {table_name}"),
+            })?
+            .version(table_schema.version() + 1);
+
+        for (k, v) in table_schema.metadata().iter() {
+            builder = builder.add_metadata(k, v);
+        }
+
+        let new_schema = builder.build().with_context(|_| error::SchemaBuildSnafu {
+            msg: format!(
+                "Table {table_name} cannot change fulltext options for column {column_name}",
+            ),
+        })?;
+
+        let _ = meta_builder
+            .schema(Arc::new(new_schema))
+            .primary_key_indices(self.primary_key_indices.clone());
+
+        Ok(meta_builder)
+    }
+
+    /// Creates a [TableMetaBuilder] with modified column fulltext options.
+    fn change_column_fulltext_options(
+        &self,
+        table_name: &str,
+        column_name: &str,
+        enable: bool,
+        options: Option<&FulltextOptions>,
+    ) -> Result<TableMetaBuilder> {
+        let table_schema = &self.schema;
+        let mut meta_builder = self.new_meta_builder();
+
+        let column = &table_schema
+            .column_schema_by_name(column_name)
+            .with_context(|| error::ColumnNotExistsSnafu {
+                column_name,
+                table_name,
+            })?;
+
+        ensure!(
+            column.data_type.is_string(),
+            error::InvalidColumnOptionSnafu {
+                column_name,
+                msg: "FULLTEXT index only supports string type",
+            }
+        );
+
+        let current_fulltext_options = column
+            .fulltext_options()
+            .context(error::SetFulltextOptionsSnafu { column_name })?;
+
+        let mut columns = Vec::with_capacity(table_schema.column_schemas().len());
+        for column_schema in table_schema.column_schemas() {
+            if column_schema.name == column_name {
+                let mut new_column_schema = column_schema.clone();
+                if enable {
+                    ensure!(
+                        options.is_some(),
+                        error::InvalidColumnOptionSnafu {
+                            column_name,
+                            msg: "FULLTEXT index options must be provided",
+                        }
+                    );
+                    set_column_fulltext_options(
+                        &mut new_column_schema,
+                        column_name,
+                        options.unwrap(),
+                        current_fulltext_options.clone(),
+                    )?
+                } else {
+                    unset_column_fulltext_options(
+                        &mut new_column_schema,
+                        column_name,
+                        current_fulltext_options.clone(),
+                    )?
+                }
+                columns.push(new_column_schema);
+            } else {
+                columns.push(column_schema.clone());
+            }
+        }
+
+        // TODO(CookiePieWw): This part for all alter table operations is similar. We can refactor it.
+        let mut builder = SchemaBuilder::try_from_columns(columns)
+            .with_context(|_| error::SchemaBuildSnafu {
+                msg: format!("Failed to convert column schemas into schema for table {table_name}"),
+            })?
+            .version(table_schema.version() + 1);
+
+        for (k, v) in table_schema.metadata().iter() {
+            builder = builder.add_metadata(k, v);
+        }
+
+        let new_schema = builder.build().with_context(|_| error::SchemaBuildSnafu {
+            msg: format!(
+                "Table {table_name} cannot change fulltext options for column {column_name}",
+            ),
+        })?;
+
+        let _ = meta_builder
+            .schema(Arc::new(new_schema))
+            .primary_key_indices(self.primary_key_indices.clone());
+
+        Ok(meta_builder)
+    }
+
+    /// Creates a [TableMetaBuilder] with modified column skipping index options.
+    fn change_column_skipping_index_options(
+        &self,
+        table_name: &str,
+        column_name: &str,
+        options: Option<&SkippingIndexOptions>,
+    ) -> Result<TableMetaBuilder> {
+        let table_schema = &self.schema;
+        let mut meta_builder = self.new_meta_builder();
+
+        let mut columns = Vec::with_capacity(table_schema.column_schemas().len());
+        for column_schema in table_schema.column_schemas() {
+            if column_schema.name == column_name {
+                let mut new_column_schema = column_schema.clone();
+                if let Some(options) = options {
+                    set_column_skipping_index_options(
+                        &mut new_column_schema,
+                        column_name,
+                        options,
+                    )?;
+                } else {
+                    unset_column_skipping_index_options(&mut new_column_schema, column_name)?;
+                }
+                columns.push(new_column_schema);
+            } else {
+                columns.push(column_schema.clone());
+            }
+        }
+
+        let mut builder = SchemaBuilder::try_from_columns(columns)
+            .with_context(|_| error::SchemaBuildSnafu {
+                msg: format!("Failed to convert column schemas into schema for table {table_name}"),
+            })?
+            .version(table_schema.version() + 1);
+
+        for (k, v) in table_schema.metadata().iter() {
+            builder = builder.add_metadata(k, v);
+        }
+
+        let new_schema = builder.build().with_context(|_| error::SchemaBuildSnafu {
+            msg: format!("Failed to convert column schemas into schema for table {table_name}"),
+        })?;
+
+        let _ = meta_builder
+            .schema(Arc::new(new_schema))
+            .primary_key_indices(self.primary_key_indices.clone());
+
+        Ok(meta_builder)
+    }
+
+    // TODO(yingwen): Remove this.
     /// Allocate a new column for the table.
     ///
     /// This method would bump the `next_column_id` of the meta.
@@ -235,9 +492,14 @@ impl TableMeta {
         Ok(desc)
     }
 
+    /// Create a [`TableMetaBuilder`].
+    ///
+    /// Note: please always use this function to create the builder.
     fn new_meta_builder(&self) -> TableMetaBuilder {
         let mut builder = TableMetaBuilder::default();
         let _ = builder
+            .schema(self.schema.clone())
+            .primary_key_indices(self.primary_key_indices.clone())
             .engine(&self.engine)
             .options(self.options.clone())
             .created_on(self.created_on)
@@ -247,11 +509,11 @@ impl TableMeta {
         builder
     }
 
+    // TODO(yingwen): Tests add if not exists.
     fn add_columns(
         &self,
         table_name: &str,
         requests: &[AddColumnRequest],
-        add_if_not_exists: bool,
     ) -> Result<TableMetaBuilder> {
         let table_schema = &self.schema;
         let mut meta_builder = self.new_meta_builder();
@@ -259,63 +521,61 @@ impl TableMeta {
             self.primary_key_indices.iter().collect();
 
         let mut names = HashSet::with_capacity(requests.len());
-        let mut new_requests = Vec::with_capacity(requests.len());
-        let requests = if add_if_not_exists {
-            for col_to_add in requests {
-                if let Some(column_schema) =
-                    table_schema.column_schema_by_name(&col_to_add.column_schema.name)
-                {
-                    // If the column already exists, we should check if the type is the same.
-                    ensure!(
-                        column_schema.data_type == col_to_add.column_schema.data_type,
-                        error::InvalidAlterRequestSnafu {
-                            table: table_name,
-                            err: format!(
-                                "column {} already exists with different type",
-                                col_to_add.column_schema.name
-                            ),
-                        }
-                    );
-                } else {
-                    new_requests.push(col_to_add.clone());
-                }
-            }
-            &new_requests[..]
-        } else {
-            requests
-        };
+        let mut new_columns = Vec::with_capacity(requests.len());
         for col_to_add in requests {
-            ensure!(
-                names.insert(&col_to_add.column_schema.name),
-                error::InvalidAlterRequestSnafu {
-                    table: table_name,
-                    err: format!(
-                        "add column {} more than once",
-                        col_to_add.column_schema.name
-                    ),
-                }
-            );
+            if let Some(column_schema) =
+                table_schema.column_schema_by_name(&col_to_add.column_schema.name)
+            {
+                // If the column already exists.
+                ensure!(
+                    col_to_add.add_if_not_exists,
+                    error::ColumnExistsSnafu {
+                        table_name,
+                        column_name: &col_to_add.column_schema.name
+                    },
+                );
 
-            ensure!(
-                !table_schema.contains_column(&col_to_add.column_schema.name),
-                error::ColumnExistsSnafu {
-                    table_name,
-                    column_name: col_to_add.column_schema.name.to_string()
-                },
-            );
+                // Checks if the type is the same
+                ensure!(
+                    column_schema.data_type == col_to_add.column_schema.data_type,
+                    error::InvalidAlterRequestSnafu {
+                        table: table_name,
+                        err: format!(
+                            "column {} already exists with different type {:?}",
+                            col_to_add.column_schema.name, column_schema.data_type,
+                        ),
+                    }
+                );
+            } else {
+                // A new column.
+                // Ensures we only add a column once.
+                ensure!(
+                    names.insert(&col_to_add.column_schema.name),
+                    error::InvalidAlterRequestSnafu {
+                        table: table_name,
+                        err: format!(
+                            "add column {} more than once",
+                            col_to_add.column_schema.name
+                        ),
+                    }
+                );
 
-            ensure!(
-                col_to_add.column_schema.is_nullable()
-                    || col_to_add.column_schema.default_constraint().is_some(),
-                error::InvalidAlterRequestSnafu {
-                    table: table_name,
-                    err: format!(
-                        "no default value for column {}",
-                        col_to_add.column_schema.name
-                    ),
-                },
-            );
+                ensure!(
+                    col_to_add.column_schema.is_nullable()
+                        || col_to_add.column_schema.default_constraint().is_some(),
+                    error::InvalidAlterRequestSnafu {
+                        table: table_name,
+                        err: format!(
+                            "no default value for column {}",
+                            col_to_add.column_schema.name
+                        ),
+                    },
+                );
+
+                new_columns.push(col_to_add.clone());
+            }
         }
+        let requests = &new_columns[..];
 
         let SplitResult {
             columns_at_first,
@@ -458,6 +718,133 @@ impl TableMeta {
         Ok(meta_builder)
     }
 
+    fn modify_column_types(
+        &self,
+        table_name: &str,
+        requests: &[ModifyColumnTypeRequest],
+    ) -> Result<TableMetaBuilder> {
+        let table_schema = &self.schema;
+        let mut meta_builder = self.new_meta_builder();
+
+        let mut modify_column_types = HashMap::with_capacity(requests.len());
+        let timestamp_index = table_schema.timestamp_index();
+
+        for col_to_change in requests {
+            let change_column_name = &col_to_change.column_name;
+
+            let index = table_schema
+                .column_index_by_name(change_column_name)
+                .with_context(|| error::ColumnNotExistsSnafu {
+                    column_name: change_column_name,
+                    table_name,
+                })?;
+
+            let column = &table_schema.column_schemas()[index];
+
+            ensure!(
+                !self.primary_key_indices.contains(&index),
+                error::InvalidAlterRequestSnafu {
+                    table: table_name,
+                    err: format!(
+                        "Not allowed to change primary key index column '{}'",
+                        column.name
+                    )
+                }
+            );
+
+            if let Some(ts_index) = timestamp_index {
+                // Not allowed to change column datatype in timestamp index.
+                ensure!(
+                    index != ts_index,
+                    error::InvalidAlterRequestSnafu {
+                        table: table_name,
+                        err: format!(
+                            "Not allowed to change timestamp index column '{}' datatype",
+                            column.name
+                        )
+                    }
+                );
+            }
+
+            ensure!(
+                modify_column_types
+                    .insert(&col_to_change.column_name, col_to_change)
+                    .is_none(),
+                error::InvalidAlterRequestSnafu {
+                    table: table_name,
+                    err: format!(
+                        "change column datatype {} more than once",
+                        col_to_change.column_name
+                    ),
+                }
+            );
+
+            ensure!(
+                column
+                    .data_type
+                    .can_arrow_type_cast_to(&col_to_change.target_type),
+                error::InvalidAlterRequestSnafu {
+                    table: table_name,
+                    err: format!(
+                        "column '{}' cannot be cast automatically to type '{}'",
+                        col_to_change.column_name, col_to_change.target_type,
+                    ),
+                }
+            );
+
+            ensure!(
+                column.is_nullable(),
+                error::InvalidAlterRequestSnafu {
+                    table: table_name,
+                    err: format!(
+                        "column '{}' must be nullable to ensure safe conversion.",
+                        col_to_change.column_name,
+                    ),
+                }
+            );
+        }
+        // Collect columns after changed.
+        let columns: Vec<_> = table_schema
+            .column_schemas()
+            .iter()
+            .cloned()
+            .map(|mut column| {
+                if let Some(change_column) = modify_column_types.get(&column.name) {
+                    column.data_type = change_column.target_type.clone();
+                }
+                column
+            })
+            .collect();
+
+        let mut builder = SchemaBuilder::try_from_columns(columns)
+            .with_context(|_| error::SchemaBuildSnafu {
+                msg: format!("Failed to convert column schemas into schema for table {table_name}"),
+            })?
+            // Also bump the schema version.
+            .version(table_schema.version() + 1);
+        for (k, v) in table_schema.metadata().iter() {
+            builder = builder.add_metadata(k, v);
+        }
+        let new_schema = builder.build().with_context(|_| {
+            let column_names: Vec<_> = requests
+                .iter()
+                .map(|request| &request.column_name)
+                .collect();
+
+            error::SchemaBuildSnafu {
+                msg: format!(
+                    "Table {table_name} cannot change datatype with columns {column_names:?}"
+                ),
+            }
+        })?;
+
+        let _ = meta_builder
+            .schema(Arc::new(new_schema))
+            .primary_key_indices(self.primary_key_indices.clone());
+
+        Ok(meta_builder)
+    }
+
     /// Split requests into different groups using column location info.
     fn split_requests_by_column_location<'a>(
         &self,
@@ -517,8 +904,6 @@ pub struct TableInfo {
     /// Id and version of the table.
     #[builder(default, setter(into))]
     pub ident: TableIdent,
-
-    // TODO(LFC): Remove the catalog, schema and table names from TableInfo.
     /// Name of the table.
     #[builder(setter(into))]
     pub name: String,
@@ -551,6 +936,23 @@ impl TableInfo {
     /// Returns the full table name in the form of `{catalog}.{schema}.{table}`.
     pub fn full_table_name(&self) -> String {
         common_catalog::format_full_table_name(&self.catalog_name, &self.schema_name, &self.name)
+    }
+
+    /// Returns true when the table is the metric engine's physical table.
+    pub fn is_physical_table(&self) -> bool {
+        self.meta
+            .options
+            .extra_options
+            .contains_key(PHYSICAL_TABLE_METADATA_KEY)
+    }
+
+    /// Return true if the table's TTL is `instant`.
+    pub fn is_ttl_instant_table(&self) -> bool {
+        self.meta
+            .options
+            .ttl
+            .map(|t| t.is_instant())
+            .unwrap_or(false)
     }
 }
 
@@ -592,7 +994,7 @@ impl From<TableId> for TableIdent {
 }
 
 /// Struct used to serialize and deserialize [`TableMeta`].
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Default)]
 pub struct RawTableMeta {
     pub schema: RawSchema,
     /// The indices of columns in primary key. Note that the index of timestamp column
@@ -602,6 +1004,7 @@ pub struct RawTableMeta {
     pub value_indices: Vec<usize>,
     /// Engine type of this table. Usually in small case.
     pub engine: String,
+    /// Next column id of a new column.
     /// Deprecated. See https://github.com/GreptimeTeam/greptimedb/issues/2982
     pub next_column_id: ColumnId,
     pub region_numbers: Vec<u32>,
@@ -694,6 +1097,13 @@ impl RawTableInfo {
         self.meta.primary_key_indices = primary_key_indices;
         self.meta.value_indices = value_indices;
     }
+
+    /// Extracts region options from table info.
+    ///
+    /// All "region options" are actually a copy of table options for redundancy.
+    pub fn to_region_options(&self) -> HashMap<String, String> {
+        HashMap::from(&self.meta.options)
+    }
 }
 
 impl From<TableInfo> for RawTableInfo {
@@ -726,9 +1136,87 @@ impl TryFrom<RawTableInfo> for TableInfo {
     }
 }
 
+fn set_column_fulltext_options(
+    column_schema: &mut ColumnSchema,
+    column_name: &str,
+    options: &FulltextOptions,
+    current_options: Option<FulltextOptions>,
+) -> Result<()> {
+    if let Some(current_options) = current_options {
+        ensure!(
+            !current_options.enable,
+            error::InvalidColumnOptionSnafu {
+                column_name,
+                msg: "FULLTEXT index already enabled",
+            }
+        );
+
+        ensure!(
+            current_options.analyzer == options.analyzer
+                && current_options.case_sensitive == options.case_sensitive,
+            error::InvalidColumnOptionSnafu {
+                column_name,
+                msg: format!("Cannot change analyzer or case_sensitive if FULLTEXT index is set before. Previous analyzer: {}, previous case_sensitive: {}",
+                current_options.analyzer, current_options.case_sensitive),
+            }
+        );
+    }
+
+    column_schema
+        .set_fulltext_options(options)
+        .context(error::SetFulltextOptionsSnafu { column_name })?;
+
+    Ok(())
+}
+
+fn unset_column_fulltext_options(
+    column_schema: &mut ColumnSchema,
+    column_name: &str,
+    current_options: Option<FulltextOptions>,
+) -> Result<()> {
+    ensure!(
+        current_options
+            .as_ref()
+            .is_some_and(|options| options.enable),
+        error::InvalidColumnOptionSnafu {
+            column_name,
+            msg: "FULLTEXT index already disabled".to_string(),
+        }
+    );
+
+    let mut options = current_options.unwrap();
+    options.enable = false;
+    column_schema
+        .set_fulltext_options(&options)
+        .context(error::SetFulltextOptionsSnafu { column_name })?;
+
+    Ok(())
+}
+
+fn set_column_skipping_index_options(
+    column_schema: &mut ColumnSchema,
+    column_name: &str,
+    options: &SkippingIndexOptions,
+) -> Result<()> {
+    column_schema
+        .set_skipping_options(options)
+        .context(error::SetSkippingOptionsSnafu { column_name })?;
+
+    Ok(())
+}
+
+fn unset_column_skipping_index_options(
+    column_schema: &mut ColumnSchema,
+    column_name: &str,
+) -> Result<()> {
+    column_schema
+        .unset_skipping_options()
+        .context(error::UnsetSkippingOptionsSnafu { column_name })?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
     use datatypes::data_type::ConcreteDataType;
@@ -736,6 +1224,7 @@ mod tests {
 
     use super::*;
 
+    /// Create a test schema with 3 columns: `[col1 int32, ts timestampmills, col2 int32]`.
     fn new_test_schema() -> Schema {
         let column_schemas = vec![
             ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), true),
@@ -787,17 +1276,19 @@ mod tests {
                     column_schema: new_tag,
                     is_key: true,
                     location: None,
+                    add_if_not_exists: false,
                 },
                 AddColumnRequest {
                     column_schema: new_field,
                     is_key: false,
                     location: None,
+                    add_if_not_exists: false,
                 },
             ],
         };
 
         let builder = meta
-            .builder_with_alter_kind("my_table", &alter_kind, false)
+            .builder_with_alter_kind("my_table", &alter_kind)
             .unwrap();
         builder.build().unwrap()
     }
@@ -815,6 +1306,7 @@ mod tests {
                     column_schema: new_tag,
                     is_key: true,
                     location: Some(AddColumnLocation::First),
+                    add_if_not_exists: false,
                 },
                 AddColumnRequest {
                     column_schema: new_field,
@@ -822,12 +1314,13 @@ mod tests {
                     location: Some(AddColumnLocation::After {
                         column_name: "ts".to_string(),
                     }),
+                    add_if_not_exists: false,
                 },
             ],
         };
 
         let builder = meta
-            .builder_with_alter_kind("my_table", &alter_kind, false)
+            .builder_with_alter_kind("my_table", &alter_kind)
             .unwrap();
         builder.build().unwrap()
     }
@@ -858,6 +1351,48 @@ mod tests {
     }
 
     #[test]
+    fn test_add_columns_multiple_times() {
+        let schema = Arc::new(new_test_schema());
+        let meta = TableMetaBuilder::default()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+
+        let alter_kind = AlterKind::AddColumns {
+            columns: vec![
+                AddColumnRequest {
+                    column_schema: ColumnSchema::new(
+                        "col3",
+                        ConcreteDataType::int32_datatype(),
+                        true,
+                    ),
+                    is_key: true,
+                    location: None,
+                    add_if_not_exists: true,
+                },
+                AddColumnRequest {
+                    column_schema: ColumnSchema::new(
+                        "col3",
+                        ConcreteDataType::int32_datatype(),
+                        true,
+                    ),
+                    is_key: true,
+                    location: None,
+                    add_if_not_exists: true,
+                },
+            ],
+        };
+        let err = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .err()
+            .unwrap();
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
+    }
+
+    #[test]
     fn test_remove_columns() {
         let schema = Arc::new(new_test_schema());
         let meta = TableMetaBuilder::default()
@@ -874,7 +1409,7 @@ mod tests {
             names: vec![String::from("col2"), String::from("my_field")],
         };
         let new_meta = meta
-            .builder_with_alter_kind("my_table", &alter_kind, false)
+            .builder_with_alter_kind("my_table", &alter_kind)
             .unwrap()
             .build()
             .unwrap();
@@ -929,7 +1464,7 @@ mod tests {
             names: vec![String::from("col3"), String::from("col1")],
         };
         let new_meta = meta
-            .builder_with_alter_kind("my_table", &alter_kind, false)
+            .builder_with_alter_kind("my_table", &alter_kind)
             .unwrap()
             .build()
             .unwrap();
@@ -965,14 +1500,62 @@ mod tests {
                 column_schema: ColumnSchema::new("col1", ConcreteDataType::string_datatype(), true),
                 is_key: false,
                 location: None,
+                add_if_not_exists: false,
             }],
         };
 
         let err = meta
-            .builder_with_alter_kind("my_table", &alter_kind, false)
+            .builder_with_alter_kind("my_table", &alter_kind)
             .err()
             .unwrap();
         assert_eq!(StatusCode::TableColumnExists, err.status_code());
+
+        // Add if not exists
+        let alter_kind = AlterKind::AddColumns {
+            columns: vec![AddColumnRequest {
+                column_schema: ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), true),
+                is_key: true,
+                location: None,
+                add_if_not_exists: true,
+            }],
+        };
+        let new_meta = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            meta.schema.column_schemas(),
+            new_meta.schema.column_schemas()
+        );
+        assert_eq!(meta.schema.version() + 1, new_meta.schema.version());
+    }
+
+    #[test]
+    fn test_add_different_type_column() {
+        let schema = Arc::new(new_test_schema());
+        let meta = TableMetaBuilder::default()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+
+        // Add if not exists, but different type.
+        let alter_kind = AlterKind::AddColumns {
+            columns: vec![AddColumnRequest {
+                column_schema: ColumnSchema::new("col1", ConcreteDataType::string_datatype(), true),
+                is_key: false,
+                location: None,
+                add_if_not_exists: true,
+            }],
+        };
+        let err = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .err()
+            .unwrap();
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
     }
 
     #[test]
@@ -986,6 +1569,7 @@ mod tests {
             .build()
             .unwrap();
 
+        // Not nullable and no default value.
         let alter_kind = AlterKind::AddColumns {
             columns: vec![AddColumnRequest {
                 column_schema: ColumnSchema::new(
@@ -995,11 +1579,12 @@ mod tests {
                 ),
                 is_key: false,
                 location: None,
+                add_if_not_exists: false,
             }],
         };
 
         let err = meta
-            .builder_with_alter_kind("my_table", &alter_kind, false)
+            .builder_with_alter_kind("my_table", &alter_kind)
             .err()
             .unwrap();
         assert_eq!(StatusCode::InvalidArguments, err.status_code());
@@ -1021,7 +1606,32 @@ mod tests {
         };
 
         let err = meta
-            .builder_with_alter_kind("my_table", &alter_kind, false)
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .err()
+            .unwrap();
+        assert_eq!(StatusCode::TableColumnNotFound, err.status_code());
+    }
+
+    #[test]
+    fn test_change_unknown_column_data_type() {
+        let schema = Arc::new(new_test_schema());
+        let meta = TableMetaBuilder::default()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+
+        let alter_kind = AlterKind::ModifyColumnTypes {
+            columns: vec![ModifyColumnTypeRequest {
+                column_name: "unknown".to_string(),
+                target_type: ConcreteDataType::string_datatype(),
+            }],
+        };
+
+        let err = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
             .err()
             .unwrap();
         assert_eq!(StatusCode::TableColumnNotFound, err.status_code());
@@ -1044,7 +1654,7 @@ mod tests {
         };
 
         let err = meta
-            .builder_with_alter_kind("my_table", &alter_kind, false)
+            .builder_with_alter_kind("my_table", &alter_kind)
             .err()
             .unwrap();
         assert_eq!(StatusCode::InvalidArguments, err.status_code());
@@ -1055,7 +1665,47 @@ mod tests {
         };
 
         let err = meta
-            .builder_with_alter_kind("my_table", &alter_kind, false)
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .err()
+            .unwrap();
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
+    }
+
+    #[test]
+    fn test_change_key_column_data_type() {
+        let schema = Arc::new(new_test_schema());
+        let meta = TableMetaBuilder::default()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+
+        // Remove column in primary key.
+        let alter_kind = AlterKind::ModifyColumnTypes {
+            columns: vec![ModifyColumnTypeRequest {
+                column_name: "col1".to_string(),
+                target_type: ConcreteDataType::string_datatype(),
+            }],
+        };
+
+        let err = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .err()
+            .unwrap();
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
+
+        // Remove timestamp column.
+        let alter_kind = AlterKind::ModifyColumnTypes {
+            columns: vec![ModifyColumnTypeRequest {
+                column_name: "ts".to_string(),
+                target_type: ConcreteDataType::string_datatype(),
+            }],
+        };
+
+        let err = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
             .err()
             .unwrap();
         assert_eq!(StatusCode::InvalidArguments, err.status_code());
@@ -1106,5 +1756,80 @@ mod tests {
         );
         assert_eq!(&[0, 1], &new_meta.primary_key_indices[..]);
         assert_eq!(&[2, 3, 4], &new_meta.value_indices[..]);
+    }
+
+    #[test]
+    fn test_modify_column_fulltext_options() {
+        let schema = Arc::new(new_test_schema());
+        let meta = TableMetaBuilder::default()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+
+        let alter_kind = AlterKind::SetIndex {
+            options: SetIndexOptions::Fulltext {
+                column_name: "col1".to_string(),
+                options: FulltextOptions::default(),
+            },
+        };
+        let err = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .err()
+            .unwrap();
+        assert_eq!(
+            "Invalid column option, column name: col1, error: FULLTEXT index only supports string type",
+            err.to_string()
+        );
+
+        // Add a string column and make it fulltext indexed
+        let new_meta = add_columns_to_meta_with_location(&meta);
+        assert_eq!(meta.region_numbers, new_meta.region_numbers);
+
+        let alter_kind = AlterKind::SetIndex {
+            options: SetIndexOptions::Fulltext {
+                column_name: "my_tag_first".to_string(),
+                options: FulltextOptions {
+                    enable: true,
+                    analyzer: datatypes::schema::FulltextAnalyzer::Chinese,
+                    case_sensitive: true,
+                },
+            },
+        };
+        let new_meta = new_meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .unwrap()
+            .build()
+            .unwrap();
+        let column_schema = new_meta
+            .schema
+            .column_schema_by_name("my_tag_first")
+            .unwrap();
+        let fulltext_options = column_schema.fulltext_options().unwrap().unwrap();
+        assert!(fulltext_options.enable);
+        assert_eq!(
+            datatypes::schema::FulltextAnalyzer::Chinese,
+            fulltext_options.analyzer
+        );
+        assert!(fulltext_options.case_sensitive);
+
+        let alter_kind = AlterKind::UnsetIndex {
+            options: UnsetIndexOptions::Fulltext {
+                column_name: "my_tag_first".to_string(),
+            },
+        };
+        let new_meta = new_meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .unwrap()
+            .build()
+            .unwrap();
+        let column_schema = new_meta
+            .schema
+            .column_schema_by_name("my_tag_first")
+            .unwrap();
+        let fulltext_options = column_schema.fulltext_options().unwrap().unwrap();
+        assert!(!fulltext_options.enable);
     }
 }

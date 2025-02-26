@@ -12,32 +12,72 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod blob;
-mod footer;
+use std::collections::VecDeque;
+use std::ops::Range;
+use std::sync::Arc;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use common_base::BitVec;
-use greptime_proto::v1::index::{InvertedIndexMeta, InvertedIndexMetas};
+use greptime_proto::v1::index::InvertedIndexMetas;
+use snafu::ResultExt;
 
-use crate::inverted_index::error::Result;
+use crate::inverted_index::error::{DecodeFstSnafu, Result};
 pub use crate::inverted_index::format::reader::blob::InvertedIndexBlobReader;
 use crate::inverted_index::FstMap;
+
+mod blob;
+mod footer;
 
 /// InvertedIndexReader defines an asynchronous reader of inverted index data
 #[mockall::automock]
 #[async_trait]
-pub trait InvertedIndexReader: Send {
-    /// Retrieve metadata of all inverted indices stored within the blob.
-    async fn metadata(&mut self) -> Result<InvertedIndexMetas>;
+pub trait InvertedIndexReader: Send + Sync {
+    /// Seeks to given offset and reads data with exact size as provided.
+    async fn range_read(&self, offset: u64, size: u32) -> Result<Vec<u8>>;
 
-    /// Retrieve the finite state transducer (FST) map for a given inverted index metadata entry.
-    async fn fst(&mut self, meta: &InvertedIndexMeta) -> Result<FstMap>;
+    /// Reads the bytes in the given ranges.
+    async fn read_vec(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
+        let mut result = Vec::with_capacity(ranges.len());
+        for range in ranges {
+            let data = self
+                .range_read(range.start, (range.end - range.start) as u32)
+                .await?;
+            result.push(Bytes::from(data));
+        }
+        Ok(result)
+    }
 
-    /// Retrieve the bitmap for a given inverted index metadata entry at the specified offset and size.
-    async fn bitmap(
-        &mut self,
-        meta: &InvertedIndexMeta,
-        relative_offset: u32,
-        size: u32,
-    ) -> Result<BitVec>;
+    /// Retrieves metadata of all inverted indices stored within the blob.
+    async fn metadata(&self) -> Result<Arc<InvertedIndexMetas>>;
+
+    /// Retrieves the finite state transducer (FST) map from the given offset and size.
+    async fn fst(&self, offset: u64, size: u32) -> Result<FstMap> {
+        let fst_data = self.range_read(offset, size).await?;
+        FstMap::new(fst_data).context(DecodeFstSnafu)
+    }
+
+    /// Retrieves the multiple finite state transducer (FST) maps from the given ranges.
+    async fn fst_vec(&mut self, ranges: &[Range<u64>]) -> Result<Vec<FstMap>> {
+        self.read_vec(ranges)
+            .await?
+            .into_iter()
+            .map(|bytes| FstMap::new(bytes.to_vec()).context(DecodeFstSnafu))
+            .collect::<Result<Vec<_>>>()
+    }
+
+    /// Retrieves the bitmap from the given offset and size.
+    async fn bitmap(&self, offset: u64, size: u32) -> Result<BitVec> {
+        self.range_read(offset, size).await.map(BitVec::from_vec)
+    }
+
+    /// Retrieves the multiple bitmaps from the given ranges.
+    async fn bitmap_deque(&mut self, ranges: &[Range<u64>]) -> Result<VecDeque<BitVec>> {
+        Ok(self
+            .read_vec(ranges)
+            .await?
+            .into_iter()
+            .map(|bytes| BitVec::from_slice(bytes.as_ref()))
+            .collect::<VecDeque<_>>())
+    }
 }

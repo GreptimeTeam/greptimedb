@@ -17,14 +17,16 @@ use std::sync::Arc;
 
 use auth::UserProviderRef;
 use common_base::Plugins;
-use common_runtime::Builder as RuntimeBuilder;
+use common_config::{Configurable, Mode};
+use servers::error::Error as ServerError;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::greptime_handler::GreptimeRequestHandler;
-use servers::grpc::{GrpcServer, GrpcServerConfig};
+use servers::grpc::{GrpcOptions, GrpcServer, GrpcServerConfig};
+use servers::http::event::LogValidatorRef;
 use servers::http::{HttpServer, HttpServerBuilder};
+use servers::interceptor::LogIngestInterceptorRef;
 use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
-use servers::opentsdb::OpentsdbServer;
 use servers::postgres::PostgresServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdapter;
 use servers::query_handler::sql::ServerSqlQueryHandlerAdapter;
@@ -32,14 +34,13 @@ use servers::server::{Server, ServerHandlers};
 use servers::tls::{maybe_watch_tls_config, ReloadableTlsServerConfig};
 use snafu::ResultExt;
 
-use crate::error::{self, Result, StartServerSnafu};
-use crate::frontend::{FrontendOptions, TomlSerializable};
+use crate::error::{self, Result, StartServerSnafu, TomlFormatSnafu};
+use crate::frontend::FrontendOptions;
 use crate::instance::FrontendInstance;
-use crate::service_config::GrpcOptions;
 
 pub struct Services<T, U>
 where
-    T: Into<FrontendOptions> + TomlSerializable + Clone,
+    T: Into<FrontendOptions> + Configurable + Clone,
     U: FrontendInstance,
 {
     opts: T,
@@ -51,7 +52,7 @@ where
 
 impl<T, U> Services<T, U>
 where
-    T: Into<FrontendOptions> + TomlSerializable + Clone,
+    T: Into<FrontendOptions> + Configurable + Clone,
     U: FrontendInstance,
 {
     pub fn new(opts: T, instance: Arc<U>, plugins: Plugins) -> Self {
@@ -65,27 +66,26 @@ where
     }
 
     pub fn grpc_server_builder(&self, opts: &GrpcOptions) -> Result<GrpcServerBuilder> {
-        let grpc_runtime = Arc::new(
-            RuntimeBuilder::default()
-                .worker_threads(opts.runtime_size)
-                .thread_name("grpc-handlers")
-                .build()
-                .context(error::RuntimeResourceSnafu)?,
-        );
-
         let grpc_config = GrpcServerConfig {
             max_recv_message_size: opts.max_recv_message_size.as_bytes() as usize,
             max_send_message_size: opts.max_send_message_size.as_bytes() as usize,
+            tls: opts.tls.clone(),
         };
-
-        Ok(GrpcServerBuilder::new(grpc_config, grpc_runtime))
+        let builder = GrpcServerBuilder::new(grpc_config, common_runtime::global_runtime())
+            .with_tls_config(opts.tls.clone())
+            .context(error::InvalidTlsConfigSnafu)?;
+        Ok(builder)
     }
 
     pub fn http_server_builder(&self, opts: &FrontendOptions) -> HttpServerBuilder {
-        let mut builder = HttpServerBuilder::new(opts.http.clone()).with_sql_handler(
-            ServerSqlQueryHandlerAdapter::arc(self.instance.clone()),
-            Some(self.instance.clone()),
-        );
+        let mut builder = HttpServerBuilder::new(opts.http.clone())
+            .with_sql_handler(ServerSqlQueryHandlerAdapter::arc(self.instance.clone()));
+
+        let validator = self.plugins.get::<LogValidatorRef>();
+        let ingest_interceptor = self.plugins.get::<LogIngestInterceptorRef<ServerError>>();
+        builder =
+            builder.with_log_ingest_handler(self.instance.clone(), validator, ingest_interceptor);
+        builder = builder.with_logs_handler(self.instance.clone());
 
         if let Some(user_provider) = self.plugins.get::<UserProviderRef>() {
             builder = builder.with_user_provider(user_provider);
@@ -101,13 +101,22 @@ where
 
         if opts.prom_store.enable {
             builder = builder
-                .with_prom_handler(self.instance.clone(), opts.prom_store.with_metric_engine)
+                .with_prom_handler(
+                    self.instance.clone(),
+                    opts.prom_store.with_metric_engine,
+                    opts.http.is_strict_mode,
+                )
                 .with_prometheus_handler(self.instance.clone());
         }
 
         if opts.otlp.enable {
             builder = builder.with_otlp_handler(self.instance.clone());
         }
+
+        if opts.jaeger.enable {
+            builder = builder.with_jaeger_handler(self.instance.clone());
+        }
+
         builder
     }
 
@@ -134,10 +143,22 @@ where
 
         let user_provider = self.plugins.get::<UserProviderRef>();
 
+        // Determine whether it is Standalone or Distributed mode based on whether the meta client is configured.
+        let mode = if opts.meta_client.is_none() {
+            Mode::Standalone
+        } else {
+            Mode::Distributed
+        };
+
+        let runtime = match mode {
+            Mode::Standalone => Some(builder.runtime().clone()),
+            _ => None,
+        };
+
         let greptime_request_handler = GreptimeRequestHandler::new(
             ServerGrpcQueryHandlerAdapter::arc(self.instance.clone()),
             user_provider.clone(),
-            builder.runtime().clone(),
+            runtime,
         );
 
         let grpc_server = builder
@@ -168,7 +189,7 @@ where
         let opts = self.opts.clone();
         let instance = self.instance.clone();
 
-        let toml = opts.to_toml()?;
+        let toml = opts.to_toml().context(TomlFormatSnafu)?;
         let opts: FrontendOptions = opts.into();
 
         let handlers = ServerHandlers::default();
@@ -177,7 +198,7 @@ where
 
         {
             // Always init GRPC server
-            let grpc_addr = parse_addr(&opts.grpc.addr)?;
+            let grpc_addr = parse_addr(&opts.grpc.bind_addr)?;
             let grpc_server = self.build_grpc_server(&opts)?;
             handlers.insert((Box::new(grpc_server), grpc_addr)).await;
         }
@@ -202,15 +223,8 @@ where
             // will not watch if watch is disabled in tls option
             maybe_watch_tls_config(tls_server_config.clone()).context(StartServerSnafu)?;
 
-            let mysql_io_runtime = Arc::new(
-                RuntimeBuilder::default()
-                    .worker_threads(opts.runtime_size)
-                    .thread_name("mysql-io-handlers")
-                    .build()
-                    .context(error::RuntimeResourceSnafu)?,
-            );
             let mysql_server = MysqlServer::create_server(
-                mysql_io_runtime,
+                common_runtime::global_runtime(),
                 Arc::new(MysqlSpawnRef::new(
                     ServerSqlQueryHandlerAdapter::arc(instance.clone()),
                     user_provider.clone(),
@@ -218,6 +232,7 @@ where
                 Arc::new(MysqlSpawnConfig::new(
                     opts.tls.should_force_tls(),
                     tls_server_config,
+                    opts.keep_alive.as_secs(),
                     opts.reject_no_database.unwrap_or(false),
                 )),
             );
@@ -235,41 +250,16 @@ where
 
             maybe_watch_tls_config(tls_server_config.clone()).context(StartServerSnafu)?;
 
-            let pg_io_runtime = Arc::new(
-                RuntimeBuilder::default()
-                    .worker_threads(opts.runtime_size)
-                    .thread_name("pg-io-handlers")
-                    .build()
-                    .context(error::RuntimeResourceSnafu)?,
-            );
-
             let pg_server = Box::new(PostgresServer::new(
                 ServerSqlQueryHandlerAdapter::arc(instance.clone()),
                 opts.tls.should_force_tls(),
                 tls_server_config,
-                pg_io_runtime,
+                opts.keep_alive.as_secs(),
+                common_runtime::global_runtime(),
                 user_provider.clone(),
             )) as Box<dyn Server>;
 
             handlers.insert((pg_server, pg_addr)).await;
-        }
-
-        if opts.opentsdb.enable {
-            // Init OpenTSDB server
-            let opts = &opts.opentsdb;
-            let addr = parse_addr(&opts.addr)?;
-
-            let io_runtime = Arc::new(
-                RuntimeBuilder::default()
-                    .worker_threads(opts.runtime_size)
-                    .thread_name("opentsdb-io-handlers")
-                    .build()
-                    .context(error::RuntimeResourceSnafu)?,
-            );
-
-            let server = OpentsdbServer::create_server(instance.clone(), io_runtime);
-
-            handlers.insert((server, addr)).await;
         }
 
         Ok(handlers)

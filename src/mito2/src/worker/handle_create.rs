@@ -17,14 +17,12 @@
 use std::sync::Arc;
 
 use common_telemetry::info;
-use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataBuilder;
 use store_api::region_request::{AffectedRows, RegionCreateRequest};
 use store_api::storage::RegionId;
 
-use crate::error::{InvalidMetadataSnafu, Result};
-use crate::metrics::REGION_COUNT;
+use crate::error::Result;
 use crate::region::opener::{check_recovered_region, RegionOpener};
 use crate::worker::RegionWorkerLoop;
 
@@ -53,25 +51,31 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             builder.push_column_metadata(column);
         }
         builder.primary_key(request.primary_key);
-        let metadata = builder.build().context(InvalidMetadataSnafu)?;
+
         // Create a MitoRegion from the RegionMetadata.
         let region = RegionOpener::new(
             region_id,
             &request.region_dir,
             self.memtable_builder_provider.clone(),
             self.object_store_manager.clone(),
-            self.scheduler.clone(),
+            self.purge_scheduler.clone(),
+            self.puffin_manager_factory.clone(),
             self.intermediate_manager.clone(),
+            self.time_provider.clone(),
         )
-        .metadata(metadata)
+        .metadata_builder(builder)
         .parse_options(request.options)?
         .cache(Some(self.cache_manager.clone()))
         .create_or_open(&self.config, &self.wal)
         .await?;
 
-        info!("A new region created, region: {:?}", region.metadata());
+        info!(
+            "A new region created, worker: {}, region: {:?}",
+            self.id,
+            region.metadata()
+        );
 
-        REGION_COUNT.inc();
+        self.region_count.inc();
 
         // Insert the MitoRegion into the RegionMap.
         self.regions.insert_region(Arc::new(region));

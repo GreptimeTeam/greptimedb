@@ -19,19 +19,19 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
 pub enum OwnedKeyRwLockGuard {
-    Read(OwnedRwLockReadGuard<()>),
-    Write(OwnedRwLockWriteGuard<()>),
+    Read { _guard: OwnedRwLockReadGuard<()> },
+    Write { _guard: OwnedRwLockWriteGuard<()> },
 }
 
 impl From<OwnedRwLockReadGuard<()>> for OwnedKeyRwLockGuard {
     fn from(guard: OwnedRwLockReadGuard<()>) -> Self {
-        OwnedKeyRwLockGuard::Read(guard)
+        OwnedKeyRwLockGuard::Read { _guard: guard }
     }
 }
 
 impl From<OwnedRwLockWriteGuard<()>> for OwnedKeyRwLockGuard {
     fn from(guard: OwnedRwLockWriteGuard<()>) -> Self {
-        OwnedKeyRwLockGuard::Write(guard)
+        OwnedKeyRwLockGuard::Write { _guard: guard }
     }
 }
 

@@ -18,7 +18,6 @@ use arrow::error::ArrowError;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
-use common_recordbatch::error::Error as RecordbatchError;
 use datafusion_common::DataFusionError;
 use datatypes::arrow;
 use datatypes::arrow::datatypes::DataType as ArrowDatatype;
@@ -31,23 +30,11 @@ use statrs::StatsError;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
-    #[snafu(display("Failed to execute Python UDF: {}", msg))]
-    PyUdf {
-        // TODO(discord9): find a way that prevent circle depend(query<-script<-query) and can use script's error type
-        msg: String,
-        location: Location,
-    },
-
-    #[snafu(display("Failed to create temporary recordbatch when eval Python UDF"))]
-    UdfTempRecordBatch {
-        location: Location,
-        source: RecordbatchError,
-    },
-
     #[snafu(display("Failed to execute function"))]
     ExecuteFunction {
         #[snafu(source)]
         error: DataFusionError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -55,6 +42,7 @@ pub enum Error {
     UnsupportedInputDataType {
         function: String,
         datatypes: Vec<ConcreteDataType>,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -62,23 +50,27 @@ pub enum Error {
     GenerateFunction {
         #[snafu(source)]
         error: StatsError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to cast scalar value into vector"))]
     FromScalarValue {
+        #[snafu(implicit)]
         location: Location,
         source: DataTypeError,
     },
 
     #[snafu(display("Failed to cast arrow array into vector"))]
     FromArrowArray {
+        #[snafu(implicit)]
         location: Location,
         source: DataTypeError,
     },
 
     #[snafu(display("Failed to cast arrow array into vector: {:?}", data_type))]
     IntoVector {
+        #[snafu(implicit)]
         location: Location,
         source: DataTypeError,
         data_type: ArrowDatatype,
@@ -91,10 +83,15 @@ pub enum Error {
     DowncastVector { err_msg: String },
 
     #[snafu(display("Bad accumulator implementation: {}", err_msg))]
-    BadAccumulatorImpl { err_msg: String, location: Location },
+    BadAccumulatorImpl {
+        err_msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Invalid input type: {}", err_msg))]
     InvalidInputType {
+        #[snafu(implicit)]
         location: Location,
         source: DataTypeError,
         err_msg: String,
@@ -103,37 +100,37 @@ pub enum Error {
     #[snafu(display(
         "Illegal input_types status, check if DataFusion has changed its UDAF execution logic"
     ))]
-    InvalidInputState { location: Location },
+    InvalidInputState {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("unexpected: not constant column"))]
-    InvalidInputCol { location: Location },
-
-    #[snafu(display("Not expected to run ExecutionPlan more than once"))]
-    ExecuteRepeatedly { location: Location },
+    InvalidInputCol {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("General DataFusion error"))]
     GeneralDataFusion {
         #[snafu(source)]
         error: DataFusionError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to convert DataFusion's recordbatch stream"))]
     ConvertDfRecordBatchStream {
+        #[snafu(implicit)]
         location: Location,
         source: common_recordbatch::error::Error,
     },
 
     #[snafu(display("Failed to convert arrow schema"))]
     ConvertArrowSchema {
+        #[snafu(implicit)]
         location: Location,
         source: DataTypeError,
-    },
-
-    #[snafu(display("Failed to execute physical plan"))]
-    ExecutePhysicalPlan {
-        location: Location,
-        source: BoxedError,
     },
 
     #[snafu(display("Failed to cast array to {:?}", typ))]
@@ -141,6 +138,7 @@ pub enum Error {
         #[snafu(source)]
         error: ArrowError,
         typ: arrow::datatypes::DataType,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -148,53 +146,106 @@ pub enum Error {
     ArrowCompute {
         #[snafu(source)]
         error: ArrowError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Query engine fail to cast value"))]
     ToScalarValue {
+        #[snafu(implicit)]
         location: Location,
         source: DataTypeError,
     },
 
     #[snafu(display("Failed to get scalar vector"))]
     GetScalarVector {
+        #[snafu(implicit)]
         location: Location,
         source: DataTypeError,
     },
 
     #[snafu(display("Failed to execute function: {source}"))]
     Execute {
+        #[snafu(implicit)]
         location: Location,
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to join thread"))]
-    ThreadJoin { location: Location },
+    #[snafu(display("Failed to decode logical plan: {source}"))]
+    DecodePlan {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
 
     #[snafu(display("Failed to do table mutation"))]
     TableMutation {
         source: BoxedError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to do procedure task"))]
     ProcedureService {
         source: BoxedError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Missing TableMutationHandler, not expected"))]
-    MissingTableMutationHandler { location: Location },
+    MissingTableMutationHandler {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Missing ProcedureServiceHandler, not expected"))]
-    MissingProcedureServiceHandler { location: Location },
+    MissingProcedureServiceHandler {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Missing FlowServiceHandler, not expected"))]
+    MissingFlowServiceHandler {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Invalid function args: {}", err_msg))]
-    InvalidFuncArgs { err_msg: String, location: Location },
+    InvalidFuncArgs {
+        err_msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Permission denied: {}", err_msg))]
-    PermissionDenied { err_msg: String, location: Location },
+    PermissionDenied {
+        err_msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Can't found alive flownode"))]
+    FlownodeNotFound {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid vector string: {}", vec_str))]
+    InvalidVectorString {
+        vec_str: String,
+        source: DataTypeError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to register UDF: {}", name))]
+    RegisterUdf {
+        name: String,
+        #[snafu(source)]
+        error: DataFusionError,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -202,41 +253,43 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::UdfTempRecordBatch { .. }
-            | Error::PyUdf { .. }
-            | Error::ExecuteFunction { .. }
-            | Error::GenerateFunction { .. }
-            | Error::CreateAccumulator { .. }
+            Error::CreateAccumulator { .. }
             | Error::DowncastVector { .. }
             | Error::InvalidInputState { .. }
             | Error::InvalidInputCol { .. }
+            | Error::GenerateFunction { .. }
             | Error::BadAccumulatorImpl { .. }
             | Error::ToScalarValue { .. }
             | Error::GetScalarVector { .. }
-            | Error::ArrowCompute { .. } => StatusCode::EngineExecuteQuery,
+            | Error::ArrowCompute { .. }
+            | Error::FlownodeNotFound { .. } => StatusCode::EngineExecuteQuery,
+
+            Error::ExecuteFunction { error, .. } | Error::GeneralDataFusion { error, .. } => {
+                datafusion_status_code::<Self>(error, None)
+            }
 
             Error::InvalidInputType { source, .. }
             | Error::IntoVector { source, .. }
             | Error::FromScalarValue { source, .. }
             | Error::ConvertArrowSchema { source, .. }
-            | Error::FromArrowArray { source, .. } => source.status_code(),
+            | Error::FromArrowArray { source, .. }
+            | Error::InvalidVectorString { source, .. } => source.status_code(),
 
             Error::MissingTableMutationHandler { .. }
             | Error::MissingProcedureServiceHandler { .. }
-            | Error::ExecuteRepeatedly { .. }
-            | Error::ThreadJoin { .. }
-            | Error::GeneralDataFusion { .. } => StatusCode::Unexpected,
+            | Error::MissingFlowServiceHandler { .. }
+            | Error::RegisterUdf { .. } => StatusCode::Unexpected,
 
             Error::UnsupportedInputDataType { .. }
             | Error::TypeCast { .. }
             | Error::InvalidFuncArgs { .. } => StatusCode::InvalidArguments,
 
             Error::ConvertDfRecordBatchStream { source, .. } => source.status_code(),
-            Error::ExecutePhysicalPlan { source, .. } => source.status_code(),
-            Error::Execute { source, .. } => source.status_code(),
-            Error::ProcedureService { source, .. } | Error::TableMutation { source, .. } => {
-                source.status_code()
-            }
+
+            Error::DecodePlan { source, .. }
+            | Error::Execute { source, .. }
+            | Error::ProcedureService { source, .. }
+            | Error::TableMutation { source, .. } => source.status_code(),
 
             Error::PermissionDenied { .. } => StatusCode::PermissionDenied,
         }
@@ -250,5 +303,25 @@ impl ErrorExt for Error {
 impl From<Error> for DataFusionError {
     fn from(e: Error) -> DataFusionError {
         DataFusionError::External(Box::new(e))
+    }
+}
+
+/// Try to get the proper [`StatusCode`] of [`DataFusionError].
+pub fn datafusion_status_code<T: ErrorExt + 'static>(
+    e: &DataFusionError,
+    default_status: Option<StatusCode>,
+) -> StatusCode {
+    match e {
+        DataFusionError::Internal(_) => StatusCode::Internal,
+        DataFusionError::NotImplemented(_) => StatusCode::Unsupported,
+        DataFusionError::Plan(_) => StatusCode::PlanQuery,
+        DataFusionError::External(e) => {
+            if let Some(ext) = (*e).downcast_ref::<T>() {
+                ext.status_code()
+            } else {
+                default_status.unwrap_or(StatusCode::EngineExecuteQuery)
+            }
+        }
+        _ => default_status.unwrap_or(StatusCode::EngineExecuteQuery),
     }
 }

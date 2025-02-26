@@ -1,0 +1,81 @@
+CREATE DATABASE mydb WITH (ttl = '1h');
+
+Affected Rows: 1
+
+SHOW DATABASES;
+
++--------------------+
+| Database           |
++--------------------+
+| greptime_private   |
+| information_schema |
+| mydb               |
+| public             |
++--------------------+
+
+SHOW FULL DATABASES;
+
++--------------------+----------+
+| Database           | Options  |
++--------------------+----------+
+| greptime_private   |          |
+| information_schema |          |
+| mydb               | ttl='1h' |
+| public             |          |
++--------------------+----------+
+
+SHOW CREATE DATABASE mydb;
+
++----------+------------------------------------+
+| Database | Create Database                    |
++----------+------------------------------------+
+| mydb     | CREATE DATABASE IF NOT EXISTS mydb |
+|          | WITH(                              |
+|          |   ttl = '1h'                       |
+|          | )                                  |
++----------+------------------------------------+
+
+USE mydb;
+
+Affected Rows: 0
+
+CREATE TABLE test(host STRING, cpu DOUBLE, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test;
+
++-------+-------------------------------------+
+| Table | Create Table                        |
++-------+-------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" ( |
+|       |   "host" STRING NULL,               |
+|       |   "cpu" DOUBLE NULL,                |
+|       |   "ts" TIMESTAMP(3) NOT NULL,       |
+|       |   TIME INDEX ("ts")                 |
+|       | )                                   |
+|       |                                     |
+|       | ENGINE=mito                         |
+|       | WITH(                               |
+|       |   ttl = '1h'                        |
+|       | )                                   |
++-------+-------------------------------------+
+
+USE public;
+
+Affected Rows: 0
+
+DROP DATABASE mydb;
+
+Affected Rows: 0
+
+SHOW DATABASES;
+
++--------------------+
+| Database           |
++--------------------+
+| greptime_private   |
+| information_schema |
+| public             |
++--------------------+
+

@@ -15,46 +15,60 @@
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use api::v1::region::RegionRequestHeader;
 use arc_swap::ArcSwap;
 use auth::UserInfoRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::{build_db_string, parse_catalog_and_schema_from_db_string};
-use common_time::timezone::get_timezone;
+use common_recordbatch::cursor::RecordBatchStreamCursor;
+use common_telemetry::warn;
+use common_time::timezone::parse_timezone;
 use common_time::Timezone;
 use derive_builder::Builder;
-use sql::dialect::{Dialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
+use sql::dialect::{Dialect, GenericDialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
 
-use crate::session_config::PGByteaOutputValue;
-use crate::SessionRef;
+use crate::session_config::{PGByteaOutputValue, PGDateOrder, PGDateTimeStyle};
+use crate::MutableInner;
 
 pub type QueryContextRef = Arc<QueryContext>;
 pub type ConnInfoRef = Arc<ConnInfo>;
 
-#[derive(Debug, Builder)]
+const CURSOR_COUNT_WARNING_LIMIT: usize = 10;
+
+#[derive(Debug, Builder, Clone)]
 #[builder(pattern = "owned")]
 #[builder(build_fn(skip))]
 pub struct QueryContext {
     current_catalog: String,
-    current_schema: String,
-    current_user: ArcSwap<Option<UserInfoRef>>,
-    #[builder(setter(custom))]
-    timezone: ArcSwap<Timezone>,
+    /// mapping of RegionId to SequenceNumber, for snapshot read, meaning that the read should only
+    /// container data that was committed before(and include) the given sequence number
+    /// this field will only be filled if extensions contains a pair of "snapshot_read" and "true"
+    snapshot_seqs: Arc<RwLock<HashMap<u64, u64>>>,
+    // we use Arc<RwLock>> for modifiable fields
+    #[builder(default)]
+    mutable_session_data: Arc<RwLock<MutableInner>>,
+    #[builder(default)]
+    mutable_query_context_data: Arc<RwLock<QueryContextMutableFields>>,
     sql_dialect: Arc<dyn Dialect + Send + Sync>,
     #[builder(default)]
-    extension: HashMap<String, String>,
+    extensions: HashMap<String, String>,
     // The configuration parameter are used to store the parameters that are set by the user
     #[builder(default)]
     configuration_parameter: Arc<ConfigurationVariables>,
+    // Track which protocol the query comes from.
+    #[builder(default)]
+    channel: Channel,
 }
 
-impl QueryContextBuilder {
-    pub fn timezone(mut self, tz: Arc<Timezone>) -> Self {
-        self.timezone = Some(ArcSwap::new(tz));
-        self
-    }
+/// This fields hold data that is only valid to current query context
+#[derive(Debug, Builder, Clone, Default)]
+pub struct QueryContextMutableFields {
+    warning: Option<String>,
+    // TODO: remove this when format is supported in datafusion
+    explain_format: Option<String>,
 }
 
 impl Display for QueryContext {
@@ -68,49 +82,122 @@ impl Display for QueryContext {
     }
 }
 
-impl Clone for QueryContext {
-    fn clone(&self) -> Self {
-        Self {
-            current_catalog: self.current_catalog.clone(),
-            current_schema: self.current_schema.clone(),
-            current_user: self.current_user.load().clone().into(),
-            timezone: self.timezone.load().clone().into(),
-            sql_dialect: self.sql_dialect.clone(),
-            extension: self.extension.clone(),
-            configuration_parameter: self.configuration_parameter.clone(),
+impl QueryContextBuilder {
+    pub fn current_schema(mut self, schema: String) -> Self {
+        if self.mutable_session_data.is_none() {
+            self.mutable_session_data = Some(Arc::new(RwLock::new(MutableInner::default())));
         }
+
+        // safe for unwrap because previous none check
+        self.mutable_session_data
+            .as_mut()
+            .unwrap()
+            .write()
+            .unwrap()
+            .schema = schema;
+        self
+    }
+
+    pub fn timezone(mut self, timezone: Timezone) -> Self {
+        if self.mutable_session_data.is_none() {
+            self.mutable_session_data = Some(Arc::new(RwLock::new(MutableInner::default())));
+        }
+
+        self.mutable_session_data
+            .as_mut()
+            .unwrap()
+            .write()
+            .unwrap()
+            .timezone = timezone;
+        self
     }
 }
 
 impl From<&RegionRequestHeader> for QueryContext {
     fn from(value: &RegionRequestHeader) -> Self {
-        let (catalog, schema) = parse_catalog_and_schema_from_db_string(&value.dbname);
-        QueryContext {
-            current_catalog: catalog.to_string(),
-            current_schema: schema.to_string(),
-            current_user: Default::default(),
-            // for request send to datanode, all timestamp have converted to UTC, so timezone is not important
-            timezone: ArcSwap::new(Arc::new(get_timezone(None).clone())),
-            sql_dialect: Arc::new(GreptimeDbDialect {}),
-            extension: Default::default(),
-            configuration_parameter: Default::default(),
+        let mut builder = QueryContextBuilder::default();
+        if let Some(ctx) = &value.query_context {
+            builder = builder
+                .current_catalog(ctx.current_catalog.clone())
+                .current_schema(ctx.current_schema.clone())
+                .timezone(parse_timezone(Some(&ctx.timezone)))
+                .extensions(ctx.extensions.clone())
+                .channel(ctx.channel.into())
+                .snapshot_seqs(Arc::new(RwLock::new(
+                    ctx.snapshot_seqs.clone().unwrap_or_default().snapshot_seqs,
+                )));
         }
+        builder.build()
+    }
+}
+
+impl From<api::v1::QueryContext> for QueryContext {
+    fn from(ctx: api::v1::QueryContext) -> Self {
+        QueryContextBuilder::default()
+            .current_catalog(ctx.current_catalog)
+            .current_schema(ctx.current_schema)
+            .timezone(parse_timezone(Some(&ctx.timezone)))
+            .extensions(ctx.extensions)
+            .channel(ctx.channel.into())
+            .snapshot_seqs(Arc::new(RwLock::new(
+                ctx.snapshot_seqs.clone().unwrap_or_default().snapshot_seqs,
+            )))
+            .build()
+    }
+}
+
+impl From<QueryContext> for api::v1::QueryContext {
+    fn from(
+        QueryContext {
+            current_catalog,
+            mutable_session_data: mutable_inner,
+            extensions,
+            channel,
+            snapshot_seqs,
+            ..
+        }: QueryContext,
+    ) -> Self {
+        let mutable_inner = mutable_inner.read().unwrap();
+        api::v1::QueryContext {
+            current_catalog,
+            current_schema: mutable_inner.schema.clone(),
+            timezone: mutable_inner.timezone.to_string(),
+            extensions,
+            channel: channel as u32,
+            snapshot_seqs: Some(api::v1::SnapshotSequences {
+                snapshot_seqs: snapshot_seqs.read().unwrap().clone(),
+            }),
+        }
+    }
+}
+
+impl From<&QueryContext> for api::v1::QueryContext {
+    fn from(ctx: &QueryContext) -> Self {
+        ctx.clone().into()
     }
 }
 
 impl QueryContext {
     pub fn arc() -> QueryContextRef {
-        QueryContextBuilder::default().build()
+        Arc::new(QueryContextBuilder::default().build())
     }
 
-    pub fn with(catalog: &str, schema: &str) -> QueryContextRef {
+    pub fn with(catalog: &str, schema: &str) -> QueryContext {
         QueryContextBuilder::default()
             .current_catalog(catalog.to_string())
             .current_schema(schema.to_string())
             .build()
     }
 
-    pub fn with_db_name(db_name: Option<&String>) -> QueryContextRef {
+    pub fn with_channel(catalog: &str, schema: &str, channel: Channel) -> QueryContext {
+        QueryContextBuilder::default()
+            .current_catalog(catalog.to_string())
+            .current_schema(schema.to_string())
+            .channel(channel)
+            .build()
+    }
+
+    pub fn with_db_name(db_name: Option<&str>) -> QueryContext {
         let (catalog, schema) = db_name
             .map(|db| {
                 let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
@@ -124,16 +211,24 @@ impl QueryContext {
             });
         QueryContextBuilder::default()
             .current_catalog(catalog)
-            .current_schema(schema)
+            .current_schema(schema.to_string())
             .build()
     }
 
-    pub fn current_schema(&self) -> &str {
-        &self.current_schema
+    pub fn current_schema(&self) -> String {
+        self.mutable_session_data.read().unwrap().schema.clone()
+    }
+
+    pub fn set_current_schema(&self, new_schema: &str) {
+        self.mutable_session_data.write().unwrap().schema = new_schema.to_string();
     }
 
     pub fn current_catalog(&self) -> &str {
         &self.current_catalog
+    }
+
+    pub fn set_current_catalog(&mut self, new_catalog: &str) {
+        self.current_catalog = new_catalog.to_string();
     }
 
     pub fn sql_dialect(&self) -> &(dyn Dialect + Send + Sync) {
@@ -143,40 +238,35 @@ impl QueryContext {
     pub fn get_db_string(&self) -> String {
         let catalog = self.current_catalog();
         let schema = self.current_schema();
-        build_db_string(catalog, schema)
+        build_db_string(catalog, &schema)
     }
 
-    pub fn timezone(&self) -> Arc<Timezone> {
-        self.timezone.load().clone()
-    }
-
-    pub fn current_user(&self) -> Option<UserInfoRef> {
-        self.current_user.load().as_ref().clone()
-    }
-
-    pub fn set_current_user(&self, user: Option<UserInfoRef>) {
-        let _ = self.current_user.swap(Arc::new(user));
+    pub fn timezone(&self) -> Timezone {
+        self.mutable_session_data.read().unwrap().timezone.clone()
     }
 
     pub fn set_timezone(&self, timezone: Timezone) {
-        let _ = self.timezone.swap(Arc::new(timezone));
+        self.mutable_session_data.write().unwrap().timezone = timezone;
+    }
+
+    pub fn current_user(&self) -> UserInfoRef {
+        self.mutable_session_data.read().unwrap().user_info.clone()
+    }
+
+    pub fn set_current_user(&self, user: UserInfoRef) {
+        self.mutable_session_data.write().unwrap().user_info = user;
     }
 
     pub fn set_extension<S1: Into<String>, S2: Into<String>>(&mut self, key: S1, value: S2) {
-        self.extension.insert(key.into(), value.into());
+        self.extensions.insert(key.into(), value.into());
     }
 
     pub fn extension<S: AsRef<str>>(&self, key: S) -> Option<&str> {
-        self.extension.get(key.as_ref()).map(|v| v.as_str())
+        self.extensions.get(key.as_ref()).map(|v| v.as_str())
     }
 
-    /// SQL like `set variable` may change timezone or other info in `QueryContext`.
-    /// We need persist these change in `Session`.
-    pub fn update_session(&self, session: &SessionRef) {
-        let tz = self.timezone();
-        if *session.timezone() != *tz {
-            session.set_timezone(tz.as_ref().clone())
-        }
+    pub fn extensions(&self) -> HashMap<String, String> {
+        self.extensions.clone()
     }
 
     /// Default to double quote and fallback to back quote
@@ -193,33 +283,111 @@ impl QueryContext {
     pub fn configuration_parameter(&self) -> &ConfigurationVariables {
         &self.configuration_parameter
     }
+
+    pub fn channel(&self) -> Channel {
+        self.channel
+    }
+
+    pub fn set_channel(&mut self, channel: Channel) {
+        self.channel = channel;
+    }
+
+    pub fn warning(&self) -> Option<String> {
+        self.mutable_query_context_data
+            .read()
+            .unwrap()
+            .warning
+            .clone()
+    }
+
+    pub fn set_warning(&self, msg: String) {
+        self.mutable_query_context_data.write().unwrap().warning = Some(msg);
+    }
+
+    pub fn explain_format(&self) -> Option<String> {
+        self.mutable_query_context_data
+            .read()
+            .unwrap()
+            .explain_format
+            .clone()
+    }
+
+    pub fn set_explain_format(&self, format: String) {
+        self.mutable_query_context_data
+            .write()
+            .unwrap()
+            .explain_format = Some(format);
+    }
+
+    pub fn query_timeout(&self) -> Option<Duration> {
+        self.mutable_session_data.read().unwrap().query_timeout
+    }
+
+    pub fn query_timeout_as_millis(&self) -> u128 {
+        let timeout = self.mutable_session_data.read().unwrap().query_timeout;
+        if let Some(t) = timeout {
+            return t.as_millis();
+        }
+        0
+    }
+
+    pub fn set_query_timeout(&self, timeout: Duration) {
+        self.mutable_session_data.write().unwrap().query_timeout = Some(timeout);
+    }
+
+    pub fn insert_cursor(&self, name: String, rb: RecordBatchStreamCursor) {
+        let mut guard = self.mutable_session_data.write().unwrap();
+        guard.cursors.insert(name, Arc::new(rb));
+
+        let cursor_count = guard.cursors.len();
+        if cursor_count > CURSOR_COUNT_WARNING_LIMIT {
+            warn!("Current connection has {} open cursors", cursor_count);
+        }
+    }
+
+    pub fn remove_cursor(&self, name: &str) {
+        let mut guard = self.mutable_session_data.write().unwrap();
+        guard.cursors.remove(name);
+    }
+
+    pub fn get_cursor(&self, name: &str) -> Option<Arc<RecordBatchStreamCursor>> {
+        let guard = self.mutable_session_data.read().unwrap();
+        let rb = guard.cursors.get(name);
+        rb.cloned()
+    }
+
+    pub fn snapshots(&self) -> HashMap<u64, u64> {
+        self.snapshot_seqs.read().unwrap().clone()
+    }
+
+    pub fn get_snapshot(&self, region_id: u64) -> Option<u64> {
+        self.snapshot_seqs.read().unwrap().get(&region_id).cloned()
+    }
 }
 
 impl QueryContextBuilder {
-    pub fn build(self) -> QueryContextRef {
-        Arc::new(QueryContext {
+    pub fn build(self) -> QueryContext {
+        let channel = self.channel.unwrap_or_default();
+        QueryContext {
             current_catalog: self
                 .current_catalog
                 .unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string()),
-            current_schema: self
-                .current_schema
-                .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string()),
-            current_user: self
-                .current_user
-                .unwrap_or_else(|| ArcSwap::new(Arc::new(None))),
-            timezone: self
-                .timezone
-                .unwrap_or(ArcSwap::new(Arc::new(get_timezone(None).clone()))),
+            snapshot_seqs: self.snapshot_seqs.unwrap_or_default(),
+            mutable_session_data: self.mutable_session_data.unwrap_or_default(),
+            mutable_query_context_data: self.mutable_query_context_data.unwrap_or_default(),
             sql_dialect: self
                 .sql_dialect
                 .unwrap_or_else(|| Arc::new(GreptimeDbDialect {})),
-            extension: self.extension.unwrap_or_default(),
-            configuration_parameter: self.configuration_parameter.unwrap_or_default(),
-        })
+            extensions: self.extensions.unwrap_or_default(),
+            configuration_parameter: self
+                .configuration_parameter
+                .unwrap_or_else(|| Arc::new(ConfigurationVariables::default())),
+            channel,
+        }
     }
 
     pub fn set_extension(mut self, key: String, value: String) -> Self {
-        self.extension
+        self.extensions
             .get_or_insert_with(HashMap::new)
             .insert(key, value);
         self
@@ -255,10 +423,42 @@ impl ConnInfo {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Default, Clone, Copy)]
+#[repr(u8)]
 pub enum Channel {
-    Mysql,
-    Postgres,
+    #[default]
+    Unknown = 0,
+
+    Mysql = 1,
+    Postgres = 2,
+    Http = 3,
+    Prometheus = 4,
+    Otlp = 5,
+    Grpc = 6,
+    Influx = 7,
+    Opentsdb = 8,
+    Loki = 9,
+    Elasticsearch = 10,
+    Jaeger = 11,
+}
+
+impl From<u32> for Channel {
+    fn from(value: u32) -> Self {
+        match value {
+            1 => Self::Mysql,
+            2 => Self::Postgres,
+            3 => Self::Http,
+            4 => Self::Prometheus,
+            5 => Self::Otlp,
+            6 => Self::Grpc,
+            7 => Self::Influx,
+            8 => Self::Opentsdb,
+            9 => Self::Loki,
+            10 => Self::Elasticsearch,
+            11 => Self::Jaeger,
+            _ => Self::Unknown,
+        }
+    }
 }
 
 impl Channel {
@@ -266,6 +466,7 @@ impl Channel {
         match self {
             Channel::Mysql => Arc::new(MySqlDialect {}),
             Channel::Postgres => Arc::new(PostgreSqlDialect {}),
+            _ => Arc::new(GenericDialect {}),
         }
     }
 }
@@ -275,6 +476,16 @@ impl Display for Channel {
         match self {
             Channel::Mysql => write!(f, "mysql"),
             Channel::Postgres => write!(f, "postgres"),
+            Channel::Http => write!(f, "http"),
+            Channel::Prometheus => write!(f, "prometheus"),
+            Channel::Otlp => write!(f, "otlp"),
+            Channel::Grpc => write!(f, "grpc"),
+            Channel::Influx => write!(f, "influx"),
+            Channel::Opentsdb => write!(f, "opentsdb"),
+            Channel::Loki => write!(f, "loki"),
+            Channel::Elasticsearch => write!(f, "elasticsearch"),
+            Channel::Jaeger => write!(f, "jaeger"),
+            Channel::Unknown => write!(f, "unknown"),
         }
     }
 }
@@ -282,12 +493,14 @@ impl Display for Channel {
 #[derive(Default, Debug)]
 pub struct ConfigurationVariables {
     postgres_bytea_output: ArcSwap<PGByteaOutputValue>,
+    pg_datestyle_format: ArcSwap<(PGDateTimeStyle, PGDateOrder)>,
 }
 
 impl Clone for ConfigurationVariables {
     fn clone(&self) -> Self {
         Self {
             postgres_bytea_output: ArcSwap::new(self.postgres_bytea_output.load().clone()),
+            pg_datestyle_format: ArcSwap::new(self.pg_datestyle_format.load().clone()),
         }
     }
 }
@@ -303,6 +516,14 @@ impl ConfigurationVariables {
 
     pub fn postgres_bytea_output(&self) -> Arc<PGByteaOutputValue> {
         self.postgres_bytea_output.load().clone()
+    }
+
+    pub fn pg_datetime_style(&self) -> Arc<(PGDateTimeStyle, PGDateOrder)> {
+        self.pg_datestyle_format.load().clone()
+    }
+
+    pub fn set_pg_datetime_style(&self, style: PGDateTimeStyle, order: PGDateOrder) {
+        self.pg_datestyle_format.swap(Arc::new((style, order)));
     }
 }
 

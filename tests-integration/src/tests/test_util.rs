@@ -15,13 +15,15 @@
 use std::env;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use client::OutputData;
 use common_query::Output;
 use common_recordbatch::util;
 use common_telemetry::warn;
 use common_test_util::find_workspace_path;
-use common_wal::config::kafka::{DatanodeKafkaConfig, MetaSrvKafkaConfig};
-use common_wal::config::{DatanodeWalConfig, MetaSrvWalConfig};
+use common_wal::config::kafka::common::{KafkaConnectionConfig, KafkaTopicConfig};
+use common_wal::config::kafka::{DatanodeKafkaConfig, MetasrvKafkaConfig};
+use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use frontend::instance::Instance;
 use rstest_reuse::{self, template};
 
@@ -36,7 +38,8 @@ pub(crate) trait RebuildableMockInstance: MockInstance {
     async fn rebuild(&mut self);
 }
 
-pub(crate) trait MockInstance: Sync + Send {
+#[async_trait]
+pub trait MockInstance: Sync + Send {
     fn frontend(&self) -> Arc<Instance>;
 
     fn is_distributed_mode(&self) -> bool;
@@ -106,7 +109,7 @@ impl MockInstanceBuilder {
                     unreachable!()
                 };
                 let GreptimeDbStandalone {
-                    mix_options,
+                    opts,
                     guard,
                     kv_backend,
                     procedure_manager,
@@ -114,7 +117,7 @@ impl MockInstanceBuilder {
                 } = instance;
                 MockInstanceImpl::Standalone(
                     builder
-                        .build_with(kv_backend, guard, mix_options, procedure_manager, false)
+                        .build_with(kv_backend, guard, opts, procedure_manager, false)
                         .await,
                 )
             }
@@ -188,7 +191,10 @@ pub(crate) async fn distributed() -> Arc<dyn MockInstance> {
 pub(crate) async fn standalone_with_multiple_object_stores() -> Arc<dyn MockInstance> {
     let _ = dotenv::dotenv();
     let test_name = uuid::Uuid::new_v4().to_string();
-    let storage_types = StorageType::build_storage_types_based_on_env();
+    let mut storage_types = StorageType::build_storage_types_based_on_env();
+    // File is the default storage, remove it to avoid panic
+    storage_types.retain(|x| *x != StorageType::File);
+
     let instance = GreptimeDbStandaloneBuilder::new(&test_name)
         .with_store_providers(storage_types)
         .build()
@@ -199,10 +205,13 @@ pub(crate) async fn standalone_with_multiple_object_stores() -> Arc<dyn MockInst
 pub(crate) async fn distributed_with_multiple_object_stores() -> Arc<dyn MockInstance> {
     let _ = dotenv::dotenv();
     let test_name = uuid::Uuid::new_v4().to_string();
-    let providers = StorageType::build_storage_types_based_on_env();
+    let mut storage_types = StorageType::build_storage_types_based_on_env();
+    // File is the default storage, remove it to avoid panic
+    storage_types.retain(|x| *x != StorageType::File);
+
     let cluster = GreptimeDbClusterBuilder::new(&test_name)
         .await
-        .with_store_providers(providers)
+        .with_store_providers(storage_types)
         .build()
         .await;
     Arc::new(MockDistributedInstance(cluster))
@@ -224,13 +233,22 @@ pub(crate) async fn standalone_with_kafka_wal() -> Option<Box<dyn RebuildableMoc
     let test_name = uuid::Uuid::new_v4().to_string();
     let builder = GreptimeDbStandaloneBuilder::new(&test_name)
         .with_datanode_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
-            broker_endpoints: endpoints.clone(),
+            connection: KafkaConnectionConfig {
+                broker_endpoints: endpoints.clone(),
+                ..Default::default()
+            },
             ..Default::default()
         }))
-        .with_metasrv_wal_config(MetaSrvWalConfig::Kafka(MetaSrvKafkaConfig {
-            broker_endpoints: endpoints,
-            topic_name_prefix: test_name.to_string(),
-            num_topics: 3,
+        .with_metasrv_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
+            connection: KafkaConnectionConfig {
+                broker_endpoints: endpoints,
+                ..Default::default()
+            },
+            kafka_topic: KafkaTopicConfig {
+                topic_name_prefix: test_name.to_string(),
+                num_topics: 3,
+                ..Default::default()
+            },
             ..Default::default()
         }));
     let instance = TestContext::new(MockInstanceBuilder::Standalone(builder)).await;
@@ -254,13 +272,22 @@ pub(crate) async fn distributed_with_kafka_wal() -> Option<Box<dyn RebuildableMo
     let builder = GreptimeDbClusterBuilder::new(&test_name)
         .await
         .with_datanode_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
-            broker_endpoints: endpoints.clone(),
+            connection: KafkaConnectionConfig {
+                broker_endpoints: endpoints.clone(),
+                ..Default::default()
+            },
             ..Default::default()
         }))
-        .with_metasrv_wal_config(MetaSrvWalConfig::Kafka(MetaSrvKafkaConfig {
-            broker_endpoints: endpoints,
-            topic_name_prefix: test_name.to_string(),
-            num_topics: 3,
+        .with_metasrv_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
+            connection: KafkaConnectionConfig {
+                broker_endpoints: endpoints,
+                ..Default::default()
+            },
+            kafka_topic: KafkaTopicConfig {
+                topic_name_prefix: test_name.to_string(),
+                num_topics: 3,
+                ..Default::default()
+            },
             ..Default::default()
         }));
     let instance = TestContext::new(MockInstanceBuilder::Distributed(builder)).await;

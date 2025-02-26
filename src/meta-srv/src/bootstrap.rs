@@ -16,15 +16,21 @@ use std::sync::Arc;
 
 use api::v1::meta::cluster_server::ClusterServer;
 use api::v1::meta::heartbeat_server::HeartbeatServer;
-use api::v1::meta::lock_server::LockServer;
 use api::v1::meta::procedure_service_server::ProcedureServiceServer;
 use api::v1::meta::store_server::StoreServer;
 use common_base::Plugins;
+use common_config::Configurable;
 use common_meta::kv_backend::chroot::ChrootKvBackend;
 use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::memory::MemoryKvBackend;
+#[cfg(feature = "pg_kvbackend")]
+use common_meta::kv_backend::rds::PgStore;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
+#[cfg(feature = "pg_kvbackend")]
+use common_telemetry::error;
 use common_telemetry::info;
+#[cfg(feature = "pg_kvbackend")]
+use deadpool_postgres::{Config, Runtime};
 use etcd_client::Client;
 use futures::future;
 use servers::configurator::ConfiguratorRef;
@@ -32,30 +38,36 @@ use servers::export_metrics::ExportMetricsTask;
 use servers::http::{HttpServer, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
 use servers::server::Server;
+#[cfg(feature = "pg_kvbackend")]
+use snafu::OptionExt;
 use snafu::ResultExt;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{self, Receiver, Sender};
+#[cfg(feature = "pg_kvbackend")]
+use tokio_postgres::NoTls;
+use tonic::codec::CompressionEncoding;
 use tonic::transport::server::{Router, TcpIncoming};
 
 use crate::election::etcd::EtcdElection;
-use crate::error::InitExportMetricsTaskSnafu;
-use crate::lock::etcd::EtcdLock;
-use crate::lock::memory::MemLock;
-use crate::metasrv::builder::MetaSrvBuilder;
-use crate::metasrv::{MetaSrv, MetaSrvOptions, SelectorRef};
+#[cfg(feature = "pg_kvbackend")]
+use crate::election::postgres::PgElection;
+#[cfg(feature = "pg_kvbackend")]
+use crate::election::CANDIDATE_LEASE_SECS;
+use crate::metasrv::builder::MetasrvBuilder;
+use crate::metasrv::{BackendImpl, Metasrv, MetasrvOptions, SelectorRef};
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::selector::load_based::LoadBasedSelector;
+use crate::selector::round_robin::RoundRobinSelector;
 use crate::selector::SelectorType;
 use crate::service::admin;
 use crate::{error, Result};
 
-#[derive(Clone)]
-pub struct MetaSrvInstance {
-    meta_srv: MetaSrv,
+pub struct MetasrvInstance {
+    metasrv: Arc<Metasrv>,
 
-    http_srv: Arc<HttpServer>,
+    httpsrv: Arc<HttpServer>,
 
-    opts: MetaSrvOptions,
+    opts: MetasrvOptions,
 
     signal_sender: Option<Sender<()>>,
 
@@ -64,25 +76,26 @@ pub struct MetaSrvInstance {
     export_metrics_task: Option<ExportMetricsTask>,
 }
 
-impl MetaSrvInstance {
+impl MetasrvInstance {
     pub async fn new(
-        opts: MetaSrvOptions,
+        opts: MetasrvOptions,
         plugins: Plugins,
-        meta_srv: MetaSrv,
-    ) -> Result<MetaSrvInstance> {
-        let http_srv = Arc::new(
+        metasrv: Metasrv,
+    ) -> Result<MetasrvInstance> {
+        let httpsrv = Arc::new(
             HttpServerBuilder::new(opts.http.clone())
                 .with_metrics_handler(MetricsHandler)
-                .with_greptime_config_options(opts.to_toml_string())
+                .with_greptime_config_options(opts.to_toml().context(error::TomlFormatSnafu)?)
                 .build(),
         );
-        // put meta_srv into plugins for later use
-        plugins.insert::<Arc<MetaSrv>>(Arc::new(meta_srv.clone()));
+        let metasrv = Arc::new(metasrv);
+        // put metasrv into plugins for later use
+        plugins.insert::<Arc<Metasrv>>(metasrv.clone());
         let export_metrics_task = ExportMetricsTask::try_new(&opts.export_metrics, Some(&plugins))
-            .context(InitExportMetricsTaskSnafu)?;
-        Ok(MetaSrvInstance {
-            meta_srv,
-            http_srv,
+            .context(error::InitExportMetricsTaskSnafu)?;
+        Ok(MetasrvInstance {
+            metasrv,
+            httpsrv,
             opts,
             signal_sender: None,
             plugins,
@@ -91,33 +104,33 @@ impl MetaSrvInstance {
     }
 
     pub async fn start(&mut self) -> Result<()> {
-        self.meta_srv.try_start().await?;
+        self.metasrv.try_start().await?;
 
         if let Some(t) = self.export_metrics_task.as_ref() {
-            t.start(None).context(InitExportMetricsTaskSnafu)?
+            t.start(None).context(error::InitExportMetricsTaskSnafu)?
         }
 
         let (tx, rx) = mpsc::channel::<()>(1);
 
         self.signal_sender = Some(tx);
 
-        let mut router = router(self.meta_srv.clone());
-        if let Some(configurator) = self.meta_srv.plugins().get::<ConfiguratorRef>() {
+        let mut router = router(self.metasrv.clone());
+        if let Some(configurator) = self.metasrv.plugins().get::<ConfiguratorRef>() {
             router = configurator.config_grpc(router);
         }
 
-        let meta_srv = bootstrap_meta_srv_with_router(&self.opts.bind_addr, router, rx);
+        let metasrv = bootstrap_metasrv_with_router(&self.opts.bind_addr, router, rx);
         let addr = self.opts.http.addr.parse().context(error::ParseAddrSnafu {
             addr: &self.opts.http.addr,
         })?;
         let http_srv = async {
-            self.http_srv
+            self.httpsrv
                 .start(addr)
                 .await
                 .map(|_| ())
                 .context(error::StartHttpSnafu)
         };
-        future::try_join(meta_srv, http_srv).await?;
+        future::try_join(metasrv, http_srv).await?;
         Ok(())
     }
 
@@ -128,12 +141,12 @@ impl MetaSrvInstance {
                 .await
                 .context(error::SendShutdownSignalSnafu)?;
         }
-        self.meta_srv.shutdown().await?;
-        self.http_srv
+        self.metasrv.shutdown().await?;
+        self.httpsrv
             .shutdown()
             .await
             .context(error::ShutdownServerSnafu {
-                server: self.http_srv.name(),
+                server: self.httpsrv.name(),
             })?;
         Ok(())
     }
@@ -141,9 +154,13 @@ impl MetaSrvInstance {
     pub fn plugins(&self) -> Plugins {
         self.plugins.clone()
     }
+
+    pub fn get_inner(&self) -> &Metasrv {
+        &self.metasrv
+    }
 }
 
-pub async fn bootstrap_meta_srv_with_router(
+pub async fn bootstrap_metasrv_with_router(
     bind_addr: &str,
     router: Router,
     mut signal: Receiver<()>,
@@ -167,86 +184,142 @@ pub async fn bootstrap_meta_srv_with_router(
     Ok(())
 }
 
-pub fn router(meta_srv: MetaSrv) -> Router {
-    tonic::transport::Server::builder()
-        .accept_http1(true) // for admin services
-        .add_service(HeartbeatServer::new(meta_srv.clone()))
-        .add_service(StoreServer::new(meta_srv.clone()))
-        .add_service(ClusterServer::new(meta_srv.clone()))
-        .add_service(LockServer::new(meta_srv.clone()))
-        .add_service(ProcedureServiceServer::new(meta_srv.clone()))
-        .add_service(admin::make_admin_service(meta_srv))
+#[macro_export]
+macro_rules! add_compressed_service {
+    ($builder:expr, $server:expr) => {
+        $builder.add_service(
+            $server
+                .accept_compressed(CompressionEncoding::Gzip)
+                .accept_compressed(CompressionEncoding::Zstd)
+                .send_compressed(CompressionEncoding::Gzip)
+                .send_compressed(CompressionEncoding::Zstd),
+        )
+    };
+}
+
+pub fn router(metasrv: Arc<Metasrv>) -> Router {
+    let mut router = tonic::transport::Server::builder().accept_http1(true); // for admin services
+    let router = add_compressed_service!(router, HeartbeatServer::from_arc(metasrv.clone()));
+    let router = add_compressed_service!(router, StoreServer::from_arc(metasrv.clone()));
+    let router = add_compressed_service!(router, ClusterServer::from_arc(metasrv.clone()));
+    let router = add_compressed_service!(router, ProcedureServiceServer::from_arc(metasrv.clone()));
+    router.add_service(admin::make_admin_service(metasrv))
 }
 
 pub async fn metasrv_builder(
-    opts: &MetaSrvOptions,
+    opts: &MetasrvOptions,
     plugins: Plugins,
     kv_backend: Option<KvBackendRef>,
-) -> Result<MetaSrvBuilder> {
-    let (kv_backend, election, lock) = match (kv_backend, opts.use_memory_store) {
-        (Some(kv_backend), _) => (kv_backend, None, Some(Arc::new(MemLock::default()) as _)),
-        (None, true) => (
-            Arc::new(MemoryKvBackend::new()) as _,
-            None,
-            Some(Arc::new(MemLock::default()) as _),
-        ),
-        (None, false) => {
+) -> Result<MetasrvBuilder> {
+    let (mut kv_backend, election) = match (kv_backend, &opts.backend) {
+        (Some(kv_backend), _) => (kv_backend, None),
+        (None, BackendImpl::MemoryStore) => (Arc::new(MemoryKvBackend::new()) as _, None),
+        (None, BackendImpl::EtcdStore) => {
             let etcd_client = create_etcd_client(opts).await?;
-            let kv_backend = {
-                let etcd_backend =
-                    EtcdStore::with_etcd_client(etcd_client.clone(), opts.max_txn_ops);
-                if !opts.store_key_prefix.is_empty() {
-                    Arc::new(ChrootKvBackend::new(
-                        opts.store_key_prefix.clone().into_bytes(),
-                        etcd_backend,
-                    ))
-                } else {
-                    etcd_backend
-                }
-            };
-            (
-                kv_backend,
-                Some(
-                    EtcdElection::with_etcd_client(
-                        &opts.server_addr,
-                        etcd_client.clone(),
-                        opts.store_key_prefix.clone(),
-                    )
-                    .await?,
-                ),
-                Some(EtcdLock::with_etcd_client(
-                    etcd_client,
-                    opts.store_key_prefix.clone(),
-                )?),
+            let kv_backend = EtcdStore::with_etcd_client(etcd_client.clone(), opts.max_txn_ops);
+            let election = EtcdElection::with_etcd_client(
+                &opts.server_addr,
+                etcd_client,
+                opts.store_key_prefix.clone(),
             )
+            .await?;
+
+            (kv_backend, Some(election))
+        }
+        #[cfg(feature = "pg_kvbackend")]
+        (None, BackendImpl::PostgresStore) => {
+            let pool = create_postgres_pool(opts).await?;
+            // TODO(CookiePie): use table name from config.
+            let kv_backend = PgStore::with_pg_pool(pool, &opts.meta_table_name, opts.max_txn_ops)
+                .await
+                .context(error::KvBackendSnafu)?;
+            // Client for election should be created separately since we need a different session keep-alive idle time.
+            let election_client = create_postgres_client(opts).await?;
+            let election = PgElection::with_pg_client(
+                opts.server_addr.clone(),
+                election_client,
+                opts.store_key_prefix.clone(),
+                CANDIDATE_LEASE_SECS,
+                &opts.meta_table_name,
+                opts.meta_election_lock_id,
+            )
+            .await?;
+            (kv_backend, Some(election))
         }
     };
+
+    if !opts.store_key_prefix.is_empty() {
+        info!(
+            "using chroot kv backend with prefix: {prefix}",
+            prefix = opts.store_key_prefix
+        );
+        kv_backend = Arc::new(ChrootKvBackend::new(
+            opts.store_key_prefix.clone().into_bytes(),
+            kv_backend,
+        ))
+    }
 
     let in_memory = Arc::new(MemoryKvBackend::new()) as ResettableKvBackendRef;
 
     let selector = match opts.selector {
         SelectorType::LoadBased => Arc::new(LoadBasedSelector::default()) as SelectorRef,
         SelectorType::LeaseBased => Arc::new(LeaseBasedSelector) as SelectorRef,
+        SelectorType::RoundRobin => Arc::new(RoundRobinSelector::default()) as SelectorRef,
     };
 
-    Ok(MetaSrvBuilder::new()
+    Ok(MetasrvBuilder::new()
         .options(opts.clone())
         .kv_backend(kv_backend)
         .in_memory(in_memory)
         .selector(selector)
         .election(election)
-        .lock(lock)
         .plugins(plugins))
 }
 
-async fn create_etcd_client(opts: &MetaSrvOptions) -> Result<Client> {
+async fn create_etcd_client(opts: &MetasrvOptions) -> Result<Client> {
     let etcd_endpoints = opts
-        .store_addr
-        .split(',')
+        .store_addrs
+        .iter()
         .map(|x| x.trim())
         .filter(|x| !x.is_empty())
         .collect::<Vec<_>>();
     Client::connect(&etcd_endpoints, None)
         .await
         .context(error::ConnectEtcdSnafu)
+}
+
+#[cfg(feature = "pg_kvbackend")]
+async fn create_postgres_client(opts: &MetasrvOptions) -> Result<tokio_postgres::Client> {
+    let postgres_url = opts
+        .store_addrs
+        .first()
+        .context(error::InvalidArgumentsSnafu {
+            err_msg: "empty store addrs",
+        })?;
+    let (client, connection) = tokio_postgres::connect(postgres_url, NoTls)
+        .await
+        .context(error::ConnectPostgresSnafu)?;
+
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            error!(e; "connection error");
+        }
+    });
+    Ok(client)
+}
+
+#[cfg(feature = "pg_kvbackend")]
+async fn create_postgres_pool(opts: &MetasrvOptions) -> Result<deadpool_postgres::Pool> {
+    let postgres_url = opts
+        .store_addrs
+        .first()
+        .context(error::InvalidArgumentsSnafu {
+            err_msg: "empty store addrs",
+        })?;
+    let mut cfg = Config::new();
+    cfg.url = Some(postgres_url.to_string());
+    let pool = cfg
+        .create_pool(Some(Runtime::Tokio1), NoTls)
+        .context(error::CreatePostgresPoolSnafu)?;
+    Ok(pool)
 }

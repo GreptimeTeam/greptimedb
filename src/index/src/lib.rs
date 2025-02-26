@@ -13,5 +13,13 @@
 // limitations under the License.
 
 #![feature(iter_partition_in_place)]
+#![feature(assert_matches)]
 
+pub mod bloom_filter;
+pub mod error;
+pub mod external_provider;
+pub mod fulltext_index;
 pub mod inverted_index;
+
+pub type Bytes = Vec<u8>;
+pub type BytesRef<'a> = &'a [u8];

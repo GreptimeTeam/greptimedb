@@ -17,8 +17,10 @@ use std::sync::Arc;
 
 use common_macro::{as_aggr_func_creator, AggrFuncTypeStore};
 use common_query::error::{
-    CreateAccumulatorSnafu, DowncastVectorSnafu, FromScalarValueSnafu, Result,
+    CreateAccumulatorSnafu, DowncastVectorSnafu, FromScalarValueSnafu, InvalidInputStateSnafu,
+    Result,
 };
+use common_query::logical_plan::accumulator::AggrFuncTypeStore;
 use common_query::logical_plan::{Accumulator, AggregateFunctionCreator};
 use common_query::prelude::*;
 use datatypes::prelude::*;
@@ -56,7 +58,7 @@ where
             .map(|&n| n.into())
             .collect::<Vec<Value>>();
         Ok(vec![Value::List(ListValue::new(
-            Some(Box::new(nums)),
+            nums,
             I::LogicalType::build_data_type(),
         ))])
     }
@@ -120,10 +122,7 @@ where
                 O::from_native(native).into()
             })
             .collect::<Vec<Value>>();
-        let diff = Value::List(ListValue::new(
-            Some(Box::new(diff)),
-            O::LogicalType::build_data_type(),
-        ));
+        let diff = Value::List(ListValue::new(diff, O::LogicalType::build_data_type()));
         Ok(diff)
     }
 }
@@ -218,10 +217,7 @@ mod test {
         let values = vec![Value::from(2_i64), Value::from(1_i64)];
         diff.update_batch(&v).unwrap();
         assert_eq!(
-            Value::List(ListValue::new(
-                Some(Box::new(values)),
-                ConcreteDataType::int64_datatype()
-            )),
+            Value::List(ListValue::new(values, ConcreteDataType::int64_datatype())),
             diff.evaluate().unwrap()
         );
 
@@ -236,10 +232,7 @@ mod test {
         let values = vec![Value::from(5_i64), Value::from(1_i64)];
         diff.update_batch(&v).unwrap();
         assert_eq!(
-            Value::List(ListValue::new(
-                Some(Box::new(values)),
-                ConcreteDataType::int64_datatype()
-            )),
+            Value::List(ListValue::new(values, ConcreteDataType::int64_datatype())),
             diff.evaluate().unwrap()
         );
 
@@ -252,10 +245,7 @@ mod test {
         let values = vec![Value::from(0_i64), Value::from(0_i64), Value::from(0_i64)];
         diff.update_batch(&v).unwrap();
         assert_eq!(
-            Value::List(ListValue::new(
-                Some(Box::new(values)),
-                ConcreteDataType::int64_datatype()
-            )),
+            Value::List(ListValue::new(values, ConcreteDataType::int64_datatype())),
             diff.evaluate().unwrap()
         );
     }

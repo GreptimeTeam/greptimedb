@@ -12,17 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) mod admin_parser;
 mod alter_parser;
 pub(crate) mod copy_parser;
 pub(crate) mod create_parser;
+pub(crate) mod cursor_parser;
+pub(crate) mod deallocate_parser;
 pub(crate) mod delete_parser;
 pub(crate) mod describe_parser;
 pub(crate) mod drop_parser;
 pub(crate) mod error;
+pub(crate) mod execute_parser;
 pub(crate) mod explain_parser;
 pub(crate) mod insert_parser;
+pub(crate) mod prepare_parser;
 pub(crate) mod query_parser;
 pub(crate) mod set_var_parser;
 pub(crate) mod show_parser;
 pub(crate) mod tql_parser;
 pub(crate) mod truncate_parser;
+pub(crate) mod utils;

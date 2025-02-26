@@ -1,0 +1,124 @@
+## The running mode of the flownode. It can be `standalone` or `distributed`.
+mode = "distributed"
+
+## The flownode identifier and should be unique in the cluster.
+## @toml2docs:none-default
+node_id = 14
+
+## flow engine options.
+[flow]
+## The number of flow worker in flownode.
+## Not setting(or set to 0) this value will use the number of CPU cores divided by 2.
+#+num_workers=0
+
+## The gRPC server options.
+[grpc]
+## The address to bind the gRPC server.
+bind_addr = "127.0.0.1:6800"
+## The address advertised to the metasrv,
+## and used for connections from outside the host
+server_addr = "127.0.0.1:6800"
+## The number of server worker threads.
+runtime_size = 2
+## The maximum receive message size for gRPC server.
+max_recv_message_size = "512MB"
+## The maximum send message size for gRPC server.
+max_send_message_size = "512MB"
+
+## The HTTP server options.
+[http]
+## The address to bind the HTTP server.
+addr = "127.0.0.1:4000"
+## HTTP request timeout. Set to 0 to disable timeout.
+timeout = "30s"
+## HTTP request body limit.
+## The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.
+## Set to 0 to disable limit.
+body_limit = "64MB"
+
+## The metasrv client options.
+[meta_client]
+## The addresses of the metasrv.
+metasrv_addrs = ["127.0.0.1:3002"]
+
+## Operation timeout.
+timeout = "3s"
+
+## Heartbeat timeout.
+heartbeat_timeout = "500ms"
+
+## DDL timeout.
+ddl_timeout = "10s"
+
+## Connect server timeout.
+connect_timeout = "1s"
+
+## `TCP_NODELAY` option for accepted connections.
+tcp_nodelay = true
+
+## The configuration about the cache of the metadata.
+metadata_cache_max_capacity = 100000
+
+## TTL of the metadata cache.
+metadata_cache_ttl = "10m"
+
+# TTI of the metadata cache.
+metadata_cache_tti = "5m"
+
+## The heartbeat options.
+[heartbeat]
+## Interval for sending heartbeat messages to the metasrv.
+interval = "3s"
+
+## Interval for retrying to send heartbeat messages to the metasrv.
+retry_interval = "3s"
+
+## The logging options.
+[logging]
+## The directory to store the log files. If set to empty, logs will not be written to files.
+dir = "/tmp/greptimedb/logs"
+
+## The log level. Can be `info`/`debug`/`warn`/`error`.
+## @toml2docs:none-default
+level = "info"
+
+## Enable OTLP tracing.
+enable_otlp_tracing = false
+
+## The OTLP tracing endpoint.
+otlp_endpoint = "http://localhost:4317"
+
+## Whether to append logs to stdout.
+append_stdout = true
+
+## The log format. Can be `text`/`json`.
+log_format = "text"
+
+## The maximum amount of log files.
+max_log_files = 720
+
+## The percentage of tracing will be sampled and exported.
+## Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.
+## ratio > 1 are treated as 1. Fractions < 0 are treated as 0
+[logging.tracing_sample_ratio]
+default_ratio = 1.0
+
+## The slow query log options.
+[logging.slow_query]
+## Whether to enable slow query log.
+enable = false
+
+## The threshold of slow query.
+## @toml2docs:none-default
+threshold = "10s"
+
+## The sampling ratio of slow query log. The value should be in the range of (0, 1].
+## @toml2docs:none-default
+sample_ratio = 1.0
+
+## The tracing options. Only effect when compiled with `tokio-console` feature.
+#+ [tracing]
+## The tokio console address.
+## @toml2docs:none-default
+#+ tokio_console_addr = "127.0.0.1"
+

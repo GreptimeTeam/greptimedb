@@ -12,29 +12,43 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::{HashMap, HashSet};
 use std::result;
 
+use api::v1::alter_database_expr::Kind as PbAlterDatabaseKind;
 use api::v1::meta::ddl_task_request::Task;
 use api::v1::meta::{
-    AlterTableTask as PbAlterTableTask, AlterTableTasks as PbAlterTableTasks,
-    CreateTableTask as PbCreateTableTask, CreateTableTasks as PbCreateTableTasks,
+    AlterDatabaseTask as PbAlterDatabaseTask, AlterTableTask as PbAlterTableTask,
+    AlterTableTasks as PbAlterTableTasks, CreateDatabaseTask as PbCreateDatabaseTask,
+    CreateFlowTask as PbCreateFlowTask, CreateTableTask as PbCreateTableTask,
+    CreateTableTasks as PbCreateTableTasks, CreateViewTask as PbCreateViewTask,
     DdlTaskRequest as PbDdlTaskRequest, DdlTaskResponse as PbDdlTaskResponse,
-    DropDatabaseTask as PbDropDatabaseTask, DropTableTask as PbDropTableTask,
-    DropTableTasks as PbDropTableTasks, Partition, ProcedureId,
+    DropDatabaseTask as PbDropDatabaseTask, DropFlowTask as PbDropFlowTask,
+    DropTableTask as PbDropTableTask, DropTableTasks as PbDropTableTasks,
+    DropViewTask as PbDropViewTask, Partition, ProcedureId,
     TruncateTableTask as PbTruncateTableTask,
 };
-use api::v1::{AlterExpr, CreateTableExpr, DropDatabaseExpr, DropTableExpr, TruncateTableExpr};
+use api::v1::{
+    AlterDatabaseExpr, AlterTableExpr, CreateDatabaseExpr, CreateFlowExpr, CreateTableExpr,
+    CreateViewExpr, DropDatabaseExpr, DropFlowExpr, DropTableExpr, DropViewExpr, ExpireAfter,
+    Option as PbOption, QueryContext as PbQueryContext, TruncateTableExpr,
+};
 use base64::engine::general_purpose;
 use base64::Engine as _;
+use common_time::DatabaseTimeToLive;
 use prost::Message;
 use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, DefaultOnNull};
+use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use table::metadata::{RawTableInfo, TableId};
+use table::table_name::TableName;
 use table::table_reference::TableReference;
 
-use crate::error::{self, Result};
-use crate::table_name::TableName;
+use crate::error::{self, InvalidSetDatabaseOptionSnafu, InvalidUnsetDatabaseOptionSnafu, Result};
+use crate::key::FlowId;
 
+/// DDL tasks
 #[derive(Debug, Clone)]
 pub enum DdlTask {
     CreateTable(CreateTableTask),
@@ -44,10 +58,32 @@ pub enum DdlTask {
     CreateLogicalTables(Vec<CreateTableTask>),
     DropLogicalTables(Vec<DropTableTask>),
     AlterLogicalTables(Vec<AlterTableTask>),
+    CreateDatabase(CreateDatabaseTask),
     DropDatabase(DropDatabaseTask),
+    AlterDatabase(AlterDatabaseTask),
+    CreateFlow(CreateFlowTask),
+    DropFlow(DropFlowTask),
+    CreateView(CreateViewTask),
+    DropView(DropViewTask),
 }
 
 impl DdlTask {
+    /// Creates a [`DdlTask`] to create a flow.
+    pub fn new_create_flow(expr: CreateFlowTask) -> Self {
+        DdlTask::CreateFlow(expr)
+    }
+
+    /// Creates a [`DdlTask`] to drop a flow.
+    pub fn new_drop_flow(expr: DropFlowTask) -> Self {
+        DdlTask::DropFlow(expr)
+    }
+
+    /// Creates a [`DdlTask`] to drop a view.
+    pub fn new_drop_view(expr: DropViewTask) -> Self {
+        DdlTask::DropView(expr)
+    }
+
+    /// Creates a [`DdlTask`] to create a table.
     pub fn new_create_table(
         expr: CreateTableExpr,
         partitions: Vec<Partition>,
@@ -56,6 +92,7 @@ impl DdlTask {
         DdlTask::CreateTable(CreateTableTask::new(expr, partitions, table_info))
     }
 
+    /// Creates a [`DdlTask`] to create several logical tables.
     pub fn new_create_logical_tables(table_data: Vec<(CreateTableExpr, RawTableInfo)>) -> Self {
         DdlTask::CreateLogicalTables(
             table_data
@@ -65,7 +102,8 @@ impl DdlTask {
         )
     }
 
-    pub fn new_alter_logical_tables(table_data: Vec<AlterExpr>) -> Self {
+    /// Creates a [`DdlTask`] to alter several logical tables.
+    pub fn new_alter_logical_tables(table_data: Vec<AlterTableExpr>) -> Self {
         DdlTask::AlterLogicalTables(
             table_data
                 .into_iter()
@@ -74,6 +112,7 @@ impl DdlTask {
         )
     }
 
+    /// Creates a [`DdlTask`] to drop a table.
     pub fn new_drop_table(
         catalog: String,
         schema: String,
@@ -90,6 +129,22 @@ impl DdlTask {
         })
     }
 
+    /// Creates a [`DdlTask`] to create a database.
+    pub fn new_create_database(
+        catalog: String,
+        schema: String,
+        create_if_not_exists: bool,
+        options: HashMap<String, String>,
+    ) -> Self {
+        DdlTask::CreateDatabase(CreateDatabaseTask {
+            catalog,
+            schema,
+            create_if_not_exists,
+            options,
+        })
+    }
+
+    /// Creates a [`DdlTask`] to drop a database.
     pub fn new_drop_database(catalog: String, schema: String, drop_if_exists: bool) -> Self {
         DdlTask::DropDatabase(DropDatabaseTask {
             catalog,
@@ -98,10 +153,17 @@ impl DdlTask {
         })
     }
 
-    pub fn new_alter_table(alter_table: AlterExpr) -> Self {
+    /// Creates a [`DdlTask`] to alter a database.
+    pub fn new_alter_database(alter_expr: AlterDatabaseExpr) -> Self {
+        DdlTask::AlterDatabase(AlterDatabaseTask { alter_expr })
+    }
+
+    /// Creates a [`DdlTask`] to alter a table.
+    pub fn new_alter_table(alter_table: AlterTableExpr) -> Self {
         DdlTask::AlterTable(AlterTableTask { alter_table })
     }
 
+    /// Creates a [`DdlTask`] to truncate a table.
     pub fn new_truncate_table(
         catalog: String,
         schema: String,
@@ -113,6 +175,14 @@ impl DdlTask {
             schema,
             table,
             table_id,
+        })
+    }
+
+    /// Creates a [`DdlTask`] to create a view.
+    pub fn new_create_view(create_view: CreateViewExpr, view_info: RawTableInfo) -> Self {
+        DdlTask::CreateView(CreateViewTask {
+            create_view,
+            view_info,
         })
     }
 }
@@ -156,15 +226,26 @@ impl TryFrom<Task> for DdlTask {
 
                 Ok(DdlTask::AlterLogicalTables(tasks))
             }
+            Task::CreateDatabaseTask(create_database) => {
+                Ok(DdlTask::CreateDatabase(create_database.try_into()?))
+            }
             Task::DropDatabaseTask(drop_database) => {
                 Ok(DdlTask::DropDatabase(drop_database.try_into()?))
             }
+            Task::AlterDatabaseTask(alter_database) => {
+                Ok(DdlTask::AlterDatabase(alter_database.try_into()?))
+            }
+            Task::CreateFlowTask(create_flow) => Ok(DdlTask::CreateFlow(create_flow.try_into()?)),
+            Task::DropFlowTask(drop_flow) => Ok(DdlTask::DropFlow(drop_flow.try_into()?)),
+            Task::CreateViewTask(create_view) => Ok(DdlTask::CreateView(create_view.try_into()?)),
+            Task::DropViewTask(drop_view) => Ok(DdlTask::DropView(drop_view.try_into()?)),
         }
     }
 }
 
 #[derive(Clone)]
 pub struct SubmitDdlTaskRequest {
+    pub query_context: QueryContextRef,
     pub task: DdlTask,
 }
 
@@ -174,7 +255,7 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
     fn try_from(request: SubmitDdlTaskRequest) -> Result<Self> {
         let task = match request.task {
             DdlTask::CreateTable(task) => Task::CreateTableTask(task.try_into()?),
-            DdlTask::DropTable(task) => Task::DropTableTask(task.try_into()?),
+            DdlTask::DropTable(task) => Task::DropTableTask(task.into()),
             DdlTask::AlterTable(task) => Task::AlterTableTask(task.try_into()?),
             DdlTask::TruncateTable(task) => Task::TruncateTableTask(task.try_into()?),
             DdlTask::CreateLogicalTables(tasks) => {
@@ -188,8 +269,8 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
             DdlTask::DropLogicalTables(tasks) => {
                 let tasks = tasks
                     .into_iter()
-                    .map(|task| task.try_into())
-                    .collect::<Result<Vec<_>>>()?;
+                    .map(|task| task.into())
+                    .collect::<Vec<_>>();
 
                 Task::DropTableTasks(PbDropTableTasks { tasks })
             }
@@ -201,11 +282,18 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
 
                 Task::AlterTableTasks(PbAlterTableTasks { tasks })
             }
+            DdlTask::CreateDatabase(task) => Task::CreateDatabaseTask(task.try_into()?),
             DdlTask::DropDatabase(task) => Task::DropDatabaseTask(task.try_into()?),
+            DdlTask::AlterDatabase(task) => Task::AlterDatabaseTask(task.try_into()?),
+            DdlTask::CreateFlow(task) => Task::CreateFlowTask(task.into()),
+            DdlTask::DropFlow(task) => Task::DropFlowTask(task.into()),
+            DdlTask::CreateView(task) => Task::CreateViewTask(task.try_into()?),
+            DdlTask::DropView(task) => Task::DropViewTask(task.into()),
         };
 
         Ok(Self {
             header: None,
+            query_context: Some((*request.query_context).clone().into()),
             task: Some(task),
         })
     }
@@ -214,10 +302,7 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
 #[derive(Debug, Default)]
 pub struct SubmitDdlTaskResponse {
     pub key: Vec<u8>,
-    // For create physical table
-    // TODO(jeremy): remove it?
-    pub table_id: Option<TableId>,
-    // For create multi logical tables
+    // `table_id`s for `CREATE TABLE` or `CREATE LOGICAL TABLES` task.
     pub table_ids: Vec<TableId>,
 }
 
@@ -225,11 +310,9 @@ impl TryFrom<PbDdlTaskResponse> for SubmitDdlTaskResponse {
     type Error = error::Error;
 
     fn try_from(resp: PbDdlTaskResponse) -> Result<Self> {
-        let table_id = resp.table_id.map(|t| t.id);
         let table_ids = resp.table_ids.into_iter().map(|t| t.id).collect();
         Ok(Self {
             key: resp.pid.map(|pid| pid.key).unwrap_or_default(),
-            table_id,
             table_ids,
         })
     }
@@ -239,15 +322,180 @@ impl From<SubmitDdlTaskResponse> for PbDdlTaskResponse {
     fn from(val: SubmitDdlTaskResponse) -> Self {
         Self {
             pid: Some(ProcedureId { key: val.key }),
-            table_id: val
-                .table_id
-                .map(|table_id| api::v1::meta::TableId { id: table_id }),
             table_ids: val
                 .table_ids
                 .into_iter()
-                .map(|id| api::v1::meta::TableId { id })
+                .map(|id| api::v1::TableId { id })
                 .collect(),
             ..Default::default()
+        }
+    }
+}
+
+/// A `CREATE VIEW` task.
+#[derive(Debug, PartialEq, Clone)]
+pub struct CreateViewTask {
+    pub create_view: CreateViewExpr,
+    pub view_info: RawTableInfo,
+}
+
+impl CreateViewTask {
+    /// Returns the [`TableReference`] of view.
+    pub fn table_ref(&self) -> TableReference {
+        TableReference {
+            catalog: &self.create_view.catalog_name,
+            schema: &self.create_view.schema_name,
+            table: &self.create_view.view_name,
+        }
+    }
+
+    /// Returns the encoded logical plan
+    pub fn raw_logical_plan(&self) -> &Vec<u8> {
+        &self.create_view.logical_plan
+    }
+
+    /// Returns the view definition in SQL
+    pub fn view_definition(&self) -> &str {
+        &self.create_view.definition
+    }
+
+    /// Returns the resolved table names in view's logical plan
+    pub fn table_names(&self) -> HashSet<TableName> {
+        self.create_view
+            .table_names
+            .iter()
+            .map(|t| t.clone().into())
+            .collect()
+    }
+
+    /// Returns the view's columns
+    pub fn columns(&self) -> &Vec<String> {
+        &self.create_view.columns
+    }
+
+    /// Returns the original logical plan's columns
+    pub fn plan_columns(&self) -> &Vec<String> {
+        &self.create_view.plan_columns
+    }
+}
+
+impl TryFrom<PbCreateViewTask> for CreateViewTask {
+    type Error = error::Error;
+
+    fn try_from(pb: PbCreateViewTask) -> Result<Self> {
+        let view_info = serde_json::from_slice(&pb.view_info).context(error::SerdeJsonSnafu)?;
+
+        Ok(CreateViewTask {
+            create_view: pb.create_view.context(error::InvalidProtoMsgSnafu {
+                err_msg: "expected create view",
+            })?,
+            view_info,
+        })
+    }
+}
+
+impl TryFrom<CreateViewTask> for PbCreateViewTask {
+    type Error = error::Error;
+
+    fn try_from(task: CreateViewTask) -> Result<PbCreateViewTask> {
+        Ok(PbCreateViewTask {
+            create_view: Some(task.create_view),
+            view_info: serde_json::to_vec(&task.view_info).context(error::SerdeJsonSnafu)?,
+        })
+    }
+}
+
+impl Serialize for CreateViewTask {
+    fn serialize<S>(&self, serializer: S) -> result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let view_info = serde_json::to_vec(&self.view_info)
+            .map_err(|err| serde::ser::Error::custom(err.to_string()))?;
+
+        let pb = PbCreateViewTask {
+            create_view: Some(self.create_view.clone()),
+            view_info,
+        };
+        let buf = pb.encode_to_vec();
+        let encoded = general_purpose::STANDARD_NO_PAD.encode(buf);
+        serializer.serialize_str(&encoded)
+    }
+}
+
+impl<'de> Deserialize<'de> for CreateViewTask {
+    fn deserialize<D>(deserializer: D) -> result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let encoded = String::deserialize(deserializer)?;
+        let buf = general_purpose::STANDARD_NO_PAD
+            .decode(encoded)
+            .map_err(|err| serde::de::Error::custom(err.to_string()))?;
+        let expr: PbCreateViewTask = PbCreateViewTask::decode(&*buf)
+            .map_err(|err| serde::de::Error::custom(err.to_string()))?;
+
+        let expr = CreateViewTask::try_from(expr)
+            .map_err(|err| serde::de::Error::custom(err.to_string()))?;
+
+        Ok(expr)
+    }
+}
+
+/// A `DROP VIEW` task.
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub struct DropViewTask {
+    pub catalog: String,
+    pub schema: String,
+    pub view: String,
+    pub view_id: TableId,
+    pub drop_if_exists: bool,
+}
+
+impl DropViewTask {
+    /// Returns the [`TableReference`] of view.
+    pub fn table_ref(&self) -> TableReference {
+        TableReference {
+            catalog: &self.catalog,
+            schema: &self.schema,
+            table: &self.view,
+        }
+    }
+}
+
+impl TryFrom<PbDropViewTask> for DropViewTask {
+    type Error = error::Error;
+
+    fn try_from(pb: PbDropViewTask) -> Result<Self> {
+        let expr = pb.drop_view.context(error::InvalidProtoMsgSnafu {
+            err_msg: "expected drop view",
+        })?;
+
+        Ok(DropViewTask {
+            catalog: expr.catalog_name,
+            schema: expr.schema_name,
+            view: expr.view_name,
+            view_id: expr
+                .view_id
+                .context(error::InvalidProtoMsgSnafu {
+                    err_msg: "expected view_id",
+                })?
+                .id,
+            drop_if_exists: expr.drop_if_exists,
+        })
+    }
+}
+
+impl From<DropViewTask> for PbDropViewTask {
+    fn from(task: DropViewTask) -> Self {
+        PbDropViewTask {
+            drop_view: Some(DropViewExpr {
+                catalog_name: task.catalog,
+                schema_name: task.schema,
+                view_name: task.view,
+                view_id: Some(api::v1::TableId { id: task.view_id }),
+                drop_if_exists: task.drop_if_exists,
+            }),
         }
     }
 }
@@ -303,11 +551,9 @@ impl TryFrom<PbDropTableTask> for DropTableTask {
     }
 }
 
-impl TryFrom<DropTableTask> for PbDropTableTask {
-    type Error = error::Error;
-
-    fn try_from(task: DropTableTask) -> Result<Self> {
-        Ok(PbDropTableTask {
+impl From<DropTableTask> for PbDropTableTask {
+    fn from(task: DropTableTask) -> Self {
+        PbDropTableTask {
             drop_table: Some(DropTableExpr {
                 catalog_name: task.catalog,
                 schema_name: task.schema,
@@ -315,7 +561,7 @@ impl TryFrom<DropTableTask> for PbDropTableTask {
                 table_id: Some(api::v1::TableId { id: task.table_id }),
                 drop_if_exists: task.drop_if_exists,
             }),
-        })
+        }
     }
 }
 
@@ -447,10 +693,21 @@ impl<'de> Deserialize<'de> for CreateTableTask {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct AlterTableTask {
-    pub alter_table: AlterExpr,
+    // TODO(CookiePieWw): Replace proto struct with user-defined struct
+    pub alter_table: AlterTableExpr,
 }
 
 impl AlterTableTask {
+    pub fn validate(&self) -> Result<()> {
+        self.alter_table
+            .kind
+            .as_ref()
+            .context(error::UnexpectedSnafu {
+                err_msg: "'kind' is absent",
+            })?;
+        Ok(())
+    }
+
     pub fn table_ref(&self) -> TableReference {
         TableReference {
             catalog: &self.alter_table.catalog_name,
@@ -588,6 +845,60 @@ impl TryFrom<TruncateTableTask> for PbTruncateTableTask {
     }
 }
 
+#[serde_as]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+pub struct CreateDatabaseTask {
+    pub catalog: String,
+    pub schema: String,
+    pub create_if_not_exists: bool,
+    #[serde_as(deserialize_as = "DefaultOnNull")]
+    pub options: HashMap<String, String>,
+}
+
+impl TryFrom<PbCreateDatabaseTask> for CreateDatabaseTask {
+    type Error = error::Error;
+
+    fn try_from(pb: PbCreateDatabaseTask) -> Result<Self> {
+        let CreateDatabaseExpr {
+            catalog_name,
+            schema_name,
+            create_if_not_exists,
+            options,
+        } = pb.create_database.context(error::InvalidProtoMsgSnafu {
+            err_msg: "expected create database",
+        })?;
+
+        Ok(CreateDatabaseTask {
+            catalog: catalog_name,
+            schema: schema_name,
+            create_if_not_exists,
+            options,
+        })
+    }
+}
+
+impl TryFrom<CreateDatabaseTask> for PbCreateDatabaseTask {
+    type Error = error::Error;
+
+    fn try_from(
+        CreateDatabaseTask {
+            catalog,
+            schema,
+            create_if_not_exists,
+            options,
+        }: CreateDatabaseTask,
+    ) -> Result<Self> {
+        Ok(PbCreateDatabaseTask {
+            create_database: Some(CreateDatabaseExpr {
+                catalog_name: catalog,
+                schema_name: schema,
+                create_if_not_exists,
+                options,
+            }),
+        })
+    }
+}
+
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct DropDatabaseTask {
     pub catalog: String,
@@ -635,11 +946,309 @@ impl TryFrom<DropDatabaseTask> for PbDropDatabaseTask {
     }
 }
 
+#[derive(Debug, PartialEq, Clone)]
+pub struct AlterDatabaseTask {
+    pub alter_expr: AlterDatabaseExpr,
+}
+
+impl TryFrom<AlterDatabaseTask> for PbAlterDatabaseTask {
+    type Error = error::Error;
+
+    fn try_from(task: AlterDatabaseTask) -> Result<Self> {
+        Ok(PbAlterDatabaseTask {
+            task: Some(task.alter_expr),
+        })
+    }
+}
+
+impl TryFrom<PbAlterDatabaseTask> for AlterDatabaseTask {
+    type Error = error::Error;
+
+    fn try_from(pb: PbAlterDatabaseTask) -> Result<Self> {
+        let alter_expr = pb.task.context(error::InvalidProtoMsgSnafu {
+            err_msg: "expected alter database",
+        })?;
+
+        Ok(AlterDatabaseTask { alter_expr })
+    }
+}
+
+impl TryFrom<PbAlterDatabaseKind> for AlterDatabaseKind {
+    type Error = error::Error;
+
+    fn try_from(pb: PbAlterDatabaseKind) -> Result<Self> {
+        match pb {
+            PbAlterDatabaseKind::SetDatabaseOptions(options) => {
+                Ok(AlterDatabaseKind::SetDatabaseOptions(SetDatabaseOptions(
+                    options
+                        .set_database_options
+                        .into_iter()
+                        .map(SetDatabaseOption::try_from)
+                        .collect::<Result<Vec<_>>>()?,
+                )))
+            }
+            PbAlterDatabaseKind::UnsetDatabaseOptions(options) => Ok(
+                AlterDatabaseKind::UnsetDatabaseOptions(UnsetDatabaseOptions(
+                    options
+                        .keys
+                        .iter()
+                        .map(|key| UnsetDatabaseOption::try_from(key.as_str()))
+                        .collect::<Result<Vec<_>>>()?,
+                )),
+            ),
+        }
+    }
+}
+
+const TTL_KEY: &str = "ttl";
+
+impl TryFrom<PbOption> for SetDatabaseOption {
+    type Error = error::Error;
+
+    fn try_from(PbOption { key, value }: PbOption) -> Result<Self> {
+        match key.to_ascii_lowercase().as_str() {
+            TTL_KEY => {
+                let ttl = DatabaseTimeToLive::from_humantime_or_str(&value)
+                    .map_err(|_| InvalidSetDatabaseOptionSnafu { key, value }.build())?;
+
+                Ok(SetDatabaseOption::Ttl(ttl))
+            }
+            _ => InvalidSetDatabaseOptionSnafu { key, value }.fail(),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub enum SetDatabaseOption {
+    Ttl(DatabaseTimeToLive),
+}
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub enum UnsetDatabaseOption {
+    Ttl,
+}
+
+impl TryFrom<&str> for UnsetDatabaseOption {
+    type Error = error::Error;
+
+    fn try_from(key: &str) -> Result<Self> {
+        match key.to_ascii_lowercase().as_str() {
+            TTL_KEY => Ok(UnsetDatabaseOption::Ttl),
+            _ => InvalidUnsetDatabaseOptionSnafu { key }.fail(),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub struct SetDatabaseOptions(pub Vec<SetDatabaseOption>);
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub struct UnsetDatabaseOptions(pub Vec<UnsetDatabaseOption>);
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub enum AlterDatabaseKind {
+    SetDatabaseOptions(SetDatabaseOptions),
+    UnsetDatabaseOptions(UnsetDatabaseOptions),
+}
+
+impl AlterDatabaseTask {
+    pub fn catalog(&self) -> &str {
+        &self.alter_expr.catalog_name
+    }
+
+    pub fn schema(&self) -> &str {
+        &self.alter_expr.catalog_name
+    }
+}
+
+/// Create flow
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateFlowTask {
+    pub catalog_name: String,
+    pub flow_name: String,
+    pub source_table_names: Vec<TableName>,
+    pub sink_table_name: TableName,
+    pub or_replace: bool,
+    pub create_if_not_exists: bool,
+    /// Duration in seconds. Data older than this duration will not be used.
+    pub expire_after: Option<i64>,
+    pub comment: String,
+    pub sql: String,
+    pub flow_options: HashMap<String, String>,
+}
+
+impl TryFrom<PbCreateFlowTask> for CreateFlowTask {
+    type Error = error::Error;
+
+    fn try_from(pb: PbCreateFlowTask) -> Result<Self> {
+        let CreateFlowExpr {
+            catalog_name,
+            flow_name,
+            source_table_names,
+            sink_table_name,
+            or_replace,
+            create_if_not_exists,
+            expire_after,
+            comment,
+            sql,
+            flow_options,
+        } = pb.create_flow.context(error::InvalidProtoMsgSnafu {
+            err_msg: "expected create_flow",
+        })?;
+
+        Ok(CreateFlowTask {
+            catalog_name,
+            flow_name,
+            source_table_names: source_table_names.into_iter().map(Into::into).collect(),
+            sink_table_name: sink_table_name
+                .context(error::InvalidProtoMsgSnafu {
+                    err_msg: "expected sink_table_name",
+                })?
+                .into(),
+            or_replace,
+            create_if_not_exists,
+            expire_after: expire_after.map(|e| e.value),
+            comment,
+            sql,
+            flow_options,
+        })
+    }
+}
+
+impl From<CreateFlowTask> for PbCreateFlowTask {
+    fn from(
+        CreateFlowTask {
+            catalog_name,
+            flow_name,
+            source_table_names,
+            sink_table_name,
+            or_replace,
+            create_if_not_exists,
+            expire_after,
+            comment,
+            sql,
+            flow_options,
+        }: CreateFlowTask,
+    ) -> Self {
+        PbCreateFlowTask {
+            create_flow: Some(CreateFlowExpr {
+                catalog_name,
+                flow_name,
+                source_table_names: source_table_names.into_iter().map(Into::into).collect(),
+                sink_table_name: Some(sink_table_name.into()),
+                or_replace,
+                create_if_not_exists,
+                expire_after: expire_after.map(|value| ExpireAfter { value }),
+                comment,
+                sql,
+                flow_options,
+            }),
+        }
+    }
+}
+
+/// Drop flow
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DropFlowTask {
+    pub catalog_name: String,
+    pub flow_name: String,
+    pub flow_id: FlowId,
+    pub drop_if_exists: bool,
+}
+
+impl TryFrom<PbDropFlowTask> for DropFlowTask {
+    type Error = error::Error;
+
+    fn try_from(pb: PbDropFlowTask) -> Result<Self> {
+        let DropFlowExpr {
+            catalog_name,
+            flow_name,
+            flow_id,
+            drop_if_exists,
+        } = pb.drop_flow.context(error::InvalidProtoMsgSnafu {
+            err_msg: "expected drop_flow",
+        })?;
+        let flow_id = flow_id
+            .context(error::InvalidProtoMsgSnafu {
+                err_msg: "expected flow_id",
+            })?
+            .id;
+        Ok(DropFlowTask {
+            catalog_name,
+            flow_name,
+            flow_id,
+            drop_if_exists,
+        })
+    }
+}
+
+impl From<DropFlowTask> for PbDropFlowTask {
+    fn from(
+        DropFlowTask {
+            catalog_name,
+            flow_name,
+            flow_id,
+            drop_if_exists,
+        }: DropFlowTask,
+    ) -> Self {
+        PbDropFlowTask {
+            drop_flow: Some(DropFlowExpr {
+                catalog_name,
+                flow_name,
+                flow_id: Some(api::v1::FlowId { id: flow_id }),
+                drop_if_exists,
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryContext {
+    current_catalog: String,
+    current_schema: String,
+    timezone: String,
+    extensions: HashMap<String, String>,
+    channel: u8,
+}
+
+impl From<QueryContextRef> for QueryContext {
+    fn from(query_context: QueryContextRef) -> Self {
+        QueryContext {
+            current_catalog: query_context.current_catalog().to_string(),
+            current_schema: query_context.current_schema().to_string(),
+            timezone: query_context.timezone().to_string(),
+            extensions: query_context.extensions(),
+            channel: query_context.channel() as u8,
+        }
+    }
+}
+
+impl From<QueryContext> for PbQueryContext {
+    fn from(
+        QueryContext {
+            current_catalog,
+            current_schema,
+            timezone,
+            extensions,
+            channel,
+        }: QueryContext,
+    ) -> Self {
+        PbQueryContext {
+            current_catalog,
+            current_schema,
+            timezone,
+            extensions,
+            channel: channel as u32,
+            snapshot_seqs: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use api::v1::{AlterExpr, ColumnDef, CreateTableExpr, SemanticType};
+    use api::v1::{AlterTableExpr, ColumnDef, CreateTableExpr, SemanticType};
     use datatypes::schema::{ColumnSchema, RawSchema, SchemaBuilder};
     use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
     use store_api::storage::ConcreteDataType;
@@ -667,7 +1276,7 @@ mod tests {
     #[test]
     fn test_basic_ser_de_alter_table_task() {
         let task = AlterTableTask {
-            alter_table: AlterExpr::default(),
+            alter_table: AlterTableExpr::default(),
         };
 
         let output = serde_json::to_vec(&task).unwrap();

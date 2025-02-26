@@ -27,7 +27,6 @@ with cte1(x, y) as (select 42 a, 84 b) select zzz, y from cte1 t1(zzz, y);
 
 SELECT 1 UNION ALL (WITH cte AS (SELECT 42) SELECT * FROM cte) order by 1;
 
--- Recursive CTEs are not supported in datafusion
 WITH RECURSIVE cte(d) AS (
 		SELECT 1
 	UNION ALL

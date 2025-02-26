@@ -18,21 +18,20 @@ use catalog::memory::new_memory_catalog_manager;
 use catalog::RegisterTableRequest;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::BoxedError;
-use common_query::prelude::Expr;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
+use datafusion_expr::expr::Expr;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::vectors::{Int64Vector, TimestampMillisecondVector};
 use store_api::data_source::{DataSource, DataSourceRef};
 use store_api::storage::ScanRequest;
 use table::metadata::FilterPushDownType;
-use table::predicate::TimeRangePredicateBuilder;
+use table::predicate::build_time_range_predicate;
 use table::test_util::MemTable;
-use table::thin_table::{ThinTable, ThinTableAdapter};
-use table::TableRef;
+use table::{Table, TableRef};
 
 use crate::tests::exec_selection;
 use crate::{QueryEngineFactory, QueryEngineRef};
@@ -42,16 +41,13 @@ struct MemTableWrapper;
 impl MemTableWrapper {
     pub fn table(table: TableRef, filter: Arc<RwLock<Vec<Expr>>>) -> TableRef {
         let table_info = table.table_info();
-        let thin_table_adapter = table.as_any().downcast_ref::<ThinTableAdapter>().unwrap();
-        let data_source = thin_table_adapter.data_source();
-
-        let thin_table = ThinTable::new(table_info, FilterPushDownType::Exact);
+        let data_source = table.data_source();
         let data_source = Arc::new(DataSourceWrapper {
             inner: data_source,
             filter,
         });
-
-        Arc::new(ThinTableAdapter::new(thin_table, data_source))
+        let table = Table::new(table_info, FilterPushDownType::Exact, data_source);
+        Arc::new(table)
     }
 }
 
@@ -62,7 +58,7 @@ struct DataSourceWrapper {
 
 impl DataSource for DataSourceWrapper {
     fn get_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream, BoxedError> {
-        *self.filter.write().unwrap() = request.filters.clone();
+        self.filter.write().unwrap().clone_from(&request.filters);
         self.inner.get_stream(request)
     }
 }
@@ -106,7 +102,8 @@ fn create_test_engine() -> TimeRangeTester {
     };
     let _ = catalog_manager.register_table_sync(req).unwrap();
 
-    let engine = QueryEngineFactory::new(catalog_manager, None, None, None, false).query_engine();
+    let engine =
+        QueryEngineFactory::new(catalog_manager, None, None, None, None, false).query_engine();
     TimeRangeTester { engine, filter }
 }
 
@@ -118,14 +115,14 @@ struct TimeRangeTester {
 impl TimeRangeTester {
     async fn check(&self, sql: &str, expect: TimestampRange) {
         let _ = exec_selection(self.engine.clone(), sql).await;
-        let filters = self.get_filters();
+        let filters = self.take_filters();
 
-        let range = TimeRangePredicateBuilder::new("ts", TimeUnit::Millisecond, &filters).build();
+        let range = build_time_range_predicate("ts", TimeUnit::Millisecond, &filters);
         assert_eq!(expect, range);
     }
 
-    fn get_filters(&self) -> Vec<Expr> {
-        self.filter.write().unwrap().drain(..).collect()
+    fn take_filters(&self) -> Vec<Expr> {
+        std::mem::take(&mut self.filter.write().unwrap())
     }
 }
 

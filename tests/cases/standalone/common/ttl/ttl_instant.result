@@ -1,0 +1,340 @@
+CREATE TABLE test_ttl(
+       ts TIMESTAMP TIME INDEX,
+       val INT,
+       PRIMARY KEY (`val`)
+) WITH (ttl = 'instant');
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test_ttl;
+
++----------+-----------------------------------------+
+| Table    | Create Table                            |
++----------+-----------------------------------------+
+| test_ttl | CREATE TABLE IF NOT EXISTS "test_ttl" ( |
+|          |   "ts" TIMESTAMP(3) NOT NULL,           |
+|          |   "val" INT NULL,                       |
+|          |   TIME INDEX ("ts"),                    |
+|          |   PRIMARY KEY ("val")                   |
+|          | )                                       |
+|          |                                         |
+|          | ENGINE=mito                             |
+|          | WITH(                                   |
+|          |   ttl = 'instant'                       |
+|          | )                                       |
++----------+-----------------------------------------+
+
+INSERT INTO
+       test_ttl
+VALUES
+       (now(), 1),
+       (now(), 2),
+       (now(), 3);
+
+Affected Rows: 0
+
+SELECT
+       val
+from
+       test_ttl
+ORDER BY
+       val;
+
+++
+++
+
+-- SQLNESS SLEEP 2s
+ADMIN flush_table('test_ttl');
+
++-------------------------------+
+| ADMIN flush_table('test_ttl') |
++-------------------------------+
+| 0                             |
++-------------------------------+
+
+ADMIN compact_table('test_ttl');
+
++---------------------------------+
+| ADMIN compact_table('test_ttl') |
++---------------------------------+
+| 0                               |
++---------------------------------+
+
+SELECT
+       val
+from
+       test_ttl
+ORDER BY
+       val;
+
+++
+++
+
+ALTER TABLE
+       test_ttl UNSET 'ttl';
+
+Affected Rows: 0
+
+INSERT INTO
+       test_ttl
+VALUES
+       (now(), 1),
+       (now(), 2),
+       (now(), 3);
+
+Affected Rows: 3
+
+SELECT
+       val
+from
+       test_ttl
+ORDER BY
+       val;
+
++-----+
+| val |
++-----+
+| 1   |
+| 2   |
+| 3   |
++-----+
+
+DROP TABLE test_ttl;
+
+Affected Rows: 0
+
+CREATE TABLE test_ttl(
+       ts TIMESTAMP TIME INDEX,
+       val INT,
+       PRIMARY KEY (`val`)
+) WITH (ttl = '1s');
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test_ttl;
+
++----------+-----------------------------------------+
+| Table    | Create Table                            |
++----------+-----------------------------------------+
+| test_ttl | CREATE TABLE IF NOT EXISTS "test_ttl" ( |
+|          |   "ts" TIMESTAMP(3) NOT NULL,           |
+|          |   "val" INT NULL,                       |
+|          |   TIME INDEX ("ts"),                    |
+|          |   PRIMARY KEY ("val")                   |
+|          | )                                       |
+|          |                                         |
+|          | ENGINE=mito                             |
+|          | WITH(                                   |
+|          |   ttl = '1s'                            |
+|          | )                                       |
++----------+-----------------------------------------+
+
+INSERT INTO
+       test_ttl
+VALUES
+       (now(), 1),
+       (now(), 2),
+       (now(), 3);
+
+Affected Rows: 3
+
+SELECT
+       val
+from
+       test_ttl
+ORDER BY
+       val;
+
++-----+
+| val |
++-----+
+| 1   |
+| 2   |
+| 3   |
++-----+
+
+ADMIN flush_table('test_ttl');
+
++-------------------------------+
+| ADMIN flush_table('test_ttl') |
++-------------------------------+
+| 0                             |
++-------------------------------+
+
+ADMIN compact_table('test_ttl');
+
++---------------------------------+
+| ADMIN compact_table('test_ttl') |
++---------------------------------+
+| 0                               |
++---------------------------------+
+
+SELECT
+       val
+from
+       test_ttl
+ORDER BY
+       val;
+
++-----+
+| val |
++-----+
+| 1   |
+| 2   |
+| 3   |
++-----+
+
+-- SQLNESS SLEEP 2s
+ADMIN flush_table('test_ttl');
+
++-------------------------------+
+| ADMIN flush_table('test_ttl') |
++-------------------------------+
+| 0                             |
++-------------------------------+
+
+ADMIN compact_table('test_ttl');
+
++---------------------------------+
+| ADMIN compact_table('test_ttl') |
++---------------------------------+
+| 0                               |
++---------------------------------+
+
+SELECT
+       val
+from
+       test_ttl
+ORDER BY
+       val;
+
+++
+++
+
+ALTER TABLE
+       test_ttl
+SET
+       ttl = '1d';
+
+Affected Rows: 0
+
+INSERT INTO
+       test_ttl
+VALUES
+       (now(), 1),
+       (now(), 2),
+       (now(), 3);
+
+Affected Rows: 3
+
+SELECT
+       val
+from
+       test_ttl
+ORDER BY
+       val;
+
++-----+
+| val |
++-----+
+| 1   |
+| 2   |
+| 3   |
++-----+
+
+ALTER TABLE
+       test_ttl
+SET
+       ttl = 'instant';
+
+Affected Rows: 0
+
+ADMIN flush_table('test_ttl');
+
++-------------------------------+
+| ADMIN flush_table('test_ttl') |
++-------------------------------+
+| 0                             |
++-------------------------------+
+
+ADMIN compact_table('test_ttl');
+
++---------------------------------+
+| ADMIN compact_table('test_ttl') |
++---------------------------------+
+| 0                               |
++---------------------------------+
+
+SELECT
+       val
+from
+       test_ttl
+ORDER BY
+       val;
+
+++
+++
+
+-- to make sure alter back and forth from duration to/from instant wouldn't break anything
+ALTER TABLE
+       test_ttl
+SET
+       ttl = '1s';
+
+Affected Rows: 0
+
+INSERT INTO
+       test_ttl
+VALUES
+       (now(), 1),
+       (now(), 2),
+       (now(), 3);
+
+Affected Rows: 3
+
+SELECT
+       val
+from
+       test_ttl
+ORDER BY
+       val;
+
++-----+
+| val |
++-----+
+| 1   |
+| 2   |
+| 3   |
++-----+
+
+-- SQLNESS SLEEP 2s
+ADMIN flush_table('test_ttl');
+
++-------------------------------+
+| ADMIN flush_table('test_ttl') |
++-------------------------------+
+| 0                             |
++-------------------------------+
+
+ADMIN compact_table('test_ttl');
+
++---------------------------------+
+| ADMIN compact_table('test_ttl') |
++---------------------------------+
+| 0                               |
++---------------------------------+
+
+SELECT
+       val
+from
+       test_ttl
+ORDER BY
+       val;
+
+++
+++
+
+DROP TABLE test_ttl;
+
+Affected Rows: 0
+

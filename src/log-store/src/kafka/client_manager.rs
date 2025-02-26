@@ -16,17 +16,18 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_wal::config::kafka::DatanodeKafkaConfig;
-use rskafka::client::partition::{PartitionClient, UnknownTopicHandling};
-use rskafka::client::producer::aggregator::RecordAggregator;
-use rskafka::client::producer::{BatchProducer, BatchProducerBuilder};
-use rskafka::client::{Client as RsKafkaClient, ClientBuilder};
+use rskafka::client::partition::{Compression, PartitionClient, UnknownTopicHandling};
+use rskafka::client::ClientBuilder;
 use rskafka::BackoffConfig;
 use snafu::ResultExt;
-use tokio::sync::RwLock;
+use store_api::logstore::provider::KafkaProvider;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::error::{
-    BuildClientSnafu, BuildPartitionClientSnafu, ResolveKafkaEndpointSnafu, Result,
+    BuildClientSnafu, BuildPartitionClientSnafu, ResolveKafkaEndpointSnafu, Result, TlsConfigSnafu,
 };
+use crate::kafka::index::{GlobalIndexCollector, NoopCollector};
+use crate::kafka::producer::{OrderedBatchProducer, OrderedBatchProducerRef};
 
 // Each topic only has one partition for now.
 // The `DEFAULT_PARTITION` refers to the index of the partition.
@@ -35,46 +36,42 @@ const DEFAULT_PARTITION: i32 = 0;
 /// Arc wrapper of ClientManager.
 pub(crate) type ClientManagerRef = Arc<ClientManager>;
 
-/// A client through which to contact Kafka cluster. Each client associates with one partition of a topic.
-/// Since a topic only has one partition in our design, the mapping between clients and topics are one-one.
+/// Topic client.
 #[derive(Debug, Clone)]
 pub(crate) struct Client {
-    /// A raw client used to construct a batch producer and/or a stream consumer for a specific topic.
-    pub(crate) raw_client: Arc<PartitionClient>,
-    /// A producer used to buffer log entries for a specific topic before sending them in a batching manner.
-    pub(crate) producer: Arc<BatchProducer<RecordAggregator>>,
+    client: Arc<PartitionClient>,
+    producer: OrderedBatchProducerRef,
 }
 
 impl Client {
-    /// Creates a Client from the raw client.
-    pub(crate) fn new(raw_client: Arc<PartitionClient>, config: &DatanodeKafkaConfig) -> Self {
-        let record_aggregator = RecordAggregator::new(config.max_batch_size.as_bytes() as usize);
-        let batch_producer = BatchProducerBuilder::new(raw_client.clone())
-            .with_compression(config.compression)
-            .with_linger(config.linger)
-            .build(record_aggregator);
+    pub(crate) fn client(&self) -> &Arc<PartitionClient> {
+        &self.client
+    }
 
-        Self {
-            raw_client,
-            producer: Arc::new(batch_producer),
-        }
+    pub(crate) fn producer(&self) -> &OrderedBatchProducerRef {
+        &self.producer
     }
 }
 
 /// Manages client construction and accesses.
 #[derive(Debug)]
 pub(crate) struct ClientManager {
-    pub(crate) config: DatanodeKafkaConfig,
-    /// Top-level client in kafka. All clients are constructed by this client.
-    client_factory: RsKafkaClient,
-    /// A pool maintaining a collection of clients.
-    /// Key: a topic. Value: the associated client of the topic.
-    client_pool: RwLock<HashMap<String, Client>>,
+    client: rskafka::client::Client,
+    /// Used to initialize a new [Client].
+    mutex: Mutex<()>,
+    instances: RwLock<HashMap<Arc<KafkaProvider>, Client>>,
+    global_index_collector: Option<GlobalIndexCollector>,
+
+    flush_batch_size: usize,
+    compression: Compression,
 }
 
 impl ClientManager {
     /// Tries to create a ClientManager.
-    pub(crate) async fn try_new(config: &DatanodeKafkaConfig) -> Result<Self> {
+    pub(crate) async fn try_new(
+        config: &DatanodeKafkaConfig,
+        global_index_collector: Option<GlobalIndexCollector>,
+    ) -> Result<Self> {
         // Sets backoff config for the top-level kafka client and all clients constructed by it.
         let backoff_config = BackoffConfig {
             init_backoff: config.backoff.init,
@@ -82,70 +79,134 @@ impl ClientManager {
             base: config.backoff.base as f64,
             deadline: config.backoff.deadline,
         };
-        let broker_endpoints = common_wal::resolve_to_ipv4(&config.broker_endpoints)
+        let broker_endpoints = common_wal::resolve_to_ipv4(&config.connection.broker_endpoints)
             .await
             .context(ResolveKafkaEndpointSnafu)?;
-        let client = ClientBuilder::new(broker_endpoints)
-            .backoff_config(backoff_config)
-            .build()
-            .await
-            .with_context(|_| BuildClientSnafu {
-                broker_endpoints: config.broker_endpoints.clone(),
-            })?;
+        let mut builder = ClientBuilder::new(broker_endpoints).backoff_config(backoff_config);
+        if let Some(sasl) = &config.connection.sasl {
+            builder = builder.sasl_config(sasl.config.clone().into_sasl_config());
+        };
+        if let Some(tls) = &config.connection.tls {
+            builder = builder.tls_config(tls.to_tls_config().await.context(TlsConfigSnafu)?)
+        };
+
+        let client = builder.build().await.with_context(|_| BuildClientSnafu {
+            broker_endpoints: config.connection.broker_endpoints.clone(),
+        })?;
 
         Ok(Self {
-            config: config.clone(),
-            client_factory: client,
-            client_pool: RwLock::new(HashMap::new()),
+            client,
+            mutex: Mutex::new(()),
+            instances: RwLock::new(HashMap::new()),
+            flush_batch_size: config.max_batch_bytes.as_bytes() as usize,
+            compression: Compression::Lz4,
+            global_index_collector,
         })
     }
 
-    /// Gets the client associated with the topic. If the client does not exist, a new one will
-    /// be created and returned.
-    pub(crate) async fn get_or_insert(&self, topic: &String) -> Result<Client> {
-        {
-            let client_pool = self.client_pool.read().await;
-            if let Some(client) = client_pool.get(topic) {
-                return Ok(client.clone());
-            }
-        }
+    async fn try_insert(&self, provider: &Arc<KafkaProvider>) -> Result<Client> {
+        let _guard = self.mutex.lock().await;
 
-        let mut client_pool = self.client_pool.write().await;
-        match client_pool.get(topic) {
-            Some(client) => Ok(client.clone()),
+        let client = self.instances.read().await.get(provider).cloned();
+        match client {
+            Some(client) => Ok(client),
             None => {
-                let client = self.try_create_client(topic).await?;
-                client_pool.insert(topic.clone(), client.clone());
+                let client = self.try_create_client(provider).await?;
+                self.instances
+                    .write()
+                    .await
+                    .insert(provider.clone(), client.clone());
                 Ok(client)
             }
         }
     }
 
-    async fn try_create_client(&self, topic: &String) -> Result<Client> {
-        // Sets to Retry to retry connecting if the kafka cluter replies with an UnknownTopic error.
+    /// Gets the client associated with the topic. If the client does not exist, a new one will
+    /// be created and returned.
+    pub(crate) async fn get_or_insert(&self, provider: &Arc<KafkaProvider>) -> Result<Client> {
+        let client = self.instances.read().await.get(provider).cloned();
+        match client {
+            Some(client) => Ok(client),
+            None => self.try_insert(provider).await,
+        }
+    }
+
+    async fn try_create_client(&self, provider: &Arc<KafkaProvider>) -> Result<Client> {
+        // Sets to Retry to retry connecting if the kafka cluster replies with an UnknownTopic error.
         // That's because the topic is believed to exist as the metasrv is expected to create required topics upon start.
         // The reconnecting won't stop until succeed or a different error returns.
-        let raw_client = self
-            .client_factory
-            .partition_client(topic, DEFAULT_PARTITION, UnknownTopicHandling::Retry)
+        let client = self
+            .client
+            .partition_client(
+                provider.topic.as_str(),
+                DEFAULT_PARTITION,
+                UnknownTopicHandling::Retry,
+            )
             .await
             .context(BuildPartitionClientSnafu {
-                topic,
+                topic: &provider.topic,
                 partition: DEFAULT_PARTITION,
             })
             .map(Arc::new)?;
 
-        Ok(Client::new(raw_client, &self.config))
+        let (tx, rx) = OrderedBatchProducer::channel();
+        let index_collector = if let Some(global_collector) = self.global_index_collector.as_ref() {
+            global_collector
+                .provider_level_index_collector(provider.clone(), tx.clone())
+                .await
+        } else {
+            Box::new(NoopCollector)
+        };
+        let producer = Arc::new(OrderedBatchProducer::new(
+            (tx, rx),
+            provider.clone(),
+            client.clone(),
+            self.compression,
+            self.flush_batch_size,
+            index_collector,
+        ));
+
+        Ok(Client { client, producer })
+    }
+
+    pub(crate) fn global_index_collector(&self) -> Option<&GlobalIndexCollector> {
+        self.global_index_collector.as_ref()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use common_wal::config::kafka::common::KafkaConnectionConfig;
     use common_wal::test_util::run_test_with_kafka_wal;
     use tokio::sync::Barrier;
 
     use super::*;
-    use crate::test_util::kafka::create_topics;
+
+    /// Creates `num_topics` number of topics each will be decorated by the given decorator.
+    pub async fn create_topics<F>(
+        num_topics: usize,
+        decorator: F,
+        broker_endpoints: &[String],
+    ) -> Vec<String>
+    where
+        F: Fn(usize) -> String,
+    {
+        assert!(!broker_endpoints.is_empty());
+        let client = ClientBuilder::new(broker_endpoints.to_vec())
+            .build()
+            .await
+            .unwrap();
+        let ctrl_client = client.controller_client().unwrap();
+        let (topics, tasks): (Vec<_>, Vec<_>) = (0..num_topics)
+            .map(|i| {
+                let topic = decorator(i);
+                let task = ctrl_client.create_topic(topic.clone(), 1, 1, 500);
+                (topic, task)
+            })
+            .unzip();
+        futures::future::try_join_all(tasks).await.unwrap();
+        topics
+    }
 
     /// Prepares for a test in that a collection of topics and a client manager are created.
     async fn prepare(
@@ -161,10 +222,13 @@ mod tests {
         .await;
 
         let config = DatanodeKafkaConfig {
-            broker_endpoints,
+            connection: KafkaConnectionConfig {
+                broker_endpoints,
+                ..Default::default()
+            },
             ..Default::default()
         };
-        let manager = ClientManager::try_new(&config).await.unwrap();
+        let manager = ClientManager::try_new(&config, None).await.unwrap();
 
         (manager, topics)
     }
@@ -182,12 +246,16 @@ mod tests {
 
                 // Gets all clients sequentially.
                 for (_, topic) in region_topic {
-                    manager.get_or_insert(topic).await.unwrap();
+                    let provider = Arc::new(KafkaProvider::new(topic.to_string()));
+                    manager.get_or_insert(&provider).await.unwrap();
                 }
 
                 // Ensures all clients exist.
-                let client_pool = manager.client_pool.read().await;
-                let all_exist = topics.iter().all(|topic| client_pool.contains_key(topic));
+                let client_pool = manager.instances.read().await;
+                let all_exist = topics.iter().all(|topic| {
+                    let provider = Arc::new(KafkaProvider::new(topic.to_string()));
+                    client_pool.contains_key(&provider)
+                });
                 assert!(all_exist);
             })
         })
@@ -213,17 +281,22 @@ mod tests {
                     .map(|topic| {
                         let manager = manager.clone();
                         let barrier = barrier.clone();
+
                         tokio::spawn(async move {
                             barrier.wait().await;
-                            assert!(manager.get_or_insert(&topic).await.is_ok());
+                            let provider = Arc::new(KafkaProvider::new(topic));
+                            assert!(manager.get_or_insert(&provider).await.is_ok());
                         })
                     })
                     .collect::<Vec<_>>();
                 futures::future::try_join_all(tasks).await.unwrap();
 
                 // Ensures all clients exist.
-                let client_pool = manager.client_pool.read().await;
-                let all_exist = topics.iter().all(|topic| client_pool.contains_key(topic));
+                let client_pool = manager.instances.read().await;
+                let all_exist = topics.iter().all(|topic| {
+                    let provider = Arc::new(KafkaProvider::new(topic.to_string()));
+                    client_pool.contains_key(&provider)
+                });
                 assert!(all_exist);
             })
         })

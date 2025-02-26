@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod auth_handler;
+mod fixtures;
 mod handler;
 mod server;
 mod types;
@@ -31,7 +32,8 @@ use std::sync::Arc;
 use ::auth::UserProviderRef;
 use derive_builder::Builder;
 use pgwire::api::auth::ServerParameterProvider;
-use pgwire::api::ClientInfo;
+use pgwire::api::copy::NoopCopyHandler;
+use pgwire::api::{ClientInfo, PgWireServerHandlers};
 pub use server::PostgresServer;
 use session::context::Channel;
 use session::Session;
@@ -41,13 +43,13 @@ use self::handler::DefaultQueryParser;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
 pub(crate) struct GreptimeDBStartupParameters {
-    version: &'static str,
+    version: String,
 }
 
 impl GreptimeDBStartupParameters {
     fn new() -> GreptimeDBStartupParameters {
         GreptimeDBStartupParameters {
-            version: env!("CARGO_PKG_VERSION"),
+            version: format!("16.3-greptimedb-{}", env!("CARGO_PKG_VERSION")),
         }
     }
 }
@@ -58,7 +60,7 @@ impl ServerParameterProvider for GreptimeDBStartupParameters {
         C: ClientInfo,
     {
         Some(HashMap::from([
-            ("server_version".to_owned(), self.version.to_owned()),
+            ("server_version".to_owned(), self.version.clone()),
             ("server_encoding".to_owned(), "UTF8".to_owned()),
             ("client_encoding".to_owned(), "UTF8".to_owned()),
             ("DateStyle".to_owned(), "ISO YMD".to_owned()),
@@ -67,7 +69,7 @@ impl ServerParameterProvider for GreptimeDBStartupParameters {
     }
 }
 
-pub struct PostgresServerHandler {
+pub struct PostgresServerHandlerInner {
     query_handler: ServerSqlQueryHandlerRef,
     login_verifier: PgLoginVerifier,
     force_tls: bool,
@@ -86,10 +88,40 @@ pub(crate) struct MakePostgresServerHandler {
     force_tls: bool,
 }
 
+pub(crate) struct PostgresServerHandler(Arc<PostgresServerHandlerInner>);
+
+impl PgWireServerHandlers for PostgresServerHandler {
+    type StartupHandler = PostgresServerHandlerInner;
+    type SimpleQueryHandler = PostgresServerHandlerInner;
+    type ExtendedQueryHandler = PostgresServerHandlerInner;
+    type CopyHandler = NoopCopyHandler;
+    type ErrorHandler = PostgresServerHandlerInner;
+
+    fn simple_query_handler(&self) -> Arc<Self::SimpleQueryHandler> {
+        self.0.clone()
+    }
+
+    fn extended_query_handler(&self) -> Arc<Self::ExtendedQueryHandler> {
+        self.0.clone()
+    }
+
+    fn startup_handler(&self) -> Arc<Self::StartupHandler> {
+        self.0.clone()
+    }
+
+    fn copy_handler(&self) -> Arc<Self::CopyHandler> {
+        Arc::new(NoopCopyHandler)
+    }
+
+    fn error_handler(&self) -> Arc<Self::ErrorHandler> {
+        self.0.clone()
+    }
+}
+
 impl MakePostgresServerHandler {
     fn make(&self, addr: Option<SocketAddr>) -> PostgresServerHandler {
         let session = Arc::new(Session::new(addr, Channel::Postgres, Default::default()));
-        PostgresServerHandler {
+        let handler = PostgresServerHandlerInner {
             query_handler: self.query_handler.clone(),
             login_verifier: PgLoginVerifier::new(self.user_provider.clone()),
             force_tls: self.force_tls,
@@ -97,6 +129,7 @@ impl MakePostgresServerHandler {
 
             session: session.clone(),
             query_parser: Arc::new(DefaultQueryParser::new(self.query_handler.clone(), session)),
-        }
+        };
+        PostgresServerHandler(Arc::new(handler))
     }
 }

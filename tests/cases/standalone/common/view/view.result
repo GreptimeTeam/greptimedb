@@ -1,0 +1,97 @@
+-- From: https://github.com/duckdb/duckdb/blob/main/test/sql/catalog/view/test_view.test --
+CREATE TABLE t1(i TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO t1 VALUES (41), (42), (43);
+
+Affected Rows: 3
+
+CREATE VIEW v1 AS SELECT
+	i AS j
+FROM t1 WHERE i < 43;
+
+Affected Rows: 0
+
+SELECT * FROM v1;
+
++-------------------------+
+| j                       |
++-------------------------+
+| 1970-01-01T00:00:00.041 |
+| 1970-01-01T00:00:00.042 |
++-------------------------+
+
+SELECT j FROM v1 WHERE j > 41;
+
++-------------------------+
+| j                       |
++-------------------------+
+| 1970-01-01T00:00:00.042 |
++-------------------------+
+
+SELECT x FROM v1 t1(x) WHERE x > 41;
+
++-------------------------+
+| x                       |
++-------------------------+
+| 1970-01-01T00:00:00.042 |
++-------------------------+
+
+INSERT INTO v1 VALUES (1);
+
+Error: 1004(InvalidArguments), Invalid SQL, error: column count mismatch, columns: 0, values: 1
+
+DROP VIEW v1;
+
+Affected Rows: 0
+
+-- substrait can't process such query currently
+-- CREATE VIEW v1 AS SELECT 'whatever';
+-- SELECT * FROM v1;
+-- substrait can't process such query currently
+-- CREATE OR REPLACE VIEW v1 AS SELECT 42;
+-- SELECT * FROM v1;
+CREATE VIEW v1 AS SELECT * FROM dontexist;
+
+Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.public.dontexist
+
+SHOW VIEWS;
+
+++
+++
+
+DROP VIEW v1;
+
+Error: 4001(TableNotFound), Table not found: greptime.public.v1
+
+SELECT * FROM v1;
+
+Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.public.v1
+
+--- view not exists ---
+DROP VIEW v2;
+
+Error: 4001(TableNotFound), Table not found: greptime.public.v2
+
+DROP VIEW IF EXISTS v2;
+
+Affected Rows: 0
+
+DROP TABLE t1;
+
+Affected Rows: 0
+
+SHOW TABLES;
+
++---------+
+| Tables  |
++---------+
+| numbers |
++---------+
+
+SHOW VIEWS;
+
+++
+++
+

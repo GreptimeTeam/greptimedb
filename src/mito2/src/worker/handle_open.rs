@@ -20,25 +20,26 @@ use common_telemetry::info;
 use object_store::util::join_path;
 use snafu::{OptionExt, ResultExt};
 use store_api::logstore::LogStore;
-use store_api::region_request::{AffectedRows, RegionOpenRequest};
+use store_api::region_request::RegionOpenRequest;
 use store_api::storage::RegionId;
+use table::requests::STORAGE_KEY;
 
-use crate::error::{ObjectStoreNotFoundSnafu, OpenDalSnafu, RegionNotFoundSnafu, Result};
-use crate::metrics::REGION_COUNT;
+use crate::error::{
+    ObjectStoreNotFoundSnafu, OpenDalSnafu, OpenRegionSnafu, RegionNotFoundSnafu, Result,
+};
 use crate::region::opener::RegionOpener;
+use crate::request::OptionOutputTx;
+use crate::wal::entry_distributor::WalEntryReceiver;
 use crate::worker::handle_drop::remove_region_dir_once;
 use crate::worker::{RegionWorkerLoop, DROPPING_MARKER_FILE};
 
 impl<S: LogStore> RegionWorkerLoop<S> {
-    pub(crate) async fn handle_open_request(
-        &mut self,
+    async fn check_and_cleanup_region(
+        &self,
         region_id: RegionId,
-        request: RegionOpenRequest,
-    ) -> Result<AffectedRows> {
-        if self.regions.is_region_exists(region_id) {
-            return Ok(0);
-        }
-        let object_store = if let Some(storage_name) = request.options.get("storage") {
+        request: &RegionOpenRequest,
+    ) -> Result<()> {
+        let object_store = if let Some(storage_name) = request.options.get(STORAGE_KEY) {
             self.object_store_manager
                 .find(storage_name)
                 .context(ObjectStoreNotFoundSnafu {
@@ -50,39 +51,96 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Check if this region is pending drop. And clean the entire dir if so.
         if !self.dropping_regions.is_region_exists(region_id)
             && object_store
-                .is_exist(&join_path(&request.region_dir, DROPPING_MARKER_FILE))
+                .exists(&join_path(&request.region_dir, DROPPING_MARKER_FILE))
                 .await
                 .context(OpenDalSnafu)?
         {
-            let result = remove_region_dir_once(&request.region_dir, object_store).await;
-            info!("Region {} is dropped, result: {:?}", region_id, result);
+            let result = remove_region_dir_once(&request.region_dir, object_store, true).await;
+            info!(
+                "Region {} is dropped, worker: {}, result: {:?}",
+                region_id, self.id, result
+            );
             return RegionNotFoundSnafu { region_id }.fail();
         }
 
-        info!("Try to open region {}", region_id);
+        Ok(())
+    }
+
+    pub(crate) async fn handle_open_request(
+        &mut self,
+        region_id: RegionId,
+        request: RegionOpenRequest,
+        wal_entry_receiver: Option<WalEntryReceiver>,
+        sender: OptionOutputTx,
+    ) {
+        if self.regions.is_region_exists(region_id) {
+            sender.send(Ok(0));
+            return;
+        }
+        let Some(sender) = self
+            .opening_regions
+            .wait_for_opening_region(region_id, sender)
+        else {
+            return;
+        };
+        if let Err(err) = self.check_and_cleanup_region(region_id, &request).await {
+            sender.send(Err(err));
+            return;
+        }
+        info!("Try to open region {}, worker: {}", region_id, self.id);
 
         // Open region from specific region dir.
-        let region = RegionOpener::new(
+        let opener = match RegionOpener::new(
             region_id,
             &request.region_dir,
             self.memtable_builder_provider.clone(),
             self.object_store_manager.clone(),
-            self.scheduler.clone(),
+            self.purge_scheduler.clone(),
+            self.puffin_manager_factory.clone(),
             self.intermediate_manager.clone(),
+            self.time_provider.clone(),
         )
         .skip_wal_replay(request.skip_wal_replay)
-        .parse_options(request.options)?
         .cache(Some(self.cache_manager.clone()))
-        .open(&self.config, &self.wal)
-        .await?;
+        .wal_entry_reader(wal_entry_receiver.map(|receiver| Box::new(receiver) as _))
+        .parse_options(request.options)
+        {
+            Ok(opener) => opener,
+            Err(err) => {
+                sender.send(Err(err));
+                return;
+            }
+        };
 
-        info!("Region {} is opened", region_id);
+        let regions = self.regions.clone();
+        let wal = self.wal.clone();
+        let config = self.config.clone();
+        let opening_regions = self.opening_regions.clone();
+        let region_count = self.region_count.clone();
+        let worker_id = self.id;
+        opening_regions.insert_sender(region_id, sender);
+        common_runtime::spawn_global(async move {
+            match opener.open(&config, &wal).await {
+                Ok(region) => {
+                    info!("Region {} is opened, worker: {}", region_id, worker_id);
+                    region_count.inc();
 
-        REGION_COUNT.inc();
+                    // Insert the Region into the RegionMap.
+                    regions.insert_region(Arc::new(region));
 
-        // Insert the MitoRegion into the RegionMap.
-        self.regions.insert_region(Arc::new(region));
-
-        Ok(0)
+                    let senders = opening_regions.remove_sender(region_id);
+                    for sender in senders {
+                        sender.send(Ok(0));
+                    }
+                }
+                Err(err) => {
+                    let senders = opening_regions.remove_sender(region_id);
+                    let err = Arc::new(err);
+                    for sender in senders {
+                        sender.send(Err(err.clone()).context(OpenRegionSnafu));
+                    }
+                }
+            }
+        });
     }
 }

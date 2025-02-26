@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use api::v1::greptime_request::Request;
 use auth::error::Error::InternalState;
+use auth::error::InternalStateSnafu;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionResp, UserInfoRef};
 use sql::statements::show::{ShowDatabases, ShowKind};
 use sql::statements::statement::Statement;
@@ -27,15 +28,16 @@ struct DummyPermissionChecker;
 impl PermissionChecker for DummyPermissionChecker {
     fn check_permission(
         &self,
-        _user_info: Option<UserInfoRef>,
+        _user_info: UserInfoRef,
         req: PermissionReq,
     ) -> auth::error::Result<PermissionResp> {
         match req {
             PermissionReq::GrpcRequest(_) => Ok(PermissionResp::Allow),
             PermissionReq::SqlStatement(_) => Ok(PermissionResp::Reject),
-            _ => Err(InternalState {
+            _ => InternalStateSnafu {
                 msg: "testing".to_string(),
-            }),
+            }
+            .fail(),
         }
     }
 }
@@ -45,17 +47,21 @@ fn test_permission_checker() {
     let checker: PermissionCheckerRef = Arc::new(DummyPermissionChecker);
 
     let grpc_result = checker.check_permission(
-        None,
+        auth::userinfo_by_name(None),
         PermissionReq::GrpcRequest(&Request::Query(Default::default())),
     );
     assert_matches!(grpc_result, Ok(PermissionResp::Allow));
 
     let sql_result = checker.check_permission(
-        None,
-        PermissionReq::SqlStatement(&Statement::ShowDatabases(ShowDatabases::new(ShowKind::All))),
+        auth::userinfo_by_name(None),
+        PermissionReq::SqlStatement(&Statement::ShowDatabases(ShowDatabases::new(
+            ShowKind::All,
+            false,
+        ))),
     );
     assert_matches!(sql_result, Ok(PermissionResp::Reject));
 
-    let err_result = checker.check_permission(None, PermissionReq::Opentsdb);
+    let err_result =
+        checker.check_permission(auth::userinfo_by_name(None), PermissionReq::Opentsdb);
     assert_matches!(err_result, Err(InternalState { msg }) if msg == "testing");
 }

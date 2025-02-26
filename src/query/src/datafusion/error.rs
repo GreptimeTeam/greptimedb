@@ -29,28 +29,22 @@ pub enum InnerError {
     Datafusion {
         #[snafu(source)]
         error: DataFusionError,
+        #[snafu(implicit)]
         location: Location,
     },
 
-    #[snafu(display("PhysicalPlan downcast failed"))]
-    PhysicalPlanDowncast { location: Location },
-
     #[snafu(display("Fail to convert arrow schema"))]
     ConvertSchema {
+        #[snafu(implicit)]
         location: Location,
         source: datatypes::error::Error,
     },
 
     #[snafu(display("Failed to convert DataFusion's recordbatch stream"))]
     ConvertDfRecordBatchStream {
+        #[snafu(implicit)]
         location: Location,
         source: common_recordbatch::error::Error,
-    },
-
-    #[snafu(display("Failed to execute physical plan"))]
-    ExecutePhysicalPlan {
-        location: Location,
-        source: common_query::error::Error,
     },
 }
 
@@ -61,9 +55,8 @@ impl ErrorExt for InnerError {
         match self {
             // TODO(yingwen): Further categorize datafusion error.
             Datafusion { .. } => StatusCode::EngineExecuteQuery,
-            PhysicalPlanDowncast { .. } | ConvertSchema { .. } => StatusCode::Unexpected,
+            ConvertSchema { .. } => StatusCode::Unexpected,
             ConvertDfRecordBatchStream { source, .. } => source.status_code(),
-            ExecutePhysicalPlan { source, .. } => source.status_code(),
         }
     }
 

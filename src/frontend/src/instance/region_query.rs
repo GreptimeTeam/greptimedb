@@ -14,32 +14,31 @@
 
 use std::sync::Arc;
 
-use api::v1::region::QueryRequest;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
-use common_meta::datanode_manager::DatanodeManagerRef;
+use common_meta::node_manager::NodeManagerRef;
+use common_query::request::QueryRequest;
 use common_recordbatch::SendableRecordBatchStream;
 use partition::manager::PartitionRuleManagerRef;
 use query::error::{RegionQuerySnafu, Result as QueryResult};
 use query::region_query::RegionQueryHandler;
 use snafu::ResultExt;
-use store_api::storage::RegionId;
 
 use crate::error::{FindTableRouteSnafu, RequestQuerySnafu, Result};
 
 pub(crate) struct FrontendRegionQueryHandler {
     partition_manager: PartitionRuleManagerRef,
-    datanode_manager: DatanodeManagerRef,
+    node_manager: NodeManagerRef,
 }
 
 impl FrontendRegionQueryHandler {
     pub fn arc(
         partition_manager: PartitionRuleManagerRef,
-        datanode_manager: DatanodeManagerRef,
+        node_manager: NodeManagerRef,
     ) -> Arc<Self> {
         Arc::new(Self {
             partition_manager,
-            datanode_manager,
+            node_manager,
         })
     }
 }
@@ -56,7 +55,7 @@ impl RegionQueryHandler for FrontendRegionQueryHandler {
 
 impl FrontendRegionQueryHandler {
     async fn do_get_inner(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
-        let region_id = RegionId::from_u64(request.region_id);
+        let region_id = request.region_id;
 
         let peer = &self
             .partition_manager
@@ -66,7 +65,7 @@ impl FrontendRegionQueryHandler {
                 table_id: region_id.table_id(),
             })?;
 
-        let client = self.datanode_manager.datanode(peer).await;
+        let client = self.node_manager.datanode(peer).await;
 
         client
             .handle_query(request)

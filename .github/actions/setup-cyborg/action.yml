@@ -1,0 +1,16 @@
+name: Setup cyborg environment
+description: Setup cyborg environment
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22
+    - uses: pnpm/action-setup@v3
+      with:
+        package_json_file: 'cyborg/package.json'
+        run_install: true
+    - name: Describe the Environment
+      working-directory: cyborg
+      shell: bash
+      run: pnpm tsx -v

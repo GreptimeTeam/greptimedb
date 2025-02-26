@@ -13,8 +13,7 @@
 // limitations under the License.
 
 use object_store::ObjectStore;
-use parquet::file::footer::{decode_footer, decode_metadata};
-use parquet::file::metadata::ParquetMetaData;
+use parquet::file::metadata::{ParquetMetaData, ParquetMetaDataReader};
 use parquet::file::FOOTER_SIZE;
 use snafu::ResultExt;
 
@@ -35,7 +34,11 @@ pub(crate) struct MetadataLoader<'a> {
 
 impl<'a> MetadataLoader<'a> {
     /// Create a new parquet metadata loader.
-    pub fn new(object_store: ObjectStore, file_path: &'a str, file_size: u64) -> MetadataLoader {
+    pub fn new(
+        object_store: ObjectStore,
+        file_path: &'a str,
+        file_size: u64,
+    ) -> MetadataLoader<'a> {
         Self {
             object_store,
             file_path,
@@ -85,13 +88,14 @@ impl<'a> MetadataLoader<'a> {
             .read_with(path)
             .range(buffer_start..file_size)
             .await
-            .context(error::OpenDalSnafu)?;
+            .context(error::OpenDalSnafu)?
+            .to_vec();
         let buffer_len = buffer.len();
 
         let mut footer = [0; 8];
         footer.copy_from_slice(&buffer[buffer_len - FOOTER_SIZE..]);
 
-        let metadata_len = decode_footer(&footer).map_err(|e| {
+        let metadata_len = ParquetMetaDataReader::decode_footer(&footer).map_err(|e| {
             error::InvalidParquetSnafu {
                 file: path,
                 reason: format!("failed to decode footer, {e}"),
@@ -113,14 +117,16 @@ impl<'a> MetadataLoader<'a> {
         if (metadata_len as usize) <= buffer_len - FOOTER_SIZE {
             // The whole metadata is in the first read
             let metadata_start = buffer_len - metadata_len as usize - FOOTER_SIZE;
-            let metadata = decode_metadata(&buffer[metadata_start..buffer_len - FOOTER_SIZE])
-                .map_err(|e| {
-                    error::InvalidParquetSnafu {
-                        file: path,
-                        reason: format!("failed to decode metadata, {e}"),
-                    }
-                    .build()
-                })?;
+            let metadata = ParquetMetaDataReader::decode_metadata(
+                &buffer[metadata_start..buffer_len - FOOTER_SIZE],
+            )
+            .map_err(|e| {
+                error::InvalidParquetSnafu {
+                    file: path,
+                    reason: format!("failed to decode metadata, {e}"),
+                }
+                .build()
+            })?;
             Ok(metadata)
         } else {
             // The metadata is out of buffer, need to make a second read
@@ -129,9 +135,10 @@ impl<'a> MetadataLoader<'a> {
                 .read_with(path)
                 .range(metadata_start..(file_size - FOOTER_SIZE as u64))
                 .await
-                .context(error::OpenDalSnafu)?;
+                .context(error::OpenDalSnafu)?
+                .to_vec();
 
-            let metadata = decode_metadata(&data).map_err(|e| {
+            let metadata = ParquetMetaDataReader::decode_metadata(&data).map_err(|e| {
                 error::InvalidParquetSnafu {
                     file: path,
                     reason: format!("failed to decode metadata, {e}"),

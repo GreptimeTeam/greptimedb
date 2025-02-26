@@ -17,7 +17,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 
-use common_telemetry::logging;
+use common_telemetry::warn;
 use snafu::{ensure, OptionExt, ResultExt};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -71,7 +71,7 @@ impl LocalScheduler {
             let child = token.child_token();
             let receiver = rx.clone();
             let state_clone = state.clone();
-            let handle = common_runtime::spawn_bg(async move {
+            let handle = common_runtime::spawn_global(async move {
                 while state_clone.load(Ordering::Relaxed) == STATE_RUNNING {
                     tokio::select! {
                         _ = child.cancelled() => {
@@ -149,7 +149,7 @@ impl Scheduler for LocalScheduler {
 impl Drop for LocalScheduler {
     fn drop(&mut self) {
         if self.state.load(Ordering::Relaxed) != STATE_STOP {
-            logging::warn!("scheduler should be stopped before dropping, which means the state of scheduler must be STATE_STOP");
+            warn!("scheduler should be stopped before dropping, which means the state of scheduler must be STATE_STOP");
 
             // We didn't call `stop()` so we cancel all background workers here.
             self.sender.write().unwrap().take();

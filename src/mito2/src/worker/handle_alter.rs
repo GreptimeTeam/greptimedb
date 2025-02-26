@@ -14,20 +14,29 @@
 
 //! Handling alter related requests.
 
+use std::str::FromStr;
 use std::sync::Arc;
 
-use common_telemetry::{debug, error, info};
+use common_base::readable_size::ReadableSize;
+use common_telemetry::{debug, info};
+use humantime_serde::re::humantime;
 use snafu::ResultExt;
-use store_api::metadata::{RegionMetadata, RegionMetadataBuilder, RegionMetadataRef};
-use store_api::region_request::RegionAlterRequest;
+use store_api::metadata::{
+    InvalidSetRegionOptionRequestSnafu, MetadataError, RegionMetadata, RegionMetadataBuilder,
+    RegionMetadataRef,
+};
+use store_api::mito_engine_options;
+use store_api::region_request::{AlterKind, RegionAlterRequest, SetRegionOption};
 use store_api::storage::RegionId;
 
 use crate::error::{
     InvalidMetadataSnafu, InvalidRegionRequestSchemaVersionSnafu, InvalidRegionRequestSnafu, Result,
 };
 use crate::flush::FlushReason;
-use crate::manifest::action::{RegionChange, RegionMetaAction, RegionMetaActionList};
-use crate::region::version::Version;
+use crate::manifest::action::RegionChange;
+use crate::region::options::CompactionOptions::Twcs;
+use crate::region::options::TwcsOptions;
+use crate::region::version::VersionRef;
 use crate::region::MitoRegionRef;
 use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest};
 use crate::worker::RegionWorkerLoop;
@@ -47,6 +56,33 @@ impl<S> RegionWorkerLoop<S> {
 
         // Get the version before alter.
         let version = region.version();
+
+        // fast path for memory state changes like options.
+        match request.kind {
+            AlterKind::SetRegionOptions { options } => {
+                match self.handle_alter_region_options(region, version, options) {
+                    Ok(_) => sender.send(Ok(0)),
+                    Err(e) => sender.send(Err(e).context(InvalidMetadataSnafu)),
+                }
+                return;
+            }
+            AlterKind::UnsetRegionOptions { keys } => {
+                // Converts the keys to SetRegionOption.
+                //
+                // It passes an empty string to achieve the purpose of unset
+                match self.handle_alter_region_options(
+                    region,
+                    version,
+                    keys.iter().map(Into::into).collect(),
+                ) {
+                    Ok(_) => sender.send(Ok(0)),
+                    Err(e) => sender.send(Err(e).context(InvalidMetadataSnafu)),
+                }
+                return;
+            }
+            _ => {}
+        }
+
         if version.metadata.schema_version != request.schema_version {
             // This is possible if we retry the request.
             debug!(
@@ -69,6 +105,7 @@ impl<S> RegionWorkerLoop<S> {
             sender.send(Err(e).context(InvalidRegionRequestSnafu));
             return;
         }
+
         // Checks whether we need to alter the region.
         if !request.need_alter(&version.metadata) {
             debug!(
@@ -107,44 +144,66 @@ impl<S> RegionWorkerLoop<S> {
             return;
         }
 
-        // Now we can alter the region directly.
-        if let Err(e) = alter_region_schema(&region, &version, request).await {
-            error!(e; "Failed to alter region schema, region_id: {}", region_id);
-            sender.send(Err(e));
-            return;
-        }
-
         info!(
-            "Schema of region {} is altered from {} to {}",
-            region_id,
-            version.metadata.schema_version,
-            region.metadata().schema_version
+            "Try to alter region {}, version.metadata: {:?}, request: {:?}",
+            region_id, version.metadata, request,
         );
-
-        // Notifies waiters.
-        sender.send(Ok(0));
+        self.handle_alter_region_metadata(region, version, request, sender);
     }
-}
 
-/// Alter the schema of the region.
-async fn alter_region_schema(
-    region: &MitoRegionRef,
-    version: &Version,
-    request: RegionAlterRequest,
-) -> Result<()> {
-    let new_meta = metadata_after_alteration(&version.metadata, request)?;
-    // Persist the metadata to region's manifest.
-    let change = RegionChange {
-        metadata: new_meta.clone(),
-    };
-    let action_list = RegionMetaActionList::with_action(RegionMetaAction::Change(change));
-    region.manifest_manager.update(action_list).await?;
+    /// Handles region metadata changes.
+    fn handle_alter_region_metadata(
+        &mut self,
+        region: MitoRegionRef,
+        version: VersionRef,
+        request: RegionAlterRequest,
+        sender: OptionOutputTx,
+    ) {
+        let new_meta = match metadata_after_alteration(&version.metadata, request) {
+            Ok(new_meta) => new_meta,
+            Err(e) => {
+                sender.send(Err(e));
+                return;
+            }
+        };
+        // Persist the metadata to region's manifest.
+        let change = RegionChange { metadata: new_meta };
+        self.handle_manifest_region_change(region, change, sender)
+    }
 
-    // Apply the metadata to region's version.
-    region
-        .version_control
-        .alter_schema(new_meta, &region.memtable_builder);
-    Ok(())
+    /// Handles requests that changes region options, like TTL. It only affects memory state
+    /// since changes are persisted in the `DatanodeTableValue` in metasrv.
+    fn handle_alter_region_options(
+        &mut self,
+        region: MitoRegionRef,
+        version: VersionRef,
+        options: Vec<SetRegionOption>,
+    ) -> std::result::Result<(), MetadataError> {
+        let mut current_options = version.options.clone();
+        for option in options {
+            match option {
+                SetRegionOption::Ttl(new_ttl) => {
+                    info!(
+                        "Update region ttl: {}, previous: {:?} new: {:?}",
+                        region.region_id, current_options.ttl, new_ttl
+                    );
+                    current_options.ttl = new_ttl;
+                }
+                SetRegionOption::Twsc(key, value) => {
+                    let Twcs(options) = &mut current_options.compaction;
+                    set_twcs_options(
+                        options,
+                        &TwcsOptions::default(),
+                        &key,
+                        &value,
+                        region.region_id,
+                    )?;
+                }
+            }
+        }
+        region.version_control.alter_options(current_options);
+        Ok(())
+    }
 }
 
 /// Creates a metadata after applying the alter `request` to the old `metadata`.
@@ -163,4 +222,90 @@ fn metadata_after_alteration(
     assert_eq!(request.schema_version + 1, new_meta.schema_version);
 
     Ok(Arc::new(new_meta))
+}
+
+fn set_twcs_options(
+    options: &mut TwcsOptions,
+    default_option: &TwcsOptions,
+    key: &str,
+    value: &str,
+    region_id: RegionId,
+) -> std::result::Result<(), MetadataError> {
+    match key {
+        mito_engine_options::TWCS_MAX_ACTIVE_WINDOW_RUNS => {
+            let runs = parse_usize_with_default(key, value, default_option.max_active_window_runs)?;
+            log_option_update(region_id, key, options.max_active_window_runs, runs);
+            options.max_active_window_runs = runs;
+        }
+        mito_engine_options::TWCS_MAX_ACTIVE_WINDOW_FILES => {
+            let files =
+                parse_usize_with_default(key, value, default_option.max_active_window_files)?;
+            log_option_update(region_id, key, options.max_active_window_files, files);
+            options.max_active_window_files = files;
+        }
+        mito_engine_options::TWCS_MAX_INACTIVE_WINDOW_RUNS => {
+            let runs =
+                parse_usize_with_default(key, value, default_option.max_inactive_window_runs)?;
+            log_option_update(region_id, key, options.max_inactive_window_runs, runs);
+            options.max_inactive_window_runs = runs;
+        }
+        mito_engine_options::TWCS_MAX_INACTIVE_WINDOW_FILES => {
+            let files =
+                parse_usize_with_default(key, value, default_option.max_inactive_window_files)?;
+            log_option_update(region_id, key, options.max_inactive_window_files, files);
+            options.max_inactive_window_files = files;
+        }
+        mito_engine_options::TWCS_MAX_OUTPUT_FILE_SIZE => {
+            let size = if value.is_empty() {
+                default_option.max_output_file_size
+            } else {
+                Some(
+                    ReadableSize::from_str(value)
+                        .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())?,
+                )
+            };
+            log_option_update(region_id, key, options.max_output_file_size, size);
+            options.max_output_file_size = size;
+        }
+        mito_engine_options::TWCS_TIME_WINDOW => {
+            let window = if value.is_empty() {
+                default_option.time_window
+            } else {
+                Some(
+                    humantime::parse_duration(value)
+                        .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())?,
+                )
+            };
+            log_option_update(region_id, key, options.time_window, window);
+            options.time_window = window;
+        }
+        _ => return InvalidSetRegionOptionRequestSnafu { key, value }.fail(),
+    }
+    Ok(())
+}
+
+fn parse_usize_with_default(
+    key: &str,
+    value: &str,
+    default: usize,
+) -> std::result::Result<usize, MetadataError> {
+    if value.is_empty() {
+        Ok(default)
+    } else {
+        value
+            .parse::<usize>()
+            .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())
+    }
+}
+
+fn log_option_update<T: std::fmt::Debug>(
+    region_id: RegionId,
+    option_name: &str,
+    prev_value: T,
+    cur_value: T,
+) {
+    info!(
+        "Update region {}: {}, previous: {:?}, new: {:?}",
+        option_name, region_id, prev_value, cur_value
+    );
 }

@@ -15,6 +15,7 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use common_query::Output;
 use frontend::instance::Instance;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use rstest::rstest;
@@ -26,6 +27,35 @@ use super::test_util::{
     both_instances_cases, check_unordered_output_stream, distributed, standalone,
 };
 use crate::tests::test_util::MockInstance;
+
+#[allow(clippy::too_many_arguments)]
+async fn promql_query(
+    ins: Arc<Instance>,
+    promql: &str,
+    query_ctx: Arc<QueryContext>,
+    start: SystemTime,
+    end: SystemTime,
+    interval: Duration,
+    lookback: Duration,
+) -> operator::error::Result<Output> {
+    let query = PromQuery {
+        query: promql.to_string(),
+        ..PromQuery::default()
+    };
+    let QueryStatement::Promql(mut eval_stmt) =
+        QueryLanguageParser::parse_promql(&query, &query_ctx).unwrap()
+    else {
+        unreachable!()
+    };
+    eval_stmt.start = start;
+    eval_stmt.end = end;
+    eval_stmt.interval = interval;
+    eval_stmt.lookback_delta = lookback;
+
+    ins.statement_executor()
+        .execute_stmt(QueryStatement::Promql(eval_stmt), query_ctx)
+        .await
+}
 
 #[allow(clippy::too_many_arguments)]
 async fn create_insert_query_assert(
@@ -54,25 +84,17 @@ async fn create_insert_query_assert(
             let _ = v.unwrap();
         });
 
-    let query = PromQuery {
-        query: promql.to_string(),
-        ..PromQuery::default()
-    };
-    let QueryStatement::Promql(mut eval_stmt) =
-        QueryLanguageParser::parse_promql(&query, &QueryContext::arc()).unwrap()
-    else {
-        unreachable!()
-    };
-    eval_stmt.start = start;
-    eval_stmt.end = end;
-    eval_stmt.interval = interval;
-    eval_stmt.lookback_delta = lookback;
-
-    let query_output = instance
-        .statement_executor()
-        .execute_stmt(QueryStatement::Promql(eval_stmt), QueryContext::arc())
-        .await
-        .unwrap();
+    let query_output = promql_query(
+        instance,
+        promql,
+        QueryContext::arc(),
+        start,
+        end,
+        interval,
+        lookback,
+    )
+    .await
+    .unwrap();
     check_unordered_output_stream(query_output, expected).await;
 }
 
@@ -250,7 +272,7 @@ async fn aggregators_simple_sum(instance: Arc<dyn MockInstance>) {
         Duration::from_secs(60),
         Duration::from_secs(0),
         "+------------+---------------------+--------------------------+\
-        \n| group      | ts                  | SUM(http_requests.value) |\
+        \n| group      | ts                  | sum(http_requests.value) |\
         \n+------------+---------------------+--------------------------+\
         \n| production | 1970-01-01T00:00:00 | 300.0                    |\
         \n| canary     | 1970-01-01T00:00:00 | 700.0                    |\
@@ -277,7 +299,7 @@ async fn aggregators_simple_avg(instance: Arc<dyn MockInstance>) {
         Duration::from_secs(60),
         Duration::from_secs(0),
         "+------------+---------------------+--------------------------+\
-        \n| group      | ts                  | AVG(http_requests.value) |\
+        \n| group      | ts                  | avg(http_requests.value) |\
         \n+------------+---------------------+--------------------------+\
         \n| production | 1970-01-01T00:00:00 | 150.0                    |\
         \n| canary     | 1970-01-01T00:00:00 | 350.0                    |\
@@ -304,7 +326,7 @@ async fn aggregators_simple_count(instance: Arc<dyn MockInstance>) {
         Duration::from_secs(60),
         Duration::from_secs(0),
         "+------------+---------------------+----------------------------+\
-        \n| group      | ts                  | COUNT(http_requests.value) |\
+        \n| group      | ts                  | count(http_requests.value) |\
         \n+------------+---------------------+----------------------------+\
         \n| canary     | 1970-01-01T00:00:00 | 2                          |\
         \n| production | 1970-01-01T00:00:00 | 2                          |\
@@ -331,7 +353,7 @@ async fn aggregators_simple_without(instance: Arc<dyn MockInstance>) {
         Duration::from_secs(60),
         Duration::from_secs(0),
         "+------------+------------+---------------------+--------------------------+\
-        \n| group      | job        | ts                  | SUM(http_requests.value) |\
+        \n| group      | job        | ts                  | sum(http_requests.value) |\
         \n+------------+------------+---------------------+--------------------------+\
         \n| production | api-server | 1970-01-01T00:00:00 | 300.0                    |\
         \n| canary     | api-server | 1970-01-01T00:00:00 | 700.0                    |\
@@ -357,7 +379,7 @@ async fn aggregators_empty_by(instance: Arc<dyn MockInstance>) {
         Duration::from_secs(60),
         Duration::from_secs(0),
         "+---------------------+--------------------------+\
-        \n| ts                  | SUM(http_requests.value) |\
+        \n| ts                  | sum(http_requests.value) |\
         \n+---------------------+--------------------------+\
         \n| 1970-01-01T00:00:00 | 1000.0                   |\
         \n+---------------------+--------------------------+",
@@ -382,7 +404,7 @@ async fn aggregators_no_by_without(instance: Arc<dyn MockInstance>) {
         Duration::from_secs(60),
         Duration::from_secs(0),
         "+---------------------+--------------------------+\
-        \n| ts                  | SUM(http_requests.value) |\
+        \n| ts                  | sum(http_requests.value) |\
         \n+---------------------+--------------------------+\
         \n| 1970-01-01T00:00:00 | 1000.0                   |\
         \n+---------------------+--------------------------+",
@@ -408,7 +430,7 @@ async fn aggregators_empty_without(instance: Arc<dyn MockInstance>) {
         Duration::from_secs(60),
         Duration::from_secs(0),
         "+------------+----------+------------+---------------------+--------------------------+\
-        \n| group      | instance | job        | ts                  | SUM(http_requests.value) |\
+        \n| group      | instance | job        | ts                  | sum(http_requests.value) |\
         \n+------------+----------+------------+---------------------+--------------------------+\
         \n| production | 0        | api-server | 1970-01-01T00:00:00 | 100.0                    |\
         \n| production | 1        | api-server | 1970-01-01T00:00:00 | 200.0                    |\
@@ -435,7 +457,7 @@ async fn aggregators_complex_combined_aggrs(instance: Arc<dyn MockInstance>) {
         Duration::from_secs(60),
         Duration::from_secs(0),
         "+------------+---------------------+---------------------------------------------------------------------------------------------------------------------------------------------+\
-        \n| job        | ts                  | lhs.lhs.lhs.SUM(http_requests.value) + rhs.MIN(http_requests.value) + http_requests.MAX(http_requests.value) + rhs.AVG(http_requests.value) |\
+        \n| job        | ts                  | lhs.rhs.lhs.sum(http_requests.value) + rhs.min(http_requests.value) + http_requests.max(http_requests.value) + rhs.avg(http_requests.value) |\
         \n+------------+---------------------+---------------------------------------------------------------------------------------------------------------------------------------------+\
         \n| api-server | 1970-01-01T00:00:00 | 1750.0                                                                                                                                      |\
         \n| app-server | 1970-01-01T00:00:00 | 4550.0                                                                                                                                      |\
@@ -459,7 +481,7 @@ async fn two_aggregators_combined_aggrs(instance: Arc<dyn MockInstance>) {
         Duration::from_secs(60),
         Duration::from_secs(0),
         "+------------+---------------------+-------------------------------------------------------------+\
-        \n| job        | ts                  | lhs.SUM(http_requests.value) + rhs.MIN(http_requests.value) |\
+        \n| job        | ts                  | lhs.sum(http_requests.value) + rhs.min(http_requests.value) |\
         \n+------------+---------------------+-------------------------------------------------------------+\
         \n| api-server | 1970-01-01T00:00:00 | 1100.0                                                      |\
         \n| app-server | 1970-01-01T00:00:00 | 3100.0                                                      |\
@@ -523,4 +545,113 @@ async fn binary_op_plain_columns(instance: Arc<dyn MockInstance>) {
         \n+------------+----------+------------+---------------------+-----------------------+",
     )
     .await;
+}
+
+#[apply(both_instances_cases)]
+async fn cross_schema_query(instance: Arc<dyn MockInstance>) {
+    let ins = instance.frontend();
+
+    ins.do_query(
+        AGGREGATORS_CREATE_TABLE,
+        QueryContext::with_db_name(Some("greptime_private")).into(),
+    )
+    .await
+    .into_iter()
+    .for_each(|v| {
+        let _ = v.unwrap();
+    });
+    ins.do_query(
+        AGGREGATORS_INSERT_DATA,
+        QueryContext::with_db_name(Some("greptime_private")).into(),
+    )
+    .await
+    .into_iter()
+    .for_each(|v| {
+        let _ = v.unwrap();
+    });
+
+    let start = UNIX_EPOCH;
+    let end = unix_epoch_plus_100s();
+    let interval = Duration::from_secs(60);
+    let lookback_delta = Duration::from_secs(0);
+
+    let query_output = promql_query(
+        ins.clone(),
+        r#"http_requests{__schema__="greptime_private"}"#,
+        QueryContext::arc(),
+        start,
+        end,
+        interval,
+        lookback_delta,
+    )
+    .await
+    .unwrap();
+
+    let expected = r#"+------------+----------+------------+-------+---------------------+
+| job        | instance | group      | value | ts                  |
++------------+----------+------------+-------+---------------------+
+| api-server | 0        | production | 100.0 | 1970-01-01T00:00:00 |
+| api-server | 0        | canary     | 300.0 | 1970-01-01T00:00:00 |
+| api-server | 1        | production | 200.0 | 1970-01-01T00:00:00 |
+| api-server | 1        | canary     | 400.0 | 1970-01-01T00:00:00 |
+| app-server | 0        | canary     | 700.0 | 1970-01-01T00:00:00 |
+| app-server | 0        | production | 500.0 | 1970-01-01T00:00:00 |
+| app-server | 1        | canary     | 800.0 | 1970-01-01T00:00:00 |
+| app-server | 1        | production | 600.0 | 1970-01-01T00:00:00 |
++------------+----------+------------+-------+---------------------+"#;
+
+    check_unordered_output_stream(query_output, expected).await;
+
+    let query_output = promql_query(
+        ins.clone(),
+        r#"http_requests{__database__="greptime_private"}"#,
+        QueryContext::arc(),
+        start,
+        end,
+        interval,
+        lookback_delta,
+    )
+    .await
+    .unwrap();
+
+    let expected = r#"+------------+----------+------------+-------+---------------------+
+| job        | instance | group      | value | ts                  |
++------------+----------+------------+-------+---------------------+
+| api-server | 0        | production | 100.0 | 1970-01-01T00:00:00 |
+| api-server | 0        | canary     | 300.0 | 1970-01-01T00:00:00 |
+| api-server | 1        | production | 200.0 | 1970-01-01T00:00:00 |
+| api-server | 1        | canary     | 400.0 | 1970-01-01T00:00:00 |
+| app-server | 0        | canary     | 700.0 | 1970-01-01T00:00:00 |
+| app-server | 0        | production | 500.0 | 1970-01-01T00:00:00 |
+| app-server | 1        | canary     | 800.0 | 1970-01-01T00:00:00 |
+| app-server | 1        | production | 600.0 | 1970-01-01T00:00:00 |
++------------+----------+------------+-------+---------------------+"#;
+
+    check_unordered_output_stream(query_output, expected).await;
+
+    let query_output = promql_query(
+        ins.clone(),
+        r#"http_requests"#,
+        QueryContext::arc(),
+        start,
+        end,
+        interval,
+        lookback_delta,
+    )
+    .await;
+    assert!(query_output.is_err());
+
+    let query_output = promql_query(
+        ins.clone(),
+        r#"http_requests"#,
+        QueryContext::with_db_name(Some("greptime_private")).into(),
+        start,
+        end,
+        interval,
+        lookback_delta,
+    )
+    .await
+    .unwrap();
+
+    check_unordered_output_stream(query_output, expected).await;
 }

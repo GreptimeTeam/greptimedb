@@ -33,7 +33,7 @@ impl DslTranslator<InsertIntoExpr, String> for InsertIntoExprTranslator {
 
 impl InsertIntoExprTranslator {
     fn format_columns(input: &InsertIntoExpr) -> String {
-        if input.columns.is_empty() {
+        if input.omit_column_list {
             "".to_string()
         } else {
             let list = input
@@ -71,7 +71,7 @@ impl InsertIntoExprTranslator {
 mod tests {
     use std::sync::Arc;
 
-    use rand::SeedableRng;
+    use rand::{Rng, SeedableRng};
 
     use super::*;
     use crate::generator::insert_expr::InsertExprGeneratorBuilder;
@@ -82,10 +82,12 @@ mod tests {
     #[test]
     fn test_insert_into_translator() {
         let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0);
+        let omit_column_list = rng.gen_bool(0.2);
 
         let test_ctx = test_utils::new_test_ctx();
         let insert_expr_generator = InsertExprGeneratorBuilder::default()
             .table_ctx(Arc::new(test_ctx))
+            .omit_column_list(omit_column_list)
             .rows(2)
             .build()
             .unwrap();
@@ -100,16 +102,16 @@ mod tests {
 
         let insert_expr = insert_expr_generator.generate(&mut rng).unwrap();
         let output = InsertIntoExprTranslator.translate(&insert_expr).unwrap();
-        let expected = r#"INSERT INTO test (cpu_util, disk_util, ts) VALUES
-(0.7074194466620976, 0.661288102315126, '-47252-05-08 07:33:49.567+0000'),
-(0.8266101224213618, 0.7947724277743285, '-224292-12-07 02:51:53.371+0000');"#;
+        let expected = r#"INSERT INTO test (ts, memory_util) VALUES
+('+22606-05-02 04:44:02.976+0000', 0.7074194466620976),
+('+33689-06-12 08:42:11.037+0000', 0.40987428386535585);"#;
         assert_eq!(output, expected);
 
         let insert_expr = insert_expr_generator.generate(&mut rng).unwrap();
         let output = InsertIntoExprTranslator.translate(&insert_expr).unwrap();
-        let expected = r#"INSERT INTO test  VALUES
-('odio', NULL, 0.48809950435391647, 0.5228925709595407, 0.9091528874275897, '+241156-12-16 20:52:15.185+0000'),
-('dignissimos', 'labore', NULL, 0.12983559048685023, 0.6362040919831425, '-30691-06-17 23:41:09.938+0000');"#;
+        let expected = r#"INSERT INTO test (ts, disk_util, cpu_util, host) VALUES
+('+200107-10-22 01:36:36.924+0000', 0.9082597320638828, 0.020853190804573818, 'voluptates'),
+('+241156-12-16 20:52:15.185+0000', 0.6492772846116915, 0.18078027701087784, 'repellat');"#;
         assert_eq!(output, expected);
     }
 }

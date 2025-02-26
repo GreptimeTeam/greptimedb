@@ -1,0 +1,101 @@
+CREATE TABLE log (
+    ts TIMESTAMP TIME INDEX,
+    msg STRING FULLTEXT INDEX,
+);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE log;
+
++-------+------------------------------------------------------------------------------------------+
+| Table | Create Table                                                                             |
++-------+------------------------------------------------------------------------------------------+
+| log   | CREATE TABLE IF NOT EXISTS "log" (                                                       |
+|       |   "ts" TIMESTAMP(3) NOT NULL,                                                            |
+|       |   "msg" STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', case_sensitive = 'false'), |
+|       |   TIME INDEX ("ts")                                                                      |
+|       | )                                                                                        |
+|       |                                                                                          |
+|       | ENGINE=mito                                                                              |
+|       |                                                                                          |
++-------+------------------------------------------------------------------------------------------+
+
+DROP TABLE log;
+
+Affected Rows: 0
+
+CREATE TABLE log_with_opts (
+    ts TIMESTAMP TIME INDEX,
+    msg TEXT FULLTEXT INDEX WITH (analyzer='English', case_sensitive='true'),
+);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE log_with_opts;
+
++---------------+-----------------------------------------------------------------------------------------+
+| Table         | Create Table                                                                            |
++---------------+-----------------------------------------------------------------------------------------+
+| log_with_opts | CREATE TABLE IF NOT EXISTS "log_with_opts" (                                            |
+|               |   "ts" TIMESTAMP(3) NOT NULL,                                                           |
+|               |   "msg" STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', case_sensitive = 'true'), |
+|               |   TIME INDEX ("ts")                                                                     |
+|               | )                                                                                       |
+|               |                                                                                         |
+|               | ENGINE=mito                                                                             |
+|               |                                                                                         |
++---------------+-----------------------------------------------------------------------------------------+
+
+DROP TABLE log_with_opts;
+
+Affected Rows: 0
+
+CREATE TABLE log_multi_fulltext_cols (
+    ts TIMESTAMP TIME INDEX,
+    msg TINYTEXT FULLTEXT INDEX,
+    msg2 VARCHAR FULLTEXT INDEX,
+);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE log_multi_fulltext_cols;
+
++-------------------------+-------------------------------------------------------------------------------------------+
+| Table                   | Create Table                                                                              |
++-------------------------+-------------------------------------------------------------------------------------------+
+| log_multi_fulltext_cols | CREATE TABLE IF NOT EXISTS "log_multi_fulltext_cols" (                                    |
+|                         |   "ts" TIMESTAMP(3) NOT NULL,                                                             |
+|                         |   "msg" STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', case_sensitive = 'false'),  |
+|                         |   "msg2" STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', case_sensitive = 'false'), |
+|                         |   TIME INDEX ("ts")                                                                       |
+|                         | )                                                                                         |
+|                         |                                                                                           |
+|                         | ENGINE=mito                                                                               |
+|                         |                                                                                           |
++-------------------------+-------------------------------------------------------------------------------------------+
+
+DROP TABLE log_multi_fulltext_cols;
+
+Affected Rows: 0
+
+CREATE TABLE log_dup_fulltext_opts (
+    ts TIMESTAMP TIME INDEX,
+    msg TEXT FULLTEXT FULLTEXT,
+);
+
+Error: 1004(InvalidArguments), Invalid column option, column name: msg, error: expect INDEX after FULLTEXT keyword
+
+CREATE TABLE log_with_invalid_type (
+    ts TIMESTAMP TIME INDEX,
+    msg INT FULLTEXT INDEX,
+);
+
+Error: 1004(InvalidArguments), Invalid column option, column name: msg, error: FULLTEXT index only supports string type
+
+CREATE TABLE log_with_invalid_option (
+    ts TIMESTAMP TIME INDEX,
+    msg TEXT FULLTEXT INDEX WITH (analyzer='English', invalid_option='true'),
+);
+
+Error: 1004(InvalidArguments), Invalid column option, column name: msg, error: invalid FULLTEXT INDEX option: invalid_option
+

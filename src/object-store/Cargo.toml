@@ -11,29 +11,28 @@ workspace = true
 services-memory = ["opendal/services-memory"]
 
 [dependencies]
-async-trait = "0.1"
 bytes.workspace = true
 common-telemetry.workspace = true
 futures.workspace = true
 lazy_static.workspace = true
 md5 = "0.7"
 moka = { workspace = true, features = ["future"] }
-opendal = { version = "0.45", features = [
+opendal = { version = "0.51.1", features = [
     "layers-tracing",
-    "rustls",
+    "layers-prometheus",
     "services-azblob",
     "services-fs",
     "services-gcs",
     "services-http",
     "services-oss",
     "services-s3",
-], default-features = false }
+] }
 prometheus.workspace = true
+tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
 anyhow = "1.0"
 common-telemetry.workspace = true
 common-test-util.workspace = true
-opendal = { version = "0.45", features = ["services-memory"] }
 tokio.workspace = true

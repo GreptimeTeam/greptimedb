@@ -14,22 +14,23 @@
 
 use core::default::Default;
 use std::cmp::Ordering;
-use std::fmt::{Display, Formatter, Write};
+use std::fmt::{self, Display, Formatter, Write};
 use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
 use arrow::datatypes::TimeUnit as ArrowTimeUnit;
 use chrono::{
-    DateTime, Days, LocalResult, Months, NaiveDate, NaiveDateTime, NaiveTime,
+    DateTime, Days, LocalResult, Months, NaiveDate, NaiveDateTime, NaiveTime, TimeDelta,
     TimeZone as ChronoTimeZone, Utc,
 };
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 
+use crate::error;
 use crate::error::{ArithmeticOverflowSnafu, ParseTimestampSnafu, Result, TimestampOverflowSnafu};
+use crate::interval::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
 use crate::timezone::{get_timezone, Timezone};
 use crate::util::{datetime_to_utc, div_ceil};
-use crate::{error, Interval};
 
 /// Timestamp represents the value of units(seconds/milliseconds/microseconds/nanoseconds) elapsed
 /// since UNIX epoch. The valid value range of [Timestamp] depends on it's unit (all in UTC timezone):
@@ -41,7 +42,7 @@ use crate::{error, Interval};
 /// # Note:
 /// For values out of range, you can still store these timestamps, but while performing arithmetic
 /// or formatting operations, it will return an error or just overflow.
-#[derive(Debug, Clone, Default, Copy, Serialize, Deserialize)]
+#[derive(Clone, Default, Copy, Serialize, Deserialize)]
 pub struct Timestamp {
     value: i64,
     unit: TimeUnit,
@@ -140,40 +141,77 @@ impl Timestamp {
         })
     }
 
-    /// Adds given Interval to the current timestamp.
-    /// Returns None if the resulting timestamp would be out of range.
-    pub fn add_interval(&self, interval: Interval) -> Option<Timestamp> {
+    // FIXME(yingwen): remove add/sub intervals later
+    /// Adds given [IntervalYearMonth] to the current timestamp.
+    pub fn add_year_month(&self, interval: IntervalYearMonth) -> Option<Timestamp> {
         let naive_datetime = self.to_chrono_datetime()?;
-        let (months, days, nsecs) = interval.to_month_day_nano();
 
-        let naive_datetime = naive_datetime
-            .checked_add_months(Months::new(months as u32))?
-            .checked_add_days(Days::new(days as u64))?
-            + Duration::from_nanos(nsecs as u64);
+        let naive_datetime =
+            naive_datetime.checked_add_months(Months::new(interval.months as u32))?;
 
-        match Timestamp::from_chrono_datetime(naive_datetime) {
-            // Have to convert the new timestamp by the current unit.
-            Some(ts) => ts.convert_to(self.unit),
-            None => None,
-        }
+        // Have to convert the new timestamp by the current unit.
+        Timestamp::from_chrono_datetime(naive_datetime).and_then(|ts| ts.convert_to(self.unit))
     }
 
-    /// Subtracts given Interval to the current timestamp.
-    /// Returns None if the resulting timestamp would be out of range.
-    pub fn sub_interval(&self, interval: Interval) -> Option<Timestamp> {
+    /// Adds given [IntervalDayTime] to the current timestamp.
+    pub fn add_day_time(&self, interval: IntervalDayTime) -> Option<Timestamp> {
         let naive_datetime = self.to_chrono_datetime()?;
-        let (months, days, nsecs) = interval.to_month_day_nano();
 
         let naive_datetime = naive_datetime
-            .checked_sub_months(Months::new(months as u32))?
-            .checked_sub_days(Days::new(days as u64))?
-            - Duration::from_nanos(nsecs as u64);
+            .checked_add_days(Days::new(interval.days as u64))?
+            .checked_add_signed(TimeDelta::milliseconds(interval.milliseconds as i64))?;
 
-        match Timestamp::from_chrono_datetime(naive_datetime) {
-            // Have to convert the new timestamp by the current unit.
-            Some(ts) => ts.convert_to(self.unit),
-            None => None,
-        }
+        // Have to convert the new timestamp by the current unit.
+        Timestamp::from_chrono_datetime(naive_datetime).and_then(|ts| ts.convert_to(self.unit))
+    }
+
+    /// Adds given [IntervalMonthDayNano] to the current timestamp.
+    pub fn add_month_day_nano(&self, interval: IntervalMonthDayNano) -> Option<Timestamp> {
+        let naive_datetime = self.to_chrono_datetime()?;
+
+        let naive_datetime = naive_datetime
+            .checked_add_months(Months::new(interval.months as u32))?
+            .checked_add_days(Days::new(interval.days as u64))?
+            .checked_add_signed(TimeDelta::nanoseconds(interval.nanoseconds))?;
+
+        // Have to convert the new timestamp by the current unit.
+        Timestamp::from_chrono_datetime(naive_datetime).and_then(|ts| ts.convert_to(self.unit))
+    }
+
+    /// Subtracts given [IntervalYearMonth] to the current timestamp.
+    pub fn sub_year_month(&self, interval: IntervalYearMonth) -> Option<Timestamp> {
+        let naive_datetime = self.to_chrono_datetime()?;
+
+        let naive_datetime =
+            naive_datetime.checked_sub_months(Months::new(interval.months as u32))?;
+
+        // Have to convert the new timestamp by the current unit.
+        Timestamp::from_chrono_datetime(naive_datetime).and_then(|ts| ts.convert_to(self.unit))
+    }
+
+    /// Subtracts given [IntervalDayTime] to the current timestamp.
+    pub fn sub_day_time(&self, interval: IntervalDayTime) -> Option<Timestamp> {
+        let naive_datetime = self.to_chrono_datetime()?;
+
+        let naive_datetime = naive_datetime
+            .checked_sub_days(Days::new(interval.days as u64))?
+            .checked_sub_signed(TimeDelta::milliseconds(interval.milliseconds as i64))?;
+
+        // Have to convert the new timestamp by the current unit.
+        Timestamp::from_chrono_datetime(naive_datetime).and_then(|ts| ts.convert_to(self.unit))
+    }
+
+    /// Subtracts given [IntervalMonthDayNano] to the current timestamp.
+    pub fn sub_month_day_nano(&self, interval: IntervalMonthDayNano) -> Option<Timestamp> {
+        let naive_datetime = self.to_chrono_datetime()?;
+
+        let naive_datetime = naive_datetime
+            .checked_sub_months(Months::new(interval.months as u32))?
+            .checked_sub_days(Days::new(interval.days as u64))?
+            .checked_sub_signed(TimeDelta::nanoseconds(interval.nanoseconds))?;
+
+        // Have to convert the new timestamp by the current unit.
+        Timestamp::from_chrono_datetime(naive_datetime).and_then(|ts| ts.convert_to(self.unit))
     }
 
     /// Subtracts current timestamp with another timestamp, yielding a duration.
@@ -357,7 +395,7 @@ impl Timestamp {
 
     pub fn to_chrono_datetime(&self) -> Option<NaiveDateTime> {
         let (sec, nsec) = self.split();
-        NaiveDateTime::from_timestamp_opt(sec, nsec)
+        chrono::DateTime::from_timestamp(sec, nsec).map(|x| x.naive_utc())
     }
 
     pub fn to_chrono_datetime_with_timezone(&self, tz: Option<&Timezone>) -> Option<NaiveDateTime> {
@@ -380,8 +418,8 @@ impl Timestamp {
     }
 
     pub fn from_chrono_datetime(ndt: NaiveDateTime) -> Option<Self> {
-        let sec = ndt.timestamp();
-        let nsec = ndt.timestamp_subsec_nanos();
+        let sec = ndt.and_utc().timestamp();
+        let nsec = ndt.and_utc().timestamp_subsec_nanos();
         Timestamp::from_splits(sec, nsec)
     }
 
@@ -441,6 +479,11 @@ impl Timestamp {
 
         ParseTimestampSnafu { raw: s }.fail()
     }
+
+    pub fn negative(mut self) -> Self {
+        self.value = -self.value;
+        self
+    }
 }
 
 impl Timestamp {
@@ -495,6 +538,12 @@ impl From<Timestamp> for i64 {
 impl From<Timestamp> for serde_json::Value {
     fn from(d: Timestamp) -> Self {
         serde_json::Value::String(d.to_iso8601_string())
+    }
+}
+
+impl fmt::Debug for Timestamp {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}::{}", self.value, self.unit)
     }
 }
 
@@ -677,13 +726,13 @@ mod tests {
     fn test_add_sub_interval() {
         let ts = Timestamp::new(1000, TimeUnit::Millisecond);
 
-        let interval = Interval::from_day_time(1, 200);
+        let interval = IntervalDayTime::new(1, 200);
 
-        let new_ts = ts.add_interval(interval).unwrap();
+        let new_ts = ts.add_day_time(interval).unwrap();
         assert_eq!(new_ts.unit(), TimeUnit::Millisecond);
         assert_eq!(new_ts.value(), 1000 + 3600 * 24 * 1000 + 200);
 
-        assert_eq!(ts, new_ts.sub_interval(interval).unwrap());
+        assert_eq!(ts, new_ts.sub_day_time(interval).unwrap());
     }
 
     #[test]
@@ -1063,9 +1112,9 @@ mod tests {
         let _ = Timestamp::new(i64::MAX, TimeUnit::Nanosecond).split();
         let _ = Timestamp::new(i64::MIN, TimeUnit::Nanosecond).split();
         let (sec, nsec) = Timestamp::new(i64::MIN, TimeUnit::Nanosecond).split();
-        let time = NaiveDateTime::from_timestamp_opt(sec, nsec).unwrap();
-        assert_eq!(sec, time.timestamp());
-        assert_eq!(nsec, time.timestamp_subsec_nanos());
+        let time = DateTime::from_timestamp(sec, nsec).unwrap().naive_utc();
+        assert_eq!(sec, time.and_utc().timestamp());
+        assert_eq!(nsec, time.and_utc().timestamp_subsec_nanos());
     }
 
     #[test]
@@ -1159,12 +1208,12 @@ mod tests {
     #[test]
     fn test_subtract_timestamp() {
         assert_eq!(
-            Some(chrono::Duration::milliseconds(42)),
+            chrono::Duration::try_milliseconds(42),
             Timestamp::new_millisecond(100).sub(&Timestamp::new_millisecond(58))
         );
 
         assert_eq!(
-            Some(chrono::Duration::milliseconds(-42)),
+            chrono::Duration::try_milliseconds(-42),
             Timestamp::new_millisecond(58).sub(&Timestamp::new_millisecond(100))
         );
     }
@@ -1286,8 +1335,8 @@ mod tests {
 
     #[test]
     fn test_from_naive_date_time() {
-        let naive_date_time_min = NaiveDateTime::MIN;
-        let naive_date_time_max = NaiveDateTime::MAX;
+        let naive_date_time_min = NaiveDateTime::MIN.and_utc();
+        let naive_date_time_max = NaiveDateTime::MAX.and_utc();
 
         let min_sec = Timestamp::new_second(naive_date_time_min.timestamp());
         let max_sec = Timestamp::new_second(naive_date_time_max.timestamp());
@@ -1380,6 +1429,26 @@ mod tests {
         assert_eq!(
             "+262142-12-31 23:59:59",
             Timestamp::MAX_SECOND.to_timezone_aware_string(Some(&Timezone::Named(Tz::UTC)))
+        );
+    }
+
+    #[test]
+    fn test_debug_timestamp() {
+        assert_eq!(
+            "1000::Second",
+            format!("{:?}", Timestamp::new(1000, TimeUnit::Second))
+        );
+        assert_eq!(
+            "1001::Millisecond",
+            format!("{:?}", Timestamp::new(1001, TimeUnit::Millisecond))
+        );
+        assert_eq!(
+            "1002::Microsecond",
+            format!("{:?}", Timestamp::new(1002, TimeUnit::Microsecond))
+        );
+        assert_eq!(
+            "1003::Nanosecond",
+            format!("{:?}", Timestamp::new(1003, TimeUnit::Nanosecond))
         );
     }
 }

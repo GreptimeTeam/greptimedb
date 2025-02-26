@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use snafu::ResultExt;
-use sqlparser::ast::Ident;
+use sqlparser::ast::{Ident, Query};
 use sqlparser::dialect::Dialect;
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::{Parser, ParserError, ParserOptions};
@@ -25,6 +25,8 @@ use crate::parsers::tql_parser;
 use crate::statements::statement::Statement;
 use crate::statements::transform_statements;
 
+pub const FLOW: &str = "FLOW";
+
 /// SQL Parser options.
 #[derive(Clone, Debug, Default)]
 pub struct ParseOptions {}
@@ -35,20 +37,31 @@ pub struct ParserContext<'a> {
     pub(crate) sql: &'a str,
 }
 
-impl<'a> ParserContext<'a> {
+impl ParserContext<'_> {
+    /// Construct a new ParserContext.
+    pub fn new<'a>(dialect: &'a dyn Dialect, sql: &'a str) -> Result<ParserContext<'a>> {
+        let parser = Parser::new(dialect)
+            .with_options(ParserOptions::new().with_trailing_commas(true))
+            .try_with_sql(sql)
+            .context(SyntaxSnafu)?;
+
+        Ok(ParserContext { parser, sql })
+    }
+
+    /// Parses parser context to Query.
+    pub fn parser_query(&mut self) -> Result<Box<Query>> {
+        self.parser.parse_query().context(SyntaxSnafu)
+    }
+
     /// Parses SQL with given dialect
     pub fn create_with_dialect(
-        sql: &'a str,
+        sql: &str,
         dialect: &dyn Dialect,
         _opts: ParseOptions,
     ) -> Result<Vec<Statement>> {
         let mut stmts: Vec<Statement> = Vec::new();
 
-        let parser = Parser::new(dialect)
-            .with_options(ParserOptions::new().with_trailing_commas(true))
-            .try_with_sql(sql)
-            .context(SyntaxSnafu)?;
-        let mut parser_ctx = ParserContext { sql, parser };
+        let mut parser_ctx = ParserContext::new(dialect, sql)?;
 
         let mut expecting_statement_delimiter = false;
         loop {
@@ -74,7 +87,7 @@ impl<'a> ParserContext<'a> {
         Ok(stmts)
     }
 
-    pub fn parse_table_name(sql: &'a str, dialect: &dyn Dialect) -> Result<ObjectName> {
+    pub fn parse_table_name(sql: &str, dialect: &dyn Dialect) -> Result<ObjectName> {
         let parser = Parser::new(dialect)
             .with_options(ParserOptions::new().with_trailing_commas(true))
             .try_with_sql(sql)
@@ -83,24 +96,23 @@ impl<'a> ParserContext<'a> {
     }
 
     pub(crate) fn intern_parse_table_name(&mut self) -> Result<ObjectName> {
-        let raw_table_name = self
-            .parser
-            .parse_object_name()
-            .context(error::UnexpectedSnafu {
-                sql: self.sql,
-                expected: "a table name",
-                actual: self.parser.peek_token().to_string(),
-            })?;
+        let raw_table_name =
+            self.parser
+                .parse_object_name(false)
+                .context(error::UnexpectedSnafu {
+                    expected: "a table name",
+                    actual: self.parser.peek_token().to_string(),
+                })?;
         Ok(Self::canonicalize_object_name(raw_table_name))
     }
 
-    pub fn parse_function(sql: &'a str, dialect: &dyn Dialect) -> Result<Expr> {
+    pub fn parse_function(sql: &str, dialect: &dyn Dialect) -> Result<Expr> {
         let mut parser = Parser::new(dialect)
             .with_options(ParserOptions::new().with_trailing_commas(true))
             .try_with_sql(sql)
             .context(SyntaxSnafu)?;
 
-        let function_name = parser.parse_identifier().context(SyntaxSnafu)?;
+        let function_name = parser.parse_identifier(false).context(SyntaxSnafu)?;
         parser
             .parse_function(ObjectName(vec![function_name]))
             .context(SyntaxSnafu)
@@ -147,10 +159,32 @@ impl<'a> ParserContext<'a> {
 
                     Keyword::SET => self.parse_set_variables(),
 
+                    Keyword::ADMIN => self.parse_admin_command(),
+
                     Keyword::NoKeyword
-                        if w.value.to_uppercase() == tql_parser::TQL && w.quote_style.is_none() =>
+                        if w.quote_style.is_none() && w.value.to_uppercase() == tql_parser::TQL =>
                     {
                         self.parse_tql()
+                    }
+
+                    Keyword::DECLARE => self.parse_declare_cursor(),
+
+                    Keyword::FETCH => self.parse_fetch_cursor(),
+
+                    Keyword::CLOSE => self.parse_close_cursor(),
+
+                    Keyword::USE => {
+                        let _ = self.parser.next_token();
+
+                        let database_name = self.parser.parse_identifier(false).context(
+                            error::UnexpectedSnafu {
+                                expected: "a database name",
+                                actual: self.peek_token_as_string(),
+                            },
+                        )?;
+                        Ok(Statement::Use(
+                            Self::canonicalize_identifier(database_name).value,
+                        ))
                     }
 
                     // todo(hl) support more statements.
@@ -162,13 +196,27 @@ impl<'a> ParserContext<'a> {
         }
     }
 
+    /// Parses MySQL style 'PREPARE stmt_name FROM stmt' into a (stmt_name, stmt) tuple.
+    pub fn parse_mysql_prepare_stmt(sql: &str, dialect: &dyn Dialect) -> Result<(String, String)> {
+        ParserContext::new(dialect, sql)?.parse_mysql_prepare()
+    }
+
+    /// Parses MySQL style 'EXECUTE stmt_name USING param_list' into a stmt_name string and a list of parameters.
+    pub fn parse_mysql_execute_stmt(
+        sql: &str,
+        dialect: &dyn Dialect,
+    ) -> Result<(String, Vec<Expr>)> {
+        ParserContext::new(dialect, sql)?.parse_mysql_execute()
+    }
+
+    /// Parses MySQL style 'DEALLOCATE stmt_name' into a stmt_name string.
+    pub fn parse_mysql_deallocate_stmt(sql: &str, dialect: &dyn Dialect) -> Result<String> {
+        ParserContext::new(dialect, sql)?.parse_deallocate()
+    }
+
     /// Raises an "unsupported statement" error.
     pub fn unsupported<T>(&self, keyword: String) -> Result<T> {
-        error::UnsupportedSnafu {
-            sql: self.sql,
-            keyword,
-        }
-        .fail()
+        error::UnsupportedSnafu { keyword }.fail()
     }
 
     // Report unexpected token
@@ -222,12 +270,29 @@ impl<'a> ParserContext<'a> {
                 .collect(),
         )
     }
+
+    /// Simply a shortcut for sqlparser's same name method `parse_object_name`,
+    /// but with constant argument "false".
+    /// Because the argument is always "false" for us (it's introduced by BigQuery),
+    /// we don't want to write it again and again.
+    pub(crate) fn parse_object_name(&mut self) -> std::result::Result<ObjectName, ParserError> {
+        self.parser.parse_object_name(false)
+    }
+
+    /// Simply a shortcut for sqlparser's same name method `parse_identifier`,
+    /// but with constant argument "false".
+    /// Because the argument is always "false" for us (it's introduced by BigQuery),
+    /// we don't want to write it again and again.
+    pub(crate) fn parse_identifier(parser: &mut Parser) -> std::result::Result<Ident, ParserError> {
+        parser.parse_identifier(false)
+    }
 }
 
 #[cfg(test)]
 mod tests {
 
     use datatypes::prelude::ConcreteDataType;
+    use sqlparser::dialect::MySqlDialect;
 
     use super::*;
     use crate::dialect::GreptimeDbDialect;
@@ -248,7 +313,7 @@ mod tests {
                 let ts_col = columns.first().unwrap();
                 assert_eq!(
                     expected_type,
-                    sql_data_type_to_concrete_data_type(&ts_col.data_type).unwrap()
+                    sql_data_type_to_concrete_data_type(ts_col.data_type()).unwrap()
                 );
             }
             _ => unreachable!(),
@@ -321,5 +386,58 @@ mod tests {
 
         assert_eq!(object_name.0.len(), 1);
         assert_eq!(object_name.to_string(), table_name.to_ascii_lowercase());
+    }
+
+    #[test]
+    pub fn test_parse_mysql_prepare_stmt() {
+        let sql = "PREPARE stmt1 FROM 'SELECT * FROM t1 WHERE id = ?';";
+        let (stmt_name, stmt) =
+            ParserContext::parse_mysql_prepare_stmt(sql, &MySqlDialect {}).unwrap();
+        assert_eq!(stmt_name, "stmt1");
+        assert_eq!(stmt, "SELECT * FROM t1 WHERE id = ?");
+
+        let sql = "PREPARE stmt2 FROM \"SELECT * FROM t1 WHERE id = ?\"";
+        let (stmt_name, stmt) =
+            ParserContext::parse_mysql_prepare_stmt(sql, &MySqlDialect {}).unwrap();
+        assert_eq!(stmt_name, "stmt2");
+        assert_eq!(stmt, "SELECT * FROM t1 WHERE id = ?");
+    }
+
+    #[test]
+    pub fn test_parse_mysql_execute_stmt() {
+        let sql = "EXECUTE stmt1 USING 1, 'hello';";
+        let (stmt_name, params) =
+            ParserContext::parse_mysql_execute_stmt(sql, &GreptimeDbDialect {}).unwrap();
+        assert_eq!(stmt_name, "stmt1");
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0].to_string(), "1");
+        assert_eq!(params[1].to_string(), "'hello'");
+
+        let sql = "EXECUTE stmt2;";
+        let (stmt_name, params) =
+            ParserContext::parse_mysql_execute_stmt(sql, &GreptimeDbDialect {}).unwrap();
+        assert_eq!(stmt_name, "stmt2");
+        assert_eq!(params.len(), 0);
+
+        let sql = "EXECUTE stmt3 USING 231, 'hello', \"2003-03-1\", NULL, ;";
+        let (stmt_name, params) =
+            ParserContext::parse_mysql_execute_stmt(sql, &GreptimeDbDialect {}).unwrap();
+        assert_eq!(stmt_name, "stmt3");
+        assert_eq!(params.len(), 4);
+        assert_eq!(params[0].to_string(), "231");
+        assert_eq!(params[1].to_string(), "'hello'");
+        assert_eq!(params[2].to_string(), "\"2003-03-1\"");
+        assert_eq!(params[3].to_string(), "NULL");
+    }
+
+    #[test]
+    pub fn test_parse_mysql_deallocate_stmt() {
+        let sql = "DEALLOCATE stmt1;";
+        let stmt_name = ParserContext::parse_mysql_deallocate_stmt(sql, &MySqlDialect {}).unwrap();
+        assert_eq!(stmt_name, "stmt1");
+
+        let sql = "DEALLOCATE stmt2";
+        let stmt_name = ParserContext::parse_mysql_deallocate_stmt(sql, &MySqlDialect {}).unwrap();
+        assert_eq!(stmt_name, "stmt2");
     }
 }

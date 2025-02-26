@@ -14,7 +14,7 @@
 
 use std::time::Duration;
 
-use api::v1::meta::{HeartbeatRequest, Peer, Role};
+use api::v1::meta::{HeartbeatRequest, Peer};
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchGetRequest, BatchPutRequest, CompareAndPutRequest, DeleteRangeRequest,
@@ -37,10 +37,7 @@ async fn run() {
         .connect_timeout(Duration::from_secs(5))
         .tcp_nodelay(true);
     let channel_manager = ChannelManager::with_config(config);
-    let mut meta_client = MetaClientBuilder::new(id.0, id.1, Role::Datanode)
-        .enable_heartbeat()
-        .enable_router()
-        .enable_store()
+    let mut meta_client = MetaClientBuilder::datanode_default_options(id.0, id.1)
         .channel_manager(channel_manager)
         .build();
     meta_client.start(&["127.0.0.1:3002"]).await.unwrap();

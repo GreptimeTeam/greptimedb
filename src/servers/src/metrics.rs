@@ -18,15 +18,13 @@ pub(crate) mod jemalloc;
 use std::task::{Context, Poll};
 use std::time::Instant;
 
-use axum::extract::MatchedPath;
-use axum::http::Request;
+use axum::extract::{MatchedPath, Request};
 use axum::middleware::Next;
 use axum::response::IntoResponse;
-use hyper::Body;
 use lazy_static::lazy_static;
 use prometheus::{
-    register_histogram, register_histogram_vec, register_int_counter, register_int_counter_vec,
-    register_int_gauge, Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    register_histogram_vec, register_int_counter, register_int_counter_vec, register_int_gauge,
+    Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge,
 };
 use tonic::body::BoxBody;
 use tower::{Layer, Service};
@@ -44,6 +42,10 @@ pub(crate) const METRIC_POSTGRES_SIMPLE_QUERY: &str = "simple";
 pub(crate) const METRIC_POSTGRES_EXTENDED_QUERY: &str = "extended";
 pub(crate) const METRIC_METHOD_LABEL: &str = "method";
 pub(crate) const METRIC_PATH_LABEL: &str = "path";
+pub(crate) const METRIC_RESULT_LABEL: &str = "result";
+
+pub(crate) const METRIC_SUCCESS_VALUE: &str = "success";
+pub(crate) const METRIC_FAILURE_VALUE: &str = "failure";
 
 lazy_static! {
     pub static ref METRIC_ERROR_COUNTER: IntCounterVec = register_int_counter_vec!(
@@ -64,6 +66,14 @@ lazy_static! {
     pub static ref METRIC_HTTP_PROMQL_ELAPSED: HistogramVec = register_histogram_vec!(
         "greptime_servers_http_promql_elapsed",
         "servers http promql elapsed",
+        &[METRIC_DB_LABEL],
+        vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
+    )
+    .unwrap();
+    /// Http logs query duration per database.
+    pub static ref METRIC_HTTP_LOGS_ELAPSED: HistogramVec = register_histogram_vec!(
+        "greptime_servers_http_logs_elapsed",
+        "servers http logs elapsed",
         &[METRIC_DB_LABEL],
         vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
     )
@@ -116,6 +126,13 @@ lazy_static! {
         &[METRIC_DB_LABEL]
     )
     .unwrap();
+    /// Http prometheus endpoint query duration per database.
+    pub static ref METRIC_HTTP_PROMETHEUS_PROMQL_ELAPSED: HistogramVec = register_histogram_vec!(
+        "greptime_servers_http_prometheus_promql_elapsed",
+        "servers http prometheus promql elapsed",
+        &[METRIC_DB_LABEL, METRIC_METHOD_LABEL]
+    )
+    .unwrap();
     pub static ref METRIC_HTTP_OPENTELEMETRY_METRICS_ELAPSED: HistogramVec =
         register_histogram_vec!(
             "greptime_servers_http_otlp_metrics_elapsed",
@@ -130,11 +147,60 @@ lazy_static! {
             &[METRIC_DB_LABEL]
         )
         .unwrap();
-    pub static ref METRIC_TCP_OPENTSDB_LINE_WRITE_ELAPSED: Histogram = register_histogram!(
-        "greptime_servers_opentsdb_line_write_elapsed",
-        "servers opentsdb line write elapsed"
+    pub static ref METRIC_HTTP_OPENTELEMETRY_LOGS_ELAPSED: HistogramVec =
+    register_histogram_vec!(
+        "greptime_servers_http_otlp_logs_elapsed",
+        "servers http otlp logs elapsed",
+        &[METRIC_DB_LABEL]
     )
     .unwrap();
+    pub static ref METRIC_HTTP_LOGS_INGESTION_COUNTER: IntCounterVec = register_int_counter_vec!(
+        "greptime_servers_http_logs_ingestion_counter",
+        "servers http logs ingestion counter",
+        &[METRIC_DB_LABEL]
+    )
+    .unwrap();
+    pub static ref METRIC_HTTP_LOGS_INGESTION_ELAPSED: HistogramVec =
+        register_histogram_vec!(
+            "greptime_servers_http_logs_ingestion_elapsed",
+            "servers http logs ingestion elapsed",
+            &[METRIC_DB_LABEL, METRIC_RESULT_LABEL]
+        )
+        .unwrap();
+    pub static ref METRIC_LOKI_LOGS_INGESTION_COUNTER: IntCounterVec = register_int_counter_vec!(
+        "greptime_servers_loki_logs_ingestion_counter",
+        "servers loki logs ingestion counter",
+        &[METRIC_DB_LABEL]
+    )
+    .unwrap();
+    pub static ref METRIC_LOKI_LOGS_INGESTION_ELAPSED: HistogramVec =
+        register_histogram_vec!(
+            "greptime_servers_loki_logs_ingestion_elapsed",
+            "servers loki logs ingestion elapsed",
+            &[METRIC_DB_LABEL, METRIC_RESULT_LABEL]
+        )
+        .unwrap();
+    pub static ref METRIC_ELASTICSEARCH_LOGS_INGESTION_ELAPSED: HistogramVec =
+        register_histogram_vec!(
+            "greptime_servers_elasticsearch_logs_ingestion_elapsed",
+            "servers elasticsearch logs ingestion elapsed",
+            &[METRIC_DB_LABEL]
+        )
+        .unwrap();
+    pub static ref METRIC_ELASTICSEARCH_LOGS_DOCS_COUNT: IntCounterVec = register_int_counter_vec!(
+        "greptime_servers_elasticsearch_logs_docs_count",
+        "servers elasticsearch logs docs count",
+        &[METRIC_DB_LABEL]
+    )
+    .unwrap();
+
+    pub static ref METRIC_HTTP_LOGS_TRANSFORM_ELAPSED: HistogramVec =
+        register_histogram_vec!(
+            "greptime_servers_http_logs_transform_elapsed",
+            "servers http logs transform elapsed",
+            &[METRIC_DB_LABEL, METRIC_RESULT_LABEL]
+        )
+        .unwrap();
     pub static ref METRIC_MYSQL_CONNECTIONS: IntGauge = register_int_gauge!(
         "greptime_servers_mysql_connection_count",
         "servers mysql connection count"
@@ -206,6 +272,12 @@ lazy_static! {
         vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
     )
     .unwrap();
+    pub static ref METRIC_JAEGER_QUERY_ELAPSED: HistogramVec = register_histogram_vec!(
+        "greptime_servers_jaeger_query_elapsed",
+        "servers jaeger query elapsed",
+        &[METRIC_DB_LABEL, METRIC_PATH_LABEL]
+    )
+.unwrap();
 }
 
 // Based on https://github.com/hyperium/tonic/blob/master/examples/src/tower/server.rs
@@ -227,9 +299,9 @@ pub(crate) struct MetricsMiddleware<S> {
     inner: S,
 }
 
-impl<S> Service<hyper::Request<Body>> for MetricsMiddleware<S>
+impl<S> Service<http::Request<BoxBody>> for MetricsMiddleware<S>
 where
-    S: Service<hyper::Request<Body>, Response = hyper::Response<BoxBody>> + Clone + Send + 'static,
+    S: Service<http::Request<BoxBody>, Response = http::Response<BoxBody>> + Clone + Send + 'static,
     S::Future: Send + 'static,
 {
     type Response = S::Response;
@@ -240,7 +312,7 @@ where
         self.inner.poll_ready(cx)
     }
 
-    fn call(&mut self, req: hyper::Request<Body>) -> Self::Future {
+    fn call(&mut self, req: http::Request<BoxBody>) -> Self::Future {
         // This is necessary because tonic internally uses `tower::buffer::Buffer`.
         // See https://github.com/tower-rs/tower/issues/547#issuecomment-767629149
         // for details on why this is necessary
@@ -270,7 +342,7 @@ where
 
 /// A middleware to record metrics for HTTP.
 // Based on https://github.com/tokio-rs/axum/blob/axum-v0.6.16/examples/prometheus-metrics/src/main.rs
-pub(crate) async fn http_metrics_layer<B>(req: Request<B>, next: Next<B>) -> impl IntoResponse {
+pub(crate) async fn http_metrics_layer(req: Request, next: Next) -> impl IntoResponse {
     let start = Instant::now();
     let path = if let Some(matched_path) = req.extensions().get::<MatchedPath>() {
         matched_path.as_str().to_owned()

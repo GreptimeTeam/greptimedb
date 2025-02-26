@@ -10,9 +10,11 @@ workspace = true
 [dependencies]
 arrow.workspace = true
 chrono.workspace = true
-chrono-tz = "0.8"
+chrono-tz.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
+humantime.workspace = true
+humantime-serde.workspace = true
 once_cell.workspace = true
 serde = { version = "1.0", features = ["derive"] }
 serde_json.workspace = true

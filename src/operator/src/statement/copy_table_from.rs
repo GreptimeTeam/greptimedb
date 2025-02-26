@@ -15,13 +15,12 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
-use std::usize;
 
 use client::{Output, OutputData, OutputMeta};
 use common_base::readable_size::ReadableSize;
 use common_datasource::file_format::csv::{CsvConfigBuilder, CsvFormat, CsvOpener};
 use common_datasource::file_format::json::{JsonFormat, JsonOpener};
-use common_datasource::file_format::orc::{infer_orc_schema, new_orc_stream_reader};
+use common_datasource::file_format::orc::{infer_orc_schema, new_orc_stream_reader, ReaderAdapter};
 use common_datasource::file_format::{FileFormat, Format};
 use common_datasource::lister::{Lister, Source};
 use common_datasource::object_store::{build_backend, parse_url};
@@ -36,6 +35,8 @@ use datafusion::datasource::physical_plan::{FileOpener, FileScanConfig, FileStre
 use datafusion::parquet::arrow::arrow_reader::ArrowReaderMetadata;
 use datafusion::parquet::arrow::ParquetRecordBatchStreamBuilder;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+use datafusion_common::Statistics;
+use datafusion_expr::Expr;
 use datatypes::arrow::compute::can_cast_types;
 use datatypes::arrow::datatypes::{Schema, SchemaRef};
 use datatypes::vectors::Helper;
@@ -46,6 +47,7 @@ use session::context::QueryContextRef;
 use snafu::ResultExt;
 use table::requests::{CopyTableRequest, InsertRequest};
 use table::table_reference::TableReference;
+use tokio_util::compat::FuturesAsyncReadCompatExt;
 
 use crate::error::{self, IntoVectorsSnafu, Result};
 use crate::statement::StatementExecutor;
@@ -146,10 +148,18 @@ impl StatementExecutor {
                 path,
             }),
             Format::Parquet(_) => {
+                let meta = object_store
+                    .stat(&path)
+                    .await
+                    .context(error::ReadObjectSnafu { path: &path })?;
                 let mut reader = object_store
                     .reader(&path)
                     .await
-                    .context(error::ReadObjectSnafu { path: &path })?;
+                    .context(error::ReadObjectSnafu { path: &path })?
+                    .into_futures_async_read(0..meta.content_length())
+                    .await
+                    .context(error::ReadObjectSnafu { path: &path })?
+                    .compat();
                 let metadata = ArrowReaderMetadata::load_async(&mut reader, Default::default())
                     .await
                     .context(error::ReadParquetMetadataSnafu)?;
@@ -161,12 +171,17 @@ impl StatementExecutor {
                 })
             }
             Format::Orc(_) => {
+                let meta = object_store
+                    .stat(&path)
+                    .await
+                    .context(error::ReadObjectSnafu { path: &path })?;
+
                 let reader = object_store
                     .reader(&path)
                     .await
                     .context(error::ReadObjectSnafu { path: &path })?;
 
-                let schema = infer_orc_schema(reader)
+                let schema = infer_orc_schema(ReaderAdapter::new(reader, meta.content_length()))
                     .await
                     .context(error::ReadOrcSnafu)?;
 
@@ -184,17 +199,17 @@ impl StatementExecutor {
         filename: &str,
         file_schema: SchemaRef,
     ) -> Result<DfSendableRecordBatchStream> {
+        let statistics = Statistics::new_unknown(file_schema.as_ref());
         let stream = FileStream::new(
             &FileScanConfig {
                 object_store_url: ObjectStoreUrl::parse("empty://").unwrap(), // won't be used
                 file_schema,
                 file_groups: vec![vec![PartitionedFile::new(filename.to_string(), 10)]],
-                statistics: Default::default(),
+                statistics,
                 projection: None,
                 limit: None,
                 table_partition_cols: vec![],
                 output_ordering: vec![],
-                infinite_source: false,
             },
             0,
             opener,
@@ -211,6 +226,7 @@ impl StatementExecutor {
         object_store: &ObjectStore,
         file_metadata: &FileMetadata,
         projection: Vec<usize>,
+        filters: Vec<Expr>,
     ) -> Result<DfSendableRecordBatchStream> {
         match file_metadata {
             FileMetadata::Csv {
@@ -238,11 +254,11 @@ impl StatementExecutor {
                     )
                     .await?;
 
-                Ok(Box::pin(RecordBatchStreamTypeAdapter::new(
-                    projected_schema,
-                    stream,
-                    Some(projection),
-                )))
+                Ok(Box::pin(
+                    RecordBatchStreamTypeAdapter::new(projected_schema, stream, Some(projection))
+                        .with_filter(filters)
+                        .context(error::PhysicalExprSnafu)?,
+                ))
             }
             FileMetadata::Json {
                 format,
@@ -272,18 +288,26 @@ impl StatementExecutor {
                     )
                     .await?;
 
-                Ok(Box::pin(RecordBatchStreamTypeAdapter::new(
-                    projected_schema,
-                    stream,
-                    Some(projection),
-                )))
+                Ok(Box::pin(
+                    RecordBatchStreamTypeAdapter::new(projected_schema, stream, Some(projection))
+                        .with_filter(filters)
+                        .context(error::PhysicalExprSnafu)?,
+                ))
             }
             FileMetadata::Parquet { metadata, path, .. } => {
-                let reader = object_store
-                    .reader_with(path)
-                    .buffer(DEFAULT_READ_BUFFER)
+                let meta = object_store
+                    .stat(path)
                     .await
                     .context(error::ReadObjectSnafu { path })?;
+                let reader = object_store
+                    .reader_with(path)
+                    .chunk(DEFAULT_READ_BUFFER)
+                    .await
+                    .context(error::ReadObjectSnafu { path })?
+                    .into_futures_async_read(0..meta.content_length())
+                    .await
+                    .context(error::ReadObjectSnafu { path })?
+                    .compat();
                 let builder =
                     ParquetRecordBatchStreamBuilder::new_with_metadata(reader, metadata.clone());
                 let stream = builder
@@ -295,21 +319,27 @@ impl StatementExecutor {
                         .project(&projection)
                         .context(error::ProjectSchemaSnafu)?,
                 );
-                Ok(Box::pin(RecordBatchStreamTypeAdapter::new(
-                    projected_schema,
-                    stream,
-                    Some(projection),
-                )))
+                Ok(Box::pin(
+                    RecordBatchStreamTypeAdapter::new(projected_schema, stream, Some(projection))
+                        .with_filter(filters)
+                        .context(error::PhysicalExprSnafu)?,
+                ))
             }
             FileMetadata::Orc { path, .. } => {
-                let reader = object_store
-                    .reader_with(path)
-                    .buffer(DEFAULT_READ_BUFFER)
+                let meta = object_store
+                    .stat(path)
                     .await
                     .context(error::ReadObjectSnafu { path })?;
-                let stream = new_orc_stream_reader(reader)
+
+                let reader = object_store
+                    .reader_with(path)
+                    .chunk(DEFAULT_READ_BUFFER)
                     .await
-                    .context(error::ReadOrcSnafu)?;
+                    .context(error::ReadObjectSnafu { path })?;
+                let stream =
+                    new_orc_stream_reader(ReaderAdapter::new(reader, meta.content_length()))
+                        .await
+                        .context(error::ReadOrcSnafu)?;
 
                 let projected_schema = Arc::new(
                     compat_schema
@@ -317,11 +347,11 @@ impl StatementExecutor {
                         .context(error::ProjectSchemaSnafu)?,
                 );
 
-                Ok(Box::pin(RecordBatchStreamTypeAdapter::new(
-                    projected_schema,
-                    stream,
-                    Some(projection),
-                )))
+                Ok(Box::pin(
+                    RecordBatchStreamTypeAdapter::new(projected_schema, stream, Some(projection))
+                        .with_filter(filters)
+                        .context(error::PhysicalExprSnafu)?,
+                ))
             }
         }
     }
@@ -342,6 +372,14 @@ impl StatementExecutor {
         let (object_store, entries) = self.list_copy_from_entries(&req).await?;
         let mut files = Vec::with_capacity(entries.len());
         let table_schema = table.schema().arrow_schema().clone();
+        let filters = table
+            .schema()
+            .timestamp_column()
+            .and_then(|c| {
+                common_query::logical_plan::build_same_type_ts_filter(c, req.timestamp_range)
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
 
         for entry in entries.iter() {
             if entry.metadata().mode() != EntryMode::FILE {
@@ -377,6 +415,7 @@ impl StatementExecutor {
 
         let mut rows_inserted = 0;
         let mut insert_cost = 0;
+        let max_insert_rows = req.limit.map(|n| n as usize);
         for (compat_schema, file_schema_projection, projected_table_schema, file_metadata) in files
         {
             let mut stream = self
@@ -385,6 +424,7 @@ impl StatementExecutor {
                     &object_store,
                     &file_metadata,
                     file_schema_projection,
+                    filters.clone(),
                 )
                 .await?;
 
@@ -427,6 +467,12 @@ impl StatementExecutor {
                     rows_inserted += rows;
                     insert_cost += cost;
                 }
+
+                if let Some(max_insert_rows) = max_insert_rows {
+                    if rows_inserted >= max_insert_rows {
+                        return Ok(gen_insert_output(rows_inserted, insert_cost));
+                    }
+                }
             }
 
             if !pending.is_empty() {
@@ -436,11 +482,15 @@ impl StatementExecutor {
             }
         }
 
-        Ok(Output::new(
-            OutputData::AffectedRows(rows_inserted),
-            OutputMeta::new_with_cost(insert_cost),
-        ))
+        Ok(gen_insert_output(rows_inserted, insert_cost))
     }
+}
+
+fn gen_insert_output(rows_inserted: usize, insert_cost: usize) -> Output {
+    Output::new(
+        OutputData::AffectedRows(rows_inserted),
+        OutputMeta::new_with_cost(insert_cost),
+    )
 }
 
 /// Executes all pending inserts all at once, drain pending requests and reset pending bytes.

@@ -12,14 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::VecDeque;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll};
-
+use async_stream::try_stream;
 use common_telemetry::debug;
-use futures::future::BoxFuture;
-use futures::{ready, FutureExt, Stream};
+use futures::Stream;
 use snafu::ensure;
 
 use crate::error::{self, Result};
@@ -28,18 +23,7 @@ use crate::rpc::store::{RangeRequest, RangeResponse};
 use crate::rpc::KeyValue;
 use crate::util::get_next_prefix_key;
 
-pub type KeyValueDecoderFn<K, V> = dyn Fn(KeyValue) -> Result<(K, V)> + Send + Sync;
-
-enum PaginationStreamState<K, V> {
-    /// At the start of reading.
-    Init,
-    /// Decoding key value pairs.
-    Decoding(SimpleKeyValueDecoder<K, V>),
-    /// Retrieving data from backend.
-    Reading(BoxFuture<'static, Result<(PaginationStreamFactory, Option<RangeResponse>)>>),
-    /// Error
-    Error,
-}
+pub type KeyValueDecoderFn<T> = dyn Fn(KeyValue) -> Result<T> + Send + Sync;
 
 /// The Range Request's default page size.
 ///
@@ -65,8 +49,6 @@ struct PaginationStreamFactory {
     /// keys.
     pub range_end: Vec<u8>,
 
-    /// page_size is the pagination page size.
-    page_size: usize,
     /// keys_only when set returns only the keys and not the values.
     pub keys_only: bool,
 
@@ -77,7 +59,7 @@ struct PaginationStreamFactory {
 }
 
 impl PaginationStreamFactory {
-    pub fn new(
+    fn new(
         kv: &KvBackendRef,
         key: Vec<u8>,
         range_end: Vec<u8>,
@@ -89,7 +71,6 @@ impl PaginationStreamFactory {
             kv: kv.clone(),
             key,
             range_end,
-            page_size,
             keys_only,
             more,
             adaptive_page_size: if page_size == 0 {
@@ -137,7 +118,7 @@ impl PaginationStreamFactory {
         }
     }
 
-    pub async fn read_next(mut self) -> Result<(Self, Option<RangeResponse>)> {
+    async fn read_next(&mut self) -> Result<Option<RangeResponse>> {
         if self.more {
             let resp = self
                 .adaptive_range(RangeRequest {
@@ -151,119 +132,55 @@ impl PaginationStreamFactory {
             let key = resp
                 .kvs
                 .last()
-                .map(|kv| kv.key.clone())
-                .unwrap_or_else(Vec::new);
+                .map(|kv| kv.key.as_slice())
+                .unwrap_or_default();
 
-            let next_key = get_next_prefix_key(&key);
-
-            Ok((
-                Self {
-                    kv: self.kv,
-                    key: next_key,
-                    range_end: self.range_end,
-                    page_size: self.page_size,
-                    keys_only: self.keys_only,
-                    more: resp.more,
-                    adaptive_page_size: self.adaptive_page_size,
-                },
-                Some(resp),
-            ))
+            let next_key = get_next_prefix_key(key);
+            self.key = next_key;
+            self.more = resp.more;
+            Ok(Some(resp))
         } else {
-            Ok((self, None))
+            Ok(None)
         }
     }
 }
 
-pub struct PaginationStream<K, V> {
-    state: PaginationStreamState<K, V>,
-    decoder_fn: Arc<KeyValueDecoderFn<K, V>>,
-    factory: Option<PaginationStreamFactory>,
+pub struct PaginationStream<T> {
+    decoder_fn: fn(KeyValue) -> Result<T>,
+    factory: PaginationStreamFactory,
 }
 
-impl<K, V> PaginationStream<K, V> {
+impl<T> PaginationStream<T> {
+    /// Returns a new [PaginationStream].
     pub fn new(
         kv: KvBackendRef,
         req: RangeRequest,
         page_size: usize,
-        decoder_fn: Arc<KeyValueDecoderFn<K, V>>,
+        decoder_fn: fn(KeyValue) -> Result<T>,
     ) -> Self {
         Self {
-            state: PaginationStreamState::Init,
             decoder_fn,
-            factory: Some(PaginationStreamFactory::new(
+            factory: PaginationStreamFactory::new(
                 &kv,
                 req.key,
                 req.range_end,
                 page_size,
                 req.keys_only,
                 true,
-            )),
+            ),
         }
     }
 }
 
-struct SimpleKeyValueDecoder<K, V> {
-    kv: VecDeque<KeyValue>,
-    decoder: Arc<KeyValueDecoderFn<K, V>>,
-}
-
-impl<K, V> Iterator for SimpleKeyValueDecoder<K, V> {
-    type Item = Result<(K, V)>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if let Some(kv) = self.kv.pop_front() {
-            Some((self.decoder)(kv))
-        } else {
-            None
-        }
-    }
-}
-
-impl<K, V> Stream for PaginationStream<K, V> {
-    type Item = Result<(K, V)>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        loop {
-            match &mut self.state {
-                PaginationStreamState::Decoding(decoder) => match decoder.next() {
-                    Some(Ok(result)) => return Poll::Ready(Some(Ok(result))),
-                    Some(Err(e)) => {
-                        self.state = PaginationStreamState::Error;
-                        return Poll::Ready(Some(Err(e)));
-                    }
-                    None => self.state = PaginationStreamState::Init,
-                },
-                PaginationStreamState::Init => {
-                    let factory = self.factory.take().expect("lost factory");
-                    if !factory.more {
-                        // Ensures the factory always exists.
-                        self.factory = Some(factory);
-                        return Poll::Ready(None);
-                    }
-                    let fut = factory.read_next().boxed();
-                    self.state = PaginationStreamState::Reading(fut);
+impl<T> PaginationStream<T> {
+    pub fn into_stream(mut self) -> impl Stream<Item = Result<T>> {
+        try_stream!({
+            while let Some(resp) = self.factory.read_next().await? {
+                for kv in resp.kvs {
+                    yield (self.decoder_fn)(kv)?
                 }
-                PaginationStreamState::Reading(f) => match ready!(f.poll_unpin(cx)) {
-                    Ok((factory, Some(resp))) => {
-                        self.factory = Some(factory);
-                        let decoder = SimpleKeyValueDecoder {
-                            kv: resp.kvs.into(),
-                            decoder: self.decoder_fn.clone(),
-                        };
-                        self.state = PaginationStreamState::Decoding(decoder);
-                    }
-                    Ok((factory, None)) => {
-                        self.factory = Some(factory);
-                        self.state = PaginationStreamState::Init;
-                    }
-                    Err(e) => {
-                        self.state = PaginationStreamState::Error;
-                        return Poll::Ready(Some(Err(e)));
-                    }
-                },
-                PaginationStreamState::Error => return Poll::Ready(None), // Ends the stream as error happens.
             }
-        }
+        })
     }
 }
 
@@ -272,6 +189,7 @@ mod tests {
 
     use std::assert_matches::assert_matches;
     use std::collections::BTreeMap;
+    use std::sync::Arc;
 
     use futures::TryStreamExt;
 
@@ -331,8 +249,9 @@ mod tests {
                 ..Default::default()
             },
             DEFAULT_PAGE_SIZE,
-            Arc::new(decoder),
-        );
+            decoder,
+        )
+        .into_stream();
         let kv = stream.try_collect::<Vec<_>>().await.unwrap();
 
         assert!(kv.is_empty());
@@ -370,9 +289,10 @@ mod tests {
                 ..Default::default()
             },
             2,
-            Arc::new(decoder),
+            decoder,
         );
         let kv = stream
+            .into_stream()
             .try_collect::<Vec<_>>()
             .await
             .unwrap()

@@ -1,0 +1,10 @@
+name: Setup Kind
+description: Deploy Kind
+runs:
+  using: composite
+  steps:
+  - uses: actions/checkout@v4
+  - name: Create kind cluster
+    shell: bash
+    run: |
+      ./.github/scripts/kind-with-registry.sh

@@ -1,8 +1,6 @@
-# Nightly CI: runs tests every night for our second tier plaforms (Windows)
-
 on:
   schedule:
-    - cron: '0 23 * * 1-5'
+    - cron: "0 23 * * 1-4"
   workflow_dispatch:
 
 name: Nightly CI
@@ -11,90 +9,169 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
-env:
-  RUST_TOOLCHAIN: nightly-2023-12-19
-
 jobs:
-  sqlness:
-    name: Sqlness Test
+  sqlness-test:
+    name: Run sqlness test
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ windows-latest-8-cores ]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check install.sh
+        run: ./.github/scripts/check-install-script.sh
+
+      - name: Run sqlness test
+        uses: ./.github/actions/sqlness-test
+        with:
+          data-root: sqlness-test
+          aws-ci-test-bucket: ${{ vars.AWS_CI_TEST_BUCKET }}
+          aws-region: ${{ vars.AWS_CI_TEST_BUCKET_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+      - name: Upload sqlness logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqlness-logs-kind
+          path: /tmp/kind/
+          retention-days: 3
+
+  sqlness-windows:
+    name: Sqlness tests on Windows
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    runs-on: windows-2022-8-cores
+    permissions:
+      issues: write
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup-cyborg
       - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
       - name: Run sqlness
-        run: cargo sqlness
-      - name: Notify slack if failed
-        if: failure()
-        uses: slackapi/slack-github-action@v1.23.0
+        run: make sqlness-test
         env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL_DEVELOP_CHANNEL }}
-        with:
-          payload: |
-            {"text": "Nightly CI failed for sqlness tests"}
+          SQLNESS_OPTS: "--preserve-state"
       - name: Upload sqlness logs
-        if: always()
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: sqlness-logs
-          path: /tmp/greptime-*.log
+          path: C:\Users\RUNNER~1\AppData\Local\Temp\sqlness*
           retention-days: 3
 
   test-on-windows:
+    name: Run tests on Windows
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-    runs-on: windows-latest-8-cores
+    runs-on: windows-2022-8-cores
     timeout-minutes: 60
     steps:
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup-cyborg
       - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+      - uses: KyleMayes/install-llvm-action@v1
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          version: "14.0"
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
           components: llvm-tools-preview
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
       - name: Install Cargo Nextest
         uses: taiki-e/install-action@nextest
-      - name: Install Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-      - name: Install PyArrow Package
-        run: pip install pyarrow
       - name: Install WSL distribution
         uses: Vampire/setup-wsl@v2
         with:
           distribution: Ubuntu-22.04
       - name: Running tests
-        run: cargo nextest run -F pyo3_backend,dashboard
+        run: cargo nextest run -F dashboard
         env:
+          CARGO_BUILD_RUSTFLAGS: "-C linker=lld-link"
           RUST_BACKTRACE: 1
           CARGO_INCREMENTAL: 0
-          GT_S3_BUCKET: ${{ secrets.S3_BUCKET }}
-          GT_S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
-          GT_S3_ACCESS_KEY: ${{ secrets.S3_ACCESS_KEY }}
-          GT_S3_REGION: ${{ secrets.S3_REGION }}
+          RUSTUP_WINDOWS_PATH_ADD_BIN: 1 # Workaround for https://github.com/nextest-rs/nextest/issues/1493
+          GT_S3_BUCKET: ${{ vars.AWS_CI_TEST_BUCKET }}
+          GT_S3_ACCESS_KEY_ID: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
+          GT_S3_ACCESS_KEY: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+          GT_S3_REGION: ${{ vars.AWS_CI_TEST_BUCKET_REGION }}
           UNITTEST_LOG_DIR: "__unittest_logs"
-      - name: Notify slack if failed
-        if: failure()
-        uses: slackapi/slack-github-action@v1.23.0
+
+  cleanbuild-linux-nix:
+    name: Run clean build on Linux
+    runs-on: ubuntu-latest
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: cachix/install-nix-action@v27
+        with:
+          nix_path: nixpkgs=channel:nixos-24.11
+      - run: nix develop --command cargo build
+
+  check-status:
+    name: Check status
+    needs: [sqlness-test, sqlness-windows, test-on-windows]
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    runs-on: ubuntu-20.04
+    outputs:
+      check-result: ${{ steps.set-check-result.outputs.check-result }}
+    steps:
+      - name: Set check result
+        id: set-check-result
+        run: |
+          echo "check-result=success" >> $GITHUB_OUTPUT
+
+  notification:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && always() }} # Not requiring successful dependent jobs, always run.
+    name: Send notification to Greptime team
+    needs: [check-status]
+    runs-on: ubuntu-20.04
+    env:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL_DEVELOP_CHANNEL }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup-cyborg
+      - name: Report CI status
+        id: report-ci-status
+        working-directory: cyborg
+        run: pnpm tsx bin/report-ci-failure.ts
         env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL_DEVELOP_CHANNEL }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CI_REPORT_STATUS: ${{ needs.check-status.outputs.check-result == 'success' }}
+      - name: Notify dev build successful result
+        uses: slackapi/slack-github-action@v1.23.0
+        if: ${{ needs.check-status.outputs.check-result == 'success' }}
         with:
           payload: |
-            {"text": "Nightly CI failed for cargo test"}
+            {"text": "Nightly CI has completed successfully."}
+
+      - name: Notify dev build failed result
+        uses: slackapi/slack-github-action@v1.23.0
+        if: ${{ needs.check-status.outputs.check-result != 'success' }}
+        with:
+          payload: |
+            {"text": "Nightly CI failed has failed, please check ${{ steps.report-ci-status.outputs.html_url }}."}

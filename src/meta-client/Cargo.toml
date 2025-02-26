@@ -9,12 +9,14 @@ workspace = true
 
 [dependencies]
 api.workspace = true
-async-trait = "0.1"
+async-trait.workspace = true
 common-error.workspace = true
 common-grpc.workspace = true
 common-macro.workspace = true
 common-meta.workspace = true
 common-telemetry.workspace = true
+futures.workspace = true
+futures-util.workspace = true
 humantime-serde.workspace = true
 rand.workspace = true
 serde.workspace = true
@@ -25,8 +27,8 @@ tonic.workspace = true
 
 [dev-dependencies]
 datatypes.workspace = true
-futures = "0.3"
+futures.workspace = true
 meta-srv = { workspace = true, features = ["mock"] }
-tower = "0.4"
+tower.workspace = true
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber.workspace = true

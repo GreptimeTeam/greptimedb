@@ -9,6 +9,22 @@ cargo install cargo-fuzz
 2. Start GreptimeDB
 3. Copy the `.env.example`, which is at project root, to `.env` and change the values on need.
 
+### For stable fuzz tests
+Set the GreptimeDB MySQL address.
+```
+GT_MYSQL_ADDR = localhost:4002
+```
+
+### For unstable fuzz tests
+Set the binary path of the GreptimeDB:
+```
+GT_FUZZ_BINARY_PATH = /path/to/
+```
+
+Change the instance root directory(the default value: `/tmp/unstable_greptime/`)
+```
+GT_FUZZ_INSTANCE_ROOT_DIR = /path/to/
+```
 ## Run
 1. List all fuzz targets
 ```bash
@@ -17,7 +33,7 @@ cargo fuzz list --fuzz-dir tests-fuzz
 
 2. Run a fuzz target.
 ```bash
-cargo fuzz run fuzz_create_table --fuzz-dir tests-fuzz
+cargo fuzz run fuzz_create_table --fuzz-dir tests-fuzz -D -s none
 ```
 
 ## Crash Reproduction
@@ -31,11 +47,11 @@ echo "Base64" > .crash
 Print the `std::fmt::Debug` output for an input.
 
 ```bash
-cargo fuzz fmt fuzz_target .crash --fuzz-dir tests-fuzz  
+cargo fuzz fmt fuzz_target .crash --fuzz-dir tests-fuzz -D -s none
 ```
 Rerun the fuzz test with the input.
 
 ```bash
-cargo fuzz run fuzz_target .crash --fuzz-dir tests-fuzz
+cargo fuzz run fuzz_target .crash --fuzz-dir tests-fuzz -D -s none
 ```
 For more details, visit [cargo fuzz](https://rust-fuzz.github.io/book/cargo-fuzz/tutorial.html) or run the command `cargo fuzz --help`.

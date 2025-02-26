@@ -15,12 +15,12 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use datafusion_expr::utils::exprlist_to_columns;
 use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
 use promql::extension_plan::{
     EmptyMetric, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
 };
 
+use crate::dist_plan::merge_sort::{merge_sort_transformer, MergeSortLogicalPlan};
 use crate::dist_plan::MergeScanLogicalPlan;
 
 #[allow(dead_code)]
@@ -68,11 +68,11 @@ impl Categorizer {
                 }
 
                 // sort plan needs to consider column priority
-                // We can implement a merge-sort on partial ordered data
-                Commutativity::Unimplemented
+                // Change Sort to MergeSort which assumes the input streams are already sorted hence can be more efficient
+                // We should ensure the number of partition is not smaller than the number of region at present. Otherwise this would result in incorrect output.
+                Commutativity::ConditionalCommutative(Some(Arc::new(merge_sort_transformer)))
             }
             LogicalPlan::Join(_) => Commutativity::NonCommutative,
-            LogicalPlan::CrossJoin(_) => Commutativity::NonCommutative,
             LogicalPlan::Repartition(_) => {
                 // unsupported? or non-commutative
                 Commutativity::Unimplemented
@@ -87,7 +87,7 @@ impl Categorizer {
                 // wait for https://github.com/apache/arrow-datafusion/pull/7669
                 if partition_cols.is_empty() && limit.fetch.is_some() {
                     Commutativity::Commutative
-                } else if limit.skip == 0 && limit.fetch.is_some() {
+                } else if limit.skip.is_none() && limit.fetch.is_some() {
                     Commutativity::PartialCommutative
                 } else {
                     Commutativity::Unimplemented
@@ -102,11 +102,11 @@ impl Categorizer {
             LogicalPlan::Values(_) => Commutativity::Unsupported,
             LogicalPlan::Explain(_) => Commutativity::Unsupported,
             LogicalPlan::Analyze(_) => Commutativity::Unsupported,
-            LogicalPlan::Prepare(_) => Commutativity::Unsupported,
             LogicalPlan::DescribeTable(_) => Commutativity::Unsupported,
             LogicalPlan::Dml(_) => Commutativity::Unsupported,
             LogicalPlan::Ddl(_) => Commutativity::Unsupported,
             LogicalPlan::Copy(_) => Commutativity::Unsupported,
+            LogicalPlan::RecursiveQuery(_) => Commutativity::Unsupported,
         }
     }
 
@@ -117,7 +117,8 @@ impl Categorizer {
                 || name == SeriesNormalize::name()
                 || name == RangeManipulate::name()
                 || name == SeriesDivide::name()
-                || name == MergeScanLogicalPlan::name() =>
+                || name == MergeScanLogicalPlan::name()
+                || name == MergeSortLogicalPlan::name() =>
             {
                 Commutativity::Unimplemented
             }
@@ -140,29 +141,26 @@ impl Categorizer {
             | Expr::IsNotFalse(_)
             | Expr::Negative(_)
             | Expr::Between(_)
-            | Expr::Sort(_)
             | Expr::Exists(_)
-            | Expr::ScalarFunction(_)
-            | Expr::ScalarUDF(_) => Commutativity::Commutative,
+            | Expr::InList(_)
+            | Expr::ScalarFunction(_) => Commutativity::Commutative,
 
             Expr::Like(_)
             | Expr::SimilarTo(_)
             | Expr::IsUnknown(_)
             | Expr::IsNotUnknown(_)
-            | Expr::GetIndexedField(_)
             | Expr::Case(_)
             | Expr::Cast(_)
             | Expr::TryCast(_)
             | Expr::AggregateFunction(_)
             | Expr::WindowFunction(_)
-            | Expr::AggregateUDF(_)
-            | Expr::InList(_)
             | Expr::InSubquery(_)
             | Expr::ScalarSubquery(_)
-            | Expr::Wildcard => Commutativity::Unimplemented,
+            | Expr::Wildcard { .. } => Commutativity::Unimplemented,
 
-            Expr::Alias(_)
-            | Expr::QualifiedWildcard { .. }
+            Expr::Alias(alias) => Self::check_expr(&alias.expr),
+
+            Expr::Unnest(_)
             | Expr::GroupingSet(_)
             | Expr::Placeholder(_)
             | Expr::OuterReferenceColumn(_, _) => Commutativity::Unimplemented,
@@ -173,12 +171,12 @@ impl Categorizer {
     /// In this case the plan can be treated as fully commutative.
     fn check_partition(exprs: &[Expr], partition_cols: &[String]) -> bool {
         let mut ref_cols = HashSet::new();
-        if exprlist_to_columns(exprs, &mut ref_cols).is_err() {
-            return false;
+        for expr in exprs {
+            expr.add_column_refs(&mut ref_cols);
         }
         let ref_cols = ref_cols
             .into_iter()
-            .map(|c| c.flat_name())
+            .map(|c| c.name.clone())
             .collect::<HashSet<_>>();
         for col in partition_cols {
             if !ref_cols.contains(col) {

@@ -20,9 +20,13 @@ use serde::{Deserialize, Serialize};
 use store_api::storage::{RegionId, RegionNumber};
 use strum::Display;
 use table::metadata::TableId;
+use table::table_name::TableName;
 
-use crate::table_name::TableName;
-use crate::{ClusterId, DatanodeId};
+use crate::flow_name::FlowName;
+use crate::key::schema_name::SchemaName;
+use crate::key::FlowId;
+use crate::peer::Peer;
+use crate::{ClusterId, DatanodeId, FlownodeId};
 
 #[derive(Eq, Hash, PartialEq, Clone, Debug, Serialize, Deserialize)]
 pub struct RegionIdent {
@@ -128,11 +132,22 @@ impl OpenRegion {
 pub struct DowngradeRegion {
     /// The [RegionId].
     pub region_id: RegionId,
+    /// The timeout of waiting for flush the region.
+    ///
+    /// `None` stands for don't flush before downgrading the region.
+    #[serde(default)]
+    pub flush_timeout: Option<Duration>,
+    /// Rejects all write requests after flushing.
+    pub reject_write: bool,
 }
 
 impl Display for DowngradeRegion {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "DowngradeRegion(region_id={})", self.region_id)
+        write!(
+            f,
+            "DowngradeRegion(region_id={}, flush_timeout={:?}, rejct_write={})",
+            self.region_id, self.flush_timeout, self.reject_write
+        )
     }
 }
 
@@ -148,14 +163,34 @@ pub struct UpgradeRegion {
     /// `None` stands for no wait,
     /// it's helpful to verify whether the leader region is ready.
     #[serde(with = "humantime_serde")]
-    pub wait_for_replay_timeout: Option<Duration>,
+    pub replay_timeout: Option<Duration>,
+    /// The hint for replaying memtable.
+    #[serde(default)]
+    pub location_id: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Display, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 /// The identifier of cache.
 pub enum CacheIdent {
+    FlowId(FlowId),
+    FlowName(FlowName),
     TableId(TableId),
     TableName(TableName),
+    SchemaName(SchemaName),
+    CreateFlow(CreateFlow),
+    DropFlow(DropFlow),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CreateFlow {
+    pub source_table_ids: Vec<TableId>,
+    pub flownodes: Vec<Peer>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DropFlow {
+    pub source_table_ids: Vec<TableId>,
+    pub flownode_ids: Vec<FlownodeId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Display, PartialEq)]

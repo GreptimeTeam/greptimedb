@@ -114,10 +114,7 @@ impl Vector for ListVector {
         let values = (0..vector.len())
             .map(|i| vector.get(i))
             .collect::<Vec<Value>>();
-        Value::List(ListValue::new(
-            Some(Box::new(values)),
-            self.item_type.clone(),
-        ))
+        Value::List(ListValue::new(values, self.item_type.clone()))
     }
 
     fn get_ref(&self, index: usize) -> ValueRef {
@@ -160,7 +157,7 @@ pub struct ListIter<'a> {
 }
 
 impl<'a> ListIter<'a> {
-    fn new(vector: &'a ListVector) -> ListIter {
+    fn new(vector: &'a ListVector) -> ListIter<'a> {
         ListIter { vector, idx: 0 }
     }
 }
@@ -248,11 +245,8 @@ impl ListVectorBuilder {
     }
 
     fn push_list_value(&mut self, list_value: &ListValue) -> Result<()> {
-        if let Some(items) = list_value.items() {
-            for item in &**items {
-                self.values_builder
-                    .try_push_value_ref(item.as_value_ref())?;
-            }
+        for v in list_value.items() {
+            self.values_builder.try_push_value_ref(v.as_value_ref())?;
         }
 
         self.finish_list(true);
@@ -496,7 +490,6 @@ pub mod tests {
         for vec_opt in data {
             if let Some(vec) = vec_opt {
                 let values = vec.iter().map(|v| Value::from(*v)).collect();
-                let values = Some(Box::new(values));
                 let list_value = ListValue::new(values, ConcreteDataType::int32_datatype());
 
                 builder.push(Some(ListValueRef::Ref { val: &list_value }));
@@ -576,11 +569,7 @@ pub mod tests {
 
         assert_eq!(
             Value::List(ListValue::new(
-                Some(Box::new(vec![
-                    Value::Int32(1),
-                    Value::Int32(2),
-                    Value::Int32(3)
-                ])),
+                vec![Value::Int32(1), Value::Int32(2), Value::Int32(3)],
                 ConcreteDataType::int32_datatype()
             )),
             list_vector.get(0)
@@ -599,11 +588,7 @@ pub mod tests {
         assert_eq!(Value::Null, list_vector.get(1));
         assert_eq!(
             Value::List(ListValue::new(
-                Some(Box::new(vec![
-                    Value::Int32(4),
-                    Value::Null,
-                    Value::Int32(6)
-                ])),
+                vec![Value::Int32(4), Value::Null, Value::Int32(6)],
                 ConcreteDataType::int32_datatype()
             )),
             list_vector.get(2)
@@ -680,11 +665,7 @@ pub mod tests {
             ListType::new(ConcreteDataType::int32_datatype()).create_mutable_vector(3);
         builder.push_value_ref(ValueRef::List(ListValueRef::Ref {
             val: &ListValue::new(
-                Some(Box::new(vec![
-                    Value::Int32(4),
-                    Value::Null,
-                    Value::Int32(6),
-                ])),
+                vec![Value::Int32(4), Value::Null, Value::Int32(6)],
                 ConcreteDataType::int32_datatype(),
             ),
         }));
@@ -717,11 +698,7 @@ pub mod tests {
         builder.push(None);
         builder.push(Some(ListValueRef::Ref {
             val: &ListValue::new(
-                Some(Box::new(vec![
-                    Value::Int32(4),
-                    Value::Null,
-                    Value::Int32(6),
-                ])),
+                vec![Value::Int32(4), Value::Null, Value::Int32(6)],
                 ConcreteDataType::int32_datatype(),
             ),
         }));
@@ -772,11 +749,7 @@ pub mod tests {
         builder.push(None);
         builder.push(Some(ListValueRef::Ref {
             val: &ListValue::new(
-                Some(Box::new(vec![
-                    Value::Int32(4),
-                    Value::Null,
-                    Value::Int32(6),
-                ])),
+                vec![Value::Int32(4), Value::Null, Value::Int32(6)],
                 ConcreteDataType::int32_datatype(),
             ),
         }));

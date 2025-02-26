@@ -30,27 +30,35 @@ pub enum Error {
     #[snafu(display("Unsupported operation: {}", operation))]
     Unsupported {
         operation: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Unexpected engine: {}", engine))]
-    UnexpectedEngine { engine: String, location: Location },
+    UnexpectedEngine {
+        engine: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Invalid region metadata"))]
     InvalidMetadata {
         source: store_api::metadata::MetadataError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Region not found, region_id: {}", region_id))]
     RegionNotFound {
         region_id: RegionId,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to check object from path: {}", path))]
     CheckObject {
         path: String,
+        #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: object_store::Error,
@@ -58,6 +66,7 @@ pub enum Error {
 
     #[snafu(display("Fail to encode object into json"))]
     EncodeJson {
+        #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: JsonError,
@@ -65,6 +74,7 @@ pub enum Error {
 
     #[snafu(display("Fail to decode object from json"))]
     DecodeJson {
+        #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: JsonError,
@@ -75,6 +85,7 @@ pub enum Error {
         #[snafu(source)]
         error: object_store::Error,
         region_id: RegionId,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -83,6 +94,7 @@ pub enum Error {
         #[snafu(source)]
         error: object_store::Error,
         region_id: RegionId,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -91,17 +103,27 @@ pub enum Error {
         #[snafu(source)]
         error: object_store::Error,
         region_id: RegionId,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Manifest already exists: {}", path))]
-    ManifestExists { path: String, location: Location },
+    ManifestExists {
+        path: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Missing required field: {}", name))]
-    MissingRequiredField { name: String, location: Location },
+    MissingRequiredField {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to build backend"))]
     BuildBackend {
+        #[snafu(implicit)]
         location: Location,
         source: common_datasource::error::Error,
     },
@@ -110,6 +132,7 @@ pub enum Error {
     BuildCsvConfig {
         #[snafu(source)]
         error: common_datasource::file_format::csv::CsvConfigBuilderError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -117,6 +140,7 @@ pub enum Error {
     BuildStream {
         #[snafu(source)]
         error: DataFusionError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -124,23 +148,27 @@ pub enum Error {
     ProjectArrowSchema {
         #[snafu(source)]
         error: ArrowError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to project schema"))]
     ProjectSchema {
         source: datatypes::error::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to build stream adapter"))]
     BuildStreamAdapter {
+        #[snafu(implicit)]
         location: Location,
         source: common_recordbatch::error::Error,
     },
 
     #[snafu(display("Failed to parse file format"))]
     ParseFileFormat {
+        #[snafu(implicit)]
         location: Location,
         source: common_datasource::error::Error,
     },
@@ -149,6 +177,7 @@ pub enum Error {
     ParquetScanPlan {
         #[snafu(source)]
         error: DataFusionError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -160,6 +189,7 @@ pub enum Error {
     ProjectionOutOfBounds {
         column_index: usize,
         bounds: usize,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -167,6 +197,7 @@ pub enum Error {
     ExtractColumnFromFilter {
         #[snafu(source)]
         error: DataFusionError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -174,11 +205,16 @@ pub enum Error {
     CreateDefault {
         column: String,
         source: datatypes::error::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Missing default value for column: {}", column))]
-    MissingColumnNoDefault { column: String, location: Location },
+    MissingColumnNoDefault {
+        column: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

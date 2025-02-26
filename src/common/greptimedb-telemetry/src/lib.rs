@@ -22,6 +22,7 @@ use std::time::Duration;
 use common_runtime::error::{Error, Result};
 use common_runtime::{BoxedTaskFunction, RepeatedTask, TaskFunction};
 use common_telemetry::{debug, info};
+use common_version::build_info;
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
 
@@ -71,7 +72,7 @@ impl GreptimeDBTelemetryTask {
         match self {
             GreptimeDBTelemetryTask::Enable((task, _)) => {
                 print_anonymous_usage_data_disclaimer();
-                task.start(common_runtime::bg_runtime())
+                task.start(common_runtime::global_runtime())
             }
             GreptimeDBTelemetryTask::Disable => Ok(()),
         }
@@ -114,11 +115,11 @@ pub enum Mode {
 #[async_trait::async_trait]
 pub trait Collector {
     fn get_version(&self) -> String {
-        env!("CARGO_PKG_VERSION").to_string()
+        build_info().version.to_string()
     }
 
     fn get_git_hash(&self) -> String {
-        env!("GIT_COMMIT").to_string()
+        build_info().commit.to_string()
     }
 
     fn get_os(&self) -> String {
@@ -198,6 +199,7 @@ pub fn default_get_uuid(working_home: &Option<String>) -> Option<String> {
 }
 
 /// Report version info to GreptimeDB.
+///
 /// We do not collect any identity-sensitive information.
 /// This task is scheduled to run every 30 minutes.
 /// The task will be disabled default. It can be enabled by setting the build feature `greptimedb-telemetry`
@@ -286,9 +288,10 @@ mod tests {
     use std::time::Duration;
 
     use common_test_util::ports;
+    use common_version::build_info;
     use hyper::service::{make_service_fn, service_fn};
     use hyper::Server;
-    use reqwest::Client;
+    use reqwest::{Client, Response};
     use tokio::spawn;
 
     use crate::{default_get_uuid, Collector, GreptimeDBTelemetry, Mode, StatisticData};
@@ -322,7 +325,7 @@ mod tests {
             });
             let addr = ([127, 0, 0, 1], port).into();
 
-            let server = Server::bind(&addr).serve(make_svc);
+            let server = Server::try_bind(&addr).unwrap().serve(make_svc);
             let graceful = server.with_graceful_shutdown(async {
                 rx.await.ok();
             });
@@ -395,6 +398,21 @@ mod tests {
             }
         }
 
+        async fn get_telemetry_report(
+            mut report: GreptimeDBTelemetry,
+            url: &'static str,
+        ) -> Option<Response> {
+            report.telemetry_url = url;
+            report.report_telemetry_info().await
+        }
+
+        fn contravariance<'a>(x: &'a str) -> &'static str
+        where
+            'static: 'a,
+        {
+            unsafe { std::mem::transmute(x) }
+        }
+
         let working_home_temp = tempfile::Builder::new()
             .prefix("greptimedb_telemetry")
             .tempdir()
@@ -402,31 +420,35 @@ mod tests {
         let working_home = working_home_temp.path().to_str().unwrap().to_string();
 
         let test_statistic = Box::new(TestStatistic);
-        let mut test_report = GreptimeDBTelemetry::new(
+        let test_report = GreptimeDBTelemetry::new(
             Some(working_home.clone()),
             test_statistic,
             Arc::new(AtomicBool::new(true)),
         );
-        let url = Box::leak(format!("{}:{}", "http://localhost", port).into_boxed_str());
-        test_report.telemetry_url = url;
-        let response = test_report.report_telemetry_info().await.unwrap();
+        let url = format!("http://localhost:{}", port);
+        let response = {
+            let url = contravariance(url.as_str());
+            get_telemetry_report(test_report, url).await.unwrap()
+        };
 
         let body = response.json::<StatisticData>().await.unwrap();
         assert_eq!(env::consts::ARCH, body.arch);
         assert_eq!(env::consts::OS, body.os);
-        assert_eq!(env!("CARGO_PKG_VERSION"), body.version);
-        assert_eq!(env!("GIT_COMMIT"), body.git_commit);
+        assert_eq!(build_info().version, body.version);
+        assert_eq!(build_info().commit, body.git_commit);
         assert_eq!(Mode::Standalone, body.mode);
         assert_eq!(1, body.nodes.unwrap());
 
         let failed_statistic = Box::new(FailedStatistic);
-        let mut failed_report = GreptimeDBTelemetry::new(
+        let failed_report = GreptimeDBTelemetry::new(
             Some(working_home),
             failed_statistic,
             Arc::new(AtomicBool::new(true)),
         );
-        failed_report.telemetry_url = url;
-        let response = failed_report.report_telemetry_info().await;
+        let response = {
+            let url = contravariance(url.as_str());
+            get_telemetry_report(failed_report, url).await
+        };
         assert!(response.is_none());
 
         let client = Client::builder()

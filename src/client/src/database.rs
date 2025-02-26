@@ -14,12 +14,12 @@
 
 use api::v1::auth_header::AuthScheme;
 use api::v1::ddl_request::Expr as DdlExpr;
+use api::v1::greptime_database_client::GreptimeDatabaseClient;
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use api::v1::{
-    AlterExpr, AuthHeader, CreateTableExpr, DdlRequest, DeleteRequests, DropTableExpr,
-    GreptimeRequest, InsertRequests, PromRangeQuery, QueryRequest, RequestHeader,
-    RowInsertRequests, TruncateTableExpr,
+    AlterTableExpr, AuthHeader, CreateTableExpr, DdlRequest, GreptimeRequest, InsertRequests,
+    QueryRequest, RequestHeader,
 };
 use arrow_flight::Ticket;
 use async_stream::stream;
@@ -28,14 +28,19 @@ use common_grpc::flight::{FlightDecoder, FlightMessage};
 use common_query::Output;
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::RecordBatchStreamWrapper;
-use common_telemetry::logging;
+use common_telemetry::error;
 use common_telemetry::tracing_context::W3cTrace;
 use futures_util::StreamExt;
 use prost::Message;
 use snafu::{ensure, ResultExt};
+use tonic::metadata::AsciiMetadataKey;
+use tonic::transport::Channel;
 
-use crate::error::{ConvertFlightDataSnafu, Error, IllegalFlightMessagesSnafu, ServerSnafu};
-use crate::{error, from_grpc_response, metrics, Client, Result, StreamInserter};
+use crate::error::{
+    ConvertFlightDataSnafu, Error, FlightGetSnafu, IllegalFlightMessagesSnafu, InvalidAsciiSnafu,
+    ServerSnafu,
+};
+use crate::{from_grpc_response, Client, Result};
 
 #[derive(Clone, Debug, Default)]
 pub struct Database {
@@ -53,6 +58,19 @@ pub struct Database {
 
     client: Client,
     ctx: FlightContext,
+}
+
+pub struct DatabaseClient {
+    pub inner: GreptimeDatabaseClient<Channel>,
+}
+
+fn make_database_client(client: &Client) -> Result<DatabaseClient> {
+    let (_, channel) = client.find_channel()?;
+    Ok(DatabaseClient {
+        inner: GreptimeDatabaseClient::new(channel)
+            .max_decoding_message_size(client.max_grpc_recv_message_size())
+            .max_encoding_message_size(client.max_grpc_send_message_size()),
+    })
 }
 
 impl Database {
@@ -74,7 +92,7 @@ impl Database {
     ///
     /// - the name of database when using GreptimeDB standalone or cluster
     /// - the name provided by GreptimeCloud or other multi-tenant GreptimeDB
-    /// environment
+    ///   environment
     pub fn new_with_dbname(dbname: impl Into<String>, client: Client) -> Self {
         Self {
             catalog: String::default(),
@@ -86,32 +104,20 @@ impl Database {
         }
     }
 
-    pub fn catalog(&self) -> &String {
-        &self.catalog
-    }
-
     pub fn set_catalog(&mut self, catalog: impl Into<String>) {
         self.catalog = catalog.into();
     }
 
-    pub fn schema(&self) -> &String {
-        &self.schema
+    pub fn catalog(&self) -> &String {
+        &self.catalog
     }
 
     pub fn set_schema(&mut self, schema: impl Into<String>) {
         self.schema = schema.into();
     }
 
-    pub fn dbname(&self) -> &String {
-        &self.dbname
-    }
-
-    pub fn set_dbname(&mut self, dbname: impl Into<String>) {
-        self.dbname = dbname.into();
-    }
-
-    pub fn timezone(&self) -> &String {
-        &self.timezone
+    pub fn schema(&self) -> &String {
+        &self.schema
     }
 
     pub fn set_timezone(&mut self, timezone: impl Into<String>) {
@@ -125,42 +131,41 @@ impl Database {
     }
 
     pub async fn insert(&self, requests: InsertRequests) -> Result<u32> {
-        let _timer = metrics::METRIC_GRPC_INSERT.start_timer();
         self.handle(Request::Inserts(requests)).await
     }
 
-    pub async fn row_insert(&self, requests: RowInsertRequests) -> Result<u32> {
-        let _timer = metrics::METRIC_GRPC_INSERT.start_timer();
-        self.handle(Request::RowInserts(requests)).await
-    }
-
-    pub fn streaming_inserter(&self) -> Result<StreamInserter> {
-        self.streaming_inserter_with_channel_size(65536)
-    }
-
-    pub fn streaming_inserter_with_channel_size(
+    pub async fn insert_with_hints(
         &self,
-        channel_size: usize,
-    ) -> Result<StreamInserter> {
-        let client = self.client.make_database_client()?.inner;
+        requests: InsertRequests,
+        hints: &[(&str, &str)],
+    ) -> Result<u32> {
+        let mut client = make_database_client(&self.client)?.inner;
+        let request = self.to_rpc_request(Request::Inserts(requests));
 
-        let stream_inserter = StreamInserter::new(
-            client,
-            self.dbname().to_string(),
-            self.ctx.auth_header.clone(),
-            channel_size,
-        );
-
-        Ok(stream_inserter)
-    }
-
-    pub async fn delete(&self, request: DeleteRequests) -> Result<u32> {
-        let _timer = metrics::METRIC_GRPC_DELETE.start_timer();
-        self.handle(Request::Deletes(request)).await
+        let mut request = tonic::Request::new(request);
+        let metadata = request.metadata_mut();
+        for (key, value) in hints {
+            let key = AsciiMetadataKey::from_bytes(format!("x-greptime-hint-{}", key).as_bytes())
+                .map_err(|_| {
+                InvalidAsciiSnafu {
+                    value: key.to_string(),
+                }
+                .build()
+            })?;
+            let value = value.parse().map_err(|_| {
+                InvalidAsciiSnafu {
+                    value: value.to_string(),
+                }
+                .build()
+            })?;
+            metadata.insert(key, value);
+        }
+        let response = client.handle(request).await?.into_inner();
+        from_grpc_response(response)
     }
 
     async fn handle(&self, request: Request) -> Result<u32> {
-        let mut client = self.client.make_database_client()?.inner;
+        let mut client = make_database_client(&self.client)?.inner;
         let request = self.to_rpc_request(request);
         let response = client.handle(request).await?.into_inner();
         from_grpc_response(response)
@@ -186,7 +191,6 @@ impl Database {
     where
         S: AsRef<str>,
     {
-        let _timer = metrics::METRIC_GRPC_SQL.start_timer();
         self.do_get(Request::Query(QueryRequest {
             query: Some(Query::Sql(sql.as_ref().to_string())),
         }))
@@ -194,67 +198,27 @@ impl Database {
     }
 
     pub async fn logical_plan(&self, logical_plan: Vec<u8>) -> Result<Output> {
-        let _timer = metrics::METRIC_GRPC_LOGICAL_PLAN.start_timer();
         self.do_get(Request::Query(QueryRequest {
             query: Some(Query::LogicalPlan(logical_plan)),
         }))
         .await
     }
 
-    pub async fn prom_range_query(
-        &self,
-        promql: &str,
-        start: &str,
-        end: &str,
-        step: &str,
-    ) -> Result<Output> {
-        let _timer = metrics::METRIC_GRPC_PROMQL_RANGE_QUERY.start_timer();
-        self.do_get(Request::Query(QueryRequest {
-            query: Some(Query::PromRangeQuery(PromRangeQuery {
-                query: promql.to_string(),
-                start: start.to_string(),
-                end: end.to_string(),
-                step: step.to_string(),
-            })),
-        }))
-        .await
-    }
-
     pub async fn create(&self, expr: CreateTableExpr) -> Result<Output> {
-        let _timer = metrics::METRIC_GRPC_CREATE_TABLE.start_timer();
         self.do_get(Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::CreateTable(expr)),
         }))
         .await
     }
 
-    pub async fn alter(&self, expr: AlterExpr) -> Result<Output> {
-        let _timer = metrics::METRIC_GRPC_ALTER.start_timer();
+    pub async fn alter(&self, expr: AlterTableExpr) -> Result<Output> {
         self.do_get(Request::Ddl(DdlRequest {
-            expr: Some(DdlExpr::Alter(expr)),
-        }))
-        .await
-    }
-
-    pub async fn drop_table(&self, expr: DropTableExpr) -> Result<Output> {
-        let _timer = metrics::METRIC_GRPC_DROP_TABLE.start_timer();
-        self.do_get(Request::Ddl(DdlRequest {
-            expr: Some(DdlExpr::DropTable(expr)),
-        }))
-        .await
-    }
-
-    pub async fn truncate_table(&self, expr: TruncateTableExpr) -> Result<Output> {
-        let _timer = metrics::METRIC_GRPC_TRUNCATE_TABLE.start_timer();
-        self.do_get(Request::Ddl(DdlRequest {
-            expr: Some(DdlExpr::TruncateTable(expr)),
+            expr: Some(DdlExpr::AlterTable(expr)),
         }))
         .await
     }
 
     async fn do_get(&self, request: Request) -> Result<Output> {
-        // FIXME(paomian): should be added some labels for metrics
-        let _timer = metrics::METRIC_GRPC_DO_GET.start_timer();
         let request = self.to_rpc_request(request);
         let request = Ticket {
             ticket: request.encode_to_vec().into(),
@@ -262,17 +226,19 @@ impl Database {
 
         let mut client = self.client.make_flight_client()?;
 
-        let response = client.mut_inner().do_get(request).await.map_err(|e| {
+        let response = client.mut_inner().do_get(request).await.or_else(|e| {
             let tonic_code = e.code();
-            let e: error::Error = e.into();
+            let e: Error = e.into();
             let code = e.status_code();
             let msg = e.to_string();
-            let error = Error::FlightGet {
-                tonic_code,
-                addr: client.addr().to_string(),
-                source: BoxedError::new(ServerSnafu { code, msg }.build()),
-            };
-            logging::error!(
+            let error =
+                Err(BoxedError::new(ServerSnafu { code, msg }.build())).with_context(|_| {
+                    FlightGetSnafu {
+                        addr: client.addr().to_string(),
+                        tonic_code,
+                    }
+                });
+            error!(
                 "Failed to do Flight get, addr: {}, code: {}, source: {:?}",
                 client.addr(),
                 tonic_code,
@@ -347,16 +313,18 @@ impl Database {
 }
 
 #[derive(Default, Debug, Clone)]
-pub struct FlightContext {
+struct FlightContext {
     auth_header: Option<AuthHeader>,
 }
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches::assert_matches;
+
     use api::v1::auth_header::AuthScheme;
     use api::v1::{AuthHeader, Basic};
 
-    use crate::database::FlightContext;
+    use super::*;
 
     #[test]
     fn test_flight_ctx() {
@@ -372,11 +340,11 @@ mod tests {
             auth_scheme: Some(basic),
         });
 
-        assert!(matches!(
+        assert_matches!(
             ctx.auth_header,
             Some(AuthHeader {
                 auth_scheme: Some(AuthScheme::Basic(_)),
             })
-        ))
+        )
     }
 }

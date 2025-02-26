@@ -20,7 +20,7 @@ use std::sync::Arc;
 use common_macro::range_fn;
 use datafusion::arrow::array::{Float64Array, TimestampMillisecondArray};
 use datafusion::common::DataFusionError;
-use datafusion::logical_expr::{ScalarUDF, Signature, TypeSignature, Volatility};
+use datafusion::logical_expr::{ScalarUDF, Volatility};
 use datafusion::physical_plan::ColumnarValue;
 use datatypes::arrow::array::Array;
 use datatypes::arrow::datatypes::DataType;
@@ -28,7 +28,7 @@ use datatypes::arrow::datatypes::DataType;
 use crate::functions::{extract_array, linear_regression};
 use crate::range_array::RangeArray;
 
-#[range_fn(name = "Deriv", ret = "Float64Array", display_name = "prom_deriv")]
+#[range_fn(name = Deriv, ret = Float64Array, display_name = prom_deriv)]
 pub fn deriv(times: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
     if values.len() < 2 {
         None

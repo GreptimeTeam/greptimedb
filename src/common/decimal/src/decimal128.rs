@@ -121,6 +121,11 @@ impl Decimal128 {
         let value = (hi | lo) as i128;
         Self::new(value, precision, scale)
     }
+
+    pub fn negative(mut self) -> Self {
+        self.value = -self.value;
+        self
+    }
 }
 
 /// The default value of Decimal128 is 0, and its precision is 1 and scale is 0.
@@ -159,7 +164,7 @@ impl FromStr for Decimal128 {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let len = s.as_bytes().len();
+        let len = s.len();
         if len <= BYTES_TO_OVERFLOW_RUST_DECIMAL {
             let rd = RustDecimal::from_str_exact(s).context(ParseRustDecimalStrSnafu { raw: s })?;
             Ok(Self::from(rd))

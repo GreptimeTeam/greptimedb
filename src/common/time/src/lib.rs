@@ -22,13 +22,15 @@ pub mod time;
 pub mod timestamp;
 pub mod timestamp_millis;
 pub mod timezone;
+pub mod ttl;
 pub mod util;
 
 pub use date::Date;
 pub use datetime::DateTime;
 pub use duration::Duration;
-pub use interval::Interval;
+pub use interval::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
 pub use range::RangeMillis;
 pub use timestamp::Timestamp;
 pub use timestamp_millis::TimestampMillis;
 pub use timezone::Timezone;
+pub use ttl::{DatabaseTimeToLive, TimeToLive, FOREVER, INSTANT};

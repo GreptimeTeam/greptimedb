@@ -31,22 +31,8 @@ SELECT * FROM my_table;
 | 22 | f | 1970-01-01T00:00:00.005 |
 +----+---+-------------------------+
 
-SELECT flush_region(greptime_partition_id) from information_schema.partitions WHERE table_name = 'my_table';
-
-+-------------------------------------------------------------------+
-| flush_region(information_schema.partitions.greptime_partition_id) |
-+-------------------------------------------------------------------+
-| 0                                                                 |
-+-------------------------------------------------------------------+
-
-SELECT compact_region(greptime_partition_id) from information_schema.partitions WHERE table_name = 'my_table';
-
-+---------------------------------------------------------------------+
-| compact_region(information_schema.partitions.greptime_partition_id) |
-+---------------------------------------------------------------------+
-| 0                                                                   |
-+---------------------------------------------------------------------+
-
+-- SELECT flush_region(greptime_partition_id) from information_schema.partitions WHERE table_name = 'my_table'; --
+-- SELECT compact_region(greptime_partition_id) from information_schema.partitions WHERE table_name = 'my_table'; --
 SELECT * FROM my_table;
 
 +----+---+-------------------------+

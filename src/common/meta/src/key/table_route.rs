@@ -14,23 +14,32 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
-use super::{txn_helper, DeserializedValueWithBytes, TableMetaValue};
 use crate::error::{
-    self, MetadataCorruptionSnafu, Result, SerdeJsonSnafu, TableRouteNotFoundSnafu,
+    InvalidMetadataSnafu, MetadataCorruptionSnafu, Result, SerdeJsonSnafu, TableRouteNotFoundSnafu,
     UnexpectedLogicalRouteTableSnafu,
 };
-use crate::key::{RegionDistribution, TableMetaKey, TABLE_ROUTE_PREFIX};
-use crate::kv_backend::txn::{Txn, TxnOp, TxnOpResponse};
+use crate::key::node_address::{NodeAddressKey, NodeAddressValue};
+use crate::key::txn_helper::TxnOpGetResponseSet;
+use crate::key::{
+    DeserializedValueWithBytes, MetadataKey, MetadataValue, RegionDistribution,
+    TABLE_ROUTE_KEY_PATTERN, TABLE_ROUTE_PREFIX,
+};
+use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::router::{region_distribution, RegionRoute};
 use crate::rpc::store::BatchGetRequest;
 
+/// The key stores table routes
+///
+/// The layout: `__table_route/{table_id}`.
+#[derive(Debug, PartialEq)]
 pub struct TableRouteKey {
     pub table_id: TableId,
 }
@@ -48,7 +57,7 @@ pub enum TableRouteValue {
     Logical(LogicalTableRouteValue),
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Default)]
 pub struct PhysicalTableRouteValue {
     pub region_routes: Vec<RegionRoute>,
     version: u64,
@@ -61,6 +70,27 @@ pub struct LogicalTableRouteValue {
 }
 
 impl TableRouteValue {
+    /// Returns a [TableRouteValue::Physical] if `table_id` equals `physical_table_id`.
+    /// Otherwise returns a [TableRouteValue::Logical].
+    pub(crate) fn new(
+        table_id: TableId,
+        physical_table_id: TableId,
+        region_routes: Vec<RegionRoute>,
+    ) -> Self {
+        if table_id == physical_table_id {
+            TableRouteValue::physical(region_routes)
+        } else {
+            let region_routes = region_routes
+                .into_iter()
+                .map(|region| {
+                    debug_assert_eq!(region.region.id.table_id(), physical_table_id);
+                    RegionId::new(table_id, region.region.id.region_number())
+                })
+                .collect();
+            TableRouteValue::logical(physical_table_id, region_routes)
+        }
+    }
+
     pub fn physical(region_routes: Vec<RegionRoute>) -> Self {
         Self::Physical(PhysicalTableRouteValue::new(region_routes))
     }
@@ -160,17 +190,17 @@ impl TableRouteValue {
                 .region_routes
                 .iter()
                 .map(|region_route| region_route.region.id.region_number())
-                .collect::<Vec<_>>(),
+                .collect(),
             TableRouteValue::Logical(x) => x
                 .region_ids()
                 .iter()
                 .map(|region_id| region_id.region_number())
-                .collect::<Vec<_>>(),
+                .collect(),
         }
     }
 }
 
-impl TableMetaValue for TableRouteValue {
+impl MetadataValue for TableRouteValue {
     fn try_from_raw_value(raw_value: &[u8]) -> Result<Self> {
         let r = serde_json::from_slice::<TableRouteValue>(raw_value);
         match r {
@@ -215,9 +245,29 @@ impl LogicalTableRouteValue {
     }
 }
 
-impl TableMetaKey for TableRouteKey {
-    fn as_raw_key(&self) -> Vec<u8> {
+impl MetadataKey<'_, TableRouteKey> for TableRouteKey {
+    fn to_bytes(&self) -> Vec<u8> {
         self.to_string().into_bytes()
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<TableRouteKey> {
+        let key = std::str::from_utf8(bytes).map_err(|e| {
+            InvalidMetadataSnafu {
+                err_msg: format!(
+                    "TableRouteKey '{}' is not a valid UTF8 string: {e}",
+                    String::from_utf8_lossy(bytes)
+                ),
+            }
+            .build()
+        })?;
+        let captures = TABLE_ROUTE_KEY_PATTERN
+            .captures(key)
+            .context(InvalidMetadataSnafu {
+                err_msg: format!("Invalid TableRouteKey '{key}'"),
+            })?;
+        // Safety: pass the regex check above
+        let table_id = captures[1].parse::<TableId>().unwrap();
+        Ok(TableRouteKey { table_id })
     }
 }
 
@@ -227,6 +277,8 @@ impl Display for TableRouteKey {
     }
 }
 
+pub type TableRouteManagerRef = Arc<TableRouteManager>;
+
 pub struct TableRouteManager {
     storage: TableRouteStorage,
 }
@@ -235,28 +287,6 @@ impl TableRouteManager {
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self {
             storage: TableRouteStorage::new(kv_backend),
-        }
-    }
-
-    /// Returns the [`PhysicalTableRouteValue`] in the first level,
-    /// It won't follow the [`LogicalTableRouteValue`] to find the next level [`PhysicalTableRouteValue`].
-    ///
-    /// Returns an error if the first level value is not a [`PhysicalTableRouteValue`].
-    pub async fn try_get_physical_table_route(
-        &self,
-        table_id: TableId,
-    ) -> Result<Option<PhysicalTableRouteValue>> {
-        match self.storage.get(table_id).await? {
-            Some(route) => {
-                ensure!(
-                    route.is_physical(),
-                    error::UnexpectedLogicalRouteTableSnafu {
-                        err_msg: format!("{route:?} is a non-physical TableRouteValue.")
-                    }
-                );
-                Ok(Some(route.into_physical_table_route()))
-            }
-            None => Ok(None),
         }
     }
 
@@ -270,7 +300,7 @@ impl TableRouteManager {
     ) -> Result<TableId> {
         let table_route = self
             .storage
-            .get(logical_or_physical_table_id)
+            .get_inner(logical_or_physical_table_id)
             .await?
             .context(TableRouteNotFoundSnafu {
                 table_id: logical_or_physical_table_id,
@@ -284,7 +314,7 @@ impl TableRouteManager {
 
     /// Returns the [TableRouteValue::Physical] recursively.
     ///
-    /// Returns a [TableRouteNotFound](crate::error::Error::TableRouteNotFound) Error if:
+    /// Returns a [TableRouteNotFound](error::Error::TableRouteNotFound) Error if:
     /// - the physical table(`logical_or_physical_table_id`) does not exist
     /// - the corresponding physical table of the logical table(`logical_or_physical_table_id`) does not exist.
     pub async fn get_physical_table_route(
@@ -420,24 +450,11 @@ pub struct TableRouteStorage {
     kv_backend: KvBackendRef,
 }
 
+pub type TableRouteValueDecodeResult = Result<Option<DeserializedValueWithBytes<TableRouteValue>>>;
+
 impl TableRouteStorage {
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self { kv_backend }
-    }
-
-    /// Builds a get table route transaction(readonly).
-    pub(crate) fn build_get_txn(
-        &self,
-        table_id: TableId,
-    ) -> (
-        Txn,
-        impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<DeserializedValueWithBytes<TableRouteValue>>>,
-    ) {
-        let key = TableRouteKey::new(table_id);
-        let raw_key = key.as_raw_key();
-        let txn = Txn::new().and_then(vec![TxnOp::Get(raw_key.clone())]);
-
-        (txn, txn_helper::build_txn_response_decoder_fn(raw_key))
     }
 
     /// Builds a create table route transaction,
@@ -448,17 +465,17 @@ impl TableRouteStorage {
         table_route_value: &TableRouteValue,
     ) -> Result<(
         Txn,
-        impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<DeserializedValueWithBytes<TableRouteValue>>>,
+        impl FnOnce(&mut TxnOpGetResponseSet) -> TableRouteValueDecodeResult,
     )> {
         let key = TableRouteKey::new(table_id);
-        let raw_key = key.as_raw_key();
+        let raw_key = key.to_bytes();
 
-        let txn = txn_helper::build_put_if_absent_txn(
-            raw_key.clone(),
-            table_route_value.try_as_raw_value()?,
-        );
+        let txn = Txn::put_if_not_exists(raw_key.clone(), table_route_value.try_as_raw_value()?);
 
-        Ok((txn, txn_helper::build_txn_response_decoder_fn(raw_key)))
+        Ok((
+            txn,
+            TxnOpGetResponseSet::decode_with(TxnOpGetResponseSet::filter(raw_key)),
+        ))
     }
 
     /// Builds a update table route transaction,
@@ -471,47 +488,60 @@ impl TableRouteStorage {
         new_table_route_value: &TableRouteValue,
     ) -> Result<(
         Txn,
-        impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<DeserializedValueWithBytes<TableRouteValue>>>,
+        impl FnOnce(&mut TxnOpGetResponseSet) -> TableRouteValueDecodeResult,
     )> {
         let key = TableRouteKey::new(table_id);
-        let raw_key = key.as_raw_key();
+        let raw_key = key.to_bytes();
         let raw_value = current_table_route_value.get_raw_bytes();
         let new_raw_value: Vec<u8> = new_table_route_value.try_as_raw_value()?;
 
-        let txn = txn_helper::build_compare_and_put_txn(raw_key.clone(), raw_value, new_raw_value);
+        let txn = Txn::compare_and_put(raw_key.clone(), raw_value, new_raw_value);
 
-        Ok((txn, txn_helper::build_txn_response_decoder_fn(raw_key)))
-    }
-
-    /// Builds a delete table route transaction,
-    /// it expected the remote value equals the `table_route_value`.
-    pub(crate) fn build_delete_txn(&self, table_id: TableId) -> Result<Txn> {
-        let key = TableRouteKey::new(table_id);
-        let raw_key = key.as_raw_key();
-
-        let txn = Txn::new().and_then(vec![TxnOp::Delete(raw_key)]);
-
-        Ok(txn)
+        Ok((
+            txn,
+            TxnOpGetResponseSet::decode_with(TxnOpGetResponseSet::filter(raw_key)),
+        ))
     }
 
     /// Returns the [`TableRouteValue`].
     pub async fn get(&self, table_id: TableId) -> Result<Option<TableRouteValue>> {
+        let mut table_route = self.get_inner(table_id).await?;
+        if let Some(table_route) = &mut table_route {
+            self.remap_route_address(table_route).await?;
+        };
+
+        Ok(table_route)
+    }
+
+    async fn get_inner(&self, table_id: TableId) -> Result<Option<TableRouteValue>> {
         let key = TableRouteKey::new(table_id);
         self.kv_backend
-            .get(&key.as_raw_key())
+            .get(&key.to_bytes())
             .await?
             .map(|kv| TableRouteValue::try_from_raw_value(&kv.value))
             .transpose()
     }
 
     /// Returns the [`TableRouteValue`] wrapped with [`DeserializedValueWithBytes`].
-    pub async fn get_raw(
+    pub async fn get_with_raw_bytes(
+        &self,
+        table_id: TableId,
+    ) -> Result<Option<DeserializedValueWithBytes<TableRouteValue>>> {
+        let mut table_route = self.get_with_raw_bytes_inner(table_id).await?;
+        if let Some(table_route) = &mut table_route {
+            self.remap_route_address(table_route).await?;
+        };
+
+        Ok(table_route)
+    }
+
+    async fn get_with_raw_bytes_inner(
         &self,
         table_id: TableId,
     ) -> Result<Option<DeserializedValueWithBytes<TableRouteValue>>> {
         let key = TableRouteKey::new(table_id);
         self.kv_backend
-            .get(&key.as_raw_key())
+            .get(&key.to_bytes())
             .await?
             .map(|kv| DeserializedValueWithBytes::from_inner_slice(&kv.value))
             .transpose()
@@ -519,9 +549,16 @@ impl TableRouteStorage {
 
     /// Returns batch of [`TableRouteValue`] that respects the order of `table_ids`.
     pub async fn batch_get(&self, table_ids: &[TableId]) -> Result<Vec<Option<TableRouteValue>>> {
+        let mut table_routes = self.batch_get_inner(table_ids).await?;
+        self.remap_routes_addresses(&mut table_routes).await?;
+
+        Ok(table_routes)
+    }
+
+    async fn batch_get_inner(&self, table_ids: &[TableId]) -> Result<Vec<Option<TableRouteValue>>> {
         let keys = table_ids
             .iter()
-            .map(|id| TableRouteKey::new(*id).as_raw_key())
+            .map(|id| TableRouteKey::new(*id).to_bytes())
             .collect::<Vec<_>>();
         let resp = self
             .kv_backend
@@ -541,8 +578,107 @@ impl TableRouteStorage {
                     Ok(None)
                 }
             })
-            .collect::<Result<Vec<_>>>()
+            .collect()
     }
+
+    async fn remap_routes_addresses(
+        &self,
+        table_routes: &mut [Option<TableRouteValue>],
+    ) -> Result<()> {
+        let keys = table_routes
+            .iter()
+            .flat_map(|table_route| {
+                table_route
+                    .as_ref()
+                    .map(extract_address_keys)
+                    .unwrap_or_default()
+            })
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let node_addrs = self.get_node_addresses(keys).await?;
+        for table_route in table_routes.iter_mut().flatten() {
+            set_addresses(&node_addrs, table_route)?;
+        }
+
+        Ok(())
+    }
+
+    async fn remap_route_address(&self, table_route: &mut TableRouteValue) -> Result<()> {
+        let keys = extract_address_keys(table_route).into_iter().collect();
+        let node_addrs = self.get_node_addresses(keys).await?;
+        set_addresses(&node_addrs, table_route)?;
+
+        Ok(())
+    }
+
+    async fn get_node_addresses(
+        &self,
+        keys: Vec<Vec<u8>>,
+    ) -> Result<HashMap<u64, NodeAddressValue>> {
+        if keys.is_empty() {
+            return Ok(HashMap::default());
+        }
+
+        self.kv_backend
+            .batch_get(BatchGetRequest { keys })
+            .await?
+            .kvs
+            .into_iter()
+            .map(|kv| {
+                let node_id = NodeAddressKey::from_bytes(&kv.key)?.node_id;
+                let node_addr = NodeAddressValue::try_from_raw_value(&kv.value)?;
+                Ok((node_id, node_addr))
+            })
+            .collect()
+    }
+}
+
+fn set_addresses(
+    node_addrs: &HashMap<u64, NodeAddressValue>,
+    table_route: &mut TableRouteValue,
+) -> Result<()> {
+    let TableRouteValue::Physical(physical_table_route) = table_route else {
+        return Ok(());
+    };
+
+    for region_route in &mut physical_table_route.region_routes {
+        if let Some(leader) = &mut region_route.leader_peer {
+            if let Some(node_addr) = node_addrs.get(&leader.id) {
+                leader.addr = node_addr.peer.addr.clone();
+            }
+        }
+        for follower in &mut region_route.follower_peers {
+            if let Some(node_addr) = node_addrs.get(&follower.id) {
+                follower.addr = node_addr.peer.addr.clone();
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn extract_address_keys(table_route: &TableRouteValue) -> HashSet<Vec<u8>> {
+    let TableRouteValue::Physical(physical_table_route) = table_route else {
+        return HashSet::default();
+    };
+
+    physical_table_route
+        .region_routes
+        .iter()
+        .flat_map(|region_route| {
+            region_route
+                .follower_peers
+                .iter()
+                .map(|peer| NodeAddressKey::with_datanode(peer.id).to_bytes())
+                .chain(
+                    region_route
+                        .leader_peer
+                        .as_ref()
+                        .map(|leader| NodeAddressKey::with_datanode(leader.id).to_bytes()),
+                )
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -551,33 +687,82 @@ mod tests {
 
     use super::*;
     use crate::kv_backend::memory::MemoryKvBackend;
-    use crate::kv_backend::TxnService;
+    use crate::kv_backend::{KvBackend, TxnService};
+    use crate::peer::Peer;
+    use crate::rpc::router::Region;
+    use crate::rpc::store::PutRequest;
 
     #[test]
     fn test_table_route_compatibility() {
         let old_raw_v = r#"{"region_routes":[{"region":{"id":1,"name":"r1","partition":null,"attrs":{}},"leader_peer":{"id":2,"addr":"a2"},"follower_peers":[]},{"region":{"id":1,"name":"r1","partition":null,"attrs":{}},"leader_peer":{"id":2,"addr":"a2"},"follower_peers":[]}],"version":0}"#;
         let v = TableRouteValue::try_from_raw_value(old_raw_v.as_bytes()).unwrap();
 
-        let new_raw_v = format!("{:?}", v);
-        assert_eq!(
-            new_raw_v,
-            r#"Physical(PhysicalTableRouteValue { region_routes: [RegionRoute { region: Region { id: 1(0, 1), name: "r1", partition: None, attrs: {} }, leader_peer: Some(Peer { id: 2, addr: "a2" }), follower_peers: [], leader_status: None, leader_down_since: None }, RegionRoute { region: Region { id: 1(0, 1), name: "r1", partition: None, attrs: {} }, leader_peer: Some(Peer { id: 2, addr: "a2" }), follower_peers: [], leader_status: None, leader_down_since: None }], version: 0 })"#
-        );
+        let expected_table_route = TableRouteValue::Physical(PhysicalTableRouteValue {
+            region_routes: vec![
+                RegionRoute {
+                    region: Region {
+                        id: RegionId::new(0, 1),
+                        name: "r1".to_string(),
+                        partition: None,
+                        attrs: Default::default(),
+                    },
+                    leader_peer: Some(Peer {
+                        id: 2,
+                        addr: "a2".to_string(),
+                    }),
+                    follower_peers: vec![],
+                    leader_state: None,
+                    leader_down_since: None,
+                },
+                RegionRoute {
+                    region: Region {
+                        id: RegionId::new(0, 1),
+                        name: "r1".to_string(),
+                        partition: None,
+                        attrs: Default::default(),
+                    },
+                    leader_peer: Some(Peer {
+                        id: 2,
+                        addr: "a2".to_string(),
+                    }),
+                    follower_peers: vec![],
+                    leader_state: None,
+                    leader_down_since: None,
+                },
+            ],
+            version: 0,
+        });
+
+        assert_eq!(v, expected_table_route);
+    }
+
+    #[test]
+    fn test_key_serialization() {
+        let key = TableRouteKey::new(42);
+        let raw_key = key.to_bytes();
+        assert_eq!(raw_key, b"__table_route/42");
+    }
+
+    #[test]
+    fn test_key_deserialization() {
+        let expected = TableRouteKey::new(42);
+        let key = TableRouteKey::from_bytes(b"__table_route/42").unwrap();
+        assert_eq!(key, expected);
     }
 
     #[tokio::test]
-    async fn test_table_route_storage_get_raw_empty() {
+    async fn test_table_route_storage_get_with_raw_bytes_empty() {
         let kv = Arc::new(MemoryKvBackend::default());
         let table_route_storage = TableRouteStorage::new(kv);
-        let table_route = table_route_storage.get_raw(1024).await.unwrap();
+        let table_route = table_route_storage.get_with_raw_bytes(1024).await.unwrap();
         assert!(table_route.is_none());
     }
 
     #[tokio::test]
-    async fn test_table_route_storage_get_raw() {
+    async fn test_table_route_storage_get_with_raw_bytes() {
         let kv = Arc::new(MemoryKvBackend::default());
         let table_route_storage = TableRouteStorage::new(kv.clone());
-        let table_route = table_route_storage.get_raw(1024).await.unwrap();
+        let table_route = table_route_storage.get_with_raw_bytes(1024).await.unwrap();
         assert!(table_route.is_none());
         let table_route_manager = TableRouteManager::new(kv.clone());
         let table_route_value = TableRouteValue::Logical(LogicalTableRouteValue {
@@ -590,7 +775,7 @@ mod tests {
             .unwrap();
         let r = kv.txn(txn).await.unwrap();
         assert!(r.succeeded);
-        let table_route = table_route_storage.get_raw(1024).await.unwrap();
+        let table_route = table_route_storage.get_with_raw_bytes(1024).await.unwrap();
         assert!(table_route.is_some());
         let got = table_route.unwrap().inner;
         assert_eq!(got, table_route_value);
@@ -640,5 +825,62 @@ mod tests {
         assert_eq!(results[1].as_ref().unwrap(), &routes[1].1);
         assert!(results[2].is_none());
         assert_eq!(results[3].as_ref().unwrap(), &routes[0].1);
+    }
+
+    #[tokio::test]
+    async fn remap_route_address_updates_addresses() {
+        let kv = Arc::new(MemoryKvBackend::default());
+        let table_route_storage = TableRouteStorage::new(kv.clone());
+        let mut table_route = TableRouteValue::Physical(PhysicalTableRouteValue {
+            region_routes: vec![RegionRoute {
+                leader_peer: Some(Peer {
+                    id: 1,
+                    ..Default::default()
+                }),
+                follower_peers: vec![Peer {
+                    id: 2,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            version: 0,
+        });
+
+        kv.put(PutRequest {
+            key: NodeAddressKey::with_datanode(1).to_bytes(),
+            value: NodeAddressValue {
+                peer: Peer {
+                    addr: "addr1".to_string(),
+                    ..Default::default()
+                },
+            }
+            .try_as_raw_value()
+            .unwrap(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+        table_route_storage
+            .remap_route_address(&mut table_route)
+            .await
+            .unwrap();
+
+        if let TableRouteValue::Physical(physical_table_route) = table_route {
+            assert_eq!(
+                physical_table_route.region_routes[0]
+                    .leader_peer
+                    .as_ref()
+                    .unwrap()
+                    .addr,
+                "addr1"
+            );
+            assert_eq!(
+                physical_table_route.region_routes[0].follower_peers[0].addr,
+                ""
+            );
+        } else {
+            panic!("Expected PhysicalTableRouteValue");
+        }
     }
 }

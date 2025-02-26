@@ -17,10 +17,11 @@ use common_meta::peer::Peer;
 use crate::error::Result;
 use crate::lease;
 use crate::metasrv::SelectorContext;
-use crate::selector::common::choose_peers;
+use crate::selector::common::choose_items;
 use crate::selector::weighted_choose::{RandomWeightedChoose, WeightedItem};
 use crate::selector::{Namespace, Selector, SelectorOptions};
 
+/// Select all alive datanodes based using a random weighted choose.
 pub struct LeaseBasedSelector;
 
 #[async_trait::async_trait]
@@ -47,13 +48,12 @@ impl Selector for LeaseBasedSelector {
                     addr: v.node_addr.clone(),
                 },
                 weight: 1,
-                reverse_weight: 1,
             })
             .collect();
 
         // 3. choose peers by weight_array.
-        let weighted_choose = &mut RandomWeightedChoose::default();
-        let selected = choose_peers(weight_array, &opts, weighted_choose)?;
+        let mut weighted_choose = RandomWeightedChoose::new(weight_array);
+        let selected = choose_items(&opts, &mut weighted_choose)?;
 
         Ok(selected)
     }

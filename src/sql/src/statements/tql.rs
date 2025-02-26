@@ -12,17 +12,45 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Display;
+
+use serde::Serialize;
 use sqlparser_derive::{Visit, VisitMut};
 
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub enum Tql {
     Eval(TqlEval),
     Explain(TqlExplain),
     Analyze(TqlAnalyze),
 }
 
+impl Display for Tql {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Tql::Eval(t) => t.fmt(f),
+            Tql::Explain(t) => t.fmt(f),
+            Tql::Analyze(t) => t.fmt(f),
+        }
+    }
+}
+
+fn format_tql(
+    f: &mut std::fmt::Formatter<'_>,
+    start: &str,
+    end: &str,
+    step: &str,
+    lookback: Option<&str>,
+    query: &str,
+) -> std::fmt::Result {
+    write!(f, "({start}, {end}, {step}")?;
+    if let Some(lookback) = lookback {
+        write!(f, ", {lookback}")?;
+    }
+    write!(f, ") {query}")
+}
+
 /// TQL EVAL (<start>, <end>, <step>, [lookback]) <promql>
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct TqlEval {
     pub start: String,
     pub end: String,
@@ -31,9 +59,23 @@ pub struct TqlEval {
     pub query: String,
 }
 
+impl Display for TqlEval {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "TQL EVAL ")?;
+        format_tql(
+            f,
+            &self.start,
+            &self.end,
+            &self.step,
+            self.lookback.as_deref(),
+            &self.query,
+        )
+    }
+}
+
 /// TQL EXPLAIN [VERBOSE] [<start>, <end>, <step>, [lookback]] <promql>
 /// doesn't execute the query but tells how the query would be executed (similar to SQL EXPLAIN).
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct TqlExplain {
     pub start: String,
     pub end: String,
@@ -43,9 +85,26 @@ pub struct TqlExplain {
     pub is_verbose: bool,
 }
 
+impl Display for TqlExplain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "TQL EXPLAIN ")?;
+        if self.is_verbose {
+            write!(f, "VERBOSE ")?;
+        }
+        format_tql(
+            f,
+            &self.start,
+            &self.end,
+            &self.step,
+            self.lookback.as_deref(),
+            &self.query,
+        )
+    }
+}
+
 /// TQL ANALYZE [VERBOSE] (<start>, <end>, <step>, [lookback]) <promql>
 /// executes the plan and tells the detailed per-step execution time (similar to SQL ANALYZE).
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct TqlAnalyze {
     pub start: String,
     pub end: String,
@@ -55,7 +114,25 @@ pub struct TqlAnalyze {
     pub is_verbose: bool,
 }
 
+impl Display for TqlAnalyze {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "TQL ANALYZE ")?;
+        if self.is_verbose {
+            write!(f, "VERBOSE ")?;
+        }
+        format_tql(
+            f,
+            &self.start,
+            &self.end,
+            &self.step,
+            self.lookback.as_deref(),
+            &self.query,
+        )
+    }
+}
+
 /// Intermediate structure used to unify parameter mappings for various TQL operations.
+///
 /// This struct serves as a common parameter container for parsing TQL queries
 /// and constructing corresponding TQL operations: `TqlEval`, `TqlAnalyze` or `TqlExplain`.
 #[derive(Debug)]

@@ -24,7 +24,7 @@ SELECT MOD(18.0, 4.0);
 
 SELECT MOD(18, 0);
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Divide by zero error
+Error: 3001(EngineExecuteQuery), Divide by zero error
 
 SELECT POW (2, 5);
 
@@ -76,5 +76,5 @@ SELECT CLAMP(0.5, 0, 1);
 
 SELECT CLAMP(10, 1, 0);
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Invalid function args: The second arg should be less than or equal to the third arg, have: ConstantVector([Int64(1); 1]), ConstantVector([Int64(0); 1])
+Error: 3001(EngineExecuteQuery), Invalid function args: The second arg should be less than or equal to the third arg, have: ConstantVector([Int64(1); 1]), ConstantVector([Int64(0); 1])
 

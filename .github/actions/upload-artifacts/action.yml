@@ -4,8 +4,8 @@ inputs:
   artifacts-dir:
     description: Directory to store artifacts
     required: true
-  target-file:
-    description: The path of the target artifact
+  target-files:
+    description: The multiple target files to upload, separated by comma
     required: false
   version:
     description: Version of the artifact
@@ -18,17 +18,21 @@ runs:
   using: composite
   steps:
     - name: Create artifacts directory
-      if: ${{ inputs.target-file != '' }}
+      if: ${{ inputs.target-files != '' }}
       working-directory: ${{ inputs.working-dir }}
       shell: bash
       run: |
-        mkdir -p ${{ inputs.artifacts-dir }} && \
-        cp ${{ inputs.target-file }} ${{ inputs.artifacts-dir }}
+        set -e
+        mkdir -p ${{ inputs.artifacts-dir }}
+        IFS=',' read -ra FILES <<< "${{ inputs.target-files }}"
+        for file in "${FILES[@]}"; do
+          cp "$file" ${{ inputs.artifacts-dir }}/
+        done
 
     # The compressed artifacts will use the following layout:
-    # greptime-linux-amd64-pyo3-v0.3.0sha256sum
-    # greptime-linux-amd64-pyo3-v0.3.0.tar.gz
-    #   greptime-linux-amd64-pyo3-v0.3.0
+    # greptime-linux-amd64-v0.3.0sha256sum
+    # greptime-linux-amd64-v0.3.0.tar.gz
+    #   greptime-linux-amd64-v0.3.0
     #   └── greptime
     - name: Compress artifacts and calculate checksum
       working-directory: ${{ inputs.working-dir }}

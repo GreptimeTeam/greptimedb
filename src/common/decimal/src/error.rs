@@ -25,6 +25,7 @@ pub enum Error {
     #[snafu(display("Decimal out of range, decimal value: {}", value))]
     BigDecimalOutOfRange {
         value: BigDecimal,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -43,24 +44,20 @@ pub enum Error {
     },
 
     #[snafu(display("Invalid precision or scale, resion: {}", reason))]
-    InvalidPrecisionOrScale { reason: String, location: Location },
+    InvalidPrecisionOrScale {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::BigDecimalOutOfRange { .. } => StatusCode::Internal,
-            Error::ParseRustDecimalStr { .. }
+            Error::BigDecimalOutOfRange { .. }
+            | Error::ParseRustDecimalStr { .. }
             | Error::InvalidPrecisionOrScale { .. }
             | Error::ParseBigDecimalStr { .. } => StatusCode::InvalidArguments,
-        }
-    }
-
-    fn location_opt(&self) -> Option<common_error::snafu::Location> {
-        match self {
-            Error::BigDecimalOutOfRange { location, .. } => Some(*location),
-            Error::InvalidPrecisionOrScale { location, .. } => Some(*location),
-            Error::ParseRustDecimalStr { .. } | Error::ParseBigDecimalStr { .. } => None,
         }
     }
 

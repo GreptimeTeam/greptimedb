@@ -19,6 +19,7 @@ use std::sync::Arc;
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::value::ValueData;
 use api::v1::{Row, Rows, SemanticType};
+use common_time::Timestamp;
 use datatypes::arrow::array::UInt64Array;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::scalars::ScalarVector;
@@ -32,22 +33,33 @@ use crate::error::Result;
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::partition_tree::data::{timestamp_array_to_i64_slice, DataBatch, DataBuffer};
 use crate::memtable::{
-    BoxedBatchIterator, KeyValues, Memtable, MemtableBuilder, MemtableId, MemtableRef,
-    MemtableStats,
+    BoxedBatchIterator, BulkPart, KeyValues, Memtable, MemtableBuilder, MemtableId, MemtableRanges,
+    MemtableRef, MemtableStats,
 };
-use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
+use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt, SortField};
 
 /// Empty memtable for test.
 #[derive(Debug, Default)]
-pub(crate) struct EmptyMemtable {
+pub struct EmptyMemtable {
     /// Id of this memtable.
     id: MemtableId,
+    /// Time range to return.
+    time_range: Option<(Timestamp, Timestamp)>,
 }
 
 impl EmptyMemtable {
     /// Returns a new memtable with specific `id`.
-    pub(crate) fn new(id: MemtableId) -> EmptyMemtable {
-        EmptyMemtable { id }
+    pub fn new(id: MemtableId) -> EmptyMemtable {
+        EmptyMemtable {
+            id,
+            time_range: None,
+        }
+    }
+
+    /// Attaches the time range to the memtable.
+    pub fn with_time_range(mut self, time_range: Option<(Timestamp, Timestamp)>) -> EmptyMemtable {
+        self.time_range = time_range;
+        self
     }
 }
 
@@ -64,12 +76,26 @@ impl Memtable for EmptyMemtable {
         Ok(())
     }
 
+    fn write_bulk(&self, _part: BulkPart) -> Result<()> {
+        Ok(())
+    }
+
     fn iter(
         &self,
         _projection: Option<&[ColumnId]>,
         _filters: Option<Predicate>,
+        _sequence: Option<SequenceNumber>,
     ) -> Result<BoxedBatchIterator> {
         Ok(Box::new(std::iter::empty()))
+    }
+
+    fn ranges(
+        &self,
+        _projection: Option<&[ColumnId]>,
+        _predicate: Option<Predicate>,
+        _sequence: Option<SequenceNumber>,
+    ) -> MemtableRanges {
+        MemtableRanges::default()
     }
 
     fn is_empty(&self) -> bool {
@@ -81,7 +107,7 @@ impl Memtable for EmptyMemtable {
     }
 
     fn stats(&self) -> MemtableStats {
-        MemtableStats::default()
+        MemtableStats::default().with_time_range(self.time_range)
     }
 
     fn fork(&self, id: MemtableId, _metadata: &RegionMetadataRef) -> MemtableRef {
@@ -115,7 +141,7 @@ pub fn metadata_with_primary_key(
     enable_table_id: bool,
 ) -> RegionMetadataRef {
     let mut builder = RegionMetadataBuilder::new(RegionId::new(123, 456));
-    let maybe_table_id = if enable_table_id { "table_id" } else { "k1" };
+    let maybe_table_id = if enable_table_id { "__table_id" } else { "k1" };
     builder
         .push_column_metadata(ColumnMetadata {
             column_schema: ColumnSchema::new("k0", ConcreteDataType::string_datatype(), false),
@@ -263,6 +289,7 @@ pub(crate) fn build_key_values_with_ts_seq_values(
             schema: column_schema,
             rows,
         }),
+        write_hint: None,
     };
     KeyValues::new(metadata.as_ref(), mutation).unwrap()
 }
@@ -289,12 +316,7 @@ pub(crate) fn encode_keys(
     key_values: &KeyValues,
     keys: &mut Vec<Vec<u8>>,
 ) {
-    let row_codec = McmpRowCodec::new(
-        metadata
-            .primary_key_columns()
-            .map(|c| SortField::new(c.column_schema.data_type.clone()))
-            .collect(),
-    );
+    let row_codec = DensePrimaryKeyCodec::new(metadata);
     for kv in key_values.iter() {
         let key = row_codec.encode(kv.primary_keys()).unwrap();
         keys.push(key);
@@ -303,9 +325,9 @@ pub(crate) fn encode_keys(
 
 /// Encode one key.
 pub(crate) fn encode_key_by_kv(key_value: &KeyValue) -> Vec<u8> {
-    let row_codec = McmpRowCodec::new(vec![
-        SortField::new(ConcreteDataType::string_datatype()),
-        SortField::new(ConcreteDataType::uint32_datatype()),
+    let row_codec = DensePrimaryKeyCodec::with_fields(vec![
+        (0, SortField::new(ConcreteDataType::string_datatype())),
+        (1, SortField::new(ConcreteDataType::uint32_datatype())),
     ]);
     row_codec.encode(key_value.primary_keys()).unwrap()
 }

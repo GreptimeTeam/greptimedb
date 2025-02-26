@@ -17,23 +17,28 @@ use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 
 use arrow::datatypes::{DataType as ArrowDataType, Field};
+use arrow_array::{Array, ListArray};
+use base64::engine::general_purpose::URL_SAFE;
+use base64::Engine as _;
 use common_base::bytes::{Bytes, StringBytes};
 use common_decimal::Decimal128;
-use common_telemetry::logging;
+use common_telemetry::error;
 use common_time::date::Date;
 use common_time::datetime::DateTime;
 use common_time::interval::IntervalUnit;
 use common_time::time::Time;
 use common_time::timestamp::{TimeUnit, Timestamp};
-use common_time::{Duration, Interval, Timezone};
+use common_time::{Duration, IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth, Timezone};
 use datafusion_common::ScalarValue;
+use greptime_proto::v1::value::ValueData;
 pub use ordered_float::OrderedFloat;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
+use serde_json::{Number, Value as JsonValue};
 use snafu::{ensure, ResultExt};
 
-use crate::error;
-use crate::error::{Error, Result, TryFromValueSnafu};
+use crate::error::{self, ConvertArrowArrayToScalarsSnafu, Error, Result, TryFromValueSnafu};
 use crate::prelude::*;
+use crate::schema::ColumnSchema;
 use crate::type_id::LogicalTypeId;
 use crate::types::{IntervalType, ListType};
 use crate::vectors::ListVector;
@@ -74,7 +79,10 @@ pub enum Value {
     Timestamp(Timestamp),
     Time(Time),
     Duration(Duration),
-    Interval(Interval),
+    // Interval types:
+    IntervalYearMonth(IntervalYearMonth),
+    IntervalDayTime(IntervalDayTime),
+    IntervalMonthDayNano(IntervalMonthDayNano),
 
     List(ListValue),
 }
@@ -107,12 +115,19 @@ impl Display for Value {
             Value::DateTime(v) => write!(f, "{v}"),
             Value::Timestamp(v) => write!(f, "{}", v.to_iso8601_string()),
             Value::Time(t) => write!(f, "{}", t.to_iso8601_string()),
-            Value::Interval(v) => write!(f, "{}", v.to_iso8601_string()),
+            Value::IntervalYearMonth(v) => {
+                write!(f, "{}", v.to_iso8601_string())
+            }
+            Value::IntervalDayTime(v) => {
+                write!(f, "{}", v.to_iso8601_string())
+            }
+            Value::IntervalMonthDayNano(v) => {
+                write!(f, "{}", v.to_iso8601_string())
+            }
             Value::Duration(d) => write!(f, "{d}"),
             Value::List(v) => {
-                let default = Box::<Vec<Value>>::default();
-                let items = v.items().as_ref().unwrap_or(&default);
-                let items = items
+                let items = v
+                    .items()
                     .iter()
                     .map(|i| i.to_string())
                     .collect::<Vec<String>>()
@@ -150,7 +165,15 @@ macro_rules! define_data_type_func {
                 $struct::DateTime(_) => ConcreteDataType::datetime_datatype(),
                 $struct::Time(t) => ConcreteDataType::time_datatype(*t.unit()),
                 $struct::Timestamp(v) => ConcreteDataType::timestamp_datatype(v.unit()),
-                $struct::Interval(v) => ConcreteDataType::interval_datatype(v.unit()),
+                $struct::IntervalYearMonth(_) => {
+                    ConcreteDataType::interval_datatype(IntervalUnit::YearMonth)
+                }
+                $struct::IntervalDayTime(_) => {
+                    ConcreteDataType::interval_datatype(IntervalUnit::DayTime)
+                }
+                $struct::IntervalMonthDayNano(_) => {
+                    ConcreteDataType::interval_datatype(IntervalUnit::MonthDayNano)
+                }
                 $struct::List(list) => ConcreteDataType::list_datatype(list.datatype().clone()),
                 $struct::Duration(d) => ConcreteDataType::duration_datatype(d.unit()),
                 $struct::Decimal128(d) => {
@@ -203,7 +226,9 @@ impl Value {
             Value::List(v) => ValueRef::List(ListValueRef::Ref { val: v }),
             Value::Timestamp(v) => ValueRef::Timestamp(*v),
             Value::Time(v) => ValueRef::Time(*v),
-            Value::Interval(v) => ValueRef::Interval(*v),
+            Value::IntervalYearMonth(v) => ValueRef::IntervalYearMonth(*v),
+            Value::IntervalDayTime(v) => ValueRef::IntervalDayTime(*v),
+            Value::IntervalMonthDayNano(v) => ValueRef::IntervalMonthDayNano(*v),
             Value::Duration(v) => ValueRef::Duration(*v),
             Value::Decimal128(v) => ValueRef::Decimal128(*v),
         }
@@ -213,14 +238,6 @@ impl Value {
     pub fn as_timestamp(&self) -> Option<Timestamp> {
         match self {
             Value::Timestamp(t) => Some(*t),
-            _ => None,
-        }
-    }
-
-    /// Cast Value to Interval. Return None if value is not a valid interval data type.
-    pub fn as_interval(&self) -> Option<Interval> {
-        match self {
-            Value::Interval(i) => Some(*i),
             _ => None,
         }
     }
@@ -252,8 +269,31 @@ impl Value {
     /// Cast Value to [Time]. Return None if value is not a valid time data type.
     pub fn as_time(&self) -> Option<Time> {
         match self {
-            Value::Int64(v) => Some(Time::new_millisecond(*v)),
             Value::Time(t) => Some(*t),
+            _ => None,
+        }
+    }
+
+    /// Cast Value to [IntervalYearMonth]. Return None if value is not a valid interval year month data type.
+    pub fn as_interval_year_month(&self) -> Option<IntervalYearMonth> {
+        match self {
+            Value::IntervalYearMonth(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// Cast Value to [IntervalDayTime]. Return None if value is not a valid interval day time data type.
+    pub fn as_interval_day_time(&self) -> Option<IntervalDayTime> {
+        match self {
+            Value::IntervalDayTime(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// Cast Value to [IntervalMonthDayNano]. Return None if value is not a valid interval month day nano data type.
+    pub fn as_interval_month_day_nano(&self) -> Option<IntervalMonthDayNano> {
+        match self {
+            Value::IntervalMonthDayNano(v) => Some(*v),
             _ => None,
         }
     }
@@ -265,6 +305,23 @@ impl Value {
             Value::UInt16(v) => Some(*v as _),
             Value::UInt32(v) => Some(*v as _),
             Value::UInt64(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// Cast Value to f64. Return None if it's not castable;
+    pub fn as_f64_lossy(&self) -> Option<f64> {
+        match self {
+            Value::Float32(v) => Some(v.0 as _),
+            Value::Float64(v) => Some(v.0),
+            Value::Int8(v) => Some(*v as _),
+            Value::Int16(v) => Some(*v as _),
+            Value::Int32(v) => Some(*v as _),
+            Value::Int64(v) => Some(*v as _),
+            Value::UInt8(v) => Some(*v as _),
+            Value::UInt16(v) => Some(*v as _),
+            Value::UInt32(v) => Some(*v as _),
+            Value::UInt64(v) => Some(*v as _),
             _ => None,
         }
     }
@@ -301,11 +358,9 @@ impl Value {
                 TimeUnit::Microsecond => LogicalTypeId::TimeMicrosecond,
                 TimeUnit::Nanosecond => LogicalTypeId::TimeNanosecond,
             },
-            Value::Interval(v) => match v.unit() {
-                IntervalUnit::YearMonth => LogicalTypeId::IntervalYearMonth,
-                IntervalUnit::DayTime => LogicalTypeId::IntervalDayTime,
-                IntervalUnit::MonthDayNano => LogicalTypeId::IntervalMonthDayNano,
-            },
+            Value::IntervalYearMonth(_) => LogicalTypeId::IntervalYearMonth,
+            Value::IntervalDayTime(_) => LogicalTypeId::IntervalDayTime,
+            Value::IntervalMonthDayNano(_) => LogicalTypeId::IntervalMonthDayNano,
             Value::Duration(d) => match d.unit() {
                 TimeUnit::Second => LogicalTypeId::DurationSecond,
                 TimeUnit::Millisecond => LogicalTypeId::DurationMillisecond,
@@ -322,7 +377,8 @@ impl Value {
         let value_type_id = self.logical_type_id();
         let output_type_id = output_type.logical_type_id();
         ensure!(
-            output_type_id == value_type_id || self.is_null(),
+            // Json type leverage Value(Binary) for storage.
+            output_type_id == value_type_id || self.is_null() || (output_type_id == LogicalTypeId::Json && value_type_id == LogicalTypeId::Binary),
             error::ToScalarValueSnafu {
                 reason: format!(
                     "expect value to return output_type {output_type_id:?}, actual: {value_type_id:?}",
@@ -343,7 +399,7 @@ impl Value {
             Value::Float32(v) => ScalarValue::Float32(Some(v.0)),
             Value::Float64(v) => ScalarValue::Float64(Some(v.0)),
             Value::String(v) => ScalarValue::Utf8(Some(v.as_utf8().to_string())),
-            Value::Binary(v) => ScalarValue::LargeBinary(Some(v.to_vec())),
+            Value::Binary(v) => ScalarValue::Binary(Some(v.to_vec())),
             Value::Date(v) => ScalarValue::Date32(Some(v.val())),
             Value::DateTime(v) => ScalarValue::Date64(Some(v.val())),
             Value::Null => to_null_scalar_value(output_type)?,
@@ -354,11 +410,9 @@ impl Value {
             }
             Value::Timestamp(t) => timestamp_to_scalar_value(t.unit(), Some(t.value())),
             Value::Time(t) => time_to_scalar_value(*t.unit(), Some(t.value()))?,
-            Value::Interval(v) => match v.unit() {
-                IntervalUnit::YearMonth => ScalarValue::IntervalYearMonth(Some(v.to_i32())),
-                IntervalUnit::DayTime => ScalarValue::IntervalDayTime(Some(v.to_i64())),
-                IntervalUnit::MonthDayNano => ScalarValue::IntervalMonthDayNano(Some(v.to_i128())),
-            },
+            Value::IntervalYearMonth(v) => ScalarValue::IntervalYearMonth(Some(v.to_i32())),
+            Value::IntervalDayTime(v) => ScalarValue::IntervalDayTime(Some((*v).into())),
+            Value::IntervalMonthDayNano(v) => ScalarValue::IntervalMonthDayNano(Some((*v).into())),
             Value::Duration(d) => duration_to_scalar_value(d.unit(), Some(d.value())),
             Value::Decimal128(d) => {
                 let (v, p, s) = d.to_scalar_value();
@@ -367,6 +421,58 @@ impl Value {
         };
 
         Ok(scalar_value)
+    }
+
+    /// Apply `-` unary op if possible
+    pub fn try_negative(&self) -> Option<Self> {
+        match self {
+            Value::Null => Some(Value::Null),
+            Value::UInt8(x) => {
+                if *x == 0 {
+                    Some(Value::UInt8(*x))
+                } else {
+                    None
+                }
+            }
+            Value::UInt16(x) => {
+                if *x == 0 {
+                    Some(Value::UInt16(*x))
+                } else {
+                    None
+                }
+            }
+            Value::UInt32(x) => {
+                if *x == 0 {
+                    Some(Value::UInt32(*x))
+                } else {
+                    None
+                }
+            }
+            Value::UInt64(x) => {
+                if *x == 0 {
+                    Some(Value::UInt64(*x))
+                } else {
+                    None
+                }
+            }
+            Value::Int8(x) => Some(Value::Int8(-*x)),
+            Value::Int16(x) => Some(Value::Int16(-*x)),
+            Value::Int32(x) => Some(Value::Int32(-*x)),
+            Value::Int64(x) => Some(Value::Int64(-*x)),
+            Value::Float32(x) => Some(Value::Float32(-*x)),
+            Value::Float64(x) => Some(Value::Float64(-*x)),
+            Value::Decimal128(x) => Some(Value::Decimal128(x.negative())),
+            Value::Date(x) => Some(Value::Date(x.negative())),
+            Value::DateTime(x) => Some(Value::DateTime(x.negative())),
+            Value::Timestamp(x) => Some(Value::Timestamp(x.negative())),
+            Value::Time(x) => Some(Value::Time(x.negative())),
+            Value::Duration(x) => Some(Value::Duration(x.negative())),
+            Value::IntervalYearMonth(x) => Some(Value::IntervalYearMonth(x.negative())),
+            Value::IntervalDayTime(x) => Some(Value::IntervalDayTime(x.negative())),
+            Value::IntervalMonthDayNano(x) => Some(Value::IntervalMonthDayNano(x.negative())),
+
+            Value::Binary(_) | Value::String(_) | Value::Boolean(_) | Value::List(_) => None,
+        }
     }
 }
 
@@ -414,7 +520,9 @@ pub fn to_null_scalar_value(output_type: &ConcreteDataType) -> Result<ScalarValu
         ConcreteDataType::UInt64(_) => ScalarValue::UInt64(None),
         ConcreteDataType::Float32(_) => ScalarValue::Float32(None),
         ConcreteDataType::Float64(_) => ScalarValue::Float64(None),
-        ConcreteDataType::Binary(_) => ScalarValue::LargeBinary(None),
+        ConcreteDataType::Binary(_) | ConcreteDataType::Json(_) | ConcreteDataType::Vector(_) => {
+            ScalarValue::Binary(None)
+        }
         ConcreteDataType::String(_) => ScalarValue::Utf8(None),
         ConcreteDataType::Date(_) => ScalarValue::Date32(None),
         ConcreteDataType::DateTime(_) => ScalarValue::Date64(None),
@@ -424,9 +532,10 @@ pub fn to_null_scalar_value(output_type: &ConcreteDataType) -> Result<ScalarValu
             IntervalType::DayTime(_) => ScalarValue::IntervalDayTime(None),
             IntervalType::MonthDayNano(_) => ScalarValue::IntervalMonthDayNano(None),
         },
-        ConcreteDataType::List(_) => {
-            ScalarValue::List(None, Arc::new(new_item_field(output_type.as_arrow_type())))
-        }
+        ConcreteDataType::List(_) => ScalarValue::List(Arc::new(ListArray::new_null(
+            Arc::new(new_item_field(output_type.as_arrow_type())),
+            0,
+        ))),
         ConcreteDataType::Dictionary(dict) => ScalarValue::Dictionary(
             Box::new(dict.key_type().as_arrow_type()),
             Box::new(to_null_scalar_value(dict.value_type())?),
@@ -487,7 +596,7 @@ pub fn scalar_value_to_timestamp(
         ScalarValue::Utf8(Some(s)) => match Timestamp::from_str(s, timezone) {
             Ok(t) => Some(t),
             Err(e) => {
-                logging::error!(e;"Failed to convert string literal {s} to timestamp");
+                error!(e;"Failed to convert string literal {s} to timestamp");
                 None
             }
         },
@@ -495,16 +604,6 @@ pub fn scalar_value_to_timestamp(
         ScalarValue::TimestampMillisecond(v, _) => v.map(Timestamp::new_millisecond),
         ScalarValue::TimestampMicrosecond(v, _) => v.map(Timestamp::new_microsecond),
         ScalarValue::TimestampNanosecond(v, _) => v.map(Timestamp::new_nanosecond),
-        _ => None,
-    }
-}
-
-/// Convert [ScalarValue] to [Interval].
-pub fn scalar_value_to_interval(scalar: &ScalarValue) -> Option<Interval> {
-    match scalar {
-        ScalarValue::IntervalYearMonth(v) => v.map(Interval::from_i32),
-        ScalarValue::IntervalDayTime(v) => v.map(Interval::from_i64),
-        ScalarValue::IntervalMonthDayNano(v) => v.map(Interval::from_i128),
         _ => None,
     }
 }
@@ -535,7 +634,9 @@ macro_rules! impl_ord_for_value_like {
                 ($Type::DateTime(v1), $Type::DateTime(v2)) => v1.cmp(v2),
                 ($Type::Timestamp(v1), $Type::Timestamp(v2)) => v1.cmp(v2),
                 ($Type::Time(v1), $Type::Time(v2)) => v1.cmp(v2),
-                ($Type::Interval(v1), $Type::Interval(v2)) => v1.cmp(v2),
+                ($Type::IntervalYearMonth(v1), $Type::IntervalYearMonth(v2)) => v1.cmp(v2),
+                ($Type::IntervalDayTime(v1), $Type::IntervalDayTime(v2)) => v1.cmp(v2),
+                ($Type::IntervalMonthDayNano(v1), $Type::IntervalMonthDayNano(v2)) => v1.cmp(v2),
                 ($Type::Duration(v1), $Type::Duration(v2)) => v1.cmp(v2),
                 ($Type::List(v1), $Type::List(v2)) => v1.cmp(v2),
                 _ => panic!(
@@ -613,7 +714,9 @@ impl_try_from_value!(Date, Date);
 impl_try_from_value!(Time, Time);
 impl_try_from_value!(DateTime, DateTime);
 impl_try_from_value!(Timestamp, Timestamp);
-impl_try_from_value!(Interval, Interval);
+impl_try_from_value!(IntervalYearMonth, IntervalYearMonth);
+impl_try_from_value!(IntervalDayTime, IntervalDayTime);
+impl_try_from_value!(IntervalMonthDayNano, IntervalMonthDayNano);
 impl_try_from_value!(Duration, Duration);
 impl_try_from_value!(Decimal128, Decimal128);
 
@@ -655,7 +758,9 @@ impl_value_from!(Date, Date);
 impl_value_from!(Time, Time);
 impl_value_from!(DateTime, DateTime);
 impl_value_from!(Timestamp, Timestamp);
-impl_value_from!(Interval, Interval);
+impl_value_from!(IntervalYearMonth, IntervalYearMonth);
+impl_value_from!(IntervalDayTime, IntervalDayTime);
+impl_value_from!(IntervalMonthDayNano, IntervalMonthDayNano);
 impl_value_from!(Duration, Duration);
 impl_value_from!(String, String);
 impl_value_from!(Decimal128, Decimal128);
@@ -695,14 +800,16 @@ impl TryFrom<Value> for serde_json::Value {
             Value::Int64(v) => serde_json::Value::from(v),
             Value::Float32(v) => serde_json::Value::from(v.0),
             Value::Float64(v) => serde_json::Value::from(v.0),
-            Value::String(bytes) => serde_json::Value::String(bytes.as_utf8().to_string()),
+            Value::String(bytes) => serde_json::Value::String(bytes.into_string()),
             Value::Binary(bytes) => serde_json::to_value(bytes)?,
             Value::Date(v) => serde_json::Value::Number(v.val().into()),
             Value::DateTime(v) => serde_json::Value::Number(v.val().into()),
             Value::List(v) => serde_json::to_value(v)?,
             Value::Timestamp(v) => serde_json::to_value(v.value())?,
             Value::Time(v) => serde_json::to_value(v.value())?,
-            Value::Interval(v) => serde_json::to_value(v.to_i128())?,
+            Value::IntervalYearMonth(v) => serde_json::to_value(v.to_i32())?,
+            Value::IntervalDayTime(v) => serde_json::to_value(v.to_i64())?,
+            Value::IntervalMonthDayNano(v) => serde_json::to_value(v.to_i128())?,
             Value::Duration(v) => serde_json::to_value(v.value())?,
             Value::Decimal128(v) => serde_json::to_value(v.to_string())?,
         };
@@ -715,9 +822,7 @@ impl TryFrom<Value> for serde_json::Value {
 /// List value.
 #[derive(Debug, Clone, PartialEq, Hash, Serialize, Deserialize)]
 pub struct ListValue {
-    /// List of nested Values (boxed to reduce size_of(Value))
-    #[allow(clippy::box_collection)]
-    items: Option<Box<Vec<Value>>>,
+    items: Vec<Value>,
     /// Inner values datatype, to distinguish empty lists of different datatypes.
     /// Restricted by DataFusion, cannot use null datatype for empty list.
     datatype: ConcreteDataType,
@@ -726,11 +831,11 @@ pub struct ListValue {
 impl Eq for ListValue {}
 
 impl ListValue {
-    pub fn new(items: Option<Box<Vec<Value>>>, datatype: ConcreteDataType) -> Self {
+    pub fn new(items: Vec<Value>, datatype: ConcreteDataType) -> Self {
         Self { items, datatype }
     }
 
-    pub fn items(&self) -> &Option<Box<Vec<Value>>> {
+    pub fn items(&self) -> &[Value] {
         &self.items
     }
 
@@ -739,38 +844,31 @@ impl ListValue {
     }
 
     fn try_to_scalar_value(&self, output_type: &ListType) -> Result<ScalarValue> {
-        let vs = if let Some(items) = self.items() {
-            Some(
-                items
-                    .iter()
-                    .map(|v| v.try_to_scalar_value(output_type.item_type()))
-                    .collect::<Result<Vec<_>>>()?,
-            )
-        } else {
-            None
-        };
-
-        Ok(ScalarValue::List(
-            vs,
-            Arc::new(new_item_field(output_type.item_type().as_arrow_type())),
-        ))
+        let vs = self
+            .items
+            .iter()
+            .map(|v| v.try_to_scalar_value(output_type.item_type()))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(ScalarValue::List(ScalarValue::new_list(
+            &vs,
+            &self.datatype.as_arrow_type(),
+            true,
+        )))
     }
 
     /// use 'the first item size' * 'length of items' to estimate the size.
     /// it could be inaccurate.
     fn estimated_size(&self) -> usize {
-        if let Some(items) = &self.items {
-            if let Some(item) = items.first() {
-                return item.as_value_ref().data_size() * items.len();
-            }
-        }
-        0
+        self.items
+            .first()
+            .map(|x| x.as_value_ref().data_size() * self.items.len())
+            .unwrap_or(0)
     }
 }
 
 impl Default for ListValue {
     fn default() -> ListValue {
-        ListValue::new(None, ConcreteDataType::null_datatype())
+        ListValue::new(vec![], ConcreteDataType::null_datatype())
     }
 }
 
@@ -824,17 +922,14 @@ impl TryFrom<ScalarValue> for Value {
             ScalarValue::Binary(b)
             | ScalarValue::LargeBinary(b)
             | ScalarValue::FixedSizeBinary(_, b) => Value::from(b.map(Bytes::from)),
-            ScalarValue::List(vs, field) | ScalarValue::Fixedsizelist(vs, field, _) => {
-                let items = if let Some(vs) = vs {
-                    let vs = vs
-                        .into_iter()
-                        .map(ScalarValue::try_into)
-                        .collect::<Result<_>>()?;
-                    Some(Box::new(vs))
-                } else {
-                    None
-                };
-                let datatype = ConcreteDataType::try_from(field.data_type())?;
+            ScalarValue::List(array) => {
+                let datatype = ConcreteDataType::try_from(array.data_type())?;
+                let items = ScalarValue::convert_array_to_scalar_vec(array.as_ref())
+                    .context(ConvertArrowArrayToScalarsSnafu)?
+                    .into_iter()
+                    .flatten()
+                    .map(|x| x.try_into())
+                    .collect::<Result<Vec<Value>>>()?;
                 Value::List(ListValue::new(items, datatype))
             }
             ScalarValue::Date32(d) => d.map(|x| Value::Date(Date::new(x))).unwrap_or(Value::Null),
@@ -867,13 +962,13 @@ impl TryFrom<ScalarValue> for Value {
                 .unwrap_or(Value::Null),
 
             ScalarValue::IntervalYearMonth(t) => t
-                .map(|x| Value::Interval(Interval::from_i32(x)))
+                .map(|x| Value::IntervalYearMonth(IntervalYearMonth::from_i32(x)))
                 .unwrap_or(Value::Null),
             ScalarValue::IntervalDayTime(t) => t
-                .map(|x| Value::Interval(Interval::from_i64(x)))
+                .map(|x| Value::IntervalDayTime(IntervalDayTime::from(x)))
                 .unwrap_or(Value::Null),
             ScalarValue::IntervalMonthDayNano(t) => t
-                .map(|x| Value::Interval(Interval::from_i128(x)))
+                .map(|x| Value::IntervalMonthDayNano(IntervalMonthDayNano::from(x)))
                 .unwrap_or(Value::Null),
             ScalarValue::DurationSecond(d) => d
                 .map(|x| Value::Duration(Duration::new(x, TimeUnit::Second)))
@@ -891,8 +986,15 @@ impl TryFrom<ScalarValue> for Value {
                 .map(|v| Value::Decimal128(Decimal128::new(v, p, s)))
                 .unwrap_or(Value::Null),
             ScalarValue::Decimal256(_, _, _)
-            | ScalarValue::Struct(_, _)
-            | ScalarValue::Dictionary(_, _) => {
+            | ScalarValue::Struct(_)
+            | ScalarValue::FixedSizeList(_)
+            | ScalarValue::LargeList(_)
+            | ScalarValue::Dictionary(_, _)
+            | ScalarValue::Union(_, _, _)
+            | ScalarValue::Float16(_)
+            | ScalarValue::Utf8View(_)
+            | ScalarValue::BinaryView(_)
+            | ScalarValue::Map(_) => {
                 return error::UnsupportedArrowTypeSnafu {
                     arrow_type: v.data_type(),
                 }
@@ -924,7 +1026,9 @@ impl From<ValueRef<'_>> for Value {
             ValueRef::DateTime(v) => Value::DateTime(v),
             ValueRef::Timestamp(v) => Value::Timestamp(v),
             ValueRef::Time(v) => Value::Time(v),
-            ValueRef::Interval(v) => Value::Interval(v),
+            ValueRef::IntervalYearMonth(v) => Value::IntervalYearMonth(v),
+            ValueRef::IntervalDayTime(v) => Value::IntervalDayTime(v),
+            ValueRef::IntervalMonthDayNano(v) => Value::IntervalMonthDayNano(v),
             ValueRef::Duration(v) => Value::Duration(v),
             ValueRef::List(v) => v.to_value(),
             ValueRef::Decimal128(v) => Value::Decimal128(v),
@@ -963,7 +1067,10 @@ pub enum ValueRef<'a> {
     Timestamp(Timestamp),
     Time(Time),
     Duration(Duration),
-    Interval(Interval),
+    // Interval types:
+    IntervalYearMonth(IntervalYearMonth),
+    IntervalDayTime(IntervalDayTime),
+    IntervalMonthDayNano(IntervalMonthDayNano),
 
     // Compound types:
     List(ListValueRef<'a>),
@@ -995,12 +1102,12 @@ impl<'a> ValueRef<'a> {
     }
 
     /// Cast itself to binary slice.
-    pub fn as_binary(&self) -> Result<Option<&[u8]>> {
+    pub fn as_binary(&self) -> Result<Option<&'a [u8]>> {
         impl_as_for_value_ref!(self, Binary)
     }
 
     /// Cast itself to string slice.
-    pub fn as_string(&self) -> Result<Option<&str>> {
+    pub fn as_string(&self) -> Result<Option<&'a str>> {
         impl_as_for_value_ref!(self, String)
     }
 
@@ -1087,9 +1194,19 @@ impl<'a> ValueRef<'a> {
         impl_as_for_value_ref!(self, Duration)
     }
 
-    /// Cast itself to [Interval].
-    pub fn as_interval(&self) -> Result<Option<Interval>> {
-        impl_as_for_value_ref!(self, Interval)
+    /// Cast itself to [IntervalYearMonth].
+    pub fn as_interval_year_month(&self) -> Result<Option<IntervalYearMonth>> {
+        impl_as_for_value_ref!(self, IntervalYearMonth)
+    }
+
+    /// Cast itself to [IntervalDayTime].
+    pub fn as_interval_day_time(&self) -> Result<Option<IntervalDayTime>> {
+        impl_as_for_value_ref!(self, IntervalDayTime)
+    }
+
+    /// Cast itself to [IntervalMonthDayNano].
+    pub fn as_interval_month_day_nano(&self) -> Result<Option<IntervalMonthDayNano>> {
+        impl_as_for_value_ref!(self, IntervalMonthDayNano)
     }
 
     /// Cast itself to [ListValueRef].
@@ -1103,13 +1220,13 @@ impl<'a> ValueRef<'a> {
     }
 }
 
-impl<'a> PartialOrd for ValueRef<'a> {
+impl PartialOrd for ValueRef<'_> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<'a> Ord for ValueRef<'a> {
+impl Ord for ValueRef<'_> {
     fn cmp(&self, other: &Self) -> Ordering {
         impl_ord_for_value_like!(ValueRef, self, other)
     }
@@ -1149,7 +1266,9 @@ impl_value_ref_from!(Date, Date);
 impl_value_ref_from!(DateTime, DateTime);
 impl_value_ref_from!(Timestamp, Timestamp);
 impl_value_ref_from!(Time, Time);
-impl_value_ref_from!(Interval, Interval);
+impl_value_ref_from!(IntervalYearMonth, IntervalYearMonth);
+impl_value_ref_from!(IntervalDayTime, IntervalDayTime);
+impl_value_ref_from!(IntervalMonthDayNano, IntervalMonthDayNano);
 impl_value_ref_from!(Duration, Duration);
 impl_value_ref_from!(Decimal128, Decimal128);
 
@@ -1174,6 +1293,54 @@ impl<'a> From<Option<ListValueRef<'a>>> for ValueRef<'a> {
     }
 }
 
+/// transform a [ValueRef] to a [serde_json::Value].
+/// The json type will be handled specially
+pub fn transform_value_ref_to_json_value<'a>(
+    value: ValueRef<'a>,
+    schema: &'a ColumnSchema,
+) -> serde_json::Result<serde_json::Value> {
+    let json_value = match value {
+        ValueRef::Null => serde_json::Value::Null,
+        ValueRef::Boolean(v) => serde_json::Value::Bool(v),
+        ValueRef::UInt8(v) => serde_json::Value::from(v),
+        ValueRef::UInt16(v) => serde_json::Value::from(v),
+        ValueRef::UInt32(v) => serde_json::Value::from(v),
+        ValueRef::UInt64(v) => serde_json::Value::from(v),
+        ValueRef::Int8(v) => serde_json::Value::from(v),
+        ValueRef::Int16(v) => serde_json::Value::from(v),
+        ValueRef::Int32(v) => serde_json::Value::from(v),
+        ValueRef::Int64(v) => serde_json::Value::from(v),
+        ValueRef::Float32(v) => serde_json::Value::from(v.0),
+        ValueRef::Float64(v) => serde_json::Value::from(v.0),
+        ValueRef::String(bytes) => serde_json::Value::String(bytes.to_string()),
+        ValueRef::Binary(bytes) => {
+            if let ConcreteDataType::Json(_) = schema.data_type {
+                match jsonb::from_slice(bytes) {
+                    Ok(json) => json.into(),
+                    Err(e) => {
+                        error!(e; "Failed to parse jsonb");
+                        serde_json::Value::Null
+                    }
+                }
+            } else {
+                serde_json::to_value(bytes)?
+            }
+        }
+        ValueRef::Date(v) => serde_json::Value::Number(v.val().into()),
+        ValueRef::DateTime(v) => serde_json::Value::Number(v.val().into()),
+        ValueRef::List(v) => serde_json::to_value(v)?,
+        ValueRef::Timestamp(v) => serde_json::to_value(v.value())?,
+        ValueRef::Time(v) => serde_json::to_value(v.value())?,
+        ValueRef::IntervalYearMonth(v) => serde_json::Value::from(v),
+        ValueRef::IntervalDayTime(v) => serde_json::Value::from(v),
+        ValueRef::IntervalMonthDayNano(v) => serde_json::Value::from(v),
+        ValueRef::Duration(v) => serde_json::to_value(v.value())?,
+        ValueRef::Decimal128(v) => serde_json::to_value(v.to_string())?,
+    };
+
+    Ok(json_value)
+}
+
 /// Reference to a [ListValue].
 ///
 /// Now comparison still requires some allocation (call of `to_value()`) and
@@ -1186,7 +1353,7 @@ pub enum ListValueRef<'a> {
     Ref { val: &'a ListValue },
 }
 
-impl<'a> ListValueRef<'a> {
+impl ListValueRef<'_> {
     /// Convert self to [Value]. This method would clone the underlying data.
     fn to_value(self) -> Value {
         match self {
@@ -1204,33 +1371,47 @@ impl<'a> ListValueRef<'a> {
     }
 }
 
-impl<'a> PartialEq for ListValueRef<'a> {
+impl Serialize for ListValueRef<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        match self {
+            ListValueRef::Indexed { vector, idx } => match vector.get(*idx) {
+                Value::List(v) => v.serialize(serializer),
+                _ => unreachable!(),
+            },
+            ListValueRef::Ref { val } => val.serialize(serializer),
+        }
+    }
+}
+
+impl PartialEq for ListValueRef<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.to_value().eq(&other.to_value())
     }
 }
 
-impl<'a> Eq for ListValueRef<'a> {}
+impl Eq for ListValueRef<'_> {}
 
-impl<'a> Ord for ListValueRef<'a> {
+impl Ord for ListValueRef<'_> {
     fn cmp(&self, other: &Self) -> Ordering {
         // Respect the order of `Value` by converting into value before comparison.
         self.to_value().cmp(&other.to_value())
     }
 }
 
-impl<'a> PartialOrd for ListValueRef<'a> {
+impl PartialOrd for ListValueRef<'_> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<'a> ValueRef<'a> {
+impl ValueRef<'_> {
     /// Returns the size of the underlying data in bytes,
     /// The size is estimated and only considers the data size.
     pub fn data_size(&self) -> usize {
         match *self {
-            ValueRef::Null => 0,
+            // Since the `Null` type is also considered to occupy space, we have opted to use the
+            // size of `i64` as an initial approximation.
+            ValueRef::Null => 8,
             ValueRef::Boolean(_) => 1,
             ValueRef::UInt8(_) => 1,
             ValueRef::UInt16(_) => 2,
@@ -1249,7 +1430,9 @@ impl<'a> ValueRef<'a> {
             ValueRef::Timestamp(_) => 16,
             ValueRef::Time(_) => 16,
             ValueRef::Duration(_) => 16,
-            ValueRef::Interval(_) => 24,
+            ValueRef::IntervalYearMonth(_) => 4,
+            ValueRef::IntervalDayTime(_) => 8,
+            ValueRef::IntervalMonthDayNano(_) => 16,
             ValueRef::Decimal128(_) => 32,
             ValueRef::List(v) => match v {
                 ListValueRef::Indexed { vector, .. } => vector.memory_size() / vector.len(),
@@ -1259,14 +1442,182 @@ impl<'a> ValueRef<'a> {
     }
 }
 
+pub fn column_data_to_json(data: ValueData) -> JsonValue {
+    match data {
+        ValueData::BinaryValue(b) => JsonValue::String(URL_SAFE.encode(b)),
+        ValueData::BoolValue(b) => JsonValue::Bool(b),
+        ValueData::U8Value(i) => JsonValue::Number(i.into()),
+        ValueData::U16Value(i) => JsonValue::Number(i.into()),
+        ValueData::U32Value(i) => JsonValue::Number(i.into()),
+        ValueData::U64Value(i) => JsonValue::Number(i.into()),
+        ValueData::I8Value(i) => JsonValue::Number(i.into()),
+        ValueData::I16Value(i) => JsonValue::Number(i.into()),
+        ValueData::I32Value(i) => JsonValue::Number(i.into()),
+        ValueData::I64Value(i) => JsonValue::Number(i.into()),
+        ValueData::F32Value(f) => Number::from_f64(f as f64)
+            .map(JsonValue::Number)
+            .unwrap_or(JsonValue::Null),
+        ValueData::F64Value(f) => Number::from_f64(f)
+            .map(JsonValue::Number)
+            .unwrap_or(JsonValue::Null),
+        ValueData::StringValue(s) => JsonValue::String(s),
+        ValueData::DateValue(d) => JsonValue::String(Date::from(d).to_string()),
+        ValueData::DatetimeValue(d) => JsonValue::String(DateTime::from(d).to_string()),
+        ValueData::TimeSecondValue(d) => JsonValue::String(Time::new_second(d).to_iso8601_string()),
+        ValueData::TimeMillisecondValue(d) => {
+            JsonValue::String(Time::new_millisecond(d).to_iso8601_string())
+        }
+        ValueData::TimeMicrosecondValue(d) => {
+            JsonValue::String(Time::new_microsecond(d).to_iso8601_string())
+        }
+        ValueData::TimeNanosecondValue(d) => {
+            JsonValue::String(Time::new_nanosecond(d).to_iso8601_string())
+        }
+        ValueData::TimestampMicrosecondValue(d) => {
+            JsonValue::String(Timestamp::new_microsecond(d).to_iso8601_string())
+        }
+        ValueData::TimestampMillisecondValue(d) => {
+            JsonValue::String(Timestamp::new_millisecond(d).to_iso8601_string())
+        }
+        ValueData::TimestampNanosecondValue(d) => {
+            JsonValue::String(Timestamp::new_nanosecond(d).to_iso8601_string())
+        }
+        ValueData::TimestampSecondValue(d) => {
+            JsonValue::String(Timestamp::new_second(d).to_iso8601_string())
+        }
+        ValueData::IntervalYearMonthValue(d) => JsonValue::String(format!("interval year [{}]", d)),
+        ValueData::IntervalMonthDayNanoValue(d) => JsonValue::String(format!(
+            "interval month [{}][{}][{}]",
+            d.months, d.days, d.nanoseconds
+        )),
+        ValueData::IntervalDayTimeValue(d) => JsonValue::String(format!("interval day [{}]", d)),
+        ValueData::Decimal128Value(d) => {
+            JsonValue::String(format!("decimal128 [{}][{}]", d.hi, d.lo))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use arrow::datatypes::DataType as ArrowDataType;
     use common_time::timezone::set_default_timezone;
+    use greptime_proto::v1::{
+        Decimal128 as ProtoDecimal128, IntervalMonthDayNano as ProtoIntervalMonthDayNano,
+    };
     use num_traits::Float;
 
     use super::*;
     use crate::vectors::ListVectorBuilder;
+
+    #[test]
+    fn test_column_data_to_json() {
+        assert_eq!(
+            column_data_to_json(ValueData::BinaryValue(b"hello".to_vec())),
+            JsonValue::String("aGVsbG8=".to_string())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::BoolValue(true)),
+            JsonValue::Bool(true)
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::U8Value(1)),
+            JsonValue::Number(1.into())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::U16Value(2)),
+            JsonValue::Number(2.into())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::U32Value(3)),
+            JsonValue::Number(3.into())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::U64Value(4)),
+            JsonValue::Number(4.into())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::I8Value(5)),
+            JsonValue::Number(5.into())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::I16Value(6)),
+            JsonValue::Number(6.into())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::I32Value(7)),
+            JsonValue::Number(7.into())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::I64Value(8)),
+            JsonValue::Number(8.into())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::F32Value(9.0)),
+            JsonValue::Number(Number::from_f64(9.0_f64).unwrap())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::F64Value(10.0)),
+            JsonValue::Number(Number::from_f64(10.0_f64).unwrap())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::StringValue("hello".to_string())),
+            JsonValue::String("hello".to_string())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::DateValue(123)),
+            JsonValue::String("1970-05-04".to_string())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::DatetimeValue(456)),
+            JsonValue::String("1970-01-01 00:00:00.456+0000".to_string())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::TimeSecondValue(789)),
+            JsonValue::String("00:13:09+0000".to_string())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::TimeMillisecondValue(789)),
+            JsonValue::String("00:00:00.789+0000".to_string())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::TimeMicrosecondValue(789)),
+            JsonValue::String("00:00:00.000789+0000".to_string())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::TimestampMillisecondValue(1234567890)),
+            JsonValue::String("1970-01-15 06:56:07.890+0000".to_string())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::TimestampNanosecondValue(1234567890123456789)),
+            JsonValue::String("2009-02-13 23:31:30.123456789+0000".to_string())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::TimestampSecondValue(1234567890)),
+            JsonValue::String("2009-02-13 23:31:30+0000".to_string())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::IntervalYearMonthValue(12)),
+            JsonValue::String("interval year [12]".to_string())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::IntervalMonthDayNanoValue(
+                ProtoIntervalMonthDayNano {
+                    months: 1,
+                    days: 2,
+                    nanoseconds: 3,
+                }
+            )),
+            JsonValue::String("interval month [1][2][3]".to_string())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::IntervalDayTimeValue(4)),
+            JsonValue::String("interval day [4]".to_string())
+        );
+        assert_eq!(
+            column_data_to_json(ValueData::Decimal128Value(ProtoDecimal128 { hi: 5, lo: 6 })),
+            JsonValue::String("decimal128 [5][6]".to_string())
+        );
+    }
 
     #[test]
     fn test_try_from_scalar_value() {
@@ -1380,19 +1731,23 @@ mod tests {
 
         assert_eq!(
             Value::List(ListValue::new(
-                Some(Box::new(vec![Value::Int32(1), Value::Null])),
-                ConcreteDataType::int32_datatype()
+                vec![Value::Int32(1), Value::Null],
+                ConcreteDataType::list_datatype(ConcreteDataType::int32_datatype())
             )),
-            ScalarValue::new_list(
-                Some(vec![ScalarValue::Int32(Some(1)), ScalarValue::Int32(None)]),
-                ArrowDataType::Int32,
-            )
+            ScalarValue::List(ScalarValue::new_list(
+                &[ScalarValue::Int32(Some(1)), ScalarValue::Int32(None)],
+                &ArrowDataType::Int32,
+                true,
+            ))
             .try_into()
             .unwrap()
         );
         assert_eq!(
-            Value::List(ListValue::new(None, ConcreteDataType::uint32_datatype())),
-            ScalarValue::new_list(None, ArrowDataType::UInt32)
+            Value::List(ListValue::new(
+                vec![],
+                ConcreteDataType::list_datatype(ConcreteDataType::uint32_datatype())
+            )),
+            ScalarValue::List(ScalarValue::new_list(&[], &ArrowDataType::UInt32, true))
                 .try_into()
                 .unwrap()
         );
@@ -1463,12 +1818,10 @@ mod tests {
             ScalarValue::IntervalMonthDayNano(None).try_into().unwrap()
         );
         assert_eq!(
-            Value::Interval(Interval::from_month_day_nano(1, 1, 1)),
-            ScalarValue::IntervalMonthDayNano(Some(
-                Interval::from_month_day_nano(1, 1, 1).to_i128()
-            ))
-            .try_into()
-            .unwrap()
+            Value::IntervalMonthDayNano(IntervalMonthDayNano::new(1, 1, 1)),
+            ScalarValue::IntervalMonthDayNano(Some(IntervalMonthDayNano::new(1, 1, 1).into()))
+                .try_into()
+                .unwrap()
         );
 
         assert_eq!(
@@ -1662,7 +2015,7 @@ mod tests {
         check_type_and_value(
             &ConcreteDataType::list_datatype(ConcreteDataType::int32_datatype()),
             &Value::List(ListValue::new(
-                Some(Box::new(vec![Value::Int32(10)])),
+                vec![Value::Int32(10)],
                 ConcreteDataType::int32_datatype(),
             )),
         );
@@ -1699,8 +2052,16 @@ mod tests {
             &Value::Time(Time::new_nanosecond(1)),
         );
         check_type_and_value(
+            &ConcreteDataType::interval_year_month_datatype(),
+            &Value::IntervalYearMonth(IntervalYearMonth::new(1)),
+        );
+        check_type_and_value(
+            &ConcreteDataType::interval_day_time_datatype(),
+            &Value::IntervalDayTime(IntervalDayTime::new(1, 2)),
+        );
+        check_type_and_value(
             &ConcreteDataType::interval_month_day_nano_datatype(),
-            &Value::Interval(Interval::from_month_day_nano(1, 2, 3)),
+            &Value::IntervalMonthDayNano(IntervalMonthDayNano::new(1, 2, 3)),
         );
         check_type_and_value(
             &ConcreteDataType::duration_second_datatype(),
@@ -1717,6 +2078,10 @@ mod tests {
         check_type_and_value(
             &ConcreteDataType::duration_nanosecond_datatype(),
             &Value::Duration(Duration::new_nanosecond(1)),
+        );
+        check_type_and_value(
+            &ConcreteDataType::decimal128_datatype(38, 10),
+            &Value::Decimal128(Decimal128::new(1, 38, 10)),
         );
     }
 
@@ -1827,7 +2192,7 @@ mod tests {
         assert_eq!(
             json_value,
             to_json(Value::List(ListValue {
-                items: Some(Box::new(vec![Value::Int32(123)])),
+                items: vec![Value::Int32(123)],
                 datatype: ConcreteDataType::int32_datatype(),
             }))
         );
@@ -1879,7 +2244,9 @@ mod tests {
         check_as_value_ref!(Float64, OrderedF64::from(16.0));
         check_as_value_ref!(Timestamp, Timestamp::new_millisecond(1));
         check_as_value_ref!(Time, Time::new_millisecond(1));
-        check_as_value_ref!(Interval, Interval::from_month_day_nano(1, 2, 3));
+        check_as_value_ref!(IntervalYearMonth, IntervalYearMonth::new(1));
+        check_as_value_ref!(IntervalDayTime, IntervalDayTime::new(1, 2));
+        check_as_value_ref!(IntervalMonthDayNano, IntervalMonthDayNano::new(1, 2, 3));
         check_as_value_ref!(Duration, Duration::new_millisecond(1));
 
         assert_eq!(
@@ -1895,12 +2262,20 @@ mod tests {
         check_as_value_ref!(DateTime, DateTime::new(1034));
 
         let list = ListValue {
-            items: None,
+            items: vec![],
             datatype: ConcreteDataType::int32_datatype(),
         };
         assert_eq!(
             ValueRef::List(ListValueRef::Ref { val: &list }),
             Value::List(list.clone()).as_value_ref()
+        );
+
+        let jsonb_value = jsonb::parse_value(r#"{"key": "value"}"#.as_bytes())
+            .unwrap()
+            .to_vec();
+        assert_eq!(
+            ValueRef::Binary(jsonb_value.clone().as_slice()),
+            Value::Binary(jsonb_value.into()).as_value_ref()
         );
     }
 
@@ -1933,7 +2308,7 @@ mod tests {
         check_as_correct!(Time::new_second(12), Time, as_time);
         check_as_correct!(Duration::new_second(12), Duration, as_duration);
         let list = ListValue {
-            items: None,
+            items: vec![],
             datatype: ConcreteDataType::int32_datatype(),
         };
         check_as_correct!(ListValueRef::Ref { val: &list }, List, as_list);
@@ -1989,7 +2364,7 @@ mod tests {
         );
         assert_eq!(
             Value::List(ListValue::new(
-                Some(Box::new(vec![Value::Int8(1), Value::Int8(2)])),
+                vec![Value::Int8(1), Value::Int8(2)],
                 ConcreteDataType::int8_datatype(),
             ))
             .to_string(),
@@ -1997,7 +2372,7 @@ mod tests {
         );
         assert_eq!(
             Value::List(ListValue::new(
-                Some(Box::default()),
+                vec![],
                 ConcreteDataType::timestamp_second_datatype(),
             ))
             .to_string(),
@@ -2005,7 +2380,7 @@ mod tests {
         );
         assert_eq!(
             Value::List(ListValue::new(
-                Some(Box::default()),
+                vec![],
                 ConcreteDataType::timestamp_millisecond_datatype(),
             ))
             .to_string(),
@@ -2013,7 +2388,7 @@ mod tests {
         );
         assert_eq!(
             Value::List(ListValue::new(
-                Some(Box::default()),
+                vec![],
                 ConcreteDataType::timestamp_microsecond_datatype(),
             ))
             .to_string(),
@@ -2021,7 +2396,7 @@ mod tests {
         );
         assert_eq!(
             Value::List(ListValue::new(
-                Some(Box::default()),
+                vec![],
                 ConcreteDataType::timestamp_nanosecond_datatype(),
             ))
             .to_string(),
@@ -2110,9 +2485,19 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(
-            ScalarValue::LargeBinary(Some("world".as_bytes().to_vec())),
+            ScalarValue::Binary(Some("world".as_bytes().to_vec())),
             Value::Binary(Bytes::from("world".as_bytes()))
                 .try_to_scalar_value(&ConcreteDataType::binary_datatype())
+                .unwrap()
+        );
+
+        let jsonb_value = jsonb::parse_value(r#"{"key": "value"}"#.as_bytes())
+            .unwrap()
+            .to_vec();
+        assert_eq!(
+            ScalarValue::Binary(Some(jsonb_value.clone())),
+            Value::Binary(jsonb_value.into())
+                .try_to_scalar_value(&ConcreteDataType::json_datatype())
                 .unwrap()
         );
     }
@@ -2192,7 +2577,7 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(
-            ScalarValue::LargeBinary(None),
+            ScalarValue::Binary(None),
             Value::Null
                 .try_to_scalar_value(&ConcreteDataType::binary_datatype())
                 .unwrap()
@@ -2247,23 +2632,39 @@ mod tests {
                 .try_to_scalar_value(&ConcreteDataType::duration_nanosecond_datatype())
                 .unwrap()
         );
+        assert_eq!(
+            ScalarValue::Binary(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::json_datatype())
+                .unwrap()
+        );
     }
 
     #[test]
     fn test_list_value_to_scalar_value() {
-        let items = Some(Box::new(vec![Value::Int32(-1), Value::Null]));
+        let items = vec![Value::Int32(-1), Value::Null];
         let list = Value::List(ListValue::new(items, ConcreteDataType::int32_datatype()));
         let df_list = list
             .try_to_scalar_value(&ConcreteDataType::list_datatype(
                 ConcreteDataType::int32_datatype(),
             ))
             .unwrap();
-        assert!(matches!(df_list, ScalarValue::List(_, _)));
+        assert!(matches!(df_list, ScalarValue::List(_)));
         match df_list {
-            ScalarValue::List(vs, field) => {
-                assert_eq!(ArrowDataType::Int32, *field.data_type());
+            ScalarValue::List(vs) => {
+                assert_eq!(
+                    ArrowDataType::List(Arc::new(Field::new_list_field(
+                        ArrowDataType::Int32,
+                        true
+                    ))),
+                    *vs.data_type()
+                );
 
-                let vs = vs.unwrap();
+                let vs = ScalarValue::convert_array_to_scalar_vec(vs.as_ref())
+                    .unwrap()
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>();
                 assert_eq!(
                     vs,
                     vec![ScalarValue::Int32(Some(-1)), ScalarValue::Int32(None)]
@@ -2339,6 +2740,7 @@ mod tests {
 
     #[test]
     fn test_value_ref_estimated_size() {
+        check_value_ref_size_eq(&ValueRef::Null, 8);
         check_value_ref_size_eq(&ValueRef::Boolean(true), 1);
         check_value_ref_size_eq(&ValueRef::UInt8(1), 1);
         check_value_ref_size_eq(&ValueRef::UInt16(1), 2);
@@ -2356,18 +2758,20 @@ mod tests {
         check_value_ref_size_eq(&ValueRef::DateTime(DateTime::new(1)), 8);
         check_value_ref_size_eq(&ValueRef::Timestamp(Timestamp::new_millisecond(1)), 16);
         check_value_ref_size_eq(&ValueRef::Time(Time::new_millisecond(1)), 16);
+        check_value_ref_size_eq(&ValueRef::IntervalYearMonth(IntervalYearMonth::new(1)), 4);
+        check_value_ref_size_eq(&ValueRef::IntervalDayTime(IntervalDayTime::new(1, 2)), 8);
         check_value_ref_size_eq(
-            &ValueRef::Interval(Interval::from_month_day_nano(1, 2, 3)),
-            24,
+            &ValueRef::IntervalMonthDayNano(IntervalMonthDayNano::new(1, 2, 3)),
+            16,
         );
         check_value_ref_size_eq(&ValueRef::Duration(Duration::new_millisecond(1)), 16);
         check_value_ref_size_eq(
             &ValueRef::List(ListValueRef::Ref {
                 val: &ListValue {
-                    items: Some(Box::new(vec![
+                    items: vec![
                         Value::String("hello world".into()),
                         Value::String("greptimedb".into()),
-                    ])),
+                    ],
                     datatype: ConcreteDataType::string_datatype(),
                 },
             }),
@@ -2384,7 +2788,6 @@ mod tests {
         for vec_opt in &data {
             if let Some(vec) = vec_opt {
                 let values = vec.iter().map(|v| Value::from(*v)).collect();
-                let values = Some(Box::new(values));
                 let list_value = ListValue::new(values, ConcreteDataType::int32_datatype());
 
                 builder.push(Some(ListValueRef::Ref { val: &list_value }));

@@ -15,21 +15,19 @@
 use std::any::Any;
 use std::sync::{Arc, Mutex};
 
-use common_query::logical_plan::Expr;
-use common_query::physical_plan::DfPhysicalPlanAdapter;
-use common_query::DfPhysicalPlan;
+use common_query::stream::StreamScanAdapter;
 use common_recordbatch::OrderOption;
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
+use datafusion::catalog::Session;
 use datafusion::datasource::{TableProvider, TableType as DfTableType};
 use datafusion::error::Result as DfResult;
-use datafusion::execution::context::SessionState;
-use datafusion_expr::expr::Expr as DfExpr;
+use datafusion::physical_plan::ExecutionPlan;
+use datafusion_expr::expr::Expr;
 use datafusion_expr::TableProviderFilterPushDown as DfTableProviderFilterPushDown;
 use datafusion_physical_expr::expressions::Column;
 use datafusion_physical_expr::PhysicalSortExpr;
 use store_api::storage::ScanRequest;
 
-use super::scan::StreamScanAdapter;
 use crate::table::{TableRef, TableType};
 
 /// Adapt greptime's [TableRef] to DataFusion's [TableProvider].
@@ -60,6 +58,14 @@ impl DfTableProviderAdapter {
     }
 }
 
+impl std::fmt::Debug for DfTableProviderAdapter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DfTableProviderAdapter")
+            .field("table", &self.table.table_info.full_table_name())
+            .finish()
+    }
+}
+
 #[async_trait::async_trait]
 impl TableProvider for DfTableProviderAdapter {
     fn as_any(&self) -> &dyn Any {
@@ -78,13 +84,17 @@ impl TableProvider for DfTableProviderAdapter {
         }
     }
 
+    fn get_column_default(&self, column: &str) -> Option<&Expr> {
+        self.table.get_column_default(column)
+    }
+
     async fn scan(
         &self,
-        _ctx: &SessionState,
+        _state: &dyn Session,
         projection: Option<&Vec<usize>>,
-        filters: &[DfExpr],
+        filters: &[Expr],
         limit: Option<usize>,
-    ) -> DfResult<Arc<dyn DfPhysicalPlan>> {
+    ) -> DfResult<Arc<dyn ExecutionPlan>> {
         let filters: Vec<Expr> = filters.iter().map(Clone::clone).map(Into::into).collect();
         let request = {
             let mut request = self.scan_req.lock().unwrap();
@@ -111,21 +121,16 @@ impl TableProvider for DfTableProviderAdapter {
                 .collect::<Vec<_>>()
         });
 
-        let mut stream_adapter = StreamScanAdapter::new(stream);
-        if let Some(sort_expr) = sort_expr {
-            stream_adapter = stream_adapter.with_output_ordering(sort_expr);
-        }
-        Ok(Arc::new(DfPhysicalPlanAdapter(Arc::new(stream_adapter))))
+        Ok(Arc::new(
+            StreamScanAdapter::new(stream).with_output_ordering(sort_expr),
+        ))
     }
 
     fn supports_filters_pushdown(
         &self,
-        filters: &[&DfExpr],
+        filters: &[&Expr],
     ) -> DfResult<Vec<DfTableProviderFilterPushDown>> {
-        let filters = filters
-            .iter()
-            .map(|&x| x.clone().into())
-            .collect::<Vec<_>>();
+        let filters = filters.iter().map(|&x| x.clone()).collect::<Vec<_>>();
         Ok(self
             .table
             .supports_filters_pushdown(&filters.iter().collect::<Vec<_>>())

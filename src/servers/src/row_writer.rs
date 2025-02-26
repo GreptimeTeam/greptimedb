@@ -14,19 +14,25 @@
 
 use std::collections::HashMap;
 
+use api::v1::column_data_type_extension::TypeExt;
 use api::v1::value::ValueData;
 use api::v1::{
-    ColumnDataType, ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows, SemanticType,
-    Value,
+    ColumnDataType, ColumnDataTypeExtension, ColumnSchema, JsonTypeExtension, Row,
+    RowInsertRequest, RowInsertRequests, Rows, SemanticType, Value,
 };
-use common_grpc::writer;
-use common_grpc::writer::Precision;
+use common_grpc::precision::Precision;
 use common_time::timestamp::TimeUnit;
+use common_time::timestamp::TimeUnit::Nanosecond;
 use common_time::Timestamp;
 use snafu::{ensure, OptionExt, ResultExt};
 
-use crate::error::{IncompatibleSchemaSnafu, InfluxdbLinesWriteSnafu, Result, TimePrecisionSnafu};
+use crate::error::{
+    IncompatibleSchemaSnafu, Result, RowWriterSnafu, TimePrecisionSnafu, TimestampOverflowSnafu,
+};
 
+/// The intermediate data structure for building the write request.
+/// It constructs the `schema` and `rows` as all input data row
+/// parsing is completed.
 pub struct TableData {
     schema: Vec<ColumnSchema>,
     rows: Vec<Row>,
@@ -138,15 +144,17 @@ impl MultiTableData {
     }
 }
 
+/// Write data as tags into the table data.
 pub fn write_tags(
     table_data: &mut TableData,
-    kvs: impl Iterator<Item = (String, String)>,
+    tags: impl Iterator<Item = (String, String)>,
     one_row: &mut Vec<Value>,
 ) -> Result<()> {
-    let ktv_iter = kvs.map(|(k, v)| (k, ColumnDataType::String, ValueData::StringValue(v)));
+    let ktv_iter = tags.map(|(k, v)| (k, ColumnDataType::String, ValueData::StringValue(v)));
     write_by_semantic_type(table_data, SemanticType::Tag, ktv_iter, one_row)
 }
 
+/// Write data as fields into the table data.
 pub fn write_fields(
     table_data: &mut TableData,
     fields: impl Iterator<Item = (String, ColumnDataType, ValueData)>,
@@ -155,6 +163,7 @@ pub fn write_fields(
     write_by_semantic_type(table_data, SemanticType::Field, fields, one_row)
 }
 
+/// Write data as a tag into the table data.
 pub fn write_tag(
     table_data: &mut TableData,
     name: impl ToString,
@@ -173,6 +182,7 @@ pub fn write_tag(
     )
 }
 
+/// Write float64 data as a field into the table data.
 pub fn write_f64(
     table_data: &mut TableData,
     name: impl ToString,
@@ -188,6 +198,68 @@ pub fn write_f64(
         )),
         one_row,
     )
+}
+
+fn build_json_column_schema(name: impl ToString) -> ColumnSchema {
+    ColumnSchema {
+        column_name: name.to_string(),
+        datatype: ColumnDataType::Binary as i32,
+        semantic_type: SemanticType::Field as i32,
+        datatype_extension: Some(ColumnDataTypeExtension {
+            type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
+        }),
+        ..Default::default()
+    }
+}
+
+pub fn write_json(
+    table_data: &mut TableData,
+    name: impl ToString,
+    value: jsonb::Value,
+    one_row: &mut Vec<Value>,
+) -> Result<()> {
+    write_by_schema(
+        table_data,
+        std::iter::once((
+            build_json_column_schema(name),
+            ValueData::BinaryValue(value.to_vec()),
+        )),
+        one_row,
+    )
+}
+
+fn write_by_schema(
+    table_data: &mut TableData,
+    kv_iter: impl Iterator<Item = (ColumnSchema, ValueData)>,
+    one_row: &mut Vec<Value>,
+) -> Result<()> {
+    let TableData {
+        schema,
+        column_indexes,
+        ..
+    } = table_data;
+
+    for (column_schema, value) in kv_iter {
+        let index = column_indexes.get(&column_schema.column_name);
+        if let Some(index) = index {
+            check_schema_number(
+                column_schema.datatype,
+                column_schema.semantic_type,
+                &schema[*index],
+            )?;
+            one_row[*index].value_data = Some(value);
+        } else {
+            let index = schema.len();
+            let key = column_schema.column_name.clone();
+            schema.push(column_schema);
+            column_indexes.insert(key, index);
+            one_row.push(Value {
+                value_data: Some(value),
+            });
+        }
+    }
+
+    Ok(())
 }
 
 fn write_by_semantic_type(
@@ -225,20 +297,53 @@ fn write_by_semantic_type(
     Ok(())
 }
 
-pub fn write_ts_millis(
-    table_data: &mut TableData,
-    name: impl ToString,
-    ts: Option<i64>,
-    one_row: &mut Vec<Value>,
-) -> Result<()> {
-    write_ts_precision(table_data, name, ts, Precision::Millisecond, one_row)
-}
-
-pub fn write_ts_precision(
+/// Write timestamp data as milliseconds into the table data.
+pub fn write_ts_to_millis(
     table_data: &mut TableData,
     name: impl ToString,
     ts: Option<i64>,
     precision: Precision,
+    one_row: &mut Vec<Value>,
+) -> Result<()> {
+    write_ts_to(
+        table_data,
+        name,
+        ts,
+        precision,
+        TimestampType::Millis,
+        one_row,
+    )
+}
+
+/// Write timestamp data as nanoseconds into the table data.
+pub fn write_ts_to_nanos(
+    table_data: &mut TableData,
+    name: impl ToString,
+    ts: Option<i64>,
+    precision: Precision,
+    one_row: &mut Vec<Value>,
+) -> Result<()> {
+    write_ts_to(
+        table_data,
+        name,
+        ts,
+        precision,
+        TimestampType::Nanos,
+        one_row,
+    )
+}
+
+enum TimestampType {
+    Millis,
+    Nanos,
+}
+
+fn write_ts_to(
+    table_data: &mut TableData,
+    name: impl ToString,
+    ts: Option<i64>,
+    precision: Precision,
+    ts_type: TimestampType,
     one_row: &mut Vec<Value>,
 ) -> Result<()> {
     let TableData {
@@ -249,65 +354,94 @@ pub fn write_ts_precision(
     let name = name.to_string();
 
     let ts = match ts {
-        Some(timestamp) => writer::to_ms_ts(precision, timestamp),
+        Some(timestamp) => match ts_type {
+            TimestampType::Millis => precision.to_millis(timestamp),
+            TimestampType::Nanos => precision.to_nanos(timestamp),
+        }
+        .with_context(|| TimestampOverflowSnafu {
+            error: format!(
+                "timestamp {} overflow with precision {}",
+                timestamp, precision
+            ),
+        })?,
         None => {
-            let timestamp = Timestamp::current_millis();
-            let unit: TimeUnit = precision.try_into().context(InfluxdbLinesWriteSnafu)?;
+            let timestamp = Timestamp::current_time(Nanosecond);
+            let unit: TimeUnit = precision.try_into().context(RowWriterSnafu)?;
             let timestamp = timestamp
                 .convert_to(unit)
                 .with_context(|| TimePrecisionSnafu {
                     name: precision.to_string(),
-                })?;
-            writer::to_ms_ts(precision, timestamp.into())
+                })?
+                .into();
+            match ts_type {
+                TimestampType::Millis => precision.to_millis(timestamp),
+                TimestampType::Nanos => precision.to_nanos(timestamp),
+            }
+            .with_context(|| TimestampOverflowSnafu {
+                error: format!(
+                    "timestamp {} overflow with precision {}",
+                    timestamp, precision
+                ),
+            })?
         }
+    };
+
+    let (datatype, ts) = match ts_type {
+        TimestampType::Millis => (
+            ColumnDataType::TimestampMillisecond,
+            ValueData::TimestampMillisecondValue(ts),
+        ),
+        TimestampType::Nanos => (
+            ColumnDataType::TimestampNanosecond,
+            ValueData::TimestampNanosecondValue(ts),
+        ),
     };
 
     let index = column_indexes.get(&name);
     if let Some(index) = index {
-        check_schema(
-            ColumnDataType::TimestampMillisecond,
-            SemanticType::Timestamp,
-            &schema[*index],
-        )?;
-        one_row[*index].value_data = Some(ValueData::TimestampMillisecondValue(ts));
+        check_schema(datatype, SemanticType::Timestamp, &schema[*index])?;
+        one_row[*index].value_data = Some(ts);
     } else {
         let index = schema.len();
         schema.push(ColumnSchema {
             column_name: name.clone(),
-            datatype: ColumnDataType::TimestampMillisecond as i32,
+            datatype: datatype as i32,
             semantic_type: SemanticType::Timestamp as i32,
             ..Default::default()
         });
         column_indexes.insert(name, index);
-        one_row.push(ValueData::TimestampMillisecondValue(ts).into())
+        one_row.push(ts.into())
     }
 
     Ok(())
 }
 
-#[inline]
 fn check_schema(
     datatype: ColumnDataType,
     semantic_type: SemanticType,
     schema: &ColumnSchema,
 ) -> Result<()> {
+    check_schema_number(datatype as i32, semantic_type as i32, schema)
+}
+
+fn check_schema_number(datatype: i32, semantic_type: i32, schema: &ColumnSchema) -> Result<()> {
     ensure!(
-        schema.datatype == datatype as i32,
+        schema.datatype == datatype,
         IncompatibleSchemaSnafu {
             column_name: &schema.column_name,
             datatype: "datatype",
             expected: schema.datatype,
-            actual: datatype as i32,
+            actual: datatype,
         }
     );
 
     ensure!(
-        schema.semantic_type == semantic_type as i32,
+        schema.semantic_type == semantic_type,
         IncompatibleSchemaSnafu {
             column_name: &schema.column_name,
             datatype: "semantic_type",
             expected: schema.semantic_type,
-            actual: semantic_type as i32,
+            actual: semantic_type,
         }
     );
 

@@ -17,44 +17,30 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::meta::Partition;
-use api::v1::region::{QueryRequest, RegionRequest};
 use api::v1::{ColumnDataType, SemanticType};
-use common_error::ext::{BoxedError, ErrorExt};
+use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_procedure::{Context as ProcedureContext, Procedure, ProcedureId, Status};
-use common_procedure_test::MockContextProvider;
-use common_recordbatch::SendableRecordBatchStream;
-use common_telemetry::debug;
+use common_procedure_test::{
+    execute_procedure_until, execute_procedure_until_done, MockContextProvider,
+};
+use store_api::storage::RegionId;
 
-use crate::datanode_manager::HandleResponse;
-use crate::ddl::create_table::CreateTableProcedure;
+use crate::ddl::create_table::{CreateTableProcedure, CreateTableState};
 use crate::ddl::test_util::columns::TestColumnDefBuilder;
 use crate::ddl::test_util::create_table::{
     build_raw_table_info_from_expr, TestCreateTableExprBuilder,
 };
-use crate::error;
-use crate::error::{Error, Result};
+use crate::ddl::test_util::datanode_handler::{
+    NaiveDatanodeHandler, RetryErrorDatanodeHandler, UnexpectedErrorDatanodeHandler,
+};
+use crate::error::Error;
 use crate::key::table_route::TableRouteValue;
-use crate::peer::Peer;
+use crate::kv_backend::memory::MemoryKvBackend;
 use crate::rpc::ddl::CreateTableTask;
-use crate::test_util::{new_ddl_context, MockDatanodeHandler, MockDatanodeManager};
+use crate::test_util::{new_ddl_context, new_ddl_context_with_kv_backend, MockDatanodeManager};
 
-#[async_trait::async_trait]
-impl MockDatanodeHandler for () {
-    async fn handle(&self, _peer: &Peer, _request: RegionRequest) -> Result<HandleResponse> {
-        unreachable!()
-    }
-
-    async fn handle_query(
-        &self,
-        _peer: &Peer,
-        _request: QueryRequest,
-    ) -> Result<SendableRecordBatchStream> {
-        unreachable!()
-    }
-}
-
-fn test_create_table_task(name: &str) -> CreateTableTask {
+pub(crate) fn test_create_table_task(name: &str) -> CreateTableTask {
     let create_table = TestCreateTableExprBuilder::default()
         .column_defs([
             TestColumnDefBuilder::default()
@@ -99,8 +85,8 @@ fn test_create_table_task(name: &str) -> CreateTableTask {
 
 #[tokio::test]
 async fn test_on_prepare_table_exists_err() {
-    let datanode_manager = Arc::new(MockDatanodeManager::new(()));
-    let ddl_context = new_ddl_context(datanode_manager);
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let ddl_context = new_ddl_context(node_manager);
     let cluster_id = 1;
     let task = test_create_table_task("foo");
     assert!(!task.create_table.create_if_not_exists);
@@ -122,8 +108,8 @@ async fn test_on_prepare_table_exists_err() {
 
 #[tokio::test]
 async fn test_on_prepare_with_create_if_table_exists() {
-    let datanode_manager = Arc::new(MockDatanodeManager::new(()));
-    let ddl_context = new_ddl_context(datanode_manager);
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let ddl_context = new_ddl_context(node_manager);
     let cluster_id = 1;
     let mut task = test_create_table_task("foo");
     task.create_table.create_if_not_exists = true;
@@ -147,8 +133,8 @@ async fn test_on_prepare_with_create_if_table_exists() {
 
 #[tokio::test]
 async fn test_on_prepare_without_create_if_table_exists() {
-    let datanode_manager = Arc::new(MockDatanodeManager::new(()));
-    let ddl_context = new_ddl_context(datanode_manager);
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let ddl_context = new_ddl_context(node_manager);
     let cluster_id = 1;
     let mut task = test_create_table_task("foo");
     task.create_table.create_if_not_exists = true;
@@ -160,8 +146,8 @@ async fn test_on_prepare_without_create_if_table_exists() {
 
 #[tokio::test]
 async fn test_on_prepare_with_no_partition_err() {
-    let datanode_manager = Arc::new(MockDatanodeManager::new(()));
-    let ddl_context = new_ddl_context(datanode_manager);
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let ddl_context = new_ddl_context(node_manager);
     let cluster_id = 1;
     let mut task = test_create_table_task("foo");
     task.partitions = vec![];
@@ -174,37 +160,11 @@ async fn test_on_prepare_with_no_partition_err() {
         .contains("The number of partitions must be greater than 0"),);
 }
 
-#[derive(Clone)]
-pub struct RetryErrorDatanodeHandler;
-
-#[async_trait::async_trait]
-impl MockDatanodeHandler for RetryErrorDatanodeHandler {
-    async fn handle(&self, peer: &Peer, request: RegionRequest) -> Result<HandleResponse> {
-        debug!("Returning retry later for request: {request:?}, peer: {peer:?}");
-        Err(Error::RetryLater {
-            source: BoxedError::new(
-                error::UnexpectedSnafu {
-                    err_msg: "retry later",
-                }
-                .build(),
-            ),
-        })
-    }
-
-    async fn handle_query(
-        &self,
-        _peer: &Peer,
-        _request: QueryRequest,
-    ) -> Result<SendableRecordBatchStream> {
-        unreachable!()
-    }
-}
-
 #[tokio::test]
 async fn test_on_datanode_create_regions_should_retry() {
     common_telemetry::init_default_ut_logging();
-    let datanode_manager = Arc::new(MockDatanodeManager::new(RetryErrorDatanodeHandler));
-    let ddl_context = new_ddl_context(datanode_manager);
+    let node_manager = Arc::new(MockDatanodeManager::new(RetryErrorDatanodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
     let cluster_id = 1;
     let task = test_create_table_task("foo");
     assert!(!task.create_table.create_if_not_exists);
@@ -218,33 +178,11 @@ async fn test_on_datanode_create_regions_should_retry() {
     assert!(error.is_retry_later());
 }
 
-#[derive(Clone)]
-pub struct UnexpectedErrorDatanodeHandler;
-
-#[async_trait::async_trait]
-impl MockDatanodeHandler for UnexpectedErrorDatanodeHandler {
-    async fn handle(&self, peer: &Peer, request: RegionRequest) -> Result<HandleResponse> {
-        debug!("Returning mock error for request: {request:?}, peer: {peer:?}");
-        error::UnexpectedSnafu {
-            err_msg: "mock error",
-        }
-        .fail()
-    }
-
-    async fn handle_query(
-        &self,
-        _peer: &Peer,
-        _request: QueryRequest,
-    ) -> Result<SendableRecordBatchStream> {
-        unreachable!()
-    }
-}
-
 #[tokio::test]
 async fn test_on_datanode_create_regions_should_not_retry() {
     common_telemetry::init_default_ut_logging();
-    let datanode_manager = Arc::new(MockDatanodeManager::new(UnexpectedErrorDatanodeHandler));
-    let ddl_context = new_ddl_context(datanode_manager);
+    let node_manager = Arc::new(MockDatanodeManager::new(UnexpectedErrorDatanodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
     let cluster_id = 1;
     let task = test_create_table_task("foo");
     assert!(!task.create_table.create_if_not_exists);
@@ -258,30 +196,11 @@ async fn test_on_datanode_create_regions_should_not_retry() {
     assert!(!error.is_retry_later());
 }
 
-#[derive(Clone)]
-pub struct NaiveDatanodeHandler;
-
-#[async_trait::async_trait]
-impl MockDatanodeHandler for NaiveDatanodeHandler {
-    async fn handle(&self, peer: &Peer, request: RegionRequest) -> Result<HandleResponse> {
-        debug!("Returning Ok(0) for request: {request:?}, peer: {peer:?}");
-        Ok(HandleResponse::new(0))
-    }
-
-    async fn handle_query(
-        &self,
-        _peer: &Peer,
-        _request: QueryRequest,
-    ) -> Result<SendableRecordBatchStream> {
-        unreachable!()
-    }
-}
-
 #[tokio::test]
 async fn test_on_create_metadata_error() {
     common_telemetry::init_default_ut_logging();
-    let datanode_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
-    let ddl_context = new_ddl_context(datanode_manager);
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
     let cluster_id = 1;
     let task = test_create_table_task("foo");
     assert!(!task.create_table.create_if_not_exists);
@@ -312,8 +231,8 @@ async fn test_on_create_metadata_error() {
 #[tokio::test]
 async fn test_on_create_metadata() {
     common_telemetry::init_default_ut_logging();
-    let datanode_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
-    let ddl_context = new_ddl_context(datanode_manager);
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
     let cluster_id = 1;
     let task = test_create_table_task("foo");
     assert!(!task.create_table.create_if_not_exists);
@@ -328,4 +247,40 @@ async fn test_on_create_metadata() {
     let status = procedure.execute(&ctx).await.unwrap();
     let table_id = status.downcast_output_ref::<u32>().unwrap();
     assert_eq!(*table_id, 1024);
+}
+
+#[tokio::test]
+async fn test_memory_region_keeper_guard_dropped_on_procedure_done() {
+    let cluster_id = 1;
+
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let kv_backend = Arc::new(MemoryKvBackend::new());
+    let ddl_context = new_ddl_context_with_kv_backend(node_manager, kv_backend);
+
+    let task = test_create_table_task("foo");
+    let mut procedure = CreateTableProcedure::new(cluster_id, task, ddl_context.clone());
+
+    execute_procedure_until(&mut procedure, |p| {
+        p.creator.data.state == CreateTableState::CreateMetadata
+    })
+    .await;
+
+    // Ensure that after running to the state `CreateMetadata`(just past `DatanodeCreateRegions`),
+    // the opening regions should be recorded:
+    let guards = &procedure.creator.opening_regions;
+    assert_eq!(guards.len(), 1);
+    let (datanode_id, region_id) = (0, RegionId::new(procedure.table_id(), 0));
+    assert_eq!(guards[0].info(), (datanode_id, region_id));
+    assert!(ddl_context
+        .memory_region_keeper
+        .contains(datanode_id, region_id));
+
+    execute_procedure_until_done(&mut procedure).await;
+
+    // Ensure that when run to the end, the opening regions should be cleared:
+    let guards = &procedure.creator.opening_regions;
+    assert!(guards.is_empty());
+    assert!(!ddl_context
+        .memory_region_keeper
+        .contains(datanode_id, region_id));
 }

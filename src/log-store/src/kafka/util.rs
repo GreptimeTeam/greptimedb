@@ -12,5 +12,5 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod offset;
-pub mod record;
+pub(crate) mod range;
+pub(crate) mod record;

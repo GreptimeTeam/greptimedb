@@ -13,9 +13,13 @@
 // limitations under the License.
 
 use std::io;
+use std::ops::Range;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use async_trait::async_trait;
+use bytes::{BufMut, Bytes};
+use common_base::range_read::{Metadata, RangeReader, SizeAwareRangeReader};
 use futures::{AsyncRead, AsyncSeek, AsyncWrite};
 use object_store::ObjectStore;
 use pin_project::pin_project;
@@ -26,6 +30,8 @@ use crate::error::{OpenDalSnafu, Result};
 
 /// A wrapper around [`ObjectStore`] that adds instrumentation for monitoring
 /// metrics such as bytes read, bytes written, and the number of seek operations.
+///
+/// TODO: Consider refactor InstrumentedStore to use async in trait instead of AsyncRead.
 #[derive(Clone)]
 pub(crate) struct InstrumentedStore {
     /// The underlying object store.
@@ -49,6 +55,23 @@ impl InstrumentedStore {
         self
     }
 
+    /// Returns an [`InstrumentedRangeReader`] for the given path.
+    /// Metrics like the number of bytes read are recorded using the provided `IntCounter`.
+    pub async fn range_reader<'a>(
+        &self,
+        path: &str,
+        read_byte_count: &'a IntCounter,
+        read_count: &'a IntCounter,
+    ) -> Result<InstrumentedRangeReader<'a>> {
+        Ok(InstrumentedRangeReader {
+            store: self.object_store.clone(),
+            path: path.to_string(),
+            read_byte_count,
+            read_count,
+            file_size_hint: None,
+        })
+    }
+
     /// Returns an [`InstrumentedAsyncRead`] for the given path.
     /// Metrics like the number of bytes read, read and seek operations
     /// are recorded using the provided `IntCounter`s.
@@ -58,8 +81,16 @@ impl InstrumentedStore {
         read_byte_count: &'a IntCounter,
         read_count: &'a IntCounter,
         seek_count: &'a IntCounter,
-    ) -> Result<InstrumentedAsyncRead<'a, object_store::Reader>> {
-        let reader = self.object_store.reader(path).await.context(OpenDalSnafu)?;
+    ) -> Result<InstrumentedAsyncRead<'a, object_store::FuturesAsyncReader>> {
+        let meta = self.object_store.stat(path).await.context(OpenDalSnafu)?;
+        let reader = self
+            .object_store
+            .reader(path)
+            .await
+            .context(OpenDalSnafu)?
+            .into_futures_async_read(0..meta.content_length())
+            .await
+            .context(OpenDalSnafu)?;
         Ok(InstrumentedAsyncRead::new(
             reader,
             read_byte_count,
@@ -77,15 +108,21 @@ impl InstrumentedStore {
         write_byte_count: &'a IntCounter,
         write_count: &'a IntCounter,
         flush_count: &'a IntCounter,
-    ) -> Result<InstrumentedAsyncWrite<'a, object_store::Writer>> {
+    ) -> Result<InstrumentedAsyncWrite<'a, object_store::FuturesAsyncWriter>> {
         let writer = match self.write_buffer_size {
             Some(size) => self
                 .object_store
                 .writer_with(path)
-                .buffer(size)
+                .chunk(size)
                 .await
-                .context(OpenDalSnafu)?,
-            None => self.object_store.writer(path).await.context(OpenDalSnafu)?,
+                .context(OpenDalSnafu)?
+                .into_futures_async_write(),
+            None => self
+                .object_store
+                .writer(path)
+                .await
+                .context(OpenDalSnafu)?
+                .into_futures_async_write(),
         };
         Ok(InstrumentedAsyncWrite::new(
             writer,
@@ -137,7 +174,7 @@ impl<'a, R> InstrumentedAsyncRead<'a, R> {
     }
 }
 
-impl<'a, R: AsyncRead + Unpin + Send> AsyncRead for InstrumentedAsyncRead<'a, R> {
+impl<R: AsyncRead + Unpin + Send> AsyncRead for InstrumentedAsyncRead<'_, R> {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -152,7 +189,7 @@ impl<'a, R: AsyncRead + Unpin + Send> AsyncRead for InstrumentedAsyncRead<'a, R>
     }
 }
 
-impl<'a, R: AsyncSeek + Unpin + Send> AsyncSeek for InstrumentedAsyncRead<'a, R> {
+impl<R: AsyncSeek + Unpin + Send> AsyncSeek for InstrumentedAsyncRead<'_, R> {
     fn poll_seek(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -193,7 +230,7 @@ impl<'a, W> InstrumentedAsyncWrite<'a, W> {
     }
 }
 
-impl<'a, W: AsyncWrite + Unpin + Send> AsyncWrite for InstrumentedAsyncWrite<'a, W> {
+impl<W: AsyncWrite + Unpin + Send> AsyncWrite for InstrumentedAsyncWrite<'_, W> {
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -220,6 +257,66 @@ impl<'a, W: AsyncWrite + Unpin + Send> AsyncWrite for InstrumentedAsyncWrite<'a,
     }
 }
 
+/// Implements `RangeReader` for `ObjectStore` and record metrics.
+pub(crate) struct InstrumentedRangeReader<'a> {
+    store: ObjectStore,
+    path: String,
+    read_byte_count: &'a IntCounter,
+    read_count: &'a IntCounter,
+    file_size_hint: Option<u64>,
+}
+
+impl SizeAwareRangeReader for InstrumentedRangeReader<'_> {
+    fn with_file_size_hint(&mut self, file_size_hint: u64) {
+        self.file_size_hint = Some(file_size_hint);
+    }
+}
+
+#[async_trait]
+impl RangeReader for InstrumentedRangeReader<'_> {
+    async fn metadata(&self) -> io::Result<Metadata> {
+        match self.file_size_hint {
+            Some(file_size_hint) => Ok(Metadata {
+                content_length: file_size_hint,
+            }),
+            None => {
+                let stat = self.store.stat(&self.path).await?;
+                Ok(Metadata {
+                    content_length: stat.content_length(),
+                })
+            }
+        }
+    }
+
+    async fn read(&self, range: Range<u64>) -> io::Result<Bytes> {
+        let buf = self.store.reader(&self.path).await?.read(range).await?;
+        self.read_byte_count.inc_by(buf.len() as _);
+        self.read_count.inc_by(1);
+        Ok(buf.to_bytes())
+    }
+
+    async fn read_into(&self, range: Range<u64>, buf: &mut (impl BufMut + Send)) -> io::Result<()> {
+        let reader = self.store.reader(&self.path).await?;
+        let size = reader.read_into(buf, range).await?;
+        self.read_byte_count.inc_by(size as _);
+        self.read_count.inc_by(1);
+        Ok(())
+    }
+
+    async fn read_vec(&self, ranges: &[Range<u64>]) -> io::Result<Vec<Bytes>> {
+        let bufs = self
+            .store
+            .reader(&self.path)
+            .await?
+            .fetch(ranges.to_owned())
+            .await?;
+        let total_size: usize = bufs.iter().map(|buf| buf.len()).sum();
+        self.read_byte_count.inc_by(total_size as _);
+        self.read_count.inc_by(1);
+        Ok(bufs.into_iter().map(|buf| buf.to_bytes()).collect())
+    }
+}
+
 /// A guard that increments a counter when dropped.
 struct CounterGuard<'a> {
     count: usize,
@@ -238,7 +335,7 @@ impl<'a> CounterGuard<'a> {
     }
 }
 
-impl<'a> Drop for CounterGuard<'a> {
+impl Drop for CounterGuard<'_> {
     fn drop(&mut self) {
         if self.count > 0 {
             self.counter.inc_by(self.count as _);

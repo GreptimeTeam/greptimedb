@@ -24,32 +24,32 @@ Affected Rows: 10
 -- 1. error timestamp
 SELECT min(val) RANGE 'not_time' FROM host ALIGN '5s';
 
-Error: 2000(InvalidSyntax), sql parser error: not a valid duration string: not_time
+Error: 2000(InvalidSyntax), Invalid SQL syntax: sql parser error: not a valid duration string: not_time
 
 SELECT min(val) RANGE '5s' FROM host ALIGN 'not_time';
 
-Error: 2000(InvalidSyntax), sql parser error: not a valid duration string: not_time
+Error: 2000(InvalidSyntax), Invalid SQL syntax: sql parser error: not a valid duration string: not_time
 
 -- 2.1 no range param
 SELECT min(val) FROM host ALIGN '5s';
 
-Error: 2000(InvalidSyntax), sql parser error: Illegal Range select, no RANGE keyword found in any SelectItem
+Error: 2000(InvalidSyntax), Invalid SQL syntax: sql parser error: Illegal Range select, no RANGE keyword found in any SelectItem
 
 SELECT 1 FROM host ALIGN '5s';
 
-Error: 2000(InvalidSyntax), sql parser error: Illegal Range select, no RANGE keyword found in any SelectItem
+Error: 2000(InvalidSyntax), Invalid SQL syntax: sql parser error: Illegal Range select, no RANGE keyword found in any SelectItem
 
 SELECT min(val) RANGE '10s', max(val) FROM host ALIGN '5s';
 
-Error: 3001(EngineExecuteQuery), DataFusion error: No field named "MAX(host.val)". Valid fields are "MIN(host.val) RANGE 10s", host.ts, host.host.
+Error: 3001(EngineExecuteQuery), DataFusion error: No field named "max(host.val)". Valid fields are "min(host.val) RANGE 10s", host.ts, host.host.
 
 SELECT min(val) * 2 RANGE '10s' FROM host ALIGN '5s';
 
-Error: 2000(InvalidSyntax), sql parser error: Can't use the RANGE keyword in Expr 2 without function
+Error: 2000(InvalidSyntax), Invalid SQL syntax: sql parser error: Can't use the RANGE keyword in Expr 2 without function
 
 SELECT 1 RANGE '10s' FILL NULL FROM host ALIGN '1h' FILL NULL;
 
-Error: 2000(InvalidSyntax), sql parser error: Can't use the RANGE keyword in Expr 1 without function
+Error: 2000(InvalidSyntax), Invalid SQL syntax: sql parser error: Can't use the RANGE keyword in Expr 1 without function
 
 -- 2.2 no align param
 SELECT min(val) RANGE '5s' FROM host;
@@ -59,8 +59,18 @@ Error: 3000(PlanQuery), DataFusion error: Error during planning: Missing argumen
 -- 2.3 type mismatch
 SELECT covar(ceil(val), floor(val)) RANGE '20s' FROM host ALIGN '10s';
 
-Error: 3001(EngineExecuteQuery), Internal error: Unsupported data type Int64 for function ceil.
-This was likely caused by a bug in DataFusion's code and we would welcome that you file an bug report in our issue tracker
++------------------------------------------------------+
+| covar_samp(ceil(host.val),floor(host.val)) RANGE 20s |
++------------------------------------------------------+
+|                                                      |
+| 0.5                                                  |
+| 0.5                                                  |
+|                                                      |
+|                                                      |
+| 0.5                                                  |
+| 0.5                                                  |
+|                                                      |
++------------------------------------------------------+
 
 -- 2.4 nest query
 SELECT min(max(val) RANGE '20s') RANGE '20s' FROM host ALIGN '10s';
@@ -88,11 +98,11 @@ Error: 3000(PlanQuery), DataFusion error: Error during planning: duration must b
 
 SELECT min(val) RANGE '5s' FROM host ALIGN (INTERVAL '0' day);
 
-Error: 2000(InvalidSyntax), Range Query: Can't use 0 as align in Range Query
+Error: 3000(PlanQuery), DataFusion error: Error during planning: Illegal argument `IntervalMonthDayNano("IntervalMonthDayNano { months: 0, days: 0, nanoseconds: 0 }")` in range select query
 
 SELECT min(val) RANGE (INTERVAL '0' day) FROM host ALIGN '5s';
 
-Error: 2000(InvalidSyntax), Range Query: Invalid Range expr `MIN(host.val) RANGE IntervalMonthDayNano("0")`, Can't use 0 as range in Range Query
+Error: 3000(PlanQuery), DataFusion error: Error during planning: Illegal argument `IntervalMonthDayNano("IntervalMonthDayNano { months: 0, days: 0, nanoseconds: 0 }")` in range select query
 
 DROP TABLE host;
 

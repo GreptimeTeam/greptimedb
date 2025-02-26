@@ -12,20 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::io::{self, SeekFrom};
-
 use async_trait::async_trait;
-use futures::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
+use common_base::range_read::RangeReader;
 use snafu::{ensure, ResultExt};
 
 use crate::blob_metadata::BlobMetadata;
-use crate::error::{
-    MagicNotMatchedSnafu, ReadSnafu, Result, SeekSnafu, UnexpectedPuffinFileSizeSnafu,
-    UnsupportedDecompressionSnafu,
-};
-use crate::file_format::reader::footer::FooterParser;
-use crate::file_format::reader::{PuffinAsyncReader, PuffinSyncReader};
-use crate::file_format::{MAGIC, MAGIC_SIZE, MIN_FILE_SIZE};
+use crate::error::{ReadSnafu, Result, UnexpectedPuffinFileSizeSnafu};
+use crate::file_format::reader::footer::DEFAULT_PREFETCH_SIZE;
+use crate::file_format::reader::{AsyncReader, PuffinFileFooterReader};
+use crate::file_format::MIN_FILE_SIZE;
 use crate::file_metadata::FileMetadata;
 use crate::partial_reader::PartialReader;
 
@@ -51,6 +46,11 @@ impl<R> PuffinFileReader<R> {
         }
     }
 
+    pub fn with_metadata(mut self, metadata: Option<FileMetadata>) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
     fn validate_file_size(file_size: u64) -> Result<()> {
         ensure!(
             file_size >= MIN_FILE_SIZE,
@@ -61,109 +61,50 @@ impl<R> PuffinFileReader<R> {
         );
         Ok(())
     }
-}
 
-impl<'a, R: io::Read + io::Seek + 'a> PuffinSyncReader<'a> for PuffinFileReader<R> {
-    type Reader = PartialReader<&'a mut R>;
-
-    fn metadata(&mut self) -> Result<FileMetadata> {
-        if let Some(metadata) = &self.metadata {
-            return Ok(metadata.clone());
-        }
-
-        // check the magic
-        let mut magic = [0; MAGIC_SIZE as usize];
-        self.source.read_exact(&mut magic).context(ReadSnafu)?;
-        ensure!(magic == MAGIC, MagicNotMatchedSnafu);
-
-        let file_size = self.get_file_size_sync()?;
-
-        // parse the footer
-        let metadata = FooterParser::new(&mut self.source, file_size).parse_sync()?;
-        self.metadata = Some(metadata.clone());
-        Ok(metadata)
-    }
-
-    fn blob_reader(&'a mut self, blob_metadata: &BlobMetadata) -> Result<Self::Reader> {
-        // TODO(zhongzc): support decompression
-        let compression = blob_metadata.compression_codec.as_ref();
-        ensure!(
-            compression.is_none(),
-            UnsupportedDecompressionSnafu {
-                decompression: compression.unwrap().to_string()
-            }
-        );
-
-        Ok(PartialReader::new(
-            &mut self.source,
+    /// Converts the reader into an owned blob reader.
+    pub fn into_blob_reader(self, blob_metadata: &BlobMetadata) -> PartialReader<R> {
+        PartialReader::new(
+            self.source,
             blob_metadata.offset as _,
             blob_metadata.length as _,
-        ))
+        )
     }
 }
 
 #[async_trait]
-impl<'a, R: AsyncRead + AsyncSeek + Unpin + Send + 'a> PuffinAsyncReader<'a>
-    for PuffinFileReader<R>
-{
-    type Reader = PartialReader<&'a mut R>;
+impl<'a, R: RangeReader + 'a> AsyncReader<'a> for PuffinFileReader<R> {
+    type Reader = PartialReader<&'a R>;
 
     async fn metadata(&'a mut self) -> Result<FileMetadata> {
         if let Some(metadata) = &self.metadata {
             return Ok(metadata.clone());
         }
-
-        // check the magic
-        let mut magic = [0; MAGIC_SIZE as usize];
-        self.source
-            .read_exact(&mut magic)
-            .await
-            .context(ReadSnafu)?;
-        ensure!(magic == MAGIC, MagicNotMatchedSnafu);
-
         let file_size = self.get_file_size_async().await?;
-
-        // parse the footer
-        let metadata = FooterParser::new(&mut self.source, file_size)
-            .parse_async()
-            .await?;
+        let mut reader = PuffinFileFooterReader::new(&self.source, file_size)
+            .with_prefetch_size(DEFAULT_PREFETCH_SIZE);
+        let metadata = reader.metadata().await?;
         self.metadata = Some(metadata.clone());
         Ok(metadata)
     }
 
     fn blob_reader(&'a mut self, blob_metadata: &BlobMetadata) -> Result<Self::Reader> {
-        // TODO(zhongzc): support decompression
-        let compression = blob_metadata.compression_codec.as_ref();
-        ensure!(
-            compression.is_none(),
-            UnsupportedDecompressionSnafu {
-                decompression: compression.unwrap().to_string()
-            }
-        );
-
         Ok(PartialReader::new(
-            &mut self.source,
+            &self.source,
             blob_metadata.offset as _,
             blob_metadata.length as _,
         ))
     }
 }
 
-impl<R: io::Read + io::Seek> PuffinFileReader<R> {
-    fn get_file_size_sync(&mut self) -> Result<u64> {
-        let file_size = self.source.seek(SeekFrom::End(0)).context(SeekSnafu)?;
-        Self::validate_file_size(file_size)?;
-        Ok(file_size)
-    }
-}
-
-impl<R: AsyncRead + AsyncSeek + Send + Unpin> PuffinFileReader<R> {
+impl<R: RangeReader> PuffinFileReader<R> {
     async fn get_file_size_async(&mut self) -> Result<u64> {
         let file_size = self
             .source
-            .seek(SeekFrom::End(0))
+            .metadata()
             .await
-            .context(SeekSnafu)?;
+            .context(ReadSnafu)?
+            .content_length;
         Self::validate_file_size(file_size)?;
         Ok(file_size)
     }

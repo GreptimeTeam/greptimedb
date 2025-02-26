@@ -207,4 +207,21 @@ mod tests {
             assert!(c.is_null(2));
         }
     }
+
+    #[test]
+    fn test_safe_cast_to_null() {
+        let string_vector = Arc::new(StringVector::from(vec![
+            Some("1"),
+            Some("hello"),
+            Some(&i64::MAX.to_string()),
+            None,
+        ])) as VectorRef;
+        let to_type = ConcreteDataType::int32_datatype();
+        let b = string_vector.cast(&to_type).unwrap();
+        let c = b.as_any().downcast_ref::<Int32Vector>().unwrap();
+        assert_eq!(Value::Int32(1), c.get(0));
+        assert_eq!(Value::Null, c.get(1));
+        assert_eq!(Value::Null, c.get(2));
+        assert_eq!(Value::Null, c.get(3));
+    }
 }

@@ -17,35 +17,43 @@ use std::any::Any;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
-use common_query::prelude::Expr;
 use datafusion_common::ScalarValue;
+use datafusion_expr::expr::Expr;
 use snafu::{Location, Snafu};
-use store_api::storage::{RegionId, RegionNumber};
+use store_api::storage::RegionId;
 use table::metadata::TableId;
+
+use crate::expr::PartitionExpr;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Failed to find table route: {}", table_id))]
+    TableRouteNotFound {
+        table_id: TableId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Table route manager error"))]
     TableRouteManager {
         source: common_meta::error::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to get meta info from cache, error: {}", err_msg))]
-    GetCache { err_msg: String, location: Location },
-
-    #[snafu(display("Failed to find Datanode, table id: {}, region: {}", table_id, region))]
-    FindDatanode {
-        table_id: TableId,
-        region: RegionNumber,
+    GetCache {
+        err_msg: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to find table routes for table id {}", table_id))]
     FindTableRoutes {
         table_id: TableId,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -57,6 +65,7 @@ pub enum Error {
     FindRegionRoutes {
         table_id: TableId,
         region_id: u64,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -64,6 +73,7 @@ pub enum Error {
     SerializeJson {
         #[snafu(source)]
         error: serde_json::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -71,44 +81,58 @@ pub enum Error {
     DeserializeJson {
         #[snafu(source)]
         error: serde_json::Error,
+        #[snafu(implicit)]
         location: Location,
     },
-
-    #[snafu(display("The column '{}' does not have a default value.", column))]
-    MissingDefaultValue { column: String },
 
     #[snafu(display("Expect {} region keys, actual {}", expect, actual))]
     RegionKeysSize {
         expect: usize,
         actual: usize,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to find region, reason: {}", reason))]
-    FindRegion { reason: String, location: Location },
+    FindRegion {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to find regions by filters: {:?}", filters))]
     FindRegions {
         filters: Vec<Expr>,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Invalid InsertRequest, reason: {}", reason))]
-    InvalidInsertRequest { reason: String, location: Location },
+    InvalidInsertRequest {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Invalid DeleteRequest, reason: {}", reason))]
-    InvalidDeleteRequest { reason: String, location: Location },
+    InvalidDeleteRequest {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Invalid table route data, table id: {}, msg: {}", table_id, err_msg))]
     InvalidTableRouteData {
         table_id: TableId,
         err_msg: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to convert DataFusion's ScalarValue: {:?}", value))]
     ConvertScalarValue {
         value: ScalarValue,
+        #[snafu(implicit)]
         location: Location,
         source: datatypes::error::Error,
     },
@@ -117,14 +141,52 @@ pub enum Error {
     FindLeader {
         table_id: TableId,
         region_id: RegionId,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Unexpected table route type: {}", err_msg))]
     UnexpectedLogicalRouteTable {
+        #[snafu(implicit)]
         location: Location,
         err_msg: String,
         source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Conjunct expr with non-expr is invalid"))]
+    ConjunctExprWithNonExpr {
+        expr: PartitionExpr,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Unclosed value {} on column {}", value, column))]
+    UnclosedValue {
+        value: String,
+        column: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid partition expr: {:?}", expr))]
+    InvalidExpr {
+        expr: PartitionExpr,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Undefined column: {}", column))]
+    UndefinedColumn {
+        column: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Unexpected: {err_msg}"))]
+    Unexpected {
+        err_msg: String,
+        #[snafu(implicit)]
+        location: Location,
     },
 }
 
@@ -132,19 +194,28 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::GetCache { .. } | Error::FindLeader { .. } => StatusCode::StorageUnavailable,
-            Error::FindRegionRoutes { .. } => StatusCode::InvalidArguments,
-            Error::FindTableRoutes { .. } => StatusCode::InvalidArguments,
+            Error::FindRegionRoutes { .. } => StatusCode::RegionNotReady,
+
+            Error::ConjunctExprWithNonExpr { .. }
+            | Error::UnclosedValue { .. }
+            | Error::InvalidExpr { .. }
+            | Error::UndefinedColumn { .. } => StatusCode::InvalidArguments,
+
             Error::FindRegion { .. }
             | Error::FindRegions { .. }
             | Error::RegionKeysSize { .. }
             | Error::InvalidInsertRequest { .. }
             | Error::InvalidDeleteRequest { .. } => StatusCode::InvalidArguments,
-            Error::SerializeJson { .. } | Error::DeserializeJson { .. } => StatusCode::Internal,
-            Error::InvalidTableRouteData { .. } => StatusCode::Internal,
-            Error::ConvertScalarValue { .. } => StatusCode::Internal,
-            Error::FindDatanode { .. } => StatusCode::InvalidArguments,
+
+            Error::ConvertScalarValue { .. }
+            | Error::SerializeJson { .. }
+            | Error::DeserializeJson { .. } => StatusCode::Internal,
+
+            Error::Unexpected { .. } => StatusCode::Unexpected,
+            Error::InvalidTableRouteData { .. } => StatusCode::TableUnavailable,
+            Error::FindTableRoutes { .. } => StatusCode::TableUnavailable,
+            Error::TableRouteNotFound { .. } => StatusCode::TableNotFound,
             Error::TableRouteManager { source, .. } => source.status_code(),
-            Error::MissingDefaultValue { .. } => StatusCode::Internal,
             Error::UnexpectedLogicalRouteTable { source, .. } => source.status_code(),
         }
     }

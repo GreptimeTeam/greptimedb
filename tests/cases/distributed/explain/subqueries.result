@@ -18,15 +18,13 @@ EXPLAIN SELECT * FROM integers WHERE i IN ((SELECT i FROM integers)) ORDER BY i;
 |_|_SubqueryAlias: __correlated_sq_1_|
 |_|_MergeScan [is_placeholder=false]_|
 | physical_plan | SortPreservingMergeExec: [i@0 ASC NULLS LAST]_|
-|_|_SortExec: expr=[i@0 ASC NULLS LAST]_|
+|_|_SortExec: expr=[i@0 ASC NULLS LAST], preserve_partitioning=[true]_|
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_REDACTED
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
-|_|_RepartitionExec: partitioning=REDACTED
 |_|_MergeScanExec: REDACTED
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
-|_|_RepartitionExec: partitioning=REDACTED
 |_|_RepartitionExec: partitioning=REDACTED
 |_|_MergeScanExec: REDACTED
 |_|_|
@@ -50,15 +48,13 @@ EXPLAIN SELECT * FROM integers i1 WHERE EXISTS(SELECT i FROM integers WHERE i=i1
 |_|_Projection: integers.i_|
 |_|_MergeScan [is_placeholder=false]_|
 | physical_plan | SortPreservingMergeExec: [i@0 ASC NULLS LAST]_|
-|_|_SortExec: expr=[i@0 ASC NULLS LAST]_|
+|_|_SortExec: expr=[i@0 ASC NULLS LAST], preserve_partitioning=[true]_|
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_REDACTED
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
-|_|_RepartitionExec: partitioning=REDACTED
 |_|_MergeScanExec: REDACTED
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
-|_|_RepartitionExec: partitioning=REDACTED
 |_|_RepartitionExec: partitioning=REDACTED
 |_|_ProjectionExec: expr=[i@0 as i]_|
 |_|_MergeScanExec: REDACTED
@@ -86,40 +82,45 @@ order by t.i desc;
 +-+-+
 | logical_plan_| Sort: t.i DESC NULLS FIRST_|
 |_|_SubqueryAlias: t_|
-|_|_Inner Join:_|
+|_|_Cross Join:_|
+|_|_Filter: integers.i IS NOT NULL_|
+|_|_Projection: integers.i_|
+|_|_MergeScan [is_placeholder=false]_|
 |_|_Projection:_|
 |_|_MergeScan [is_placeholder=false]_|
-|_|_Filter: other.i IS NOT NULL_|
-|_|_Projection: other.i_|
-|_|_MergeScan [is_placeholder=false]_|
 | physical_plan | SortPreservingMergeExec: [i@0 DESC]_|
-|_|_SortExec: expr=[i@0 DESC]_|
-|_|_NestedLoopJoinExec: join_type=Inner_|
-|_|_RepartitionExec: partitioning=REDACTED
-|_|_ProjectionExec: expr=[]_|
-|_|_MergeScanExec: REDACTED
+|_|_SortExec: expr=[i@0 DESC], preserve_partitioning=[true]_|
+|_|_CrossJoinExec_|
 |_|_CoalescePartitionsExec_|
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_FilterExec: i@0 IS NOT NULL_|
-|_|_RepartitionExec: partitioning=REDACTED
 |_|_ProjectionExec: expr=[i@0 as i]_|
+|_|_MergeScanExec: REDACTED
+|_|_ProjectionExec: expr=[]_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
 
+INSERT INTO other SELECT i, 2 FROM integers WHERE i=(SELECT MAX(i) FROM integers);
+
+Affected Rows: 0
+
+-- Explain physical plan for DML is not supported because it looks up the table name in a way that is
+-- different from normal queries. It also requires the table provider to implement the `insert_into()` method.
 EXPLAIN INSERT INTO other SELECT i, 2 FROM integers WHERE i=(SELECT MAX(i) FROM integers);
 
-+--------------+-------------------------------------------------------------------+
-| plan_type    | plan                                                              |
-+--------------+-------------------------------------------------------------------+
-| logical_plan | Dml: op=[Insert Into] table=[other]                               |
-|              |   Projection: integers.i AS i, TimestampMillisecond(2, None) AS j |
-|              |     Inner Join: integers.i = __scalar_sq_1.MAX(integers.i)        |
-|              |       Projection: integers.i                                      |
-|              |         MergeScan [is_placeholder=false]                          |
-|              |       SubqueryAlias: __scalar_sq_1                                |
-|              |         MergeScan [is_placeholder=false]                          |
-+--------------+-------------------------------------------------------------------+
++---------------------+-------------------------------------------------------------------+
+| plan_type           | plan                                                              |
++---------------------+-------------------------------------------------------------------+
+| logical_plan        | Dml: op=[Insert Into] table=[other]                               |
+|                     |   Projection: integers.i AS i, TimestampMillisecond(2, None) AS j |
+|                     |     Inner Join: integers.i = __scalar_sq_1.max(integers.i)        |
+|                     |       Projection: integers.i                                      |
+|                     |         MergeScan [is_placeholder=false]                          |
+|                     |       SubqueryAlias: __scalar_sq_1                                |
+|                     |         MergeScan [is_placeholder=false]                          |
+| physical_plan_error | Error during planning: failed to resolve catalog: datafusion      |
++---------------------+-------------------------------------------------------------------+
 
 drop table other;
 

@@ -12,20 +12,17 @@ on:
 
 name: Build API docs
 
-env:
-  RUST_TOOLCHAIN: nightly-2023-12-19
-
 jobs:
   apidoc:
     runs-on: ubuntu-20.04
     steps:
     - uses: actions/checkout@v4
+      with:
+        persist-credentials: false
     - uses: arduino/setup-protoc@v3
       with:
         repo-token: ${{ secrets.GITHUB_TOKEN }}
-    - uses: dtolnay/rust-toolchain@master
-      with:
-        toolchain: ${{ env.RUST_TOOLCHAIN }}
+    - uses: actions-rust-lang/setup-rust-toolchain@v1
     - run: cargo doc --workspace --no-deps --document-private-items
     - run: |
         cat <<EOF > target/doc/index.html

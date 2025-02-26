@@ -18,7 +18,9 @@ use std::any::Any;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use datafusion_common::ScalarValue;
 use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::SchemaRef;
 use snafu::{Location, Snafu};
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -31,27 +33,35 @@ pub enum Error {
     NewDfRecordBatch {
         #[snafu(source)]
         error: datatypes::arrow::error::ArrowError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Data types error"))]
     DataTypes {
+        #[snafu(implicit)]
         location: Location,
         source: datatypes::error::Error,
     },
 
     #[snafu(display("External error"))]
     External {
+        #[snafu(implicit)]
         location: Location,
         source: BoxedError,
     },
 
     #[snafu(display("Failed to create RecordBatches, reason: {}", reason))]
-    CreateRecordBatches { reason: String, location: Location },
+    CreateRecordBatches {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to convert Arrow schema"))]
     SchemaConversion {
         source: datatypes::error::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -59,6 +69,15 @@ pub enum Error {
     PollStream {
         #[snafu(source)]
         error: datafusion::error::DataFusionError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Create physical expr error"))]
+    PhysicalExpr {
+        #[snafu(source)]
+        error: datafusion::error::DataFusionError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -66,13 +85,16 @@ pub enum Error {
     Format {
         #[snafu(source)]
         error: datatypes::arrow::error::ArrowError,
+        #[snafu(implicit)]
         location: Location,
     },
 
-    #[snafu(display("Failed to init Recordbatch stream"))]
-    InitRecordbatchStream {
+    #[snafu(display("Failed to convert {v:?} to Arrow scalar"))]
+    ToArrowScalar {
+        v: ScalarValue,
         #[snafu(source)]
         error: datafusion_common::DataFusionError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -84,6 +106,7 @@ pub enum Error {
     ProjectArrowRecordBatch {
         #[snafu(source)]
         error: datatypes::arrow::error::ArrowError,
+        #[snafu(implicit)]
         location: Location,
         schema: datatypes::schema::SchemaRef,
         projection: Vec<usize>,
@@ -93,6 +116,7 @@ pub enum Error {
     ColumnNotExists {
         column_name: String,
         table_name: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -104,6 +128,7 @@ pub enum Error {
     CastVector {
         from_type: ConcreteDataType,
         to_type: ConcreteDataType,
+        #[snafu(implicit)]
         location: Location,
         source: datatypes::error::Error,
     },
@@ -112,26 +137,66 @@ pub enum Error {
     ArrowCompute {
         #[snafu(source)]
         error: datatypes::arrow::error::ArrowError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Unsupported operation: {}", reason))]
-    UnsupportedOperation { reason: String, location: Location },
+    UnsupportedOperation {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Cannot construct an empty stream"))]
+    EmptyStream {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Schema not match, left: {:?}, right: {:?}", left, right))]
+    SchemaNotMatch {
+        left: SchemaRef,
+        right: SchemaRef,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Stream timeout"))]
+    StreamTimeout {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: tokio::time::error::Elapsed,
+    },
+    #[snafu(display("RecordBatch slice index overflow: {visit_index} > {size}"))]
+    RecordBatchSliceIndexOverflow {
+        #[snafu(implicit)]
+        location: Location,
+        size: usize,
+        visit_index: usize,
+    },
 }
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::NewDfRecordBatch { .. } => StatusCode::InvalidArguments,
+            Error::NewDfRecordBatch { .. }
+            | Error::EmptyStream { .. }
+            | Error::SchemaNotMatch { .. } => StatusCode::InvalidArguments,
 
             Error::DataTypes { .. }
             | Error::CreateRecordBatches { .. }
-            | Error::PollStream { .. }
             | Error::Format { .. }
-            | Error::InitRecordbatchStream { .. }
-            | Error::ColumnNotExists { .. }
+            | Error::ToArrowScalar { .. }
             | Error::ProjectArrowRecordBatch { .. }
-            | Error::ArrowCompute { .. } => StatusCode::Internal,
+            | Error::PhysicalExpr { .. }
+            | Error::RecordBatchSliceIndexOverflow { .. } => StatusCode::Internal,
+
+            Error::PollStream { .. } => StatusCode::EngineExecuteQuery,
+
+            Error::ArrowCompute { .. } => StatusCode::IllegalState,
+
+            Error::ColumnNotExists { .. } => StatusCode::TableColumnNotFound,
 
             Error::External { source, .. } => source.status_code(),
 
@@ -140,6 +205,8 @@ impl ErrorExt for Error {
             Error::SchemaConversion { source, .. } | Error::CastVector { source, .. } => {
                 source.status_code()
             }
+
+            Error::StreamTimeout { .. } => StatusCode::Cancelled,
         }
     }
 

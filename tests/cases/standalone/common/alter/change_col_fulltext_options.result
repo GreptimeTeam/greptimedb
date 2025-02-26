@@ -1,0 +1,217 @@
+CREATE TABLE `test` (
+  `message` STRING,
+  `time` TIMESTAMP TIME INDEX,
+) WITH (
+  append_mode = 'true'
+);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test;
+
++-------+-------------------------------------+
+| Table | Create Table                        |
++-------+-------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" ( |
+|       |   "message" STRING NULL,            |
+|       |   "time" TIMESTAMP(3) NOT NULL,     |
+|       |   TIME INDEX ("time")               |
+|       | )                                   |
+|       |                                     |
+|       | ENGINE=mito                         |
+|       | WITH(                               |
+|       |   append_mode = 'true'              |
+|       | )                                   |
++-------+-------------------------------------+
+
+-- Write/read after altering column fulltext options
+INSERT INTO test VALUES ('hello', '2020-01-01 00:00:00'), 
+('world', '2020-01-01 00:00:01'), 
+('hello world', '2020-01-02 00:00:00'), 
+('world hello', '2020-01-02 00:00:01');
+
+Affected Rows: 4
+
+SELECT * FROM test WHERE MATCHES(message, 'hello') ORDER BY message;
+
++-------------+---------------------+
+| message     | time                |
++-------------+---------------------+
+| hello       | 2020-01-01T00:00:00 |
+| hello world | 2020-01-02T00:00:00 |
+| world hello | 2020-01-02T00:00:01 |
++-------------+---------------------+
+
+ALTER TABLE test MODIFY COLUMN message SET FULLTEXT INDEX WITH(analyzer = 'Chinese', case_sensitive = 'true');
+
+Affected Rows: 0
+
+SELECT * FROM test WHERE MATCHES(message, 'hello') ORDER BY message;
+
++-------------+---------------------+
+| message     | time                |
++-------------+---------------------+
+| hello       | 2020-01-01T00:00:00 |
+| hello world | 2020-01-02T00:00:00 |
+| world hello | 2020-01-02T00:00:01 |
++-------------+---------------------+
+
+INSERT INTO test VALUES ('hello NiKo', '2020-01-03 00:00:00'), 
+('NiKo hello', '2020-01-03 00:00:01'), 
+('hello hello', '2020-01-04 00:00:00'), 
+('NiKo, NiKo', '2020-01-04 00:00:01');
+
+Affected Rows: 4
+
+SELECT * FROM test WHERE MATCHES(message, 'hello') ORDER BY message;
+
++-------------+---------------------+
+| message     | time                |
++-------------+---------------------+
+| NiKo hello  | 2020-01-03T00:00:01 |
+| hello       | 2020-01-01T00:00:00 |
+| hello NiKo  | 2020-01-03T00:00:00 |
+| hello hello | 2020-01-04T00:00:00 |
+| hello world | 2020-01-02T00:00:00 |
+| world hello | 2020-01-02T00:00:01 |
++-------------+---------------------+
+
+-- SQLNESS ARG restart=true
+SHOW CREATE TABLE test;
+
++-------+---------------------------------------------------------------------------------------------+
+| Table | Create Table                                                                                |
++-------+---------------------------------------------------------------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" (                                                         |
+|       |   "message" STRING NULL FULLTEXT INDEX WITH(analyzer = 'Chinese', case_sensitive = 'true'), |
+|       |   "time" TIMESTAMP(3) NOT NULL,                                                             |
+|       |   TIME INDEX ("time")                                                                       |
+|       | )                                                                                           |
+|       |                                                                                             |
+|       | ENGINE=mito                                                                                 |
+|       | WITH(                                                                                       |
+|       |   append_mode = 'true'                                                                      |
+|       | )                                                                                           |
++-------+---------------------------------------------------------------------------------------------+
+
+SHOW INDEX FROM test;
+
++-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+----------------------------+---------+---------------+---------+------------+
+| Table | Non_unique | Key_name       | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type                 | Comment | Index_comment | Visible | Expression |
++-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+----------------------------+---------+---------------+---------+------------+
+| test  | 1          | FULLTEXT INDEX | 1            | message     | A         |             |          |        | YES  | greptime-fulltext-index-v1 |         |               | YES     |            |
+| test  | 1          | TIME INDEX     | 1            | time        | A         |             |          |        | NO   |                            |         |               | YES     |            |
++-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+----------------------------+---------+---------------+---------+------------+
+
+ALTER TABLE test MODIFY COLUMN message UNSET FULLTEXT INDEX;
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test;
+
++-------+-------------------------------------+
+| Table | Create Table                        |
++-------+-------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" ( |
+|       |   "message" STRING NULL,            |
+|       |   "time" TIMESTAMP(3) NOT NULL,     |
+|       |   TIME INDEX ("time")               |
+|       | )                                   |
+|       |                                     |
+|       | ENGINE=mito                         |
+|       | WITH(                               |
+|       |   append_mode = 'true'              |
+|       | )                                   |
++-------+-------------------------------------+
+
+SHOW INDEX FROM test;
+
++-------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
+| Table | Non_unique | Key_name   | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type | Comment | Index_comment | Visible | Expression |
++-------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
+| test  | 1          | TIME INDEX | 1            | time        | A         |             |          |        | NO   |            |         |               | YES     |            |
++-------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
+
+ALTER TABLE test MODIFY COLUMN message SET FULLTEXT INDEX WITH(analyzer = 'Chinese', case_sensitive = 'true');
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test;
+
++-------+---------------------------------------------------------------------------------------------+
+| Table | Create Table                                                                                |
++-------+---------------------------------------------------------------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" (                                                         |
+|       |   "message" STRING NULL FULLTEXT INDEX WITH(analyzer = 'Chinese', case_sensitive = 'true'), |
+|       |   "time" TIMESTAMP(3) NOT NULL,                                                             |
+|       |   TIME INDEX ("time")                                                                       |
+|       | )                                                                                           |
+|       |                                                                                             |
+|       | ENGINE=mito                                                                                 |
+|       | WITH(                                                                                       |
+|       |   append_mode = 'true'                                                                      |
+|       | )                                                                                           |
++-------+---------------------------------------------------------------------------------------------+
+
+SHOW INDEX FROM test;
+
++-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+----------------------------+---------+---------------+---------+------------+
+| Table | Non_unique | Key_name       | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type                 | Comment | Index_comment | Visible | Expression |
++-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+----------------------------+---------+---------------+---------+------------+
+| test  | 1          | FULLTEXT INDEX | 1            | message     | A         |             |          |        | YES  | greptime-fulltext-index-v1 |         |               | YES     |            |
+| test  | 1          | TIME INDEX     | 1            | time        | A         |             |          |        | NO   |                            |         |               | YES     |            |
++-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+----------------------------+---------+---------------+---------+------------+
+
+ALTER TABLE test MODIFY COLUMN message SET FULLTEXT INDEX WITH(analyzer = 'Chinese', case_sensitive = 'false');
+
+Error: 1004(InvalidArguments), Invalid column option, column name: message, error: FULLTEXT index already enabled
+
+ALTER TABLE test MODIFY COLUMN message UNSET FULLTEXT INDEX;
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test;
+
++-------+-------------------------------------+
+| Table | Create Table                        |
++-------+-------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" ( |
+|       |   "message" STRING NULL,            |
+|       |   "time" TIMESTAMP(3) NOT NULL,     |
+|       |   TIME INDEX ("time")               |
+|       | )                                   |
+|       |                                     |
+|       | ENGINE=mito                         |
+|       | WITH(                               |
+|       |   append_mode = 'true'              |
+|       | )                                   |
++-------+-------------------------------------+
+
+SHOW INDEX FROM test;
+
++-------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
+| Table | Non_unique | Key_name   | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type | Comment | Index_comment | Visible | Expression |
++-------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
+| test  | 1          | TIME INDEX | 1            | time        | A         |             |          |        | NO   |            |         |               | YES     |            |
++-------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
+
+ALTER TABLE test MODIFY COLUMN message SET FULLTEXT INDEX WITH(analyzer = 'Chinglish', case_sensitive = 'false');
+
+Error: 1002(Unexpected), Invalid fulltext option: Chinglish, expected: 'English' | 'Chinese'
+
+ALTER TABLE test MODIFY COLUMN message SET FULLTEXT INDEX WITH(analyzer = 'Chinese', case_sensitive = 'no');
+
+Error: 1002(Unexpected), Invalid fulltext option: no, expected: 'true' | 'false'
+
+ALTER TABLE test MODIFY COLUMN time SET FULLTEXT INDEX WITH(analyzer = 'Chinese', case_sensitive = 'false');
+
+Error: 1004(InvalidArguments), Invalid column option, column name: time, error: FULLTEXT index only supports string type
+
+ALTER TABLE test MODIFY COLUMN message SET FULLTEXT INDEX WITH(analyzer = 'English', case_sensitive = 'true');
+
+Error: 1004(InvalidArguments), Invalid column option, column name: message, error: Cannot change analyzer or case_sensitive if FULLTEXT index is set before. Previous analyzer: Chinese, previous case_sensitive: true
+
+DROP TABLE test;
+
+Affected Rows: 0
+

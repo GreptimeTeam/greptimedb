@@ -14,8 +14,9 @@
 
 use std::any::Any;
 use std::io::Error as IoError;
+use std::sync::Arc;
 
-use common_error::ext::ErrorExt;
+use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
@@ -24,17 +25,11 @@ use snafu::{Location, Snafu};
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
-    #[snafu(display("Failed to seek"))]
-    Seek {
-        #[snafu(source)]
-        error: IoError,
-        location: Location,
-    },
-
     #[snafu(display("Failed to read"))]
     Read {
         #[snafu(source)]
         error: IoError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -42,6 +37,7 @@ pub enum Error {
     Write {
         #[snafu(source)]
         error: IoError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -49,6 +45,7 @@ pub enum Error {
     Flush {
         #[snafu(source)]
         error: IoError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -56,22 +53,68 @@ pub enum Error {
     Close {
         #[snafu(source)]
         error: IoError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to open"))]
+    Open {
+        #[snafu(source)]
+        error: IoError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to read metadata"))]
+    Metadata {
+        #[snafu(source)]
+        error: IoError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to create"))]
+    Create {
+        #[snafu(source)]
+        error: IoError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to rename"))]
+    Rename {
+        #[snafu(source)]
+        error: IoError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to remove"))]
+    Remove {
+        #[snafu(source)]
+        error: IoError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Error while walking directory"))]
+    WalkDir {
+        #[snafu(source)]
+        error: async_walkdir::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Magic not matched"))]
-    MagicNotMatched { location: Location },
-
-    #[snafu(display("Failed to convert bytes to integer"))]
-    BytesToInteger {
-        #[snafu(source)]
-        error: std::array::TryFromSliceError,
+    MagicNotMatched {
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Unsupported decompression: {}", decompression))]
     UnsupportedDecompression {
         decompression: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -79,6 +122,7 @@ pub enum Error {
     SerializeJson {
         #[snafu(source)]
         error: serde_json::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -86,18 +130,22 @@ pub enum Error {
     DeserializeJson {
         #[snafu(source)]
         error: serde_json::Error,
-        location: Location,
-    },
-
-    #[snafu(display("Parse stage not match, expected: {}, actual: {}", expected, actual))]
-    ParseStageNotMatch {
-        expected: String,
-        actual: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Unexpected footer payload size: {}", size))]
-    UnexpectedFooterPayloadSize { size: i32, location: Location },
+    UnexpectedFooterPayloadSize {
+        size: i32,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid puffin footer"))]
+    InvalidPuffinFooter {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display(
         "Unexpected puffin file size, min: {}, actual: {}",
@@ -107,36 +155,112 @@ pub enum Error {
     UnexpectedPuffinFileSize {
         min_file_size: u64,
         actual_file_size: u64,
+        #[snafu(implicit)]
         location: Location,
     },
 
-    #[snafu(display("Invalid blob offset: {}, location: {:?}", offset, location))]
-    InvalidBlobOffset { offset: i64, location: Location },
+    #[snafu(display("Failed to compress lz4"))]
+    Lz4Compression {
+        #[snafu(source)]
+        error: std::io::Error,
 
-    #[snafu(display("Invalid blob area end: {}, location: {:?}", offset, location))]
-    InvalidBlobAreaEnd { offset: u64, location: Location },
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to decompress lz4"))]
+    Lz4Decompression {
+        #[snafu(source)]
+        error: serde_json::Error,
+
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Unsupported compression: {codec}"))]
+    UnsupportedCompression {
+        codec: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Write to the same blob twice: {blob}"))]
+    DuplicateBlob {
+        blob: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Blob not found: {blob}"))]
+    BlobNotFound {
+        blob: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Blob index out of bound, index: {}, max index: {}", index, max_index))]
+    BlobIndexOutOfBound {
+        index: usize,
+        max_index: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("File key not match, expected: {}, actual: {}", expected, actual))]
+    FileKeyNotMatch {
+        expected: String,
+        actual: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Get value from cache"))]
+    CacheGet { source: Arc<Error> },
+
+    #[snafu(display("External error"))]
+    External {
+        #[snafu(source)]
+        error: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         use Error::*;
         match self {
-            Seek { .. }
-            | Read { .. }
+            Read { .. }
             | MagicNotMatched { .. }
             | DeserializeJson { .. }
             | Write { .. }
             | Flush { .. }
             | Close { .. }
+            | Open { .. }
+            | Metadata { .. }
+            | Create { .. }
+            | Remove { .. }
+            | Rename { .. }
             | SerializeJson { .. }
-            | BytesToInteger { .. }
-            | ParseStageNotMatch { .. }
             | UnexpectedFooterPayloadSize { .. }
             | UnexpectedPuffinFileSize { .. }
-            | InvalidBlobOffset { .. }
-            | InvalidBlobAreaEnd { .. } => StatusCode::Unexpected,
+            | Lz4Compression { .. }
+            | Lz4Decompression { .. }
+            | BlobNotFound { .. }
+            | BlobIndexOutOfBound { .. }
+            | FileKeyNotMatch { .. }
+            | WalkDir { .. }
+            | InvalidPuffinFooter { .. } => StatusCode::Unexpected,
 
-            UnsupportedDecompression { .. } => StatusCode::Unsupported,
+            UnsupportedCompression { .. } | UnsupportedDecompression { .. } => {
+                StatusCode::Unsupported
+            }
+
+            DuplicateBlob { .. } => StatusCode::InvalidArguments,
+
+            CacheGet { source } => source.status_code(),
+
+            External { error, .. } => error.status_code(),
         }
     }
 

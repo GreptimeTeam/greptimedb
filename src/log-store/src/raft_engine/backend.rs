@@ -17,29 +17,33 @@
 use std::any::Any;
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::path::Path;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
+use common_config::KvBackendConfig;
 use common_error::ext::BoxedError;
 use common_meta::error as meta_error;
 use common_meta::kv_backend::txn::{Txn, TxnOp, TxnOpResponse, TxnRequest, TxnResponse};
 use common_meta::kv_backend::{KvBackend, TxnService};
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
-    BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
-    DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
+    BatchPutResponse, DeleteRangeRequest, DeleteRangeResponse, PutRequest, PutResponse,
+    RangeRequest, RangeResponse,
 };
 use common_meta::rpc::KeyValue;
 use common_meta::util::get_next_prefix_key;
-use raft_engine::{Config, Engine, LogBatch};
+use common_runtime::RepeatedTask;
+use raft_engine::{Config, Engine, LogBatch, ReadableSize, RecoveryMode};
 use snafu::{IntoError, ResultExt};
 
-use crate::error::{self, IoSnafu, RaftEngineSnafu};
+use crate::error::{self, Error, IoSnafu, RaftEngineSnafu, StartGcTaskSnafu};
+use crate::raft_engine::log_store::PurgeExpiredFilesFunction;
 
 pub(crate) const SYSTEM_NAMESPACE: u64 = 0;
 
 /// RaftEngine based [KvBackend] implementation.
 pub struct RaftEngineBackend {
-    engine: RwLock<Engine>,
+    engine: RwLock<Arc<Engine>>,
+    _gc_task: RepeatedTask<Error>,
 }
 
 fn ensure_dir(dir: &str) -> error::Result<()> {
@@ -65,15 +69,34 @@ fn ensure_dir(dir: &str) -> error::Result<()> {
 }
 
 impl RaftEngineBackend {
-    pub fn try_open_with_cfg(config: Config) -> error::Result<Self> {
-        ensure_dir(&config.dir)?;
-        if let Some(spill_dir) = &config.spill_dir {
+    pub fn try_open_with_cfg(dir: String, config: &KvBackendConfig) -> error::Result<Self> {
+        let cfg = Config {
+            dir: dir.to_string(),
+            purge_threshold: ReadableSize(config.purge_threshold.0),
+            recovery_mode: RecoveryMode::TolerateTailCorruption,
+            batch_compression_threshold: ReadableSize::kb(8),
+            target_file_size: ReadableSize(config.file_size.0),
+            ..Default::default()
+        };
+
+        ensure_dir(&dir)?;
+        if let Some(spill_dir) = &cfg.spill_dir {
             ensure_dir(spill_dir)?;
         }
 
-        let engine = Engine::open(config).context(RaftEngineSnafu)?;
+        let engine = Arc::new(Engine::open(cfg).context(RaftEngineSnafu)?);
+        let gc_task = RepeatedTask::new(
+            config.purge_interval,
+            Box::new(PurgeExpiredFilesFunction {
+                engine: engine.clone(),
+            }),
+        );
+        gc_task
+            .start(common_runtime::global_runtime())
+            .context(StartGcTaskSnafu)?;
         Ok(Self {
             engine: RwLock::new(engine),
+            _gc_task: gc_task,
         })
     }
 }
@@ -93,7 +116,7 @@ impl TxnService for RaftEngineBackend {
         let engine = self.engine.write().unwrap();
         for cmp in compare {
             let existing_value = engine_get(&engine, &cmp.key)?.map(|kv| kv.value);
-            if !cmp.compare_with_value(existing_value.as_ref()) {
+            if !cmp.compare_value(existing_value.as_ref()) {
                 succeeded = false;
                 break;
             }
@@ -103,7 +126,7 @@ impl TxnService for RaftEngineBackend {
         let do_txn = |txn_op| match txn_op {
             TxnOp::Put(key, value) => {
                 batch
-                    .put(SYSTEM_NAMESPACE, key.clone(), value)
+                    .put(SYSTEM_NAMESPACE, key, value)
                     .context(RaftEngineSnafu)
                     .map_err(BoxedError::new)
                     .context(meta_error::ExternalSnafu)?;
@@ -113,11 +136,8 @@ impl TxnService for RaftEngineBackend {
             TxnOp::Get(key) => {
                 let value = engine_get(&engine, &key)?.map(|kv| kv.value);
                 let kvs = value
+                    .map(|value| KeyValue { key, value })
                     .into_iter()
-                    .map(|value| KeyValue {
-                        key: key.clone(),
-                        value,
-                    })
                     .collect();
                 Ok(TxnOpResponse::ResponseGet(RangeResponse {
                     kvs,
@@ -267,50 +287,13 @@ impl KvBackend for RaftEngineBackend {
         let mut response = BatchGetResponse {
             kvs: Vec::with_capacity(req.keys.len()),
         };
-        let engine = self.engine.read().unwrap();
         for key in req.keys {
-            let Some(value) = engine.get(SYSTEM_NAMESPACE, &key) else {
+            let Some(value) = self.engine.read().unwrap().get(SYSTEM_NAMESPACE, &key) else {
                 continue;
             };
             response.kvs.push(KeyValue { key, value });
         }
         Ok(response)
-    }
-
-    async fn compare_and_put(
-        &self,
-        req: CompareAndPutRequest,
-    ) -> Result<CompareAndPutResponse, Self::Error> {
-        let CompareAndPutRequest { key, expect, value } = req;
-
-        let mut batch = LogBatch::with_capacity(1);
-        let engine = self.engine.write().unwrap();
-        let existing = engine_get(&engine, &key)?;
-        let eq = existing
-            .as_ref()
-            .map(|kv| kv.value == expect)
-            .unwrap_or_else(|| {
-                // if the associated value of key does not exist and expect is empty,
-                // then we still consider them as equal.
-                expect.is_empty()
-            });
-
-        if eq {
-            batch
-                .put(SYSTEM_NAMESPACE, key, value)
-                .context(RaftEngineSnafu)
-                .map_err(BoxedError::new)
-                .context(meta_error::ExternalSnafu)?;
-            engine
-                .write(&mut batch, false)
-                .context(RaftEngineSnafu)
-                .map_err(BoxedError::new)
-                .context(meta_error::ExternalSnafu)?;
-        }
-        Ok(CompareAndPutResponse {
-            success: eq,
-            prev_kv: existing,
-        })
     }
 
     async fn delete_range(
@@ -365,7 +348,6 @@ impl KvBackend for RaftEngineBackend {
             }
             batch.delete(SYSTEM_NAMESPACE, key);
         }
-        let engine = self.engine.read().unwrap();
         engine
             .write(&mut batch, false)
             .context(RaftEngineSnafu)
@@ -437,22 +419,13 @@ mod tests {
         prepare_kv, test_kv_batch_delete, test_kv_batch_get, test_kv_compare_and_put,
         test_kv_delete_range, test_kv_put, test_kv_range, test_kv_range_2,
     };
+    use common_meta::rpc::store::{CompareAndPutRequest, CompareAndPutResponse};
     use common_test_util::temp_dir::create_temp_dir;
-    use raft_engine::{Config, ReadableSize, RecoveryMode};
 
     use super::*;
 
     fn build_kv_backend(dir: String) -> RaftEngineBackend {
-        let config = Config {
-            dir,
-            spill_dir: None,
-            recovery_mode: RecoveryMode::AbsoluteConsistency,
-            target_file_size: ReadableSize::mb(4),
-            purge_threshold: ReadableSize::mb(16),
-            ..Default::default()
-        };
-        let engine = RwLock::new(Engine::open(config).unwrap());
-        RaftEngineBackend { engine }
+        RaftEngineBackend::try_open_with_cfg(dir, &KvBackendConfig::default()).unwrap()
     }
 
     #[tokio::test]
@@ -511,7 +484,8 @@ mod tests {
             .await
             .unwrap();
         assert!(success);
-        assert_eq!(b"word".as_slice(), &prev_kv.unwrap().value);
+        // Do not return prev_kv on success
+        assert!(prev_kv.is_none());
 
         assert_eq!(
             b"world".as_slice(),
@@ -675,7 +649,7 @@ mod tests {
         let backend = build_kv_backend(dir.path().to_str().unwrap().to_string());
         prepare_kv(&backend).await;
 
-        test_kv_range(backend).await;
+        test_kv_range(&backend).await;
     }
 
     #[tokio::test]
@@ -683,7 +657,7 @@ mod tests {
         let dir = create_temp_dir("range2");
         let backend = build_kv_backend(dir.path().to_str().unwrap().to_string());
 
-        test_kv_range_2(backend).await;
+        test_kv_range_2(&backend).await;
     }
 
     #[tokio::test]
@@ -692,7 +666,7 @@ mod tests {
         let backend = build_kv_backend(dir.path().to_str().unwrap().to_string());
         prepare_kv(&backend).await;
 
-        test_kv_put(backend).await;
+        test_kv_put(&backend).await;
     }
 
     #[tokio::test]
@@ -701,7 +675,7 @@ mod tests {
         let backend = build_kv_backend(dir.path().to_str().unwrap().to_string());
         prepare_kv(&backend).await;
 
-        test_kv_batch_get(backend).await;
+        test_kv_batch_get(&backend).await;
     }
 
     #[tokio::test]
@@ -710,7 +684,7 @@ mod tests {
         let backend = build_kv_backend(dir.path().to_str().unwrap().to_string());
         prepare_kv(&backend).await;
 
-        test_kv_batch_delete(backend).await;
+        test_kv_batch_delete(&backend).await;
     }
 
     #[tokio::test]
@@ -719,7 +693,7 @@ mod tests {
         let backend = build_kv_backend(dir.path().to_str().unwrap().to_string());
         prepare_kv(&backend).await;
 
-        test_kv_delete_range(backend).await;
+        test_kv_delete_range(&backend).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]

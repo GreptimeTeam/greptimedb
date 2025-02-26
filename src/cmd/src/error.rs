@@ -17,7 +17,6 @@ use std::any::Any;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
-use config::ConfigError;
 use rustyline::error::ReadlineError;
 use snafu::{Location, Snafu};
 
@@ -25,99 +24,149 @@ use snafu::{Location, Snafu};
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Failed to install ring crypto provider: {}", msg))]
+    InitTlsProvider {
+        #[snafu(implicit)]
+        location: Location,
+        msg: String,
+    },
     #[snafu(display("Failed to create default catalog and schema"))]
     InitMetadata {
-        location: Location,
-        source: common_meta::error::Error,
-    },
-
-    #[snafu(display("Failed to iter stream"))]
-    IterStream {
+        #[snafu(implicit)]
         location: Location,
         source: common_meta::error::Error,
     },
 
     #[snafu(display("Failed to init DDL manager"))]
     InitDdlManager {
+        #[snafu(implicit)]
         location: Location,
         source: common_meta::error::Error,
     },
 
     #[snafu(display("Failed to init default timezone"))]
     InitTimezone {
+        #[snafu(implicit)]
         location: Location,
         source: common_time::error::Error,
     },
 
     #[snafu(display("Failed to start procedure manager"))]
     StartProcedureManager {
+        #[snafu(implicit)]
         location: Location,
         source: common_procedure::error::Error,
     },
 
     #[snafu(display("Failed to stop procedure manager"))]
     StopProcedureManager {
+        #[snafu(implicit)]
         location: Location,
         source: common_procedure::error::Error,
     },
 
     #[snafu(display("Failed to start wal options allocator"))]
     StartWalOptionsAllocator {
+        #[snafu(implicit)]
         location: Location,
         source: common_meta::error::Error,
     },
 
     #[snafu(display("Failed to start datanode"))]
     StartDatanode {
+        #[snafu(implicit)]
         location: Location,
         source: datanode::error::Error,
     },
 
     #[snafu(display("Failed to shutdown datanode"))]
     ShutdownDatanode {
+        #[snafu(implicit)]
         location: Location,
         source: datanode::error::Error,
     },
 
+    #[snafu(display("Failed to start flownode"))]
+    StartFlownode {
+        #[snafu(implicit)]
+        location: Location,
+        source: flow::Error,
+    },
+
+    #[snafu(display("Failed to shutdown flownode"))]
+    ShutdownFlownode {
+        #[snafu(implicit)]
+        location: Location,
+        source: flow::Error,
+    },
+
     #[snafu(display("Failed to start frontend"))]
     StartFrontend {
+        #[snafu(implicit)]
         location: Location,
         source: frontend::error::Error,
     },
 
     #[snafu(display("Failed to shutdown frontend"))]
     ShutdownFrontend {
+        #[snafu(implicit)]
         location: Location,
         source: frontend::error::Error,
     },
 
+    #[snafu(display("Failed to build cli"))]
+    BuildCli {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to start cli"))]
+    StartCli {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
     #[snafu(display("Failed to build meta server"))]
     BuildMetaServer {
+        #[snafu(implicit)]
         location: Location,
         source: meta_srv::error::Error,
     },
 
     #[snafu(display("Failed to start meta server"))]
     StartMetaServer {
+        #[snafu(implicit)]
         location: Location,
         source: meta_srv::error::Error,
     },
 
     #[snafu(display("Failed to shutdown meta server"))]
     ShutdownMetaServer {
+        #[snafu(implicit)]
         location: Location,
         source: meta_srv::error::Error,
     },
 
     #[snafu(display("Missing config, msg: {}", msg))]
-    MissingConfig { msg: String, location: Location },
+    MissingConfig {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Illegal config: {}", msg))]
-    IllegalConfig { msg: String, location: Location },
+    IllegalConfig {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Unsupported selector type: {}", selector_type))]
     UnsupportedSelectorType {
         selector_type: String,
+        #[snafu(implicit)]
         location: Location,
         source: meta_srv::error::Error,
     },
@@ -129,6 +178,7 @@ pub enum Error {
     ReplCreation {
         #[snafu(source)]
         error: ReadlineError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -136,30 +186,36 @@ pub enum Error {
     Readline {
         #[snafu(source)]
         error: ReadlineError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to request database, sql: {sql}"))]
     RequestDatabase {
         sql: String,
-        location: Location,
+        #[snafu(source)]
         source: client::Error,
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display("Failed to collect RecordBatches"))]
     CollectRecordBatches {
+        #[snafu(implicit)]
         location: Location,
         source: common_recordbatch::error::Error,
     },
 
     #[snafu(display("Failed to pretty print Recordbatches"))]
     PrettyPrintRecordBatches {
+        #[snafu(implicit)]
         location: Location,
         source: common_recordbatch::error::Error,
     },
 
     #[snafu(display("Failed to start Meta client"))]
     StartMetaClient {
+        #[snafu(implicit)]
         location: Location,
         source: meta_client::error::Error,
     },
@@ -167,33 +223,31 @@ pub enum Error {
     #[snafu(display("Failed to parse SQL: {}", sql))]
     ParseSql {
         sql: String,
+        #[snafu(implicit)]
         location: Location,
         source: query::error::Error,
     },
 
     #[snafu(display("Failed to plan statement"))]
     PlanStatement {
+        #[snafu(implicit)]
         location: Location,
         source: query::error::Error,
     },
 
     #[snafu(display("Failed to encode logical plan in substrait"))]
     SubstraitEncodeLogicalPlan {
+        #[snafu(implicit)]
         location: Location,
         source: substrait::error::Error,
     },
 
     #[snafu(display("Failed to load layered config"))]
     LoadLayeredConfig {
-        #[snafu(source)]
-        error: ConfigError,
+        #[snafu(source(from(common_config::error::Error, Box::new)))]
+        source: Box<common_config::error::Error>,
+        #[snafu(implicit)]
         location: Location,
-    },
-
-    #[snafu(display("Failed to start catalog manager"))]
-    StartCatalogManager {
-        location: Location,
-        source: catalog::error::Error,
     },
 
     #[snafu(display("Failed to connect to Etcd at {etcd_addr}"))]
@@ -201,13 +255,7 @@ pub enum Error {
         etcd_addr: String,
         #[snafu(source)]
         error: etcd_client::Error,
-        location: Location,
-    },
-
-    #[snafu(display("Failed to connect server at {addr}"))]
-    ConnectServer {
-        addr: String,
-        source: client::error::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -215,26 +263,31 @@ pub enum Error {
     SerdeJson {
         #[snafu(source)]
         error: serde_json::error::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
-    #[snafu(display("Expect data from output, but got another thing"))]
-    NotDataFromOutput { location: Location },
+    #[snafu(display("Failed to run http request: {reason}"))]
+    HttpQuerySql {
+        reason: String,
+        #[snafu(source)]
+        error: reqwest::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Empty result from output"))]
-    EmptyResult { location: Location },
+    EmptyResult {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to manipulate file"))]
     FileIo {
+        #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: std::io::Error,
-    },
-
-    #[snafu(display("Invalid database name: {}", database))]
-    InvalidDatabaseName {
-        location: Location,
-        database: String,
     },
 
     #[snafu(display("Failed to create directory {}", dir))]
@@ -244,16 +297,60 @@ pub enum Error {
         error: std::io::Error,
     },
 
+    #[snafu(display("Failed to spawn thread"))]
+    SpawnThread {
+        #[snafu(source)]
+        error: std::io::Error,
+    },
+
     #[snafu(display("Other error"))]
     Other {
         source: BoxedError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to build runtime"))]
     BuildRuntime {
+        #[snafu(implicit)]
         location: Location,
         source: common_runtime::error::Error,
+    },
+
+    #[snafu(display("Failed to get cache from cache registry: {}", name))]
+    CacheRequired {
+        #[snafu(implicit)]
+        location: Location,
+        name: String,
+    },
+
+    #[snafu(display("Failed to build cache registry"))]
+    BuildCacheRegistry {
+        #[snafu(implicit)]
+        location: Location,
+        source: cache::error::Error,
+    },
+
+    #[snafu(display("Failed to initialize meta client"))]
+    MetaClientInit {
+        #[snafu(implicit)]
+        location: Location,
+        source: meta_client::error::Error,
+    },
+
+    #[snafu(display("Cannot find schema {schema} in catalog {catalog}"))]
+    SchemaNotFound {
+        catalog: String,
+        schema: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to build wal options allocator"))]
+    BuildWalOptionsAllocator {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
     },
 }
 
@@ -270,27 +367,29 @@ impl ErrorExt for Error {
             Error::ShutdownMetaServer { source, .. } => source.status_code(),
             Error::BuildMetaServer { source, .. } => source.status_code(),
             Error::UnsupportedSelectorType { source, .. } => source.status_code(),
+            Error::BuildCli { source, .. } => source.status_code(),
+            Error::StartCli { source, .. } => source.status_code(),
 
-            Error::IterStream { source, .. }
-            | Error::InitMetadata { source, .. }
-            | Error::InitDdlManager { source, .. } => source.status_code(),
+            Error::InitMetadata { source, .. } | Error::InitDdlManager { source, .. } => {
+                source.status_code()
+            }
 
-            Error::ConnectServer { source, .. } => source.status_code(),
             Error::MissingConfig { .. }
             | Error::LoadLayeredConfig { .. }
             | Error::IllegalConfig { .. }
             | Error::InvalidReplCommand { .. }
             | Error::InitTimezone { .. }
             | Error::ConnectEtcd { .. }
-            | Error::NotDataFromOutput { .. }
             | Error::CreateDir { .. }
-            | Error::EmptyResult { .. }
-            | Error::InvalidDatabaseName { .. } => StatusCode::InvalidArguments,
+            | Error::EmptyResult { .. } => StatusCode::InvalidArguments,
 
             Error::StartProcedureManager { source, .. }
             | Error::StopProcedureManager { source, .. } => source.status_code(),
-            Error::StartWalOptionsAllocator { source, .. } => source.status_code(),
-            Error::ReplCreation { .. } | Error::Readline { .. } => StatusCode::Internal,
+            Error::BuildWalOptionsAllocator { source, .. }
+            | Error::StartWalOptionsAllocator { source, .. } => source.status_code(),
+            Error::ReplCreation { .. } | Error::Readline { .. } | Error::HttpQuerySql { .. } => {
+                StatusCode::Internal
+            }
             Error::RequestDatabase { source, .. } => source.status_code(),
             Error::CollectRecordBatches { source, .. }
             | Error::PrettyPrintRecordBatches { source, .. } => source.status_code(),
@@ -299,13 +398,22 @@ impl ErrorExt for Error {
                 source.status_code()
             }
             Error::SubstraitEncodeLogicalPlan { source, .. } => source.status_code(),
-            Error::StartCatalogManager { source, .. } => source.status_code(),
 
-            Error::SerdeJson { .. } | Error::FileIo { .. } => StatusCode::Unexpected,
+            Error::SerdeJson { .. }
+            | Error::FileIo { .. }
+            | Error::SpawnThread { .. }
+            | Error::InitTlsProvider { .. } => StatusCode::Unexpected,
 
             Error::Other { source, .. } => source.status_code(),
 
             Error::BuildRuntime { source, .. } => source.status_code(),
+
+            Error::CacheRequired { .. } | Error::BuildCacheRegistry { .. } => StatusCode::Internal,
+            Self::StartFlownode { source, .. } | Self::ShutdownFlownode { source, .. } => {
+                source.status_code()
+            }
+            Error::MetaClientInit { source, .. } => source.status_code(),
+            Error::SchemaNotFound { .. } => StatusCode::DatabaseNotFound,
         }
     }
 

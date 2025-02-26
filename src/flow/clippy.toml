@@ -1,0 +1,5 @@
+# Whether to only check for missing documentation in items visible within the current crate. For example, pub(crate) items. (default: false)
+# This is a config for clippy::missing_docs_in_private_items
+missing-docs-in-crate-items = true
+
+too-many-lines-threshold = 500

@@ -111,6 +111,24 @@ macro_rules! define_timestamp_with_unit {
                     val.0.value()
                 }
             }
+
+            impl TryFrom<Value> for Option<[<Timestamp $unit>]> {
+                type Error = $crate::error::Error;
+
+                #[inline]
+                fn try_from(from: Value) -> std::result::Result<Self, Self::Error> {
+                    match from {
+                        Value::Timestamp(v) if v.unit() == TimeUnit::$unit => {
+                            Ok(Some([<Timestamp $unit>](v)))
+                        },
+                        Value::Null => Ok(None),
+                        _ => $crate::error::TryFromValueSnafu {
+                            reason: format!("{:?} is not a {}", from, stringify!([<Timestamp $unit>])),
+                        }
+                        .fail(),
+                    }
+                }
+            }
         }
     };
 }

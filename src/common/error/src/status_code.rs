@@ -15,6 +15,7 @@
 use std::fmt;
 
 use strum::{AsRefStr, EnumIter, EnumString, FromRepr};
+use tonic::Code;
 
 /// Common status code for public API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, EnumString, AsRefStr, EnumIter, FromRepr)]
@@ -35,6 +36,10 @@ pub enum StatusCode {
     InvalidArguments = 1004,
     /// The task is cancelled.
     Cancelled = 1005,
+    /// Illegal state, can be exposed to users.
+    IllegalState = 1006,
+    /// Caused by some error originated from external system.
+    External = 1007,
     // ====== End of common status code ================
 
     // ====== Begin of SQL related status code =========
@@ -52,23 +57,34 @@ pub enum StatusCode {
     // ====== Begin of catalog related status code =====
     /// Table already exists.
     TableAlreadyExists = 4000,
+    /// Table not found.
     TableNotFound = 4001,
+    /// Table column not found.
     TableColumnNotFound = 4002,
+    /// Table column already exists.
     TableColumnExists = 4003,
+    /// Database not found.
     DatabaseNotFound = 4004,
+    /// Region not found.
     RegionNotFound = 4005,
+    /// Region already exists.
     RegionAlreadyExists = 4006,
+    /// Region is read-only in current state.
     RegionReadonly = 4007,
+    /// Region is not in a proper state to handle specific request.
     RegionNotReady = 4008,
-    // If mutually exclusive operations are reached at the same time,
-    // only one can be executed, another one will get region busy.
+    /// Region is temporarily in busy state.
     RegionBusy = 4009,
+    /// Table is temporarily unable to handle the request.
+    TableUnavailable = 4010,
+    /// Database already exists.
+    DatabaseAlreadyExists = 4011,
     // ====== End of catalog related status code =======
 
     // ====== Begin of storage related status code =====
-    /// Storage is temporarily unable to handle the request
+    /// Storage is temporarily unable to handle the request.
     StorageUnavailable = 5000,
-    /// Request is outdated, e.g., version mismatch
+    /// Request is outdated, e.g., version mismatch.
     RequestOutdated = 5001,
     // ====== End of storage related status code =======
 
@@ -76,26 +92,31 @@ pub enum StatusCode {
     /// Runtime resources exhausted, like creating threads failed.
     RuntimeResourcesExhausted = 6000,
 
-    /// Rate limit exceeded
+    /// Rate limit exceeded.
     RateLimited = 6001,
     // ====== End of server related status code =======
 
     // ====== Begin of auth related status code =====
-    /// User not exist
+    /// User not exist.
     UserNotFound = 7000,
-    /// Unsupported password type
+    /// Unsupported password type.
     UnsupportedPasswordType = 7001,
-    /// Username and password does not match
+    /// Username and password does not match.
     UserPasswordMismatch = 7002,
-    /// Not found http authorization header
+    /// Not found http authorization header.
     AuthHeaderNotFound = 7003,
-    /// Invalid http authorization header
+    /// Invalid http authorization header.
     InvalidAuthHeader = 7004,
-    /// Illegal request to connect catalog-schema
+    /// Illegal request to connect catalog-schema.
     AccessDenied = 7005,
-    /// User is not authorized to perform the operation
+    /// User is not authorized to perform the operation.
     PermissionDenied = 7006,
     // ====== End of auth related status code =====
+
+    // ====== Begin of flow related status code =====
+    FlowAlreadyExists = 8000,
+    FlowNotFound = 8001,
+    // ====== End of flow related status code =====
 }
 
 impl StatusCode {
@@ -111,21 +132,26 @@ impl StatusCode {
             | StatusCode::RuntimeResourcesExhausted
             | StatusCode::Internal
             | StatusCode::RegionNotReady
+            | StatusCode::TableUnavailable
             | StatusCode::RegionBusy => true,
 
             StatusCode::Success
             | StatusCode::Unknown
             | StatusCode::Unsupported
+            | StatusCode::IllegalState
             | StatusCode::Unexpected
             | StatusCode::InvalidArguments
             | StatusCode::Cancelled
             | StatusCode::InvalidSyntax
+            | StatusCode::DatabaseAlreadyExists
             | StatusCode::PlanQuery
             | StatusCode::EngineExecuteQuery
             | StatusCode::TableAlreadyExists
             | StatusCode::TableNotFound
-            | StatusCode::RegionNotFound
             | StatusCode::RegionAlreadyExists
+            | StatusCode::RegionNotFound
+            | StatusCode::FlowAlreadyExists
+            | StatusCode::FlowNotFound
             | StatusCode::RegionReadonly
             | StatusCode::TableColumnNotFound
             | StatusCode::TableColumnExists
@@ -138,7 +164,8 @@ impl StatusCode {
             | StatusCode::InvalidAuthHeader
             | StatusCode::AccessDenied
             | StatusCode::PermissionDenied
-            | StatusCode::RequestOutdated => false,
+            | StatusCode::RequestOutdated
+            | StatusCode::External => false,
         }
     }
 
@@ -150,26 +177,33 @@ impl StatusCode {
             | StatusCode::Unexpected
             | StatusCode::Internal
             | StatusCode::Cancelled
-            | StatusCode::PlanQuery
+            | StatusCode::IllegalState
             | StatusCode::EngineExecuteQuery
             | StatusCode::StorageUnavailable
-            | StatusCode::RuntimeResourcesExhausted => true,
+            | StatusCode::RuntimeResourcesExhausted
+            | StatusCode::External => true,
+
             StatusCode::Success
             | StatusCode::Unsupported
             | StatusCode::InvalidArguments
             | StatusCode::InvalidSyntax
             | StatusCode::TableAlreadyExists
             | StatusCode::TableNotFound
+            | StatusCode::RegionAlreadyExists
             | StatusCode::RegionNotFound
+            | StatusCode::PlanQuery
+            | StatusCode::FlowAlreadyExists
+            | StatusCode::FlowNotFound
             | StatusCode::RegionNotReady
             | StatusCode::RegionBusy
-            | StatusCode::RegionAlreadyExists
             | StatusCode::RegionReadonly
             | StatusCode::TableColumnNotFound
             | StatusCode::TableColumnExists
             | StatusCode::DatabaseNotFound
             | StatusCode::RateLimited
             | StatusCode::UserNotFound
+            | StatusCode::TableUnavailable
+            | StatusCode::DatabaseAlreadyExists
             | StatusCode::UnsupportedPasswordType
             | StatusCode::UserPasswordMismatch
             | StatusCode::AuthHeaderNotFound
@@ -189,6 +223,79 @@ impl fmt::Display for StatusCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // The current debug format is suitable to display.
         write!(f, "{self:?}")
+    }
+}
+
+#[macro_export]
+macro_rules! define_into_tonic_status {
+    ($Error: ty) => {
+        impl From<$Error> for tonic::Status {
+            fn from(err: $Error) -> Self {
+                use tonic::codegen::http::{HeaderMap, HeaderValue};
+                use tonic::metadata::MetadataMap;
+                use $crate::GREPTIME_DB_HEADER_ERROR_CODE;
+
+                let mut headers = HeaderMap::<HeaderValue>::with_capacity(2);
+
+                // If either of the status_code or error msg cannot convert to valid HTTP header value
+                // (which is a very rare case), just ignore. Client will use Tonic status code and message.
+                let status_code = err.status_code();
+                headers.insert(
+                    GREPTIME_DB_HEADER_ERROR_CODE,
+                    HeaderValue::from(status_code as u32),
+                );
+                let root_error = err.output_msg();
+
+                let metadata = MetadataMap::from_headers(headers);
+                tonic::Status::with_metadata(
+                    $crate::status_code::status_to_tonic_code(status_code),
+                    root_error,
+                    metadata,
+                )
+            }
+        }
+    };
+}
+
+/// Returns the tonic [Code] of a [StatusCode].
+pub fn status_to_tonic_code(status_code: StatusCode) -> Code {
+    match status_code {
+        StatusCode::Success => Code::Ok,
+        StatusCode::Unknown | StatusCode::External => Code::Unknown,
+        StatusCode::Unsupported => Code::Unimplemented,
+        StatusCode::Unexpected
+        | StatusCode::IllegalState
+        | StatusCode::Internal
+        | StatusCode::PlanQuery
+        | StatusCode::EngineExecuteQuery => Code::Internal,
+        StatusCode::InvalidArguments | StatusCode::InvalidSyntax | StatusCode::RequestOutdated => {
+            Code::InvalidArgument
+        }
+        StatusCode::Cancelled => Code::Cancelled,
+        StatusCode::TableAlreadyExists
+        | StatusCode::TableColumnExists
+        | StatusCode::RegionAlreadyExists
+        | StatusCode::DatabaseAlreadyExists
+        | StatusCode::FlowAlreadyExists => Code::AlreadyExists,
+        StatusCode::TableNotFound
+        | StatusCode::RegionNotFound
+        | StatusCode::TableColumnNotFound
+        | StatusCode::DatabaseNotFound
+        | StatusCode::UserNotFound
+        | StatusCode::FlowNotFound => Code::NotFound,
+        StatusCode::TableUnavailable
+        | StatusCode::StorageUnavailable
+        | StatusCode::RegionNotReady => Code::Unavailable,
+        StatusCode::RuntimeResourcesExhausted
+        | StatusCode::RateLimited
+        | StatusCode::RegionBusy => Code::ResourceExhausted,
+        StatusCode::UnsupportedPasswordType
+        | StatusCode::UserPasswordMismatch
+        | StatusCode::AuthHeaderNotFound
+        | StatusCode::InvalidAuthHeader => Code::Unauthenticated,
+        StatusCode::AccessDenied | StatusCode::PermissionDenied | StatusCode::RegionReadonly => {
+            Code::PermissionDenied
+        }
     }
 }
 

@@ -11,8 +11,10 @@ testing = []
 workspace = true
 
 [dependencies]
+ahash.workspace = true
 api.workspace = true
-async-trait = "0.1"
+async-stream.workspace = true
+async-trait.workspace = true
 catalog.workspace = true
 chrono.workspace = true
 client.workspace = true
@@ -34,26 +36,29 @@ datafusion-common.workspace = true
 datafusion-expr.workspace = true
 datatypes.workspace = true
 file-engine.workspace = true
-futures = "0.3"
+futures.workspace = true
 futures-util.workspace = true
+jsonb.workspace = true
 lazy_static.workspace = true
 meta-client.workspace = true
 meter-core.workspace = true
 meter-macros.workspace = true
+moka.workspace = true
 object-store.workspace = true
 partition.workspace = true
 prometheus.workspace = true
 query.workspace = true
 regex.workspace = true
 serde_json.workspace = true
-servers.workspace = true
 session.workspace = true
 snafu.workspace = true
 sql.workspace = true
 sqlparser.workspace = true
 store-api.workspace = true
+substrait.workspace = true
 table.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tonic.workspace = true
 
 [dev-dependencies]

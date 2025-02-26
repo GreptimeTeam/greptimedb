@@ -1,5 +1,16 @@
 [default.extend-words]
+Pn = "Pn"
 ue = "ue"
-datas = "datas"
+worl = "worl"
+ot = "ot"
+unqualifed = "unqualifed"
+
 [files]
-extend-exclude = ["corrupted","tests-fuzz/src/data/lorem_words"]
+extend-exclude = [
+    "corrupted",
+    "tests-fuzz/src/data/lorem_words",
+    "*.sql",
+    "*.result",
+    "src/pipeline/benches/data.log",
+    "cyborg/pnpm-lock.yaml"
+]

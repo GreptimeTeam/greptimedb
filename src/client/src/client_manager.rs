@@ -17,42 +17,49 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
-use common_meta::datanode_manager::{Datanode, DatanodeManager};
+use common_meta::node_manager::{DatanodeRef, FlownodeRef, NodeManager};
 use common_meta::peer::Peer;
 use moka::future::{Cache, CacheBuilder};
 
+use crate::flow::FlowRequester;
 use crate::region::RegionRequester;
 use crate::Client;
 
-pub struct DatanodeClients {
+pub struct NodeClients {
     channel_manager: ChannelManager,
     clients: Cache<Peer, Client>,
 }
 
-impl Default for DatanodeClients {
+impl Default for NodeClients {
     fn default() -> Self {
         Self::new(ChannelConfig::new())
     }
 }
 
-impl Debug for DatanodeClients {
+impl Debug for NodeClients {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DatanodeClients")
+        f.debug_struct("NodeClients")
             .field("channel_manager", &self.channel_manager)
             .finish()
     }
 }
 
 #[async_trait::async_trait]
-impl DatanodeManager for DatanodeClients {
-    async fn datanode(&self, datanode: &Peer) -> Arc<dyn Datanode> {
+impl NodeManager for NodeClients {
+    async fn datanode(&self, datanode: &Peer) -> DatanodeRef {
         let client = self.get_client(datanode).await;
 
         Arc::new(RegionRequester::new(client))
     }
+
+    async fn flownode(&self, flownode: &Peer) -> FlownodeRef {
+        let client = self.get_client(flownode).await;
+
+        Arc::new(FlowRequester::new(client))
+    }
 }
 
-impl DatanodeClients {
+impl NodeClients {
     pub fn new(config: ChannelConfig) -> Self {
         Self {
             channel_manager: ChannelManager::with_config(config),

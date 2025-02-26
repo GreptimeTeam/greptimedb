@@ -18,8 +18,8 @@ use std::sync::Arc;
 
 use ::auth::UserProviderRef;
 use async_trait::async_trait;
+use common_runtime::runtime::RuntimeTrait;
 use common_runtime::Runtime;
-use common_telemetry::logging::error;
 use common_telemetry::{debug, warn};
 use futures::StreamExt;
 use pgwire::tokio::process_socket;
@@ -35,6 +35,7 @@ pub struct PostgresServer {
     base_server: BaseTcpServer,
     make_handler: Arc<MakePostgresServerHandler>,
     tls_server_config: Arc<ReloadableTlsServerConfig>,
+    keep_alive_secs: u64,
 }
 
 impl PostgresServer {
@@ -43,7 +44,8 @@ impl PostgresServer {
         query_handler: ServerSqlQueryHandlerRef,
         force_tls: bool,
         tls_server_config: Arc<ReloadableTlsServerConfig>,
-        io_runtime: Arc<Runtime>,
+        keep_alive_secs: u64,
+        io_runtime: Runtime,
         user_provider: Option<UserProviderRef>,
     ) -> PostgresServer {
         let make_handler = Arc::new(
@@ -58,12 +60,13 @@ impl PostgresServer {
             base_server: BaseTcpServer::create_server("Postgres", io_runtime),
             make_handler,
             tls_server_config,
+            keep_alive_secs,
         }
     }
 
     fn accept(
         &self,
-        io_runtime: Arc<Runtime>,
+        io_runtime: Runtime,
         accepting_stream: AbortableStream,
     ) -> impl Future<Output = ()> {
         let handler_maker = self.make_handler.clone();
@@ -79,7 +82,7 @@ impl PostgresServer {
 
             async move {
                 match tcp_stream {
-                    Err(error) => error!("Broken pipe: {}", error), // IoError doesn't impl ErrorExt.
+                    Err(error) => debug!("Broken pipe: {}", error), // IoError doesn't impl ErrorExt.
                     Ok(io_stream) => {
                         let addr = match io_stream.peer_addr() {
                             Ok(addr) => {
@@ -87,7 +90,7 @@ impl PostgresServer {
                                 Some(addr)
                             }
                             Err(e) => {
-                                warn!("Failed to get PostgreSQL client addr, err: {}", e);
+                                warn!(e; "Failed to get PostgreSQL client addr");
                                 None
                             }
                         };
@@ -95,14 +98,8 @@ impl PostgresServer {
                         let _handle = io_runtime.spawn(async move {
                             crate::metrics::METRIC_POSTGRES_CONNECTIONS.inc();
                             let pg_handler = Arc::new(handler_maker.make(addr));
-                            let r = process_socket(
-                                io_stream,
-                                tls_acceptor.clone(),
-                                pg_handler.clone(),
-                                pg_handler.clone(),
-                                pg_handler,
-                            )
-                            .await;
+                            let r =
+                                process_socket(io_stream, tls_acceptor.clone(), pg_handler).await;
                             crate::metrics::METRIC_POSTGRES_CONNECTIONS.dec();
                             r
                         });
@@ -122,10 +119,13 @@ impl Server for PostgresServer {
     }
 
     async fn start(&self, listening: SocketAddr) -> Result<SocketAddr> {
-        let (stream, addr) = self.base_server.bind(listening).await?;
+        let (stream, addr) = self
+            .base_server
+            .bind(listening, self.keep_alive_secs)
+            .await?;
 
         let io_runtime = self.base_server.io_runtime();
-        let join_handle = common_runtime::spawn_read(self.accept(io_runtime, stream));
+        let join_handle = common_runtime::spawn_global(self.accept(io_runtime, stream));
 
         self.base_server.start_with(join_handle).await?;
         Ok(addr)

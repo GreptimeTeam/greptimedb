@@ -30,20 +30,23 @@ pub enum Error {
     #[snafu(display("Unknown proto column datatype: {}", datatype))]
     UnknownColumnDataType {
         datatype: i32,
+        #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
-        error: prost::DecodeError,
+        error: prost::UnknownEnumValue,
     },
 
     #[snafu(display("Failed to create column datatype from {:?}", from))]
     IntoColumnDataType {
         from: ConcreteDataType,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to convert column default constraint, column: {}", column))]
     ConvertColumnDefaultConstraint {
         column: String,
+        #[snafu(implicit)]
         location: Location,
         source: datatypes::error::Error,
     },
@@ -51,8 +54,17 @@ pub enum Error {
     #[snafu(display("Invalid column default constraint, column: {}", column))]
     InvalidColumnDefaultConstraint {
         column: String,
+        #[snafu(implicit)]
         location: Location,
         source: datatypes::error::Error,
+    },
+
+    #[snafu(display("Failed to serialize JSON"))]
+    SerializeJson {
+        #[snafu(source)]
+        error: serde_json::Error,
+        #[snafu(implicit)]
+        location: Location,
     },
 }
 
@@ -60,7 +72,9 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::UnknownColumnDataType { .. } => StatusCode::InvalidArguments,
-            Error::IntoColumnDataType { .. } => StatusCode::Unexpected,
+            Error::IntoColumnDataType { .. } | Error::SerializeJson { .. } => {
+                StatusCode::Unexpected
+            }
             Error::ConvertColumnDefaultConstraint { source, .. }
             | Error::InvalidColumnDefaultConstraint { source, .. } => source.status_code(),
         }

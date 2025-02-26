@@ -1,0 +1,96 @@
+create table fox (
+    ts timestamp time index,
+    fox string,
+);
+
+insert into fox values
+    (1, 'The quick brown fox jumps over the lazy dog'),
+    (2, 'The             fox jumps over the lazy dog'),
+    (3, 'The quick brown     jumps over the lazy dog'),
+    (4, 'The quick brown fox       over the lazy dog'),
+    (5, 'The quick brown fox jumps      the lazy dog'),
+    (6, 'The quick brown fox jumps over          dog'),
+    (7, 'The quick brown fox jumps over the      dog');
+
+select fox from fox where matches(fox, '"fox jumps"') order by ts;
+
+select fox from fox where matches(fox, '"quick brown"') order by ts;
+
+select fox from fox where matches(fox, '"fox jumps"') order by ts;
+
+select fox from fox where matches(fox, 'fox OR lazy') order by ts;
+
+select fox from fox where matches(fox, 'fox AND lazy') order by ts;
+
+select fox from fox where matches(fox, '-over -lazy') order by ts;
+
+select fox from fox where matches(fox, '-over AND -lazy') order by ts;
+
+select fox from fox where matches(fox, 'fox AND jumps OR over') order by ts;
+
+select fox from fox where matches(fox, 'fox OR brown AND quick') order by ts;
+
+select fox from fox where matches(fox, '(fox OR brown) AND quick') order by ts;
+
+select fox from fox where matches(fox, 'brown AND quick OR fox') order by ts;
+
+select fox from fox where matches(fox, 'brown AND (quick OR fox)') order by ts;
+
+select fox from fox where matches(fox, 'brown AND quick AND fox  OR  jumps AND over AND lazy') order by ts;
+
+select fox from fox where matches(fox, 'quick brown fox +jumps') order by ts;
+
+select fox from fox where matches(fox, 'fox +jumps -over') order by ts;
+
+select fox from fox where matches(fox, 'fox AND +jumps AND -over') order by ts;
+
+select fox from fox where matches(fox, '(+fox +jumps) over') order by ts;
+
+select fox from fox where matches(fox, '+(fox jumps) AND over') order by ts;
+
+select fox from fox where matches(fox, 'over -(fox jumps)') order by ts;
+
+select fox from fox where matches(fox, 'over -(fox AND jumps)') order by ts;
+
+select fox from fox where matches(fox, 'over AND -(-(fox OR jumps))') order by ts;
+
+drop table fox;
+
+create table fox_zh (
+    ts timestamp time index,
+    fox string,
+);
+
+insert into fox_zh values
+    (1, '快速的棕色狐狸跳过了懒狗'),
+    (2, '这只狐狸非常聪明，跳过了高高的栅栏'),
+    (3, '狐狸和狗是好朋友，它们一起玩耍'),
+    (4, '狐狸跳过了一条小溪，狗在后面追赶'),
+    (5, '狐狸和狗都喜欢在森林里探险'),
+    (6, '狐狸跳过了一个大石头，狗却没有跳过去'),
+    (7, '狐狸和狗在阳光下休息，享受着温暖的时光'),
+    (8, '狐狸跳过了一个小山坡，狗在后面慢慢地走'),
+    (9, '狐狸和狗一起找到了一颗闪闪发光的宝石'),
+    (10, '狐狸跳过了一个小水坑，狗在旁边看着');
+
+select fox from fox_zh where matches(fox, '狐狸 AND 跳过') order by ts;
+
+select fox from fox_zh where matches(fox, '狐狸 OR 狗') order by ts;
+
+select fox from fox_zh where matches(fox, '狐狸 AND 狗') order by ts;
+
+select fox from fox_zh where matches(fox, '狐狸 -跳过') order by ts;
+
+select fox from fox_zh where matches(fox, '狐狸 AND 跳过 -石头') order by ts;
+
+select fox from fox_zh where matches(fox, '(狐狸 OR 狗) AND 森林') order by ts;
+
+select fox from fox_zh where matches(fox, '狐狸 AND (跳过 OR 追赶)') order by ts;
+
+select fox from fox_zh where matches(fox, '狐狸 AND -(跳过 OR 追赶)') order by ts;
+
+select fox from fox_zh where matches(fox, '狐狸 AND 跳过 AND (小溪 OR 石头)') order by ts;
+
+select fox from fox_zh where matches(fox, '狐狸 AND 跳过 AND -(石头 OR 栅栏)') order by ts;
+
+drop table fox_zh;

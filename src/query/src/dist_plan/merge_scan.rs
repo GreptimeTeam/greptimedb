@@ -13,44 +13,47 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use arrow_schema::{Schema as ArrowSchema, SchemaRef as ArrowSchemaRef};
 use async_stream::stream;
-use common_base::bytes::Bytes;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::BoxedError;
-use common_meta::table_name::TableName;
 use common_plugins::GREPTIME_EXEC_READ_COST;
-use common_query::physical_plan::TaskContext;
-use common_recordbatch::adapter::DfRecordBatchStreamAdapter;
+use common_query::request::QueryRequest;
+use common_recordbatch::adapter::{DfRecordBatchStreamAdapter, RecordBatchMetrics};
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{
     DfSendableRecordBatchStream, RecordBatch, RecordBatchStreamWrapper, SendableRecordBatchStream,
 };
 use common_telemetry::tracing_context::TracingContext;
+use datafusion::execution::TaskContext;
 use datafusion::physical_plan::metrics::{
     Count, ExecutionPlanMetricsSet, Gauge, MetricBuilder, MetricsSet, Time,
 };
-use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning};
-use datafusion_common::{Result, Statistics};
+use datafusion::physical_plan::{
+    DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, Partitioning, PlanProperties,
+};
+use datafusion_common::Result;
 use datafusion_expr::{Extension, LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion_physical_expr::PhysicalSortExpr;
+use datafusion_physical_expr::EquivalenceProperties;
 use datatypes::schema::{Schema, SchemaRef};
 use futures_util::StreamExt;
-use greptime_proto::v1::region::{QueryRequest, RegionRequestHeader};
+use greptime_proto::v1::region::RegionRequestHeader;
 use meter_core::data::ReadItem;
 use meter_macros::read_meter;
+use session::context::QueryContextRef;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
+use table::table_name::TableName;
 use tokio::time::Instant;
 
 use crate::error::ConvertSchemaSnafu;
 use crate::metrics::{MERGE_SCAN_ERRORS_TOTAL, MERGE_SCAN_POLL_ELAPSED, MERGE_SCAN_REGIONS};
 use crate::region_query::RegionQueryHandlerRef;
 
-#[derive(Debug, Hash, PartialEq, Eq, Clone)]
+#[derive(Debug, Hash, PartialOrd, PartialEq, Eq, Clone)]
 pub struct MergeScanLogicalPlan {
     /// In logical plan phase it only contains one input
     input: LogicalPlan,
@@ -82,8 +85,12 @@ impl UserDefinedLogicalNodeCore for MergeScanLogicalPlan {
         write!(f, "MergeScan [is_placeholder={}]", self.is_placeholder)
     }
 
-    fn from_template(&self, _exprs: &[datafusion_expr::Expr], _inputs: &[LogicalPlan]) -> Self {
-        self.clone()
+    fn with_exprs_and_inputs(
+        &self,
+        _exprs: Vec<datafusion::prelude::Expr>,
+        _inputs: Vec<LogicalPlan>,
+    ) -> Result<Self> {
+        Ok(self.clone())
     }
 }
 
@@ -114,15 +121,19 @@ impl MergeScanLogicalPlan {
         &self.input
     }
 }
-
 pub struct MergeScanExec {
     table: TableName,
     regions: Vec<RegionId>,
-    substrait_plan: Bytes,
+    plan: LogicalPlan,
     schema: SchemaRef,
     arrow_schema: ArrowSchemaRef,
     region_query_handler: RegionQueryHandlerRef,
     metric: ExecutionPlanMetricsSet,
+    properties: PlanProperties,
+    /// Metrics from sub stages
+    sub_stage_metrics: Arc<Mutex<Vec<RecordBatchMetrics>>>,
+    query_ctx: QueryContextRef,
+    target_partition: usize,
 }
 
 impl std::fmt::Debug for MergeScanExec {
@@ -139,49 +150,81 @@ impl MergeScanExec {
     pub fn new(
         table: TableName,
         regions: Vec<RegionId>,
-        substrait_plan: Bytes,
+        plan: LogicalPlan,
         arrow_schema: &ArrowSchema,
         region_query_handler: RegionQueryHandlerRef,
+        query_ctx: QueryContextRef,
+        target_partition: usize,
     ) -> Result<Self> {
-        let arrow_schema_without_metadata = Self::arrow_schema_without_metadata(arrow_schema);
-        let schema_without_metadata =
-            Self::arrow_schema_to_schema(arrow_schema_without_metadata.clone())?;
+        // TODO(CookiePieWw): Initially we removed the metadata from the schema in #2000, but we have to
+        // keep it for #4619 to identify json type in src/datatypes/src/schema/column_schema.rs.
+        // Reconsider if it's possible to remove it.
+        let arrow_schema = Arc::new(arrow_schema.clone());
+        let properties = PlanProperties::new(
+            EquivalenceProperties::new(arrow_schema.clone()),
+            Partitioning::UnknownPartitioning(target_partition),
+            ExecutionMode::Bounded,
+        );
+        let schema = Self::arrow_schema_to_schema(arrow_schema.clone())?;
         Ok(Self {
             table,
             regions,
-            substrait_plan,
-            schema: schema_without_metadata,
-            arrow_schema: arrow_schema_without_metadata,
+            plan,
+            schema,
+            arrow_schema,
             region_query_handler,
             metric: ExecutionPlanMetricsSet::new(),
+            sub_stage_metrics: Arc::default(),
+            properties,
+            query_ctx,
+            target_partition,
         })
     }
 
-    pub fn to_stream(&self, context: Arc<TaskContext>) -> Result<SendableRecordBatchStream> {
-        let substrait_plan = self.substrait_plan.to_vec();
+    pub fn to_stream(
+        &self,
+        context: Arc<TaskContext>,
+        partition: usize,
+    ) -> Result<SendableRecordBatchStream> {
+        // prepare states to move
         let regions = self.regions.clone();
         let region_query_handler = self.region_query_handler.clone();
         let metric = MergeScanMetric::new(&self.metric);
-        let schema = Self::arrow_schema_to_schema(self.schema())?;
-
+        let schema = self.schema.clone();
+        let query_ctx = self.query_ctx.clone();
+        let sub_stage_metrics_moved = self.sub_stage_metrics.clone();
+        let plan = self.plan.clone();
+        let target_partition = self.target_partition;
         let dbname = context.task_id().unwrap_or_default();
         let tracing_context = TracingContext::from_json(context.session_id().as_str());
+        let current_channel = self.query_ctx.channel();
 
         let stream = Box::pin(stream!({
-            MERGE_SCAN_REGIONS.observe(regions.len() as f64);
+            // only report metrics once for each MergeScan
+            if partition == 0 {
+                MERGE_SCAN_REGIONS.observe(regions.len() as f64);
+            }
+
             let _finish_timer = metric.finish_time().timer();
             let mut ready_timer = metric.ready_time().timer();
             let mut first_consume_timer = Some(metric.first_consume_time().timer());
 
-            for region_id in regions {
+            for region_id in regions
+                .iter()
+                .skip(partition)
+                .step_by(target_partition)
+                .copied()
+            {
                 let request = QueryRequest {
                     header: Some(RegionRequestHeader {
                         tracing_context: tracing_context.to_w3c(),
                         dbname: dbname.clone(),
+                        query_context: Some(query_ctx.as_ref().into()),
                     }),
-                    region_id: region_id.into(),
-                    plan: substrait_plan.clone(),
+                    region_id,
+                    plan: plan.clone(),
                 };
+                let do_get_start = Instant::now();
                 let mut stream = region_query_handler
                     .do_get(request)
                     .await
@@ -190,11 +233,11 @@ impl MergeScanExec {
                         BoxedError::new(e)
                     })
                     .context(ExternalSnafu)?;
+                let do_get_cost = do_get_start.elapsed();
 
                 ready_timer.stop();
 
-                let mut poll_duration = Duration::new(0, 0);
-
+                let mut poll_duration = Duration::ZERO;
                 let mut poll_timer = Instant::now();
                 while let Some(batch) = stream.next().await {
                     let poll_elapsed = poll_timer.elapsed();
@@ -205,13 +248,19 @@ impl MergeScanExec {
                     // to remove metadata and correct column name
                     let batch = RecordBatch::new(schema.clone(), batch.columns().iter().cloned())?;
                     metric.record_output_batch_rows(batch.num_rows());
-                    if let Some(first_consume_timer) = first_consume_timer.as_mut().take() {
+                    if let Some(mut first_consume_timer) = first_consume_timer.take() {
                         first_consume_timer.stop();
                     }
                     yield Ok(batch);
                     // reset poll timer
                     poll_timer = Instant::now();
                 }
+                common_telemetry::debug!(
+                    "Merge scan stop poll stream, partition: {}, region_id: {}, poll_duration: {:?}, first_consume: {}, do_get_cost: {:?}",
+                    partition, region_id, poll_duration, metric.first_consume_time(), do_get_cost
+                );
+
+                // process metrics after all data is drained.
                 if let Some(metrics) = stream.metrics() {
                     let (c, s) = parse_catalog_and_schema_from_db_string(&dbname);
                     let value = read_meter!(
@@ -220,9 +269,13 @@ impl MergeScanExec {
                         ReadItem {
                             cpu_time: metrics.elapsed_compute as u64,
                             table_scan: metrics.memory_usage as u64
-                        }
+                        },
+                        current_channel as u8
                     );
                     metric.record_greptime_exec_cost(value as usize);
+
+                    // record metrics from sub sgates
+                    sub_stage_metrics_moved.lock().unwrap().push(metrics);
                 }
 
                 MERGE_SCAN_POLL_ELAPSED.observe(poll_duration.as_secs_f64());
@@ -237,23 +290,21 @@ impl MergeScanExec {
         }))
     }
 
-    fn arrow_schema_without_metadata(arrow_schema: &ArrowSchema) -> ArrowSchemaRef {
-        Arc::new(ArrowSchema::new(
-            arrow_schema
-                .fields()
-                .iter()
-                .map(|field| {
-                    let field = field.as_ref().clone();
-                    let field_without_metadata = field.with_metadata(Default::default());
-                    Arc::new(field_without_metadata)
-                })
-                .collect::<Vec<_>>(),
-        ))
-    }
-
     fn arrow_schema_to_schema(arrow_schema: ArrowSchemaRef) -> Result<SchemaRef> {
         let schema = Schema::try_from(arrow_schema).context(ConvertSchemaSnafu)?;
         Ok(Arc::new(schema))
+    }
+
+    pub fn sub_stage_metrics(&self) -> Vec<RecordBatchMetrics> {
+        self.sub_stage_metrics.lock().unwrap().clone()
+    }
+
+    pub fn partition_count(&self) -> usize {
+        self.target_partition
+    }
+
+    pub fn region_count(&self) -> usize {
+        self.regions.len()
     }
 }
 
@@ -266,15 +317,11 @@ impl ExecutionPlan for MergeScanExec {
         self.arrow_schema.clone()
     }
 
-    fn output_partitioning(&self) -> Partitioning {
-        Partitioning::UnknownPartitioning(1)
+    fn properties(&self) -> &PlanProperties {
+        &self.properties
     }
 
-    fn output_ordering(&self) -> Option<&[PhysicalSortExpr]> {
-        None
-    }
-
-    fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![]
     }
 
@@ -289,20 +336,20 @@ impl ExecutionPlan for MergeScanExec {
 
     fn execute(
         &self,
-        _partition: usize,
+        partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<DfSendableRecordBatchStream> {
         Ok(Box::pin(DfRecordBatchStreamAdapter::new(
-            self.to_stream(context)?,
+            self.to_stream(context, partition)?,
         )))
-    }
-
-    fn statistics(&self) -> Statistics {
-        Statistics::default()
     }
 
     fn metrics(&self) -> Option<MetricsSet> {
         Some(self.metric.clone_inner())
+    }
+
+    fn name(&self) -> &str {
+        "MergeScanExec"
     }
 }
 

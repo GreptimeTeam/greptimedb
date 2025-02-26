@@ -43,7 +43,7 @@ pub struct FlightRecordBatchStream {
 impl FlightRecordBatchStream {
     pub fn new(recordbatches: SendableRecordBatchStream, tracing_context: TracingContext) -> Self {
         let (tx, rx) = mpsc::channel::<TonicResult<FlightMessage>>(1);
-        let join_handle = common_runtime::spawn_read(async move {
+        let join_handle = common_runtime::spawn_global(async move {
             Self::flight_data_stream(recordbatches, tx)
                 .trace(tracing_context.attach(info_span!("flight_data_stream")))
                 .await
@@ -62,7 +62,7 @@ impl FlightRecordBatchStream {
     ) {
         let schema = recordbatches.schema();
         if let Err(e) = tx.send(Ok(FlightMessage::Schema(schema))).await {
-            warn!("stop sending Flight data, err: {e}");
+            warn!(e; "stop sending Flight data");
             return;
         }
 
@@ -70,14 +70,14 @@ impl FlightRecordBatchStream {
             match batch_or_err {
                 Ok(recordbatch) => {
                     if let Err(e) = tx.send(Ok(FlightMessage::Recordbatch(recordbatch))).await {
-                        warn!("stop sending Flight data, err: {e}");
+                        warn!(e; "stop sending Flight data");
                         return;
                     }
                 }
                 Err(e) => {
                     let e = Err(e).context(error::CollectRecordbatchSnafu);
                     if let Err(e) = tx.send(e.map_err(|x| x.into())).await {
-                        warn!("stop sending Flight data, err: {e}");
+                        warn!(e; "stop sending Flight data");
                     }
                     return;
                 }

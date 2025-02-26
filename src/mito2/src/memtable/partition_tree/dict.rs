@@ -19,14 +19,16 @@ use std::sync::Arc;
 
 use datatypes::arrow::array::{Array, ArrayBuilder, BinaryArray, BinaryBuilder};
 
-use crate::memtable::partition_tree::metrics::WriteMetrics;
 use crate::memtable::partition_tree::PkIndex;
+use crate::memtable::stats::WriteMetrics;
 use crate::metrics::MEMTABLE_DICT_BYTES;
 
 /// Maximum keys in a [DictBlock].
 const MAX_KEYS_PER_BLOCK: u16 = 256;
 
-type PkIndexMap = BTreeMap<Vec<u8>, PkIndex>;
+/// The key is mcmp-encoded primary keys, while the values are the pk index and
+/// optionally sparsely encoded primary keys.
+type PkIndexMap = BTreeMap<Vec<u8>, (PkIndex, Option<Vec<u8>>)>;
 
 /// Builder to build a key dictionary.
 pub struct KeyDictBuilder {
@@ -66,10 +68,15 @@ impl KeyDictBuilder {
     ///
     /// # Panics
     /// Panics if the builder is full.
-    pub fn insert_key(&mut self, key: &[u8], metrics: &mut WriteMetrics) -> PkIndex {
+    pub fn insert_key(
+        &mut self,
+        full_primary_key: &[u8],
+        sparse_key: Option<&[u8]>,
+        metrics: &mut WriteMetrics,
+    ) -> PkIndex {
         assert!(!self.is_full());
 
-        if let Some(pk_index) = self.pk_to_index.get(key).copied() {
+        if let Some(pk_index) = self.pk_to_index.get(full_primary_key).map(|v| v.0) {
             // Already in the builder.
             return pk_index;
         }
@@ -81,16 +88,22 @@ impl KeyDictBuilder {
         }
 
         // Safety: we have checked the buffer length.
-        let pk_index = self.key_buffer.push_key(key);
-        self.pk_to_index.insert(key.to_vec(), pk_index);
+        let pk_index = self.key_buffer.push_key(full_primary_key);
+        let (sparse_key, sparse_key_len) = if let Some(sparse_key) = sparse_key {
+            (Some(sparse_key.to_vec()), sparse_key.len())
+        } else {
+            (None, 0)
+        };
+        self.pk_to_index
+            .insert(full_primary_key.to_vec(), (pk_index, sparse_key));
         self.num_keys += 1;
 
         // Since we store the key twice so the bytes usage doubled.
-        metrics.key_bytes += key.len() * 2;
-        self.key_bytes_in_index += key.len();
+        metrics.key_bytes += full_primary_key.len() * 2 + sparse_key_len;
+        self.key_bytes_in_index += full_primary_key.len();
 
         // Adds key size of index to the metrics.
-        MEMTABLE_DICT_BYTES.add(key.len() as i64);
+        MEMTABLE_DICT_BYTES.add((full_primary_key.len() + sparse_key_len) as i64);
 
         pk_index
     }
@@ -107,38 +120,47 @@ impl KeyDictBuilder {
                 .sum::<usize>()
     }
 
-    /// Finishes the builder.
-    pub fn finish(&mut self, pk_to_index: &mut BTreeMap<Vec<u8>, PkIndex>) -> Option<KeyDict> {
+    /// Finishes the builder. The key of the second BTreeMap is sparse-encoded bytes.
+    pub fn finish(&mut self) -> Option<(KeyDict, BTreeMap<Vec<u8>, PkIndex>)> {
         if self.key_buffer.is_empty() {
             return None;
         }
+        let mut pk_to_index_map = BTreeMap::new();
 
         // Finishes current dict block and resets the pk index.
         let dict_block = self.key_buffer.finish(true);
         self.dict_blocks.push(dict_block);
         // Computes key position and then alter pk index.
         let mut key_positions = vec![0; self.pk_to_index.len()];
-        for (i, pk_index) in self.pk_to_index.values_mut().enumerate() {
+
+        for (i, (_full_pk, (pk_index, sparse_key))) in (std::mem::take(&mut self.pk_to_index))
+            .into_iter()
+            .enumerate()
+        {
             // The position of the i-th key is the old pk index.
-            key_positions[i] = *pk_index;
-            // Overwrites the pk index.
-            *pk_index = i as PkIndex;
+            key_positions[i] = pk_index;
+            if let Some(sparse_key) = sparse_key {
+                pk_to_index_map.insert(sparse_key, i as PkIndex);
+            }
         }
+
         self.num_keys = 0;
         let key_bytes_in_index = self.key_bytes_in_index;
         self.key_bytes_in_index = 0;
-        *pk_to_index = std::mem::take(&mut self.pk_to_index);
 
-        Some(KeyDict {
-            dict_blocks: std::mem::take(&mut self.dict_blocks),
-            key_positions,
-            key_bytes_in_index,
-        })
+        Some((
+            KeyDict {
+                dict_blocks: std::mem::take(&mut self.dict_blocks),
+                key_positions,
+                key_bytes_in_index,
+            },
+            pk_to_index_map,
+        ))
     }
 
     /// Reads the builder.
     pub fn read(&self) -> DictBuilderReader {
-        let sorted_pk_indices = self.pk_to_index.values().copied().collect();
+        let sorted_pk_indices = self.pk_to_index.values().map(|v| v.0).collect();
         let block = self.key_buffer.finish_cloned();
         let mut blocks = Vec::with_capacity(self.dict_blocks.len() + 1);
         blocks.extend_from_slice(&self.dict_blocks);
@@ -259,10 +281,6 @@ impl Drop for KeyDict {
 
 /// Buffer to store unsorted primary keys.
 struct KeyBuffer {
-    // We use arrow's binary builder as out default binary builder
-    // is LargeBinaryBuilder
-    // TODO(yingwen): Change the type binary vector to Binary instead of LargeBinary.
-    /// Builder for binary key array.
     key_builder: BinaryBuilder,
     next_pk_index: usize,
 }
@@ -394,7 +412,7 @@ mod tests {
         let mut metrics = WriteMetrics::default();
         for key in &keys {
             assert!(!builder.is_full());
-            let pk_index = builder.insert_key(key, &mut metrics);
+            let pk_index = builder.insert_key(key, None, &mut metrics);
             last_pk_index = Some(pk_index);
         }
         assert_eq!(num_keys - 1, last_pk_index.unwrap());
@@ -426,14 +444,14 @@ mod tests {
         for i in 0..num_keys {
             // Each key is 5 bytes.
             let key = format!("{i:05}");
-            builder.insert_key(key.as_bytes(), &mut metrics);
+            builder.insert_key(key.as_bytes(), None, &mut metrics);
         }
         let key_bytes = num_keys as usize * 5;
         assert_eq!(key_bytes * 2, metrics.key_bytes);
         assert_eq!(key_bytes, builder.key_bytes_in_index);
         assert_eq!(8850, builder.memory_size());
 
-        let dict = builder.finish(&mut BTreeMap::new()).unwrap();
+        let (dict, _) = builder.finish().unwrap();
         assert_eq!(0, builder.key_bytes_in_index);
         assert_eq!(key_bytes, dict.key_bytes_in_index);
         assert!(dict.shared_memory_size() > key_bytes);
@@ -446,12 +464,12 @@ mod tests {
         for i in 0..MAX_KEYS_PER_BLOCK * 2 {
             let key = format!("{i:010}");
             assert!(!builder.is_full());
-            builder.insert_key(key.as_bytes(), &mut metrics);
+            builder.insert_key(key.as_bytes(), None, &mut metrics);
         }
         assert!(builder.is_full());
-        builder.finish(&mut BTreeMap::new());
+        builder.finish();
 
         assert!(!builder.is_full());
-        assert_eq!(0, builder.insert_key(b"a0", &mut metrics));
+        assert_eq!(0, builder.insert_key(b"a0", None, &mut metrics));
     }
 }

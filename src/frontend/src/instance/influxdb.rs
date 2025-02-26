@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use client::Output;
 use common_error::ext::BoxedError;
-use servers::error::{AuthSnafu, Error};
+use servers::error::{AuthSnafu, Error, InFlightWriteBytesExceededSnafu};
 use servers::influxdb::InfluxdbRequest;
 use servers::interceptor::{LineProtocolInterceptor, LineProtocolInterceptorRef};
 use servers::query_handler::InfluxdbLineProtocolHandler;
@@ -42,7 +42,21 @@ impl InfluxdbLineProtocolHandler for Instance {
         interceptor_ref.pre_execute(&request.lines, ctx.clone())?;
 
         let requests = request.try_into()?;
-        self.handle_row_inserts(requests, ctx)
+        let requests = interceptor_ref
+            .post_lines_conversion(requests, ctx.clone())
+            .await?;
+
+        let _guard = if let Some(limiter) = &self.limiter {
+            let result = limiter.limit_row_inserts(&requests);
+            if result.is_none() {
+                return InFlightWriteBytesExceededSnafu.fail();
+            }
+            result
+        } else {
+            None
+        };
+
+        self.handle_influx_row_inserts(requests, ctx)
             .await
             .map_err(BoxedError::new)
             .context(servers::error::ExecuteGrpcQuerySnafu)

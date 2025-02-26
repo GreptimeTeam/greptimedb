@@ -14,6 +14,7 @@
 
 mod authorize;
 pub mod builder;
+mod cancellation;
 mod database;
 pub mod flight;
 pub mod greptime_handler;
@@ -26,17 +27,20 @@ use std::net::SocketAddr;
 use api::v1::health_check_server::{HealthCheck, HealthCheckServer};
 use api::v1::{HealthCheckRequest, HealthCheckResponse};
 use async_trait::async_trait;
+use common_base::readable_size::ReadableSize;
 use common_grpc::channel_manager::{
     DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE, DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
 };
-use common_telemetry::logging::info;
-use common_telemetry::{error, warn};
+use common_telemetry::{error, info, warn};
 use futures::FutureExt;
+use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot::{self, Receiver, Sender};
 use tokio::sync::Mutex;
-use tonic::transport::server::{Routes, TcpIncoming};
+use tonic::service::Routes;
+use tonic::transport::server::TcpIncoming;
+use tonic::transport::ServerTlsConfig;
 use tonic::{Request, Response, Status};
 use tonic_reflection::server::{ServerReflection, ServerReflectionServer};
 
@@ -45,8 +49,85 @@ use crate::error::{
 };
 use crate::metrics::MetricsMiddlewareLayer;
 use crate::server::Server;
+use crate::tls::TlsOption;
 
 type TonicResult<T> = std::result::Result<T, Status>;
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GrpcOptions {
+    /// The address to bind the gRPC server.
+    pub bind_addr: String,
+    /// The address to advertise to clients.
+    pub server_addr: String,
+    /// Max gRPC receiving(decoding) message size
+    pub max_recv_message_size: ReadableSize,
+    /// Max gRPC sending(encoding) message size
+    pub max_send_message_size: ReadableSize,
+    pub runtime_size: usize,
+    #[serde(default = "Default::default")]
+    pub tls: TlsOption,
+}
+
+impl GrpcOptions {
+    /// Detect the server address.
+    #[cfg(not(target_os = "android"))]
+    pub fn detect_server_addr(&mut self) {
+        if self.server_addr.is_empty() {
+            match local_ip_address::local_ip() {
+                Ok(ip) => {
+                    let detected_addr = format!(
+                        "{}:{}",
+                        ip,
+                        self.bind_addr
+                            .split(':')
+                            .nth(1)
+                            .unwrap_or(DEFAULT_GRPC_ADDR_PORT)
+                    );
+                    info!("Using detected: {} as server address", detected_addr);
+                    self.server_addr = detected_addr;
+                }
+                Err(e) => {
+                    error!("Failed to detect local ip address: {}", e);
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn detect_server_addr(&mut self) {
+        if self.server_addr.is_empty() {
+            common_telemetry::debug!("detect local IP is not supported on Android");
+        }
+    }
+}
+
+const DEFAULT_GRPC_ADDR_PORT: &str = "4001";
+
+impl Default for GrpcOptions {
+    fn default() -> Self {
+        Self {
+            bind_addr: format!("127.0.0.1:{}", DEFAULT_GRPC_ADDR_PORT),
+            // If hostname is not set, the server will use the local ip address as the hostname.
+            server_addr: String::new(),
+            max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
+            max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
+            runtime_size: 8,
+            tls: TlsOption::default(),
+        }
+    }
+}
+
+impl GrpcOptions {
+    pub fn with_bind_addr(mut self, bind_addr: &str) -> Self {
+        self.bind_addr = bind_addr.to_string();
+        self
+    }
+
+    pub fn with_server_addr(mut self, server_addr: &str) -> Self {
+        self.server_addr = server_addr.to_string();
+        self
+    }
+}
 
 pub struct GrpcServer {
     // states
@@ -56,6 +137,8 @@ pub struct GrpcServer {
     serve_state: Mutex<Option<Receiver<Result<()>>>>,
     // handlers
     routes: Mutex<Option<Routes>>,
+    // tls config
+    tls_config: Option<ServerTlsConfig>,
 }
 
 /// Grpc Server configuration
@@ -65,6 +148,7 @@ pub struct GrpcServerConfig {
     pub max_recv_message_size: usize,
     // Max gRPC sending(encoding) message size
     pub max_send_message_size: usize,
+    pub tls: TlsOption,
 }
 
 impl Default for GrpcServerConfig {
@@ -72,6 +156,7 @@ impl Default for GrpcServerConfig {
         Self {
             max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE.as_bytes() as usize,
             max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE.as_bytes() as usize,
+            tls: TlsOption::default(),
         }
     }
 }
@@ -87,7 +172,10 @@ impl GrpcServer {
             .with_service_name("greptime.v1.GreptimeDatabase")
             .with_service_name("greptime.v1.HealthCheck")
             .with_service_name("greptime.v1.RegionServer")
-            .build()
+            .build_v1()
+            .inspect_err(|e| {
+                common_telemetry::error!(e; "Failed to build gRPC reflection server");
+            })
             .unwrap()
     }
 
@@ -173,8 +261,11 @@ impl Server for GrpcServer {
             .layer(MetricsMiddlewareLayer)
             .into_inner();
 
-        let builder = tonic::transport::Server::builder()
-            .layer(metrics_layer)
+        let mut builder = tonic::transport::Server::builder().layer(metrics_layer);
+        if let Some(tls_config) = self.tls_config.clone() {
+            builder = builder.tls_config(tls_config).context(StartGrpcSnafu)?;
+        }
+        let builder = builder
             .add_routes(routes)
             .add_service(self.create_healthcheck_service())
             .add_service(self.create_reflection_service());
@@ -183,7 +274,7 @@ impl Server for GrpcServer {
         let mut serve_state = self.serve_state.lock().await;
         *serve_state = Some(serve_state_rx);
 
-        let _handle = common_runtime::spawn_bg(async move {
+        let _handle = common_runtime::spawn_global(async move {
             let result = builder
                 .serve_with_incoming_shutdown(incoming, rx.map(drop))
                 .await

@@ -15,9 +15,10 @@
 use std::mem;
 use std::sync::Arc;
 
-use api::v1::{Mutation, OpType, Rows, WalEntry};
-use common_wal::options::WalOptions;
+use api::v1::{Mutation, OpType, Rows, WalEntry, WriteHint};
+use futures::stream::{FuturesUnordered, StreamExt};
 use snafu::ResultExt;
+use store_api::logstore::provider::Provider;
 use store_api::logstore::LogStore;
 use store_api::storage::{RegionId, SequenceNumber};
 
@@ -86,7 +87,7 @@ pub(crate) struct RegionWriteCtx {
     /// out of the context to construct the wal entry when we write to the wal.
     wal_entry: WalEntry,
     /// Wal options of the region being written to.
-    wal_options: WalOptions,
+    provider: Provider,
     /// Notifiers to send write results to waiters.
     ///
     /// The i-th notify is for i-th mutation.
@@ -106,7 +107,7 @@ impl RegionWriteCtx {
     pub(crate) fn new(
         region_id: RegionId,
         version_control: &VersionControlRef,
-        wal_options: WalOptions,
+        provider: Provider,
     ) -> RegionWriteCtx {
         let VersionControlData {
             version,
@@ -122,7 +123,7 @@ impl RegionWriteCtx {
             next_sequence: committed_sequence + 1,
             next_entry_id: last_entry_id + 1,
             wal_entry: WalEntry::default(),
-            wal_options,
+            provider,
             notifiers: Vec::new(),
             failed: false,
             put_num: 0,
@@ -131,12 +132,19 @@ impl RegionWriteCtx {
     }
 
     /// Push mutation to the context.
-    pub(crate) fn push_mutation(&mut self, op_type: i32, rows: Option<Rows>, tx: OptionOutputTx) {
+    pub(crate) fn push_mutation(
+        &mut self,
+        op_type: i32,
+        rows: Option<Rows>,
+        write_hint: Option<WriteHint>,
+        tx: OptionOutputTx,
+    ) {
         let num_rows = rows.as_ref().map(|rows| rows.rows.len()).unwrap_or(0);
         self.wal_entry.mutations.push(Mutation {
             op_type,
             sequence: self.next_sequence,
             rows,
+            write_hint,
         });
 
         let notify = WriteNotify::new(tx, num_rows);
@@ -163,7 +171,7 @@ impl RegionWriteCtx {
             self.region_id,
             self.next_entry_id,
             &self.wal_entry,
-            &self.wal_options,
+            &self.provider,
         )?;
         self.next_entry_id += 1;
         Ok(())
@@ -190,23 +198,43 @@ impl RegionWriteCtx {
     }
 
     /// Consumes mutations and writes them into mutable memtable.
-    pub(crate) fn write_memtable(&mut self) {
+    pub(crate) async fn write_memtable(&mut self) {
         debug_assert_eq!(self.notifiers.len(), self.wal_entry.mutations.len());
 
         if self.failed {
             return;
         }
 
-        let mutable = &self.version.memtables.mutable;
-        // Takes mutations from the wal entry.
-        let mutations = mem::take(&mut self.wal_entry.mutations);
-        for (mutation, notify) in mutations.into_iter().zip(&mut self.notifiers) {
-            // Write mutation to the memtable.
-            let Some(kvs) = KeyValues::new(&self.version.metadata, mutation) else {
-                continue;
-            };
-            if let Err(e) = mutable.write(&kvs) {
-                notify.err = Some(Arc::new(e));
+        let mutable = self.version.memtables.mutable.clone();
+        let mutations = mem::take(&mut self.wal_entry.mutations)
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, mutation)| {
+                let kvs = KeyValues::new(&self.version.metadata, mutation)?;
+                Some((i, kvs))
+            })
+            .collect::<Vec<_>>();
+
+        if mutations.len() == 1 {
+            if let Err(err) = mutable.write(&mutations[0].1) {
+                self.notifiers[mutations[0].0].err = Some(Arc::new(err));
+            }
+        } else {
+            let mut tasks = FuturesUnordered::new();
+            for (i, kvs) in mutations {
+                let mutable = mutable.clone();
+                // use tokio runtime to schedule tasks.
+                tasks.push(common_runtime::spawn_blocking_global(move || {
+                    (i, mutable.write(&kvs))
+                }));
+            }
+
+            while let Some(result) = tasks.next().await {
+                // first unwrap the result from `spawn` above
+                let (i, result) = result.unwrap();
+                if let Err(err) = result {
+                    self.notifiers[i].err = Some(Arc::new(err));
+                }
             }
         }
 

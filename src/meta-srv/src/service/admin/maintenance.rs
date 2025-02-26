@@ -14,30 +14,29 @@
 
 use std::collections::HashMap;
 
-use common_meta::key::MAINTENANCE_KEY;
-use common_meta::kv_backend::KvBackendRef;
-use common_meta::rpc::store::PutRequest;
+use common_meta::key::maintenance::MaintenanceModeManagerRef;
 use snafu::{OptionExt, ResultExt};
 use tonic::codegen::http;
 use tonic::codegen::http::Response;
 
 use crate::error::{
-    InvalidHttpBodySnafu, KvBackendSnafu, MissingRequiredParameterSnafu, ParseBoolSnafu,
+    InvalidHttpBodySnafu, MaintenanceModeManagerSnafu, MissingRequiredParameterSnafu,
+    ParseBoolSnafu, UnsupportedSnafu,
 };
 use crate::service::admin::HttpHandler;
 
 #[derive(Clone)]
 pub struct MaintenanceHandler {
-    pub kv_backend: KvBackendRef,
+    pub manager: MaintenanceModeManagerRef,
 }
 
 impl MaintenanceHandler {
     async fn get_maintenance(&self) -> crate::Result<Response<String>> {
         let enabled = self
-            .kv_backend
-            .exists(MAINTENANCE_KEY.as_bytes())
+            .manager
+            .maintenance_mode()
             .await
-            .context(KvBackendSnafu)?;
+            .context(MaintenanceModeManagerSnafu)?;
         let response = if enabled {
             "Maintenance mode is enabled"
         } else {
@@ -62,21 +61,16 @@ impl MaintenanceHandler {
             })?;
 
         let response = if enable {
-            let req = PutRequest {
-                key: Vec::from(MAINTENANCE_KEY),
-                value: vec![],
-                prev_kv: false,
-            };
-            self.kv_backend
-                .put(req.clone())
+            self.manager
+                .set_maintenance_mode()
                 .await
-                .context(KvBackendSnafu)?;
+                .context(MaintenanceModeManagerSnafu)?;
             "Maintenance mode enabled"
         } else {
-            self.kv_backend
-                .delete(MAINTENANCE_KEY.as_bytes(), false)
+            self.manager
+                .unset_maintenance_mode()
                 .await
-                .context(KvBackendSnafu)?;
+                .context(MaintenanceModeManagerSnafu)?;
             "Maintenance mode disabled"
         };
 
@@ -91,13 +85,17 @@ impl MaintenanceHandler {
 impl HttpHandler for MaintenanceHandler {
     async fn handle(
         &self,
-        path: &str,
+        _: &str,
+        method: http::Method,
         params: &HashMap<String, String>,
     ) -> crate::Result<Response<String>> {
-        if path.ends_with("/set") {
-            self.set_maintenance(params).await
-        } else {
-            self.get_maintenance().await
+        match method {
+            http::Method::GET => self.get_maintenance().await,
+            http::Method::PUT => self.set_maintenance(params).await,
+            _ => UnsupportedSnafu {
+                operation: format!("http method {method}"),
+            }
+            .fail(),
         }
     }
 }

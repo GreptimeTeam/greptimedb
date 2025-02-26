@@ -40,7 +40,7 @@ with cte1 as (with b as (Select i as j from a) select j from b), cte2 as (with c
 
 with cte1 as (select 42), cte1 as (select 42) select * FROM cte1;
 
-Error: 3000(PlanQuery), Failed to plan SQL: sql parser error: WITH query name "cte1" specified more than once
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: WITH query name "cte1" specified more than once
 
 with cte1 as (Select i as j from a) select * from (with cte2 as (select max(j) as j from cte1) select * from cte2) f;
 
@@ -64,12 +64,12 @@ with cte1 as (Select i as j from a) select * from cte1 where j = (with cte2 as (
 -- this feature is not implemented in datafusion
 with cte as (Select i as j from a) select * from cte where j = (with cte as (select max(j) as j from cte) select j from cte);
 
-Error: 3000(PlanQuery), Failed to plan SQL: sql parser error: WITH query name "cte" specified more than once
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: WITH query name "cte" specified more than once
 
 -- self-refer to non-existent cte-
 with cte as (select * from cte) select * from cte;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Table not found: greptime.public.cte
+Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.public.cte
 
 drop table a;
 

@@ -14,8 +14,8 @@
 
 use std::sync::Arc;
 
-use api::v1::region::QueryRequest;
 use async_trait::async_trait;
+use common_query::request::QueryRequest;
 use common_recordbatch::SendableRecordBatchStream;
 
 use crate::error::Result;

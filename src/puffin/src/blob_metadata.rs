@@ -56,7 +56,7 @@ pub struct BlobMetadata {
     pub length: i64,
 
     /// See [`CompressionCodec`]. If omitted, the data is assumed to be uncompressed.
-    #[builder(default, setter(strip_option))]
+    #[builder(default)]
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compression_codec: Option<CompressionCodec>,
@@ -68,8 +68,22 @@ pub struct BlobMetadata {
     pub properties: HashMap<String, String>,
 }
 
+impl BlobMetadata {
+    /// Calculates the memory usage of the blob metadata in bytes.
+    pub fn memory_usage(&self) -> usize {
+        self.blob_type.len()
+            + self.input_fields.len() * std::mem::size_of::<i32>()
+            + self
+                .properties
+                .iter()
+                .map(|(k, v)| k.len() + v.len())
+                .sum::<usize>()
+            + std::mem::size_of::<Self>()
+    }
+}
+
 /// Compression codec used to compress the blob
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CompressionCodec {
     /// Single [LZ4 compression frame](https://github.com/lz4/lz4/blob/77d1b93f72628af7bbde0243b4bba9205c3138d9/doc/lz4_Frame_format.md),
@@ -107,7 +121,7 @@ mod tests {
             .sequence_number(200)
             .offset(300)
             .length(400)
-            .compression_codec(CompressionCodec::Lz4)
+            .compression_codec(Some(CompressionCodec::Lz4))
             .properties(properties)
             .build()
             .unwrap();

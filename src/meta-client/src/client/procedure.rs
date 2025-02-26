@@ -18,19 +18,21 @@ use std::time::Duration;
 
 use api::v1::meta::procedure_service_client::ProcedureServiceClient;
 use api::v1::meta::{
-    DdlTaskRequest, DdlTaskResponse, ErrorCode, MigrateRegionRequest, MigrateRegionResponse,
-    ProcedureId, ProcedureStateResponse, QueryProcedureRequest, ResponseHeader, Role,
+    DdlTaskRequest, DdlTaskResponse, MigrateRegionRequest, MigrateRegionResponse,
+    ProcedureDetailRequest, ProcedureDetailResponse, ProcedureId, ProcedureStateResponse,
+    QueryProcedureRequest, ResponseHeader, Role,
 };
 use common_grpc::channel_manager::ChannelManager;
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{info, warn};
 use snafu::{ensure, ResultExt};
 use tokio::sync::RwLock;
+use tonic::codec::CompressionEncoding;
 use tonic::transport::Channel;
-use tonic::{Code, Status};
+use tonic::Status;
 
 use crate::client::ask_leader::AskLeader;
-use crate::client::Id;
+use crate::client::{util, Id};
 use crate::error;
 use crate::error::Result;
 
@@ -61,11 +63,6 @@ impl Client {
         inner.start(urls).await
     }
 
-    pub async fn is_started(&self) -> bool {
-        let inner = self.inner.read().await;
-        inner.is_started()
-    }
-
     pub async fn submit_ddl_task(&self, req: DdlTaskRequest) -> Result<DdlTaskResponse> {
         let inner = self.inner.read().await;
         inner.submit_ddl_task(req).await
@@ -81,18 +78,23 @@ impl Client {
     /// - `region_id`:  the migrated region id
     /// - `from_peer`:  the source datanode id
     /// - `to_peer`:  the target datanode id
-    /// - `replay_timeout`: replay WAL timeout after migration.
+    /// - `timeout`: timeout for downgrading region and upgrading region operations
     pub async fn migrate_region(
         &self,
         region_id: u64,
         from_peer: u64,
         to_peer: u64,
-        replay_timeout: Duration,
+        timeout: Duration,
     ) -> Result<MigrateRegionResponse> {
         let inner = self.inner.read().await;
         inner
-            .migrate_region(region_id, from_peer, to_peer, replay_timeout)
+            .migrate_region(region_id, from_peer, to_peer, timeout)
             .await
+    }
+
+    pub async fn list_procedures(&self) -> Result<ProcedureDetailResponse> {
+        let inner = self.inner.read().await;
+        inner.list_procedures().await
     }
 }
 
@@ -140,7 +142,10 @@ impl Inner {
             .get(addr)
             .context(error::CreateChannelSnafu)?;
 
-        Ok(ProcedureServiceClient::new(channel))
+        Ok(ProcedureServiceClient::new(channel)
+            .accept_compressed(CompressionEncoding::Gzip)
+            .accept_compressed(CompressionEncoding::Zstd)
+            .send_compressed(CompressionEncoding::Zstd))
     }
 
     #[inline]
@@ -167,13 +172,15 @@ impl Inner {
     {
         let ask_leader = self.ask_leader()?;
         let mut times = 0;
+        let mut last_error = None;
 
         while times < self.max_retry {
             if let Some(leader) = &ask_leader.get_leader() {
                 let client = self.make_client(leader)?;
                 match body_fn(client).await {
                     Ok(res) => {
-                        if is_not_leader(get_header(&res)) {
+                        if util::is_not_leader(get_header(&res)) {
+                            last_error = Some(format!("{leader} is not a leader"));
                             warn!("Failed to {task} to {leader}, not a leader");
                             let leader = ask_leader.ask_leader().await?;
                             info!("DDL client updated to new leader addr: {leader}");
@@ -184,7 +191,8 @@ impl Inner {
                     }
                     Err(status) => {
                         // The leader may be unreachable.
-                        if is_unreachable(&status) {
+                        if util::is_unreachable(&status) {
+                            last_error = Some(status.to_string());
                             warn!("Failed to {task} to {leader}, source: {status}");
                             let leader = ask_leader.ask_leader().await?;
                             info!("Procedure client updated to new leader addr: {leader}");
@@ -201,7 +209,7 @@ impl Inner {
         }
 
         error::RetryTimesExceededSnafu {
-            msg: "Failed to {task}",
+            msg: format!("Failed to {task}, last error: {:?}", last_error),
             times: self.max_retry,
         }
         .fail()
@@ -212,13 +220,13 @@ impl Inner {
         region_id: u64,
         from_peer: u64,
         to_peer: u64,
-        replay_timeout: Duration,
+        timeout: Duration,
     ) -> Result<MigrateRegionResponse> {
         let mut req = MigrateRegionRequest {
             region_id,
             from_peer,
             to_peer,
-            replay_timeout_secs: replay_timeout.as_secs() as u32,
+            timeout_secs: timeout.as_secs() as u32,
             ..Default::default()
         };
 
@@ -281,18 +289,23 @@ impl Inner {
         )
         .await
     }
-}
 
-fn is_unreachable(status: &Status) -> bool {
-    status.code() == Code::Unavailable || status.code() == Code::DeadlineExceeded
-}
+    async fn list_procedures(&self) -> Result<ProcedureDetailResponse> {
+        let mut req = ProcedureDetailRequest::default();
+        req.set_header(
+            self.id,
+            self.role,
+            TracingContext::from_current_span().to_w3c(),
+        );
 
-fn is_not_leader(header: &Option<ResponseHeader>) -> bool {
-    if let Some(header) = header {
-        if let Some(err) = header.error.as_ref() {
-            return err.code == ErrorCode::NotLeader as i32;
-        }
+        self.with_retry(
+            "list procedure",
+            move |mut client| {
+                let req = req.clone();
+                async move { client.details(req).await.map(|res| res.into_inner()) }
+            },
+            |resp: &ProcedureDetailResponse| &resp.header,
+        )
+        .await
     }
-
-    false
 }

@@ -17,12 +17,14 @@ use std::slice;
 use std::sync::Arc;
 
 use datafusion::arrow::util::pretty::pretty_format_batches;
+use datatypes::arrow::array::RecordBatchOptions;
+use datatypes::prelude::DataType;
 use datatypes::schema::SchemaRef;
 use datatypes::value::Value;
 use datatypes::vectors::{Helper, VectorRef};
 use serde::ser::{Error, SerializeStruct};
 use serde::{Serialize, Serializer};
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
     self, CastVectorSnafu, ColumnNotExistsSnafu, DataTypesSnafu, ProjectArrowRecordBatchSnafu,
@@ -34,7 +36,7 @@ use crate::DfRecordBatch;
 #[derive(Clone, Debug, PartialEq)]
 pub struct RecordBatch {
     pub schema: SchemaRef,
-    columns: Vec<VectorRef>,
+    pub columns: Vec<VectorRef>,
     df_record_batch: DfRecordBatch,
 }
 
@@ -58,8 +60,28 @@ impl RecordBatch {
     }
 
     /// Create an empty [`RecordBatch`] from `schema`.
-    pub fn new_empty(schema: SchemaRef) -> Result<RecordBatch> {
+    pub fn new_empty(schema: SchemaRef) -> RecordBatch {
         let df_record_batch = DfRecordBatch::new_empty(schema.arrow_schema().clone());
+        let columns = schema
+            .column_schemas()
+            .iter()
+            .map(|col| col.data_type.create_mutable_vector(0).to_vector())
+            .collect();
+        RecordBatch {
+            schema,
+            columns,
+            df_record_batch,
+        }
+    }
+
+    /// Create an empty [`RecordBatch`] from `schema` with `num_rows`.
+    pub fn new_with_count(schema: SchemaRef, num_rows: usize) -> Result<Self> {
+        let df_record_batch = DfRecordBatch::try_new_with_options(
+            schema.arrow_schema().clone(),
+            vec![],
+            &RecordBatchOptions::new().with_row_count(Some(num_rows)),
+        )
+        .context(error::NewDfRecordBatchSnafu)?;
         Ok(RecordBatch {
             schema,
             columns: vec![],
@@ -188,6 +210,19 @@ impl RecordBatch {
             .map(|t| t.to_string())
             .unwrap_or("failed to pretty display a record batch".to_string())
     }
+
+    /// Return a slice record batch starts from offset, with len rows
+    pub fn slice(&self, offset: usize, len: usize) -> Result<RecordBatch> {
+        ensure!(
+            offset + len <= self.num_rows(),
+            error::RecordBatchSliceIndexOverflowSnafu {
+                size: self.num_rows(),
+                visit_index: offset + len
+            }
+        );
+        let columns = self.columns.iter().map(|vector| vector.slice(offset, len));
+        RecordBatch::new(self.schema.clone(), columns)
+    }
 }
 
 impl Serialize for RecordBatch {
@@ -220,7 +255,7 @@ pub struct RecordBatchRowIterator<'a> {
 }
 
 impl<'a> RecordBatchRowIterator<'a> {
-    fn new(record_batch: &'a RecordBatch) -> RecordBatchRowIterator {
+    fn new(record_batch: &'a RecordBatch) -> RecordBatchRowIterator<'a> {
         RecordBatchRowIterator {
             record_batch,
             rows: record_batch.df_record_batch.num_rows(),
@@ -230,7 +265,7 @@ impl<'a> RecordBatchRowIterator<'a> {
     }
 }
 
-impl<'a> Iterator for RecordBatchRowIterator<'a> {
+impl Iterator for RecordBatchRowIterator<'_> {
     type Item = Vec<Value>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -248,6 +283,36 @@ impl<'a> Iterator for RecordBatchRowIterator<'a> {
             Some(row)
         }
     }
+}
+
+/// merge multiple recordbatch into a single
+pub fn merge_record_batches(schema: SchemaRef, batches: &[RecordBatch]) -> Result<RecordBatch> {
+    let batches_len = batches.len();
+    if batches_len == 0 {
+        return Ok(RecordBatch::new_empty(schema));
+    }
+
+    let n_rows = batches.iter().map(|b| b.num_rows()).sum();
+    let n_columns = schema.num_columns();
+    // Collect arrays from each batch
+    let mut merged_columns = Vec::with_capacity(n_columns);
+
+    for col_idx in 0..n_columns {
+        let mut acc = schema.column_schemas()[col_idx]
+            .data_type
+            .create_mutable_vector(n_rows);
+
+        for batch in batches {
+            let column = batch.column(col_idx);
+            acc.extend_slice_of(column.as_ref(), 0, column.len())
+                .context(error::DataTypesSnafu)?;
+        }
+
+        merged_columns.push(acc.to_vector());
+    }
+
+    // Create a new RecordBatch with merged columns
+    RecordBatch::new(schema, merged_columns)
 }
 
 #[cfg(test)]
@@ -368,5 +433,81 @@ mod tests {
         );
 
         assert!(record_batch_iter.next().is_none());
+    }
+
+    #[test]
+    fn test_record_batch_slice() {
+        let column_schemas = vec![
+            ColumnSchema::new("numbers", ConcreteDataType::uint32_datatype(), false),
+            ColumnSchema::new("strings", ConcreteDataType::string_datatype(), true),
+        ];
+        let schema = Arc::new(Schema::new(column_schemas));
+        let columns: Vec<VectorRef> = vec![
+            Arc::new(UInt32Vector::from_slice(vec![1, 2, 3, 4])),
+            Arc::new(StringVector::from(vec![
+                None,
+                Some("hello"),
+                Some("greptime"),
+                None,
+            ])),
+        ];
+        let recordbatch = RecordBatch::new(schema, columns).unwrap();
+        let recordbatch = recordbatch.slice(1, 2).expect("recordbatch slice");
+        let mut record_batch_iter = recordbatch.rows();
+        assert_eq!(
+            vec![Value::UInt32(2), Value::String("hello".into())],
+            record_batch_iter
+                .next()
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<Value>>()
+        );
+
+        assert_eq!(
+            vec![Value::UInt32(3), Value::String("greptime".into())],
+            record_batch_iter
+                .next()
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<Value>>()
+        );
+
+        assert!(record_batch_iter.next().is_none());
+
+        assert!(recordbatch.slice(1, 5).is_err());
+    }
+
+    #[test]
+    fn test_merge_record_batch() {
+        let column_schemas = vec![
+            ColumnSchema::new("numbers", ConcreteDataType::uint32_datatype(), false),
+            ColumnSchema::new("strings", ConcreteDataType::string_datatype(), true),
+        ];
+        let schema = Arc::new(Schema::new(column_schemas));
+        let columns: Vec<VectorRef> = vec![
+            Arc::new(UInt32Vector::from_slice(vec![1, 2, 3, 4])),
+            Arc::new(StringVector::from(vec![
+                None,
+                Some("hello"),
+                Some("greptime"),
+                None,
+            ])),
+        ];
+        let recordbatch = RecordBatch::new(schema.clone(), columns).unwrap();
+
+        let columns: Vec<VectorRef> = vec![
+            Arc::new(UInt32Vector::from_slice(vec![1, 2, 3, 4])),
+            Arc::new(StringVector::from(vec![
+                None,
+                Some("hello"),
+                Some("greptime"),
+                None,
+            ])),
+        ];
+        let recordbatch2 = RecordBatch::new(schema.clone(), columns).unwrap();
+
+        let merged = merge_record_batches(schema.clone(), &[recordbatch, recordbatch2])
+            .expect("merge recordbatch");
+        assert_eq!(merged.num_rows(), 8);
     }
 }

@@ -12,24 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use datafusion_common::DFSchema;
+use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
+use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use snafu::ensure;
+use snafu::{ensure, OptionExt, ResultExt};
 
-use crate::adapter::error::{InvalidQuerySnafu, Result};
+use crate::error::{DatafusionSnafu, InternalSnafu, InvalidQuerySnafu, Result, UnexpectedSnafu};
+use crate::expr::{SafeMfpPlan, ScalarExpr};
 
 /// a set of column indices that are "keys" for the collection.
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, Hash)]
+#[derive(Default, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, Hash)]
 pub struct Key {
+    /// indicate whose column form key
     pub column_indices: Vec<usize>,
 }
 
 impl Key {
     /// create a new Key
     pub fn new() -> Self {
-        Self {
-            column_indices: Vec::new(),
-        }
+        Default::default()
     }
 
     /// create a new Key from a vector of column indices
@@ -41,14 +44,6 @@ impl Key {
     /// Add a column to Key
     pub fn add_col(&mut self, col: usize) {
         self.column_indices.push(col);
-    }
-
-    /// Add columns to Key
-    pub fn add_cols<I>(&mut self, cols: I)
-    where
-        I: IntoIterator<Item = usize>,
-    {
-        self.column_indices.extend(cols);
     }
 
     /// Remove a column from Key
@@ -88,13 +83,86 @@ pub struct RelationType {
     ///
     /// A collection can contain multiple sets of keys, although it is common to
     /// have either zero or one sets of key indices.
-    #[serde(default)]
     pub keys: Vec<Key>,
     /// optionally indicate the column that is TIME INDEX
     pub time_index: Option<usize>,
+    /// mark all the columns that are added automatically by flow, but are not present in original sql
+    pub auto_columns: Vec<usize>,
 }
 
 impl RelationType {
+    pub fn with_autos(mut self, auto_cols: &[usize]) -> Self {
+        self.auto_columns = auto_cols.to_vec();
+        self
+    }
+
+    /// Trying to apply a mpf on current types, will return a new RelationType
+    /// with the new types, will also try to preserve keys&time index information
+    /// if the old key&time index columns are preserve in given mfp
+    ///
+    /// i.e. old column of size 3, with a mfp's
+    ///
+    /// project = `[2, 1]`,
+    ///
+    /// the old key = `[1]`, old time index = `[2]`,
+    ///
+    /// then new key=`[1]`, new time index=`[0]`
+    ///
+    /// note that this function will remove empty keys like key=`[]` will be removed
+    pub fn apply_mfp(&self, mfp: &SafeMfpPlan) -> Result<Self> {
+        let mfp = &mfp.mfp;
+        let mut all_types = self.column_types.clone();
+        for expr in &mfp.expressions {
+            let expr_typ = expr.typ(&self.column_types)?;
+            all_types.push(expr_typ);
+        }
+        let all_types = all_types;
+        let mfp_out_types = mfp
+            .projection
+            .iter()
+            .map(|i| {
+                all_types.get(*i).cloned().with_context(|| UnexpectedSnafu {
+                    reason: format!(
+                        "MFP index out of bound, len is {}, but the index is {}",
+                        all_types.len(),
+                        *i
+                    ),
+                })
+            })
+            .try_collect()?;
+
+        let old_to_new_col = mfp.get_old_to_new_mapping();
+
+        // since it's just a mfp, we also try to preserve keys&time index information, if they survive mfp transform
+        let keys = self
+            .keys
+            .iter()
+            .filter_map(|key| {
+                key.column_indices
+                    .iter()
+                    .map(|old| old_to_new_col.get(old).cloned())
+                    .collect::<Option<Vec<_>>>()
+                    // remove empty keys
+                    .and_then(|v| if v.is_empty() { None } else { Some(v) })
+                    .map(Key::from)
+            })
+            .collect_vec();
+
+        let time_index = self
+            .time_index
+            .and_then(|old| old_to_new_col.get(&old).cloned());
+        let auto_columns = self
+            .auto_columns
+            .iter()
+            .filter_map(|old| old_to_new_col.get(old).cloned())
+            .collect_vec();
+        Ok(Self {
+            column_types: mfp_out_types,
+            keys,
+            time_index,
+            auto_columns,
+        })
+    }
     /// Constructs a `RelationType` representing the relation with no columns and
     /// no keys.
     pub fn empty() -> Self {
@@ -109,11 +177,17 @@ impl RelationType {
             column_types,
             keys: Vec::new(),
             time_index: None,
+            auto_columns: vec![],
         }
     }
 
     /// Adds a new key for the relation. Also sorts the key indices.
+    ///
+    /// will ignore empty key
     pub fn with_key(mut self, mut indices: Vec<usize>) -> Self {
+        if indices.is_empty() {
+            return self;
+        }
         indices.sort_unstable();
         let key = Key::from(indices);
         if !self.keys.contains(&key) {
@@ -122,10 +196,24 @@ impl RelationType {
         self
     }
 
+    /// Adds new keys for the relation. Also sorts the key indices.
+    ///
+    /// will ignore empty keys
     pub fn with_keys(mut self, keys: Vec<Vec<usize>>) -> Self {
         for key in keys {
             self = self.with_key(key)
         }
+        self
+    }
+
+    /// will also remove time index from keys if it's in keys
+    pub fn with_time_index(mut self, time_index: Option<usize>) -> Self {
+        self.time_index = time_index;
+        for key in &mut self.keys {
+            key.remove_col(time_index.unwrap_or(usize::MAX));
+        }
+        // remove empty keys
+        self.keys.retain(|key| !key.is_empty());
         self
     }
 
@@ -176,6 +264,19 @@ impl RelationType {
 
         true
     }
+
+    /// Return relation describe with column names
+    pub fn into_named(self, names: Vec<Option<ColumnName>>) -> RelationDesc {
+        RelationDesc { typ: self, names }
+    }
+
+    /// Return relation describe without column names
+    pub fn into_unnamed(self) -> RelationDesc {
+        RelationDesc {
+            names: vec![None; self.column_types.len()],
+            typ: self,
+        }
+    }
 }
 
 /// The type of a `Value`
@@ -194,6 +295,35 @@ pub struct ColumnType {
     pub nullable: bool,
 }
 
+impl ColumnType {
+    /// Constructs a new `ColumnType` from a scalar type and a nullability flag.
+    pub fn new(scalar_type: ConcreteDataType, nullable: bool) -> Self {
+        ColumnType {
+            scalar_type,
+            nullable,
+        }
+    }
+
+    /// Constructs a new `ColumnType` from a scalar type, with nullability set to
+    /// ***true***
+    pub fn new_nullable(scalar_type: ConcreteDataType) -> Self {
+        ColumnType {
+            scalar_type,
+            nullable: true,
+        }
+    }
+
+    /// Returns the scalar type of this column.
+    pub fn scalar_type(&self) -> &ConcreteDataType {
+        &self.scalar_type
+    }
+
+    /// Returns true if this column can be null.
+    pub fn nullable(&self) -> bool {
+        self.nullable
+    }
+}
+
 /// This method exists solely for the purpose of making ColumnType nullable by
 /// default in unit tests. The default value of a bool is false, and the only
 /// way to make an object take on any other value by default is to pass it a
@@ -208,10 +338,64 @@ fn return_true() -> bool {
 ///
 /// It bundles a [`RelationType`] with the name of each column in the relation.
 /// Individual column names are optional.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Hash)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, Hash)]
 pub struct RelationDesc {
-    typ: RelationType,
-    names: Vec<ColumnName>,
+    pub typ: RelationType,
+    pub names: Vec<Option<ColumnName>>,
+}
+
+impl RelationDesc {
+    pub fn len(&self) -> Result<usize> {
+        ensure!(
+            self.typ.column_types.len() == self.names.len(),
+            InternalSnafu {
+                reason: "Expect typ and names field to be of same length"
+            }
+        );
+        Ok(self.names.len())
+    }
+
+    pub fn to_df_schema(&self) -> Result<DFSchema> {
+        let fields: Vec<_> = self
+            .iter()
+            .enumerate()
+            .map(|(i, (name, typ))| {
+                let name = name.clone().unwrap_or(format!("Col_{i}"));
+                let nullable = typ.nullable;
+                let data_type = typ.scalar_type.clone().as_arrow_type();
+                arrow_schema::Field::new(name, data_type, nullable)
+            })
+            .collect();
+        let arrow_schema = arrow_schema::Schema::new(fields);
+
+        DFSchema::try_from(arrow_schema.clone()).with_context(|_e| DatafusionSnafu {
+            context: format!("Error when converting to DFSchema: {:?}", arrow_schema),
+        })
+    }
+
+    /// apply mfp, and also project col names for the projected columns
+    pub fn apply_mfp(&self, mfp: &SafeMfpPlan) -> Result<Self> {
+        // TODO(discord9): find a way to deduce name at best effect
+        let names = {
+            let mfp = &mfp.mfp;
+            let mut names = self.names.clone();
+            for expr in &mfp.expressions {
+                if let ScalarExpr::Column(i) = expr {
+                    names.push(self.names.get(*i).cloned().flatten());
+                } else {
+                    names.push(None);
+                }
+            }
+            mfp.projection
+                .iter()
+                .map(|i| names.get(*i).cloned().flatten())
+                .collect_vec()
+        };
+        Ok(Self {
+            typ: self.typ.apply_mfp(mfp)?,
+            names,
+        })
+    }
 }
 
 impl RelationDesc {
@@ -230,7 +414,7 @@ impl RelationDesc {
     pub fn try_new<I, N>(typ: RelationType, names: I) -> Result<Self>
     where
         I: IntoIterator<Item = N>,
-        N: Into<ColumnName>,
+        N: Into<Option<ColumnName>>,
     {
         let names: Vec<_> = names.into_iter().map(|name| name.into()).collect();
         ensure!(
@@ -255,7 +439,7 @@ impl RelationDesc {
     pub fn new_unchecked<I, N>(typ: RelationType, names: I) -> Self
     where
         I: IntoIterator<Item = N>,
-        N: Into<ColumnName>,
+        N: Into<Option<ColumnName>>,
     {
         let names: Vec<_> = names.into_iter().map(|name| name.into()).collect();
         assert_eq!(typ.arity(), names.len());
@@ -266,7 +450,7 @@ impl RelationDesc {
     where
         I: IntoIterator<Item = (N, T)>,
         T: Into<ColumnType>,
-        N: Into<ColumnName>,
+        N: Into<Option<ColumnName>>,
     {
         let (names, types): (Vec<_>, Vec<_>) = iter.into_iter().unzip();
         let types = types.into_iter().map(Into::into).collect();
@@ -292,7 +476,7 @@ impl RelationDesc {
     /// Appends a column with the specified name and type.
     pub fn with_column<N>(mut self, name: N, column_type: ColumnType) -> Self
     where
-        N: Into<ColumnName>,
+        N: Into<Option<ColumnName>>,
     {
         self.typ.column_types.push(column_type);
         self.names.push(name.into());
@@ -305,19 +489,13 @@ impl RelationDesc {
         self
     }
 
-    /// Drops all existing keys.
-    pub fn without_keys(mut self) -> Self {
-        self.typ.keys.clear();
-        self
-    }
-
     /// Builds a new relation description with the column names replaced with
     /// new names.
     ///
     pub fn try_with_names<I, N>(self, names: I) -> Result<Self>
     where
         I: IntoIterator<Item = N>,
-        N: Into<ColumnName>,
+        N: Into<Option<ColumnName>>,
     {
         Self::try_new(self.typ, names)
     }
@@ -333,7 +511,7 @@ impl RelationDesc {
     }
 
     /// Returns an iterator over the columns in this relation.
-    pub fn iter(&self) -> impl Iterator<Item = (&ColumnName, &ColumnType)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&Option<ColumnName>, &ColumnType)> {
         self.iter_names().zip(self.iter_types())
     }
 
@@ -343,7 +521,7 @@ impl RelationDesc {
     }
 
     /// Returns an iterator over the names of the columns in this relation.
-    pub fn iter_names(&self) -> impl Iterator<Item = &ColumnName> {
+    pub fn iter_names(&self) -> impl Iterator<Item = &Option<ColumnName>> {
         self.names.iter()
     }
 
@@ -354,7 +532,7 @@ impl RelationDesc {
     /// specified name, the leftmost column is returned.
     pub fn get_by_name(&self, name: &ColumnName) -> Option<(usize, &ColumnType)> {
         self.iter_names()
-            .position(|n| n == name)
+            .position(|n| n.as_ref() == Some(name))
             .map(|i| (i, &self.typ.column_types[i]))
     }
 
@@ -363,34 +541,8 @@ impl RelationDesc {
     /// # Panics
     ///
     /// Panics if `i` is not a valid column index.
-    pub fn get_name(&self, i: usize) -> &ColumnName {
+    pub fn get_name(&self, i: usize) -> &Option<ColumnName> {
         &self.names[i]
-    }
-
-    /// Mutably gets the name of the `i`th column.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `i` is not a valid column index.
-    pub fn get_name_mut(&mut self, i: usize) -> &mut ColumnName {
-        &mut self.names[i]
-    }
-
-    /// Gets the name of the `i`th column if that column name is unambiguous.
-    ///
-    /// If at least one other column has the same name as the `i`th column,
-    /// returns `None`. If the `i`th column has no name, returns `None`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `i` is not a valid column index.
-    pub fn get_unambiguous_name(&self, i: usize) -> Option<&ColumnName> {
-        let name = &self.names[i];
-        if self.iter_names().filter(|n| *n == name).count() == 1 {
-            Some(name)
-        } else {
-            None
-        }
     }
 }
 

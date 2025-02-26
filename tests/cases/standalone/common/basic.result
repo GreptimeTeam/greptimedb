@@ -32,7 +32,7 @@ SELECT * FROM system_metrics;
 SELECT count(*) FROM system_metrics;
 
 +----------+
-| COUNT(*) |
+| count(*) |
 +----------+
 | 3        |
 +----------+
@@ -40,7 +40,7 @@ SELECT count(*) FROM system_metrics;
 SELECT avg(cpu_util) FROM system_metrics;
 
 +------------------------------+
-| AVG(system_metrics.cpu_util) |
+| avg(system_metrics.cpu_util) |
 +------------------------------+
 | 47.26666666666667            |
 +------------------------------+
@@ -48,15 +48,11 @@ SELECT avg(cpu_util) FROM system_metrics;
 SELECT idc, avg(memory_util) FROM system_metrics GROUP BY idc ORDER BY idc;
 
 +-------+---------------------------------+
-| idc   | AVG(system_metrics.memory_util) |
+| idc   | avg(system_metrics.memory_util) |
 +-------+---------------------------------+
 | idc_a | 40.3                            |
 | idc_b | 66.7                            |
 +-------+---------------------------------+
-
-DROP TABLE system_metrics;
-
-Affected Rows: 0
 
 create table foo (
     host string,
@@ -64,7 +60,7 @@ create table foo (
     cpu double default 0,
     TIME INDEX (ts),
     PRIMARY KEY(host)
-) engine=mito with(regions=1);
+) engine=mito;
 
 Affected Rows: 0
 
@@ -90,7 +86,121 @@ select * from foo;
 | host3 | 2023-04-29T00:00:00 | 0.0 |
 +-------+---------------------+-----+
 
+CREATE TABLE phy (ts timestamp time index, val double) engine=metric with ("physical_metric_table" = "");
+
+Affected Rows: 0
+
+CREATE TABLE t1 (ts timestamp time index, val double, host string primary key) engine = metric with ("on_physical_table" = "phy");
+
+Affected Rows: 0
+
+INSERT INTO t1 VALUES ('host1',0, 0), ('host2', 1, 1,);
+
+Affected Rows: 2
+
+SELECT * from t1;
+
++-------+-------------------------+-----+
+| host  | ts                      | val |
++-------+-------------------------+-----+
+| host2 | 1970-01-01T00:00:00.001 | 1.0 |
+| host1 | 1970-01-01T00:00:00     | 0.0 |
++-------+-------------------------+-----+
+
+-- issue #4649 should fail (do not support delete from logical table for now)
+delete from t1;
+
+Error: 1001(Unsupported), Unsupported region request: Delete
+
+-- issue #4649 should succeed
+delete from phy;
+
+Affected Rows: 2
+
+CREATE TABLE t2 (ts timestamp time index, job string primary key, val double) engine = metric with ("on_physical_table" = "phy");
+
+Affected Rows: 0
+
+SELECT * from t2;
+
+++
+++
+
+INSERT INTO t2 VALUES ('job1', 0, 0), ('job2', 1, 1);
+
+Affected Rows: 2
+
+-- SQLNESS ARG restart=true
+SELECT * FROM system_metrics;
+
++-------+-------+----------+-------------+-----------+-------------------------+
+| host  | idc   | cpu_util | memory_util | disk_util | ts                      |
++-------+-------+----------+-------------+-----------+-------------------------+
+| host1 | idc_a | 11.8     | 10.3        | 10.3      | 2022-11-03T03:39:57.450 |
+| host1 | idc_b | 50.0     | 66.7        | 40.6      | 2022-11-03T03:39:57.450 |
+| host2 | idc_a | 80.0     | 70.3        | 90.0      | 2022-11-03T03:39:57.450 |
++-------+-------+----------+-------------+-----------+-------------------------+
+
+select * from foo;
+
++-------+---------------------+-----+
+| host  | ts                  | cpu |
++-------+---------------------+-----+
+| host1 | 2000-01-01T00:00:00 | 1.1 |
+| host2 | 2023-04-29T00:00:00 | 2.2 |
+| host3 | 2023-04-29T00:00:00 | 0.0 |
++-------+---------------------+-----+
+
+SELECT * from t1;
+
+++
+++
+
+SELECT * from t2;
+
++------+-------------------------+-----+
+| job  | ts                      | val |
++------+-------------------------+-----+
+| job2 | 1970-01-01T00:00:00.001 | 1.0 |
+| job1 | 1970-01-01T00:00:00     | 0.0 |
++------+-------------------------+-----+
+
+DROP TABLE t1;
+
+Affected Rows: 0
+
+DROP TABLE t2;
+
+Affected Rows: 0
+
+DROP TABLE phy;
+
+Affected Rows: 0
+
+DROP TABLE system_metrics;
+
+Affected Rows: 0
+
 DROP TABLE foo;
 
 Affected Rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+SET MAX_EXECUTION_TIME = 2000;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+SHOW VARIABLES MAX_EXECUTION_TIME;
+
++---------------+-------+
+| Variable_name | Value |
++---------------+-------+
+|               |       |
++---------------+-------+
+
+-- SQLNESS PROTOCOL MYSQL
+SET MAX_EXECUTION_TIME = 0;
+
+affected_rows: 0
 

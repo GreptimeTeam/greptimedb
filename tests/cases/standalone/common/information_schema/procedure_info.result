@@ -1,0 +1,40 @@
+--- test information_schema.procedure_info ----
+USE public;
+
+Affected Rows: 0
+
+CREATE TABLE procedure_info_for_sql_test1(
+  ts TIMESTAMP TIME INDEX,
+  temperature DOUBLE DEFAULT 10,
+) engine=mito with('append_mode'='true');
+
+Affected Rows: 0
+
+CREATE TABLE procedure_info_for_sql_test2(
+  ts TIMESTAMP TIME INDEX,
+  temperature DOUBLE DEFAULT 10,
+) engine=mito with('append_mode'='true');
+
+Affected Rows: 0
+
+use INFORMATION_SCHEMA;
+
+Affected Rows: 0
+
+select procedure_type from procedure_info where lock_keys like '%procedure_info_for_sql_test%';
+
++--------------------------------+
+| procedure_type                 |
++--------------------------------+
+| metasrv-procedure::CreateTable |
+| metasrv-procedure::CreateTable |
++--------------------------------+
+
+use public;
+
+Affected Rows: 0
+
+DROP TABLE procedure_info_for_sql_test1, procedure_info_for_sql_test2;
+
+Affected Rows: 0
+

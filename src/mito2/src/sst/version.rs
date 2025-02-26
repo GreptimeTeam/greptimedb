@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
-use common_time::Timestamp;
+use common_time::{TimeToLive, Timestamp};
 
 use crate::sst::file::{FileHandle, FileId, FileMeta, Level, MAX_LEVEL};
 use crate::sst::file_purger::FilePurgerRef;
@@ -84,7 +84,25 @@ impl SstVersion {
         }
     }
 
-    /// Returns SST files'space occupied in current version.
+    /// Returns the number of rows in SST files.
+    /// For historical reasons, the result is not precise for old SST files.
+    pub(crate) fn num_rows(&self) -> u64 {
+        self.levels
+            .iter()
+            .map(|level_meta| {
+                level_meta
+                    .files
+                    .values()
+                    .map(|file_handle| {
+                        let meta = file_handle.meta_ref();
+                        meta.num_rows
+                    })
+                    .sum::<u64>()
+            })
+            .sum()
+    }
+
+    /// Returns SST data files'space occupied in current version.
     pub(crate) fn sst_usage(&self) -> u64 {
         self.levels
             .iter()
@@ -93,8 +111,25 @@ impl SstVersion {
                     .files
                     .values()
                     .map(|file_handle| {
-                        let meta = file_handle.meta();
-                        meta.file_size + meta.index_file_size
+                        let meta = file_handle.meta_ref();
+                        meta.file_size
+                    })
+                    .sum::<u64>()
+            })
+            .sum()
+    }
+
+    /// Returns SST index files'space occupied in current version.
+    pub(crate) fn index_usage(&self) -> u64 {
+        self.levels
+            .iter()
+            .map(|level_meta| {
+                level_meta
+                    .files
+                    .values()
+                    .map(|file_handle| {
+                        let meta = file_handle.meta_ref();
+                        meta.index_file_size
                     })
                     .sum::<u64>()
             })
@@ -125,12 +160,19 @@ impl LevelMeta {
     }
 
     /// Returns expired SSTs from current level.
-    pub fn get_expired_files(&self, expire_time: &Timestamp) -> Vec<FileHandle> {
+    pub fn get_expired_files(&self, now: &Timestamp, ttl: &TimeToLive) -> Vec<FileHandle> {
         self.files
             .values()
             .filter(|v| {
                 let (_, end) = v.time_range();
-                &end < expire_time
+
+                match ttl.is_expired(&end, now) {
+                    Ok(expired) => expired,
+                    Err(e) => {
+                        common_telemetry::error!(e; "Failed to calculate region TTL expire time");
+                        false
+                    }
+                }
             })
             .cloned()
             .collect()

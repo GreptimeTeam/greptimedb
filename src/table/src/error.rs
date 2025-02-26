@@ -17,11 +17,10 @@ use std::any::Any;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use common_query::error::datafusion_status_code;
 use datafusion::error::DataFusionError;
 use datatypes::arrow::error::ArrowError;
 use snafu::{Location, Snafu};
-
-use crate::metadata::TableId;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -34,12 +33,14 @@ pub enum Error {
     Datafusion {
         #[snafu(source)]
         error: DataFusionError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to convert Arrow schema"))]
     SchemaConversion {
         source: datatypes::error::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -47,11 +48,13 @@ pub enum Error {
     TableProjection {
         #[snafu(source)]
         error: ArrowError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to create record batch for Tables"))]
     TablesRecordBatch {
+        #[snafu(implicit)]
         location: Location,
         source: BoxedError,
     },
@@ -60,11 +63,13 @@ pub enum Error {
     ColumnExists {
         column_name: String,
         table_name: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to build schema, msg: {}", msg))]
     SchemaBuild {
+        #[snafu(implicit)]
         location: Location,
         source: datatypes::error::Error,
         msg: String,
@@ -74,11 +79,9 @@ pub enum Error {
     ColumnNotExists {
         column_name: String,
         table_name: String,
+        #[snafu(implicit)]
         location: Location,
     },
-
-    #[snafu(display("Duplicated call to plan execute method. table: {}", table))]
-    DuplicatedExecuteCall { location: Location, table: String },
 
     #[snafu(display(
         "Not allowed to remove index column {} from table {}",
@@ -88,6 +91,7 @@ pub enum Error {
     RemoveColumnInIndex {
         column_name: String,
         table_name: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -101,11 +105,9 @@ pub enum Error {
         error: store_api::storage::ColumnDescriptorBuilderError,
         table_name: String,
         column_name: String,
+        #[snafu(implicit)]
         location: Location,
     },
-
-    #[snafu(display("Regions schemas mismatch in table: {}", table))]
-    RegionSchemaMismatch { table: String, location: Location },
 
     #[snafu(display("Failed to operate table"))]
     TableOperation { source: BoxedError },
@@ -117,25 +119,57 @@ pub enum Error {
     ParseTableOption {
         key: String,
         value: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Invalid alter table({}) request: {}", table, err))]
     InvalidAlterRequest {
         table: String,
+        #[snafu(implicit)]
         location: Location,
         err: String,
-    },
-
-    #[snafu(display("Invalid table state: {}", table_id))]
-    InvalidTable {
-        table_id: TableId,
-        location: Location,
     },
 
     #[snafu(display("Missing time index column in table: {}", table_name))]
     MissingTimeIndexColumn {
         table_name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Table options value is not valid, key: `{}`, value: `{}`", key, value))]
+    InvalidTableOptionValue { key: String, value: String },
+
+    #[snafu(display("Invalid column option, column name: {}, error: {}", column_name, msg))]
+    InvalidColumnOption {
+        column_name: String,
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to set fulltext options for column {}", column_name))]
+    SetFulltextOptions {
+        column_name: String,
+        source: datatypes::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to set skipping index options for column {}", column_name))]
+    SetSkippingOptions {
+        column_name: String,
+        source: datatypes::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to unset skipping index options for column {}", column_name))]
+    UnsetSkippingOptions {
+        column_name: String,
+        source: datatypes::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 }
@@ -143,26 +177,27 @@ pub enum Error {
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::Datafusion { .. }
-            | Error::SchemaConversion { .. }
-            | Error::TableProjection { .. } => StatusCode::EngineExecuteQuery,
+            Error::Datafusion { error, .. } => datafusion_status_code::<Self>(error, None),
+            Error::SchemaConversion { .. } | Error::TableProjection { .. } => {
+                StatusCode::EngineExecuteQuery
+            }
             Error::RemoveColumnInIndex { .. }
             | Error::BuildColumnDescriptor { .. }
             | Error::InvalidAlterRequest { .. } => StatusCode::InvalidArguments,
-            Error::TablesRecordBatch { .. } | Error::DuplicatedExecuteCall { .. } => {
-                StatusCode::Unexpected
-            }
+            Error::TablesRecordBatch { .. } => StatusCode::Unexpected,
             Error::ColumnExists { .. } => StatusCode::TableColumnExists,
-            Error::SchemaBuild { source, .. } => source.status_code(),
+            Error::SchemaBuild { source, .. } | Error::SetFulltextOptions { source, .. } => {
+                source.status_code()
+            }
             Error::TableOperation { source } => source.status_code(),
+            Error::InvalidColumnOption { .. } => StatusCode::InvalidArguments,
             Error::ColumnNotExists { .. } => StatusCode::TableColumnNotFound,
-            Error::RegionSchemaMismatch { .. } => StatusCode::StorageUnavailable,
             Error::Unsupported { .. } => StatusCode::Unsupported,
             Error::ParseTableOption { .. } => StatusCode::InvalidArguments,
-
-            Error::InvalidTable { .. } | Error::MissingTimeIndexColumn { .. } => {
-                StatusCode::Internal
-            }
+            Error::MissingTimeIndexColumn { .. } => StatusCode::IllegalState,
+            Error::InvalidTableOptionValue { .. }
+            | Error::SetSkippingOptions { .. }
+            | Error::UnsetSkippingOptions { .. } => StatusCode::InvalidArguments,
         }
     }
 

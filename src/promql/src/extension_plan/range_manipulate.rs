@@ -23,24 +23,28 @@ use datafusion::arrow::compute;
 use datafusion::arrow::datatypes::{Field, SchemaRef};
 use datafusion::arrow::error::ArrowError;
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::common::{DFField, DFSchema, DFSchemaRef};
+use datafusion::common::stats::Precision;
+use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion::physical_expr::PhysicalSortExpr;
-use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
+use datafusion::physical_expr::EquivalenceProperties;
+use datafusion::physical_plan::metrics::{
+    BaselineMetrics, Count, ExecutionPlanMetricsSet, MetricBuilder, MetricValue, MetricsSet,
+};
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, RecordBatchStream,
+    DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream, Statistics,
 };
 use datafusion::sql::TableReference;
-use futures::{Stream, StreamExt};
+use futures::{ready, Stream, StreamExt};
 use greptime_proto::substrait_extension as pb;
 use prost::Message;
 use snafu::ResultExt;
 
 use crate::error::{DataFusionPlanningSnafu, DeserializeSnafu, Result};
-use crate::extension_plan::Millisecond;
+use crate::extension_plan::{Millisecond, METRIC_NUM_SERIES};
+use crate::metrics::PROMQL_SERIES_COUNT;
 use crate::range_array::RangeArray;
 
 /// Time series manipulator for range function.
@@ -110,44 +114,55 @@ impl RangeManipulate {
         time_index: &str,
         field_columns: &[String],
     ) -> DataFusionResult<DFSchemaRef> {
-        let mut columns = input_schema.fields().clone();
+        let columns = input_schema.fields();
+        let mut new_columns = Vec::with_capacity(columns.len() + 1);
+        for i in 0..columns.len() {
+            let x = input_schema.qualified_field(i);
+            new_columns.push((x.0.cloned(), Arc::new(x.1.clone())));
+        }
 
         // process time index column
         // the raw timestamp field is preserved. And a new timestamp_range field is appended to the last.
-        let Some(ts_col_index) = input_schema.index_of_column_by_name(None, time_index)? else {
+        let Some(ts_col_index) = input_schema.index_of_column_by_name(None, time_index) else {
             return Err(datafusion::common::field_not_found(
                 None::<TableReference>,
                 time_index,
                 input_schema.as_ref(),
             ));
         };
-        let ts_col_field = columns[ts_col_index].field();
+        let ts_col_field = &columns[ts_col_index];
         let timestamp_range_field = Field::new(
             Self::build_timestamp_range_name(time_index),
             RangeArray::convert_field(ts_col_field).data_type().clone(),
             ts_col_field.is_nullable(),
         );
-        columns.push(DFField::from(timestamp_range_field));
+        new_columns.push((None, Arc::new(timestamp_range_field)));
 
         // process value columns
         for name in field_columns {
-            let Some(index) = input_schema.index_of_column_by_name(None, name)? else {
+            let Some(index) = input_schema.index_of_column_by_name(None, name) else {
                 return Err(datafusion::common::field_not_found(
                     None::<TableReference>,
                     name,
                     input_schema.as_ref(),
                 ));
             };
-            columns[index] = DFField::from(RangeArray::convert_field(columns[index].field()));
+            new_columns[index] = (None, Arc::new(RangeArray::convert_field(&columns[index])));
         }
 
         Ok(Arc::new(DFSchema::new_with_metadata(
-            columns,
+            new_columns,
             HashMap::new(),
         )?))
     }
 
     pub fn to_execution_plan(&self, exec_input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
+        let output_schema: SchemaRef = SchemaRef::new(self.output_schema.as_ref().into());
+        let properties = PlanProperties::new(
+            EquivalenceProperties::new(output_schema.clone()),
+            exec_input.properties().partitioning.clone(),
+            exec_input.properties().execution_mode,
+        );
         Arc::new(RangeManipulateExec {
             start: self.start,
             end: self.end,
@@ -157,8 +172,9 @@ impl RangeManipulate {
             time_range_column: self.range_timestamp_name(),
             field_columns: self.field_columns.clone(),
             input: exec_input,
-            output_schema: SchemaRef::new(self.output_schema.as_ref().into()),
+            output_schema,
             metric: ExecutionPlanMetricsSet::new(),
+            properties,
         })
     }
 
@@ -193,6 +209,37 @@ impl RangeManipulate {
     }
 }
 
+impl PartialOrd for RangeManipulate {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        // Compare fields in order excluding output_schema
+        match self.start.partial_cmp(&other.start) {
+            Some(core::cmp::Ordering::Equal) => {}
+            ord => return ord,
+        }
+        match self.end.partial_cmp(&other.end) {
+            Some(core::cmp::Ordering::Equal) => {}
+            ord => return ord,
+        }
+        match self.interval.partial_cmp(&other.interval) {
+            Some(core::cmp::Ordering::Equal) => {}
+            ord => return ord,
+        }
+        match self.range.partial_cmp(&other.range) {
+            Some(core::cmp::Ordering::Equal) => {}
+            ord => return ord,
+        }
+        match self.time_index.partial_cmp(&other.time_index) {
+            Some(core::cmp::Ordering::Equal) => {}
+            ord => return ord,
+        }
+        match self.field_columns.partial_cmp(&other.field_columns) {
+            Some(core::cmp::Ordering::Equal) => {}
+            ord => return ord,
+        }
+        self.input.partial_cmp(&other.input)
+    }
+}
+
 impl UserDefinedLogicalNodeCore for RangeManipulate {
     fn name(&self) -> &str {
         Self::name()
@@ -218,19 +265,27 @@ impl UserDefinedLogicalNodeCore for RangeManipulate {
         )
     }
 
-    fn from_template(&self, _exprs: &[Expr], inputs: &[LogicalPlan]) -> Self {
-        assert!(!inputs.is_empty());
+    fn with_exprs_and_inputs(
+        &self,
+        _exprs: Vec<Expr>,
+        inputs: Vec<LogicalPlan>,
+    ) -> DataFusionResult<Self> {
+        if inputs.is_empty() {
+            return Err(DataFusionError::Internal(
+                "RangeManipulate should have at least one input".to_string(),
+            ));
+        }
 
-        Self {
+        Ok(Self {
             start: self.start,
             end: self.end,
             interval: self.interval,
             range: self.range,
             time_index: self.time_index.clone(),
             field_columns: self.field_columns.clone(),
-            input: inputs[0].clone(),
+            input: inputs.into_iter().next().unwrap(),
             output_schema: self.output_schema.clone(),
-        }
+        })
     }
 }
 
@@ -247,6 +302,7 @@ pub struct RangeManipulateExec {
     input: Arc<dyn ExecutionPlan>,
     output_schema: SchemaRef,
     metric: ExecutionPlanMetricsSet,
+    properties: PlanProperties,
 }
 
 impl ExecutionPlan for RangeManipulateExec {
@@ -258,20 +314,20 @@ impl ExecutionPlan for RangeManipulateExec {
         self.output_schema.clone()
     }
 
-    fn output_partitioning(&self) -> Partitioning {
-        self.input.output_partitioning()
-    }
-
-    fn output_ordering(&self) -> Option<&[PhysicalSortExpr]> {
-        self.input.output_ordering()
+    fn properties(&self) -> &PlanProperties {
+        &self.properties
     }
 
     fn maintains_input_order(&self) -> Vec<bool> {
         vec![true; self.children().len()]
     }
 
-    fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
-        vec![self.input.clone()]
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.input]
+    }
+
+    fn required_input_distribution(&self) -> Vec<Distribution> {
+        vec![Distribution::SinglePartition]
     }
 
     fn with_new_children(
@@ -279,6 +335,12 @@ impl ExecutionPlan for RangeManipulateExec {
         children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         assert!(!children.is_empty());
+        let exec_input = children[0].clone();
+        let properties = PlanProperties::new(
+            EquivalenceProperties::new(self.output_schema.clone()),
+            exec_input.properties().partitioning.clone(),
+            exec_input.properties().execution_mode,
+        );
         Ok(Arc::new(Self {
             start: self.start,
             end: self.end,
@@ -290,6 +352,7 @@ impl ExecutionPlan for RangeManipulateExec {
             output_schema: self.output_schema.clone(),
             input: children[0].clone(),
             metric: self.metric.clone(),
+            properties,
         }))
     }
 
@@ -299,6 +362,14 @@ impl ExecutionPlan for RangeManipulateExec {
         context: Arc<TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
         let baseline_metric = BaselineMetrics::new(&self.metric, partition);
+        let metrics_builder = MetricBuilder::new(&self.metric);
+        let num_series = Count::new();
+        metrics_builder
+            .with_partition(partition)
+            .build(MetricValue::Count {
+                name: METRIC_NUM_SERIES.into(),
+                count: num_series.clone(),
+            });
 
         let input = self.input.execute(partition, context)?;
         let schema = input.schema();
@@ -316,6 +387,8 @@ impl ExecutionPlan for RangeManipulateExec {
                     .0
             })
             .collect();
+        let aligned_ts_array =
+            RangeManipulateStream::build_aligned_ts_array(self.start, self.end, self.interval);
         Ok(Box::pin(RangeManipulateStream {
             start: self.start,
             end: self.end,
@@ -323,9 +396,11 @@ impl ExecutionPlan for RangeManipulateExec {
             range: self.range,
             time_index,
             field_columns,
+            aligned_ts_array,
             output_schema: self.output_schema.clone(),
             input,
             metric: baseline_metric,
+            num_series,
         }))
     }
 
@@ -333,23 +408,29 @@ impl ExecutionPlan for RangeManipulateExec {
         Some(self.metric.clone_inner())
     }
 
-    fn statistics(&self) -> Statistics {
-        let input_stats = self.input.statistics();
+    fn statistics(&self) -> DataFusionResult<Statistics> {
+        let input_stats = self.input.statistics()?;
 
         let estimated_row_num = (self.end - self.start) as f64 / self.interval as f64;
         let estimated_total_bytes = input_stats
             .total_byte_size
-            .zip(input_stats.num_rows)
-            .map(|(size, rows)| (size as f64 / rows as f64) * estimated_row_num)
-            .map(|size| size.floor() as _);
+            .get_value()
+            .zip(input_stats.num_rows.get_value())
+            .map(|(size, rows)| {
+                Precision::Inexact(((*size as f64 / *rows as f64) * estimated_row_num).floor() as _)
+            })
+            .unwrap_or_default();
 
-        Statistics {
-            num_rows: Some(estimated_row_num.floor() as _),
+        Ok(Statistics {
+            num_rows: Precision::Inexact(estimated_row_num as _),
             total_byte_size: estimated_total_bytes,
             // TODO(ruihang): support this column statistics
-            column_statistics: None,
-            is_exact: false,
-        }
+            column_statistics: Statistics::unknown_column(&self.schema()),
+        })
+    }
+
+    fn name(&self) -> &str {
+        "RangeManipulateExec"
     }
 }
 
@@ -374,10 +455,13 @@ pub struct RangeManipulateStream {
     range: Millisecond,
     time_index: usize,
     field_columns: Vec<usize>,
+    aligned_ts_array: ArrayRef,
 
     output_schema: SchemaRef,
     input: SendableRecordBatchStream,
     metric: BaselineMetrics,
+    /// Number of series processed.
+    num_series: Count,
 }
 
 impl RecordBatchStream for RangeManipulateStream {
@@ -390,19 +474,24 @@ impl Stream for RangeManipulateStream {
     type Item = DataFusionResult<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let timer = std::time::Instant::now();
         let poll = loop {
-            match self.input.poll_next_unpin(cx) {
-                Poll::Ready(Some(Ok(batch))) => {
-                    let _timer = self.metric.elapsed_compute().timer();
+            match ready!(self.input.poll_next_unpin(cx)) {
+                Some(Ok(batch)) => {
                     let result = self.manipulate(batch);
                     if let Ok(None) = result {
                         continue;
                     } else {
+                        self.num_series.add(1);
+                        self.metric.elapsed_compute().add_elapsed(timer);
                         break Poll::Ready(result.transpose());
                     }
                 }
-                Poll::Ready(other) => break Poll::Ready(other),
-                Poll::Pending => break Poll::Pending,
+                None => {
+                    PROMQL_SERIES_COUNT.observe(self.num_series.value() as f64);
+                    break Poll::Ready(None);
+                }
+                Some(Err(e)) => break Poll::Ready(Some(Err(e))),
             }
         };
         self.metric.record_poll(poll)
@@ -416,7 +505,7 @@ impl RangeManipulateStream {
     pub fn manipulate(&self, input: RecordBatch) -> DataFusionResult<Option<RecordBatch>> {
         let mut other_columns = (0..input.columns().len()).collect::<HashSet<_>>();
         // calculate the range
-        let (aligned_ts, ranges) = self.calculate_range(&input);
+        let ranges = self.calculate_range(&input)?;
         // ignore this if all ranges are empty
         if ranges.iter().all(|(_, len)| *len == 0) {
             return Ok(None);
@@ -448,26 +537,34 @@ impl RangeManipulateStream {
             new_columns[index] = compute::take(&input.column(index), &take_indices, None)?;
         }
         // replace timestamp with the aligned one
-        new_columns[self.time_index] = aligned_ts;
+        new_columns[self.time_index] = self.aligned_ts_array.clone();
 
         RecordBatch::try_new(self.output_schema.clone(), new_columns)
             .map(Some)
-            .map_err(DataFusionError::ArrowError)
+            .map_err(|e| DataFusionError::ArrowError(e, None))
     }
 
-    fn calculate_range(&self, input: &RecordBatch) -> (ArrayRef, Vec<(u32, u32)>) {
+    fn build_aligned_ts_array(start: i64, end: i64, interval: i64) -> ArrayRef {
+        Arc::new(TimestampMillisecondArray::from_iter_values(
+            (start..=end).step_by(interval as _),
+        ))
+    }
+
+    fn calculate_range(&self, input: &RecordBatch) -> DataFusionResult<Vec<(u32, u32)>> {
         let ts_column = input
             .column(self.time_index)
             .as_any()
             .downcast_ref::<TimestampMillisecondArray>()
-            .unwrap();
+            .ok_or_else(|| {
+                DataFusionError::Execution(
+                    "Time index Column downcast to TimestampMillisecondArray failed".into(),
+                )
+            })?;
 
-        let mut aligned_ts = vec![];
         let mut ranges = vec![];
 
         // calculate for every aligned timestamp (`curr_ts`), assume the ts column is ordered.
         for curr_ts in (self.start..=self.end).step_by(self.interval as _) {
-            aligned_ts.push(curr_ts);
             let mut range_start = ts_column.len();
             let mut range_end = 0;
             for (index, ts) in ts_column.values().iter().enumerate() {
@@ -487,9 +584,7 @@ impl RangeManipulateStream {
             }
         }
 
-        let aligned_ts_array = Arc::new(TimestampMillisecondArray::from(aligned_ts)) as _;
-
-        (aligned_ts_array, ranges)
+        Ok(ranges)
     }
 }
 
@@ -500,7 +595,9 @@ mod test {
         ArrowPrimitiveType, DataType, Field, Int64Type, Schema, TimestampMillisecondType,
     };
     use datafusion::common::ToDFSchema;
+    use datafusion::physical_expr::Partitioning;
     use datafusion::physical_plan::memory::MemoryExec;
+    use datafusion::physical_plan::ExecutionMode;
     use datafusion::prelude::SessionContext;
     use datatypes::arrow::array::TimestampMillisecondArray;
 
@@ -556,6 +653,11 @@ mod test {
             .as_ref()
             .into(),
         );
+        let properties = PlanProperties::new(
+            EquivalenceProperties::new(manipulate_output_schema.clone()),
+            Partitioning::UnknownPartitioning(1),
+            ExecutionMode::Bounded,
+        );
         let normalize_exec = Arc::new(RangeManipulateExec {
             start,
             end,
@@ -567,6 +669,7 @@ mod test {
             time_index_column: time_index,
             input: memory_exec,
             metric: ExecutionPlanMetricsSet::new(),
+            properties,
         });
         let session_context = SessionContext::default();
         let result = datafusion::physical_plan::collect(normalize_exec, session_context.task_ctx())

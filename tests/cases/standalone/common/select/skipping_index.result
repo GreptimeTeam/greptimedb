@@ -1,0 +1,97 @@
+create table
+    skipping_table (
+        ts timestamp time index,
+        `id` string skipping index,
+        `name` string skipping index
+        with
+            (granularity = 8192),
+    );
+
+Affected Rows: 0
+
+INSERT INTO skipping_table VALUES (1664356800000, 'id1', 'name1');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('skipping_table');
+
++-------------------------------------+
+| ADMIN FLUSH_TABLE('skipping_table') |
++-------------------------------------+
+| 0                                   |
++-------------------------------------+
+
+INSERT INTO skipping_table VALUES (1664356801000, 'id2', 'name2');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('skipping_table');
+
++-------------------------------------+
+| ADMIN FLUSH_TABLE('skipping_table') |
++-------------------------------------+
+| 0                                   |
++-------------------------------------+
+
+INSERT INTO skipping_table VALUES (1664356802000, 'id3', 'name3');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('skipping_table');
+
++-------------------------------------+
+| ADMIN FLUSH_TABLE('skipping_table') |
++-------------------------------------+
+| 0                                   |
++-------------------------------------+
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE SELECT * FROM skipping_table WHERE id = 'id2' ORDER BY `name`;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_SortPreservingMergeExec: [name@2 ASC NULLS LAST] REDACTED
+|_|_|_SortExec: expr=[name@2 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_FilterExec: id@1 = id2 REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_SeqScan: region=REDACTED, partition_count=3 (0 memtable ranges, 3 file 3 ranges) REDACTED
+|_|_|_|
+|_|_| Total rows: 1_|
++-+-+-+
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE SELECT * FROM skipping_table WHERE id = 'id5' ORDER BY `name`;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_SortPreservingMergeExec: [name@2 ASC NULLS LAST] REDACTED
+|_|_|_SortExec: expr=[name@2 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_FilterExec: id@1 = id5 REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_SeqScan: region=REDACTED, partition_count=3 (0 memtable ranges, 3 file 3 ranges) REDACTED
+|_|_|_|
+|_|_| Total rows: 0_|
++-+-+-+
+
+DROP TABLE IF EXISTS skipping_table;
+
+Affected Rows: 0
+

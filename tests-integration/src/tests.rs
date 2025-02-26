@@ -15,7 +15,7 @@
 mod instance_kafka_wal_test;
 mod instance_test;
 mod promql_test;
-mod test_util;
+pub(crate) mod test_util;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -38,7 +38,7 @@ impl MockDistributedInstance {
     }
 
     pub fn table_metadata_manager(&self) -> &TableMetadataManagerRef {
-        self.0.meta_srv.table_metadata_manager()
+        self.0.metasrv.table_metadata_manager()
     }
 }
 

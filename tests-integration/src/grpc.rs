@@ -17,14 +17,16 @@ mod test {
     use std::collections::HashMap;
 
     use api::v1::column::Values;
+    use api::v1::column_data_type_extension::TypeExt;
     use api::v1::ddl_request::Expr as DdlExpr;
     use api::v1::greptime_request::Request;
     use api::v1::query_request::Query;
     use api::v1::region::QueryRequest as RegionQueryRequest;
     use api::v1::{
-        alter_expr, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDef,
-        CreateDatabaseExpr, CreateTableExpr, DdlRequest, DeleteRequest, DeleteRequests,
-        DropTableExpr, InsertRequest, InsertRequests, QueryRequest, SemanticType,
+        alter_table_expr, AddColumn, AddColumns, AlterTableExpr, Column, ColumnDataType,
+        ColumnDataTypeExtension, ColumnDef, CreateDatabaseExpr, CreateTableExpr, DdlRequest,
+        DeleteRequest, DeleteRequests, DropTableExpr, InsertRequest, InsertRequests, QueryRequest,
+        SemanticType, VectorTypeExtension,
     };
     use client::OutputData;
     use common_catalog::consts::MITO_ENGINE;
@@ -33,7 +35,7 @@ mod test {
     use common_recordbatch::RecordBatches;
     use frontend::instance::Instance;
     use query::parser::QueryLanguageParser;
-    use query::plan::LogicalPlan;
+    use query::query_engine::DefaultSerializer;
     use servers::query_handler::grpc::GrpcQueryHandler;
     use session::context::QueryContext;
     use store_api::storage::RegionId;
@@ -64,16 +66,39 @@ mod test {
         test_handle_ddl_request(instance.as_ref()).await;
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_distributed_handle_multi_ddl_request() {
+        common_telemetry::init_default_ut_logging();
+        let instance =
+            tests::create_distributed_instance("test_distributed_handle_multi_ddl_request").await;
+
+        test_handle_multi_ddl_request(instance.frontend().as_ref()).await;
+
+        verify_table_is_dropped(&instance).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_standalone_handle_multi_ddl_request() {
+        let standalone =
+            GreptimeDbStandaloneBuilder::new("test_standalone_handle_multi_ddl_request")
+                .build()
+                .await;
+        let instance = &standalone.instance;
+
+        test_handle_multi_ddl_request(instance.as_ref()).await;
+    }
+
     async fn query(instance: &Instance, request: Request) -> Output {
         GrpcQueryHandler::do_query(instance, request, QueryContext::arc())
             .await
             .unwrap()
     }
 
-    async fn test_handle_ddl_request(instance: &Instance) {
+    async fn test_handle_multi_ddl_request(instance: &Instance) {
         let request = Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::CreateDatabase(CreateDatabaseExpr {
-                database_name: "database_created_through_grpc".to_string(),
+                catalog_name: "greptime".to_string(),
+                schema_name: "database_created_through_grpc".to_string(),
                 create_if_not_exists: true,
                 options: Default::default(),
             })),
@@ -113,11 +138,167 @@ mod test {
         assert!(matches!(output.data, OutputData::AffectedRows(0)));
 
         let request = Request::Ddl(DdlRequest {
-            expr: Some(DdlExpr::Alter(AlterExpr {
+            expr: Some(DdlExpr::AlterTable(AlterTableExpr {
                 catalog_name: "greptime".to_string(),
                 schema_name: "database_created_through_grpc".to_string(),
                 table_name: "table_created_through_grpc".to_string(),
-                kind: Some(alter_expr::Kind::AddColumns(AddColumns {
+                kind: Some(alter_table_expr::Kind::AddColumns(AddColumns {
+                    add_columns: vec![
+                        AddColumn {
+                            column_def: Some(ColumnDef {
+                                name: "b".to_string(),
+                                data_type: ColumnDataType::Int32 as _,
+                                is_nullable: true,
+                                default_constraint: vec![],
+                                semantic_type: SemanticType::Field as i32,
+                                ..Default::default()
+                            }),
+                            location: None,
+                            add_if_not_exists: true,
+                        },
+                        AddColumn {
+                            column_def: Some(ColumnDef {
+                                name: "a".to_string(),
+                                data_type: ColumnDataType::String as _,
+                                is_nullable: true,
+                                default_constraint: vec![],
+                                semantic_type: SemanticType::Field as i32,
+                                ..Default::default()
+                            }),
+                            location: None,
+                            add_if_not_exists: true,
+                        },
+                    ],
+                })),
+            })),
+        });
+        let output = query(instance, request).await;
+        assert!(matches!(output.data, OutputData::AffectedRows(0)));
+
+        let request = Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::AlterTable(AlterTableExpr {
+                catalog_name: "greptime".to_string(),
+                schema_name: "database_created_through_grpc".to_string(),
+                table_name: "table_created_through_grpc".to_string(),
+                kind: Some(alter_table_expr::Kind::AddColumns(AddColumns {
+                    add_columns: vec![
+                        AddColumn {
+                            column_def: Some(ColumnDef {
+                                name: "c".to_string(),
+                                data_type: ColumnDataType::Int32 as _,
+                                is_nullable: true,
+                                default_constraint: vec![],
+                                semantic_type: SemanticType::Field as i32,
+                                ..Default::default()
+                            }),
+                            location: None,
+                            add_if_not_exists: true,
+                        },
+                        AddColumn {
+                            column_def: Some(ColumnDef {
+                                name: "d".to_string(),
+                                data_type: ColumnDataType::Int32 as _,
+                                is_nullable: true,
+                                default_constraint: vec![],
+                                semantic_type: SemanticType::Field as i32,
+                                ..Default::default()
+                            }),
+                            location: None,
+                            add_if_not_exists: true,
+                        },
+                    ],
+                })),
+            })),
+        });
+        let output = query(instance, request).await;
+        assert!(matches!(output.data, OutputData::AffectedRows(0)));
+
+        let request = Request::Query(QueryRequest {
+            query: Some(Query::Sql("INSERT INTO database_created_through_grpc.table_created_through_grpc (a, b, c, d, ts) VALUES ('s', 1, 1, 1, 1672816466000)".to_string()))
+        });
+        let output = query(instance, request).await;
+        assert!(matches!(output.data, OutputData::AffectedRows(1)));
+
+        let request = Request::Query(QueryRequest {
+            query: Some(Query::Sql(
+                "SELECT ts, a, b FROM database_created_through_grpc.table_created_through_grpc"
+                    .to_string(),
+            )),
+        });
+        let output = query(instance, request).await;
+        let OutputData::Stream(stream) = output.data else {
+            unreachable!()
+        };
+        let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
+        let expected = "\
++---------------------+---+---+
+| ts                  | a | b |
++---------------------+---+---+
+| 2023-01-04T07:14:26 | s | 1 |
++---------------------+---+---+";
+        assert_eq!(recordbatches.pretty_print().unwrap(), expected);
+
+        let request = Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::DropTable(DropTableExpr {
+                catalog_name: "greptime".to_string(),
+                schema_name: "database_created_through_grpc".to_string(),
+                table_name: "table_created_through_grpc".to_string(),
+                ..Default::default()
+            })),
+        });
+        let output = query(instance, request).await;
+        assert!(matches!(output.data, OutputData::AffectedRows(0)));
+    }
+
+    async fn test_handle_ddl_request(instance: &Instance) {
+        let request = Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::CreateDatabase(CreateDatabaseExpr {
+                catalog_name: "greptime".to_string(),
+                schema_name: "database_created_through_grpc".to_string(),
+                create_if_not_exists: true,
+                options: Default::default(),
+            })),
+        });
+        let output = query(instance, request).await;
+        assert!(matches!(output.data, OutputData::AffectedRows(1)));
+
+        let request = Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::CreateTable(CreateTableExpr {
+                catalog_name: "greptime".to_string(),
+                schema_name: "database_created_through_grpc".to_string(),
+                table_name: "table_created_through_grpc".to_string(),
+                column_defs: vec![
+                    ColumnDef {
+                        name: "a".to_string(),
+                        data_type: ColumnDataType::String as _,
+                        is_nullable: true,
+                        default_constraint: vec![],
+                        semantic_type: SemanticType::Field as i32,
+                        ..Default::default()
+                    },
+                    ColumnDef {
+                        name: "ts".to_string(),
+                        data_type: ColumnDataType::TimestampMillisecond as _,
+                        is_nullable: false,
+                        default_constraint: vec![],
+                        semantic_type: SemanticType::Timestamp as i32,
+                        ..Default::default()
+                    },
+                ],
+                time_index: "ts".to_string(),
+                engine: MITO_ENGINE.to_string(),
+                ..Default::default()
+            })),
+        });
+        let output = query(instance, request).await;
+        assert!(matches!(output.data, OutputData::AffectedRows(0)));
+
+        let request = Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::AlterTable(AlterTableExpr {
+                catalog_name: "greptime".to_string(),
+                schema_name: "database_created_through_grpc".to_string(),
+                table_name: "table_created_through_grpc".to_string(),
+                kind: Some(alter_table_expr::Kind::AddColumns(AddColumns {
                     add_columns: vec![AddColumn {
                         column_def: Some(ColumnDef {
                             name: "b".to_string(),
@@ -128,6 +309,7 @@ mod test {
                             ..Default::default()
                         }),
                         location: None,
+                        add_if_not_exists: false,
                     }],
                 })),
             })),
@@ -179,7 +361,8 @@ mod test {
             .table(
                 "greptime",
                 "database_created_through_grpc",
-                "table_created_through_grpc"
+                "table_created_through_grpc",
+                None,
             )
             .await
             .unwrap()
@@ -201,9 +384,11 @@ mod test {
 CREATE TABLE {table_name} (
     a INT,
     b STRING,
+    c JSON,
+    d VECTOR(3),
     ts TIMESTAMP,
     TIME INDEX (ts),
-    PRIMARY KEY (a, b)
+    PRIMARY KEY (a, b, c)
 ) PARTITION ON COLUMNS(a) (
     a < 10,
     a >= 10 AND a < 20,
@@ -289,13 +474,14 @@ CREATE TABLE {table_name} (
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_standalone_insert_and_query() {
+        common_telemetry::init_default_ut_logging();
         let standalone = GreptimeDbStandaloneBuilder::new("test_standalone_insert_and_query")
             .build()
             .await;
         let instance = &standalone.instance;
 
         let table_name = "my_table";
-        let sql = format!("CREATE TABLE {table_name} (a INT, b STRING, ts TIMESTAMP, TIME INDEX (ts), PRIMARY KEY (a, b))");
+        let sql = format!("CREATE TABLE {table_name} (a INT, b STRING, c JSON, ts TIMESTAMP, TIME INDEX (ts), PRIMARY KEY (a, b, c))");
         create_table(instance, sql).await;
 
         test_insert_delete_and_query_on_existing_table(instance, table_name).await;
@@ -330,6 +516,46 @@ CREATE TABLE {table_name} (
             1672557986000,
             1672557987000,
         ];
+        let json_strings = vec![
+            r#"{ "id": 1, "name": "Alice", "age": 30, "active": true }"#.to_string(),
+            r#"{ "id": 2, "name": "Bob", "balance": 1234.56, "active": false }"#.to_string(),
+            r#"{ "id": 3, "tags": ["rust", "testing", "json"], "age": 28 }"#.to_string(),
+            r#"{ "id": 4, "metadata": { "created_at": "2024-10-30T12:00:00Z", "status": "inactive" } }"#.to_string(),
+            r#"{ "id": 5, "name": null, "phone": "+1234567890" }"#.to_string(),
+            r#"{ "id": 6, "height": 5.9, "weight": 72.5, "active": true }"#.to_string(),
+            r#"{ "id": 7, "languages": ["English", "Spanish"], "age": 29 }"#.to_string(),
+            r#"{ "id": 8, "contact": { "email": "hank@example.com", "phone": "+0987654321" } }"#.to_string(),
+            r#"{ "id": 9, "preferences": { "notifications": true, "theme": "dark" } }"#.to_string(),
+            r#"{ "id": 10, "scores": [88, 92, 76], "active": false }"#.to_string(),
+            r#"{ "id": 11, "birthday": "1996-07-20", "location": { "city": "New York", "zip": "10001" } }"#.to_string(),
+            r#"{ "id": 12, "subscription": { "type": "premium", "expires": "2025-01-01" } }"#.to_string(),
+            r#"{ "id": 13, "settings": { "volume": 0.8, "brightness": 0.6 }, "active": true }"#.to_string(),
+            r#"{ "id": 14, "notes": ["first note", "second note"], "priority": 1 }"#.to_string(),
+            r#"{ "id": 15, "transactions": [{ "amount": 500, "date": "2024-01-01" }, { "amount": -200, "date": "2024-02-01" }] }"#.to_string(),
+            r#"{ "id": 16, "transactions": [{ "amount": 500, "date": "2024-01-01" }] }"#.to_string(),
+        ];
+        let vector_values = [
+            [1.0f32, 2.0, 3.0],
+            [4.0, 5.0, 6.0],
+            [7.0, 8.0, 9.0],
+            [10.0, 11.0, 12.0],
+            [13.0, 14.0, 15.0],
+            [16.0, 17.0, 18.0],
+            [19.0, 20.0, 21.0],
+            [22.0, 23.0, 24.0],
+            [25.0, 26.0, 27.0],
+            [28.0, 29.0, 30.0],
+            [31.0, 32.0, 33.0],
+            [34.0, 35.0, 36.0],
+            [37.0, 38.0, 39.0],
+            [40.0, 41.0, 42.0],
+            [43.0, 44.0, 45.0],
+            [46.0, 47.0, 48.0],
+        ]
+        .iter()
+        .map(|x| x.iter().flat_map(|&f| f.to_le_bytes()).collect::<Vec<u8>>())
+        .collect::<Vec<_>>();
+
         let insert = InsertRequest {
             table_name: table_name.to_string(),
             columns: vec![
@@ -358,6 +584,29 @@ CREATE TABLE {table_name} (
                     ..Default::default()
                 },
                 Column {
+                    column_name: "c".to_string(),
+                    values: Some(Values {
+                        string_values: json_strings,
+                        ..Default::default()
+                    }),
+                    semantic_type: SemanticType::Tag as i32,
+                    datatype: ColumnDataType::Json as i32,
+                    ..Default::default()
+                },
+                Column {
+                    column_name: "d".to_string(),
+                    values: Some(Values {
+                        binary_values: vector_values.clone(),
+                        ..Default::default()
+                    }),
+                    semantic_type: SemanticType::Field as i32,
+                    datatype: ColumnDataType::Vector as i32,
+                    datatype_extension: Some(ColumnDataTypeExtension {
+                        type_ext: Some(TypeExt::VectorType(VectorTypeExtension { dim: 3 })),
+                    }),
+                    ..Default::default()
+                },
+                Column {
                     column_name: "ts".to_string(),
                     values: Some(Values {
                         timestamp_millisecond_values,
@@ -381,7 +630,7 @@ CREATE TABLE {table_name} (
 
         let request = Request::Query(QueryRequest {
             query: Some(Query::Sql(format!(
-                "SELECT ts, a, b FROM {table_name} ORDER BY ts"
+                "SELECT ts, a, b, json_to_string(c) as c, d FROM {table_name} ORDER BY ts"
             ))),
         });
         let output = query(instance, request.clone()).await;
@@ -389,30 +638,53 @@ CREATE TABLE {table_name} (
             unreachable!()
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
-        let expected = "\
-+---------------------+----+-------------------+
-| ts                  | a  | b                 |
-+---------------------+----+-------------------+
-| 2023-01-01T07:26:12 | 1  | ts: 1672557972000 |
-| 2023-01-01T07:26:13 | 2  | ts: 1672557973000 |
-| 2023-01-01T07:26:14 | 3  | ts: 1672557974000 |
-| 2023-01-01T07:26:15 | 4  | ts: 1672557975000 |
-| 2023-01-01T07:26:16 | 5  | ts: 1672557976000 |
-| 2023-01-01T07:26:17 |    | ts: 1672557977000 |
-| 2023-01-01T07:26:18 | 11 | ts: 1672557978000 |
-| 2023-01-01T07:26:19 | 12 | ts: 1672557979000 |
-| 2023-01-01T07:26:20 | 20 | ts: 1672557980000 |
-| 2023-01-01T07:26:21 | 21 | ts: 1672557981000 |
-| 2023-01-01T07:26:22 | 22 | ts: 1672557982000 |
-| 2023-01-01T07:26:23 | 23 | ts: 1672557983000 |
-| 2023-01-01T07:26:24 | 50 | ts: 1672557984000 |
-| 2023-01-01T07:26:25 | 51 | ts: 1672557985000 |
-| 2023-01-01T07:26:26 | 52 | ts: 1672557986000 |
-| 2023-01-01T07:26:27 | 53 | ts: 1672557987000 |
-+---------------------+----+-------------------+";
-        assert_eq!(recordbatches.pretty_print().unwrap(), expected);
+        let expected = r#"+---------------------+----+-------------------+---------------------------------------------------------------------------------------------------+--------------------------+
+| ts                  | a  | b                 | c                                                                                                 | d                        |
++---------------------+----+-------------------+---------------------------------------------------------------------------------------------------+--------------------------+
+| 2023-01-01T07:26:12 | 1  | ts: 1672557972000 | {"active":true,"age":30,"id":1,"name":"Alice"}                                                    | 0000803f0000004000004040 |
+| 2023-01-01T07:26:13 | 2  | ts: 1672557973000 | {"active":false,"balance":1234.56,"id":2,"name":"Bob"}                                            | 000080400000a0400000c040 |
+| 2023-01-01T07:26:14 | 3  | ts: 1672557974000 | {"age":28,"id":3,"tags":["rust","testing","json"]}                                                | 0000e0400000004100001041 |
+| 2023-01-01T07:26:15 | 4  | ts: 1672557975000 | {"id":4,"metadata":{"created_at":"2024-10-30T12:00:00Z","status":"inactive"}}                     | 000020410000304100004041 |
+| 2023-01-01T07:26:16 | 5  | ts: 1672557976000 | {"id":5,"name":null,"phone":"+1234567890"}                                                        | 000050410000604100007041 |
+| 2023-01-01T07:26:17 |    | ts: 1672557977000 | {"active":true,"height":5.9,"id":6,"weight":72.5}                                                 | 000080410000884100009041 |
+| 2023-01-01T07:26:18 | 11 | ts: 1672557978000 | {"age":29,"id":7,"languages":["English","Spanish"]}                                               | 000098410000a0410000a841 |
+| 2023-01-01T07:26:19 | 12 | ts: 1672557979000 | {"contact":{"email":"hank@example.com","phone":"+0987654321"},"id":8}                             | 0000b0410000b8410000c041 |
+| 2023-01-01T07:26:20 | 20 | ts: 1672557980000 | {"id":9,"preferences":{"notifications":true,"theme":"dark"}}                                      | 0000c8410000d0410000d841 |
+| 2023-01-01T07:26:21 | 21 | ts: 1672557981000 | {"active":false,"id":10,"scores":[88,92,76]}                                                      | 0000e0410000e8410000f041 |
+| 2023-01-01T07:26:22 | 22 | ts: 1672557982000 | {"birthday":"1996-07-20","id":11,"location":{"city":"New York","zip":"10001"}}                    | 0000f8410000004200000442 |
+| 2023-01-01T07:26:23 | 23 | ts: 1672557983000 | {"id":12,"subscription":{"expires":"2025-01-01","type":"premium"}}                                | 0000084200000c4200001042 |
+| 2023-01-01T07:26:24 | 50 | ts: 1672557984000 | {"active":true,"id":13,"settings":{"brightness":0.6,"volume":0.8}}                                | 000014420000184200001c42 |
+| 2023-01-01T07:26:25 | 51 | ts: 1672557985000 | {"id":14,"notes":["first note","second note"],"priority":1}                                       | 000020420000244200002842 |
+| 2023-01-01T07:26:26 | 52 | ts: 1672557986000 | {"id":15,"transactions":[{"amount":500,"date":"2024-01-01"},{"amount":-200,"date":"2024-02-01"}]} | 00002c420000304200003442 |
+| 2023-01-01T07:26:27 | 53 | ts: 1672557987000 | {"id":16,"transactions":[{"amount":500,"date":"2024-01-01"}]}                                     | 0000384200003c4200004042 |
++---------------------+----+-------------------+---------------------------------------------------------------------------------------------------+--------------------------+"#;
+        similar_asserts::assert_eq!(recordbatches.pretty_print().unwrap(), expected);
 
-        let new_grpc_delete_request = |a, b, ts, row_count| DeleteRequest {
+        // Checks if the encoded vector values are as expected.
+        let hex_repr_of_vector_values = vector_values.iter().map(hex::encode).collect::<Vec<_>>();
+        assert_eq!(
+            hex_repr_of_vector_values,
+            vec![
+                "0000803f0000004000004040",
+                "000080400000a0400000c040",
+                "0000e0400000004100001041",
+                "000020410000304100004041",
+                "000050410000604100007041",
+                "000080410000884100009041",
+                "000098410000a0410000a841",
+                "0000b0410000b8410000c041",
+                "0000c8410000d0410000d841",
+                "0000e0410000e8410000f041",
+                "0000f8410000004200000442",
+                "0000084200000c4200001042",
+                "000014420000184200001c42",
+                "000020420000244200002842",
+                "00002c420000304200003442",
+                "0000384200003c4200004042",
+            ]
+        );
+
+        let new_grpc_delete_request = |a, b, c, d, ts, row_count| DeleteRequest {
             table_name: table_name.to_string(),
             key_columns: vec![
                 Column {
@@ -436,6 +708,29 @@ CREATE TABLE {table_name} (
                     ..Default::default()
                 },
                 Column {
+                    column_name: "c".to_string(),
+                    values: Some(Values {
+                        string_values: c,
+                        ..Default::default()
+                    }),
+                    semantic_type: SemanticType::Tag as i32,
+                    datatype: ColumnDataType::Json as i32,
+                    ..Default::default()
+                },
+                Column {
+                    column_name: "d".to_string(),
+                    values: Some(Values {
+                        binary_values: d,
+                        ..Default::default()
+                    }),
+                    semantic_type: SemanticType::Field as i32,
+                    datatype: ColumnDataType::Vector as i32,
+                    datatype_extension: Some(ColumnDataTypeExtension {
+                        type_ext: Some(TypeExt::VectorType(VectorTypeExtension { dim: 3 })),
+                    }),
+                    ..Default::default()
+                },
+                Column {
                     column_name: "ts".to_string(),
                     semantic_type: SemanticType::Timestamp as i32,
                     values: Some(Values {
@@ -456,6 +751,18 @@ CREATE TABLE {table_name} (
                 "ts: 1672557982000".to_string(),
                 "ts: 1672557986000".to_string(),
             ],
+            vec![
+                r#"{ "id": 2, "name": "Bob", "balance": 1234.56, "active": false }"#.to_string(),
+                r#"{ "id": 8, "contact": { "email": "hank@example.com", "phone": "+0987654321" } }"#.to_string(),
+                r#"{ "id": 11, "birthday": "1996-07-20", "location": { "city": "New York", "zip": "10001" } }"#.to_string(),
+                r#"{ "id": 15, "transactions": [{ "amount": 500, "date": "2024-01-01" }, { "amount": -200, "date": "2024-02-01" }] }"#.to_string(),
+            ],
+            vec![
+                [4.0f32, 5.0, 6.0].iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<u8>>(),
+                [22.0f32, 23.0, 24.0].iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<u8>>(),
+                [31.0f32, 32.0, 33.0].iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<u8>>(),
+                [43.0f32, 44.0, 45.0].iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<u8>>(),
+            ],
             vec![1672557973000, 1672557979000, 1672557982000, 1672557986000],
             4,
         );
@@ -464,6 +771,21 @@ CREATE TABLE {table_name} (
             vec![
                 "ts: 1672557974000".to_string(),
                 "ts: 1672557987000".to_string(),
+            ],
+            vec![
+                r#"{ "id": 3, "tags": ["rust", "testing", "json"], "age": 28 }"#.to_string(),
+                r#"{ "id": 16, "transactions": [{ "amount": 500, "date": "2024-01-01" }] }"#
+                    .to_string(),
+            ],
+            vec![
+                [7.0f32, 8.0, 9.0]
+                    .iter()
+                    .flat_map(|f| f.to_le_bytes())
+                    .collect::<Vec<u8>>(),
+                [46.0f32, 47.0, 48.0]
+                    .iter()
+                    .flat_map(|f| f.to_le_bytes())
+                    .collect::<Vec<u8>>(),
             ],
             vec![1672557974000, 1672557987000],
             2,
@@ -482,22 +804,21 @@ CREATE TABLE {table_name} (
             unreachable!()
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
-        let expected = "\
-+---------------------+----+-------------------+
-| ts                  | a  | b                 |
-+---------------------+----+-------------------+
-| 2023-01-01T07:26:12 | 1  | ts: 1672557972000 |
-| 2023-01-01T07:26:15 | 4  | ts: 1672557975000 |
-| 2023-01-01T07:26:16 | 5  | ts: 1672557976000 |
-| 2023-01-01T07:26:17 |    | ts: 1672557977000 |
-| 2023-01-01T07:26:18 | 11 | ts: 1672557978000 |
-| 2023-01-01T07:26:20 | 20 | ts: 1672557980000 |
-| 2023-01-01T07:26:21 | 21 | ts: 1672557981000 |
-| 2023-01-01T07:26:23 | 23 | ts: 1672557983000 |
-| 2023-01-01T07:26:24 | 50 | ts: 1672557984000 |
-| 2023-01-01T07:26:25 | 51 | ts: 1672557985000 |
-+---------------------+----+-------------------+";
-        assert_eq!(recordbatches.pretty_print().unwrap(), expected);
+        let expected = r#"+---------------------+----+-------------------+-------------------------------------------------------------------------------+--------------------------+
+| ts                  | a  | b                 | c                                                                             | d                        |
++---------------------+----+-------------------+-------------------------------------------------------------------------------+--------------------------+
+| 2023-01-01T07:26:12 | 1  | ts: 1672557972000 | {"active":true,"age":30,"id":1,"name":"Alice"}                                | 0000803f0000004000004040 |
+| 2023-01-01T07:26:15 | 4  | ts: 1672557975000 | {"id":4,"metadata":{"created_at":"2024-10-30T12:00:00Z","status":"inactive"}} | 000020410000304100004041 |
+| 2023-01-01T07:26:16 | 5  | ts: 1672557976000 | {"id":5,"name":null,"phone":"+1234567890"}                                    | 000050410000604100007041 |
+| 2023-01-01T07:26:17 |    | ts: 1672557977000 | {"active":true,"height":5.9,"id":6,"weight":72.5}                             | 000080410000884100009041 |
+| 2023-01-01T07:26:18 | 11 | ts: 1672557978000 | {"age":29,"id":7,"languages":["English","Spanish"]}                           | 000098410000a0410000a841 |
+| 2023-01-01T07:26:20 | 20 | ts: 1672557980000 | {"id":9,"preferences":{"notifications":true,"theme":"dark"}}                  | 0000c8410000d0410000d841 |
+| 2023-01-01T07:26:21 | 21 | ts: 1672557981000 | {"active":false,"id":10,"scores":[88,92,76]}                                  | 0000e0410000e8410000f041 |
+| 2023-01-01T07:26:23 | 23 | ts: 1672557983000 | {"id":12,"subscription":{"expires":"2025-01-01","type":"premium"}}            | 0000084200000c4200001042 |
+| 2023-01-01T07:26:24 | 50 | ts: 1672557984000 | {"active":true,"id":13,"settings":{"brightness":0.6,"volume":0.8}}            | 000014420000184200001c42 |
+| 2023-01-01T07:26:25 | 51 | ts: 1672557985000 | {"id":14,"notes":["first note","second note"],"priority":1}                   | 000020420000244200002842 |
++---------------------+----+-------------------+-------------------------------------------------------------------------------+--------------------------+"#;
+        similar_asserts::assert_eq!(recordbatches.pretty_print().unwrap(), expected);
     }
 
     async fn verify_data_distribution(
@@ -508,7 +829,7 @@ CREATE TABLE {table_name} (
         let table = instance
             .frontend()
             .catalog_manager()
-            .table("greptime", "public", table_name)
+            .table("greptime", "public", table_name, None)
             .await
             .unwrap()
             .unwrap();
@@ -537,13 +858,15 @@ CREATE TABLE {table_name} (
             &QueryContext::arc(),
         )
         .unwrap();
-        let LogicalPlan::DfPlan(plan) = instance
+        let plan = instance
             .frontend()
             .statement_executor()
-            .plan(stmt, QueryContext::arc())
+            .plan(&stmt, QueryContext::arc())
             .await
             .unwrap();
-        let plan = DFLogicalSubstraitConvertor.encode(&plan).unwrap();
+        let plan = DFLogicalSubstraitConvertor
+            .encode(&plan, DefaultSerializer)
+            .unwrap();
 
         for (region, dn) in region_to_dn_map.iter() {
             let region_server = instance.datanodes().get(dn).unwrap().region_server();
@@ -551,7 +874,7 @@ CREATE TABLE {table_name} (
             let region_id = RegionId::new(table_id, *region);
 
             let stream = region_server
-                .handle_read(RegionQueryRequest {
+                .handle_remote_read(RegionQueryRequest {
                     region_id: region_id.as_u64(),
                     plan: plan.to_vec(),
                     ..Default::default()
@@ -580,6 +903,22 @@ CREATE TABLE {table_name} (
                     null_mask: vec![2],
                     semantic_type: SemanticType::Field as i32,
                     datatype: ColumnDataType::Int32 as i32,
+                    ..Default::default()
+                },
+                Column {
+                    column_name: "c".to_string(),
+                    values: Some(Values {
+                        string_values: vec![
+                            r#"{ "id": 1, "name": "Alice", "age": 30, "active": true }"#
+                                .to_string(),
+                            r#"{ "id": 2, "name": "Bob", "balance": 1234.56, "active": false }"#
+                                .to_string(),
+                        ],
+                        ..Default::default()
+                    }),
+                    null_mask: vec![2],
+                    semantic_type: SemanticType::Field as i32,
+                    datatype: ColumnDataType::Json as i32,
                     ..Default::default()
                 },
                 Column {
@@ -648,7 +987,8 @@ CREATE TABLE {table_name} (
 
         let request = Request::Query(QueryRequest {
             query: Some(Query::Sql(
-                "SELECT ts, a, b FROM auto_created_table".to_string(),
+                "SELECT ts, a, b, json_to_string(c) as c FROM auto_created_table order by ts"
+                    .to_string(),
             )),
         });
         let output = query(instance, request.clone()).await;
@@ -656,18 +996,17 @@ CREATE TABLE {table_name} (
             unreachable!()
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
-        let expected = "\
-+---------------------+---+---+
-| ts                  | a | b |
-+---------------------+---+---+
-| 2023-01-01T07:26:15 | 4 |   |
-| 2023-01-01T07:26:16 |   |   |
-| 2023-01-01T07:26:17 | 6 |   |
-| 2023-01-01T07:26:18 |   | x |
-| 2023-01-01T07:26:19 |   |   |
-| 2023-01-01T07:26:20 |   | z |
-+---------------------+---+---+";
-        assert_eq!(recordbatches.pretty_print().unwrap(), expected);
+        let expected = r#"+---------------------+---+---+--------------------------------------------------------+
+| ts                  | a | b | c                                                      |
++---------------------+---+---+--------------------------------------------------------+
+| 2023-01-01T07:26:15 | 4 |   | {"active":true,"age":30,"id":1,"name":"Alice"}         |
+| 2023-01-01T07:26:16 |   |   |                                                        |
+| 2023-01-01T07:26:17 | 6 |   | {"active":false,"balance":1234.56,"id":2,"name":"Bob"} |
+| 2023-01-01T07:26:18 |   | x |                                                        |
+| 2023-01-01T07:26:19 |   |   |                                                        |
+| 2023-01-01T07:26:20 |   | z |                                                        |
++---------------------+---+---+--------------------------------------------------------+"#;
+        similar_asserts::assert_eq!(recordbatches.pretty_print().unwrap(), expected);
 
         let delete = DeleteRequest {
             table_name: "auto_created_table".to_string(),
@@ -698,16 +1037,15 @@ CREATE TABLE {table_name} (
             unreachable!()
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
-        let expected = "\
-+---------------------+---+---+
-| ts                  | a | b |
-+---------------------+---+---+
-| 2023-01-01T07:26:16 |   |   |
-| 2023-01-01T07:26:17 | 6 |   |
-| 2023-01-01T07:26:18 |   | x |
-| 2023-01-01T07:26:20 |   | z |
-+---------------------+---+---+";
-        assert_eq!(recordbatches.pretty_print().unwrap(), expected);
+        let expected = r#"+---------------------+---+---+--------------------------------------------------------+
+| ts                  | a | b | c                                                      |
++---------------------+---+---+--------------------------------------------------------+
+| 2023-01-01T07:26:16 |   |   |                                                        |
+| 2023-01-01T07:26:17 | 6 |   | {"active":false,"balance":1234.56,"id":2,"name":"Bob"} |
+| 2023-01-01T07:26:18 |   | x |                                                        |
+| 2023-01-01T07:26:20 |   | z |                                                        |
++---------------------+---+---+--------------------------------------------------------+"#;
+        similar_asserts::assert_eq!(recordbatches.pretty_print().unwrap(), expected);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -789,6 +1127,7 @@ CREATE TABLE {table_name} (
                 start: "1672557973".to_owned(),
                 end: "1672557978".to_owned(),
                 step: "1s".to_owned(),
+                lookback: "5m".to_string(),
             })),
         });
         let output = query(instance, request).await;

@@ -19,14 +19,14 @@ use std::collections::VecDeque;
 use parquet::column::page::{Page, PageMetadata, PageReader};
 use parquet::errors::Result;
 
-/// A reader that reads from cached pages.
-pub(crate) struct CachedPageReader {
+/// A reader that reads all pages from a cache.
+pub(crate) struct RowGroupCachedReader {
     /// Cached pages.
     pages: VecDeque<Page>,
 }
 
-impl CachedPageReader {
-    /// Returns a new reader from existing pages.
+impl RowGroupCachedReader {
+    /// Returns a new reader from pages of a column in a row group.
     pub(crate) fn new(pages: &[Page]) -> Self {
         Self {
             pages: pages.iter().cloned().collect(),
@@ -34,7 +34,7 @@ impl CachedPageReader {
     }
 }
 
-impl PageReader for CachedPageReader {
+impl PageReader for RowGroupCachedReader {
     fn get_next_page(&mut self) -> Result<Option<Page>> {
         Ok(self.pages.pop_front())
     }
@@ -55,9 +55,8 @@ impl PageReader for CachedPageReader {
     }
 }
 
-impl Iterator for CachedPageReader {
+impl Iterator for RowGroupCachedReader {
     type Item = Result<Page>;
-
     fn next(&mut self) -> Option<Self::Item> {
         self.get_next_page().transpose()
     }

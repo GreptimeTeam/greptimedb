@@ -1,0 +1,46 @@
+USE public;
+
+Affected Rows: 0
+
+CREATE TABLE test (
+    a int primary key,
+    b string,
+    ts timestamp time index,
+) PARTITION ON COLUMNS (a) (
+    a < 10,
+    a >= 10 AND a < 20,
+    a >= 20,
+);
+
+Affected Rows: 0
+
+INSERT INTO test VALUES
+       (1, 'a', 1),
+       (11, 'b', 11),
+       (21, 'c', 21);
+
+Affected Rows: 3
+
+-- SQLNESS SLEEP 3s
+SELECT SUM(region_rows), SUM(disk_size), SUM(sst_size), SUM(index_size)
+       FROM INFORMATION_SCHEMA.REGION_STATISTICS WHERE table_id
+       IN (SELECT TABLE_ID FROM INFORMATION_SCHEMA.TABLES WHERE table_name = 'test' and table_schema = 'public');
+
++-------------------------------------------------------+-----------------------------------------------------+----------------------------------------------------+------------------------------------------------------+
+| sum(information_schema.region_statistics.region_rows) | sum(information_schema.region_statistics.disk_size) | sum(information_schema.region_statistics.sst_size) | sum(information_schema.region_statistics.index_size) |
++-------------------------------------------------------+-----------------------------------------------------+----------------------------------------------------+------------------------------------------------------+
+| 3                                                     | 2238                                                | 0                                                  | 0                                                    |
++-------------------------------------------------------+-----------------------------------------------------+----------------------------------------------------+------------------------------------------------------+
+
+SELECT data_length, index_length, avg_row_length, table_rows FROM INFORMATION_SCHEMA.TABLES WHERE table_name = 'test';
+
++-------------+--------------+----------------+------------+
+| data_length | index_length | avg_row_length | table_rows |
++-------------+--------------+----------------+------------+
+| 0           | 0            | 26             | 3          |
++-------------+--------------+----------------+------------+
+
+DROP TABLE test;
+
+Affected Rows: 0
+

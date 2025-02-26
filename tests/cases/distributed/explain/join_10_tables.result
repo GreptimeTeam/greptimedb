@@ -73,8 +73,7 @@ limit 1;
 +-+-+
 | plan_type_| plan_|
 +-+-+
-| logical_plan_| Limit: skip=0, fetch=1_|
-|_|_Sort: t_1.ts DESC NULLS FIRST, fetch=1_|
+| logical_plan_| Sort: t_1.ts DESC NULLS FIRST, fetch=1_|
 |_|_Inner Join: t_9.ts = t_10.ts, t_9.vin = t_10.vin_|
 |_|_Inner Join: t_8.ts = t_9.ts, t_8.vin = t_9.vin_|
 |_|_Inner Join: t_7.ts = t_8.ts, t_7.vin = t_8.vin_|
@@ -96,9 +95,8 @@ limit 1;
 |_|_MergeScan [is_placeholder=false]_|
 |_|_MergeScan [is_placeholder=false]_|
 |_|_MergeScan [is_placeholder=false]_|
-| physical_plan | GlobalLimitExec: skip=0, fetch=1_|
-|_|_SortPreservingMergeExec: [ts@0 DESC], fetch=1_|
-|_|_SortExec: TopK(fetch=1), expr=[ts@0 DESC]_|
+| physical_plan | SortPreservingMergeExec: [ts@0 DESC], fetch=1_|
+|_|_SortExec: TopK(fetch=1), expr=[ts@0 DESC], preserve_partitioning=[true]_|
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_REDACTED
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
@@ -121,44 +119,34 @@ limit 1;
 |_|_RepartitionExec: partitioning=REDACTED
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_FilterExec: vin@1 IS NOT NULL_|
-|_|_RepartitionExec: partitioning=REDACTED
 |_|_MergeScanExec: REDACTED
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_FilterExec: vin@1 IS NOT NULL_|
+|_|_MergeScanExec: REDACTED
+|_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
 |_|_MergeScanExec: REDACTED
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
+|_|_MergeScanExec: REDACTED
+|_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
 |_|_MergeScanExec: REDACTED
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
+|_|_MergeScanExec: REDACTED
+|_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
 |_|_MergeScanExec: REDACTED
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
-|_|_RepartitionExec: partitioning=REDACTED
 |_|_MergeScanExec: REDACTED
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
-|_|_RepartitionExec: partitioning=REDACTED
 |_|_MergeScanExec: REDACTED
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
-|_|_RepartitionExec: partitioning=REDACTED
-|_|_RepartitionExec: partitioning=REDACTED
-|_|_MergeScanExec: REDACTED
-|_|_CoalesceBatchesExec: target_batch_size=8192_|
-|_|_RepartitionExec: partitioning=REDACTED
-|_|_RepartitionExec: partitioning=REDACTED
-|_|_MergeScanExec: REDACTED
-|_|_CoalesceBatchesExec: target_batch_size=8192_|
-|_|_RepartitionExec: partitioning=REDACTED
-|_|_RepartitionExec: partitioning=REDACTED
-|_|_MergeScanExec: REDACTED
-|_|_CoalesceBatchesExec: target_batch_size=8192_|
-|_|_RepartitionExec: partitioning=REDACTED
 |_|_RepartitionExec: partitioning=REDACTED
 |_|_MergeScanExec: REDACTED
 |_|_|

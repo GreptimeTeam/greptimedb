@@ -26,6 +26,7 @@
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use common_telemetry::info;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::SequenceNumber;
 
@@ -77,17 +78,23 @@ impl VersionControl {
         data.last_entry_id = entry_id;
     }
 
+    /// Sequence number of last committed data.
+    pub(crate) fn committed_sequence(&self) -> SequenceNumber {
+        self.data.read().unwrap().committed_sequence
+    }
+
     /// Freezes the mutable memtable if it is not empty.
     pub(crate) fn freeze_mutable(&self) -> Result<()> {
         let version = self.current().version;
-        if version.memtables.mutable.is_empty() {
-            return Ok(());
-        }
-        // Safety: Immutable memtable is None.
-        let new_memtables = version
+        let time_window = version.compaction_time_window;
+
+        let Some(new_memtables) = version
             .memtables
-            .freeze_mutable(&version.metadata)?
-            .unwrap();
+            .freeze_mutable(&version.metadata, time_window)?
+        else {
+            return Ok(());
+        };
+
         // Create a new version with memtable switched.
         let new_version = Arc::new(
             VersionBuilder::from_version(version)
@@ -99,6 +106,18 @@ impl VersionControl {
         version_data.version = new_version;
 
         Ok(())
+    }
+
+    /// Applies region option changes and generates a new version.
+    pub(crate) fn alter_options(&self, options: RegionOptions) {
+        let version = self.current().version;
+        let new_version = Arc::new(
+            VersionBuilder::from_version(version)
+                .options(options)
+                .build(),
+        );
+        let mut version_data = self.data.write().unwrap();
+        version_data.version = new_version;
     }
 
     /// Apply edit to current version.
@@ -240,7 +259,10 @@ pub(crate) struct Version {
     ///
     /// Used to check if it is a flush task during the truncating table.
     pub(crate) truncated_entry_id: Option<EntryId>,
-    /// Inferred compaction time window.
+    /// Inferred compaction time window from flush.
+    ///
+    /// If compaction options contain a time window, it will overwrite this value
+    /// when creating a new version from the [VersionBuilder].
     pub(crate) compaction_time_window: Option<Duration>,
     /// Options of the region.
     pub(crate) options: RegionOptions,
@@ -376,7 +398,24 @@ impl VersionBuilder {
     }
 
     /// Builds a new [Version] from the builder.
+    /// It overwrites the window size by compaction option.
     pub(crate) fn build(self) -> Version {
+        let compaction_time_window = self
+            .options
+            .compaction
+            .time_window()
+            .or(self.compaction_time_window);
+        if self.compaction_time_window.is_some()
+            && compaction_time_window != self.compaction_time_window
+        {
+            info!(
+                "VersionBuilder overwrites region compaction time window from {:?} to {:?}, region: {}",
+                self.compaction_time_window,
+                compaction_time_window,
+                self.metadata.region_id
+            );
+        }
+
         Version {
             metadata: self.metadata,
             memtables: self.memtables,
@@ -384,7 +423,7 @@ impl VersionBuilder {
             flushed_entry_id: self.flushed_entry_id,
             flushed_sequence: self.flushed_sequence,
             truncated_entry_id: self.truncated_entry_id,
-            compaction_time_window: self.compaction_time_window,
+            compaction_time_window,
             options: self.options,
         }
     }

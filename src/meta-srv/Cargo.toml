@@ -6,39 +6,52 @@ license.workspace = true
 
 [features]
 mock = []
+pg_kvbackend = ["dep:tokio-postgres", "common-meta/pg_kvbackend"]
 
 [lints]
 workspace = true
 
+[target.'cfg(not(target_os = "android"))'.dependencies]
+local-ip-address.workspace = true
+
 [dependencies]
 api.workspace = true
-async-trait = "0.1"
+async-trait.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+clap.workspace = true
 client.workspace = true
 common-base.workspace = true
 common-catalog.workspace = true
+common-config.workspace = true
 common-error.workspace = true
 common-greptimedb-telemetry.workspace = true
 common-grpc.workspace = true
 common-macro.workspace = true
 common-meta.workspace = true
+common-options.workspace = true
 common-procedure.workspace = true
 common-runtime.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
+common-version.workspace = true
 common-wal.workspace = true
 dashmap.workspace = true
 datatypes.workspace = true
+deadpool.workspace = true
+deadpool-postgres.workspace = true
 derive_builder.workspace = true
 etcd-client.workspace = true
 futures.workspace = true
 h2 = "0.3"
-http-body = "0.4"
-humantime = "2.1"
+http-body-util = "0.1"
+humantime.workspace = true
 humantime-serde.workspace = true
+hyper-util = { workspace = true, features = ["tokio"] }
 itertools.workspace = true
 lazy_static.workspace = true
 once_cell.workspace = true
-parking_lot = "0.12"
+parking_lot.workspace = true
 prometheus.workspace = true
 prost.workspace = true
 rand.workspace = true
@@ -50,12 +63,14 @@ snafu.workspace = true
 store-api.workspace = true
 table.workspace = true
 tokio.workspace = true
+tokio-postgres = { workspace = true, optional = true, features = ["with-chrono-0_4"] }
 tokio-stream = { workspace = true, features = ["net"] }
 toml.workspace = true
 tonic.workspace = true
-tower = "0.4"
-typetag = "0.2"
+tower.workspace = true
+typetag.workspace = true
 url = "2.3"
+uuid.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true
@@ -64,4 +79,4 @@ common-meta = { workspace = true, features = ["testing"] }
 common-procedure-test.workspace = true
 session.workspace = true
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber.workspace = true

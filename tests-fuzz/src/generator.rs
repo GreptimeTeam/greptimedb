@@ -20,11 +20,13 @@ pub mod select_expr;
 use std::fmt;
 
 use datatypes::data_type::ConcreteDataType;
+use datatypes::types::TimestampType;
+use datatypes::value::Value;
 use rand::Rng;
 
 use crate::error::Error;
 use crate::ir::create_expr::ColumnOption;
-use crate::ir::{AlterTableExpr, CreateTableExpr};
+use crate::ir::{AlterTableExpr, CreateTableExpr, Ident};
 
 pub type CreateTableExprGenerator<R> =
     Box<dyn Generator<CreateTableExpr, R, Error = Error> + Sync + Send>;
@@ -35,6 +37,11 @@ pub type AlterTableExprGenerator<R> =
 pub type ColumnOptionGenerator<R> = Box<dyn Fn(&mut R, &ConcreteDataType) -> Vec<ColumnOption>>;
 
 pub type ConcreteDataTypeGenerator<R> = Box<dyn Random<ConcreteDataType, R>>;
+
+pub type ValueGenerator<R> =
+    Box<dyn Fn(&mut R, &ConcreteDataType, Option<&dyn Random<Ident, R>>) -> Value>;
+
+pub type TsValueGenerator<R> = Box<dyn Fn(&mut R, TimestampType) -> Value>;
 
 pub trait Generator<T, R: Rng> {
     type Error: Sync + Send + fmt::Debug;

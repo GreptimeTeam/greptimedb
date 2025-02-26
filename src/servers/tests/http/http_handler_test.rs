@@ -14,44 +14,35 @@
 
 use std::collections::HashMap;
 
-use axum::body::{Body, Bytes};
-use axum::extract::{Json, Query, RawBody, State};
+use axum::extract::{Json, Query, State};
 use axum::http::header;
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::Form;
+use bytes::Bytes;
 use headers::HeaderValue;
-use http_body::combinators::UnsyncBoxBody;
-use hyper::Response;
 use mime_guess::mime;
+use servers::http::GreptimeQueryOutput::Records;
 use servers::http::{
-    handler as http_handler, script as script_handler, ApiState, GreptimeOptionsConfigState,
-    GreptimeQueryOutput, HttpResponse,
+    handler as http_handler, ApiState, GreptimeOptionsConfigState, GreptimeQueryOutput,
+    HttpResponse,
 };
 use servers::metrics_handler::MetricsHandler;
 use session::context::QueryContext;
 use table::test_util::MemTable;
 
-use crate::{
-    create_testing_script_handler, create_testing_sql_query_handler, ScriptHandlerRef,
-    ServerSqlQueryHandlerRef,
-};
+use crate::create_testing_sql_query_handler;
 
 #[tokio::test]
 async fn test_sql_not_provided() {
     let sql_handler = create_testing_sql_query_handler(MemTable::default_numbers_table());
-    let ctx = QueryContext::arc();
-    ctx.set_current_user(Some(auth::userinfo_by_name(None)));
-    let api_state = ApiState {
-        sql_handler,
-        script_handler: None,
-    };
+    let ctx = QueryContext::with_db_name(None);
+    ctx.set_current_user(auth::userinfo_by_name(None));
+    let api_state = ApiState { sql_handler };
 
     for format in ["greptimedb_v1", "influxdb_v1", "csv", "table"] {
         let query = http_handler::SqlQuery {
-            db: None,
-            sql: None,
             format: Some(format.to_string()),
-            epoch: None,
+            ..Default::default()
         };
 
         let HttpResponse::Error(resp) = http_handler::sql(
@@ -75,15 +66,13 @@ async fn test_sql_output_rows() {
 
     let sql_handler = create_testing_sql_query_handler(MemTable::default_numbers_table());
 
-    let ctx = QueryContext::arc();
-    ctx.set_current_user(Some(auth::userinfo_by_name(None)));
-    let api_state = ApiState {
-        sql_handler,
-        script_handler: None,
-    };
+    let ctx = QueryContext::with_db_name(None);
+    ctx.set_current_user(auth::userinfo_by_name(None));
+    let api_state = ApiState { sql_handler };
 
+    let query_sql = "select sum(uint32s) from numbers limit 20";
     for format in ["greptimedb_v1", "influxdb_v1", "csv", "table"] {
-        let query = create_query(format);
+        let query = create_query(format, query_sql, None);
         let json = http_handler::sql(
             State(api_state.clone()),
             query,
@@ -103,7 +92,7 @@ async fn test_sql_output_rows() {
   "schema": {
     "column_schemas": [
       {
-        "name": "SUM(numbers.uint32s)",
+        "name": "sum(numbers.uint32s)",
         "data_type": "UInt64"
       }
     ]
@@ -112,7 +101,8 @@ async fn test_sql_output_rows() {
     [
       4950
     ]
-  ]
+  ],
+  "total_rows": 1
 }"#
                     );
                 }
@@ -129,7 +119,7 @@ async fn test_sql_output_rows() {
       {
         "name": "",
         "columns": [
-          "SUM(numbers.uint32s)"
+          "sum(numbers.uint32s)"
         ],
         "values": [
           [
@@ -143,28 +133,30 @@ async fn test_sql_output_rows() {
                 );
             }
             HttpResponse::Csv(resp) => {
-                use http_body::Body as HttpBody;
-                let mut resp = resp.into_response();
+                let resp = resp.into_response();
                 assert_eq!(
                     resp.headers().get(header::CONTENT_TYPE),
                     Some(HeaderValue::from_static(mime::TEXT_CSV_UTF_8.as_ref())).as_ref(),
                 );
                 assert_eq!(
-                    resp.body_mut().data().await.unwrap().unwrap(),
-                    hyper::body::Bytes::from_static(b"4950\n"),
+                    axum::body::to_bytes(resp.into_body(), usize::MAX)
+                        .await
+                        .unwrap(),
+                    Bytes::from_static(b"4950\n"),
                 );
             }
             HttpResponse::Table(resp) => {
-                use http_body::Body as HttpBody;
-                let mut resp = resp.into_response();
+                let resp = resp.into_response();
                 assert_eq!(
                     resp.headers().get(header::CONTENT_TYPE),
                     Some(HeaderValue::from_static(mime::TEXT_PLAIN_UTF_8.as_ref())).as_ref(),
                 );
                 assert_eq!(
-                    resp.body_mut().data().await.unwrap().unwrap(),
-                    hyper::body::Bytes::from(
-                        r#"┌─SUM(numbers.uint32s)─┐
+                    axum::body::to_bytes(resp.into_body(), usize::MAX)
+                        .await
+                        .unwrap(),
+                    Bytes::from(
+                        r#"┌─sum(numbers.uint32s)─┐
 │ 4950                 │
 └──────────────────────┘
 "#
@@ -177,17 +169,54 @@ async fn test_sql_output_rows() {
 }
 
 #[tokio::test]
+async fn test_dashboard_sql_limit() {
+    let sql_handler = create_testing_sql_query_handler(MemTable::specified_numbers_table(2000));
+    let ctx = QueryContext::with_db_name(None);
+    ctx.set_current_user(auth::userinfo_by_name(None));
+    let api_state = ApiState { sql_handler };
+    for format in ["greptimedb_v1", "csv", "table"] {
+        let query = create_query(format, "select * from numbers", Some(1000));
+        let sql_response = http_handler::sql(
+            State(api_state.clone()),
+            query,
+            axum::Extension(ctx.clone()),
+            Form(http_handler::SqlQuery::default()),
+        )
+        .await;
+
+        match sql_response {
+            HttpResponse::GreptimedbV1(resp) => match resp.output().first().unwrap() {
+                Records(records) => {
+                    assert_eq!(records.num_rows(), 1000);
+                }
+                _ => unreachable!(),
+            },
+            HttpResponse::Csv(resp) => match resp.output().first().unwrap() {
+                Records(records) => {
+                    assert_eq!(records.num_rows(), 1000);
+                }
+                _ => unreachable!(),
+            },
+            HttpResponse::Table(resp) => match resp.output().first().unwrap() {
+                Records(records) => {
+                    assert_eq!(records.num_rows(), 1000);
+                }
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_sql_form() {
     common_telemetry::init_default_ut_logging();
 
     let sql_handler = create_testing_sql_query_handler(MemTable::default_numbers_table());
 
-    let ctx = QueryContext::arc();
-    ctx.set_current_user(Some(auth::userinfo_by_name(None)));
-    let api_state = ApiState {
-        sql_handler,
-        script_handler: None,
-    };
+    let ctx = QueryContext::with_db_name(None);
+    ctx.set_current_user(auth::userinfo_by_name(None));
+    let api_state = ApiState { sql_handler };
 
     for format in ["greptimedb_v1", "influxdb_v1", "csv", "table"] {
         let form = create_form(format);
@@ -210,7 +239,7 @@ async fn test_sql_form() {
   "schema": {
     "column_schemas": [
       {
-        "name": "SUM(numbers.uint32s)",
+        "name": "sum(numbers.uint32s)",
         "data_type": "UInt64"
       }
     ]
@@ -219,7 +248,8 @@ async fn test_sql_form() {
     [
       4950
     ]
-  ]
+  ],
+  "total_rows": 1
 }"#
                     );
                 }
@@ -236,7 +266,7 @@ async fn test_sql_form() {
       {
         "name": "",
         "columns": [
-          "SUM(numbers.uint32s)"
+          "sum(numbers.uint32s)"
         ],
         "values": [
           [
@@ -250,28 +280,30 @@ async fn test_sql_form() {
                 );
             }
             HttpResponse::Csv(resp) => {
-                use http_body::Body as HttpBody;
-                let mut resp = resp.into_response();
+                let resp = resp.into_response();
                 assert_eq!(
                     resp.headers().get(header::CONTENT_TYPE),
                     Some(HeaderValue::from_static(mime::TEXT_CSV_UTF_8.as_ref())).as_ref(),
                 );
                 assert_eq!(
-                    resp.body_mut().data().await.unwrap().unwrap(),
-                    hyper::body::Bytes::from_static(b"4950\n"),
+                    axum::body::to_bytes(resp.into_body(), usize::MAX)
+                        .await
+                        .unwrap(),
+                    Bytes::from_static(b"4950\n"),
                 );
             }
             HttpResponse::Table(resp) => {
-                use http_body::Body as HttpBody;
-                let mut resp = resp.into_response();
+                let resp = resp.into_response();
                 assert_eq!(
                     resp.headers().get(header::CONTENT_TYPE),
                     Some(HeaderValue::from_static(mime::TEXT_PLAIN_UTF_8.as_ref())).as_ref(),
                 );
                 assert_eq!(
-                    resp.body_mut().data().await.unwrap().unwrap(),
-                    hyper::body::Bytes::from(
-                        r#"┌─SUM(numbers.uint32s)─┐
+                    axum::body::to_bytes(resp.into_body(), usize::MAX)
+                        .await
+                        .unwrap(),
+                    Bytes::from(
+                        r#"┌─sum(numbers.uint32s)─┐
 │ 4950                 │
 └──────────────────────┘
 "#
@@ -296,209 +328,20 @@ async fn test_metrics() {
     assert!(text.contains("test_metrics counter"));
 }
 
-async fn insert_script(
-    script: String,
-    script_handler: ScriptHandlerRef,
-    sql_handler: ServerSqlQueryHandlerRef,
-) {
-    let body = RawBody(Body::from(script.clone()));
-    let invalid_query = create_invalid_script_query();
-    let json = script_handler::scripts(
-        State(ApiState {
-            sql_handler: sql_handler.clone(),
-            script_handler: Some(script_handler.clone()),
-        }),
-        invalid_query,
-        body,
-    )
-    .await;
-    let HttpResponse::Error(json) = json else {
-        unreachable!()
-    };
-    assert_eq!(json.error(), "invalid schema");
-
-    let body = RawBody(Body::from(script.clone()));
-    let exec = create_script_query();
-    // Insert the script
-    let json = script_handler::scripts(
-        State(ApiState {
-            sql_handler: sql_handler.clone(),
-            script_handler: Some(script_handler.clone()),
-        }),
-        exec,
-        body,
-    )
-    .await;
-    let HttpResponse::GreptimedbV1(json) = json else {
-        unreachable!()
-    };
-    assert!(json.output().is_empty());
-}
-
-#[tokio::test]
-async fn test_scripts() {
-    common_telemetry::init_default_ut_logging();
-
-    let script = r#"
-@copr(sql='select uint32s as number from numbers limit 5', args=['number'], returns=['n'])
-def test(n) -> vector[i64]:
-    return n;
-"#
-    .to_string();
-    let sql_handler = create_testing_sql_query_handler(MemTable::default_numbers_table());
-    let script_handler = create_testing_script_handler(MemTable::default_numbers_table());
-
-    insert_script(script.clone(), script_handler.clone(), sql_handler.clone()).await;
-    // Run the script
-    let exec = create_script_query();
-    let json = script_handler::run_script(
-        State(ApiState {
-            sql_handler,
-            script_handler: Some(script_handler),
-        }),
-        exec,
-    )
-    .await;
-    let HttpResponse::GreptimedbV1(json) = json else {
-        unreachable!()
-    };
-    match &json.output()[0] {
-        GreptimeQueryOutput::Records(records) => {
-            let json = serde_json::to_string_pretty(&records).unwrap();
-            assert_eq!(5, records.num_rows());
-            assert_eq!(
-                json,
-                r#"{
-  "schema": {
-    "column_schemas": [
-      {
-        "name": "n",
-        "data_type": "Int64"
-      }
-    ]
-  },
-  "rows": [
-    [
-      0
-    ],
-    [
-      1
-    ],
-    [
-      2
-    ],
-    [
-      3
-    ],
-    [
-      4
-    ]
-  ]
-}"#
-            );
-        }
-        _ => unreachable!(),
-    }
-}
-
-#[tokio::test]
-async fn test_scripts_with_params() {
-    common_telemetry::init_default_ut_logging();
-
-    let script = r#"
-@copr(sql='select uint32s as number from numbers limit 5', args=['number'], returns=['n'])
-def test(n, **params)  -> vector[i64]:
-    return n + int(params['a'])
-"#
-    .to_string();
-    let sql_handler = create_testing_sql_query_handler(MemTable::default_numbers_table());
-    let script_handler = create_testing_script_handler(MemTable::default_numbers_table());
-
-    insert_script(script.clone(), script_handler.clone(), sql_handler.clone()).await;
-    // Run the script
-    let mut exec = create_script_query();
-    let _ = exec.0.params.insert("a".to_string(), "42".to_string());
-    let json = script_handler::run_script(
-        State(ApiState {
-            sql_handler,
-            script_handler: Some(script_handler),
-        }),
-        exec,
-    )
-    .await;
-    let HttpResponse::GreptimedbV1(json) = json else {
-        unreachable!()
-    };
-    match &json.output()[0] {
-        GreptimeQueryOutput::Records(records) => {
-            let json = serde_json::to_string_pretty(&records).unwrap();
-            assert_eq!(5, records.num_rows());
-            assert_eq!(
-                json,
-                r#"{
-  "schema": {
-    "column_schemas": [
-      {
-        "name": "n",
-        "data_type": "Int64"
-      }
-    ]
-  },
-  "rows": [
-    [
-      42
-    ],
-    [
-      43
-    ],
-    [
-      44
-    ],
-    [
-      45
-    ],
-    [
-      46
-    ]
-  ]
-}"#
-            );
-        }
-        _ => unreachable!(),
-    }
-}
-
-fn create_script_query() -> Query<script_handler::ScriptQuery> {
-    Query(script_handler::ScriptQuery {
-        db: Some("test".to_string()),
-        name: Some("test".to_string()),
-        ..Default::default()
-    })
-}
-
-fn create_invalid_script_query() -> Query<script_handler::ScriptQuery> {
-    Query(script_handler::ScriptQuery {
-        db: None,
-        name: None,
-        ..Default::default()
-    })
-}
-
-fn create_query(format: &str) -> Query<http_handler::SqlQuery> {
+fn create_query(format: &str, sql: &str, limit: Option<usize>) -> Query<http_handler::SqlQuery> {
     Query(http_handler::SqlQuery {
-        sql: Some("select sum(uint32s) from numbers limit 20".to_string()),
-        db: None,
+        sql: Some(sql.to_string()),
         format: Some(format.to_string()),
-        epoch: None,
+        limit,
+        ..Default::default()
     })
 }
 
 fn create_form(format: &str) -> Form<http_handler::SqlQuery> {
     Form(http_handler::SqlQuery {
         sql: Some("select sum(uint32s) from numbers limit 20".to_string()),
-        db: None,
         format: Some(format.to_string()),
-        epoch: None,
+        ..Default::default()
     })
 }
 
@@ -522,13 +365,14 @@ async fn test_status() {
     let hostname = hostname::get()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|_| "unknown".to_string());
+    let build_info = common_version::build_info();
     let expected_json = http_handler::StatusResponse {
-        source_time: env!("SOURCE_TIMESTAMP"),
-        commit: env!("GIT_COMMIT"),
-        branch: env!("GIT_BRANCH"),
-        rustc_version: env!("RUSTC_VERSION"),
+        source_time: build_info.source_time,
+        commit: build_info.commit,
+        branch: build_info.branch,
+        rustc_version: build_info.rustc,
         hostname,
-        version: env!("CARGO_PKG_VERSION"),
+        version: build_info.version,
     };
 
     let Json(json) = http_handler::status().await;
@@ -557,6 +401,8 @@ async fn test_config() {
     assert_eq!(get_body(rs).await, toml_str);
 }
 
-async fn get_body(response: Response<UnsyncBoxBody<Bytes, axum::Error>>) -> Bytes {
-    hyper::body::to_bytes(response.into_body()).await.unwrap()
+async fn get_body(response: Response) -> Bytes {
+    axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap()
 }

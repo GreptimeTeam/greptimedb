@@ -13,22 +13,28 @@
 // limitations under the License.
 
 use api::v1;
-use api::v1::alter_expr::Kind;
+use api::v1::alter_table_expr::Kind;
 use api::v1::region::{
     alter_request, region_request, AddColumn, AddColumns, AlterRequest, AlterRequests,
     RegionColumnDef, RegionRequest, RegionRequestHeader,
 };
 use common_telemetry::tracing_context::TracingContext;
-use store_api::storage::{RegionId, RegionNumber};
+use store_api::storage::RegionId;
 
 use crate::ddl::alter_logical_tables::AlterLogicalTablesProcedure;
 use crate::error::Result;
 use crate::key::table_info::TableInfoValue;
+use crate::peer::Peer;
 use crate::rpc::ddl::AlterTableTask;
+use crate::rpc::router::{find_leader_regions, RegionRoute};
 
 impl AlterLogicalTablesProcedure {
-    pub(crate) fn make_request(&self, region_number: RegionNumber) -> Result<RegionRequest> {
-        let alter_requests = self.make_alter_region_requests(region_number)?;
+    pub(crate) fn make_request(
+        &self,
+        peer: &Peer,
+        region_routes: &[RegionRoute],
+    ) -> Result<RegionRequest> {
+        let alter_requests = self.make_alter_region_requests(peer, region_routes)?;
         let request = RegionRequest {
             header: Some(RegionRequestHeader {
                 tracing_context: TracingContext::from_current_span().to_w3c(),
@@ -40,17 +46,25 @@ impl AlterLogicalTablesProcedure {
         Ok(request)
     }
 
-    fn make_alter_region_requests(&self, region_number: RegionNumber) -> Result<AlterRequests> {
-        let mut requests = Vec::with_capacity(self.data.tasks.len());
+    fn make_alter_region_requests(
+        &self,
+        peer: &Peer,
+        region_routes: &[RegionRoute],
+    ) -> Result<AlterRequests> {
+        let tasks = &self.data.tasks;
+        let regions_on_this_peer = find_leader_regions(region_routes, peer);
+        let mut requests = Vec::with_capacity(tasks.len() * regions_on_this_peer.len());
         for (task, table) in self
             .data
             .tasks
             .iter()
             .zip(self.data.table_info_values.iter())
         {
-            let region_id = RegionId::new(table.table_info.ident.table_id, region_number);
-            let request = self.make_alter_region_request(region_id, task, table)?;
-            requests.push(request);
+            for region_number in &regions_on_this_peer {
+                let region_id = RegionId::new(table.table_info.ident.table_id, *region_number);
+                let request = self.make_alter_region_request(region_id, task, table)?;
+                requests.push(request);
+            }
         }
 
         Ok(AlterRequests { requests })

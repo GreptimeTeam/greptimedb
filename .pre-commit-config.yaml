@@ -16,6 +16,7 @@ repos:
     hooks:
     -    id: fmt
     -    id: clippy
-         args: ["--workspace", "--all-targets", "--", "-D", "warnings", "-D", "clippy::print_stdout", "-D", "clippy::print_stderr"]
-         stages: [push]
+         args: ["--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"]
+         stages: [pre-push]
     -    id: cargo-check
+         args: ["--workspace", "--all-targets", "--all-features"]

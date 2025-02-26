@@ -21,7 +21,7 @@ use api::v1::GreptimeRequest;
 use arrow_flight::flight_service_server::FlightService;
 use arrow_flight::{
     Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightInfo,
-    HandshakeRequest, HandshakeResponse, PutResult, SchemaResult, Ticket,
+    HandshakeRequest, HandshakeResponse, PollInfo, PutResult, SchemaResult, Ticket,
 };
 use async_trait::async_trait;
 use common_grpc::flight::{FlightEncoder, FlightMessage};
@@ -96,6 +96,13 @@ impl<T: FlightCraft> FlightService for FlightCraftWrapper<T> {
         Err(Status::unimplemented("Not yet implemented"))
     }
 
+    async fn poll_flight_info(
+        &self,
+        _: Request<FlightDescriptor>,
+    ) -> TonicResult<Response<PollInfo>> {
+        Err(Status::unimplemented("Not yet implemented"))
+    }
+
     async fn get_schema(
         &self,
         _: Request<FlightDescriptor>,
@@ -160,7 +167,7 @@ impl FlightCraft for GreptimeRequestHandler {
             request_type = get_request_type(&request)
         );
         async {
-            let output = self.handle_request(request).await?;
+            let output = self.handle_request(request, Default::default()).await?;
             let stream: Pin<Box<dyn Stream<Item = Result<FlightData, Status>> + Send + Sync>> =
                 to_flight_data_stream(output, TracingContext::from_current_span());
             Ok(Response::new(stream))

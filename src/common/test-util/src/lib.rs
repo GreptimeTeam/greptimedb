@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(lazy_cell)]
-
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;

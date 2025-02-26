@@ -17,13 +17,13 @@ use std::sync::Arc;
 use api::v1::greptime_request::Request;
 use async_trait::async_trait;
 use axum::Router;
-use axum_test_helper::TestClient;
 use common_query::Output;
 use common_test_util::ports;
+use datafusion_expr::LogicalPlan;
 use query::parser::PromQuery;
-use query::plan::LogicalPlan;
 use query::query_engine::DescribeResult;
 use servers::error::{self, Result};
+use servers::http::test_helpers::TestClient;
 use servers::http::{HttpOptions, HttpServerBuilder};
 use servers::opentsdb::codec::DataPoint;
 use servers::query_handler::grpc::GrpcQueryHandler;
@@ -109,18 +109,20 @@ fn make_test_app(tx: mpsc::Sender<String>) -> Router {
 
     let instance = Arc::new(DummyInstance { tx });
     let server = HttpServerBuilder::new(http_opts)
-        .with_sql_handler(instance.clone(), None)
+        .with_sql_handler(instance.clone())
         .with_opentsdb_handler(instance)
         .build();
-    server.build(server.make_app())
+    server.build(server.make_app()).unwrap()
 }
 
 #[tokio::test]
 async fn test_opentsdb_put() {
+    common_telemetry::init_default_ut_logging();
+
     let (tx, mut rx) = mpsc::channel(100);
 
     let app = make_test_app(tx);
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     // single data point put
     let result = client
@@ -174,10 +176,12 @@ async fn test_opentsdb_put() {
 
 #[tokio::test]
 async fn test_opentsdb_debug_put() {
+    common_telemetry::init_default_ut_logging();
+
     let (tx, mut rx) = mpsc::channel(100);
 
     let app = make_test_app(tx);
-    let client = TestClient::new(app);
+    let client = TestClient::new(app).await;
 
     // single data point summary debug put
     let result = client

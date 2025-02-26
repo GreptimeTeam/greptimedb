@@ -21,16 +21,17 @@ use std::hash::{Hash, Hasher};
 use api::prom_store::remote::label_matcher::Type as MatcherType;
 use api::prom_store::remote::{Label, Query, Sample, TimeSeries, WriteRequest};
 use api::v1::RowInsertRequests;
+use common_grpc::precision::Precision;
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_telemetry::tracing;
 use common_time::timestamp::TimeUnit;
 use datafusion::prelude::{col, lit, regexp_match, Expr};
 use datafusion_common::ScalarValue;
+use datafusion_expr::LogicalPlan;
 use datatypes::prelude::{ConcreteDataType, Value};
 use openmetrics_parser::{MetricsExposition, PrometheusType, PrometheusValue};
 use query::dataframe::DataFrame;
-use query::plan::LogicalPlan;
 use snafu::{ensure, OptionExt, ResultExt};
 use snap::raw::{Decoder, Encoder};
 
@@ -40,6 +41,9 @@ use crate::row_writer::{self, MultiTableData};
 pub const METRIC_NAME_LABEL: &str = "__name__";
 
 pub const METRIC_NAME_LABEL_BYTES: &[u8] = b"__name__";
+
+/// The same as `FIELD_COLUMN_MATCHER` in `promql` crate
+pub const FIELD_NAME_LABEL: &str = "__field__";
 
 /// Metrics for push gateway protocol
 pub struct Metrics {
@@ -103,11 +107,11 @@ pub fn query_to_plan(dataframe: DataFrame, q: &Query) -> Result<LogicalPlan> {
             }
             // Case sensitive regexp match
             MatcherType::Re => {
-                conditions.push(regexp_match(vec![col(name), lit(value)]).is_not_null());
+                conditions.push(regexp_match(col(name), lit(value), None).is_not_null());
             }
             // Case sensitive regexp not match
             MatcherType::Nre => {
-                conditions.push(regexp_match(vec![col(name), lit(value)]).is_null());
+                conditions.push(regexp_match(col(name), lit(value), None).is_null());
             }
         }
     }
@@ -119,7 +123,7 @@ pub fn query_to_plan(dataframe: DataFrame, q: &Query) -> Result<LogicalPlan> {
         .filter(conditions)
         .context(error::DataFrameSnafu)?;
 
-    Ok(LogicalPlan::DfPlan(dataframe.into_parts().1))
+    Ok(dataframe.into_parts().1)
 }
 
 #[inline]
@@ -351,10 +355,11 @@ pub fn to_grpc_row_insert_requests(request: &WriteRequest) -> Result<(RowInsertR
                 &mut one_row,
             )?;
             // timestamp
-            row_writer::write_ts_millis(
+            row_writer::write_ts_to_millis(
                 table_data,
                 GREPTIME_TIMESTAMP,
                 Some(series.samples[0].timestamp),
+                Precision::Millisecond,
                 &mut one_row,
             )?;
 
@@ -369,10 +374,11 @@ pub fn to_grpc_row_insert_requests(request: &WriteRequest) -> Result<(RowInsertR
                 // value
                 row_writer::write_f64(table_data, GREPTIME_VALUE, *value, &mut one_row)?;
                 // timestamp
-                row_writer::write_ts_millis(
+                row_writer::write_ts_to_millis(
                     table_data,
                     GREPTIME_TIMESTAMP,
                     Some(*timestamp),
+                    Precision::Millisecond,
                     &mut one_row,
                 )?;
 
@@ -389,7 +395,7 @@ pub fn snappy_decompress(buf: &[u8]) -> Result<Vec<u8>> {
     let mut decoder = Decoder::new();
     decoder
         .decompress_vec(buf)
-        .context(error::DecompressPromRemoteRequestSnafu)
+        .context(error::DecompressSnappyPromRemoteRequestSnafu)
 }
 
 #[inline]
@@ -398,6 +404,11 @@ pub fn snappy_compress(buf: &[u8]) -> Result<Vec<u8>> {
     encoder
         .compress_vec(buf)
         .context(error::CompressPromRemoteRequestSnafu)
+}
+
+#[inline]
+pub fn zstd_decompress(buf: &[u8]) -> Result<Vec<u8>> {
+    zstd::stream::decode_all(buf).context(error::DecompressZstdPromRemoteRequestSnafu)
 }
 
 /// Mock timeseries for test, it is both used in servers and frontend crate

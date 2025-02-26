@@ -12,30 +12,43 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::{
     procedure_service_server, DdlTaskRequest as PbDdlTaskRequest,
-    DdlTaskResponse as PbDdlTaskResponse, MigrateRegionRequest, MigrateRegionResponse,
-    ProcedureStateResponse, QueryProcedureRequest,
+    DdlTaskResponse as PbDdlTaskResponse, Error, MigrateRegionRequest, MigrateRegionResponse,
+    ProcedureDetailRequest, ProcedureDetailResponse, ProcedureStateResponse, QueryProcedureRequest,
+    ResponseHeader,
 };
 use common_meta::ddl::ExecutorContext;
 use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest};
 use common_meta::rpc::procedure;
-use snafu::{ensure, OptionExt, ResultExt};
+use common_telemetry::warn;
+use snafu::{OptionExt, ResultExt};
 use tonic::{Request, Response};
 
 use super::GrpcResult;
 use crate::error;
-use crate::metasrv::MetaSrv;
+use crate::metasrv::Metasrv;
 use crate::procedure::region_migration::manager::RegionMigrationProcedureTask;
 
 #[async_trait::async_trait]
-impl procedure_service_server::ProcedureService for MetaSrv {
+impl procedure_service_server::ProcedureService for Metasrv {
     async fn query(
         &self,
         request: Request<QueryProcedureRequest>,
     ) -> GrpcResult<ProcedureStateResponse> {
+        if !self.is_leader() {
+            let resp = ProcedureStateResponse {
+                header: Some(ResponseHeader::failed(0, Error::is_not_leader())),
+                ..Default::default()
+            };
+
+            warn!("The current meta is not leader, but a `query procedure state` request have reached the meta. Detail: {:?}.", request);
+            return Ok(Response::new(resp));
+        }
+
         let QueryProcedureRequest { header, pid, .. } = request.into_inner();
         let _header = header.context(error::MissingRequestHeaderSnafu)?;
         let pid = pid.context(error::MissingRequiredParameterSnafu { param: "pid" })?;
@@ -56,10 +69,30 @@ impl procedure_service_server::ProcedureService for MetaSrv {
     }
 
     async fn ddl(&self, request: Request<PbDdlTaskRequest>) -> GrpcResult<PbDdlTaskResponse> {
-        let PbDdlTaskRequest { header, task, .. } = request.into_inner();
+        if !self.is_leader() {
+            let resp = PbDdlTaskResponse {
+                header: Some(ResponseHeader::failed(0, Error::is_not_leader())),
+                ..Default::default()
+            };
+
+            warn!("The current meta is not leader, but a `ddl` request have reached the meta. Detail: {:?}.", request);
+            return Ok(Response::new(resp));
+        }
+
+        let PbDdlTaskRequest {
+            header,
+            query_context,
+            task,
+            ..
+        } = request.into_inner();
 
         let header = header.context(error::MissingRequestHeaderSnafu)?;
         let cluster_id = header.cluster_id;
+        let query_context = query_context
+            .context(error::MissingRequiredParameterSnafu {
+                param: "query_context",
+            })?
+            .into();
         let task: DdlTask = task
             .context(error::MissingRequiredParameterSnafu { param: "task" })?
             .try_into()
@@ -72,7 +105,10 @@ impl procedure_service_server::ProcedureService for MetaSrv {
                     cluster_id: Some(cluster_id),
                     tracing_context: Some(header.tracing_context),
                 },
-                SubmitDdlTaskRequest { task },
+                SubmitDdlTaskRequest {
+                    query_context: Arc::new(query_context),
+                    task,
+                },
             )
             .await
             .context(error::SubmitDdlTaskSnafu)?
@@ -85,20 +121,22 @@ impl procedure_service_server::ProcedureService for MetaSrv {
         &self,
         request: Request<MigrateRegionRequest>,
     ) -> GrpcResult<MigrateRegionResponse> {
-        ensure!(
-            self.meta_peer_client().is_leader(),
-            error::UnexpectedSnafu {
-                violated: "Trying to submit a region migration procedure to non-leader meta server"
-            }
-        );
+        if !self.is_leader() {
+            let resp = MigrateRegionResponse {
+                header: Some(ResponseHeader::failed(0, Error::is_not_leader())),
+                ..Default::default()
+            };
+
+            warn!("The current meta is not leader, but a `migrate` request have reached the meta. Detail: {:?}.", request);
+            return Ok(Response::new(resp));
+        }
 
         let MigrateRegionRequest {
             header,
             region_id,
             from_peer,
             to_peer,
-            replay_timeout_secs,
-            ..
+            timeout_secs,
         } = request.into_inner();
 
         let header = header.context(error::MissingRequestHeaderSnafu)?;
@@ -120,7 +158,7 @@ impl procedure_service_server::ProcedureService for MetaSrv {
                 region_id: region_id.into(),
                 from_peer,
                 to_peer,
-                replay_timeout: Duration::from_secs(replay_timeout_secs.into()),
+                timeout: Duration::from_secs(timeout_secs.into()),
             })
             .await?
             .map(procedure::pid_to_pb_pid);
@@ -131,5 +169,31 @@ impl procedure_service_server::ProcedureService for MetaSrv {
         };
 
         Ok(Response::new(resp))
+    }
+
+    async fn details(
+        &self,
+        request: Request<ProcedureDetailRequest>,
+    ) -> GrpcResult<ProcedureDetailResponse> {
+        if !self.is_leader() {
+            let resp = ProcedureDetailResponse {
+                header: Some(ResponseHeader::failed(0, Error::is_not_leader())),
+                ..Default::default()
+            };
+
+            warn!("The current meta is not leader, but a `procedure details` request have reached the meta. Detail: {:?}.", request);
+            return Ok(Response::new(resp));
+        }
+
+        let ProcedureDetailRequest { header } = request.into_inner();
+        let _header = header.context(error::MissingRequestHeaderSnafu)?;
+        let metas = self
+            .procedure_manager()
+            .list_procedures()
+            .await
+            .context(error::QueryProcedureSnafu)?;
+        Ok(Response::new(procedure::procedure_details_to_pb_response(
+            metas,
+        )))
     }
 }

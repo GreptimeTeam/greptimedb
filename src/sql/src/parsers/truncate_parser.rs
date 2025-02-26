@@ -21,16 +21,14 @@ use crate::statements::statement::Statement;
 use crate::statements::truncate::TruncateTable;
 
 /// `TRUNCATE [TABLE] table_name;`
-impl<'a> ParserContext<'a> {
+impl ParserContext<'_> {
     pub(crate) fn parse_truncate(&mut self) -> Result<Statement> {
         let _ = self.parser.next_token();
         let _ = self.parser.parse_keyword(Keyword::TABLE);
 
         let raw_table_ident =
-            self.parser
-                .parse_object_name()
+            self.parse_object_name()
                 .with_context(|_| error::UnexpectedSnafu {
-                    sql: self.sql,
                     expected: "a table name",
                     actual: self.peek_token_as_string(),
                 })?;

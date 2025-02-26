@@ -17,29 +17,38 @@ use std::sync::Arc;
 use object_store::services::Fs;
 use object_store::util::{join_dir, with_instrument_layers};
 use object_store::ObjectStore;
+use smallvec::SmallVec;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
+use store_api::storage::{RegionId, SequenceNumber};
 
+use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::write_cache::SstUploadRequest;
 use crate::cache::CacheManagerRef;
+use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
 use crate::error::{CleanDirSnafu, DeleteIndexSnafu, DeleteSstSnafu, OpenDalSnafu, Result};
 use crate::read::Source;
 use crate::region::options::IndexOptions;
 use crate::sst::file::{FileHandle, FileId, FileMeta};
 use crate::sst::index::intermediate::IntermediateManager;
-use crate::sst::index::IndexerBuilder;
+use crate::sst::index::puffin_manager::PuffinManagerFactory;
+use crate::sst::index::IndexerBuilderImpl;
 use crate::sst::location;
 use crate::sst::parquet::reader::ParquetReaderBuilder;
 use crate::sst::parquet::writer::ParquetWriter;
 use crate::sst::parquet::{SstInfo, WriteOptions};
 
 pub type AccessLayerRef = Arc<AccessLayer>;
+/// SST write results.
+pub type SstInfoArray = SmallVec<[SstInfo; 2]>;
 
 /// A layer to access SST files under the same directory.
 pub struct AccessLayer {
     region_dir: String,
     /// Target object store.
     object_store: ObjectStore,
+    /// Puffin manager factory for index.
+    puffin_manager_factory: PuffinManagerFactory,
     /// Intermediate manager for inverted index.
     intermediate_manager: IntermediateManager,
 }
@@ -57,11 +66,13 @@ impl AccessLayer {
     pub fn new(
         region_dir: impl Into<String>,
         object_store: ObjectStore,
+        puffin_manager_factory: PuffinManagerFactory,
         intermediate_manager: IntermediateManager,
     ) -> AccessLayer {
         AccessLayer {
             region_dir: region_dir.into(),
             object_store,
+            puffin_manager_factory,
             intermediate_manager,
         }
     }
@@ -76,6 +87,11 @@ impl AccessLayer {
         &self.object_store
     }
 
+    /// Returns the puffin manager factory.
+    pub fn puffin_manager_factory(&self) -> &PuffinManagerFactory {
+        &self.puffin_manager_factory
+    }
+
     /// Deletes a SST file (and its index file if it has one) with given file id.
     pub(crate) async fn delete_sst(&self, file_meta: &FileMeta) -> Result<()> {
         let path = location::sst_file_path(&self.region_dir, file_meta.file_id);
@@ -86,15 +102,13 @@ impl AccessLayer {
                 file_id: file_meta.file_id,
             })?;
 
-        if file_meta.inverted_index_available() {
-            let path = location::index_file_path(&self.region_dir, file_meta.file_id);
-            self.object_store
-                .delete(&path)
-                .await
-                .context(DeleteIndexSnafu {
-                    file_id: file_meta.file_id,
-                })?;
-        }
+        let path = location::index_file_path(&self.region_dir, file_meta.file_id);
+        self.object_store
+            .delete(&path)
+            .await
+            .context(DeleteIndexSnafu {
+                file_id: file_meta.file_id,
+            })?;
 
         Ok(())
     }
@@ -111,11 +125,8 @@ impl AccessLayer {
         &self,
         request: SstWriteRequest,
         write_opts: &WriteOptions,
-    ) -> Result<Option<SstInfo>> {
-        let file_path = location::sst_file_path(&self.region_dir, request.file_id);
-        let index_file_path = location::index_file_path(&self.region_dir, request.file_id);
+    ) -> Result<SstInfoArray> {
         let region_id = request.metadata.region_id;
-        let file_id = request.file_id;
         let cache_manager = request.cache_manager.clone();
 
         let sst_info = if let Some(write_cache) = cache_manager.write_cache() {
@@ -124,8 +135,9 @@ impl AccessLayer {
                 .write_and_upload_sst(
                     request,
                     SstUploadRequest {
-                        upload_path: file_path,
-                        index_upload_path: index_file_path,
+                        dest_path_provider: RegionFilePathFactory {
+                            region_dir: self.region_dir.clone(),
+                        },
                         remote_store: self.object_store.clone(),
                     },
                     write_opts,
@@ -133,77 +145,82 @@ impl AccessLayer {
                 .await?
         } else {
             // Write cache is disabled.
-            let indexer = IndexerBuilder {
-                create_inverted_index: request.create_inverted_index,
-                mem_threshold_index_create: request.mem_threshold_index_create,
-                write_buffer_size: request.index_write_buffer_size,
-                file_id,
-                file_path: index_file_path,
-                metadata: &request.metadata,
+            let store = self.object_store.clone();
+            let path_provider = RegionFilePathFactory::new(self.region_dir.clone());
+            let indexer_builder = IndexerBuilderImpl {
+                op_type: request.op_type,
+                metadata: request.metadata.clone(),
                 row_group_size: write_opts.row_group_size,
-                object_store: self.object_store.clone(),
+                puffin_manager: self
+                    .puffin_manager_factory
+                    .build(store, path_provider.clone()),
                 intermediate_manager: self.intermediate_manager.clone(),
                 index_options: request.index_options,
-            }
-            .build();
-            let mut writer = ParquetWriter::new(
-                file_path,
-                request.metadata,
+                inverted_index_config: request.inverted_index_config,
+                fulltext_index_config: request.fulltext_index_config,
+                bloom_filter_index_config: request.bloom_filter_index_config,
+            };
+            let mut writer = ParquetWriter::new_with_object_store(
                 self.object_store.clone(),
-                indexer,
-            );
-            writer.write_all(request.source, write_opts).await?
+                request.metadata,
+                indexer_builder,
+                path_provider,
+            )
+            .await;
+            writer
+                .write_all(request.source, request.max_sequence, write_opts)
+                .await?
         };
 
         // Put parquet metadata to cache manager.
-        if let Some(sst_info) = &sst_info {
-            if let Some(parquet_metadata) = &sst_info.file_metadata {
-                cache_manager.put_parquet_meta_data(region_id, file_id, parquet_metadata.clone())
+        if !sst_info.is_empty() {
+            for sst in &sst_info {
+                if let Some(parquet_metadata) = &sst.file_metadata {
+                    cache_manager.put_parquet_meta_data(
+                        region_id,
+                        sst.file_id,
+                        parquet_metadata.clone(),
+                    )
+                }
             }
         }
 
         Ok(sst_info)
     }
-    /// Returns whether the file exists in the object store.
-    pub(crate) async fn is_exist(&self, file_meta: &FileMeta) -> Result<bool> {
-        let path = location::sst_file_path(&self.region_dir, file_meta.file_id);
-        self.object_store
-            .is_exist(&path)
-            .await
-            .context(OpenDalSnafu)
-    }
+}
+
+/// `OperationType` represents the origin of the `SstWriteRequest`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum OperationType {
+    Flush,
+    Compact,
 }
 
 /// Contents to build a SST.
 pub(crate) struct SstWriteRequest {
-    pub(crate) file_id: FileId,
+    pub(crate) op_type: OperationType,
     pub(crate) metadata: RegionMetadataRef,
     pub(crate) source: Source,
     pub(crate) cache_manager: CacheManagerRef,
     #[allow(dead_code)]
     pub(crate) storage: Option<String>,
-    /// Whether to create inverted index.
-    pub(crate) create_inverted_index: bool,
-    /// The threshold of memory size to create inverted index.
-    pub(crate) mem_threshold_index_create: Option<usize>,
-    /// The size of write buffer for index.
-    pub(crate) index_write_buffer_size: Option<usize>,
-    /// The options of the index for the region.
+    pub(crate) max_sequence: Option<SequenceNumber>,
+
+    /// Configs for index
     pub(crate) index_options: IndexOptions,
+    pub(crate) inverted_index_config: InvertedIndexConfig,
+    pub(crate) fulltext_index_config: FulltextIndexConfig,
+    pub(crate) bloom_filter_index_config: BloomFilterConfig,
 }
 
-/// Creates a fs object store with atomic write dir.
-pub(crate) async fn new_fs_object_store(root: &str) -> Result<ObjectStore> {
+pub(crate) async fn new_fs_cache_store(root: &str) -> Result<ObjectStore> {
     let atomic_write_dir = join_dir(root, ".tmp/");
     clean_dir(&atomic_write_dir).await?;
 
-    let mut builder = Fs::default();
-    builder.root(root).atomic_write_dir(&atomic_write_dir);
-    let object_store = ObjectStore::new(builder).context(OpenDalSnafu)?.finish();
+    let builder = Fs::default().root(root).atomic_write_dir(&atomic_write_dir);
+    let store = ObjectStore::new(builder).context(OpenDalSnafu)?.finish();
 
-    // Add layers.
-    let object_store = with_instrument_layers(object_store);
-    Ok(object_store)
+    Ok(with_instrument_layers(store, false))
 }
 
 /// Clean the directory.
@@ -218,4 +235,65 @@ async fn clean_dir(dir: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Path provider for SST file and index file.
+pub trait FilePathProvider: Send + Sync {
+    /// Creates index file path of given file id.
+    fn build_index_file_path(&self, file_id: FileId) -> String;
+
+    /// Creates SST file path of given file id.
+    fn build_sst_file_path(&self, file_id: FileId) -> String;
+}
+
+/// Path provider that builds paths in local write cache.
+#[derive(Clone)]
+pub(crate) struct WriteCachePathProvider {
+    region_id: RegionId,
+    file_cache: FileCacheRef,
+}
+
+impl WriteCachePathProvider {
+    /// Creates a new `WriteCachePathProvider` instance.
+    pub fn new(region_id: RegionId, file_cache: FileCacheRef) -> Self {
+        Self {
+            region_id,
+            file_cache,
+        }
+    }
+}
+
+impl FilePathProvider for WriteCachePathProvider {
+    fn build_index_file_path(&self, file_id: FileId) -> String {
+        let puffin_key = IndexKey::new(self.region_id, file_id, FileType::Puffin);
+        self.file_cache.cache_file_path(puffin_key)
+    }
+
+    fn build_sst_file_path(&self, file_id: FileId) -> String {
+        let parquet_file_key = IndexKey::new(self.region_id, file_id, FileType::Parquet);
+        self.file_cache.cache_file_path(parquet_file_key)
+    }
+}
+
+/// Path provider that builds paths in region storage path.
+#[derive(Clone, Debug)]
+pub(crate) struct RegionFilePathFactory {
+    region_dir: String,
+}
+
+impl RegionFilePathFactory {
+    /// Creates a new `RegionFilePathFactory` instance.
+    pub fn new(region_dir: String) -> Self {
+        Self { region_dir }
+    }
+}
+
+impl FilePathProvider for RegionFilePathFactory {
+    fn build_index_file_path(&self, file_id: FileId) -> String {
+        location::index_file_path(&self.region_dir, file_id)
+    }
+
+    fn build_sst_file_path(&self, file_id: FileId) -> String {
+        location::sst_file_path(&self.region_dir, file_id)
+    }
 }

@@ -14,14 +14,17 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::str::FromStr;
 
 use arrow::datatypes::Field;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
+use sqlparser_derive::{Visit, VisitMut};
 
 use crate::data_type::{ConcreteDataType, DataType};
-use crate::error::{self, Error, Result};
+use crate::error::{self, Error, InvalidFulltextOptionSnafu, ParseExtendedTypeSnafu, Result};
 use crate::schema::constraint::ColumnDefaultConstraint;
+use crate::schema::TYPE_KEY;
 use crate::value::Value;
 use crate::vectors::VectorRef;
 
@@ -32,6 +35,23 @@ pub const TIME_INDEX_KEY: &str = "greptime:time_index";
 pub const COMMENT_KEY: &str = "greptime:storage:comment";
 /// Key used to store default constraint in arrow field's metadata.
 const DEFAULT_CONSTRAINT_KEY: &str = "greptime:default_constraint";
+/// Key used to store fulltext options in arrow field's metadata.
+pub const FULLTEXT_KEY: &str = "greptime:fulltext";
+/// Key used to store whether the column has inverted index in arrow field's metadata.
+pub const INVERTED_INDEX_KEY: &str = "greptime:inverted_index";
+/// Key used to store skip options in arrow field's metadata.
+pub const SKIPPING_INDEX_KEY: &str = "greptime:skipping_index";
+
+/// Keys used in fulltext options
+pub const COLUMN_FULLTEXT_CHANGE_OPT_KEY_ENABLE: &str = "enable";
+pub const COLUMN_FULLTEXT_OPT_KEY_ANALYZER: &str = "analyzer";
+pub const COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE: &str = "case_sensitive";
+
+/// Keys used in SKIPPING index options
+pub const COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY: &str = "granularity";
+pub const COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE: &str = "type";
+
+pub const DEFAULT_GRANULARITY: u32 = 10240;
 
 /// Schema of a column, used as an immutable struct.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +73,10 @@ impl fmt::Debug for ColumnSchema {
             self.data_type,
             if self.is_nullable { "null" } else { "not null" },
         )?;
+
+        if self.is_time_index {
+            write!(f, " time_index")?;
+        }
 
         // Add default constraint if present
         if let Some(default_constraint) = &self.default_constraint {
@@ -99,6 +123,14 @@ impl ColumnSchema {
         self.default_constraint.as_ref()
     }
 
+    /// Check if the default constraint is a impure function.
+    pub fn is_default_impure(&self) -> bool {
+        self.default_constraint
+            .as_ref()
+            .map(|c| c.is_function())
+            .unwrap_or(false)
+    }
+
     #[inline]
     pub fn metadata(&self) -> &Metadata {
         &self.metadata
@@ -124,6 +156,53 @@ impl ColumnSchema {
             let _ = self.metadata.remove(TIME_INDEX_KEY);
         }
         self
+    }
+
+    /// Set the inverted index for the column.
+    /// Similar to [with_inverted_index] but don't take the ownership.
+    ///
+    /// [with_inverted_index]: Self::with_inverted_index
+    pub fn set_inverted_index(&mut self, value: bool) {
+        match value {
+            true => {
+                self.metadata
+                    .insert(INVERTED_INDEX_KEY.to_string(), value.to_string());
+            }
+            false => {
+                self.metadata.remove(INVERTED_INDEX_KEY);
+            }
+        }
+    }
+
+    /// Set the inverted index for the column.
+    /// Similar to [set_inverted_index] but take the ownership and return a owned value.
+    ///
+    /// [set_inverted_index]: Self::set_inverted_index
+    pub fn with_inverted_index(mut self, value: bool) -> Self {
+        self.set_inverted_index(value);
+        self
+    }
+
+    pub fn is_inverted_indexed(&self) -> bool {
+        self.metadata
+            .get(INVERTED_INDEX_KEY)
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    }
+
+    pub fn is_fulltext_indexed(&self) -> bool {
+        self.fulltext_options()
+            .unwrap_or_default()
+            .map(|option| option.enable)
+            .unwrap_or_default()
+    }
+
+    pub fn is_skipping_indexed(&self) -> bool {
+        self.skipping_index_options().unwrap_or_default().is_some()
+    }
+
+    pub fn has_inverted_index_key(&self) -> bool {
+        self.metadata.contains_key(INVERTED_INDEX_KEY)
     }
 
     /// Set default constraint.
@@ -157,6 +236,14 @@ impl ColumnSchema {
     /// [with_nullable_set]: Self::with_nullable_set
     pub fn set_nullable(&mut self) {
         self.is_nullable = true;
+    }
+
+    /// Set the `is_time_index` to `true` of the column.
+    /// Similar to [with_time_index] but don't take the ownership.
+    ///
+    /// [with_time_index]: Self::with_time_index
+    pub fn set_time_index(&mut self) {
+        self.is_time_index = true;
     }
 
     /// Creates a new [`ColumnSchema`] with given metadata.
@@ -228,13 +315,130 @@ impl ColumnSchema {
             }
         }
     }
+
+    /// Creates an impure default value for this column, only if it have a impure default constraint.
+    /// Otherwise, returns `Ok(None)`.
+    pub fn create_impure_default(&self) -> Result<Option<Value>> {
+        match &self.default_constraint {
+            Some(c) => c.create_impure_default(&self.data_type),
+            None => Ok(None),
+        }
+    }
+
+    /// Retrieves the fulltext options for the column.
+    pub fn fulltext_options(&self) -> Result<Option<FulltextOptions>> {
+        match self.metadata.get(FULLTEXT_KEY) {
+            None => Ok(None),
+            Some(json) => {
+                let options =
+                    serde_json::from_str(json).context(error::DeserializeSnafu { json })?;
+                Ok(Some(options))
+            }
+        }
+    }
+
+    pub fn with_fulltext_options(mut self, options: FulltextOptions) -> Result<Self> {
+        self.metadata.insert(
+            FULLTEXT_KEY.to_string(),
+            serde_json::to_string(&options).context(error::SerializeSnafu)?,
+        );
+        Ok(self)
+    }
+
+    pub fn set_fulltext_options(&mut self, options: &FulltextOptions) -> Result<()> {
+        self.metadata.insert(
+            FULLTEXT_KEY.to_string(),
+            serde_json::to_string(options).context(error::SerializeSnafu)?,
+        );
+        Ok(())
+    }
+
+    /// Retrieves the skipping index options for the column.
+    pub fn skipping_index_options(&self) -> Result<Option<SkippingIndexOptions>> {
+        match self.metadata.get(SKIPPING_INDEX_KEY) {
+            None => Ok(None),
+            Some(json) => {
+                let options =
+                    serde_json::from_str(json).context(error::DeserializeSnafu { json })?;
+                Ok(Some(options))
+            }
+        }
+    }
+
+    pub fn with_skipping_options(mut self, options: SkippingIndexOptions) -> Result<Self> {
+        self.metadata.insert(
+            SKIPPING_INDEX_KEY.to_string(),
+            serde_json::to_string(&options).context(error::SerializeSnafu)?,
+        );
+        Ok(self)
+    }
+
+    pub fn set_skipping_options(&mut self, options: &SkippingIndexOptions) -> Result<()> {
+        self.metadata.insert(
+            SKIPPING_INDEX_KEY.to_string(),
+            serde_json::to_string(options).context(error::SerializeSnafu)?,
+        );
+        Ok(())
+    }
+
+    pub fn unset_skipping_options(&mut self) -> Result<()> {
+        self.metadata.remove(SKIPPING_INDEX_KEY);
+        Ok(())
+    }
+}
+
+/// Column extended type set in column schema's metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ColumnExtType {
+    /// Json type.
+    Json,
+
+    /// Vector type with dimension.
+    Vector(u32),
+}
+
+impl fmt::Display for ColumnExtType {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            ColumnExtType::Json => write!(f, "Json"),
+            ColumnExtType::Vector(dim) => write!(f, "Vector({})", dim),
+        }
+    }
+}
+
+impl FromStr for ColumnExtType {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "Json" => Ok(ColumnExtType::Json),
+            _ if s.starts_with("Vector(") && s.ends_with(')') => s[7..s.len() - 1]
+                .parse::<u32>()
+                .map(ColumnExtType::Vector)
+                .map_err(|_| "Invalid dimension for Vector".to_string()),
+            _ => Err("Unknown variant".to_string()),
+        }
+    }
 }
 
 impl TryFrom<&Field> for ColumnSchema {
     type Error = Error;
 
     fn try_from(field: &Field) -> Result<ColumnSchema> {
-        let data_type = ConcreteDataType::try_from(field.data_type())?;
+        let mut data_type = ConcreteDataType::try_from(field.data_type())?;
+        // Override the data type if it is specified in the metadata.
+        if let Some(s) = field.metadata().get(TYPE_KEY) {
+            let extype = ColumnExtType::from_str(s)
+                .map_err(|_| ParseExtendedTypeSnafu { value: s }.build())?;
+            match extype {
+                ColumnExtType::Json => {
+                    data_type = ConcreteDataType::json_datatype();
+                }
+                ColumnExtType::Vector(dim) => {
+                    data_type = ConcreteDataType::vector_datatype(dim);
+                }
+            }
+        }
         let mut metadata = field.metadata().clone();
         let default_constraint = match metadata.remove(DEFAULT_CONSTRAINT_KEY) {
             Some(json) => {
@@ -242,7 +446,21 @@ impl TryFrom<&Field> for ColumnSchema {
             }
             None => None,
         };
-        let is_time_index = metadata.contains_key(TIME_INDEX_KEY);
+        let mut is_time_index = metadata.contains_key(TIME_INDEX_KEY);
+        if is_time_index && !data_type.is_timestamp() {
+            // If the column is time index but the data type is not timestamp, it is invalid.
+            // We set the time index to false and remove the metadata.
+            // This is possible if we cast the time index column to another type. DataFusion will
+            // keep the metadata:
+            // https://github.com/apache/datafusion/pull/12951
+            is_time_index = false;
+            metadata.remove(TIME_INDEX_KEY);
+            common_telemetry::debug!(
+                "Column {} is not timestamp ({:?}) but has time index metadata",
+                data_type,
+                field.name(),
+            );
+        }
 
         Ok(ColumnSchema {
             name: field.name().clone(),
@@ -284,11 +502,175 @@ impl TryFrom<&ColumnSchema> for Field {
     }
 }
 
+/// Fulltext options for a column.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Visit, VisitMut)]
+#[serde(rename_all = "kebab-case")]
+pub struct FulltextOptions {
+    /// Whether the fulltext index is enabled.
+    pub enable: bool,
+    /// The fulltext analyzer to use.
+    #[serde(default)]
+    pub analyzer: FulltextAnalyzer,
+    /// Whether the fulltext index is case-sensitive.
+    #[serde(default)]
+    pub case_sensitive: bool,
+}
+
+impl fmt::Display for FulltextOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "enable={}", self.enable)?;
+        if self.enable {
+            write!(f, ", analyzer={}", self.analyzer)?;
+            write!(f, ", case_sensitive={}", self.case_sensitive)?;
+        }
+        Ok(())
+    }
+}
+
+impl TryFrom<HashMap<String, String>> for FulltextOptions {
+    type Error = Error;
+
+    fn try_from(options: HashMap<String, String>) -> Result<Self> {
+        let mut fulltext_options = FulltextOptions {
+            enable: true,
+            ..Default::default()
+        };
+
+        if let Some(enable) = options.get(COLUMN_FULLTEXT_CHANGE_OPT_KEY_ENABLE) {
+            match enable.to_ascii_lowercase().as_str() {
+                "true" => fulltext_options.enable = true,
+                "false" => fulltext_options.enable = false,
+                _ => {
+                    return InvalidFulltextOptionSnafu {
+                        msg: format!("{enable}, expected: 'true' | 'false'"),
+                    }
+                    .fail();
+                }
+            }
+        };
+
+        if let Some(analyzer) = options.get(COLUMN_FULLTEXT_OPT_KEY_ANALYZER) {
+            match analyzer.to_ascii_lowercase().as_str() {
+                "english" => fulltext_options.analyzer = FulltextAnalyzer::English,
+                "chinese" => fulltext_options.analyzer = FulltextAnalyzer::Chinese,
+                _ => {
+                    return InvalidFulltextOptionSnafu {
+                        msg: format!("{analyzer}, expected: 'English' | 'Chinese'"),
+                    }
+                    .fail();
+                }
+            }
+        };
+
+        if let Some(case_sensitive) = options.get(COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE) {
+            match case_sensitive.to_ascii_lowercase().as_str() {
+                "true" => fulltext_options.case_sensitive = true,
+                "false" => fulltext_options.case_sensitive = false,
+                _ => {
+                    return InvalidFulltextOptionSnafu {
+                        msg: format!("{case_sensitive}, expected: 'true' | 'false'"),
+                    }
+                    .fail();
+                }
+            }
+        }
+
+        Ok(fulltext_options)
+    }
+}
+
+/// Fulltext analyzer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Visit, VisitMut)]
+pub enum FulltextAnalyzer {
+    #[default]
+    English,
+    Chinese,
+}
+
+impl fmt::Display for FulltextAnalyzer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FulltextAnalyzer::English => write!(f, "English"),
+            FulltextAnalyzer::Chinese => write!(f, "Chinese"),
+        }
+    }
+}
+
+/// Skipping options for a column.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Visit, VisitMut)]
+#[serde(rename_all = "kebab-case")]
+pub struct SkippingIndexOptions {
+    /// The granularity of the skip index.
+    pub granularity: u32,
+    /// The type of the skip index.
+    #[serde(default)]
+    pub index_type: SkippingIndexType,
+}
+
+impl fmt::Display for SkippingIndexOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "granularity={}", self.granularity)?;
+        write!(f, ", index_type={}", self.index_type)?;
+        Ok(())
+    }
+}
+
+/// Skip index types.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, Visit, VisitMut)]
+pub enum SkippingIndexType {
+    #[default]
+    BloomFilter,
+}
+
+impl fmt::Display for SkippingIndexType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SkippingIndexType::BloomFilter => write!(f, "BLOOM"),
+        }
+    }
+}
+
+impl TryFrom<HashMap<String, String>> for SkippingIndexOptions {
+    type Error = Error;
+
+    fn try_from(options: HashMap<String, String>) -> Result<Self> {
+        // Parse granularity with default value 1
+        let granularity = match options.get(COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY) {
+            Some(value) => value.parse::<u32>().map_err(|_| {
+                error::InvalidSkippingIndexOptionSnafu {
+                    msg: format!("Invalid granularity: {value}, expected: positive integer"),
+                }
+                .build()
+            })?,
+            None => DEFAULT_GRANULARITY,
+        };
+
+        // Parse index type with default value BloomFilter
+        let index_type = match options.get(COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE) {
+            Some(typ) => match typ.to_ascii_uppercase().as_str() {
+                "BLOOM" => SkippingIndexType::BloomFilter,
+                _ => {
+                    return error::InvalidSkippingIndexOptionSnafu {
+                        msg: format!("Invalid index type: {typ}, expected: 'BLOOM'"),
+                    }
+                    .fail();
+                }
+            },
+            None => SkippingIndexType::default(),
+        };
+
+        Ok(SkippingIndexOptions {
+            granularity,
+            index_type,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use arrow::datatypes::DataType as ArrowDataType;
+    use arrow::datatypes::{DataType as ArrowDataType, TimeUnit};
 
     use super::*;
     use crate::value::Value;
@@ -462,5 +844,88 @@ mod tests {
         let formatted_int32 = format!("{:?}", column_schema_int32);
         assert_eq!(formatted_int8, "test_column_1 Int8 null");
         assert_eq!(formatted_int32, "test_column_2 Int32 not null");
+    }
+
+    #[test]
+    fn test_from_field_to_column_schema() {
+        let field = Field::new("test", ArrowDataType::Int32, true);
+        let column_schema = ColumnSchema::try_from(&field).unwrap();
+        assert_eq!("test", column_schema.name);
+        assert_eq!(ConcreteDataType::int32_datatype(), column_schema.data_type);
+        assert!(column_schema.is_nullable);
+        assert!(!column_schema.is_time_index);
+        assert!(column_schema.default_constraint.is_none());
+        assert!(column_schema.metadata.is_empty());
+
+        let field = Field::new("test", ArrowDataType::Binary, true);
+        let field = field.with_metadata(Metadata::from([(
+            TYPE_KEY.to_string(),
+            ConcreteDataType::json_datatype().name(),
+        )]));
+        let column_schema = ColumnSchema::try_from(&field).unwrap();
+        assert_eq!("test", column_schema.name);
+        assert_eq!(ConcreteDataType::json_datatype(), column_schema.data_type);
+        assert!(column_schema.is_nullable);
+        assert!(!column_schema.is_time_index);
+        assert!(column_schema.default_constraint.is_none());
+        assert_eq!(
+            column_schema.metadata.get(TYPE_KEY).unwrap(),
+            &ConcreteDataType::json_datatype().name()
+        );
+
+        let field = Field::new("test", ArrowDataType::Binary, true);
+        let field = field.with_metadata(Metadata::from([(
+            TYPE_KEY.to_string(),
+            ConcreteDataType::vector_datatype(3).name(),
+        )]));
+        let column_schema = ColumnSchema::try_from(&field).unwrap();
+        assert_eq!("test", column_schema.name);
+        assert_eq!(
+            ConcreteDataType::vector_datatype(3),
+            column_schema.data_type
+        );
+        assert!(column_schema.is_nullable);
+        assert!(!column_schema.is_time_index);
+        assert!(column_schema.default_constraint.is_none());
+        assert_eq!(
+            column_schema.metadata.get(TYPE_KEY).unwrap(),
+            &ConcreteDataType::vector_datatype(3).name()
+        );
+    }
+
+    #[test]
+    fn test_column_schema_fix_time_index() {
+        let field = Field::new(
+            "test",
+            ArrowDataType::Timestamp(TimeUnit::Second, None),
+            false,
+        );
+        let field = field.with_metadata(Metadata::from([(
+            TIME_INDEX_KEY.to_string(),
+            "true".to_string(),
+        )]));
+        let column_schema = ColumnSchema::try_from(&field).unwrap();
+        assert_eq!("test", column_schema.name);
+        assert_eq!(
+            ConcreteDataType::timestamp_second_datatype(),
+            column_schema.data_type
+        );
+        assert!(!column_schema.is_nullable);
+        assert!(column_schema.is_time_index);
+        assert!(column_schema.default_constraint.is_none());
+        assert_eq!(1, column_schema.metadata().len());
+
+        let field = Field::new("test", ArrowDataType::Int32, false);
+        let field = field.with_metadata(Metadata::from([(
+            TIME_INDEX_KEY.to_string(),
+            "true".to_string(),
+        )]));
+        let column_schema = ColumnSchema::try_from(&field).unwrap();
+        assert_eq!("test", column_schema.name);
+        assert_eq!(ConcreteDataType::int32_datatype(), column_schema.data_type);
+        assert!(!column_schema.is_nullable);
+        assert!(!column_schema.is_time_index);
+        assert!(column_schema.default_constraint.is_none());
+        assert!(column_schema.metadata.is_empty());
     }
 }

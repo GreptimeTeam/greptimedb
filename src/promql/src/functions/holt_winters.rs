@@ -20,8 +20,9 @@ use std::sync::Arc;
 use datafusion::arrow::array::Float64Array;
 use datafusion::arrow::datatypes::TimeUnit;
 use datafusion::common::DataFusionError;
-use datafusion::logical_expr::{ScalarUDF, Signature, TypeSignature, Volatility};
+use datafusion::logical_expr::{ScalarUDF, Volatility};
 use datafusion::physical_plan::ColumnarValue;
+use datafusion_expr::create_udf;
 use datatypes::arrow::array::Array;
 use datatypes::arrow::datatypes::DataType;
 
@@ -31,11 +32,12 @@ use crate::range_array::RangeArray;
 
 /// There are 3 variants of smoothing functions:
 /// 1) "Simple exponential smoothing": only the `level` component (the weighted average of the observations) is used to make forecasts.
-///   This method is applied for time-series data that does not exhibit trend or seasonality.
+///    This method is applied for time-series data that does not exhibit trend or seasonality.
 /// 2) "Holt's linear method" (a.k.a. "double exponential smoothing"): `level` and `trend` components are used to make forecasts.
-///   This method is applied for time-series data that exhibits trend but not seasonality.
+///    This method is applied for time-series data that exhibits trend but not seasonality.
 /// 3) "Holt-Winter's method" (a.k.a. "triple exponential smoothing"): `level`, `trend`, and `seasonality` are used to make forecasts.
-///   This method is applied for time-series data that exhibits both trend and seasonality.
+///
+/// This method is applied for time-series data that exhibits both trend and seasonality.
 ///
 /// In order to keep the parity with the Prometheus functions we had to follow the same naming ("HoltWinters"), however
 /// the "Holt's linear"("double exponential smoothing") suits better and reflects implementation.
@@ -68,15 +70,13 @@ impl HoltWinters {
     }
 
     pub fn scalar_udf(level: f64, trend: f64) -> ScalarUDF {
-        ScalarUDF {
-            name: Self::name().to_string(),
-            signature: Signature::new(
-                TypeSignature::Exact(Self::input_type()),
-                Volatility::Immutable,
-            ),
-            return_type: Arc::new(|_| Ok(Arc::new(Self::return_type()))),
-            fun: Arc::new(move |input| Self::new(level, trend).calc(input)),
-        }
+        create_udf(
+            Self::name(),
+            Self::input_type(),
+            Self::return_type(),
+            Volatility::Immutable,
+            Arc::new(move |input: &_| Self::new(level, trend).calc(input)) as _,
+        )
     }
 
     fn calc(&self, input: &[ColumnarValue]) -> Result<ColumnarValue, DataFusionError> {

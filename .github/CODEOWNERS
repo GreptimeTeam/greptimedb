@@ -1,0 +1,27 @@
+# GreptimeDB CODEOWNERS
+
+# These owners will be the default owners for everything in the repo.
+
+* @GreptimeTeam/db-approver
+
+## [Module] Databse Engine
+/src/index @zhongzc
+/src/mito2 @evenyag @v0y4g3r @waynexia
+/src/query @evenyag
+
+## [Module] Distributed
+/src/common/meta @MichaelScofield
+/src/common/procedure @MichaelScofield
+/src/meta-client @MichaelScofield
+/src/meta-srv @MichaelScofield
+
+## [Module] Write Ahead Log
+/src/log-store @v0y4g3r
+/src/store-api @v0y4g3r
+
+## [Module] Metrics Engine
+/src/metric-engine @waynexia
+/src/promql @waynexia
+
+## [Module] Flow
+/src/flow @zhongzc @waynexia

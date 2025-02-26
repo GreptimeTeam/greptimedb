@@ -20,17 +20,21 @@ use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
 use common_function::function::FunctionRef;
-use common_function::handlers::{ProcedureServiceHandlerRef, TableMutationHandlerRef};
+use common_function::handlers::{
+    FlowServiceHandlerRef, ProcedureServiceHandlerRef, TableMutationHandlerRef,
+};
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::state::FunctionState;
-use common_query::physical_plan::SessionContext;
 use common_query::prelude::ScalarUdf;
 use common_telemetry::warn;
-use datafusion::catalog::MemoryCatalogList;
 use datafusion::dataframe::DataFrame;
 use datafusion::error::Result as DfResult;
-use datafusion::execution::context::{QueryPlanner, SessionConfig, SessionState};
+use datafusion::execution::context::{QueryPlanner, SessionConfig, SessionContext, SessionState};
 use datafusion::execution::runtime_env::RuntimeEnv;
+use datafusion::execution::SessionStateBuilder;
+use datafusion::physical_optimizer::optimizer::PhysicalOptimizer;
+use datafusion::physical_optimizer::sanity_checker::SanityCheckPlan;
+use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner};
 use datafusion_expr::LogicalPlan as DfLogicalPlan;
@@ -38,24 +42,25 @@ use datafusion_optimizer::analyzer::count_wildcard_rule::CountWildcardRule;
 use datafusion_optimizer::analyzer::{Analyzer, AnalyzerRule};
 use datafusion_optimizer::optimizer::Optimizer;
 use promql::extension_plan::PromExtensionPlanner;
-use substrait::extension_serializer::ExtensionSerializer;
 use table::table::adapter::DfTableProviderAdapter;
 use table::TableRef;
 
-use crate::dist_plan::{DistExtensionPlanner, DistPlannerAnalyzer};
-use crate::optimizer::order_hint::OrderHintRule;
+use crate::dist_plan::{DistExtensionPlanner, DistPlannerAnalyzer, MergeSortExtensionPlanner};
+use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
+use crate::optimizer::parallelize_scan::ParallelizeScan;
+use crate::optimizer::remove_duplicate::RemoveDuplicate;
+use crate::optimizer::scan_hint::ScanHintRule;
 use crate::optimizer::string_normalization::StringNormalizationRule;
 use crate::optimizer::type_conversion::TypeConversionRule;
+use crate::optimizer::windowed_sort::WindowedSortPhysicalRule;
 use crate::optimizer::ExtensionAnalyzerRule;
 use crate::query_engine::options::QueryOptions;
+use crate::query_engine::DefaultSerializer;
 use crate::range_select::planner::RangeSelectPlanner;
 use crate::region_query::RegionQueryHandlerRef;
 use crate::QueryEngineContext;
 
 /// Query engine global state
-// TODO(yingwen): This QueryEngineState still relies on datafusion, maybe we can define a trait for it,
-// which allows different implementation use different engine state. The state can also be an associated
-// type in QueryEngine trait.
 #[derive(Clone)]
 pub struct QueryEngineState {
     df_context: SessionContext,
@@ -81,6 +86,7 @@ impl QueryEngineState {
         region_query_handler: Option<RegionQueryHandlerRef>,
         table_mutation_handler: Option<TableMutationHandlerRef>,
         procedure_service_handler: Option<ProcedureServiceHandlerRef>,
+        flow_service_handler: Option<FlowServiceHandlerRef>,
         with_dist_planner: bool,
         plugins: Plugins,
     ) -> Self {
@@ -88,31 +94,59 @@ impl QueryEngineState {
         let session_config = SessionConfig::new().with_create_default_catalog_and_schema(false);
         // Apply extension rules
         let mut extension_rules = Vec::new();
+
         // The [`TypeConversionRule`] must be at first
         extension_rules.insert(0, Arc::new(TypeConversionRule) as _);
+
         // Apply the datafusion rules
         let mut analyzer = Analyzer::new();
         analyzer.rules.insert(0, Arc::new(StringNormalizationRule));
+
+        // Use our custom rule instead to optimize the count(*) query
         Self::remove_analyzer_rule(&mut analyzer.rules, CountWildcardRule {}.name());
-        analyzer.rules.insert(0, Arc::new(CountWildcardRule {}));
+        analyzer
+            .rules
+            .insert(0, Arc::new(CountWildcardToTimeIndexRule));
+
         if with_dist_planner {
             analyzer.rules.push(Arc::new(DistPlannerAnalyzer));
         }
-        let mut optimizer = Optimizer::new();
-        optimizer.rules.push(Arc::new(OrderHintRule));
 
-        let session_state = SessionState::new_with_config_rt_and_catalog_list(
-            session_config,
-            runtime_env,
-            Arc::new(MemoryCatalogList::default()), // pass a dummy catalog list
-        )
-        .with_serializer_registry(Arc::new(ExtensionSerializer))
-        .with_analyzer_rules(analyzer.rules)
-        .with_query_planner(Arc::new(DfQueryPlanner::new(
-            catalog_list.clone(),
-            region_query_handler,
-        )))
-        .with_optimizer_rules(optimizer.rules);
+        let mut optimizer = Optimizer::new();
+        optimizer.rules.push(Arc::new(ScanHintRule));
+
+        // add physical optimizer
+        let mut physical_optimizer = PhysicalOptimizer::new();
+        // Change TableScan's partition at first
+        physical_optimizer
+            .rules
+            .insert(0, Arc::new(ParallelizeScan));
+        // Add rule for windowed sort
+        physical_optimizer
+            .rules
+            .push(Arc::new(WindowedSortPhysicalRule));
+        // Add rule to remove duplicate nodes generated by other rules. Run this in the last.
+        physical_optimizer.rules.push(Arc::new(RemoveDuplicate));
+        // Place SanityCheckPlan at the end of the list to ensure that it runs after all other rules.
+        Self::remove_physical_optimizer_rule(
+            &mut physical_optimizer.rules,
+            SanityCheckPlan {}.name(),
+        );
+        physical_optimizer.rules.push(Arc::new(SanityCheckPlan {}));
+
+        let session_state = SessionStateBuilder::new()
+            .with_config(session_config)
+            .with_runtime_env(runtime_env)
+            .with_default_features()
+            .with_analyzer_rules(analyzer.rules)
+            .with_serializer_registry(Arc::new(DefaultSerializer))
+            .with_query_planner(Arc::new(DfQueryPlanner::new(
+                catalog_list.clone(),
+                region_query_handler,
+            )))
+            .with_optimizer_rules(optimizer.rules)
+            .with_physical_optimizer_rules(physical_optimizer.rules)
+            .build();
 
         let df_context = SessionContext::new_with_state(session_state);
 
@@ -122,6 +156,7 @@ impl QueryEngineState {
             function_state: Arc::new(FunctionState {
                 table_mutation_handler,
                 procedure_service_handler,
+                flow_service_handler,
             }),
             aggregate_functions: Arc::new(RwLock::new(HashMap::new())),
             extension_rules,
@@ -131,6 +166,13 @@ impl QueryEngineState {
     }
 
     fn remove_analyzer_rule(rules: &mut Vec<Arc<dyn AnalyzerRule + Send + Sync>>, name: &str) {
+        rules.retain(|rule| rule.name() != name);
+    }
+
+    fn remove_physical_optimizer_rule(
+        rules: &mut Vec<Arc<dyn PhysicalOptimizerRule + Send + Sync>>,
+        name: &str,
+    ) {
         rules.retain(|rule| rule.name() != name);
     }
 
@@ -145,6 +187,11 @@ impl QueryEngineState {
             .try_fold(plan, |acc_plan, rule| {
                 rule.analyze(acc_plan, context, self.session_state().config_options())
             })
+    }
+
+    /// Run the full logical plan optimize phase for the given plan.
+    pub fn optimize_logical_plan(&self, plan: DfLogicalPlan) -> DfResult<DfLogicalPlan> {
+        self.session_state().optimize(&plan)
     }
 
     /// Register an udf function.
@@ -171,6 +218,11 @@ impl QueryEngineState {
             .cloned()
     }
 
+    /// Retrieve udf function names.
+    pub fn udf_names(&self) -> Vec<String> {
+        self.udf_functions.read().unwrap().keys().cloned().collect()
+    }
+
     /// Retrieve the aggregate function by name
     pub fn aggregate_function(&self, function_name: &str) -> Option<AggregateFunctionMetaRef> {
         self.aggregate_functions
@@ -178,6 +230,16 @@ impl QueryEngineState {
             .unwrap()
             .get(function_name)
             .cloned()
+    }
+
+    /// Retrieve aggregate function names.
+    pub fn udaf_names(&self) -> Vec<String> {
+        self.aggregate_functions
+            .read()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect()
     }
 
     /// Register a [`ScalarUdf`].
@@ -230,7 +292,7 @@ impl QueryEngineState {
             .unwrap_or(false)
     }
 
-    pub(crate) fn session_state(&self) -> SessionState {
+    pub fn session_state(&self) -> SessionState {
         self.df_context.state()
     }
 
@@ -243,6 +305,12 @@ impl QueryEngineState {
 
 struct DfQueryPlanner {
     physical_planner: DefaultPhysicalPlanner,
+}
+
+impl fmt::Debug for DfQueryPlanner {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("DfQueryPlanner").finish()
+    }
 }
 
 #[async_trait]
@@ -270,6 +338,7 @@ impl DfQueryPlanner {
                 catalog_manager,
                 region_query_handler,
             )));
+            planners.push(Arc::new(MergeSortExtensionPlanner {}));
         }
         Self {
             physical_planner: DefaultPhysicalPlanner::with_extension_planners(planners),

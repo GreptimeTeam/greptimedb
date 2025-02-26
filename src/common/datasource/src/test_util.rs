@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
+use datafusion::common::Statistics;
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::object_store::ObjectStoreUrl;
 use datafusion::datasource::physical_plan::{FileScanConfig, FileStream};
@@ -46,19 +47,15 @@ pub fn format_schema(schema: Schema) -> Vec<String> {
 }
 
 pub fn test_store(root: &str) -> ObjectStore {
-    let mut builder = Fs::default();
-    let _ = builder.root(root);
-
-    ObjectStore::new(builder).unwrap().finish()
+    let builder = Fs::default();
+    ObjectStore::new(builder.root(root)).unwrap().finish()
 }
 
 pub fn test_tmp_store(root: &str) -> (ObjectStore, TempDir) {
     let dir = create_temp_dir(root);
 
-    let mut builder = Fs::default();
-    let _ = builder.root("/");
-
-    (ObjectStore::new(builder).unwrap().finish(), dir)
+    let builder = Fs::default();
+    (ObjectStore::new(builder.root("/")).unwrap().finish(), dir)
 }
 
 pub fn test_basic_schema() -> SchemaRef {
@@ -72,17 +69,16 @@ pub fn test_basic_schema() -> SchemaRef {
 pub fn scan_config(file_schema: SchemaRef, limit: Option<usize>, filename: &str) -> FileScanConfig {
     // object_store only recognize the Unix style path, so make it happy.
     let filename = &filename.replace('\\', "/");
-
+    let statistics = Statistics::new_unknown(file_schema.as_ref());
     FileScanConfig {
         object_store_url: ObjectStoreUrl::parse("empty://").unwrap(), // won't be used
         file_schema,
         file_groups: vec![vec![PartitionedFile::new(filename.to_string(), 10)]],
-        statistics: Default::default(),
+        statistics,
         projection: None,
         limit,
         table_partition_cols: vec![],
         output_ordering: vec![],
-        infinite_source: false,
     }
 }
 
@@ -120,7 +116,7 @@ pub async fn setup_stream_to_json_test(origin_path: &str, threshold: impl Fn(usi
 
     let written = tmp_store.read(&output_path).await.unwrap();
     let origin = store.read(origin_path).await.unwrap();
-    assert_eq_lines(written, origin);
+    assert_eq_lines(written.to_vec(), origin.to_vec());
 }
 
 pub async fn setup_stream_to_csv_test(origin_path: &str, threshold: impl Fn(usize) -> usize) {
@@ -158,7 +154,7 @@ pub async fn setup_stream_to_csv_test(origin_path: &str, threshold: impl Fn(usiz
 
     let written = tmp_store.read(&output_path).await.unwrap();
     let origin = store.read(origin_path).await.unwrap();
-    assert_eq_lines(written, origin);
+    assert_eq_lines(written.to_vec(), origin.to_vec());
 }
 
 // Ignore the CRLF difference across operating systems.

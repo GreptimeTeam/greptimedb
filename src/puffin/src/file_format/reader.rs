@@ -16,31 +16,24 @@ mod file;
 mod footer;
 
 use async_trait::async_trait;
+use common_base::range_read::RangeReader;
 
 use crate::blob_metadata::BlobMetadata;
 use crate::error::Result;
 pub use crate::file_format::reader::file::PuffinFileReader;
+pub use crate::file_format::reader::footer::PuffinFileFooterReader;
 use crate::file_metadata::FileMetadata;
 
-/// `PuffinSyncReader` defines a synchronous reader for puffin data.
-pub trait PuffinSyncReader<'a> {
-    type Reader: std::io::Read + std::io::Seek;
-
-    /// fetch the FileMetadata
-    fn metadata(&'a mut self) -> Result<FileMetadata>;
-
-    /// read particular blob data based on given metadata
-    fn blob_reader(&'a mut self, blob_metadata: &BlobMetadata) -> Result<Self::Reader>;
-}
-
-/// `PuffinAsyncReader` defines an asynchronous reader for puffin data.
+/// `AsyncReader` defines an asynchronous reader for puffin data.
 #[async_trait]
-pub trait PuffinAsyncReader<'a> {
-    type Reader: futures::AsyncRead + futures::AsyncSeek;
+pub trait AsyncReader<'a> {
+    type Reader: RangeReader;
 
-    /// fetch the FileMetadata
+    /// Fetches the FileMetadata.
     async fn metadata(&'a mut self) -> Result<FileMetadata>;
 
-    /// read particular blob data based on given metadata
+    /// Reads particular blob data based on given metadata.
+    ///
+    /// Data read from the reader is compressed leaving the caller to decompress the data.
     fn blob_reader(&'a mut self, blob_metadata: &BlobMetadata) -> Result<Self::Reader>;
 }

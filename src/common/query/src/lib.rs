@@ -12,22 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt::{Debug, Formatter};
+pub mod columnar_value;
+pub mod error;
+mod function;
+pub mod logical_plan;
+pub mod prelude;
+pub mod request;
+mod signature;
+pub mod stream;
+#[cfg(any(test, feature = "testing"))]
+pub mod test_util;
+
+use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
 
 use api::greptime_proto::v1::add_column_location::LocationType;
 use api::greptime_proto::v1::AddColumnLocation as Location;
 use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
-use physical_plan::PhysicalPlan;
+use datafusion::physical_plan::ExecutionPlan;
 use serde::{Deserialize, Serialize};
-
-pub mod columnar_value;
-pub mod error;
-mod function;
-pub mod logical_plan;
-pub mod physical_plan;
-pub mod prelude;
-mod signature;
 use sqlparser_derive::{Visit, VisitMut};
 
 /// new Output struct with output data(previously Output) and output meta
@@ -49,7 +52,7 @@ pub enum OutputData {
 #[derive(Debug, Default)]
 pub struct OutputMeta {
     /// May exist for query output. One can retrieve execution metrics from this plan.
-    pub plan: Option<Arc<dyn PhysicalPlan>>,
+    pub plan: Option<Arc<dyn ExecutionPlan>>,
     pub cost: OutputCost,
 }
 
@@ -94,19 +97,19 @@ impl Debug for OutputData {
             OutputData::RecordBatches(recordbatches) => {
                 write!(f, "OutputData::RecordBatches({recordbatches:?})")
             }
-            OutputData::Stream(_) => {
-                write!(f, "OutputData::Stream(<stream>)")
+            OutputData::Stream(s) => {
+                write!(f, "OutputData::Stream(<{}>)", s.name())
             }
         }
     }
 }
 
 impl OutputMeta {
-    pub fn new(plan: Option<Arc<dyn PhysicalPlan>>, cost: usize) -> Self {
+    pub fn new(plan: Option<Arc<dyn ExecutionPlan>>, cost: usize) -> Self {
         Self { plan, cost }
     }
 
-    pub fn new_with_plan(plan: Arc<dyn PhysicalPlan>) -> Self {
+    pub fn new_with_plan(plan: Arc<dyn ExecutionPlan>) -> Self {
         Self {
             plan: Some(plan),
             cost: 0,
@@ -118,12 +121,21 @@ impl OutputMeta {
     }
 }
 
-pub use datafusion::physical_plan::ExecutionPlan as DfPhysicalPlan;
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Visit, VisitMut)]
 pub enum AddColumnLocation {
     First,
     After { column_name: String },
+}
+
+impl Display for AddColumnLocation {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AddColumnLocation::First => write!(f, r#"FIRST"#),
+            AddColumnLocation::After { column_name } => {
+                write!(f, r#"AFTER {column_name}"#)
+            }
+        }
+    }
 }
 
 impl From<&AddColumnLocation> for Location {

@@ -13,6 +13,12 @@
 // limitations under the License.
 
 mod alter_logical_tables;
+mod alter_table;
+mod create_flow;
 mod create_logical_tables;
 mod create_table;
+pub(crate) mod create_view;
 mod drop_database;
+mod drop_flow;
+mod drop_table;
+mod drop_view;

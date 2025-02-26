@@ -23,6 +23,7 @@ use api::v1::{
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use hashbrown::hash_map::Entry;
 use hashbrown::HashMap;
+use prost::DecodeError;
 
 use crate::proto::PromLabel;
 use crate::repeated_field::Clear;
@@ -96,6 +97,7 @@ impl TableBuilder {
             datatype: ColumnDataType::TimestampMillisecond as i32,
             semantic_type: SemanticType::Timestamp as i32,
             datatype_extension: None,
+            options: None,
         });
 
         schema.push(ColumnSchema {
@@ -103,6 +105,7 @@ impl TableBuilder {
             datatype: ColumnDataType::Float64 as i32,
             semantic_type: SemanticType::Field as i32,
             datatype_extension: None,
+            options: None,
         });
 
         Self {
@@ -118,13 +121,31 @@ impl TableBuilder {
     }
 
     /// Adds a set of labels and samples to table builder.
-    pub(crate) fn add_labels_and_samples(&mut self, labels: &[PromLabel], samples: &[Sample]) {
+    pub(crate) fn add_labels_and_samples(
+        &mut self,
+        labels: &[PromLabel],
+        samples: &[Sample],
+        is_strict_mode: bool,
+    ) -> Result<(), DecodeError> {
         let mut row = vec![Value { value_data: None }; self.col_indexes.len()];
 
         for PromLabel { name, value } in labels {
-            // safety: we expect all labels are UTF-8 encoded strings.
-            let tag_name = unsafe { String::from_utf8_unchecked(name.to_vec()) };
-            let tag_value = unsafe { String::from_utf8_unchecked(value.to_vec()) };
+            let (tag_name, tag_value) = if is_strict_mode {
+                let tag_name = match String::from_utf8(name.to_vec()) {
+                    Ok(s) => s,
+                    Err(_) => return Err(DecodeError::new("invalid utf-8")),
+                };
+                let tag_value = match String::from_utf8(value.to_vec()) {
+                    Ok(s) => s,
+                    Err(_) => return Err(DecodeError::new("invalid utf-8")),
+                };
+                (tag_name, tag_value)
+            } else {
+                let tag_name = unsafe { String::from_utf8_unchecked(name.to_vec()) };
+                let tag_value = unsafe { String::from_utf8_unchecked(value.to_vec()) };
+                (tag_name, tag_value)
+            };
+
             let tag_value = Some(ValueData::StringValue(tag_value));
             let tag_num = self.col_indexes.len();
 
@@ -140,6 +161,7 @@ impl TableBuilder {
                         datatype: ColumnDataType::String as i32,
                         semantic_type: SemanticType::Tag as i32,
                         datatype_extension: None,
+                        options: None,
                     });
                     row.push(Value {
                         value_data: tag_value,
@@ -153,7 +175,7 @@ impl TableBuilder {
             row[0].value_data = Some(ValueData::TimestampMillisecondValue(sample.timestamp));
             row[1].value_data = Some(ValueData::F64Value(sample.value));
             self.rows.push(Row { values: row });
-            return;
+            return Ok(());
         }
         for sample in samples {
             row[0].value_data = Some(ValueData::TimestampMillisecondValue(sample.timestamp));
@@ -162,6 +184,8 @@ impl TableBuilder {
                 values: row.clone(),
             });
         }
+
+        Ok(())
     }
 
     /// Converts [TableBuilder] to [RowInsertRequest] and clears buffered data.
@@ -187,14 +211,17 @@ mod tests {
     use api::prom_store::remote::Sample;
     use api::v1::value::ValueData;
     use api::v1::Value;
+    use arrow::datatypes::ToByteSlice;
     use bytes::Bytes;
+    use prost::DecodeError;
 
     use crate::prom_row_builder::TableBuilder;
     use crate::proto::PromLabel;
     #[test]
     fn test_table_builder() {
         let mut builder = TableBuilder::default();
-        builder.add_labels_and_samples(
+        let is_strict_mode = true;
+        let _ = builder.add_labels_and_samples(
             &[
                 PromLabel {
                     name: Bytes::from("tag0"),
@@ -209,9 +236,10 @@ mod tests {
                 value: 0.0,
                 timestamp: 0,
             }],
+            is_strict_mode,
         );
 
-        builder.add_labels_and_samples(
+        let _ = builder.add_labels_and_samples(
             &[
                 PromLabel {
                     name: Bytes::from("tag0"),
@@ -226,6 +254,7 @@ mod tests {
                 value: 0.1,
                 timestamp: 1,
             }],
+            is_strict_mode,
         );
 
         let request = builder.as_row_insert_request("test".to_string());
@@ -269,5 +298,20 @@ mod tests {
             ],
             rows[1].values
         );
+
+        let invalid_utf8_bytes = &[0xFF, 0xFF, 0xFF];
+
+        let res = builder.add_labels_and_samples(
+            &[PromLabel {
+                name: Bytes::from("tag0"),
+                value: invalid_utf8_bytes.to_byte_slice().into(),
+            }],
+            &[Sample {
+                value: 0.1,
+                timestamp: 1,
+            }],
+            is_strict_mode,
+        );
+        assert_eq!(res, Err(DecodeError::new("invalid utf-8")));
     }
 }

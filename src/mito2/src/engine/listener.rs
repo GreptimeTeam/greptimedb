@@ -14,6 +14,7 @@
 
 //! Engine event listener for tests.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,17 +23,23 @@ use common_telemetry::info;
 use store_api::storage::RegionId;
 use tokio::sync::Notify;
 
+use crate::sst::file::FileId;
+
 /// Mito engine background event listener.
 #[async_trait]
 pub trait EventListener: Send + Sync {
     /// Notifies the listener that a region is flushed successfully.
-    fn on_flush_success(&self, region_id: RegionId);
+    fn on_flush_success(&self, region_id: RegionId) {
+        let _ = region_id;
+    }
 
     /// Notifies the listener that the engine is stalled.
-    fn on_write_stall(&self);
+    fn on_write_stall(&self) {}
 
     /// Notifies the listener that the region starts to do flush.
-    async fn on_flush_begin(&self, region_id: RegionId);
+    async fn on_flush_begin(&self, region_id: RegionId) {
+        let _ = region_id;
+    }
 
     /// Notifies the listener that the later drop task starts running.
     /// Returns the gc interval if we want to override the default one.
@@ -46,6 +53,26 @@ pub trait EventListener: Send + Sync {
         let _ = region_id;
         let _ = removed;
     }
+
+    /// Notifies the listener that ssts has been merged and the region
+    /// is going to update its manifest.
+    async fn on_merge_ssts_finished(&self, region_id: RegionId) {
+        let _ = region_id;
+    }
+
+    /// Notifies the listener that the worker receives requests from the request channel.
+    fn on_recv_requests(&self, request_num: usize) {
+        let _ = request_num;
+    }
+
+    /// Notifies the listener that the file cache is filled when, for example, editing region.
+    fn on_file_cache_filled(&self, _file_id: FileId) {}
+
+    /// Notifies the listener that the compaction is scheduled.
+    fn on_compaction_scheduled(&self, _region_id: RegionId) {}
+
+    /// Notifies the listener that region starts to send a region change result to worker.
+    async fn on_notify_region_change_result_begin(&self, _region_id: RegionId) {}
 }
 
 pub type EventListenerRef = Arc<dyn EventListener>;
@@ -54,12 +81,18 @@ pub type EventListenerRef = Arc<dyn EventListener>;
 #[derive(Default)]
 pub struct FlushListener {
     notify: Notify,
+    success_count: AtomicUsize,
 }
 
 impl FlushListener {
     /// Wait until one flush job is done.
     pub async fn wait(&self) {
         self.notify.notified().await;
+    }
+
+    /// Returns the success count.
+    pub fn success_count(&self) -> usize {
+        self.success_count.load(Ordering::Relaxed)
     }
 }
 
@@ -68,12 +101,9 @@ impl EventListener for FlushListener {
     fn on_flush_success(&self, region_id: RegionId) {
         info!("Region {} flush successfully", region_id);
 
-        self.notify.notify_one()
+        self.success_count.fetch_add(1, Ordering::Relaxed);
+        self.notify.notify_one();
     }
-
-    fn on_write_stall(&self) {}
-
-    async fn on_flush_begin(&self, _region_id: RegionId) {}
 }
 
 /// Listener to watch stall events.
@@ -98,8 +128,6 @@ impl EventListener for StallListener {
 
         self.notify.notify_one();
     }
-
-    async fn on_flush_begin(&self, _region_id: RegionId) {}
 }
 
 /// Listener to watch begin flush events.
@@ -130,10 +158,6 @@ impl FlushTruncateListener {
 
 #[async_trait]
 impl EventListener for FlushTruncateListener {
-    fn on_flush_success(&self, _region_id: RegionId) {}
-
-    fn on_write_stall(&self) {}
-
     /// Calling this function will block the thread!
     /// Notify the listener to perform a truncate region and block the flush region job.
     async fn on_flush_begin(&self, region_id: RegionId) {
@@ -169,12 +193,6 @@ impl DropListener {
 
 #[async_trait]
 impl EventListener for DropListener {
-    fn on_flush_success(&self, _region_id: RegionId) {}
-
-    fn on_write_stall(&self) {}
-
-    async fn on_flush_begin(&self, _region_id: RegionId) {}
-
     fn on_later_drop_begin(&self, _region_id: RegionId) -> Option<Duration> {
         Some(self.gc_duration)
     }
@@ -183,5 +201,102 @@ impl EventListener for DropListener {
         // Asserts result.
         assert!(removed);
         self.notify.notify_one();
+    }
+}
+
+/// Listener on handling compaction requests.
+#[derive(Default)]
+pub struct CompactionListener {
+    handle_finished_notify: Notify,
+    blocker: Notify,
+}
+
+impl CompactionListener {
+    /// Waits for handling compaction finished request.
+    pub async fn wait_handle_finished(&self) {
+        self.handle_finished_notify.notified().await;
+    }
+
+    /// Wakes up the listener.
+    pub fn wake(&self) {
+        self.blocker.notify_one();
+    }
+}
+
+#[async_trait]
+impl EventListener for CompactionListener {
+    async fn on_merge_ssts_finished(&self, region_id: RegionId) {
+        info!("Handle compaction finished request, region {region_id}");
+
+        self.handle_finished_notify.notify_one();
+
+        // Blocks current task.
+        self.blocker.notified().await;
+    }
+}
+
+/// Listener to block on flush and alter.
+#[derive(Default)]
+pub struct AlterFlushListener {
+    flush_begin_notify: Notify,
+    block_flush_notify: Notify,
+    request_begin_notify: Notify,
+}
+
+impl AlterFlushListener {
+    /// Waits on flush begin.
+    pub async fn wait_flush_begin(&self) {
+        self.flush_begin_notify.notified().await;
+    }
+
+    /// Waits on request begin.
+    pub async fn wait_request_begin(&self) {
+        self.request_begin_notify.notified().await;
+    }
+
+    /// Continue the flush job.
+    pub fn wake_flush(&self) {
+        self.block_flush_notify.notify_one();
+    }
+}
+
+#[async_trait]
+impl EventListener for AlterFlushListener {
+    async fn on_flush_begin(&self, region_id: RegionId) {
+        info!("Wait on notify to start flush for region {}", region_id);
+
+        self.flush_begin_notify.notify_one();
+        self.block_flush_notify.notified().await;
+
+        info!("region {} begin flush", region_id);
+    }
+
+    fn on_recv_requests(&self, request_num: usize) {
+        info!("receive {} request", request_num);
+
+        self.request_begin_notify.notify_one();
+    }
+}
+
+#[derive(Default)]
+pub struct NotifyRegionChangeResultListener {
+    notify: Notify,
+}
+
+impl NotifyRegionChangeResultListener {
+    /// Continue to sending region change result.
+    pub fn wake_notify(&self) {
+        self.notify.notify_one();
+    }
+}
+
+#[async_trait]
+impl EventListener for NotifyRegionChangeResultListener {
+    async fn on_notify_region_change_result_begin(&self, region_id: RegionId) {
+        info!(
+            "Wait on notify to start notify region change result for region {}",
+            region_id
+        );
+        self.notify.notified().await;
     }
 }

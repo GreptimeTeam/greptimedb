@@ -32,10 +32,10 @@ pub struct FunctionContext {
 
 impl FunctionContext {
     /// Create a mock [`FunctionContext`] for test.
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     pub fn mock() -> Self {
         Self {
-            query_ctx: QueryContextBuilder::default().build(),
+            query_ctx: QueryContextBuilder::default().build().into(),
             state: Arc::new(FunctionState::mock()),
         }
     }
@@ -44,7 +44,7 @@ impl FunctionContext {
 impl Default for FunctionContext {
     fn default() -> Self {
         Self {
-            query_ctx: QueryContextBuilder::default().build(),
+            query_ctx: QueryContextBuilder::default().build().into(),
             state: Arc::new(FunctionState::default()),
         }
     }
@@ -56,8 +56,10 @@ pub trait Function: fmt::Display + Sync + Send {
     /// Returns the name of the function, should be unique.
     fn name(&self) -> &str;
 
+    /// The returned data type of function execution.
     fn return_type(&self, input_types: &[ConcreteDataType]) -> Result<ConcreteDataType>;
 
+    /// The signature of function.
     fn signature(&self) -> Signature;
 
     /// Evaluate the function, e.g. run/execute the function.
@@ -65,3 +67,22 @@ pub trait Function: fmt::Display + Sync + Send {
 }
 
 pub type FunctionRef = Arc<dyn Function>;
+
+/// Async Scalar function trait
+#[async_trait::async_trait]
+pub trait AsyncFunction: fmt::Display + Sync + Send {
+    /// Returns the name of the function, should be unique.
+    fn name(&self) -> &str;
+
+    /// The returned data type of function execution.
+    fn return_type(&self, input_types: &[ConcreteDataType]) -> Result<ConcreteDataType>;
+
+    /// The signature of function.
+    fn signature(&self) -> Signature;
+
+    /// Evaluate the function, e.g. run/execute the function.
+    /// TODO(dennis): simplify the signature and refactor all the admin functions.
+    async fn eval(&self, _func_ctx: FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef>;
+}
+
+pub type AsyncFunctionRef = Arc<dyn AsyncFunction>;

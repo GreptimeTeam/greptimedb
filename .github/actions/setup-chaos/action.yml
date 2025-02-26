@@ -1,0 +1,17 @@
+name: Setup Kind
+description: Deploy Kind
+runs:
+  using: composite
+  steps:
+  - uses: actions/checkout@v4
+  - name: Create kind cluster
+    shell: bash
+    run: |
+      helm repo add chaos-mesh https://charts.chaos-mesh.org
+      kubectl create ns chaos-mesh
+      helm install chaos-mesh chaos-mesh/chaos-mesh -n=chaos-mesh --version 2.6.3
+  - name: Print Chaos-mesh
+    if: always()
+    shell: bash
+    run: | 
+      kubectl get po -n chaos-mesh

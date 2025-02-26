@@ -11,23 +11,23 @@ SELECT 'nan'::FLOAT;
 -- cannot cast nan, inf or -inf to these types
 SELECT 'nan'::FLOAT::INT;
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Cast error: Can't cast value NaN to type Int32
+Error: 3001(EngineExecuteQuery), Cast error: Can't cast value NaN to type Int32
 
 SELECT 'nan'::FLOAT::DECIMAL(4,1);
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Cast error: Cannot cast to Decimal128(4, 1). Overflowing on NaN
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(4, 1). Overflowing on NaN
 
 SELECT 'nan'::FLOAT::DECIMAL(9,1);
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Cast error: Cannot cast to Decimal128(9, 1). Overflowing on NaN
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(9, 1). Overflowing on NaN
 
 SELECT 'nan'::FLOAT::DECIMAL(18,1);
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Cast error: Cannot cast to Decimal128(18, 1). Overflowing on NaN
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(18, 1). Overflowing on NaN
 
 SELECT 'nan'::FLOAT::DECIMAL(38,1);
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Cast error: Cannot cast to Decimal128(38, 1). Overflowing on NaN
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(38, 1). Overflowing on NaN
 
 SELECT 'inf'::FLOAT;
 
@@ -40,23 +40,23 @@ SELECT 'inf'::FLOAT;
 -- cannot cast nan, inf or -inf to these types
 SELECT 'inf'::FLOAT::INT;
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Cast error: Can't cast value inf to type Int32
+Error: 3001(EngineExecuteQuery), Cast error: Can't cast value inf to type Int32
 
 SELECT 'inf'::FLOAT::DECIMAL(4,1);
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Cast error: Cannot cast to Decimal128(4, 1). Overflowing on inf
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(4, 1). Overflowing on inf
 
 SELECT 'inf'::FLOAT::DECIMAL(9,1);
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Cast error: Cannot cast to Decimal128(9, 1). Overflowing on inf
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(9, 1). Overflowing on inf
 
 SELECT 'inf'::FLOAT::DECIMAL(18,1);
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Cast error: Cannot cast to Decimal128(18, 1). Overflowing on inf
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(18, 1). Overflowing on inf
 
 SELECT 'inf'::FLOAT::DECIMAL(38,1);
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Cast error: Cannot cast to Decimal128(38, 1). Overflowing on inf
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(38, 1). Overflowing on inf
 
 SELECT '-inf'::FLOAT;
 
@@ -69,23 +69,23 @@ SELECT '-inf'::FLOAT;
 -- cannot cast nan, inf or -inf to these types
 SELECT '-inf'::FLOAT::INT;
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Cast error: Can't cast value -inf to type Int32
+Error: 3001(EngineExecuteQuery), Cast error: Can't cast value -inf to type Int32
 
 SELECT '-inf'::FLOAT::DECIMAL(4,1);
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Cast error: Cannot cast to Decimal128(4, 1). Overflowing on -inf
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(4, 1). Overflowing on -inf
 
 SELECT '-inf'::FLOAT::DECIMAL(9,1);
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Cast error: Cannot cast to Decimal128(9, 1). Overflowing on -inf
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(9, 1). Overflowing on -inf
 
 SELECT '-inf'::FLOAT::DECIMAL(18,1);
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Cast error: Cannot cast to Decimal128(18, 1). Overflowing on -inf
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(18, 1). Overflowing on -inf
 
 SELECT '-inf'::FLOAT::DECIMAL(38,1);
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Cast error: Cannot cast to Decimal128(38, 1). Overflowing on -inf
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(38, 1). Overflowing on -inf
 
 SELECT 'nan'::DOUBLE;
 
@@ -98,23 +98,23 @@ SELECT 'nan'::DOUBLE;
 -- cannot cast nan, inf or -inf to these types
 SELECT 'nan'::DOUBLE::INT;
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Cast error: Can't cast value NaN to type Int32
+Error: 3001(EngineExecuteQuery), Cast error: Can't cast value NaN to type Int32
 
 SELECT 'nan'::DOUBLE::DECIMAL(4,1);
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Cast error: Cannot cast to Decimal128(4, 1). Overflowing on NaN
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(4, 1). Overflowing on NaN
 
 SELECT 'nan'::DOUBLE::DECIMAL(9,1);
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Cast error: Cannot cast to Decimal128(9, 1). Overflowing on NaN
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(9, 1). Overflowing on NaN
 
 SELECT 'nan'::DOUBLE::DECIMAL(18,1);
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Cast error: Cannot cast to Decimal128(18, 1). Overflowing on NaN
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(18, 1). Overflowing on NaN
 
 SELECT 'nan'::DOUBLE::DECIMAL(38,1);
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Cast error: Cannot cast to Decimal128(38, 1). Overflowing on NaN
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(38, 1). Overflowing on NaN
 
 SELECT 'inf'::DOUBLE;
 
@@ -127,23 +127,23 @@ SELECT 'inf'::DOUBLE;
 -- cannot cast nan, inf or -inf to these types
 SELECT 'inf'::DOUBLE::INT;
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Cast error: Can't cast value inf to type Int32
+Error: 3001(EngineExecuteQuery), Cast error: Can't cast value inf to type Int32
 
 SELECT 'inf'::DOUBLE::DECIMAL(4,1);
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Cast error: Cannot cast to Decimal128(4, 1). Overflowing on inf
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(4, 1). Overflowing on inf
 
 SELECT 'inf'::DOUBLE::DECIMAL(9,1);
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Cast error: Cannot cast to Decimal128(9, 1). Overflowing on inf
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(9, 1). Overflowing on inf
 
 SELECT 'inf'::DOUBLE::DECIMAL(18,1);
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Cast error: Cannot cast to Decimal128(18, 1). Overflowing on inf
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(18, 1). Overflowing on inf
 
 SELECT 'inf'::DOUBLE::DECIMAL(38,1);
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Cast error: Cannot cast to Decimal128(38, 1). Overflowing on inf
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(38, 1). Overflowing on inf
 
 SELECT '-inf'::DOUBLE;
 
@@ -156,23 +156,23 @@ SELECT '-inf'::DOUBLE;
 -- cannot cast nan, inf or -inf to these types
 SELECT '-inf'::DOUBLE::INT;
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Cast error: Can't cast value -inf to type Int32
+Error: 3001(EngineExecuteQuery), Cast error: Can't cast value -inf to type Int32
 
 SELECT '-inf'::DOUBLE::DECIMAL(4,1);
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Cast error: Cannot cast to Decimal128(4, 1). Overflowing on -inf
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(4, 1). Overflowing on -inf
 
 SELECT '-inf'::DOUBLE::DECIMAL(9,1);
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Cast error: Cannot cast to Decimal128(9, 1). Overflowing on -inf
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(9, 1). Overflowing on -inf
 
 SELECT '-inf'::DOUBLE::DECIMAL(18,1);
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Cast error: Cannot cast to Decimal128(18, 1). Overflowing on -inf
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(18, 1). Overflowing on -inf
 
 SELECT '-inf'::DOUBLE::DECIMAL(38,1);
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Cast error: Cannot cast to Decimal128(38, 1). Overflowing on -inf
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(38, 1). Overflowing on -inf
 
 -- we can cast nan, inf and -inf between floats and doubles, as well as to/from strings
 SELECT 'nan'::FLOAT::VARCHAR;

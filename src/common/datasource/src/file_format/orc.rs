@@ -16,16 +16,17 @@ use std::sync::Arc;
 
 use arrow_schema::{ArrowError, Schema, SchemaRef};
 use async_trait::async_trait;
+use bytes::Bytes;
 use common_recordbatch::adapter::RecordBatchStreamTypeAdapter;
 use datafusion::datasource::physical_plan::{FileMeta, FileOpenFuture, FileOpener};
 use datafusion::error::{DataFusionError, Result as DfResult};
-use futures::{StreamExt, TryStreamExt};
+use futures::future::BoxFuture;
+use futures::{FutureExt, StreamExt, TryStreamExt};
 use object_store::ObjectStore;
-use orc_rust::arrow_reader::{create_arrow_schema, Cursor};
+use orc_rust::arrow_reader::ArrowReaderBuilder;
 use orc_rust::async_arrow_reader::ArrowStreamReader;
-use orc_rust::reader::Reader;
+use orc_rust::reader::AsyncChunkReader;
 use snafu::ResultExt;
-use tokio::io::{AsyncRead, AsyncSeek};
 
 use crate::error::{self, Result};
 use crate::file_format::FileFormat;
@@ -33,40 +34,65 @@ use crate::file_format::FileFormat;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct OrcFormat;
 
-pub async fn new_orc_cursor<R: AsyncRead + AsyncSeek + Unpin + Send + 'static>(
-    reader: R,
-) -> Result<Cursor<R>> {
-    let reader = Reader::new_async(reader)
+#[derive(Clone)]
+pub struct ReaderAdapter {
+    reader: object_store::Reader,
+    len: u64,
+}
+
+impl ReaderAdapter {
+    pub fn new(reader: object_store::Reader, len: u64) -> Self {
+        Self { reader, len }
+    }
+}
+
+impl AsyncChunkReader for ReaderAdapter {
+    fn len(&mut self) -> BoxFuture<'_, std::io::Result<u64>> {
+        async move { Ok(self.len) }.boxed()
+    }
+
+    fn get_bytes(
+        &mut self,
+        offset_from_start: u64,
+        length: u64,
+    ) -> BoxFuture<'_, std::io::Result<Bytes>> {
+        async move {
+            let bytes = self
+                .reader
+                .read(offset_from_start..offset_from_start + length)
+                .await?;
+            Ok(bytes.to_bytes())
+        }
+        .boxed()
+    }
+}
+
+pub async fn new_orc_stream_reader(
+    reader: ReaderAdapter,
+) -> Result<ArrowStreamReader<ReaderAdapter>> {
+    let reader_build = ArrowReaderBuilder::try_new_async(reader)
         .await
         .context(error::OrcReaderSnafu)?;
-    let cursor = Cursor::root(reader).context(error::OrcReaderSnafu)?;
-    Ok(cursor)
+    Ok(reader_build.build_async())
 }
 
-pub async fn new_orc_stream_reader<R: AsyncRead + AsyncSeek + Unpin + Send + 'static>(
-    reader: R,
-) -> Result<ArrowStreamReader<R>> {
-    let cursor = new_orc_cursor(reader).await?;
-    Ok(ArrowStreamReader::new(cursor, None))
-}
-
-pub async fn infer_orc_schema<R: AsyncRead + AsyncSeek + Unpin + Send + 'static>(
-    reader: R,
-) -> Result<Schema> {
-    let cursor = new_orc_cursor(reader).await?;
-    Ok(create_arrow_schema(&cursor))
+pub async fn infer_orc_schema(reader: ReaderAdapter) -> Result<Schema> {
+    let reader = new_orc_stream_reader(reader).await?;
+    Ok(reader.schema().as_ref().clone())
 }
 
 #[async_trait]
 impl FileFormat for OrcFormat {
     async fn infer_schema(&self, store: &ObjectStore, path: &str) -> Result<Schema> {
+        let meta = store
+            .stat(path)
+            .await
+            .context(error::ReadObjectSnafu { path })?;
         let reader = store
             .reader(path)
             .await
             .context(error::ReadObjectSnafu { path })?;
-
-        let schema = infer_orc_schema(reader).await?;
-
+        let schema = infer_orc_schema(ReaderAdapter::new(reader, meta.content_length())).await?;
         Ok(schema)
     }
 }
@@ -106,14 +132,22 @@ impl FileOpener for OrcOpener {
         };
         let projection = self.projection.clone();
         Ok(Box::pin(async move {
-            let reader = object_store
-                .reader(meta.location().to_string().as_str())
+            let path = meta.location().to_string();
+
+            let meta = object_store
+                .stat(&path)
                 .await
                 .map_err(|e| DataFusionError::External(Box::new(e)))?;
 
-            let stream_reader = new_orc_stream_reader(reader)
+            let reader = object_store
+                .reader(&path)
                 .await
                 .map_err(|e| DataFusionError::External(Box::new(e)))?;
+
+            let stream_reader =
+                new_orc_stream_reader(ReaderAdapter::new(reader, meta.content_length()))
+                    .await
+                    .map_err(|e| DataFusionError::External(Box::new(e)))?;
 
             let stream =
                 RecordBatchStreamTypeAdapter::new(projected_schema, stream_reader, projection);

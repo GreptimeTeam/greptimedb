@@ -14,12 +14,19 @@
 
 use common_base::Plugins;
 use meta_srv::error::Result;
-use meta_srv::metasrv::MetaSrvOptions;
+use meta_srv::metasrv::MetasrvOptions;
 
-pub async fn setup_meta_srv_plugins(_opts: &mut MetaSrvOptions) -> Result<Plugins> {
-    Ok(Plugins::new())
+use crate::options::PluginOptions;
+
+#[allow(unused_variables)]
+pub async fn setup_metasrv_plugins(
+    _plugins: &mut Plugins,
+    plugin_options: &[PluginOptions],
+    metasrv_opts: &MetasrvOptions,
+) -> Result<()> {
+    Ok(())
 }
 
-pub async fn start_meta_srv_plugins(_plugins: Plugins) -> Result<()> {
+pub async fn start_metasrv_plugins(_plugins: Plugins) -> Result<()> {
     Ok(())
 }

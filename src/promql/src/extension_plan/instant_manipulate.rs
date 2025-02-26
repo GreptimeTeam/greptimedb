@@ -21,32 +21,35 @@ use std::task::{Context, Poll};
 use datafusion::arrow::array::{Array, Float64Array, TimestampMillisecondArray, UInt64Array};
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::common::{DFSchema, DFSchemaRef};
+use datafusion::common::stats::Precision;
+use datafusion::common::{ColumnStatistics, DFSchema, DFSchemaRef};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion::physical_expr::PhysicalSortExpr;
-use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
+use datafusion::physical_plan::metrics::{
+    BaselineMetrics, Count, ExecutionPlanMetricsSet, MetricBuilder, MetricValue, MetricsSet,
+};
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, RecordBatchStream,
+    DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream, Statistics,
 };
 use datatypes::arrow::compute;
 use datatypes::arrow::error::Result as ArrowResult;
-use futures::{Stream, StreamExt};
+use futures::{ready, Stream, StreamExt};
 use greptime_proto::substrait_extension as pb;
 use prost::Message;
 use snafu::ResultExt;
 
 use crate::error::{DeserializeSnafu, Result};
-use crate::extension_plan::Millisecond;
+use crate::extension_plan::{Millisecond, METRIC_NUM_SERIES};
+use crate::metrics::PROMQL_SERIES_COUNT;
 
 /// Manipulate the input record batch to make it suitable for Instant Operator.
 ///
 /// This plan will try to align the input time series, for every timestamp between
 /// `start` and `end` with step `interval`. Find in the `lookback` range if data
 /// is missing at the given timestamp.
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash, PartialOrd)]
 pub struct InstantManipulate {
     start: Millisecond,
     end: Millisecond,
@@ -83,18 +86,26 @@ impl UserDefinedLogicalNodeCore for InstantManipulate {
         )
     }
 
-    fn from_template(&self, _exprs: &[Expr], inputs: &[LogicalPlan]) -> Self {
-        assert!(!inputs.is_empty());
+    fn with_exprs_and_inputs(
+        &self,
+        _exprs: Vec<Expr>,
+        inputs: Vec<LogicalPlan>,
+    ) -> DataFusionResult<Self> {
+        if inputs.is_empty() {
+            return Err(DataFusionError::Internal(
+                "InstantManipulate should have at least one input".to_string(),
+            ));
+        }
 
-        Self {
+        Ok(Self {
             start: self.start,
             end: self.end,
             lookback_delta: self.lookback_delta,
             interval: self.interval,
             time_index_column: self.time_index_column.clone(),
             field_column: self.field_column.clone(),
-            input: inputs[0].clone(),
-        }
+            input: inputs.into_iter().next().unwrap(),
+        })
     }
 }
 
@@ -194,20 +205,21 @@ impl ExecutionPlan for InstantManipulateExec {
         self.input.schema()
     }
 
-    fn output_partitioning(&self) -> Partitioning {
-        self.input.output_partitioning()
+    fn properties(&self) -> &PlanProperties {
+        self.input.properties()
     }
 
-    fn output_ordering(&self) -> Option<&[PhysicalSortExpr]> {
-        self.input.output_ordering()
+    fn required_input_distribution(&self) -> Vec<Distribution> {
+        self.input.required_input_distribution()
     }
 
+    // Prevent reordering of input
     fn maintains_input_order(&self) -> Vec<bool> {
-        vec![true; self.children().len()]
+        vec![false; self.children().len()]
     }
 
-    fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
-        vec![self.input.clone()]
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.input]
     }
 
     fn with_new_children(
@@ -233,6 +245,14 @@ impl ExecutionPlan for InstantManipulateExec {
         context: Arc<TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
         let baseline_metric = BaselineMetrics::new(&self.metric, partition);
+        let metrics_builder = MetricBuilder::new(&self.metric);
+        let num_series = Count::new();
+        metrics_builder
+            .with_partition(partition)
+            .build(MetricValue::Count {
+                name: METRIC_NUM_SERIES.into(),
+                count: num_series.clone(),
+            });
 
         let input = self.input.execute(partition, context)?;
         let schema = input.schema();
@@ -255,6 +275,7 @@ impl ExecutionPlan for InstantManipulateExec {
             schema,
             input,
             metric: baseline_metric,
+            num_series,
         }))
     }
 
@@ -262,23 +283,32 @@ impl ExecutionPlan for InstantManipulateExec {
         Some(self.metric.clone_inner())
     }
 
-    fn statistics(&self) -> Statistics {
-        let input_stats = self.input.statistics();
+    fn statistics(&self) -> DataFusionResult<Statistics> {
+        let input_stats = self.input.statistics()?;
 
         let estimated_row_num = (self.end - self.start) as f64 / self.interval as f64;
         let estimated_total_bytes = input_stats
             .total_byte_size
-            .zip(input_stats.num_rows)
-            .map(|(size, rows)| (size as f64 / rows as f64) * estimated_row_num)
-            .map(|size| size.floor() as _);
+            .get_value()
+            .zip(input_stats.num_rows.get_value())
+            .map(|(size, rows)| {
+                Precision::Inexact(((*size as f64 / *rows as f64) * estimated_row_num).floor() as _)
+            })
+            .unwrap_or(Precision::Absent);
 
-        Statistics {
-            num_rows: Some(estimated_row_num.floor() as _),
+        Ok(Statistics {
+            num_rows: Precision::Inexact(estimated_row_num.floor() as _),
             total_byte_size: estimated_total_bytes,
             // TODO(ruihang): support this column statistics
-            column_statistics: None,
-            is_exact: false,
-        }
+            column_statistics: vec![
+                ColumnStatistics::new_unknown();
+                self.schema().flattened_fields().len()
+            ],
+        })
+    }
+
+    fn name(&self) -> &str {
+        "InstantManipulateExec"
     }
 }
 
@@ -308,6 +338,8 @@ pub struct InstantManipulateStream {
     schema: SchemaRef,
     input: SendableRecordBatchStream,
     metric: BaselineMetrics,
+    /// Number of series processed.
+    num_series: Count,
 }
 
 impl RecordBatchStream for InstantManipulateStream {
@@ -320,12 +352,19 @@ impl Stream for InstantManipulateStream {
     type Item = DataFusionResult<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let poll = match self.input.poll_next_unpin(cx) {
-            Poll::Ready(batch) => {
-                let _timer = self.metric.elapsed_compute().timer();
-                Poll::Ready(batch.map(|batch| batch.and_then(|batch| self.manipulate(batch))))
+        let timer = std::time::Instant::now();
+        let poll = match ready!(self.input.poll_next_unpin(cx)) {
+            Some(Ok(batch)) => {
+                self.num_series.add(1);
+                let result = Ok(batch).and_then(|batch| self.manipulate(batch));
+                self.metric.elapsed_compute().add_elapsed(timer);
+                Poll::Ready(Some(result))
             }
-            Poll::Pending => Poll::Pending,
+            None => {
+                PROMQL_SERIES_COUNT.observe(self.num_series.value() as f64);
+                Poll::Ready(None)
+            }
+            Some(Err(e)) => Poll::Ready(Some(Err(e))),
         };
         self.metric.record_poll(poll)
     }
@@ -336,12 +375,16 @@ impl InstantManipulateStream {
     // and the function `vectorSelectorSingle`
     pub fn manipulate(&self, input: RecordBatch) -> DataFusionResult<RecordBatch> {
         let mut take_indices = vec![];
-        // TODO(ruihang): maybe the input is not timestamp millisecond array
+
         let ts_column = input
             .column(self.time_index)
             .as_any()
             .downcast_ref::<TimestampMillisecondArray>()
-            .unwrap();
+            .ok_or_else(|| {
+                DataFusionError::Execution(
+                    "Time index Column downcast to TimestampMillisecondArray failed".into(),
+                )
+            })?;
 
         // field column for staleness check
         let field_column = self
@@ -438,7 +481,7 @@ impl InstantManipulateStream {
         arrays[self.time_index] = Arc::new(TimestampMillisecondArray::from(aligned_ts));
 
         let result = RecordBatch::try_new(record_batch.schema(), arrays)
-            .map_err(DataFusionError::ArrowError)?;
+            .map_err(|e| DataFusionError::ArrowError(e, None))?;
         Ok(result)
     }
 }

@@ -1,0 +1,56 @@
+CREATE TABLE system_metrics (
+    host STRING,
+    idc STRING,
+    cpu_util DOUBLE,
+    memory_util DOUBLE,
+    disk_util DOUBLE,
+    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
+    PRIMARY KEY(host, idc),
+    TIME INDEX(ts)
+);
+
+Affected Rows: 0
+
+INSERT INTO system_metrics
+VALUES
+    ("host1", "idc_a", 11.8, 10.3, 10.3, 1667446797450),
+    ("host2", "idc_a", 80.0, 70.3, 90.0, 1667446797450),
+    ("host1", "idc_b", 50.0, 66.7, 40.6, 1667446797450);
+
+Affected Rows: 3
+
+SELECT count(*) FROM system_metrics;
+
++----------+
+| count(*) |
++----------+
+| 3        |
++----------+
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+explain analyze SELECT count(*) FROM system_metrics;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[count(system_REDACTED
+|_|_|_AggregateExec: mode=Final, gby=[], aggr=[count(system_REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[], aggr=[count(system_REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges) REDACTED
+|_|_|_|
+|_|_| Total rows: 1_|
++-+-+-+
+
+drop table system_metrics;
+
+Affected Rows: 0
+

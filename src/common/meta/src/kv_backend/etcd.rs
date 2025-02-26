@@ -15,11 +15,11 @@
 use std::any::Any;
 use std::sync::Arc;
 
+use common_telemetry::info;
 use etcd_client::{
-    Client, Compare, CompareOp, DeleteOptions, GetOptions, PutOptions, Txn, TxnOp, TxnOpResponse,
-    TxnResponse,
+    Client, DeleteOptions, GetOptions, PutOptions, Txn, TxnOp, TxnOpResponse, TxnResponse,
 };
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{ensure, ResultExt};
 
 use super::KvBackendRef;
 use crate::error::{self, Error, Result};
@@ -28,15 +28,10 @@ use crate::kv_backend::{KvBackend, TxnService};
 use crate::metrics::METRIC_META_TXN_REQUEST;
 use crate::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
-    BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
-    DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
+    BatchPutResponse, DeleteRangeRequest, DeleteRangeResponse, PutRequest, PutResponse,
+    RangeRequest, RangeResponse,
 };
 use crate::rpc::KeyValue;
-
-fn convert_key_value(kv: etcd_client::KeyValue) -> KeyValue {
-    let (key, value) = kv.into_key_value();
-    KeyValue { key, value }
-}
 
 pub struct EtcdStore {
     client: Client,
@@ -61,6 +56,7 @@ impl EtcdStore {
     }
 
     pub fn with_etcd_client(client: Client, max_txn_ops: usize) -> KvBackendRef {
+        info!("Connected to etcd");
         Arc::new(Self {
             client,
             max_txn_ops,
@@ -124,7 +120,7 @@ impl KvBackend for EtcdStore {
         let kvs = res
             .take_kvs()
             .into_iter()
-            .map(convert_key_value)
+            .map(KeyValue::from)
             .collect::<Vec<_>>();
 
         Ok(RangeResponse {
@@ -147,7 +143,7 @@ impl KvBackend for EtcdStore {
             .await
             .context(error::EtcdFailedSnafu)?;
 
-        let prev_kv = res.take_prev_key().map(convert_key_value);
+        let prev_kv = res.take_prev_key().map(KeyValue::from);
         Ok(PutResponse { prev_kv })
     }
 
@@ -166,7 +162,7 @@ impl KvBackend for EtcdStore {
             for op_res in txn_res.op_responses() {
                 match op_res {
                     TxnOpResponse::Put(mut put_res) => {
-                        if let Some(prev_kv) = put_res.take_prev_key().map(convert_key_value) {
+                        if let Some(prev_kv) = put_res.take_prev_key().map(KeyValue::from) {
                             prev_kvs.push(prev_kv);
                         }
                     }
@@ -195,58 +191,11 @@ impl KvBackend for EtcdStore {
                     TxnOpResponse::Get(get_res) => get_res,
                     _ => unreachable!(),
                 };
-                kvs.extend(get_res.take_kvs().into_iter().map(convert_key_value));
+                kvs.extend(get_res.take_kvs().into_iter().map(KeyValue::from));
             }
         }
 
         Ok(BatchGetResponse { kvs })
-    }
-
-    async fn compare_and_put(&self, req: CompareAndPutRequest) -> Result<CompareAndPutResponse> {
-        let CompareAndPut {
-            key,
-            expect,
-            value,
-            put_options,
-        } = req.try_into()?;
-
-        let compare = if expect.is_empty() {
-            // create if absent
-            // revision 0 means key was not exist
-            Compare::create_revision(key.clone(), CompareOp::Equal, 0)
-        } else {
-            // compare and put
-            Compare::value(key.clone(), CompareOp::Equal, expect)
-        };
-        let put = TxnOp::put(key.clone(), value, put_options);
-        let get = TxnOp::get(key, None);
-        let txn = Txn::new()
-            .when(vec![compare])
-            .and_then(vec![put])
-            .or_else(vec![get]);
-
-        let txn_res = self
-            .client
-            .kv_client()
-            .txn(txn)
-            .await
-            .context(error::EtcdFailedSnafu)?;
-
-        let success = txn_res.succeeded();
-        let op_res = txn_res
-            .op_responses()
-            .pop()
-            .context(error::InvalidTxnResultSnafu {
-                err_msg: "empty response",
-            })?;
-
-        let prev_kv = match op_res {
-            TxnOpResponse::Put(mut res) => res.take_prev_key().map(convert_key_value),
-            TxnOpResponse::Get(mut res) => res.take_kvs().into_iter().next().map(convert_key_value),
-            _ => unreachable!(),
-        };
-
-        Ok(CompareAndPutResponse { success, prev_kv })
     }
 
     async fn delete_range(&self, req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
@@ -262,7 +211,7 @@ impl KvBackend for EtcdStore {
         let prev_kvs = res
             .take_prev_kvs()
             .into_iter()
-            .map(convert_key_value)
+            .map(KeyValue::from)
             .collect::<Vec<_>>();
 
         Ok(DeleteRangeResponse {
@@ -290,7 +239,7 @@ impl KvBackend for EtcdStore {
                         delete_res
                             .take_prev_kvs()
                             .into_iter()
-                            .map(convert_key_value)
+                            .map(KeyValue::from)
                             .for_each(|kv| {
                                 prev_kvs.push(kv);
                             });
@@ -461,28 +410,6 @@ impl TryFrom<BatchDeleteRequest> for BatchDelete {
     }
 }
 
-struct CompareAndPut {
-    key: Vec<u8>,
-    expect: Vec<u8>,
-    value: Vec<u8>,
-    put_options: Option<PutOptions>,
-}
-
-impl TryFrom<CompareAndPutRequest> for CompareAndPut {
-    type Error = Error;
-
-    fn try_from(req: CompareAndPutRequest) -> Result<Self> {
-        let CompareAndPutRequest { key, expect, value } = req;
-
-        Ok(CompareAndPut {
-            key,
-            expect,
-            value,
-            put_options: Some(PutOptions::default().with_prev_key()),
-        })
-    }
-}
-
 struct Delete {
     key: Vec<u8>,
     options: Option<DeleteOptions>,
@@ -598,22 +525,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_compare_and_put() {
-        let req = CompareAndPutRequest {
-            key: b"test_key".to_vec(),
-            expect: b"test_expect".to_vec(),
-            value: b"test_value".to_vec(),
-        };
-
-        let compare_and_put: CompareAndPut = req.try_into().unwrap();
-
-        assert_eq!(b"test_key".to_vec(), compare_and_put.key);
-        assert_eq!(b"test_expect".to_vec(), compare_and_put.expect);
-        assert_eq!(b"test_value".to_vec(), compare_and_put.value);
-        let _ = compare_and_put.put_options.unwrap();
-    }
-
-    #[test]
     fn test_parse_delete() {
         let req = DeleteRangeRequest {
             key: b"test_key".to_vec(),
@@ -625,5 +536,112 @@ mod tests {
 
         assert_eq!(b"test_key".to_vec(), delete.key);
         let _ = delete.options.unwrap();
+    }
+
+    use crate::kv_backend::test::{
+        prepare_kv_with_prefix, test_kv_batch_delete_with_prefix, test_kv_batch_get_with_prefix,
+        test_kv_compare_and_put_with_prefix, test_kv_delete_range_with_prefix,
+        test_kv_put_with_prefix, test_kv_range_2_with_prefix, test_kv_range_with_prefix,
+        test_txn_compare_equal, test_txn_compare_greater, test_txn_compare_less,
+        test_txn_compare_not_equal, test_txn_one_compare_op, text_txn_multi_compare_op,
+        unprepare_kv,
+    };
+
+    async fn build_kv_backend() -> Option<EtcdStore> {
+        let endpoints = std::env::var("GT_ETCD_ENDPOINTS").unwrap_or_default();
+        if endpoints.is_empty() {
+            return None;
+        }
+
+        let endpoints = endpoints
+            .split(',')
+            .map(|s| s.to_string())
+            .collect::<Vec<String>>();
+
+        let client = Client::connect(endpoints, None)
+            .await
+            .expect("malformed endpoints");
+
+        Some(EtcdStore {
+            client,
+            max_txn_ops: 128,
+        })
+    }
+
+    #[tokio::test]
+    async fn test_put() {
+        if let Some(kv_backend) = build_kv_backend().await {
+            let prefix = b"put/";
+            prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
+            test_kv_put_with_prefix(&kv_backend, prefix.to_vec()).await;
+            unprepare_kv(&kv_backend, prefix).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_range() {
+        if let Some(kv_backend) = build_kv_backend().await {
+            let prefix = b"range/";
+            prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
+            test_kv_range_with_prefix(&kv_backend, prefix.to_vec()).await;
+            unprepare_kv(&kv_backend, prefix).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_range_2() {
+        if let Some(kv_backend) = build_kv_backend().await {
+            test_kv_range_2_with_prefix(&kv_backend, b"range2/".to_vec()).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_batch_get() {
+        if let Some(kv_backend) = build_kv_backend().await {
+            let prefix = b"batchGet/";
+            prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
+            test_kv_batch_get_with_prefix(&kv_backend, prefix.to_vec()).await;
+            unprepare_kv(&kv_backend, prefix).await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_compare_and_put() {
+        if let Some(kv_backend) = build_kv_backend().await {
+            let kv_backend = Arc::new(kv_backend);
+            test_kv_compare_and_put_with_prefix(kv_backend, b"compareAndPut/".to_vec()).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_delete_range() {
+        if let Some(kv_backend) = build_kv_backend().await {
+            let prefix = b"deleteRange/";
+            prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
+            test_kv_delete_range_with_prefix(&kv_backend, prefix.to_vec()).await;
+            unprepare_kv(&kv_backend, prefix).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_batch_delete() {
+        if let Some(kv_backend) = build_kv_backend().await {
+            let prefix = b"batchDelete/";
+            prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
+            test_kv_batch_delete_with_prefix(&kv_backend, prefix.to_vec()).await;
+            unprepare_kv(&kv_backend, prefix).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_etcd_txn() {
+        if let Some(kv_backend) = build_kv_backend().await {
+            test_txn_one_compare_op(&kv_backend).await;
+            text_txn_multi_compare_op(&kv_backend).await;
+            test_txn_compare_equal(&kv_backend).await;
+            test_txn_compare_greater(&kv_backend).await;
+            test_txn_compare_less(&kv_backend).await;
+            test_txn_compare_not_equal(&kv_backend).await;
+        }
     }
 }

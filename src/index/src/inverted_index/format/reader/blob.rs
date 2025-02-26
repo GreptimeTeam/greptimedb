@@ -12,19 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::io::SeekFrom;
+use std::ops::Range;
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use common_base::BitVec;
-use futures::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
-use greptime_proto::v1::index::{InvertedIndexMeta, InvertedIndexMetas};
+use bytes::Bytes;
+use common_base::range_read::RangeReader;
+use greptime_proto::v1::index::InvertedIndexMetas;
 use snafu::{ensure, ResultExt};
 
-use crate::inverted_index::error::{
-    DecodeFstSnafu, ReadSnafu, Result, SeekSnafu, UnexpectedBlobSizeSnafu,
-};
-use crate::inverted_index::format::reader::footer::InvertedIndeFooterReader;
-use crate::inverted_index::format::reader::{FstMap, InvertedIndexReader};
+use super::footer::DEFAULT_PREFETCH_SIZE;
+use crate::inverted_index::error::{CommonIoSnafu, Result, UnexpectedBlobSizeSnafu};
+use crate::inverted_index::format::reader::footer::InvertedIndexFooterReader;
+use crate::inverted_index::format::reader::InvertedIndexReader;
 use crate::inverted_index::format::MIN_BLOB_SIZE;
 
 /// Inverted index blob reader, implements [`InvertedIndexReader`]
@@ -51,37 +51,28 @@ impl<R> InvertedIndexBlobReader<R> {
 }
 
 #[async_trait]
-impl<R: AsyncRead + AsyncSeek + Unpin + Send> InvertedIndexReader for InvertedIndexBlobReader<R> {
-    async fn metadata(&mut self) -> Result<InvertedIndexMetas> {
-        let end = SeekFrom::End(0);
-        let blob_size = self.source.seek(end).await.context(SeekSnafu)?;
+impl<R: RangeReader + Sync> InvertedIndexReader for InvertedIndexBlobReader<R> {
+    async fn range_read(&self, offset: u64, size: u32) -> Result<Vec<u8>> {
+        let buf = self
+            .source
+            .read(offset..offset + size as u64)
+            .await
+            .context(CommonIoSnafu)?;
+        Ok(buf.into())
+    }
+
+    async fn read_vec(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
+        self.source.read_vec(ranges).await.context(CommonIoSnafu)
+    }
+
+    async fn metadata(&self) -> Result<Arc<InvertedIndexMetas>> {
+        let metadata = self.source.metadata().await.context(CommonIoSnafu)?;
+        let blob_size = metadata.content_length;
         Self::validate_blob_size(blob_size)?;
 
-        let mut footer_reader = InvertedIndeFooterReader::new(&mut self.source, blob_size);
-        footer_reader.metadata().await
-    }
-
-    async fn fst(&mut self, meta: &InvertedIndexMeta) -> Result<FstMap> {
-        let offset = SeekFrom::Start(meta.base_offset + meta.relative_fst_offset as u64);
-        self.source.seek(offset).await.context(SeekSnafu)?;
-        let mut buf = vec![0u8; meta.fst_size as usize];
-        self.source.read_exact(&mut buf).await.context(ReadSnafu)?;
-
-        FstMap::new(buf).context(DecodeFstSnafu)
-    }
-
-    async fn bitmap(
-        &mut self,
-        meta: &InvertedIndexMeta,
-        relative_offset: u32,
-        size: u32,
-    ) -> Result<BitVec> {
-        let offset = SeekFrom::Start(meta.base_offset + relative_offset as u64);
-        self.source.seek(offset).await.context(SeekSnafu)?;
-        let mut buf = vec![0u8; size as usize];
-        self.source.read_exact(&mut buf).await.context(ReadSnafu)?;
-
-        Ok(BitVec::from_vec(buf))
+        let mut footer_reader = InvertedIndexFooterReader::new(&self.source, blob_size)
+            .with_prefetch_size(DEFAULT_PREFETCH_SIZE);
+        footer_reader.metadata().await.map(Arc::new)
     }
 }
 
@@ -89,7 +80,6 @@ impl<R: AsyncRead + AsyncSeek + Unpin + Send> InvertedIndexReader for InvertedIn
 mod tests {
     use common_base::bit_vec::prelude::*;
     use fst::MapBuilder;
-    use futures::io::Cursor;
     use greptime_proto::v1::index::{InvertedIndexMeta, InvertedIndexMetas};
     use prost::Message;
 
@@ -170,7 +160,7 @@ mod tests {
     #[tokio::test]
     async fn test_inverted_index_blob_reader_metadata() {
         let blob = create_inverted_index_blob();
-        let mut blob_reader = InvertedIndexBlobReader::new(Cursor::new(blob));
+        let blob_reader = InvertedIndexBlobReader::new(blob);
 
         let metas = blob_reader.metadata().await.unwrap();
         assert_eq!(metas.metas.len(), 2);
@@ -197,18 +187,30 @@ mod tests {
     #[tokio::test]
     async fn test_inverted_index_blob_reader_fst() {
         let blob = create_inverted_index_blob();
-        let mut blob_reader = InvertedIndexBlobReader::new(Cursor::new(blob));
+        let blob_reader = InvertedIndexBlobReader::new(blob);
 
         let metas = blob_reader.metadata().await.unwrap();
         let meta = metas.metas.get("tag0").unwrap();
 
-        let fst_map = blob_reader.fst(meta).await.unwrap();
+        let fst_map = blob_reader
+            .fst(
+                meta.base_offset + meta.relative_fst_offset as u64,
+                meta.fst_size,
+            )
+            .await
+            .unwrap();
         assert_eq!(fst_map.len(), 2);
         assert_eq!(fst_map.get("key1".as_bytes()), Some(1));
         assert_eq!(fst_map.get("key2".as_bytes()), Some(2));
 
         let meta = metas.metas.get("tag1").unwrap();
-        let fst_map = blob_reader.fst(meta).await.unwrap();
+        let fst_map = blob_reader
+            .fst(
+                meta.base_offset + meta.relative_fst_offset as u64,
+                meta.fst_size,
+            )
+            .await
+            .unwrap();
         assert_eq!(fst_map.len(), 2);
         assert_eq!(fst_map.get("key1".as_bytes()), Some(1));
         assert_eq!(fst_map.get("key2".as_bytes()), Some(2));
@@ -217,22 +219,22 @@ mod tests {
     #[tokio::test]
     async fn test_inverted_index_blob_reader_bitmap() {
         let blob = create_inverted_index_blob();
-        let mut blob_reader = InvertedIndexBlobReader::new(Cursor::new(blob));
+        let blob_reader = InvertedIndexBlobReader::new(blob);
 
         let metas = blob_reader.metadata().await.unwrap();
         let meta = metas.metas.get("tag0").unwrap();
 
-        let bitmap = blob_reader.bitmap(meta, 0, 2).await.unwrap();
+        let bitmap = blob_reader.bitmap(meta.base_offset, 2).await.unwrap();
         assert_eq!(bitmap.into_vec(), create_fake_bitmap());
-        let bitmap = blob_reader.bitmap(meta, 2, 2).await.unwrap();
+        let bitmap = blob_reader.bitmap(meta.base_offset + 2, 2).await.unwrap();
         assert_eq!(bitmap.into_vec(), create_fake_bitmap());
 
         let metas = blob_reader.metadata().await.unwrap();
         let meta = metas.metas.get("tag1").unwrap();
 
-        let bitmap = blob_reader.bitmap(meta, 0, 2).await.unwrap();
+        let bitmap = blob_reader.bitmap(meta.base_offset, 2).await.unwrap();
         assert_eq!(bitmap.into_vec(), create_fake_bitmap());
-        let bitmap = blob_reader.bitmap(meta, 2, 2).await.unwrap();
+        let bitmap = blob_reader.bitmap(meta.base_offset + 2, 2).await.unwrap();
         assert_eq!(bitmap.into_vec(), create_fake_bitmap());
     }
 }

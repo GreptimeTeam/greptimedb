@@ -1,0 +1,127 @@
+# https://git-cliff.org/docs/configuration
+
+[remote.github]
+owner = "GreptimeTeam"
+repo = "greptimedb"
+
+[changelog]
+header = ""
+footer = ""
+# template for the changelog body
+# https://keats.github.io/tera/docs/#introduction
+body = """
+# {{ version }}
+
+Release date: {{ timestamp | date(format="%B %d, %Y") }}
+
+{%- set breakings = commits | filter(attribute="breaking", value=true) -%}
+{%- if breakings | length > 0 %}
+
+## Breaking changes
+    {% for commit in breakings %}
+      * {{ commit.github.pr_title }}\
+        {% if commit.github.username %} by \
+          {% set author = commit.github.username -%}
+          [@{{ author }}](https://github.com/{{ author }})
+        {%- endif -%}
+        {% if commit.github.pr_number %} in \
+          {% set number = commit.github.pr_number -%}
+          [#{{ number }}]({{ self::remote_url() }}/pull/{{ number }})
+        {%- endif %}
+    {%- endfor %}
+{%- endif -%}
+
+{%- set grouped_commits = commits | filter(attribute="breaking", value=false) | group_by(attribute="group") -%}
+{% for group, commits in grouped_commits %}
+
+    ### {{ group | striptags | trim | upper_first }}
+    {% for commit in commits %}
+        * {{ commit.github.pr_title }}\
+            {% if commit.github.username %} by \
+              {% set author = commit.github.username -%}
+              [@{{ author }}](https://github.com/{{ author }})
+            {%- endif -%}
+            {% if commit.github.pr_number %} in \
+              {% set number = commit.github.pr_number -%}
+              [#{{ number }}]({{ self::remote_url() }}/pull/{{ number }})
+            {%- endif %}
+    {%- endfor -%}
+{% endfor %}
+
+{%- if github.contributors | filter(attribute="is_first_time", value=true) | length != 0 %}
+  {% raw %}\n{% endraw -%}
+  ## New Contributors
+{% endif -%}
+{% for contributor in github.contributors | filter(attribute="is_first_time", value=true) %}
+  * [@{{ contributor.username }}](https://github.com/{{ contributor.username }}) made their first contribution
+    {%- if contributor.pr_number %} in \
+      [#{{ contributor.pr_number }}]({{ self::remote_url() }}/pull/{{ contributor.pr_number }}) \
+    {%- endif %}
+{%- endfor -%}
+
+{% if github.contributors | length != 0 %}
+  {% raw %}\n{% endraw -%}
+## All Contributors
+
+We would like to thank the following contributors from the GreptimeDB community:
+
+{%- set contributors = github.contributors | sort(attribute="username") | map(attribute="username") -%}
+{%- set bots = ['dependabot[bot]'] %}
+
+{% for contributor in contributors %}
+{%- if bots is containing(contributor) -%}{% continue %}{%- endif -%}
+{%- if loop.first -%}
+  [@{{ contributor }}](https://github.com/{{ contributor }})
+{%- else -%}
+  , [@{{ contributor }}](https://github.com/{{ contributor }})
+{%- endif -%}
+{%- endfor %}
+{%- endif %}
+{% raw %}\n{% endraw %}
+
+{%- macro remote_url() -%}
+  https://github.com/{{ remote.github.owner }}/{{ remote.github.repo }}
+{%- endmacro -%}
+"""
+trim = true
+
+[git]
+# parse the commits based on https://www.conventionalcommits.org
+conventional_commits = true
+# filter out the commits that are not conventional
+filter_unconventional = true
+# process each line of a commit as an individual commit
+split_commits = false
+# regex for parsing and grouping commits
+commit_parsers = [
+  { message = "^feat", group = "<!-- 0 -->🚀 Features" },
+  { message = "^fix", group = "<!-- 1 -->🐛 Bug Fixes" },
+  { message = "^doc", group = "<!-- 3 -->📚 Documentation" },
+  { message = "^perf", group = "<!-- 4 -->⚡ Performance" },
+  { message = "^refactor", group = "<!-- 2 -->🚜 Refactor" },
+  { message = "^style", group = "<!-- 5 -->🎨 Styling" },
+  { message = "^test", group = "<!-- 6 -->🧪 Testing" },
+  { message = "^chore\\(release\\): prepare for", skip = true },
+  { message = "^chore\\(deps.*\\)", skip = true },
+  { message = "^chore\\(pr\\)", skip = true },
+  { message = "^chore\\(pull\\)", skip = true },
+  { message = "^chore|^ci", group = "<!-- 7 -->⚙️ Miscellaneous Tasks" },
+  { body = ".*security", group = "<!-- 8 -->🛡️ Security" },
+  { message = "^revert", group = "<!-- 9 -->◀️ Revert" },
+]
+# protect breaking changes from being skipped due to matching a skipping commit_parser
+protect_breaking_commits = false
+# filter out the commits that are not matched by commit parsers
+filter_commits = false
+# regex for matching git tags
+# tag_pattern = "v[0-9].*"
+# regex for skipping tags
+# skip_tags = ""
+# regex for ignoring tags
+ignore_tags = ".*-nightly-.*"
+# sort the tags topologically
+topo_order = false
+# sort the commits inside sections by oldest/newest order
+sort_commits = "oldest"
+# limit the number of commits included in the changelog.
+# limit_commits = 42

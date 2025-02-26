@@ -33,6 +33,40 @@ TQL EVAL (0, 10, '5s') {__name__="test"};
 +-----+---------------------+---+
 
 -- SQLNESS SORT_RESULT 2 1
+TQL EVAL (0, 10, '5s') test{__schema__="public"};
+
++-----+---------------------+---+
+| i   | j                   | k |
++-----+---------------------+---+
+| 1.0 | 1970-01-01T00:00:05 | b |
+| 1.0 | 1970-01-01T00:00:10 | b |
+| 2.0 | 1970-01-01T00:00:05 | a |
+| 2.0 | 1970-01-01T00:00:10 | a |
++-----+---------------------+---+
+
+-- SQLNESS SORT_RESULT 2 1
+TQL EVAL (0, 10, '5s') test{__schema__="greptime_private"};
+
+Error: 4001(TableNotFound), Table not found: greptime.greptime_private.test
+
+-- SQLNESS SORT_RESULT 2 1
+TQL EVAL (0, 10, '5s') test{__database__="public"};
+
++-----+---------------------+---+
+| i   | j                   | k |
++-----+---------------------+---+
+| 1.0 | 1970-01-01T00:00:05 | b |
+| 1.0 | 1970-01-01T00:00:10 | b |
+| 2.0 | 1970-01-01T00:00:05 | a |
+| 2.0 | 1970-01-01T00:00:10 | a |
++-----+---------------------+---+
+
+-- SQLNESS SORT_RESULT 2 1
+TQL EVAL (0, 10, '5s') test{__database__="greptime_private"};
+
+Error: 4001(TableNotFound), Table not found: greptime.greptime_private.test
+
+-- SQLNESS SORT_RESULT 2 1
 TQL EVAL (0, 10, '5s') {__name__="test", __field__="i"};
 
 +-----+---+---------------------+
@@ -49,6 +83,10 @@ TQL EVAL (0, 10, '5s') {__name__!="test"};
 
 Error: 2000(InvalidSyntax), vector selector must contain at least one non-empty matcher
 
+TQL EVAL (0, 10, '5s') {__name__=~"test"};
+
+Error: 1004(InvalidArguments), Matcher operator =~ is not supported for __name__
+
 -- the point at 1ms will be shadowed by the point at 2ms
 TQL EVAL (0, 10, '5s') test{k="a"};
 
@@ -59,7 +97,6 @@ TQL EVAL (0, 10, '5s') test{k="a"};
 | 2.0 | 1970-01-01T00:00:10 | a |
 +-----+---------------------+---+
 
--- 'lookback' parameter is not fully supported, the test has to be updated
 TQL EVAL (0, 10, '1s', '2s') test{k="a"};
 
 +-----+---------------------+---+
@@ -67,14 +104,6 @@ TQL EVAL (0, 10, '1s', '2s') test{k="a"};
 +-----+---------------------+---+
 | 2.0 | 1970-01-01T00:00:01 | a |
 | 2.0 | 1970-01-01T00:00:02 | a |
-| 2.0 | 1970-01-01T00:00:03 | a |
-| 2.0 | 1970-01-01T00:00:04 | a |
-| 2.0 | 1970-01-01T00:00:05 | a |
-| 2.0 | 1970-01-01T00:00:06 | a |
-| 2.0 | 1970-01-01T00:00:07 | a |
-| 2.0 | 1970-01-01T00:00:08 | a |
-| 2.0 | 1970-01-01T00:00:09 | a |
-| 2.0 | 1970-01-01T00:00:10 | a |
 +-----+---------------------+---+
 
 TQL EVAL ('1970-01-01T00:00:00'::timestamp, '1970-01-01T00:00:00'::timestamp + '10 seconds'::interval, '1s') test{k="a"};
@@ -112,6 +141,33 @@ TQL EVAL (now() - now(), now() -  (now() - '10 seconds'::interval), '1s')  test{
 +-----+---------------------+---+
 
 DROP TABLE test;
+
+Affected Rows: 0
+
+CREATE TABLE test (`Field_I` DOUBLE, `Ts_J` TIMESTAMP TIME INDEX, `Tag_K` STRING PRIMARY KEY);
+
+Affected Rows: 0
+
+INSERT INTO test VALUES (1, 1, "a"), (1, 1, "b"), (2, 2, "a");
+
+Affected Rows: 3
+
+TQL EVAL (0, 10, '5s') test{__field__="Field_I"};
+
++---------+-------+---------------------+
+| Field_I | Tag_K | Ts_J                |
++---------+-------+---------------------+
+| 2.0     | a     | 1970-01-01T00:00:05 |
+| 2.0     | a     | 1970-01-01T00:00:10 |
+| 1.0     | b     | 1970-01-01T00:00:05 |
+| 1.0     | b     | 1970-01-01T00:00:10 |
++---------+-------+---------------------+
+
+TQL EVAL (0, 10, '5s') test{__field__="field_i"};
+
+Error: 1004(InvalidArguments), Cannot find column field_i
+
+drop table test;
 
 Affected Rows: 0
 

@@ -16,19 +16,23 @@
 
 use common_telemetry::info;
 use store_api::logstore::LogStore;
-use store_api::region_request::AffectedRows;
 use store_api::storage::RegionId;
 
-use crate::error::Result;
-use crate::manifest::action::{RegionMetaAction, RegionMetaActionList, RegionTruncate};
+use crate::error::RegionNotFoundSnafu;
+use crate::manifest::action::RegionTruncate;
+use crate::region::RegionLeaderState;
+use crate::request::{OptionOutputTx, TruncateResult};
 use crate::worker::RegionWorkerLoop;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) async fn handle_truncate_request(
         &mut self,
         region_id: RegionId,
-    ) -> Result<AffectedRows> {
-        let region = self.regions.writable_region(region_id)?;
+        mut sender: OptionOutputTx,
+    ) {
+        let Some(region) = self.regions.writable_region_or(region_id, &mut sender) else {
+            return;
+        };
 
         info!("Try to truncate region {}", region_id);
 
@@ -42,31 +46,65 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             truncated_entry_id,
             truncated_sequence,
         };
-        let action_list =
-            RegionMetaActionList::with_action(RegionMetaAction::Truncate(truncate.clone()));
-        region.manifest_manager.update(action_list).await?;
+        self.handle_manifest_truncate_action(region, truncate, sender);
+    }
+
+    /// Handles truncate result.
+    pub(crate) async fn handle_truncate_result(&mut self, truncate_result: TruncateResult) {
+        let region_id = truncate_result.region_id;
+        let Some(region) = self.regions.get_region(region_id) else {
+            truncate_result.sender.send(
+                RegionNotFoundSnafu {
+                    region_id: truncate_result.region_id,
+                }
+                .fail(),
+            );
+            return;
+        };
+
+        // We are already in the worker loop so we can set the state first.
+        region.switch_state_to_writable(RegionLeaderState::Truncating);
+
+        match truncate_result.result {
+            Ok(()) => {
+                // Applies the truncate action to the region.
+                region.version_control.truncate(
+                    truncate_result.truncated_entry_id,
+                    truncate_result.truncated_sequence,
+                    &region.memtable_builder,
+                );
+            }
+            Err(e) => {
+                // Unable to truncate the region.
+                truncate_result.sender.send(Err(e));
+                return;
+            }
+        }
 
         // Notifies flush scheduler.
         self.flush_scheduler.on_region_truncated(region_id);
         // Notifies compaction scheduler.
         self.compaction_scheduler.on_region_truncated(region_id);
 
-        // Reset region's version and mark all SSTs deleted.
-        region.version_control.truncate(
-            truncated_entry_id,
-            truncated_sequence,
-            &region.memtable_builder,
-        );
-
         // Make all data obsolete.
-        self.wal
-            .obsolete(region_id, truncated_entry_id, &region.wal_options)
-            .await?;
+        if let Err(e) = self
+            .wal
+            .obsolete(
+                region_id,
+                truncate_result.truncated_entry_id,
+                &region.provider,
+            )
+            .await
+        {
+            truncate_result.sender.send(Err(e));
+            return;
+        }
+
         info!(
             "Complete truncating region: {}, entry id: {} and sequence: {}.",
-            region_id, truncated_entry_id, truncated_sequence
+            region_id, truncate_result.truncated_entry_id, truncate_result.truncated_sequence
         );
 
-        Ok(0)
+        truncate_result.sender.send(Ok(0));
     }
 }

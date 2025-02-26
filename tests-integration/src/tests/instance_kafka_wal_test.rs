@@ -43,7 +43,7 @@ async fn test_create_database_and_insert_query(
     let output = execute_sql_with(
         &instance,
         "create database test",
-        QueryContext::with(DEFAULT_CATALOG_NAME, "test"),
+        QueryContext::with(DEFAULT_CATALOG_NAME, "test").into(),
     )
     .await;
     assert_matches!(output.data, OutputData::AffectedRows(1));
@@ -57,7 +57,7 @@ async fn test_create_database_and_insert_query(
              ts timestamp,
              TIME INDEX(ts)
         )"#,
-        QueryContext::with(DEFAULT_CATALOG_NAME, "test"),
+        QueryContext::with(DEFAULT_CATALOG_NAME, "test").into(),
     )
     .await;
     assert!(matches!(output.data, OutputData::AffectedRows(0)));
@@ -68,7 +68,7 @@ async fn test_create_database_and_insert_query(
                            ('host1', 66.6, 1024, 1655276557000),
                            ('host2', 88.8, 333.3, 1655276558000)
         "#,
-        QueryContext::with(DEFAULT_CATALOG_NAME, "test"),
+        QueryContext::with(DEFAULT_CATALOG_NAME, "test").into(),
     )
     .await;
     assert!(matches!(output.data, OutputData::AffectedRows(2)));
@@ -76,7 +76,7 @@ async fn test_create_database_and_insert_query(
     let query_output = execute_sql_with(
         &instance,
         "select ts from test.demo order by ts limit 1",
-        QueryContext::with(DEFAULT_CATALOG_NAME, "test"),
+        QueryContext::with(DEFAULT_CATALOG_NAME, "test").into(),
     )
     .await;
     match query_output.data {
@@ -112,7 +112,7 @@ async fn test_replay(rebuildable_instance: Option<Box<dyn RebuildableMockInstanc
     let output = execute_sql_with(
         &instance,
         "create database test",
-        QueryContext::with(DEFAULT_CATALOG_NAME, "test"),
+        QueryContext::with(DEFAULT_CATALOG_NAME, "test").into(),
     )
     .await;
     assert_matches!(output.data, OutputData::AffectedRows(1));
@@ -138,7 +138,7 @@ async fn test_flush_then_replay(rebuildable_instance: Option<Box<dyn Rebuildable
     let output = execute_sql_with(
         &instance,
         "create database test",
-        QueryContext::with(DEFAULT_CATALOG_NAME, "test"),
+        QueryContext::with(DEFAULT_CATALOG_NAME, "test").into(),
     )
     .await;
     assert_matches!(output.data, OutputData::AffectedRows(1));
@@ -256,7 +256,7 @@ async fn do_create(instance: &Arc<Instance>, table_name: &str) -> Output {
             )"#,
             table_name
         ),
-        QueryContext::with(DEFAULT_CATALOG_NAME, "test"),
+        QueryContext::with(DEFAULT_CATALOG_NAME, "test").into(),
     )
     .await
 }
@@ -266,7 +266,7 @@ async fn do_alter(instance: &Arc<Instance>, table_name: &str) -> Output {
     execute_sql_with(
         instance,
         &format!("alter table {} add column new_col STRING", table_name),
-        QueryContext::with(DEFAULT_CATALOG_NAME, "test"),
+        QueryContext::with(DEFAULT_CATALOG_NAME, "test").into(),
     )
     .await
 }
@@ -276,7 +276,7 @@ async fn do_insert(instance: &Arc<Instance>, table_name: &str, row: String) -> O
     execute_sql_with(
         instance,
         &format!("insert into test.{table_name}(host, cpu, memory, ts) values {row}"),
-        QueryContext::with(DEFAULT_CATALOG_NAME, "test"),
+        QueryContext::with(DEFAULT_CATALOG_NAME, "test").into(),
     )
     .await
 }
@@ -286,7 +286,7 @@ async fn do_query(instance: &Arc<Instance>, table_name: &str) -> Output {
     execute_sql_with(
         instance,
         &format!("select ts from test.{table_name} order by ts"),
-        QueryContext::with(DEFAULT_CATALOG_NAME, "test"),
+        QueryContext::with(DEFAULT_CATALOG_NAME, "test").into(),
     )
     .await
 }

@@ -35,13 +35,8 @@ static MYSQL_CONN_JAVA_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new("(?i)^(/\\* mysql-connector-j(.*))").unwrap());
 static SHOW_LOWER_CASE_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new("(?i)^(SHOW VARIABLES LIKE 'lower_case_table_names'(.*))").unwrap());
-static SHOW_COLLATION_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new("(?i)^(show collation where(.*))").unwrap());
 static SHOW_VARIABLES_LIKE_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new("(?i)^(SHOW VARIABLES( LIKE (.*))?)").unwrap());
-
-static SELECT_DATABASE_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)^(SELECT DATABASE\(\s*\))").unwrap());
 
 // SELECT TIMEDIFF(NOW(), UTC_TIMESTAMP());
 static SELECT_TIME_DIFF_FUNC_PATTERN: Lazy<Regex> =
@@ -65,19 +60,17 @@ static OTHER_NOT_SUPPORTED_STMT: Lazy<RegexSet> = Lazy::new(|| {
         "(?i)^(SET FOREIGN_KEY_CHECKS(.*))",
         "(?i)^(SET AUTOCOMMIT(.*))",
         "(?i)^(SET SQL_LOG_BIN(.*))",
+        "(?i)^(SET SESSION TRANSACTION(.*))",
+        "(?i)^(SET TRANSACTION(.*))",
         "(?i)^(SET sql_mode(.*))",
         "(?i)^(SET SQL_SELECT_LIMIT(.*))",
         "(?i)^(SET @@(.*))",
         "(?i)^(SET PROFILING(.*))",
 
-        "(?i)^(SHOW COLLATION)",
-        "(?i)^(SHOW CHARSET)",
-
         // mysqlclient.
         "(?i)^(SELECT \\$\\$)",
 
         // mysqldump.
-        "(?i)^(SET SESSION(.*))",
         "(?i)^(SET SQL_QUOTE_SHOW_CREATE(.*))",
         "(?i)^(LOCK TABLES(.*))",
         "(?i)^(UNLOCK TABLES(.*))",
@@ -96,8 +89,6 @@ static OTHER_NOT_SUPPORTED_STMT: Lazy<RegexSet> = Lazy::new(|| {
         "(?i)^(SHOW WARNINGS)",
         "(?i)^(/\\* ApplicationName=(.*)SHOW WARNINGS)",
         "(?i)^(/\\* ApplicationName=(.*)SHOW PLUGINS)",
-        "(?i)^(/\\* ApplicationName=(.*)SHOW COLLATION)",
-        "(?i)^(/\\* ApplicationName=(.*)SHOW CHARSET)",
         "(?i)^(/\\* ApplicationName=(.*)SHOW ENGINES)",
         "(?i)^(/\\* ApplicationName=(.*)SELECT @@(.*))",
         "(?i)^(/\\* ApplicationName=(.*)SHOW @@(.*))",
@@ -207,7 +198,7 @@ fn select_variable(query: &str, query_context: QueryContextRef) -> Option<Output
                 // @@aa
                 // field is '@@aa'
                 fields.push(ColumnSchema::new(
-                    &format!("@@{}", var_as[0]),
+                    format!("@@{}", var_as[0]),
                     ConcreteDataType::string_datatype(),
                     true,
                 ));
@@ -248,8 +239,7 @@ fn check_show_variables(query: &str) -> Option<Output> {
         Some(show_variables("sql_mode", "ONLY_FULL_GROUP_BY STRICT_TRANS_TABLES NO_ZERO_IN_DATE NO_ZERO_DATE ERROR_FOR_DIVISION_BY_ZERO NO_ENGINE_SUBSTITUTION"))
     } else if SHOW_LOWER_CASE_PATTERN.is_match(query) {
         Some(show_variables("lower_case_table_names", "0"))
-    } else if SHOW_COLLATION_PATTERN.is_match(query) || SHOW_VARIABLES_LIKE_PATTERN.is_match(query)
-    {
+    } else if SHOW_VARIABLES_LIKE_PATTERN.is_match(query) {
         Some(show_variables("", ""))
     } else {
         None
@@ -258,15 +248,12 @@ fn check_show_variables(query: &str) -> Option<Output> {
 }
 
 // Check for SET or others query, this is the final check of the federated query.
-fn check_others(query: &str, query_ctx: QueryContextRef) -> Option<Output> {
+fn check_others(query: &str, _query_ctx: QueryContextRef) -> Option<Output> {
     if OTHER_NOT_SUPPORTED_STMT.is_match(query.as_bytes()) {
         return Some(Output::new_with_record_batches(RecordBatches::empty()));
     }
 
-    let recordbatches = if SELECT_DATABASE_PATTERN.is_match(query) {
-        let schema = query_ctx.current_schema();
-        Some(select_function("database()", schema))
-    } else if SELECT_TIME_DIFF_FUNC_PATTERN.is_match(query) {
+    let recordbatches = if SELECT_TIME_DIFF_FUNC_PATTERN.is_match(query) {
         Some(select_function(
             "TIMEDIFF(NOW(), UTC_TIMESTAMP())",
             "00:00:00",
@@ -286,8 +273,11 @@ pub(crate) fn check(
 ) -> Option<Output> {
     // INSERT don't need MySQL federated check. We assume the query doesn't contain
     // federated or driver setup command if it starts with a 'INSERT' statement.
-    if query.len() > 6 && query[..6].eq_ignore_ascii_case("INSERT") {
-        return None;
+    let the_6th_index = query.char_indices().nth(6).map(|(i, _)| i);
+    if let Some(index) = the_6th_index {
+        if query[..index].eq_ignore_ascii_case("INSERT") {
+            return None;
+        }
     }
 
     // First to check the query is like "select @@variables".
@@ -309,13 +299,22 @@ mod test {
     use super::*;
 
     #[test]
+    fn test_check_abnormal() {
+        let session = Arc::new(Session::new(None, Channel::Mysql, Default::default()));
+        let query = "🫣一点不正常的东西🫣";
+        let output = check(query, QueryContext::arc(), session.clone());
+
+        assert!(output.is_none());
+    }
+
+    #[test]
     fn test_check() {
         let session = Arc::new(Session::new(None, Channel::Mysql, Default::default()));
         let query = "select 1";
         let result = check(query, QueryContext::arc(), session.clone());
         assert!(result.is_none());
 
-        let query = "select versiona";
+        let query = "select version";
         let output = check(query, QueryContext::arc(), session.clone());
         assert!(output.is_none());
 
@@ -377,12 +376,6 @@ mod test {
 +------------------------+-------+
 | lower_case_table_names | 0     |
 +------------------------+-------+";
-        test(query, expected);
-
-        let query = "show collation";
-        let expected = "\
-++
-++"; // empty
         test(query, expected);
 
         let query = "SELECT TIMEDIFF(NOW(), UTC_TIMESTAMP())";

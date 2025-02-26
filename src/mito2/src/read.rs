@@ -15,21 +15,27 @@
 //! Common structs and utilities for reading data.
 
 pub mod compat;
+pub mod dedup;
+pub mod last_row;
 pub mod merge;
 pub mod projection;
+pub(crate) mod prune;
+pub(crate) mod range;
 pub(crate) mod scan_region;
+pub(crate) mod scan_util;
 pub(crate) mod seq_scan;
 pub(crate) mod unordered_scan;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use api::v1::OpType;
 use async_trait::async_trait;
 use common_time::Timestamp;
 use datafusion_common::arrow::array::UInt8Array;
 use datatypes::arrow;
-use datatypes::arrow::array::{Array, ArrayRef};
+use datatypes::arrow::array::{Array, ArrayRef, UInt64Array};
 use datatypes::arrow::compute::SortOptions;
 use datatypes::arrow::row::{RowConverter, SortField};
 use datatypes::prelude::{ConcreteDataType, DataType, ScalarVector};
@@ -50,6 +56,9 @@ use crate::error::{
     ComputeArrowSnafu, ComputeVectorSnafu, ConvertVectorSnafu, InvalidBatchSnafu, Result,
 };
 use crate::memtable::BoxedBatchIterator;
+use crate::metrics::{READ_BATCHES_RETURN, READ_ROWS_RETURN, READ_STAGE_ELAPSED};
+use crate::read::prune::PruneReader;
+use crate::row_converter::{CompositeValues, PrimaryKeyCodec};
 
 /// Storage internal representation of a batch of rows for a primary key (time series).
 ///
@@ -60,7 +69,7 @@ pub struct Batch {
     /// Primary key encoded in a comparable form.
     primary_key: Vec<u8>,
     /// Possibly decoded `primary_key` values. Some places would decode it in advance.
-    pk_values: Option<Vec<Value>>,
+    pk_values: Option<CompositeValues>,
     /// Timestamps of rows, should be sorted and not null.
     timestamps: VectorRef,
     /// Sequences of rows
@@ -71,10 +80,10 @@ pub struct Batch {
     ///
     /// UInt8 type, not null.
     op_types: Arc<UInt8Vector>,
-    /// True if op types only contains put operations.
-    put_only: bool,
     /// Fields organized in columnar format.
     fields: Vec<BatchColumn>,
+    /// Cache for field index lookup.
+    fields_idx: Option<HashMap<ColumnId, usize>>,
 }
 
 impl Batch {
@@ -108,12 +117,12 @@ impl Batch {
     }
 
     /// Returns possibly decoded primary-key values.
-    pub fn pk_values(&self) -> Option<&[Value]> {
-        self.pk_values.as_deref()
+    pub fn pk_values(&self) -> Option<&CompositeValues> {
+        self.pk_values.as_ref()
     }
 
     /// Sets possibly decoded primary-key values.
-    pub fn set_pk_values(&mut self, pk_values: Vec<Value>) {
+    pub fn set_pk_values(&mut self, pk_values: CompositeValues) {
         self.pk_values = Some(pk_values);
     }
 
@@ -222,7 +231,7 @@ impl Batch {
             sequences: Arc::new(self.sequences.get_slice(offset, length)),
             op_types: Arc::new(self.op_types.get_slice(offset, length)),
             fields,
-            put_only: self.put_only,
+            fields_idx: self.fields_idx.clone(),
         }
     }
 
@@ -289,11 +298,6 @@ impl Batch {
 
     /// Removes rows whose op type is delete.
     pub fn filter_deleted(&mut self) -> Result<()> {
-        if self.put_only {
-            // If there is only put operation, we can skip comparison and filtering.
-            return Ok(());
-        }
-
         // Safety: op type column is not null.
         let array = self.op_types.as_arrow();
         // Find rows with non-delete op type.
@@ -324,16 +328,30 @@ impl Batch {
             )
             .unwrap(),
         );
-        // Also updates put_only field if it contains other ops.
-        if !self.put_only {
-            self.put_only = is_put_only(&self.op_types);
-        }
         for batch_column in &mut self.fields {
             batch_column.data = batch_column
                 .data
                 .filter(predicate)
                 .context(ComputeVectorSnafu)?;
         }
+
+        Ok(())
+    }
+
+    /// Filters rows by the given `sequence`. Only preserves rows with sequence less than or equal to `sequence`.
+    pub fn filter_by_sequence(&mut self, sequence: Option<SequenceNumber>) -> Result<()> {
+        let seq = match (sequence, self.last_sequence()) {
+            (None, _) | (_, None) => return Ok(()),
+            (Some(sequence), Some(last_sequence)) if sequence >= last_sequence => return Ok(()),
+            (Some(sequence), Some(_)) => sequence,
+        };
+
+        let seqs = self.sequences.as_arrow();
+        let sequence = UInt64Array::new_scalar(seq);
+        let predicate = datafusion_common::arrow::compute::kernels::cmp::lt_eq(seqs, &sequence)
+            .context(ComputeArrowSnafu)?;
+        let predicate = BooleanVector::from(predicate);
+        self.filter(&predicate)?;
 
         Ok(())
     }
@@ -382,17 +400,30 @@ impl Batch {
         self.take_in_place(&indices)
     }
 
-    /// Returns ids of fields in the [Batch] after applying the `projection`.
+    /// Returns the estimated memory size of the batch.
+    pub fn memory_size(&self) -> usize {
+        let mut size = std::mem::size_of::<Self>();
+        size += self.primary_key.len();
+        size += self.timestamps.memory_size();
+        size += self.sequences.memory_size();
+        size += self.op_types.memory_size();
+        for batch_column in &self.fields {
+            size += batch_column.data.memory_size();
+        }
+        size
+    }
+
+    /// Returns ids and datatypes of fields in the [Batch] after applying the `projection`.
     pub(crate) fn projected_fields(
         metadata: &RegionMetadata,
         projection: &[ColumnId],
-    ) -> Vec<ColumnId> {
+    ) -> Vec<(ColumnId, ConcreteDataType)> {
         let projected_ids: HashSet<_> = projection.iter().copied().collect();
         metadata
             .field_columns()
             .filter_map(|column| {
                 if projected_ids.contains(&column.column_id) {
-                    Some(column.column_id)
+                    Some((column.column_id, column.column_schema.data_type.clone()))
                 } else {
                     None
                 }
@@ -451,10 +482,6 @@ impl Batch {
         let array = arrow::compute::take(self.op_types.as_arrow(), indices.as_arrow(), None)
             .context(ComputeArrowSnafu)?;
         self.op_types = Arc::new(UInt8Vector::try_from_arrow_array(array).unwrap());
-        // Also updates put_only field if it contains other ops.
-        if !self.put_only {
-            self.put_only = is_put_only(&self.op_types);
-        }
         for batch_column in &mut self.fields {
             batch_column.data = batch_column
                 .data
@@ -486,16 +513,229 @@ impl Batch {
         // Safety: sequences is not null so it actually returns Some.
         self.sequences.get_data(index).unwrap()
     }
+
+    /// Checks the batch is monotonic by timestamps.
+    #[cfg(debug_assertions)]
+    pub(crate) fn check_monotonic(&self) -> Result<(), String> {
+        use std::cmp::Ordering;
+        if self.timestamps_native().is_none() {
+            return Ok(());
+        }
+
+        let timestamps = self.timestamps_native().unwrap();
+        let sequences = self.sequences.as_arrow().values();
+        for (i, window) in timestamps.windows(2).enumerate() {
+            let current = window[0];
+            let next = window[1];
+            let current_sequence = sequences[i];
+            let next_sequence = sequences[i + 1];
+            match current.cmp(&next) {
+                Ordering::Less => {
+                    // The current timestamp is less than the next timestamp.
+                    continue;
+                }
+                Ordering::Equal => {
+                    // The current timestamp is equal to the next timestamp.
+                    if current_sequence < next_sequence {
+                        return Err(format!(
+                            "sequence are not monotonic: ts {} == {} but current sequence {} < {}, index: {}",
+                            current, next, current_sequence, next_sequence, i
+                        ));
+                    }
+                }
+                Ordering::Greater => {
+                    // The current timestamp is greater than the next timestamp.
+                    return Err(format!(
+                        "timestamps are not monotonic: {} > {}, index: {}",
+                        current, next, i
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Returns Ok if the given batch is behind the current batch.
+    #[cfg(debug_assertions)]
+    pub(crate) fn check_next_batch(&self, other: &Batch) -> Result<(), String> {
+        // Checks the primary key
+        if self.primary_key() < other.primary_key() {
+            return Ok(());
+        }
+        if self.primary_key() > other.primary_key() {
+            return Err(format!(
+                "primary key is not monotonic: {:?} > {:?}",
+                self.primary_key(),
+                other.primary_key()
+            ));
+        }
+        // Checks the timestamp.
+        if self.last_timestamp() < other.first_timestamp() {
+            return Ok(());
+        }
+        if self.last_timestamp() > other.first_timestamp() {
+            return Err(format!(
+                "timestamps are not monotonic: {:?} > {:?}",
+                self.last_timestamp(),
+                other.first_timestamp()
+            ));
+        }
+        // Checks the sequence.
+        if self.last_sequence() >= other.first_sequence() {
+            return Ok(());
+        }
+        Err(format!(
+            "sequences are not monotonic: {:?} < {:?}",
+            self.last_sequence(),
+            other.first_sequence()
+        ))
+    }
+
+    /// Returns the value of the column in the primary key.
+    ///
+    /// Lazily decodes the primary key and caches the result.
+    pub fn pk_col_value(
+        &mut self,
+        codec: &dyn PrimaryKeyCodec,
+        col_idx_in_pk: usize,
+        column_id: ColumnId,
+    ) -> Result<Option<&Value>> {
+        if self.pk_values.is_none() {
+            self.pk_values = Some(codec.decode(&self.primary_key)?);
+        }
+
+        let pk_values = self.pk_values.as_ref().unwrap();
+        Ok(match pk_values {
+            CompositeValues::Dense(values) => values.get(col_idx_in_pk).map(|(_, v)| v),
+            CompositeValues::Sparse(values) => values.get(&column_id),
+        })
+    }
+
+    /// Returns values of the field in the batch.
+    ///
+    /// Lazily caches the field index.
+    pub fn field_col_value(&mut self, column_id: ColumnId) -> Option<&BatchColumn> {
+        if self.fields_idx.is_none() {
+            self.fields_idx = Some(
+                self.fields
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| (c.column_id, i))
+                    .collect(),
+            );
+        }
+
+        self.fields_idx
+            .as_ref()
+            .unwrap()
+            .get(&column_id)
+            .map(|&idx| &self.fields[idx])
+    }
 }
 
-/// Returns whether the op types vector only contains put operation.
-fn is_put_only(op_types: &UInt8Vector) -> bool {
-    // Safety: Op types is not null.
-    op_types
-        .as_arrow()
-        .values()
-        .iter()
-        .all(|v| *v == OpType::Put as u8)
+/// A struct to check the batch is monotonic.
+#[cfg(debug_assertions)]
+#[derive(Default)]
+pub(crate) struct BatchChecker {
+    last_batch: Option<Batch>,
+    start: Option<Timestamp>,
+    end: Option<Timestamp>,
+}
+
+#[cfg(debug_assertions)]
+impl BatchChecker {
+    /// Attaches the given start timestamp to the checker.
+    pub(crate) fn with_start(mut self, start: Option<Timestamp>) -> Self {
+        self.start = start;
+        self
+    }
+
+    /// Attaches the given end timestamp to the checker.
+    pub(crate) fn with_end(mut self, end: Option<Timestamp>) -> Self {
+        self.end = end;
+        self
+    }
+
+    /// Returns true if the given batch is monotonic and behind
+    /// the last batch.
+    pub(crate) fn check_monotonic(&mut self, batch: &Batch) -> Result<(), String> {
+        batch.check_monotonic()?;
+
+        if let (Some(start), Some(first)) = (self.start, batch.first_timestamp()) {
+            if start > first {
+                return Err(format!(
+                    "batch's first timestamp is before the start timestamp: {:?} > {:?}",
+                    start, first
+                ));
+            }
+        }
+        if let (Some(end), Some(last)) = (self.end, batch.last_timestamp()) {
+            if end <= last {
+                return Err(format!(
+                    "batch's last timestamp is after the end timestamp: {:?} <= {:?}",
+                    end, last
+                ));
+            }
+        }
+
+        // Checks the batch is behind the last batch.
+        // Then Updates the last batch.
+        let res = self
+            .last_batch
+            .as_ref()
+            .map(|last| last.check_next_batch(batch))
+            .unwrap_or(Ok(()));
+        self.last_batch = Some(batch.clone());
+        res
+    }
+
+    /// Formats current batch and last batch for debug.
+    pub(crate) fn format_batch(&self, batch: &Batch) -> String {
+        use std::fmt::Write;
+
+        let mut message = String::new();
+        if let Some(last) = &self.last_batch {
+            write!(
+                message,
+                "last_pk: {:?}, last_ts: {:?}, last_seq: {:?}, ",
+                last.primary_key(),
+                last.last_timestamp(),
+                last.last_sequence()
+            )
+            .unwrap();
+        }
+        write!(
+            message,
+            "batch_pk: {:?}, batch_ts: {:?}, batch_seq: {:?}",
+            batch.primary_key(),
+            batch.timestamps(),
+            batch.sequences()
+        )
+        .unwrap();
+
+        message
+    }
+
+    /// Checks batches from the part range are monotonic. Otherwise, panics.
+    pub(crate) fn ensure_part_range_batch(
+        &mut self,
+        scanner: &str,
+        region_id: store_api::storage::RegionId,
+        partition: usize,
+        part_range: store_api::region_engine::PartitionRange,
+        batch: &Batch,
+    ) {
+        if let Err(e) = self.check_monotonic(batch) {
+            let err_msg = format!(
+                "{}: batch is not sorted, {}, region_id: {}, partition: {}, part_range: {:?}",
+                scanner, e, region_id, partition, part_range,
+            );
+            common_telemetry::error!("{err_msg}, {}", self.format_batch(batch));
+            // Only print the number of row in the panic message.
+            panic!("{err_msg}, batch rows: {}", batch.num_rows());
+        }
+    }
 }
 
 /// Len of timestamp in arrow row format.
@@ -673,10 +913,6 @@ impl BatchBuilder {
             );
         }
 
-        // Checks whether op types are put only. In the future, we may get this from statistics
-        // in memtables and SSTs.
-        let put_only = is_put_only(&op_types);
-
         Ok(Batch {
             primary_key: self.primary_key,
             pk_values: None,
@@ -684,8 +920,20 @@ impl BatchBuilder {
             sequences,
             op_types,
             fields: self.fields,
-            put_only,
+            fields_idx: None,
         })
+    }
+}
+
+impl From<Batch> for BatchBuilder {
+    fn from(batch: Batch) -> Self {
+        Self {
+            primary_key: batch.primary_key,
+            timestamps: Some(batch.timestamps),
+            sequences: Some(batch.sequences),
+            op_types: Some(batch.op_types),
+            fields: batch.fields,
+        }
     }
 }
 
@@ -699,6 +947,8 @@ pub enum Source {
     Iter(BoxedBatchIterator),
     /// Source from a [BoxedBatchStream].
     Stream(BoxedBatchStream),
+    /// Source from a [PruneReader].
+    PruneReader(PruneReader),
 }
 
 impl Source {
@@ -708,6 +958,7 @@ impl Source {
             Source::Reader(reader) => reader.next_batch().await,
             Source::Iter(iter) => iter.next().transpose(),
             Source::Stream(stream) => stream.try_next().await,
+            Source::PruneReader(reader) => reader.next_batch().await,
         }
     }
 }
@@ -740,10 +991,85 @@ impl<T: BatchReader + ?Sized> BatchReader for Box<T> {
     }
 }
 
+/// Metrics for scanners.
+#[derive(Debug, Default)]
+pub(crate) struct ScannerMetrics {
+    /// Duration to prepare the scan task.
+    prepare_scan_cost: Duration,
+    /// Duration to build file ranges.
+    build_parts_cost: Duration,
+    /// Duration to build the (merge) reader.
+    build_reader_cost: Duration,
+    /// Duration to scan data.
+    scan_cost: Duration,
+    /// Duration to convert batches.
+    convert_cost: Duration,
+    /// Duration while waiting for `yield`.
+    yield_cost: Duration,
+    /// Duration of the scan.
+    total_cost: Duration,
+    /// Number of batches returned.
+    num_batches: usize,
+    /// Number of rows returned.
+    num_rows: usize,
+    /// Number of mem ranges scanned.
+    num_mem_ranges: usize,
+    /// Number of file ranges scanned.
+    num_file_ranges: usize,
+}
+
+impl ScannerMetrics {
+    /// Observes metrics.
+    fn observe_metrics(&self) {
+        READ_STAGE_ELAPSED
+            .with_label_values(&["prepare_scan"])
+            .observe(self.prepare_scan_cost.as_secs_f64());
+        READ_STAGE_ELAPSED
+            .with_label_values(&["build_parts"])
+            .observe(self.build_parts_cost.as_secs_f64());
+        READ_STAGE_ELAPSED
+            .with_label_values(&["build_reader"])
+            .observe(self.build_reader_cost.as_secs_f64());
+        READ_STAGE_ELAPSED
+            .with_label_values(&["convert_rb"])
+            .observe(self.convert_cost.as_secs_f64());
+        READ_STAGE_ELAPSED
+            .with_label_values(&["scan"])
+            .observe(self.scan_cost.as_secs_f64());
+        READ_STAGE_ELAPSED
+            .with_label_values(&["yield"])
+            .observe(self.yield_cost.as_secs_f64());
+        READ_STAGE_ELAPSED
+            .with_label_values(&["total"])
+            .observe(self.total_cost.as_secs_f64());
+        READ_ROWS_RETURN.observe(self.num_rows as f64);
+        READ_BATCHES_RETURN.observe(self.num_batches as f64);
+    }
+
+    /// Merges metrics from another [ScannerMetrics].
+    fn merge_from(&mut self, other: &ScannerMetrics) {
+        self.prepare_scan_cost += other.prepare_scan_cost;
+        self.build_parts_cost += other.build_parts_cost;
+        self.build_reader_cost += other.build_reader_cost;
+        self.scan_cost += other.scan_cost;
+        self.convert_cost += other.convert_cost;
+        self.yield_cost += other.yield_cost;
+        self.total_cost += other.total_cost;
+        self.num_batches += other.num_batches;
+        self.num_rows += other.num_rows;
+        self.num_mem_ranges += other.num_mem_ranges;
+        self.num_file_ranges += other.num_file_ranges;
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use store_api::codec::PrimaryKeyEncoding;
+    use store_api::storage::consts::ReservedColumnId;
+
     use super::*;
     use crate::error::Error;
+    use crate::row_converter::{self, build_primary_key_codec_with_fields};
     use crate::test_util::new_batch_builder;
 
     fn new_batch(
@@ -939,7 +1265,6 @@ mod tests {
             &[OpType::Delete, OpType::Put, OpType::Delete, OpType::Put],
             &[21, 22, 23, 24],
         );
-        assert!(!batch.put_only);
         batch.filter_deleted().unwrap();
         let expect = new_batch(&[2, 4], &[12, 14], &[OpType::Put, OpType::Put], &[22, 24]);
         assert_eq!(expect, batch);
@@ -950,10 +1275,60 @@ mod tests {
             &[OpType::Put, OpType::Put, OpType::Put, OpType::Put],
             &[21, 22, 23, 24],
         );
-        assert!(batch.put_only);
         let expect = batch.clone();
         batch.filter_deleted().unwrap();
         assert_eq!(expect, batch);
+    }
+
+    #[test]
+    fn test_filter_by_sequence() {
+        // Filters put only.
+        let mut batch = new_batch(
+            &[1, 2, 3, 4],
+            &[11, 12, 13, 14],
+            &[OpType::Put, OpType::Put, OpType::Put, OpType::Put],
+            &[21, 22, 23, 24],
+        );
+        batch.filter_by_sequence(Some(13)).unwrap();
+        let expect = new_batch(
+            &[1, 2, 3],
+            &[11, 12, 13],
+            &[OpType::Put, OpType::Put, OpType::Put],
+            &[21, 22, 23],
+        );
+        assert_eq!(expect, batch);
+
+        // Filters to empty.
+        let mut batch = new_batch(
+            &[1, 2, 3, 4],
+            &[11, 12, 13, 14],
+            &[OpType::Put, OpType::Delete, OpType::Put, OpType::Put],
+            &[21, 22, 23, 24],
+        );
+
+        batch.filter_by_sequence(Some(10)).unwrap();
+        assert!(batch.is_empty());
+
+        // None filter.
+        let mut batch = new_batch(
+            &[1, 2, 3, 4],
+            &[11, 12, 13, 14],
+            &[OpType::Put, OpType::Delete, OpType::Put, OpType::Put],
+            &[21, 22, 23, 24],
+        );
+        let expect = batch.clone();
+        batch.filter_by_sequence(None).unwrap();
+        assert_eq!(expect, batch);
+
+        // Filter a empty batch
+        let mut batch = new_batch(&[], &[], &[], &[]);
+        batch.filter_by_sequence(Some(10)).unwrap();
+        assert!(batch.is_empty());
+
+        // Filter a empty batch with None
+        let mut batch = new_batch(&[], &[], &[], &[]);
+        batch.filter_by_sequence(None).unwrap();
+        assert!(batch.is_empty());
     }
 
     #[test]
@@ -1065,5 +1440,89 @@ mod tests {
             &[23, 22, 21],
         );
         assert_eq!(expect, batch);
+    }
+
+    #[test]
+    fn test_get_value() {
+        let encodings = [PrimaryKeyEncoding::Dense, PrimaryKeyEncoding::Sparse];
+
+        for encoding in encodings {
+            let codec = build_primary_key_codec_with_fields(
+                encoding,
+                [
+                    (
+                        ReservedColumnId::table_id(),
+                        row_converter::SortField::new(ConcreteDataType::uint32_datatype()),
+                    ),
+                    (
+                        ReservedColumnId::tsid(),
+                        row_converter::SortField::new(ConcreteDataType::uint64_datatype()),
+                    ),
+                    (
+                        100,
+                        row_converter::SortField::new(ConcreteDataType::string_datatype()),
+                    ),
+                    (
+                        200,
+                        row_converter::SortField::new(ConcreteDataType::string_datatype()),
+                    ),
+                ]
+                .into_iter(),
+            );
+
+            let values = [
+                Value::UInt32(1000),
+                Value::UInt64(2000),
+                Value::String("abcdefgh".into()),
+                Value::String("zyxwvu".into()),
+            ];
+            let mut buf = vec![];
+            codec
+                .encode_values(
+                    &[
+                        (ReservedColumnId::table_id(), values[0].clone()),
+                        (ReservedColumnId::tsid(), values[1].clone()),
+                        (100, values[2].clone()),
+                        (200, values[3].clone()),
+                    ],
+                    &mut buf,
+                )
+                .unwrap();
+
+            let field_col_id = 2;
+            let mut batch = new_batch_builder(
+                &buf,
+                &[1, 2, 3],
+                &[1, 1, 1],
+                &[OpType::Put, OpType::Put, OpType::Put],
+                field_col_id,
+                &[42, 43, 44],
+            )
+            .build()
+            .unwrap();
+
+            let v = batch
+                .pk_col_value(&*codec, 0, ReservedColumnId::table_id())
+                .unwrap()
+                .unwrap();
+            assert_eq!(values[0], *v);
+
+            let v = batch
+                .pk_col_value(&*codec, 1, ReservedColumnId::tsid())
+                .unwrap()
+                .unwrap();
+            assert_eq!(values[1], *v);
+
+            let v = batch.pk_col_value(&*codec, 2, 100).unwrap().unwrap();
+            assert_eq!(values[2], *v);
+
+            let v = batch.pk_col_value(&*codec, 3, 200).unwrap().unwrap();
+            assert_eq!(values[3], *v);
+
+            let v = batch.field_col_value(field_col_id).unwrap();
+            assert_eq!(v.data.get(0), Value::UInt64(42));
+            assert_eq!(v.data.get(1), Value::UInt64(43));
+            assert_eq!(v.data.get(2), Value::UInt64(44));
+        }
     }
 }

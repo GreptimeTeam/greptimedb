@@ -39,6 +39,30 @@ lazy_static! {
         &["step"]
     )
     .unwrap();
+    pub static ref METRIC_META_PROCEDURE_CREATE_VIEW: HistogramVec = register_histogram_vec!(
+        "greptime_meta_procedure_create_view",
+        "meta procedure create view",
+        &["step"]
+    )
+    .unwrap();
+    pub static ref METRIC_META_PROCEDURE_CREATE_FLOW: HistogramVec = register_histogram_vec!(
+        "greptime_meta_procedure_create_flow",
+        "meta procedure create flow",
+        &["step"]
+    )
+    .unwrap();
+    pub static ref METRIC_META_PROCEDURE_DROP_FLOW: HistogramVec = register_histogram_vec!(
+        "greptime_meta_procedure_drop_flow",
+        "meta procedure drop flow",
+        &["step"]
+    )
+        .unwrap();
+    pub static ref METRIC_META_PROCEDURE_DROP_VIEW: HistogramVec = register_histogram_vec!(
+        "greptime_meta_procedure_drop_view",
+        "meta procedure drop view",
+        &["step"]
+    )
+    .unwrap();
     pub static ref METRIC_META_PROCEDURE_CREATE_TABLES: HistogramVec = register_histogram_vec!(
         "greptime_meta_procedure_create_tables",
         "meta procedure create tables",
@@ -61,6 +85,27 @@ lazy_static! {
         "greptime_meta_procedure_truncate_table",
         "meta procedure truncate table",
         &["step"]
+    )
+    .unwrap();
+    /// Cache container cache get counter.
+    pub static ref CACHE_CONTAINER_CACHE_GET: IntCounterVec = register_int_counter_vec!(
+        "greptime_meta_cache_container_cache_get",
+        "cache container cache get",
+        &["name"]
+    )
+    .unwrap();
+    /// Cache container cache miss counter.
+    pub static ref CACHE_CONTAINER_CACHE_MISS: IntCounterVec = register_int_counter_vec!(
+        "greptime_meta_cache_container_cache_miss",
+        "cache container cache miss",
+        &["name"]
+    )
+    .unwrap();
+    /// Cache container load cache timer
+    pub static ref CACHE_CONTAINER_LOAD_CACHE: HistogramVec = register_histogram_vec!(
+        "greptime_meta_cache_container_load_cache",
+        "cache container load cache",
+        &["name"]
     )
     .unwrap();
 }

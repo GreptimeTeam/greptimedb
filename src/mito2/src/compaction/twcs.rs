@@ -12,142 +12,216 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
-use std::fmt::{Debug, Formatter};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeMap, HashMap};
+use std::fmt::Debug;
 
-use common_telemetry::{debug, error, info};
+use common_telemetry::{info, trace};
 use common_time::timestamp::TimeUnit;
 use common_time::timestamp_millis::BucketAligned;
 use common_time::Timestamp;
-use smallvec::SmallVec;
-use snafu::ResultExt;
-use store_api::metadata::RegionMetadataRef;
-use store_api::storage::RegionId;
-use tokio::sync::mpsc;
 
-use crate::access_layer::{AccessLayerRef, SstWriteRequest};
-use crate::cache::CacheManagerRef;
-use crate::compaction::picker::{CompactionTask, Picker};
-use crate::compaction::CompactionRequest;
-use crate::config::MitoConfig;
-use crate::error::{self, CompactRegionSnafu};
-use crate::metrics::{COMPACTION_FAILURE_COUNT, COMPACTION_STAGE_ELAPSED};
-use crate::read::projection::ProjectionMapper;
-use crate::read::scan_region::ScanInput;
-use crate::read::seq_scan::SeqScan;
-use crate::read::{BoxedBatchReader, Source};
-use crate::region::options::IndexOptions;
-use crate::request::{
-    BackgroundNotify, CompactionFailed, CompactionFinished, OutputTx, WorkerRequest,
-};
-use crate::sst::file::{FileHandle, FileId, FileMeta, IndexType, Level};
-use crate::sst::file_purger::FilePurgerRef;
-use crate::sst::parquet::WriteOptions;
+use crate::compaction::buckets::infer_time_bucket;
+use crate::compaction::compactor::CompactionRegion;
+use crate::compaction::picker::{Picker, PickerOutput};
+use crate::compaction::run::{find_sorted_runs, reduce_runs, Item};
+use crate::compaction::{get_expired_ssts, CompactionOutput};
+use crate::sst::file::{overlaps, FileHandle, Level};
 use crate::sst::version::LevelMeta;
 
-const MAX_PARALLEL_COMPACTION: usize = 8;
+const LEVEL_COMPACTED: Level = 1;
 
 /// `TwcsPicker` picks files of which the max timestamp are in the same time window as compaction
 /// candidates.
+#[derive(Debug)]
 pub struct TwcsPicker {
-    max_active_window_files: usize,
-    max_inactive_window_files: usize,
-    time_window_seconds: Option<i64>,
-}
-
-impl Debug for TwcsPicker {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TwcsPicker")
-            .field("max_active_window_files", &self.max_active_window_files)
-            .field("max_inactive_window_files", &self.max_inactive_window_files)
-            .finish()
-    }
+    /// Max allowed sorted runs in active window.
+    pub max_active_window_runs: usize,
+    /// Max allowed files in active window.
+    pub max_active_window_files: usize,
+    /// Max allowed sorted runs in inactive windows.
+    pub max_inactive_window_runs: usize,
+    /// Max allowed files in inactive windows.
+    pub max_inactive_window_files: usize,
+    /// Compaction time window in seconds.
+    pub time_window_seconds: Option<i64>,
+    /// Max allowed compaction output file size.
+    pub max_output_file_size: Option<u64>,
+    /// Whether the target region is in append mode.
+    pub append_mode: bool,
 }
 
 impl TwcsPicker {
-    pub fn new(
-        max_active_window_files: usize,
-        max_inactive_window_files: usize,
-        time_window_seconds: Option<i64>,
-    ) -> Self {
-        Self {
-            max_inactive_window_files,
-            max_active_window_files,
-            time_window_seconds,
-        }
-    }
-
     /// Builds compaction output from files.
-    /// For active writing window, we allow for at most `max_active_window_files` files to alleviate
+    /// For active writing window, we allow for at most `max_active_window_runs` files to alleviate
     /// fragmentation. For other windows, we allow at most 1 file at each window.
     fn build_output(
         &self,
-        time_windows: &BTreeMap<i64, Vec<FileHandle>>,
+        time_windows: &mut BTreeMap<i64, Window>,
         active_window: Option<i64>,
     ) -> Vec<CompactionOutput> {
         let mut output = vec![];
         for (window, files) in time_windows {
-            if let Some(active_window) = active_window
+            let sorted_runs = find_sorted_runs(&mut files.files);
+
+            let (max_runs, max_files) = if let Some(active_window) = active_window
                 && *window == active_window
             {
-                if files.len() > self.max_active_window_files {
-                    output.push(CompactionOutput {
-                        output_file_id: FileId::random(),
-                        output_level: 1, // we only have two levels and always compact to l1
-                        inputs: files.clone(),
-                    });
-                } else {
-                    debug!("Active window not present or no enough files in active window {:?}, window: {}", active_window, *window);
-                }
+                (self.max_active_window_runs, self.max_active_window_files)
             } else {
-                // not active writing window
-                if files.len() > self.max_inactive_window_files {
-                    output.push(CompactionOutput {
-                        output_file_id: FileId::random(),
-                        output_level: 1,
-                        inputs: files.clone(),
-                    });
-                } else {
-                    debug!(
-                        "No enough files, current: {}, max_inactive_window_files: {}",
-                        files.len(),
-                        self.max_inactive_window_files
-                    )
+                (
+                    self.max_inactive_window_runs,
+                    self.max_inactive_window_files,
+                )
+            };
+
+            let found_runs = sorted_runs.len();
+            // We only remove deletion markers once no file in current window overlaps with any other window
+            // and region is not in append mode.
+            let filter_deleted =
+                !files.overlapping && (found_runs == 1 || max_runs == 1) && !self.append_mode;
+
+            let inputs = if found_runs > max_runs {
+                let files_to_compact = reduce_runs(sorted_runs, max_runs);
+                let files_to_compact_len = files_to_compact.len();
+                info!(
+                    "Building compaction output, active window: {:?}, \
+                        current window: {}, \
+                        max runs: {}, \
+                        found runs: {}, \
+                        output size: {}, \
+                        max output size: {:?}, \
+                        remove deletion markers: {}",
+                    active_window,
+                    *window,
+                    max_runs,
+                    found_runs,
+                    files_to_compact_len,
+                    self.max_output_file_size,
+                    filter_deleted
+                );
+                files_to_compact
+            } else if files.files.len() > max_files {
+                info!(
+                    "Enforcing max file num in window: {}, active: {:?}, max: {}, current: {}, max output size: {:?}, filter delete: {}",
+                    *window,
+                    active_window,
+                    max_files,
+                    files.files.len(),
+                    self.max_output_file_size,
+                    filter_deleted,
+                );
+                // Files in window exceeds file num limit
+                vec![enforce_file_num(&files.files, max_files)]
+            } else {
+                trace!("Skip building compaction output, active window: {:?}, current window: {}, max runs: {}, found runs: {}, ", active_window, *window, max_runs, found_runs);
+                continue;
+            };
+
+            let split_inputs = if !filter_deleted
+                && let Some(max_output_file_size) = self.max_output_file_size
+            {
+                let len_before_split = inputs.len();
+                let maybe_split = enforce_max_output_size(inputs, max_output_file_size);
+                if maybe_split.len() != len_before_split {
+                    info!("Compaction output file size exceeds threshold {}, split compaction inputs to: {:?}", max_output_file_size, maybe_split);
                 }
+                maybe_split
+            } else {
+                inputs
+            };
+
+            for input in split_inputs {
+                debug_assert!(input.len() > 1);
+                output.push(CompactionOutput {
+                    output_level: LEVEL_COMPACTED, // always compact to l1
+                    inputs: input,
+                    filter_deleted,
+                    output_time_range: None, // we do not enforce output time range in twcs compactions.
+                });
             }
         }
         output
     }
 }
 
+/// Limits the size of compaction output in a naive manner.
+/// todo(hl): we can find the output file size more precisely by checking the time range
+/// of each row group and adding the sizes of those non-overlapping row groups. But now
+/// we'd better not to expose the SST details in this level.
+fn enforce_max_output_size(
+    inputs: Vec<Vec<FileHandle>>,
+    max_output_file_size: u64,
+) -> Vec<Vec<FileHandle>> {
+    inputs
+        .into_iter()
+        .flat_map(|input| {
+            debug_assert!(input.len() > 1);
+            let estimated_output_size = input.iter().map(|f| f.size()).sum::<u64>();
+            if estimated_output_size < max_output_file_size {
+                // total file size does not exceed the threshold, just return the original input.
+                return vec![input];
+            }
+            let mut splits = vec![];
+            let mut new_input = vec![];
+            let mut new_input_size = 0;
+            for f in input {
+                if new_input_size + f.size() > max_output_file_size {
+                    splits.push(std::mem::take(&mut new_input));
+                    new_input_size = 0;
+                }
+                new_input_size += f.size();
+                new_input.push(f);
+            }
+            if !new_input.is_empty() {
+                splits.push(new_input);
+            }
+            splits
+        })
+        .filter(|p| p.len() > 1)
+        .collect()
+}
+
+/// Merges consecutive files so that file num does not exceed `max_file_num`, and chooses
+/// the solution with minimum overhead according to files sizes to be merged.
+/// `enforce_file_num` only merges consecutive files so that it won't create overlapping outputs.
+/// `runs` must be sorted according to time ranges.
+fn enforce_file_num<T: Item>(files: &[T], max_file_num: usize) -> Vec<T> {
+    debug_assert!(files.len() > max_file_num);
+    let to_merge = files.len() - max_file_num + 1;
+    let mut min_penalty = usize::MAX;
+    let mut min_idx = 0;
+
+    for idx in 0..=(files.len() - to_merge) {
+        let current_penalty: usize = files
+            .iter()
+            .skip(idx)
+            .take(to_merge)
+            .map(|f| f.size())
+            .sum();
+        if current_penalty < min_penalty {
+            min_penalty = current_penalty;
+            min_idx = idx;
+        }
+    }
+    files.iter().skip(min_idx).take(to_merge).cloned().collect()
+}
+
 impl Picker for TwcsPicker {
-    fn pick(&self, req: CompactionRequest) -> Option<Box<dyn CompactionTask>> {
-        let CompactionRequest {
-            engine_config,
-            current_version,
-            access_layer,
-            request_sender,
-            waiters,
-            file_purger,
-            start_time,
-            cache_manager,
-        } = req;
+    fn pick(&self, compaction_region: &CompactionRegion) -> Option<PickerOutput> {
+        let region_id = compaction_region.region_id;
+        let levels = compaction_region.current_version.ssts.levels();
 
-        let region_metadata = current_version.metadata.clone();
-        let region_id = region_metadata.region_id;
-
-        let levels = current_version.ssts.levels();
-        let ttl = current_version.options.ttl;
-        let expired_ssts = get_expired_ssts(levels, ttl, Timestamp::current_millis());
+        let expired_ssts =
+            get_expired_ssts(levels, compaction_region.ttl, Timestamp::current_millis());
         if !expired_ssts.is_empty() {
             info!("Expired SSTs in region {}: {:?}", region_id, expired_ssts);
             // here we mark expired SSTs as compacting to avoid them being picked.
             expired_ssts.iter().for_each(|f| f.set_compacting(true));
         }
 
-        let compaction_time_window = current_version
+        let compaction_time_window = compaction_region
+            .current_version
             .compaction_time_window
             .map(|window| window.as_secs() as i64);
         let time_window_size = compaction_time_window
@@ -164,34 +238,54 @@ impl Picker for TwcsPicker {
         // Find active window from files in level 0.
         let active_window = find_latest_window_in_seconds(levels[0].files(), time_window_size);
         // Assign files to windows
-        let windows = assign_to_windows(levels.iter().flat_map(LevelMeta::files), time_window_size);
-        let outputs = self.build_output(&windows, active_window);
+        let mut windows =
+            assign_to_windows(levels.iter().flat_map(LevelMeta::files), time_window_size);
+        let outputs = self.build_output(&mut windows, active_window);
 
         if outputs.is_empty() && expired_ssts.is_empty() {
-            // Nothing to compact, we are done. Notifies all waiters as we consume the compaction request.
-            for waiter in waiters {
-                waiter.send(Ok(0));
-            }
             return None;
         }
-        let task = TwcsCompactionTask {
-            engine_config,
-            region_id,
-            metadata: region_metadata,
-            sst_layer: access_layer,
+
+        Some(PickerOutput {
             outputs,
             expired_ssts,
-            compaction_time_window: Some(time_window_size),
-            request_sender,
-            waiters,
-            file_purger,
-            start_time,
-            cache_manager,
-            storage: current_version.options.storage.clone(),
-            index_options: current_version.options.index_options.clone(),
-            append_mode: current_version.options.append_mode,
-        };
-        Some(Box::new(task))
+            time_window_size,
+        })
+    }
+}
+
+struct Window {
+    start: Timestamp,
+    end: Timestamp,
+    files: Vec<FileHandle>,
+    time_window: i64,
+    overlapping: bool,
+}
+
+impl Window {
+    /// Creates a new [Window] with given file.
+    fn new_with_file(file: FileHandle) -> Self {
+        let (start, end) = file.time_range();
+        Self {
+            start,
+            end,
+            files: vec![file],
+            time_window: 0,
+            overlapping: false,
+        }
+    }
+
+    /// Returns the time range of all files in current window (inclusive).
+    fn range(&self) -> (Timestamp, Timestamp) {
+        (self.start, self.end)
+    }
+
+    /// Adds a new file to window and updates time range.
+    fn add_file(&mut self, file: FileHandle) {
+        let (start, end) = file.time_range();
+        self.start = self.start.min(start);
+        self.end = self.end.max(end);
+        self.files.push(file);
     }
 }
 
@@ -199,20 +293,54 @@ impl Picker for TwcsPicker {
 fn assign_to_windows<'a>(
     files: impl Iterator<Item = &'a FileHandle>,
     time_window_size: i64,
-) -> BTreeMap<i64, Vec<FileHandle>> {
-    let mut windows: BTreeMap<i64, Vec<FileHandle>> = BTreeMap::new();
+) -> BTreeMap<i64, Window> {
+    let mut windows: HashMap<i64, Window> = HashMap::new();
     // Iterates all files and assign to time windows according to max timestamp
-    for file in files {
-        let (_, end) = file.time_range();
+    for f in files {
+        if f.compacting() {
+            continue;
+        }
+        let (_, end) = f.time_range();
         let time_window = end
             .convert_to(TimeUnit::Second)
             .unwrap()
             .value()
             .align_to_ceil_by_bucket(time_window_size)
             .unwrap_or(i64::MIN);
-        windows.entry(time_window).or_default().push(file.clone());
+
+        match windows.entry(time_window) {
+            Entry::Occupied(mut e) => {
+                e.get_mut().add_file(f.clone());
+            }
+            Entry::Vacant(e) => {
+                let mut window = Window::new_with_file(f.clone());
+                window.time_window = time_window;
+                e.insert(window);
+            }
+        }
     }
-    windows
+    if windows.is_empty() {
+        return BTreeMap::new();
+    }
+
+    let mut windows = windows.into_values().collect::<Vec<_>>();
+    windows.sort_unstable_by(|l, r| l.start.cmp(&r.start).then(l.end.cmp(&r.end).reverse()));
+
+    let mut current_range: (Timestamp, Timestamp) = windows[0].range(); // windows cannot be empty.
+
+    for idx in 1..windows.len() {
+        let next_range = windows[idx].range();
+        if overlaps(&current_range, &next_range) {
+            windows[idx - 1].overlapping = true;
+            windows[idx].overlapping = true;
+        }
+        current_range = (
+            current_range.0.min(next_range.0),
+            current_range.1.max(next_range.1),
+        );
+    }
+
+    windows.into_iter().map(|w| (w.time_window, w)).collect()
 }
 
 /// Finds the latest active writing window among all files.
@@ -224,10 +352,10 @@ fn find_latest_window_in_seconds<'a>(
     let mut latest_timestamp = None;
     for f in files {
         let (_, end) = f.time_range();
-        if let Some(latest) = latest_timestamp
-            && end > latest
-        {
-            latest_timestamp = Some(end);
+        if let Some(latest) = latest_timestamp {
+            if end > latest {
+                latest_timestamp = Some(end);
+            }
         } else {
             latest_timestamp = Some(end);
         }
@@ -237,362 +365,15 @@ fn find_latest_window_in_seconds<'a>(
         .and_then(|ts| ts.value().align_to_ceil_by_bucket(time_window_size))
 }
 
-pub(crate) struct TwcsCompactionTask {
-    pub engine_config: Arc<MitoConfig>,
-    pub region_id: RegionId,
-    pub metadata: RegionMetadataRef,
-    pub sst_layer: AccessLayerRef,
-    pub outputs: Vec<CompactionOutput>,
-    pub expired_ssts: Vec<FileHandle>,
-    pub compaction_time_window: Option<i64>,
-    pub file_purger: FilePurgerRef,
-    /// Request sender to notify the worker.
-    pub(crate) request_sender: mpsc::Sender<WorkerRequest>,
-    /// Senders that are used to notify waiters waiting for pending compaction tasks.
-    pub waiters: Vec<OutputTx>,
-    /// Start time of compaction task
-    pub start_time: Instant,
-    pub(crate) cache_manager: CacheManagerRef,
-    /// Target storage of the region.
-    pub(crate) storage: Option<String>,
-    /// Index options of the region.
-    pub(crate) index_options: IndexOptions,
-    /// The region is using append mode.
-    pub(crate) append_mode: bool,
-}
-
-impl Debug for TwcsCompactionTask {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TwcsCompactionTask")
-            .field("region_id", &self.region_id)
-            .field("outputs", &self.outputs)
-            .field("expired_ssts", &self.expired_ssts)
-            .field("compaction_time_window", &self.compaction_time_window)
-            .field("append_mode", &self.append_mode)
-            .finish()
-    }
-}
-
-impl Drop for TwcsCompactionTask {
-    fn drop(&mut self) {
-        self.mark_files_compacting(false)
-    }
-}
-
-impl TwcsCompactionTask {
-    fn mark_files_compacting(&self, compacting: bool) {
-        self.outputs
-            .iter()
-            .flat_map(|o| o.inputs.iter())
-            .for_each(|f| f.set_compacting(compacting))
-    }
-
-    /// Merges all SST files.
-    /// Returns `(output files, input files)`.
-    async fn merge_ssts(&mut self) -> error::Result<(Vec<FileMeta>, Vec<FileMeta>)> {
-        let mut futs = Vec::with_capacity(self.outputs.len());
-        let mut compacted_inputs =
-            Vec::with_capacity(self.outputs.iter().map(|o| o.inputs.len()).sum());
-
-        for output in self.outputs.drain(..) {
-            compacted_inputs.extend(output.inputs.iter().map(FileHandle::meta));
-
-            info!(
-                "Compaction region {} output [{}]-> {}",
-                self.region_id,
-                output
-                    .inputs
-                    .iter()
-                    .map(|f| f.file_id().to_string())
-                    .collect::<Vec<_>>()
-                    .join(","),
-                output.output_file_id
-            );
-
-            let write_opts = WriteOptions {
-                write_buffer_size: self.engine_config.sst_write_buffer_size,
-                ..Default::default()
-            };
-            let create_inverted_index = self
-                .engine_config
-                .inverted_index
-                .create_on_compaction
-                .auto();
-            let mem_threshold_index_create = self
-                .engine_config
-                .inverted_index
-                .mem_threshold_on_create
-                .map(|m| m.as_bytes() as _);
-            let index_write_buffer_size = Some(
-                self.engine_config
-                    .inverted_index
-                    .write_buffer_size
-                    .as_bytes() as usize,
-            );
-
-            let metadata = self.metadata.clone();
-            let sst_layer = self.sst_layer.clone();
-            let region_id = self.region_id;
-            let file_id = output.output_file_id;
-            let cache_manager = self.cache_manager.clone();
-            let storage = self.storage.clone();
-            let index_options = self.index_options.clone();
-            let append_mode = self.append_mode;
-            futs.push(async move {
-                let reader = build_sst_reader(
-                    metadata.clone(),
-                    sst_layer.clone(),
-                    &output.inputs,
-                    append_mode,
-                )
-                .await?;
-                let file_meta_opt = sst_layer
-                    .write_sst(
-                        SstWriteRequest {
-                            file_id,
-                            metadata,
-                            source: Source::Reader(reader),
-                            cache_manager,
-                            storage,
-                            create_inverted_index,
-                            mem_threshold_index_create,
-                            index_write_buffer_size,
-                            index_options,
-                        },
-                        &write_opts,
-                    )
-                    .await?
-                    .map(|sst_info| FileMeta {
-                        region_id,
-                        file_id,
-                        time_range: sst_info.time_range,
-                        level: output.output_level,
-                        file_size: sst_info.file_size,
-                        available_indexes: sst_info
-                            .inverted_index_available
-                            .then(|| SmallVec::from_iter([IndexType::InvertedIndex]))
-                            .unwrap_or_default(),
-                        index_file_size: sst_info.index_file_size,
-                    });
-                Ok(file_meta_opt)
-            });
-        }
-
-        let mut output_files = Vec::with_capacity(futs.len());
-        while !futs.is_empty() {
-            let mut task_chunk = Vec::with_capacity(MAX_PARALLEL_COMPACTION);
-            for _ in 0..MAX_PARALLEL_COMPACTION {
-                if let Some(task) = futs.pop() {
-                    task_chunk.push(common_runtime::spawn_bg(task));
-                }
-            }
-            let metas = futures::future::try_join_all(task_chunk)
-                .await
-                .context(error::JoinSnafu)?
-                .into_iter()
-                .collect::<error::Result<Vec<_>>>()?;
-            output_files.extend(metas.into_iter().flatten());
-        }
-
-        let inputs = compacted_inputs.into_iter().collect();
-        Ok((output_files, inputs))
-    }
-
-    async fn handle_compaction(&mut self) -> error::Result<(Vec<FileMeta>, Vec<FileMeta>)> {
-        self.mark_files_compacting(true);
-        let merge_timer = COMPACTION_STAGE_ELAPSED
-            .with_label_values(&["merge"])
-            .start_timer();
-        let (output, mut compacted) = self.merge_ssts().await.map_err(|e| {
-            error!(e; "Failed to compact region: {}", self.region_id);
-            merge_timer.stop_and_discard();
-            e
-        })?;
-        compacted.extend(self.expired_ssts.iter().map(FileHandle::meta));
-        Ok((output, compacted))
-    }
-
-    /// Handles compaction failure, notifies all waiters.
-    fn on_failure(&mut self, err: Arc<error::Error>) {
-        COMPACTION_FAILURE_COUNT.inc();
-        for waiter in self.waiters.drain(..) {
-            waiter.send(Err(err.clone()).context(CompactRegionSnafu {
-                region_id: self.region_id,
-            }));
-        }
-    }
-
-    /// Notifies region worker to handle post-compaction tasks.
-    async fn send_to_worker(&self, request: WorkerRequest) {
-        if let Err(e) = self.request_sender.send(request).await {
-            error!(
-                "Failed to notify compaction job status for region {}, request: {:?}",
-                self.region_id, e.0
-            );
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl CompactionTask for TwcsCompactionTask {
-    async fn run(&mut self) {
-        let notify = match self.handle_compaction().await {
-            Ok((added, deleted)) => {
-                info!(
-                    "Compacted SST files, input: {:?}, output: {:?}, window: {:?}",
-                    deleted, added, self.compaction_time_window
-                );
-
-                BackgroundNotify::CompactionFinished(CompactionFinished {
-                    region_id: self.region_id,
-                    compaction_outputs: added,
-                    compacted_files: deleted,
-                    senders: std::mem::take(&mut self.waiters),
-                    file_purger: self.file_purger.clone(),
-                    compaction_time_window: self
-                        .compaction_time_window
-                        .map(|seconds| Duration::from_secs(seconds as u64)),
-                    start_time: self.start_time,
-                })
-            }
-            Err(e) => {
-                error!(e; "Failed to compact region, region id: {}", self.region_id);
-                let err = Arc::new(e);
-                // notify compaction waiters
-                self.on_failure(err.clone());
-                BackgroundNotify::CompactionFailed(CompactionFailed {
-                    region_id: self.region_id,
-                    err,
-                })
-            }
-        };
-
-        self.send_to_worker(WorkerRequest::Background {
-            region_id: self.region_id,
-            notify,
-        })
-        .await;
-    }
-}
-
-/// Infers the suitable time bucket duration.
-/// Now it simply find the max and min timestamp across all SSTs in level and fit the time span
-/// into time bucket.
-pub(crate) fn infer_time_bucket<'a>(files: impl Iterator<Item = &'a FileHandle>) -> i64 {
-    let mut max_ts = Timestamp::new(i64::MIN, TimeUnit::Second);
-    let mut min_ts = Timestamp::new(i64::MAX, TimeUnit::Second);
-
-    for f in files {
-        let (start, end) = f.time_range();
-        min_ts = min_ts.min(start);
-        max_ts = max_ts.max(end);
-    }
-
-    // safety: Convert whatever timestamp into seconds will not cause overflow.
-    let min_sec = min_ts.convert_to(TimeUnit::Second).unwrap().value();
-    let max_sec = max_ts.convert_to(TimeUnit::Second).unwrap().value();
-
-    max_sec
-        .checked_sub(min_sec)
-        .map(|span| TIME_BUCKETS.fit_time_bucket(span)) // return the max bucket on subtraction overflow.
-        .unwrap_or_else(|| TIME_BUCKETS.max()) // safety: TIME_BUCKETS cannot be empty.
-}
-
-pub(crate) struct TimeBuckets([i64; 7]);
-
-impl TimeBuckets {
-    /// Fits a given time span into time bucket by find the minimum bucket that can cover the span.
-    /// Returns the max bucket if no such bucket can be found.
-    fn fit_time_bucket(&self, span_sec: i64) -> i64 {
-        assert!(span_sec >= 0);
-        match self.0.binary_search(&span_sec) {
-            Ok(idx) => self.0[idx],
-            Err(idx) => {
-                if idx < self.0.len() {
-                    self.0[idx]
-                } else {
-                    self.0.last().copied().unwrap()
-                }
-            }
-        }
-    }
-
-    #[cfg(test)]
-    fn get(&self, idx: usize) -> i64 {
-        self.0[idx]
-    }
-
-    fn max(&self) -> i64 {
-        self.0.last().copied().unwrap()
-    }
-}
-
-/// A set of predefined time buckets.
-pub(crate) const TIME_BUCKETS: TimeBuckets = TimeBuckets([
-    60 * 60,                 // one hour
-    2 * 60 * 60,             // two hours
-    12 * 60 * 60,            // twelve hours
-    24 * 60 * 60,            // one day
-    7 * 24 * 60 * 60,        // one week
-    365 * 24 * 60 * 60,      // one year
-    10 * 365 * 24 * 60 * 60, // ten years
-]);
-
-/// Finds all expired SSTs across levels.
-fn get_expired_ssts(
-    levels: &[LevelMeta],
-    ttl: Option<Duration>,
-    now: Timestamp,
-) -> Vec<FileHandle> {
-    let Some(ttl) = ttl else {
-        return vec![];
-    };
-
-    let expire_time = match now.sub_duration(ttl) {
-        Ok(expire_time) => expire_time,
-        Err(e) => {
-            error!(e; "Failed to calculate region TTL expire time");
-            return vec![];
-        }
-    };
-
-    levels
-        .iter()
-        .flat_map(|l| l.get_expired_files(&expire_time).into_iter())
-        .collect()
-}
-
-#[derive(Debug)]
-pub(crate) struct CompactionOutput {
-    pub output_file_id: FileId,
-    /// Compaction output file level.
-    pub output_level: Level,
-    /// Compaction input files.
-    pub inputs: Vec<FileHandle>,
-}
-
-/// Builds [BoxedBatchReader] that reads all SST files and yields batches in primary key order.
-async fn build_sst_reader(
-    metadata: RegionMetadataRef,
-    sst_layer: AccessLayerRef,
-    inputs: &[FileHandle],
-    append_mode: bool,
-) -> error::Result<BoxedBatchReader> {
-    let scan_input = ScanInput::new(sst_layer, ProjectionMapper::all(&metadata)?)
-        .with_files(inputs.to_vec())
-        .with_append_mode(append_mode)
-        // We ignore file not found error during compaction.
-        .with_ignore_file_not_found(true);
-    SeqScan::new(scan_input).build_reader().await
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::sync::Arc;
 
     use super::*;
-    use crate::compaction::test_util::new_file_handle;
-    use crate::sst::file::Level;
+    use crate::compaction::test_util::{new_file_handle, new_file_handles};
+    use crate::sst::file::{FileId, FileMeta, Level};
+    use crate::test_util::NoopFilePurger;
 
     #[test]
     fn test_get_latest_window_in_seconds() {
@@ -624,6 +405,18 @@ mod tests {
             )
             .unwrap()
         );
+
+        assert_eq!(
+            Some((i64::MAX / 3600000 + 1) * 3600),
+            find_latest_window_in_seconds(
+                [
+                    new_file_handle(FileId::random(), i64::MIN, i64::MAX, 0),
+                    new_file_handle(FileId::random(), 0, 1000, 0)
+                ]
+                .iter(),
+                3600
+            )
+        );
     }
 
     #[test]
@@ -639,7 +432,7 @@ mod tests {
             .iter(),
             3,
         );
-        assert_eq!(5, windows.get(&0).unwrap().len());
+        assert_eq!(5, windows.get(&0).unwrap().files.len());
 
         let files = [FileId::random(); 3];
         let windows = assign_to_windows(
@@ -653,15 +446,163 @@ mod tests {
         );
         assert_eq!(
             files[0],
-            windows.get(&0).unwrap().first().unwrap().file_id()
+            windows.get(&0).unwrap().files.first().unwrap().file_id()
         );
         assert_eq!(
             files[1],
-            windows.get(&3).unwrap().first().unwrap().file_id()
+            windows.get(&3).unwrap().files.first().unwrap().file_id()
         );
         assert_eq!(
             files[2],
-            windows.get(&12).unwrap().first().unwrap().file_id()
+            windows.get(&12).unwrap().files.first().unwrap().file_id()
+        );
+    }
+
+    #[test]
+    fn test_assign_compacting_to_windows() {
+        let files = [
+            new_file_handle(FileId::random(), 0, 999, 0),
+            new_file_handle(FileId::random(), 0, 999, 0),
+            new_file_handle(FileId::random(), 0, 999, 0),
+            new_file_handle(FileId::random(), 0, 999, 0),
+            new_file_handle(FileId::random(), 0, 999, 0),
+        ];
+        files[0].set_compacting(true);
+        files[2].set_compacting(true);
+        let windows = assign_to_windows(files.iter(), 3);
+        assert_eq!(3, windows.get(&0).unwrap().files.len());
+    }
+
+    /// (Window value, overlapping, files' time ranges in window)
+    type ExpectedWindowSpec = (i64, bool, Vec<(i64, i64)>);
+
+    fn check_assign_to_windows_with_overlapping(
+        file_time_ranges: &[(i64, i64)],
+        time_window: i64,
+        expected_files: &[ExpectedWindowSpec],
+    ) {
+        let files: Vec<_> = (0..file_time_ranges.len())
+            .map(|_| FileId::random())
+            .collect();
+
+        let file_handles = files
+            .iter()
+            .zip(file_time_ranges.iter())
+            .map(|(file_id, range)| new_file_handle(*file_id, range.0, range.1, 0))
+            .collect::<Vec<_>>();
+
+        let windows = assign_to_windows(file_handles.iter(), time_window);
+
+        for (expected_window, overlapping, window_files) in expected_files {
+            let actual_window = windows.get(expected_window).unwrap();
+            assert_eq!(*overlapping, actual_window.overlapping);
+            let mut file_ranges = actual_window
+                .files
+                .iter()
+                .map(|f| {
+                    let (s, e) = f.time_range();
+                    (s.value(), e.value())
+                })
+                .collect::<Vec<_>>();
+            file_ranges.sort_unstable_by(|l, r| l.0.cmp(&r.0).then(l.1.cmp(&r.1)));
+            assert_eq!(window_files, &file_ranges);
+        }
+    }
+
+    #[test]
+    fn test_assign_to_windows_with_overlapping() {
+        check_assign_to_windows_with_overlapping(
+            &[(0, 999), (1000, 1999), (2000, 2999)],
+            2,
+            &[
+                (0, false, vec![(0, 999)]),
+                (2, false, vec![(1000, 1999), (2000, 2999)]),
+            ],
+        );
+
+        check_assign_to_windows_with_overlapping(
+            &[(0, 1), (0, 999), (100, 2999)],
+            2,
+            &[
+                (0, true, vec![(0, 1), (0, 999)]),
+                (2, true, vec![(100, 2999)]),
+            ],
+        );
+
+        check_assign_to_windows_with_overlapping(
+            &[(0, 999), (1000, 1999), (2000, 2999), (3000, 3999)],
+            2,
+            &[
+                (0, false, vec![(0, 999)]),
+                (2, false, vec![(1000, 1999), (2000, 2999)]),
+                (4, false, vec![(3000, 3999)]),
+            ],
+        );
+
+        check_assign_to_windows_with_overlapping(
+            &[
+                (0, 999),
+                (1000, 1999),
+                (2000, 2999),
+                (3000, 3999),
+                (0, 3999),
+            ],
+            2,
+            &[
+                (0, true, vec![(0, 999)]),
+                (2, true, vec![(1000, 1999), (2000, 2999)]),
+                (4, true, vec![(0, 3999), (3000, 3999)]),
+            ],
+        );
+
+        check_assign_to_windows_with_overlapping(
+            &[
+                (0, 999),
+                (1000, 1999),
+                (2000, 2999),
+                (3000, 3999),
+                (1999, 3999),
+            ],
+            2,
+            &[
+                (0, false, vec![(0, 999)]),
+                (2, true, vec![(1000, 1999), (2000, 2999)]),
+                (4, true, vec![(1999, 3999), (3000, 3999)]),
+            ],
+        );
+
+        check_assign_to_windows_with_overlapping(
+            &[
+                (0, 999),     // window 0
+                (1000, 1999), // window 2
+                (2000, 2999), // window 2
+                (3000, 3999), // window 4
+                (2999, 3999), // window 4
+            ],
+            2,
+            &[
+                // window 2 overlaps with window 4
+                (0, false, vec![(0, 999)]),
+                (2, true, vec![(1000, 1999), (2000, 2999)]),
+                (4, true, vec![(2999, 3999), (3000, 3999)]),
+            ],
+        );
+
+        check_assign_to_windows_with_overlapping(
+            &[
+                (0, 999),     // window 0
+                (1000, 1999), // window 2
+                (2000, 2999), // window 2
+                (3000, 3999), // window 4
+                (0, 1000),    // // window 2
+            ],
+            2,
+            &[
+                // only window 0 overlaps with window 2.
+                (0, true, vec![(0, 999)]),
+                (2, true, vec![(0, 1000), (1000, 1999), (2000, 2999)]),
+                (4, false, vec![(3000, 3999)]),
+            ],
         );
     }
 
@@ -673,10 +614,19 @@ mod tests {
 
     impl CompactionPickerTestCase {
         fn check(&self) {
-            let windows = assign_to_windows(self.input_files.iter(), self.window_size);
+            let mut windows = assign_to_windows(self.input_files.iter(), self.window_size);
             let active_window =
                 find_latest_window_in_seconds(self.input_files.iter(), self.window_size);
-            let output = TwcsPicker::new(4, 1, None).build_output(&windows, active_window);
+            let output = TwcsPicker {
+                max_active_window_runs: 4,
+                max_active_window_files: usize::MAX,
+                max_inactive_window_runs: 1,
+                max_inactive_window_files: usize::MAX,
+                time_window_seconds: None,
+                max_output_file_size: None,
+                append_mode: false,
+            }
+            .build_output(&mut windows, active_window);
 
             let output = output
                 .iter()
@@ -706,6 +656,43 @@ mod tests {
     struct ExpectedOutput {
         input_files: Vec<usize>,
         output_level: Level,
+    }
+
+    fn check_enforce_file_num(
+        input_files: &[(i64, i64, u64)],
+        max_file_num: usize,
+        files_to_merge: &[(i64, i64)],
+    ) {
+        let mut files = new_file_handles(input_files);
+        // ensure sorted
+        find_sorted_runs(&mut files);
+        let mut to_merge = enforce_file_num(&files, max_file_num);
+        to_merge.sort_unstable_by_key(|f| f.time_range().0);
+        assert_eq!(
+            files_to_merge.to_vec(),
+            to_merge
+                .iter()
+                .map(|f| {
+                    let (start, end) = f.time_range();
+                    (start.value(), end.value())
+                })
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_enforce_file_num() {
+        check_enforce_file_num(
+            &[(0, 300, 2), (100, 200, 1), (200, 400, 1)],
+            2,
+            &[(100, 200), (200, 400)],
+        );
+
+        check_enforce_file_num(
+            &[(0, 300, 200), (100, 200, 100), (200, 400, 100)],
+            1,
+            &[(0, 300), (100, 200), (200, 400)],
+        );
     }
 
     #[test]
@@ -754,42 +741,43 @@ mod tests {
         .check();
     }
 
-    #[test]
-    fn test_time_bucket() {
-        assert_eq!(TIME_BUCKETS.get(0), TIME_BUCKETS.fit_time_bucket(1));
-        assert_eq!(TIME_BUCKETS.get(0), TIME_BUCKETS.fit_time_bucket(60 * 60));
-        assert_eq!(
-            TIME_BUCKETS.get(1),
-            TIME_BUCKETS.fit_time_bucket(60 * 60 + 1)
-        );
-
-        assert_eq!(
-            TIME_BUCKETS.get(2),
-            TIME_BUCKETS.fit_time_bucket(TIME_BUCKETS.get(2) - 1)
-        );
-        assert_eq!(
-            TIME_BUCKETS.get(2),
-            TIME_BUCKETS.fit_time_bucket(TIME_BUCKETS.get(2))
-        );
-        assert_eq!(
-            TIME_BUCKETS.get(3),
-            TIME_BUCKETS.fit_time_bucket(TIME_BUCKETS.get(3) - 1)
-        );
-        assert_eq!(TIME_BUCKETS.get(6), TIME_BUCKETS.fit_time_bucket(i64::MAX));
+    fn make_file_handles(inputs: &[(i64, i64, u64)]) -> Vec<FileHandle> {
+        inputs
+            .iter()
+            .map(|(start, end, size)| {
+                FileHandle::new(
+                    FileMeta {
+                        region_id: Default::default(),
+                        file_id: Default::default(),
+                        time_range: (
+                            Timestamp::new_millisecond(*start),
+                            Timestamp::new_millisecond(*end),
+                        ),
+                        level: 0,
+                        file_size: *size,
+                        available_indexes: Default::default(),
+                        index_file_size: 0,
+                        num_rows: 0,
+                        num_row_groups: 0,
+                        sequence: None,
+                    },
+                    Arc::new(NoopFilePurger),
+                )
+            })
+            .collect()
     }
 
     #[test]
-    fn test_infer_time_buckets() {
-        assert_eq!(
-            TIME_BUCKETS.get(0),
-            infer_time_bucket(
-                [
-                    new_file_handle(FileId::random(), 0, TIME_BUCKETS.get(0) * 1000 - 1, 0),
-                    new_file_handle(FileId::random(), 1, 10_000, 0)
-                ]
-                .iter()
-            )
-        );
+    fn test_limit_output_size() {
+        let mut files = make_file_handles(&[(1, 1, 1)].repeat(6));
+        let runs = find_sorted_runs(&mut files);
+        assert_eq!(6, runs.len());
+        let files_to_merge = reduce_runs(runs, 2);
+
+        let enforced = enforce_max_output_size(files_to_merge, 2);
+        assert_eq!(2, enforced.len());
+        assert_eq!(2, enforced[0].len());
+        assert_eq!(2, enforced[1].len());
     }
 
     // TODO(hl): TTL tester that checks if get_expired_ssts function works as expected.

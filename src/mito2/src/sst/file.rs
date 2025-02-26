@@ -15,6 +15,7 @@
 //! Structures to describe metadata of files.
 
 use std::fmt;
+use std::num::NonZeroU64;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -63,6 +64,17 @@ impl FileId {
     pub fn as_puffin(&self) -> String {
         format!("{}{}", self, ".puffin")
     }
+
+    /// Converts [FileId] as byte slice.
+    pub fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+
+impl From<FileId> for Uuid {
+    fn from(value: FileId) -> Self {
+        value.0
+    }
 }
 
 impl fmt::Display for FileId {
@@ -79,8 +91,18 @@ impl FromStr for FileId {
     }
 }
 
-/// Time range of a SST file.
+/// Time range (min and max timestamps) of a SST file.
+/// Both min and max are inclusive.
 pub type FileTimeRange = (Timestamp, Timestamp);
+
+/// Checks if two inclusive timestamp ranges overlap with each other.
+pub(crate) fn overlaps(l: &FileTimeRange, r: &FileTimeRange) -> bool {
+    let (l, r) = if l.0 <= r.0 { (l, r) } else { (r, l) };
+    let (_, l_end) = l;
+    let (r_start, _) = r;
+
+    r_start <= l_end
+}
 
 /// Metadata of a SST file.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -90,7 +112,8 @@ pub struct FileMeta {
     pub region_id: RegionId,
     /// Compared to normal file names, FileId ignore the extension
     pub file_id: FileId,
-    /// Timestamp range of file.
+    /// Timestamp range of file. The timestamps have the same time unit as the
+    /// data in the SST.
     pub time_range: FileTimeRange,
     /// SST level of the file.
     pub level: Level,
@@ -100,6 +123,23 @@ pub struct FileMeta {
     pub available_indexes: SmallVec<[IndexType; 4]>,
     /// Size of the index file.
     pub index_file_size: u64,
+    /// Number of rows in the file.
+    ///
+    /// For historical reasons, this field might be missing in old files. Thus
+    /// the default value `0` doesn't means the file doesn't contains any rows,
+    /// but instead means the number of rows is unknown.
+    pub num_rows: u64,
+    /// Number of row groups in the file.
+    ///
+    /// For historical reasons, this field might be missing in old files. Thus
+    /// the default value `0` doesn't means the file doesn't contains any rows,
+    /// but instead means the number of rows is unknown.
+    pub num_row_groups: u64,
+    /// Sequence in this file.
+    ///
+    /// This sequence is the only sequence in this file. And it's retrieved from the max
+    /// sequence of the rows on generating this file.
+    pub sequence: Option<NonZeroU64>,
 }
 
 /// Type of index.
@@ -107,11 +147,35 @@ pub struct FileMeta {
 pub enum IndexType {
     /// Inverted index.
     InvertedIndex,
+    /// Full-text index.
+    FulltextIndex,
+    /// Bloom Filter index
+    BloomFilterIndex,
 }
 
 impl FileMeta {
+    pub fn exists_index(&self) -> bool {
+        !self.available_indexes.is_empty()
+    }
+
+    /// Returns true if the file has an inverted index
     pub fn inverted_index_available(&self) -> bool {
         self.available_indexes.contains(&IndexType::InvertedIndex)
+    }
+
+    /// Returns true if the file has a fulltext index
+    pub fn fulltext_index_available(&self) -> bool {
+        self.available_indexes.contains(&IndexType::FulltextIndex)
+    }
+
+    /// Returns true if the file has a bloom filter index.
+    pub fn bloom_filter_index_available(&self) -> bool {
+        self.available_indexes
+            .contains(&IndexType::BloomFilterIndex)
+    }
+
+    pub fn index_file_size(&self) -> u64 {
+        self.index_file_size
     }
 }
 
@@ -175,8 +239,17 @@ impl FileHandle {
         self.inner.compacting.store(compacting, Ordering::Relaxed);
     }
 
-    pub fn meta(&self) -> FileMeta {
-        self.inner.meta.clone()
+    /// Returns a reference to the [FileMeta].
+    pub fn meta_ref(&self) -> &FileMeta {
+        &self.inner.meta
+    }
+
+    pub fn size(&self) -> u64 {
+        self.inner.meta.file_size
+    }
+
+    pub fn num_rows(&self) -> usize {
+        self.inner.meta.num_rows as usize
     }
 }
 
@@ -255,6 +328,9 @@ mod tests {
             file_size: 0,
             available_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
             index_file_size: 0,
+            num_rows: 0,
+            num_row_groups: 0,
+            sequence: None,
         }
     }
 

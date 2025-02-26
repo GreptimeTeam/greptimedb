@@ -4,9 +4,6 @@ inputs:
   arch:
     description: Architecture to build
     required: true
-  rust-toolchain:
-    description: Rust toolchain to use
-    required: true
   cargo-profile:
     description: Cargo profile to build
     required: true
@@ -43,10 +40,9 @@ runs:
         brew install protobuf
 
     - name: Install rust toolchain
-      uses: dtolnay/rust-toolchain@master
+      uses: actions-rust-lang/setup-rust-toolchain@v1
       with:
-        toolchain: ${{ inputs.rust-toolchain }}
-        targets: ${{ inputs.arch }}
+        target: ${{ inputs.arch }}
 
     - name: Start etcd # For integration tests.
       if: ${{ inputs.disable-run-tests == 'false' }}
@@ -59,9 +55,16 @@ runs:
       if: ${{ inputs.disable-run-tests == 'false' }}
       uses: taiki-e/install-action@nextest
 
+    # Get proper backtraces in mac Sonoma. Currently there's an issue with the new
+    # linker that prevents backtraces from getting printed correctly.
+    #
+    # <https://github.com/rust-lang/rust/issues/113783>
     - name: Run integration tests
       if: ${{ inputs.disable-run-tests == 'false' }}
       shell: bash
+      env:
+        CARGO_BUILD_RUSTFLAGS: "-Clink-arg=-Wl,-ld_classic"
+        SQLNESS_OPTS: "--preserve-state"
       run: |
         make test sqlness-test
 
@@ -75,6 +78,8 @@ runs:
 
     - name: Build greptime binary
       shell: bash
+      env:
+        CARGO_BUILD_RUSTFLAGS: "-Clink-arg=-Wl,-ld_classic"
       run: |
         make build \
         CARGO_PROFILE=${{ inputs.cargo-profile }} \
@@ -85,5 +90,5 @@ runs:
       uses: ./.github/actions/upload-artifacts
       with:
         artifacts-dir: ${{ inputs.artifacts-dir }}
-        target-file: target/${{ inputs.arch }}/${{ inputs.cargo-profile }}/greptime
+        target-files: target/${{ inputs.arch }}/${{ inputs.cargo-profile }}/greptime
         version: ${{ inputs.version }}

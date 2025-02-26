@@ -20,7 +20,7 @@ use tonic::codegen::http;
 
 use crate::cluster::MetaPeerClientRef;
 use crate::error::{self, Result};
-use crate::keys::{LeaseKey, LeaseValue};
+use crate::key::{DatanodeLeaseKey, LeaseValue};
 use crate::lease;
 use crate::service::admin::{util, HttpHandler};
 
@@ -33,12 +33,12 @@ impl HttpHandler for NodeLeaseHandler {
     async fn handle(
         &self,
         _: &str,
+        _: http::Method,
         params: &HashMap<String, String>,
     ) -> Result<http::Response<String>> {
         let cluster_id = util::extract_cluster_id(params)?;
 
-        let leases =
-            lease::filter_datanodes(cluster_id, &self.meta_peer_client, |_, _| true).await?;
+        let leases = lease::alive_datanodes(cluster_id, &self.meta_peer_client, u64::MAX).await?;
         let leases = leases
             .into_iter()
             .map(|(k, v)| HumanLease {
@@ -58,7 +58,7 @@ impl HttpHandler for NodeLeaseHandler {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HumanLease {
-    pub name: LeaseKey,
+    pub name: DatanodeLeaseKey,
     pub human_time: String,
     pub lease: LeaseValue,
 }

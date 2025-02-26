@@ -61,6 +61,9 @@ async fn resolve_to_ipv4_one<T: AsRef<str>>(endpoint: T) -> Result<String> {
 mod tests {
     use std::assert_matches::assert_matches;
 
+    use common_telemetry::warn;
+    use rskafka::client::{Credentials, SaslConfig};
+
     use super::*;
     use crate::error::Error;
 
@@ -85,5 +88,45 @@ mod tests {
         let host = "non-exist-host:9092";
         let got = resolve_to_ipv4_one(host).await;
         assert_matches!(got.unwrap_err(), Error::ResolveEndpoint { .. });
+    }
+
+    #[tokio::test]
+    async fn test_sasl() {
+        common_telemetry::init_default_ut_logging();
+        let Ok(broker_endpoints) = std::env::var("GT_KAFKA_SASL_ENDPOINTS") else {
+            warn!("The endpoints is empty, skipping the test 'test_sasl'");
+            return;
+        };
+        let broker_endpoints = broker_endpoints
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .collect::<Vec<_>>();
+
+        let username = "user_kafka";
+        let password = "secret";
+        let _ = rskafka::client::ClientBuilder::new(broker_endpoints.clone())
+            .sasl_config(SaslConfig::Plain(Credentials::new(
+                username.to_string(),
+                password.to_string(),
+            )))
+            .build()
+            .await
+            .unwrap();
+        let _ = rskafka::client::ClientBuilder::new(broker_endpoints.clone())
+            .sasl_config(SaslConfig::ScramSha256(Credentials::new(
+                username.to_string(),
+                password.to_string(),
+            )))
+            .build()
+            .await
+            .unwrap();
+        let _ = rskafka::client::ClientBuilder::new(broker_endpoints)
+            .sasl_config(SaslConfig::ScramSha512(Credentials::new(
+                username.to_string(),
+                password.to_string(),
+            )))
+            .build()
+            .await
+            .unwrap();
     }
 }

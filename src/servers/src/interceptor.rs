@@ -15,12 +15,16 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use api::prom_store::remote::{ReadRequest, WriteRequest};
+use api::prom_store::remote::ReadRequest;
 use api::v1::greptime_request::Request;
+use api::v1::RowInsertRequests;
+use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 use common_query::Output;
+use datafusion_expr::LogicalPlan;
+use log_query::LogQuery;
 use query::parser::PromQuery;
-use query::plan::LogicalPlan;
+use serde_json::Value;
 use session::context::QueryContextRef;
 use sql::statements::statement::Statement;
 
@@ -198,6 +202,7 @@ pub trait PromQueryInterceptor {
     fn pre_execute(
         &self,
         _query: &PromQuery,
+        _plan: Option<&LogicalPlan>,
         _query_ctx: QueryContextRef,
     ) -> Result<(), Self::Error> {
         Ok(())
@@ -226,10 +231,11 @@ where
     fn pre_execute(
         &self,
         query: &PromQuery,
+        plan: Option<&LogicalPlan>,
         query_ctx: QueryContextRef,
     ) -> Result<(), Self::Error> {
         if let Some(this) = self {
-            this.pre_execute(query, query_ctx)
+            this.pre_execute(query, plan, query_ctx)
         } else {
             Ok(())
         }
@@ -248,44 +254,33 @@ where
     }
 }
 
-/// ScriptInterceptor can track life cycle of a script request and customize or
-/// abort its execution at given point.
-pub trait ScriptInterceptor {
-    type Error: ErrorExt;
-
-    /// Called before script request is actually executed.
-    fn pre_execute(&self, _name: &str, _query_ctx: QueryContextRef) -> Result<(), Self::Error> {
-        Ok(())
-    }
-}
-
-pub type ScriptInterceptorRef<E> = Arc<dyn ScriptInterceptor<Error = E> + Send + Sync + 'static>;
-
-impl<E: ErrorExt> ScriptInterceptor for Option<ScriptInterceptorRef<E>> {
-    type Error = E;
-
-    fn pre_execute(&self, name: &str, query_ctx: QueryContextRef) -> Result<(), Self::Error> {
-        if let Some(this) = self {
-            this.pre_execute(name, query_ctx)
-        } else {
-            Ok(())
-        }
-    }
-}
-
 /// LineProtocolInterceptor can track life cycle of a line protocol request
 /// and customize or abort its execution at given point.
+#[async_trait]
 pub trait LineProtocolInterceptor {
     type Error: ErrorExt;
 
     fn pre_execute(&self, _line: &str, _query_ctx: QueryContextRef) -> Result<(), Self::Error> {
         Ok(())
     }
+
+    /// Called after the lines are converted to the [RowInsertRequests].
+    /// We can then modify the resulting requests if needed.
+    /// Typically used in some backward compatibility situation.
+    async fn post_lines_conversion(
+        &self,
+        requests: RowInsertRequests,
+        query_context: QueryContextRef,
+    ) -> Result<RowInsertRequests, Self::Error> {
+        let _ = query_context;
+        Ok(requests)
+    }
 }
 
 pub type LineProtocolInterceptorRef<E> =
     Arc<dyn LineProtocolInterceptor<Error = E> + Send + Sync + 'static>;
 
+#[async_trait]
 impl<E: ErrorExt> LineProtocolInterceptor for Option<LineProtocolInterceptorRef<E>> {
     type Error = E;
 
@@ -294,6 +289,18 @@ impl<E: ErrorExt> LineProtocolInterceptor for Option<LineProtocolInterceptorRef<
             this.pre_execute(line, query_ctx)
         } else {
             Ok(())
+        }
+    }
+
+    async fn post_lines_conversion(
+        &self,
+        requests: RowInsertRequests,
+        query_context: QueryContextRef,
+    ) -> Result<RowInsertRequests, Self::Error> {
+        if let Some(this) = self {
+            this.post_lines_conversion(requests, query_context).await
+        } else {
+            Ok(requests)
         }
     }
 }
@@ -332,7 +339,7 @@ pub trait PromStoreProtocolInterceptor {
 
     fn pre_write(
         &self,
-        _write_req: &WriteRequest,
+        _write_req: &RowInsertRequests,
         _ctx: QueryContextRef,
     ) -> Result<(), Self::Error> {
         Ok(())
@@ -349,7 +356,11 @@ pub type PromStoreProtocolInterceptorRef<E> =
 impl<E: ErrorExt> PromStoreProtocolInterceptor for Option<PromStoreProtocolInterceptorRef<E>> {
     type Error = E;
 
-    fn pre_write(&self, write_req: &WriteRequest, ctx: QueryContextRef) -> Result<(), Self::Error> {
+    fn pre_write(
+        &self,
+        write_req: &RowInsertRequests,
+        ctx: QueryContextRef,
+    ) -> Result<(), Self::Error> {
         if let Some(this) = self {
             this.pre_write(write_req, ctx)
         } else {
@@ -362,6 +373,115 @@ impl<E: ErrorExt> PromStoreProtocolInterceptor for Option<PromStoreProtocolInter
             this.pre_read(read_req, ctx)
         } else {
             Ok(())
+        }
+    }
+}
+
+/// LogIngestInterceptor can track life cycle of a log ingestion request
+/// and customize or abort its execution at given point.
+pub trait LogIngestInterceptor {
+    type Error: ErrorExt;
+
+    /// Called before pipeline execution.
+    fn pre_pipeline(
+        &self,
+        values: Vec<Value>,
+        _query_ctx: QueryContextRef,
+    ) -> Result<Vec<Value>, Self::Error> {
+        Ok(values)
+    }
+
+    /// Called before insertion.
+    fn pre_ingest(
+        &self,
+        request: RowInsertRequests,
+        _query_ctx: QueryContextRef,
+    ) -> Result<RowInsertRequests, Self::Error> {
+        Ok(request)
+    }
+}
+
+pub type LogIngestInterceptorRef<E> =
+    Arc<dyn LogIngestInterceptor<Error = E> + Send + Sync + 'static>;
+
+impl<E> LogIngestInterceptor for Option<&LogIngestInterceptorRef<E>>
+where
+    E: ErrorExt,
+{
+    type Error = E;
+
+    fn pre_pipeline(
+        &self,
+        values: Vec<Value>,
+        query_ctx: QueryContextRef,
+    ) -> Result<Vec<Value>, Self::Error> {
+        if let Some(this) = self {
+            this.pre_pipeline(values, query_ctx)
+        } else {
+            Ok(values)
+        }
+    }
+
+    fn pre_ingest(
+        &self,
+        request: RowInsertRequests,
+        query_ctx: QueryContextRef,
+    ) -> Result<RowInsertRequests, Self::Error> {
+        if let Some(this) = self {
+            this.pre_ingest(request, query_ctx)
+        } else {
+            Ok(request)
+        }
+    }
+}
+
+/// LogQueryInterceptor can track life cycle of a log query request
+/// and customize or abort its execution at given point.
+pub trait LogQueryInterceptor {
+    type Error: ErrorExt;
+
+    /// Called before query is actually executed.
+    fn pre_query(&self, _query: &LogQuery, _query_ctx: QueryContextRef) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// Called after execution finished. The implementation can modify the
+    /// output if needed.
+    fn post_query(
+        &self,
+        output: Output,
+        _query_ctx: QueryContextRef,
+    ) -> Result<Output, Self::Error> {
+        Ok(output)
+    }
+}
+
+pub type LogQueryInterceptorRef<E> =
+    Arc<dyn LogQueryInterceptor<Error = E> + Send + Sync + 'static>;
+
+impl<E> LogQueryInterceptor for Option<&LogQueryInterceptorRef<E>>
+where
+    E: ErrorExt,
+{
+    type Error = E;
+
+    fn pre_query(&self, query: &LogQuery, query_ctx: QueryContextRef) -> Result<(), Self::Error> {
+        if let Some(this) = self {
+            this.pre_query(query, query_ctx)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn post_query(
+        &self,
+        output: Output,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output, Self::Error> {
+        if let Some(this) = self {
+            this.post_query(output, query_ctx)
+        } else {
+            Ok(output)
         }
     }
 }

@@ -18,86 +18,101 @@ use std::net::SocketAddr;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
-use aide::axum::{routing as apirouting, ApiRouter, IntoApiResponse};
-use aide::openapi::{Info, OpenApi, Server as OpenAPIServer};
-use aide::OperationOutput;
 use async_trait::async_trait;
 use auth::UserProviderRef;
-use axum::error_handling::HandleErrorLayer;
 use axum::extract::DefaultBodyLimit;
-use axum::response::{Html, IntoResponse, Json, Response};
-use axum::{middleware, routing, BoxError, Extension, Router};
+use axum::http::StatusCode as HttpStatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::serve::ListenerExt;
+use axum::{middleware, routing, Router};
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
-use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatch;
-use common_telemetry::logging::{error, info};
+use common_telemetry::{error, info};
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datatypes::data_type::DataType;
 use datatypes::schema::SchemaRef;
+use datatypes::value::transform_value_ref_to_json_value;
+use event::{LogState, LogValidatorRef};
 use futures::FutureExt;
-use schemars::JsonSchema;
+use http::{HeaderValue, Method};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use snafu::{ensure, ResultExt};
 use tokio::sync::oneshot::{self, Sender};
 use tokio::sync::Mutex;
-use tower::timeout::TimeoutLayer;
 use tower::ServiceBuilder;
+use tower_http::compression::CompressionLayer;
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::decompression::RequestDecompressionLayer;
 use tower_http::trace::TraceLayer;
 
 use self::authorize::AuthState;
-use self::table_result::TableResponse;
+use self::result::table_result::TableResponse;
 use crate::configurator::ConfiguratorRef;
-use crate::error::{AlreadyStartedSnafu, Error, HyperSnafu, Result, ToJsonSnafu};
-use crate::http::arrow_result::ArrowResponse;
-use crate::http::csv_result::CsvResponse;
-use crate::http::error_result::ErrorResponse;
-use crate::http::greptime_result_v1::GreptimedbV1Response;
-use crate::http::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb_write_v2};
-use crate::http::influxdb_result_v1::InfluxdbV1Response;
-use crate::http::prometheus::{
-    build_info_query, format_query, instant_query, label_values_query, labels_query, range_query,
-    series_query,
+use crate::elasticsearch;
+use crate::error::{
+    AddressBindSnafu, AlreadyStartedSnafu, Error, InternalIoSnafu, InvalidHeaderValueSnafu, Result,
+    ToJsonSnafu,
 };
+use crate::http::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb_write_v2};
+use crate::http::prometheus::{
+    build_info_query, format_query, instant_query, label_values_query, labels_query, parse_query,
+    range_query, series_query,
+};
+use crate::http::result::arrow_result::ArrowResponse;
+use crate::http::result::csv_result::CsvResponse;
+use crate::http::result::error_result::ErrorResponse;
+use crate::http::result::greptime_result_v1::GreptimedbV1Response;
+use crate::http::result::influxdb_result_v1::InfluxdbV1Response;
+use crate::http::result::json_result::JsonResponse;
+use crate::interceptor::LogIngestInterceptorRef;
 use crate::metrics::http_metrics_layer;
 use crate::metrics_handler::MetricsHandler;
 use crate::prometheus_handler::PrometheusHandlerRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::query_handler::{
-    InfluxdbLineProtocolHandlerRef, OpenTelemetryProtocolHandlerRef, OpentsdbProtocolHandlerRef,
-    PromStoreProtocolHandlerRef, ScriptHandlerRef,
+    InfluxdbLineProtocolHandlerRef, JaegerQueryHandlerRef, LogQueryHandlerRef,
+    OpenTelemetryProtocolHandlerRef, OpentsdbProtocolHandlerRef, PipelineHandlerRef,
+    PromStoreProtocolHandlerRef,
 };
 use crate::server::Server;
 
 pub mod authorize;
+#[cfg(feature = "dashboard")]
+mod dashboard;
+pub mod dyn_log;
+pub mod event;
+mod extractor;
 pub mod handler;
 pub mod header;
 pub mod influxdb;
+pub mod jaeger;
+pub mod logs;
+pub mod loki;
 pub mod mem_prof;
 pub mod opentsdb;
 pub mod otlp;
 pub mod pprof;
 pub mod prom_store;
 pub mod prometheus;
-mod prometheus_resp;
-pub mod script;
+pub mod result;
+mod timeout;
 
-pub mod arrow_result;
-pub mod csv_result;
-#[cfg(feature = "dashboard")]
-mod dashboard;
-pub mod error_result;
-pub mod greptime_result_v1;
-pub mod influxdb_result_v1;
-pub mod table_result;
+pub(crate) use timeout::DynamicTimeoutLayer;
+
+mod hints;
+#[cfg(any(test, feature = "testing"))]
+pub mod test_helpers;
 
 pub const HTTP_API_VERSION: &str = "v1";
 pub const HTTP_API_PREFIX: &str = "/v1/";
 /// Default http body limit (64M).
 const DEFAULT_BODY_LIMIT: ReadableSize = ReadableSize::mb(64);
+
+/// Authorization header
+pub const AUTHORIZATION_HEADER: &str = "x-greptime-auth";
 
 // TODO(fys): This is a temporary workaround, it will be improved later
 pub static PUBLIC_APIS: [&str; 2] = ["/v1/influxdb/ping", "/v1/influxdb/health"];
@@ -127,6 +142,12 @@ pub struct HttpOptions {
     pub disable_dashboard: bool,
 
     pub body_limit: ReadableSize,
+
+    pub is_strict_mode: bool,
+
+    pub cors_allowed_origins: Vec<String>,
+
+    pub enable_cors: bool,
 }
 
 impl Default for HttpOptions {
@@ -136,11 +157,14 @@ impl Default for HttpOptions {
             timeout: Duration::from_secs(30),
             disable_dashboard: false,
             body_limit: DEFAULT_BODY_LIMIT,
+            is_strict_mode: false,
+            cors_allowed_origins: Vec::new(),
+            enable_cors: true,
         }
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct ColumnSchema {
     name: String,
     data_type: String,
@@ -152,7 +176,7 @@ impl ColumnSchema {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct OutputSchema {
     column_schemas: Vec<ColumnSchema>,
 }
@@ -180,10 +204,14 @@ impl From<SchemaRef> for OutputSchema {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct HttpRecordsOutput {
     schema: OutputSchema,
     rows: Vec<Vec<Value>>,
+    // total_rows is equal to rows.len() in most cases,
+    // the Dashboard query result may be truncated, so we need to return the total_rows.
+    #[serde(default)]
+    total_rows: usize,
 
     // plan level execution metrics
     #[serde(skip_serializing_if = "HashMap::is_empty")]
@@ -210,7 +238,7 @@ impl HttpRecordsOutput {
 }
 
 impl HttpRecordsOutput {
-    pub(crate) fn try_new(
+    pub fn try_new(
         schema: SchemaRef,
         recordbatches: Vec<RecordBatch>,
     ) -> std::result::Result<HttpRecordsOutput, Error> {
@@ -218,26 +246,33 @@ impl HttpRecordsOutput {
             Ok(HttpRecordsOutput {
                 schema: OutputSchema::from(schema),
                 rows: vec![],
+                total_rows: 0,
                 metrics: Default::default(),
             })
         } else {
-            let mut rows =
-                Vec::with_capacity(recordbatches.iter().map(|r| r.num_rows()).sum::<usize>());
+            let num_rows = recordbatches.iter().map(|r| r.num_rows()).sum::<usize>();
+            let mut rows = Vec::with_capacity(num_rows);
+            let schemas = schema.column_schemas();
+            let num_cols = schema.column_schemas().len();
+            rows.resize_with(num_rows, || Vec::with_capacity(num_cols));
 
+            let mut finished_row_cursor = 0;
             for recordbatch in recordbatches {
-                for row in recordbatch.rows() {
-                    let value_row = row
-                        .into_iter()
-                        .map(Value::try_from)
-                        .collect::<std::result::Result<Vec<Value>, _>>()
-                        .context(ToJsonSnafu)?;
-
-                    rows.push(value_row);
+                for (col_idx, col) in recordbatch.columns().iter().enumerate() {
+                    // safety here: schemas length is equal to the number of columns in the recordbatch
+                    let schema = &schemas[col_idx];
+                    for row_idx in 0..recordbatch.num_rows() {
+                        let value = transform_value_ref_to_json_value(col.get_ref(row_idx), schema)
+                            .context(ToJsonSnafu)?;
+                        rows[row_idx + finished_row_cursor].push(value);
+                    }
                 }
+                finished_row_cursor += recordbatch.num_rows();
             }
 
             Ok(HttpRecordsOutput {
                 schema: OutputSchema::from(schema),
+                total_rows: rows.len(),
                 rows,
                 metrics: Default::default(),
             })
@@ -245,7 +280,7 @@ impl HttpRecordsOutput {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, JsonSchema, Eq, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum GreptimeQueryOutput {
     AffectedRows(usize),
@@ -261,6 +296,7 @@ pub enum ResponseFormat {
     #[default]
     GreptimedbV1,
     InfluxdbV1,
+    Json,
 }
 
 impl ResponseFormat {
@@ -271,6 +307,7 @@ impl ResponseFormat {
             "table" => Some(ResponseFormat::Table),
             "greptimedb_v1" => Some(ResponseFormat::GreptimedbV1),
             "influxdb_v1" => Some(ResponseFormat::InfluxdbV1),
+            "json" => Some(ResponseFormat::Json),
             _ => None,
         }
     }
@@ -282,6 +319,7 @@ impl ResponseFormat {
             ResponseFormat::Table => "table",
             ResponseFormat::GreptimedbV1 => "greptimedb_v1",
             ResponseFormat::InfluxdbV1 => "influxdb_v1",
+            ResponseFormat::Json => "json",
         }
     }
 }
@@ -330,7 +368,7 @@ impl Display for Epoch {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug)]
 pub enum HttpResponse {
     Arrow(ArrowResponse),
     Csv(CsvResponse),
@@ -338,6 +376,7 @@ pub enum HttpResponse {
     Error(ErrorResponse),
     GreptimedbV1(GreptimedbV1Response),
     InfluxdbV1(InfluxdbV1Response),
+    Json(JsonResponse),
 }
 
 impl HttpResponse {
@@ -348,9 +387,39 @@ impl HttpResponse {
             HttpResponse::Table(resp) => resp.with_execution_time(execution_time).into(),
             HttpResponse::GreptimedbV1(resp) => resp.with_execution_time(execution_time).into(),
             HttpResponse::InfluxdbV1(resp) => resp.with_execution_time(execution_time).into(),
+            HttpResponse::Json(resp) => resp.with_execution_time(execution_time).into(),
             HttpResponse::Error(resp) => resp.with_execution_time(execution_time).into(),
         }
     }
+
+    pub fn with_limit(self, limit: usize) -> Self {
+        match self {
+            HttpResponse::Csv(resp) => resp.with_limit(limit).into(),
+            HttpResponse::Table(resp) => resp.with_limit(limit).into(),
+            HttpResponse::GreptimedbV1(resp) => resp.with_limit(limit).into(),
+            HttpResponse::Json(resp) => resp.with_limit(limit).into(),
+            _ => self,
+        }
+    }
+}
+
+pub fn process_with_limit(
+    mut outputs: Vec<GreptimeQueryOutput>,
+    limit: usize,
+) -> Vec<GreptimeQueryOutput> {
+    outputs
+        .drain(..)
+        .map(|data| match data {
+            GreptimeQueryOutput::Records(mut records) => {
+                if records.rows.len() > limit {
+                    records.rows.truncate(limit);
+                    records.total_rows = limit;
+                }
+                GreptimeQueryOutput::Records(records)
+            }
+            _ => data,
+        })
+        .collect()
 }
 
 impl IntoResponse for HttpResponse {
@@ -361,13 +430,10 @@ impl IntoResponse for HttpResponse {
             HttpResponse::Table(resp) => resp.into_response(),
             HttpResponse::GreptimedbV1(resp) => resp.into_response(),
             HttpResponse::InfluxdbV1(resp) => resp.into_response(),
+            HttpResponse::Json(resp) => resp.into_response(),
             HttpResponse::Error(resp) => resp.into_response(),
         }
     }
-}
-
-impl OperationOutput for HttpResponse {
-    type Inner = Response;
 }
 
 impl From<ArrowResponse> for HttpResponse {
@@ -406,18 +472,15 @@ impl From<InfluxdbV1Response> for HttpResponse {
     }
 }
 
-async fn serve_api(Extension(api): Extension<OpenApi>) -> impl IntoApiResponse {
-    Json(api)
-}
-
-async fn serve_docs() -> Html<String> {
-    Html(include_str!("http/redoc.html").to_owned())
+impl From<JsonResponse> for HttpResponse {
+    fn from(value: JsonResponse) -> Self {
+        HttpResponse::Json(value)
+    }
 }
 
 #[derive(Clone)]
 pub struct ApiState {
     pub sql_handler: ServerSqlQueryHandlerRef,
-    pub script_handler: Option<ScriptHandlerRef>,
 }
 
 #[derive(Clone)]
@@ -430,50 +493,37 @@ pub struct HttpServerBuilder {
     options: HttpOptions,
     plugins: Plugins,
     user_provider: Option<UserProviderRef>,
-    api: OpenApi,
     router: Router,
 }
 
 impl HttpServerBuilder {
     pub fn new(options: HttpOptions) -> Self {
-        let api = OpenApi {
-            info: Info {
-                title: "GreptimeDB HTTP API".to_string(),
-                description: Some("HTTP APIs to interact with GreptimeDB".to_string()),
-                version: HTTP_API_VERSION.to_string(),
-                ..Info::default()
-            },
-            servers: vec![OpenAPIServer {
-                url: format!("/{HTTP_API_VERSION}"),
-                ..OpenAPIServer::default()
-            }],
-            ..OpenApi::default()
-        };
         Self {
             options,
             plugins: Plugins::default(),
             user_provider: None,
-            api,
             router: Router::new(),
         }
     }
 
-    pub fn with_sql_handler(
-        mut self,
-        sql_handler: ServerSqlQueryHandlerRef,
-        script_handler: Option<ScriptHandlerRef>,
-    ) -> Self {
-        let sql_router = HttpServer::route_sql(ApiState {
-            sql_handler,
-            script_handler,
-        })
-        .finish_api(&mut self.api)
-        .layer(Extension(self.api.clone()));
+    pub fn with_sql_handler(self, sql_handler: ServerSqlQueryHandlerRef) -> Self {
+        let sql_router = HttpServer::route_sql(ApiState { sql_handler });
 
         Self {
             router: self
                 .router
                 .nest(&format!("/{HTTP_API_VERSION}"), sql_router),
+            ..self
+        }
+    }
+
+    pub fn with_logs_handler(self, logs_handler: LogQueryHandlerRef) -> Self {
+        let logs_router = HttpServer::route_logs(logs_handler);
+
+        Self {
+            router: self
+                .router
+                .nest(&format!("/{HTTP_API_VERSION}"), logs_router),
             ..self
         }
     }
@@ -502,11 +552,12 @@ impl HttpServerBuilder {
         self,
         handler: PromStoreProtocolHandlerRef,
         prom_store_with_metric_engine: bool,
+        is_strict_mode: bool,
     ) -> Self {
         Self {
             router: self.router.nest(
                 &format!("/{HTTP_API_VERSION}/prometheus"),
-                HttpServer::route_prom(handler, prom_store_with_metric_engine),
+                HttpServer::route_prom(handler, prom_store_with_metric_engine, is_strict_mode),
             ),
             ..self
         }
@@ -541,30 +592,82 @@ impl HttpServerBuilder {
 
     pub fn with_metrics_handler(self, handler: MetricsHandler) -> Self {
         Self {
-            router: self.router.nest("", HttpServer::route_metrics(handler)),
+            router: self.router.merge(HttpServer::route_metrics(handler)),
             ..self
         }
+    }
+
+    pub fn with_log_ingest_handler(
+        self,
+        handler: PipelineHandlerRef,
+        validator: Option<LogValidatorRef>,
+        ingest_interceptor: Option<LogIngestInterceptorRef<Error>>,
+    ) -> Self {
+        let log_state = LogState {
+            log_handler: handler,
+            log_validator: validator,
+            ingest_interceptor,
+        };
+
+        let router = self.router.nest(
+            &format!("/{HTTP_API_VERSION}"),
+            HttpServer::route_pipelines(log_state.clone()),
+        );
+        // deprecated since v0.11.0. Use `/logs` and `/pipelines` instead.
+        let router = router.nest(
+            &format!("/{HTTP_API_VERSION}/events"),
+            #[allow(deprecated)]
+            HttpServer::route_log_deprecated(log_state.clone()),
+        );
+
+        let router = router.nest(
+            &format!("/{HTTP_API_VERSION}/loki"),
+            HttpServer::route_loki(log_state.clone()),
+        );
+
+        let router = router.nest(
+            &format!("/{HTTP_API_VERSION}/elasticsearch"),
+            HttpServer::route_elasticsearch(log_state.clone()),
+        );
+
+        let router = router.nest(
+            &format!("/{HTTP_API_VERSION}/elasticsearch/"),
+            Router::new()
+                .route("/", routing::get(elasticsearch::handle_get_version))
+                .with_state(log_state),
+        );
+
+        Self { router, ..self }
     }
 
     pub fn with_plugins(self, plugins: Plugins) -> Self {
         Self { plugins, ..self }
     }
 
-    pub fn with_greptime_config_options(mut self, opts: String) -> Self {
+    pub fn with_greptime_config_options(self, opts: String) -> Self {
         let config_router = HttpServer::route_config(GreptimeOptionsConfigState {
             greptime_config_options: opts,
-        })
-        .finish_api(&mut self.api);
+        });
 
         Self {
-            router: self.router.nest("", config_router),
+            router: self.router.merge(config_router),
+            ..self
+        }
+    }
+
+    pub fn with_jaeger_handler(self, handler: JaegerQueryHandlerRef) -> Self {
+        Self {
+            router: self.router.nest(
+                &format!("/{HTTP_API_VERSION}/jaeger"),
+                HttpServer::route_jaeger(handler),
+            ),
             ..self
         }
     }
 
     pub fn with_extra_router(self, router: Router) -> Self {
         Self {
-            router: self.router.nest("", router),
+            router: self.router.merge(router),
             ..self
         }
     }
@@ -581,16 +684,22 @@ impl HttpServerBuilder {
 }
 
 impl HttpServer {
+    /// Gets the router and adds necessary root routes (health, status, dashboard).
     pub fn make_app(&self) -> Router {
         let mut router = {
             let router = self.router.lock().unwrap();
             router.clone()
         };
 
-        router = router.route(
-            "/health",
-            routing::get(handler::health).post(handler::health),
-        );
+        router = router
+            .route(
+                "/health",
+                routing::get(handler::health).post(handler::health),
+            )
+            .route(
+                "/ready",
+                routing::get(handler::health).post(handler::health),
+            );
 
         router = router.route("/status", routing::get(handler::status));
 
@@ -598,15 +707,30 @@ impl HttpServer {
         {
             if !self.options.disable_dashboard {
                 info!("Enable dashboard service at '/dashboard'");
-                router = router.nest("/dashboard", dashboard::dashboard());
+                // redirect /dashboard to /dashboard/
+                router = router.route(
+                    "/dashboard",
+                    routing::get(|uri: axum::http::uri::Uri| async move {
+                        let path = uri.path();
+                        let query = uri.query().map(|q| format!("?{}", q)).unwrap_or_default();
+
+                        let new_uri = format!("{}/{}", path, query);
+                        axum::response::Redirect::permanent(&new_uri)
+                    }),
+                );
 
                 // "/dashboard" and "/dashboard/" are two different paths in Axum.
-                // We cannot nest "/dashboard/", because we already mapping "/dashboard/*x" while nesting "/dashboard".
+                // We cannot nest "/dashboard/", because we already mapping "/dashboard/{*x}" while nesting "/dashboard".
                 // So we explicitly route "/dashboard/" here.
-                router = router.route(
-                    "/dashboard/",
-                    routing::get(dashboard::static_handler).post(dashboard::static_handler),
-                );
+                router = router
+                    .route(
+                        "/dashboard/",
+                        routing::get(dashboard::static_handler).post(dashboard::static_handler),
+                    )
+                    .route(
+                        "/dashboard/{*x}",
+                        routing::get(dashboard::static_handler).post(dashboard::static_handler),
+                    );
             }
         }
 
@@ -616,40 +740,85 @@ impl HttpServer {
         router
     }
 
-    pub fn build(&self, router: Router) -> Router {
-        router
+    /// Attaches middlewares and debug routes to the router.
+    /// Callers should call this method after [HttpServer::make_app()].
+    pub fn build(&self, router: Router) -> Result<Router> {
+        let timeout_layer = if self.options.timeout != Duration::default() {
+            Some(ServiceBuilder::new().layer(DynamicTimeoutLayer::new(self.options.timeout)))
+        } else {
+            info!("HTTP server timeout is disabled");
+            None
+        };
+        let body_limit_layer = if self.options.body_limit != ReadableSize(0) {
+            Some(
+                ServiceBuilder::new()
+                    .layer(DefaultBodyLimit::max(self.options.body_limit.0 as usize)),
+            )
+        } else {
+            info!("HTTP server body limit is disabled");
+            None
+        };
+        let cors_layer = if self.options.enable_cors {
+            Some(
+                CorsLayer::new()
+                    .allow_methods([
+                        Method::GET,
+                        Method::POST,
+                        Method::PUT,
+                        Method::DELETE,
+                        Method::HEAD,
+                    ])
+                    .allow_origin(if self.options.cors_allowed_origins.is_empty() {
+                        AllowOrigin::from(Any)
+                    } else {
+                        AllowOrigin::from(
+                            self.options
+                                .cors_allowed_origins
+                                .iter()
+                                .map(|s| {
+                                    HeaderValue::from_str(s.as_str())
+                                        .context(InvalidHeaderValueSnafu)
+                                })
+                                .collect::<Result<Vec<HeaderValue>>>()?,
+                        )
+                    })
+                    .allow_headers(Any),
+            )
+        } else {
+            info!("HTTP server cross-origin is disabled");
+            None
+        };
+
+        Ok(router
             // middlewares
             .layer(
                 ServiceBuilder::new()
-                    .layer(HandleErrorLayer::new(handle_error))
-                    .layer(TraceLayer::new_for_http())
-                    .layer(TimeoutLayer::new(self.options.timeout))
-                    .layer(DefaultBodyLimit::max(
-                        self.options
-                            .body_limit
-                            .0
-                            .try_into()
-                            .unwrap_or_else(|_| DEFAULT_BODY_LIMIT.as_bytes() as usize),
-                    ))
+                    // disable on failure tracing. because printing out isn't very helpful,
+                    // and we have impl IntoResponse for Error. It will print out more detailed error messages
+                    .layer(TraceLayer::new_for_http().on_failure(()))
+                    .option_layer(cors_layer)
+                    .option_layer(timeout_layer)
+                    .option_layer(body_limit_layer)
                     // auth layer
                     .layer(middleware::from_fn_with_state(
                         AuthState::new(self.user_provider.clone()),
                         authorize::check_http_auth,
-                    )),
+                    ))
+                    .layer(middleware::from_fn(hints::extract_hints)),
             )
             // Handlers for debug, we don't expect a timeout.
             .nest(
-                &format!("/{HTTP_API_VERSION}/prof"),
+                "/debug",
                 Router::new()
-                    .route(
-                        "/cpu",
-                        routing::get(pprof::pprof_handler).post(pprof::pprof_handler),
-                    )
-                    .route(
-                        "/mem",
-                        routing::get(mem_prof::mem_prof_handler).post(mem_prof::mem_prof_handler),
+                    // handler for changing log level dynamically
+                    .route("/log_level", routing::post(dyn_log::dyn_log_handler))
+                    .nest(
+                        "/prof",
+                        Router::new()
+                            .route("/cpu", routing::post(pprof::pprof_handler))
+                            .route("/mem", routing::post(mem_prof::mem_prof_handler)),
                     ),
-            )
+            ))
     }
 
     fn route_metrics<S>(metrics_handler: MetricsHandler) -> Router<S> {
@@ -658,25 +827,154 @@ impl HttpServer {
             .with_state(metrics_handler)
     }
 
-    fn route_sql<S>(api_state: ApiState) -> ApiRouter<S> {
-        ApiRouter::new()
-            .api_route(
-                "/sql",
-                apirouting::get_with(handler::sql, handler::sql_docs)
-                    .post_with(handler::sql, handler::sql_docs),
+    fn route_loki<S>(log_state: LogState) -> Router<S> {
+        Router::new()
+            .route("/api/v1/push", routing::post(loki::loki_ingest))
+            .layer(
+                ServiceBuilder::new()
+                    .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
             )
-            .api_route(
+            .with_state(log_state)
+    }
+
+    fn route_elasticsearch<S>(log_state: LogState) -> Router<S> {
+        Router::new()
+            // Return fake responsefor HEAD '/' request.
+            .route(
+                "/",
+                routing::head((HttpStatusCode::OK, elasticsearch::elasticsearch_headers())),
+            )
+            // Return fake response for Elasticsearch version request.
+            .route("/", routing::get(elasticsearch::handle_get_version))
+            // Return fake response for Elasticsearch license request.
+            .route("/_license", routing::get(elasticsearch::handle_get_license))
+            .route("/_bulk", routing::post(elasticsearch::handle_bulk_api))
+            .route(
+                "/{index}/_bulk",
+                routing::post(elasticsearch::handle_bulk_api_with_index),
+            )
+            // Return fake response for Elasticsearch ilm request.
+            .route(
+                "/_ilm/policy/{*path}",
+                routing::any((
+                    HttpStatusCode::OK,
+                    elasticsearch::elasticsearch_headers(),
+                    axum::Json(serde_json::json!({})),
+                )),
+            )
+            // Return fake response for Elasticsearch index template request.
+            .route(
+                "/_index_template/{*path}",
+                routing::any((
+                    HttpStatusCode::OK,
+                    elasticsearch::elasticsearch_headers(),
+                    axum::Json(serde_json::json!({})),
+                )),
+            )
+            // Return fake response for Elasticsearch ingest pipeline request.
+            // See: https://www.elastic.co/guide/en/elasticsearch/reference/8.8/put-pipeline-api.html.
+            .route(
+                "/_ingest/{*path}",
+                routing::any((
+                    HttpStatusCode::OK,
+                    elasticsearch::elasticsearch_headers(),
+                    axum::Json(serde_json::json!({})),
+                )),
+            )
+            // Return fake response for Elasticsearch nodes discovery request.
+            // See: https://www.elastic.co/guide/en/elasticsearch/reference/8.8/cluster.html.
+            .route(
+                "/_nodes/{*path}",
+                routing::any((
+                    HttpStatusCode::OK,
+                    elasticsearch::elasticsearch_headers(),
+                    axum::Json(serde_json::json!({})),
+                )),
+            )
+            // Return fake response for Logstash APIs requests.
+            // See: https://www.elastic.co/guide/en/elasticsearch/reference/8.8/logstash-apis.html
+            .route(
+                "/logstash/{*path}",
+                routing::any((
+                    HttpStatusCode::OK,
+                    elasticsearch::elasticsearch_headers(),
+                    axum::Json(serde_json::json!({})),
+                )),
+            )
+            .route(
+                "/_logstash/{*path}",
+                routing::any((
+                    HttpStatusCode::OK,
+                    elasticsearch::elasticsearch_headers(),
+                    axum::Json(serde_json::json!({})),
+                )),
+            )
+            .layer(ServiceBuilder::new().layer(RequestDecompressionLayer::new()))
+            .with_state(log_state)
+    }
+
+    #[deprecated(since = "0.11.0", note = "Use `route_pipelines()` instead.")]
+    fn route_log_deprecated<S>(log_state: LogState) -> Router<S> {
+        Router::new()
+            .route("/logs", routing::post(event::log_ingester))
+            .route(
+                "/pipelines/{pipeline_name}",
+                routing::post(event::add_pipeline),
+            )
+            .route(
+                "/pipelines/{pipeline_name}",
+                routing::delete(event::delete_pipeline),
+            )
+            .route("/pipelines/dryrun", routing::post(event::pipeline_dryrun))
+            .layer(
+                ServiceBuilder::new()
+                    .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
+            )
+            .with_state(log_state)
+    }
+
+    fn route_pipelines<S>(log_state: LogState) -> Router<S> {
+        Router::new()
+            .route("/ingest", routing::post(event::log_ingester))
+            .route(
+                "/pipelines/{pipeline_name}",
+                routing::post(event::add_pipeline),
+            )
+            .route(
+                "/pipelines/{pipeline_name}",
+                routing::delete(event::delete_pipeline),
+            )
+            .route("/pipelines/_dryrun", routing::post(event::pipeline_dryrun))
+            .layer(
+                ServiceBuilder::new()
+                    .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
+            )
+            .with_state(log_state)
+    }
+
+    fn route_sql<S>(api_state: ApiState) -> Router<S> {
+        Router::new()
+            .route("/sql", routing::get(handler::sql).post(handler::sql))
+            .route(
+                "/sql/parse",
+                routing::get(handler::sql_parse).post(handler::sql_parse),
+            )
+            .route(
                 "/promql",
-                apirouting::get_with(handler::promql, handler::sql_docs)
-                    .post_with(handler::promql, handler::sql_docs),
+                routing::get(handler::promql).post(handler::promql),
             )
-            .api_route("/scripts", apirouting::post(script::scripts))
-            .api_route("/run-script", apirouting::post(script::run_script))
-            .route("/private/api.json", apirouting::get(serve_api))
-            .route("/private/docs", apirouting::get(serve_docs))
             .with_state(api_state)
     }
 
+    fn route_logs<S>(log_handler: LogQueryHandlerRef) -> Router<S> {
+        Router::new()
+            .route("/logs", routing::get(logs::logs).post(logs::logs))
+            .with_state(log_handler)
+    }
+
+    /// Route Prometheus [HTTP API].
+    ///
+    /// [HTTP API]: https://prometheus.io/docs/prometheus/latest/querying/api/
     fn route_prometheus<S>(prometheus_handler: PrometheusHandlerRef) -> Router<S> {
         Router::new()
             .route(
@@ -688,25 +986,48 @@ impl HttpServer {
             .route("/query_range", routing::post(range_query).get(range_query))
             .route("/labels", routing::post(labels_query).get(labels_query))
             .route("/series", routing::post(series_query).get(series_query))
+            .route("/parse_query", routing::post(parse_query).get(parse_query))
             .route(
-                "/label/:label_name/values",
+                "/label/{label_name}/values",
                 routing::get(label_values_query),
             )
+            .layer(ServiceBuilder::new().layer(CompressionLayer::new()))
             .with_state(prometheus_handler)
     }
 
+    /// Route Prometheus remote [read] and [write] API. In other places the related modules are
+    /// called `prom_store`.
+    ///
+    /// [read]: https://prometheus.io/docs/prometheus/latest/querying/remote_read_api/
+    /// [write]: https://prometheus.io/docs/concepts/remote_write_spec/
     fn route_prom<S>(
         prom_handler: PromStoreProtocolHandlerRef,
         prom_store_with_metric_engine: bool,
+        is_strict_mode: bool,
     ) -> Router<S> {
         let mut router = Router::new().route("/read", routing::post(prom_store::remote_read));
-        if prom_store_with_metric_engine {
-            router = router.route("/write", routing::post(prom_store::remote_write));
-        } else {
-            router = router.route(
-                "/write",
-                routing::post(prom_store::route_write_without_metric_engine),
-            );
+        match (prom_store_with_metric_engine, is_strict_mode) {
+            (true, true) => {
+                router = router.route("/write", routing::post(prom_store::remote_write))
+            }
+            (true, false) => {
+                router = router.route(
+                    "/write",
+                    routing::post(prom_store::remote_write_without_strict_mode),
+                )
+            }
+            (false, true) => {
+                router = router.route(
+                    "/write",
+                    routing::post(prom_store::route_write_without_metric_engine),
+                )
+            }
+            (false, false) => {
+                router = router.route(
+                    "/write",
+                    routing::post(prom_store::route_write_without_metric_engine_and_strict_mode),
+                )
+            }
         }
         router.with_state(prom_handler)
     }
@@ -717,8 +1038,7 @@ impl HttpServer {
             .route("/api/v2/write", routing::post(influxdb_write_v2))
             .layer(
                 ServiceBuilder::new()
-                    .layer(HandleErrorLayer::new(handle_error))
-                    .layer(RequestDecompressionLayer::new()),
+                    .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
             )
             .route("/ping", routing::get(influxdb_ping))
             .route("/health", routing::get(influxdb_health))
@@ -735,13 +1055,37 @@ impl HttpServer {
         Router::new()
             .route("/v1/metrics", routing::post(otlp::metrics))
             .route("/v1/traces", routing::post(otlp::traces))
+            .route("/v1/logs", routing::post(otlp::logs))
+            .layer(
+                ServiceBuilder::new()
+                    .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
+            )
             .with_state(otlp_handler)
     }
 
-    fn route_config<S>(state: GreptimeOptionsConfigState) -> ApiRouter<S> {
-        ApiRouter::new()
-            .route("/config", apirouting::get(handler::config))
+    fn route_config<S>(state: GreptimeOptionsConfigState) -> Router<S> {
+        Router::new()
+            .route("/config", routing::get(handler::config))
             .with_state(state)
+    }
+
+    fn route_jaeger<S>(handler: JaegerQueryHandlerRef) -> Router<S> {
+        Router::new()
+            .route("/api/services", routing::get(jaeger::handle_get_services))
+            .route(
+                "/api/services/{service_name}/operations",
+                routing::get(jaeger::handle_get_operations_by_service),
+            )
+            .route(
+                "/api/operations",
+                routing::get(jaeger::handle_get_operations),
+            )
+            .route("/api/traces", routing::get(jaeger::handle_find_traces))
+            .route(
+                "/api/traces/{trace_id}",
+                routing::get(jaeger::handle_get_trace),
+            )
+            .with_state(handler)
     }
 }
 
@@ -763,7 +1107,7 @@ impl Server for HttpServer {
 
     async fn start(&self, listening: SocketAddr) -> Result<SocketAddr> {
         let (tx, rx) = oneshot::channel();
-        let server = {
+        let serve = {
             let mut shutdown_tx = self.shutdown_tx.lock().await;
             ensure!(
                 shutdown_tx.is_none(),
@@ -774,23 +1118,45 @@ impl Server for HttpServer {
             if let Some(configurator) = self.plugins.get::<ConfiguratorRef>() {
                 app = configurator.config_http(app);
             }
-            let app = self.build(app);
-            let server = axum::Server::bind(&listening)
-                .tcp_nodelay(true)
-                .serve(app.into_make_service());
+            let app = self.build(app)?;
+            let listener = tokio::net::TcpListener::bind(listening)
+                .await
+                .context(AddressBindSnafu { addr: listening })?
+                .tap_io(|tcp_stream| {
+                    if let Err(e) = tcp_stream.set_nodelay(true) {
+                        error!(e; "Failed to set TCP_NODELAY on incoming connection");
+                    }
+                });
+            let serve = axum::serve(listener, app.into_make_service());
+
+            // FIXME(yingwen): Support keepalive.
+            // See:
+            // - https://github.com/tokio-rs/axum/discussions/2939
+            // - https://stackoverflow.com/questions/73069718/how-do-i-keep-alive-tokiotcpstream-in-rust
+            // let server = axum::Server::try_bind(&listening)
+            //     .with_context(|_| AddressBindSnafu { addr: listening })?
+            //     .tcp_nodelay(true)
+            //     // Enable TCP keepalive to close the dangling established connections.
+            //     // It's configured to let the keepalive probes first send after the connection sits
+            //     // idle for 59 minutes, and then send every 10 seconds for 6 times.
+            //     // So the connection will be closed after roughly 1 hour.
+            //     .tcp_keepalive(Some(Duration::from_secs(59 * 60)))
+            //     .tcp_keepalive_interval(Some(Duration::from_secs(10)))
+            //     .tcp_keepalive_retries(Some(6))
+            //     .serve(app.into_make_service());
 
             *shutdown_tx = Some(tx);
 
-            server
+            serve
         };
-        let listening = server.local_addr();
+        let listening = serve.local_addr().context(InternalIoSnafu)?;
         info!("HTTP server is bound to {}", listening);
 
-        common_runtime::spawn_bg(async move {
-            if let Err(e) = server
+        common_runtime::spawn_global(async move {
+            if let Err(e) = serve
                 .with_graceful_shutdown(rx.map(drop))
                 .await
-                .context(HyperSnafu)
+                .context(InternalIoSnafu)
             {
                 error!(e; "Failed to shutdown http server");
             }
@@ -801,15 +1167,6 @@ impl Server for HttpServer {
     fn name(&self) -> &str {
         HTTP_SERVER
     }
-}
-
-/// handle error middleware
-async fn handle_error(err: BoxError) -> Json<HttpResponse> {
-    error!(err; "Unhandled internal error");
-    Json(HttpResponse::Error(ErrorResponse::from_error_message(
-        StatusCode::Unexpected,
-        format!("Unhandled internal error: {err}"),
-    )))
 }
 
 #[cfg(test)]
@@ -824,20 +1181,22 @@ mod test {
     use axum::handler::Handler;
     use axum::http::StatusCode;
     use axum::routing::get;
-    use axum_test_helper::TestClient;
     use common_query::Output;
     use common_recordbatch::RecordBatches;
+    use datafusion_expr::LogicalPlan;
     use datatypes::prelude::*;
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{StringVector, UInt32Vector};
+    use header::constants::GREPTIME_DB_HEADER_TIMEOUT;
     use query::parser::PromQuery;
-    use query::plan::LogicalPlan;
     use query::query_engine::DescribeResult;
     use session::context::QueryContextRef;
     use tokio::sync::mpsc;
+    use tokio::time::Instant;
 
     use super::*;
     use crate::error::Error;
+    use crate::http::test_helpers::TestClient;
     use crate::query_handler::grpc::GrpcQueryHandler;
     use crate::query_handler::sql::{ServerSqlQueryHandlerAdapter, SqlQueryHandler};
 
@@ -895,8 +1254,8 @@ mod test {
         }
     }
 
-    fn timeout() -> TimeoutLayer {
-        TimeoutLayer::new(Duration::from_millis(10))
+    fn timeout() -> DynamicTimeoutLayer {
+        DynamicTimeoutLayer::new(Duration::from_millis(10))
     }
 
     async fn forever() {
@@ -904,21 +1263,121 @@ mod test {
     }
 
     fn make_test_app(tx: mpsc::Sender<(String, Vec<u8>)>) -> Router {
+        make_test_app_custom(tx, HttpOptions::default())
+    }
+
+    fn make_test_app_custom(tx: mpsc::Sender<(String, Vec<u8>)>, options: HttpOptions) -> Router {
         let instance = Arc::new(DummyInstance { _tx: tx });
         let sql_instance = ServerSqlQueryHandlerAdapter::arc(instance.clone());
-        let server = HttpServerBuilder::new(HttpOptions::default())
-            .with_sql_handler(sql_instance, None)
+        let server = HttpServerBuilder::new(options)
+            .with_sql_handler(sql_instance)
             .build();
-        server.build(server.make_app()).route(
+        server.build(server.make_app()).unwrap().route(
             "/test/timeout",
-            get(forever.layer(
-                ServiceBuilder::new()
-                    .layer(HandleErrorLayer::new(|_: BoxError| async {
-                        StatusCode::REQUEST_TIMEOUT
-                    }))
-                    .layer(timeout()),
-            )),
+            get(forever.layer(ServiceBuilder::new().layer(timeout()))),
         )
+    }
+
+    #[tokio::test]
+    pub async fn test_cors() {
+        // cors is on by default
+        let (tx, _rx) = mpsc::channel(100);
+        let app = make_test_app(tx);
+        let client = TestClient::new(app).await;
+
+        let res = client.get("/health").send().await;
+
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers()
+                .get(http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .expect("expect cors header origin"),
+            "*"
+        );
+
+        let res = client
+            .options("/health")
+            .header("Access-Control-Request-Headers", "x-greptime-auth")
+            .header("Access-Control-Request-Method", "DELETE")
+            .header("Origin", "https://example.com")
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers()
+                .get(http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .expect("expect cors header origin"),
+            "*"
+        );
+        assert_eq!(
+            res.headers()
+                .get(http::header::ACCESS_CONTROL_ALLOW_HEADERS)
+                .expect("expect cors header headers"),
+            "*"
+        );
+        assert_eq!(
+            res.headers()
+                .get(http::header::ACCESS_CONTROL_ALLOW_METHODS)
+                .expect("expect cors header methods"),
+            "GET,POST,PUT,DELETE,HEAD"
+        );
+    }
+
+    #[tokio::test]
+    pub async fn test_cors_custom_origins() {
+        // cors is on by default
+        let (tx, _rx) = mpsc::channel(100);
+        let origin = "https://example.com";
+
+        let options = HttpOptions {
+            cors_allowed_origins: vec![origin.to_string()],
+            ..Default::default()
+        };
+
+        let app = make_test_app_custom(tx, options);
+        let client = TestClient::new(app).await;
+
+        let res = client.get("/health").header("Origin", origin).send().await;
+
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers()
+                .get(http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .expect("expect cors header origin"),
+            origin
+        );
+
+        let res = client
+            .get("/health")
+            .header("Origin", "https://notallowed.com")
+            .send()
+            .await;
+
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(!res
+            .headers()
+            .contains_key(http::header::ACCESS_CONTROL_ALLOW_ORIGIN));
+    }
+
+    #[tokio::test]
+    pub async fn test_cors_disabled() {
+        // cors is on by default
+        let (tx, _rx) = mpsc::channel(100);
+
+        let options = HttpOptions {
+            enable_cors: false,
+            ..Default::default()
+        };
+
+        let app = make_test_app_custom(tx, options);
+        let client = TestClient::new(app).await;
+
+        let res = client.get("/health").send().await;
+
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(!res
+            .headers()
+            .contains_key(http::header::ACCESS_CONTROL_ALLOW_ORIGIN));
     }
 
     #[test]
@@ -930,11 +1389,46 @@ mod test {
 
     #[tokio::test]
     async fn test_http_server_request_timeout() {
+        common_telemetry::init_default_ut_logging();
+
         let (tx, _rx) = mpsc::channel(100);
         let app = make_test_app(tx);
-        let client = TestClient::new(app);
+        let client = TestClient::new(app).await;
         let res = client.get("/test/timeout").send().await;
         assert_eq!(res.status(), StatusCode::REQUEST_TIMEOUT);
+
+        let now = Instant::now();
+        let res = client
+            .get("/test/timeout")
+            .header(GREPTIME_DB_HEADER_TIMEOUT, "20ms")
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::REQUEST_TIMEOUT);
+        let elapsed = now.elapsed();
+        assert!(elapsed > Duration::from_millis(15));
+
+        tokio::time::timeout(
+            Duration::from_millis(15),
+            client
+                .get("/test/timeout")
+                .header(GREPTIME_DB_HEADER_TIMEOUT, "0s")
+                .send(),
+        )
+        .await
+        .unwrap_err();
+
+        tokio::time::timeout(
+            Duration::from_millis(15),
+            client
+                .get("/test/timeout")
+                .header(
+                    GREPTIME_DB_HEADER_TIMEOUT,
+                    humantime::format_duration(Duration::default()).to_string(),
+                )
+                .send(),
+        )
+        .await
+        .unwrap_err();
     }
 
     #[tokio::test]
@@ -988,16 +1482,18 @@ mod test {
             ResponseFormat::Csv,
             ResponseFormat::Table,
             ResponseFormat::Arrow,
+            ResponseFormat::Json,
         ] {
             let recordbatches =
                 RecordBatches::try_new(schema.clone(), vec![recordbatch.clone()]).unwrap();
             let outputs = vec![Ok(Output::new_with_record_batches(recordbatches))];
             let json_resp = match format {
-                ResponseFormat::Arrow => ArrowResponse::from_output(outputs).await,
+                ResponseFormat::Arrow => ArrowResponse::from_output(outputs, None).await,
                 ResponseFormat::Csv => CsvResponse::from_output(outputs).await,
                 ResponseFormat::Table => TableResponse::from_output(outputs).await,
                 ResponseFormat::GreptimedbV1 => GreptimedbV1Response::from_output(outputs).await,
                 ResponseFormat::InfluxdbV1 => InfluxdbV1Response::from_output(outputs, None).await,
+                ResponseFormat::Json => JsonResponse::from_output(outputs).await,
             };
 
             match json_resp {
@@ -1067,6 +1563,21 @@ mod test {
                     assert_eq!(rb.num_columns(), 2);
                     assert_eq!(rb.num_rows(), 4);
                 }
+
+                HttpResponse::Json(resp) => {
+                    let output = &resp.output()[0];
+                    if let GreptimeQueryOutput::Records(r) = output {
+                        assert_eq!(r.num_rows(), 4);
+                        assert_eq!(r.num_cols(), 2);
+                        assert_eq!(r.schema.column_schemas[0].name, "numbers");
+                        assert_eq!(r.schema.column_schemas[0].data_type, "UInt32");
+                        assert_eq!(r.rows[0][0], serde_json::Value::from(1));
+                        assert_eq!(r.rows[0][1], serde_json::Value::Null);
+                    } else {
+                        panic!("invalid output type");
+                    }
+                }
+
                 HttpResponse::Error(err) => unreachable!("{err:?}"),
             }
         }

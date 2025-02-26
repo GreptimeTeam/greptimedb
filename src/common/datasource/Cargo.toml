@@ -20,6 +20,7 @@ async-compression = { version = "0.3", features = [
 ] }
 async-trait.workspace = true
 bytes.workspace = true
+common-base.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
 common-recordbatch.workspace = true
@@ -30,9 +31,12 @@ derive_builder.workspace = true
 futures.workspace = true
 lazy_static.workspace = true
 object-store.workspace = true
-orc-rust = "0.2"
+orc-rust = { version = "0.5", default-features = false, features = [
+    "async",
+] }
 parquet.workspace = true
-paste = "1.0"
+paste.workspace = true
+rand.workspace = true
 regex = "1.7"
 serde.workspace = true
 snafu.workspace = true
@@ -42,4 +46,6 @@ tokio-util.workspace = true
 url = "2.3"
 
 [dev-dependencies]
+common-telemetry.workspace = true
 common-test-util.workspace = true
+uuid.workspace = true

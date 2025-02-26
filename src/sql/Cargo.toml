@@ -24,12 +24,18 @@ datafusion-physical-expr.workspace = true
 datafusion-sql.workspace = true
 datatypes.workspace = true
 hex = "0.4"
+humantime.workspace = true
+iso8601 = "0.6.1"
 itertools.workspace = true
+jsonb.workspace = true
 lazy_static.workspace = true
 regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 snafu.workspace = true
 sqlparser.workspace = true
 sqlparser_derive = "0.1"
+store-api.workspace = true
 table.workspace = true
 
 [dev-dependencies]

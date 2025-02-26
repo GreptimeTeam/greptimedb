@@ -12,7 +12,7 @@ on:
       linux_amd64_runner:
         type: choice
         description: The runner uses to build linux-amd64 artifacts
-        default: ec2-c6i.2xlarge-amd64
+        default: ec2-c6i.4xlarge-amd64
         options:
           - ubuntu-20.04
           - ubuntu-20.04-8-cores
@@ -27,7 +27,7 @@ on:
       linux_arm64_runner:
         type: choice
         description: The runner uses to build linux-arm64 artifacts
-        default: ec2-c6g.2xlarge-arm64
+        default: ec2-c6g.4xlarge-arm64
         options:
           - ec2-c6g.xlarge-arm64 # 4C8G
           - ec2-c6g.2xlarge-arm64 # 8C16G
@@ -88,6 +88,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Create version
         id: create-version
@@ -140,6 +141,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - uses: ./.github/actions/build-linux-artifacts
         with:
@@ -147,6 +149,8 @@ jobs:
           cargo-profile: ${{ env.CARGO_PROFILE }}
           version: ${{ needs.allocate-runners.outputs.version }}
           disable-run-tests: ${{ env.DISABLE_RUN_TESTS }}
+          image-registry: ${{ vars.ECR_IMAGE_REGISTRY }}
+          image-namespace: ${{ vars.ECR_IMAGE_NAMESPACE }}
 
   build-linux-arm64-artifacts:
     name: Build linux-arm64 artifacts
@@ -159,6 +163,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - uses: ./.github/actions/build-linux-artifacts
         with:
@@ -166,6 +171,8 @@ jobs:
           cargo-profile: ${{ env.CARGO_PROFILE }}
           version: ${{ needs.allocate-runners.outputs.version }}
           disable-run-tests: ${{ env.DISABLE_RUN_TESTS }}
+          image-registry: ${{ vars.ECR_IMAGE_REGISTRY }}
+          image-namespace: ${{ vars.ECR_IMAGE_NAMESPACE }}
 
   release-images-to-dockerhub:
     name: Build and push images to DockerHub
@@ -182,16 +189,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Build and push images to dockerhub
         uses: ./.github/actions/build-images
         with:
           image-registry: docker.io
           image-namespace: ${{ vars.IMAGE_NAMESPACE }}
+          image-name: ${{ vars.NIGHTLY_BUILD_IMAGE_NAME }}
           image-registry-username: ${{ secrets.DOCKERHUB_USERNAME }}
           image-registry-password: ${{ secrets.DOCKERHUB_TOKEN }}
           version: ${{ needs.allocate-runners.outputs.version }}
-          push-latest-tag: false # Don't push the latest tag to registry.
+          push-latest-tag: false
 
       - name: Set nightly build result
         id: set-nightly-build-result
@@ -214,13 +223,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Release artifacts to CN region
         uses: ./.github/actions/release-cn-artifacts
         with:
           src-image-registry: docker.io
           src-image-namespace: ${{ vars.IMAGE_NAMESPACE }}
-          src-image-name: greptimedb
+          src-image-name: ${{ vars.NIGHTLY_BUILD_IMAGE_NAME }}
           dst-image-registry-username: ${{ secrets.ALICLOUD_USERNAME }}
           dst-image-registry-password: ${{ secrets.ALICLOUD_PASSWORD }}
           dst-image-registry: ${{ vars.ACR_IMAGE_REGISTRY }}
@@ -230,9 +240,10 @@ jobs:
           aws-cn-access-key-id: ${{ secrets.AWS_CN_ACCESS_KEY_ID }}
           aws-cn-secret-access-key: ${{ secrets.AWS_CN_SECRET_ACCESS_KEY }}
           aws-cn-region: ${{ vars.AWS_RELEASE_BUCKET_REGION }}
+          upload-to-s3: false
           dev-mode: false
           update-version-info: false  # Don't update version info in S3.
-          push-latest-tag: false      # Don't push the latest tag to registry.
+          push-latest-tag: false
 
   stop-linux-amd64-runner: # It's always run as the last job in the workflow to make sure that the runner is released.
     name: Stop linux-amd64 runner
@@ -248,6 +259,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Stop EC2 runner
         uses: ./.github/actions/stop-runner
@@ -273,6 +285,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Stop EC2 runner
         uses: ./.github/actions/stop-runner
@@ -285,25 +298,38 @@ jobs:
           github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
 
   notification:
-    if: ${{ always() }} # Not requiring successful dependent jobs, always run.
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && always() }} # Not requiring successful dependent jobs, always run.
     name: Send notification to Greptime team
     needs: [
       release-images-to-dockerhub
     ]
     runs-on: ubuntu-20.04
+    permissions:
+      issues: write
     env:
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL_DEVELOP_CHANNEL }}
     steps:
-      - name: Notifiy nightly build successful result
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-cyborg
+      - name: Report CI status
+        id: report-ci-status
+        working-directory: cyborg
+        run: pnpm tsx bin/report-ci-failure.ts
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CI_REPORT_STATUS: ${{ needs.release-images-to-dockerhub.outputs.nightly-build-result == 'success' }}
+      - name: Notify nightly build successful result
         uses: slackapi/slack-github-action@v1.23.0
         if: ${{ needs.release-images-to-dockerhub.outputs.nightly-build-result == 'success' }}
         with:
           payload: |
             {"text": "GreptimeDB's ${{ env.NEXT_RELEASE_VERSION }} build has completed successfully."}
 
-      - name: Notifiy nightly build failed result
+      - name: Notify nightly build failed result
         uses: slackapi/slack-github-action@v1.23.0
         if: ${{ needs.release-images-to-dockerhub.outputs.nightly-build-result != 'success' }}
         with:
           payload: |
-            {"text": "GreptimeDB's ${{ env.NEXT_RELEASE_VERSION }} build has failed, please check 'https://github.com/GreptimeTeam/greptimedb/actions/workflows/${{ env.NEXT_RELEASE_VERSION }}-build.yml'."}
+            {"text": "GreptimeDB's ${{ env.NEXT_RELEASE_VERSION }} build has failed, please check ${{ steps.report-ci-status.outputs.html_url }}."}

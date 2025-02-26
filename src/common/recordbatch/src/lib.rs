@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![feature(never_type)]
+
 pub mod adapter;
+pub mod cursor;
 pub mod error;
 pub mod filter;
 mod recordbatch;
@@ -23,7 +26,6 @@ use std::sync::Arc;
 
 use adapter::RecordBatchMetrics;
 use arc_swap::ArcSwapOption;
-use datafusion::physical_plan::memory::MemoryStream;
 pub use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
 use datatypes::arrow::compute::SortOptions;
 pub use datatypes::arrow::record_batch::RecordBatch as DfRecordBatch;
@@ -37,6 +39,10 @@ pub use recordbatch::RecordBatch;
 use snafu::{ensure, ResultExt};
 
 pub trait RecordBatchStream: Stream<Item = Result<RecordBatch>> {
+    fn name(&self) -> &str {
+        "RecordBatchStream"
+    }
+
     fn schema(&self) -> SchemaRef;
 
     fn output_ordering(&self) -> Option<&[OrderOption]>;
@@ -163,19 +169,6 @@ impl RecordBatches {
             index: 0,
         })
     }
-
-    pub fn into_df_stream(self) -> DfSendableRecordBatchStream {
-        let df_record_batches = self
-            .batches
-            .into_iter()
-            .map(|batch| batch.into_df_record_batch())
-            .collect();
-        // unwrap safety: `MemoryStream::try_new` won't fail
-        Box::pin(
-            MemoryStream::try_new(df_record_batches, self.schema.arrow_schema().clone(), None)
-                .unwrap(),
-        )
-    }
 }
 
 impl IntoIterator for RecordBatches {
@@ -243,6 +236,10 @@ impl<S> RecordBatchStreamWrapper<S> {
 impl<S: Stream<Item = Result<RecordBatch>> + Unpin> RecordBatchStream
     for RecordBatchStreamWrapper<S>
 {
+    fn name(&self) -> &str {
+        "RecordBatchStreamWrapper"
+    }
+
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -252,7 +249,7 @@ impl<S: Stream<Item = Result<RecordBatch>> + Unpin> RecordBatchStream
     }
 
     fn metrics(&self) -> Option<RecordBatchMetrics> {
-        self.metrics.load().as_ref().map(|s| *s.as_ref())
+        self.metrics.load().as_ref().map(|s| s.as_ref().clone())
     }
 }
 

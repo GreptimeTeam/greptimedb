@@ -19,6 +19,7 @@ use common_query::error::Result;
 use common_query::prelude::{Signature, Volatility};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::vectors::{StringVector, VectorRef};
+use session::context::Channel;
 
 use crate::function::{Function, FunctionContext};
 
@@ -41,14 +42,25 @@ impl Function for VersionFunction {
     }
 
     fn signature(&self) -> Signature {
-        Signature::exact(vec![], Volatility::Immutable)
+        Signature::nullary(Volatility::Immutable)
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
-        let result = StringVector::from(vec![format!(
-            "5.7.20-greptimedb-{}",
-            env!("CARGO_PKG_VERSION")
-        )]);
+    fn eval(&self, func_ctx: FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
+        let version = match func_ctx.query_ctx.channel() {
+            Channel::Mysql => {
+                format!(
+                    "{}-greptimedb-{}",
+                    std::env::var("GREPTIMEDB_MYSQL_SERVER_VERSION")
+                        .unwrap_or_else(|_| "8.4.2".to_string()),
+                    env!("CARGO_PKG_VERSION")
+                )
+            }
+            Channel::Postgres => {
+                format!("16.3-greptimedb-{}", env!("CARGO_PKG_VERSION"))
+            }
+            _ => env!("CARGO_PKG_VERSION").to_string(),
+        };
+        let result = StringVector::from(vec![version]);
         Ok(Arc::new(result))
     }
 }

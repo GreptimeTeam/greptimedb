@@ -14,7 +14,8 @@
 
 use std::sync::Arc;
 
-use api::v1::region::{QueryRequest, RegionRequest};
+use api::region::RegionResponse;
+use api::v1::region::RegionRequest;
 use api::v1::ResponseHeader;
 use arc_swap::ArcSwapOption;
 use arrow_flight::Ticket;
@@ -23,19 +24,22 @@ use async_trait::async_trait;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_grpc::flight::{FlightDecoder, FlightMessage};
-use common_meta::datanode_manager::{Datanode, HandleResponse};
 use common_meta::error::{self as meta_error, Result as MetaResult};
+use common_meta::node_manager::Datanode;
+use common_query::request::QueryRequest;
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
 use common_telemetry::error;
 use common_telemetry::tracing_context::TracingContext;
 use prost::Message;
-use snafu::{location, Location, OptionExt, ResultExt};
+use query::query_engine::DefaultSerializer;
+use snafu::{location, OptionExt, ResultExt};
+use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use tokio_stream::StreamExt;
 
 use crate::error::{
-    self, ConvertFlightDataSnafu, IllegalDatabaseResponseSnafu, IllegalFlightMessagesSnafu,
-    MissingFieldSnafu, Result, ServerSnafu,
+    self, ConvertFlightDataSnafu, FlightGetSnafu, IllegalDatabaseResponseSnafu,
+    IllegalFlightMessagesSnafu, MissingFieldSnafu, Result, ServerSnafu,
 };
 use crate::{metrics, Client, Error};
 
@@ -46,7 +50,7 @@ pub struct RegionRequester {
 
 #[async_trait]
 impl Datanode for RegionRequester {
-    async fn handle(&self, request: RegionRequest) -> MetaResult<HandleResponse> {
+    async fn handle(&self, request: RegionRequest) -> MetaResult<RegionResponse> {
         self.handle_inner(request).await.map_err(|err| {
             if err.should_retry() {
                 meta_error::Error::RetryLater {
@@ -62,6 +66,17 @@ impl Datanode for RegionRequester {
     }
 
     async fn handle_query(&self, request: QueryRequest) -> MetaResult<SendableRecordBatchStream> {
+        let plan = DFLogicalSubstraitConvertor
+            .encode(&request.plan, DefaultSerializer)
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)?
+            .to_vec();
+        let request = api::v1::region::QueryRequest {
+            header: request.header,
+            region_id: request.region_id.as_u64(),
+            plan,
+        };
+
         let ticket = Ticket {
             ticket: request.encode_to_vec().into(),
         };
@@ -88,11 +103,14 @@ impl RegionRequester {
                 let e: error::Error = e.into();
                 let code = e.status_code();
                 let msg = e.to_string();
-                let error = Error::FlightGet {
-                    tonic_code,
-                    addr: flight_client.addr().to_string(),
-                    source: BoxedError::new(ServerSnafu { code, msg }.build()),
-                };
+                let error = ServerSnafu { code, msg }
+                    .fail::<()>()
+                    .map_err(BoxedError::new)
+                    .with_context(|_| FlightGetSnafu {
+                        tonic_code,
+                        addr: flight_client.addr().to_string(),
+                    })
+                    .unwrap_err();
                 error!(
                     e; "Failed to do Flight get, addr: {}, code: {}",
                     flight_client.addr(),
@@ -165,7 +183,7 @@ impl RegionRequester {
         Ok(Box::pin(record_batch_stream))
     }
 
-    async fn handle_inner(&self, request: RegionRequest) -> Result<HandleResponse> {
+    async fn handle_inner(&self, request: RegionRequest) -> Result<RegionResponse> {
         let request_type = request
             .body
             .as_ref()
@@ -176,7 +194,7 @@ impl RegionRequester {
             .with_label_values(&[request_type.as_str()])
             .start_timer();
 
-        let mut client = self.client.raw_region_client()?;
+        let (addr, mut client) = self.client.raw_region_client()?;
 
         let response = client
             .handle(request)
@@ -186,18 +204,20 @@ impl RegionRequester {
                 let err: error::Error = e.into();
                 // Uses `Error::RegionServer` instead of `Error::Server`
                 error::Error::RegionServer {
+                    addr,
                     code,
                     source: BoxedError::new(err),
+                    location: location!(),
                 }
             })?
             .into_inner();
 
         check_response_header(&response.header)?;
 
-        Ok(HandleResponse::from_region_response(response))
+        Ok(RegionResponse::from_region_response(response))
     }
 
-    pub async fn handle(&self, request: RegionRequest) -> Result<HandleResponse> {
+    pub async fn handle(&self, request: RegionRequest) -> Result<RegionResponse> {
         self.handle_inner(request).await
     }
 }
@@ -271,7 +291,7 @@ mod test {
                 err_msg: "blabla".to_string(),
             }),
         }));
-        let Server { code, msg } = result.unwrap_err() else {
+        let Server { code, msg, .. } = result.unwrap_err() else {
             unreachable!()
         };
         assert_eq!(code, StatusCode::Internal);

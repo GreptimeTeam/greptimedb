@@ -8,7 +8,7 @@ create table foo (
      cpu double default 0,
      TIME INDEX (ts),
      PRIMARY KEY(host)
-) engine=mito with(regions=1);
+) engine=mito;
 
 Affected Rows: 0
 
@@ -17,6 +17,61 @@ DROP TABLE IF EXISTS foo;
 Affected Rows: 0
 
 DROP TABLE IF EXISTS foo;
+
+Affected Rows: 0
+
+DROP TABLE IF EXISTS foo, bar;
+
+Affected Rows: 0
+
+create table foo (
+     host string,
+     ts timestamp DEFAULT '2024-06-01 00:00:00+00:00',
+     cpu double default 0,
+     TIME INDEX (ts),
+     PRIMARY KEY(host)
+) engine=mito;
+
+Affected Rows: 0
+
+DROP TABLE foo, bar;
+
+Error: 4001(TableNotFound), Table not found: greptime.public.bar
+
+SHOW TABLES;
+
++---------+
+| Tables  |
++---------+
+| foo     |
+| numbers |
++---------+
+
+DROP TABLE IF EXISTS foo, bar;
+
+Affected Rows: 0
+
+create table foo (
+     host string,
+     ts timestamp DEFAULT '2024-06-01 00:00:00+00:00',
+     cpu double default 0,
+     TIME INDEX (ts),
+     PRIMARY KEY(host)
+) engine=mito;
+
+Affected Rows: 0
+
+create table bar (
+     host string,
+     ts timestamp DEFAULT '2024-06-01 00:00:00+00:00',
+     cpu double default 0,
+     TIME INDEX (ts),
+     PRIMARY KEY(host)
+) engine=mito;
+
+Affected Rows: 0
+
+DROP TABLE foo, bar;
 
 Affected Rows: 0
 

@@ -14,13 +14,14 @@
 
 //! Close a metric region
 
+use common_telemetry::debug;
 use snafu::ResultExt;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{AffectedRows, RegionCloseRequest, RegionRequest};
 use store_api::storage::RegionId;
 
 use super::MetricEngineInner;
-use crate::error::{CloseMitoRegionSnafu, LogicalRegionNotFoundSnafu, Result};
+use crate::error::{CloseMitoRegionSnafu, Result};
 use crate::metrics::PHYSICAL_REGION_COUNT;
 use crate::utils;
 
@@ -35,8 +36,7 @@ impl MetricEngineInner {
             .state
             .read()
             .unwrap()
-            .physical_regions()
-            .contains_key(&data_region_id)
+            .exist_physical_region(data_region_id)
         {
             self.close_physical_region(data_region_id).await?;
             self.state
@@ -54,7 +54,8 @@ impl MetricEngineInner {
         {
             Ok(0)
         } else {
-            Err(LogicalRegionNotFoundSnafu { region_id }.build())
+            debug!("Closing a non-existent logical region {}", region_id);
+            Ok(0)
         }
     }
 

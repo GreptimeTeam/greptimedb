@@ -26,11 +26,37 @@ use crate::function::{Function, FunctionContext};
 #[derive(Clone, Debug, Default)]
 pub struct DatabaseFunction;
 
-const NAME: &str = "database";
+#[derive(Clone, Debug, Default)]
+pub struct CurrentSchemaFunction;
+pub struct SessionUserFunction;
+
+const DATABASE_FUNCTION_NAME: &str = "database";
+const CURRENT_SCHEMA_FUNCTION_NAME: &str = "current_schema";
+const SESSION_USER_FUNCTION_NAME: &str = "session_user";
 
 impl Function for DatabaseFunction {
     fn name(&self) -> &str {
-        NAME
+        DATABASE_FUNCTION_NAME
+    }
+
+    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
+        Ok(ConcreteDataType::string_datatype())
+    }
+
+    fn signature(&self) -> Signature {
+        Signature::nullary(Volatility::Immutable)
+    }
+
+    fn eval(&self, func_ctx: FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
+        let db = func_ctx.query_ctx.current_schema();
+
+        Ok(Arc::new(StringVector::from_slice(&[&db])) as _)
+    }
+}
+
+impl Function for CurrentSchemaFunction {
+    fn name(&self) -> &str {
+        CURRENT_SCHEMA_FUNCTION_NAME
     }
 
     fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
@@ -44,7 +70,27 @@ impl Function for DatabaseFunction {
     fn eval(&self, func_ctx: FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
         let db = func_ctx.query_ctx.current_schema();
 
-        Ok(Arc::new(StringVector::from_slice(&[db])) as _)
+        Ok(Arc::new(StringVector::from_slice(&[&db])) as _)
+    }
+}
+
+impl Function for SessionUserFunction {
+    fn name(&self) -> &str {
+        SESSION_USER_FUNCTION_NAME
+    }
+
+    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
+        Ok(ConcreteDataType::string_datatype())
+    }
+
+    fn signature(&self) -> Signature {
+        Signature::uniform(0, vec![], Volatility::Immutable)
+    }
+
+    fn eval(&self, func_ctx: FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
+        let user = func_ctx.query_ctx.current_user();
+
+        Ok(Arc::new(StringVector::from_slice(&[user.username()])) as _)
     }
 }
 
@@ -54,11 +100,22 @@ impl fmt::Display for DatabaseFunction {
     }
 }
 
+impl fmt::Display for CurrentSchemaFunction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "CURRENT_SCHEMA")
+    }
+}
+
+impl fmt::Display for SessionUserFunction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SESSION_USER")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use common_query::prelude::TypeSignature;
     use session::context::QueryContextBuilder;
 
     use super::*;
@@ -70,16 +127,12 @@ mod tests {
             ConcreteDataType::string_datatype(),
             build.return_type(&[]).unwrap()
         );
-        assert!(matches!(build.signature(),
-                         Signature {
-                             type_signature: TypeSignature::Uniform(0, valid_types),
-                             volatility: Volatility::Immutable
-                         } if  valid_types == vec![]
-        ));
+        assert_eq!(build.signature(), Signature::nullary(Volatility::Immutable));
 
         let query_ctx = QueryContextBuilder::default()
             .current_schema("test_db".to_string())
-            .build();
+            .build()
+            .into();
 
         let func_ctx = FunctionContext {
             query_ctx,

@@ -14,11 +14,9 @@
 
 use std::sync::Arc;
 mod greatest;
-mod to_timezone;
 mod to_unixtime;
 
 use greatest::GreatestFunction;
-use to_timezone::ToTimezoneFunction;
 use to_unixtime::ToUnixtimeFunction;
 
 use crate::function_registry::FunctionRegistry;
@@ -27,7 +25,6 @@ pub(crate) struct TimestampFunction;
 
 impl TimestampFunction {
     pub fn register(registry: &FunctionRegistry) {
-        registry.register(Arc::new(ToTimezoneFunction));
         registry.register(Arc::new(ToUnixtimeFunction));
         registry.register(Arc::new(GreatestFunction));
     }

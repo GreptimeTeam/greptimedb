@@ -37,8 +37,13 @@ impl ObjectStoreManager {
     }
 
     /// Adds an object store to the manager.
+    /// # Safety
+    ///      Panic when the name already exists
     pub fn add(&mut self, name: &str, object_store: ObjectStore) {
-        self.stores.insert(name.to_lowercase(), object_store);
+        let name = name.to_lowercase();
+        if self.stores.insert(name.clone(), object_store).is_some() {
+            panic!("Object storage provider name conflicts, the `{name}` already exists");
+        }
     }
 
     /// Finds an object store corresponding to the name.
@@ -46,6 +51,7 @@ impl ObjectStoreManager {
         self.stores.get(&name.to_lowercase())
     }
 
+    /// Returns the default object storage
     pub fn default_object_store(&self) -> &ObjectStore {
         &self.default_object_store
     }
@@ -61,8 +67,7 @@ mod tests {
 
     fn new_object_store(dir: &TempDir) -> ObjectStore {
         let store_dir = dir.path().to_str().unwrap();
-        let mut builder = Builder::default();
-        let _ = builder.root(store_dir);
+        let builder = Builder::default().root(store_dir);
         ObjectStore::new(builder).unwrap().finish()
     }
 

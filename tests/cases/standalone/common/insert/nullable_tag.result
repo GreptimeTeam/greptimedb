@@ -1,0 +1,54 @@
+CREATE TABLE `esT`(
+  `eT` TIMESTAMP(3) TIME INDEX,
+  `eAque` BOOLEAN,
+  `DoLOruM` INT,
+  `repudiAndae` STRING,
+  `ULLaM` BOOLEAN,
+  `COnSECTeTuR` SMALLINT DEFAULT -31852,
+  `DOLOrIBUS` FLOAT NOT NULL,
+  `QUiS` SMALLINT NULL,
+  `consEquatuR` BOOLEAN NOT NULL,
+  `vERO` BOOLEAN,
+  PRIMARY KEY(`repudiAndae`, `ULLaM`, `DoLOruM`)
+);
+
+Affected Rows: 0
+
+INSERT INTO `esT` (
+  `consEquatuR`,
+  `eAque`,
+  `eT`,
+  `repudiAndae`,
+  `DOLOrIBUS`
+)
+VALUES
+(
+  false,
+  false,
+  '+234049-06-04 01:11:41.163+0000',
+  'hello',
+  0.97377783
+),
+(
+  false,
+  true,
+  '-19578-12-20 11:45:59.875+0000',
+  NULL,
+  0.3535998
+);
+
+Affected Rows: 2
+
+SELECT * FROM `esT` order by `eT` desc;
+
++----------------------------+-------+---------+-------------+-------+-------------+------------+------+-------------+------+
+| eT                         | eAque | DoLOruM | repudiAndae | ULLaM | COnSECTeTuR | DOLOrIBUS  | QUiS | consEquatuR | vERO |
++----------------------------+-------+---------+-------------+-------+-------------+------------+------+-------------+------+
+| +234049-06-04T01:11:41.163 | false |         | hello       |       | -31852      | 0.97377783 |      | false       |      |
+| -19578-12-20T11:45:59.875  | true  |         |             |       | -31852      | 0.3535998  |      | false       |      |
++----------------------------+-------+---------+-------------+-------+-------------+------------+------+-------------+------+
+
+DROP TABLE `esT`;
+
+Affected Rows: 0
+

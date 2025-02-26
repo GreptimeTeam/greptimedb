@@ -15,13 +15,33 @@
 #![feature(error_iter)]
 
 pub mod ext;
-pub mod format;
 pub mod mock;
 pub mod status_code;
 
+use http::{HeaderMap, HeaderValue};
 pub use snafu;
 
 // HACK - these headers are here for shared in gRPC services. For common HTTP headers,
 // please define in `src/servers/src/http/header.rs`.
 pub const GREPTIME_DB_HEADER_ERROR_CODE: &str = "x-greptime-err-code";
 pub const GREPTIME_DB_HEADER_ERROR_MSG: &str = "x-greptime-err-msg";
+
+/// Create a http header map from error code and message.
+/// using `GREPTIME_DB_HEADER_ERROR_CODE` and `GREPTIME_DB_HEADER_ERROR_MSG` as keys.
+pub fn from_err_code_msg_to_header(code: u32, msg: &str) -> HeaderMap {
+    let mut header = HeaderMap::new();
+
+    let msg = HeaderValue::from_str(msg).unwrap_or_else(|_| {
+        HeaderValue::from_bytes(
+            &msg.as_bytes()
+                .iter()
+                .flat_map(|b| std::ascii::escape_default(*b))
+                .collect::<Vec<u8>>(),
+        )
+        .expect("Already escaped string should be valid ascii")
+    });
+
+    header.insert(GREPTIME_DB_HEADER_ERROR_CODE, code.into());
+    header.insert(GREPTIME_DB_HEADER_ERROR_MSG, msg);
+    header
+}

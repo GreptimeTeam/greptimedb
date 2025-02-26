@@ -18,14 +18,17 @@ mod df_substrait;
 pub mod error;
 pub mod extension_serializer;
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use bytes::{Buf, Bytes};
-use datafusion::catalog::CatalogList;
+use datafusion::execution::context::SessionState;
+pub use datafusion::execution::registry::SerializerRegistry;
+/// Re-export the Substrait module of datafusion,
+/// note this is a different version of the `substrait_proto` crate
+pub use datafusion_substrait::substrait as substrait_proto_df;
+pub use datafusion_substrait::{logical_plan as df_logical_plan, variation_const};
+pub use substrait_proto;
 
 pub use crate::df_substrait::DFLogicalSubstraitConvertor;
-
 #[async_trait]
 pub trait SubstraitPlan {
     type Error: std::error::Error;
@@ -35,10 +38,12 @@ pub trait SubstraitPlan {
     async fn decode<B: Buf + Send>(
         &self,
         message: B,
-        catalog_list: Arc<dyn CatalogList>,
-        catalog: &str,
-        schema: &str,
+        state: SessionState,
     ) -> Result<Self::Plan, Self::Error>;
 
-    fn encode(&self, plan: &Self::Plan) -> Result<Bytes, Self::Error>;
+    fn encode(
+        &self,
+        plan: &Self::Plan,
+        serializer: impl SerializerRegistry + 'static,
+    ) -> Result<Bytes, Self::Error>;
 }

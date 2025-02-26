@@ -19,22 +19,29 @@ use derive_builder::Builder;
 use rand::seq::SliceRandom;
 use rand::Rng;
 
+use super::TsValueGenerator;
 use crate::context::TableContextRef;
 use crate::error::{Error, Result};
 use crate::fake::WordGenerator;
-use crate::generator::{Generator, Random};
+use crate::generator::{Generator, Random, ValueGenerator};
 use crate::ir::insert_expr::{InsertIntoExpr, RowValue};
-use crate::ir::{generate_random_value, Ident};
+use crate::ir::{generate_random_timestamp, generate_random_value, Ident};
 
 /// Generates [InsertIntoExpr].
 #[derive(Builder)]
 #[builder(pattern = "owned")]
 pub struct InsertExprGenerator<R: Rng + 'static> {
     table_ctx: TableContextRef,
+    // Whether to omit all columns, i.e. INSERT INTO table_name VALUES (...)
+    omit_column_list: bool,
     #[builder(default = "1")]
     rows: usize,
     #[builder(default = "Box::new(WordGenerator)")]
     word_generator: Box<dyn Random<Ident, R>>,
+    #[builder(default = "Box::new(generate_random_value)")]
+    value_generator: ValueGenerator<R>,
+    #[builder(default = "Box::new(generate_random_timestamp)")]
+    ts_value_generator: TsValueGenerator<R>,
     #[builder(default)]
     _phantom: PhantomData<R>,
 }
@@ -44,13 +51,10 @@ impl<R: Rng + 'static> Generator<InsertIntoExpr, R> for InsertExprGenerator<R> {
 
     /// Generates the [InsertIntoExpr].
     fn generate(&self, rng: &mut R) -> Result<InsertIntoExpr> {
-        // Whether to omit all columns, i.e. INSERT INTO table_name VALUES (...)
-        let omit_column_list = rng.gen_bool(0.2);
-
         let mut values_columns = vec![];
-        if omit_column_list {
+        if self.omit_column_list {
             // If omit column list, then all columns are required in the values list
-            values_columns = self.table_ctx.columns.clone();
+            values_columns.clone_from(&self.table_ctx.columns);
         } else {
             for column in &self.table_ctx.columns {
                 let can_omit = column.is_nullable() || column.has_default_value();
@@ -81,24 +85,27 @@ impl<R: Rng + 'static> Generator<InsertIntoExpr, R> for InsertExprGenerator<R> {
                     row.push(RowValue::Default);
                     continue;
                 }
-
-                row.push(RowValue::Value(generate_random_value(
-                    rng,
-                    &column.column_type,
-                    Some(self.word_generator.as_ref()),
-                )));
+                if column.is_time_index() {
+                    row.push(RowValue::Value((self.ts_value_generator)(
+                        rng,
+                        column.timestamp_type().unwrap(),
+                    )));
+                } else {
+                    row.push(RowValue::Value((self.value_generator)(
+                        rng,
+                        &column.column_type,
+                        Some(self.word_generator.as_ref()),
+                    )));
+                }
             }
 
             values_list.push(row);
         }
 
         Ok(InsertIntoExpr {
-            table_name: self.table_ctx.name.to_string(),
-            columns: if omit_column_list {
-                vec![]
-            } else {
-                values_columns
-            },
+            table_name: self.table_ctx.name.clone(),
+            omit_column_list: self.omit_column_list,
+            columns: values_columns,
             values_list,
         })
     }

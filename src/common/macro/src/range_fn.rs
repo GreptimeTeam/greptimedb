@@ -16,11 +16,10 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::spanned::Spanned;
 use syn::{
-    parse_macro_input, Attribute, AttributeArgs, Ident, ItemFn, Signature, Type, TypeReference,
-    Visibility,
+    parse_macro_input, Attribute, Ident, ItemFn, Signature, Type, TypeReference, Visibility,
 };
 
-use crate::utils::{extract_arg_map, extract_input_types, get_ident};
+use crate::utils::extract_input_types;
 
 macro_rules! ok {
     ($item:expr) => {
@@ -32,12 +31,27 @@ macro_rules! ok {
 }
 
 pub(crate) fn process_range_fn(args: TokenStream, input: TokenStream) -> TokenStream {
-    let mut result = TokenStream::new();
+    let mut name: Option<Ident> = None;
+    let mut display_name: Option<Ident> = None;
+    let mut ret: Option<Ident> = None;
+
+    let parser = syn::meta::parser(|meta| {
+        if meta.path.is_ident("name") {
+            name = Some(meta.value()?.parse()?);
+            Ok(())
+        } else if meta.path.is_ident("display_name") {
+            display_name = Some(meta.value()?.parse()?);
+            Ok(())
+        } else if meta.path.is_ident("ret") {
+            ret = Some(meta.value()?.parse()?);
+            Ok(())
+        } else {
+            Err(meta.error("unsupported property"))
+        }
+    });
 
     // extract arg map
-    let arg_pairs = parse_macro_input!(args as AttributeArgs);
-    let arg_span = arg_pairs[0].span();
-    let arg_map = ok!(extract_arg_map(arg_pairs));
+    parse_macro_input!(args with parser);
 
     // decompose the fn block
     let compute_fn = parse_macro_input!(input as ItemFn);
@@ -68,25 +82,27 @@ pub(crate) fn process_range_fn(args: TokenStream, input: TokenStream) -> TokenSt
         })
         .collect::<Vec<_>>();
 
+    let mut result = TokenStream::new();
+
     // build the struct and its impl block
     // only do this when `display_name` is specified
-    if let Ok(display_name) = get_ident(&arg_map, "display_name", arg_span) {
+    if let Some(display_name) = display_name {
         let struct_code = build_struct(
             attrs,
             vis,
-            ok!(get_ident(&arg_map, "name", arg_span)),
+            name.clone().expect("name required"),
             display_name,
             array_types,
-            ok!(get_ident(&arg_map, "ret", arg_span)),
+            ret.clone().expect("ret required"),
         );
         result.extend(struct_code);
     }
 
     let calc_fn_code = build_calc_fn(
-        ok!(get_ident(&arg_map, "name", arg_span)),
+        name.expect("name required"),
         arg_types,
         fn_name.clone(),
-        ok!(get_ident(&arg_map, "ret", arg_span)),
+        ret.expect("ret required"),
     );
     // preserve this fn, but remove its `pub` modifier
     let input_fn_code: TokenStream = quote! {
@@ -119,15 +135,13 @@ fn build_struct(
             }
 
             pub fn scalar_udf() -> ScalarUDF {
-                ScalarUDF {
-                    name: Self::name().to_string(),
-                    signature: Signature::new(
-                        TypeSignature::Exact(Self::input_type()),
-                        Volatility::Immutable,
-                    ),
-                    return_type: Arc::new(|_| Ok(Arc::new(Self::return_type()))),
-                    fun: Arc::new(Self::calc),
-                }
+                datafusion_expr::create_udf(
+                    Self::name(),
+                    Self::input_type(),
+                    Self::return_type(),
+                    Volatility::Immutable,
+                    Arc::new(Self::calc) as _,
+                )
             }
 
             fn input_type() -> Vec<DataType> {

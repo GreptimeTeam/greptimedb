@@ -23,23 +23,25 @@ use datafusion::common::{DFSchema, DFSchemaRef, Result as DataFusionResult, Stat
 use datafusion::error::DataFusionError;
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion::physical_expr::PhysicalSortExpr;
-use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
+use datafusion::physical_plan::metrics::{
+    BaselineMetrics, Count, ExecutionPlanMetricsSet, MetricBuilder, MetricValue, MetricsSet,
+};
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, Partitioning, RecordBatchStream,
+    DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream,
 };
 use datatypes::arrow::array::TimestampMillisecondArray;
 use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow::error::Result as ArrowResult;
 use datatypes::arrow::record_batch::RecordBatch;
-use futures::{Stream, StreamExt};
+use futures::{ready, Stream, StreamExt};
 use greptime_proto::substrait_extension as pb;
 use prost::Message;
 use snafu::ResultExt;
 
 use crate::error::{DeserializeSnafu, Result};
-use crate::extension_plan::Millisecond;
+use crate::extension_plan::{Millisecond, METRIC_NUM_SERIES};
+use crate::metrics::PROMQL_SERIES_COUNT;
 
 /// Normalize the input record batch. Notice that for simplicity, this method assumes
 /// the input batch only contains sample points from one time series.
@@ -48,7 +50,7 @@ use crate::extension_plan::Millisecond;
 /// - bias sample's timestamp by offset
 /// - sort the record batch based on timestamp column
 /// - remove NaN values (optional)
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash, PartialOrd)]
 pub struct SeriesNormalize {
     offset: Millisecond,
     time_index_column_name: String,
@@ -82,15 +84,23 @@ impl UserDefinedLogicalNodeCore for SeriesNormalize {
         )
     }
 
-    fn from_template(&self, _exprs: &[Expr], inputs: &[LogicalPlan]) -> Self {
-        assert!(!inputs.is_empty());
+    fn with_exprs_and_inputs(
+        &self,
+        _exprs: Vec<Expr>,
+        inputs: Vec<LogicalPlan>,
+    ) -> DataFusionResult<Self> {
+        if inputs.is_empty() {
+            return Err(DataFusionError::Internal(
+                "SeriesNormalize should have at least one input".to_string(),
+            ));
+        }
 
-        Self {
+        Ok(Self {
             offset: self.offset,
             time_index_column_name: self.time_index_column_name.clone(),
             need_filter_out_nan: self.need_filter_out_nan,
-            input: inputs[0].clone(),
-        }
+            input: inputs.into_iter().next().unwrap(),
+        })
     }
 }
 
@@ -170,16 +180,12 @@ impl ExecutionPlan for SeriesNormalizeExec {
         vec![Distribution::SinglePartition]
     }
 
-    fn output_partitioning(&self) -> Partitioning {
-        self.input.output_partitioning()
+    fn properties(&self) -> &PlanProperties {
+        self.input.properties()
     }
 
-    fn output_ordering(&self) -> Option<&[PhysicalSortExpr]> {
-        self.input.output_ordering()
-    }
-
-    fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
-        vec![self.input.clone()]
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.input]
     }
 
     fn with_new_children(
@@ -202,6 +208,14 @@ impl ExecutionPlan for SeriesNormalizeExec {
         context: Arc<TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
         let baseline_metric = BaselineMetrics::new(&self.metric, partition);
+        let metrics_builder = MetricBuilder::new(&self.metric);
+        let num_series = Count::new();
+        metrics_builder
+            .with_partition(partition)
+            .build(MetricValue::Count {
+                name: METRIC_NUM_SERIES.into(),
+                count: num_series.clone(),
+            });
 
         let input = self.input.execute(partition, context)?;
         let schema = input.schema();
@@ -216,6 +230,7 @@ impl ExecutionPlan for SeriesNormalizeExec {
             schema,
             input,
             metric: baseline_metric,
+            num_series,
         }))
     }
 
@@ -223,8 +238,12 @@ impl ExecutionPlan for SeriesNormalizeExec {
         Some(self.metric.clone_inner())
     }
 
-    fn statistics(&self) -> Statistics {
+    fn statistics(&self) -> DataFusionResult<Statistics> {
         self.input.statistics()
+    }
+
+    fn name(&self) -> &str {
+        "SeriesNormalizeExec"
     }
 }
 
@@ -251,16 +270,21 @@ pub struct SeriesNormalizeStream {
     schema: SchemaRef,
     input: SendableRecordBatchStream,
     metric: BaselineMetrics,
+    /// Number of series processed.
+    num_series: Count,
 }
 
 impl SeriesNormalizeStream {
     pub fn normalize(&self, input: RecordBatch) -> DataFusionResult<RecordBatch> {
-        // TODO(ruihang): maybe the input is not timestamp millisecond array
         let ts_column = input
             .column(self.time_index)
             .as_any()
             .downcast_ref::<TimestampMillisecondArray>()
-            .unwrap();
+            .ok_or_else(|| {
+                DataFusionError::Execution(
+                    "Time index Column downcast to TimestampMillisecondArray failed".into(),
+                )
+            })?;
 
         // bias the timestamp column by offset
         let ts_column_biased = if self.offset == 0 {
@@ -299,7 +323,7 @@ impl SeriesNormalizeStream {
         }
 
         let result = compute::filter_record_batch(&ordered_batch, &BooleanArray::from(filter))
-            .map_err(DataFusionError::ArrowError)?;
+            .map_err(|e| DataFusionError::ArrowError(e, None))?;
         Ok(result)
     }
 }
@@ -314,12 +338,19 @@ impl Stream for SeriesNormalizeStream {
     type Item = DataFusionResult<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let poll = match self.input.poll_next_unpin(cx) {
-            Poll::Ready(batch) => {
-                let _timer = self.metric.elapsed_compute().timer();
-                Poll::Ready(batch.map(|batch| batch.and_then(|batch| self.normalize(batch))))
+        let timer = std::time::Instant::now();
+        let poll = match ready!(self.input.poll_next_unpin(cx)) {
+            Some(Ok(batch)) => {
+                self.num_series.add(1);
+                let result = Ok(batch).and_then(|batch| self.normalize(batch));
+                self.metric.elapsed_compute().add_elapsed(timer);
+                Poll::Ready(Some(result))
             }
-            Poll::Pending => Poll::Pending,
+            None => {
+                PROMQL_SERIES_COUNT.observe(self.num_series.value() as f64);
+                Poll::Ready(None)
+            }
+            Some(Err(e)) => Poll::Ready(Some(Err(e))),
         };
         self.metric.record_poll(poll)
     }

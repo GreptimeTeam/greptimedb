@@ -14,13 +14,13 @@
 
 use std::fmt::{Display, Formatter, Write};
 
-use chrono::{Datelike, Days, LocalResult, Months, NaiveDate, NaiveTime, TimeZone};
+use chrono::{Datelike, Days, LocalResult, Months, NaiveDate, NaiveTime, TimeDelta, TimeZone};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use snafu::ResultExt;
 
 use crate::error::{InvalidDateStrSnafu, ParseDateStrSnafu, Result};
-use crate::interval::Interval;
+use crate::interval::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
 use crate::timezone::get_timezone;
 use crate::util::datetime_to_utc;
 use crate::Timezone;
@@ -134,30 +134,69 @@ impl Date {
         (self.0 as i64) * 24 * 3600
     }
 
-    /// Adds given Interval to the current date.
-    /// Returns None if the resulting date would be out of range.
-    pub fn add_interval(&self, interval: Interval) -> Option<Date> {
+    // FIXME(yingwen): remove add/sub intervals later
+    /// Adds given [IntervalYearMonth] to the current date.
+    pub fn add_year_month(&self, interval: IntervalYearMonth) -> Option<Date> {
         let naive_date = self.to_chrono_date()?;
 
-        let (months, days, _) = interval.to_month_day_nano();
-
         naive_date
-            .checked_add_months(Months::new(months as u32))?
-            .checked_add_days(Days::new(days as u64))
+            .checked_add_months(Months::new(interval.months as u32))
             .map(Into::into)
     }
 
-    /// Subtracts given Interval to the current date.
-    /// Returns None if the resulting date would be out of range.
-    pub fn sub_interval(&self, interval: Interval) -> Option<Date> {
+    /// Adds given [IntervalDayTime] to the current date.
+    pub fn add_day_time(&self, interval: IntervalDayTime) -> Option<Date> {
         let naive_date = self.to_chrono_date()?;
 
-        let (months, days, _) = interval.to_month_day_nano();
+        naive_date
+            .checked_add_days(Days::new(interval.days as u64))?
+            .checked_add_signed(TimeDelta::milliseconds(interval.milliseconds as i64))
+            .map(Into::into)
+    }
+
+    /// Adds given [IntervalMonthDayNano] to the current date.
+    pub fn add_month_day_nano(&self, interval: IntervalMonthDayNano) -> Option<Date> {
+        let naive_date = self.to_chrono_date()?;
 
         naive_date
-            .checked_sub_months(Months::new(months as u32))?
-            .checked_sub_days(Days::new(days as u64))
+            .checked_add_months(Months::new(interval.months as u32))?
+            .checked_add_days(Days::new(interval.days as u64))?
+            .checked_add_signed(TimeDelta::nanoseconds(interval.nanoseconds))
             .map(Into::into)
+    }
+
+    /// Subtracts given [IntervalYearMonth] to the current date.
+    pub fn sub_year_month(&self, interval: IntervalYearMonth) -> Option<Date> {
+        let naive_date = self.to_chrono_date()?;
+
+        naive_date
+            .checked_sub_months(Months::new(interval.months as u32))
+            .map(Into::into)
+    }
+
+    /// Subtracts given [IntervalDayTime] to the current date.
+    pub fn sub_day_time(&self, interval: IntervalDayTime) -> Option<Date> {
+        let naive_date = self.to_chrono_date()?;
+
+        naive_date
+            .checked_sub_days(Days::new(interval.days as u64))?
+            .checked_sub_signed(TimeDelta::milliseconds(interval.milliseconds as i64))
+            .map(Into::into)
+    }
+
+    /// Subtracts given [IntervalMonthDayNano] to the current date.
+    pub fn sub_month_day_nano(&self, interval: IntervalMonthDayNano) -> Option<Date> {
+        let naive_date = self.to_chrono_date()?;
+
+        naive_date
+            .checked_sub_months(Months::new(interval.months as u32))?
+            .checked_sub_days(Days::new(interval.days as u64))?
+            .checked_sub_signed(TimeDelta::nanoseconds(interval.nanoseconds))
+            .map(Into::into)
+    }
+
+    pub fn negative(&self) -> Self {
+        Self(-self.0)
     }
 }
 
@@ -242,12 +281,12 @@ mod tests {
     fn test_add_sub_interval() {
         let date = Date::new(1000);
 
-        let interval = Interval::from_year_month(3);
+        let interval = IntervalYearMonth::new(3);
 
-        let new_date = date.add_interval(interval).unwrap();
+        let new_date = date.add_year_month(interval).unwrap();
         assert_eq!(new_date.val(), 1091);
 
-        assert_eq!(date, new_date.sub_interval(interval).unwrap());
+        assert_eq!(date, new_date.sub_year_month(interval).unwrap());
     }
 
     #[test]

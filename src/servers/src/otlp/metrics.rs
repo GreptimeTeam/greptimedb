@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use api::v1::{RowInsertRequests, Value};
-use common_grpc::writer::Precision;
+use common_grpc::precision::Precision;
 use common_query::prelude::{GREPTIME_COUNT, GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::common::v1::{any_value, KeyValue};
@@ -29,10 +29,10 @@ const APPROXIMATE_COLUMN_COUNT: usize = 8;
 ///
 /// <https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/metrics/api.md#instrument-name-syntax>
 /// - since the name are case-insensitive, we transform them to lowercase for
-/// better sql usability
+///   better sql usability
 /// - replace `.` and `-` with `_`
 fn normalize_otlp_name(name: &str) -> String {
-    name.to_lowercase().replace(|c| c == '.' || c == '-', "_")
+    name.to_lowercase().replace(['.', '-'], "_")
 }
 
 /// Convert OpenTelemetry metrics to GreptimeDB insert requests
@@ -117,7 +117,7 @@ fn write_attributes(
 }
 
 fn write_timestamp(table: &mut TableData, row: &mut Vec<Value>, time_nano: i64) -> Result<()> {
-    row_writer::write_ts_precision(
+    row_writer::write_ts_to_nanos(
         table,
         GREPTIME_TIMESTAMP,
         Some(time_nano),
@@ -174,7 +174,7 @@ fn encode_gauge(
     scope_attrs: Option<&Vec<KeyValue>>,
 ) -> Result<()> {
     let table = table_writer.get_or_default_table_data(
-        &normalize_otlp_name(name),
+        normalize_otlp_name(name),
         APPROXIMATE_COLUMN_COUNT,
         gauge.data_points.len(),
     );
@@ -208,7 +208,7 @@ fn encode_sum(
     scope_attrs: Option<&Vec<KeyValue>>,
 ) -> Result<()> {
     let table = table_writer.get_or_default_table_data(
-        &normalize_otlp_name(name),
+        normalize_otlp_name(name),
         APPROXIMATE_COLUMN_COUNT,
         sum.data_points.len(),
     );
@@ -237,7 +237,7 @@ const HISTOGRAM_LE_COLUMN: &str = "le";
 /// The implementation has been following Prometheus histogram table format:
 ///
 /// - A `%metric%_bucket` table including `greptime_le` tag that stores bucket upper
-/// limit, and `greptime_value` for bucket count
+///   limit, and `greptime_value` for bucket count
 /// - A `%metric%_sum` table storing sum of samples
 /// -  A `%metric%_count` table storing count of samples.
 ///
@@ -358,7 +358,7 @@ fn encode_summary(
     scope_attrs: Option<&Vec<KeyValue>>,
 ) -> Result<()> {
     let table = table_writer.get_or_default_table_data(
-        &normalize_otlp_name(name),
+        normalize_otlp_name(name),
         APPROXIMATE_COLUMN_COUNT,
         summary.data_points.len(),
     );
@@ -377,7 +377,7 @@ fn encode_summary(
         for quantile in &data_point.quantile_values {
             row_writer::write_f64(
                 table,
-                &format!("greptime_p{:02}", quantile.quantile * 100f64),
+                format!("greptime_p{:02}", quantile.quantile * 100f64),
                 quantile.value,
                 &mut row,
             )?;

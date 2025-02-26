@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub use opendal::raw::{normalize_path as raw_normalize_path, HttpClient};
+pub use opendal::raw::{Access, HttpClient};
 pub use opendal::{
-    services, Builder as ObjectStoreBuilder, Entry, EntryMode, Error, ErrorKind, Lister, Metakey,
-    Operator as ObjectStore, Reader, Result, Writer,
+    services, Buffer, Builder as ObjectStoreBuilder, Entry, EntryMode, Error, ErrorKind,
+    FuturesAsyncReader, FuturesAsyncWriter, Lister, Operator as ObjectStore, Reader, Result,
+    Writer,
 };
 
 pub mod layers;
@@ -23,3 +24,5 @@ pub mod manager;
 mod metrics;
 pub mod test_util;
 pub mod util;
+/// The default object cache directory name.
+pub const OBJECT_CACHE_DIR: &str = "object_cache";

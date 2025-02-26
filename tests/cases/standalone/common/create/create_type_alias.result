@@ -36,7 +36,7 @@ SHOW CREATE TABLE data_types;
 |            |   "b" BOOLEAN NULL,                                        |
 |            |   "vb" VARBINARY NULL,                                     |
 |            |   "dt" DATE NULL,                                          |
-|            |   "dtt" DATETIME NULL,                                     |
+|            |   "dtt" TIMESTAMP(6) NULL,                                 |
 |            |   "ts0" TIMESTAMP(0) NULL,                                 |
 |            |   "ts3" TIMESTAMP(3) NULL,                                 |
 |            |   "ts6" TIMESTAMP(6) NULL,                                 |
@@ -46,9 +46,7 @@ SHOW CREATE TABLE data_types;
 |            | )                                                          |
 |            |                                                            |
 |            | ENGINE=mito                                                |
-|            | WITH(                                                      |
-|            |   regions = 1                                              |
-|            | )                                                          |
+|            |                                                            |
 +------------+------------------------------------------------------------+
 
 DESC TABLE data_types;
@@ -67,7 +65,7 @@ DESC TABLE data_types;
 | b      | Boolean              |     | YES  |                     | FIELD         |
 | vb     | Binary               |     | YES  |                     | FIELD         |
 | dt     | Date                 |     | YES  |                     | FIELD         |
-| dtt    | DateTime             |     | YES  |                     | FIELD         |
+| dtt    | TimestampMicrosecond |     | YES  |                     | FIELD         |
 | ts0    | TimestampSecond      |     | YES  |                     | FIELD         |
 | ts3    | TimestampMillisecond |     | YES  |                     | FIELD         |
 | ts6    | TimestampMicrosecond |     | YES  |                     | FIELD         |

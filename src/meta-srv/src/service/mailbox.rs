@@ -24,6 +24,7 @@ use futures::Future;
 use tokio::sync::oneshot;
 
 use crate::error::{self, Result};
+use crate::handler::PusherId;
 
 pub type MailboxRef = Arc<dyn Mailbox>;
 
@@ -33,6 +34,7 @@ pub type MessageId = u64;
 pub enum Channel {
     Datanode(u64),
     Frontend(u64),
+    Flownode(u64),
 }
 
 impl Display for Channel {
@@ -44,21 +46,26 @@ impl Display for Channel {
             Channel::Frontend(id) => {
                 write!(f, "Frontend-{}", id)
             }
+            Channel::Flownode(id) => {
+                write!(f, "Flownode-{}", id)
+            }
         }
     }
 }
 
 impl Channel {
-    pub(crate) fn pusher_id(&self) -> String {
+    pub(crate) fn pusher_id(&self) -> PusherId {
         match self {
-            Channel::Datanode(id) => format!("{}-{}", Role::Datanode as i32, id),
-            Channel::Frontend(id) => format!("{}-{}", Role::Frontend as i32, id),
+            Channel::Datanode(id) => PusherId::new(Role::Datanode, *id),
+            Channel::Frontend(id) => PusherId::new(Role::Frontend, *id),
+            Channel::Flownode(id) => PusherId::new(Role::Flownode, *id),
         }
     }
 }
 pub enum BroadcastChannel {
     Datanode,
     Frontend,
+    Flownode,
 }
 
 impl BroadcastChannel {
@@ -70,7 +77,11 @@ impl BroadcastChannel {
             },
             BroadcastChannel::Frontend => Range {
                 start: format!("{}-", Role::Frontend as i32),
-                end: format!("{}-", Role::Frontend as i32 + 1),
+                end: format!("{}-", Role::Flownode as i32),
+            },
+            BroadcastChannel::Flownode => Range {
+                start: format!("{}-", Role::Flownode as i32),
+                end: format!("{}-", Role::Flownode as i32 + 1),
             },
         }
     }
@@ -143,6 +154,10 @@ mod tests {
         assert_eq!(
             BroadcastChannel::Frontend.pusher_range(),
             ("1-".to_string().."2-".to_string())
+        );
+        assert_eq!(
+            BroadcastChannel::Flownode.pusher_range(),
+            ("2-".to_string().."3-".to_string())
         );
     }
 }

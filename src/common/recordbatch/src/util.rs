@@ -12,10 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use futures::TryStreamExt;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
 
-use crate::error::Result;
-use crate::{RecordBatch, RecordBatches, SendableRecordBatchStream};
+use arc_swap::ArcSwapOption;
+use datatypes::schema::SchemaRef;
+use futures::{Stream, StreamExt, TryStreamExt};
+use snafu::ensure;
+
+use crate::adapter::RecordBatchMetrics;
+use crate::error::{EmptyStreamSnafu, Result, SchemaNotMatchSnafu};
+use crate::{
+    OrderOption, RecordBatch, RecordBatchStream, RecordBatches, SendableRecordBatchStream,
+};
 
 /// Collect all the items from the stream into a vector of [`RecordBatch`].
 pub async fn collect(stream: SendableRecordBatchStream) -> Result<Vec<RecordBatch>> {
@@ -27,6 +37,91 @@ pub async fn collect_batches(stream: SendableRecordBatchStream) -> Result<Record
     let schema = stream.schema();
     let batches = stream.try_collect::<Vec<_>>().await?;
     RecordBatches::try_new(schema, batches)
+}
+
+/// A stream that chains multiple streams into a single stream.
+pub struct ChainedRecordBatchStream {
+    inputs: Vec<SendableRecordBatchStream>,
+    curr_index: usize,
+    schema: SchemaRef,
+    metrics: Arc<ArcSwapOption<RecordBatchMetrics>>,
+}
+
+impl ChainedRecordBatchStream {
+    pub fn new(inputs: Vec<SendableRecordBatchStream>) -> Result<Self> {
+        // check length
+        ensure!(!inputs.is_empty(), EmptyStreamSnafu);
+
+        // check schema
+        let first_schema = inputs[0].schema();
+        for input in inputs.iter().skip(1) {
+            let schema = input.schema();
+            ensure!(
+                first_schema == schema,
+                SchemaNotMatchSnafu {
+                    left: first_schema,
+                    right: schema
+                }
+            );
+        }
+
+        Ok(Self {
+            inputs,
+            curr_index: 0,
+            schema: first_schema,
+            metrics: Default::default(),
+        })
+    }
+
+    fn sequence_poll(
+        mut self: Pin<&mut Self>,
+        ctx: &mut Context<'_>,
+    ) -> Poll<Option<Result<RecordBatch>>> {
+        if self.curr_index >= self.inputs.len() {
+            return Poll::Ready(None);
+        }
+
+        let curr_index = self.curr_index;
+        match self.inputs[curr_index].poll_next_unpin(ctx) {
+            Poll::Ready(Some(Ok(batch))) => Poll::Ready(Some(Ok(batch))),
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
+            Poll::Ready(None) => {
+                self.curr_index += 1;
+                if self.curr_index < self.inputs.len() {
+                    self.sequence_poll(ctx)
+                } else {
+                    Poll::Ready(None)
+                }
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl RecordBatchStream for ChainedRecordBatchStream {
+    fn name(&self) -> &str {
+        "ChainedRecordBatchStream"
+    }
+
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+
+    fn output_ordering(&self) -> Option<&[OrderOption]> {
+        None
+    }
+
+    fn metrics(&self) -> Option<RecordBatchMetrics> {
+        self.metrics.load().as_ref().map(|m| m.as_ref().clone())
+    }
+}
+
+impl Stream for ChainedRecordBatchStream {
+    type Item = Result<RecordBatch>;
+
+    fn poll_next(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.sequence_poll(ctx)
+    }
 }
 
 #[cfg(test)]

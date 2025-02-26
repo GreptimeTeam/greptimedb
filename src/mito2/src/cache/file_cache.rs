@@ -16,16 +16,17 @@
 
 use std::ops::Range;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use common_base::readable_size::ReadableSize;
-use common_telemetry::{info, warn};
+use common_telemetry::{error, info, warn};
 use futures::{FutureExt, TryStreamExt};
 use moka::future::Cache;
 use moka::notification::RemovalCause;
+use moka::policy::EvictionPolicy;
 use object_store::util::join_path;
-use object_store::{ErrorKind, Metakey, ObjectStore, Reader};
+use object_store::{ErrorKind, ObjectStore, Reader};
 use parquet::file::metadata::ParquetMetaData;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
@@ -37,8 +38,10 @@ use crate::sst::file::FileId;
 use crate::sst::parquet::helper::fetch_byte_ranges;
 use crate::sst::parquet::metadata::MetadataLoader;
 
-/// Subdirectory of cached files.
-const FILE_DIR: &str = "files/";
+/// Subdirectory of cached files for write.
+///
+/// This must contain three layers, corresponding to [`build_prometheus_metrics_layer`](object_store::layers::build_prometheus_metrics_layer).
+const FILE_DIR: &str = "cache/object/write/";
 
 /// A file cache manages files on local store and evict files based
 /// on size.
@@ -56,9 +59,14 @@ pub(crate) type FileCacheRef = Arc<FileCache>;
 
 impl FileCache {
     /// Creates a new file cache.
-    pub(crate) fn new(local_store: ObjectStore, capacity: ReadableSize) -> FileCache {
+    pub(crate) fn new(
+        local_store: ObjectStore,
+        capacity: ReadableSize,
+        ttl: Option<Duration>,
+    ) -> FileCache {
         let cache_store = local_store.clone();
-        let memory_index = Cache::builder()
+        let mut builder = Cache::builder()
+            .eviction_policy(EvictionPolicy::lru())
             .weigher(|_key, value: &IndexValue| -> u32 {
                 // We only measure space on local store.
                 value.file_size
@@ -87,8 +95,11 @@ impl FileCache {
                     }
                 }
                 .boxed()
-            })
-            .build();
+            });
+        if let Some(ttl) = ttl {
+            builder = builder.time_to_idle(ttl);
+        }
+        let memory_index = builder.build();
         FileCache {
             local_store,
             memory_index,
@@ -103,9 +114,17 @@ impl FileCache {
             .with_label_values(&[FILE_TYPE])
             .add(value.file_size.into());
         self.memory_index.insert(key, value).await;
+
+        // Since files are large items, we run the pending tasks immediately.
+        self.memory_index.run_pending_tasks().await;
+    }
+
+    pub(crate) async fn get(&self, key: IndexKey) -> Option<IndexValue> {
+        self.memory_index.get(&key).await
     }
 
     /// Reads a file from the cache.
+    #[allow(unused)]
     pub(crate) async fn reader(&self, key: IndexKey) -> Option<Reader> {
         // We must use `get()` to update the estimator of the cache.
         // See https://docs.rs/moka/latest/moka/future/struct.Cache.html#method.contains_key
@@ -167,27 +186,28 @@ impl FileCache {
         }
     }
 
-    #[allow(unused)]
     /// Removes a file from the cache explicitly.
+    /// It always tries to remove the file from the local store because we may not have the file
+    /// in the memory index if upload is failed.
     pub(crate) async fn remove(&self, key: IndexKey) {
         let file_path = self.cache_file_path(key);
         self.memory_index.remove(&key).await;
+        // Always delete the file from the local store.
         if let Err(e) = self.local_store.delete(&file_path).await {
             warn!(e; "Failed to delete a cached file {}", file_path);
         }
     }
 
-    /// Recovers the index from local store.
-    pub(crate) async fn recover(&self) -> Result<()> {
+    async fn recover_inner(&self) -> Result<()> {
         let now = Instant::now();
-
         let mut lister = self
             .local_store
             .lister_with(FILE_DIR)
-            .metakey(Metakey::ContentLength)
             .await
             .context(OpenDalSnafu)?;
-        let (mut total_size, mut total_keys) = (0, 0);
+        // Use i64 for total_size to reduce the risk of overflow.
+        // It is possible that the total size of the cache is larger than i32::MAX.
+        let (mut total_size, mut total_keys) = (0i64, 0);
         while let Some(entry) = lister.try_next().await.context(OpenDalSnafu)? {
             let meta = entry.metadata();
             if !meta.is_file() {
@@ -196,26 +216,48 @@ impl FileCache {
             let Some(key) = parse_index_key(entry.name()) else {
                 continue;
             };
+
+            let meta = self
+                .local_store
+                .stat(entry.path())
+                .await
+                .context(OpenDalSnafu)?;
             let file_size = meta.content_length() as u32;
             self.memory_index
                 .insert(key, IndexValue { file_size })
                 .await;
-            total_size += file_size;
+            total_size += i64::from(file_size);
             total_keys += 1;
         }
         // The metrics is a signed int gauge so we can updates it finally.
-        CACHE_BYTES
-            .with_label_values(&[FILE_TYPE])
-            .add(total_size.into());
+        CACHE_BYTES.with_label_values(&[FILE_TYPE]).add(total_size);
+
+        // Run all pending tasks of the moka cache so that the cache size is updated
+        // and the eviction policy is applied.
+        self.memory_index.run_pending_tasks().await;
 
         info!(
-            "Recovered file cache, num_keys: {}, num_bytes: {}, cost: {:?}",
+            "Recovered file cache, num_keys: {}, num_bytes: {}, total weight: {}, cost: {:?}",
             total_keys,
             total_size,
+            self.memory_index.weighted_size(),
             now.elapsed()
         );
-
         Ok(())
+    }
+
+    /// Recovers the index from local store.
+    pub(crate) async fn recover(self: &Arc<Self>, sync: bool) {
+        let moved_self = self.clone();
+        let handle = tokio::spawn(async move {
+            if let Err(err) = moved_self.recover_inner().await {
+                error!(err; "Failed to recover file cache.")
+            }
+        });
+
+        if sync {
+            let _ = handle.await;
+        }
     }
 
     /// Returns the cache file path for the key.
@@ -231,7 +273,7 @@ impl FileCache {
     /// Get the parquet metadata in file cache.
     /// If the file is not in the cache or fail to load metadata, return None.
     pub(crate) async fn get_parquet_meta_data(&self, key: IndexKey) -> Option<ParquetMetaData> {
-        // Check if file cache contrains the key
+        // Check if file cache contains the key
         if let Some(index_value) = self.memory_index.get(&key).await {
             // Load metadata from file cache
             let local_store = self.local_store();
@@ -264,7 +306,7 @@ impl FileCache {
     }
 
     async fn get_reader(&self, file_path: &str) -> object_store::Result<Option<Reader>> {
-        if self.local_store.is_exist(file_path).await? {
+        if self.local_store.exists(file_path).await? {
             Ok(Some(self.local_store.reader(file_path).await?))
         } else {
             Ok(None)
@@ -365,15 +407,53 @@ fn parse_index_key(name: &str) -> Option<IndexKey> {
 #[cfg(test)]
 mod tests {
     use common_test_util::temp_dir::create_temp_dir;
-    use futures::AsyncReadExt;
     use object_store::services::Fs;
 
     use super::*;
 
     fn new_fs_store(path: &str) -> ObjectStore {
-        let mut builder = Fs::default();
-        builder.root(path);
+        let builder = Fs::default().root(path);
         ObjectStore::new(builder).unwrap().finish()
+    }
+
+    #[tokio::test]
+    async fn test_file_cache_ttl() {
+        let dir = create_temp_dir("");
+        let local_store = new_fs_store(dir.path().to_str().unwrap());
+
+        let cache = FileCache::new(
+            local_store.clone(),
+            ReadableSize::mb(10),
+            Some(Duration::from_millis(10)),
+        );
+        let region_id = RegionId::new(2000, 0);
+        let file_id = FileId::random();
+        let key = IndexKey::new(region_id, file_id, FileType::Parquet);
+        let file_path = cache.cache_file_path(key);
+
+        // Get an empty file.
+        assert!(cache.reader(key).await.is_none());
+
+        // Write a file.
+        local_store
+            .write(&file_path, b"hello".as_slice())
+            .await
+            .unwrap();
+
+        // Add to the cache.
+        cache
+            .put(
+                IndexKey::new(region_id, file_id, FileType::Parquet),
+                IndexValue { file_size: 5 },
+            )
+            .await;
+
+        let exist = cache.reader(key).await;
+        assert!(exist.is_some());
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        cache.memory_index.run_pending_tasks().await;
+        let non = cache.reader(key).await;
+        assert!(non.is_none());
     }
 
     #[tokio::test]
@@ -381,7 +461,7 @@ mod tests {
         let dir = create_temp_dir("");
         let local_store = new_fs_store(dir.path().to_str().unwrap());
 
-        let cache = FileCache::new(local_store.clone(), ReadableSize::mb(10));
+        let cache = FileCache::new(local_store.clone(), ReadableSize::mb(10), None);
         let region_id = RegionId::new(2000, 0);
         let file_id = FileId::random();
         let key = IndexKey::new(region_id, file_id, FileType::Parquet);
@@ -404,10 +484,9 @@ mod tests {
             .await;
 
         // Read file content.
-        let mut reader = cache.reader(key).await.unwrap();
-        let mut buf = String::new();
-        reader.read_to_string(&mut buf).await.unwrap();
-        assert_eq!("hello", buf);
+        let reader = cache.reader(key).await.unwrap();
+        let buf = reader.read(..).await.unwrap().to_vec();
+        assert_eq!("hello", String::from_utf8(buf).unwrap());
 
         // Get weighted size.
         cache.memory_index.run_pending_tasks().await;
@@ -421,7 +500,7 @@ mod tests {
         cache.memory_index.run_pending_tasks().await;
 
         // The file also not exists.
-        assert!(!local_store.is_exist(&file_path).await.unwrap());
+        assert!(!local_store.exists(&file_path).await.unwrap());
         assert_eq!(0, cache.memory_index.weighted_size());
     }
 
@@ -430,7 +509,7 @@ mod tests {
         let dir = create_temp_dir("");
         let local_store = new_fs_store(dir.path().to_str().unwrap());
 
-        let cache = FileCache::new(local_store.clone(), ReadableSize::mb(10));
+        let cache = FileCache::new(local_store.clone(), ReadableSize::mb(10), None);
         let region_id = RegionId::new(2000, 0);
         let file_id = FileId::random();
         let key = IndexKey::new(region_id, file_id, FileType::Parquet);
@@ -462,7 +541,7 @@ mod tests {
     async fn test_file_cache_recover() {
         let dir = create_temp_dir("");
         let local_store = new_fs_store(dir.path().to_str().unwrap());
-        let cache = FileCache::new(local_store.clone(), ReadableSize::mb(10));
+        let cache = FileCache::new(local_store.clone(), ReadableSize::mb(10), None);
 
         let region_id = RegionId::new(2000, 0);
         let file_type = FileType::Parquet;
@@ -488,13 +567,17 @@ mod tests {
         }
 
         // Recover the cache.
-        let cache = FileCache::new(local_store.clone(), ReadableSize::mb(10));
+        let cache = Arc::new(FileCache::new(
+            local_store.clone(),
+            ReadableSize::mb(10),
+            None,
+        ));
         // No entry before recovery.
         assert!(cache
             .reader(IndexKey::new(region_id, file_ids[0], file_type))
             .await
             .is_none());
-        cache.recover().await.unwrap();
+        cache.recover(true).await;
 
         // Check size.
         cache.memory_index.run_pending_tasks().await;
@@ -502,10 +585,9 @@ mod tests {
 
         for (i, file_id) in file_ids.iter().enumerate() {
             let key = IndexKey::new(region_id, *file_id, file_type);
-            let mut reader = cache.reader(key).await.unwrap();
-            let mut buf = String::new();
-            reader.read_to_string(&mut buf).await.unwrap();
-            assert_eq!(i.to_string(), buf);
+            let reader = cache.reader(key).await.unwrap();
+            let buf = reader.read(..).await.unwrap().to_vec();
+            assert_eq!(i.to_string(), String::from_utf8(buf).unwrap());
         }
     }
 
@@ -513,7 +595,7 @@ mod tests {
     async fn test_file_cache_read_ranges() {
         let dir = create_temp_dir("");
         let local_store = new_fs_store(dir.path().to_str().unwrap());
-        let file_cache = FileCache::new(local_store.clone(), ReadableSize::mb(10));
+        let file_cache = FileCache::new(local_store.clone(), ReadableSize::mb(10), None);
         let region_id = RegionId::new(2000, 0);
         let file_id = FileId::random();
         let key = IndexKey::new(region_id, file_id, FileType::Parquet);

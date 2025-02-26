@@ -25,11 +25,11 @@ use datafusion::common::DFSchemaRef;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion::physical_expr::PhysicalSortExpr;
+use datafusion::physical_expr::EquivalenceProperties;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
-    hash_utils, DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, Partitioning,
-    RecordBatchStream, SendableRecordBatchStream, Statistics,
+    hash_utils, DisplayAs, DisplayFormatType, Distribution, ExecutionMode, ExecutionPlan,
+    Partitioning, PlanProperties, RecordBatchStream, SendableRecordBatchStream,
 };
 use datatypes::arrow::compute;
 use futures::future::BoxFuture;
@@ -91,15 +91,41 @@ impl UnionDistinctOn {
         left_exec: Arc<dyn ExecutionPlan>,
         right_exec: Arc<dyn ExecutionPlan>,
     ) -> Arc<dyn ExecutionPlan> {
+        let output_schema: SchemaRef = Arc::new(self.output_schema.as_ref().into());
+        let properties = Arc::new(PlanProperties::new(
+            EquivalenceProperties::new(output_schema.clone()),
+            Partitioning::UnknownPartitioning(1),
+            ExecutionMode::Bounded,
+        ));
         Arc::new(UnionDistinctOnExec {
             left: left_exec,
             right: right_exec,
             compare_keys: self.compare_keys.clone(),
             ts_col: self.ts_col.clone(),
-            output_schema: Arc::new(self.output_schema.as_ref().into()),
+            output_schema,
             metric: ExecutionPlanMetricsSet::new(),
+            properties,
             random_state: RandomState::new(),
         })
+    }
+}
+
+impl PartialOrd for UnionDistinctOn {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        // Compare fields in order excluding output_schema
+        match self.left.partial_cmp(&other.left) {
+            Some(core::cmp::Ordering::Equal) => {}
+            ord => return ord,
+        }
+        match self.right.partial_cmp(&other.right) {
+            Some(core::cmp::Ordering::Equal) => {}
+            ord => return ord,
+        }
+        match self.compare_keys.partial_cmp(&other.compare_keys) {
+            Some(core::cmp::Ordering::Equal) => {}
+            ord => return ord,
+        }
+        self.ts_col.partial_cmp(&other.ts_col)
     }
 }
 
@@ -128,18 +154,28 @@ impl UserDefinedLogicalNodeCore for UnionDistinctOn {
         )
     }
 
-    fn from_template(&self, _exprs: &[Expr], inputs: &[LogicalPlan]) -> Self {
-        assert_eq!(inputs.len(), 2);
+    fn with_exprs_and_inputs(
+        &self,
+        _exprs: Vec<Expr>,
+        inputs: Vec<LogicalPlan>,
+    ) -> DataFusionResult<Self> {
+        if inputs.len() != 2 {
+            return Err(DataFusionError::Internal(
+                "UnionDistinctOn must have exactly 2 inputs".to_string(),
+            ));
+        }
 
-        let left = inputs[0].clone();
-        let right = inputs[1].clone();
-        Self {
+        let mut inputs = inputs.into_iter();
+        let left = inputs.next().unwrap();
+        let right = inputs.next().unwrap();
+
+        Ok(Self {
             left,
             right,
             compare_keys: self.compare_keys.clone(),
             ts_col: self.ts_col.clone(),
             output_schema: self.output_schema.clone(),
-        }
+        })
     }
 }
 
@@ -151,6 +187,7 @@ pub struct UnionDistinctOnExec {
     ts_col: String,
     output_schema: SchemaRef,
     metric: ExecutionPlanMetricsSet,
+    properties: Arc<PlanProperties>,
 
     /// Shared the `RandomState` for the hashing algorithm
     random_state: RandomState,
@@ -169,18 +206,12 @@ impl ExecutionPlan for UnionDistinctOnExec {
         vec![Distribution::SinglePartition, Distribution::SinglePartition]
     }
 
-    fn output_partitioning(&self) -> Partitioning {
-        Partitioning::UnknownPartitioning(1)
+    fn properties(&self) -> &PlanProperties {
+        self.properties.as_ref()
     }
 
-    /// [UnionDistinctOnExec] will output left first, then right.
-    /// So the order of the output is not maintained.
-    fn output_ordering(&self) -> Option<&[PhysicalSortExpr]> {
-        None
-    }
-
-    fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
-        vec![self.left.clone(), self.right.clone()]
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.left, &self.right]
     }
 
     fn with_new_children(
@@ -198,6 +229,7 @@ impl ExecutionPlan for UnionDistinctOnExec {
             ts_col: self.ts_col.clone(),
             output_schema: self.output_schema.clone(),
             metric: self.metric.clone(),
+            properties: self.properties.clone(),
             random_state: self.random_state.clone(),
         }))
     }
@@ -250,8 +282,8 @@ impl ExecutionPlan for UnionDistinctOnExec {
         Some(self.metric.clone_inner())
     }
 
-    fn statistics(&self) -> Statistics {
-        Statistics::default()
+    fn name(&self) -> &str {
+        "UnionDistinctOnExec"
     }
 }
 
@@ -399,7 +431,7 @@ impl HashedData {
             }
         }
 
-        // Finilize the hash map
+        // Finalize the hash map
         let batch = interleave_batches(schema, batches, interleave_indices)?;
 
         Ok(Self {
@@ -466,13 +498,14 @@ fn interleave_batches(
     }
 
     // interleave arrays
-    let mut interleaved_arrays = Vec::with_capacity(arrays.len());
-    for array in arrays {
-        interleaved_arrays.push(compute::interleave(&array, &indices)?);
-    }
+    let interleaved_arrays: Vec<_> = arrays
+        .into_iter()
+        .map(|array| compute::interleave(&array, &indices))
+        .collect::<Result<_, _>>()?;
 
     // assemble new record batch
-    RecordBatch::try_new(schema.clone(), interleaved_arrays).map_err(DataFusionError::ArrowError)
+    RecordBatch::try_new(schema, interleaved_arrays)
+        .map_err(|e| DataFusionError::ArrowError(e, None))
 }
 
 /// Utility function to take rows from a record batch. Based on [take](datafusion::arrow::compute::take)
@@ -490,9 +523,10 @@ fn take_batch(batch: &RecordBatch, indices: &[usize]) -> DataFusionResult<Record
         .iter()
         .map(|array| compute::take(array, &indices_array, None))
         .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(DataFusionError::ArrowError)?;
+        .map_err(|e| DataFusionError::ArrowError(e, None))?;
 
-    let result = RecordBatch::try_new(schema, arrays).map_err(DataFusionError::ArrowError)?;
+    let result =
+        RecordBatch::try_new(schema, arrays).map_err(|e| DataFusionError::ArrowError(e, None))?;
     Ok(result)
 }
 

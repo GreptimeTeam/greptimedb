@@ -16,6 +16,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+use api::region::RegionResponse;
 use async_trait::async_trait;
 use common_catalog::consts::FILE_ENGINE;
 use common_error::ext::BoxedError;
@@ -24,12 +25,15 @@ use common_telemetry::{error, info};
 use object_store::ObjectStore;
 use snafu::{ensure, OptionExt};
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::{RegionEngine, RegionHandleResult, RegionRole, SetReadonlyResponse};
+use store_api::region_engine::{
+    RegionEngine, RegionRole, RegionScannerRef, RegionStatistic, SetRegionRoleStateResponse,
+    SettableRegionRoleState, SinglePartitionScanner,
+};
 use store_api::region_request::{
     AffectedRows, RegionCloseRequest, RegionCreateRequest, RegionDropRequest, RegionOpenRequest,
     RegionRequest,
 };
-use store_api::storage::{RegionId, ScanRequest};
+use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 use tokio::sync::Mutex;
 
 use crate::config::EngineConfig;
@@ -48,24 +52,6 @@ impl FileRegionEngine {
             inner: Arc::new(EngineInner::new(object_store)),
         }
     }
-}
-
-#[async_trait]
-impl RegionEngine for FileRegionEngine {
-    fn name(&self) -> &str {
-        FILE_ENGINE
-    }
-
-    async fn handle_request(
-        &self,
-        region_id: RegionId,
-        request: RegionRequest,
-    ) -> Result<RegionHandleResult, BoxedError> {
-        self.inner
-            .handle_request(region_id, request)
-            .await
-            .map_err(BoxedError::new)
-    }
 
     async fn handle_query(
         &self,
@@ -79,6 +65,36 @@ impl RegionEngine for FileRegionEngine {
             .map_err(BoxedError::new)?
             .query(request)
             .map_err(BoxedError::new)
+    }
+}
+
+#[async_trait]
+impl RegionEngine for FileRegionEngine {
+    fn name(&self) -> &str {
+        FILE_ENGINE
+    }
+
+    async fn handle_request(
+        &self,
+        region_id: RegionId,
+        request: RegionRequest,
+    ) -> Result<RegionResponse, BoxedError> {
+        self.inner
+            .handle_request(region_id, request)
+            .await
+            .map_err(BoxedError::new)
+    }
+
+    async fn handle_query(
+        &self,
+        region_id: RegionId,
+        request: ScanRequest,
+    ) -> Result<RegionScannerRef, BoxedError> {
+        let stream = self.handle_query(region_id, request).await?;
+        let metadata = self.get_metadata(region_id).await?;
+        // We don't support enabling append mode for file engine.
+        let scanner = Box::new(SinglePartitionScanner::new(stream, false, metadata));
+        Ok(scanner)
     }
 
     async fn get_metadata(&self, region_id: RegionId) -> Result<RegionMetadataRef, BoxedError> {
@@ -94,26 +110,31 @@ impl RegionEngine for FileRegionEngine {
         self.inner.stop().await.map_err(BoxedError::new)
     }
 
-    async fn region_disk_usage(&self, _: RegionId) -> Option<i64> {
+    fn region_statistic(&self, _: RegionId) -> Option<RegionStatistic> {
         None
     }
 
-    fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<(), BoxedError> {
+    async fn get_last_seq_num(&self, _: RegionId) -> Result<Option<SequenceNumber>, BoxedError> {
+        Ok(None)
+    }
+
+    fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<(), BoxedError> {
         self.inner
-            .set_writable(region_id, writable)
+            .set_region_role(region_id, role)
             .map_err(BoxedError::new)
     }
 
-    async fn set_readonly_gracefully(
+    async fn set_region_role_state_gracefully(
         &self,
         region_id: RegionId,
-    ) -> Result<SetReadonlyResponse, BoxedError> {
+        _region_role_state: SettableRegionRoleState,
+    ) -> Result<SetRegionRoleStateResponse, BoxedError> {
         let exists = self.inner.get_region(region_id).await.is_some();
 
         if exists {
-            Ok(SetReadonlyResponse::success(None))
+            Ok(SetRegionRoleStateResponse::success(None))
         } else {
-            Ok(SetReadonlyResponse::NotFound)
+            Ok(SetRegionRoleStateResponse::NotFound)
         }
     }
 
@@ -154,7 +175,7 @@ impl EngineInner {
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> EngineResult<RegionHandleResult> {
+    ) -> EngineResult<RegionResponse> {
         let result = match request {
             RegionRequest::Create(req) => self.handle_create(region_id, req).await,
             RegionRequest::Drop(req) => self.handle_drop(region_id, req).await,
@@ -165,7 +186,7 @@ impl EngineInner {
             }
             .fail(),
         };
-        result.map(RegionHandleResult::new)
+        result.map(RegionResponse::new)
     }
 
     async fn stop(&self) -> EngineResult<()> {
@@ -174,7 +195,7 @@ impl EngineInner {
         Ok(())
     }
 
-    fn set_writable(&self, _region_id: RegionId, _writable: bool) -> EngineResult<()> {
+    fn set_region_role(&self, _region_id: RegionId, _region_role: RegionRole) -> EngineResult<()> {
         // TODO(zhongzc): Improve the semantics and implementation of this API.
         Ok(())
     }
@@ -216,8 +237,9 @@ impl EngineInner {
         let res = FileRegion::create(region_id, request, &self.object_store).await;
         let region = res.inspect_err(|err| {
             error!(
-                "Failed to create region, region_id: {}, err: {}",
-                region_id, err
+                err;
+                "Failed to create region, region_id: {}",
+                region_id
             );
         })?;
         self.regions.write().unwrap().insert(region_id, region);
@@ -246,8 +268,9 @@ impl EngineInner {
         let res = FileRegion::open(region_id, request, &self.object_store).await;
         let region = res.inspect_err(|err| {
             error!(
-                "Failed to open region, region_id: {}, err: {}",
-                region_id, err
+                err;
+                "Failed to open region, region_id: {}",
+                region_id
             );
         })?;
         self.regions.write().unwrap().insert(region_id, region);
@@ -289,8 +312,9 @@ impl EngineInner {
             let res = FileRegion::drop(&region, &self.object_store).await;
             res.inspect_err(|err| {
                 error!(
-                    "Failed to drop region, region_id: {}, err: {}",
-                    region_id, err
+                    err;
+                    "Failed to drop region, region_id: {}",
+                    region_id
                 );
             })?;
         }

@@ -1,93 +1,244 @@
-# The working home directory.
+## The working home directory.
 data_home = "/tmp/metasrv/"
-# The bind address of metasrv, "127.0.0.1:3002" by default.
+
+## The bind address of metasrv.
 bind_addr = "127.0.0.1:3002"
-# The communication server address for frontend and datanode to connect to metasrv,  "127.0.0.1:3002" by default for localhost.
+
+## The communication server address for the frontend and datanode to connect to metasrv.
+## If left empty or unset, the server will automatically use the IP address of the first network interface
+## on the host, with the same port number as the one specified in `bind_addr`.
 server_addr = "127.0.0.1:3002"
-# Etcd server address, "127.0.0.1:2379" by default.
-store_addr = "127.0.0.1:2379"
-# Datanode selector type.
-# - "lease_based" (default value).
-# - "load_based"
-# For details, please see "https://docs.greptime.com/developer-guide/metasrv/selector".
-selector = "lease_based"
-# Store data in memory, false by default.
-use_memory_store = false
-# Whether to enable greptimedb telemetry, true by default.
-enable_telemetry = true
-# If it's not empty, the metasrv will store all data with this key prefix.
+
+## Store server address default to etcd store.
+## For postgres store, the format is:
+## "password=password dbname=postgres user=postgres host=localhost port=5432"
+## For etcd store, the format is:
+## "127.0.0.1:2379"
+store_addrs = ["127.0.0.1:2379"]
+
+## If it's not empty, the metasrv will store all data with this key prefix.
 store_key_prefix = ""
 
-# Log options, see `standalone.example.toml`
-# [logging]
-# dir = "/tmp/greptimedb/logs"
-# level = "info"
+## The datastore for meta server.
+## Available values:
+## - `etcd_store` (default value)
+## - `memory_store`
+## - `postgres_store`
+backend = "etcd_store"
 
-# Procedure storage options.
+## Table name in RDS to store metadata. Effect when using a RDS kvbackend.
+## **Only used when backend is `postgres_store`.**
+meta_table_name = "greptime_metakv"
+
+## Advisory lock id in PostgreSQL for election. Effect when using PostgreSQL as kvbackend
+## Only used when backend is `postgres_store`.
+meta_election_lock_id = 1
+
+## Datanode selector type.
+## - `round_robin` (default value)
+## - `lease_based`
+## - `load_based`
+## For details, please see "https://docs.greptime.com/developer-guide/metasrv/selector".
+selector = "round_robin"
+
+## Store data in memory.
+use_memory_store = false
+
+## Whether to enable region failover.
+## This feature is only available on GreptimeDB running on cluster mode and
+## - Using Remote WAL
+## - Using shared storage (e.g., s3).
+enable_region_failover = false
+
+## Whether to enable greptimedb telemetry. Enabled by default.
+#+ enable_telemetry = true
+
+## The runtime options.
+#+ [runtime]
+## The number of threads to execute the runtime for global read operations.
+#+ global_rt_size = 8
+## The number of threads to execute the runtime for global write operations.
+#+ compact_rt_size = 4
+
+## Procedure storage options.
 [procedure]
-# Procedure max retry time.
+
+## Procedure max retry time.
 max_retry_times = 12
-# Initial retry delay of procedures, increases exponentially
+
+## Initial retry delay of procedures, increases exponentially
 retry_delay = "500ms"
+
+## Auto split large value
+## GreptimeDB procedure uses etcd as the default metadata storage backend.
+## The etcd the maximum size of any request is 1.5 MiB
+## 1500KiB = 1536KiB (1.5MiB) - 36KiB (reserved size of key)
+## Comments out the `max_metadata_value_size`, for don't split large value (no limit).
+max_metadata_value_size = "1500KiB"
 
 # Failure detectors options.
 [failure_detector]
+
+## The threshold value used by the failure detector to determine failure conditions.
 threshold = 8.0
+
+## The minimum standard deviation of the heartbeat intervals, used to calculate acceptable variations.
 min_std_deviation = "100ms"
-acceptable_heartbeat_pause = "3000ms"
+
+## The acceptable pause duration between heartbeats, used to determine if a heartbeat interval is acceptable.
+acceptable_heartbeat_pause = "10000ms"
+
+## The initial estimate of the heartbeat interval used by the failure detector.
 first_heartbeat_estimate = "1000ms"
 
-# # Datanode options.
-# [datanode]
-# # Datanode client options.
-# [datanode.client_options]
-# timeout = "10s"
-# connect_timeout = "10s"
-# tcp_nodelay = true
+## Datanode options.
+[datanode]
+
+## Datanode client options.
+[datanode.client]
+
+## Operation timeout.
+timeout = "10s"
+
+## Connect server timeout.
+connect_timeout = "10s"
+
+## `TCP_NODELAY` option for accepted connections.
+tcp_nodelay = true
 
 [wal]
 # Available wal providers:
-# - "raft_engine" (default)
-# - "kafka"
+# - `raft_engine` (default): there're none raft-engine wal config since metasrv only involves in remote wal currently.
+# - `kafka`: metasrv **have to be** configured with kafka wal config when using kafka wal provider in datanode.
 provider = "raft_engine"
 
-# There're none raft-engine wal config since meta srv only involves in remote wal currently.
-
 # Kafka wal config.
-# The broker endpoints of the Kafka cluster. ["127.0.0.1:9092"] by default.
-# broker_endpoints = ["127.0.0.1:9092"]
-# Number of topics to be created upon start.
-# num_topics = 64
-# Topic selector type.
-# Available selector types: 
-# - "round_robin" (default)
-# selector_type = "round_robin"
-# A Kafka topic is constructed by concatenating `topic_name_prefix` and `topic_id`.
-# topic_name_prefix = "greptimedb_wal_topic"
-# Expected number of replicas of each partition.
-# replication_factor = 1
-# Above which a topic creation operation will be cancelled.
-# create_topic_timeout = "30s"
-# The initial backoff for kafka clients.
-# backoff_init = "500ms"
-# The maximum backoff for kafka clients.
-# backoff_max = "10s"
-# Exponential backoff rate, i.e. next backoff = base * current backoff.
-# backoff_base = 2
-# Stop reconnecting if the total wait time reaches the deadline. If this config is missing, the reconnecting won't terminate.
-# backoff_deadline = "5mins"
 
-# Metasrv export the metrics generated by itself
-# encoded to Prometheus remote-write format
-# and send to Prometheus remote-write compatible receiver (e.g. send to `greptimedb` itself)
-# This is only used for `greptimedb` to export its own metrics internally. It's different from prometheus scrape.
-# [export_metrics]
-# whether enable export metrics, default is false
-# enable = false
-# The interval of export metrics
-# write_interval = "30s"
-# [export_metrics.remote_write]
-# The url the metrics send to. The url is empty by default, url example: `http://127.0.0.1:4000/v1/prometheus/write?db=information_schema`
-# url = ""
-# HTTP headers of Prometheus remote-write carry
-# headers = {}
+## The broker endpoints of the Kafka cluster.
+broker_endpoints = ["127.0.0.1:9092"]
+
+## Automatically create topics for WAL.
+## Set to `true` to automatically create topics for WAL.
+## Otherwise, use topics named `topic_name_prefix_[0..num_topics)`
+auto_create_topics = true
+
+## Number of topics.
+num_topics = 64
+
+## Topic selector type.
+## Available selector types:
+## - `round_robin` (default)
+selector_type = "round_robin"
+
+## A Kafka topic is constructed by concatenating `topic_name_prefix` and `topic_id`.
+## Only accepts strings that match the following regular expression pattern:
+## [a-zA-Z_:-][a-zA-Z0-9_:\-\.@#]*
+## i.g., greptimedb_wal_topic_0, greptimedb_wal_topic_1.
+topic_name_prefix = "greptimedb_wal_topic"
+
+## Expected number of replicas of each partition.
+replication_factor = 1
+
+## Above which a topic creation operation will be cancelled.
+create_topic_timeout = "30s"
+## The initial backoff for kafka clients.
+backoff_init = "500ms"
+
+## The maximum backoff for kafka clients.
+backoff_max = "10s"
+
+## Exponential backoff rate, i.e. next backoff = base * current backoff.
+backoff_base = 2
+
+## Stop reconnecting if the total wait time reaches the deadline. If this config is missing, the reconnecting won't terminate.
+backoff_deadline = "5mins"
+
+# The Kafka SASL configuration.
+# **It's only used when the provider is `kafka`**.
+# Available SASL mechanisms:
+# - `PLAIN`
+# - `SCRAM-SHA-256`
+# - `SCRAM-SHA-512`
+# [wal.sasl]
+# type = "SCRAM-SHA-512"
+# username = "user_kafka"
+# password = "secret"
+
+# The Kafka TLS configuration.
+# **It's only used when the provider is `kafka`**.
+# [wal.tls]
+# server_ca_cert_path = "/path/to/server_cert"
+# client_cert_path = "/path/to/client_cert"
+# client_key_path = "/path/to/key"
+
+## The logging options.
+[logging]
+## The directory to store the log files. If set to empty, logs will not be written to files.
+dir = "/tmp/greptimedb/logs"
+
+## The log level. Can be `info`/`debug`/`warn`/`error`.
+## @toml2docs:none-default
+level = "info"
+
+## Enable OTLP tracing.
+enable_otlp_tracing = false
+
+## The OTLP tracing endpoint.
+otlp_endpoint = "http://localhost:4317"
+
+## Whether to append logs to stdout.
+append_stdout = true
+
+## The log format. Can be `text`/`json`.
+log_format = "text"
+
+## The maximum amount of log files.
+max_log_files = 720
+
+## The percentage of tracing will be sampled and exported.
+## Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.
+## ratio > 1 are treated as 1. Fractions < 0 are treated as 0
+[logging.tracing_sample_ratio]
+default_ratio = 1.0
+
+## The slow query log options.
+[logging.slow_query]
+## Whether to enable slow query log.
+enable = false
+
+## The threshold of slow query.
+## @toml2docs:none-default
+threshold = "10s"
+
+## The sampling ratio of slow query log. The value should be in the range of (0, 1].
+## @toml2docs:none-default
+sample_ratio = 1.0
+
+## The datanode can export its metrics and send to Prometheus compatible service (e.g. send to `greptimedb` itself) from remote-write API.
+## This is only used for `greptimedb` to export its own metrics internally. It's different from prometheus scrape.
+[export_metrics]
+
+## whether enable export metrics.
+enable = false
+
+## The interval of export metrics.
+write_interval = "30s"
+
+## For `standalone` mode, `self_import` is recommend to collect metrics generated by itself
+## You must create the database before enabling it.
+[export_metrics.self_import]
+## @toml2docs:none-default
+db = "greptime_metrics"
+
+[export_metrics.remote_write]
+## The url the metrics send to. The url example can be: `http://127.0.0.1:4000/v1/prometheus/write?db=greptime_metrics`.
+url = ""
+
+## HTTP headers of Prometheus remote-write carry.
+headers = { }
+
+## The tracing options. Only effect when compiled with `tokio-console` feature.
+#+ [tracing]
+## The tokio console address.
+## @toml2docs:none-default
+#+ tokio_console_addr = "127.0.0.1"

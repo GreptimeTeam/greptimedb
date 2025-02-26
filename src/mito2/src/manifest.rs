@@ -15,6 +15,7 @@
 //! manifest storage
 
 pub mod action;
+mod checkpointer;
 pub mod manager;
 pub mod storage;
 #[cfg(test)]

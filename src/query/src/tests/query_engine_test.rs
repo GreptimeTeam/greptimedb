@@ -35,7 +35,6 @@ use table::test_util::MemTable;
 
 use crate::error::{QueryExecutionSnafu, Result};
 use crate::parser::QueryLanguageParser;
-use crate::plan::LogicalPlan;
 use crate::query_engine::options::QueryOptions;
 use crate::query_engine::QueryEngineFactory;
 use crate::tests::exec_selection;
@@ -47,7 +46,7 @@ async fn test_datafusion_query_engine() -> Result<()> {
     let catalog_list = catalog::memory::new_memory_catalog_manager()
         .map_err(BoxedError::new)
         .context(QueryExecutionSnafu)?;
-    let factory = QueryEngineFactory::new(catalog_list, None, None, None, false);
+    let factory = QueryEngineFactory::new(catalog_list, None, None, None, None, false);
     let engine = factory.query_engine();
 
     let column_schemas = vec![ColumnSchema::new(
@@ -64,18 +63,16 @@ async fn test_datafusion_query_engine() -> Result<()> {
 
     let limit = 10;
     let table_provider = Arc::new(DfTableProviderAdapter::new(table.clone()));
-    let plan = LogicalPlan::DfPlan(
-        LogicalPlanBuilder::scan(
-            "numbers",
-            Arc::new(DefaultTableSource { table_provider }),
-            None,
-        )
-        .unwrap()
-        .limit(0, Some(limit))
-        .unwrap()
-        .build()
-        .unwrap(),
-    );
+    let plan = LogicalPlanBuilder::scan(
+        "numbers",
+        Arc::new(DefaultTableSource { table_provider }),
+        None,
+    )
+    .unwrap()
+    .limit(0, Some(limit))
+    .unwrap()
+    .build()
+    .unwrap();
 
     let output = engine.execute(plan, QueryContext::arc()).await?;
 
@@ -129,7 +126,7 @@ async fn test_query_validate() -> Result<()> {
     });
 
     let factory =
-        QueryEngineFactory::new_with_plugins(catalog_list, None, None, None, false, plugins);
+        QueryEngineFactory::new_with_plugins(catalog_list, None, None, None, None, false, plugins);
     let engine = factory.query_engine();
 
     let stmt =
@@ -137,7 +134,7 @@ async fn test_query_validate() -> Result<()> {
             .unwrap();
     assert!(engine
         .planner()
-        .plan(stmt, QueryContext::arc())
+        .plan(&stmt, QueryContext::arc())
         .await
         .is_ok());
 
@@ -148,7 +145,7 @@ async fn test_query_validate() -> Result<()> {
     .unwrap();
     assert!(engine
         .planner()
-        .plan(stmt, QueryContext::arc())
+        .plan(&stmt, QueryContext::arc())
         .await
         .is_err());
     Ok(())
@@ -159,7 +156,7 @@ async fn test_udf() -> Result<()> {
     common_telemetry::init_default_ut_logging();
     let catalog_list = catalog_manager()?;
 
-    let factory = QueryEngineFactory::new(catalog_list, None, None, None, false);
+    let factory = QueryEngineFactory::new(catalog_list, None, None, None, None, false);
     let engine = factory.query_engine();
 
     let pow = make_scalar_function(pow);

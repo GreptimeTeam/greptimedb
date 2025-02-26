@@ -21,6 +21,9 @@ use std::time::Duration;
 use api::v1::Rows;
 use common_recordbatch::RecordBatches;
 use common_time::util::current_time_millis;
+use common_wal::options::WAL_OPTIONS_KEY;
+use rstest::rstest;
+use rstest_reuse::{self, apply};
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::RegionRequest;
 use store_api::storage::{RegionId, ScanRequest};
@@ -28,8 +31,10 @@ use store_api::storage::{RegionId, ScanRequest};
 use crate::config::MitoConfig;
 use crate::engine::listener::{FlushListener, StallListener};
 use crate::test_util::{
-    build_rows, build_rows_for_key, flush_region, put_rows, reopen_region, rows_schema,
-    CreateRequestBuilder, MockWriteBufferManager, TestEnv,
+    build_rows, build_rows_for_key, flush_region, kafka_log_store_factory,
+    multiple_log_store_factories, prepare_test_for_kafka_log_store, put_rows,
+    raft_engine_log_store_factory, reopen_region, rows_schema, CreateRequestBuilder,
+    LogStoreFactory, MockWriteBufferManager, TestEnv,
 };
 use crate::time_provider::TimeProvider;
 use crate::worker::MAX_INITIAL_CHECK_DELAY_SECS;
@@ -40,6 +45,17 @@ async fn test_manual_flush() {
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
     let request = CreateRequestBuilder::new().build();
 
     let column_schemas = rows_schema(&request);
@@ -87,6 +103,17 @@ async fn test_flush_engine() {
         .await;
 
     let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
     let request = CreateRequestBuilder::new().build();
 
     let column_schemas = rows_schema(&request);
@@ -146,6 +173,16 @@ async fn test_write_stall() {
         .await;
 
     let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
     let request = CreateRequestBuilder::new().build();
 
     let column_schemas = rows_schema(&request);
@@ -210,6 +247,16 @@ async fn test_flush_empty() {
         .await;
 
     let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
     let request = CreateRequestBuilder::new().build();
 
     engine
@@ -231,13 +278,35 @@ async fn test_flush_empty() {
     assert_eq!(expected, batches.pretty_print().unwrap());
 }
 
-#[tokio::test]
-async fn test_flush_reopen_region() {
-    let mut env = TestEnv::new();
-    let engine = env.create_engine(MitoConfig::default()).await;
+#[apply(multiple_log_store_factories)]
+async fn test_flush_reopen_region(factory: Option<LogStoreFactory>) {
+    use std::collections::HashMap;
 
+    use common_wal::options::{KafkaWalOptions, WalOptions};
+
+    common_telemetry::init_default_ut_logging();
+    let Some(factory) = factory else {
+        return;
+    };
+
+    let mut env = TestEnv::new().with_log_store_factory(factory.clone());
+    let engine = env.create_engine(MitoConfig::default()).await;
     let region_id = RegionId::new(1, 1);
-    let request = CreateRequestBuilder::new().build();
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let topic = prepare_test_for_kafka_log_store(&factory).await;
+    let request = CreateRequestBuilder::new()
+        .kafka_topic(topic.clone())
+        .build();
     let region_dir = request.region_dir.clone();
 
     let column_schemas = rows_schema(&request);
@@ -263,7 +332,17 @@ async fn test_flush_reopen_region() {
     };
     check_region();
 
-    reopen_region(&engine, region_id, region_dir, true, Default::default()).await;
+    let mut options = HashMap::new();
+    if let Some(topic) = &topic {
+        options.insert(
+            WAL_OPTIONS_KEY.to_string(),
+            serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
+                topic: topic.to_string(),
+            }))
+            .unwrap(),
+        );
+    };
+    reopen_region(&engine, region_id, region_dir, true, options).await;
     check_region();
 
     // Puts again.
@@ -279,7 +358,7 @@ async fn test_flush_reopen_region() {
 }
 
 #[derive(Debug)]
-struct MockTimeProvider {
+pub(crate) struct MockTimeProvider {
     now: AtomicI64,
     elapsed: AtomicI64,
 }
@@ -299,14 +378,14 @@ impl TimeProvider for MockTimeProvider {
 }
 
 impl MockTimeProvider {
-    fn new(now: i64) -> Self {
+    pub(crate) fn new(now: i64) -> Self {
         Self {
             now: AtomicI64::new(now),
             elapsed: AtomicI64::new(0),
         }
     }
 
-    fn set_now(&self, now: i64) {
+    pub(crate) fn set_now(&self, now: i64) {
         self.now.store(now, Ordering::Relaxed);
     }
 
@@ -333,8 +412,18 @@ async fn test_auto_flush_engine() {
             time_provider.clone(),
         )
         .await;
-
     let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
     let request = CreateRequestBuilder::new().build();
 
     let column_schemas = rows_schema(&request);
@@ -362,6 +451,86 @@ async fn test_auto_flush_engine() {
 
     let request = ScanRequest::default();
     let scanner = engine.scanner(region_id, request).unwrap();
+    assert_eq!(0, scanner.num_memtables());
+    assert_eq!(1, scanner.num_files());
+    let stream = scanner.scan().await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    let expected = "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| a     | 0.0     | 1970-01-01T00:00:00 |
+| a     | 1.0     | 1970-01-01T00:00:01 |
++-------+---------+---------------------+";
+    assert_eq!(expected, batches.pretty_print().unwrap());
+}
+
+#[tokio::test]
+async fn test_flush_workers() {
+    let mut env = TestEnv::new();
+    let write_buffer_manager = Arc::new(MockWriteBufferManager::default());
+    let listener = Arc::new(FlushListener::default());
+    let engine = env
+        .create_engine_with(
+            MitoConfig {
+                num_workers: 2,
+                ..Default::default()
+            },
+            Some(write_buffer_manager.clone()),
+            Some(listener.clone()),
+        )
+        .await;
+
+    let region_id0 = RegionId::new(1, 0);
+    let region_id1 = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id0.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let request = CreateRequestBuilder::new().region_dir("r0").build();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id0, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let request = CreateRequestBuilder::new().region_dir("r1").build();
+    engine
+        .handle_request(region_id1, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+
+    // Prepares rows for flush.
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows_for_key("a", 0, 2, 0),
+    };
+    put_rows(&engine, region_id0, rows.clone()).await;
+    put_rows(&engine, region_id1, rows).await;
+
+    write_buffer_manager.set_should_flush(true);
+
+    // Writes to the mutable memtable and triggers flush for region 0.
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows_for_key("b", 0, 2, 0),
+    };
+    put_rows(&engine, region_id0, rows).await;
+
+    // Waits until flush is finished.
+    while listener.success_count() < 2 {
+        listener.wait().await;
+    }
+
+    // Scans region 1.
+    let request = ScanRequest::default();
+    let scanner = engine.scanner(region_id1, request).unwrap();
     assert_eq!(0, scanner.num_memtables());
     assert_eq!(1, scanner.num_files());
     let stream = scanner.scan().await.unwrap();

@@ -1,0 +1,45 @@
+meta:
+  configData: |-
+    [runtime]
+    global_rt_size = 4
+    
+    [wal]
+    provider = "kafka"
+    broker_endpoints = ["kafka.kafka-cluster.svc.cluster.local:9092"]
+    num_topics = 3
+
+        
+    [datanode]
+    [datanode.client]
+    timeout = "120s"
+datanode:
+  configData: |-
+    [runtime]
+    global_rt_size = 4
+    compact_rt_size = 2
+
+    [wal]
+    provider = "kafka"
+    broker_endpoints = ["kafka.kafka-cluster.svc.cluster.local:9092"]
+    linger = "2ms"
+frontend:
+  configData: |-
+    [runtime]
+    global_rt_size = 4
+
+    [meta_client]
+    ddl_timeout = "120s"
+objectStorage:
+  s3:
+    bucket: default
+    region: us-west-2
+    root: test-root
+    endpoint: http://minio.minio.svc.cluster.local 
+  credentials:
+    accessKeyId: rootuser
+    secretAccessKey: rootpass123
+remoteWal:
+   enabled: true
+   kafka:
+     brokerEndpoints: 
+      - "kafka.kafka-cluster.svc.cluster.local:9092"

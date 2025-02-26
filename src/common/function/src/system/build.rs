@@ -42,7 +42,7 @@ impl Function for BuildFunction {
     }
 
     fn signature(&self) -> Signature {
-        Signature::uniform(0, vec![], Volatility::Immutable)
+        Signature::nullary(Volatility::Immutable)
     }
 
     fn eval(&self, _func_ctx: FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
@@ -56,8 +56,6 @@ impl Function for BuildFunction {
 mod tests {
     use std::sync::Arc;
 
-    use common_query::prelude::TypeSignature;
-
     use super::*;
     #[test]
     fn test_build_function() {
@@ -67,12 +65,7 @@ mod tests {
             ConcreteDataType::string_datatype(),
             build.return_type(&[]).unwrap()
         );
-        assert!(matches!(build.signature(),
-                         Signature {
-                             type_signature: TypeSignature::Uniform(0, valid_types),
-                             volatility: Volatility::Immutable
-                         } if  valid_types.is_empty()
-        ));
+        assert_eq!(build.signature(), Signature::nullary(Volatility::Immutable));
         let build_info = common_version::build_info().to_string();
         let vector = build.eval(FunctionContext::default(), &[]).unwrap();
         let expect: VectorRef = Arc::new(StringVector::from(vec![build_info]));

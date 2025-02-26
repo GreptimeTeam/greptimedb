@@ -15,12 +15,14 @@
 #![feature(assert_matches, let_chains)]
 
 use async_trait::async_trait;
-use clap::arg;
 use common_telemetry::{error, info};
+
+use crate::error::Result;
 
 pub mod cli;
 pub mod datanode;
 pub mod error;
+pub mod flownode;
 pub mod frontend;
 pub mod metasrv;
 pub mod options;
@@ -28,7 +30,32 @@ pub mod standalone;
 
 lazy_static::lazy_static! {
     static ref APP_VERSION: prometheus::IntGaugeVec =
-        prometheus::register_int_gauge_vec!("greptime_app_version", "app version", &["short_version", "version"]).unwrap();
+        prometheus::register_int_gauge_vec!("greptime_app_version", "app version", &["version", "short_version", "app"]).unwrap();
+}
+
+/// wait for the close signal, for unix platform it's SIGINT or SIGTERM
+#[cfg(unix)]
+async fn start_wait_for_close_signal() -> std::io::Result<()> {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut sigint = signal(SignalKind::interrupt())?;
+    let mut sigterm = signal(SignalKind::terminate())?;
+
+    tokio::select! {
+        _ = sigint.recv() => {
+            info!("Received SIGINT, shutting down");
+        }
+        _ = sigterm.recv() => {
+            info!("Received SIGTERM, shutting down");
+        }
+    }
+
+    Ok(())
+}
+
+/// wait for the close signal, for non-unix platform it's ctrl-c
+#[cfg(not(unix))]
+async fn start_wait_for_close_signal() -> std::io::Result<()> {
+    tokio::signal::ctrl_c().await
 }
 
 #[async_trait]
@@ -36,88 +63,55 @@ pub trait App: Send {
     fn name(&self) -> &str;
 
     /// A hook for implementor to make something happened before actual startup. Defaults to no-op.
-    async fn pre_start(&mut self) -> error::Result<()> {
+    async fn pre_start(&mut self) -> Result<()> {
         Ok(())
     }
 
-    async fn start(&mut self) -> error::Result<()>;
+    async fn start(&mut self) -> Result<()>;
 
-    async fn stop(&self) -> error::Result<()>;
-}
-
-pub async fn start_app(mut app: Box<dyn App>) -> error::Result<()> {
-    info!("Starting app: {}", app.name());
-
-    app.pre_start().await?;
-
-    app.start().await?;
-
-    if let Err(e) = tokio::signal::ctrl_c().await {
-        error!("Failed to listen for ctrl-c signal: {}", e);
-        // It's unusual to fail to listen for ctrl-c signal, maybe there's something unexpected in
-        // the underlying system. So we stop the app instead of running nonetheless to let people
-        // investigate the issue.
+    /// Waits the quit signal by default.
+    fn wait_signal(&self) -> bool {
+        true
     }
 
-    app.stop().await?;
-    info!("Goodbye!");
-    Ok(())
+    async fn stop(&self) -> Result<()>;
+
+    async fn run(&mut self) -> Result<()> {
+        info!("Starting app: {}", self.name());
+
+        self.pre_start().await?;
+
+        self.start().await?;
+
+        if self.wait_signal() {
+            if let Err(e) = start_wait_for_close_signal().await {
+                error!(e; "Failed to listen for close signal");
+                // It's unusual to fail to listen for close signal, maybe there's something unexpected in
+                // the underlying system. So we stop the app instead of running nonetheless to let people
+                // investigate the issue.
+            }
+        }
+
+        self.stop().await?;
+        info!("Goodbye!");
+        Ok(())
+    }
 }
 
-pub fn log_versions() {
+/// Log the versions of the application, and the arguments passed to the cli.
+///
+/// `version` should be the same as the output of cli "--version";
+/// and the `short_version` is the short version of the codes, often consist of git branch and commit.
+pub fn log_versions(version: &str, short_version: &str, app: &str) {
     // Report app version as gauge.
     APP_VERSION
-        .with_label_values(&[short_version(), full_version()])
+        .with_label_values(&[env!("CARGO_PKG_VERSION"), short_version, app])
         .inc();
 
     // Log version and argument flags.
-    info!(
-        "short_version: {}, full_version: {}",
-        short_version(),
-        full_version()
-    );
+    info!("GreptimeDB version: {}", version);
 
     log_env_flags();
-}
-
-pub fn greptimedb_cli() -> clap::Command {
-    let cmd = clap::Command::new("greptimedb")
-        .version(print_version())
-        .subcommand_required(true);
-
-    #[cfg(feature = "tokio-console")]
-    let cmd = cmd.arg(arg!(--"tokio-console-addr"[TOKIO_CONSOLE_ADDR]));
-
-    cmd.args([arg!(--"log-dir"[LOG_DIR]), arg!(--"log-level"[LOG_LEVEL])])
-}
-
-fn print_version() -> &'static str {
-    concat!(
-        "\nbranch: ",
-        env!("GIT_BRANCH"),
-        "\ncommit: ",
-        env!("GIT_COMMIT"),
-        "\ndirty: ",
-        env!("GIT_DIRTY"),
-        "\nversion: ",
-        env!("CARGO_PKG_VERSION")
-    )
-}
-
-fn short_version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
-}
-
-// {app_name}-{branch_name}-{commit_short}
-// The branch name (tag) of a release build should already contain the short
-// version so the full version doesn't concat the short version explicitly.
-fn full_version() -> &'static str {
-    concat!(
-        "greptimedb-",
-        env!("GIT_BRANCH"),
-        "-",
-        env!("GIT_COMMIT_SHORT")
-    )
 }
 
 fn log_env_flags() {

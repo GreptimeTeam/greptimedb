@@ -40,6 +40,10 @@ SHOW TABLES FROM public WHERE Tables = 'numbers';
 
 DROP SCHEMA test_public_schema;
 
+USE public;
+
+DROP SCHEMA test_public_schema;
+
 SELECT * FROM test_public_schema.hello;
 
 USE public;

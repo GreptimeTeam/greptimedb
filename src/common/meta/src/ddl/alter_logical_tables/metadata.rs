@@ -24,6 +24,7 @@ use crate::error::{
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
+use crate::key::DeserializedValueWithBytes;
 use crate::rpc::ddl::AlterTableTask;
 
 impl AlterLogicalTablesProcedure {
@@ -61,11 +62,9 @@ impl AlterLogicalTablesProcedure {
             .get_full_table_info(self.data.physical_table_id)
             .await?;
 
-        let physical_table_info = physical_table_info
-            .with_context(|| TableInfoNotFoundSnafu {
-                table: format!("table id - {}", self.data.physical_table_id),
-            })?
-            .into_inner();
+        let physical_table_info = physical_table_info.with_context(|| TableInfoNotFoundSnafu {
+            table: format!("table id - {}", self.data.physical_table_id),
+        })?;
         let physical_table_route = physical_table_route
             .context(TableRouteNotFoundSnafu {
                 table_id: self.data.physical_table_id,
@@ -99,9 +98,9 @@ impl AlterLogicalTablesProcedure {
     async fn get_all_table_info_values(
         &self,
         table_ids: &[TableId],
-    ) -> Result<Vec<TableInfoValue>> {
+    ) -> Result<Vec<DeserializedValueWithBytes<TableInfoValue>>> {
         let table_info_manager = self.context.table_metadata_manager.table_info_manager();
-        let mut table_info_map = table_info_manager.batch_get(table_ids).await?;
+        let mut table_info_map = table_info_manager.batch_get_raw(table_ids).await?;
         let mut table_info_values = Vec::with_capacity(table_ids.len());
         for (table_id, task) in table_ids.iter().zip(self.data.tasks.iter()) {
             let table_info_value =

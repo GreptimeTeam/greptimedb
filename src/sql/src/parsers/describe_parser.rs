@@ -21,7 +21,7 @@ use crate::statements::describe::DescribeTable;
 use crate::statements::statement::Statement;
 
 /// DESCRIBE statement parser implementation
-impl<'a> ParserContext<'a> {
+impl ParserContext<'_> {
     pub(crate) fn parse_describe(&mut self) -> Result<Statement> {
         if self.matches_keyword(Keyword::TABLE) {
             let _ = self.parser.next_token();
@@ -31,10 +31,8 @@ impl<'a> ParserContext<'a> {
 
     fn parse_describe_table(&mut self) -> Result<Statement> {
         let raw_table_idents =
-            self.parser
-                .parse_object_name()
+            self.parse_object_name()
                 .with_context(|_| error::UnexpectedSnafu {
-                    sql: self.sql,
                     expected: "a table name",
                     actual: self.peek_token_as_string(),
                 })?;

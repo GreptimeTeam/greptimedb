@@ -15,18 +15,29 @@
 mod ask_leader;
 mod heartbeat;
 mod load_balance;
-mod lock;
 mod procedure;
 
+mod cluster;
 mod store;
+mod util;
 
-use api::v1::meta::Role;
+use std::sync::Arc;
+
+use api::v1::meta::{ProcedureDetailResponse, Role};
+use cluster::Client as ClusterClient;
+pub use cluster::ClusterKvBackend;
 use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_meta::cluster::{
+    ClusterInfo, MetasrvStatus, NodeInfo, NodeInfoKey, NodeStatus, Role as ClusterRole,
+};
+use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue, RegionStat};
 use common_meta::ddl::{ExecutorContext, ProcedureExecutor};
-use common_meta::error::{self as meta_error, Result as MetaResult};
+use common_meta::error::{self as meta_error, ExternalSnafu, Result as MetaResult};
+use common_meta::key::flow::flow_state::{FlowStat, FlowStateManager};
+use common_meta::kv_backend::KvBackendRef;
+use common_meta::range_stream::PaginationStream;
 use common_meta::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
-use common_meta::rpc::lock::{LockRequest, LockResponse, UnlockRequest};
 use common_meta::rpc::procedure::{
     MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
 };
@@ -35,38 +46,42 @@ use common_meta::rpc::store::{
     BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
     DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
 };
+use common_meta::rpc::KeyValue;
+use common_meta::ClusterId;
 use common_telemetry::info;
+use futures::TryStreamExt;
 use heartbeat::Client as HeartbeatClient;
-use lock::Client as LockClient;
 use procedure::Client as ProcedureClient;
 use snafu::{OptionExt, ResultExt};
 use store::Client as StoreClient;
 
 pub use self::heartbeat::{HeartbeatSender, HeartbeatStream};
-use crate::error;
-use crate::error::{ConvertMetaResponseSnafu, Result};
+use crate::error::{
+    ConvertMetaRequestSnafu, ConvertMetaResponseSnafu, Error, GetFlowStatSnafu, NotStartedSnafu,
+    Result,
+};
 
 pub type Id = (u64, u64);
 
 const DEFAULT_ASK_LEADER_MAX_RETRY: usize = 3;
 const DEFAULT_SUBMIT_DDL_MAX_RETRY: usize = 3;
+const DEFAULT_CLUSTER_CLIENT_MAX_RETRY: usize = 3;
 
 #[derive(Clone, Debug, Default)]
 pub struct MetaClientBuilder {
     id: Id,
     role: Role,
     enable_heartbeat: bool,
-    enable_router: bool,
     enable_store: bool,
-    enable_lock: bool,
     enable_procedure: bool,
+    enable_access_cluster_info: bool,
     channel_manager: Option<ChannelManager>,
     ddl_channel_manager: Option<ChannelManager>,
     heartbeat_channel_manager: Option<ChannelManager>,
 }
 
 impl MetaClientBuilder {
-    pub fn new(cluster_id: u64, member_id: u64, role: Role) -> Self {
+    pub fn new(cluster_id: ClusterId, member_id: u64, role: Role) -> Self {
         Self {
             id: (cluster_id, member_id),
             role,
@@ -74,16 +89,34 @@ impl MetaClientBuilder {
         }
     }
 
+    /// Returns the role of Frontend's default options.
+    pub fn frontend_default_options(cluster_id: ClusterId) -> Self {
+        // Frontend does not need a member id.
+        Self::new(cluster_id, 0, Role::Frontend)
+            .enable_store()
+            .enable_heartbeat()
+            .enable_procedure()
+            .enable_access_cluster_info()
+    }
+
+    /// Returns the role of Datanode's default options.
+    pub fn datanode_default_options(cluster_id: ClusterId, member_id: u64) -> Self {
+        Self::new(cluster_id, member_id, Role::Datanode)
+            .enable_store()
+            .enable_heartbeat()
+    }
+
+    /// Returns the role of Flownode's default options.
+    pub fn flownode_default_options(cluster_id: ClusterId, member_id: u64) -> Self {
+        Self::new(cluster_id, member_id, Role::Flownode)
+            .enable_store()
+            .enable_heartbeat()
+            .enable_procedure()
+    }
+
     pub fn enable_heartbeat(self) -> Self {
         Self {
             enable_heartbeat: true,
-            ..self
-        }
-    }
-
-    pub fn enable_router(self) -> Self {
-        Self {
-            enable_router: true,
             ..self
         }
     }
@@ -95,16 +128,16 @@ impl MetaClientBuilder {
         }
     }
 
-    pub fn enable_lock(self) -> Self {
+    pub fn enable_procedure(self) -> Self {
         Self {
-            enable_lock: true,
+            enable_procedure: true,
             ..self
         }
     }
 
-    pub fn enable_procedure(self) -> Self {
+    pub fn enable_access_cluster_info(self) -> Self {
         Self {
-            enable_procedure: true,
+            enable_access_cluster_info: true,
             ..self
         }
     }
@@ -137,10 +170,6 @@ impl MetaClientBuilder {
             MetaClient::new(self.id)
         };
 
-        if !(self.enable_heartbeat || self.enable_router || self.enable_store || self.enable_lock) {
-            panic!("At least one client needs to be enabled.")
-        }
-
         let mgr = client.channel_manager.clone();
 
         if self.enable_heartbeat {
@@ -152,14 +181,13 @@ impl MetaClientBuilder {
                 DEFAULT_ASK_LEADER_MAX_RETRY,
             ));
         }
+
         if self.enable_store {
             client.store = Some(StoreClient::new(self.id, self.role, mgr.clone()));
         }
-        if self.enable_lock {
-            client.lock = Some(LockClient::new(self.id, self.role, mgr.clone()));
-        }
+
         if self.enable_procedure {
-            let mgr = self.ddl_channel_manager.unwrap_or(mgr);
+            let mgr = self.ddl_channel_manager.unwrap_or(mgr.clone());
             client.procedure = Some(ProcedureClient::new(
                 self.id,
                 self.role,
@@ -168,18 +196,27 @@ impl MetaClientBuilder {
             ));
         }
 
+        if self.enable_access_cluster_info {
+            client.cluster = Some(ClusterClient::new(
+                self.id,
+                self.role,
+                mgr,
+                DEFAULT_CLUSTER_CLIENT_MAX_RETRY,
+            ))
+        }
+
         client
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct MetaClient {
     id: Id,
     channel_manager: ChannelManager,
     heartbeat: Option<HeartbeatClient>,
     store: Option<StoreClient>,
-    lock: Option<LockClient>,
     procedure: Option<ProcedureClient>,
+    cluster: Option<ClusterClient>,
 }
 
 #[async_trait::async_trait]
@@ -216,9 +253,113 @@ impl ProcedureExecutor for MetaClient {
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)
     }
+
+    async fn list_procedures(&self, _ctx: &ExecutorContext) -> MetaResult<ProcedureDetailResponse> {
+        self.procedure_client()
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)?
+            .list_procedures()
+            .await
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)
+    }
+}
+
+#[async_trait::async_trait]
+impl ClusterInfo for MetaClient {
+    type Error = Error;
+
+    async fn list_nodes(&self, role: Option<ClusterRole>) -> Result<Vec<NodeInfo>> {
+        let cluster_client = self.cluster_client()?;
+
+        let (get_metasrv_nodes, nodes_key_prefix) = match role {
+            None => (
+                true,
+                Some(NodeInfoKey::key_prefix_with_cluster_id(self.id.0)),
+            ),
+            Some(ClusterRole::Metasrv) => (true, None),
+            Some(role) => (
+                false,
+                Some(NodeInfoKey::key_prefix_with_role(self.id.0, role)),
+            ),
+        };
+
+        let mut nodes = if get_metasrv_nodes {
+            let last_activity_ts = -1; // Metasrv does not provide this information.
+
+            let (leader, followers) = cluster_client.get_metasrv_peers().await?;
+            followers
+                .into_iter()
+                .map(|node| NodeInfo {
+                    peer: node.peer.map(|p| p.into()).unwrap_or_default(),
+                    last_activity_ts,
+                    status: NodeStatus::Metasrv(MetasrvStatus { is_leader: false }),
+                    version: node.version,
+                    git_commit: node.git_commit,
+                    start_time_ms: node.start_time_ms,
+                })
+                .chain(leader.into_iter().map(|node| NodeInfo {
+                    peer: node.peer.map(|p| p.into()).unwrap_or_default(),
+                    last_activity_ts,
+                    status: NodeStatus::Metasrv(MetasrvStatus { is_leader: true }),
+                    version: node.version,
+                    git_commit: node.git_commit,
+                    start_time_ms: node.start_time_ms,
+                }))
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+
+        if let Some(prefix) = nodes_key_prefix {
+            let req = RangeRequest::new().with_prefix(prefix);
+            let res = cluster_client.range(req).await?;
+            for kv in res.kvs {
+                nodes.push(NodeInfo::try_from(kv.value).context(ConvertMetaResponseSnafu)?);
+            }
+        }
+
+        Ok(nodes)
+    }
+
+    async fn list_region_stats(&self) -> Result<Vec<RegionStat>> {
+        let cluster_kv_backend = Arc::new(self.cluster_client()?);
+        let range_prefix = DatanodeStatKey::key_prefix_with_cluster_id(self.id.0);
+        let req = RangeRequest::new().with_prefix(range_prefix);
+        let stream =
+            PaginationStream::new(cluster_kv_backend, req, 256, decode_stats).into_stream();
+        let mut datanode_stats = stream
+            .try_collect::<Vec<_>>()
+            .await
+            .context(ConvertMetaResponseSnafu)?;
+        let region_stats = datanode_stats
+            .iter_mut()
+            .flat_map(|datanode_stat| {
+                let last = datanode_stat.stats.pop();
+                last.map(|stat| stat.region_stats).unwrap_or_default()
+            })
+            .collect::<Vec<_>>();
+
+        Ok(region_stats)
+    }
+}
+
+fn decode_stats(kv: KeyValue) -> MetaResult<DatanodeStatValue> {
+    DatanodeStatValue::try_from(kv.value)
+        .map_err(BoxedError::new)
+        .context(ExternalSnafu)
 }
 
 impl MetaClient {
+    pub async fn list_flow_stats(&self) -> Result<Option<FlowStat>> {
+        let cluster_backend = ClusterKvBackend::new(Arc::new(self.cluster_client()?));
+        let cluster_backend = Arc::new(cluster_backend) as KvBackendRef;
+        let flow_state_manager = FlowStateManager::new(cluster_backend);
+        let res = flow_state_manager.get().await.context(GetFlowStatSnafu)?;
+
+        Ok(res.map(|r| r.into()))
+    }
+
     pub fn new(id: Id) -> Self {
         Self {
             id,
@@ -249,13 +390,13 @@ impl MetaClient {
             client.start(urls.clone()).await?;
             info!("Store client started");
         }
-        if let Some(client) = &mut self.lock {
-            client.start(urls.clone()).await?;
-            info!("Lock client started");
-        }
         if let Some(client) = &mut self.procedure {
-            client.start(urls).await?;
+            client.start(urls.clone()).await?;
             info!("DDL client started");
+        }
+        if let Some(client) = &mut self.cluster {
+            client.start(urls).await?;
+            info!("Cluster client started");
         }
 
         Ok(())
@@ -344,15 +485,6 @@ impl MetaClient {
             .context(ConvertMetaResponseSnafu)
     }
 
-    pub async fn lock(&self, req: LockRequest) -> Result<LockResponse> {
-        self.lock_client()?.lock(req.into()).await.map(Into::into)
-    }
-
-    pub async fn unlock(&self, req: UnlockRequest) -> Result<()> {
-        let _ = self.lock_client()?.unlock(req.into()).await?;
-        Ok(())
-    }
-
     /// Query the procedure state by its id.
     pub async fn query_procedure_state(&self, pid: &str) -> Result<ProcedureStateResponse> {
         self.procedure_client()?.query_procedure_state(pid).await
@@ -368,7 +500,7 @@ impl MetaClient {
                 request.region_id,
                 request.from_peer,
                 request.to_peer,
-                request.replay_timeout,
+                request.timeout,
             )
             .await
     }
@@ -380,48 +512,42 @@ impl MetaClient {
     ) -> Result<SubmitDdlTaskResponse> {
         let res = self
             .procedure_client()?
-            .submit_ddl_task(req.try_into().context(error::ConvertMetaRequestSnafu)?)
+            .submit_ddl_task(req.try_into().context(ConvertMetaRequestSnafu)?)
             .await?
             .try_into()
-            .context(error::ConvertMetaResponseSnafu)?;
+            .context(ConvertMetaResponseSnafu)?;
 
         Ok(res)
     }
 
-    #[inline]
     pub fn heartbeat_client(&self) -> Result<HeartbeatClient> {
-        self.heartbeat.clone().context(error::NotStartedSnafu {
+        self.heartbeat.clone().context(NotStartedSnafu {
             name: "heartbeat_client",
         })
     }
 
-    #[inline]
     pub fn store_client(&self) -> Result<StoreClient> {
-        self.store.clone().context(error::NotStartedSnafu {
+        self.store.clone().context(NotStartedSnafu {
             name: "store_client",
         })
     }
 
-    #[inline]
-    pub fn lock_client(&self) -> Result<LockClient> {
-        self.lock.clone().context(error::NotStartedSnafu {
-            name: "lock_client",
+    pub fn procedure_client(&self) -> Result<ProcedureClient> {
+        self.procedure.clone().context(NotStartedSnafu {
+            name: "procedure_client",
         })
     }
 
-    #[inline]
-    pub fn procedure_client(&self) -> Result<ProcedureClient> {
-        self.procedure
-            .clone()
-            .context(error::NotStartedSnafu { name: "ddl_client" })
+    pub fn cluster_client(&self) -> Result<ClusterClient> {
+        self.cluster.clone().context(NotStartedSnafu {
+            name: "cluster_client",
+        })
     }
 
-    #[inline]
     pub fn channel_config(&self) -> &ChannelConfig {
         self.channel_manager.config()
     }
 
-    #[inline]
     pub fn id(&self) -> Id {
         self.id
     }
@@ -430,27 +556,29 @@ impl MetaClient {
 #[cfg(test)]
 mod tests {
     use api::v1::meta::{HeartbeatRequest, Peer};
-    use meta_srv::metasrv::SelectorContext;
-    use meta_srv::selector::{Namespace, Selector, SelectorOptions};
-    use meta_srv::Result as MetaResult;
+    use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
+    use rand::Rng;
 
     use super::*;
-    use crate::mocks;
+    use crate::error;
+    use crate::mocks::{self, MockMetaContext};
 
     const TEST_KEY_PREFIX: &str = "__unit_test__meta__";
 
     struct TestClient {
         ns: String,
         client: MetaClient,
+        meta_ctx: MockMetaContext,
     }
 
     impl TestClient {
         async fn new(ns: impl Into<String>) -> Self {
             // can also test with etcd: mocks::mock_client_with_etcdstore("127.0.0.1:2379").await;
-            let client = mocks::mock_client_with_memstore().await;
+            let (client, meta_ctx) = mocks::mock_client_with_memstore().await;
             Self {
                 ns: ns.into(),
                 client,
+                meta_ctx,
             }
         }
 
@@ -475,6 +603,15 @@ mod tests {
             let res = self.client.delete_range(req).await;
             let _ = res.unwrap();
         }
+
+        #[allow(dead_code)]
+        fn kv_backend(&self) -> KvBackendRef {
+            self.meta_ctx.kv_backend.clone()
+        }
+
+        fn in_memory(&self) -> Option<ResettableKvBackendRef> {
+            self.meta_ctx.in_memory.clone()
+        }
     }
 
     async fn new_client(ns: impl Into<String>) -> TestClient {
@@ -493,11 +630,8 @@ mod tests {
         let _ = meta_client.heartbeat_client().unwrap();
         assert!(meta_client.store_client().is_err());
         meta_client.start(urls).await.unwrap();
-        assert!(meta_client.heartbeat_client().unwrap().is_started().await);
 
-        let mut meta_client = MetaClientBuilder::new(0, 0, Role::Datanode)
-            .enable_router()
-            .build();
+        let mut meta_client = MetaClientBuilder::new(0, 0, Role::Datanode).build();
         assert!(meta_client.heartbeat_client().is_err());
         assert!(meta_client.store_client().is_err());
         meta_client.start(urls).await.unwrap();
@@ -508,11 +642,9 @@ mod tests {
         assert!(meta_client.heartbeat_client().is_err());
         let _ = meta_client.store_client().unwrap();
         meta_client.start(urls).await.unwrap();
-        assert!(meta_client.store_client().unwrap().is_started().await);
 
         let mut meta_client = MetaClientBuilder::new(1, 2, Role::Datanode)
             .enable_heartbeat()
-            .enable_router()
             .enable_store()
             .build();
         assert_eq!(1, meta_client.id().0);
@@ -520,15 +652,12 @@ mod tests {
         let _ = meta_client.heartbeat_client().unwrap();
         let _ = meta_client.store_client().unwrap();
         meta_client.start(urls).await.unwrap();
-        assert!(meta_client.heartbeat_client().unwrap().is_started().await);
-        assert!(meta_client.store_client().unwrap().is_started().await);
     }
 
     #[tokio::test]
     async fn test_not_start_heartbeat_client() {
         let urls = &["127.0.0.1:3001", "127.0.0.1:3002"];
         let mut meta_client = MetaClientBuilder::new(0, 0, Role::Datanode)
-            .enable_router()
             .enable_store()
             .build();
         meta_client.start(urls).await.unwrap();
@@ -541,18 +670,11 @@ mod tests {
         let urls = &["127.0.0.1:3001", "127.0.0.1:3002"];
         let mut meta_client = MetaClientBuilder::new(0, 0, Role::Datanode)
             .enable_heartbeat()
-            .enable_router()
             .build();
 
         meta_client.start(urls).await.unwrap();
         let res = meta_client.put(PutRequest::default()).await;
         assert!(matches!(res.err(), Some(error::Error::NotStarted { .. })));
-    }
-
-    #[should_panic]
-    #[test]
-    fn test_failed_when_start_nothing() {
-        let _ = MetaClientBuilder::new(0, 0, Role::Datanode).build();
     }
 
     #[tokio::test]
@@ -584,36 +706,6 @@ mod tests {
                 assert_eq!(1000, res.header.unwrap().cluster_id);
             }
         });
-    }
-
-    struct MockSelector;
-
-    #[async_trait::async_trait]
-    impl Selector for MockSelector {
-        type Context = SelectorContext;
-        type Output = Vec<Peer>;
-
-        async fn select(
-            &self,
-            _ns: Namespace,
-            _ctx: &Self::Context,
-            _opts: SelectorOptions,
-        ) -> MetaResult<Self::Output> {
-            Ok(vec![
-                Peer {
-                    id: 0,
-                    addr: "peer0".to_string(),
-                },
-                Peer {
-                    id: 1,
-                    addr: "peer1".to_string(),
-                },
-                Peer {
-                    id: 2,
-                    addr: "peer2".to_string(),
-                },
-            ])
-        }
     }
 
     #[tokio::test]
@@ -874,5 +966,37 @@ mod tests {
                 kv.take_value()
             );
         }
+    }
+
+    fn mock_decoder(_kv: KeyValue) -> MetaResult<()> {
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_cluster_client_adaptive_range() {
+        let tx = new_client("test_cluster_client").await;
+        let in_memory = tx.in_memory().unwrap();
+        let cluster_client = tx.client.cluster_client().unwrap();
+        let mut rng = rand::thread_rng();
+
+        // Generates rough 10MB data, which is larger than the default grpc message size limit.
+        for i in 0..10 {
+            let data: Vec<u8> = (0..1024 * 1024).map(|_| rng.gen()).collect();
+            in_memory
+                .put(
+                    PutRequest::new()
+                        .with_key(format!("__prefix/{i}").as_bytes())
+                        .with_value(data.clone()),
+                )
+                .await
+                .unwrap();
+        }
+
+        let req = RangeRequest::new().with_prefix(b"__prefix/");
+        let stream =
+            PaginationStream::new(Arc::new(cluster_client), req, 10, mock_decoder).into_stream();
+
+        let res = stream.try_collect::<Vec<_>>().await.unwrap();
+        assert_eq!(10, res.len());
     }
 }

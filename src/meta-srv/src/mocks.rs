@@ -15,54 +15,79 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use api::v1::meta::cluster_server::ClusterServer;
 use api::v1::meta::heartbeat_server::HeartbeatServer;
 use api::v1::meta::procedure_service_server::ProcedureServiceServer;
 use api::v1::meta::store_server::StoreServer;
-use client::client_manager::DatanodeClients;
+use client::client_manager::NodeClients;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::memory::MemoryKvBackend;
-use common_meta::kv_backend::KvBackendRef;
+use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
+use hyper_util::rt::TokioIo;
+use tonic::codec::CompressionEncoding;
 use tower::service_fn;
 
-use crate::metasrv::builder::MetaSrvBuilder;
-use crate::metasrv::{MetaSrv, MetaSrvOptions, SelectorRef};
+use crate::add_compressed_service;
+use crate::metasrv::builder::MetasrvBuilder;
+use crate::metasrv::{Metasrv, MetasrvOptions, SelectorRef};
 
 #[derive(Clone)]
 pub struct MockInfo {
     pub server_addr: String,
     pub channel_manager: ChannelManager,
-    pub meta_srv: MetaSrv,
+    pub metasrv: Arc<Metasrv>,
+    pub kv_backend: KvBackendRef,
+    pub in_memory: Option<ResettableKvBackendRef>,
 }
 
 pub async fn mock_with_memstore() -> MockInfo {
     let kv_backend = Arc::new(MemoryKvBackend::new());
-    mock(Default::default(), kv_backend, None, None).await
+    let in_memory = Arc::new(MemoryKvBackend::new());
+    mock(
+        MetasrvOptions {
+            server_addr: "127.0.0.1:3002".to_string(),
+            ..Default::default()
+        },
+        kv_backend,
+        None,
+        None,
+        Some(in_memory),
+    )
+    .await
 }
 
 pub async fn mock_with_etcdstore(addr: &str) -> MockInfo {
     let kv_backend = EtcdStore::with_endpoints([addr], 128).await.unwrap();
-    mock(Default::default(), kv_backend, None, None).await
-}
-
-pub async fn mock_with_memstore_and_selector(selector: SelectorRef) -> MockInfo {
-    let kv_backend = Arc::new(MemoryKvBackend::new());
-    mock(Default::default(), kv_backend, Some(selector), None).await
+    mock(
+        MetasrvOptions {
+            server_addr: "127.0.0.1:3002".to_string(),
+            ..Default::default()
+        },
+        kv_backend,
+        None,
+        None,
+        None,
+    )
+    .await
 }
 
 pub async fn mock(
-    opts: MetaSrvOptions,
+    opts: MetasrvOptions,
     kv_backend: KvBackendRef,
     selector: Option<SelectorRef>,
-    datanode_clients: Option<Arc<DatanodeClients>>,
+    datanode_clients: Option<Arc<NodeClients>>,
+    in_memory: Option<ResettableKvBackendRef>,
 ) -> MockInfo {
     let server_addr = opts.server_addr.clone();
     let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
 
     table_metadata_manager.init().await.unwrap();
 
-    let builder = MetaSrvBuilder::new().options(opts).kv_backend(kv_backend);
+    let builder = MetasrvBuilder::new()
+        .options(opts)
+        .kv_backend(kv_backend.clone());
 
     let builder = match selector {
         Some(s) => builder.selector(s),
@@ -70,20 +95,30 @@ pub async fn mock(
     };
 
     let builder = match datanode_clients {
-        Some(clients) => builder.datanode_manager(clients),
+        Some(clients) => builder.node_manager(clients),
         None => builder,
     };
 
-    let meta_srv = builder.build().await.unwrap();
-    meta_srv.try_start().await.unwrap();
+    let builder = match &in_memory {
+        Some(in_memory) => builder.in_memory(in_memory.clone()),
+        None => builder,
+    };
+
+    let metasrv = builder.build().await.unwrap();
+    metasrv.try_start().await.unwrap();
 
     let (client, server) = tokio::io::duplex(1024);
-    let service = meta_srv.clone();
+    let metasrv = Arc::new(metasrv);
+    let service = metasrv.clone();
+
     let _handle = tokio::spawn(async move {
-        tonic::transport::Server::builder()
-            .add_service(HeartbeatServer::new(service.clone()))
-            .add_service(StoreServer::new(service.clone()))
-            .add_service(ProcedureServiceServer::new(service.clone()))
+        let mut router = tonic::transport::Server::builder();
+        let router = add_compressed_service!(router, HeartbeatServer::from_arc(service.clone()));
+        let router = add_compressed_service!(router, StoreServer::from_arc(service.clone()));
+        let router =
+            add_compressed_service!(router, ProcedureServiceServer::from_arc(service.clone()));
+        let router = add_compressed_service!(router, ClusterServer::from_arc(service.clone()));
+        router
             .serve_with_incoming(futures::stream::iter(vec![Ok::<_, std::io::Error>(server)]))
             .await
     });
@@ -104,7 +139,7 @@ pub async fn mock(
 
             async move {
                 if let Some(client) = client {
-                    Ok(client)
+                    Ok(TokioIo::new(client))
                 } else {
                     Err(std::io::Error::new(
                         std::io::ErrorKind::Other,
@@ -119,6 +154,8 @@ pub async fn mock(
     MockInfo {
         server_addr,
         channel_manager,
-        meta_srv,
+        metasrv,
+        kv_backend,
+        in_memory,
     }
 }

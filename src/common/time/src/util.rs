@@ -29,10 +29,6 @@ pub fn format_utc_datetime(utc: &NaiveDateTime, pattern: &str) -> String {
     }
 }
 
-pub fn system_datetime_to_utc(local: &NaiveDateTime) -> LocalResult<NaiveDateTime> {
-    datetime_to_utc(local, get_timezone(None))
-}
-
 /// Cast a [`NaiveDateTime`] with the given timezone.
 pub fn datetime_to_utc(
     datetime: &NaiveDateTime,
@@ -69,7 +65,10 @@ pub fn current_time_rfc3339() -> String {
 /// Returns the yesterday time in rfc3339 format.
 pub fn yesterday_rfc3339() -> String {
     let now = chrono::Utc::now();
-    let day_before = now - chrono::Duration::days(1);
+    let day_before = now
+        - chrono::Duration::try_days(1).unwrap_or_else(|| {
+            panic!("now time ('{now}') is too early to calculate the day before")
+        });
     day_before.to_rfc3339()
 }
 

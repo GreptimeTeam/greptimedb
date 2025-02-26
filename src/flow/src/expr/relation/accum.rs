@@ -18,20 +18,20 @@
 //! So the overhead is acceptable.
 //!
 //! Currently support sum, count, any, all and min/max(with one caveat that min/max can't support delete with aggregate).
+//! TODO: think of better ways to not ser/de every time a accum needed to be updated, since it's in a tight loop
 
+use std::any::type_name;
 use std::fmt::Display;
 
 use common_decimal::Decimal128;
-use common_time::{Date, DateTime};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::value::{OrderedF32, OrderedF64, OrderedFloat, Value};
 use enum_dispatch::enum_dispatch;
-use hydroflow::futures::stream::Concat;
 use serde::{Deserialize, Serialize};
 use snafu::ensure;
 
 use crate::expr::error::{InternalSnafu, OverflowSnafu, TryFromValueSnafu, TypeMismatchSnafu};
-use crate::expr::relation::func::GenericFn;
+use crate::expr::signature::GenericFn;
 use crate::expr::{AggregateFunc, EvalError};
 use crate::repr::Diff;
 
@@ -39,6 +39,7 @@ use crate::repr::Diff;
 #[enum_dispatch]
 pub trait Accumulator: Sized {
     fn into_state(self) -> Vec<Value>;
+
     fn update(
         &mut self,
         aggr_fn: &AggregateFunc,
@@ -68,6 +69,21 @@ pub struct Bool {
     falses: Diff,
 }
 
+impl Bool {
+    /// Expect two `Diff` type values, one for `true` and one for `false`.
+    pub fn try_from_iter<I>(iter: &mut I) -> Result<Self, EvalError>
+    where
+        I: Iterator<Item = Value>,
+    {
+        Ok(Self {
+            trues: Diff::try_from(iter.next().ok_or_else(fail_accum::<Self>)?)
+                .map_err(err_try_from_val)?,
+            falses: Diff::try_from(iter.next().ok_or_else(fail_accum::<Self>)?)
+                .map_err(err_try_from_val)?,
+        })
+    }
+}
+
 impl TryFrom<Vec<Value>> for Bool {
     type Error = EvalError;
 
@@ -78,13 +94,9 @@ impl TryFrom<Vec<Value>> for Bool {
                 reason: "Bool Accumulator state should have 2 values",
             }
         );
-
         let mut iter = state.into_iter();
 
-        Ok(Self {
-            trues: Diff::try_from(iter.next().unwrap()).map_err(err_try_from_val)?,
-            falses: Diff::try_from(iter.next().unwrap()).map_err(err_try_from_val)?,
-        })
+        Self::try_from_iter(&mut iter)
     }
 }
 
@@ -157,6 +169,24 @@ pub struct SimpleNumber {
     non_nulls: Diff,
 }
 
+impl SimpleNumber {
+    /// Expect one `Decimal128` and one `Diff` type values.
+    /// The `Decimal128` type is used to store the sum of all non-NULL values.
+    /// The `Diff` type is used to count the number of non-NULL values.
+    pub fn try_from_iter<I>(iter: &mut I) -> Result<Self, EvalError>
+    where
+        I: Iterator<Item = Value>,
+    {
+        Ok(Self {
+            accum: Decimal128::try_from(iter.next().ok_or_else(fail_accum::<Self>)?)
+                .map_err(err_try_from_val)?
+                .val(),
+            non_nulls: Diff::try_from(iter.next().ok_or_else(fail_accum::<Self>)?)
+                .map_err(err_try_from_val)?,
+        })
+    }
+}
+
 impl TryFrom<Vec<Value>> for SimpleNumber {
     type Error = EvalError;
 
@@ -168,13 +198,7 @@ impl TryFrom<Vec<Value>> for SimpleNumber {
             }
         );
         let mut iter = state.into_iter();
-
-        Ok(Self {
-            accum: Decimal128::try_from(iter.next().unwrap())
-                .map_err(err_try_from_val)?
-                .val(),
-            non_nulls: Diff::try_from(iter.next().unwrap()).map_err(err_try_from_val)?,
-        })
+        Self::try_from_iter(&mut iter)
     }
 }
 
@@ -221,7 +245,7 @@ impl Accumulator for SimpleNumber {
             (f, v) => {
                 let expected_datatype = f.signature().input;
                 return Err(TypeMismatchSnafu {
-                    expected: expected_datatype,
+                    expected: expected_datatype[0].clone(),
                     actual: v.data_type(),
                 }
                 .build())?;
@@ -258,7 +282,6 @@ impl Accumulator for SimpleNumber {
 }
 /// Accumulates float values for sum over floating numbers.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-
 pub struct Float {
     /// Accumulates non-special float values, i.e. not NaN, +inf, -inf.
     /// accum will be set to zero if `non_nulls` is zero.
@@ -271,6 +294,34 @@ pub struct Float {
     nans: Diff,
     /// Counts non-NULL values
     non_nulls: Diff,
+}
+
+impl Float {
+    /// Expect first value to be `OrderedF64` and the rest four values to be `Diff` type values.
+    pub fn try_from_iter<I>(iter: &mut I) -> Result<Self, EvalError>
+    where
+        I: Iterator<Item = Value>,
+    {
+        let mut ret = Self {
+            accum: OrderedF64::try_from(iter.next().ok_or_else(fail_accum::<Self>)?)
+                .map_err(err_try_from_val)?,
+            pos_infs: Diff::try_from(iter.next().ok_or_else(fail_accum::<Self>)?)
+                .map_err(err_try_from_val)?,
+            neg_infs: Diff::try_from(iter.next().ok_or_else(fail_accum::<Self>)?)
+                .map_err(err_try_from_val)?,
+            nans: Diff::try_from(iter.next().ok_or_else(fail_accum::<Self>)?)
+                .map_err(err_try_from_val)?,
+            non_nulls: Diff::try_from(iter.next().ok_or_else(fail_accum::<Self>)?)
+                .map_err(err_try_from_val)?,
+        };
+
+        // This prevent counter-intuitive behavior of summing over no values having non-zero results
+        if ret.non_nulls == 0 {
+            ret.accum = OrderedFloat::from(0.0);
+        }
+
+        Ok(ret)
+    }
 }
 
 impl TryFrom<Vec<Value>> for Float {
@@ -341,7 +392,7 @@ impl Accumulator for Float {
             (f, v) => {
                 let expected_datatype = f.signature().input;
                 return Err(TypeMismatchSnafu {
-                    expected: expected_datatype,
+                    expected: expected_datatype[0].clone(),
                     actual: v.data_type(),
                 }
                 .build())?;
@@ -384,6 +435,26 @@ impl Accumulator for Float {
 pub struct OrdValue {
     val: Option<Value>,
     non_nulls: Diff,
+}
+
+impl OrdValue {
+    pub fn try_from_iter<I>(iter: &mut I) -> Result<Self, EvalError>
+    where
+        I: Iterator<Item = Value>,
+    {
+        Ok(Self {
+            val: {
+                let v = iter.next().ok_or_else(fail_accum::<Self>)?;
+                if v == Value::Null {
+                    None
+                } else {
+                    Some(v)
+                }
+            },
+            non_nulls: Diff::try_from(iter.next().ok_or_else(fail_accum::<Self>)?)
+                .map_err(err_try_from_val)?,
+        })
+    }
 }
 
 impl TryFrom<Vec<Value>> for OrdValue {
@@ -445,25 +516,27 @@ impl Accumulator for OrdValue {
         // if aggr_fn is count, the incoming value type doesn't matter in type checking
         // otherwise, type need to be the same or value can be null
         let check_type_aggr_fn_and_arg_value =
-            ty_eq_without_precision(value.data_type(), aggr_fn.signature().input)
+            ty_eq_without_precision(value.data_type(), aggr_fn.signature().input[0].clone())
                 || matches!(aggr_fn, AggregateFunc::Count)
                 || value.is_null();
         let check_type_aggr_fn_and_self_val = self
             .val
             .as_ref()
-            .map(|zelf| ty_eq_without_precision(zelf.data_type(), aggr_fn.signature().input))
+            .map(|zelf| {
+                ty_eq_without_precision(zelf.data_type(), aggr_fn.signature().input[0].clone())
+            })
             .unwrap_or(true)
             || matches!(aggr_fn, AggregateFunc::Count);
 
         if !check_type_aggr_fn_and_arg_value {
             return Err(TypeMismatchSnafu {
-                expected: aggr_fn.signature().input,
+                expected: aggr_fn.signature().input[0].clone(),
                 actual: value.data_type(),
             }
             .build());
         } else if !check_type_aggr_fn_and_self_val {
             return Err(TypeMismatchSnafu {
-                expected: aggr_fn.signature().input,
+                expected: aggr_fn.signature().input[0].clone(),
                 actual: self
                     .val
                     .as_ref()
@@ -548,6 +621,7 @@ pub enum Accum {
 }
 
 impl Accum {
+    /// create a new accumulator from given aggregate function
     pub fn new_accum(aggr_fn: &AggregateFunc) -> Result<Self, EvalError> {
         Ok(match aggr_fn {
             AggregateFunc::Any
@@ -590,6 +664,39 @@ impl Accum {
             }
         })
     }
+
+    pub fn try_from_iter(
+        aggr_fn: &AggregateFunc,
+        iter: &mut impl Iterator<Item = Value>,
+    ) -> Result<Self, EvalError> {
+        match aggr_fn {
+            AggregateFunc::Any
+            | AggregateFunc::All
+            | AggregateFunc::MaxBool
+            | AggregateFunc::MinBool => Ok(Self::from(Bool::try_from_iter(iter)?)),
+            AggregateFunc::SumInt16
+            | AggregateFunc::SumInt32
+            | AggregateFunc::SumInt64
+            | AggregateFunc::SumUInt16
+            | AggregateFunc::SumUInt32
+            | AggregateFunc::SumUInt64 => Ok(Self::from(SimpleNumber::try_from_iter(iter)?)),
+            AggregateFunc::SumFloat32 | AggregateFunc::SumFloat64 => {
+                Ok(Self::from(Float::try_from_iter(iter)?))
+            }
+            f if f.is_max() || f.is_min() || matches!(f, AggregateFunc::Count) => {
+                Ok(Self::from(OrdValue::try_from_iter(iter)?))
+            }
+            f => Err(InternalSnafu {
+                reason: format!(
+                    "Accumulator does not support this aggregation function: {:?}",
+                    f
+                ),
+            }
+            .build()),
+        }
+    }
+
+    /// try to convert a vector of value into given aggregate function's accumulator
     pub fn try_into_accum(aggr_fn: &AggregateFunc, state: Vec<Value>) -> Result<Self, EvalError> {
         match aggr_fn {
             AggregateFunc::Any
@@ -619,6 +726,16 @@ impl Accum {
     }
 }
 
+fn fail_accum<T>() -> EvalError {
+    InternalSnafu {
+        reason: format!(
+            "list of values exhausted before a accum of type {} can be build from it",
+            type_name::<T>()
+        ),
+    }
+    .build()
+}
+
 fn err_try_from_val<T: Display>(reason: T) -> EvalError {
     TryFromValueSnafu {
         msg: reason.to_string(),
@@ -639,9 +756,13 @@ fn ty_eq_without_precision(left: ConcreteDataType, right: ConcreteDataType) -> b
             && matches!(right, ConcreteDataType::Interval(..))
 }
 
+#[allow(clippy::too_many_lines)]
 #[cfg(test)]
 mod test {
+    use common_time::DateTime;
+
     use super::*;
+
     #[test]
     fn test_accum() {
         let testcases = vec![
@@ -770,7 +891,9 @@ mod test {
                 let mut acc = Accum::new_accum(&aggr_fn)?;
                 acc.update_batch(&aggr_fn, input.clone())?;
                 let row = acc.into_state();
-                let acc = Accum::try_into_accum(&aggr_fn, row)?;
+                let acc = Accum::try_into_accum(&aggr_fn, row.clone())?;
+                let alter_acc = Accum::try_from_iter(&aggr_fn, &mut row.into_iter())?;
+                assert_eq!(acc, alter_acc);
                 Ok(acc)
             };
             let acc = match create_and_insert() {

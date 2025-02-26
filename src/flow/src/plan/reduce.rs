@@ -12,19 +12,30 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use serde::{Deserialize, Serialize};
+use crate::expr::{AggregateExpr, SafeMfpPlan, ScalarExpr};
 
-use crate::expr::{AggregateExpr, Id, LocalId, MapFilterProject, SafeMfpPlan, ScalarExpr};
-
-#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
+/// Describe how to extract key-value pair from a `Row`
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct KeyValPlan {
+    /// Extract key from row
     pub key_plan: SafeMfpPlan,
+    /// Extract value from row
     pub val_plan: SafeMfpPlan,
+}
+
+impl KeyValPlan {
+    /// Get nth expr using column ref
+    pub fn get_nth_expr(&self, n: usize) -> Option<ScalarExpr> {
+        self.key_plan.get_nth_expr(n).or_else(|| {
+            self.val_plan
+                .get_nth_expr(n - self.key_plan.projection.len())
+        })
+    }
 }
 
 /// TODO(discord9): def&impl of Hierarchical aggregates(for min/max with support to deletion) and
 /// basic aggregates(for other aggregate functions) and mixed aggregate
-#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub enum ReducePlan {
     /// Plan for not computing any aggregations, just determining the set of
     /// distinct keys.
@@ -35,7 +46,7 @@ pub enum ReducePlan {
 }
 
 /// Accumulable plan for the execution of a reduction.
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct AccumulablePlan {
     /// All of the aggregations we were asked to compute, stored
     /// in order.
@@ -44,7 +55,33 @@ pub struct AccumulablePlan {
     /// Each element represents:
     /// (index of aggr output, index of value among inputs, aggr expr)
     /// These will all be rendered together in one dataflow fragment.
-    pub simple_aggrs: Vec<(usize, usize, AggregateExpr)>,
-    /// Same as above but for all of the `DISTINCT` accumulable aggregations.
-    pub distinct_aggrs: Vec<(usize, usize, AggregateExpr)>,
+    ///
+    /// Invariant: the output index is the index of the aggregation in `full_aggrs`
+    /// which means output index is always smaller than the length of `full_aggrs`
+    pub simple_aggrs: Vec<AggrWithIndex>,
+    /// Same as `simple_aggrs` but for all of the `DISTINCT` accumulable aggregations.
+    pub distinct_aggrs: Vec<AggrWithIndex>,
+}
+
+/// Invariant: the output index is the index of the aggregation in `full_aggrs`
+/// which means output index is always smaller than the length of `full_aggrs`
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub struct AggrWithIndex {
+    /// aggregation expression
+    pub expr: AggregateExpr,
+    /// index of aggr input among input row
+    pub input_idx: usize,
+    /// index of aggr output among output row
+    pub output_idx: usize,
+}
+
+impl AggrWithIndex {
+    /// Create a new `AggrWithIndex`
+    pub fn new(expr: AggregateExpr, input_idx: usize, output_idx: usize) -> Self {
+        Self {
+            expr,
+            input_idx,
+            output_idx,
+        }
+    }
 }

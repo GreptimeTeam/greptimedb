@@ -12,19 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use serde::{Deserialize, Serialize};
-
 use crate::expr::ScalarExpr;
 use crate::plan::SafeMfpPlan;
 
 /// TODO(discord9): consider impl more join strategies
-#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum JoinPlan {
     Linear(LinearJoinPlan),
 }
 
 /// Determine if a given row should stay in the output. And apply a map filter project before output the row
-#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct JoinFilter {
     /// each element in the outer vector will check if each expr in itself can be eval to same value
     /// if not, the row will be filtered out. Useful for equi-join(join based on equality of some columns)
@@ -37,7 +35,7 @@ pub struct JoinFilter {
 ///
 /// A linear join is a sequence of stages, each of which introduces
 /// a new collection. Each stage is represented by a [LinearStagePlan].
-#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct LinearJoinPlan {
     /// The source relation from which we start the join.
     pub source_relation: usize,
@@ -60,7 +58,7 @@ pub struct LinearJoinPlan {
 /// Each stage is a binary join between the current accumulated
 /// join results, and a new collection. The former is referred to
 /// as the "stream" and the latter the "lookup".
-#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct LinearStagePlan {
     /// The index of the relation into which we will look up.
     pub lookup_relation: usize,

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Display;
+
 use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
 use sql::ast::Value;
@@ -25,6 +27,7 @@ pub enum Error {
         name: String,
         value: String,
         hint: String,
+        #[snafu(implicit)]
         location: Location,
     },
 }
@@ -57,6 +60,117 @@ impl TryFrom<Value> for PGByteaOutputValue {
                 name: "BYTEA_OUTPUT",
                 value: value.to_string(),
                 hint: "Available values: escape, hex",
+            }
+            .fail(),
+        }
+    }
+}
+
+// Refers to: https://www.postgresql.org/docs/current/runtime-config-client.html#GUC-DATESTYLE
+#[derive(Default, PartialEq, Eq, Clone, Copy, Debug)]
+pub enum PGDateOrder {
+    #[default]
+    MDY,
+    DMY,
+    YMD,
+}
+
+impl Display for PGDateOrder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PGDateOrder::MDY => write!(f, "MDY"),
+            PGDateOrder::DMY => write!(f, "DMY"),
+            PGDateOrder::YMD => write!(f, "YMD"),
+        }
+    }
+}
+
+impl TryFrom<&str> for PGDateOrder {
+    type Error = Error;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        match s.to_uppercase().as_str() {
+            "US" | "NONEURO" | "NONEUROPEAN" | "MDY" => Ok(PGDateOrder::MDY),
+            "EUROPEAN" | "EURO" | "DMY" => Ok(PGDateOrder::DMY),
+            "YMD" => Ok(PGDateOrder::YMD),
+            _ => InvalidConfigValueSnafu {
+                name: "DateStyle",
+                value: s,
+                hint: format!("Unrecognized key word: {}", s),
+            }
+            .fail(),
+        }
+    }
+}
+impl TryFrom<&Value> for PGDateOrder {
+    type Error = Error;
+
+    fn try_from(value: &Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::DoubleQuotedString(s) | Value::SingleQuotedString(s) => {
+                Self::try_from(s.as_str())
+            }
+            _ => InvalidConfigValueSnafu {
+                name: "DateStyle",
+                value: value.to_string(),
+                hint: format!("Unrecognized key word: {}", value),
+            }
+            .fail(),
+        }
+    }
+}
+
+#[derive(Default, PartialEq, Eq, Clone, Copy, Debug)]
+pub enum PGDateTimeStyle {
+    #[default]
+    ISO,
+    SQL,
+    Postgres,
+    German,
+}
+
+impl Display for PGDateTimeStyle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PGDateTimeStyle::ISO => write!(f, "ISO"),
+            PGDateTimeStyle::SQL => write!(f, "SQL"),
+            PGDateTimeStyle::Postgres => write!(f, "Postgres"),
+            PGDateTimeStyle::German => write!(f, "German"),
+        }
+    }
+}
+
+impl TryFrom<&str> for PGDateTimeStyle {
+    type Error = Error;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        match s.to_uppercase().as_str() {
+            "ISO" => Ok(PGDateTimeStyle::ISO),
+            "SQL" => Ok(PGDateTimeStyle::SQL),
+            "POSTGRES" => Ok(PGDateTimeStyle::Postgres),
+            "GERMAN" => Ok(PGDateTimeStyle::German),
+            _ => InvalidConfigValueSnafu {
+                name: "DateStyle",
+                value: s,
+                hint: format!("Unrecognized key word: {}", s),
+            }
+            .fail(),
+        }
+    }
+}
+
+impl TryFrom<&Value> for PGDateTimeStyle {
+    type Error = Error;
+
+    fn try_from(value: &Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::DoubleQuotedString(s) | Value::SingleQuotedString(s) => {
+                Self::try_from(s.as_str())
+            }
+            _ => InvalidConfigValueSnafu {
+                name: "DateStyle",
+                value: value.to_string(),
+                hint: format!("Unrecognized key word: {}", value),
             }
             .fail(),
         }

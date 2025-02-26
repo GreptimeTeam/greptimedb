@@ -9,7 +9,7 @@ EXPLAIN SELECT * FROM (SELECT SUM(number) FROM numbers LIMIT 100000000000) LIMIT
 | plan_type     | plan                             |
 +---------------+----------------------------------+
 | logical_plan  | MergeScan [is_placeholder=false] |
-| physical_plan | EmptyExec: produce_one_row=false |
+| physical_plan | EmptyExec                        |
 |               |                                  |
 +---------------+----------------------------------+
 
@@ -19,7 +19,36 @@ EXPLAIN SELECT * FROM (SELECT SUM(number) FROM numbers LIMIT 100000000000) WHERE
 | plan_type     | plan                             |
 +---------------+----------------------------------+
 | logical_plan  | MergeScan [is_placeholder=false] |
-| physical_plan | EmptyExec: produce_one_row=false |
+| physical_plan | EmptyExec                        |
 |               |                                  |
 +---------------+----------------------------------+
+
+CREATE TABLE test (a TIMESTAMP TIME INDEX, b INTEGER);
+
+Affected Rows: 0
+
+INSERT INTO test VALUES (11, 23), (12, 21), (13, 22);
+
+Affected Rows: 3
+
+SELECT a FROM test LIMIT 1;
+
++-------------------------+
+| a                       |
++-------------------------+
+| 1970-01-01T00:00:00.011 |
++-------------------------+
+
+SELECT b FROM test ORDER BY b LIMIT 2 OFFSET 0;
+
++----+
+| b  |
++----+
+| 21 |
+| 22 |
++----+
+
+DROP TABLE test;
+
+Affected Rows: 0
 

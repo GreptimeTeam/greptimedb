@@ -39,7 +39,12 @@ impl Display for ColumnOption {
             ColumnOption::Null => write!(f, "NULL"),
             ColumnOption::NotNull => write!(f, "NOT NULL"),
             ColumnOption::DefaultFn(s) => write!(f, "DEFAULT {}", s),
-            ColumnOption::DefaultValue(s) => write!(f, "DEFAULT {}", s),
+            ColumnOption::DefaultValue(s) => match s {
+                Value::String(value) => {
+                    write!(f, "DEFAULT \'{}\'", value.as_utf8())
+                }
+                _ => write!(f, "DEFAULT {}", s),
+            },
             ColumnOption::TimeIndex => write!(f, "TIME INDEX"),
             ColumnOption::PrimaryKey => write!(f, "PRIMARY KEY"),
         }
@@ -63,4 +68,12 @@ pub struct CreateTableExpr {
     #[builder(default, setter(into))]
     pub options: HashMap<String, Value>,
     pub primary_keys: Vec<usize>,
+}
+
+#[derive(Debug, Builder, Clone, Serialize, Deserialize)]
+pub struct CreateDatabaseExpr {
+    #[builder(setter(into))]
+    pub database_name: Ident,
+    #[builder(default)]
+    pub if_not_exists: bool,
 }

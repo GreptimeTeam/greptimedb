@@ -46,7 +46,6 @@ fn parquet_file_data() -> Vec<u8> {
 }
 
 pub(crate) fn new_fs_store(path: &str) -> ObjectStore {
-    let mut builder = Fs::default();
-    builder.root(path);
-    ObjectStore::new(builder).unwrap().finish()
+    let builder = Fs::default();
+    ObjectStore::new(builder.root(path)).unwrap().finish()
 }

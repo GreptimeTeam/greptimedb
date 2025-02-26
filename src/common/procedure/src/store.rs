@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use common_telemetry::logging;
+use common_telemetry::{debug, error, info, warn};
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
@@ -25,6 +25,7 @@ pub(crate) use crate::store::state_store::StateStoreRef;
 use crate::ProcedureId;
 
 pub mod state_store;
+pub mod util;
 
 /// Key prefix of procedure store.
 const PROC_PATH: &str = "procedure/";
@@ -49,6 +50,20 @@ pub struct ProcedureMessage {
     pub parent_id: Option<ProcedureId>,
     /// Current step.
     pub step: u32,
+    /// Errors raised during the procedure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// A collection of all procedures' messages.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcedureMessages {
+    /// A map of uncommitted procedures
+    pub messages: HashMap<ProcedureId, ProcedureMessage>,
+    /// A map of rolling back procedures
+    pub rollback_messages: HashMap<ProcedureId, ProcedureMessage>,
+    /// A list of finished procedures' ids
+    pub finished_ids: Vec<ProcedureId>,
 }
 
 /// Procedure storage layer.
@@ -61,7 +76,7 @@ impl ProcedureStore {
     /// Creates a new [ProcedureStore] from specific [StateStoreRef].
     pub(crate) fn new(parent_path: &str, store: StateStoreRef) -> ProcedureStore {
         let proc_path = format!("{}{PROC_PATH}", parent_path);
-        logging::info!("The procedure state store path is: {}", &proc_path);
+        info!("The procedure state store path is: {}", &proc_path);
         ProcedureStore { proc_path, store }
     }
 
@@ -84,6 +99,7 @@ impl ProcedureStore {
             data,
             parent_id,
             step,
+            error: None,
         };
         let key = ParsedKey {
             prefix: &self.proc_path,
@@ -121,16 +137,19 @@ impl ProcedureStore {
     pub(crate) async fn rollback_procedure(
         &self,
         procedure_id: ProcedureId,
-        step: u32,
+        message: ProcedureMessage,
     ) -> Result<()> {
         let key = ParsedKey {
             prefix: &self.proc_path,
             procedure_id,
-            step,
+            step: message.step,
             key_type: KeyType::Rollback,
         }
         .to_string();
-        self.store.put(&key, Vec::new()).await?;
+
+        self.store
+            .put(&key, serde_json::to_vec(&message).context(ToJsonSnafu)?)
+            .await?;
 
         Ok(())
     }
@@ -143,24 +162,23 @@ impl ProcedureStore {
         // 8 should be enough for most procedures.
         let mut step_keys = Vec::with_capacity(8);
         let mut finish_keys = Vec::new();
-        while let Some((key, _)) = key_values.try_next().await? {
-            let Some(curr_key) = ParsedKey::parse_str(&self.proc_path, &key) else {
-                logging::warn!("Unknown key while deleting procedures, key: {}", key);
+        while let Some((key_set, _)) = key_values.try_next().await? {
+            let key = key_set.key();
+            let Some(curr_key) = ParsedKey::parse_str(&self.proc_path, key) else {
+                warn!("Unknown key while deleting procedures, key: {}", key);
                 continue;
             };
             if curr_key.key_type == KeyType::Step {
-                step_keys.push(key);
+                step_keys.extend(key_set.keys());
             } else {
                 // .commit or .rollback
-                finish_keys.push(key);
+                finish_keys.extend(key_set.keys());
             }
         }
 
-        logging::debug!(
+        debug!(
             "Delete keys for procedure {}, step_keys: {:?}, finish_keys: {:?}",
-            procedure_id,
-            step_keys,
-            finish_keys
+            procedure_id, step_keys, finish_keys
         );
         // We delete all step keys first.
         self.store.batch_delete(step_keys.as_slice()).await?;
@@ -174,19 +192,17 @@ impl ProcedureStore {
         Ok(())
     }
 
-    /// Load procedures from the storage. Returns a map of uncommitted procedures and a list
-    /// of finished procedures' ids.
-    pub(crate) async fn load_messages(
-        &self,
-    ) -> Result<(HashMap<ProcedureId, ProcedureMessage>, Vec<ProcedureId>)> {
+    /// Load procedures from the storage.
+    pub(crate) async fn load_messages(&self) -> Result<ProcedureMessages> {
         // Track the key-value pair by procedure id.
         let mut procedure_key_values: HashMap<_, (ParsedKey, Vec<u8>)> = HashMap::new();
 
         // Scan all procedures.
         let mut key_values = self.store.walk_top_down(&self.proc_path).await?;
-        while let Some((key, value)) = key_values.try_next().await? {
-            let Some(curr_key) = ParsedKey::parse_str(&self.proc_path, &key) else {
-                logging::warn!("Unknown key while loading procedures, key: {}", key);
+        while let Some((key_set, value)) = key_values.try_next().await? {
+            let key = key_set.key();
+            let Some(curr_key) = ParsedKey::parse_str(&self.proc_path, key) else {
+                warn!("Unknown key while loading procedures, key: {}", key);
                 continue;
             };
 
@@ -201,28 +217,44 @@ impl ProcedureStore {
         }
 
         let mut messages = HashMap::with_capacity(procedure_key_values.len());
+        let mut rollback_messages = HashMap::new();
         let mut finished_ids = Vec::new();
         for (procedure_id, (parsed_key, value)) in procedure_key_values {
-            if parsed_key.key_type == KeyType::Step {
-                let Some(message) = self.load_one_message(&parsed_key, &value) else {
-                    // We don't abort the loading process and just ignore errors to ensure all remaining
-                    // procedures are loaded.
-                    continue;
-                };
-                let _ = messages.insert(procedure_id, message);
-            } else {
-                finished_ids.push(procedure_id);
+            match parsed_key.key_type {
+                KeyType::Step => {
+                    let Some(message) = self.load_one_message(&parsed_key, &value) else {
+                        // We don't abort the loading process and just ignore errors to ensure all remaining
+                        // procedures are loaded.
+                        continue;
+                    };
+                    let _ = messages.insert(procedure_id, message);
+                }
+                KeyType::Commit => {
+                    finished_ids.push(procedure_id);
+                }
+                KeyType::Rollback => {
+                    let Some(message) = self.load_one_message(&parsed_key, &value) else {
+                        // We don't abort the loading process and just ignore errors to ensure all remaining
+                        // procedures are loaded.
+                        continue;
+                    };
+                    let _ = rollback_messages.insert(procedure_id, message);
+                }
             }
         }
 
-        Ok((messages, finished_ids))
+        Ok(ProcedureMessages {
+            messages,
+            rollback_messages,
+            finished_ids,
+        })
     }
 
     fn load_one_message(&self, key: &ParsedKey, value: &[u8]) -> Option<ProcedureMessage> {
         serde_json::from_slice(value)
             .map_err(|e| {
                 // `e` doesn't impl ErrorExt so we print it as normal error.
-                logging::error!("Failed to parse value, key: {:?}, source: {:?}", key, e);
+                error!("Failed to parse value, key: {:?}, source: {:?}", key, e);
                 e
             })
             .ok()
@@ -265,7 +297,7 @@ struct ParsedKey<'a> {
     key_type: KeyType,
 }
 
-impl<'a> fmt::Display for ParsedKey<'a> {
+impl fmt::Display for ParsedKey<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -329,8 +361,7 @@ mod tests {
 
     fn procedure_store_for_test(dir: &TempDir) -> ProcedureStore {
         let store_dir = dir.path().to_str().unwrap();
-        let mut builder = Builder::default();
-        let _ = builder.root(store_dir);
+        let builder = Builder::default().root(store_dir);
         let object_store = ObjectStore::new(builder).unwrap().finish();
 
         ProcedureStore::from_object_store(object_store)
@@ -427,6 +458,7 @@ mod tests {
             data: "no parent id".to_string(),
             parent_id: None,
             step: 4,
+            error: None,
         };
 
         let json = serde_json::to_string(&message).unwrap();
@@ -487,15 +519,21 @@ mod tests {
             .await
             .unwrap();
 
-        let (messages, finished) = store.load_messages().await.unwrap();
+        let ProcedureMessages {
+            messages,
+            rollback_messages,
+            finished_ids,
+        } = store.load_messages().await.unwrap();
         assert_eq!(1, messages.len());
-        assert!(finished.is_empty());
+        assert!(rollback_messages.is_empty());
+        assert!(finished_ids.is_empty());
         let msg = messages.get(&procedure_id).unwrap();
         let expect = ProcedureMessage {
             type_name: "MockProcedure".to_string(),
             data: "test store procedure".to_string(),
             parent_id: None,
             step: 0,
+            error: None,
         };
         assert_eq!(expect, *msg);
     }
@@ -515,9 +553,14 @@ mod tests {
             .unwrap();
         store.commit_procedure(procedure_id, 1).await.unwrap();
 
-        let (messages, finished) = store.load_messages().await.unwrap();
+        let ProcedureMessages {
+            messages,
+            rollback_messages,
+            finished_ids,
+        } = store.load_messages().await.unwrap();
         assert!(messages.is_empty());
-        assert_eq!(&[procedure_id], &finished[..]);
+        assert!(rollback_messages.is_empty());
+        assert_eq!(&[procedure_id], &finished_ids[..]);
     }
 
     #[tokio::test]
@@ -530,14 +573,36 @@ mod tests {
         let type_name = procedure.type_name().to_string();
         let data = procedure.dump().unwrap();
         store
-            .store_procedure(procedure_id, 0, type_name, data, None)
+            .store_procedure(
+                procedure_id,
+                0,
+                type_name.to_string(),
+                data.to_string(),
+                None,
+            )
             .await
             .unwrap();
-        store.rollback_procedure(procedure_id, 1).await.unwrap();
+        let message = ProcedureMessage {
+            type_name,
+            data,
+            parent_id: None,
+            step: 1,
+            error: None,
+        };
+        store
+            .rollback_procedure(procedure_id, message)
+            .await
+            .unwrap();
 
-        let (messages, finished) = store.load_messages().await.unwrap();
+        let ProcedureMessages {
+            messages,
+            rollback_messages,
+            finished_ids,
+        } = store.load_messages().await.unwrap();
         assert!(messages.is_empty());
-        assert_eq!(&[procedure_id], &finished[..]);
+        assert_eq!(1, rollback_messages.len());
+        assert!(finished_ids.is_empty());
+        assert!(rollback_messages.contains_key(&procedure_id));
     }
 
     #[tokio::test]
@@ -562,9 +627,14 @@ mod tests {
 
         store.delete_procedure(procedure_id).await.unwrap();
 
-        let (messages, finished) = store.load_messages().await.unwrap();
+        let ProcedureMessages {
+            messages,
+            rollback_messages,
+            finished_ids,
+        } = store.load_messages().await.unwrap();
         assert!(messages.is_empty());
-        assert!(finished.is_empty());
+        assert!(rollback_messages.is_empty());
+        assert!(finished_ids.is_empty());
     }
 
     #[tokio::test]
@@ -592,9 +662,14 @@ mod tests {
 
         store.delete_procedure(procedure_id).await.unwrap();
 
-        let (messages, finished) = store.load_messages().await.unwrap();
+        let ProcedureMessages {
+            messages,
+            rollback_messages,
+            finished_ids,
+        } = store.load_messages().await.unwrap();
         assert!(messages.is_empty());
-        assert!(finished.is_empty());
+        assert!(rollback_messages.is_empty());
+        assert!(finished_ids.is_empty());
     }
 
     #[tokio::test]
@@ -654,9 +729,14 @@ mod tests {
             .await
             .unwrap();
 
-        let (messages, finished) = store.load_messages().await.unwrap();
+        let ProcedureMessages {
+            messages,
+            rollback_messages,
+            finished_ids,
+        } = store.load_messages().await.unwrap();
         assert_eq!(2, messages.len());
-        assert_eq!(1, finished.len());
+        assert!(rollback_messages.is_empty());
+        assert_eq!(1, finished_ids.len());
 
         let msg = messages.get(&id0).unwrap();
         assert_eq!("id0-2", msg.data);

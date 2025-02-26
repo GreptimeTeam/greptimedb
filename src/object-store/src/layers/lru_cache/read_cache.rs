@@ -14,18 +14,25 @@
 
 use std::sync::Arc;
 
-use common_telemetry::logging::debug;
-use futures::FutureExt;
+use common_telemetry::debug;
+use futures::{FutureExt, TryStreamExt};
 use moka::future::Cache;
 use moka::notification::ListenerFuture;
-use opendal::raw::oio::{ListExt, Read, ReadExt, Reader, WriteExt};
-use opendal::raw::{Accessor, OpDelete, OpList, OpRead, OpStat, OpWrite, RpRead};
-use opendal::{Error as OpendalError, ErrorKind, Result};
+use moka::policy::EvictionPolicy;
+use opendal::raw::oio::{Read, Reader, Write};
+use opendal::raw::{oio, Access, OpDelete, OpRead, OpStat, OpWrite, RpRead};
+use opendal::{Error as OpendalError, ErrorKind, OperatorBuilder, Result};
 
 use crate::metrics::{
     OBJECT_STORE_LRU_CACHE_BYTES, OBJECT_STORE_LRU_CACHE_ENTRIES, OBJECT_STORE_LRU_CACHE_HIT,
     OBJECT_STORE_LRU_CACHE_MISS, OBJECT_STORE_READ_ERROR,
 };
+
+const RECOVER_CACHE_LIST_CONCURRENT: usize = 8;
+/// Subdirectory of cached files for read.
+///
+/// This must contain three layers, corresponding to [`build_prometheus_metrics_layer`](object_store::layers::build_prometheus_metrics_layer).
+const READ_CACHE_DIR: &str = "cache/object/read";
 
 /// Cache value for read file
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
@@ -51,28 +58,45 @@ fn can_cache(path: &str) -> bool {
     !path.ends_with("_last_checkpoint")
 }
 
-/// Generate an unique cache key for the read path and range.
+/// Generate a unique cache key for the read path and range.
 fn read_cache_key(path: &str, args: &OpRead) -> String {
     format!(
-        "{:x}.cache-{}",
+        "{READ_CACHE_DIR}/{:x}.cache-{}",
         md5::compute(path),
         args.range().to_header()
     )
 }
 
+fn read_cache_root() -> String {
+    format!("/{READ_CACHE_DIR}/")
+}
+
+fn read_cache_key_prefix(path: &str) -> String {
+    format!("{READ_CACHE_DIR}/{:x}", md5::compute(path))
+}
+
 /// Local read cache for files in object storage
-#[derive(Clone, Debug)]
-pub(crate) struct ReadCache<C: Clone> {
+#[derive(Debug)]
+pub(crate) struct ReadCache<C> {
     /// Local file cache backend
     file_cache: Arc<C>,
     /// Local memory cache to track local cache files
     mem_cache: Cache<String, ReadResult>,
 }
 
-impl<C: Accessor + Clone> ReadCache<C> {
+impl<C> Clone for ReadCache<C> {
+    fn clone(&self) -> Self {
+        Self {
+            file_cache: self.file_cache.clone(),
+            mem_cache: self.mem_cache.clone(),
+        }
+    }
+}
+
+impl<C: Access> ReadCache<C> {
     /// Create a [`ReadCache`] with capacity in bytes.
     pub(crate) fn new(file_cache: Arc<C>, capacity: usize) -> Self {
-        let file_cache_cloned = file_cache.clone();
+        let file_cache_cloned = OperatorBuilder::new(file_cache.clone()).finish();
         let eviction_listener =
             move |read_key: Arc<String>, read_result: ReadResult, cause| -> ListenerFuture {
                 // Delete the file from local file cache when it's purged from mem_cache.
@@ -83,7 +107,7 @@ impl<C: Accessor + Clone> ReadCache<C> {
                     if let ReadResult::Success(size) = read_result {
                         OBJECT_STORE_LRU_CACHE_BYTES.sub(size as i64);
 
-                        let result = file_cache_cloned.delete(&read_key, OpDelete::new()).await;
+                        let result = file_cache_cloned.delete(&read_key).await;
                         debug!(
                             "Deleted local cache file `{}`, result: {:?}, cause: {:?}.",
                             read_key, result, cause
@@ -97,6 +121,7 @@ impl<C: Accessor + Clone> ReadCache<C> {
             file_cache,
             mem_cache: Cache::builder()
                 .max_capacity(capacity as u64)
+                .eviction_policy(EvictionPolicy::lru())
                 .weigher(|_key, value: &ReadResult| -> u32 {
                     // TODO(dennis): add key's length to weight?
                     value.size_bytes()
@@ -108,22 +133,15 @@ impl<C: Accessor + Clone> ReadCache<C> {
     }
 
     /// Returns the cache's entry count and total approximate entry size in bytes.
-    pub(crate) async fn stat(&self) -> (u64, u64) {
+    pub(crate) async fn cache_stat(&self) -> (u64, u64) {
         self.mem_cache.run_pending_tasks().await;
 
         (self.mem_cache.entry_count(), self.mem_cache.weighted_size())
     }
 
-    /// Invalidate all cache items which key starts with `prefix`.
-    pub(crate) async fn invalidate_entries_with_prefix(&self, prefix: String) {
-        // Safety: always ok when building cache with `support_invalidation_closures`.
-        self.mem_cache
-            .invalidate_entries_if(move |k: &String, &_v| k.starts_with(&prefix))
-            .ok();
-    }
-
-    /// Blocking version of `invalidate_entries_with_prefix`.
-    pub(crate) fn blocking_invalidate_entries_with_prefix(&self, prefix: String) {
+    /// Invalidate all cache items belong to the specific path.
+    pub(crate) fn invalidate_entries_with_prefix(&self, path: &str) {
+        let prefix = read_cache_key_prefix(path);
         // Safety: always ok when building cache with `support_invalidation_closures`.
         self.mem_cache
             .invalidate_entries_if(move |k: &String, &_v| k.starts_with(&prefix))
@@ -133,27 +151,40 @@ impl<C: Accessor + Clone> ReadCache<C> {
     /// Recover existing cache items from `file_cache` to `mem_cache`.
     /// Return entry count and total approximate entry size in bytes.
     pub(crate) async fn recover_cache(&self) -> Result<(u64, u64)> {
-        let (_, mut pager) = self.file_cache.list("/", OpList::default()).await?;
+        let op = OperatorBuilder::new(self.file_cache.clone()).finish();
+        let cloned_op = op.clone();
+        let root = read_cache_root();
+        let mut entries = op
+            .lister_with(&root)
+            .await?
+            .map_ok(|entry| async {
+                let (path, mut meta) = entry.into_parts();
 
-        while let Some(entry) = pager.next().await? {
-            let read_key = entry.path();
+                if !cloned_op.info().full_capability().list_has_content_length {
+                    meta = cloned_op.stat(&path).await?;
+                }
 
-            // We can't retrieve the metadata from `[opendal::raw::oio::Entry]` directly,
-            // because it's private field.
-            let size = {
-                let stat = self.file_cache.stat(read_key, OpStat::default()).await?;
+                Ok((path, meta))
+            })
+            .try_buffer_unordered(RECOVER_CACHE_LIST_CONCURRENT)
+            .try_collect::<Vec<_>>()
+            .await?;
 
-                stat.into_metadata().content_length()
-            };
+        while let Some((read_key, metadata)) = entries.pop() {
+            if !metadata.is_file() {
+                continue;
+            }
 
+            let size = metadata.content_length();
             OBJECT_STORE_LRU_CACHE_ENTRIES.inc();
             OBJECT_STORE_LRU_CACHE_BYTES.add(size as i64);
+
             self.mem_cache
                 .insert(read_key.to_string(), ReadResult::Success(size as u32))
                 .await;
         }
 
-        Ok(self.stat().await)
+        Ok(self.cache_stat().await)
     }
 
     /// Returns true when the read cache contains the specific file.
@@ -166,16 +197,16 @@ impl<C: Accessor + Clone> ReadCache<C> {
     /// Read from a specific path using the OpRead operation.
     /// It will attempt to retrieve the data from the local cache.
     /// If the data is not found in the local cache,
-    /// it will fallback to retrieving it from remote object storage
+    /// it will fall back to retrieving it from remote object storage
     /// and cache the result locally.
-    pub(crate) async fn read<I>(
+    pub(crate) async fn read_from_cache<I>(
         &self,
         inner: &I,
         path: &str,
         args: OpRead,
-    ) -> Result<(RpRead, Box<dyn Read>)>
+    ) -> Result<(RpRead, Reader)>
     where
-        I: Accessor,
+        I: Access,
     {
         if !can_cache(path) {
             return inner.read(path, args).await.map(to_output_reader);
@@ -190,12 +221,12 @@ impl<C: Accessor + Clone> ReadCache<C> {
                 self.read_remote(inner, &read_key, path, args.clone()),
             )
             .await
-            .map_err(|e| OpendalError::new(e.kind(), &e.to_string()))?;
+            .map_err(|e| OpendalError::new(e.kind(), e.to_string()))?;
 
         match read_result {
             ReadResult::Success(_) => {
                 // There is a concurrent issue here, the local cache may be purged
-                // while reading, we have to fallback to remote read
+                // while reading, we have to fall back to remote read
                 match self.file_cache.read(&read_key, OpRead::default()).await {
                     Ok(ret) => {
                         OBJECT_STORE_LRU_CACHE_HIT
@@ -216,7 +247,7 @@ impl<C: Accessor + Clone> ReadCache<C> {
 
                 Err(OpendalError::new(
                     ErrorKind::NotFound,
-                    &format!("File not found: {path}"),
+                    format!("File not found: {path}"),
                 ))
             }
         }
@@ -224,12 +255,16 @@ impl<C: Accessor + Clone> ReadCache<C> {
 
     async fn try_write_cache<I>(&self, mut reader: I::Reader, read_key: &str) -> Result<usize>
     where
-        I: Accessor,
+        I: Access,
     {
         let (_, mut writer) = self.file_cache.write(read_key, OpWrite::new()).await?;
         let mut total = 0;
-        while let Some(bytes) = reader.next().await {
-            let bytes = &bytes?;
+        loop {
+            let bytes = reader.read().await?;
+            if bytes.is_empty() {
+                break;
+            }
+
             total += bytes.len();
             writer.write(bytes).await?;
         }
@@ -247,7 +282,7 @@ impl<C: Accessor + Clone> ReadCache<C> {
         args: OpRead,
     ) -> Result<ReadResult>
     where
-        I: Accessor,
+        I: Access,
     {
         OBJECT_STORE_LRU_CACHE_MISS.inc();
 
@@ -278,6 +313,29 @@ impl<C: Accessor + Clone> ReadCache<C> {
                 Err(e)
             }
         }
+    }
+}
+
+pub struct CacheAwareDeleter<C, D> {
+    cache: ReadCache<C>,
+    deleter: D,
+}
+
+impl<C: Access, D: oio::Delete> CacheAwareDeleter<C, D> {
+    pub(crate) fn new(cache: ReadCache<C>, deleter: D) -> Self {
+        Self { cache, deleter }
+    }
+}
+
+impl<C: Access, D: oio::Delete> oio::Delete for CacheAwareDeleter<C, D> {
+    fn delete(&mut self, path: &str, args: OpDelete) -> Result<()> {
+        self.cache.invalidate_entries_with_prefix(path);
+        self.deleter.delete(path, args)?;
+        Ok(())
+    }
+
+    async fn flush(&mut self) -> Result<usize> {
+        self.deleter.flush().await
     }
 }
 

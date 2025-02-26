@@ -25,7 +25,12 @@ pub struct HealthHandler;
 
 #[async_trait::async_trait]
 impl HttpHandler for HealthHandler {
-    async fn handle(&self, _: &str, _: &HashMap<String, String>) -> Result<http::Response<String>> {
+    async fn handle(
+        &self,
+        _: &str,
+        _: http::Method,
+        _: &HashMap<String, String>,
+    ) -> Result<http::Response<String>> {
         Ok(http::Response::builder()
             .status(http::StatusCode::OK)
             .body(HTTP_OK.to_owned())
@@ -42,7 +47,10 @@ mod tests {
         let health_handler = HealthHandler {};
         let path = "any";
         let params = HashMap::default();
-        let res = health_handler.handle(path, &params).await.unwrap();
+        let res = health_handler
+            .handle(path, http::Method::GET, &params)
+            .await
+            .unwrap();
 
         assert!(res.status().is_success());
         assert_eq!(HTTP_OK.to_owned(), res.body().clone());

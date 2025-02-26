@@ -55,6 +55,20 @@ ALTER TABLE test_alt_table ADD COLUMN m INTEGER;
 
 Affected Rows: 0
 
+ALTER TABLE test_alt_table ADD COLUMN dt DATETIME;
+
+Affected Rows: 0
+
+-- Should fail issue #5422
+ALTER TABLE test_alt_table ADD COLUMN n interval;
+
+Error: 1001(Unsupported), Not supported: Add column with interval type
+
+-- Should fail issue #5422
+ALTER TABLE test_alt_table MODIFY COLUMN m interval;
+
+Error: 1001(Unsupported), Not supported: Modify column type to interval type
+
 DESC TABLE test_alt_table;
 
 +--------+----------------------+-----+------+---------+---------------+
@@ -65,9 +79,116 @@ DESC TABLE test_alt_table;
 | j      | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
 | k      | String               | PRI | YES  |         | TAG           |
 | m      | Int32                |     | YES  |         | FIELD         |
+| dt     | TimestampMicrosecond |     | YES  |         | FIELD         |
 +--------+----------------------+-----+------+---------+---------------+
 
 DROP TABLE test_alt_table;
+
+Affected Rows: 0
+
+-- to test if same name column can be added
+CREATE TABLE phy (ts timestamp time index, val double) engine = metric with ("physical_metric_table" = "");
+
+Affected Rows: 0
+
+CREATE TABLE t1 (
+    ts timestamp time index,
+    val double,
+    host string primary key
+) engine = metric with ("on_physical_table" = "phy");
+
+Affected Rows: 0
+
+INSERT INTO
+    t1
+VALUES
+    ('host1', 0, 1),
+    ('host2', 1, 0,);
+
+Affected Rows: 2
+
+SELECT
+    *
+FROM
+    t1;
+
++-------+-------------------------+-----+
+| host  | ts                      | val |
++-------+-------------------------+-----+
+| host2 | 1970-01-01T00:00:00.001 | 0.0 |
+| host1 | 1970-01-01T00:00:00     | 1.0 |
++-------+-------------------------+-----+
+
+CREATE TABLE t2 (
+    ts timestamp time index,
+    job string primary key,
+    val double
+) engine = metric with ("on_physical_table" = "phy");
+
+Affected Rows: 0
+
+ALTER TABLE
+    t1
+ADD
+    COLUMN `at` STRING;
+
+Affected Rows: 0
+
+ALTER TABLE
+    t2
+ADD
+    COLUMN at3 STRING;
+
+Affected Rows: 0
+
+ALTER TABLE
+    t2
+ADD
+    COLUMN `at` STRING;
+
+Affected Rows: 0
+
+ALTER TABLE
+    t2
+ADD
+    COLUMN at2 STRING;
+
+Affected Rows: 0
+
+ALTER TABLE 
+    t2 
+ADD 
+    COLUMN at4 UINT16;
+
+Affected Rows: 0
+
+INSERT INTO
+    t2
+VALUES
+    ("loc_1", "loc_2", "loc_3", 2, 'job1', 0, 1);
+
+Affected Rows: 1
+
+SELECT
+    *
+FROM
+    t2;
+
++-------+-------+-------+-----+------+---------------------+-----+
+| at    | at2   | at3   | at4 | job  | ts                  | val |
++-------+-------+-------+-----+------+---------------------+-----+
+| loc_1 | loc_2 | loc_3 | 2   | job1 | 1970-01-01T00:00:00 | 1.0 |
++-------+-------+-------+-----+------+---------------------+-----+
+
+DROP TABLE t1;
+
+Affected Rows: 0
+
+DROP TABLE t2;
+
+Affected Rows: 0
+
+DROP TABLE phy;
 
 Affected Rows: 0
 

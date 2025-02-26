@@ -81,7 +81,7 @@ SELECT f FROM floats ORDER BY f NULLS LAST LIMIT 4;
 SELECT COUNT(*) FROM floats WHERE f > 0;
 
 +----------+
-| COUNT(*) |
+| count(*) |
 +----------+
 | 3        |
 +----------+
@@ -89,7 +89,7 @@ SELECT COUNT(*) FROM floats WHERE f > 0;
 SELECT COUNT(*) FROM floats WHERE f < 0;
 
 +----------+
-| COUNT(*) |
+| count(*) |
 +----------+
 | 2        |
 +----------+
@@ -180,7 +180,7 @@ SELECT d FROM doubles ORDER BY d NULLS LAST LIMIT 4;
 SELECT COUNT(*) FROM doubles WHERE d > 0;
 
 +----------+
-| COUNT(*) |
+| count(*) |
 +----------+
 | 3        |
 +----------+
@@ -188,7 +188,7 @@ SELECT COUNT(*) FROM doubles WHERE d > 0;
 SELECT COUNT(*) FROM doubles WHERE d < 0;
 
 +----------+
-| COUNT(*) |
+| count(*) |
 +----------+
 | 2        |
 +----------+

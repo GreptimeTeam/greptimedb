@@ -12,17 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::Duration;
+
 use lazy_static::lazy_static;
 use prometheus::*;
+use puffin::puffin_manager::stager::StagerNotifier;
 
 /// Stage label.
 pub const STAGE_LABEL: &str = "stage";
 /// Type label.
 pub const TYPE_LABEL: &str = "type";
+const CACHE_EVICTION_CAUSE: &str = "cause";
 /// Reason to flush.
 pub const FLUSH_REASON: &str = "reason";
 /// File type label.
 pub const FILE_TYPE_LABEL: &str = "file_type";
+/// Region worker id label.
+pub const WORKER_LABEL: &str = "worker";
+/// Partition label.
+pub const PARTITION_LABEL: &str = "partition";
+/// Staging dir type label.
+pub const STAGING_TYPE: &str = "index_staging";
+/// Recycle bin type label.
+pub const RECYCLE_TYPE: &str = "recycle_bin";
 
 lazy_static! {
     /// Global write buffer size in bytes.
@@ -31,15 +43,20 @@ lazy_static! {
     /// Global memtable dictionary size in bytes.
     pub static ref MEMTABLE_DICT_BYTES: IntGauge =
         register_int_gauge!("greptime_mito_memtable_dict_bytes", "mito memtable dictionary size in bytes").unwrap();
-    /// Gauge for open regions
-    pub static ref REGION_COUNT: IntGauge =
-        register_int_gauge!("greptime_mito_region_count", "mito region count").unwrap();
+    /// Gauge for open regions in each worker.
+    pub static ref REGION_COUNT: IntGaugeVec =
+        register_int_gauge_vec!(
+            "greptime_mito_region_count",
+            "mito region count in each worker",
+            &[WORKER_LABEL],
+        ).unwrap();
     /// Elapsed time to handle requests.
     pub static ref HANDLE_REQUEST_ELAPSED: HistogramVec = register_histogram_vec!(
             "greptime_mito_handle_request_elapsed",
             "mito handle request elapsed",
             &[TYPE_LABEL],
-            vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 60.0, 300.0]
+            // 0.01 ~ 10000
+            exponential_buckets(0.01, 10.0, 7).unwrap(),
         )
         .unwrap();
 
@@ -60,19 +77,29 @@ lazy_static! {
             "greptime_mito_flush_elapsed",
             "mito flush elapsed",
             &[TYPE_LABEL],
-            vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
+            // 1 ~ 625
+            exponential_buckets(1.0, 5.0, 6).unwrap(),
         )
         .unwrap();
     /// Histogram of flushed bytes.
     pub static ref FLUSH_BYTES_TOTAL: IntCounter =
         register_int_counter!("greptime_mito_flush_bytes_total", "mito flush bytes total").unwrap();
+    /// Gauge for inflight compaction tasks.
+    pub static ref INFLIGHT_FLUSH_COUNT: IntGauge =
+        register_int_gauge!(
+            "greptime_mito_inflight_flush_count",
+            "inflight flush count",
+        ).unwrap();
     // ------ End of flush related metrics
 
 
     // ------ Write related metrics
-    /// Counter of stalled write requests.
-    pub static ref WRITE_STALL_TOTAL: IntCounter =
-        register_int_counter!("greptime_mito_write_stall_total", "mito write stall total").unwrap();
+    /// Number of stalled write requests in each worker.
+    pub static ref WRITE_STALL_TOTAL: IntGaugeVec = register_int_gauge_vec!(
+            "greptime_mito_write_stall_total",
+            "mito stalled write request in each worker",
+            &[WORKER_LABEL]
+        ).unwrap();
     /// Counter of rejected write requests.
     pub static ref WRITE_REJECT_TOTAL: IntCounter =
         register_int_counter!("greptime_mito_write_reject_total", "mito write reject total").unwrap();
@@ -81,7 +108,8 @@ lazy_static! {
             "greptime_mito_write_stage_elapsed",
             "mito write stage elapsed",
             &[STAGE_LABEL],
-            vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
+            // 0.01 ~ 1000
+            exponential_buckets(0.01, 10.0, 6).unwrap(),
         )
         .unwrap();
     /// Counter of rows to write.
@@ -100,18 +128,31 @@ lazy_static! {
         "greptime_mito_compaction_stage_elapsed",
         "mito compaction stage elapsed",
         &[STAGE_LABEL],
-        vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
+        // 1 ~ 100000
+        exponential_buckets(1.0, 10.0, 6).unwrap(),
     )
     .unwrap();
     /// Timer of whole compaction task.
     pub static ref COMPACTION_ELAPSED_TOTAL: Histogram =
-        register_histogram!("greptime_mito_compaction_total_elapsed", "mito compaction total elapsed").unwrap();
+        register_histogram!(
+        "greptime_mito_compaction_total_elapsed",
+        "mito compaction total elapsed",
+        // 1 ~ 100000
+        exponential_buckets(1.0, 10.0, 6).unwrap(),
+    ).unwrap();
     /// Counter of all requested compaction task.
     pub static ref COMPACTION_REQUEST_COUNT: IntCounter =
         register_int_counter!("greptime_mito_compaction_requests_total", "mito compaction requests total").unwrap();
     /// Counter of failed compaction task.
     pub static ref COMPACTION_FAILURE_COUNT: IntCounter =
         register_int_counter!("greptime_mito_compaction_failure_total", "mito compaction failure total").unwrap();
+
+    /// Gauge for inflight compaction tasks.
+    pub static ref INFLIGHT_COMPACTION_COUNT: IntGauge =
+        register_int_gauge!(
+            "greptime_mito_inflight_compaction_count",
+            "inflight compaction count",
+        ).unwrap();
     // ------- End of compaction metrics.
 
     // Query metrics.
@@ -120,7 +161,16 @@ lazy_static! {
         "greptime_mito_read_stage_elapsed",
         "mito read stage elapsed",
         &[STAGE_LABEL],
-        vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
+        // 0.01 ~ 10000
+        exponential_buckets(0.01, 10.0, 7).unwrap(),
+    )
+    .unwrap();
+    pub static ref READ_STAGE_FETCH_PAGES: Histogram = READ_STAGE_ELAPSED.with_label_values(&["fetch_pages"]);
+    /// Number of in-progress scan per partition.
+    pub static ref IN_PROGRESS_SCAN: IntGaugeVec = register_int_gauge_vec!(
+        "greptime_mito_in_progress_scan",
+        "mito in progress scan per partition",
+        &[TYPE_LABEL, PARTITION_LABEL]
     )
     .unwrap();
     /// Counter of rows read from different source.
@@ -179,19 +229,41 @@ lazy_static! {
         &[TYPE_LABEL]
     )
     .unwrap();
+    /// Download bytes counter in the write cache.
+    pub static ref WRITE_CACHE_DOWNLOAD_BYTES_TOTAL: IntCounter = register_int_counter!(
+        "mito_write_cache_download_bytes_total",
+        "mito write cache download bytes total",
+    ).unwrap();
+    /// Timer of the downloading task in the write cache.
+    pub static ref WRITE_CACHE_DOWNLOAD_ELAPSED: HistogramVec = register_histogram_vec!(
+        "mito_write_cache_download_elapsed",
+        "mito write cache download elapsed",
+        &[TYPE_LABEL],
+        // 0.1 ~ 10000
+        exponential_buckets(0.1, 10.0, 6).unwrap(),
+    ).unwrap();
     /// Upload bytes counter.
     pub static ref UPLOAD_BYTES_TOTAL: IntCounter = register_int_counter!(
         "mito_upload_bytes_total",
         "mito upload bytes total",
     )
     .unwrap();
+    /// Cache eviction counter, labeled with cache type and eviction reason.
+    pub static ref CACHE_EVICTION: IntCounterVec = register_int_counter_vec!(
+        "greptime_mito_cache_eviction",
+        "mito cache eviction",
+        &[TYPE_LABEL, CACHE_EVICTION_CAUSE]
+    ).unwrap();
     // ------- End of cache metrics.
 
     // Index metrics.
     /// Timer of index application.
-    pub static ref INDEX_APPLY_ELAPSED: Histogram = register_histogram!(
+    pub static ref INDEX_APPLY_ELAPSED: HistogramVec = register_histogram_vec!(
         "greptime_index_apply_elapsed",
         "index apply elapsed",
+        &[TYPE_LABEL],
+        // 0.01 ~ 1000
+        exponential_buckets(0.01, 10.0, 6).unwrap(),
     )
     .unwrap();
     /// Gauge of index apply memory usage.
@@ -204,26 +276,30 @@ lazy_static! {
     pub static ref INDEX_CREATE_ELAPSED: HistogramVec = register_histogram_vec!(
         "greptime_index_create_elapsed",
         "index create elapsed",
-        &[STAGE_LABEL],
-        vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
+        &[STAGE_LABEL, TYPE_LABEL],
+        // 0.1 ~ 10000
+        exponential_buckets(0.1, 10.0, 6).unwrap(),
     )
     .unwrap();
     /// Counter of rows indexed.
-    pub static ref INDEX_CREATE_ROWS_TOTAL: IntCounter = register_int_counter!(
+    pub static ref INDEX_CREATE_ROWS_TOTAL: IntCounterVec = register_int_counter_vec!(
         "greptime_index_create_rows_total",
         "index create rows total",
+        &[TYPE_LABEL],
     )
     .unwrap();
     /// Counter of created index bytes.
-    pub static ref INDEX_CREATE_BYTES_TOTAL: IntCounter = register_int_counter!(
+    pub static ref INDEX_CREATE_BYTES_TOTAL: IntCounterVec = register_int_counter_vec!(
         "greptime_index_create_bytes_total",
         "index create bytes total",
+        &[TYPE_LABEL],
     )
     .unwrap();
     /// Gauge of index create memory usage.
-    pub static ref INDEX_CREATE_MEMORY_USAGE: IntGauge = register_int_gauge!(
+    pub static ref INDEX_CREATE_MEMORY_USAGE: IntGaugeVec = register_int_gauge_vec!(
         "greptime_index_create_memory_usage",
         "index create memory usage",
+        &[TYPE_LABEL],
     ).unwrap();
     /// Counter of r/w bytes on index related IO operations.
     pub static ref INDEX_IO_BYTES_TOTAL: IntCounterVec = register_int_counter_vec!(
@@ -283,7 +359,8 @@ lazy_static! {
         "greptime_partition_tree_buffer_freeze_stage_elapsed",
         "mito partition tree data buffer freeze stage elapsed",
         &[STAGE_LABEL],
-        vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0]
+        // 0.01 ~ 1000
+        exponential_buckets(0.01, 10.0, 6).unwrap(),
     )
     .unwrap();
 
@@ -292,9 +369,87 @@ lazy_static! {
         "greptime_partition_tree_read_stage_elapsed",
         "mito partition tree read stage elapsed",
         &[STAGE_LABEL],
-        vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0]
+        // 0.01 ~ 1000
+        exponential_buckets(0.01, 10.0, 6).unwrap(),
     )
     .unwrap();
 
     // ------- End of partition tree memtable metrics.
+
+
+    // Manifest related metrics:
+
+    /// Elapsed time of manifest operation. Labeled with "op".
+    pub static ref MANIFEST_OP_ELAPSED: HistogramVec = register_histogram_vec!(
+        "greptime_manifest_op_elapsed",
+        "mito manifest operation elapsed",
+        &["op"],
+        // 0.01 ~ 1000
+        exponential_buckets(0.01, 10.0, 6).unwrap(),
+    ).unwrap();
+}
+
+/// Stager notifier to collect metrics.
+pub struct StagerMetrics {
+    cache_hit: IntCounter,
+    cache_miss: IntCounter,
+    staging_cache_bytes: IntGauge,
+    recycle_cache_bytes: IntGauge,
+    cache_eviction: IntCounter,
+    staging_miss_read: Histogram,
+}
+
+impl StagerMetrics {
+    /// Creates a new stager notifier.
+    pub fn new() -> Self {
+        Self {
+            cache_hit: CACHE_HIT.with_label_values(&[STAGING_TYPE]),
+            cache_miss: CACHE_MISS.with_label_values(&[STAGING_TYPE]),
+            staging_cache_bytes: CACHE_BYTES.with_label_values(&[STAGING_TYPE]),
+            recycle_cache_bytes: CACHE_BYTES.with_label_values(&[RECYCLE_TYPE]),
+            cache_eviction: CACHE_EVICTION.with_label_values(&[STAGING_TYPE, "size"]),
+            staging_miss_read: READ_STAGE_ELAPSED.with_label_values(&["staging_miss_read"]),
+        }
+    }
+}
+
+impl Default for StagerMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StagerNotifier for StagerMetrics {
+    fn on_cache_hit(&self, _size: u64) {
+        self.cache_hit.inc();
+    }
+
+    fn on_cache_miss(&self, _size: u64) {
+        self.cache_miss.inc();
+    }
+
+    fn on_cache_insert(&self, size: u64) {
+        self.staging_cache_bytes.add(size as i64);
+    }
+
+    fn on_load_dir(&self, duration: Duration) {
+        self.staging_miss_read.observe(duration.as_secs_f64());
+    }
+
+    fn on_load_blob(&self, duration: Duration) {
+        self.staging_miss_read.observe(duration.as_secs_f64());
+    }
+
+    fn on_cache_evict(&self, size: u64) {
+        self.cache_eviction.inc();
+        self.staging_cache_bytes.sub(size as i64);
+    }
+
+    fn on_recycle_insert(&self, size: u64) {
+        self.recycle_cache_bytes.add(size as i64);
+    }
+
+    fn on_recycle_clear(&self, size: u64) {
+        self.recycle_cache_bytes.sub(size as i64);
+    }
 }

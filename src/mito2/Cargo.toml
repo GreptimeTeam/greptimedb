@@ -6,7 +6,7 @@ license.workspace = true
 
 [features]
 default = []
-test = ["common-test-util", "log-store"]
+test = ["common-test-util", "log-store", "rstest", "rstest_reuse", "rskafka"]
 
 [lints]
 workspace = true
@@ -16,7 +16,8 @@ api.workspace = true
 aquamarine.workspace = true
 async-channel = "1.9"
 async-stream.workspace = true
-async-trait = "0.1"
+async-trait.workspace = true
+bytemuck.workspace = true
 bytes.workspace = true
 common-base.workspace = true
 common-config.workspace = true
@@ -24,6 +25,7 @@ common-datasource.workspace = true
 common-decimal.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
+common-meta.workspace = true
 common-query.workspace = true
 common-recordbatch.workspace = true
 common-runtime.workspace = true
@@ -31,10 +33,13 @@ common-telemetry.workspace = true
 common-test-util = { workspace = true, optional = true }
 common-time.workspace = true
 common-wal.workspace = true
+crc32fast = "1"
+crossbeam-utils.workspace = true
 datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
 datatypes.workspace = true
+dotenv.workspace = true
 futures.workspace = true
 humantime-serde.workspace = true
 index.workspace = true
@@ -52,6 +57,10 @@ prost.workspace = true
 puffin.workspace = true
 rand.workspace = true
 regex = "1.5"
+rskafka = { workspace = true, optional = true }
+rstest = { workspace = true, optional = true }
+rstest_reuse = { workspace = true, optional = true }
+scopeguard = "1.2"
 serde.workspace = true
 serde_json.workspace = true
 serde_with.workspace = true
@@ -66,11 +75,17 @@ tokio-util.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-common-procedure-test.workspace = true
+common-function.workspace = true
+common-meta = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
 criterion = "0.4"
+dotenv.workspace = true
 log-store.workspace = true
 object-store = { workspace = true, features = ["services-memory"] }
+rskafka.workspace = true
+rstest.workspace = true
+rstest_reuse.workspace = true
+session.workspace = true
 toml.workspace = true
 
 [[bench]]

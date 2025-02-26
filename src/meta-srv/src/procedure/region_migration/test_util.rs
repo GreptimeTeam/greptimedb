@@ -20,12 +20,14 @@ use std::time::Duration;
 
 use api::v1::meta::mailbox_message::Payload;
 use api::v1::meta::{HeartbeatResponse, MailboxMessage, RequestHeader};
+use common_meta::ddl::NoopRegionFailureDetectorControl;
 use common_meta::instruction::{
     DowngradeRegionReply, InstructionReply, SimpleReply, UpgradeRegionReply,
 };
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
+use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
 use common_meta::region_keeper::{MemoryRegionKeeper, MemoryRegionKeeperRef};
 use common_meta::rpc::router::RegionRoute;
@@ -42,16 +44,21 @@ use store_api::storage::RegionId;
 use table::metadata::RawTableInfo;
 use tokio::sync::mpsc::{Receiver, Sender};
 
-use super::migration_abort::RegionMigrationAbort;
-use super::upgrade_candidate_region::UpgradeCandidateRegion;
-use super::{Context, ContextFactory, DefaultContextFactory, State, VolatileContext};
+use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::error::{self, Error, Result};
 use crate::handler::{HeartbeatMailbox, Pusher, Pushers};
+use crate::metasrv::MetasrvInfo;
+use crate::procedure::region_migration::close_downgraded_region::CloseDowngradedRegion;
 use crate::procedure::region_migration::downgrade_leader_region::DowngradeLeaderRegion;
+use crate::procedure::region_migration::manager::RegionMigrationProcedureTracker;
+use crate::procedure::region_migration::migration_abort::RegionMigrationAbort;
 use crate::procedure::region_migration::migration_end::RegionMigrationEnd;
 use crate::procedure::region_migration::open_candidate_region::OpenCandidateRegion;
 use crate::procedure::region_migration::update_metadata::UpdateMetadata;
-use crate::procedure::region_migration::PersistentContext;
+use crate::procedure::region_migration::upgrade_candidate_region::UpgradeCandidateRegion;
+use crate::procedure::region_migration::{
+    Context, ContextFactory, DefaultContextFactory, PersistentContext, State, VolatileContext,
+};
 use crate::service::mailbox::{Channel, MailboxRef};
 
 pub type MockHeartbeatReceiver = Receiver<std::result::Result<HeartbeatResponse, tonic::Status>>;
@@ -79,7 +86,7 @@ impl MailboxContext {
     ) {
         let pusher_id = channel.pusher_id();
         let pusher = Pusher::new(tx, &RequestHeader::default());
-        let _ = self.pushers.insert(pusher_id, pusher).await;
+        let _ = self.pushers.insert(pusher_id.string_key(), pusher).await;
     }
 
     pub fn mailbox(&self) -> &MailboxRef {
@@ -94,6 +101,14 @@ pub struct TestingEnv {
     opening_region_keeper: MemoryRegionKeeperRef,
     server_addr: String,
     procedure_manager: ProcedureManagerRef,
+    tracker: RegionMigrationProcedureTracker,
+    kv_backend: KvBackendRef,
+}
+
+impl Default for TestingEnv {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TestingEnv {
@@ -117,7 +132,19 @@ impl TestingEnv {
             mailbox_ctx,
             server_addr: "localhost".to_string(),
             procedure_manager,
+            tracker: Default::default(),
+            kv_backend,
         }
+    }
+
+    /// Returns the [KvBackendRef].
+    pub fn kv_backend(&self) -> KvBackendRef {
+        self.kv_backend.clone()
+    }
+
+    /// Returns the [RegionMigrationProcedureTracker].
+    pub(crate) fn tracker(&self) -> RegionMigrationProcedureTracker {
+        self.tracker.clone()
     }
 
     /// Returns a context of region migration procedure.
@@ -128,6 +155,13 @@ impl TestingEnv {
             volatile_ctx: Default::default(),
             mailbox: self.mailbox_ctx.mailbox().clone(),
             server_addr: self.server_addr.to_string(),
+            region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
+            cache_invalidator: Arc::new(MetasrvCacheInvalidator::new(
+                self.mailbox_ctx.mailbox.clone(),
+                MetasrvInfo {
+                    server_addr: self.server_addr.to_string(),
+                },
+            )),
         }
     }
 
@@ -267,7 +301,7 @@ pub fn send_mock_reply(
     mut rx: MockHeartbeatReceiver,
     msg: impl Fn(u64) -> Result<MailboxMessage> + Send + 'static,
 ) {
-    common_runtime::spawn_bg(async move {
+    common_runtime::spawn_global(async move {
         while let Some(Ok(resp)) = rx.recv().await {
             let reply_id = resp.mailbox_message.unwrap().id;
             mailbox.on_recv(reply_id, msg(reply_id)).await.unwrap();
@@ -284,7 +318,7 @@ pub fn new_persistent_context(from: u64, to: u64, region_id: RegionId) -> Persis
         to_peer: Peer::empty(to),
         region_id,
         cluster_id: 0,
-        replay_timeout: Duration::from_millis(1000),
+        timeout: Duration::from_secs(10),
     }
 }
 
@@ -417,7 +451,7 @@ impl ProcedureMigrationTestSuite {
             .find(|route| route.region.id == region_id)
             .unwrap();
 
-        assert!(!region_route.is_leader_downgraded());
+        assert!(!region_route.is_leader_downgrading());
         assert_eq!(
             region_route.leader_peer.as_ref().unwrap().id,
             expected_leader_id
@@ -431,7 +465,7 @@ impl ProcedureMigrationTestSuite {
 
 /// The step of test.
 #[derive(Clone)]
-pub enum Step {
+pub(crate) enum Step {
     Setup((String, BeforeTest)),
     Next((String, Option<BeforeTest>, Assertion)),
 }
@@ -535,6 +569,14 @@ pub(crate) fn assert_update_metadata_rollback(next: &dyn State) {
 /// Asserts the [State] should be [RegionMigrationEnd].
 pub(crate) fn assert_region_migration_end(next: &dyn State) {
     let _ = next.as_any().downcast_ref::<RegionMigrationEnd>().unwrap();
+}
+
+/// Asserts the [State] should be [CloseDowngradedRegion].
+pub(crate) fn assert_close_downgraded_region(next: &dyn State) {
+    let _ = next
+        .as_any()
+        .downcast_ref::<CloseDowngradedRegion>()
+        .unwrap();
 }
 
 /// Asserts the [State] should be [RegionMigrationAbort].

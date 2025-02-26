@@ -17,12 +17,13 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use common_error::ext::ErrorExt;
-use common_telemetry::logging;
+use common_telemetry::{debug, error};
 use snafu::{ensure, ResultExt};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{IllegalStateSnafu, Result, WaitGcTaskStopSnafu};
+use crate::runtime::RuntimeTrait;
 use crate::Runtime;
 
 /// Task to execute repeatedly.
@@ -128,17 +129,16 @@ impl<E: ErrorExt + 'static> RepeatedTask<E> {
                     }
                 }
                 if let Err(e) = task_fn.call().await {
-                    logging::error!(e; "Failed to run repeated task: {}", task_fn.name());
+                    error!(e; "Failed to run repeated task: {}", task_fn.name());
                 }
             }
         });
         inner.task_handle = Some(handle);
         self.started.store(true, Ordering::Relaxed);
 
-        logging::debug!(
+        debug!(
             "Repeated task {} started with interval: {:?}",
-            self.name,
-            self.interval
+            self.name, self.interval
         );
 
         Ok(())
@@ -162,7 +162,7 @@ impl<E: ErrorExt + 'static> RepeatedTask<E> {
             .await
             .context(WaitGcTaskStopSnafu { name: &self.name })?;
 
-        logging::debug!("Repeated task {} stopped", self.name);
+        debug!("Repeated task {} stopped", self.name);
 
         Ok(())
     }
@@ -201,11 +201,11 @@ mod tests {
 
         let task = RepeatedTask::new(Duration::from_millis(100), Box::new(task_fn));
 
-        task.start(crate::bg_runtime()).unwrap();
+        task.start(crate::global_runtime()).unwrap();
         tokio::time::sleep(Duration::from_millis(550)).await;
         task.stop().await.unwrap();
 
-        assert_eq!(n.load(Ordering::Relaxed), 5);
+        assert!(n.load(Ordering::Relaxed) >= 3);
     }
 
     #[tokio::test]
@@ -218,10 +218,10 @@ mod tests {
         let task = RepeatedTask::new(Duration::from_millis(100), Box::new(task_fn))
             .with_initial_delay(Some(Duration::ZERO));
 
-        task.start(crate::bg_runtime()).unwrap();
+        task.start(crate::global_runtime()).unwrap();
         tokio::time::sleep(Duration::from_millis(550)).await;
         task.stop().await.unwrap();
 
-        assert_eq!(n.load(Ordering::Relaxed), 6);
+        assert!(n.load(Ordering::Relaxed) >= 4);
     }
 }

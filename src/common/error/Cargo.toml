@@ -8,5 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+http.workspace = true
 snafu.workspace = true
 strum.workspace = true
+tonic.workspace = true

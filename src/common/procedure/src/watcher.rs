@@ -37,6 +37,12 @@ pub async fn wait(watcher: &mut Watcher) -> Result<Option<Output>> {
             ProcedureState::Retrying { error } => {
                 debug!("retrying, source: {}", error)
             }
+            ProcedureState::RollingBack { error } => {
+                debug!("rolling back, source: {:?}", error)
+            }
+            ProcedureState::PrepareRollback { error } => {
+                debug!("commit rollback, source: {}", error)
+            }
         }
     }
 }

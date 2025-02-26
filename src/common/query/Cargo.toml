@@ -4,12 +4,16 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+testing = []
+
 [lints]
 workspace = true
 
 [dependencies]
 api.workspace = true
 async-trait.workspace = true
+bytes.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
 common-recordbatch.workspace = true
@@ -23,7 +27,9 @@ snafu.workspace = true
 sqlparser.workspace = true
 sqlparser_derive = "0.1"
 statrs = "0.16"
+store-api.workspace = true
 
 [dev-dependencies]
 common-base.workspace = true
+futures-util.workspace = true
 tokio.workspace = true

@@ -19,23 +19,19 @@ use std::thread;
 use std::time::Duration;
 
 use snafu::ResultExt;
-use tokio::runtime::{Builder as RuntimeBuilder, Handle};
+use tokio::runtime::Builder as RuntimeBuilder;
 use tokio::sync::oneshot;
 pub use tokio::task::{JoinError, JoinHandle};
 
 use crate::error::*;
 use crate::metrics::*;
+use crate::runtime_default::DefaultRuntime;
+use crate::runtime_throttleable::ThrottleableRuntime;
+
+// configurations
+pub type Runtime = DefaultRuntime;
 
 static RUNTIME_ID: AtomicUsize = AtomicUsize::new(0);
-
-/// A runtime to run future tasks
-#[derive(Clone, Debug)]
-pub struct Runtime {
-    name: String,
-    handle: Handle,
-    // Used to receive a drop signal when dropper is dropped, inspired by databend
-    _dropper: Arc<Dropper>,
-}
 
 /// Dropping the dropper will cause runtime to shutdown.
 #[derive(Debug)]
@@ -50,45 +46,42 @@ impl Drop for Dropper {
     }
 }
 
-impl Runtime {
-    pub fn builder() -> Builder {
+pub trait RuntimeTrait {
+    /// Get a runtime builder
+    fn builder() -> Builder {
         Builder::default()
     }
 
     /// Spawn a future and execute it in this thread pool
     ///
     /// Similar to tokio::runtime::Runtime::spawn()
-    pub fn spawn<F>(&self, future: F) -> JoinHandle<F::Output>
+    fn spawn<F>(&self, future: F) -> JoinHandle<F::Output>
     where
         F: Future + Send + 'static,
-        F::Output: Send + 'static,
-    {
-        self.handle.spawn(future)
-    }
+        F::Output: Send + 'static;
 
     /// Run the provided function on an executor dedicated to blocking
     /// operations.
-    pub fn spawn_blocking<F, R>(&self, func: F) -> JoinHandle<R>
+    fn spawn_blocking<F, R>(&self, func: F) -> JoinHandle<R>
     where
         F: FnOnce() -> R + Send + 'static,
-        R: Send + 'static,
-    {
-        self.handle.spawn_blocking(func)
-    }
+        R: Send + 'static;
 
     /// Run a future to complete, this is the runtime's entry point
-    pub fn block_on<F: Future>(&self, future: F) -> F::Output {
-        self.handle.block_on(future)
-    }
+    fn block_on<F: Future>(&self, future: F) -> F::Output;
 
-    pub fn name(&self) -> &str {
-        &self.name
-    }
+    /// Get the name of the runtime
+    fn name(&self) -> &str;
+}
+
+pub trait BuilderBuild<R: RuntimeTrait> {
+    fn build(&mut self) -> Result<R>;
 }
 
 pub struct Builder {
     runtime_name: String,
     thread_name: String,
+    priority: Priority,
     builder: RuntimeBuilder,
 }
 
@@ -98,11 +91,17 @@ impl Default for Builder {
             runtime_name: format!("runtime-{}", RUNTIME_ID.fetch_add(1, Ordering::Relaxed)),
             thread_name: "default-worker".to_string(),
             builder: RuntimeBuilder::new_multi_thread(),
+            priority: Priority::VeryHigh,
         }
     }
 }
 
 impl Builder {
+    pub fn priority(&mut self, priority: Priority) -> &mut Self {
+        self.priority = priority;
+        self
+    }
+
     /// Sets the number of worker threads the Runtime will use.
     ///
     /// This can be any number above 0. The default value is the number of cores available to the system.
@@ -139,8 +138,53 @@ impl Builder {
         self.thread_name = val.into();
         self
     }
+}
 
-    pub fn build(&mut self) -> Result<Runtime> {
+impl BuilderBuild<DefaultRuntime> for Builder {
+    fn build(&mut self) -> Result<DefaultRuntime> {
+        let builder = self
+            .builder
+            .enable_all()
+            .thread_name(self.thread_name.clone())
+            .on_thread_start(on_thread_start(self.thread_name.clone()))
+            .on_thread_stop(on_thread_stop(self.thread_name.clone()))
+            .on_thread_park(on_thread_park(self.thread_name.clone()))
+            .on_thread_unpark(on_thread_unpark(self.thread_name.clone()));
+        let runtime = if cfg!(debug_assertions) {
+            // Set the stack size to 8MB for the thread so it wouldn't overflow on large stack usage in debug mode
+            // This is necessary to avoid stack overflow while running sqlness.
+            // https://github.com/rust-lang/rust/issues/34283
+            builder
+                .thread_stack_size(8 * 1024 * 1024)
+                .build()
+                .context(BuildRuntimeSnafu)?
+        } else {
+            builder.build().context(BuildRuntimeSnafu)?
+        };
+
+        let name = self.runtime_name.clone();
+        let handle = runtime.handle().clone();
+        let (send_stop, recv_stop) = oneshot::channel();
+        // Block the runtime to shutdown.
+        let _ = thread::Builder::new()
+            .name(format!("{}-blocker", self.thread_name))
+            .spawn(move || runtime.block_on(recv_stop));
+
+        #[cfg(tokio_unstable)]
+        register_collector(name.clone(), &handle);
+
+        Ok(DefaultRuntime::new(
+            &name,
+            handle,
+            Arc::new(Dropper {
+                close: Some(send_stop),
+            }),
+        ))
+    }
+}
+
+impl BuilderBuild<ThrottleableRuntime> for Builder {
+    fn build(&mut self) -> Result<ThrottleableRuntime> {
         let runtime = self
             .builder
             .enable_all()
@@ -163,18 +207,19 @@ impl Builder {
         #[cfg(tokio_unstable)]
         register_collector(name.clone(), &handle);
 
-        Ok(Runtime {
-            name,
+        ThrottleableRuntime::new(
+            &name,
+            self.priority,
             handle,
-            _dropper: Arc::new(Dropper {
+            Arc::new(Dropper {
                 close: Some(send_stop),
             }),
-        })
+        )
     }
 }
 
 #[cfg(tokio_unstable)]
-pub fn register_collector(name: String, handle: &Handle) {
+pub fn register_collector(name: String, handle: &tokio::runtime::Handle) {
     let name = name.replace("-", "_");
     let monitor = tokio_metrics::RuntimeMonitor::new(handle);
     let collector = tokio_metrics_collector::RuntimeCollector::new(monitor, name);
@@ -213,8 +258,18 @@ fn on_thread_unpark(thread_name: String) -> impl Fn() + 'static {
     }
 }
 
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub enum Priority {
+    VeryLow = 0,
+    Low = 1,
+    Middle = 2,
+    High = 3,
+    VeryHigh = 4,
+}
+
 #[cfg(test)]
 mod tests {
+
     use std::sync::Arc;
     use std::thread;
     use std::time::Duration;
@@ -235,12 +290,12 @@ mod tests {
 
     #[test]
     fn test_metric() {
-        let runtime = Builder::default()
+        let runtime: Runtime = Builder::default()
             .worker_threads(5)
             .thread_name("test_runtime_metric")
             .build()
             .unwrap();
-        // wait threads created
+        // wait threads create
         thread::sleep(Duration::from_millis(50));
 
         let _handle = runtime.spawn(async {

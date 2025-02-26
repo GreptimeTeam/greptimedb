@@ -8,17 +8,32 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+async-compression = { version = "0.4", features = ["futures-io", "zstd"] }
 async-trait.workspace = true
+async-walkdir = "2.0.0"
+auto_impl = "1.2.0"
+base64.workspace = true
 bitflags.workspace = true
+bytes.workspace = true
+common-base.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
+common-runtime.workspace = true
+common-telemetry.workspace = true
+common-test-util.workspace = true
 derive_builder.workspace = true
 futures.workspace = true
+lz4_flex = "0.11"
+moka = { workspace = true, features = ["future", "sync"] }
 pin-project.workspace = true
+prometheus.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "0.10.8"
 snafu.workspace = true
-
-[dev-dependencies]
 tokio.workspace = true
 tokio-util.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+common-base = { workspace = true, features = ["testing"] }

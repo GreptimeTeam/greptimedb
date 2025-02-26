@@ -18,55 +18,20 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datafusion::error::DataFusionError;
-use promql_parser::parser::{Expr as PromExpr, TokenType, VectorMatchCardinality};
 use snafu::{Location, Snafu};
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
-    #[snafu(display("Unsupported expr type: {}", name))]
-    UnsupportedExpr { name: String, location: Location },
-
-    #[snafu(display("Unsupported vector matches: {:?}", name))]
-    UnsupportedVectorMatch {
-        name: VectorMatchCardinality,
-        location: Location,
-    },
-
-    #[snafu(display("Unexpected token: {:?}", token))]
-    UnexpectedToken {
-        token: TokenType,
-        location: Location,
-    },
-
     #[snafu(display("Internal error during building DataFusion plan"))]
     DataFusionPlanning {
         #[snafu(source)]
-        error: datafusion::error::DataFusionError,
+        error: DataFusionError,
+        #[snafu(implicit)]
         location: Location,
     },
 
-    #[snafu(display("Unexpected plan or expression: {}", desc))]
-    UnexpectedPlanExpr { desc: String, location: Location },
-
-    #[snafu(display("Unknown table type, downcast failed"))]
-    UnknownTable { location: Location },
-
-    #[snafu(display("Cannot find time index column in table {}", table))]
-    TimeIndexNotFound { table: String, location: Location },
-
-    #[snafu(display("Cannot find value columns in table {}", table))]
-    ValueNotFound { table: String, location: Location },
-
-    #[snafu(display(
-        "Cannot accept multiple vector as function input, PromQL expr: {:?}",
-        expr,
-    ))]
-    MultipleVector { expr: PromExpr, location: Location },
-
-    #[snafu(display("Expect a PromQL expr but not found, input expr: {:?}", expr))]
-    ExpectExpr { expr: PromExpr, location: Location },
     #[snafu(display(
         "Illegal range: offset {}, length {}, array len {}",
         offset,
@@ -77,6 +42,7 @@ pub enum Error {
         offset: u32,
         length: u32,
         len: usize,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -84,55 +50,20 @@ pub enum Error {
     Deserialize {
         #[snafu(source)]
         error: prost::DecodeError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Empty range is not expected"))]
-    EmptyRange { location: Location },
-
-    #[snafu(display(
-        "Table (metric) name not found, this indicates a procedure error in PromQL planner"
-    ))]
-    TableNameNotFound { location: Location },
-
-    #[snafu(display("General catalog error: "))]
-    Catalog {
+    EmptyRange {
+        #[snafu(implicit)]
         location: Location,
-        source: catalog::error::Error,
     },
-
-    #[snafu(display("Expect a range selector, but not found"))]
-    ExpectRangeSelector { location: Location },
-
-    #[snafu(display("Zero range in range selector"))]
-    ZeroRangeSelector { location: Location },
 
     #[snafu(display("Cannot find column {col}"))]
-    ColumnNotFound { col: String, location: Location },
-
-    #[snafu(display("Found multiple metric matchers in selector"))]
-    MultipleMetricMatchers { location: Location },
-
-    #[snafu(display("Expect a metric matcher, but not found"))]
-    NoMetricMatcher { location: Location },
-
-    #[snafu(display("Invalid function argument for {}", fn_name))]
-    FunctionInvalidArgument { fn_name: String, location: Location },
-
-    #[snafu(display(
-        "Attempt to combine two tables with different column sets, left: {:?}, right: {:?}",
-        left,
-        right
-    ))]
-    CombineTableColumnMismatch {
-        left: Vec<String>,
-        right: Vec<String>,
-        location: Location,
-    },
-
-    #[snafu(display("Multi fields calculation is not supported in {}", operator))]
-    MultiFieldsNotSupported {
-        operator: String,
+    ColumnNotFound {
+        col: String,
+        #[snafu(implicit)]
         location: Location,
     },
 }
@@ -141,31 +72,12 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         use Error::*;
         match self {
-            TimeIndexNotFound { .. }
-            | ValueNotFound { .. }
-            | UnsupportedExpr { .. }
-            | UnexpectedToken { .. }
-            | MultipleVector { .. }
-            | ExpectExpr { .. }
-            | ExpectRangeSelector { .. }
-            | ZeroRangeSelector { .. }
-            | ColumnNotFound { .. }
-            | Deserialize { .. }
-            | FunctionInvalidArgument { .. }
-            | UnsupportedVectorMatch { .. }
-            | CombineTableColumnMismatch { .. }
-            | DataFusionPlanning { .. }
-            | MultiFieldsNotSupported { .. }
-            | UnexpectedPlanExpr { .. }
-            | IllegalRange { .. } => StatusCode::InvalidArguments,
+            Deserialize { .. } => StatusCode::Unexpected,
+            IllegalRange { .. } | ColumnNotFound { .. } | EmptyRange { .. } => {
+                StatusCode::InvalidArguments
+            }
 
-            UnknownTable { .. } | EmptyRange { .. } => StatusCode::Internal,
-
-            TableNameNotFound { .. } => StatusCode::TableNotFound,
-
-            MultipleMetricMatchers { .. } | NoMetricMatcher { .. } => StatusCode::InvalidSyntax,
-
-            Catalog { source, .. } => source.status_code(),
+            DataFusionPlanning { .. } => StatusCode::PlanQuery,
         }
     }
 

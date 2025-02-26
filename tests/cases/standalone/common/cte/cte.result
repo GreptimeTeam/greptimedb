@@ -57,12 +57,12 @@ with cte1 as (select i as j from a), cte2 as (select ref.j as k from cte1 as ref
 
 with cte1 as (select 42), cte1 as (select 42) select * FROM cte1;
 
-Error: 3000(PlanQuery), Failed to plan SQL: sql parser error: WITH query name "cte1" specified more than once
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: WITH query name "cte1" specified more than once
 
 -- reference to CTE before its actually defined, it's not supported by datafusion
 with cte3 as (select ref2.j as i from cte1 as ref2), cte1 as (Select i as j from a), cte2 as (select ref.j+1 as k from cte1 as ref) select * from cte2 union all select * FROM cte3;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Table not found: greptime.public.cte1
+Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.public.cte1
 
 with cte1 as (Select i as j from a) select * from cte1 cte11, cte1 cte12;
 
@@ -97,7 +97,6 @@ SELECT 1 UNION ALL (WITH cte AS (SELECT 42) SELECT * FROM cte) order by 1;
 | 42       |
 +----------+
 
--- Recursive CTEs are not supported in datafusion
 WITH RECURSIVE cte(d) AS (
 		SELECT 1
 	UNION ALL
@@ -109,7 +108,11 @@ WITH RECURSIVE cte(d) AS (
 )
 SELECT max(d) FROM cte;
 
-Error: 3000(PlanQuery), Failed to plan SQL: This feature is not implemented: Recursive CTEs are not supported
++------------+
+| max(cte.d) |
++------------+
+| 1          |
++------------+
 
 -- Nested aliases is not supported in datafusion
 with cte (a) as (

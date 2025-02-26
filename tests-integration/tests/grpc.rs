@@ -12,24 +12,30 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::alter_expr::Kind;
+use api::v1::alter_table_expr::Kind;
 use api::v1::promql_request::Promql;
 use api::v1::{
-    column, AddColumn, AddColumns, AlterExpr, Basic, Column, ColumnDataType, ColumnDef,
+    column, AddColumn, AddColumns, AlterTableExpr, Basic, Column, ColumnDataType, ColumnDef,
     CreateTableExpr, InsertRequest, InsertRequests, PromInstantQuery, PromRangeQuery,
     PromqlRequest, RequestHeader, SemanticType,
 };
 use auth::user_provider_from_option;
 use client::{Client, Database, OutputData, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::consts::MITO_ENGINE;
+use common_grpc::channel_manager::ClientTlsOption;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
+use common_runtime::runtime::{BuilderBuild, RuntimeTrait};
+use common_runtime::Runtime;
+use common_test_util::find_workspace_path;
+use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::GrpcServerConfig;
 use servers::http::prometheus::{
     PromData, PromQueryResult, PromSeriesMatrix, PromSeriesVector, PrometheusJsonResponse,
     PrometheusResponse,
 };
 use servers::server::Server;
+use servers::tls::{TlsMode, TlsOption};
 use tests_integration::test_util::{
     setup_grpc_server, setup_grpc_server_with, setup_grpc_server_with_user_provider, StorageType,
 };
@@ -66,15 +72,18 @@ macro_rules! grpc_tests {
 
                 test_invalid_dbname,
                 test_auto_create_table,
+                test_auto_create_table_with_hints,
                 test_insert_and_select,
                 test_dbname,
                 test_grpc_message_size_ok,
+                test_grpc_zstd_compression,
                 test_grpc_message_size_limit_recv,
                 test_grpc_message_size_limit_send,
                 test_grpc_auth,
                 test_health_check,
                 test_prom_gateway_query,
                 test_grpc_timezone,
+                test_grpc_tls_config,
             );
         )*
     };
@@ -127,6 +136,27 @@ pub async fn test_grpc_message_size_ok(store_type: StorageType) {
     let config = GrpcServerConfig {
         max_recv_message_size: 1024,
         max_send_message_size: 1024,
+        ..Default::default()
+    };
+    let (addr, mut guard, fe_grpc_server) =
+        setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;
+
+    let grpc_client = Client::with_urls(vec![addr]);
+    let db = Database::new_with_dbname(
+        format!("{}-{}", DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME),
+        grpc_client,
+    );
+    db.sql("show tables;").await.unwrap();
+    let _ = fe_grpc_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_grpc_zstd_compression(store_type: StorageType) {
+    // server and client both support gzip
+    let config = GrpcServerConfig {
+        max_recv_message_size: 1024,
+        max_send_message_size: 1024,
+        ..Default::default()
     };
     let (addr, mut guard, fe_grpc_server) =
         setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;
@@ -145,6 +175,7 @@ pub async fn test_grpc_message_size_limit_send(store_type: StorageType) {
     let config = GrpcServerConfig {
         max_recv_message_size: 1024,
         max_send_message_size: 50,
+        ..Default::default()
     };
     let (addr, mut guard, fe_grpc_server) =
         setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;
@@ -164,6 +195,7 @@ pub async fn test_grpc_message_size_limit_recv(store_type: StorageType) {
     let config = GrpcServerConfig {
         max_recv_message_size: 10,
         max_send_message_size: 1024,
+        ..Default::default()
     };
     let (addr, mut guard, fe_grpc_server) =
         setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;
@@ -243,6 +275,17 @@ pub async fn test_auto_create_table(store_type: StorageType) {
     let grpc_client = Client::with_urls(vec![addr]);
     let db = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, grpc_client);
     insert_and_assert(&db).await;
+    let _ = fe_grpc_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_auto_create_table_with_hints(store_type: StorageType) {
+    let (addr, mut guard, fe_grpc_server) =
+        setup_grpc_server(store_type, "auto_create_table_with_hints").await;
+
+    let grpc_client = Client::with_urls(vec![addr]);
+    let db = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, grpc_client);
+    insert_with_hints_and_assert(&db).await;
     let _ = fe_grpc_server.shutdown().await;
     guard.remove_all().await;
 }
@@ -329,9 +372,10 @@ pub async fn test_insert_and_select(store_type: StorageType) {
         add_columns: vec![AddColumn {
             column_def: Some(add_column),
             location: None,
+            add_if_not_exists: false,
         }],
     });
-    let expr = AlterExpr {
+    let expr = AlterTableExpr {
         catalog_name: DEFAULT_CATALOG_NAME.to_string(),
         schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: "demo".to_string(),
@@ -345,6 +389,96 @@ pub async fn test_insert_and_select(store_type: StorageType) {
 
     let _ = fe_grpc_server.shutdown().await;
     guard.remove_all().await;
+}
+
+async fn insert_with_hints_and_assert(db: &Database) {
+    // testing data:
+    let (expected_host_col, expected_cpu_col, expected_mem_col, expected_ts_col) = expect_data();
+
+    let request = InsertRequest {
+        table_name: "demo".to_string(),
+        columns: vec![
+            expected_host_col.clone(),
+            expected_cpu_col.clone(),
+            expected_mem_col.clone(),
+            expected_ts_col.clone(),
+        ],
+        row_count: 4,
+    };
+    let result = db
+        .insert_with_hints(
+            InsertRequests {
+                inserts: vec![request],
+            },
+            &[("append_mode", "true")],
+        )
+        .await;
+    assert_eq!(result.unwrap(), 4);
+
+    // show table
+    let output = db.sql("SHOW CREATE TABLE demo;").await.unwrap();
+
+    let record_batches = match output.data {
+        OutputData::RecordBatches(record_batches) => record_batches,
+        OutputData::Stream(stream) => RecordBatches::try_collect(stream).await.unwrap(),
+        OutputData::AffectedRows(_) => unreachable!(),
+    };
+
+    let pretty = record_batches.pretty_print().unwrap();
+    let expected = "\
++-------+-------------------------------------+
+| Table | Create Table                        |
++-------+-------------------------------------+
+| demo  | CREATE TABLE IF NOT EXISTS \"demo\" ( |
+|       |   \"host\" STRING NULL,               |
+|       |   \"cpu\" DOUBLE NULL,                |
+|       |   \"memory\" DOUBLE NULL,             |
+|       |   \"ts\" TIMESTAMP(3) NOT NULL,       |
+|       |   TIME INDEX (\"ts\"),                |
+|       |   PRIMARY KEY (\"host\")              |
+|       | )                                   |
+|       |                                     |
+|       | ENGINE=mito                         |
+|       | WITH(                               |
+|       |   append_mode = 'true'              |
+|       | )                                   |
++-------+-------------------------------------+\
+";
+    assert_eq!(pretty, expected);
+
+    // testing data with ttl=instant and auto_create_table = true can be handled correctly
+    let (expected_host_col, expected_cpu_col, expected_mem_col, expected_ts_col) = expect_data();
+
+    let request = InsertRequest {
+        table_name: "demo1".to_string(),
+        columns: vec![
+            expected_host_col.clone(),
+            expected_cpu_col.clone(),
+            expected_mem_col.clone(),
+            expected_ts_col.clone(),
+        ],
+        row_count: 4,
+    };
+    let result = db
+        .insert_with_hints(
+            InsertRequests {
+                inserts: vec![request],
+            },
+            &[("auto_create_table", "true"), ("ttl", "instant")],
+        )
+        .await;
+    assert_eq!(result.unwrap(), 0);
+
+    // check table is empty
+    let output = db.sql("SELECT * FROM demo1").await.unwrap();
+
+    let record_batches = match output.data {
+        OutputData::RecordBatches(record_batches) => record_batches,
+        OutputData::Stream(stream) => RecordBatches::try_collect(stream).await.unwrap(),
+        OutputData::AffectedRows(_) => unreachable!(),
+    };
+
+    assert!(record_batches.iter().all(|r| r.num_rows() == 0));
 }
 
 async fn insert_and_assert(db: &Database) {
@@ -504,6 +638,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
     let instant_query = PromInstantQuery {
         query: "test".to_string(),
         time: "5".to_string(),
+        lookback: "5m".to_string(),
     };
     let instant_query_request = PromqlRequest {
         header: Some(header.clone()),
@@ -546,6 +681,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         error_type: None,
         warnings: None,
         resp_metrics: Default::default(),
+        status_code: None,
     };
     assert_eq!(instant_query_result, expected);
 
@@ -555,6 +691,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         start: "0".to_string(),
         end: "10".to_string(),
         step: "5s".to_string(),
+        lookback: "5m".to_string(),
     };
     let range_query_request: PromqlRequest = PromqlRequest {
         header: Some(header.clone()),
@@ -596,6 +733,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         error_type: None,
         warnings: None,
         resp_metrics: Default::default(),
+        status_code: None,
     };
     assert_eq!(range_query_result, expected);
 
@@ -605,6 +743,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         start: "1000000000".to_string(),
         end: "1000001000".to_string(),
         step: "5s".to_string(),
+        lookback: "5m".to_string(),
     };
     let range_query_request: PromqlRequest = PromqlRequest {
         header: Some(header),
@@ -627,6 +766,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         error_type: None,
         warnings: None,
         resp_metrics: Default::default(),
+        status_code: None,
     };
     assert_eq!(range_query_result, expected);
 
@@ -639,6 +779,7 @@ pub async fn test_grpc_timezone(store_type: StorageType) {
     let config = GrpcServerConfig {
         max_recv_message_size: 1024,
         max_send_message_size: 1024,
+        ..Default::default()
     };
     let (addr, mut guard, fe_grpc_server) =
         setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;
@@ -694,4 +835,72 @@ async fn to_batch(output: Output) -> String {
     }
     .pretty_print()
     .unwrap()
+}
+
+pub async fn test_grpc_tls_config(store_type: StorageType) {
+    let comm_dir = find_workspace_path("/src/common/grpc/tests/tls");
+    let ca_path = comm_dir.join("ca.pem").to_str().unwrap().to_string();
+    let server_cert_path = comm_dir.join("server.pem").to_str().unwrap().to_string();
+    let server_key_path = comm_dir.join("server.key").to_str().unwrap().to_string();
+    let client_cert_path = comm_dir.join("client.pem").to_str().unwrap().to_string();
+    let client_key_path = comm_dir.join("client.key").to_str().unwrap().to_string();
+    let client_corrupted = comm_dir.join("corrupted").to_str().unwrap().to_string();
+
+    let tls = TlsOption::new(
+        Some(TlsMode::Require),
+        Some(server_cert_path),
+        Some(server_key_path),
+    );
+    let config = GrpcServerConfig {
+        max_recv_message_size: 1024,
+        max_send_message_size: 1024,
+        tls,
+    };
+    let (addr, mut guard, fe_grpc_server) =
+        setup_grpc_server_with(store_type, "tls_create_table", None, Some(config)).await;
+
+    let mut client_tls = ClientTlsOption {
+        server_ca_cert_path: ca_path,
+        client_cert_path,
+        client_key_path,
+    };
+    {
+        let grpc_client =
+            Client::with_tls_and_urls(vec![addr.clone()], client_tls.clone()).unwrap();
+        let db = Database::new_with_dbname(
+            format!("{}-{}", DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME),
+            grpc_client,
+        );
+        db.sql("show tables;").await.unwrap();
+    }
+    // test corrupted client key
+    {
+        client_tls.client_key_path = client_corrupted;
+        let grpc_client = Client::with_tls_and_urls(vec![addr], client_tls.clone()).unwrap();
+        let db = Database::new_with_dbname(
+            format!("{}-{}", DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME),
+            grpc_client,
+        );
+        let re = db.sql("show tables;").await;
+        assert!(re.is_err());
+    }
+    // test grpc unsupported tls watch
+    {
+        let tls = TlsOption {
+            watch: true,
+            ..Default::default()
+        };
+        let config = GrpcServerConfig {
+            max_recv_message_size: 1024,
+            max_send_message_size: 1024,
+            tls,
+        };
+        let runtime = Runtime::builder().build().unwrap();
+        let grpc_builder =
+            GrpcServerBuilder::new(config.clone(), runtime).with_tls_config(config.tls);
+        assert!(grpc_builder.is_err());
+    }
+
+    let _ = fe_grpc_server.shutdown().await;
+    guard.remove_all().await;
 }

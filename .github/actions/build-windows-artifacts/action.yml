@@ -4,9 +4,6 @@ inputs:
   arch:
     description: Architecture to build
     required: true
-  rust-toolchain:
-    description: Rust toolchain to use
-    required: true
   cargo-profile:
     description: Cargo profile to build
     required: true
@@ -28,23 +25,13 @@ runs:
     - uses: arduino/setup-protoc@v3
 
     - name: Install rust toolchain
-      uses: dtolnay/rust-toolchain@master
+      uses: actions-rust-lang/setup-rust-toolchain@v1
       with:
-        toolchain: ${{ inputs.rust-toolchain }}
-        targets: ${{ inputs.arch }}
+        target: ${{ inputs.arch }}
         components: llvm-tools-preview
 
     - name: Rust Cache
       uses: Swatinem/rust-cache@v2
-
-    - name: Install Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.10'
-
-    - name: Install PyArrow Package
-      shell: pwsh
-      run: pip install pyarrow
 
     - name: Install WSL distribution
       uses: Vampire/setup-wsl@v2
@@ -59,13 +46,17 @@ runs:
       if: ${{ inputs.disable-run-tests == 'false' }}
       shell: pwsh
       run: make test sqlness-test
+      env:
+        RUSTUP_WINDOWS_PATH_ADD_BIN: 1 # Workaround for https://github.com/nextest-rs/nextest/issues/1493
+        RUST_BACKTRACE: 1
+        SQLNESS_OPTS: "--preserve-state"
 
     - name: Upload sqlness logs
       if: ${{ failure() }} # Only upload logs when the integration tests failed.
       uses: actions/upload-artifact@v4
       with:
         name: sqlness-logs
-        path: /tmp/greptime-*.log
+        path: C:\Users\RUNNER~1\AppData\Local\Temp\sqlness*
         retention-days: 3
 
     - name: Build greptime binary
@@ -76,5 +67,5 @@ runs:
       uses: ./.github/actions/upload-artifacts
       with:
         artifacts-dir: ${{ inputs.artifacts-dir }}
-        target-file: target/${{ inputs.arch }}/${{ inputs.cargo-profile }}/greptime
+        target-files: target/${{ inputs.arch }}/${{ inputs.cargo-profile }}/greptime,target/${{ inputs.arch }}/${{ inputs.cargo-profile }}/greptime.pdb
         version: ${{ inputs.version }}

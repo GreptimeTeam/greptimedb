@@ -14,30 +14,40 @@
 
 #![feature(let_chains)]
 #![feature(int_roundings)]
+#![feature(trait_upcasting)]
+#![feature(try_blocks)]
+#![feature(stmt_expr_attributes)]
+#![feature(iterator_try_collect)]
 
+mod analyze;
 pub mod dataframe;
 pub mod datafusion;
 pub mod dist_plan;
+pub mod dummy_catalog;
 pub mod error;
 pub mod executor;
-pub mod logical_optimizer;
+pub mod log_query;
 pub mod metrics;
 mod optimizer;
 pub mod parser;
-pub mod physical_optimizer;
-pub mod physical_planner;
+mod part_sort;
 pub mod physical_wrapper;
 pub mod plan;
 pub mod planner;
+pub mod promql;
 pub mod query_engine;
 mod range_select;
 pub mod region_query;
 pub mod sql;
+pub mod stats;
+pub(crate) mod window_sort;
+
+#[cfg(test)]
+pub(crate) mod test_util;
+#[cfg(test)]
+mod tests;
 
 pub use crate::datafusion::DfContextProviderAdapter;
 pub use crate::query_engine::{
     QueryEngine, QueryEngineContext, QueryEngineFactory, QueryEngineRef,
 };
-
-#[cfg(test)]
-mod tests;

@@ -1,0 +1,3 @@
+native-tls
+openssl
+aws-lc-sys

@@ -2,19 +2,41 @@ CREATE TABLE demo(host string, cpu double, memory double, ts TIMESTAMP time inde
 
 Affected Rows: 0
 
-insert into demo(host, cpu, memory, ts) values ('host1', 66.6, 1024, 1655276557000), ('host2', 88.8,  333.3, 1655276558000);
+CREATE TABLE demo_2(host string, cpu double, memory double, ts TIMESTAMP time index);
 
-Affected Rows: 2
+Affected Rows: 0
 
-Copy demo TO '/tmp/demo/export/parquet/demo.parquet';
+insert into
+    demo(host, cpu, memory, ts)
+values
+    ('host1', 66.6, 1024, 1655276557000),
+    ('host2', 88.8, 333.3, 1655276558000),
+    ('host3', 111.1, 444.4, 1722077263000);
 
-Affected Rows: 2
+Affected Rows: 3
+
+insert into
+    demo_2(host, cpu, memory, ts)
+values
+    ('host4', 77.7, 1111, 1655276555000),
+    ('host5', 99.9, 444.4, 1655276556000),
+    ('host6', 222.2, 555.5, 1722077264000);
+
+Affected Rows: 3
+
+Copy demo TO '${SQLNESS_HOME}/demo/export/parquet_files/demo.parquet';
+
+Affected Rows: 3
+
+Copy demo_2 TO '${SQLNESS_HOME}/demo/export/parquet_files/demo_2.parquet';
+
+Affected Rows: 3
 
 CREATE TABLE with_filename(host string, cpu double, memory double, ts timestamp time index);
 
 Affected Rows: 0
 
-Copy with_filename FROM '/tmp/demo/export/parquet/demo.parquet';
+Copy with_filename FROM '${SQLNESS_HOME}/demo/export/parquet_files/demo.parquet' with (start_time='2022-06-15 07:02:37', end_time='2022-06-15 07:02:39');
 
 Affected Rows: 2
 
@@ -31,37 +53,81 @@ CREATE TABLE with_path(host string, cpu double, memory double, ts timestamp time
 
 Affected Rows: 0
 
-Copy with_path FROM '/tmp/demo/export/parquet/';
+Copy with_path FROM '${SQLNESS_HOME}/demo/export/parquet_files/';
 
-Affected Rows: 2
+Affected Rows: 6
 
 select * from with_path order by ts;
 
-+-------+------+--------+---------------------+
-| host  | cpu  | memory | ts                  |
-+-------+------+--------+---------------------+
-| host1 | 66.6 | 1024.0 | 2022-06-15T07:02:37 |
-| host2 | 88.8 | 333.3  | 2022-06-15T07:02:38 |
-+-------+------+--------+---------------------+
++-------+-------+--------+---------------------+
+| host  | cpu   | memory | ts                  |
++-------+-------+--------+---------------------+
+| host4 | 77.7  | 1111.0 | 2022-06-15T07:02:35 |
+| host5 | 99.9  | 444.4  | 2022-06-15T07:02:36 |
+| host1 | 66.6  | 1024.0 | 2022-06-15T07:02:37 |
+| host2 | 88.8  | 333.3  | 2022-06-15T07:02:38 |
+| host3 | 111.1 | 444.4  | 2024-07-27T10:47:43 |
+| host6 | 222.2 | 555.5  | 2024-07-27T10:47:44 |
++-------+-------+--------+---------------------+
 
 CREATE TABLE with_pattern(host string, cpu double, memory double, ts timestamp time index);
 
 Affected Rows: 0
 
-Copy with_pattern FROM '/tmp/demo/export/parquet/' WITH (PATTERN = 'demo.*');
+Copy with_pattern FROM '${SQLNESS_HOME}/demo/export/parquet_files/' WITH (PATTERN = 'demo.*', start_time='2022-06-15 07:02:39');
 
 Affected Rows: 2
 
 select * from with_pattern order by ts;
 
-+-------+------+--------+---------------------+
-| host  | cpu  | memory | ts                  |
-+-------+------+--------+---------------------+
-| host1 | 66.6 | 1024.0 | 2022-06-15T07:02:37 |
-| host2 | 88.8 | 333.3  | 2022-06-15T07:02:38 |
-+-------+------+--------+---------------------+
++-------+-------+--------+---------------------+
+| host  | cpu   | memory | ts                  |
++-------+-------+--------+---------------------+
+| host3 | 111.1 | 444.4  | 2024-07-27T10:47:43 |
+| host6 | 222.2 | 555.5  | 2024-07-27T10:47:44 |
++-------+-------+--------+---------------------+
+
+CREATE TABLE without_limit_rows(host string, cpu double, memory double, ts timestamp time index);
+
+Affected Rows: 0
+
+Copy without_limit_rows FROM '${SQLNESS_HOME}/demo/export/parquet_files/';
+
+Affected Rows: 6
+
+select count(*) from without_limit_rows;
+
++----------+
+| count(*) |
++----------+
+| 6        |
++----------+
+
+CREATE TABLE with_limit_rows_segment(host string, cpu double, memory double, ts timestamp time index);
+
+Affected Rows: 0
+
+Copy with_limit_rows_segment FROM '${SQLNESS_HOME}/demo/export/parquet_files/' LIMIT 3;
+
+Affected Rows: 3
+
+select count(*) from with_limit_rows_segment;
+
++----------+
+| count(*) |
++----------+
+| 3        |
++----------+
+
+Copy with_limit_rows_segment FROM '${SQLNESS_HOME}/demo/export/parquet_files/' LIMIT hello;
+
+Error: 2000(InvalidSyntax), Unexpected token while parsing SQL statement, expected: 'the number of maximum rows', found: ;: sql parser error: Expected: literal int, found: hello at Line: 1, Column: 86
 
 drop table demo;
+
+Affected Rows: 0
+
+drop table demo_2;
 
 Affected Rows: 0
 
@@ -74,6 +140,14 @@ drop table with_path;
 Affected Rows: 0
 
 drop table with_pattern;
+
+Affected Rows: 0
+
+drop table without_limit_rows;
+
+Affected Rows: 0
+
+drop table with_limit_rows_segment;
 
 Affected Rows: 0
 

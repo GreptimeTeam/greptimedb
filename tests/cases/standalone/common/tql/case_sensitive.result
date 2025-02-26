@@ -39,7 +39,7 @@ select table_name from information_schema.tables where table_type = 'BASE TABLE'
 tql eval (0,10,'5s') sum(MemAvailable / 4) + sum(MemTotal / 4);
 
 +---------------------+---------------------------------------------------------------------+
-| ts                  | MemAvailable.SUM(val / Float64(4)) + MemTotal.SUM(val / Float64(4)) |
+| ts                  | MemAvailable.sum(val / Float64(4)) + MemTotal.sum(val / Float64(4)) |
 +---------------------+---------------------------------------------------------------------+
 | 1970-01-01T00:00:00 | 62.5                                                                |
 | 1970-01-01T00:00:05 | 67.5                                                                |
@@ -72,6 +72,10 @@ drop table "MemAvailable";
 Affected Rows: 0
 
 drop table "AnotherSchema"."MemTotal";
+
+Affected Rows: 0
+
+drop schema "AnotherSchema";
 
 Affected Rows: 0
 

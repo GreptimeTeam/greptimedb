@@ -16,49 +16,54 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 use crate::error::Result;
-use crate::key::{DeserializedValueWithBytes, TableMetaValue};
-use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp, TxnOpResponse};
+use crate::key::{DeserializedValueWithBytes, MetadataValue};
+use crate::kv_backend::txn::TxnOpResponse;
+use crate::rpc::KeyValue;
 
-pub(crate) fn build_txn_response_decoder_fn<T>(
-    raw_key: Vec<u8>,
-) -> impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<DeserializedValueWithBytes<T>>>
-where
-    T: Serialize + DeserializeOwned + TableMetaValue,
-{
-    move |txn_res: &Vec<TxnOpResponse>| {
-        txn_res
-            .iter()
-            .filter_map(|resp| {
-                if let TxnOpResponse::ResponseGet(r) = resp {
-                    Some(r)
-                } else {
-                    None
-                }
-            })
-            .flat_map(|r| &r.kvs)
-            .find(|kv| kv.key == raw_key)
-            .map(|kv| DeserializedValueWithBytes::from_inner_slice(&kv.value))
-            .transpose()
+/// The response set of [TxnOpResponse::ResponseGet]
+pub struct TxnOpGetResponseSet(Vec<KeyValue>);
+
+impl TxnOpGetResponseSet {
+    /// Returns a filter to consume a [KeyValue] where the key equals `key`.
+    pub(crate) fn filter(key: Vec<u8>) -> impl FnMut(&mut TxnOpGetResponseSet) -> Option<Vec<u8>> {
+        move |set| {
+            let pos = set.0.iter().position(|kv| kv.key == key);
+            match pos {
+                Some(pos) => Some(set.0.remove(pos).value),
+                None => None,
+            }
+        }
+    }
+
+    /// Returns a decoder to decode bytes to `DeserializedValueWithBytes<T>`.
+    pub(crate) fn decode_with<F, T>(
+        mut f: F,
+    ) -> impl FnMut(&mut TxnOpGetResponseSet) -> Result<Option<DeserializedValueWithBytes<T>>>
+    where
+        F: FnMut(&mut TxnOpGetResponseSet) -> Option<Vec<u8>>,
+        T: Serialize + DeserializeOwned + MetadataValue,
+    {
+        move |set| {
+            f(set)
+                .map(|value| DeserializedValueWithBytes::from_inner_slice(&value))
+                .transpose()
+        }
     }
 }
 
-pub(crate) fn build_put_if_absent_txn(key: Vec<u8>, value: Vec<u8>) -> Txn {
-    Txn::new()
-        .when(vec![Compare::with_not_exist_value(
-            key.clone(),
-            CompareOp::Equal,
-        )])
-        .and_then(vec![TxnOp::Put(key.clone(), value)])
-        .or_else(vec![TxnOp::Get(key)])
-}
+impl From<&mut Vec<TxnOpResponse>> for TxnOpGetResponseSet {
+    fn from(value: &mut Vec<TxnOpResponse>) -> Self {
+        let value = value
+            .extract_if(.., |resp| matches!(resp, TxnOpResponse::ResponseGet(_)))
+            .flat_map(|resp| {
+                // Safety: checked
+                let TxnOpResponse::ResponseGet(r) = resp else {
+                    unreachable!()
+                };
 
-pub(crate) fn build_compare_and_put_txn(key: Vec<u8>, old_value: Vec<u8>, value: Vec<u8>) -> Txn {
-    Txn::new()
-        .when(vec![Compare::with_value(
-            key.clone(),
-            CompareOp::Equal,
-            old_value,
-        )])
-        .and_then(vec![TxnOp::Put(key.clone(), value)])
-        .or_else(vec![TxnOp::Get(key)])
+                r.kvs
+            })
+            .collect::<Vec<_>>();
+        TxnOpGetResponseSet(value)
+    }
 }

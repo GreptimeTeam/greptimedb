@@ -143,8 +143,6 @@ fn clamp_impl<T: LogicalPrimitiveType, const CLAMP_MIN: bool, const CLAMP_MAX: b
     min: T::Native,
     max: T::Native,
 ) -> Result<VectorRef> {
-    common_telemetry::info!("[DEBUG] min {min:?}, max {max:?}");
-
     let iter = ArrayIter::new(input);
     let result = iter.map(|x| {
         x.map(|x| {

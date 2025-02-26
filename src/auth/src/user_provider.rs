@@ -21,7 +21,7 @@ use std::io;
 use std::io::BufRead;
 use std::path::Path;
 
-use secrecy::ExposeSecret;
+use common_base::secrets::ExposeSecret;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::common::{Identity, Password};
@@ -56,6 +56,11 @@ pub trait UserProvider: Send + Sync {
         let user_info = self.authenticate(id, password).await?;
         self.authorize(catalog, schema, &user_info).await?;
         Ok(user_info)
+    }
+
+    /// Returns whether this user provider implementation is backed by an external system.
+    fn external(&self) -> bool {
+        false
     }
 }
 

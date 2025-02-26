@@ -18,15 +18,15 @@ use async_trait::async_trait;
 use crate::error::Result;
 use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
-use crate::pubsub::{Message, PublishRef};
+use crate::pubsub::{Message, PublisherRef};
 
 pub struct PublishHeartbeatHandler {
-    publish: PublishRef,
+    publisher: PublisherRef,
 }
 
 impl PublishHeartbeatHandler {
-    pub fn new(publish: PublishRef) -> PublishHeartbeatHandler {
-        PublishHeartbeatHandler { publish }
+    pub fn new(publisher: PublisherRef) -> PublishHeartbeatHandler {
+        PublishHeartbeatHandler { publisher }
     }
 }
 
@@ -43,7 +43,7 @@ impl HeartbeatHandler for PublishHeartbeatHandler {
         _: &mut HeartbeatAccumulator,
     ) -> Result<HandleControl> {
         let msg = Message::Heartbeat(Box::new(req.clone()));
-        self.publish.send_msg(msg).await;
+        self.publisher.publish(msg).await;
 
         Ok(HandleControl::Continue)
     }

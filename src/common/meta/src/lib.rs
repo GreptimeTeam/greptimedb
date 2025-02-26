@@ -14,34 +14,46 @@
 
 #![feature(assert_matches)]
 #![feature(btree_extract_if)]
-#![feature(async_closure)]
 #![feature(let_chains)]
+#![feature(extract_if)]
+#![feature(hash_extract_if)]
 
+pub mod cache;
 pub mod cache_invalidator;
-pub mod datanode_manager;
+pub mod cluster;
+pub mod datanode;
 pub mod ddl;
 pub mod ddl_manager;
 pub mod distributed_time_constants;
 pub mod error;
+pub mod flow_name;
 pub mod heartbeat;
 pub mod instruction;
 pub mod key;
 pub mod kv_backend;
+pub mod leadership_notifier;
 pub mod lock_key;
 pub mod metrics;
+pub mod node_manager;
 pub mod peer;
 pub mod range_stream;
 pub mod region_keeper;
 pub mod rpc;
 pub mod sequence;
 pub mod state_store;
-pub mod table_name;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_util;
 pub mod util;
 pub mod wal_options_allocator;
 
+// The id of the cluster.
 pub type ClusterId = u64;
+// The id of the datanode.
 pub type DatanodeId = u64;
+// The id of the flownode.
+pub type FlownodeId = u64;
+
+/// Schema options.
+pub type SchemaOptions = key::schema_name::SchemaNameValue;
 
 pub use instruction::RegionIdent;

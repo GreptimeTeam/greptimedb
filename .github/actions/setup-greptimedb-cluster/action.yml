@@ -1,0 +1,95 @@
+name: Setup GreptimeDB cluster
+description: Deploy GreptimeDB cluster on Kubernetes
+inputs:
+  frontend-replicas:
+    default: 2
+    description: "Number of Frontend replicas"
+  datanode-replicas:
+    default: 2
+    description: "Number of Datanode replicas"
+  meta-replicas:
+    default: 1
+    description: "Number of Metasrv replicas"
+  image-registry: 
+    default: "docker.io"
+    description: "Image registry"
+  image-repository: 
+    default: "greptime/greptimedb"
+    description: "Image repository"
+  image-tag: 
+    default: "latest"
+    description: 'Image tag'
+  etcd-endpoints:
+    default: "etcd.etcd-cluster.svc.cluster.local:2379"
+    description: "Etcd endpoints"
+  values-filename:
+    default: "with-minio.yaml"
+  enable-region-failover:
+    default: false
+
+runs:
+  using: composite
+  steps:
+  - name: Install GreptimeDB operator
+    uses: nick-fields/retry@v3
+    with: 
+      timeout_minutes: 3
+      max_attempts: 3
+      shell: bash
+      command: |
+        helm repo add greptime https://greptimeteam.github.io/helm-charts/ 
+        helm repo update
+        helm upgrade \
+          --install \
+          --create-namespace \
+          greptimedb-operator greptime/greptimedb-operator \
+          -n greptimedb-admin \
+          --wait \
+          --wait-for-jobs
+  - name: Install GreptimeDB cluster
+    shell: bash
+    run: | 
+      helm upgrade \
+        --install my-greptimedb \
+        --set meta.etcdEndpoints=${{ inputs.etcd-endpoints }} \
+        --set meta.enableRegionFailover=${{ inputs.enable-region-failover }} \
+        --set image.registry=${{ inputs.image-registry }} \
+        --set image.repository=${{ inputs.image-repository }}  \
+        --set image.tag=${{ inputs.image-tag }} \
+        --set base.podTemplate.main.resources.requests.cpu=50m \
+        --set base.podTemplate.main.resources.requests.memory=256Mi \
+        --set base.podTemplate.main.resources.limits.cpu=2000m \
+        --set base.podTemplate.main.resources.limits.memory=2Gi \
+        --set frontend.replicas=${{ inputs.frontend-replicas }} \
+        --set datanode.replicas=${{ inputs.datanode-replicas }} \
+        --set meta.replicas=${{ inputs.meta-replicas }} \
+        greptime/greptimedb-cluster \
+        --create-namespace \
+        -n my-greptimedb \
+        --values ./.github/actions/setup-greptimedb-cluster/${{ inputs.values-filename }} \
+        --wait \
+        --wait-for-jobs
+  - name: Wait for GreptimeDB
+    shell: bash
+    run: |
+      while true; do 
+        PHASE=$(kubectl -n my-greptimedb get gtc my-greptimedb -o jsonpath='{.status.clusterPhase}')
+        if [ "$PHASE" == "Running" ]; then
+          echo "Cluster is ready"
+          break
+        else
+          echo "Cluster is not ready yet: Current phase: $PHASE"
+          kubectl get pods -n my-greptimedb
+          sleep 5 # wait for 5 seconds before check again.
+        fi
+      done
+  - name: Print GreptimeDB info
+    if: always()
+    shell: bash
+    run: | 
+      kubectl get all --show-labels -n my-greptimedb
+  - name: Describe Nodes
+    if: always()
+    shell: bash
+    run: | 
+      kubectl describe nodes

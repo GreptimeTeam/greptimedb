@@ -20,9 +20,10 @@ use snafu::ResultExt;
 
 use crate::arrow_array::{BinaryArray, MutableBinaryArray};
 use crate::data_type::ConcreteDataType;
-use crate::error::{self, Result};
+use crate::error::{self, InvalidVectorSnafu, Result};
 use crate::scalars::{ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
+use crate::types::parse_string_to_vector_type_value;
 use crate::value::{Value, ValueRef};
 use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
 
@@ -36,6 +37,75 @@ impl BinaryVector {
     pub(crate) fn as_arrow(&self) -> &dyn Array {
         &self.array
     }
+
+    /// Creates a new binary vector of JSONB from a binary vector.
+    /// The binary vector must contain valid JSON strings.
+    pub fn convert_binary_to_json(&self) -> Result<BinaryVector> {
+        let arrow_array = self.to_arrow_array();
+        let mut vector = vec![];
+        for binary in arrow_array
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap()
+            .iter()
+        {
+            let jsonb = if let Some(binary) = binary {
+                match jsonb::from_slice(binary) {
+                    Ok(jsonb) => Some(jsonb.to_vec()),
+                    Err(_) => {
+                        let s = String::from_utf8_lossy(binary);
+                        return error::InvalidJsonSnafu {
+                            value: s.to_string(),
+                        }
+                        .fail();
+                    }
+                }
+            } else {
+                None
+            };
+            vector.push(jsonb);
+        }
+        Ok(BinaryVector::from(vector))
+    }
+
+    pub fn convert_binary_to_vector(&self, dim: u32) -> Result<BinaryVector> {
+        let arrow_array = self.to_arrow_array();
+        let mut vector = vec![];
+        for binary in arrow_array
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap()
+            .iter()
+        {
+            let Some(binary) = binary else {
+                vector.push(None);
+                continue;
+            };
+
+            if let Ok(s) = String::from_utf8(binary.to_vec()) {
+                if let Ok(v) = parse_string_to_vector_type_value(&s, Some(dim)) {
+                    vector.push(Some(v));
+                    continue;
+                }
+            }
+
+            let expected_bytes_size = dim as usize * std::mem::size_of::<f32>();
+            if binary.len() == expected_bytes_size {
+                vector.push(Some(binary.to_vec()));
+                continue;
+            } else {
+                return InvalidVectorSnafu {
+                    msg: format!(
+                        "Unexpected bytes size for vector value, expected {}, got {}",
+                        expected_bytes_size,
+                        binary.len()
+                    ),
+                }
+                .fail();
+            }
+        }
+        Ok(BinaryVector::from(vector))
+    }
 }
 
 impl From<BinaryArray> for BinaryVector {
@@ -48,6 +118,14 @@ impl From<Vec<Option<Vec<u8>>>> for BinaryVector {
     fn from(data: Vec<Option<Vec<u8>>>) -> Self {
         Self {
             array: BinaryArray::from_iter(data),
+        }
+    }
+}
+
+impl From<Vec<&[u8]>> for BinaryVector {
+    fn from(data: Vec<&[u8]>) -> Self {
+        Self {
+            array: BinaryArray::from_iter_values(data),
         }
     }
 }
@@ -225,6 +303,8 @@ vectors::impl_try_from_arrow_array_for_vector!(BinaryArray, BinaryVector);
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches::assert_matches;
+
     use arrow::datatypes::DataType as ArrowDataType;
     use common_base::bytes::Bytes;
     use serde_json;
@@ -257,7 +337,7 @@ mod tests {
 
         let arrow_arr = v.to_arrow_array();
         assert_eq!(2, arrow_arr.len());
-        assert_eq!(&ArrowDataType::LargeBinary, arrow_arr.data_type());
+        assert_eq!(&ArrowDataType::Binary, arrow_arr.data_type());
     }
 
     #[test]
@@ -374,5 +454,104 @@ mod tests {
         let vector = builder.finish_cloned();
         assert_eq!(b"four", vector.get_data(3).unwrap());
         assert_eq!(builder.len(), 4);
+    }
+
+    #[test]
+    fn test_binary_json_conversion() {
+        // json strings
+        let json_strings = vec![
+            b"{\"hello\": \"world\"}".to_vec(),
+            b"{\"foo\": 1}".to_vec(),
+            b"123".to_vec(),
+        ];
+        let json_vector = BinaryVector::from(json_strings.clone())
+            .convert_binary_to_json()
+            .unwrap();
+        let jsonbs = json_strings
+            .iter()
+            .map(|v| jsonb::parse_value(v).unwrap().to_vec())
+            .collect::<Vec<_>>();
+        for i in 0..3 {
+            assert_eq!(
+                json_vector.get_ref(i).as_binary().unwrap().unwrap(),
+                jsonbs.get(i).unwrap().as_slice()
+            );
+        }
+
+        // jsonb
+        let json_vector = BinaryVector::from(jsonbs.clone())
+            .convert_binary_to_json()
+            .unwrap();
+        for i in 0..3 {
+            assert_eq!(
+                json_vector.get_ref(i).as_binary().unwrap().unwrap(),
+                jsonbs.get(i).unwrap().as_slice()
+            );
+        }
+
+        // binary with jsonb header (0x80, 0x40, 0x20)
+        let binary_with_jsonb_header: Vec<u8> = [0x80, 0x23, 0x40, 0x22].to_vec();
+        let error = BinaryVector::from(vec![binary_with_jsonb_header])
+            .convert_binary_to_json()
+            .unwrap_err();
+        assert_matches!(error, error::Error::InvalidJson { .. });
+
+        // invalid json string
+        let json_strings = vec![b"{\"hello\": \"world\"".to_vec()];
+        let error = BinaryVector::from(json_strings)
+            .convert_binary_to_json()
+            .unwrap_err();
+        assert_matches!(error, error::Error::InvalidJson { .. });
+
+        // corrupted jsonb
+        let jsonb = jsonb::parse_value("{\"hello\": \"world\"}".as_bytes())
+            .unwrap()
+            .to_vec();
+        let corrupted_jsonb = jsonb[0..jsonb.len() - 1].to_vec();
+        let error = BinaryVector::from(vec![corrupted_jsonb])
+            .convert_binary_to_json()
+            .unwrap_err();
+        assert_matches!(error, error::Error::InvalidJson { .. });
+    }
+
+    #[test]
+    fn test_binary_vector_conversion() {
+        let dim = 3;
+        let vector = BinaryVector::from(vec![
+            Some(b"[1,2,3]".to_vec()),
+            Some(b"[4,5,6]".to_vec()),
+            Some(b"[7,8,9]".to_vec()),
+            None,
+        ]);
+        let expected = BinaryVector::from(vec![
+            Some(
+                [1.0f32, 2.0, 3.0]
+                    .iter()
+                    .flat_map(|v| v.to_le_bytes())
+                    .collect(),
+            ),
+            Some(
+                [4.0f32, 5.0, 6.0]
+                    .iter()
+                    .flat_map(|v| v.to_le_bytes())
+                    .collect(),
+            ),
+            Some(
+                [7.0f32, 8.0, 9.0]
+                    .iter()
+                    .flat_map(|v| v.to_le_bytes())
+                    .collect(),
+            ),
+            None,
+        ]);
+
+        let converted = vector.convert_binary_to_vector(dim).unwrap();
+        assert_eq!(converted.len(), expected.len());
+        for i in 0..3 {
+            assert_eq!(
+                converted.get_ref(i).as_binary().unwrap().unwrap(),
+                expected.get_ref(i).as_binary().unwrap().unwrap()
+            );
+        }
     }
 }

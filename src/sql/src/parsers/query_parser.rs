@@ -19,12 +19,12 @@ use crate::parser::ParserContext;
 use crate::statements::query::Query;
 use crate::statements::statement::Statement;
 
-impl<'a> ParserContext<'a> {
+impl ParserContext<'_> {
     /// Parses select and it's variants.
     pub(crate) fn parse_query(&mut self) -> Result<Statement> {
         let spquery = self.parser.parse_query().context(error::SyntaxSnafu)?;
 
-        Ok(Statement::Query(Box::new(Query::try_from(spquery)?)))
+        Ok(Statement::Query(Box::new(Query::try_from(*spquery)?)))
     }
 }
 
@@ -56,6 +56,6 @@ mod tests {
         assert!(result
             .unwrap_err()
             .output_msg()
-            .contains("Expected an expression"));
+            .contains("Expected: an expression"));
     }
 }

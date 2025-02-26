@@ -1,0 +1,27 @@
+name: "Semantic Pull Request"
+
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - edited
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-20.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-cyborg
+      - name: Check Pull Request
+        working-directory: cyborg
+        run: pnpm tsx bin/check-pull-request.ts
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

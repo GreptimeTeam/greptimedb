@@ -16,9 +16,10 @@
 
 use std::time::Duration;
 
+use common_base::readable_size::ReadableSize;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProcedureConfig {
     /// Max retry times of procedure.
@@ -26,6 +27,8 @@ pub struct ProcedureConfig {
     /// Initial retry delay of procedures, increases exponentially.
     #[serde(with = "humantime_serde")]
     pub retry_delay: Duration,
+    /// `None` stands for no limit.
+    pub max_metadata_value_size: Option<ReadableSize>,
 }
 
 impl Default for ProcedureConfig {
@@ -33,6 +36,7 @@ impl Default for ProcedureConfig {
         ProcedureConfig {
             max_retry_times: 3,
             retry_delay: Duration::from_millis(500),
+            max_metadata_value_size: None,
         }
     }
 }

@@ -27,7 +27,12 @@ pub struct LeaderHandler {
 
 #[async_trait::async_trait]
 impl HttpHandler for LeaderHandler {
-    async fn handle(&self, _: &str, _: &HashMap<String, String>) -> Result<http::Response<String>> {
+    async fn handle(
+        &self,
+        _: &str,
+        _: http::Method,
+        _: &HashMap<String, String>,
+    ) -> Result<http::Response<String>> {
         if let Some(election) = &self.election {
             let leader_addr = election.leader().await?.0;
             return http::Response::builder()

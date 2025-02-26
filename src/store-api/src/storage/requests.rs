@@ -12,8 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_query::logical_plan::Expr;
 use common_recordbatch::OrderOption;
+use datafusion_expr::expr::Expr;
+use strum::Display;
+
+use crate::storage::SequenceNumber;
+
+/// A hint on how to select rows from a time-series.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display)]
+pub enum TimeSeriesRowSelector {
+    /// Only keep the last row of each time-series.
+    LastRow,
+}
 
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct ScanRequest {
@@ -29,4 +39,10 @@ pub struct ScanRequest {
     /// If set, it contains the amount of rows needed by the caller,
     /// The data source should return *at least* this number of rows if available.
     pub limit: Option<usize>,
+    /// Optional hint to select rows from time-series.
+    pub series_row_selector: Option<TimeSeriesRowSelector>,
+    /// Optional constraint on the sequence number of the rows to read.
+    /// If set, only rows with a sequence number lesser or equal to this value
+    /// will be returned.
+    pub sequence: Option<SequenceNumber>,
 }

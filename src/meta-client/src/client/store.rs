@@ -25,6 +25,7 @@ use common_grpc::channel_manager::ChannelManager;
 use common_telemetry::tracing_context::TracingContext;
 use snafu::{ensure, OptionExt, ResultExt};
 use tokio::sync::RwLock;
+use tonic::codec::CompressionEncoding;
 use tonic::transport::Channel;
 
 use crate::client::{load_balance as lb, Id};
@@ -55,11 +56,6 @@ impl Client {
     {
         let mut inner = self.inner.write().await;
         inner.start(urls).await
-    }
-
-    pub async fn is_started(&self) -> bool {
-        let inner = self.inner.read().await;
-        inner.is_started()
     }
 
     pub async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
@@ -241,7 +237,10 @@ impl Inner {
             .get(addr)
             .context(error::CreateChannelSnafu)?;
 
-        Ok(StoreClient::new(channel))
+        Ok(StoreClient::new(channel)
+            .accept_compressed(CompressionEncoding::Gzip)
+            .accept_compressed(CompressionEncoding::Zstd)
+            .send_compressed(CompressionEncoding::Zstd))
     }
 
     #[inline]
@@ -255,24 +254,12 @@ mod test {
     use super::*;
 
     #[tokio::test]
-    async fn test_start_client() {
-        let mut client = Client::new((0, 0), Role::Frontend, ChannelManager::default());
-        assert!(!client.is_started().await);
-        client
-            .start(&["127.0.0.1:1000", "127.0.0.1:1001"])
-            .await
-            .unwrap();
-        assert!(client.is_started().await);
-    }
-
-    #[tokio::test]
     async fn test_already_start() {
         let mut client = Client::new((0, 0), Role::Frontend, ChannelManager::default());
         client
             .start(&["127.0.0.1:1000", "127.0.0.1:1001"])
             .await
             .unwrap();
-        assert!(client.is_started().await);
         let res = client.start(&["127.0.0.1:1002"]).await;
         assert!(res.is_err());
         assert!(matches!(

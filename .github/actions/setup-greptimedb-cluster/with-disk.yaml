@@ -1,0 +1,13 @@
+meta:
+  configData: |-
+    [runtime]
+    global_rt_size = 4
+datanode:
+  configData: |-
+    [runtime]
+    global_rt_size = 4
+    compact_rt_size = 2
+frontend:
+  configData: |-
+    [runtime]
+    global_rt_size = 4

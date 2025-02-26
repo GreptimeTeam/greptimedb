@@ -58,7 +58,7 @@ impl MemoryRegionKeeper {
         Default::default()
     }
 
-    /// Returns [OpeningRegionGuard] if Region(`region_id`) on Peer(`datanode_id`) does not exist.
+    /// Returns [OperatingRegionGuard] if Region(`region_id`) on Peer(`datanode_id`) does not exist.
     pub fn register(
         &self,
         datanode_id: DatanodeId,
@@ -83,16 +83,18 @@ impl MemoryRegionKeeper {
         inner.contains(&(datanode_id, region_id))
     }
 
-    /// Returns a set of filtered out regions that are opening.
-    pub fn filter_opening_regions(
+    /// Extracts all operating regions from `region_ids` and returns operating regions.
+    pub fn extract_operating_regions(
         &self,
         datanode_id: DatanodeId,
-        mut region_ids: HashSet<RegionId>,
+        region_ids: &mut HashSet<RegionId>,
     ) -> HashSet<RegionId> {
         let inner = self.inner.read().unwrap();
-        region_ids.retain(|region_id| !inner.contains(&(datanode_id, *region_id)));
+        let operating_regions = region_ids
+            .extract_if(|region_id| inner.contains(&(datanode_id, *region_id)))
+            .collect::<HashSet<_>>();
 
-        region_ids
+        operating_regions
     }
 
     /// Returns number of element in tracking set.
@@ -101,8 +103,15 @@ impl MemoryRegionKeeper {
         inner.len()
     }
 
+    /// Returns true if it's empty.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    #[cfg(test)]
+    pub fn clear(&self) {
+        let mut inner = self.inner.write().unwrap();
+        inner.clear();
     }
 }
 
@@ -122,25 +131,23 @@ mod tests {
         assert!(keeper.register(1, RegionId::from_u64(1)).is_none());
         let guard2 = keeper.register(1, RegionId::from_u64(2)).unwrap();
 
-        let output = keeper.filter_opening_regions(
-            1,
-            HashSet::from([
-                RegionId::from_u64(1),
-                RegionId::from_u64(2),
-                RegionId::from_u64(3),
-            ]),
-        );
-        assert_eq!(output.len(), 1);
-        assert!(output.contains(&RegionId::from_u64(3)));
+        let mut regions = HashSet::from([
+            RegionId::from_u64(1),
+            RegionId::from_u64(2),
+            RegionId::from_u64(3),
+        ]);
+        let output = keeper.extract_operating_regions(1, &mut regions);
+        assert_eq!(output.len(), 2);
 
+        assert!(output.contains(&RegionId::from_u64(1)));
+        assert!(output.contains(&RegionId::from_u64(2)));
         assert_eq!(keeper.len(), 2);
+
         drop(guard);
-
         assert_eq!(keeper.len(), 1);
-
         assert!(keeper.contains(1, RegionId::from_u64(2)));
-        drop(guard2);
 
+        drop(guard2);
         assert!(keeper.is_empty());
     }
 }

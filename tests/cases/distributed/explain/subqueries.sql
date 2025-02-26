@@ -28,6 +28,10 @@ from (
 where t.i is not null
 order by t.i desc;
 
+INSERT INTO other SELECT i, 2 FROM integers WHERE i=(SELECT MAX(i) FROM integers);
+
+-- Explain physical plan for DML is not supported because it looks up the table name in a way that is
+-- different from normal queries. It also requires the table provider to implement the `insert_into()` method.
 EXPLAIN INSERT INTO other SELECT i, 2 FROM integers WHERE i=(SELECT MAX(i) FROM integers);
 
 drop table other;

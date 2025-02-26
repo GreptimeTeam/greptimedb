@@ -17,8 +17,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_query::Output;
+use datafusion_expr::LogicalPlan;
 use query::parser::PromQuery;
-use query::plan::LogicalPlan;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 use sql::statements::statement::Statement;
@@ -84,10 +84,7 @@ where
             .do_query(query, query_ctx)
             .await
             .into_iter()
-            .map(|x| {
-                x.map_err(BoxedError::new)
-                    .context(error::ExecuteQuerySnafu { query })
-            })
+            .map(|x| x.map_err(BoxedError::new).context(error::ExecuteQuerySnafu))
             .collect()
     }
 
@@ -108,14 +105,7 @@ where
             .do_promql_query(query, query_ctx)
             .await
             .into_iter()
-            .map(|x| {
-                x.map_err(BoxedError::new).with_context(|_| {
-                    let query_literal = format!("{query:?}");
-                    error::ExecuteQuerySnafu {
-                        query: query_literal,
-                    }
-                })
-            })
+            .map(|x| x.map_err(BoxedError::new).context(error::ExecuteQuerySnafu))
             .collect()
     }
 

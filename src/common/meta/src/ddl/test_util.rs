@@ -15,12 +15,15 @@
 pub mod alter_table;
 pub mod columns;
 pub mod create_table;
+pub mod datanode_handler;
+pub mod flownode_handler;
 
 use std::collections::HashMap;
 
 use api::v1::meta::Partition;
 use api::v1::{ColumnDataType, SemanticType};
 use common_procedure::Status;
+use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
 use table::metadata::{RawTableInfo, TableId};
 
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
@@ -46,7 +49,7 @@ pub async fn create_physical_table_metadata(
 }
 
 pub async fn create_physical_table(
-    ddl_context: DdlContext,
+    ddl_context: &DdlContext,
     cluster_id: ClusterId,
     name: &str,
 ) -> TableId {
@@ -66,7 +69,7 @@ pub async fn create_physical_table(
         .unwrap();
     create_physical_table_task.set_table_id(table_id);
     create_physical_table_metadata(
-        &ddl_context,
+        ddl_context,
         create_physical_table_task.table_info.clone(),
         TableRouteValue::Physical(table_route),
     )
@@ -80,7 +83,7 @@ pub async fn create_logical_table(
     cluster_id: ClusterId,
     physical_table_id: TableId,
     table_name: &str,
-) {
+) -> TableId {
     use std::assert_matches::assert_matches;
 
     let tasks = vec![test_create_logical_table_task(table_name)];
@@ -90,6 +93,14 @@ pub async fn create_logical_table(
     assert_matches!(status, Status::Executing { persist: true });
     let status = procedure.on_create_metadata().await.unwrap();
     assert_matches!(status, Status::Done { .. });
+
+    let Status::Done {
+        output: Some(output),
+    } = status
+    else {
+        panic!("Unexpected status: {:?}", status);
+    };
+    output.downcast_ref::<Vec<u32>>().unwrap()[0]
 }
 
 pub fn test_create_logical_table_task(name: &str) -> CreateTableTask {
@@ -120,6 +131,11 @@ pub fn test_create_logical_table_task(name: &str) -> CreateTableTask {
         .time_index("ts")
         .primary_keys(["host".into()])
         .table_name(name)
+        .engine(METRIC_ENGINE_NAME)
+        .table_options(HashMap::from([(
+            LOGICAL_TABLE_METADATA_KEY.to_string(),
+            "phy".to_string(),
+        )]))
         .build()
         .unwrap()
         .into();
@@ -156,6 +172,7 @@ pub fn test_create_physical_table_task(name: &str) -> CreateTableTask {
         .time_index("ts")
         .primary_keys(["value".into()])
         .table_name(name)
+        .engine(METRIC_ENGINE_NAME)
         .build()
         .unwrap()
         .into();

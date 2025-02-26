@@ -225,23 +225,57 @@ SELECT i FROM (SELECT * FROM integers i1 UNION SELECT * FROM integers i2) a WHER
 | 3 |
 +---+
 
--- TODO(LFC): Somehow the following SQL does not order by column 1 under new DataFusion occasionally. Should further investigate it. Comment it out temporarily.
--- expected:
---  +---+---+--------------+
---  | a | b | ROW_NUMBER() |
---  +---+---+--------------+
---  | 1 | 1 | 1            |
---  | 2 | 2 | 5            |
---  | 3 | 3 | 9            |
---  +---+---+--------------+
--- SELECT * FROM (SELECT i1.i AS a, i2.i AS b, row_number() OVER (ORDER BY i1.i, i2.i) FROM integers i1, integers i2 WHERE i1.i IS NOT NULL AND i2.i IS NOT NULL) a1 WHERE a=b ORDER BY 1;
-SELECT * FROM (SELECT 0=1 AS cond FROM integers i1, integers i2) a1 WHERE cond ORDER BY 1;
+SELECT * FROM (SELECT i1.i AS a, i2.i AS b, row_number() OVER (ORDER BY i1.i, i2.i) FROM integers i1, integers i2 WHERE i1.i IS NOT NULL AND i2.i IS NOT NULL) a1 WHERE a=b ORDER BY 1;
 
-Error: 3001(EngineExecuteQuery), Invalid argument error: must either specify a row count or at least one column
++---+---+--------------------------------------------------------------------------------------------------------------------+
+| a | b | row_number() ORDER BY [i1.i ASC NULLS LAST, i2.i ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW |
++---+---+--------------------------------------------------------------------------------------------------------------------+
+| 1 | 1 | 1                                                                                                                  |
+| 2 | 2 | 5                                                                                                                  |
+| 3 | 3 | 9                                                                                                                  |
++---+---+--------------------------------------------------------------------------------------------------------------------+
 
+-- The "0=1" will be evaluated as a constant expression that is always false, and will be optimized away in the query
+-- engine. In the final plan, there's no filter node. We explain it to ensure that.
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT * FROM (SELECT 0=1 AS cond FROM integers i1, integers i2) a1 WHERE cond ORDER BY 1;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| Sort: a1.cond ASC NULLS LAST_|
+|_|_SubqueryAlias: a1_|
+|_|_Projection: Boolean(false) AS cond_|
+|_|_Cross Join:_|
+|_|_SubqueryAlias: i1_|
+|_|_Projection:_|
+|_|_MergeScan [is_placeholder=false]_|
+|_|_SubqueryAlias: i2_|
+|_|_Projection:_|
+|_|_MergeScan [is_placeholder=false]_|
+| physical_plan | CoalescePartitionsExec_|
+|_|_ProjectionExec: expr=[false as cond]_|
+|_|_CrossJoinExec_|
+|_|_CoalescePartitionsExec_|
+|_|_ProjectionExec: expr=[]_|
+|_|_MergeScanExec: REDACTED
+|_|_ProjectionExec: expr=[]_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+-- This should be a bug in DataFusion, it use UserDefinedLogicalNode::prevent_predicate_push_down_columns()
+-- to prevent pushdown, but this filter is Literal(Boolean(false)). It doesn't reference any column.
 SELECT * FROM (SELECT 0=1 AS cond FROM integers i1, integers i2 GROUP BY 1) a1 WHERE cond ORDER BY 1;
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Error during planning: Attempted to create Filter predicate with expression `Boolean(false)` aliased as 'Int64(0) = Int64(1)'. Filter predicates should not be aliased.
++-------+
+| cond  |
++-------+
+| false |
++-------+
 
 DROP TABLE integers;
 

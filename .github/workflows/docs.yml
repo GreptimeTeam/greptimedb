@@ -34,7 +34,18 @@ jobs:
     runs-on: ubuntu-20.04
     steps:
       - uses: actions/checkout@v4
-      - uses: crate-ci/typos@v1.13.10
+        with:
+          persist-credentials: false
+      - uses: crate-ci/typos@master
+
+  license-header-check:
+    runs-on: ubuntu-20.04
+    name: Check License Header
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: korandoru/hawkeye@v5
 
   check:
     name: Check
@@ -59,20 +70,19 @@ jobs:
     steps:
       - run: 'echo "No action required"'
 
-  sqlness:
-    name: Sqlness Test
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ ubuntu-20.04 ]
+  test:
+    runs-on: ubuntu-20.04
     steps:
       - run: 'echo "No action required"'
 
-  sqlness-kafka-wal:
-    name: Sqlness Test with Kafka Wal
+  sqlness:
+    name: Sqlness Test (${{ matrix.mode.name }})
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         os: [ ubuntu-20.04 ]
+        mode:
+          - name: "Basic"
+          - name: "Remote WAL"
     steps:
       - run: 'echo "No action required"'

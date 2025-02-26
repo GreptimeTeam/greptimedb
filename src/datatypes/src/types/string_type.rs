@@ -78,7 +78,15 @@ impl DataType for StringType {
             Value::DateTime(v) => Some(Value::String(StringBytes::from(v.to_string()))),
             Value::Timestamp(v) => Some(Value::String(StringBytes::from(v.to_iso8601_string()))),
             Value::Time(v) => Some(Value::String(StringBytes::from(v.to_iso8601_string()))),
-            Value::Interval(v) => Some(Value::String(StringBytes::from(v.to_iso8601_string()))),
+            Value::IntervalYearMonth(v) => {
+                Some(Value::String(StringBytes::from(v.to_iso8601_string())))
+            }
+            Value::IntervalDayTime(v) => {
+                Some(Value::String(StringBytes::from(v.to_iso8601_string())))
+            }
+            Value::IntervalMonthDayNano(v) => {
+                Some(Value::String(StringBytes::from(v.to_iso8601_string())))
+            }
             Value::Duration(v) => Some(Value::String(StringBytes::from(v.to_string()))),
             Value::Decimal128(v) => Some(Value::String(StringBytes::from(v.to_string()))),
 

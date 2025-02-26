@@ -20,7 +20,8 @@ pub mod start;
 use std::any::Any;
 use std::fmt::Debug;
 
-use common_procedure::error::{Error as ProcedureError, FromJsonSnafu, ToJsonSnafu};
+use common_error::ext::BoxedError;
+use common_procedure::error::{Error as ProcedureError, ExternalSnafu, FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
     Context as ProcedureContext, LockKey, Procedure, Result as ProcedureResult, Status,
 };
@@ -34,6 +35,7 @@ use crate::ddl::DdlContext;
 use crate::error::Result;
 use crate::key::table_name::TableNameValue;
 use crate::lock_key::{CatalogLock, SchemaLock};
+use crate::ClusterId;
 
 pub struct DropDatabaseProcedure {
     /// The context of procedure runtime.
@@ -52,6 +54,7 @@ pub(crate) enum DropTableTarget {
 
 /// Context of [DropDatabaseProcedure] execution.
 pub(crate) struct DropDatabaseContext {
+    cluster_id: ClusterId,
     catalog: String,
     schema: String,
     drop_if_exists: bool,
@@ -68,6 +71,11 @@ pub(crate) trait State: Send + Debug {
         ctx: &mut DropDatabaseContext,
     ) -> Result<(Box<dyn State>, Status)>;
 
+    /// The hook is called during the recovery.
+    fn recover(&mut self, _ddl_ctx: &DdlContext) -> Result<()> {
+        Ok(())
+    }
+
     /// Returns as [Any](std::any::Any).
     fn as_any(&self) -> &dyn Any;
 }
@@ -79,6 +87,7 @@ impl DropDatabaseProcedure {
         Self {
             runtime_context: context,
             context: DropDatabaseContext {
+                cluster_id: 0,
                 catalog,
                 schema,
                 drop_if_exists,
@@ -99,6 +108,7 @@ impl DropDatabaseProcedure {
         Ok(Self {
             runtime_context,
             context: DropDatabaseContext {
+                cluster_id: 0,
                 catalog,
                 schema,
                 drop_if_exists,
@@ -107,12 +117,24 @@ impl DropDatabaseProcedure {
             state,
         })
     }
+
+    #[cfg(test)]
+    pub(crate) fn state(&self) -> &dyn State {
+        self.state.as_ref()
+    }
 }
 
 #[async_trait]
 impl Procedure for DropDatabaseProcedure {
     fn type_name(&self) -> &str {
         Self::TYPE_NAME
+    }
+
+    fn recover(&mut self) -> ProcedureResult<()> {
+        self.state
+            .recover(&self.runtime_context)
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)
     }
 
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {

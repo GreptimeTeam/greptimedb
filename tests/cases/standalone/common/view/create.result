@@ -1,0 +1,204 @@
+--- test CREATE VIEW ---
+CREATE TABLE test_table(a STRING, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+CREATE VIEW test_view;
+
+Error: 2000(InvalidSyntax), Invalid SQL syntax: sql parser error: Expected: AS, found: ; at Line: 1, Column: 22
+
+CREATE VIEW test_view as DELETE FROM public.numbers;
+
+Error: 2000(InvalidSyntax), Invalid SQL syntax: sql parser error: Expected: SELECT, VALUES, or a subquery in the query body, found: DELETE at Line: 1, Column: 26
+
+--- Table already exists ---
+CREATE VIEW test_table as SELECT * FROM public.numbers;
+
+Error: 4000(TableAlreadyExists), Table already exists: `greptime.public.test_table`
+
+--- Table already exists even when create_if_not_exists ---
+CREATE VIEW IF NOT EXISTS test_table as SELECT * FROM public.numbers;
+
+Error: 4000(TableAlreadyExists), Table already exists: `greptime.public.test_table`
+
+--- Table already exists even when or_replace ---
+CREATE OR REPLACE VIEW test_table as SELECT * FROM public.numbers;
+
+Error: 4000(TableAlreadyExists), Table already exists: `greptime.public.test_table`
+
+CREATE VIEW test_view as SELECT * FROM public.numbers;
+
+Affected Rows: 0
+
+--- View already exists ----
+CREATE VIEW test_view as SELECT * FROM public.numbers;
+
+Error: 4000(TableAlreadyExists), View already exists: `greptime.public.test_view`
+
+CREATE VIEW IF NOT EXISTS test_view as SELECT * FROM public.numbers;
+
+Affected Rows: 0
+
+CREATE OR REPLACE VIEW test_view as SELECT * FROM public.numbers;
+
+Affected Rows: 0
+
+SHOW TABLES;
+
++------------+
+| Tables     |
++------------+
+| numbers    |
+| test_table |
+| test_view  |
++------------+
+
+SHOW FULL TABLES;
+
++------------+-----------------+
+| Tables     | Table_type      |
++------------+-----------------+
+| numbers    | LOCAL TEMPORARY |
+| test_table | BASE TABLE      |
+| test_view  | VIEW            |
++------------+-----------------+
+
+-- psql: \dv
+SELECT n.nspname as "Schema",
+  c.relname as "Name",
+  CASE c.relkind WHEN 'r' THEN 'table' WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized view' WHEN 'i' THEN 'index' WHEN 'S' THEN 'sequence' WHEN 't' THEN 'TOAST table' WHEN 'f' THEN 'foreign table' WHEN 'p' THEN 'partitioned table' WHEN 'I' THEN 'partitioned index' END as "Type",
+  pg_catalog.pg_get_userbyid(c.relowner) as "Owner"
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('v','')
+      AND n.nspname <> 'pg_catalog'
+      AND n.nspname !~ '^pg_toast'
+      AND n.nspname <> 'information_schema'
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 1,2;
+
+Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.pg_catalog.pg_class
+
+-- SQLNESS REPLACE (\s\d+\s) ID
+-- SQLNESS REPLACE (\s[\-0-9T:\.]{15,}) DATETIME
+-- SQLNESS REPLACE [\u0020\-]+
+SELECT * FROM INFORMATION_SCHEMA.TABLES ORDER BY TABLE_NAME, TABLE_TYPE;
+
++++++++++++++++++++++++++
+|table_catalog|table_schema|table_name|table_type|table_id|data_length|max_data_length|index_length|max_index_length|avg_row_length|engine|version|row_format|table_rows|data_free|auto_increment|create_time|update_time|check_time|table_collation|checksum|create_options|table_comment|temporary|
++++++++++++++++++++++++++
+|greptime|information_schema|build_info|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
+|greptime|information_schema|character_sets|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
+|greptime|information_schema|check_constraints|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
+|greptime|information_schema|cluster_info|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
+|greptime|information_schema|collation_character_set_applicability|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
+|greptime|information_schema|collations|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
+|greptime|information_schema|column_privileges|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
+|greptime|information_schema|column_statistics|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
+|greptime|information_schema|columns|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
+|greptime|information_schema|engines|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
+|greptime|information_schema|events|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
+|greptime|information_schema|files|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
+|greptime|information_schema|flows|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
+|greptime|information_schema|global_status|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
+|greptime|information_schema|key_column_usage|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
+|greptime|public|numbers|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID|test_engine|ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
+|greptime|information_schema|optimizer_trace|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
+|greptime|information_schema|parameters|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
+|greptime|information_schema|partitions|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
+|greptime|information_schema|procedure_info|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
+|greptime|information_schema|profiling|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
+|greptime|information_schema|referential_constraints|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
+|greptime|information_schema|region_peers|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
+|greptime|information_schema|region_statistics|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
+|greptime|information_schema|routines|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
+|greptime|information_schema|runtime_metrics|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
+|greptime|information_schema|schema_privileges|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
+|greptime|information_schema|schemata|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
+|greptime|information_schema|session_status|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
+|greptime|information_schema|table_constraints|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
+|greptime|information_schema|table_privileges|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
+|greptime|information_schema|tables|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
+|greptime|public|test_table|BASETABLE|ID|ID|ID|ID|ID|ID|mito|ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||N|
+|greptime|public|test_view|VIEW|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||N|
+|greptime|information_schema|triggers|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
+|greptime|information_schema|views|LOCALTEMPORARY|ID|ID|ID|ID|ID|ID||ID|Fixed|ID|ID|ID|DATETIME|||utf8_bin|ID|||Y|
++++++++++++++++++++++++++
+
+-- SQLNESS REPLACE (\s\d+\s) ID
+SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'VIEW';
+
++---------------+--------------+------------+------------+----------+-------------+-----------------+--------------+------------------+----------------+--------+---------+------------+------------+-----------+----------------+---------------------+-------------+------------+-----------------+----------+----------------+---------------+-----------+
+| table_catalog | table_schema | table_name | table_type | table_id | data_length | max_data_length | index_length | max_index_length | avg_row_length | engine | version | row_format | table_rows | data_free | auto_increment | create_time         | update_time | check_time | table_collation | checksum | create_options | table_comment | temporary |
++---------------+--------------+------------+------------+----------+-------------+-----------------+--------------+------------------+----------------+--------+---------+------------+------------+-----------+----------------+---------------------+-------------+------------+-----------------+----------+----------------+---------------+-----------+
+| greptime      | public       | test_view  | VIEW       |ID    |ID          |ID              |ID           |ID               |ID             |        |ID     | Fixed      |ID         |ID        |ID             | 1970-01-01T00:00:00 |             |            | utf8_bin        |ID       |                |               | N         |
++---------------+--------------+------------+------------+----------+-------------+-----------------+--------------+------------------+----------------+--------+---------+------------+------------+-----------+----------------+---------------------+-------------+------------+-----------------+----------+----------------+---------------+-----------+
+
+SHOW COLUMNS FROM test_view;
+
+++
+++
+
+SHOW FULL COLUMNS FROM test_view;
+
+++
+++
+
+SELECT * FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'test_view';
+
+++
+++
+
+SELECT * FROM test_view LIMIT 10;
+
++--------+
+| number |
++--------+
+| 0      |
+| 1      |
+| 2      |
+| 3      |
+| 4      |
+| 5      |
+| 6      |
+| 7      |
+| 8      |
+| 9      |
++--------+
+
+DROP VIEW test_view;
+
+Affected Rows: 0
+
+DROP TABLE test_table;
+
+Affected Rows: 0
+
+SELECT * FROM test_view LIMIT 10;
+
+Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.public.test_view
+
+SHOW TABLES;
+
++---------+
+| Tables  |
++---------+
+| numbers |
++---------+
+
+-- psql: \dv
+SELECT n.nspname as "Schema",
+  c.relname as "Name",
+  CASE c.relkind WHEN 'r' THEN 'table' WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized view' WHEN 'i' THEN 'index' WHEN 'S' THEN 'sequence' WHEN 't' THEN 'TOAST table' WHEN 'f' THEN 'foreign table' WHEN 'p' THEN 'partitioned table' WHEN 'I' THEN 'partitioned index' END as "Type",
+  pg_catalog.pg_get_userbyid(c.relowner) as "Owner"
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('v','')
+      AND n.nspname <> 'pg_catalog'
+      AND n.nspname !~ '^pg_toast'
+      AND n.nspname <> 'information_schema'
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 1,2;
+
+Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.pg_catalog.pg_class
+

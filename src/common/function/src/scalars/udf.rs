@@ -89,7 +89,7 @@ mod tests {
     #[test]
     fn test_create_udf() {
         let f = Arc::new(TestAndFunction);
-        let query_ctx = QueryContextBuilder::default().build();
+        let query_ctx = QueryContextBuilder::default().build().into();
 
         let args: Vec<VectorRef> = vec![
             Arc::new(ConstantVector::new(

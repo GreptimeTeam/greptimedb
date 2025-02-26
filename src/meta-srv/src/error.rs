@@ -12,37 +12,68 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_error::define_into_tonic_status;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
-use common_meta::peer::Peer;
 use common_meta::DatanodeId;
 use common_runtime::JoinError;
-use rand::distributions::WeightedError;
-use servers::define_into_tonic_status;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
 use table::metadata::TableId;
 use tokio::sync::mpsc::error::SendError;
 use tonic::codegen::http;
 
+use crate::metasrv::SelectTarget;
 use crate::pubsub::Message;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Failed to choose items"))]
+    ChooseItems {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: rand::distributions::WeightedError,
+    },
+
+    #[snafu(display("Exceeded deadline, operation: {}", operation))]
+    ExceededDeadline {
+        #[snafu(implicit)]
+        location: Location,
+        operation: String,
+    },
+
     #[snafu(display("The target peer is unavailable temporally: {}", peer_id))]
-    PeerUnavailable { location: Location, peer_id: u64 },
+    PeerUnavailable {
+        #[snafu(implicit)]
+        location: Location,
+        peer_id: u64,
+    },
+
+    #[snafu(display("Failed to lookup peer: {}", peer_id))]
+    LookupPeer {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+        peer_id: u64,
+    },
 
     #[snafu(display("Another migration procedure is running for region: {}", region_id))]
     MigrationRunning {
+        #[snafu(implicit)]
         location: Location,
         region_id: RegionId,
     },
 
     #[snafu(display("The region migration procedure aborted, reason: {}", reason))]
-    MigrationAbort { location: Location, reason: String },
+    MigrationAbort {
+        #[snafu(implicit)]
+        location: Location,
+        reason: String,
+    },
 
     #[snafu(display(
         "Another procedure is opening the region: {} on peer: {}",
@@ -50,6 +81,7 @@ pub enum Error {
         peer_id
     ))]
     RegionOpeningRace {
+        #[snafu(implicit)]
         location: Location,
         peer_id: DatanodeId,
         region_id: RegionId,
@@ -57,55 +89,56 @@ pub enum Error {
 
     #[snafu(display("Failed to init ddl manager"))]
     InitDdlManager {
+        #[snafu(implicit)]
         location: Location,
         source: common_meta::error::Error,
     },
 
     #[snafu(display("Failed to create default catalog and schema"))]
     InitMetadata {
+        #[snafu(implicit)]
         location: Location,
         source: common_meta::error::Error,
     },
 
     #[snafu(display("Failed to allocate next sequence number"))]
     NextSequence {
+        #[snafu(implicit)]
         location: Location,
         source: common_meta::error::Error,
     },
 
     #[snafu(display("Failed to start telemetry task"))]
     StartTelemetryTask {
+        #[snafu(implicit)]
         location: Location,
         source: common_runtime::error::Error,
     },
 
     #[snafu(display("Failed to submit ddl task"))]
     SubmitDdlTask {
+        #[snafu(implicit)]
         location: Location,
         source: common_meta::error::Error,
     },
 
     #[snafu(display("Failed to invalidate table cache"))]
     InvalidateTableCache {
+        #[snafu(implicit)]
         location: Location,
         source: common_meta::error::Error,
     },
 
-    #[snafu(display("Failed to operate region on peer:{}", peer))]
-    OperateRegion {
-        location: Location,
-        peer: Peer,
-        source: BoxedError,
-    },
-
     #[snafu(display("Failed to list catalogs"))]
     ListCatalogs {
+        #[snafu(implicit)]
         location: Location,
         source: BoxedError,
     },
 
     #[snafu(display("Failed to list {}'s schemas", catalog))]
     ListSchemas {
+        #[snafu(implicit)]
         location: Location,
         catalog: String,
         source: BoxedError,
@@ -113,6 +146,7 @@ pub enum Error {
 
     #[snafu(display("Failed to list {}.{}'s tables", catalog, schema))]
     ListTables {
+        #[snafu(implicit)]
         location: Location,
         catalog: String,
         schema: String,
@@ -121,41 +155,24 @@ pub enum Error {
 
     #[snafu(display("Failed to join a future"))]
     Join {
+        #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
         error: JoinError,
     },
 
-    #[snafu(display("Failed to execute transaction: {}", msg))]
-    Txn { location: Location, msg: String },
-
     #[snafu(display(
-        "Unexpected table_id changed, expected: {}, found: {}",
-        expected,
-        found,
-    ))]
-    TableIdChanged {
-        location: Location,
-        expected: u64,
-        found: u64,
-    },
-
-    #[snafu(display(
-        "Failed to request Datanode, required: {}, but only {} available",
+        "Failed to request {}, required: {}, but only {} available",
+        select_target,
         required,
         available
     ))]
-    NoEnoughAvailableDatanode {
+    NoEnoughAvailableNode {
+        #[snafu(implicit)]
         location: Location,
         required: usize,
         available: usize,
-    },
-
-    #[snafu(display("Failed to request Datanode {}", peer))]
-    RequestDatanode {
-        location: Location,
-        peer: Peer,
-        source: client::Error,
+        select_target: SelectTarget,
     },
 
     #[snafu(display("Failed to send shutdown signal"))]
@@ -166,18 +183,23 @@ pub enum Error {
 
     #[snafu(display("Failed to shutdown {} server", server))]
     ShutdownServer {
+        #[snafu(implicit)]
         location: Location,
         source: servers::error::Error,
         server: String,
     },
 
     #[snafu(display("Empty key is not allowed"))]
-    EmptyKey { location: Location },
+    EmptyKey {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to execute via Etcd"))]
     EtcdFailed {
         #[snafu(source)]
         error: etcd_client::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -185,6 +207,7 @@ pub enum Error {
     ConnectEtcd {
         #[snafu(source)]
         error: etcd_client::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -193,6 +216,7 @@ pub enum Error {
         addr: String,
         #[snafu(source)]
         error: std::io::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -206,67 +230,65 @@ pub enum Error {
     StartGrpc {
         #[snafu(source)]
         error: tonic::transport::Error,
+        #[snafu(implicit)]
         location: Location,
     },
+
     #[snafu(display("Failed to start http server"))]
     StartHttp {
+        #[snafu(implicit)]
         location: Location,
         source: servers::error::Error,
     },
+
     #[snafu(display("Failed to init export metrics task"))]
     InitExportMetricsTask {
+        #[snafu(implicit)]
         location: Location,
         source: servers::error::Error,
     },
-    #[snafu(display("Failed to parse duration {}", duration))]
-    ParseDuration {
-        duration: String,
-        #[snafu(source)]
-        error: humantime::DurationError,
-    },
+
     #[snafu(display("Failed to parse address {}", addr))]
     ParseAddr {
         addr: String,
         #[snafu(source)]
         error: std::net::AddrParseError,
     },
-    #[snafu(display("Empty table name"))]
-    EmptyTableName { location: Location },
 
-    #[snafu(display("Invalid datanode lease key: {}", key))]
-    InvalidLeaseKey { key: String, location: Location },
+    #[snafu(display("Invalid lease key: {}", key))]
+    InvalidLeaseKey {
+        key: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Invalid datanode stat key: {}", key))]
-    InvalidStatKey { key: String, location: Location },
+    InvalidStatKey {
+        key: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Invalid inactive region key: {}", key))]
-    InvalidInactiveRegionKey { key: String, location: Location },
+    InvalidInactiveRegionKey {
+        key: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
-    #[snafu(display("Failed to parse datanode lease key from utf8"))]
+    #[snafu(display("Failed to parse lease key from utf8"))]
     LeaseKeyFromUtf8 {
         #[snafu(source)]
         error: std::string::FromUtf8Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
-    #[snafu(display("Failed to parse datanode lease value from utf8"))]
+    #[snafu(display("Failed to parse lease value from utf8"))]
     LeaseValueFromUtf8 {
         #[snafu(source)]
         error: std::string::FromUtf8Error,
-        location: Location,
-    },
-
-    #[snafu(display("Failed to parse datanode stat key from utf8"))]
-    StatKeyFromUtf8 {
-        #[snafu(source)]
-        error: std::string::FromUtf8Error,
-        location: Location,
-    },
-
-    #[snafu(display("Failed to parse datanode stat value from utf8"))]
-    StatValueFromUtf8 {
-        #[snafu(source)]
-        error: std::string::FromUtf8Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -274,6 +296,7 @@ pub enum Error {
     InvalidRegionKeyFromUtf8 {
         #[snafu(source)]
         error: std::string::FromUtf8Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -282,6 +305,7 @@ pub enum Error {
         input: String,
         #[snafu(source)]
         error: serde_json::error::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -290,6 +314,7 @@ pub enum Error {
         input: String,
         #[snafu(source)]
         error: serde_json::error::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -298,6 +323,7 @@ pub enum Error {
         err_msg: String,
         #[snafu(source)]
         error: std::num::ParseIntError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -306,46 +332,35 @@ pub enum Error {
         err_msg: String,
         #[snafu(source)]
         error: std::str::ParseBoolError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Invalid arguments: {}", err_msg))]
-    InvalidArguments { err_msg: String, location: Location },
-
-    #[snafu(display("Cannot parse catalog value"))]
-    InvalidCatalogValue {
-        location: Location,
-        source: common_catalog::error::Error,
-    },
-
-    #[snafu(display("Cannot parse full table name"))]
-    InvalidFullTableName {
-        location: Location,
-        source: common_catalog::error::Error,
-    },
-
-    #[snafu(display("Failed to decode table route"))]
-    DecodeTableRoute {
-        #[snafu(source)]
-        error: prost::DecodeError,
+    InvalidArguments {
+        err_msg: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to find table route for {table_id}"))]
     TableRouteNotFound {
         table_id: TableId,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to find table route for {region_id}"))]
     RegionRouteNotFound {
         region_id: RegionId,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Table info not found: {}", table_id))]
     TableInfoNotFound {
         table_id: TableId,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -353,42 +368,40 @@ pub enum Error {
     DatanodeTableNotFound {
         table_id: TableId,
         datanode_id: DatanodeId,
+        #[snafu(implicit)]
         location: Location,
     },
 
-    #[snafu(display("Table route corrupted, key: {}, reason: {}", key, reason))]
-    CorruptedTableRoute {
-        key: String,
-        reason: String,
+    #[snafu(display("Metasrv has no leader at this moment"))]
+    NoLeader {
+        #[snafu(implicit)]
         location: Location,
     },
-
-    #[snafu(display("MetaSrv has no leader at this moment"))]
-    NoLeader { location: Location },
 
     #[snafu(display("Table {} not found", name))]
-    TableNotFound { name: String, location: Location },
-
-    #[snafu(display(
-        "Failed to move the value of {} because other clients caused a race condition",
-        key
-    ))]
-    MoveValue { key: String, location: Location },
+    TableNotFound {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Unsupported selector type, {}", selector_type))]
     UnsupportedSelectorType {
         selector_type: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Unexpected, violated: {violated}"))]
     Unexpected {
         violated: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to create gRPC channel"))]
     CreateChannel {
+        #[snafu(implicit)]
         location: Location,
         source: common_grpc::error::Error,
     },
@@ -397,6 +410,7 @@ pub enum Error {
     BatchGet {
         #[snafu(source)]
         error: tonic::Status,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -404,15 +418,20 @@ pub enum Error {
     Range {
         #[snafu(source)]
         error: tonic::Status,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Response header not found"))]
-    ResponseHeaderNotFound { location: Location },
+    ResponseHeaderNotFound {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("The requested meta node is not leader, node addr: {}", node_addr))]
     IsNotLeader {
         node_addr: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -420,6 +439,7 @@ pub enum Error {
     InvalidHttpBody {
         #[snafu(source)]
         error: http::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -431,37 +451,15 @@ pub enum Error {
     ExceededRetryLimit {
         func_name: String,
         retry_num: usize,
+        #[snafu(implicit)]
         location: Location,
     },
-
-    #[snafu(display("Failed to lock based on etcd"))]
-    Lock {
-        #[snafu(source)]
-        error: etcd_client::Error,
-        location: Location,
-    },
-
-    #[snafu(display("Failed to unlock based on etcd"))]
-    Unlock {
-        #[snafu(source)]
-        error: etcd_client::Error,
-        location: Location,
-    },
-
-    #[snafu(display("Failed to grant lease"))]
-    LeaseGrant {
-        #[snafu(source)]
-        error: etcd_client::Error,
-        location: Location,
-    },
-
-    #[snafu(display("Distributed lock is not configured"))]
-    LockNotConfig { location: Location },
 
     #[snafu(display("Invalid utf-8 value"))]
     InvalidUtf8Value {
         #[snafu(source)]
         error: std::string::FromUtf8Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -470,33 +468,42 @@ pub enum Error {
 
     #[snafu(display("Failed to start procedure manager"))]
     StartProcedureManager {
+        #[snafu(implicit)]
         location: Location,
         source: common_procedure::Error,
     },
 
     #[snafu(display("Failed to stop procedure manager"))]
     StopProcedureManager {
+        #[snafu(implicit)]
         location: Location,
         source: common_procedure::Error,
     },
 
     #[snafu(display("Failed to wait procedure done"))]
     WaitProcedure {
+        #[snafu(implicit)]
         location: Location,
         source: common_procedure::Error,
     },
 
     #[snafu(display("Failed to query procedure state"))]
     QueryProcedure {
+        #[snafu(implicit)]
         location: Location,
         source: common_procedure::Error,
     },
 
     #[snafu(display("Procedure not found: {pid}"))]
-    ProcedureNotFound { location: Location, pid: String },
+    ProcedureNotFound {
+        #[snafu(implicit)]
+        location: Location,
+        pid: String,
+    },
 
     #[snafu(display("Failed to submit procedure"))]
     SubmitProcedure {
+        #[snafu(implicit)]
         location: Location,
         source: common_procedure::Error,
     },
@@ -504,51 +511,65 @@ pub enum Error {
     #[snafu(display("Schema already exists, name: {schema_name}"))]
     SchemaAlreadyExists {
         schema_name: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Table already exists: {table_name}"))]
     TableAlreadyExists {
         table_name: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Pusher not found: {pusher_id}"))]
     PusherNotFound {
         pusher_id: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to push message: {err_msg}"))]
-    PushMessage { err_msg: String, location: Location },
+    PushMessage {
+        err_msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Mailbox already closed: {id}"))]
-    MailboxClosed { id: u64, location: Location },
+    MailboxClosed {
+        id: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Mailbox timeout: {id}"))]
-    MailboxTimeout { id: u64, location: Location },
+    MailboxTimeout {
+        id: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Mailbox receiver got an error: {id}, {err_msg}"))]
     MailboxReceiver {
         id: u64,
         err_msg: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Missing request header"))]
-    MissingRequestHeader { location: Location },
+    MissingRequestHeader {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to register procedure loader, type name: {}", type_name))]
     RegisterProcedureLoader {
         type_name: String,
+        #[snafu(implicit)]
         location: Location,
         source: common_procedure::error::Error,
-    },
-
-    #[snafu(display("Failed to find failover candidates for region: {}", failed_region))]
-    RegionFailoverCandidatesNotFound {
-        failed_region: String,
-        location: Location,
     },
 
     #[snafu(display(
@@ -559,30 +580,28 @@ pub enum Error {
     UnexpectedInstructionReply {
         mailbox_message: String,
         reason: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Expected to retry later, reason: {}", reason))]
-    RetryLater { reason: String, location: Location },
+    RetryLater {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Expected to retry later, reason: {}", reason))]
     RetryLaterWithSource {
         reason: String,
+        #[snafu(implicit)]
         location: Location,
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to update table metadata, err_msg: {}", err_msg))]
-    UpdateTableMetadata { err_msg: String, location: Location },
-
-    #[snafu(display("Failed to convert table route"))]
-    TableRouteConversion {
-        location: Location,
-        source: common_meta::error::Error,
-    },
-
     #[snafu(display("Failed to convert proto data"))]
     ConvertProtoData {
+        #[snafu(implicit)]
         location: Location,
         source: common_meta::error::Error,
     },
@@ -592,66 +611,142 @@ pub enum Error {
     #[snafu(display("Other error"))]
     Other {
         source: BoxedError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Table metadata manager error"))]
     TableMetadataManager {
         source: common_meta::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Maintenance mode manager error"))]
+    MaintenanceModeManager {
+        source: common_meta::error::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Keyvalue backend error"))]
     KvBackend {
         source: common_meta::error::Error,
+        #[snafu(implicit)]
         location: Location,
     },
-
-    #[snafu(display("Failed to update table route"))]
-    UpdateTableRoute {
-        source: common_meta::error::Error,
-        location: Location,
-    },
-
-    #[snafu(display("Failed to get table info error"))]
-    GetFullTableInfo {
-        source: common_meta::error::Error,
-        location: Location,
-    },
-
-    #[snafu(display("Invalid heartbeat request: {}", err_msg))]
-    InvalidHeartbeatRequest { err_msg: String, location: Location },
 
     #[snafu(display("Failed to publish message"))]
     PublishMessage {
         #[snafu(source)]
         error: SendError<Message>,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Too many partitions"))]
-    TooManyPartitions { location: Location },
+    TooManyPartitions {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Unsupported operation {}", operation))]
     Unsupported {
         operation: String,
+        #[snafu(implicit)]
         location: Location,
     },
-
-    #[snafu(display("Failed to set weight array"))]
-    WeightArray {
-        #[snafu(source)]
-        error: WeightedError,
-        location: Location,
-    },
-
-    #[snafu(display("Weight array is not set"))]
-    NotSetWeightArray { location: Location },
 
     #[snafu(display("Unexpected table route type: {}", err_msg))]
     UnexpectedLogicalRouteTable {
+        #[snafu(implicit)]
         location: Location,
         err_msg: String,
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Failed to save cluster info"))]
+    SaveClusterInfo {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Invalid cluster info format"))]
+    InvalidClusterInfoFormat {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Invalid datanode stat format"))]
+    InvalidDatanodeStatFormat {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Failed to serialize options to TOML"))]
+    TomlFormat {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source(from(common_config::error::Error, Box::new)))]
+        source: Box<common_config::error::Error>,
+    },
+
+    #[cfg(feature = "pg_kvbackend")]
+    #[snafu(display("Failed to execute via postgres"))]
+    PostgresExecution {
+        #[snafu(source)]
+        error: tokio_postgres::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "pg_kvbackend")]
+    #[snafu(display("Failed to connect to Postgres"))]
+    ConnectPostgres {
+        #[snafu(source)]
+        error: tokio_postgres::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "pg_kvbackend")]
+    #[snafu(display("Failed to create connection pool for Postgres"))]
+    CreatePostgresPool {
+        #[snafu(source)]
+        error: deadpool_postgres::CreatePoolError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "pg_kvbackend")]
+    #[snafu(display("Failed to get connection from Postgres pool: {}", reason))]
+    GetPostgresConnection {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Handler not found: {}", name))]
+    HandlerNotFound {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Flow state handler error"))]
+    FlowStateHandler {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Failed to build wal options allocator"))]
+    BuildWalOptionsAllocator {
+        #[snafu(implicit)]
+        location: Location,
         source: common_meta::error::Error,
     },
 }
@@ -677,7 +772,6 @@ impl ErrorExt for Error {
             | Error::TcpIncoming { .. }
             | Error::SerializeToJson { .. }
             | Error::DeserializeFromJson { .. }
-            | Error::DecodeTableRoute { .. }
             | Error::NoLeader { .. }
             | Error::CreateChannel { .. }
             | Error::BatchGet { .. }
@@ -685,13 +779,8 @@ impl ErrorExt for Error {
             | Error::ResponseHeaderNotFound { .. }
             | Error::IsNotLeader { .. }
             | Error::InvalidHttpBody { .. }
-            | Error::Lock { .. }
-            | Error::Unlock { .. }
-            | Error::LeaseGrant { .. }
-            | Error::LockNotConfig { .. }
             | Error::ExceededRetryLimit { .. }
             | Error::SendShutdownSignal { .. }
-            | Error::SchemaAlreadyExists { .. }
             | Error::PusherNotFound { .. }
             | Error::PushMessage { .. }
             | Error::MailboxClosed { .. }
@@ -700,56 +789,54 @@ impl ErrorExt for Error {
             | Error::RetryLater { .. }
             | Error::RetryLaterWithSource { .. }
             | Error::StartGrpc { .. }
-            | Error::UpdateTableMetadata { .. }
-            | Error::NoEnoughAvailableDatanode { .. }
+            | Error::NoEnoughAvailableNode { .. }
             | Error::PublishMessage { .. }
             | Error::Join { .. }
-            | Error::WeightArray { .. }
-            | Error::NotSetWeightArray { .. }
-            | Error::Unsupported { .. }
-            | Error::PeerUnavailable { .. } => StatusCode::Internal,
+            | Error::PeerUnavailable { .. }
+            | Error::ExceededDeadline { .. }
+            | Error::ChooseItems { .. }
+            | Error::FlowStateHandler { .. }
+            | Error::BuildWalOptionsAllocator { .. } => StatusCode::Internal,
+
+            Error::Unsupported { .. } => StatusCode::Unsupported,
+
+            Error::SchemaAlreadyExists { .. } => StatusCode::DatabaseAlreadyExists,
+
             Error::TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,
             Error::EmptyKey { .. }
             | Error::MissingRequiredParameter { .. }
             | Error::MissingRequestHeader { .. }
-            | Error::EmptyTableName { .. }
             | Error::InvalidLeaseKey { .. }
             | Error::InvalidStatKey { .. }
             | Error::InvalidInactiveRegionKey { .. }
             | Error::ParseNum { .. }
             | Error::ParseBool { .. }
             | Error::ParseAddr { .. }
-            | Error::ParseDuration { .. }
             | Error::UnsupportedSelectorType { .. }
             | Error::InvalidArguments { .. }
             | Error::InitExportMetricsTask { .. }
-            | Error::InvalidHeartbeatRequest { .. }
             | Error::ProcedureNotFound { .. }
-            | Error::TooManyPartitions { .. } => StatusCode::InvalidArguments,
+            | Error::TooManyPartitions { .. }
+            | Error::TomlFormat { .. }
+            | Error::HandlerNotFound { .. } => StatusCode::InvalidArguments,
             Error::LeaseKeyFromUtf8 { .. }
             | Error::LeaseValueFromUtf8 { .. }
-            | Error::StatKeyFromUtf8 { .. }
-            | Error::StatValueFromUtf8 { .. }
             | Error::InvalidRegionKeyFromUtf8 { .. }
             | Error::TableRouteNotFound { .. }
             | Error::TableInfoNotFound { .. }
             | Error::DatanodeTableNotFound { .. }
-            | Error::CorruptedTableRoute { .. }
-            | Error::MoveValue { .. }
             | Error::InvalidUtf8Value { .. }
             | Error::UnexpectedInstructionReply { .. }
             | Error::Unexpected { .. }
-            | Error::Txn { .. }
-            | Error::TableIdChanged { .. }
             | Error::RegionOpeningRace { .. }
             | Error::RegionRouteNotFound { .. }
             | Error::MigrationAbort { .. }
             | Error::MigrationRunning { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
+            Error::SaveClusterInfo { source, .. }
+            | Error::InvalidClusterInfoFormat { source, .. }
+            | Error::InvalidDatanodeStatFormat { source, .. } => source.status_code(),
             Error::InvalidateTableCache { source, .. } => source.status_code(),
-            Error::RequestDatanode { source, .. } => source.status_code(),
-            Error::InvalidCatalogValue { source, .. }
-            | Error::InvalidFullTableName { source, .. } => source.status_code(),
             Error::SubmitProcedure { source, .. }
             | Error::WaitProcedure { source, .. }
             | Error::QueryProcedure { source, .. } => source.status_code(),
@@ -764,18 +851,14 @@ impl ErrorExt for Error {
             | Error::ListTables { source, .. } => source.status_code(),
             Error::StartTelemetryTask { source, .. } => source.status_code(),
 
-            Error::RegionFailoverCandidatesNotFound { .. } => StatusCode::RuntimeResourcesExhausted,
             Error::NextSequence { source, .. } => source.status_code(),
 
             Error::RegisterProcedureLoader { source, .. } => source.status_code(),
-            Error::OperateRegion { source, .. } => source.status_code(),
             Error::SubmitDdlTask { source, .. } => source.status_code(),
-            Error::TableRouteConversion { source, .. }
-            | Error::ConvertProtoData { source, .. }
+            Error::ConvertProtoData { source, .. }
             | Error::TableMetadataManager { source, .. }
+            | Error::MaintenanceModeManager { source, .. }
             | Error::KvBackend { source, .. }
-            | Error::UpdateTableRoute { source, .. }
-            | Error::GetFullTableInfo { source, .. }
             | Error::UnexpectedLogicalRouteTable { source, .. } => source.status_code(),
 
             Error::InitMetadata { source, .. } | Error::InitDdlManager { source, .. } => {
@@ -783,6 +866,12 @@ impl ErrorExt for Error {
             }
 
             Error::Other { source, .. } => source.status_code(),
+            Error::LookupPeer { source, .. } => source.status_code(),
+            #[cfg(feature = "pg_kvbackend")]
+            Error::CreatePostgresPool { .. }
+            | Error::GetPostgresConnection { .. }
+            | Error::PostgresExecution { .. }
+            | Error::ConnectPostgres { .. } => StatusCode::Internal,
         }
     }
 
@@ -808,9 +897,6 @@ pub(crate) fn match_for_io_error(err_status: &tonic::Status) -> Option<&std::io:
             }
         }
 
-        err = match err.source() {
-            Some(err) => err,
-            None => return None,
-        };
+        err = err.source()?;
     }
 }

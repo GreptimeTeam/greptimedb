@@ -1,8 +1,6 @@
 node_id = 1
 mode = 'distributed'
 require_lease_before_startup = true
-rpc_addr = '127.0.0.1:4100'
-rpc_hostname = '127.0.0.1'
 rpc_runtime_size = 8
 
 [wal]
@@ -24,7 +22,7 @@ type = 'File'
 data_home = '{data_home}'
 
 [meta_client_options]
-metasrv_addrs = ['127.0.0.1:3002']
+metasrv_addrs = ['{metasrv_addr}']
 timeout_millis = 3000
 connect_timeout_millis = 5000
 tcp_nodelay = false
@@ -32,3 +30,6 @@ tcp_nodelay = false
 [procedure]
 max_retry_times = 3
 retry_delay = "500ms"
+
+[heartbeat]
+interval = '1s'

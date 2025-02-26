@@ -23,6 +23,7 @@ use arrow_schema::DECIMAL_DEFAULT_SCALE;
 use common_decimal::decimal128::DECIMAL128_MAX_PRECISION;
 use common_time::interval::IntervalUnit;
 use common_time::timestamp::TimeUnit;
+use enum_dispatch::enum_dispatch;
 use paste::paste;
 use serde::{Deserialize, Serialize};
 
@@ -32,16 +33,16 @@ use crate::types::{
     BinaryType, BooleanType, DateTimeType, DateType, Decimal128Type, DictionaryType,
     DurationMicrosecondType, DurationMillisecondType, DurationNanosecondType, DurationSecondType,
     DurationType, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type,
-    IntervalDayTimeType, IntervalMonthDayNanoType, IntervalType, IntervalYearMonthType, ListType,
-    NullType, StringType, TimeMillisecondType, TimeType, TimestampMicrosecondType,
+    IntervalDayTimeType, IntervalMonthDayNanoType, IntervalType, IntervalYearMonthType, JsonType,
+    ListType, NullType, StringType, TimeMillisecondType, TimeType, TimestampMicrosecondType,
     TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType, TimestampType,
-    UInt16Type, UInt32Type, UInt64Type, UInt8Type,
+    UInt16Type, UInt32Type, UInt64Type, UInt8Type, VectorType,
 };
 use crate::value::Value;
 use crate::vectors::MutableVector;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[enum_dispatch::enum_dispatch(DataType)]
+#[enum_dispatch(DataType)]
 pub enum ConcreteDataType {
     Null(NullType),
     Boolean(BooleanType),
@@ -80,6 +81,12 @@ pub enum ConcreteDataType {
     // Compound types:
     List(ListType),
     Dictionary(DictionaryType),
+
+    // JSON type:
+    Json(JsonType),
+
+    // Vector type:
+    Vector(VectorType),
 }
 
 impl fmt::Display for ConcreteDataType {
@@ -127,6 +134,8 @@ impl fmt::Display for ConcreteDataType {
             ConcreteDataType::Decimal128(v) => write!(f, "{}", v.name()),
             ConcreteDataType::List(v) => write!(f, "{}", v.name()),
             ConcreteDataType::Dictionary(v) => write!(f, "{}", v.name()),
+            ConcreteDataType::Json(v) => write!(f, "{}", v.name()),
+            ConcreteDataType::Vector(v) => write!(f, "{}", v.name()),
         }
     }
 }
@@ -160,6 +169,9 @@ impl ConcreteDataType {
                 | ConcreteDataType::Interval(_)
                 | ConcreteDataType::Duration(_)
                 | ConcreteDataType::Decimal128(_)
+                | ConcreteDataType::Binary(_)
+                | ConcreteDataType::Json(_)
+                | ConcreteDataType::Vector(_)
         )
     }
 
@@ -214,6 +226,14 @@ impl ConcreteDataType {
         matches!(self, ConcreteDataType::Decimal128(_))
     }
 
+    pub fn is_json(&self) -> bool {
+        matches!(self, ConcreteDataType::Json(_))
+    }
+
+    pub fn is_vector(&self) -> bool {
+        matches!(self, ConcreteDataType::Vector(_))
+    }
+
     pub fn numerics() -> Vec<ConcreteDataType> {
         vec![
             ConcreteDataType::int8_datatype(),
@@ -235,6 +255,15 @@ impl ConcreteDataType {
             ConcreteDataType::uint16_datatype(),
             ConcreteDataType::uint32_datatype(),
             ConcreteDataType::uint64_datatype(),
+        ]
+    }
+
+    pub fn timestamps() -> Vec<ConcreteDataType> {
+        vec![
+            ConcreteDataType::timestamp_second_datatype(),
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            ConcreteDataType::timestamp_microsecond_datatype(),
+            ConcreteDataType::timestamp_nanosecond_datatype(),
         ]
     }
 
@@ -266,6 +295,38 @@ impl ConcreteDataType {
         }
     }
 
+    /// Try to get numeric precision, returns `None` if it's not numeric type
+    pub fn numeric_precision(&self) -> Option<u8> {
+        match self {
+            ConcreteDataType::Int8(_) | ConcreteDataType::UInt8(_) => Some(3),
+            ConcreteDataType::Int16(_) | ConcreteDataType::UInt16(_) => Some(5),
+            ConcreteDataType::Int32(_) | ConcreteDataType::UInt32(_) => Some(10),
+            ConcreteDataType::Int64(_) => Some(19),
+            ConcreteDataType::UInt64(_) => Some(20),
+            ConcreteDataType::Float32(_) => Some(12),
+            ConcreteDataType::Float64(_) => Some(22),
+            ConcreteDataType::Decimal128(decimal_type) => Some(decimal_type.precision()),
+            _ => None,
+        }
+    }
+
+    /// Try to get numeric scale, returns `None` if it's float or not numeric type
+    pub fn numeric_scale(&self) -> Option<i8> {
+        match self {
+            ConcreteDataType::Int8(_)
+            | ConcreteDataType::UInt8(_)
+            | ConcreteDataType::Int16(_)
+            | ConcreteDataType::UInt16(_)
+            | ConcreteDataType::Int32(_)
+            | ConcreteDataType::UInt32(_)
+            | ConcreteDataType::Int64(_)
+            | ConcreteDataType::UInt64(_) => Some(0),
+            ConcreteDataType::Float32(_) | ConcreteDataType::Float64(_) => None,
+            ConcreteDataType::Decimal128(decimal_type) => Some(decimal_type.scale()),
+            _ => None,
+        }
+    }
+
     /// Try to cast data type as a [`TimeType`].
     pub fn as_time(&self) -> Option<TimeType> {
         match self {
@@ -282,6 +343,20 @@ impl ConcreteDataType {
         }
     }
 
+    pub fn as_json(&self) -> Option<JsonType> {
+        match self {
+            ConcreteDataType::Json(j) => Some(*j),
+            _ => None,
+        }
+    }
+
+    pub fn as_vector(&self) -> Option<VectorType> {
+        match self {
+            ConcreteDataType::Vector(v) => Some(*v),
+            _ => None,
+        }
+    }
+
     /// Checks if the data type can cast to another data type.
     pub fn can_arrow_type_cast_to(&self, to_type: &ConcreteDataType) -> bool {
         let array = arrow_array::new_empty_array(&self.as_arrow_type());
@@ -293,6 +368,51 @@ impl ConcreteDataType {
         match self {
             ConcreteDataType::Duration(d) => Some(*d),
             _ => None,
+        }
+    }
+
+    /// Return the datatype name in postgres type system
+    pub fn postgres_datatype_name(&self) -> &'static str {
+        match self {
+            &ConcreteDataType::Null(_) => "UNKNOWN",
+            &ConcreteDataType::Boolean(_) => "BOOL",
+            &ConcreteDataType::Int8(_) | &ConcreteDataType::UInt8(_) => "CHAR",
+            &ConcreteDataType::Int16(_) | &ConcreteDataType::UInt16(_) => "INT2",
+            &ConcreteDataType::Int32(_) | &ConcreteDataType::UInt32(_) => "INT4",
+            &ConcreteDataType::Int64(_) | &ConcreteDataType::UInt64(_) => "INT8",
+            &ConcreteDataType::Float32(_) => "FLOAT4",
+            &ConcreteDataType::Float64(_) => "FLOAT8",
+            &ConcreteDataType::Binary(_) | &ConcreteDataType::Vector(_) => "BYTEA",
+            &ConcreteDataType::String(_) => "VARCHAR",
+            &ConcreteDataType::Date(_) => "DATE",
+            &ConcreteDataType::DateTime(_) | &ConcreteDataType::Timestamp(_) => "TIMESTAMP",
+            &ConcreteDataType::Time(_) => "TIME",
+            &ConcreteDataType::Interval(_) => "INTERVAL",
+            &ConcreteDataType::Decimal128(_) => "NUMERIC",
+            &ConcreteDataType::Json(_) => "JSON",
+            ConcreteDataType::List(list) => match list.item_type() {
+                &ConcreteDataType::Null(_) => "UNKNOWN",
+                &ConcreteDataType::Boolean(_) => "_BOOL",
+                &ConcreteDataType::Int8(_) | &ConcreteDataType::UInt8(_) => "_CHAR",
+                &ConcreteDataType::Int16(_) | &ConcreteDataType::UInt16(_) => "_INT2",
+                &ConcreteDataType::Int32(_) | &ConcreteDataType::UInt32(_) => "_INT4",
+                &ConcreteDataType::Int64(_) | &ConcreteDataType::UInt64(_) => "_INT8",
+                &ConcreteDataType::Float32(_) => "_FLOAT4",
+                &ConcreteDataType::Float64(_) => "_FLOAT8",
+                &ConcreteDataType::Binary(_) => "_BYTEA",
+                &ConcreteDataType::String(_) => "_VARCHAR",
+                &ConcreteDataType::Date(_) => "_DATE",
+                &ConcreteDataType::DateTime(_) | &ConcreteDataType::Timestamp(_) => "_TIMESTAMP",
+                &ConcreteDataType::Time(_) => "_TIME",
+                &ConcreteDataType::Interval(_) => "_INTERVAL",
+                &ConcreteDataType::Decimal128(_) => "_NUMERIC",
+                &ConcreteDataType::Json(_) => "_JSON",
+                &ConcreteDataType::Duration(_)
+                | &ConcreteDataType::Dictionary(_)
+                | &ConcreteDataType::Vector(_)
+                | &ConcreteDataType::List(_) => "UNKNOWN",
+            },
+            &ConcreteDataType::Duration(_) | &ConcreteDataType::Dictionary(_) => "UNKNOWN",
         }
     }
 }
@@ -370,7 +490,7 @@ macro_rules! impl_new_concrete_type_functions {
 
 impl_new_concrete_type_functions!(
     Null, Boolean, UInt8, UInt16, UInt32, UInt64, Int8, Int16, Int32, Int64, Float32, Float64,
-    Binary, Date, DateTime, String
+    Binary, Date, DateTime, String, Json
 );
 
 impl ConcreteDataType {
@@ -511,6 +631,14 @@ impl ConcreteDataType {
 
     pub fn decimal128_default_datatype() -> ConcreteDataType {
         Self::decimal128_datatype(DECIMAL128_MAX_PRECISION, DECIMAL_DEFAULT_SCALE)
+    }
+
+    pub fn vector_datatype(dim: u32) -> ConcreteDataType {
+        ConcreteDataType::Vector(VectorType::new(dim))
+    }
+
+    pub fn vector_default_datatype() -> ConcreteDataType {
+        Self::vector_datatype(0)
     }
 }
 
@@ -684,6 +812,7 @@ mod tests {
         assert!(!ConcreteDataType::int32_datatype().is_stringifiable());
         assert!(!ConcreteDataType::float32_datatype().is_stringifiable());
         assert!(ConcreteDataType::string_datatype().is_stringifiable());
+        assert!(ConcreteDataType::binary_datatype().is_stringifiable());
         assert!(ConcreteDataType::date_datatype().is_stringifiable());
         assert!(ConcreteDataType::datetime_datatype().is_stringifiable());
         assert!(ConcreteDataType::timestamp_second_datatype().is_stringifiable());
@@ -704,6 +833,7 @@ mod tests {
         assert!(ConcreteDataType::duration_microsecond_datatype().is_stringifiable());
         assert!(ConcreteDataType::duration_nanosecond_datatype().is_stringifiable());
         assert!(ConcreteDataType::decimal128_datatype(10, 2).is_stringifiable());
+        assert!(ConcreteDataType::vector_default_datatype().is_stringifiable());
     }
 
     #[test]
@@ -855,6 +985,10 @@ mod tests {
             )
             .to_string(),
             "Dictionary<Int32, String>"
+        );
+        assert_eq!(
+            ConcreteDataType::vector_datatype(3).to_string(),
+            "Vector(3)"
         );
     }
 }

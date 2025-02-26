@@ -44,6 +44,12 @@ impl From<Vec<u8>> for Bytes {
     }
 }
 
+impl From<Bytes> for Vec<u8> {
+    fn from(bytes: Bytes) -> Vec<u8> {
+        bytes.0.into()
+    }
+}
+
 impl Deref for Bytes {
     type Target = [u8];
 
@@ -81,16 +87,17 @@ impl PartialEq<Bytes> for [u8] {
 /// Now this buffer is restricted to only hold valid UTF-8 string (only allow constructing `StringBytes`
 /// from String or str). We may support other encoding in the future.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct StringBytes(bytes::Bytes);
+pub struct StringBytes(String);
 
 impl StringBytes {
     /// View this string as UTF-8 string slice.
-    ///
-    /// # Safety
-    /// We only allow constructing `StringBytes` from String/str, so the inner
-    /// buffer must holds valid UTF-8.
     pub fn as_utf8(&self) -> &str {
-        unsafe { std::str::from_utf8_unchecked(&self.0) }
+        &self.0
+    }
+
+    /// Convert this string into owned UTF-8 string.
+    pub fn into_string(self) -> String {
+        self.0
     }
 
     pub fn len(&self) -> usize {
@@ -104,37 +111,37 @@ impl StringBytes {
 
 impl From<String> for StringBytes {
     fn from(string: String) -> StringBytes {
-        StringBytes(bytes::Bytes::from(string))
+        StringBytes(string)
     }
 }
 
 impl From<&str> for StringBytes {
     fn from(string: &str) -> StringBytes {
-        StringBytes(bytes::Bytes::copy_from_slice(string.as_bytes()))
+        StringBytes(string.to_string())
     }
 }
 
 impl PartialEq<String> for StringBytes {
     fn eq(&self, other: &String) -> bool {
-        self.0 == other.as_bytes()
+        &self.0 == other
     }
 }
 
 impl PartialEq<StringBytes> for String {
     fn eq(&self, other: &StringBytes) -> bool {
-        self.as_bytes() == other.0
+        self == &other.0
     }
 }
 
 impl PartialEq<str> for StringBytes {
     fn eq(&self, other: &str) -> bool {
-        self.0 == other.as_bytes()
+        self.0.as_str() == other
     }
 }
 
 impl PartialEq<StringBytes> for str {
     fn eq(&self, other: &StringBytes) -> bool {
-        self.as_bytes() == other.0
+        self == other.0
     }
 }
 

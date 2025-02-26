@@ -129,8 +129,10 @@ impl RegionAliveKeeper {
         let request = RegionRequest::Close(RegionCloseRequest {});
         if let Err(e) = self.region_server.handle_request(region_id, request).await {
             if e.status_code() != StatusCode::RegionNotFound {
-                let _ = self.region_server.set_writable(region_id, false);
-                error!(e; "Failed to close staled region {}, set region to readonly.",region_id);
+                let _ = self
+                    .region_server
+                    .set_region_role(region_id, RegionRole::Follower);
+                error!(e; "Failed to close staled region {}, convert region to follower.", region_id);
             }
         }
     }
@@ -187,7 +189,7 @@ impl RegionAliveKeeper {
             let running = self.started.clone();
 
             // Watches changes
-            common_runtime::spawn_bg(async move {
+            common_runtime::spawn_global(async move {
                 loop {
                     if !running.load(Ordering::Relaxed) {
                         info!("RegionAliveKeeper stopped! Quits the watch loop!");
@@ -286,7 +288,7 @@ impl CountdownTaskHandle {
             region_id,
             rx,
         };
-        let handler = common_runtime::spawn_bg(async move {
+        let handler = common_runtime::spawn_hb(async move {
             countdown_task.run().await;
         });
 
@@ -378,7 +380,7 @@ impl CountdownTask {
                             }
                         },
                         Some(CountdownCommand::Reset((role, deadline))) => {
-                            let _ = self.region_server.set_writable(self.region_id, role.writable());
+                            let _ = self.region_server.set_region_role(self.region_id, role);
                             trace!(
                                 "Reset deadline of region {region_id} to approximately {} seconds later.",
                                 (deadline - Instant::now()).as_secs_f32(),
@@ -399,8 +401,8 @@ impl CountdownTask {
                     }
                 }
                 () = &mut countdown => {
-                    warn!("The region {region_id} lease is expired, set region to readonly.");
-                    let _ = self.region_server.set_writable(self.region_id, false);
+                    warn!("The region {region_id} lease is expired, convert region to follower.");
+                    let _ = self.region_server.set_region_role(self.region_id, RegionRole::Follower);
                     // resets the countdown.
                     let far_future = Instant::now() + Duration::from_secs(86400 * 365 * 30);
                     countdown.as_mut().reset(far_future);
@@ -425,7 +427,8 @@ mod test {
         common_telemetry::init_default_ut_logging();
         let mut region_server = mock_region_server();
         let mut engine_env = TestEnv::with_prefix("region-alive-keeper");
-        let engine = Arc::new(engine_env.create_engine(MitoConfig::default()).await);
+        let engine = engine_env.create_engine(MitoConfig::default()).await;
+        let engine = Arc::new(engine);
         region_server.register_engine(engine.clone());
 
         let alive_keeper = Arc::new(RegionAliveKeeper::new(region_server.clone(), 100));
@@ -436,7 +439,9 @@ mod test {
             .handle_request(region_id, RegionRequest::Create(builder.build()))
             .await
             .unwrap();
-        region_server.set_writable(region_id, true).unwrap();
+        region_server
+            .set_region_role(region_id, RegionRole::Leader)
+            .unwrap();
 
         // Register a region before starting.
         alive_keeper.register_region(region_id).await;

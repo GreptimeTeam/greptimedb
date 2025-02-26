@@ -26,8 +26,7 @@ use store_api::metadata::ColumnMetadata;
 pub fn new_test_object_store(prefix: &str) -> (TempDir, ObjectStore) {
     let dir = create_temp_dir(prefix);
     let store_dir = dir.path().to_string_lossy();
-    let mut builder = Fs::default();
-    let _ = builder.root(&store_dir);
+    let builder = Fs::default().root(&store_dir);
     (dir, ObjectStore::new(builder).unwrap().finish())
 }
 

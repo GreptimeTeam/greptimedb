@@ -18,15 +18,15 @@ use std::collections::{hash_map, HashMap};
 use std::sync::Arc;
 
 use api::v1::OpType;
+use common_telemetry::{debug, error};
 use snafu::ensure;
+use store_api::codec::PrimaryKeyEncoding;
 use store_api::logstore::LogStore;
-use store_api::metadata::RegionMetadata;
 use store_api::storage::RegionId;
 
-use crate::error::{InvalidRequestSnafu, RejectWriteSnafu, Result};
-use crate::metrics::{
-    WRITE_REJECT_TOTAL, WRITE_ROWS_TOTAL, WRITE_STAGE_ELAPSED, WRITE_STALL_TOTAL,
-};
+use crate::error::{InvalidRequestSnafu, RegionLeaderStateSnafu, RejectWriteSnafu, Result};
+use crate::metrics::{WRITE_REJECT_TOTAL, WRITE_ROWS_TOTAL, WRITE_STAGE_ELAPSED};
+use crate::region::{RegionLeaderState, RegionRoleState};
 use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::{SenderWriteRequest, WriteRequest};
 use crate::worker::RegionWorkerLoop;
@@ -35,7 +35,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     /// Takes and handles all write requests.
     pub(crate) async fn handle_write_requests(
         &mut self,
-        mut write_requests: Vec<SenderWriteRequest>,
+        write_requests: &mut Vec<SenderWriteRequest>,
         allow_stall: bool,
     ) {
         if write_requests.is_empty() {
@@ -49,15 +49,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             // The memory pressure is still too high, reject write requests.
             reject_write_requests(write_requests);
             // Also reject all stalled requests.
-            let stalled = std::mem::take(&mut self.stalled_requests);
-            reject_write_requests(stalled.requests);
+            self.reject_stalled_requests();
             return;
         }
 
         if self.write_buffer_manager.should_stall() && allow_stall {
-            WRITE_STALL_TOTAL.inc_by(write_requests.len() as u64);
-
-            self.stalled_requests.append(&mut write_requests);
+            self.stalled_count.add(write_requests.len() as i64);
+            self.stalled_requests.append(write_requests);
             self.listener.on_write_stall();
             return;
         }
@@ -86,8 +84,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     for (region_id, region_ctx) in region_ctxs.iter_mut() {
                         // Safety: the log store implementation ensures that either the `write_to_wal` fails and no
                         // response is returned or the last entry ids for each region do exist.
-                        let last_entry_id =
-                            response.last_entry_ids.get(&region_id.as_u64()).unwrap();
+                        let last_entry_id = response.last_entry_ids.get(region_id).unwrap();
                         region_ctx.set_next_entry_id(last_entry_id + 1);
                     }
                 }
@@ -107,10 +104,35 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             let _timer = WRITE_STAGE_ELAPSED
                 .with_label_values(&["write_memtable"])
                 .start_timer();
-            for mut region_ctx in region_ctxs.into_values() {
-                region_ctx.write_memtable();
+            if region_ctxs.len() == 1 {
+                // fast path for single region.
+                let mut region_ctx = region_ctxs.into_values().next().unwrap();
+                region_ctx.write_memtable().await;
                 put_rows += region_ctx.put_num;
                 delete_rows += region_ctx.delete_num;
+            } else {
+                let region_write_task = region_ctxs
+                    .into_values()
+                    .map(|mut region_ctx| {
+                        // use tokio runtime to schedule tasks.
+                        common_runtime::spawn_global(async move {
+                            region_ctx.write_memtable().await;
+                            (region_ctx.put_num, region_ctx.delete_num)
+                        })
+                    })
+                    .collect::<Vec<_>>();
+
+                for result in futures::future::join_all(region_write_task).await {
+                    match result {
+                        Ok((put, delete)) => {
+                            put_rows += put;
+                            delete_rows += delete;
+                        }
+                        Err(e) => {
+                            error!(e; "unexpected error when joining region write tasks");
+                        }
+                    }
+                }
             }
         }
         WRITE_ROWS_TOTAL
@@ -120,17 +142,53 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             .with_label_values(&["delete"])
             .inc_by(delete_rows as u64);
     }
+
+    /// Handles all stalled write requests.
+    pub(crate) async fn handle_stalled_requests(&mut self) {
+        // Handle stalled requests.
+        let stalled = std::mem::take(&mut self.stalled_requests);
+        self.stalled_count.sub(stalled.requests.len() as i64);
+        // We already stalled these requests, don't stall them again.
+        for (_, (_, mut requests)) in stalled.requests {
+            self.handle_write_requests(&mut requests, false).await;
+        }
+    }
+
+    /// Rejects all stalled requests.
+    pub(crate) fn reject_stalled_requests(&mut self) {
+        let stalled = std::mem::take(&mut self.stalled_requests);
+        self.stalled_count.sub(stalled.requests.len() as i64);
+        for (_, (_, mut requests)) in stalled.requests {
+            reject_write_requests(&mut requests);
+        }
+    }
+
+    /// Rejects a specific region's stalled requests.
+    pub(crate) fn reject_region_stalled_requests(&mut self, region_id: &RegionId) {
+        debug!("Rejects stalled requests for region {}", region_id);
+        let mut requests = self.stalled_requests.remove(region_id);
+        self.stalled_count.sub(requests.len() as i64);
+        reject_write_requests(&mut requests);
+    }
+
+    /// Handles a specific region's stalled requests.
+    pub(crate) async fn handle_region_stalled_requests(&mut self, region_id: &RegionId) {
+        debug!("Handles stalled requests for region {}", region_id);
+        let mut requests = self.stalled_requests.remove(region_id);
+        self.stalled_count.sub(requests.len() as i64);
+        self.handle_write_requests(&mut requests, true).await;
+    }
 }
 
 impl<S> RegionWorkerLoop<S> {
     /// Validates and groups requests by region.
     fn prepare_region_write_ctx(
         &mut self,
-        write_requests: Vec<SenderWriteRequest>,
+        write_requests: &mut Vec<SenderWriteRequest>,
     ) -> HashMap<RegionId, RegionWriteCtx> {
         // Initialize region write context map.
         let mut region_ctxs = HashMap::new();
-        for mut sender_req in write_requests {
+        for mut sender_req in write_requests.drain(..) {
             let region_id = sender_req.request.region_id;
 
             // If region is waiting for alteration, add requests to pending writes.
@@ -146,19 +204,43 @@ impl<S> RegionWorkerLoop<S> {
             if let hash_map::Entry::Vacant(e) = region_ctxs.entry(region_id) {
                 let Some(region) = self
                     .regions
-                    .writable_region_or(region_id, &mut sender_req.sender)
+                    .get_region_or(region_id, &mut sender_req.sender)
                 else {
-                    // No such region or the region is read only.
+                    // No such region.
                     continue;
                 };
+                match region.state() {
+                    RegionRoleState::Leader(RegionLeaderState::Writable) => {
+                        let region_ctx = RegionWriteCtx::new(
+                            region.region_id,
+                            &region.version_control,
+                            region.provider.clone(),
+                        );
 
-                let region_ctx = RegionWriteCtx::new(
-                    region.region_id,
-                    &region.version_control,
-                    region.wal_options.clone(),
-                );
-
-                e.insert(region_ctx);
+                        e.insert(region_ctx);
+                    }
+                    RegionRoleState::Leader(RegionLeaderState::Altering) => {
+                        debug!(
+                            "Region {} is altering, add request to pending writes",
+                            region.region_id
+                        );
+                        self.stalled_count.add(1);
+                        self.stalled_requests.push(sender_req);
+                        continue;
+                    }
+                    state => {
+                        // The region is not writable.
+                        sender_req.sender.send(
+                            RegionLeaderStateSnafu {
+                                region_id,
+                                state,
+                                expect: RegionLeaderState::Writable,
+                            }
+                            .fail(),
+                        );
+                        continue;
+                    }
+                }
             }
 
             // Safety: Now we ensure the region exists.
@@ -174,19 +256,32 @@ impl<S> RegionWorkerLoop<S> {
                 continue;
             }
 
-            // Checks whether request schema is compatible with region schema.
-            if let Err(e) =
-                maybe_fill_missing_columns(&mut sender_req.request, &region_ctx.version().metadata)
+            // Double check the request schema
+            let need_fill_missing_columns =
+                if let Some(ref region_metadata) = sender_req.request.region_metadata {
+                    region_ctx.version().metadata.schema_version != region_metadata.schema_version
+                } else {
+                    true
+                };
+            // Only fill missing columns if primary key is dense encoded.
+            if need_fill_missing_columns
+                && sender_req.request.primary_key_encoding() == PrimaryKeyEncoding::Dense
             {
-                sender_req.sender.send(Err(e));
+                if let Err(e) = sender_req
+                    .request
+                    .maybe_fill_missing_columns(&region_ctx.version().metadata)
+                {
+                    sender_req.sender.send(Err(e));
 
-                continue;
+                    continue;
+                }
             }
 
             // Collect requests by region.
             region_ctx.push_mutation(
                 sender_req.request.op_type as i32,
                 Some(sender_req.request.rows),
+                sender_req.request.hint,
                 sender_req.sender,
             );
         }
@@ -203,10 +298,10 @@ impl<S> RegionWorkerLoop<S> {
 }
 
 /// Send rejected error to all `write_requests`.
-fn reject_write_requests(write_requests: Vec<SenderWriteRequest>) {
+fn reject_write_requests(write_requests: &mut Vec<SenderWriteRequest>) {
     WRITE_REJECT_TOTAL.inc_by(write_requests.len() as u64);
 
-    for req in write_requests {
+    for req in write_requests.drain(..) {
         req.sender.send(
             RejectWriteSnafu {
                 region_id: req.request.region_id,
@@ -216,22 +311,6 @@ fn reject_write_requests(write_requests: Vec<SenderWriteRequest>) {
     }
 }
 
-/// Checks the schema and fill missing columns.
-fn maybe_fill_missing_columns(request: &mut WriteRequest, metadata: &RegionMetadata) -> Result<()> {
-    if let Err(e) = request.check_schema(metadata) {
-        if e.is_fill_default() {
-            // TODO(yingwen): Add metrics for this case.
-            // We need to fill default value. The write request may be a request
-            // sent before changing the schema.
-            request.fill_missing_columns(metadata)?;
-        } else {
-            return Err(e);
-        }
-    }
-
-    Ok(())
-}
-
 /// Rejects delete request under append mode.
 fn check_op_type(append_mode: bool, request: &WriteRequest) -> Result<()> {
     if append_mode {
@@ -239,7 +318,7 @@ fn check_op_type(append_mode: bool, request: &WriteRequest) -> Result<()> {
             request.op_type == OpType::Put,
             InvalidRequestSnafu {
                 region_id: request.region_id,
-                reason: "Only put is allowed under append mode",
+                reason: "DELETE is not allowed under append mode",
             }
         );
     }

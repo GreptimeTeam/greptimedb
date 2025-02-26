@@ -20,10 +20,10 @@ mod subscriber;
 #[cfg(test)]
 mod tests;
 
-pub use publish::{DefaultPublish, Publish, PublishRef};
+pub use publish::{DefaultPublisher, Publisher, PublisherRef};
 pub use subscribe_manager::{
-    AddSubRequest, DefaultSubscribeManager, SubscribeManager, SubscribeManagerRef, SubscribeQuery,
-    UnSubRequest,
+    DefaultSubscribeManager, SubscribeRequest, SubscriptionManager, SubscriptionManagerRef,
+    SubscriptionQuery, UnsubscribeRequest,
 };
 pub use subscriber::{Subscriber, SubscriberRef, Transport};
 

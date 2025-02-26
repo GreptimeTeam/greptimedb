@@ -13,12 +13,15 @@
 // limitations under the License.
 
 use arrow::datatypes::{
-    DataType as ArrowDataType, IntervalDayTimeType as ArrowIntervalDayTimeType,
+    DataType as ArrowDataType, IntervalDayTime as ArrowIntervalDayTime,
+    IntervalDayTimeType as ArrowIntervalDayTimeType,
+    IntervalMonthDayNano as ArrowIntervalMonthDayNano,
     IntervalMonthDayNanoType as ArrowIntervalMonthDayNanoType, IntervalUnit as ArrowIntervalUnit,
     IntervalYearMonthType as ArrowIntervalYearMonthType,
 };
-use common_time::interval::IntervalUnit;
-use common_time::Interval;
+use common_time::interval::{
+    IntervalDayTime, IntervalMonthDayNano, IntervalUnit, IntervalYearMonth,
+};
 use enum_dispatch::enum_dispatch;
 use paste::paste;
 use serde::{Deserialize, Serialize};
@@ -26,7 +29,6 @@ use snafu::OptionExt;
 
 use crate::data_type::ConcreteDataType;
 use crate::error;
-use crate::interval::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
 use crate::prelude::{
     DataType, LogicalTypeId, MutableVector, ScalarVectorBuilder, Value, ValueRef, Vector,
 };
@@ -75,7 +77,7 @@ macro_rules! impl_data_type_for_interval {
                 }
 
                 fn default_value(&self) -> Value {
-                    Value::Interval(Interval::from_i128(0))
+                    Value::[<Interval $unit>]([<Interval $unit>]::default())
                 }
 
                 fn as_arrow_type(&self) -> ArrowDataType {
@@ -124,7 +126,7 @@ macro_rules! impl_data_type_for_interval {
                 fn cast_value_ref(value: ValueRef) -> crate::Result<Option<Self::Wrapper>> {
                     match value {
                         ValueRef::Null => Ok(None),
-                        ValueRef::Interval(t) => Ok(Some([<Interval $unit>](t))),
+                        ValueRef::[<Interval $unit>](t) => Ok(Some(t)),
                         other => error::CastTypeSnafu {
                             msg: format!("Failed to cast value {:?} to {}", other, stringify!([<Interval $unit>])),
                         }
@@ -137,8 +139,8 @@ macro_rules! impl_data_type_for_interval {
 }
 
 impl_data_type_for_interval!(YearMonth, i32);
-impl_data_type_for_interval!(DayTime, i64);
-impl_data_type_for_interval!(MonthDayNano, i128);
+impl_data_type_for_interval!(DayTime, ArrowIntervalDayTime);
+impl_data_type_for_interval!(MonthDayNano, ArrowIntervalMonthDayNano);
 
 #[cfg(test)]
 mod tests {

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::result::Result as StdResult;
+use std::sync::Arc;
 
 use opentelemetry_proto::tonic::collector::metrics::v1::metrics_service_server::MetricsService;
 use opentelemetry_proto::tonic::collector::metrics::v1::{
@@ -22,11 +23,13 @@ use opentelemetry_proto::tonic::collector::trace::v1::trace_service_server::Trac
 use opentelemetry_proto::tonic::collector::trace::v1::{
     ExportTraceServiceRequest, ExportTraceServiceResponse,
 };
-use session::context::QueryContextRef;
-use snafu::OptionExt;
+use session::context::{Channel, QueryContext};
+use snafu::{OptionExt, ResultExt};
 use tonic::{Request, Response, Status};
 
 use crate::error;
+use crate::http::header::constants::GREPTIME_TRACE_TABLE_NAME_HEADER_NAME;
+use crate::otlp::trace::TRACE_TABLE_NAME;
 use crate::query_handler::OpenTelemetryProtocolHandlerRef;
 
 pub struct OtlpService {
@@ -45,14 +48,24 @@ impl TraceService for OtlpService {
         &self,
         request: Request<ExportTraceServiceRequest>,
     ) -> StdResult<Response<ExportTraceServiceResponse>, Status> {
-        let (_headers, extensions, req) = request.into_parts();
+        let (headers, extensions, req) = request.into_parts();
 
-        let ctx = extensions
-            .get::<QueryContextRef>()
+        let table_name = match headers.get(GREPTIME_TRACE_TABLE_NAME_HEADER_NAME) {
+            Some(table_name) => table_name
+                .to_str()
+                .context(error::InvalidTableNameSnafu)?
+                .to_string(),
+            None => TRACE_TABLE_NAME.to_string(),
+        };
+
+        let mut ctx = extensions
+            .get::<QueryContext>()
             .cloned()
             .context(error::MissingQueryContextSnafu)?;
+        ctx.set_channel(Channel::Otlp);
+        let ctx = Arc::new(ctx);
 
-        let _ = self.handler.traces(req, ctx).await?;
+        let _ = self.handler.traces(req, table_name, ctx).await?;
 
         Ok(Response::new(ExportTraceServiceResponse {
             partial_success: None,
@@ -68,10 +81,12 @@ impl MetricsService for OtlpService {
     ) -> StdResult<Response<ExportMetricsServiceResponse>, Status> {
         let (_headers, extensions, req) = request.into_parts();
 
-        let ctx = extensions
-            .get::<QueryContextRef>()
+        let mut ctx = extensions
+            .get::<QueryContext>()
             .cloned()
             .context(error::MissingQueryContextSnafu)?;
+        ctx.set_channel(Channel::Otlp);
+        let ctx = Arc::new(ctx);
 
         let _ = self.handler.metrics(req, ctx).await?;
 

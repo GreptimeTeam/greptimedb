@@ -1,0 +1,27 @@
+name: Follow Up Docs
+on:
+  pull_request_target:
+    types: [opened, edited]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  docbot:
+    runs-on: ubuntu-20.04
+    permissions:
+      pull-requests: write
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-cyborg
+      - name: Maybe Follow Up Docs Issue
+        working-directory: cyborg
+        run: pnpm tsx bin/follow-up-docs-issue.ts
+        env:
+          DOCS_REPO_TOKEN: ${{ secrets.DOCS_REPO_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -11,6 +11,7 @@ workspace = true
 arc-swap = "1.6"
 common-error.workspace = true
 common-macro.workspace = true
+common-telemetry.workspace = true
 datafusion.workspace = true
 datafusion-common.workspace = true
 datatypes.workspace = true
@@ -19,6 +20,7 @@ pin-project.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

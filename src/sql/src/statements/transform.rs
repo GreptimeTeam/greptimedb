@@ -12,21 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod expand_interval;
+pub(crate) mod type_alias;
+
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
+use expand_interval::ExpandIntervalTransformRule;
 use lazy_static::lazy_static;
 use sqlparser::ast::{visit_expressions_mut, Expr};
+use type_alias::TypeAliasTransformRule;
 
 use crate::error::Result;
 use crate::statements::statement::Statement;
-mod type_alias;
-pub use type_alias::get_data_type_by_alias_name;
-use type_alias::TypeAliasTransformRule;
 
 lazy_static! {
     /// [TransformRule] registry
     static ref RULES: Vec<Arc<dyn TransformRule>> = vec![
+        Arc::new(ExpandIntervalTransformRule{}),
         Arc::new(TypeAliasTransformRule{}),
     ];
 }

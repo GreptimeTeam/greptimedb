@@ -16,8 +16,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_plugins::GREPTIME_EXEC_PREFIX;
-use common_query::physical_plan::PhysicalPlan;
 use datafusion::physical_plan::metrics::MetricValue;
+use datafusion::physical_plan::ExecutionPlan;
 use headers::{Header, HeaderName, HeaderValue};
 use hyper::HeaderMap;
 use serde_json::Value;
@@ -39,11 +39,19 @@ pub mod constants {
 
     // LEGACY HEADERS - KEEP IT UNMODIFIED
     pub const GREPTIME_DB_HEADER_FORMAT: &str = "x-greptime-format";
+    pub const GREPTIME_DB_HEADER_TIMEOUT: &str = "x-greptime-timeout";
     pub const GREPTIME_DB_HEADER_EXECUTION_TIME: &str = "x-greptime-execution-time";
     pub const GREPTIME_DB_HEADER_METRICS: &str = "x-greptime-metrics";
     pub const GREPTIME_DB_HEADER_NAME: &str = "x-greptime-db-name";
     pub const GREPTIME_TIMEZONE_HEADER_NAME: &str = "x-greptime-timezone";
     pub const GREPTIME_DB_HEADER_ERROR_CODE: &str = common_error::GREPTIME_DB_HEADER_ERROR_CODE;
+    pub const GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME: &str = "x-greptime-log-pipeline-name";
+    pub const GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME: &str = "x-greptime-log-pipeline-version";
+    pub const GREPTIME_LOG_TABLE_NAME_HEADER_NAME: &str = "x-greptime-log-table-name";
+    pub const GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME: &str = "x-greptime-log-extract-keys";
+    pub const GREPTIME_TRACE_TABLE_NAME_HEADER_NAME: &str = "x-greptime-trace-table-name";
+    /// The header key that contains the pipeline params.
+    pub const GREPTIME_PIPELINE_PARAMS_HEADER: &str = "x-greptime-pipeline-params";
 }
 
 pub static GREPTIME_DB_HEADER_FORMAT: HeaderName =
@@ -61,7 +69,8 @@ pub static GREPTIME_DB_HEADER_NAME: HeaderName =
 pub static GREPTIME_TIMEZONE_HEADER_NAME: HeaderName =
     HeaderName::from_static(constants::GREPTIME_TIMEZONE_HEADER_NAME);
 
-pub static CONTENT_TYPE_PROTOBUF: HeaderValue = HeaderValue::from_static("application/x-protobuf");
+pub static CONTENT_TYPE_PROTOBUF_STR: &str = "application/x-protobuf";
+pub static CONTENT_TYPE_PROTOBUF: HeaderValue = HeaderValue::from_static(CONTENT_TYPE_PROTOBUF_STR);
 pub static CONTENT_ENCODING_SNAPPY: HeaderValue = HeaderValue::from_static("snappy");
 
 pub struct GreptimeDbName(Option<String>);
@@ -126,7 +135,7 @@ fn collect_into_maps(name: &str, value: u64, maps: &mut [&mut HashMap<String, u6
     }
 }
 
-pub fn collect_plan_metrics(plan: Arc<dyn PhysicalPlan>, maps: &mut [&mut HashMap<String, u64>]) {
+pub fn collect_plan_metrics(plan: &Arc<dyn ExecutionPlan>, maps: &mut [&mut HashMap<String, u64>]) {
     if let Some(m) = plan.metrics() {
         m.iter().for_each(|m| match m.value() {
             MetricValue::Count { name, count } => {

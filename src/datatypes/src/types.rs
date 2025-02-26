@@ -21,12 +21,14 @@ mod decimal_type;
 mod dictionary_type;
 mod duration_type;
 mod interval_type;
+mod json_type;
 mod list_type;
 mod null_type;
 mod primitive_type;
 mod string_type;
 mod time_type;
 mod timestamp_type;
+mod vector_type;
 
 pub use binary_type::BinaryType;
 pub use boolean_type::BooleanType;
@@ -42,11 +44,14 @@ pub use duration_type::{
 pub use interval_type::{
     IntervalDayTimeType, IntervalMonthDayNanoType, IntervalType, IntervalYearMonthType,
 };
+pub use json_type::{
+    json_type_value_to_string, parse_string_to_json_type_value, JsonType, JSON_TYPE_NAME,
+};
 pub use list_type::ListType;
 pub use null_type::NullType;
 pub use primitive_type::{
     Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, LogicalPrimitiveType,
-    NativeType, OrdPrimitive, UInt16Type, UInt32Type, UInt64Type, UInt8Type, WrapperType,
+    OrdPrimitive, UInt16Type, UInt32Type, UInt64Type, UInt8Type, WrapperType,
 };
 pub use string_type::StringType;
 pub use time_type::{
@@ -56,3 +61,4 @@ pub use timestamp_type::{
     TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
     TimestampSecondType, TimestampType,
 };
+pub use vector_type::{parse_string_to_vector_type_value, vector_type_value_to_string, VectorType};

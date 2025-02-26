@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use api::v1::region::{
     region_request, DropRequest as PbDropRegionRequest, RegionRequest, RegionRequestHeader,
 };
@@ -19,19 +21,22 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_telemetry::debug;
 use common_telemetry::tracing_context::TracingContext;
+use common_wal::options::WalOptions;
 use futures::future::join_all;
 use snafu::ensure;
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
+use table::table_name::TableName;
 
 use crate::cache_invalidator::Context;
-use crate::ddl::utils::add_peer_context_if_needed;
+use crate::ddl::utils::{add_peer_context_if_needed, convert_region_routes_to_detecting_regions};
 use crate::ddl::DdlContext;
 use crate::error::{self, Result};
 use crate::instruction::CacheIdent;
 use crate::key::table_name::TableNameKey;
+use crate::key::table_route::TableRouteValue;
 use crate::rpc::router::{find_leader_regions, find_leaders, RegionRoute};
-use crate::table_name::TableName;
+use crate::ClusterId;
 
 /// [Control] indicated to the caller whether to go to the next step.
 #[derive(Debug)]
@@ -49,8 +54,14 @@ impl<T> Control<T> {
 
 impl DropTableExecutor {
     /// Returns the [DropTableExecutor].
-    pub fn new(table: TableName, table_id: TableId, drop_if_exists: bool) -> Self {
+    pub fn new(
+        cluster_id: ClusterId,
+        table: TableName,
+        table_id: TableId,
+        drop_if_exists: bool,
+    ) -> Self {
         Self {
+            cluster_id,
             table,
             table_id,
             drop_if_exists,
@@ -63,6 +74,7 @@ impl DropTableExecutor {
 /// - Invalidates the cache on the Frontend nodes.
 /// - Drops the regions on the Datanode nodes.
 pub struct DropTableExecutor {
+    cluster_id: ClusterId,
     table: TableName,
     table_id: TableId,
     drop_if_exists: bool,
@@ -99,14 +111,81 @@ impl DropTableExecutor {
         Ok(Control::Continue(()))
     }
 
-    /// Removes the table metadata.
-    pub async fn on_remove_metadata(
+    /// Deletes the table metadata **logically**.
+    pub async fn on_delete_metadata(
         &self,
         ctx: &DdlContext,
-        region_routes: &[RegionRoute],
+        table_route_value: &TableRouteValue,
+        region_wal_options: &HashMap<RegionNumber, WalOptions>,
     ) -> Result<()> {
         ctx.table_metadata_manager
-            .delete_table_metadata(self.table_id, &self.table, region_routes)
+            .delete_table_metadata(
+                self.table_id,
+                &self.table,
+                table_route_value,
+                region_wal_options,
+            )
+            .await
+    }
+
+    /// Deletes the table metadata tombstone **permanently**.
+    pub async fn on_delete_metadata_tombstone(
+        &self,
+        ctx: &DdlContext,
+        table_route_value: &TableRouteValue,
+        region_wal_options: &HashMap<u32, WalOptions>,
+    ) -> Result<()> {
+        ctx.table_metadata_manager
+            .delete_table_metadata_tombstone(
+                self.table_id,
+                &self.table,
+                table_route_value,
+                region_wal_options,
+            )
+            .await
+    }
+
+    /// Deletes metadata for table **permanently**.
+    pub async fn on_destroy_metadata(
+        &self,
+        ctx: &DdlContext,
+        table_route_value: &TableRouteValue,
+        region_wal_options: &HashMap<u32, WalOptions>,
+    ) -> Result<()> {
+        ctx.table_metadata_manager
+            .destroy_table_metadata(
+                self.table_id,
+                &self.table,
+                table_route_value,
+                region_wal_options,
+            )
+            .await?;
+
+        let detecting_regions = if table_route_value.is_physical() {
+            // Safety: checked.
+            let regions = table_route_value.region_routes().unwrap();
+            convert_region_routes_to_detecting_regions(self.cluster_id, regions)
+        } else {
+            vec![]
+        };
+        ctx.deregister_failure_detectors(detecting_regions).await;
+        Ok(())
+    }
+
+    /// Restores the table metadata.
+    pub async fn on_restore_metadata(
+        &self,
+        ctx: &DdlContext,
+        table_route_value: &TableRouteValue,
+        region_wal_options: &HashMap<u32, WalOptions>,
+    ) -> Result<()> {
+        ctx.table_metadata_manager
+            .restore_table_metadata(
+                self.table_id,
+                &self.table,
+                table_route_value,
+                region_wal_options,
+            )
             .await
     }
 
@@ -120,7 +199,7 @@ impl DropTableExecutor {
         cache_invalidator
             .invalidate(
                 &ctx,
-                vec![
+                &[
                     CacheIdent::TableName(self.table.table_ref().into()),
                     CacheIdent::TableId(self.table_id),
                 ],
@@ -135,13 +214,14 @@ impl DropTableExecutor {
         &self,
         ctx: &DdlContext,
         region_routes: &[RegionRoute],
+        fast_path: bool,
     ) -> Result<()> {
         let leaders = find_leaders(region_routes);
         let mut drop_region_tasks = Vec::with_capacity(leaders.len());
         let table_id = self.table_id;
 
         for datanode in leaders {
-            let requester = ctx.datanode_manager.datanode(&datanode).await;
+            let requester = ctx.node_manager.datanode(&datanode).await;
             let regions = find_leader_regions(region_routes, &datanode);
             let region_ids = regions
                 .iter()
@@ -157,6 +237,7 @@ impl DropTableExecutor {
                     }),
                     body: Some(region_request::Body::Drop(PbDropRegionRequest {
                         region_id: region_id.as_u64(),
+                        fast_path,
                     })),
                 };
                 let datanode = datanode.clone();
@@ -190,6 +271,7 @@ mod tests {
     use api::v1::{ColumnDataType, SemanticType};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use table::metadata::RawTableInfo;
+    use table::table_name::TableName;
 
     use super::*;
     use crate::ddl::test_util::columns::TestColumnDefBuilder;
@@ -197,7 +279,6 @@ mod tests {
         build_raw_table_info_from_expr, TestCreateTableExprBuilder,
     };
     use crate::key::table_route::TableRouteValue;
-    use crate::table_name::TableName;
     use crate::test_util::{new_ddl_context, MockDatanodeManager};
 
     fn test_create_raw_table_info(name: &str) -> RawTableInfo {
@@ -237,9 +318,10 @@ mod tests {
     #[tokio::test]
     async fn test_on_prepare() {
         // Drops if exists
-        let datanode_manager = Arc::new(MockDatanodeManager::new(()));
-        let ctx = new_ddl_context(datanode_manager);
+        let node_manager = Arc::new(MockDatanodeManager::new(()));
+        let ctx = new_ddl_context(node_manager);
         let executor = DropTableExecutor::new(
+            0,
             TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_table"),
             1024,
             true,
@@ -249,6 +331,7 @@ mod tests {
 
         // Drops a non-exists table
         let executor = DropTableExecutor::new(
+            0,
             TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_table"),
             1024,
             false,
@@ -258,6 +341,7 @@ mod tests {
 
         // Drops a exists table
         let executor = DropTableExecutor::new(
+            0,
             TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_table"),
             1024,
             false,

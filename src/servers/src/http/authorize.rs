@@ -12,15 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use ::auth::UserProviderRef;
-use axum::extract::State;
-use axum::http::{self, Request, StatusCode};
+use axum::extract::{Request, State};
+use axum::http::{self, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
+use common_base::secrets::SecretString;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
@@ -28,18 +27,16 @@ use common_telemetry::warn;
 use common_time::timezone::parse_timezone;
 use common_time::Timezone;
 use headers::Header;
-use secrecy::SecretString;
 use session::context::QueryContextBuilder;
 use snafu::{ensure, OptionExt, ResultExt};
 
-use super::header::{GreptimeDbName, GREPTIME_TIMEZONE_HEADER_NAME};
-use super::PUBLIC_APIS;
 use crate::error::{
     self, InvalidAuthHeaderInvisibleASCIISnafu, InvalidAuthHeaderSnafu, InvalidParameterSnafu,
     NotFoundInfluxAuthSnafu, Result, UnsupportedAuthSchemeSnafu, UrlDecodeSnafu,
 };
-use crate::http::error_result::ErrorResponse;
-use crate::http::HTTP_API_PREFIX;
+use crate::http::header::{GreptimeDbName, GREPTIME_TIMEZONE_HEADER_NAME};
+use crate::http::result::error_result::ErrorResponse;
+use crate::http::{AUTHORIZATION_HEADER, HTTP_API_PREFIX, PUBLIC_APIS};
 use crate::influxdb::{is_influxdb_request, is_influxdb_v2_request};
 
 /// AuthState is a holder state for [`UserProviderRef`]
@@ -62,7 +59,7 @@ pub async fn inner_auth<B>(
     // 1. prepare
     let (catalog, schema) = extract_catalog_and_schema(&req);
     // TODO(ruihang): move this out of auth module
-    let timezone = Arc::new(extract_timezone(&req));
+    let timezone = extract_timezone(&req);
     let query_ctx_builder = QueryContextBuilder::default()
         .current_catalog(catalog.clone())
         .current_schema(schema.clone())
@@ -75,7 +72,7 @@ pub async fn inner_auth<B>(
     let user_provider = if let Some(user_provider) = user_provider.filter(|_| need_auth) {
         user_provider
     } else {
-        query_ctx.set_current_user(Some(auth::userinfo_by_name(None)));
+        query_ctx.set_current_user(auth::userinfo_by_name(None));
         let _ = req.extensions_mut().insert(query_ctx);
         return Ok(req);
     };
@@ -84,7 +81,7 @@ pub async fn inner_auth<B>(
     let (username, password) = match extract_username_and_password(&req) {
         Ok((username, password)) => (username, password),
         Err(e) => {
-            warn!("extract username and password failed: {}", e);
+            warn!(e; "extract username and password failed");
             crate::metrics::METRIC_AUTH_FAILURE
                 .with_label_values(&[e.status_code().as_ref()])
                 .inc();
@@ -103,12 +100,12 @@ pub async fn inner_auth<B>(
         .await
     {
         Ok(userinfo) => {
-            query_ctx.set_current_user(Some(userinfo));
+            query_ctx.set_current_user(userinfo);
             let _ = req.extensions_mut().insert(query_ctx);
             Ok(req)
         }
         Err(e) => {
-            warn!("authenticate failed: {}", e);
+            warn!(e; "authenticate failed");
             crate::metrics::METRIC_AUTH_FAILURE
                 .with_label_values(&[e.status_code().as_ref()])
                 .inc();
@@ -117,10 +114,10 @@ pub async fn inner_auth<B>(
     }
 }
 
-pub async fn check_http_auth<B>(
+pub async fn check_http_auth(
     State(auth_state): State<AuthState>,
-    req: Request<B>,
-    next: Next<B>,
+    req: Request,
+    next: Next,
 ) -> Response {
     match inner_auth(auth_state.user_provider, req).await {
         Ok(req) => next.run(req).await,
@@ -248,7 +245,8 @@ type Credential<'a> = &'a str;
 fn auth_header<B>(req: &Request<B>) -> Result<AuthScheme> {
     let auth_header = req
         .headers()
-        .get(http::header::AUTHORIZATION)
+        .get(AUTHORIZATION_HEADER)
+        .or_else(|| req.headers().get(http::header::AUTHORIZATION))
         .context(error::NotFoundAuthHeaderSnafu)?
         .to_str()
         .context(InvalidAuthHeaderInvisibleASCIISnafu)?;
@@ -320,7 +318,7 @@ fn extract_influxdb_user_from_query(query: &str) -> (Option<&str>, Option<&str>)
 mod tests {
     use std::assert_matches::assert_matches;
 
-    use secrecy::ExposeSecret;
+    use common_base::secrets::ExposeSecret;
 
     use super::*;
 

@@ -24,13 +24,6 @@ pub trait ErrorExt: StackError {
         StatusCode::Unknown
     }
 
-    // TODO(ruihang): remove this default implementation
-    /// Get the location of this error, None if the location is unavailable.
-    /// Add `_opt` suffix to avoid confusing with similar method in `std::error::Error`
-    fn location_opt(&self) -> Option<crate::snafu::Location> {
-        None
-    }
-
     /// Returns the error as [Any](std::any::Any) so that it can be
     /// downcast to a specific implementation.
     fn as_any(&self) -> &dyn Any;
@@ -58,6 +51,20 @@ pub trait ErrorExt: StackError {
                     format!("{error}")
                 }
             }
+        }
+    }
+
+    /// Find out root level error for nested error
+    fn root_cause(&self) -> Option<&dyn std::error::Error>
+    where
+        Self: Sized,
+    {
+        let error = self.last();
+        if let Some(external_error) = error.source() {
+            let external_root = external_error.sources().last().unwrap();
+            Some(external_root)
+        } else {
+            None
         }
     }
 }
@@ -112,13 +119,17 @@ impl BoxedError {
             inner: Box::new(err),
         }
     }
+
+    pub fn into_inner(self) -> Box<dyn crate::ext::ErrorExt + Send + Sync> {
+        self.inner
+    }
 }
 
 impl std::fmt::Debug for BoxedError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Use the pretty debug format of inner error for opaque error.
-        let debug_format = crate::format::DebugFormat::new(&*self.inner);
-        debug_format.fmt(f)
+        let mut buf = vec![];
+        self.debug_fmt(0, &mut buf);
+        write!(f, "{}", buf.join("\n"))
     }
 }
 
@@ -137,10 +148,6 @@ impl std::error::Error for BoxedError {
 impl crate::ext::ErrorExt for BoxedError {
     fn status_code(&self) -> crate::status_code::StatusCode {
         self.inner.status_code()
-    }
-
-    fn location_opt(&self) -> Option<crate::snafu::Location> {
-        self.inner.location_opt()
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -194,10 +201,6 @@ impl std::error::Error for PlainError {
 impl crate::ext::ErrorExt for PlainError {
     fn status_code(&self) -> crate::status_code::StatusCode {
         self.status_code
-    }
-
-    fn location_opt(&self) -> Option<crate::snafu::Location> {
-        None
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

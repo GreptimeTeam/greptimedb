@@ -12,15 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
-use chrono::Utc;
-use datafusion::optimizer::simplify_expressions::{ExprSimplifier, SimplifyContext};
-use datafusion_common::config::ConfigOptions;
-use datafusion_common::{DFSchema, Result as DFResult, ScalarValue, TableReference};
-use datafusion_expr::{AggregateUDF, Expr, ScalarUDF, TableSource, WindowUDF};
-use datafusion_physical_expr::execution_props::ExecutionProps;
-use datafusion_sql::planner::{ContextProvider, SqlToRel};
+use datafusion_common::ScalarValue;
 use snafu::{OptionExt, ResultExt};
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::ParserError;
@@ -28,6 +20,7 @@ use sqlparser::tokenizer::Token;
 
 use crate::error::{self, Result};
 use crate::parser::ParserContext;
+use crate::parsers::utils;
 use crate::statements::statement::Statement;
 use crate::statements::tql::{Tql, TqlAnalyze, TqlEval, TqlExplain, TqlParameters};
 
@@ -36,19 +29,17 @@ const EVAL: &str = "EVAL";
 const EVALUATE: &str = "EVALUATE";
 const VERBOSE: &str = "VERBOSE";
 
-use datatypes::arrow::datatypes::DataType;
 use sqlparser::parser::Parser;
 
+use super::error::ConvertToLogicalExpressionSnafu;
 use crate::dialect::GreptimeDbDialect;
-use crate::parsers::error::{
-    ConvertToLogicalExpressionSnafu, EvaluationSnafu, ParserSnafu, SimplificationSnafu, TQLError,
-};
+use crate::parsers::error::{EvaluationSnafu, ParserSnafu, TQLError};
 
 /// TQL extension parser, including:
 /// - `TQL EVAL <query>`
 /// - `TQL EXPLAIN [VERBOSE] <query>`
 /// - `TQL ANALYZE [VERBOSE] <query>`
-impl<'a> ParserContext<'a> {
+impl ParserContext<'_> {
     pub(crate) fn parse_tql(&mut self) -> Result<Statement> {
         let _ = self.parser.next_token();
 
@@ -103,17 +94,19 @@ impl<'a> ParserContext<'a> {
         let (start, end, step, lookback) = match parser.peek_token().token {
             Token::LParen => {
                 let _consume_lparen_token = parser.next_token();
-                let start = Self::parse_string_or_number_or_word(parser, Token::Comma)?;
-                let end = Self::parse_string_or_number_or_word(parser, Token::Comma)?;
-                let delimiter_token = Self::find_next_delimiter_token(parser);
-                let (step, lookback) = if Self::is_comma(&delimiter_token) {
-                    let step = Self::parse_string_or_number_or_word(parser, Token::Comma)?;
-                    let lookback = Self::parse_string_or_number_or_word(parser, Token::RParen).ok();
-                    (step, lookback)
+                let start = Self::parse_string_or_number_or_word(parser, &[Token::Comma])?.0;
+                let end = Self::parse_string_or_number_or_word(parser, &[Token::Comma])?.0;
+
+                let (step, delimiter) =
+                    Self::parse_string_or_number_or_word(parser, &[Token::Comma, Token::RParen])?;
+                let lookback = if delimiter == Token::Comma {
+                    Self::parse_string_or_number_or_word(parser, &[Token::RParen])
+                        .ok()
+                        .map(|t| t.0)
                 } else {
-                    let step = Self::parse_string_or_number_or_word(parser, Token::RParen)?;
-                    (step, None)
+                    None
                 };
+
                 (start, end, step, lookback)
             }
             _ => ("0".to_string(), "0".to_string(), "5m".to_string(), None),
@@ -122,22 +115,8 @@ impl<'a> ParserContext<'a> {
         Ok(TqlParameters::new(start, end, step, lookback, query))
     }
 
-    fn find_next_delimiter_token(parser: &mut Parser) -> Token {
-        let mut n: usize = 0;
-        while !(Self::is_comma(&parser.peek_nth_token(n).token)
-            || Self::is_rparen(&parser.peek_nth_token(n).token))
-        {
-            n += 1;
-        }
-        parser.peek_nth_token(n).token
-    }
-
-    pub fn is_delimiter_token(token: &Token, delimiter_token: &Token) -> bool {
-        match token {
-            Token::Comma => Self::is_comma(delimiter_token),
-            Token::RParen => Self::is_rparen(delimiter_token),
-            _ => false,
-        }
+    pub fn comma_or_rparen(token: &Token) -> bool {
+        Self::is_comma(token) || Self::is_rparen(token)
     }
 
     #[inline]
@@ -154,15 +133,21 @@ impl<'a> ParserContext<'a> {
         self.peek_token_as_string().eq_ignore_ascii_case(VERBOSE)
     }
 
+    /// Try to parse and consume a string, number or word token.
+    /// Return `Ok` if it's parsed and one of the given delimiter tokens is consumed.
+    /// The string and matched delimiter will be returned as a tuple.
     fn parse_string_or_number_or_word(
         parser: &mut Parser,
-        delimiter_token: Token,
-    ) -> std::result::Result<String, TQLError> {
+        delimiter_tokens: &[Token],
+    ) -> std::result::Result<(String, Token), TQLError> {
         let mut tokens = vec![];
 
-        while !Self::is_delimiter_token(&parser.peek_token().token, &delimiter_token) {
-            let token = parser.next_token();
-            tokens.push(token.token);
+        while !delimiter_tokens.contains(&parser.peek_token().token) {
+            let token = parser.next_token().token;
+            if matches!(token, Token::EOF) {
+                break;
+            }
+            tokens.push(token);
         }
         let result = match tokens.len() {
             0 => Err(ParserError::ParserError(
@@ -185,15 +170,39 @@ impl<'a> ParserContext<'a> {
             }
             _ => Self::parse_tokens(tokens),
         };
-        parser.expect_token(&delimiter_token).context(ParserSnafu)?;
-        result
+        for token in delimiter_tokens {
+            if parser.consume_token(token) {
+                return result.map(|v| (v, token.clone()));
+            }
+        }
+        Err(ParserError::ParserError(format!(
+            "Delimiters not match {delimiter_tokens:?}"
+        )))
+        .context(ParserSnafu)
     }
 
     fn parse_tokens(tokens: Vec<Token>) -> std::result::Result<String, TQLError> {
-        Self::parse_to_expr(tokens)
-            .and_then(Self::parse_to_logical_expr)
-            .and_then(Self::simplify_expr)
-            .and_then(Self::evaluate_expr)
+        let parser_expr = Self::parse_to_expr(tokens)?;
+        let lit = utils::parser_expr_to_scalar_value(parser_expr)
+            .map_err(Box::new)
+            .context(ConvertToLogicalExpressionSnafu)?;
+
+        let second = match lit {
+            ScalarValue::TimestampNanosecond(ts_nanos, _)
+            | ScalarValue::DurationNanosecond(ts_nanos) => ts_nanos.map(|v| v / 1_000_000_000),
+            ScalarValue::TimestampMicrosecond(ts_micros, _)
+            | ScalarValue::DurationMicrosecond(ts_micros) => ts_micros.map(|v| v / 1_000_000),
+            ScalarValue::TimestampMillisecond(ts_millis, _)
+            | ScalarValue::DurationMillisecond(ts_millis) => ts_millis.map(|v| v / 1_000),
+            ScalarValue::TimestampSecond(ts_secs, _) | ScalarValue::DurationSecond(ts_secs) => {
+                ts_secs
+            }
+            _ => None,
+        };
+
+        second.map(|ts| ts.to_string()).context(EvaluationSnafu {
+            msg: format!("Failed to extract a timestamp value {lit:?}"),
+        })
     }
 
     fn parse_to_expr(tokens: Vec<Token>) -> std::result::Result<sqlparser::ast::Expr, TQLError> {
@@ -201,46 +210,6 @@ impl<'a> ParserContext<'a> {
             .with_tokens(tokens)
             .parse_expr()
             .context(ParserSnafu)
-    }
-
-    fn parse_to_logical_expr(expr: sqlparser::ast::Expr) -> std::result::Result<Expr, TQLError> {
-        let empty_df_schema = DFSchema::empty();
-        SqlToRel::new(&StubContextProvider {})
-            .sql_to_expr(expr.into(), &empty_df_schema, &mut Default::default())
-            .context(ConvertToLogicalExpressionSnafu)
-    }
-
-    fn simplify_expr(logical_expr: Expr) -> std::result::Result<Expr, TQLError> {
-        let empty_df_schema = DFSchema::empty();
-        let execution_props = ExecutionProps::new().with_query_execution_start_time(Utc::now());
-        let info = SimplifyContext::new(&execution_props).with_schema(Arc::new(empty_df_schema));
-        ExprSimplifier::new(info)
-            .simplify(logical_expr)
-            .context(SimplificationSnafu)
-    }
-
-    fn evaluate_expr(simplified_expr: Expr) -> std::result::Result<String, TQLError> {
-        match simplified_expr {
-            Expr::Literal(ScalarValue::TimestampNanosecond(ts_nanos, _))
-            | Expr::Literal(ScalarValue::DurationNanosecond(ts_nanos)) => {
-                ts_nanos.map(|v| v / 1_000_000_000)
-            }
-            Expr::Literal(ScalarValue::TimestampMicrosecond(ts_micros, _))
-            | Expr::Literal(ScalarValue::DurationMicrosecond(ts_micros)) => {
-                ts_micros.map(|v| v / 1_000_000)
-            }
-            Expr::Literal(ScalarValue::TimestampMillisecond(ts_millis, _))
-            | Expr::Literal(ScalarValue::DurationMillisecond(ts_millis)) => {
-                ts_millis.map(|v| v / 1_000)
-            }
-            Expr::Literal(ScalarValue::TimestampSecond(ts_secs, _))
-            | Expr::Literal(ScalarValue::DurationSecond(ts_secs)) => ts_secs,
-            _ => None,
-        }
-        .map(|ts| ts.to_string())
-        .context(EvaluationSnafu {
-            msg: format!("Failed to extract a timestamp value {simplified_expr:?}"),
-        })
     }
 
     fn parse_tql_query(parser: &mut Parser, sql: &str) -> std::result::Result<String, ParserError> {
@@ -259,35 +228,6 @@ impl<'a> ParserContext<'a> {
         }
         // remove the last ';' or tailing space if exists
         Ok(query.trim().trim_end_matches(';').to_string())
-    }
-}
-
-#[derive(Default)]
-struct StubContextProvider {}
-
-impl ContextProvider for StubContextProvider {
-    fn get_table_provider(&self, _name: TableReference) -> DFResult<Arc<dyn TableSource>> {
-        unimplemented!()
-    }
-
-    fn get_function_meta(&self, _name: &str) -> Option<Arc<ScalarUDF>> {
-        None
-    }
-
-    fn get_aggregate_meta(&self, _name: &str) -> Option<Arc<AggregateUDF>> {
-        unimplemented!()
-    }
-
-    fn get_window_meta(&self, _name: &str) -> Option<Arc<WindowUDF>> {
-        unimplemented!()
-    }
-
-    fn get_variable_type(&self, _variable_names: &[String]) -> Option<DataType> {
-        unimplemented!()
-    }
-
-    fn options(&self) -> &ConfigOptions {
-        unimplemented!()
     }
 }
 
@@ -333,6 +273,11 @@ mod tests {
             }
             _ => unreachable!(),
         }
+
+        let sql = "TQL EVAL (now(), now()-'5m', '30s') http_requests_total";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        assert!(result.is_err());
     }
 
     #[test]
@@ -711,5 +656,11 @@ mod tests {
         let result =
             ParserContext::create_with_dialect(sql, dialect, parse_options.clone()).unwrap_err();
         assert!(result.output_msg().contains("empty TQL query"));
+
+        // invalid token
+        let sql = "tql eval (0, 0, '1s) t;;';";
+        let result =
+            ParserContext::create_with_dialect(sql, dialect, parse_options.clone()).unwrap_err();
+        assert!(result.output_msg().contains("Delimiters not match"));
     }
 }

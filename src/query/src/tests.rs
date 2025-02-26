@@ -25,7 +25,6 @@ mod argmax_test;
 mod argmin_test;
 mod mean_test;
 mod my_sum_udaf_example;
-mod percentile_test;
 mod polyval_test;
 mod query_engine_test;
 mod scipy_stats_norm_cdf_test;
@@ -34,13 +33,15 @@ mod time_range_filter_test;
 
 mod function;
 mod pow;
+mod vec_product_test;
+mod vec_sum_test;
 
 async fn exec_selection(engine: QueryEngineRef, sql: &str) -> Vec<RecordBatch> {
     let query_ctx = QueryContext::arc();
     let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx).unwrap();
     let plan = engine
         .planner()
-        .plan(stmt, query_ctx.clone())
+        .plan(&stmt, query_ctx.clone())
         .await
         .unwrap();
     let OutputData::Stream(stream) = engine.execute(plan, query_ctx).await.unwrap().data else {
@@ -52,5 +53,5 @@ async fn exec_selection(engine: QueryEngineRef, sql: &str) -> Vec<RecordBatch> {
 pub fn new_query_engine_with_table(table: TableRef) -> QueryEngineRef {
     let catalog_manager = MemoryCatalogManager::new_with_table(table);
 
-    QueryEngineFactory::new(catalog_manager, None, None, None, false).query_engine()
+    QueryEngineFactory::new(catalog_manager, None, None, None, None, false).query_engine()
 }

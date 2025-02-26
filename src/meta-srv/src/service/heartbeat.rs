@@ -23,18 +23,21 @@ use api::v1::meta::{
 use common_telemetry::{debug, error, info, warn};
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
+use snafu::OptionExt;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::Sender;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Streaming};
 
 use crate::error;
 use crate::error::Result;
-use crate::handler::Pusher;
-use crate::metasrv::{Context, MetaSrv};
+use crate::handler::{HeartbeatHandlerGroup, Pusher, PusherId};
+use crate::metasrv::{Context, Metasrv};
+use crate::metrics::METRIC_META_HEARTBEAT_RECV;
 use crate::service::{GrpcResult, GrpcStream};
 
 #[async_trait::async_trait]
-impl heartbeat_server::Heartbeat for MetaSrv {
+impl heartbeat_server::Heartbeat for Metasrv {
     type HeartbeatStream = GrpcStream<HeartbeatResponse>;
 
     async fn heartbeat(
@@ -43,43 +46,44 @@ impl heartbeat_server::Heartbeat for MetaSrv {
     ) -> GrpcResult<Self::HeartbeatStream> {
         let mut in_stream = req.into_inner();
         let (tx, rx) = mpsc::channel(128);
-        let handler_group = self.handler_group().clone();
+        let handler_group = self.handler_group().context(error::UnexpectedSnafu {
+            violated: "expected heartbeat handlers",
+        })?;
+
         let ctx = self.new_ctx();
-        let _handle = common_runtime::spawn_bg(async move {
-            let mut pusher_key = None;
+        let _handle = common_runtime::spawn_global(async move {
+            let mut pusher_id = None;
             while let Some(msg) = in_stream.next().await {
                 let mut is_not_leader = false;
                 match msg {
                     Ok(req) => {
-                        let header = match req.header.as_ref() {
-                            Some(header) => header,
-                            None => {
-                                let err = error::MissingRequestHeaderSnafu {}.build();
-                                error!("Exit on malformed request: MissingRequestHeader");
-                                let _ = tx.send(Err(err.into())).await;
-                                break;
-                            }
-                        };
-
                         debug!("Receiving heartbeat request: {:?}", req);
 
-                        if pusher_key.is_none() {
-                            let node_id = get_node_id(header);
-                            let role = header.role() as i32;
-                            let key = format!("{}-{}", role, node_id);
-                            let pusher = Pusher::new(tx.clone(), header);
-                            handler_group.register(&key, pusher).await;
-                            pusher_key = Some(key);
-                        }
+                        let Some(header) = req.header.as_ref() else {
+                            error!("Exit on malformed request: MissingRequestHeader");
+                            let _ = tx
+                                .send(Err(error::MissingRequestHeaderSnafu {}.build().into()))
+                                .await;
+                            break;
+                        };
 
+                        if pusher_id.is_none() {
+                            pusher_id = register_pusher(&handler_group, header, tx.clone()).await;
+                        }
+                        if let Some(k) = &pusher_id {
+                            METRIC_META_HEARTBEAT_RECV.with_label_values(&[&k.to_string()]);
+                        } else {
+                            METRIC_META_HEARTBEAT_RECV.with_label_values(&["none"]);
+                        }
                         let res = handler_group
                             .handle(req, ctx.clone())
                             .await
                             .map_err(|e| e.into());
 
-                        is_not_leader = res.as_ref().map_or(false, |r| r.is_not_leader());
+                        is_not_leader = res.as_ref().is_ok_and(|r| r.is_not_leader());
 
                         debug!("Sending heartbeat response: {:?}", res);
+
                         if tx.send(res).await.is_err() {
                             info!("ReceiverStream was dropped; shutting down");
                             break;
@@ -107,13 +111,10 @@ impl heartbeat_server::Heartbeat for MetaSrv {
                 }
             }
 
-            info!(
-                "Heartbeat stream closed: {:?}",
-                pusher_key.as_ref().unwrap_or(&"unknown".to_string())
-            );
+            info!("Heartbeat stream closed: {pusher_id:?}");
 
-            if let Some(key) = pusher_key {
-                let _ = handler_group.deregister(&key).await;
+            if let Some(pusher_id) = pusher_id {
+                let _ = handler_group.deregister_push(pusher_id).await;
             }
         });
 
@@ -164,8 +165,21 @@ fn get_node_id(header: &RequestHeader) -> u64 {
 
     match header.role() {
         Role::Frontend => next_id(),
-        Role::Datanode => header.member_id,
+        Role::Datanode | Role::Flownode => header.member_id,
     }
+}
+
+async fn register_pusher(
+    handler_group: &HeartbeatHandlerGroup,
+    header: &RequestHeader,
+    sender: Sender<std::result::Result<HeartbeatResponse, tonic::Status>>,
+) -> Option<PusherId> {
+    let role = header.role();
+    let id = get_node_id(header);
+    let pusher_id = PusherId::new(role, id);
+    let pusher = Pusher::new(sender, header);
+    handler_group.register_pusher(pusher_id, pusher).await;
+    Some(pusher_id)
 }
 
 #[cfg(test)]
@@ -179,14 +193,19 @@ mod tests {
     use tonic::IntoRequest;
 
     use super::get_node_id;
-    use crate::metasrv::builder::MetaSrvBuilder;
+    use crate::metasrv::builder::MetasrvBuilder;
+    use crate::metasrv::MetasrvOptions;
 
     #[tokio::test]
     async fn test_ask_leader() {
         let kv_backend = Arc::new(MemoryKvBackend::new());
 
-        let meta_srv = MetaSrvBuilder::new()
+        let metasrv = MetasrvBuilder::new()
             .kv_backend(kv_backend)
+            .options(MetasrvOptions {
+                server_addr: "127.0.0.1:3002".to_string(),
+                ..Default::default()
+            })
             .build()
             .await
             .unwrap();
@@ -195,10 +214,10 @@ mod tests {
             header: Some(RequestHeader::new((1, 1), Role::Datanode, W3cTrace::new())),
         };
 
-        let res = meta_srv.ask_leader(req.into_request()).await.unwrap();
+        let res = metasrv.ask_leader(req.into_request()).await.unwrap();
         let res = res.into_inner();
         assert_eq!(1, res.header.unwrap().cluster_id);
-        assert_eq!(meta_srv.options().bind_addr, res.leader.unwrap().addr);
+        assert_eq!(metasrv.options().bind_addr, res.leader.unwrap().addr);
     }
 
     #[test]

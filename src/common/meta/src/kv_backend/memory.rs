@@ -13,24 +13,23 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::marker::PhantomData;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 use serde::Serializer;
 
-use super::ResettableKvBackend;
+use super::{KvBackendRef, ResettableKvBackend};
 use crate::kv_backend::txn::{Txn, TxnOp, TxnOpResponse, TxnRequest, TxnResponse};
 use crate::kv_backend::{KvBackend, TxnService};
 use crate::metrics::METRIC_META_TXN_REQUEST;
 use crate::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
-    BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
-    DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
+    BatchPutResponse, DeleteRangeRequest, DeleteRangeResponse, PutRequest, PutResponse,
+    RangeRequest, RangeResponse,
 };
 use crate::rpc::KeyValue;
 
@@ -69,6 +68,25 @@ impl<T> MemoryKvBackend<T> {
     pub fn clear(&self) {
         let mut kvs = self.kvs.write().unwrap();
         kvs.clear();
+    }
+
+    #[cfg(test)]
+    /// Returns true if the `kvs` is empty.
+    pub fn is_empty(&self) -> bool {
+        self.kvs.read().unwrap().is_empty()
+    }
+
+    #[cfg(test)]
+    /// Returns the `kvs`.
+    pub fn dump(&self) -> BTreeMap<Vec<u8>, Vec<u8>> {
+        let kvs = self.kvs.read().unwrap();
+        kvs.clone()
+    }
+
+    #[cfg(test)]
+    /// Returns the length of `kvs`
+    pub fn len(&self) -> usize {
+        self.kvs.read().unwrap().len()
     }
 }
 
@@ -171,41 +189,6 @@ impl<T: ErrorExt + Send + Sync + 'static> KvBackend for MemoryKvBackend<T> {
         Ok(BatchGetResponse { kvs })
     }
 
-    async fn compare_and_put(
-        &self,
-        req: CompareAndPutRequest,
-    ) -> Result<CompareAndPutResponse, Self::Error> {
-        let CompareAndPutRequest { key, expect, value } = req;
-
-        let mut kvs = self.kvs.write().unwrap();
-
-        let existed = kvs.entry(key);
-        let (success, prev_kv) = match existed {
-            Entry::Vacant(e) => {
-                let expected = expect.is_empty();
-                if expected {
-                    let _ = e.insert(value);
-                }
-                (expected, None)
-            }
-            Entry::Occupied(mut existed) => {
-                let expected = existed.get() == &expect;
-                let prev_kv = if expected {
-                    let _ = existed.insert(value);
-                    None
-                } else {
-                    Some(KeyValue {
-                        key: existed.key().clone(),
-                        value: existed.get().clone(),
-                    })
-                };
-                (expected, prev_kv)
-            }
-        };
-
-        Ok(CompareAndPutResponse { success, prev_kv })
-    }
-
     async fn delete_range(
         &self,
         req: DeleteRangeRequest,
@@ -281,24 +264,19 @@ impl<T: ErrorExt + Send + Sync> TxnService for MemoryKvBackend<T> {
 
         let mut kvs = self.kvs.write().unwrap();
 
-        let succeeded = compare
-            .iter()
-            .all(|x| x.compare_with_value(kvs.get(&x.key)));
+        let succeeded = compare.iter().all(|x| x.compare_value(kvs.get(&x.key)));
 
         let do_txn = |txn_op| match txn_op {
             TxnOp::Put(key, value) => {
-                kvs.insert(key.clone(), value);
+                kvs.insert(key, value);
                 TxnOpResponse::ResponsePut(PutResponse { prev_kv: None })
             }
 
             TxnOp::Get(key) => {
-                let value = kvs.get(&key);
+                let value = kvs.get(&key).cloned();
                 let kvs = value
+                    .map(|value| KeyValue { key, value })
                     .into_iter()
-                    .map(|value| KeyValue {
-                        key: key.clone(),
-                        value: value.clone(),
-                    })
                     .collect();
                 TxnOpResponse::ResponseGet(RangeResponse { kvs, more: false })
             }
@@ -333,6 +311,10 @@ impl<T: ErrorExt + Send + Sync + 'static> ResettableKvBackend for MemoryKvBacken
     fn reset(&self) {
         self.clear();
     }
+
+    fn as_kv_backend_ref(self: Arc<Self>) -> KvBackendRef<T> {
+        self
+    }
 }
 
 #[cfg(test)]
@@ -343,7 +325,9 @@ mod tests {
     use crate::error::Error;
     use crate::kv_backend::test::{
         prepare_kv, test_kv_batch_delete, test_kv_batch_get, test_kv_compare_and_put,
-        test_kv_delete_range, test_kv_put, test_kv_range, test_kv_range_2,
+        test_kv_delete_range, test_kv_put, test_kv_range, test_kv_range_2, test_txn_compare_equal,
+        test_txn_compare_greater, test_txn_compare_less, test_txn_compare_not_equal,
+        test_txn_one_compare_op, text_txn_multi_compare_op,
     };
 
     async fn mock_mem_store_with_data() -> MemoryKvBackend<Error> {
@@ -357,28 +341,28 @@ mod tests {
     async fn test_put() {
         let kv_backend = mock_mem_store_with_data().await;
 
-        test_kv_put(kv_backend).await;
+        test_kv_put(&kv_backend).await;
     }
 
     #[tokio::test]
     async fn test_range() {
         let kv_backend = mock_mem_store_with_data().await;
 
-        test_kv_range(kv_backend).await;
+        test_kv_range(&kv_backend).await;
     }
 
     #[tokio::test]
     async fn test_range_2() {
         let kv = MemoryKvBackend::<Error>::new();
 
-        test_kv_range_2(kv).await;
+        test_kv_range_2(&kv).await;
     }
 
     #[tokio::test]
     async fn test_batch_get() {
         let kv_backend = mock_mem_store_with_data().await;
 
-        test_kv_batch_get(kv_backend).await;
+        test_kv_batch_get(&kv_backend).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -392,13 +376,24 @@ mod tests {
     async fn test_delete_range() {
         let kv_backend = mock_mem_store_with_data().await;
 
-        test_kv_delete_range(kv_backend).await;
+        test_kv_delete_range(&kv_backend).await;
     }
 
     #[tokio::test]
     async fn test_batch_delete() {
         let kv_backend = mock_mem_store_with_data().await;
 
-        test_kv_batch_delete(kv_backend).await;
+        test_kv_batch_delete(&kv_backend).await;
+    }
+
+    #[tokio::test]
+    async fn test_memory_txn() {
+        let kv_backend = MemoryKvBackend::<Error>::new();
+        test_txn_one_compare_op(&kv_backend).await;
+        text_txn_multi_compare_op(&kv_backend).await;
+        test_txn_compare_equal(&kv_backend).await;
+        test_txn_compare_greater(&kv_backend).await;
+        test_txn_compare_less(&kv_backend).await;
+        test_txn_compare_not_equal(&kv_backend).await;
     }
 }

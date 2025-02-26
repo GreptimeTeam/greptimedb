@@ -14,14 +14,17 @@
 
 use std::sync::Arc;
 
-use tokio::sync::RwLock;
-
 use crate::error::Result;
+use crate::flow_name::FlowName;
 use crate::instruction::CacheIdent;
+use crate::key::flow::flow_info::FlowInfoKey;
+use crate::key::flow::flow_name::FlowNameKey;
+use crate::key::schema_name::SchemaNameKey;
 use crate::key::table_info::TableInfoKey;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteKey;
-use crate::key::TableMetaKey;
+use crate::key::view_info::ViewInfoKey;
+use crate::key::MetadataKey;
 
 /// KvBackend cache invalidator
 #[async_trait::async_trait]
@@ -46,7 +49,7 @@ pub struct Context {
 
 #[async_trait::async_trait]
 pub trait CacheInvalidator: Send + Sync {
-    async fn invalidate(&self, ctx: &Context, caches: Vec<CacheIdent>) -> Result<()>;
+    async fn invalidate(&self, ctx: &Context, caches: &[CacheIdent]) -> Result<()>;
 }
 
 pub type CacheInvalidatorRef = Arc<dyn CacheInvalidator>;
@@ -55,35 +58,7 @@ pub struct DummyCacheInvalidator;
 
 #[async_trait::async_trait]
 impl CacheInvalidator for DummyCacheInvalidator {
-    async fn invalidate(&self, _ctx: &Context, _caches: Vec<CacheIdent>) -> Result<()> {
-        Ok(())
-    }
-}
-
-#[derive(Default)]
-pub struct MultiCacheInvalidator {
-    invalidators: RwLock<Vec<CacheInvalidatorRef>>,
-}
-
-impl MultiCacheInvalidator {
-    pub fn with_invalidators(invalidators: Vec<CacheInvalidatorRef>) -> Self {
-        Self {
-            invalidators: RwLock::new(invalidators),
-        }
-    }
-
-    pub async fn add_invalidator(&self, invalidator: CacheInvalidatorRef) {
-        self.invalidators.write().await.push(invalidator);
-    }
-}
-
-#[async_trait::async_trait]
-impl CacheInvalidator for MultiCacheInvalidator {
-    async fn invalidate(&self, ctx: &Context, caches: Vec<CacheIdent>) -> Result<()> {
-        let invalidators = self.invalidators.read().await;
-        for invalidator in invalidators.iter() {
-            invalidator.invalidate(ctx, caches.clone()).await?;
-        }
+    async fn invalidate(&self, _ctx: &Context, _caches: &[CacheIdent]) -> Result<()> {
         Ok(())
     }
 }
@@ -93,19 +68,40 @@ impl<T> CacheInvalidator for T
 where
     T: KvCacheInvalidator,
 {
-    async fn invalidate(&self, _ctx: &Context, caches: Vec<CacheIdent>) -> Result<()> {
+    async fn invalidate(&self, _ctx: &Context, caches: &[CacheIdent]) -> Result<()> {
         for cache in caches {
             match cache {
                 CacheIdent::TableId(table_id) => {
-                    let key = TableInfoKey::new(table_id);
-                    self.invalidate_key(&key.as_raw_key()).await;
+                    let key = TableInfoKey::new(*table_id);
+                    self.invalidate_key(&key.to_bytes()).await;
 
-                    let key = &TableRouteKey { table_id };
-                    self.invalidate_key(&key.as_raw_key()).await;
+                    let key = TableRouteKey::new(*table_id);
+                    self.invalidate_key(&key.to_bytes()).await;
+
+                    let key = ViewInfoKey::new(*table_id);
+                    self.invalidate_key(&key.to_bytes()).await;
                 }
                 CacheIdent::TableName(table_name) => {
-                    let key: TableNameKey = (&table_name).into();
-                    self.invalidate_key(&key.as_raw_key()).await
+                    let key: TableNameKey = table_name.into();
+                    self.invalidate_key(&key.to_bytes()).await
+                }
+                CacheIdent::SchemaName(schema_name) => {
+                    let key: SchemaNameKey = schema_name.into();
+                    self.invalidate_key(&key.to_bytes()).await;
+                }
+                CacheIdent::CreateFlow(_) | CacheIdent::DropFlow(_) => {
+                    // Do nothing
+                }
+                CacheIdent::FlowName(FlowName {
+                    catalog_name,
+                    flow_name,
+                }) => {
+                    let key = FlowNameKey::new(catalog_name, flow_name);
+                    self.invalidate_key(&key.to_bytes()).await
+                }
+                CacheIdent::FlowId(flow_id) => {
+                    let key = FlowInfoKey::new(*flow_id);
+                    self.invalidate_key(&key.to_bytes()).await;
                 }
             }
         }

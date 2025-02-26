@@ -1,0 +1,66 @@
+--- test information_schema.views ----
+create schema test_information_schema_views;
+
+Affected Rows: 1
+
+use test_information_schema_views;
+
+Affected Rows: 0
+
+USE test_information_schema_views;
+
+Affected Rows: 0
+
+create table t1 (ts timestamp time index, val1  int);
+
+Affected Rows: 0
+
+create table t2 (ts timestamp time index, val2 int primary key);
+
+Affected Rows: 0
+
+create view myview as select * from t1 where val1 > 5;
+
+Affected Rows: 0
+
+create view myview2 as select * from t2 inner join t1 on t1.val1 = t2.val2;
+
+Affected Rows: 0
+
+select table_catalog, table_schema, table_name, view_definition from information_schema.views order by table_name;
+
++---------------+-------------------------------+------------+----------------------------------------------------------------------+
+| table_catalog | table_schema                  | table_name | view_definition                                                      |
++---------------+-------------------------------+------------+----------------------------------------------------------------------+
+| greptime      | test_information_schema_views | myview     | CREATE VIEW myview AS SELECT * FROM t1 WHERE val1 > 5                |
+| greptime      | test_information_schema_views | myview2    | CREATE VIEW myview2 AS SELECT * FROM t2 JOIN t1 ON t1.val1 = t2.val2 |
++---------------+-------------------------------+------------+----------------------------------------------------------------------+
+
+drop view myview;
+
+Affected Rows: 0
+
+select table_catalog, table_schema, table_name, view_definition from information_schema.views order by table_name;
+
++---------------+-------------------------------+------------+----------------------------------------------------------------------+
+| table_catalog | table_schema                  | table_name | view_definition                                                      |
++---------------+-------------------------------+------------+----------------------------------------------------------------------+
+| greptime      | test_information_schema_views | myview2    | CREATE VIEW myview2 AS SELECT * FROM t2 JOIN t1 ON t1.val1 = t2.val2 |
++---------------+-------------------------------+------------+----------------------------------------------------------------------+
+
+drop view myview2;
+
+Affected Rows: 0
+
+drop table t1, t2;
+
+Affected Rows: 0
+
+USE public;
+
+Affected Rows: 0
+
+drop schema test_information_schema_views;
+
+Affected Rows: 0
+

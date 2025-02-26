@@ -26,9 +26,9 @@ use api::v1::meta::{
     ResponseHeader as PbResponseHeader,
 };
 
-use crate::error;
 use crate::error::Result;
-use crate::rpc::{util, KeyValue};
+use crate::rpc::KeyValue;
+use crate::{error, util};
 
 pub fn to_range(key: Vec<u8>, range_end: Vec<u8>) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
     match (&key[..], &range_end[..]) {
@@ -97,7 +97,6 @@ impl Display for RangeRequest {
 }
 
 impl RangeRequest {
-    #[inline]
     pub fn new() -> Self {
         Self {
             key: vec![],
@@ -114,7 +113,6 @@ impl RangeRequest {
 
     /// key is the first key for the range, If range_end is not given, the
     /// request only looks up key.
-    #[inline]
     pub fn with_key(mut self, key: impl Into<Vec<u8>>) -> Self {
         self.key = key.into();
         self
@@ -129,7 +127,6 @@ impl RangeRequest {
     /// then the range request gets all keys prefixed with key.
     /// If both key and range_end are '\0', then the range request returns all
     /// keys.
-    #[inline]
     pub fn with_range(mut self, key: impl Into<Vec<u8>>, range_end: impl Into<Vec<u8>>) -> Self {
         self.key = key.into();
         self.range_end = range_end.into();
@@ -138,7 +135,6 @@ impl RangeRequest {
 
     /// Gets all keys prefixed with key.
     /// range_end is the key plus one (e.g., "aa"+1 == "ab", "a\xff"+1 == "b"),
-    #[inline]
     pub fn with_prefix(mut self, key: impl Into<Vec<u8>>) -> Self {
         self.key = key.into();
         self.range_end = util::get_prefix_end_key(&self.key);
@@ -147,14 +143,12 @@ impl RangeRequest {
 
     /// limit is a limit on the number of keys returned for the request. When
     /// limit is set to 0, it is treated as no limit.
-    #[inline]
     pub fn with_limit(mut self, limit: i64) -> Self {
         self.limit = limit;
         self
     }
 
     /// keys_only when set returns only the keys and not the values.
-    #[inline]
     pub fn with_keys_only(mut self) -> Self {
         self.keys_only = true;
         self
@@ -204,7 +198,6 @@ impl RangeResponse {
         }
     }
 
-    #[inline]
     pub fn take_kvs(&mut self) -> Vec<KeyValue> {
         self.kvs.drain(..).collect()
     }
@@ -244,7 +237,6 @@ impl From<PbPutRequest> for PutRequest {
 }
 
 impl PutRequest {
-    #[inline]
     pub fn new() -> Self {
         Self {
             key: vec![],
@@ -254,7 +246,6 @@ impl PutRequest {
     }
 
     /// key is the key, in bytes, to put into the key-value store.
-    #[inline]
     pub fn with_key(mut self, key: impl Into<Vec<u8>>) -> Self {
         self.key = key.into();
         self
@@ -262,7 +253,6 @@ impl PutRequest {
 
     /// value is the value, in bytes, to associate with the key in the
     /// key-value store.
-    #[inline]
     pub fn with_value(mut self, value: impl Into<Vec<u8>>) -> Self {
         self.value = value.into();
         self
@@ -270,14 +260,13 @@ impl PutRequest {
 
     /// If prev_kv is set, gets the previous key-value pair before changing it.
     /// The previous key-value pair will be returned in the put response.
-    #[inline]
     pub fn with_prev_kv(mut self) -> Self {
         self.prev_kv = true;
         self
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct PutResponse {
     pub prev_kv: Option<KeyValue>,
 }
@@ -330,18 +319,15 @@ impl Default for BatchGetRequest {
 }
 
 impl BatchGetRequest {
-    #[inline]
     pub fn new() -> Self {
         Self { keys: vec![] }
     }
 
-    #[inline]
     pub fn with_keys(mut self, keys: Vec<Vec<u8>>) -> Self {
         self.keys = keys;
         self
     }
 
-    #[inline]
     pub fn add_key(mut self, key: impl Into<Vec<u8>>) -> Self {
         self.keys.push(key.into());
         self
@@ -416,7 +402,6 @@ impl From<PbBatchPutRequest> for BatchPutRequest {
 }
 
 impl BatchPutRequest {
-    #[inline]
     pub fn new() -> Self {
         Self {
             kvs: vec![],
@@ -424,7 +409,6 @@ impl BatchPutRequest {
         }
     }
 
-    #[inline]
     pub fn add_kv(mut self, key: impl Into<Vec<u8>>, value: impl Into<Vec<u8>>) -> Self {
         self.kvs.push(KeyValue {
             key: key.into(),
@@ -435,14 +419,13 @@ impl BatchPutRequest {
 
     /// If prev_kv is set, gets the previous key-value pair before changing it.
     /// The previous key-value pair will be returned in the put response.
-    #[inline]
     pub fn with_prev_kv(mut self) -> Self {
         self.prev_kv = true;
         self
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct BatchPutResponse {
     pub prev_kvs: Vec<KeyValue>,
 }
@@ -467,7 +450,6 @@ impl BatchPutResponse {
         }
     }
 
-    #[inline]
     pub fn take_prev_kvs(&mut self) -> Vec<KeyValue> {
         self.prev_kvs.drain(..).collect()
     }
@@ -501,7 +483,6 @@ impl From<PbBatchDeleteRequest> for BatchDeleteRequest {
 }
 
 impl BatchDeleteRequest {
-    #[inline]
     pub fn new() -> Self {
         Self {
             keys: vec![],
@@ -509,7 +490,12 @@ impl BatchDeleteRequest {
         }
     }
 
-    #[inline]
+    /// Sets `keys`.
+    pub fn with_keys(mut self, keys: Vec<Vec<u8>>) -> Self {
+        self.keys = keys;
+        self
+    }
+
     pub fn add_key(mut self, key: impl Into<Vec<u8>>) -> Self {
         self.keys.push(key.into());
         self
@@ -517,14 +503,13 @@ impl BatchDeleteRequest {
 
     /// If prev_kv is set, gets the previous key-value pair before deleting it.
     /// The previous key-value pair will be returned in the batch delete response.
-    #[inline]
     pub fn with_prev_kv(mut self) -> Self {
         self.prev_kv = true;
         self
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct BatchDeleteResponse {
     pub prev_kvs: Vec<KeyValue>,
 }
@@ -582,7 +567,6 @@ impl From<PbCompareAndPutRequest> for CompareAndPutRequest {
 }
 
 impl CompareAndPutRequest {
-    #[inline]
     pub fn new() -> Self {
         Self {
             key: vec![],
@@ -592,14 +576,12 @@ impl CompareAndPutRequest {
     }
 
     /// key is the key, in bytes, to put into the key-value store.
-    #[inline]
     pub fn with_key(mut self, key: impl Into<Vec<u8>>) -> Self {
         self.key = key.into();
         self
     }
 
     /// expect is the previous value, in bytes
-    #[inline]
     pub fn with_expect(mut self, expect: impl Into<Vec<u8>>) -> Self {
         self.expect = expect.into();
         self
@@ -607,7 +589,6 @@ impl CompareAndPutRequest {
 
     /// value is the value, in bytes, to associate with the key in the
     /// key-value store.
-    #[inline]
     pub fn with_value(mut self, value: impl Into<Vec<u8>>) -> Self {
         self.value = value.into();
         self
@@ -649,12 +630,10 @@ impl CompareAndPutResponse {
         }
     }
 
-    #[inline]
     pub fn is_success(&self) -> bool {
         self.success
     }
 
-    #[inline]
     pub fn take_prev_kv(&mut self) -> Option<KeyValue> {
         self.prev_kv.take()
     }
@@ -703,7 +682,6 @@ impl From<PbDeleteRangeRequest> for DeleteRangeRequest {
 }
 
 impl DeleteRangeRequest {
-    #[inline]
     pub fn new() -> Self {
         Self {
             key: vec![],
@@ -719,7 +697,6 @@ impl DeleteRangeRequest {
 
     /// key is the first key to delete in the range. If range_end is not given,
     /// the range is defined to contain only the key argument.
-    #[inline]
     pub fn with_key(mut self, key: impl Into<Vec<u8>>) -> Self {
         self.key = key.into();
         self
@@ -735,7 +712,6 @@ impl DeleteRangeRequest {
     /// the keys with the prefix (the given key).
     /// If range_end is '\0', the range is all keys greater than or equal to the
     /// key argument.
-    #[inline]
     pub fn with_range(mut self, key: impl Into<Vec<u8>>, range_end: impl Into<Vec<u8>>) -> Self {
         self.key = key.into();
         self.range_end = range_end.into();
@@ -744,7 +720,6 @@ impl DeleteRangeRequest {
 
     /// Deletes all keys prefixed with key.
     /// range_end is one bit larger than the given key.
-    #[inline]
     pub fn with_prefix(mut self, key: impl Into<Vec<u8>>) -> Self {
         self.key = key.into();
         self.range_end = util::get_prefix_end_key(&self.key);
@@ -753,7 +728,6 @@ impl DeleteRangeRequest {
 
     /// If prev_kv is set, gets the previous key-value pairs before deleting it.
     /// The previous key-value pairs will be returned in the delete response.
-    #[inline]
     pub fn with_prev_kv(mut self) -> Self {
         self.prev_kv = true;
         self
@@ -780,6 +754,19 @@ impl TryFrom<PbDeleteRangeResponse> for DeleteRangeResponse {
 }
 
 impl DeleteRangeResponse {
+    /// Creates a new [`DeleteRangeResponse`] with the given deleted count.
+    pub fn new(deleted: i64) -> Self {
+        Self {
+            deleted,
+            prev_kvs: vec![],
+        }
+    }
+
+    /// Creates a new [`DeleteRangeResponse`] with the given deleted count and previous key-value pairs.
+    pub fn with_prev_kvs(&mut self, prev_kvs: Vec<KeyValue>) {
+        self.prev_kvs = prev_kvs;
+    }
+
     pub fn to_proto_resp(self, header: PbResponseHeader) -> PbDeleteRangeResponse {
         PbDeleteRangeResponse {
             header: Some(header),
@@ -788,12 +775,10 @@ impl DeleteRangeResponse {
         }
     }
 
-    #[inline]
     pub fn deleted(&self) -> i64 {
         self.deleted
     }
 
-    #[inline]
     pub fn take_prev_kvs(&mut self) -> Vec<KeyValue> {
         self.prev_kvs.drain(..).collect()
     }

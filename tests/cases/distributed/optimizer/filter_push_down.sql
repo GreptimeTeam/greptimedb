@@ -44,19 +44,18 @@ SELECT * FROM (SELECT DISTINCT i1.i AS a, i2.i AS b FROM integers i1, integers i
 
 SELECT i FROM (SELECT * FROM integers i1 UNION SELECT * FROM integers i2) a WHERE i=3;
 
--- TODO(LFC): Somehow the following SQL does not order by column 1 under new DataFusion occasionally. Should further investigate it. Comment it out temporarily.
--- expected:
---  +---+---+--------------+
---  | a | b | ROW_NUMBER() |
---  +---+---+--------------+
---  | 1 | 1 | 1            |
---  | 2 | 2 | 5            |
---  | 3 | 3 | 9            |
---  +---+---+--------------+
--- SELECT * FROM (SELECT i1.i AS a, i2.i AS b, row_number() OVER (ORDER BY i1.i, i2.i) FROM integers i1, integers i2 WHERE i1.i IS NOT NULL AND i2.i IS NOT NULL) a1 WHERE a=b ORDER BY 1;
+SELECT * FROM (SELECT i1.i AS a, i2.i AS b, row_number() OVER (ORDER BY i1.i, i2.i) FROM integers i1, integers i2 WHERE i1.i IS NOT NULL AND i2.i IS NOT NULL) a1 WHERE a=b ORDER BY 1;
 
-SELECT * FROM (SELECT 0=1 AS cond FROM integers i1, integers i2) a1 WHERE cond ORDER BY 1;
+-- The "0=1" will be evaluated as a constant expression that is always false, and will be optimized away in the query
+-- engine. In the final plan, there's no filter node. We explain it to ensure that.
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT * FROM (SELECT 0=1 AS cond FROM integers i1, integers i2) a1 WHERE cond ORDER BY 1;
 
+-- This should be a bug in DataFusion, it use UserDefinedLogicalNode::prevent_predicate_push_down_columns()
+-- to prevent pushdown, but this filter is Literal(Boolean(false)). It doesn't reference any column.
 SELECT * FROM (SELECT 0=1 AS cond FROM integers i1, integers i2 GROUP BY 1) a1 WHERE cond ORDER BY 1;
 
 DROP TABLE integers;

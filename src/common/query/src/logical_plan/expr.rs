@@ -16,26 +16,35 @@ use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datafusion_common::{Column, ScalarValue};
-pub use datafusion_expr::expr::Expr as DfExpr;
+use datafusion_expr::expr::Expr;
 use datafusion_expr::{and, binary_expr, Operator};
+use datatypes::data_type::DataType;
+use datatypes::schema::ColumnSchema;
+use datatypes::value::Value;
 
-/// Central struct of query API.
-/// Represent logical expressions such as `A + 1`, or `CAST(c1 AS int)`.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub struct Expr {
-    df_expr: DfExpr,
-}
+/// Builds a filter for a timestamp column with the same type as the timestamp column.
+/// Returns [None] if time range is [None] or full time range.
+pub fn build_same_type_ts_filter(
+    ts_schema: &ColumnSchema,
+    time_range: Option<TimestampRange>,
+) -> Option<Expr> {
+    let time_range = time_range?;
+    let start = time_range
+        .start()
+        .and_then(|start| ts_schema.data_type.try_cast(Value::Timestamp(start)));
+    let end = time_range
+        .end()
+        .and_then(|end| ts_schema.data_type.try_cast(Value::Timestamp(end)));
 
-impl Expr {
-    pub fn df_expr(&self) -> &DfExpr {
-        &self.df_expr
-    }
-}
-
-impl From<DfExpr> for Expr {
-    fn from(df_expr: DfExpr) -> Self {
-        Self { df_expr }
-    }
+    let time_range = match (start, end) {
+        (Some(Value::Timestamp(start)), Some(Value::Timestamp(end))) => {
+            TimestampRange::new(start, end)
+        }
+        (Some(Value::Timestamp(start)), None) => Some(TimestampRange::from_start(start)),
+        (None, Some(Value::Timestamp(end))) => Some(TimestampRange::until_end(end, false)),
+        _ => return None,
+    };
+    build_filter_from_timestamp(&ts_schema.name, time_range.as_ref())
 }
 
 /// Builds an `Expr` that filters timestamp column from given timestamp range.
@@ -44,15 +53,13 @@ pub fn build_filter_from_timestamp(
     ts_col_name: &str,
     time_range: Option<&TimestampRange>,
 ) -> Option<Expr> {
-    let Some(time_range) = time_range else {
-        return None;
-    };
-    let ts_col_expr = DfExpr::Column(Column {
+    let time_range = time_range?;
+    let ts_col_expr = Expr::Column(Column {
         relation: None,
         name: ts_col_name.to_string(),
     });
 
-    let df_expr = match (time_range.start(), time_range.end()) {
+    match (time_range.start(), time_range.end()) {
         (None, None) => None,
         (Some(start), None) => Some(binary_expr(
             ts_col_expr,
@@ -72,20 +79,18 @@ pub fn build_filter_from_timestamp(
             ),
             binary_expr(ts_col_expr, Operator::Lt, timestamp_to_literal(end)),
         )),
-    };
-
-    df_expr.map(Expr::from)
+    }
 }
 
 /// Converts a [Timestamp] to datafusion literal value.
-fn timestamp_to_literal(timestamp: &Timestamp) -> DfExpr {
+fn timestamp_to_literal(timestamp: &Timestamp) -> Expr {
     let scalar_value = match timestamp.unit() {
         TimeUnit::Second => ScalarValue::TimestampSecond(Some(timestamp.value()), None),
         TimeUnit::Millisecond => ScalarValue::TimestampMillisecond(Some(timestamp.value()), None),
         TimeUnit::Microsecond => ScalarValue::TimestampMicrosecond(Some(timestamp.value()), None),
         TimeUnit::Nanosecond => ScalarValue::TimestampNanosecond(Some(timestamp.value()), None),
     };
-    DfExpr::Literal(scalar_value)
+    Expr::Literal(scalar_value)
 }
 
 #[cfg(test)]
@@ -93,11 +98,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_from_df_expr() {
-        let df_expr = DfExpr::Wildcard;
+    fn test_timestamp_to_literal() {
+        let timestamp = Timestamp::new(123456789, TimeUnit::Second);
+        let expected = Expr::Literal(ScalarValue::TimestampSecond(Some(123456789), None));
+        assert_eq!(timestamp_to_literal(&timestamp), expected);
 
-        let expr: Expr = df_expr.into();
+        let timestamp = Timestamp::new(123456789, TimeUnit::Millisecond);
+        let expected = Expr::Literal(ScalarValue::TimestampMillisecond(Some(123456789), None));
+        assert_eq!(timestamp_to_literal(&timestamp), expected);
 
-        assert_eq!(DfExpr::Wildcard, *expr.df_expr());
+        let timestamp = Timestamp::new(123456789, TimeUnit::Microsecond);
+        let expected = Expr::Literal(ScalarValue::TimestampMicrosecond(Some(123456789), None));
+        assert_eq!(timestamp_to_literal(&timestamp), expected);
+
+        let timestamp = Timestamp::new(123456789, TimeUnit::Nanosecond);
+        let expected = Expr::Literal(ScalarValue::TimestampNanosecond(Some(123456789), None));
+        assert_eq!(timestamp_to_literal(&timestamp), expected);
     }
 }

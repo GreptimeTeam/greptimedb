@@ -51,8 +51,8 @@ inputs:
     required: true
   upload-to-s3:
     description: Upload to S3
-    required: false
-    default: 'true'
+    required: true
+    default: 'false'
   artifacts-dir:
     description: Directory to store artifacts
     required: false
@@ -77,13 +77,21 @@ runs:
       with:
         path: ${{ inputs.artifacts-dir }}
 
+    - name: Install s5cmd
+      shell: bash
+      run: |
+        wget https://github.com/peak/s5cmd/releases/download/v2.3.0/s5cmd_2.3.0_Linux-64bit.tar.gz
+        tar -xzf s5cmd_2.3.0_Linux-64bit.tar.gz
+        sudo mv s5cmd /usr/local/bin/
+        sudo chmod +x /usr/local/bin/s5cmd
+
     - name: Release artifacts to cn region
       uses: nick-invision/retry@v2
       if: ${{ inputs.upload-to-s3 == 'true' }}
       env:
         AWS_ACCESS_KEY_ID: ${{ inputs.aws-cn-access-key-id }}
         AWS_SECRET_ACCESS_KEY: ${{ inputs.aws-cn-secret-access-key }}
-        AWS_DEFAULT_REGION: ${{ inputs.aws-cn-region }}
+        AWS_REGION: ${{ inputs.aws-cn-region }}
         UPDATE_VERSION_INFO: ${{ inputs.update-version-info }}
       with:
         max_attempts: ${{ inputs.upload-max-retry-times }}
@@ -123,10 +131,10 @@ runs:
         DST_REGISTRY_PASSWORD: ${{ inputs.dst-image-registry-password }}
       run: |
         ./.github/scripts/copy-image.sh \
-         ${{ inputs.src-image-registry }}/${{ inputs.src-image-namespace }}/${{ inputs.src-image-name }}-centos:latest \
+         ${{ inputs.src-image-registry }}/${{ inputs.src-image-namespace }}/${{ inputs.src-image-name }}-centos:${{ inputs.version }} \
          ${{ inputs.dst-image-registry }}/${{ inputs.dst-image-namespace }}
 
-    - name: Push greptimedb-centos image from DockerHub to ACR
+    - name: Push latest greptimedb-centos image from DockerHub to ACR
       shell: bash
       if: ${{ inputs.dev-mode == 'false' && inputs.push-latest-tag == 'true' }}
       env:

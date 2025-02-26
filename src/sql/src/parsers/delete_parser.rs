@@ -21,7 +21,7 @@ use crate::statements::delete::Delete;
 use crate::statements::statement::Statement;
 
 /// DELETE statement parser implementation
-impl<'a> ParserContext<'a> {
+impl ParserContext<'_> {
     pub(crate) fn parse_delete(&mut self) -> Result<Statement> {
         let _ = self.parser.next_token();
         let spstatement = self.parser.parse_delete().context(error::SyntaxSnafu)?;
@@ -31,7 +31,6 @@ impl<'a> ParserContext<'a> {
                 Ok(Statement::Delete(Box::new(Delete { inner: spstatement })))
             }
             unexp => error::UnsupportedSnafu {
-                sql: self.sql.to_string(),
                 keyword: unexp.to_string(),
             }
             .fail(),

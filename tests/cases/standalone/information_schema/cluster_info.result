@@ -1,0 +1,63 @@
+USE INFORMATION_SCHEMA;
+
+Affected Rows: 0
+
+DESC TABLE CLUSTER_INFO;
+
++-------------+----------------------+-----+------+---------+---------------+
+| Column      | Type                 | Key | Null | Default | Semantic Type |
++-------------+----------------------+-----+------+---------+---------------+
+| peer_id     | Int64                |     | NO   |         | FIELD         |
+| peer_type   | String               |     | NO   |         | FIELD         |
+| peer_addr   | String               |     | YES  |         | FIELD         |
+| version     | String               |     | NO   |         | FIELD         |
+| git_commit  | String               |     | NO   |         | FIELD         |
+| start_time  | TimestampMillisecond |     | YES  |         | FIELD         |
+| uptime      | String               |     | YES  |         | FIELD         |
+| active_time | String               |     | YES  |         | FIELD         |
++-------------+----------------------+-----+------+---------+---------------+
+
+-- SQLNESS REPLACE version node_version
+-- SQLNESS REPLACE (\d+\.\d+\.\d+) Version
+-- SQLNESS REPLACE (\s[a-z0-9]{7,8}\s) Hash
+-- SQLNESS REPLACE (\s[\-0-9T:\.]{15,}) Start_time
+-- SQLNESS REPLACE ((\d+(s|ms|m)\s)+) Duration
+-- SQLNESS REPLACE [\s\-]+
+SELECT * FROM CLUSTER_INFO;
+
++++++++++|peer_id|peer_type|peer_addr|node_version|git_commit|start_time|uptime|active_time|+++++++++|0|STANDALONE||Version|Hash|Start_time|Duration||+++++++++
+
+-- SQLNESS REPLACE version node_version
+-- SQLNESS REPLACE (\d+\.\d+\.\d+) Version
+-- SQLNESS REPLACE (\s[a-z0-9]{7,8}\s) Hash
+-- SQLNESS REPLACE (\s[\-0-9T:\.]{15,}) Start_time
+-- SQLNESS REPLACE ((\d+(s|ms|m)\s)+) Duration
+-- SQLNESS REPLACE [\s\-]+
+SELECT * FROM CLUSTER_INFO WHERE PEER_TYPE = 'STANDALONE';
+
++++++++++|peer_id|peer_type|peer_addr|node_version|git_commit|start_time|uptime|active_time|+++++++++|0|STANDALONE||Version|Hash|Start_time|Duration||+++++++++
+
+SELECT * FROM CLUSTER_INFO WHERE PEER_TYPE != 'STANDALONE';
+
+++
+++
+
+-- SQLNESS REPLACE version node_version
+-- SQLNESS REPLACE (\d+\.\d+\.\d+) Version
+-- SQLNESS REPLACE (\s[a-z0-9]{7,8}\s) Hash
+-- SQLNESS REPLACE (\s[\-0-9T:\.]{15,}) Start_time
+-- SQLNESS REPLACE ((\d+(s|ms|m)\s)+) Duration
+-- SQLNESS REPLACE [\s\-]+
+SELECT * FROM CLUSTER_INFO WHERE PEER_ID = 0;
+
+++++
+
+SELECT * FROM CLUSTER_INFO WHERE PEER_ID > 0;
+
+++
+++
+
+USE PUBLIC;
+
+Affected Rows: 0
+

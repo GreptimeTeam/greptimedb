@@ -17,10 +17,10 @@ use std::io;
 use asynchronous_codec::{BytesMut, Decoder, Encoder};
 use bytes::{Buf, BufMut};
 use common_base::BitVec;
-use snafu::{location, Location};
+use snafu::ResultExt;
 
-use crate::inverted_index::error::{Error, Result};
-use crate::inverted_index::Bytes;
+use crate::inverted_index::error::{CommonIoSnafu, Error, Result};
+use crate::Bytes;
 
 const U64_LENGTH: usize = std::mem::size_of::<u64>();
 
@@ -105,10 +105,9 @@ impl Decoder for IntermediateItemDecoderV1 {
 /// Required for [`Encoder`] and [`Decoder`] implementations.
 impl From<io::Error> for Error {
     fn from(error: io::Error) -> Self {
-        Error::CommonIoError {
-            error,
-            location: location!(),
-        }
+        Err::<(), io::Error>(error)
+            .context(CommonIoSnafu)
+            .unwrap_err()
     }
 }
 

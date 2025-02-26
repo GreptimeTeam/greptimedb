@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_error::ext::ErrorExt;
 use common_meta::instruction::{InstructionReply, UpgradeRegion, UpgradeRegionReply};
 use common_telemetry::{info, warn};
 use futures_util::future::BoxFuture;
@@ -27,11 +26,12 @@ impl HandlerContext {
         UpgradeRegion {
             region_id,
             last_entry_id,
-            wait_for_replay_timeout,
+            replay_timeout,
+            location_id,
         }: UpgradeRegion,
     ) -> BoxFuture<'static, InstructionReply> {
         Box::pin(async move {
-            let Some(writable) = self.region_server.is_writable(region_id) else {
+            let Some(writable) = self.region_server.is_region_leader(region_id) else {
                 return InstructionReply::UpgradeRegion(UpgradeRegionReply {
                     ready: false,
                     exists: false,
@@ -63,6 +63,7 @@ impl HandlerContext {
                                 RegionRequest::Catchup(RegionCatchupRequest {
                                     set_writable: true,
                                     entry_id: last_entry_id,
+                                    location_id,
                                 }),
                             )
                             .await?;
@@ -77,7 +78,7 @@ impl HandlerContext {
             }
 
             // Returns immediately
-            let Some(wait_for_replay_timeout) = wait_for_replay_timeout else {
+            let Some(replay_timeout) = replay_timeout else {
                 return InstructionReply::UpgradeRegion(UpgradeRegionReply {
                     ready: false,
                     exists: true,
@@ -87,10 +88,7 @@ impl HandlerContext {
 
             // We don't care that it returns a newly registered or running task.
             let mut watcher = register_result.into_watcher();
-            let result = self
-                .catchup_tasks
-                .wait(&mut watcher, wait_for_replay_timeout)
-                .await;
+            let result = self.catchup_tasks.wait(&mut watcher, replay_timeout).await;
 
             match result {
                 WaitResult::Timeout => InstructionReply::UpgradeRegion(UpgradeRegionReply {
@@ -107,7 +105,7 @@ impl HandlerContext {
                     InstructionReply::UpgradeRegion(UpgradeRegionReply {
                         ready: false,
                         exists: true,
-                        error: Some(err.output_msg()),
+                        error: Some(format!("{err:?}")),
                     })
                 }
             }
@@ -121,36 +119,34 @@ mod tests {
     use std::time::Duration;
 
     use common_meta::instruction::{InstructionReply, UpgradeRegion};
+    use mito2::engine::MITO_ENGINE_NAME;
     use store_api::region_engine::RegionRole;
     use store_api::storage::RegionId;
     use tokio::time::Instant;
 
     use crate::error;
     use crate::heartbeat::handler::HandlerContext;
-    use crate::heartbeat::task_tracker::TaskTracker;
     use crate::tests::{mock_region_server, MockRegionEngine};
 
     #[tokio::test]
     async fn test_region_not_exist() {
         let mut mock_region_server = mock_region_server();
-        let (mock_engine, _) = MockRegionEngine::new();
+        let (mock_engine, _) = MockRegionEngine::new(MITO_ENGINE_NAME);
         mock_region_server.register_engine(mock_engine);
 
-        let handler_context = HandlerContext {
-            region_server: mock_region_server,
-            catchup_tasks: TaskTracker::new(),
-        };
+        let handler_context = HandlerContext::new_for_test(mock_region_server);
 
         let region_id = RegionId::new(1024, 1);
         let waits = vec![None, Some(Duration::from_millis(100u64))];
 
-        for wait_for_replay_timeout in waits {
+        for replay_timeout in waits {
             let reply = handler_context
                 .clone()
                 .handle_upgrade_region_instruction(UpgradeRegion {
                     region_id,
                     last_entry_id: None,
-                    wait_for_replay_timeout,
+                    replay_timeout,
+                    location_id: None,
                 })
                 .await;
             assert_matches!(reply, InstructionReply::UpgradeRegion(_));
@@ -167,29 +163,28 @@ mod tests {
         let mock_region_server = mock_region_server();
         let region_id = RegionId::new(1024, 1);
 
-        let (mock_engine, _) = MockRegionEngine::with_custom_apply_fn(|region_engine| {
-            region_engine.mock_role = Some(Some(RegionRole::Leader));
-            region_engine.handle_request_mock_fn = Some(Box::new(|_, _| {
-                // Should be unreachable.
-                unreachable!();
-            }));
-        });
+        let (mock_engine, _) =
+            MockRegionEngine::with_custom_apply_fn(MITO_ENGINE_NAME, |region_engine| {
+                region_engine.mock_role = Some(Some(RegionRole::Leader));
+                region_engine.handle_request_mock_fn = Some(Box::new(|_, _| {
+                    // Should be unreachable.
+                    unreachable!();
+                }));
+            });
         mock_region_server.register_test_region(region_id, mock_engine);
 
-        let handler_context = HandlerContext {
-            region_server: mock_region_server,
-            catchup_tasks: TaskTracker::new(),
-        };
+        let handler_context = HandlerContext::new_for_test(mock_region_server);
 
         let waits = vec![None, Some(Duration::from_millis(100u64))];
 
-        for wait_for_replay_timeout in waits {
+        for replay_timeout in waits {
             let reply = handler_context
                 .clone()
                 .handle_upgrade_region_instruction(UpgradeRegion {
                     region_id,
                     last_entry_id: None,
-                    wait_for_replay_timeout,
+                    replay_timeout,
+                    location_id: None,
                 })
                 .await;
             assert_matches!(reply, InstructionReply::UpgradeRegion(_));
@@ -207,29 +202,28 @@ mod tests {
         let mock_region_server = mock_region_server();
         let region_id = RegionId::new(1024, 1);
 
-        let (mock_engine, _) = MockRegionEngine::with_custom_apply_fn(|region_engine| {
-            // Region is not ready.
-            region_engine.mock_role = Some(Some(RegionRole::Follower));
-            region_engine.handle_request_mock_fn = Some(Box::new(|_, _| Ok(0)));
-            // Note: Don't change.
-            region_engine.handle_request_delay = Some(Duration::from_secs(100));
-        });
+        let (mock_engine, _) =
+            MockRegionEngine::with_custom_apply_fn(MITO_ENGINE_NAME, |region_engine| {
+                // Region is not ready.
+                region_engine.mock_role = Some(Some(RegionRole::Follower));
+                region_engine.handle_request_mock_fn = Some(Box::new(|_, _| Ok(0)));
+                // Note: Don't change.
+                region_engine.handle_request_delay = Some(Duration::from_secs(100));
+            });
         mock_region_server.register_test_region(region_id, mock_engine);
 
-        let handler_context = HandlerContext {
-            region_server: mock_region_server,
-            catchup_tasks: TaskTracker::new(),
-        };
+        let handler_context = HandlerContext::new_for_test(mock_region_server);
 
         let waits = vec![None, Some(Duration::from_millis(100u64))];
 
-        for wait_for_replay_timeout in waits {
+        for replay_timeout in waits {
             let reply = handler_context
                 .clone()
                 .handle_upgrade_region_instruction(UpgradeRegion {
                     region_id,
                     last_entry_id: None,
-                    wait_for_replay_timeout,
+                    replay_timeout,
+                    location_id: None,
                 })
                 .await;
             assert_matches!(reply, InstructionReply::UpgradeRegion(_));
@@ -247,13 +241,14 @@ mod tests {
         let mock_region_server = mock_region_server();
         let region_id = RegionId::new(1024, 1);
 
-        let (mock_engine, _) = MockRegionEngine::with_custom_apply_fn(|region_engine| {
-            // Region is not ready.
-            region_engine.mock_role = Some(Some(RegionRole::Follower));
-            region_engine.handle_request_mock_fn = Some(Box::new(|_, _| Ok(0)));
-            // Note: Don't change.
-            region_engine.handle_request_delay = Some(Duration::from_millis(300));
-        });
+        let (mock_engine, _) =
+            MockRegionEngine::with_custom_apply_fn(MITO_ENGINE_NAME, |region_engine| {
+                // Region is not ready.
+                region_engine.mock_role = Some(Some(RegionRole::Follower));
+                region_engine.handle_request_mock_fn = Some(Box::new(|_, _| Ok(0)));
+                // Note: Don't change.
+                region_engine.handle_request_delay = Some(Duration::from_millis(300));
+            });
         mock_region_server.register_test_region(region_id, mock_engine);
 
         let waits = vec![
@@ -261,18 +256,16 @@ mod tests {
             Some(Duration::from_millis(100u64)),
         ];
 
-        let handler_context = HandlerContext {
-            region_server: mock_region_server,
-            catchup_tasks: TaskTracker::new(),
-        };
+        let handler_context = HandlerContext::new_for_test(mock_region_server);
 
-        for wait_for_replay_timeout in waits {
+        for replay_timeout in waits {
             let reply = handler_context
                 .clone()
                 .handle_upgrade_region_instruction(UpgradeRegion {
                     region_id,
+                    replay_timeout,
                     last_entry_id: None,
-                    wait_for_replay_timeout,
+                    location_id: None,
                 })
                 .await;
             assert_matches!(reply, InstructionReply::UpgradeRegion(_));
@@ -289,7 +282,8 @@ mod tests {
             .handle_upgrade_region_instruction(UpgradeRegion {
                 region_id,
                 last_entry_id: None,
-                wait_for_replay_timeout: Some(Duration::from_millis(500)),
+                replay_timeout: Some(Duration::from_millis(500)),
+                location_id: None,
             })
             .await;
         assert_matches!(reply, InstructionReply::UpgradeRegion(_));
@@ -308,31 +302,30 @@ mod tests {
         let mock_region_server = mock_region_server();
         let region_id = RegionId::new(1024, 1);
 
-        let (mock_engine, _) = MockRegionEngine::with_custom_apply_fn(|region_engine| {
-            // Region is not ready.
-            region_engine.mock_role = Some(Some(RegionRole::Follower));
-            region_engine.handle_request_mock_fn = Some(Box::new(|_, _| {
-                error::UnexpectedSnafu {
-                    violated: "mock_error".to_string(),
-                }
-                .fail()
-            }));
-            // Note: Don't change.
-            region_engine.handle_request_delay = Some(Duration::from_millis(100));
-        });
+        let (mock_engine, _) =
+            MockRegionEngine::with_custom_apply_fn(MITO_ENGINE_NAME, |region_engine| {
+                // Region is not ready.
+                region_engine.mock_role = Some(Some(RegionRole::Follower));
+                region_engine.handle_request_mock_fn = Some(Box::new(|_, _| {
+                    error::UnexpectedSnafu {
+                        violated: "mock_error".to_string(),
+                    }
+                    .fail()
+                }));
+                // Note: Don't change.
+                region_engine.handle_request_delay = Some(Duration::from_millis(100));
+            });
         mock_region_server.register_test_region(region_id, mock_engine);
 
-        let handler_context = HandlerContext {
-            region_server: mock_region_server,
-            catchup_tasks: TaskTracker::new(),
-        };
+        let handler_context = HandlerContext::new_for_test(mock_region_server);
 
         let reply = handler_context
             .clone()
             .handle_upgrade_region_instruction(UpgradeRegion {
                 region_id,
                 last_entry_id: None,
-                wait_for_replay_timeout: None,
+                replay_timeout: None,
+                location_id: None,
             })
             .await;
         assert_matches!(reply, InstructionReply::UpgradeRegion(_));
@@ -349,7 +342,8 @@ mod tests {
             .handle_upgrade_region_instruction(UpgradeRegion {
                 region_id,
                 last_entry_id: None,
-                wait_for_replay_timeout: Some(Duration::from_millis(200)),
+                replay_timeout: Some(Duration::from_millis(200)),
+                location_id: None,
             })
             .await;
         assert_matches!(reply, InstructionReply::UpgradeRegion(_));

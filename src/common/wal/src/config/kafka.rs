@@ -15,8 +15,6 @@
 pub mod common;
 pub mod datanode;
 pub mod metasrv;
-pub mod standalone;
 
 pub use datanode::DatanodeKafkaConfig;
-pub use metasrv::MetaSrvKafkaConfig;
-pub use standalone::StandaloneKafkaConfig;
+pub use metasrv::MetasrvKafkaConfig;

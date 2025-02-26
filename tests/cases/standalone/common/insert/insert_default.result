@@ -64,3 +64,28 @@ DROP TABLE test2;
 
 Affected Rows: 0
 
+CREATE TABLE test3 (
+    i INTEGER DEFAULT -1,
+    j DOUBLE DEFAULT -2,
+    k TIMESTAMP DEFAULT -3,
+    ts TIMESTAMP TIME INDEX,
+);
+
+Affected Rows: 0
+
+INSERT INTO test3 (ts) VALUES (1);
+
+Affected Rows: 1
+
+SELECT * FROM test3;
+
++----+------+-------------------------+-------------------------+
+| i  | j    | k                       | ts                      |
++----+------+-------------------------+-------------------------+
+| -1 | -2.0 | 1969-12-31T23:59:59.997 | 1970-01-01T00:00:00.001 |
++----+------+-------------------------+-------------------------+
+
+DROP TABLE test3;
+
+Affected Rows: 0
+

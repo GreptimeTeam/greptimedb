@@ -12,8 +12,37 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod region_failover;
+use async_trait::async_trait;
+use common_meta::error::{self, Result};
+use common_meta::leadership_notifier::LeadershipChangeListener;
+use common_procedure::ProcedureManagerRef;
+use snafu::ResultExt;
+
 pub mod region_migration;
 #[cfg(test)]
 mod tests;
 pub mod utils;
+
+#[derive(Clone)]
+pub struct ProcedureManagerListenerAdapter(pub ProcedureManagerRef);
+
+#[async_trait]
+impl LeadershipChangeListener for ProcedureManagerListenerAdapter {
+    fn name(&self) -> &str {
+        "ProcedureManager"
+    }
+
+    async fn on_leader_start(&self) -> Result<()> {
+        self.0
+            .start()
+            .await
+            .context(error::StartProcedureManagerSnafu)
+    }
+
+    async fn on_leader_stop(&self) -> Result<()> {
+        self.0
+            .stop()
+            .await
+            .context(error::StopProcedureManagerSnafu)
+    }
+}

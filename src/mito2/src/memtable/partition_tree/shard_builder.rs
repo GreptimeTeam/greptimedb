@@ -14,7 +14,7 @@
 
 //! Builder of a shard.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -26,11 +26,11 @@ use crate::memtable::partition_tree::data::{
     DataBatch, DataBuffer, DataBufferReader, DataBufferReaderBuilder, DataParts, DATA_INIT_CAP,
 };
 use crate::memtable::partition_tree::dict::{DictBuilderReader, KeyDictBuilder};
-use crate::memtable::partition_tree::metrics::WriteMetrics;
-use crate::memtable::partition_tree::partition::PrimaryKeyFilter;
 use crate::memtable::partition_tree::shard::Shard;
 use crate::memtable::partition_tree::{PartitionTreeConfig, PkId, PkIndex, ShardId};
+use crate::memtable::stats::WriteMetrics;
 use crate::metrics::PARTITION_TREE_READ_STAGE_ELAPSED;
+use crate::row_converter::PrimaryKeyFilter;
 
 /// Builder to write keys and data to a shard that the key dictionary
 /// is still active.
@@ -71,12 +71,15 @@ impl ShardBuilder {
     /// Write a key value with its encoded primary key.
     pub fn write_with_key(
         &mut self,
-        primary_key: &[u8],
+        full_primary_key: &[u8],
+        sparse_key: Option<&[u8]>,
         key_value: &KeyValue,
         metrics: &mut WriteMetrics,
     ) -> PkId {
         // Safety: we check whether the builder need to freeze before.
-        let pk_index = self.dict_builder.insert_key(primary_key, metrics);
+        let pk_index = self
+            .dict_builder
+            .insert_key(full_primary_key, sparse_key, metrics);
         self.data_buffer.write_row(pk_index, key_value);
         PkId {
             shard_id: self.current_shard_id,
@@ -106,10 +109,8 @@ impl ShardBuilder {
             return Ok(None);
         }
 
-        let mut pk_to_index = BTreeMap::new();
-        let key_dict = self.dict_builder.finish(&mut pk_to_index);
-        let data_part = match &key_dict {
-            Some(dict) => {
+        let (data_part, key_dict) = match self.dict_builder.finish() {
+            Some((dict, pk_to_index)) => {
                 // Adds mapping to the map.
                 pk_to_pk_id.reserve(pk_to_index.len());
                 for (k, pk_index) in pk_to_index {
@@ -123,11 +124,12 @@ impl ShardBuilder {
                 }
 
                 let pk_weights = dict.pk_weights_to_sort_data();
-                self.data_buffer.freeze(Some(&pk_weights), true)?
+                let part = self.data_buffer.freeze(Some(&pk_weights), true)?;
+                (part, Some(dict))
             }
             None => {
                 let pk_weights = [0];
-                self.data_buffer.freeze(Some(&pk_weights), true)?
+                (self.data_buffer.freeze(Some(&pk_weights), true)?, None)
             }
         };
 
@@ -187,7 +189,7 @@ impl ShardBuilderReaderBuilder {
     pub(crate) fn build(
         self,
         pk_weights: Option<&[u16]>,
-        key_filter: Option<PrimaryKeyFilter>,
+        key_filter: Option<Box<dyn PrimaryKeyFilter>>,
     ) -> Result<ShardBuilderReader> {
         let now = Instant::now();
         let data_reader = self.data_reader.build(pk_weights)?;
@@ -206,7 +208,7 @@ pub struct ShardBuilderReader {
     shard_id: ShardId,
     dict_reader: DictBuilderReader,
     data_reader: DataBufferReader,
-    key_filter: Option<PrimaryKeyFilter>,
+    key_filter: Option<Box<dyn PrimaryKeyFilter>>,
     last_yield_pk_index: Option<PkIndex>,
     keys_before_pruning: usize,
     keys_after_pruning: usize,
@@ -219,7 +221,7 @@ impl ShardBuilderReader {
         shard_id: ShardId,
         dict_reader: DictBuilderReader,
         data_reader: DataBufferReader,
-        key_filter: Option<PrimaryKeyFilter>,
+        key_filter: Option<Box<dyn PrimaryKeyFilter>>,
         data_build_cost: Duration,
     ) -> Result<Self> {
         let mut reader = ShardBuilderReader {
@@ -279,7 +281,7 @@ impl ShardBuilderReader {
             self.keys_before_pruning += 1;
             let key = self.dict_reader.key_by_pk_index(pk_index);
             let now = Instant::now();
-            if key_filter.prune_primary_key(key) {
+            if key_filter.matches(key) {
                 self.prune_pk_cost += now.elapsed();
                 self.last_yield_pk_index = Some(pk_index);
                 self.keys_after_pruning += 1;
@@ -316,7 +318,6 @@ mod tests {
 
     use super::*;
     use crate::memtable::partition_tree::data::timestamp_array_to_i64_slice;
-    use crate::memtable::partition_tree::metrics::WriteMetrics;
     use crate::memtable::KeyValues;
     use crate::test_util::memtable_util::{
         build_key_values_with_ts_seq_values, encode_key_by_kv, metadata_for_test,
@@ -367,7 +368,7 @@ mod tests {
         for key_values in &input {
             for kv in key_values.iter() {
                 let key = encode_key_by_kv(&kv);
-                shard_builder.write_with_key(&key, &kv, &mut metrics);
+                shard_builder.write_with_key(&key, None, &kv, &mut metrics);
             }
         }
         let shard = shard_builder
@@ -389,7 +390,7 @@ mod tests {
         for key_values in &input {
             for kv in key_values.iter() {
                 let key = encode_key_by_kv(&kv);
-                shard_builder.write_with_key(&key, &kv, &mut metrics);
+                shard_builder.write_with_key(&key, None, &kv, &mut metrics);
             }
         }
 

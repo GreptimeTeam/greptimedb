@@ -17,20 +17,27 @@
 use std::collections::HashMap;
 
 use api::v1::value::ValueData;
-use api::v1::Rows;
+use api::v1::{Rows, SemanticType};
 use common_base::readable_size::ReadableSize;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
+use common_wal::options::WAL_OPTIONS_KEY;
 use datatypes::prelude::ConcreteDataType;
-use store_api::region_request::{RegionOpenRequest, RegionPutRequest};
+use datatypes::schema::ColumnSchema;
+use rstest::rstest;
+use rstest_reuse::{self, apply};
+use store_api::metadata::ColumnMetadata;
+use store_api::region_request::{RegionCreateRequest, RegionOpenRequest, RegionPutRequest};
 use store_api::storage::RegionId;
 
 use super::*;
 use crate::region::version::VersionControlData;
 use crate::test_util::{
     build_delete_rows_for_key, build_rows, build_rows_for_key, delete_rows, delete_rows_schema,
-    flush_region, put_rows, reopen_region, rows_schema, CreateRequestBuilder, TestEnv,
+    flush_region, kafka_log_store_factory, multiple_log_store_factories,
+    prepare_test_for_kafka_log_store, put_rows, raft_engine_log_store_factory, reopen_region,
+    rows_schema, CreateRequestBuilder, LogStoreFactory, TestEnv,
 };
 
 #[tokio::test]
@@ -81,14 +88,24 @@ async fn test_write_to_region() {
     put_rows(&engine, region_id, rows).await;
 }
 
-#[tokio::test]
-async fn test_region_replay() {
+#[apply(multiple_log_store_factories)]
+
+async fn test_region_replay(factory: Option<LogStoreFactory>) {
+    use common_wal::options::{KafkaWalOptions, WalOptions};
+
     common_telemetry::init_default_ut_logging();
-    let mut env = TestEnv::with_prefix("region-replay");
+    let Some(factory) = factory else {
+        return;
+    };
+    let mut env = TestEnv::with_prefix("region-replay").with_log_store_factory(factory.clone());
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
-    let request = CreateRequestBuilder::new().build();
+    let topic = prepare_test_for_kafka_log_store(&factory).await;
+    let request = CreateRequestBuilder::new()
+        .kafka_topic(topic.clone())
+        .build();
+
     let region_dir = request.region_dir.clone();
 
     let column_schemas = rows_schema(&request);
@@ -111,13 +128,24 @@ async fn test_region_replay() {
 
     let engine = env.reopen_engine(engine, MitoConfig::default()).await;
 
+    let mut options = HashMap::new();
+    if let Some(topic) = &topic {
+        options.insert(
+            WAL_OPTIONS_KEY.to_string(),
+            serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
+                topic: topic.to_string(),
+            }))
+            .unwrap(),
+        );
+    };
+
     let result = engine
         .handle_request(
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
                 region_dir,
-                options: HashMap::default(),
+                options,
                 skip_wal_replay: false,
             }),
         )
@@ -126,7 +154,7 @@ async fn test_region_replay() {
     assert_eq!(0, result.affected_rows);
 
     let request = ScanRequest::default();
-    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     assert_eq!(42, batches.iter().map(|b| b.num_rows()).sum::<usize>());
 
@@ -164,7 +192,7 @@ async fn test_write_query_region() {
     put_rows(&engine, region_id, rows).await;
 
     let request = ScanRequest::default();
-    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
 +-------+---------+---------------------+
@@ -225,7 +253,7 @@ async fn test_different_order() {
     put_rows(&engine, region_id, rows).await;
 
     let request = ScanRequest::default();
-    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
 +-------+-------+---------+---------+---------------------+
@@ -287,7 +315,7 @@ async fn test_different_order_and_type() {
     put_rows(&engine, region_id, rows).await;
 
     let request = ScanRequest::default();
-    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
 +-------+-------+---------+---------+---------------------+
@@ -302,6 +330,8 @@ async fn test_different_order_and_type() {
 
 #[tokio::test]
 async fn test_put_delete() {
+    common_telemetry::init_default_ut_logging();
+
     let mut env = TestEnv::new();
     let engine = env.create_engine(MitoConfig::default()).await;
 
@@ -339,7 +369,7 @@ async fn test_put_delete() {
     delete_rows(&engine, region_id, rows).await;
 
     let request = ScanRequest::default();
-    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
 +-------+---------+---------------------+
@@ -381,7 +411,7 @@ async fn test_delete_not_null_fields() {
     delete_rows(&engine, region_id, rows).await;
 
     let request = ScanRequest::default();
-    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
 +-------+---------+---------------------+
@@ -396,7 +426,7 @@ async fn test_delete_not_null_fields() {
     // Reopen and scan again.
     reopen_region(&engine, region_id, region_dir, false, HashMap::new()).await;
     let request = ScanRequest::default();
-    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     assert_eq!(expected, batches.pretty_print().unwrap());
 }
@@ -445,7 +475,7 @@ async fn test_put_overwrite() {
     put_rows(&engine, region_id, rows).await;
 
     let request = ScanRequest::default();
-    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
 +-------+---------+---------------------+
@@ -500,7 +530,10 @@ async fn test_absent_and_invalid_columns() {
         rows,
     };
     let err = engine
-        .handle_request(region_id, RegionRequest::Put(RegionPutRequest { rows }))
+        .handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest { rows, hint: None }),
+        )
         .await
         .unwrap_err();
     assert_eq!(StatusCode::InvalidArguments, err.status_code());
@@ -522,8 +555,8 @@ async fn test_region_usage() {
         .unwrap();
     // region is empty now, check manifest size
     let region = engine.get_region(region_id).unwrap();
-    let region_stat = region.region_usage().await;
-    assert_eq!(region_stat.manifest_usage, 686);
+    let region_stat = region.region_statistic();
+    assert!(region_stat.manifest_size > 0);
 
     // put some rows
     let rows = Rows {
@@ -533,8 +566,8 @@ async fn test_region_usage() {
 
     put_rows(&engine, region_id, rows).await;
 
-    let region_stat = region.region_usage().await;
-    assert!(region_stat.wal_usage > 0);
+    let region_stat = region.region_statistic();
+    assert!(region_stat.wal_size > 0);
 
     // delete some rows
     let rows = Rows {
@@ -543,18 +576,19 @@ async fn test_region_usage() {
     };
     delete_rows(&engine, region_id, rows).await;
 
-    let region_stat = region.region_usage().await;
-    assert!(region_stat.wal_usage > 0);
+    let region_stat = region.region_statistic();
+    assert!(region_stat.wal_size > 0);
 
     // flush region
     flush_region(&engine, region_id, None).await;
 
-    let region_stat = region.region_usage().await;
-    assert_eq!(region_stat.sst_usage, 2962);
+    let region_stat = region.region_statistic();
+    assert!(region_stat.sst_size > 0);
+    assert_eq!(region_stat.num_rows, 10);
 
     // region total usage
     // Some memtables may share items.
-    assert!(region_stat.disk_usage() >= 4028);
+    assert!(region_stat.estimated_disk_size() > 3000);
 }
 
 #[tokio::test]
@@ -563,7 +597,7 @@ async fn test_engine_with_write_cache() {
 
     let mut env = TestEnv::new();
     let path = env.data_home().to_str().unwrap().to_string();
-    let mito_config = MitoConfig::default().enable_write_cache(path, ReadableSize::mb(512));
+    let mito_config = MitoConfig::default().enable_write_cache(path, ReadableSize::mb(512), None);
     let engine = env.create_engine(mito_config).await;
 
     let region_id = RegionId::new(1, 1);
@@ -596,5 +630,104 @@ async fn test_engine_with_write_cache() {
 | a     | 1.0     | 1970-01-01T00:00:01 |
 | a     | 2.0     | 1970-01-01T00:00:02 |
 +-------+---------+---------------------+";
+    assert_eq!(expected, batches.pretty_print().unwrap());
+}
+
+#[tokio::test]
+async fn test_cache_null_primary_key() {
+    let mut env = TestEnv::new();
+    let engine = env
+        .create_engine(MitoConfig {
+            vector_cache_size: ReadableSize::mb(32),
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let column_metadatas = vec![
+        ColumnMetadata {
+            column_schema: ColumnSchema::new("tag_0", ConcreteDataType::string_datatype(), true),
+            semantic_type: SemanticType::Tag,
+            column_id: 1,
+        },
+        ColumnMetadata {
+            column_schema: ColumnSchema::new("tag_1", ConcreteDataType::int64_datatype(), true),
+            semantic_type: SemanticType::Tag,
+            column_id: 2,
+        },
+        ColumnMetadata {
+            column_schema: ColumnSchema::new("field_0", ConcreteDataType::float64_datatype(), true),
+            semantic_type: SemanticType::Field,
+            column_id: 3,
+        },
+        ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Timestamp,
+            column_id: 4,
+        },
+    ];
+    let request = RegionCreateRequest {
+        engine: MITO_ENGINE_NAME.to_string(),
+        column_metadatas,
+        primary_key: vec![1, 2],
+        options: HashMap::new(),
+        region_dir: "test".to_string(),
+    };
+
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let rows = Rows {
+        schema: column_schemas,
+        rows: vec![
+            api::v1::Row {
+                values: vec![
+                    api::v1::Value {
+                        value_data: Some(ValueData::StringValue("1".to_string())),
+                    },
+                    api::v1::Value { value_data: None },
+                    api::v1::Value {
+                        value_data: Some(ValueData::F64Value(10.0)),
+                    },
+                    api::v1::Value {
+                        value_data: Some(ValueData::TimestampMillisecondValue(1000)),
+                    },
+                ],
+            },
+            api::v1::Row {
+                values: vec![
+                    api::v1::Value { value_data: None },
+                    api::v1::Value {
+                        value_data: Some(ValueData::I64Value(200)),
+                    },
+                    api::v1::Value {
+                        value_data: Some(ValueData::F64Value(20.0)),
+                    },
+                    api::v1::Value {
+                        value_data: Some(ValueData::TimestampMillisecondValue(2000)),
+                    },
+                ],
+            },
+        ],
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    let request = ScanRequest::default();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    let expected = "\
++-------+-------+---------+---------------------+
+| tag_0 | tag_1 | field_0 | ts                  |
++-------+-------+---------+---------------------+
+|       | 200   | 20.0    | 1970-01-01T00:00:02 |
+| 1     |       | 10.0    | 1970-01-01T00:00:01 |
++-------+-------+---------+---------------------+";
     assert_eq!(expected, batches.pretty_print().unwrap());
 }

@@ -16,14 +16,12 @@
 
 use api::v1::Rows;
 use common_recordbatch::RecordBatches;
-use datatypes::arrow::compute::{self, SortColumn};
-use datatypes::arrow::record_batch::RecordBatch;
-use datatypes::arrow::util::pretty;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{RegionCompactRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
+use crate::test_util::batch_util::sort_batches_and_print;
 use crate::test_util::{
     build_rows, build_rows_for_key, flush_region, put_rows, reopen_region, rows_schema,
     CreateRequestBuilder, TestEnv,
@@ -65,7 +63,7 @@ async fn test_append_mode_write_query() {
     put_rows(&engine, region_id, rows).await;
 
     let request = ScanRequest::default();
-    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
 +-------+---------+---------------------+
@@ -84,7 +82,7 @@ async fn test_append_mode_write_query() {
         .scan_region(region_id, ScanRequest::default())
         .unwrap();
     let seq_scan = scan.seq_scan().unwrap();
-    let stream = seq_scan.build_stream().await.unwrap();
+    let stream = seq_scan.build_stream().unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     assert_eq!(expected, batches.pretty_print().unwrap());
 }
@@ -94,16 +92,26 @@ async fn test_append_mode_compaction() {
     let mut env = TestEnv::new();
     let engine = env
         .create_engine(MitoConfig {
-            scan_parallelism: 2,
             ..Default::default()
         })
         .await;
     let region_id = RegionId::new(1, 1);
 
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
     let request = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
-        .insert_option("compaction.twcs.max_active_window_files", "2")
-        .insert_option("compaction.twcs.max_inactive_window_files", "2")
+        .insert_option("compaction.twcs.max_active_window_runs", "2")
+        .insert_option("compaction.twcs.max_inactive_window_runs", "2")
         .insert_option("append_mode", "true")
         .build();
     let region_dir = request.region_dir.clone();
@@ -115,7 +123,7 @@ async fn test_append_mode_compaction() {
         .await
         .unwrap();
 
-    // Flush 2 SSTs for compaction.
+    // Flush 3 SSTs for compaction.
     // a, field 1, 2
     let rows = Rows {
         schema: column_schemas.clone(),
@@ -139,7 +147,10 @@ async fn test_append_mode_compaction() {
     flush_region(&engine, region_id, None).await;
 
     let output = engine
-        .handle_request(region_id, RegionRequest::Compact(RegionCompactRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Compact(RegionCompactRequest::default()),
+        )
         .await
         .unwrap();
     assert_eq!(output.affected_rows, 0);
@@ -165,19 +176,19 @@ async fn test_append_mode_compaction() {
 | b     | 1.0     | 1970-01-01T00:00:01 |
 +-------+---------+---------------------+";
     // Scans in parallel.
-    let scanner = engine.scanner(region_id, ScanRequest::default()).unwrap();
-    assert_eq!(1, scanner.num_files());
+    let mut scanner = engine.scanner(region_id, ScanRequest::default()).unwrap();
+    assert_eq!(2, scanner.num_files());
     assert_eq!(1, scanner.num_memtables());
+    scanner.set_target_partitions(2);
     let stream = scanner.scan().await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     assert_eq!(expected, sort_batches_and_print(&batches, &["tag_0", "ts"]));
 
-    // Reopens engine with parallelism 1.
+    // Reopens engine.
     let engine = env
         .reopen_engine(
             engine,
             MitoConfig {
-                scan_parallelism: 1,
                 ..Default::default()
             },
         )
@@ -185,37 +196,9 @@ async fn test_append_mode_compaction() {
     // Reopens the region.
     reopen_region(&engine, region_id, region_dir, false, region_opts).await;
     let stream = engine
-        .handle_query(region_id, ScanRequest::default())
+        .scan_to_stream(region_id, ScanRequest::default())
         .await
         .unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     assert_eq!(expected, sort_batches_and_print(&batches, &["tag_0", "ts"]));
-}
-
-/// Sorts `batches` by column `names`.
-fn sort_batches_and_print(batches: &RecordBatches, names: &[&str]) -> String {
-    let schema = batches.schema();
-    let record_batches = batches.iter().map(|batch| batch.df_record_batch());
-    let record_batch = compute::concat_batches(schema.arrow_schema(), record_batches).unwrap();
-    let columns: Vec<_> = names
-        .iter()
-        .map(|name| {
-            let array = record_batch.column_by_name(name).unwrap();
-            SortColumn {
-                values: array.clone(),
-                options: None,
-            }
-        })
-        .collect();
-    let indices = compute::lexsort_to_indices(&columns, None).unwrap();
-    let columns = record_batch
-        .columns()
-        .iter()
-        .map(|array| compute::take(&array, &indices, None).unwrap())
-        .collect();
-    let record_batch = RecordBatch::try_new(record_batch.schema(), columns).unwrap();
-
-    pretty::pretty_format_batches(&[record_batch])
-        .unwrap()
-        .to_string()
 }

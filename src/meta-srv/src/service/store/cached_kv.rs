@@ -61,9 +61,9 @@ impl CheckLeader for RwLock<State> {
 /// To use this cache, the following constraints must be followed:
 ///   1. The leader node can create this metadata.
 ///   2. The follower node can create this metadata. The leader node can lazily retrieve
-///     the corresponding data through the caching loading mechanism.
+///      the corresponding data through the caching loading mechanism.
 ///   3. Only the leader node can update this metadata, as the cache cannot detect
-///     modifications made to the data on the follower node.
+///      modifications made to the data on the follower node.
 ///   4. Only the leader node can delete this metadata for the same reason mentioned above.
 pub struct LeaderCachedKvBackend {
     check_leader: CheckLeaderRef,
@@ -102,15 +102,11 @@ impl LeaderCachedKvBackend {
                 self.store.clone(),
                 RangeRequest::new().with_prefix(prefix.as_bytes()),
                 DEFAULT_PAGE_SIZE,
-                Arc::new(|kv| Ok((kv, ()))),
-            );
+                Ok,
+            )
+            .into_stream();
 
-            let kvs = stream
-                .try_collect::<Vec<_>>()
-                .await?
-                .into_iter()
-                .map(|(kv, _)| kv)
-                .collect();
+            let kvs = stream.try_collect::<Vec<_>>().await?;
 
             self.cache
                 .batch_put(BatchPutRequest {
@@ -263,7 +259,7 @@ impl KvBackend for LeaderCachedKvBackend {
             .collect::<HashSet<_>>();
 
         metrics::METRIC_META_KV_CACHE_HIT
-            .with_label_values(&[&"batch_get"])
+            .with_label_values(&["batch_get"])
             .inc_by(hit_keys.len() as u64);
 
         let missed_keys = req
@@ -273,7 +269,7 @@ impl KvBackend for LeaderCachedKvBackend {
             .cloned()
             .collect::<Vec<_>>();
         metrics::METRIC_META_KV_CACHE_MISS
-            .with_label_values(&[&"batch_get"])
+            .with_label_values(&["batch_get"])
             .inc_by(missed_keys.len() as u64);
 
         let remote_req = BatchGetRequest { keys: missed_keys };
@@ -389,6 +385,10 @@ impl TxnService for LeaderCachedKvBackend {
 impl ResettableKvBackend for LeaderCachedKvBackend {
     fn reset(&self) {
         self.cache.reset()
+    }
+
+    fn as_kv_backend_ref(self: Arc<Self>) -> KvBackendRef<Self::Error> {
+        self
     }
 }
 

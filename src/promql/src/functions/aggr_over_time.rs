@@ -17,7 +17,7 @@ use std::sync::Arc;
 use common_macro::range_fn;
 use datafusion::arrow::array::{Float64Array, TimestampMillisecondArray};
 use datafusion::common::DataFusionError;
-use datafusion::logical_expr::{ScalarUDF, Signature, TypeSignature, Volatility};
+use datafusion::logical_expr::{ScalarUDF, Volatility};
 use datafusion::physical_plan::ColumnarValue;
 use datatypes::arrow::array::Array;
 use datatypes::arrow::compute;
@@ -28,9 +28,9 @@ use crate::range_array::RangeArray;
 
 /// The average value of all points in the specified interval.
 #[range_fn(
-    name = "AvgOverTime",
-    ret = "Float64Array",
-    display_name = "prom_avg_over_time"
+    name = AvgOverTime,
+    ret = Float64Array,
+    display_name = prom_avg_over_time
 )]
 pub fn avg_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
     compute::sum(values).map(|result| result / values.len() as f64)
@@ -38,9 +38,9 @@ pub fn avg_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Op
 
 /// The minimum value of all points in the specified interval.
 #[range_fn(
-    name = "MinOverTime",
-    ret = "Float64Array",
-    display_name = "prom_min_over_time"
+    name = MinOverTime,
+    ret = Float64Array,
+    display_name = prom_min_over_time
 )]
 pub fn min_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
     compute::min(values)
@@ -48,9 +48,9 @@ pub fn min_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Op
 
 /// The maximum value of all points in the specified interval.
 #[range_fn(
-    name = "MaxOverTime",
-    ret = "Float64Array",
-    display_name = "prom_max_over_time"
+    name = MaxOverTime,
+    ret = Float64Array,
+    display_name = prom_max_over_time
 )]
 pub fn max_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
     compute::max(values)
@@ -58,9 +58,9 @@ pub fn max_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Op
 
 /// The sum of all values in the specified interval.
 #[range_fn(
-    name = "SumOverTime",
-    ret = "Float64Array",
-    display_name = "prom_sum_over_time"
+    name = SumOverTime,
+    ret = Float64Array,
+    display_name = prom_sum_over_time
 )]
 pub fn sum_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
     compute::sum(values)
@@ -68,9 +68,9 @@ pub fn sum_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Op
 
 /// The count of all values in the specified interval.
 #[range_fn(
-    name = "CountOverTime",
-    ret = "Float64Array",
-    display_name = "prom_count_over_time"
+    name = CountOverTime,
+    ret = Float64Array,
+    display_name = prom_count_over_time
 )]
 pub fn count_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
     if values.is_empty() {
@@ -82,9 +82,9 @@ pub fn count_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> 
 
 /// The most recent point value in specified interval.
 #[range_fn(
-    name = "LastOverTime",
-    ret = "Float64Array",
-    display_name = "prom_last_over_time"
+    name = LastOverTime,
+    ret = Float64Array,
+    display_name = prom_last_over_time
 )]
 pub fn last_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
     values.values().last().copied()
@@ -94,9 +94,9 @@ pub fn last_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> O
 /// elements (floats or native histograms) and a 1-element vector with the value 1 if
 /// the range vector passed to it has no elements.
 #[range_fn(
-    name = "AbsentOverTime",
-    ret = "Float64Array",
-    display_name = "prom_absent_over_time"
+    name = AbsentOverTime,
+    ret = Float64Array,
+    display_name = prom_absent_over_time
 )]
 pub fn absent_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
     if values.is_empty() {
@@ -108,9 +108,9 @@ pub fn absent_over_time(_: &TimestampMillisecondArray, values: &Float64Array) ->
 
 /// the value 1 for any series in the specified interval.
 #[range_fn(
-    name = "PresentOverTime",
-    ret = "Float64Array",
-    display_name = "prom_present_over_time"
+    name = PresentOverTime,
+    ret = Float64Array,
+    display_name = prom_present_over_time
 )]
 pub fn present_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
     if values.is_empty() {
@@ -124,9 +124,9 @@ pub fn present_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -
 /// DataFusion's implementation:
 /// <https://github.com/apache/arrow-datafusion/blob/292eb954fc0bad3a1febc597233ba26cb60bda3e/datafusion/physical-expr/src/aggregate/variance.rs#L224-#L241>
 #[range_fn(
-    name = "StdvarOverTime",
-    ret = "Float64Array",
-    display_name = "prom_stdvar_over_time"
+    name = StdvarOverTime,
+    ret = Float64Array,
+    display_name = prom_stdvar_over_time
 )]
 pub fn stdvar_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
     if values.is_empty() {
@@ -154,9 +154,9 @@ pub fn stdvar_over_time(_: &TimestampMillisecondArray, values: &Float64Array) ->
 /// the population standard deviation of the values in the specified interval.
 /// Prometheus's implementation: <https://github.com/prometheus/prometheus/blob/f55ab2217984770aa1eecd0f2d5f54580029b1c0/promql/functions.go#L556-L569>
 #[range_fn(
-    name = "StddevOverTime",
-    ret = "Float64Array",
-    display_name = "prom_stddev_over_time"
+    name = StddevOverTime,
+    ret = Float64Array,
+    display_name = prom_stddev_over_time
 )]
 pub fn stddev_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
     if values.is_empty() {

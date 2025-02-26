@@ -165,8 +165,8 @@ async fn test_engine_create_with_options() {
     assert!(engine.is_region_exists(region_id));
     let region = engine.get_region(region_id).unwrap();
     assert_eq!(
-        Duration::from_secs(3600 * 24 * 10),
-        region.version().options.ttl.unwrap()
+        region.version().options.ttl,
+        Some(Duration::from_secs(3600 * 24 * 10).into())
     );
 }
 
@@ -192,12 +192,12 @@ async fn test_engine_create_with_custom_store() {
     assert!(object_store_manager
         .find("Gcs")
         .unwrap()
-        .is_exist(region_dir)
+        .exists(region_dir)
         .await
         .unwrap());
     assert!(!object_store_manager
         .default_object_store()
-        .is_exist(region_dir)
+        .exists(region_dir)
         .await
         .unwrap());
 }
@@ -231,7 +231,7 @@ async fn test_engine_create_with_memtable_opts() {
     put_rows(&engine, region_id, rows).await;
 
     let request = ScanRequest::default();
-    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let stream = engine.scan_to_stream(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
 +-------+---------+---------------------+

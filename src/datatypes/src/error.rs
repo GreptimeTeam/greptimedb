@@ -27,6 +27,7 @@ pub enum Error {
     Serialize {
         #[snafu(source)]
         error: serde_json::Error,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -34,26 +35,37 @@ pub enum Error {
     Deserialize {
         #[snafu(source)]
         error: serde_json::Error,
+        #[snafu(implicit)]
         location: Location,
         json: String,
     },
 
     #[snafu(display("Failed to convert datafusion type: {}", from))]
-    Conversion { from: String, location: Location },
+    Conversion {
+        from: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Bad array access, Index out of bounds: {}, size: {}", index, size))]
     BadArrayAccess {
         index: usize,
         size: usize,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Unknown vector, {}", msg))]
-    UnknownVector { msg: String, location: Location },
+    UnknownVector {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Unsupported arrow data type, type: {:?}", arrow_type))]
     UnsupportedArrowType {
         arrow_type: arrow::datatypes::DataType,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -61,6 +73,7 @@ pub enum Error {
     UnsupportedOperation {
         op: String,
         vector_type: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -69,19 +82,29 @@ pub enum Error {
         value: String,
         #[snafu(source)]
         error: std::num::ParseIntError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Invalid timestamp index: {}", index))]
-    InvalidTimestampIndex { index: usize, location: Location },
+    InvalidTimestampIndex {
+        index: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("{}", msg))]
-    CastType { msg: String, location: Location },
+    CastType {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to cast arrow time i32 type into i64"))]
     CastTimeType {
         #[snafu(source)]
         error: std::num::TryFromIntError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -89,6 +112,7 @@ pub enum Error {
     ArrowCompute {
         #[snafu(source)]
         error: arrow::error::ArrowError,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -96,32 +120,64 @@ pub enum Error {
     ProjectArrowSchema {
         #[snafu(source)]
         error: arrow::error::ArrowError,
+        #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Unsupported column default constraint expression: {}", expr))]
-    UnsupportedDefaultExpr { expr: String, location: Location },
+    UnsupportedDefaultExpr {
+        expr: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Default value should not be null for non null column"))]
-    NullDefault { location: Location },
+    NullDefault {
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Incompatible default value type, reason: {}", reason))]
-    DefaultValueType { reason: String, location: Location },
+    DefaultValueType {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Duplicated metadata for {}", key))]
-    DuplicateMeta { key: String, location: Location },
+    DuplicateMeta {
+        key: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to convert value into scalar value, reason: {}", reason))]
-    ToScalarValue { reason: String, location: Location },
+    ToScalarValue {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Invalid timestamp precision: {}", precision))]
-    InvalidTimestampPrecision { precision: u64, location: Location },
+    InvalidTimestampPrecision {
+        precision: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Column {} already exists", column))]
-    DuplicateColumn { column: String, location: Location },
+    DuplicateColumn {
+        column: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to unpack value to given type: {}", reason))]
-    TryFromValue { reason: String, location: Location },
+    TryFromValue {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to specify the precision {} and scale {}", precision, scale))]
     InvalidPrecisionOrScale {
@@ -129,6 +185,21 @@ pub enum Error {
         scale: i8,
         #[snafu(source)]
         error: arrow::error::ArrowError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid JSON text: {}", value))]
+    InvalidJson {
+        value: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid Vector: {}", msg))]
+    InvalidVector {
+        msg: String,
+        #[snafu(implicit)]
         location: Location,
     },
 
@@ -137,14 +208,75 @@ pub enum Error {
         precision: u8,
         #[snafu(source)]
         error: arrow::error::ArrowError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to convert Arrow array to scalars"))]
+    ConvertArrowArrayToScalars {
+        #[snafu(source)]
+        error: datafusion_common::DataFusionError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to parse extended type in metadata: {}", value))]
+    ParseExtendedType {
+        value: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Invalid fulltext option: {}", msg))]
+    InvalidFulltextOption {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Invalid skipping index option: {}", msg))]
+    InvalidSkippingIndexOption {
+        msg: String,
+        #[snafu(implicit)]
         location: Location,
     },
 }
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
-        // Inner encoding and decoding error should not be exposed to users.
-        StatusCode::Internal
+        use Error::*;
+        match self {
+            UnsupportedOperation { .. }
+            | UnsupportedArrowType { .. }
+            | UnsupportedDefaultExpr { .. } => StatusCode::Unsupported,
+
+            DuplicateColumn { .. }
+            | BadArrayAccess { .. }
+            | NullDefault { .. }
+            | InvalidTimestampIndex { .. }
+            | DefaultValueType { .. }
+            | DuplicateMeta { .. }
+            | InvalidTimestampPrecision { .. }
+            | InvalidPrecisionOrScale { .. }
+            | InvalidJson { .. }
+            | InvalidVector { .. }
+            | InvalidFulltextOption { .. }
+            | InvalidSkippingIndexOption { .. } => StatusCode::InvalidArguments,
+
+            ValueExceedsPrecision { .. }
+            | CastType { .. }
+            | CastTimeType { .. }
+            | Conversion { .. } => StatusCode::IllegalState,
+
+            Serialize { .. }
+            | Deserialize { .. }
+            | UnknownVector { .. }
+            | ParseSchemaVersion { .. }
+            | ArrowCompute { .. }
+            | ProjectArrowSchema { .. }
+            | ToScalarValue { .. }
+            | TryFromValue { .. }
+            | ConvertArrowArrayToScalars { .. }
+            | ParseExtendedType { .. } => StatusCode::Internal,
+        }
     }
 
     fn as_any(&self) -> &dyn Any {
