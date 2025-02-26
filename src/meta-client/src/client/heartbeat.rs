@@ -198,13 +198,13 @@ impl Inner {
             }
         );
 
-        let leader = self
+        let leader_addr = self
             .ask_leader
             .as_ref()
             .unwrap()
             .get_leader()
             .context(error::NoLeaderSnafu)?;
-        let mut leader = self.make_client(leader)?;
+        let mut leader = self.make_client(&leader_addr)?;
 
         let (sender, receiver) = mpsc::channel::<HeartbeatRequest>(128);
 
@@ -236,7 +236,8 @@ impl Inner {
             .await
             .map_err(error::Error::from)?
             .context(error::CreateHeartbeatStreamSnafu)?;
-        info!("Success to create heartbeat stream to server: {:#?}", res);
+
+        info!("Success to create heartbeat stream to server: {}, response: {:#?}", leader_addr, res);
 
         Ok((
             HeartbeatSender::new(self.id, self.role, sender),
