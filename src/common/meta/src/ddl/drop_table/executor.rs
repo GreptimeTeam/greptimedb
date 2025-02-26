@@ -214,6 +214,7 @@ impl DropTableExecutor {
         &self,
         ctx: &DdlContext,
         region_routes: &[RegionRoute],
+        fast_path: bool,
     ) -> Result<()> {
         let leaders = find_leaders(region_routes);
         let mut drop_region_tasks = Vec::with_capacity(leaders.len());
@@ -236,7 +237,7 @@ impl DropTableExecutor {
                     }),
                     body: Some(region_request::Body::Drop(PbDropRegionRequest {
                         region_id: region_id.as_u64(),
-                        fast_path: false,
+                        fast_path,
                     })),
                 };
                 let datanode = datanode.clone();

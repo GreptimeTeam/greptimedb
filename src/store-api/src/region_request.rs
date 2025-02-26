@@ -222,7 +222,12 @@ fn make_region_creates(creates: CreateRequests) -> Result<Vec<(RegionId, RegionR
 
 fn parse_region_drop(drop: DropRequest) -> Result<(RegionId, RegionDropRequest)> {
     let region_id = drop.region_id.into();
-    Ok((region_id, RegionDropRequest {}))
+    Ok((
+        region_id,
+        RegionDropRequest {
+            fast_path: drop.fast_path,
+        },
+    ))
 }
 
 fn make_region_drop(drop: DropRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
@@ -397,8 +402,10 @@ impl RegionCreateRequest {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct RegionDropRequest {}
+#[derive(Debug, Clone)]
+pub struct RegionDropRequest {
+    pub fast_path: bool,
+}
 
 /// Open region request.
 #[derive(Debug, Clone)]
