@@ -81,6 +81,10 @@ impl App for Instance {
     }
 
     async fn start(&mut self) -> Result<()> {
+        plugins::start_flownode_plugins(self.flownode.server.plugins().clone())
+            .await
+            .context(StartFlownodeSnafu)?;
+
         self.flownode.start().await.context(StartFlownodeSnafu)
     }
 
@@ -238,8 +242,16 @@ impl StartCommand {
         info!("Flownode start command: {:#?}", self);
         info!("Flownode options: {:#?}", opts);
 
+        // loading plugins
+        let plugin_opts = opts.plugins;
+
         let mut opts = opts.component;
         opts.grpc.detect_server_addr();
+
+        let mut plugins = Plugins::new();
+        plugins::setup_flownode_plugins(&mut plugins, &plugin_opts, &opts)
+            .await
+            .context(StartFlownodeSnafu)?;
 
         // TODO(discord9): make it not optionale after cluster id is required
         let cluster_id = opts.cluster_id.unwrap_or(0);
@@ -320,7 +332,7 @@ impl StartCommand {
         let flow_metadata_manager = Arc::new(FlowMetadataManager::new(cached_meta_backend.clone()));
         let flownode_builder = FlownodeBuilder::new(
             opts,
-            Plugins::new(),
+            plugins.clone(),
             table_metadata_manager,
             catalog_manager.clone(),
             flow_metadata_manager,
@@ -344,6 +356,7 @@ impl StartCommand {
             layered_cache_registry.clone(),
             meta_client.clone(),
             client,
+            plugins.clone(),
         )
         .await
         .context(StartFlownodeSnafu)?;

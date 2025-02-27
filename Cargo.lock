@@ -8494,6 +8494,7 @@ dependencies = [
  "common-base",
  "common-error",
  "datanode",
+ "flow",
  "frontend",
  "meta-srv",
  "serde",
