@@ -14,6 +14,7 @@
 
 use api::v1::flow::FlowRequestHeader;
 use async_trait::async_trait;
+use chrono::Utc;
 use common_error::ext::BoxedError;
 use common_function::handlers::FlowServiceHandler;
 use common_meta::key::flow::{flow_info, FlowMetadataManagerRef};
@@ -136,6 +137,14 @@ impl FlowServiceOperator {
                 final_result = Some(res);
             }
         }
+
+        self.flow_metadata_manager
+            .flow_info_manager()
+            .update_last_execution_time(id, Utc::now())
+            .await
+            .map_err(BoxedError::new)
+            .context(common_query::error::ExecuteSnafu)?;
+
         final_result.context(common_query::error::FlownodeNotFoundSnafu)
     }
 }

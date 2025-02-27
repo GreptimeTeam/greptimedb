@@ -31,7 +31,7 @@ use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::value::Value;
 use datatypes::vectors::{
-    DateTimeVector, DateTimeVectorBuilder, Int64VectorBuilder, StringVectorBuilder,
+    DateTimeVectorBuilder, Int64VectorBuilder, StringVectorBuilder,
     UInt32VectorBuilder, UInt64VectorBuilder, VectorRef,
 };
 use futures::TryStreamExt;
@@ -61,8 +61,8 @@ pub const SOURCE_TABLE_IDS: &str = "source_table_ids";
 pub const SINK_TABLE_NAME: &str = "sink_table_name";
 pub const FLOWNODE_IDS: &str = "flownode_ids";
 pub const OPTIONS: &str = "options";
-pub const CREATE_TIME: &str = "create_time";
-pub const UPDATE_TIME: &str = "update_time";
+pub const CREATED_TIME: &str = "created_time";
+pub const UPDATED_TIME: &str = "updated_time";
 pub const LAST_EXECUTION_TIME: &str = "last_execution_time";
 pub const SOURCE_TABLE_NAMES: &str = "source_table_names";
 
@@ -105,8 +105,8 @@ impl InformationSchemaFlows {
                 (SINK_TABLE_NAME, CDT::string_datatype(), false),
                 (FLOWNODE_IDS, CDT::string_datatype(), true),
                 (OPTIONS, CDT::string_datatype(), true),
-                (CREATE_TIME, CDT::datetime_datatype(), false),
-                (UPDATE_TIME, CDT::datetime_datatype(), false),
+                (CREATED_TIME, CDT::datetime_datatype(), false),
+                (UPDATED_TIME, CDT::datetime_datatype(), false),
                 (LAST_EXECUTION_TIME, CDT::datetime_datatype(), true),
                 (SOURCE_TABLE_NAMES, CDT::string_datatype(), true),
             ]
@@ -180,8 +180,8 @@ struct InformationSchemaFlowsBuilder {
     sink_table_names: StringVectorBuilder,
     flownode_id_groups: StringVectorBuilder,
     option_groups: StringVectorBuilder,
-    create_time: DateTimeVectorBuilder,
-    update_time: DateTimeVectorBuilder,
+    created_time: DateTimeVectorBuilder,
+    updated_time: DateTimeVectorBuilder,
     last_execution_time: DateTimeVectorBuilder,
     source_table_names: StringVectorBuilder,
 }
@@ -210,8 +210,8 @@ impl InformationSchemaFlowsBuilder {
             sink_table_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             flownode_id_groups: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             option_groups: StringVectorBuilder::with_capacity(INIT_CAPACITY),
-            create_time: DateTimeVectorBuilder::with_capacity(INIT_CAPACITY),
-            update_time: DateTimeVectorBuilder::with_capacity(INIT_CAPACITY),
+            created_time: DateTimeVectorBuilder::with_capacity(INIT_CAPACITY),
+            updated_time: DateTimeVectorBuilder::with_capacity(INIT_CAPACITY),
             last_execution_time: DateTimeVectorBuilder::with_capacity(INIT_CAPACITY),
             source_table_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
         }
@@ -308,11 +308,20 @@ impl InformationSchemaFlowsBuilder {
                     input: format!("{:?}", flow_info.options()),
                 },
             )?));
-        self.create_time.push(Some(flow_info.create_time()));
-        self.update_time.push(Some(flow_info.update_time()));
-        self.last_execution_time
-            .push(flow_info.last_execution_time().map(DateTime::from));
-        self.source_table_names.push(Some("todo by jia"));
+        self.created_time
+            .push(Some(flow_info.created_time().timestamp_millis().into()));
+        self.updated_time
+            .push(Some(flow_info.updated_time().timestamp_millis().into()));
+        self.last_execution_time.push(
+            flow_info
+                .last_execution_time()
+                .map(|t| t.timestamp_millis().into()),
+        );
+        self.source_table_names.push(Some(
+            &serde_json::to_string(flow_info.source_table_names()).context(JsonSnafu {
+                input: format!("{:?}", flow_info.source_table_names()),
+            })?,
+        ));
         Ok(())
     }
 
@@ -329,8 +338,8 @@ impl InformationSchemaFlowsBuilder {
             Arc::new(self.sink_table_names.finish()),
             Arc::new(self.flownode_id_groups.finish()),
             Arc::new(self.option_groups.finish()),
-            Arc::new(self.create_time.finish()),
-            Arc::new(self.update_time.finish()),
+            Arc::new(self.created_time.finish()),
+            Arc::new(self.updated_time.finish()),
             Arc::new(self.last_execution_time.finish()),
             Arc::new(self.source_table_names.finish()),
         ];

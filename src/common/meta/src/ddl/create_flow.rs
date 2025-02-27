@@ -432,7 +432,14 @@ impl From<&CreateFlowData> for (FlowInfoValue, Vec<(FlowPartitionId, FlowRouteVa
         let flow_type = value.flow_type.unwrap_or_default().to_string();
         options.insert("flow_type".to_string(), flow_type);
 
-        let flow_info = FlowInfoValue {
+        let mut create_time = chrono::Utc::now();
+        if let Some(prev_flow_value) = value.prev_flow_info_value.as_ref()
+            && value.task.or_replace
+        {
+            create_time = prev_flow_value.get_inner_ref().created_time;
+        }
+
+        let flow_info: FlowInfoValue = FlowInfoValue {
             source_table_ids: value.source_table_ids.clone(),
             sink_table_name,
             flownode_ids,
@@ -442,7 +449,7 @@ impl From<&CreateFlowData> for (FlowInfoValue, Vec<(FlowPartitionId, FlowRouteVa
             expire_after,
             comment,
             options,
-            created_time: chrono::Utc::now(),
+            created_time: create_time,
             updated_time: chrono::Utc::now(),
             last_execution_time: None,
         };
