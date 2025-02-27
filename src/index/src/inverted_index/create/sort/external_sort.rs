@@ -128,7 +128,7 @@ impl Sorter for ExternalSorter {
 
         Ok(SortOutput {
             segment_null_bitmap: mem::take(&mut self.segment_null_bitmap),
-            sorted_stream: Box::new(tree_nodes.pop_front().unwrap()),
+            sorted_stream: tree_nodes.pop_front().unwrap(),
             total_row_count: self.total_row_count,
         })
     }
@@ -181,7 +181,7 @@ impl ExternalSorter {
     }
 
     /// Pushes the non-null values to the values buffer and sets the bits within
-    /// the specified range in the given RoaringBitmap to true.
+    /// the specified range in the given bitmap to true.
     /// Returns the memory usage difference of the buffer after the operation.
     fn push_not_null(
         &mut self,
@@ -349,7 +349,6 @@ mod tests {
             mut sorted_stream,
             total_row_count,
         } = sorter.output().await.unwrap();
-
         assert_eq!(total_row_count, row_count);
         let n = sorted_result.remove(&None);
         assert_eq!(
