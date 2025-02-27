@@ -52,7 +52,7 @@ use promql::extension_plan::{
 use promql::functions::{
     AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, HoltWinters, IDelta,
     Increase, LastOverTime, MaxOverTime, MinOverTime, PredictLinear, PresentOverTime,
-    QuantileOverTime, Rate, Resets, StddevOverTime, StdvarOverTime, SumOverTime,
+    QuantileOverTime, Rate, Resets, Round, StddevOverTime, StdvarOverTime, SumOverTime,
 };
 use promql_parser::label::{MatchOp, Matcher, Matchers, METRIC_NAME};
 use promql_parser::parser::token::TokenType;
@@ -200,10 +200,9 @@ impl PromPlanner {
             PromExpr::Paren(ParenExpr { expr }) => {
                 self.prom_expr_to_plan(expr, session_state).await?
             }
-            PromExpr::Subquery(SubqueryExpr { .. }) => UnsupportedExprSnafu {
-                name: "Prom Subquery",
+            PromExpr::Subquery(expr) => {
+                self.prom_subquery_expr_to_plan(session_state, expr).await?
             }
-            .fail()?,
             PromExpr::NumberLiteral(lit) => self.prom_number_lit_to_plan(lit)?,
             PromExpr::StringLiteral(lit) => self.prom_string_lit_to_plan(lit)?,
             PromExpr::VectorSelector(selector) => {
@@ -216,6 +215,48 @@ impl PromPlanner {
             PromExpr::Extension(expr) => self.prom_ext_expr_to_plan(session_state, expr).await?,
         };
         Ok(res)
+    }
+
+    async fn prom_subquery_expr_to_plan(
+        &mut self,
+        session_state: &SessionState,
+        subquery_expr: &SubqueryExpr,
+    ) -> Result<LogicalPlan> {
+        let SubqueryExpr {
+            expr, range, step, ..
+        } = subquery_expr;
+
+        let current_interval = self.ctx.interval;
+        if let Some(step) = step {
+            self.ctx.interval = step.as_millis() as _;
+        }
+        let current_start = self.ctx.start;
+        self.ctx.start -= range.as_millis() as i64 - self.ctx.interval;
+        let input = self.prom_expr_to_plan(expr, session_state).await?;
+        self.ctx.interval = current_interval;
+        self.ctx.start = current_start;
+
+        ensure!(!range.is_zero(), ZeroRangeSelectorSnafu);
+        let range_ms = range.as_millis() as _;
+        self.ctx.range = Some(range_ms);
+
+        let manipulate = RangeManipulate::new(
+            self.ctx.start,
+            self.ctx.end,
+            self.ctx.interval,
+            range_ms,
+            self.ctx
+                .time_index_column
+                .clone()
+                .expect("time index should be set in `setup_context`"),
+            self.ctx.field_columns.clone(),
+            input,
+        )
+        .context(DataFusionPlanningSnafu)?;
+
+        Ok(LogicalPlan::Extension(Extension {
+            node: Arc::new(manipulate),
+        }))
     }
 
     async fn prom_aggr_expr_to_plan(
@@ -1468,6 +1509,20 @@ impl PromPlanner {
 
                 ScalarFunc::GeneratedExpr
             }
+            "round" => {
+                let nearest = match other_input_exprs.pop_front() {
+                    Some(DfExpr::Literal(ScalarValue::Float64(Some(t)))) => t,
+                    Some(DfExpr::Literal(ScalarValue::Int64(Some(t)))) => t as f64,
+                    None => 0.0,
+                    other => UnexpectedPlanExprSnafu {
+                        desc: format!("expected f64 literal as t, but found {:?}", other),
+                    }
+                    .fail()?,
+                };
+
+                ScalarFunc::DataFusionUdf(Arc::new(Round::scalar_udf(nearest)))
+            }
+
             _ => {
                 if let Some(f) = session_state.scalar_functions().get(func.name) {
                     ScalarFunc::DataFusionBuiltin(f.clone())
@@ -1674,7 +1729,7 @@ impl PromPlanner {
         ensure!(
             !src_labels.is_empty(),
             FunctionInvalidArgumentSnafu {
-                fn_name: "label_join",
+                fn_name: "label_join"
             }
         );
 
