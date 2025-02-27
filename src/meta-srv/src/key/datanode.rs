@@ -145,6 +145,9 @@ mod tests {
         assert_eq!(new_key, key);
     }
 
+    // add test for DatanodeLeaseKey compatibility when cluster_id is not present in serialized data,   AI!
+
+
     #[test]
     fn test_lease_key_to_stat_key() {
         let lease_key = DatanodeLeaseKey { node_id: 101 };
