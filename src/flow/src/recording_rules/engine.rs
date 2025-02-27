@@ -38,8 +38,8 @@ use crate::recording_rules::{find_plan_time_window_bound, sql_to_df_plan};
 use crate::Error;
 
 /// TODO(discord9): make those constants configurable
-/// The default rule engine query timeout is 5 minutes
-pub const DEFAULT_RULE_ENGINE_QUERY_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+/// The default rule engine query timeout is 10 minutes
+pub const DEFAULT_RULE_ENGINE_QUERY_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 /// will output a warn log for any query that runs for more that 1 minutes, and also every 1 minutes when that query is still running
 pub const SLOW_QUERY_THRESHOLD: Duration = Duration::from_secs(60);
