@@ -1693,6 +1693,7 @@ dependencies = [
  "humantime",
  "meta-client",
  "nu-ansi-term",
+ "opendal",
  "query",
  "rand",
  "reqwest",
