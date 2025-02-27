@@ -19,7 +19,7 @@ use api::v1::meta::Peer as PbPeer;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Error;
-use crate::{ClusterId, DatanodeId, FlownodeId};
+use crate::{DatanodeId, FlownodeId};
 
 #[derive(Debug, Default, Clone, Hash, Eq, PartialEq, Deserialize, Serialize)]
 pub struct Peer {
@@ -72,8 +72,8 @@ impl Display for Peer {
 /// can query peer given a node id
 #[async_trait::async_trait]
 pub trait PeerLookupService {
-    async fn datanode(&self, cluster_id: ClusterId, id: DatanodeId) -> Result<Option<Peer>, Error>;
-    async fn flownode(&self, cluster_id: ClusterId, id: FlownodeId) -> Result<Option<Peer>, Error>;
+    async fn datanode(&self, id: DatanodeId) -> Result<Option<Peer>, Error>;
+    async fn flownode(&self, id: FlownodeId) -> Result<Option<Peer>, Error>;
 }
 
 pub type PeerLookupServiceRef = Arc<dyn PeerLookupService + Send + Sync>;

@@ -25,19 +25,12 @@ use serde::{Deserialize, Serialize};
 use crate::error;
 use crate::error::Result;
 
-pub type Namespace = u64;
-
 #[async_trait::async_trait]
 pub trait Selector: Send + Sync {
     type Context;
     type Output;
 
-    async fn select(
-        &self,
-        ns: Namespace,
-        ctx: &Self::Context,
-        opts: SelectorOptions,
-    ) -> Result<Self::Output>;
+    async fn select(&self, ctx: &Self::Context, opts: SelectorOptions) -> Result<Self::Output>;
 }
 
 #[derive(Debug)]

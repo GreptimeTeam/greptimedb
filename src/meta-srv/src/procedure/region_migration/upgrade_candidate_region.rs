@@ -238,7 +238,6 @@ mod tests {
             from_peer: Peer::empty(1),
             to_peer: Peer::empty(2),
             region_id: RegionId::new(1024, 1),
-            cluster_id: 0,
             timeout: Duration::from_millis(1000),
         }
     }

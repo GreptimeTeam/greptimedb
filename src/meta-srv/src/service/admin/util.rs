@@ -12,24 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 use tonic::codegen::http;
 
-use crate::error::{self, MissingRequiredParameterSnafu, ParseNumSnafu, Result};
-
-pub fn extract_cluster_id(params: &HashMap<String, String>) -> Result<u64> {
-    params
-        .get("cluster_id")
-        .map(|id| id.parse::<u64>())
-        .context(MissingRequiredParameterSnafu {
-            param: "cluster_id",
-        })?
-        .context(ParseNumSnafu {
-            err_msg: "`cluster_id` is not a valid number",
-        })
-}
+use crate::error::{self, Result};
 
 pub fn to_text_response(text: &str) -> Result<http::Response<String>> {
     http::Response::builder()

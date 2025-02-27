@@ -32,11 +32,6 @@ impl ResponseHeader {
     }
 
     #[inline]
-    pub fn cluster_id(&self) -> u64 {
-        self.0.cluster_id
-    }
-
-    #[inline]
     pub fn error_code(&self) -> i32 {
         match self.0.error.as_ref() {
             Some(err) => err.code,
@@ -143,7 +138,6 @@ mod tests {
     fn test_response_header_trans() {
         let pb_header = PbResponseHeader {
             protocol_version: 101,
-            cluster_id: 1,
             error: Some(Error {
                 code: 100,
                 err_msg: "test".to_string(),
@@ -152,7 +146,6 @@ mod tests {
 
         let header = ResponseHeader(pb_header);
         assert_eq!(101, header.protocol_version());
-        assert_eq!(1, header.cluster_id());
         assert_eq!(100, header.error_code());
         assert_eq!("test".to_string(), header.error_msg());
     }

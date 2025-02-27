@@ -235,7 +235,6 @@ mod tests {
         Instruction::CloseRegion(RegionIdent {
             table_id: region_id.table_id(),
             region_number: region_id.region_number(),
-            cluster_id: 1,
             datanode_id: 2,
             engine: MITO_ENGINE_NAME.to_string(),
         })
@@ -246,7 +245,6 @@ mod tests {
             RegionIdent {
                 table_id: region_id.table_id(),
                 region_number: region_id.region_number(),
-                cluster_id: 1,
                 datanode_id: 2,
                 engine: MITO_ENGINE_NAME.to_string(),
             },

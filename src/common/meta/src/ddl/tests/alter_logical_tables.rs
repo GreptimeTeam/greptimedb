@@ -86,7 +86,6 @@ fn make_alter_logical_table_rename_task(
 async fn test_on_prepare_check_schema() {
     let node_manager = Arc::new(MockDatanodeManager::new(()));
     let ddl_context = new_ddl_context(node_manager);
-    let cluster_id = 1;
     let tasks = vec![
         make_alter_logical_table_add_column_task(
             Some("schema1"),
@@ -100,8 +99,7 @@ async fn test_on_prepare_check_schema() {
         ),
     ];
     let physical_table_id = 1024u32;
-    let mut procedure =
-        AlterLogicalTablesProcedure::new(cluster_id, tasks, physical_table_id, ddl_context);
+    let mut procedure = AlterLogicalTablesProcedure::new(tasks, physical_table_id, ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err, AlterLogicalTablesInvalidArguments { .. });
 }
@@ -110,50 +108,46 @@ async fn test_on_prepare_check_schema() {
 async fn test_on_prepare_check_alter_kind() {
     let node_manager = Arc::new(MockDatanodeManager::new(()));
     let ddl_context = new_ddl_context(node_manager);
-    let cluster_id = 1;
     let tasks = vec![make_alter_logical_table_rename_task(
         "schema1",
         "table1",
         "new_table1",
     )];
     let physical_table_id = 1024u32;
-    let mut procedure =
-        AlterLogicalTablesProcedure::new(cluster_id, tasks, physical_table_id, ddl_context);
+    let mut procedure = AlterLogicalTablesProcedure::new(tasks, physical_table_id, ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err, AlterLogicalTablesInvalidArguments { .. });
 }
 
 #[tokio::test]
 async fn test_on_prepare_different_physical_table() {
-    let cluster_id = 1;
     let node_manager = Arc::new(MockDatanodeManager::new(()));
     let ddl_context = new_ddl_context(node_manager);
 
-    let phy1_id = create_physical_table(&ddl_context, cluster_id, "phy1").await;
-    create_logical_table(ddl_context.clone(), cluster_id, phy1_id, "table1").await;
-    let phy2_id = create_physical_table(&ddl_context, cluster_id, "phy2").await;
-    create_logical_table(ddl_context.clone(), cluster_id, phy2_id, "table2").await;
+    let phy1_id = create_physical_table(&ddl_context, "phy1").await;
+    create_logical_table(ddl_context.clone(), phy1_id, "table1").await;
+    let phy2_id = create_physical_table(&ddl_context, "phy2").await;
+    create_logical_table(ddl_context.clone(), phy2_id, "table2").await;
 
     let tasks = vec![
         make_alter_logical_table_add_column_task(None, "table1", vec!["column1".to_string()]),
         make_alter_logical_table_add_column_task(None, "table2", vec!["column2".to_string()]),
     ];
 
-    let mut procedure = AlterLogicalTablesProcedure::new(cluster_id, tasks, phy1_id, ddl_context);
+    let mut procedure = AlterLogicalTablesProcedure::new(tasks, phy1_id, ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err, AlterLogicalTablesInvalidArguments { .. });
 }
 
 #[tokio::test]
 async fn test_on_prepare_logical_table_not_exists() {
-    let cluster_id = 1;
     let node_manager = Arc::new(MockDatanodeManager::new(()));
     let ddl_context = new_ddl_context(node_manager);
 
     // Creates physical table
-    let phy_id = create_physical_table(&ddl_context, cluster_id, "phy").await;
+    let phy_id = create_physical_table(&ddl_context, "phy").await;
     // Creates 3 logical tables
-    create_logical_table(ddl_context.clone(), cluster_id, phy_id, "table1").await;
+    create_logical_table(ddl_context.clone(), phy_id, "table1").await;
 
     let tasks = vec![
         make_alter_logical_table_add_column_task(None, "table1", vec!["column1".to_string()]),
@@ -161,23 +155,22 @@ async fn test_on_prepare_logical_table_not_exists() {
         make_alter_logical_table_add_column_task(None, "table2", vec!["column2".to_string()]),
     ];
 
-    let mut procedure = AlterLogicalTablesProcedure::new(cluster_id, tasks, phy_id, ddl_context);
+    let mut procedure = AlterLogicalTablesProcedure::new(tasks, phy_id, ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err, TableNotFound { .. });
 }
 
 #[tokio::test]
 async fn test_on_prepare() {
-    let cluster_id = 1;
     let node_manager = Arc::new(MockDatanodeManager::new(()));
     let ddl_context = new_ddl_context(node_manager);
 
     // Creates physical table
-    let phy_id = create_physical_table(&ddl_context, cluster_id, "phy").await;
+    let phy_id = create_physical_table(&ddl_context, "phy").await;
     // Creates 3 logical tables
-    create_logical_table(ddl_context.clone(), cluster_id, phy_id, "table1").await;
-    create_logical_table(ddl_context.clone(), cluster_id, phy_id, "table2").await;
-    create_logical_table(ddl_context.clone(), cluster_id, phy_id, "table3").await;
+    create_logical_table(ddl_context.clone(), phy_id, "table1").await;
+    create_logical_table(ddl_context.clone(), phy_id, "table2").await;
+    create_logical_table(ddl_context.clone(), phy_id, "table3").await;
 
     let tasks = vec![
         make_alter_logical_table_add_column_task(None, "table1", vec!["column1".to_string()]),
@@ -185,25 +178,24 @@ async fn test_on_prepare() {
         make_alter_logical_table_add_column_task(None, "table3", vec!["column3".to_string()]),
     ];
 
-    let mut procedure = AlterLogicalTablesProcedure::new(cluster_id, tasks, phy_id, ddl_context);
+    let mut procedure = AlterLogicalTablesProcedure::new(tasks, phy_id, ddl_context);
     let result = procedure.on_prepare().await;
     assert_matches!(result, Ok(Status::Executing { persist: true }));
 }
 
 #[tokio::test]
 async fn test_on_update_metadata() {
-    let cluster_id = 1;
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
     let ddl_context = new_ddl_context(node_manager);
 
     // Creates physical table
-    let phy_id = create_physical_table(&ddl_context, cluster_id, "phy").await;
+    let phy_id = create_physical_table(&ddl_context, "phy").await;
     // Creates 3 logical tables
-    create_logical_table(ddl_context.clone(), cluster_id, phy_id, "table1").await;
-    create_logical_table(ddl_context.clone(), cluster_id, phy_id, "table2").await;
-    create_logical_table(ddl_context.clone(), cluster_id, phy_id, "table3").await;
-    create_logical_table(ddl_context.clone(), cluster_id, phy_id, "table4").await;
-    create_logical_table(ddl_context.clone(), cluster_id, phy_id, "table5").await;
+    create_logical_table(ddl_context.clone(), phy_id, "table1").await;
+    create_logical_table(ddl_context.clone(), phy_id, "table2").await;
+    create_logical_table(ddl_context.clone(), phy_id, "table3").await;
+    create_logical_table(ddl_context.clone(), phy_id, "table4").await;
+    create_logical_table(ddl_context.clone(), phy_id, "table5").await;
 
     let tasks = vec![
         make_alter_logical_table_add_column_task(None, "table1", vec!["new_col".to_string()]),
@@ -211,7 +203,7 @@ async fn test_on_update_metadata() {
         make_alter_logical_table_add_column_task(None, "table3", vec!["new_col".to_string()]),
     ];
 
-    let mut procedure = AlterLogicalTablesProcedure::new(cluster_id, tasks, phy_id, ddl_context);
+    let mut procedure = AlterLogicalTablesProcedure::new(tasks, phy_id, ddl_context);
     let mut status = procedure.on_prepare().await.unwrap();
     assert_matches!(status, Status::Executing { persist: true });
 
@@ -229,23 +221,21 @@ async fn test_on_update_metadata() {
 
 #[tokio::test]
 async fn test_on_part_duplicate_alter_request() {
-    let cluster_id = 1;
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
     let ddl_context = new_ddl_context(node_manager);
 
     // Creates physical table
-    let phy_id = create_physical_table(&ddl_context, cluster_id, "phy").await;
+    let phy_id = create_physical_table(&ddl_context, "phy").await;
     // Creates 3 logical tables
-    create_logical_table(ddl_context.clone(), cluster_id, phy_id, "table1").await;
-    create_logical_table(ddl_context.clone(), cluster_id, phy_id, "table2").await;
+    create_logical_table(ddl_context.clone(), phy_id, "table1").await;
+    create_logical_table(ddl_context.clone(), phy_id, "table2").await;
 
     let tasks = vec![
         make_alter_logical_table_add_column_task(None, "table1", vec!["col_0".to_string()]),
         make_alter_logical_table_add_column_task(None, "table2", vec!["col_0".to_string()]),
     ];
 
-    let mut procedure =
-        AlterLogicalTablesProcedure::new(cluster_id, tasks, phy_id, ddl_context.clone());
+    let mut procedure = AlterLogicalTablesProcedure::new(tasks, phy_id, ddl_context.clone());
     let mut status = procedure.on_prepare().await.unwrap();
     assert_matches!(status, Status::Executing { persist: true });
 
@@ -278,8 +268,7 @@ async fn test_on_part_duplicate_alter_request() {
         ),
     ];
 
-    let mut procedure =
-        AlterLogicalTablesProcedure::new(cluster_id, tasks, phy_id, ddl_context.clone());
+    let mut procedure = AlterLogicalTablesProcedure::new(tasks, phy_id, ddl_context.clone());
     let mut status = procedure.on_prepare().await.unwrap();
     assert_matches!(status, Status::Executing { persist: true });
 

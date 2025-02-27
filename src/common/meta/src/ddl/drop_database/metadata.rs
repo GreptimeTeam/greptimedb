@@ -118,7 +118,6 @@ mod tests {
             .unwrap();
         let mut state = DropDatabaseRemoveMetadata;
         let mut ctx = DropDatabaseContext {
-            cluster_id: 0,
             catalog: "foo".to_string(),
             schema: "bar".to_string(),
             drop_if_exists: true,
@@ -145,7 +144,6 @@ mod tests {
         // Schema not exists
         let mut state = DropDatabaseRemoveMetadata;
         let mut ctx = DropDatabaseContext {
-            cluster_id: 0,
             catalog: "foo".to_string(),
             schema: "bar".to_string(),
             drop_if_exists: true,

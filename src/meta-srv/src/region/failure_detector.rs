@@ -129,7 +129,7 @@ mod tests {
     #[test]
     fn test_default_failure_detector_container() {
         let container = RegionFailureDetector::new(Default::default());
-        let detecting_region = (0, 2, RegionId::new(1, 1));
+        let detecting_region = (2, RegionId::new(1, 1));
         let _ = container.region_failure_detector(detecting_region);
         assert!(container.contains(&detecting_region));
 

@@ -17,7 +17,6 @@ use std::sync::Arc;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{Region, RegionRoute};
-use common_meta::ClusterId;
 use common_time::util as time_util;
 
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
@@ -63,15 +62,10 @@ pub(crate) fn create_selector_context() -> SelectorContext {
     }
 }
 
-pub(crate) async fn put_datanodes(
-    cluster_id: ClusterId,
-    meta_peer_client: &MetaPeerClientRef,
-    datanodes: Vec<Peer>,
-) {
+pub(crate) async fn put_datanodes(meta_peer_client: &MetaPeerClientRef, datanodes: Vec<Peer>) {
     let backend = meta_peer_client.memory_backend();
     for datanode in datanodes {
         let lease_key = DatanodeLeaseKey {
-            cluster_id,
             node_id: datanode.id,
         };
         let lease_value = LeaseValue {

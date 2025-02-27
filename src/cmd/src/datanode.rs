@@ -287,7 +287,6 @@ impl StartCommand {
             .await
             .context(StartDatanodeSnafu)?;
 
-        let cluster_id = 0; // TODO(hl): read from config
         let member_id = opts
             .node_id
             .context(MissingConfigSnafu { msg: "'node_id'" })?;
@@ -296,13 +295,10 @@ impl StartCommand {
             msg: "'meta_client_options'",
         })?;
 
-        let meta_client = meta_client::create_meta_client(
-            cluster_id,
-            MetaClientType::Datanode { member_id },
-            meta_config,
-        )
-        .await
-        .context(MetaClientInitSnafu)?;
+        let meta_client =
+            meta_client::create_meta_client(MetaClientType::Datanode { member_id }, meta_config)
+                .await
+                .context(MetaClientInitSnafu)?;
 
         let meta_backend = Arc::new(MetaKvBackend {
             client: meta_client.clone(),

@@ -217,11 +217,10 @@ mod tests {
     async fn test_next_without_logical_tables() {
         let node_manager = Arc::new(MockDatanodeManager::new(()));
         let ddl_context = new_ddl_context(node_manager);
-        create_physical_table(&ddl_context, 0, "phy").await;
+        create_physical_table(&ddl_context, "phy").await;
         // It always starts from Logical
         let mut state = DropDatabaseCursor::new(DropTableTarget::Logical);
         let mut ctx = DropDatabaseContext {
-            cluster_id: 0,
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             drop_if_exists: false,
@@ -252,12 +251,11 @@ mod tests {
     async fn test_next_with_logical_tables() {
         let node_manager = Arc::new(MockDatanodeManager::new(()));
         let ddl_context = new_ddl_context(node_manager);
-        let physical_table_id = create_physical_table(&ddl_context, 0, "phy").await;
-        create_logical_table(ddl_context.clone(), 0, physical_table_id, "metric_0").await;
+        let physical_table_id = create_physical_table(&ddl_context, "phy").await;
+        create_logical_table(ddl_context.clone(), physical_table_id, "metric_0").await;
         // It always starts from Logical
         let mut state = DropDatabaseCursor::new(DropTableTarget::Logical);
         let mut ctx = DropDatabaseContext {
-            cluster_id: 0,
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             drop_if_exists: false,
@@ -286,7 +284,6 @@ mod tests {
         let ddl_context = new_ddl_context(node_manager);
         let mut state = DropDatabaseCursor::new(DropTableTarget::Physical);
         let mut ctx = DropDatabaseContext {
-            cluster_id: 0,
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             drop_if_exists: false,

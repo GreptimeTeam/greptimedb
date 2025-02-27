@@ -97,7 +97,6 @@ fn create_table_task(table_name: Option<&str>) -> CreateTableTask {
 #[test]
 fn test_region_request_builder() {
     let mut procedure = CreateTableProcedure::new(
-        1,
         create_table_task(None),
         test_data::new_ddl_context(Arc::new(NodeClients::default())),
     );
@@ -192,7 +191,6 @@ async fn test_on_datanode_create_regions() {
     let node_manager = new_node_manager(&region_server, &region_routes).await;
 
     let mut procedure = CreateTableProcedure::new(
-        1,
         create_table_task(None),
         test_data::new_ddl_context(node_manager),
     );
@@ -260,7 +258,7 @@ async fn test_on_datanode_create_logical_regions() {
         .0;
     let _ = kv_backend.txn(physical_route_txn).await.unwrap();
     let mut procedure =
-        CreateLogicalTablesProcedure::new(1, vec![task1, task2, task3], physical_table_id, ctx);
+        CreateLogicalTablesProcedure::new(vec![task1, task2, task3], physical_table_id, ctx);
 
     let expected_created_regions = Arc::new(Mutex::new(HashMap::from([(1, 3), (2, 3), (3, 3)])));
 

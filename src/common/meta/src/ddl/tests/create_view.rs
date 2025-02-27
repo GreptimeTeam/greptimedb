@@ -97,7 +97,6 @@ pub(crate) fn test_create_view_task(name: &str) -> CreateViewTask {
 async fn test_on_prepare_view_exists_err() {
     let node_manager = Arc::new(MockDatanodeManager::new(()));
     let ddl_context = new_ddl_context(node_manager);
-    let cluster_id = 1;
     let task = test_create_view_task("foo");
     assert!(!task.create_view.create_if_not_exists);
     // Puts a value to table name key.
@@ -113,7 +112,7 @@ async fn test_on_prepare_view_exists_err() {
         )
         .await
         .unwrap();
-    let mut procedure = CreateViewProcedure::new(cluster_id, task, ddl_context);
+    let mut procedure = CreateViewProcedure::new(task, ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err, Error::ViewAlreadyExists { .. });
     assert_eq!(err.status_code(), StatusCode::TableAlreadyExists);
@@ -123,7 +122,6 @@ async fn test_on_prepare_view_exists_err() {
 async fn test_on_prepare_with_create_if_view_exists() {
     let node_manager = Arc::new(MockDatanodeManager::new(()));
     let ddl_context = new_ddl_context(node_manager);
-    let cluster_id = 1;
     let mut task = test_create_view_task("foo");
     task.create_view.create_if_not_exists = true;
     task.view_info.ident.table_id = 1024;
@@ -140,7 +138,7 @@ async fn test_on_prepare_with_create_if_view_exists() {
         )
         .await
         .unwrap();
-    let mut procedure = CreateViewProcedure::new(cluster_id, task, ddl_context);
+    let mut procedure = CreateViewProcedure::new(task, ddl_context);
     let status = procedure.on_prepare().await.unwrap();
     assert_matches!(status, Status::Done { output: Some(..) });
     let table_id = *status.downcast_output_ref::<u32>().unwrap();
@@ -151,10 +149,9 @@ async fn test_on_prepare_with_create_if_view_exists() {
 async fn test_on_prepare_without_create_if_table_exists() {
     let node_manager = Arc::new(MockDatanodeManager::new(()));
     let ddl_context = new_ddl_context(node_manager);
-    let cluster_id = 1;
     let mut task = test_create_view_task("foo");
     task.create_view.create_if_not_exists = true;
-    let mut procedure = CreateViewProcedure::new(cluster_id, task, ddl_context);
+    let mut procedure = CreateViewProcedure::new(task, ddl_context);
     let status = procedure.on_prepare().await.unwrap();
     assert_matches!(status, Status::Executing { persist: true });
     assert_eq!(procedure.view_id(), 1024);
@@ -165,10 +162,9 @@ async fn test_on_create_metadata() {
     common_telemetry::init_default_ut_logging();
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
     let ddl_context = new_ddl_context(node_manager);
-    let cluster_id = 1;
     let task = test_create_view_task("foo");
     assert!(!task.create_view.create_if_not_exists);
-    let mut procedure = CreateViewProcedure::new(cluster_id, task, ddl_context);
+    let mut procedure = CreateViewProcedure::new(task, ddl_context);
     procedure.on_prepare().await.unwrap();
     let ctx = ProcedureContext {
         procedure_id: ProcedureId::random(),
@@ -185,10 +181,9 @@ async fn test_replace_view_metadata() {
     common_telemetry::init_default_ut_logging();
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
     let ddl_context = new_ddl_context(node_manager.clone());
-    let cluster_id = 1;
     let task = test_create_view_task("foo");
     assert!(!task.create_view.create_if_not_exists);
-    let mut procedure = CreateViewProcedure::new(cluster_id, task.clone(), ddl_context.clone());
+    let mut procedure = CreateViewProcedure::new(task.clone(), ddl_context.clone());
     procedure.on_prepare().await.unwrap();
     let ctx = ProcedureContext {
         procedure_id: ProcedureId::random(),
@@ -213,7 +208,7 @@ async fn test_replace_view_metadata() {
     let mut task = test_create_view_task("foo");
     // The view already exists, prepare should fail
     {
-        let mut procedure = CreateViewProcedure::new(cluster_id, task.clone(), ddl_context.clone());
+        let mut procedure = CreateViewProcedure::new(task.clone(), ddl_context.clone());
         let err = procedure.on_prepare().await.unwrap_err();
         assert_matches!(err, Error::ViewAlreadyExists { .. });
         assert_eq!(err.status_code(), StatusCode::TableAlreadyExists);
@@ -224,7 +219,7 @@ async fn test_replace_view_metadata() {
     task.create_view.logical_plan = vec![4, 5, 6];
     task.create_view.definition = "new_definition".to_string();
 
-    let mut procedure = CreateViewProcedure::new(cluster_id, task, ddl_context.clone());
+    let mut procedure = CreateViewProcedure::new(task, ddl_context.clone());
     procedure.on_prepare().await.unwrap();
     let ctx = ProcedureContext {
         procedure_id: ProcedureId::random(),
@@ -254,12 +249,11 @@ async fn test_replace_table() {
     common_telemetry::init_default_ut_logging();
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
     let ddl_context = new_ddl_context(node_manager.clone());
-    let cluster_id = 1;
 
     {
         // Create a `foo` table.
         let task = test_create_table_task("foo");
-        let mut procedure = CreateTableProcedure::new(cluster_id, task, ddl_context.clone());
+        let mut procedure = CreateTableProcedure::new(task, ddl_context.clone());
         procedure.on_prepare().await.unwrap();
         let ctx = ProcedureContext {
             procedure_id: ProcedureId::random(),
@@ -272,7 +266,7 @@ async fn test_replace_table() {
     // Try to replace a view named `foo` too.
     let mut task = test_create_view_task("foo");
     task.create_view.or_replace = true;
-    let mut procedure = CreateViewProcedure::new(cluster_id, task.clone(), ddl_context.clone());
+    let mut procedure = CreateViewProcedure::new(task.clone(), ddl_context.clone());
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err, Error::TableAlreadyExists { .. });
     assert_eq!(err.status_code(), StatusCode::TableAlreadyExists);

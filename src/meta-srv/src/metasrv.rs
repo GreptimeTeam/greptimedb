@@ -26,6 +26,7 @@ use common_config::Configurable;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::ProcedureExecutorRef;
+use common_meta::distributed_time_constants;
 use common_meta::key::maintenance::MaintenanceModeManagerRef;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackend, ResettableKvBackendRef};
@@ -36,7 +37,6 @@ use common_meta::node_expiry_listener::NodeExpiryListener;
 use common_meta::peer::Peer;
 use common_meta::region_keeper::MemoryRegionKeeperRef;
 use common_meta::wal_options_allocator::WalOptionsAllocatorRef;
-use common_meta::{distributed_time_constants, ClusterId};
 use common_options::datanode::DatanodeClientOptions;
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
@@ -572,13 +572,8 @@ impl Metasrv {
     }
 
     /// Lookup a peer by peer_id, return it only when it's alive.
-    pub(crate) async fn lookup_peer(
-        &self,
-        cluster_id: ClusterId,
-        peer_id: u64,
-    ) -> Result<Option<Peer>> {
+    pub(crate) async fn lookup_peer(&self, peer_id: u64) -> Result<Option<Peer>> {
         lookup_datanode_peer(
-            cluster_id,
             peer_id,
             &self.meta_peer_client,
             distributed_time_constants::DATANODE_LEASE_SECS,

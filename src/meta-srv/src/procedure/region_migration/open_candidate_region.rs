@@ -61,7 +61,6 @@ impl OpenCandidateRegion {
     /// - Datanode Table is not found.
     async fn build_open_region_instruction(&self, ctx: &mut Context) -> Result<Instruction> {
         let pc = &ctx.persistent_ctx;
-        let cluster_id = pc.cluster_id;
         let table_id = pc.region_id.table_id();
         let region_number = pc.region_id.region_number();
         let candidate_id = pc.to_peer.id;
@@ -76,7 +75,6 @@ impl OpenCandidateRegion {
 
         let open_instruction = Instruction::OpenRegion(OpenRegion::new(
             RegionIdent {
-                cluster_id,
                 datanode_id: candidate_id,
                 table_id,
                 region_number,
@@ -208,7 +206,6 @@ mod tests {
     fn new_mock_open_instruction(datanode_id: DatanodeId, region_id: RegionId) -> Instruction {
         Instruction::OpenRegion(OpenRegion {
             region_ident: RegionIdent {
-                cluster_id: 0,
                 datanode_id,
                 table_id: region_id.table_id(),
                 region_number: region_id.region_number(),

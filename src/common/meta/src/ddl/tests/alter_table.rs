@@ -59,7 +59,6 @@ fn test_rename_alter_table_task(table_name: &str, new_table_name: &str) -> Alter
 async fn test_on_prepare_table_exists_err() {
     let node_manager = Arc::new(MockDatanodeManager::new(()));
     let ddl_context = new_ddl_context(node_manager);
-    let cluster_id = 1;
     let task = test_create_table_task("foo", 1024);
     // Puts a value to table name key.
     ddl_context
@@ -73,7 +72,7 @@ async fn test_on_prepare_table_exists_err() {
         .unwrap();
 
     let task = test_rename_alter_table_task("non-exists", "foo");
-    let mut procedure = AlterTableProcedure::new(cluster_id, 1024, task, ddl_context).unwrap();
+    let mut procedure = AlterTableProcedure::new(1024, task, ddl_context).unwrap();
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err.status_code(), StatusCode::TableAlreadyExists);
 }
@@ -82,9 +81,8 @@ async fn test_on_prepare_table_exists_err() {
 async fn test_on_prepare_table_not_exists_err() {
     let node_manager = Arc::new(MockDatanodeManager::new(()));
     let ddl_context = new_ddl_context(node_manager);
-    let cluster_id = 1;
     let task = test_rename_alter_table_task("non-exists", "foo");
-    let mut procedure = AlterTableProcedure::new(cluster_id, 1024, task, ddl_context).unwrap();
+    let mut procedure = AlterTableProcedure::new(1024, task, ddl_context).unwrap();
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err.status_code(), StatusCode::TableNotFound);
 }
@@ -95,7 +93,6 @@ async fn test_on_submit_alter_request() {
     let datanode_handler = DatanodeWatcher(tx);
     let node_manager = Arc::new(MockDatanodeManager::new(datanode_handler));
     let ddl_context = new_ddl_context(node_manager);
-    let cluster_id = 1;
     let table_id = 1024;
     let table_name = "foo";
     let task = test_create_table_task(table_name, table_id);
@@ -144,8 +141,7 @@ async fn test_on_submit_alter_request() {
             })),
         },
     };
-    let mut procedure =
-        AlterTableProcedure::new(cluster_id, table_id, alter_table_task, ddl_context).unwrap();
+    let mut procedure = AlterTableProcedure::new(table_id, alter_table_task, ddl_context).unwrap();
     procedure.on_prepare().await.unwrap();
     procedure.submit_alter_region_requests().await.unwrap();
 
@@ -181,7 +177,6 @@ async fn test_on_submit_alter_request_with_outdated_request() {
         RequestOutdatedErrorDatanodeHandler,
     ));
     let ddl_context = new_ddl_context(node_manager);
-    let cluster_id = 1;
     let table_id = 1024;
     let table_name = "foo";
     let task = test_create_table_task(table_name, table_id);
@@ -230,8 +225,7 @@ async fn test_on_submit_alter_request_with_outdated_request() {
             })),
         },
     };
-    let mut procedure =
-        AlterTableProcedure::new(cluster_id, table_id, alter_table_task, ddl_context).unwrap();
+    let mut procedure = AlterTableProcedure::new(table_id, alter_table_task, ddl_context).unwrap();
     procedure.on_prepare().await.unwrap();
     procedure.submit_alter_region_requests().await.unwrap();
 }
@@ -240,7 +234,6 @@ async fn test_on_submit_alter_request_with_outdated_request() {
 async fn test_on_update_metadata_rename() {
     let node_manager = Arc::new(MockDatanodeManager::new(()));
     let ddl_context = new_ddl_context(node_manager);
-    let cluster_id = 1;
     let table_name = "foo";
     let new_table_name = "bar";
     let table_id = 1024;
@@ -257,8 +250,7 @@ async fn test_on_update_metadata_rename() {
         .unwrap();
 
     let task = test_rename_alter_table_task(table_name, new_table_name);
-    let mut procedure =
-        AlterTableProcedure::new(cluster_id, table_id, task, ddl_context.clone()).unwrap();
+    let mut procedure = AlterTableProcedure::new(table_id, task, ddl_context.clone()).unwrap();
     procedure.on_prepare().await.unwrap();
     procedure.on_update_metadata().await.unwrap();
 
@@ -291,7 +283,6 @@ async fn test_on_update_metadata_rename() {
 async fn test_on_update_metadata_add_columns() {
     let node_manager = Arc::new(MockDatanodeManager::new(()));
     let ddl_context = new_ddl_context(node_manager);
-    let cluster_id = 1;
     let table_name = "foo";
     let table_id = 1024;
     let task = test_create_table_task(table_name, table_id);
@@ -335,8 +326,7 @@ async fn test_on_update_metadata_add_columns() {
             })),
         },
     };
-    let mut procedure =
-        AlterTableProcedure::new(cluster_id, table_id, task, ddl_context.clone()).unwrap();
+    let mut procedure = AlterTableProcedure::new(table_id, task, ddl_context.clone()).unwrap();
     procedure.on_prepare().await.unwrap();
     procedure.submit_alter_region_requests().await.unwrap();
     procedure.on_update_metadata().await.unwrap();
@@ -361,7 +351,6 @@ async fn test_on_update_metadata_add_columns() {
 async fn test_on_update_table_options() {
     let node_manager = Arc::new(MockDatanodeManager::new(()));
     let ddl_context = new_ddl_context(node_manager);
-    let cluster_id = 1;
     let table_name = "foo";
     let table_id = 1024;
     let task = test_create_table_task(table_name, table_id);
@@ -398,8 +387,7 @@ async fn test_on_update_table_options() {
             })),
         },
     };
-    let mut procedure =
-        AlterTableProcedure::new(cluster_id, table_id, task, ddl_context.clone()).unwrap();
+    let mut procedure = AlterTableProcedure::new(table_id, task, ddl_context.clone()).unwrap();
     procedure.on_prepare().await.unwrap();
     procedure.submit_alter_region_requests().await.unwrap();
     procedure.on_update_metadata().await.unwrap();

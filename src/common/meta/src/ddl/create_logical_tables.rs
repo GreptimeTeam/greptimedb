@@ -36,9 +36,9 @@ use crate::ddl::DdlContext;
 use crate::error::{DecodeJsonSnafu, MetadataCorruptionSnafu, Result};
 use crate::key::table_route::TableRouteValue;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
+use crate::metrics;
 use crate::rpc::ddl::CreateTableTask;
 use crate::rpc::router::{find_leaders, RegionRoute};
-use crate::{metrics, ClusterId};
 
 pub struct CreateLogicalTablesProcedure {
     pub context: DdlContext,
@@ -49,7 +49,6 @@ impl CreateLogicalTablesProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::CreateLogicalTables";
 
     pub fn new(
-        cluster_id: ClusterId,
         tasks: Vec<CreateTableTask>,
         physical_table_id: TableId,
         context: DdlContext,
@@ -57,7 +56,6 @@ impl CreateLogicalTablesProcedure {
         Self {
             context,
             data: CreateTablesData {
-                cluster_id,
                 state: CreateTablesState::Prepare,
                 tasks,
                 table_ids_already_exists: vec![],
@@ -245,7 +243,6 @@ impl Procedure for CreateLogicalTablesProcedure {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateTablesData {
-    cluster_id: ClusterId,
     state: CreateTablesState,
     tasks: Vec<CreateTableTask>,
     table_ids_already_exists: Vec<Option<TableId>>,

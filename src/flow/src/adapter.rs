@@ -103,7 +103,6 @@ impl Default for FlowConfig {
 #[serde(default)]
 pub struct FlownodeOptions {
     pub mode: Mode,
-    pub cluster_id: Option<u64>,
     pub node_id: Option<u64>,
     pub flow: FlowConfig,
     pub grpc: GrpcOptions,
@@ -118,7 +117,6 @@ impl Default for FlownodeOptions {
     fn default() -> Self {
         Self {
             mode: servers::Mode::Standalone,
-            cluster_id: None,
             node_id: None,
             flow: FlowConfig::default(),
             grpc: GrpcOptions::default().with_bind_addr("127.0.0.1:3004"),

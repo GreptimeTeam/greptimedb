@@ -23,11 +23,10 @@ impl CreateFlowProcedure {
     pub(crate) async fn allocate_flow_id(&mut self) -> Result<()> {
         //TODO(weny, ruihang): We doesn't support the partitions. It's always be 1, now.
         let partitions = 1;
-        let cluster_id = self.data.cluster_id;
         let (flow_id, peers) = self
             .context
             .flow_metadata_allocator
-            .create(cluster_id, partitions)
+            .create(partitions)
             .await?;
         self.data.flow_id = Some(flow_id);
         self.data.peers = peers;

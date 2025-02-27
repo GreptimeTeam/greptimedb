@@ -31,13 +31,13 @@ fn main() {
 
 #[tokio::main]
 async fn run() {
-    let id = (1000u64, 2000u64);
+    let id = 2000u64;
     let config = ChannelConfig::new()
         .timeout(Duration::from_secs(3))
         .connect_timeout(Duration::from_secs(5))
         .tcp_nodelay(true);
     let channel_manager = ChannelManager::with_config(config);
-    let mut meta_client = MetaClientBuilder::datanode_default_options(id.0, id.1)
+    let mut meta_client = MetaClientBuilder::datanode_default_options(id)
         .channel_manager(channel_manager)
         .build();
     meta_client.start(&["127.0.0.1:3002"]).await.unwrap();

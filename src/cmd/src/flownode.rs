@@ -241,9 +241,6 @@ impl StartCommand {
         let mut opts = opts.component;
         opts.grpc.detect_server_addr();
 
-        // TODO(discord9): make it not optionale after cluster id is required
-        let cluster_id = opts.cluster_id.unwrap_or(0);
-
         let member_id = opts
             .node_id
             .context(MissingConfigSnafu { msg: "'node_id'" })?;
@@ -252,13 +249,10 @@ impl StartCommand {
             msg: "'meta_client_options'",
         })?;
 
-        let meta_client = meta_client::create_meta_client(
-            cluster_id,
-            MetaClientType::Flownode { member_id },
-            meta_config,
-        )
-        .await
-        .context(MetaClientInitSnafu)?;
+        let meta_client =
+            meta_client::create_meta_client(MetaClientType::Flownode { member_id }, meta_config)
+                .await
+                .context(MetaClientInitSnafu)?;
 
         let cache_max_capacity = meta_config.metadata_cache_max_capacity;
         let cache_ttl = meta_config.metadata_cache_ttl;

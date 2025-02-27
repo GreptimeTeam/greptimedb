@@ -22,7 +22,7 @@ use crate::cluster::MetaPeerClientRef;
 use crate::error::{self, Result};
 use crate::key::{DatanodeLeaseKey, LeaseValue};
 use crate::lease;
-use crate::service::admin::{util, HttpHandler};
+use crate::service::admin::HttpHandler;
 
 pub struct NodeLeaseHandler {
     pub meta_peer_client: MetaPeerClientRef,
@@ -34,11 +34,9 @@ impl HttpHandler for NodeLeaseHandler {
         &self,
         _: &str,
         _: http::Method,
-        params: &HashMap<String, String>,
+        _params: &HashMap<String, String>,
     ) -> Result<http::Response<String>> {
-        let cluster_id = util::extract_cluster_id(params)?;
-
-        let leases = lease::alive_datanodes(cluster_id, &self.meta_peer_client, u64::MAX).await?;
+        let leases = lease::alive_datanodes(&self.meta_peer_client, u64::MAX).await?;
         let leases = leases
             .into_iter()
             .map(|(k, v)| HumanLease {

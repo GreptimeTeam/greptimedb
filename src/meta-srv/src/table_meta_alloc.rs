@@ -45,7 +45,7 @@ impl MetasrvPeerAllocator {
     /// table or not. So this method isn't idempotent.
     async fn alloc(
         &self,
-        ctx: &TableMetadataAllocatorContext,
+        _ctx: &TableMetadataAllocatorContext,
         regions: usize,
     ) -> Result<Vec<Peer>> {
         ensure!(regions <= MAX_REGION_SEQ as usize, TooManyPartitionsSnafu);
@@ -53,7 +53,6 @@ impl MetasrvPeerAllocator {
         let mut peers = self
             .selector
             .select(
-                ctx.cluster_id,
                 &self.ctx,
                 SelectorOptions {
                     min_required_items: regions,

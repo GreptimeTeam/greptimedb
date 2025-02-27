@@ -104,26 +104,17 @@ mod tests {
     #[test]
     fn test_weight_compute() {
         let mut stat_kvs: HashMap<DatanodeStatKey, DatanodeStatValue> = HashMap::default();
-        let stat_key = DatanodeStatKey {
-            cluster_id: 1,
-            node_id: 1,
-        };
+        let stat_key = DatanodeStatKey { node_id: 1 };
         let stat_val = DatanodeStatValue {
             stats: vec![mock_stat_1()],
         };
         stat_kvs.insert(stat_key, stat_val);
-        let stat_key = DatanodeStatKey {
-            cluster_id: 1,
-            node_id: 2,
-        };
+        let stat_key = DatanodeStatKey { node_id: 2 };
         let stat_val = DatanodeStatValue {
             stats: vec![mock_stat_2()],
         };
         stat_kvs.insert(stat_key, stat_val);
-        let stat_key = DatanodeStatKey {
-            cluster_id: 1,
-            node_id: 3,
-        };
+        let stat_key = DatanodeStatKey { node_id: 3 };
         let stat_val = DatanodeStatValue {
             stats: vec![mock_stat_3()],
         };

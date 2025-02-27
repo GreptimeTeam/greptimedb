@@ -46,9 +46,9 @@ use crate::key::flow::flow_route::FlowRouteValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::{DeserializedValueWithBytes, FlowId, FlowPartitionId};
 use crate::lock_key::{CatalogLock, FlowNameLock, TableNameLock};
+use crate::metrics;
 use crate::peer::Peer;
 use crate::rpc::ddl::{CreateFlowTask, QueryContext};
-use crate::{metrics, ClusterId};
 
 /// The procedure of flow creation.
 pub struct CreateFlowProcedure {
@@ -60,16 +60,10 @@ impl CreateFlowProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::CreateFlow";
 
     /// Returns a new [CreateFlowProcedure].
-    pub fn new(
-        cluster_id: ClusterId,
-        task: CreateFlowTask,
-        query_context: QueryContext,
-        context: DdlContext,
-    ) -> Self {
+    pub fn new(task: CreateFlowTask, query_context: QueryContext, context: DdlContext) -> Self {
         Self {
             context,
             data: CreateFlowData {
-                cluster_id,
                 task,
                 flow_id: None,
                 peers: vec![],
@@ -363,7 +357,6 @@ impl fmt::Display for FlowType {
 /// The serializable data.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateFlowData {
-    pub(crate) cluster_id: ClusterId,
     pub(crate) state: CreateFlowState,
     pub(crate) task: CreateFlowTask,
     pub(crate) flow_id: Option<FlowId>,

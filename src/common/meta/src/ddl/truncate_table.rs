@@ -39,9 +39,9 @@ use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::DeserializedValueWithBytes;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock};
+use crate::metrics;
 use crate::rpc::ddl::TruncateTableTask;
 use crate::rpc::router::{find_leader_regions, find_leaders, RegionRoute};
-use crate::{metrics, ClusterId};
 
 pub struct TruncateTableProcedure {
     context: DdlContext,
@@ -91,7 +91,6 @@ impl TruncateTableProcedure {
     pub(crate) const TYPE_NAME: &'static str = "metasrv-procedure::TruncateTable";
 
     pub(crate) fn new(
-        cluster_id: ClusterId,
         task: TruncateTableTask,
         table_info_value: DeserializedValueWithBytes<TableInfoValue>,
         region_routes: Vec<RegionRoute>,
@@ -99,7 +98,7 @@ impl TruncateTableProcedure {
     ) -> Self {
         Self {
             context,
-            data: TruncateTableData::new(cluster_id, task, table_info_value, region_routes),
+            data: TruncateTableData::new(task, table_info_value, region_routes),
         }
     }
 
@@ -189,7 +188,6 @@ impl TruncateTableProcedure {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TruncateTableData {
     state: TruncateTableState,
-    cluster_id: ClusterId,
     task: TruncateTableTask,
     table_info_value: DeserializedValueWithBytes<TableInfoValue>,
     region_routes: Vec<RegionRoute>,
@@ -197,14 +195,12 @@ pub struct TruncateTableData {
 
 impl TruncateTableData {
     pub fn new(
-        cluster_id: ClusterId,
         task: TruncateTableTask,
         table_info_value: DeserializedValueWithBytes<TableInfoValue>,
         region_routes: Vec<RegionRoute>,
     ) -> Self {
         Self {
             state: TruncateTableState::Prepare,
-            cluster_id,
             task,
             table_info_value,
             region_routes,

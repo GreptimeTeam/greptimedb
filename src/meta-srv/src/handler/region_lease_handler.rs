@@ -64,7 +64,6 @@ impl HeartbeatHandler for RegionLeaseHandler {
         };
 
         let regions = stat.regions();
-        let cluster_id = stat.cluster_id;
         let datanode_id = stat.id;
 
         let RenewRegionLeasesResponse {
@@ -72,7 +71,7 @@ impl HeartbeatHandler for RegionLeaseHandler {
             renewed,
         } = self
             .region_lease_keeper
-            .renew_region_leases(cluster_id, datanode_id, &regions)
+            .renew_region_leases(datanode_id, &regions)
             .await?;
 
         let renewed = renewed
@@ -153,7 +152,6 @@ mod test {
         let peer = Peer::empty(datanode_id);
         let follower_peer = Peer::empty(datanode_id + 1);
         let table_info = new_test_table_info(table_id, vec![region_number]).into();
-        let cluster_id = 1;
 
         let region_routes = vec![RegionRoute {
             region: Region::new_test(region_id),
@@ -181,7 +179,6 @@ mod test {
         let acc = &mut HeartbeatAccumulator::default();
 
         acc.stat = Some(Stat {
-            cluster_id,
             id: peer.id,
             region_stats: vec![
                 new_empty_region_stat(region_id, RegionRole::Follower),
@@ -215,7 +212,6 @@ mod test {
         let acc = &mut HeartbeatAccumulator::default();
 
         acc.stat = Some(Stat {
-            cluster_id,
             id: follower_peer.id,
             region_stats: vec![
                 new_empty_region_stat(region_id, RegionRole::Follower),
@@ -249,7 +245,6 @@ mod test {
         let acc = &mut HeartbeatAccumulator::default();
 
         acc.stat = Some(Stat {
-            cluster_id,
             id: follower_peer.id,
             region_stats: vec![
                 new_empty_region_stat(region_id, RegionRole::Follower),
@@ -292,7 +287,6 @@ mod test {
         let peer = Peer::empty(datanode_id);
         let follower_peer = Peer::empty(datanode_id + 1);
         let table_info = new_test_table_info(table_id, vec![region_number]).into();
-        let cluster_id = 1;
 
         let region_routes = vec![
             RegionRoute {
@@ -333,7 +327,6 @@ mod test {
         let acc = &mut HeartbeatAccumulator::default();
 
         acc.stat = Some(Stat {
-            cluster_id,
             id: peer.id,
             region_stats: vec![
                 new_empty_region_stat(region_id, RegionRole::Leader),

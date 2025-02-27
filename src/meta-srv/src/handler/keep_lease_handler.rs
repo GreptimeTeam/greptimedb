@@ -38,17 +38,14 @@ impl HeartbeatHandler for DatanodeKeepLeaseHandler {
         _acc: &mut HeartbeatAccumulator,
     ) -> Result<HandleControl> {
         let HeartbeatRequest { header, peer, .. } = req;
-        let Some(header) = &header else {
+        let Some(_header) = &header else {
             return Ok(HandleControl::Continue);
         };
         let Some(peer) = &peer else {
             return Ok(HandleControl::Continue);
         };
 
-        let key = DatanodeLeaseKey {
-            cluster_id: header.cluster_id,
-            node_id: peer.id,
-        };
+        let key = DatanodeLeaseKey { node_id: peer.id };
         let value = LeaseValue {
             timestamp_millis: time_util::current_time_millis(),
             node_addr: peer.addr.clone(),
@@ -80,17 +77,14 @@ impl HeartbeatHandler for FlownodeKeepLeaseHandler {
         _acc: &mut HeartbeatAccumulator,
     ) -> Result<HandleControl> {
         let HeartbeatRequest { header, peer, .. } = req;
-        let Some(header) = &header else {
+        let Some(_header) = &header else {
             return Ok(HandleControl::Continue);
         };
         let Some(peer) = &peer else {
             return Ok(HandleControl::Continue);
         };
 
-        let key = FlownodeLeaseKey {
-            cluster_id: header.cluster_id,
-            node_id: peer.id,
-        };
+        let key = FlownodeLeaseKey { node_id: peer.id };
         let value = LeaseValue {
             timestamp_millis: time_util::current_time_millis(),
             node_addr: peer.addr.clone(),

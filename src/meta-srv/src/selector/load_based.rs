@@ -29,7 +29,7 @@ use crate::metasrv::SelectorContext;
 use crate::selector::common::choose_items;
 use crate::selector::weight_compute::{RegionNumsBasedWeightCompute, WeightCompute};
 use crate::selector::weighted_choose::RandomWeightedChoose;
-use crate::selector::{Namespace, Selector, SelectorOptions};
+use crate::selector::{Selector, SelectorOptions};
 
 pub struct LoadBasedSelector<C> {
     weight_compute: C,
@@ -57,15 +57,10 @@ where
     type Context = SelectorContext;
     type Output = Vec<Peer>;
 
-    async fn select(
-        &self,
-        ns: Namespace,
-        ctx: &Self::Context,
-        opts: SelectorOptions,
-    ) -> Result<Self::Output> {
+    async fn select(&self, ctx: &Self::Context, opts: SelectorOptions) -> Result<Self::Output> {
         // 1. get alive datanodes.
         let lease_kvs =
-            lease::alive_datanodes(ns, &ctx.meta_peer_client, ctx.datanode_lease_secs).await?;
+            lease::alive_datanodes(&ctx.meta_peer_client, ctx.datanode_lease_secs).await?;
 
         // 2. get stat kvs and filter out expired datanodes.
         let stat_keys = lease_kvs.keys().map(|k| k.into()).collect();
@@ -97,8 +92,8 @@ where
         let selected = choose_items(&opts, &mut weighted_choose)?;
 
         debug!(
-            "LoadBasedSelector select peers: {:?}, namespace: {}, opts: {:?}.",
-            selected, ns, opts,
+            "LoadBasedSelector select peers: {:?}, opts: {:?}.",
+            selected, opts,
         );
 
         Ok(selected)
@@ -165,33 +160,21 @@ mod tests {
     fn test_filter_out_expired_datanode() {
         let mut stat_kvs = HashMap::new();
         stat_kvs.insert(
-            DatanodeStatKey {
-                cluster_id: 1,
-                node_id: 0,
-            },
+            DatanodeStatKey { node_id: 0 },
             DatanodeStatValue { stats: vec![] },
         );
         stat_kvs.insert(
-            DatanodeStatKey {
-                cluster_id: 1,
-                node_id: 1,
-            },
+            DatanodeStatKey { node_id: 1 },
             DatanodeStatValue { stats: vec![] },
         );
         stat_kvs.insert(
-            DatanodeStatKey {
-                cluster_id: 1,
-                node_id: 2,
-            },
+            DatanodeStatKey { node_id: 2 },
             DatanodeStatValue { stats: vec![] },
         );
 
         let mut lease_kvs = HashMap::new();
         lease_kvs.insert(
-            DatanodeLeaseKey {
-                cluster_id: 1,
-                node_id: 1,
-            },
+            DatanodeLeaseKey { node_id: 1 },
             LeaseValue {
                 timestamp_millis: 0,
                 node_addr: "127.0.0.1:3002".to_string(),
@@ -201,9 +184,6 @@ mod tests {
         let alive_stat_kvs = filter_out_expired_datanode(stat_kvs, &lease_kvs);
 
         assert_eq!(1, alive_stat_kvs.len());
-        assert!(alive_stat_kvs.contains_key(&DatanodeStatKey {
-            cluster_id: 1,
-            node_id: 1
-        }));
+        assert!(alive_stat_kvs.contains_key(&DatanodeStatKey { node_id: 1 }));
     }
 }

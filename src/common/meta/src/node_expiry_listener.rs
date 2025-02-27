@@ -99,7 +99,7 @@ impl NodeExpiryListener {
         in_memory: &ResettableKvBackendRef,
         max_idle_time: Duration,
     ) -> error::Result<impl Iterator<Item = NodeInfoKey>> {
-        let prefix = NodeInfoKey::key_prefix_with_cluster_id(0);
+        let prefix = NodeInfoKey::key_prefix();
         let req = RangeRequest::new().with_prefix(prefix);
         let current_time_millis = common_time::util::current_time_millis();
         let resp = in_memory.range(req).await?;

@@ -262,15 +262,11 @@ mod tests {
         let handler = CollectStatsHandler::default();
         handle_request_many_times(ctx.clone(), &handler, 1).await;
 
-        let key = DatanodeStatKey {
-            cluster_id: 3,
-            node_id: 101,
-        };
+        let key = DatanodeStatKey { node_id: 101 };
         let key: Vec<u8> = key.into();
         let res = ctx.in_memory.get(&key).await.unwrap();
         let kv = res.unwrap();
         let key: DatanodeStatKey = kv.key.clone().try_into().unwrap();
-        assert_eq!(3, key.cluster_id);
         assert_eq!(101, key.node_id);
         let val: DatanodeStatValue = kv.value.try_into().unwrap();
         // first new stat must be set in kv store immediately
@@ -295,7 +291,6 @@ mod tests {
         for i in 1..=loop_times {
             let mut acc = HeartbeatAccumulator {
                 stat: Some(Stat {
-                    cluster_id: 3,
                     id: 101,
                     region_num: i as _,
                     ..Default::default()

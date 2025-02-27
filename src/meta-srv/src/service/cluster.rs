@@ -29,7 +29,7 @@ use crate::{error, metasrv};
 impl cluster_server::Cluster for Metasrv {
     async fn batch_get(&self, req: Request<PbBatchGetRequest>) -> GrpcResult<PbBatchGetResponse> {
         if !self.is_leader() {
-            let is_not_leader = ResponseHeader::failed(0, Error::is_not_leader());
+            let is_not_leader = ResponseHeader::failed(Error::is_not_leader());
             let resp = PbBatchGetResponse {
                 header: Some(is_not_leader),
                 ..Default::default()
@@ -46,13 +46,13 @@ impl cluster_server::Cluster for Metasrv {
             .await
             .context(error::KvBackendSnafu)?;
 
-        let resp = resp.to_proto_resp(ResponseHeader::success(0));
+        let resp = resp.to_proto_resp(ResponseHeader::success());
         Ok(Response::new(resp))
     }
 
     async fn range(&self, req: Request<PbRangeRequest>) -> GrpcResult<PbRangeResponse> {
         if !self.is_leader() {
-            let is_not_leader = ResponseHeader::failed(0, Error::is_not_leader());
+            let is_not_leader = ResponseHeader::failed(Error::is_not_leader());
             let resp = PbRangeResponse {
                 header: Some(is_not_leader),
                 ..Default::default()
@@ -69,7 +69,7 @@ impl cluster_server::Cluster for Metasrv {
             .await
             .context(error::KvBackendSnafu)?;
 
-        let resp = res.to_proto_resp(ResponseHeader::success(0));
+        let resp = res.to_proto_resp(ResponseHeader::success());
         Ok(Response::new(resp))
     }
 
@@ -78,7 +78,7 @@ impl cluster_server::Cluster for Metasrv {
         req: Request<MetasrvPeersRequest>,
     ) -> GrpcResult<MetasrvPeersResponse> {
         if !self.is_leader() {
-            let is_not_leader = ResponseHeader::failed(0, Error::is_not_leader());
+            let is_not_leader = ResponseHeader::failed(Error::is_not_leader());
             let resp = MetasrvPeersResponse {
                 header: Some(is_not_leader),
                 ..Default::default()
@@ -103,7 +103,7 @@ impl cluster_server::Cluster for Metasrv {
         };
 
         let resp = MetasrvPeersResponse {
-            header: Some(ResponseHeader::success(0)),
+            header: Some(ResponseHeader::success()),
             leader: Some(leader),
             followers,
         };
