@@ -295,3 +295,40 @@ drop table histogram3_bucket;
 
 Affected Rows: 0
 
+-- test with invalid data (unaligned buckets)
+create table histogram4_bucket (
+    ts timestamp time index,
+    le string,
+    s string,
+    val double,
+    primary key (s, le),
+);
+
+Affected Rows: 0
+
+insert into histogram4_bucket values
+    (2900000, "0.1", "a", 0),
+    (2900000, "1", "a", 10),
+    (2900000, "5", "a", 20),
+    (2900000, "+Inf", "a", 150),
+    (3000000, "0.1", "a", 50),
+    (3000000, "1", "a", 70),
+    (3000000, "5", "a", 120),
+    -- INF here is missing
+;
+
+Affected Rows: 7
+
+tql eval (2900, 3000, '100s') histogram_quantile(0.9, histogram4_bucket);
+
++---------------------+---+-----+
+| ts                  | s | val |
++---------------------+---+-----+
+| 1970-01-01T00:48:20 | a | 5.0 |
+| 1970-01-01T00:50:00 | a | 5.0 |
++---------------------+---+-----+
+
+drop table histogram4_bucket;
+
+Affected Rows: 0
+

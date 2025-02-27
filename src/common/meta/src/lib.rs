@@ -34,6 +34,7 @@ pub mod kv_backend;
 pub mod leadership_notifier;
 pub mod lock_key;
 pub mod metrics;
+pub mod node_expiry_listener;
 pub mod node_manager;
 pub mod peer;
 pub mod range_stream;

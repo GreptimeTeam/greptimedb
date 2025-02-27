@@ -52,7 +52,7 @@ use promql::extension_plan::{
 use promql::functions::{
     AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, HoltWinters, IDelta,
     Increase, LastOverTime, MaxOverTime, MinOverTime, PredictLinear, PresentOverTime,
-    QuantileOverTime, Rate, Resets, StddevOverTime, StdvarOverTime, SumOverTime,
+    QuantileOverTime, Rate, Resets, Round, StddevOverTime, StdvarOverTime, SumOverTime,
 };
 use promql_parser::label::{MatchOp, Matcher, Matchers, METRIC_NAME};
 use promql_parser::parser::token::TokenType;
@@ -200,10 +200,9 @@ impl PromPlanner {
             PromExpr::Paren(ParenExpr { expr }) => {
                 self.prom_expr_to_plan(expr, session_state).await?
             }
-            PromExpr::Subquery(SubqueryExpr { .. }) => UnsupportedExprSnafu {
-                name: "Prom Subquery",
+            PromExpr::Subquery(expr) => {
+                self.prom_subquery_expr_to_plan(session_state, expr).await?
             }
-            .fail()?,
             PromExpr::NumberLiteral(lit) => self.prom_number_lit_to_plan(lit)?,
             PromExpr::StringLiteral(lit) => self.prom_string_lit_to_plan(lit)?,
             PromExpr::VectorSelector(selector) => {
@@ -216,6 +215,48 @@ impl PromPlanner {
             PromExpr::Extension(expr) => self.prom_ext_expr_to_plan(session_state, expr).await?,
         };
         Ok(res)
+    }
+
+    async fn prom_subquery_expr_to_plan(
+        &mut self,
+        session_state: &SessionState,
+        subquery_expr: &SubqueryExpr,
+    ) -> Result<LogicalPlan> {
+        let SubqueryExpr {
+            expr, range, step, ..
+        } = subquery_expr;
+
+        let current_interval = self.ctx.interval;
+        if let Some(step) = step {
+            self.ctx.interval = step.as_millis() as _;
+        }
+        let current_start = self.ctx.start;
+        self.ctx.start -= range.as_millis() as i64 - self.ctx.interval;
+        let input = self.prom_expr_to_plan(expr, session_state).await?;
+        self.ctx.interval = current_interval;
+        self.ctx.start = current_start;
+
+        ensure!(!range.is_zero(), ZeroRangeSelectorSnafu);
+        let range_ms = range.as_millis() as _;
+        self.ctx.range = Some(range_ms);
+
+        let manipulate = RangeManipulate::new(
+            self.ctx.start,
+            self.ctx.end,
+            self.ctx.interval,
+            range_ms,
+            self.ctx
+                .time_index_column
+                .clone()
+                .expect("time index should be set in `setup_context`"),
+            self.ctx.field_columns.clone(),
+            input,
+        )
+        .context(DataFusionPlanningSnafu)?;
+
+        Ok(LogicalPlan::Extension(Extension {
+            node: Arc::new(manipulate),
+        }))
     }
 
     async fn prom_aggr_expr_to_plan(
@@ -441,6 +482,7 @@ impl PromPlanner {
                     // if left plan or right plan tag is empty, means case like `scalar(...) + host` or `host + scalar(...)`
                     // under this case we only join on time index
                     left_context.tag_columns.is_empty() || right_context.tag_columns.is_empty(),
+                    modifier,
                 )?;
                 let join_plan_schema = join_plan.schema().clone();
 
@@ -1468,6 +1510,20 @@ impl PromPlanner {
 
                 ScalarFunc::GeneratedExpr
             }
+            "round" => {
+                let nearest = match other_input_exprs.pop_front() {
+                    Some(DfExpr::Literal(ScalarValue::Float64(Some(t)))) => t,
+                    Some(DfExpr::Literal(ScalarValue::Int64(Some(t)))) => t as f64,
+                    None => 0.0,
+                    other => UnexpectedPlanExprSnafu {
+                        desc: format!("expected f64 literal as t, but found {:?}", other),
+                    }
+                    .fail()?,
+                };
+
+                ScalarFunc::DataFusionUdf(Arc::new(Round::scalar_udf(nearest)))
+            }
+
             _ => {
                 if let Some(f) = session_state.scalar_functions().get(func.name) {
                     ScalarFunc::DataFusionBuiltin(f.clone())
@@ -1674,7 +1730,7 @@ impl PromPlanner {
         ensure!(
             !src_labels.is_empty(),
             FunctionInvalidArgumentSnafu {
-                fn_name: "label_join",
+                fn_name: "label_join"
             }
         );
 
@@ -2121,24 +2177,49 @@ impl PromPlanner {
         left_time_index_column: Option<String>,
         right_time_index_column: Option<String>,
         only_join_time_index: bool,
+        modifier: &Option<BinModifier>,
     ) -> Result<LogicalPlan> {
         let mut left_tag_columns = if only_join_time_index {
-            vec![]
+            BTreeSet::new()
         } else {
             self.ctx
                 .tag_columns
                 .iter()
-                .map(Column::from_name)
-                .collect::<Vec<_>>()
+                .cloned()
+                .collect::<BTreeSet<_>>()
         };
         let mut right_tag_columns = left_tag_columns.clone();
+
+        // apply modifier
+        if let Some(modifier) = modifier {
+            // apply label modifier
+            if let Some(matching) = &modifier.matching {
+                match matching {
+                    // keeps columns mentioned in `on`
+                    LabelModifier::Include(on) => {
+                        let mask = on.labels.iter().cloned().collect::<BTreeSet<_>>();
+                        left_tag_columns = left_tag_columns.intersection(&mask).cloned().collect();
+                        right_tag_columns =
+                            right_tag_columns.intersection(&mask).cloned().collect();
+                    }
+                    // removes columns memtioned in `ignoring`
+                    LabelModifier::Exclude(ignoring) => {
+                        // doesn't check existence of label
+                        for label in &ignoring.labels {
+                            let _ = left_tag_columns.remove(label);
+                            let _ = right_tag_columns.remove(label);
+                        }
+                    }
+                }
+            }
+        }
 
         // push time index column if it exists
         if let (Some(left_time_index_column), Some(right_time_index_column)) =
             (left_time_index_column, right_time_index_column)
         {
-            left_tag_columns.push(Column::from_name(left_time_index_column));
-            right_tag_columns.push(Column::from_name(right_time_index_column));
+            left_tag_columns.insert(left_time_index_column);
+            right_tag_columns.insert(right_time_index_column);
         }
 
         let right = LogicalPlanBuilder::from(right)
@@ -2154,7 +2235,16 @@ impl PromPlanner {
             .join(
                 right,
                 JoinType::Inner,
-                (left_tag_columns, right_tag_columns),
+                (
+                    left_tag_columns
+                        .into_iter()
+                        .map(Column::from_name)
+                        .collect::<Vec<_>>(),
+                    right_tag_columns
+                        .into_iter()
+                        .map(Column::from_name)
+                        .collect::<Vec<_>>(),
+                ),
                 None,
             )
             .context(DataFusionPlanningSnafu)?
@@ -3338,6 +3428,59 @@ mod test {
         );
 
         indie_query_plan_compare(query, expected).await;
+    }
+
+    #[tokio::test]
+    async fn test_hash_join() {
+        let mut eval_stmt = EvalStmt {
+            expr: PromExpr::NumberLiteral(NumberLiteral { val: 1.0 }),
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+
+        let case = r#"http_server_requests_seconds_sum{uri="/accounts/login"} / ignoring(kubernetes_pod_name,kubernetes_namespace) http_server_requests_seconds_count{uri="/accounts/login"}"#;
+
+        let prom_expr = parser::parse(case).unwrap();
+        eval_stmt.expr = prom_expr;
+        let table_provider = build_test_table_provider_with_fields(
+            &[
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "http_server_requests_seconds_sum".to_string(),
+                ),
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "http_server_requests_seconds_count".to_string(),
+                ),
+            ],
+            &["uri", "kubernetes_namespace", "kubernetes_pod_name"],
+        )
+        .await;
+        // Should be ok
+        let plan = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
+            .await
+            .unwrap();
+        let expected = r#"Projection: http_server_requests_seconds_count.uri, http_server_requests_seconds_count.kubernetes_namespace, http_server_requests_seconds_count.kubernetes_pod_name, http_server_requests_seconds_count.greptime_timestamp, http_server_requests_seconds_sum.greptime_value / http_server_requests_seconds_count.greptime_value AS http_server_requests_seconds_sum.greptime_value / http_server_requests_seconds_count.greptime_value
+  Inner Join: http_server_requests_seconds_sum.greptime_timestamp = http_server_requests_seconds_count.greptime_timestamp, http_server_requests_seconds_sum.uri = http_server_requests_seconds_count.uri
+    SubqueryAlias: http_server_requests_seconds_sum
+      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[greptime_timestamp]
+        PromSeriesNormalize: offset=[0], time index=[greptime_timestamp], filter NaN: [false]
+          PromSeriesDivide: tags=["uri", "kubernetes_namespace", "kubernetes_pod_name"]
+            Sort: http_server_requests_seconds_sum.uri DESC NULLS LAST, http_server_requests_seconds_sum.kubernetes_namespace DESC NULLS LAST, http_server_requests_seconds_sum.kubernetes_pod_name DESC NULLS LAST, http_server_requests_seconds_sum.greptime_timestamp DESC NULLS LAST
+              Filter: http_server_requests_seconds_sum.uri = Utf8("/accounts/login") AND http_server_requests_seconds_sum.greptime_timestamp >= TimestampMillisecond(-1000, None) AND http_server_requests_seconds_sum.greptime_timestamp <= TimestampMillisecond(100001000, None)
+                TableScan: http_server_requests_seconds_sum
+    SubqueryAlias: http_server_requests_seconds_count
+      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[greptime_timestamp]
+        PromSeriesNormalize: offset=[0], time index=[greptime_timestamp], filter NaN: [false]
+          PromSeriesDivide: tags=["uri", "kubernetes_namespace", "kubernetes_pod_name"]
+            Sort: http_server_requests_seconds_count.uri DESC NULLS LAST, http_server_requests_seconds_count.kubernetes_namespace DESC NULLS LAST, http_server_requests_seconds_count.kubernetes_pod_name DESC NULLS LAST, http_server_requests_seconds_count.greptime_timestamp DESC NULLS LAST
+              Filter: http_server_requests_seconds_count.uri = Utf8("/accounts/login") AND http_server_requests_seconds_count.greptime_timestamp >= TimestampMillisecond(-1000, None) AND http_server_requests_seconds_count.greptime_timestamp <= TimestampMillisecond(100001000, None)
+                TableScan: http_server_requests_seconds_count"#;
+        assert_eq!(plan.to_string(), expected);
     }
 
     #[tokio::test]

@@ -32,6 +32,7 @@ use common_meta::kv_backend::{KvBackendRef, ResettableKvBackend, ResettableKvBac
 use common_meta::leadership_notifier::{
     LeadershipChangeNotifier, LeadershipChangeNotifierCustomizerRef,
 };
+use common_meta::node_expiry_listener::NodeExpiryListener;
 use common_meta::peer::Peer;
 use common_meta::region_keeper::MemoryRegionKeeperRef;
 use common_meta::wal_options_allocator::WalOptionsAllocatorRef;
@@ -151,6 +152,8 @@ pub struct MetasrvOptions {
     #[cfg(feature = "pg_kvbackend")]
     /// Lock id for meta kv election. Only effect when using pg_kvbackend.
     pub meta_election_lock_id: u64,
+    #[serde(with = "humantime_serde")]
+    pub node_max_idle_time: Duration,
 }
 
 const DEFAULT_METASRV_ADDR_PORT: &str = "3002";
@@ -192,6 +195,7 @@ impl Default for MetasrvOptions {
             meta_table_name: DEFAULT_META_TABLE_NAME.to_string(),
             #[cfg(feature = "pg_kvbackend")]
             meta_election_lock_id: DEFAULT_META_ELECTION_LOCK_ID,
+            node_max_idle_time: Duration::from_secs(24 * 60 * 60),
         }
     }
 }
@@ -442,6 +446,10 @@ impl Metasrv {
             leadership_change_notifier.add_listener(self.wal_options_allocator.clone());
             leadership_change_notifier
                 .add_listener(Arc::new(ProcedureManagerListenerAdapter(procedure_manager)));
+            leadership_change_notifier.add_listener(Arc::new(NodeExpiryListener::new(
+                self.options.node_max_idle_time,
+                self.in_memory.clone(),
+            )));
             if let Some(region_supervisor_ticker) = &self.region_supervisor_ticker {
                 leadership_change_notifier.add_listener(region_supervisor_ticker.clone() as _);
             }

@@ -583,7 +583,8 @@ impl HistogramFoldStream {
                     .expect("field column should not be nullable");
                 counters.push(counter);
             }
-            let result = Self::evaluate_row(self.quantile, &bucket, &counters)?;
+            // ignore invalid data
+            let result = Self::evaluate_row(self.quantile, &bucket, &counters).unwrap_or(f64::NAN);
             self.output_buffer[self.field_column_index].push_value_ref(ValueRef::from(result));
             cursor += bucket_num;
             remaining_rows -= bucket_num;
@@ -672,7 +673,7 @@ impl HistogramFoldStream {
         if bucket.len() <= 1 {
             return Ok(f64::NAN);
         }
-        if *bucket.last().unwrap() != f64::INFINITY {
+        if bucket.last().unwrap().is_finite() {
             return Err(DataFusionError::Execution(
                 "last bucket should be +Inf".to_string(),
             ));
@@ -692,8 +693,8 @@ impl HistogramFoldStream {
         }
 
         // check input value
-        debug_assert!(bucket.windows(2).all(|w| w[0] <= w[1]));
-        debug_assert!(counter.windows(2).all(|w| w[0] <= w[1]));
+        debug_assert!(bucket.windows(2).all(|w| w[0] <= w[1]), "{bucket:?}");
+        debug_assert!(counter.windows(2).all(|w| w[0] <= w[1]), "{counter:?}");
 
         let total = *counter.last().unwrap();
         let expected_pos = total * quantile;

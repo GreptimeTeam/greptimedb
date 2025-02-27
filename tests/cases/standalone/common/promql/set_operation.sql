@@ -295,3 +295,45 @@ tql eval (3, 4, '1s') cache_hit / (cache_miss + cache_hit);
 drop table cache_hit;
 
 drop table cache_miss;
+
+create table cache_hit_with_null_label (
+    ts timestamp time index,
+    job string,
+    null_label string null,
+    greptime_value double,
+    primary key (job, null_label)
+);
+
+create table cache_miss_with_null_label (
+    ts timestamp time index,
+    job string,
+    null_label string null,
+    greptime_value double,
+    primary key (job, null_label)
+);
+
+insert into cache_hit_with_null_label values
+    (3000, "read", null, 1.0),
+    (3000, "write", null, 2.0),
+    (4000, "read", null, 3.0),
+    (4000, "write", null, 4.0);
+
+insert into cache_miss_with_null_label values
+    (3000, "read", null, 1.0),
+    (3000, "write", null, 2.0),
+    (4000, "read", null, 1.0),
+    (4000, "write", null, 2.0);
+
+-- SQLNESS SORT_RESULT 3 1
+-- null!=null, so it will returns the empty set.
+tql eval (3, 4, '1s') cache_hit_with_null_label / (cache_miss_with_null_label + cache_hit_with_null_label);
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3, 4, '1s') cache_hit_with_null_label / ignoring(null_label) (cache_miss_with_null_label + ignoring(null_label) cache_hit_with_null_label);
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3, 4, '1s') cache_hit_with_null_label / on(job) (cache_miss_with_null_label + on(job) cache_hit_with_null_label);
+
+drop table cache_hit_with_null_label;
+
+drop table cache_miss_with_null_label;
