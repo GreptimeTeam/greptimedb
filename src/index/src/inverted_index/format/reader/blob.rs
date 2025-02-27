@@ -100,7 +100,9 @@ mod tests {
 
     fn mock_bitmap_bytes() -> Vec<u8> {
         let mut buf = Vec::new();
-        mock_bitmap().serialize_into(BitmapType::Roaring, &mut buf);
+        mock_bitmap()
+            .serialize_into(BitmapType::Roaring, &mut buf)
+            .unwrap();
         buf
     }
 

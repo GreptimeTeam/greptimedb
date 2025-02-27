@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::io;
+use std::ops::RangeInclusive;
+
 use common_base::BitVec;
 /// `BitmapType` enumerates how bitmaps are encoded within the inverted index.
 pub use greptime_proto::v1::index::BitmapType;
@@ -40,8 +43,8 @@ use roaring::RoaringBitmap;
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub enum Bitmap {
-    BitVec(BitVec),
     Roaring(RoaringBitmap),
+    BitVec(BitVec),
 }
 
 impl Bitmap {
@@ -89,30 +92,65 @@ impl Bitmap {
         }
     }
 
+    pub fn insert_range(&mut self, range: RangeInclusive<usize>) {
+        match self {
+            Bitmap::BitVec(bitvec) => {
+                if *range.end() >= bitvec.len() {
+                    bitvec.resize(range.end() + 1, false);
+                }
+                for i in range {
+                    bitvec.set(i, true);
+                }
+            }
+            Bitmap::Roaring(roaring) => {
+                let range = *range.start() as u32..=*range.end() as u32;
+                roaring.insert_range(range);
+            }
+        }
+    }
+
     /// Serializes the bitmap into a byte buffer using the specified format.
     ///
     /// # Arguments
     /// * `serialize_type` - Target format for serialization
-    /// * `buf` - Output buffer to write serialized data
-    pub fn serialize_into(&self, serialize_type: BitmapType, buf: &mut Vec<u8>) {
+    /// * `writer` - Output writer to write the serialized data
+    pub fn serialize_into(
+        &self,
+        serialize_type: BitmapType,
+        mut writer: impl io::Write,
+    ) -> io::Result<()> {
         match (self, serialize_type) {
             (Bitmap::BitVec(bitvec), BitmapType::BitVec) => {
-                buf.extend_from_slice(bitvec.as_raw_slice());
+                writer.write_all(bitvec.as_raw_slice())?;
             }
             (Bitmap::Roaring(roaring), BitmapType::Roaring) => {
-                roaring
-                    .serialize_into(buf)
-                    .expect("Writing to Vec<u8> should never fail");
+                roaring.serialize_into(writer)?;
             }
             (Bitmap::BitVec(bitvec), BitmapType::Roaring) => {
                 let bitmap = Bitmap::bitvec_to_roaring(bitvec.clone());
-                bitmap
-                    .serialize_into(buf)
-                    .expect("Writing to Vec<u8> should never fail");
+                bitmap.serialize_into(writer)?;
             }
             (Bitmap::Roaring(roaring), BitmapType::BitVec) => {
                 let bitvec = Bitmap::roaring_to_bitvec(roaring);
-                buf.extend_from_slice(bitvec.as_raw_slice());
+                writer.write_all(bitvec.as_raw_slice())?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Computes the size of the serialized bitmap in bytes.
+    pub fn serialized_size(&self, bitmap_type: BitmapType) -> usize {
+        match (self, bitmap_type) {
+            (Bitmap::BitVec(bitvec), BitmapType::BitVec) => bitvec.as_raw_slice().len(),
+            (Bitmap::Roaring(roaring), BitmapType::Roaring) => roaring.serialized_size(),
+            (Bitmap::BitVec(bitvec), BitmapType::Roaring) => {
+                let bitmap = Bitmap::bitvec_to_roaring(bitvec.clone());
+                bitmap.serialized_size()
+            }
+            (Bitmap::Roaring(roaring), BitmapType::BitVec) => {
+                let bitvec = Bitmap::roaring_to_bitvec(roaring);
+                bitvec.as_raw_slice().len()
             }
         }
     }
@@ -228,6 +266,19 @@ impl Bitmap {
         }
     }
 
+    /// Computes memory usage of the bitmap in bytes.
+    pub fn memory_usage(&self) -> usize {
+        match self {
+            Bitmap::BitVec(bitvec) => bitvec.capacity(),
+            Bitmap::Roaring(roaring) => {
+                let stat = roaring.statistics();
+                (stat.n_bytes_array_containers
+                    + stat.n_bytes_bitset_containers
+                    + stat.n_bytes_run_containers) as usize
+            }
+        }
+    }
+
     fn roaring_to_bitvec(roaring: &RoaringBitmap) -> BitVec {
         let max_value = roaring.max().unwrap_or(0);
         let mut bitvec = BitVec::repeat(false, max_value as usize + 1);
@@ -240,6 +291,12 @@ impl Bitmap {
     fn bitvec_to_roaring(mut bitvec: BitVec) -> RoaringBitmap {
         bitvec.resize(bitvec.capacity(), false);
         RoaringBitmap::from_lsb0_bytes(0, bitvec.as_raw_slice())
+    }
+}
+
+impl Default for Bitmap {
+    fn default() -> Self {
+        Bitmap::new_roaring()
     }
 }
 
@@ -262,13 +319,17 @@ mod tests {
         let mut buf = Vec::new();
 
         // Serialize as Roaring
-        original.serialize_into(BitmapType::Roaring, &mut buf);
+        original
+            .serialize_into(BitmapType::Roaring, &mut buf)
+            .unwrap();
         let deserialized = Bitmap::deserialize_from(&buf, BitmapType::Roaring).unwrap();
         assert_eq!(original, deserialized);
 
         // Serialize as BitVec
         buf.clear();
-        original.serialize_into(BitmapType::BitVec, &mut buf);
+        original
+            .serialize_into(BitmapType::BitVec, &mut buf)
+            .unwrap();
         let deserialized = Bitmap::deserialize_from(&buf, BitmapType::BitVec).unwrap();
         assert_eq!(original.count_ones(), deserialized.count_ones());
     }
@@ -783,5 +844,24 @@ mod tests {
         let bv = Bitmap::new_bitvec();
         rb.intersect(bv);
         assert!(rb.is_empty());
+    }
+
+    #[test]
+    fn test_insert_range() {
+        let mut bv = Bitmap::new_bitvec();
+        bv.insert_range(0..=5);
+        assert_eq!(bv.iter_ones().collect::<Vec<_>>(), vec![0, 1, 2, 3, 4, 5]);
+
+        let mut rb = Bitmap::new_roaring();
+        rb.insert_range(0..=5);
+        assert_eq!(bv.iter_ones().collect::<Vec<_>>(), vec![0, 1, 2, 3, 4, 5]);
+
+        let mut bv = Bitmap::new_bitvec();
+        bv.insert_range(10..=10);
+        assert_eq!(bv.iter_ones().collect::<Vec<_>>(), vec![10]);
+
+        let mut rb = Bitmap::new_roaring();
+        rb.insert_range(10..=10);
+        assert_eq!(bv.iter_ones().collect::<Vec<_>>(), vec![10]);
     }
 }

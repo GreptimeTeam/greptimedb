@@ -36,6 +36,7 @@ use asynchronous_codec::{FramedRead, FramedWrite};
 use futures::{stream, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, StreamExt};
 use snafu::ResultExt;
 
+use crate::bitmap::{Bitmap, BitmapType};
 use crate::inverted_index::create::sort::SortedStream;
 use crate::inverted_index::error::{
     CloseSnafu, FlushSnafu, ReadSnafu, Result, UnknownIntermediateCodecMagicSnafu, WriteSnafu,
@@ -56,11 +57,13 @@ impl<W: AsyncWrite + Unpin> IntermediateWriter<W> {
     /// Serializes and writes all provided values to the wrapped writer
     pub async fn write_all(
         mut self,
-        values: impl IntoIterator<Item = (Bytes, roaring::RoaringBitmap)>,
+        values: impl IntoIterator<Item = (Bytes, Bitmap)>,
     ) -> Result<()> {
         let (codec_magic, encoder) = (
             codec_v1::CODEC_V1_MAGIC,
-            codec_v1::IntermediateItemEncoderV1,
+            codec_v1::IntermediateItemEncoderV1 {
+                bitmap_type: BitmapType::Roaring,
+            },
         );
 
         self.writer
@@ -100,7 +103,9 @@ impl<R: AsyncRead + Unpin + Send + 'static> IntermediateReader<R> {
             .context(ReadSnafu)?;
 
         let decoder = match &magic {
-            codec_v1::CODEC_V1_MAGIC => codec_v1::IntermediateItemDecoderV1,
+            codec_v1::CODEC_V1_MAGIC => codec_v1::IntermediateItemDecoderV1 {
+                bitmap_type: BitmapType::Roaring,
+            },
             _ => return UnknownIntermediateCodecMagicSnafu { magic }.fail(),
         };
 
@@ -119,8 +124,8 @@ mod tests {
     use super::*;
     use crate::inverted_index::error::Error;
 
-    fn bitmap(bytes: &[u8]) -> roaring::RoaringBitmap {
-        roaring::RoaringBitmap::from_lsb0_bytes(0, bytes)
+    fn bitmap(bytes: &[u8]) -> Bitmap {
+        Bitmap::from_lsb0_bytes(bytes, BitmapType::Roaring)
     }
 
     #[tokio::test]

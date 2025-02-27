@@ -129,9 +129,7 @@ etcd-client = "0.14"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-# TODO(zhongzc): wait for greptime-proto#pull/219 to be merged
-# greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "a25adc8a01340231121646d8f0a29d0e92f45461" }
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", branch = "zhongzc/intro-roaring-bitmap" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "f8bd7fabb97f9b520beac918479ede5b6e95a395" }
 hex = "0.4"
 http = "1"
 humantime = "2.1"

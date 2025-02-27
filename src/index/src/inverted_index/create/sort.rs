@@ -18,7 +18,6 @@ mod merge_stream;
 
 use async_trait::async_trait;
 use futures::Stream;
-use roaring::RoaringBitmap;
 
 use crate::bitmap::Bitmap;
 use crate::inverted_index::error::Result;
@@ -26,7 +25,7 @@ use crate::inverted_index::format::writer::ValueStream;
 use crate::{Bytes, BytesRef};
 
 /// A stream of sorted values along with their associated bitmap
-pub type SortedStream = Box<dyn Stream<Item = Result<(Bytes, RoaringBitmap)>> + Send + Unpin>;
+pub type SortedStream = Box<dyn Stream<Item = Result<(Bytes, Bitmap)>> + Send + Unpin>;
 
 /// Output of a sorting operation, encapsulating a bitmap for null values and a stream of sorted items
 pub struct SortOutput {

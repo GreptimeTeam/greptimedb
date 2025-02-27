@@ -92,7 +92,8 @@ where
     async fn write_null_bitmap(&mut self) -> Result<()> {
         self.buf.clear();
         self.null_bitmap
-            .serialize_into(self.bitmap_type, &mut self.buf);
+            .serialize_into(self.bitmap_type, &mut self.buf)
+            .expect("Write to vec should not fail");
         self.blob_writer
             .write_all(&self.buf)
             .await
@@ -114,7 +115,9 @@ where
     /// Appends a value and its bitmap to the blob, updates the FST, and the metadata
     async fn append_value(&mut self, value: Bytes, bitmap: Bitmap) -> Result<()> {
         self.buf.clear();
-        bitmap.serialize_into(self.bitmap_type, &mut self.buf);
+        bitmap
+            .serialize_into(self.bitmap_type, &mut self.buf)
+            .expect("Write to vec should not fail");
         self.blob_writer
             .write_all(&self.buf)
             .await

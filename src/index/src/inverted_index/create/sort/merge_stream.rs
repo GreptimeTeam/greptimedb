@@ -18,8 +18,8 @@ use std::task::{Context, Poll};
 
 use futures::{ready, Stream, StreamExt};
 use pin_project::pin_project;
-use roaring::RoaringBitmap;
 
+use crate::bitmap::Bitmap;
 use crate::inverted_index::create::sort::SortedStream;
 use crate::inverted_index::error::Result;
 use crate::Bytes;
@@ -28,10 +28,10 @@ use crate::Bytes;
 #[pin_project]
 pub struct MergeSortedStream {
     stream1: Option<SortedStream>,
-    peek1: Option<(Bytes, RoaringBitmap)>,
+    peek1: Option<(Bytes, Bitmap)>,
 
     stream2: Option<SortedStream>,
-    peek2: Option<(Bytes, RoaringBitmap)>,
+    peek2: Option<(Bytes, Bitmap)>,
 }
 
 impl MergeSortedStream {
@@ -49,7 +49,7 @@ impl MergeSortedStream {
 }
 
 impl Stream for MergeSortedStream {
-    type Item = Result<(Bytes, RoaringBitmap)>;
+    type Item = Result<(Bytes, Bitmap)>;
 
     /// Polls both streams and returns the next item from the stream that has the smaller next item.
     /// If both streams have the same next item, the bitmaps are unioned together.
@@ -89,22 +89,24 @@ impl Stream for MergeSortedStream {
 }
 
 /// Merges two bitmaps by bit-wise OR'ing them together, preserving all bits from both
-fn merge_bitmaps(bitmap1: RoaringBitmap, bitmap2: RoaringBitmap) -> RoaringBitmap {
-    bitmap1 | bitmap2
+fn merge_bitmaps(mut bitmap1: Bitmap, bitmap2: Bitmap) -> Bitmap {
+    bitmap1.union(bitmap2);
+    bitmap1
 }
 
 #[cfg(test)]
 mod tests {
     use futures::stream;
+    use greptime_proto::v1::index::BitmapType;
 
     use super::*;
     use crate::inverted_index::error::Error;
 
-    fn bitmap(bytes: &[u8]) -> roaring::RoaringBitmap {
-        roaring::RoaringBitmap::from_lsb0_bytes(0, bytes)
+    fn bitmap(bytes: &[u8]) -> Bitmap {
+        Bitmap::from_lsb0_bytes(bytes, BitmapType::Roaring)
     }
 
-    fn sorted_stream_from_vec(vec: Vec<(Bytes, RoaringBitmap)>) -> SortedStream {
+    fn sorted_stream_from_vec(vec: Vec<(Bytes, Bitmap)>) -> SortedStream {
         Box::new(stream::iter(vec.into_iter().map(Ok::<_, Error>)))
     }
 

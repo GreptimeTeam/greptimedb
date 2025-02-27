@@ -21,8 +21,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_telemetry::{debug, error};
-use futures::{stream, StreamExt};
-use roaring::RoaringBitmap;
+use futures::stream;
 use snafu::ResultExt;
 
 use crate::bitmap::Bitmap;
@@ -46,10 +45,10 @@ pub struct ExternalSorter {
     temp_file_provider: Arc<dyn ExternalTempFileProvider>,
 
     /// Bitmap indicating which segments have null values
-    segment_null_bitmap: RoaringBitmap,
+    segment_null_bitmap: Bitmap,
 
     /// In-memory buffer to hold values and their corresponding bitmaps until memory threshold is exceeded
-    values_buffer: BTreeMap<Bytes, (RoaringBitmap, usize)>,
+    values_buffer: BTreeMap<Bytes, (Bitmap, usize)>,
 
     /// Count of all rows ingested so far
     total_row_count: usize,
@@ -93,7 +92,7 @@ impl Sorter for ExternalSorter {
             let memory_diff = self.push_not_null(value, segment_index_range);
             self.may_dump_buffer(memory_diff).await
         } else {
-            set_bits(&mut self.segment_null_bitmap, segment_index_range);
+            self.segment_null_bitmap.insert_range(segment_index_range);
             Ok(())
         }
     }
@@ -128,13 +127,8 @@ impl Sorter for ExternalSorter {
         }
 
         Ok(SortOutput {
-            segment_null_bitmap: Bitmap::Roaring(mem::take(&mut self.segment_null_bitmap)),
-            sorted_stream: Box::new(
-                tree_nodes
-                    .pop_front()
-                    .unwrap()
-                    .map(|r| r.map(|(k, v)| (k, Bitmap::Roaring(v)))),
-            ),
+            segment_null_bitmap: mem::take(&mut self.segment_null_bitmap),
+            sorted_stream: Box::new(tree_nodes.pop_front().unwrap()),
             total_row_count: self.total_row_count,
         })
     }
@@ -154,7 +148,7 @@ impl ExternalSorter {
             index_name,
             temp_file_provider,
 
-            segment_null_bitmap: RoaringBitmap::new(),
+            segment_null_bitmap: Bitmap::new_bitvec(), // bitvec is more efficient for many null values
             values_buffer: BTreeMap::new(),
 
             total_row_count: 0,
@@ -196,18 +190,18 @@ impl ExternalSorter {
     ) -> usize {
         match self.values_buffer.get_mut(value) {
             Some((bitmap, mem_usage)) => {
-                set_bits(bitmap, segment_index_range);
-                let new_usage = bitmap_memory_usage(bitmap) + value.len();
+                bitmap.insert_range(segment_index_range);
+                let new_usage = bitmap.memory_usage() + value.len();
                 let diff = new_usage - *mem_usage;
                 *mem_usage = new_usage;
 
                 diff
             }
             None => {
-                let mut bitmap = RoaringBitmap::new();
-                set_bits(&mut bitmap, segment_index_range);
+                let mut bitmap = Bitmap::new_roaring();
+                bitmap.insert_range(segment_index_range);
 
-                let mem_usage = bitmap_memory_usage(&bitmap) + value.len();
+                let mem_usage = bitmap.memory_usage() + value.len();
                 self.values_buffer
                     .insert(value.to_vec(), (bitmap, mem_usage));
 
@@ -275,18 +269,6 @@ impl ExternalSorter {
     }
 }
 
-/// Sets the bits within the specified range in the given `RoaringBitmap` to true
-fn set_bits(bitmap: &mut RoaringBitmap, index_range: RangeInclusive<usize>) {
-    let range = *index_range.start() as u32..=*index_range.end() as u32;
-    bitmap.insert_range(range);
-}
-
-fn bitmap_memory_usage(bitmap: &RoaringBitmap) -> usize {
-    let stat = bitmap.statistics();
-    (stat.n_bytes_array_containers + stat.n_bytes_bitset_containers + stat.n_bytes_run_containers)
-        as usize
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -300,13 +282,6 @@ mod tests {
 
     use super::*;
     use crate::external_provider::MockExternalTempFileProvider;
-
-    fn roaring(bm: Bitmap) -> RoaringBitmap {
-        match bm {
-            Bitmap::Roaring(bm) => bm,
-            _ => unreachable!(),
-        }
-    }
 
     async fn test_external_sorter(
         current_memory_usage_threshold: Option<usize>,
@@ -374,25 +349,17 @@ mod tests {
             mut sorted_stream,
             total_row_count,
         } = sorter.output().await.unwrap();
-        let segment_null_bitmap = roaring(segment_null_bitmap);
 
         assert_eq!(total_row_count, row_count);
         let n = sorted_result.remove(&None);
         assert_eq!(
-            segment_null_bitmap
-                .iter()
-                .map(|n| n as usize)
-                .collect::<Vec<_>>(),
+            segment_null_bitmap.iter_ones().collect::<Vec<_>>(),
             n.unwrap_or_default()
         );
         for (value, offsets) in sorted_result {
             let item = sorted_stream.next().await.unwrap().unwrap();
-            let bitmap = roaring(item.1);
             assert_eq!(item.0, value.unwrap());
-            assert_eq!(
-                bitmap.iter().map(|n| n as usize).collect::<Vec<_>>(),
-                offsets
-            );
+            assert_eq!(item.1.iter_ones().collect::<Vec<_>>(), offsets);
         }
     }
 
