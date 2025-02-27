@@ -164,7 +164,6 @@ where
         let grpc_server = builder
             .database_handler(greptime_request_handler.clone())
             .prometheus_handler(self.instance.clone(), user_provider.clone())
-            .otlp_handler(self.instance.clone(), user_provider)
             .flight_handler(Arc::new(greptime_request_handler))
             .build();
         Ok(grpc_server)
