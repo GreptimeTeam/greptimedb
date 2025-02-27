@@ -360,8 +360,7 @@ impl PromPlanner {
         let mut new_group_exprs = group_exprs.clone();
         // Order by ranks
         new_group_exprs.extend(rank_columns);
-        // When the field values are equal, we sort based on tags to ensure the relative stability of the output results.
-        new_group_exprs.extend(self.create_tag_column_exprs()?);
+
         let group_sort_expr = new_group_exprs
             .into_iter()
             .map(|expr| expr.sort(true, false));
@@ -2009,17 +2008,29 @@ impl PromPlanner {
 
         let asc = matches!(op.id(), token::T_BOTTOMK);
 
+        let tag_sort_exprs = self
+            .create_tag_column_exprs()?
+            .into_iter()
+            .map(|expr| expr.sort(asc, false));
+
         // perform window operation to each value column
         let exprs: Vec<DfExpr> = self
             .ctx
             .field_columns
             .iter()
             .map(|col| {
+                let mut sort_exprs = Vec::with_capacity(self.ctx.tag_columns.len() + 1);
+                // Order by value in the specific order
+                sort_exprs.push(DfExpr::Column(Column::from(col)).sort(asc, false));
+                // Then tags if the values are equal,
+                // Try to ensure the relative stability of the output results.
+                sort_exprs.extend(tag_sort_exprs.clone());
+
                 DfExpr::WindowFunction(WindowFunction {
                     fun: WindowFunctionDefinition::WindowUDF(Arc::new(RowNumber::new().into())),
                     args: vec![],
                     partition_by: group_exprs.clone(),
-                    order_by: vec![DfExpr::Column(Column::from(col)).sort(asc, false)],
+                    order_by: sort_exprs,
                     window_frame: WindowFrame::new(Some(true)),
                     null_treatment: None,
                 })
