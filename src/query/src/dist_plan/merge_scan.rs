@@ -198,7 +198,6 @@ impl MergeScanExec {
         let dbname = context.task_id().unwrap_or_default();
         let tracing_context = TracingContext::from_json(context.session_id().as_str());
         let current_channel = self.query_ctx.channel();
-
         let stream = Box::pin(stream!({
             // only report metrics once for each MergeScan
             if partition == 0 {
