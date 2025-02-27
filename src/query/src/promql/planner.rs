@@ -52,7 +52,7 @@ use promql::extension_plan::{
 use promql::functions::{
     AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, HoltWinters, IDelta,
     Increase, LastOverTime, MaxOverTime, MinOverTime, PredictLinear, PresentOverTime,
-    QuantileOverTime, Rate, Resets, StddevOverTime, StdvarOverTime, SumOverTime,
+    QuantileOverTime, Rate, Resets, Round, StddevOverTime, StdvarOverTime, SumOverTime,
 };
 use promql_parser::label::{MatchOp, Matcher, Matchers, METRIC_NAME};
 use promql_parser::parser::token::TokenType;
@@ -1509,6 +1509,20 @@ impl PromPlanner {
 
                 ScalarFunc::GeneratedExpr
             }
+            "round" => {
+                let nearest = match other_input_exprs.pop_front() {
+                    Some(DfExpr::Literal(ScalarValue::Float64(Some(t)))) => t,
+                    Some(DfExpr::Literal(ScalarValue::Int64(Some(t)))) => t as f64,
+                    None => 0.0,
+                    other => UnexpectedPlanExprSnafu {
+                        desc: format!("expected f64 literal as t, but found {:?}", other),
+                    }
+                    .fail()?,
+                };
+
+                ScalarFunc::DataFusionUdf(Arc::new(Round::scalar_udf(nearest)))
+            }
+
             _ => {
                 if let Some(f) = session_state.scalar_functions().get(func.name) {
                     ScalarFunc::DataFusionBuiltin(f.clone())
