@@ -107,7 +107,7 @@ impl HeartbeatTask {
         self.create_streams().await
     }
 
-    pub async fn create_streams(&self) -> Result<(), Error> {
+    async fn create_streams(&self) -> Result<(), Error> {
         info!("Start to establish the heartbeat connection to metasrv.");
         let (req_sender, resp_stream) = self
             .meta_client
