@@ -31,7 +31,7 @@ name: CI
 jobs:
   typos:
     name: Spell Check with Typos
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
@@ -39,7 +39,7 @@ jobs:
       - uses: crate-ci/typos@master
 
   license-header-check:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     name: Check License Header
     steps:
       - uses: actions/checkout@v4
@@ -49,29 +49,29 @@ jobs:
 
   check:
     name: Check
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     steps:
       - run: 'echo "No action required"'
 
   fmt:
     name: Rustfmt
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     steps:
       - run: 'echo "No action required"'
 
   clippy:
     name: Clippy
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     steps:
       - run: 'echo "No action required"'
 
   coverage:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     steps:
       - run: 'echo "No action required"'
 
   test:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     steps:
       - run: 'echo "No action required"'
 
@@ -80,7 +80,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ ubuntu-20.04 ]
+        os: [ ubuntu-latest ]
         mode:
           - name: "Basic"
           - name: "Remote WAL"
