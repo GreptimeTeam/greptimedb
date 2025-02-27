@@ -145,7 +145,13 @@ mod tests {
         assert_eq!(new_key, key);
     }
 
-    // add test for DatanodeLeaseKey compatibility when cluster_id is not present in serialized data,   AI!
+    #[test]
+    fn test_lease_key_compatibility() {
+        // Test that we can parse old format keys without cluster_id
+        let old_format_key = "__meta_datanode_lease-1";
+        let parsed_key: DatanodeLeaseKey = old_format_key.parse().unwrap();
+        assert_eq!(parsed_key.node_id, 1);
+    }
 
 
     #[test]
