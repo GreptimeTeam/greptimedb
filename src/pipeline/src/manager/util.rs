@@ -23,10 +23,10 @@ use crate::table::{
 };
 use crate::PipelineVersion;
 
-pub fn to_pipeline_version(version_str: Option<String>) -> Result<PipelineVersion> {
+pub fn to_pipeline_version(version_str: Option<&str>) -> Result<PipelineVersion> {
     match version_str {
         Some(version) => {
-            let ts = Timestamp::from_str_utc(&version)
+            let ts = Timestamp::from_str_utc(version)
                 .map_err(|_| InvalidPipelineVersionSnafu { version }.build())?;
             Ok(Some(TimestampNanosecond(ts)))
         }
@@ -73,14 +73,14 @@ mod tests {
         assert!(none_result.is_ok());
         assert!(none_result.unwrap().is_none());
 
-        let some_result = to_pipeline_version(Some("2023-01-01 00:00:00Z".to_string()));
+        let some_result = to_pipeline_version(Some("2023-01-01 00:00:00Z"));
         assert!(some_result.is_ok());
         assert_eq!(
             some_result.unwrap(),
             Some(TimestampNanosecond::new(1672531200000000000))
         );
 
-        let invalid = to_pipeline_version(Some("invalid".to_string()));
+        let invalid = to_pipeline_version(Some("invalid"));
         assert!(invalid.is_err());
     }
 

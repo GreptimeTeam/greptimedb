@@ -18,7 +18,6 @@ mod cancellation;
 mod database;
 pub mod flight;
 pub mod greptime_handler;
-mod otlp;
 pub mod prom_query_gateway;
 pub mod region_server;
 
