@@ -231,7 +231,7 @@ impl PromPlanner {
             self.ctx.interval = step.as_millis() as _;
         }
         let current_start = self.ctx.start;
-        self.ctx.start = self.ctx.start - (range.as_millis() as i64 - self.ctx.interval);
+        self.ctx.start -= range.as_millis() as i64 - self.ctx.interval;
         let input = self.prom_expr_to_plan(expr, session_state).await?;
         self.ctx.interval = current_interval;
         self.ctx.start = current_start;
