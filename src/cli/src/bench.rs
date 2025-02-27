@@ -23,6 +23,8 @@ use common_error::ext::BoxedError;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::memory::MemoryKvBackend;
+#[cfg(feature = "mysql_kvbackend")]
+use common_meta::kv_backend::rds::MySqlStore;
 #[cfg(feature = "pg_kvbackend")]
 use common_meta::kv_backend::rds::PgStore;
 use common_meta::peer::Peer;
@@ -63,6 +65,9 @@ pub struct BenchTableMetadataCommand {
     #[cfg(feature = "pg_kvbackend")]
     #[clap(long)]
     postgres_addr: Option<String>,
+    #[cfg(feature = "mysql_kvbackend")]
+    #[clap(long)]
+    mysql_addr: Option<String>,
     #[clap(long)]
     count: u32,
 }
@@ -80,6 +85,16 @@ impl BenchTableMetadataCommand {
         let kv_backend = if let Some(postgres_addr) = &self.postgres_addr {
             info!("Using postgres as kv backend");
             PgStore::with_url(postgres_addr, "greptime_metakv", 128)
+                .await
+                .unwrap()
+        } else {
+            kv_backend
+        };
+
+        #[cfg(feature = "mysql_kvbackend")]
+        let kv_backend = if let Some(mysql_addr) = &self.mysql_addr {
+            info!("Using mysql as kv backend");
+            MySqlStore::with_url(mysql_addr, "greptime_metakv", 128)
                 .await
                 .unwrap()
         } else {

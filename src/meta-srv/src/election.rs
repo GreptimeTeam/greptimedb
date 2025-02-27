@@ -13,6 +13,8 @@
 // limitations under the License.
 
 pub mod etcd;
+#[cfg(feature = "mysql_kvbackend")]
+pub mod mysql;
 #[cfg(feature = "pg_kvbackend")]
 pub mod postgres;
 
@@ -31,6 +33,8 @@ pub const CANDIDATES_ROOT: &str = "__metasrv_election_candidates/";
 
 pub(crate) const CANDIDATE_LEASE_SECS: u64 = 600;
 const KEEP_ALIVE_INTERVAL_SECS: u64 = CANDIDATE_LEASE_SECS / 2;
+#[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
+pub(crate) const DEFAULT_IDLE_SESSION_TIMEOUT_SECS: u8 = 10;
 
 /// Messages sent when the leader changes.
 #[derive(Debug, Clone)]

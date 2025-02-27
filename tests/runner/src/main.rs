@@ -112,6 +112,10 @@ struct Args {
     #[clap(long, default_value = "false")]
     setup_pg: bool,
 
+    /// Whether to setup mysql, by default it is false.
+    #[clap(long, default_value = "false")]
+    setup_mysql: bool,
+
     /// The number of jobs to run in parallel. Default to half of the cores.
     #[clap(short, long, default_value = "0")]
     jobs: usize,
@@ -179,6 +183,7 @@ async fn main() {
         store_addrs: args.store_addrs.clone(),
         setup_etcd: args.setup_etcd,
         setup_pg: args.setup_pg,
+        setup_mysql: args.setup_mysql,
     };
 
     let runner = Runner::new(
