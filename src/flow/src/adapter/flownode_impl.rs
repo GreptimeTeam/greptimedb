@@ -13,6 +13,7 @@
 // limitations under the License.
 
 //! impl `FlowNode` trait for FlowNodeManager so standalone can call them
+use chrono::Utc;
 use common_telemetry::warn;
 use std::collections::HashMap;
 
@@ -287,11 +288,15 @@ impl Flownode for FlowWorkerManager {
                     .flatten()
                     .cloned()
                     .collect_vec();
-                for id in flow_ids {
-                    if let Some(flow) = &&self.query_engine.as_ref().engine_state().function_state().flow_service_handler {
-                        flow.
+                if let Some(handler) = &self.query_engine
+                .engine_state()
+                .function_state()
+                .flow_service_handler
+                {
+                    let time = Utc::now();
+                    for id in flow_ids {
+                        let _ = handler.update_last_execution_time(id.try_into().unwrap(), time).await;
                     }
-
                 }
             }
         }

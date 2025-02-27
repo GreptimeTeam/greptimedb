@@ -22,7 +22,6 @@ use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::FlowId;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{DfSendableRecordBatchStream, RecordBatch, SendableRecordBatchStream};
-use common_time::DateTime;
 use datafusion::execution::TaskContext;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::PartitionStream as DfPartitionStream;
@@ -317,11 +316,7 @@ impl InformationSchemaFlowsBuilder {
                 .last_execution_time()
                 .map(|t| t.timestamp_millis().into()),
         );
-        self.source_table_names.push(Some(
-            &serde_json::to_string(flow_info.source_table_names()).context(JsonSnafu {
-                input: format!("{:?}", flow_info.source_table_names()),
-            })?,
-        ));
+        self.source_table_names.push(Some("todo by jia" ));
         Ok(())
     }
 

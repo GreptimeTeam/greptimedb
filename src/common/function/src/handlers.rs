@@ -19,6 +19,7 @@ use common_base::AffectedRows;
 use common_meta::rpc::procedure::{MigrateRegionRequest, ProcedureStateResponse};
 use common_query::error::Result;
 use common_query::Output;
+use chrono::{DateTime, Utc};
 use session::context::QueryContextRef;
 use store_api::storage::RegionId;
 use table::requests::{CompactTableRequest, DeleteRequest, FlushTableRequest, InsertRequest};
@@ -74,6 +75,12 @@ pub trait FlowServiceHandler: Send + Sync {
         flow: &str,
         ctx: QueryContextRef,
     ) -> Result<api::v1::flow::FlowResponse>;
+
+    async fn update_last_execution_time(
+        &self,
+        flow_id: u32,
+        time: DateTime<Utc>,
+    ) -> Result<()>;
 }
 
 pub type TableMutationHandlerRef = Arc<dyn TableMutationHandler>;

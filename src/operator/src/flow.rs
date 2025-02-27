@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use common_error::ext::BoxedError;
 use common_function::handlers::FlowServiceHandler;
-use common_meta::key::flow::{flow_info, FlowMetadataManagerRef};
+use common_meta::key::flow::FlowMetadataManagerRef;
 use common_meta::node_manager::NodeManagerRef;
 use common_query::error::Result;
 use common_telemetry::tracing_context::TracingContext;
@@ -54,6 +54,14 @@ impl FlowServiceHandler for FlowServiceOperator {
     ) -> Result<api::v1::flow::FlowResponse> {
         self.flush_inner(catalog, flow, ctx).await
     }
+
+    async fn update_last_execution_time(
+        &self,
+        flow_id: u32,
+        time: chrono::DateTime<Utc>,
+    ) -> Result<()> {
+        self.update_last_execution_time_inner(flow_id, time).await
+    }
 }
 
 impl FlowServiceOperator {
@@ -77,19 +85,6 @@ impl FlowServiceOperator {
             .map_err(BoxedError::new)
             .context(common_query::error::ExecuteSnafu)?
             .flow_id();
-        let flow_info = self
-            .flow_metadata_manager
-            .flow_info_manager()
-            .get(id)
-            .await
-            .map_err(BoxedError::new)
-            .context(InternalSnafu)?
-            .context(FlowInfoNotFoundSnafu {
-                catalog_name: catalog_name.to_string(),
-                flow_name: flow_name.to_string(),
-            })?
-            .updated_time();
-            todo!("todo by jiajingzhe");
             
         let all_flownode_peers = self
             .flow_metadata_manager
@@ -110,9 +105,9 @@ impl FlowServiceOperator {
 
         let mut final_result: Option<api::v1::flow::FlowResponse> = None;
         for node in all_flow_nodes {
-            let res = {
+            let res: api::v1::flow::FlowResponse = {
                 use api::v1::flow::{flow_request, FlowRequest, FlushFlow};
-                let flush_req = FlowRequest {
+                let flush_req: FlowRequest = FlowRequest {
                     header: Some(FlowRequestHeader {
                         tracing_context: TracingContext::from_current_span().to_w3c(),
                         query_context: Some(
@@ -146,5 +141,20 @@ impl FlowServiceOperator {
             .context(common_query::error::ExecuteSnafu)?;
 
         final_result.context(common_query::error::FlownodeNotFoundSnafu)
+    }
+
+    /// Update the last execution time of the flow.
+    async fn update_last_execution_time_inner(
+        &self,
+        flow_id: u32,
+        time: chrono::DateTime<Utc>,
+    ) -> Result<()> {
+        let _ = self.flow_metadata_manager
+            .flow_info_manager()
+            .update_last_execution_time(flow_id, time)
+            .await
+            .map_err(BoxedError::new)
+            .context(common_query::error::ExecuteSnafu);
+        Ok(())
     }
 }
