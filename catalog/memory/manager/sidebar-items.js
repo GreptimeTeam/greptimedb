@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["new_memory_catalog_manager"],"struct":["MemoryCatalogManager"],"type":["SchemaEntries"]};

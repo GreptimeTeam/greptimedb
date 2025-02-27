@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Commutativity"],"fn":["partial_commutative_transformer"],"struct":["Categorizer"],"type":["Transformer"]};

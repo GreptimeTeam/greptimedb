@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_TABLE_ID_SKIPPING_INDEX_GRANULARITY"],"fn":["region_options_for_metadata_region"],"mod":["extract_new_columns","validate"]};

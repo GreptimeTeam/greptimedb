@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["RegionRole","ScannerPartitioning","SetRegionRoleStateResponse","SettableRegionRoleState"],"struct":["GrantedRegion","PartitionRange","PrepareRequest","RegionStatistic","ScannerProperties","SetRegionRoleStateRequest","SinglePartitionScanner"],"trait":["RegionEngine","RegionScanner"],"type":["BatchResponses","RegionEngineRef","RegionScannerRef"]};
