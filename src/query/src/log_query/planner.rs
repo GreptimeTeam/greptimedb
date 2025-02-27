@@ -218,6 +218,27 @@ impl LogQueryPlanner {
                     lit(ScalarValue::Utf8(Some(escape_like_pattern(end)))),
                 )))
             }
+            log_query::ContentFilter::GreatThan { value, inclusive } => {
+                let expr = if *inclusive { Expr::gt_eq } else { Expr::gt };
+                Ok(expr(
+                    col(column_name),
+                    lit(ScalarValue::Utf8(Some(escape_like_pattern(value)))),
+                ))
+            }
+            log_query::ContentFilter::LessThan { value, inclusive } => {
+                let expr = if *inclusive { Expr::lt_eq } else { Expr::lt };
+                Ok(expr(
+                    col(column_name),
+                    lit(ScalarValue::Utf8(Some(escape_like_pattern(value)))),
+                ))
+            }
+            log_query::ContentFilter::In(values) => {
+                let list = values
+                    .iter()
+                    .map(|value| lit(ScalarValue::Utf8(Some(escape_like_pattern(value)))))
+                    .collect();
+                Ok(col(column_name).in_list(list, false))
+            }
             log_query::ContentFilter::Compound(filters, op) => {
                 let exprs = filters
                     .iter()
@@ -862,6 +883,123 @@ mod tests {
         let expected_expr = col("message")
             .like(lit(ScalarValue::Utf8(Some("%error%".to_string()))))
             .and(expected_nested);
+
+        assert_eq!(format!("{:?}", expr), format!("{:?}", expected_expr));
+    }
+
+    #[tokio::test]
+    async fn test_build_great_than_filter() {
+        let table_provider =
+            build_test_table_provider(&[("public".to_string(), "test_table".to_string())]).await;
+        let session_state = SessionStateBuilder::new().with_default_features().build();
+        let planner = LogQueryPlanner::new(table_provider, session_state);
+
+        // Test GreatThan with inclusive=true
+        let column_filter = ColumnFilters {
+            column_name: "message".to_string(),
+            filters: vec![ContentFilter::GreatThan {
+                value: "error".to_string(),
+                inclusive: true,
+            }],
+        };
+
+        let expr_option = planner.build_column_filter(&column_filter).unwrap();
+        assert!(expr_option.is_some());
+
+        let expr = expr_option.unwrap();
+        let expected_expr = col("message").gt_eq(lit(ScalarValue::Utf8(Some("error".to_string()))));
+
+        assert_eq!(format!("{:?}", expr), format!("{:?}", expected_expr));
+
+        // Test GreatThan with inclusive=false
+        let column_filter = ColumnFilters {
+            column_name: "message".to_string(),
+            filters: vec![ContentFilter::GreatThan {
+                value: "error".to_string(),
+                inclusive: false,
+            }],
+        };
+
+        let expr_option = planner.build_column_filter(&column_filter).unwrap();
+        assert!(expr_option.is_some());
+
+        let expr = expr_option.unwrap();
+        let expected_expr = col("message").gt(lit(ScalarValue::Utf8(Some("error".to_string()))));
+
+        assert_eq!(format!("{:?}", expr), format!("{:?}", expected_expr));
+    }
+
+    #[tokio::test]
+    async fn test_build_less_than_filter() {
+        let table_provider =
+            build_test_table_provider(&[("public".to_string(), "test_table".to_string())]).await;
+        let session_state = SessionStateBuilder::new().with_default_features().build();
+        let planner = LogQueryPlanner::new(table_provider, session_state);
+
+        // Test LessThan with inclusive=true
+        let column_filter = ColumnFilters {
+            column_name: "message".to_string(),
+            filters: vec![ContentFilter::LessThan {
+                value: "error".to_string(),
+                inclusive: true,
+            }],
+        };
+
+        let expr_option = planner.build_column_filter(&column_filter).unwrap();
+        assert!(expr_option.is_some());
+
+        let expr = expr_option.unwrap();
+        let expected_expr = col("message").lt_eq(lit(ScalarValue::Utf8(Some("error".to_string()))));
+
+        assert_eq!(format!("{:?}", expr), format!("{:?}", expected_expr));
+
+        // Test LessThan with inclusive=false
+        let column_filter = ColumnFilters {
+            column_name: "message".to_string(),
+            filters: vec![ContentFilter::LessThan {
+                value: "error".to_string(),
+                inclusive: false,
+            }],
+        };
+
+        let expr_option = planner.build_column_filter(&column_filter).unwrap();
+        assert!(expr_option.is_some());
+
+        let expr = expr_option.unwrap();
+        let expected_expr = col("message").lt(lit(ScalarValue::Utf8(Some("error".to_string()))));
+
+        assert_eq!(format!("{:?}", expr), format!("{:?}", expected_expr));
+    }
+
+    #[tokio::test]
+    async fn test_build_in_filter() {
+        let table_provider =
+            build_test_table_provider(&[("public".to_string(), "test_table".to_string())]).await;
+        let session_state = SessionStateBuilder::new().with_default_features().build();
+        let planner = LogQueryPlanner::new(table_provider, session_state);
+
+        // Test In filter with multiple values
+        let column_filter = ColumnFilters {
+            column_name: "message".to_string(),
+            filters: vec![ContentFilter::In(vec![
+                "error".to_string(),
+                "warning".to_string(),
+                "info".to_string(),
+            ])],
+        };
+
+        let expr_option = planner.build_column_filter(&column_filter).unwrap();
+        assert!(expr_option.is_some());
+
+        let expr = expr_option.unwrap();
+        let expected_expr = col("message").in_list(
+            vec![
+                lit(ScalarValue::Utf8(Some("error".to_string()))),
+                lit(ScalarValue::Utf8(Some("warning".to_string()))),
+                lit(ScalarValue::Utf8(Some("info".to_string()))),
+            ],
+            false,
+        );
 
         assert_eq!(format!("{:?}", expr), format!("{:?}", expected_expr));
     }

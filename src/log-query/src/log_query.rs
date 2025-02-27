@@ -318,6 +318,15 @@ pub enum ContentFilter {
         start_inclusive: bool,
         end_inclusive: bool,
     },
+    GreatThan {
+        value: String,
+        inclusive: bool,
+    },
+    LessThan {
+        value: String,
+        inclusive: bool,
+    },
+    In(Vec<String>),
     // TODO(ruihang): arithmetic operations
 
     // Compound filters
