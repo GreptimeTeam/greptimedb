@@ -200,10 +200,62 @@ impl PromPlanner {
             PromExpr::Paren(ParenExpr { expr }) => {
                 self.prom_expr_to_plan(expr, session_state).await?
             }
-            PromExpr::Subquery(SubqueryExpr { .. }) => UnsupportedExprSnafu {
-                name: "Prom Subquery",
+            PromExpr::Subquery(SubqueryExpr {
+                expr, range, step, ..
+            }) => {
+                let current_interval = self.ctx.interval;
+                if let Some(step) = step {
+                    self.ctx.interval = step.as_millis() as _;
+                }
+                let current_start = self.ctx.start;
+                self.ctx.start = self.ctx.start - (range.as_millis() as i64 - self.ctx.interval);
+                let input = match expr.as_ref() {
+                    // PromExpr::VectorSelector(selector) => {
+                    //     let current_interval = self.ctx.interval;
+                    //     if let Some(step) = step {
+                    //         self.ctx.interval = step.as_millis() as _;
+                    //     }
+                    //     let matrix_selector = MatrixSelector {
+                    //         vs: selector.clone(),
+                    //         range: range.clone(),
+                    //     };
+                    //     let result = self.prom_matrix_selector_to_plan(&matrix_selector).await?;
+                    //     self.ctx.interval = current_interval;
+                    //     return Ok(result);
+                    // }
+                    _ => self.prom_expr_to_plan(expr, session_state).await?,
+                };
+                self.ctx.interval = current_interval;
+                self.ctx.start = current_start;
+
+                let current_interval = self.ctx.interval;
+                if let Some(step) = step {
+                    self.ctx.interval = step.as_millis() as _;
+                }
+
+                ensure!(!range.is_zero(), ZeroRangeSelectorSnafu);
+                let range_ms = range.as_millis() as _;
+                self.ctx.range = Some(range_ms);
+
+                let manipulate = RangeManipulate::new(
+                    self.ctx.start,
+                    self.ctx.end,
+                    self.ctx.interval,
+                    range_ms,
+                    self.ctx
+                        .time_index_column
+                        .clone()
+                        .expect("time index should be set in `setup_context`"),
+                    self.ctx.field_columns.clone(),
+                    input,
+                )
+                .context(DataFusionPlanningSnafu)?;
+                self.ctx.interval = current_interval;
+
+                LogicalPlan::Extension(Extension {
+                    node: Arc::new(manipulate),
+                })
             }
-            .fail()?,
             PromExpr::NumberLiteral(lit) => self.prom_number_lit_to_plan(lit)?,
             PromExpr::StringLiteral(lit) => self.prom_string_lit_to_plan(lit)?,
             PromExpr::VectorSelector(selector) => {
