@@ -162,15 +162,38 @@ impl MetricEngineInner {
         let physical_region_id = validate_create_logical_regions(&requests)?;
         let data_region_id = utils::to_data_region_id(physical_region_id);
 
+        ensure!(
+            self.state
+                .read()
+                .unwrap()
+                .exist_physical_region(data_region_id),
+            PhysicalRegionNotFoundSnafu {
+                region_id: data_region_id,
+            }
+        );
+
         // Filters out the requests that the logical region already exists
         let requests = {
             let state = self.state.read().unwrap();
-            let logical_region_exists = state.logical_region_exists_filter(data_region_id);
-            // TODO(weny): log the skipped logical regions
-            requests
-                .into_iter()
-                .filter(|(region_id, _)| !logical_region_exists(region_id))
-                .collect::<Vec<_>>()
+            let mut skipped = Vec::with_capacity(requests.len());
+            let mut kept_requests = Vec::with_capacity(requests.len());
+
+            for (region_id, request) in requests {
+                if state.is_logical_region_exist(region_id) {
+                    skipped.push(region_id);
+                } else {
+                    kept_requests.push((region_id, request));
+                }
+            }
+
+            // log skipped regions
+            if !skipped.is_empty() {
+                info!(
+                    "Skipped creating logical regions {skipped:?} because they already exist",
+                    skipped = skipped
+                );
+            }
+            kept_requests
         };
 
         // Finds new columns to add to physical region
