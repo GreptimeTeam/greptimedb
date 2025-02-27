@@ -231,7 +231,7 @@ impl Inner {
         };
 
         req.set_header(
-            self.id,
+            (0, self.id),
             self.role,
             TracingContext::from_current_span().to_w3c(),
         );
@@ -255,7 +255,7 @@ impl Inner {
         };
 
         req.set_header(
-            self.id,
+            (0, self.id),
             self.role,
             TracingContext::from_current_span().to_w3c(),
         );
@@ -274,7 +274,7 @@ impl Inner {
 
     async fn submit_ddl_task(&self, mut req: DdlTaskRequest) -> Result<DdlTaskResponse> {
         req.set_header(
-            self.id,
+            (0, self.id),
             self.role,
             TracingContext::from_current_span().to_w3c(),
         );
@@ -293,7 +293,7 @@ impl Inner {
     async fn list_procedures(&self) -> Result<ProcedureDetailResponse> {
         let mut req = ProcedureDetailRequest::default();
         req.set_header(
-            self.id,
+            (0, self.id),
             self.role,
             TracingContext::from_current_span().to_w3c(),
         );

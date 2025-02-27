@@ -132,7 +132,7 @@ impl Inner {
     async fn range(&self, mut req: RangeRequest) -> Result<RangeResponse> {
         let mut client = self.random_client()?;
         req.set_header(
-            self.id,
+            (0, self.id),
             self.role,
             TracingContext::from_current_span().to_w3c(),
         );
@@ -144,7 +144,7 @@ impl Inner {
     async fn put(&self, mut req: PutRequest) -> Result<PutResponse> {
         let mut client = self.random_client()?;
         req.set_header(
-            self.id,
+            (0, self.id),
             self.role,
             TracingContext::from_current_span().to_w3c(),
         );
@@ -156,7 +156,7 @@ impl Inner {
     async fn batch_get(&self, mut req: BatchGetRequest) -> Result<BatchGetResponse> {
         let mut client = self.random_client()?;
         req.set_header(
-            self.id,
+            (0, self.id),
             self.role,
             TracingContext::from_current_span().to_w3c(),
         );
@@ -169,7 +169,7 @@ impl Inner {
     async fn batch_put(&self, mut req: BatchPutRequest) -> Result<BatchPutResponse> {
         let mut client = self.random_client()?;
         req.set_header(
-            self.id,
+            (0, self.id),
             self.role,
             TracingContext::from_current_span().to_w3c(),
         );
@@ -181,7 +181,7 @@ impl Inner {
     async fn batch_delete(&self, mut req: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
         let mut client = self.random_client()?;
         req.set_header(
-            self.id,
+            (0, self.id),
             self.role,
             TracingContext::from_current_span().to_w3c(),
         );
@@ -196,7 +196,7 @@ impl Inner {
     ) -> Result<CompareAndPutResponse> {
         let mut client = self.random_client()?;
         req.set_header(
-            self.id,
+            (0, self.id),
             self.role,
             TracingContext::from_current_span().to_w3c(),
         );
@@ -211,7 +211,7 @@ impl Inner {
     async fn delete_range(&self, mut req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
         let mut client = self.random_client()?;
         req.set_header(
-            self.id,
+            (0, self.id),
             self.role,
             TracingContext::from_current_span().to_w3c(),
         );
@@ -255,7 +255,7 @@ mod test {
 
     #[tokio::test]
     async fn test_already_start() {
-        let mut client = Client::new((0, 0), Role::Frontend, ChannelManager::default());
+        let mut client = Client::new(0, Role::Frontend, ChannelManager::default());
         client
             .start(&["127.0.0.1:1000", "127.0.0.1:1001"])
             .await
@@ -270,7 +270,7 @@ mod test {
 
     #[tokio::test]
     async fn test_start_with_duplicate_peers() {
-        let mut client = Client::new((0, 0), Role::Frontend, ChannelManager::default());
+        let mut client = Client::new(0, Role::Frontend, ChannelManager::default());
         client
             .start(&["127.0.0.1:1000", "127.0.0.1:1000", "127.0.0.1:1000"])
             .await

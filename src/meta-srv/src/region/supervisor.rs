@@ -22,7 +22,7 @@ use common_meta::ddl::{DetectingRegion, RegionFailureDetectorController};
 use common_meta::key::maintenance::MaintenanceModeManagerRef;
 use common_meta::leadership_notifier::LeadershipChangeListener;
 use common_meta::peer::PeerLookupServiceRef;
-use common_meta::{ClusterId, DatanodeId};
+use common_meta::DatanodeId;
 use common_runtime::JoinHandle;
 use common_telemetry::{error, info, warn};
 use common_time::util::current_time_millis;
@@ -45,7 +45,6 @@ use crate::selector::SelectorOptions;
 /// and a timestamp indicating when the heartbeat was sent.
 #[derive(Debug)]
 pub(crate) struct DatanodeHeartbeat {
-    cluster_id: ClusterId,
     datanode_id: DatanodeId,
     // TODO(weny): Considers collecting the memtable size in regions.
     regions: Vec<RegionId>,
@@ -55,7 +54,6 @@ pub(crate) struct DatanodeHeartbeat {
 impl From<&Stat> for DatanodeHeartbeat {
     fn from(value: &Stat) -> Self {
         DatanodeHeartbeat {
-            cluster_id: value.cluster_id,
             datanode_id: value.id,
             regions: value.region_stats.iter().map(|x| x.id).collect(),
             timestamp: value.timestamp_millis,
@@ -341,7 +339,7 @@ impl RegionSupervisor {
         }
     }
 
-    async fn handle_region_failures(&self, mut regions: Vec<(ClusterId, DatanodeId, RegionId)>) {
+    async fn handle_region_failures(&self, mut regions: Vec<(DatanodeId, RegionId)>) {
         if regions.is_empty() {
             return;
         }
@@ -358,22 +356,19 @@ impl RegionSupervisor {
         }
 
         let migrating_regions = regions
-            .extract_if(.., |(_, _, region_id)| {
+            .extract_if(.., |(_, region_id)| {
                 self.region_migration_manager.tracker().contains(*region_id)
             })
             .collect::<Vec<_>>();
 
-        for (cluster_id, datanode_id, region_id) in migrating_regions {
-            self.failure_detector
-                .remove(&(cluster_id, datanode_id, region_id));
+        for (datanode_id, region_id) in migrating_regions {
+            self.failure_detector.remove(&(datanode_id, region_id));
         }
 
         warn!("Detects region failures: {:?}", regions);
-        for (cluster_id, datanode_id, region_id) in regions {
-            match self.do_failover(cluster_id, datanode_id, region_id).await {
-                Ok(_) => self
-                    .failure_detector
-                    .remove(&(cluster_id, datanode_id, region_id)),
+        for (datanode_id, region_id) in regions {
+            match self.do_failover(datanode_id, region_id).await {
+                Ok(_) => self.failure_detector.remove(&(datanode_id, region_id)),
                 Err(err) => {
                     error!(err; "Failed to execute region failover for region: {region_id}, datanode: {datanode_id}");
                 }
@@ -388,15 +383,10 @@ impl RegionSupervisor {
             .context(error::MaintenanceModeManagerSnafu)
     }
 
-    async fn do_failover(
-        &self,
-        cluster_id: ClusterId,
-        datanode_id: DatanodeId,
-        region_id: RegionId,
-    ) -> Result<()> {
+    async fn do_failover(&self, datanode_id: DatanodeId, region_id: RegionId) -> Result<()> {
         let from_peer = self
             .peer_lookup
-            .datanode(cluster_id, datanode_id)
+            .datanode(datanode_id)
             .await
             .context(error::LookupPeerSnafu {
                 peer_id: datanode_id,
@@ -407,7 +397,6 @@ impl RegionSupervisor {
         let mut peers = self
             .selector
             .select(
-                cluster_id,
                 &self.selector_context,
                 SelectorOptions {
                     min_required_items: 1,
@@ -417,7 +406,6 @@ impl RegionSupervisor {
             .await?;
         let to_peer = peers.remove(0);
         let task = RegionMigrationProcedureTask {
-            cluster_id,
             region_id,
             from_peer,
             to_peer,
@@ -436,7 +424,7 @@ impl RegionSupervisor {
     }
 
     /// Detects the failure of regions.
-    fn detect_region_failure(&self) -> Vec<(ClusterId, DatanodeId, RegionId)> {
+    fn detect_region_failure(&self) -> Vec<(DatanodeId, RegionId)> {
         self.failure_detector
             .iter()
             .filter_map(|e| {
@@ -458,7 +446,7 @@ impl RegionSupervisor {
     /// Updates the state of corresponding failure detectors.
     fn on_heartbeat_arrived(&self, heartbeat: DatanodeHeartbeat) {
         for region_id in heartbeat.regions {
-            let detecting_region = (heartbeat.cluster_id, heartbeat.datanode_id, region_id);
+            let detecting_region = (heartbeat.datanode_id, region_id);
             let mut detector = self
                 .failure_detector
                 .region_failure_detector(detecting_region);
@@ -531,7 +519,6 @@ pub(crate) mod tests {
 
         sender
             .send(Event::HeartbeatArrived(DatanodeHeartbeat {
-                cluster_id: 0,
                 datanode_id: 0,
                 regions: vec![RegionId::new(1, 1)],
                 timestamp: 100,
@@ -541,7 +528,7 @@ pub(crate) mod tests {
         let (tx, rx) = oneshot::channel();
         sender.send(Event::Dump(tx)).await.unwrap();
         let detector = rx.await.unwrap();
-        assert!(detector.contains(&(0, 0, RegionId::new(1, 1))));
+        assert!(detector.contains(&(0, RegionId::new(1, 1))));
 
         // Clear up
         sender.send(Event::Clear).await.unwrap();
@@ -555,7 +542,6 @@ pub(crate) mod tests {
             (0..2000)
                 .map(|i| DatanodeHeartbeat {
                     timestamp: start + i * 1000 + rng.gen_range(0..100),
-                    cluster_id: 0,
                     datanode_id,
                     regions: region_ids
                         .iter()
@@ -624,7 +610,7 @@ pub(crate) mod tests {
         let (mut supervisor, sender) = new_test_supervisor();
         let controller = RegionFailureDetectorControl::new(sender.clone());
         tokio::spawn(async move { supervisor.run().await });
-        let detecting_region = (0, 1, RegionId::new(1, 1));
+        let detecting_region = (1, RegionId::new(1, 1));
         controller
             .register_failure_detectors(vec![detecting_region])
             .await;

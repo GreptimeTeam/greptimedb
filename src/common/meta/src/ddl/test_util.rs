@@ -34,7 +34,6 @@ use crate::ddl::test_util::create_table::{
 use crate::ddl::{DdlContext, TableMetadata, TableMetadataAllocatorContext};
 use crate::key::table_route::TableRouteValue;
 use crate::rpc::ddl::CreateTableTask;
-use crate::ClusterId;
 
 pub async fn create_physical_table_metadata(
     ddl_context: &DdlContext,
@@ -48,11 +47,7 @@ pub async fn create_physical_table_metadata(
         .unwrap();
 }
 
-pub async fn create_physical_table(
-    ddl_context: &DdlContext,
-    cluster_id: ClusterId,
-    name: &str,
-) -> TableId {
+pub async fn create_physical_table(ddl_context: &DdlContext, name: &str) -> TableId {
     // Prepares physical table metadata.
     let mut create_physical_table_task = test_create_physical_table_task(name);
     let TableMetadata {
@@ -61,10 +56,7 @@ pub async fn create_physical_table(
         ..
     } = ddl_context
         .table_metadata_allocator
-        .create(
-            &TableMetadataAllocatorContext { cluster_id },
-            &create_physical_table_task,
-        )
+        .create(&TableMetadataAllocatorContext, &create_physical_table_task)
         .await
         .unwrap();
     create_physical_table_task.set_table_id(table_id);
@@ -80,15 +72,13 @@ pub async fn create_physical_table(
 
 pub async fn create_logical_table(
     ddl_context: DdlContext,
-    cluster_id: ClusterId,
     physical_table_id: TableId,
     table_name: &str,
 ) -> TableId {
     use std::assert_matches::assert_matches;
 
     let tasks = vec![test_create_logical_table_task(table_name)];
-    let mut procedure =
-        CreateLogicalTablesProcedure::new(cluster_id, tasks, physical_table_id, ddl_context);
+    let mut procedure = CreateLogicalTablesProcedure::new(tasks, physical_table_id, ddl_context);
     let status = procedure.on_prepare().await.unwrap();
     assert_matches!(status, Status::Executing { persist: true });
     let status = procedure.on_create_metadata().await.unwrap();

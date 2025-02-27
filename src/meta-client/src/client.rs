@@ -47,7 +47,6 @@ use common_meta::rpc::store::{
     DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
 };
 use common_meta::rpc::KeyValue;
-use common_meta::ClusterId;
 use common_telemetry::info;
 use futures::TryStreamExt;
 use heartbeat::Client as HeartbeatClient;
@@ -61,7 +60,7 @@ use crate::error::{
     Result,
 };
 
-pub type Id = (u64, u64);
+pub type Id = u64;
 
 const DEFAULT_ASK_LEADER_MAX_RETRY: usize = 3;
 const DEFAULT_SUBMIT_DDL_MAX_RETRY: usize = 3;
@@ -81,18 +80,18 @@ pub struct MetaClientBuilder {
 }
 
 impl MetaClientBuilder {
-    pub fn new(cluster_id: ClusterId, member_id: u64, role: Role) -> Self {
+    pub fn new(member_id: u64, role: Role) -> Self {
         Self {
-            id: (cluster_id, member_id),
+            id: member_id,
             role,
             ..Default::default()
         }
     }
 
     /// Returns the role of Frontend's default options.
-    pub fn frontend_default_options(cluster_id: ClusterId) -> Self {
+    pub fn frontend_default_options() -> Self {
         // Frontend does not need a member id.
-        Self::new(cluster_id, 0, Role::Frontend)
+        Self::new(0, Role::Frontend)
             .enable_store()
             .enable_heartbeat()
             .enable_procedure()
@@ -100,15 +99,15 @@ impl MetaClientBuilder {
     }
 
     /// Returns the role of Datanode's default options.
-    pub fn datanode_default_options(cluster_id: ClusterId, member_id: u64) -> Self {
-        Self::new(cluster_id, member_id, Role::Datanode)
+    pub fn datanode_default_options(member_id: u64) -> Self {
+        Self::new(member_id, Role::Datanode)
             .enable_store()
             .enable_heartbeat()
     }
 
     /// Returns the role of Flownode's default options.
-    pub fn flownode_default_options(cluster_id: ClusterId, member_id: u64) -> Self {
-        Self::new(cluster_id, member_id, Role::Flownode)
+    pub fn flownode_default_options(member_id: u64) -> Self {
+        Self::new(member_id, Role::Flownode)
             .enable_store()
             .enable_heartbeat()
             .enable_procedure()
@@ -273,15 +272,9 @@ impl ClusterInfo for MetaClient {
         let cluster_client = self.cluster_client()?;
 
         let (get_metasrv_nodes, nodes_key_prefix) = match role {
-            None => (
-                true,
-                Some(NodeInfoKey::key_prefix_with_cluster_id(self.id.0)),
-            ),
+            None => (true, Some(NodeInfoKey::key_prefix())),
             Some(ClusterRole::Metasrv) => (true, None),
-            Some(role) => (
-                false,
-                Some(NodeInfoKey::key_prefix_with_role(self.id.0, role)),
-            ),
+            Some(role) => (false, Some(NodeInfoKey::key_prefix_with_role(role))),
         };
 
         let mut nodes = if get_metasrv_nodes {
@@ -324,7 +317,7 @@ impl ClusterInfo for MetaClient {
 
     async fn list_region_stats(&self) -> Result<Vec<RegionStat>> {
         let cluster_kv_backend = Arc::new(self.cluster_client()?);
-        let range_prefix = DatanodeStatKey::key_prefix_with_cluster_id(self.id.0);
+        let range_prefix = DatanodeStatKey::prefix_key();
         let req = RangeRequest::new().with_prefix(range_prefix);
         let stream =
             PaginationStream::new(cluster_kv_backend, req, 256, decode_stats).into_stream();
@@ -624,31 +617,31 @@ mod tests {
     async fn test_meta_client_builder() {
         let urls = &["127.0.0.1:3001", "127.0.0.1:3002"];
 
-        let mut meta_client = MetaClientBuilder::new(0, 0, Role::Datanode)
+        let mut meta_client = MetaClientBuilder::new(0, Role::Datanode)
             .enable_heartbeat()
             .build();
         let _ = meta_client.heartbeat_client().unwrap();
         assert!(meta_client.store_client().is_err());
         meta_client.start(urls).await.unwrap();
 
-        let mut meta_client = MetaClientBuilder::new(0, 0, Role::Datanode).build();
+        let mut meta_client = MetaClientBuilder::new(0, Role::Datanode).build();
         assert!(meta_client.heartbeat_client().is_err());
         assert!(meta_client.store_client().is_err());
         meta_client.start(urls).await.unwrap();
 
-        let mut meta_client = MetaClientBuilder::new(0, 0, Role::Datanode)
+        let mut meta_client = MetaClientBuilder::new(0, Role::Datanode)
             .enable_store()
             .build();
         assert!(meta_client.heartbeat_client().is_err());
         let _ = meta_client.store_client().unwrap();
         meta_client.start(urls).await.unwrap();
 
-        let mut meta_client = MetaClientBuilder::new(1, 2, Role::Datanode)
+        let mut meta_client = MetaClientBuilder::new(2, Role::Datanode)
             .enable_heartbeat()
             .enable_store()
             .build();
-        assert_eq!(1, meta_client.id().0);
-        assert_eq!(2, meta_client.id().1);
+        assert_eq!(2, meta_client.id());
+        assert_eq!(2, meta_client.id());
         let _ = meta_client.heartbeat_client().unwrap();
         let _ = meta_client.store_client().unwrap();
         meta_client.start(urls).await.unwrap();
@@ -657,7 +650,7 @@ mod tests {
     #[tokio::test]
     async fn test_not_start_heartbeat_client() {
         let urls = &["127.0.0.1:3001", "127.0.0.1:3002"];
-        let mut meta_client = MetaClientBuilder::new(0, 0, Role::Datanode)
+        let mut meta_client = MetaClientBuilder::new(0, Role::Datanode)
             .enable_store()
             .build();
         meta_client.start(urls).await.unwrap();
@@ -668,7 +661,7 @@ mod tests {
     #[tokio::test]
     async fn test_not_start_store_client() {
         let urls = &["127.0.0.1:3001", "127.0.0.1:3002"];
-        let mut meta_client = MetaClientBuilder::new(0, 0, Role::Datanode)
+        let mut meta_client = MetaClientBuilder::new(0, Role::Datanode)
             .enable_heartbeat()
             .build();
 

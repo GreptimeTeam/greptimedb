@@ -47,7 +47,6 @@ use crate::test_util::{new_ddl_context, new_ddl_context_with_kv_backend, MockDat
 async fn test_on_prepare_table_not_exists_err() {
     let node_manager = Arc::new(MockDatanodeManager::new(()));
     let ddl_context = new_ddl_context(node_manager);
-    let cluster_id = 1;
     let table_name = "foo";
     let table_id = 1024;
     let task = test_create_table_task(table_name, table_id);
@@ -63,7 +62,7 @@ async fn test_on_prepare_table_not_exists_err() {
         .unwrap();
 
     let task = new_drop_table_task("bar", table_id, false);
-    let mut procedure = DropTableProcedure::new(cluster_id, task, ddl_context);
+    let mut procedure = DropTableProcedure::new(task, ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
     assert_eq!(err.status_code(), StatusCode::TableNotFound);
 }
@@ -72,7 +71,6 @@ async fn test_on_prepare_table_not_exists_err() {
 async fn test_on_prepare_table() {
     let node_manager = Arc::new(MockDatanodeManager::new(()));
     let ddl_context = new_ddl_context(node_manager);
-    let cluster_id = 1;
     let table_name = "foo";
     let table_id = 1024;
     let task = test_create_table_task(table_name, table_id);
@@ -89,13 +87,13 @@ async fn test_on_prepare_table() {
 
     let task = new_drop_table_task("bar", table_id, true);
     // Drop if exists
-    let mut procedure = DropTableProcedure::new(cluster_id, task, ddl_context.clone());
+    let mut procedure = DropTableProcedure::new(task, ddl_context.clone());
     procedure.on_prepare().await.unwrap();
     assert!(!procedure.rollback_supported());
 
     let task = new_drop_table_task(table_name, table_id, false);
     // Drop table
-    let mut procedure = DropTableProcedure::new(cluster_id, task, ddl_context);
+    let mut procedure = DropTableProcedure::new(task, ddl_context);
     procedure.on_prepare().await.unwrap();
 }
 
@@ -105,7 +103,6 @@ async fn test_on_datanode_drop_regions() {
     let datanode_handler = DatanodeWatcher(tx);
     let node_manager = Arc::new(MockDatanodeManager::new(datanode_handler));
     let ddl_context = new_ddl_context(node_manager);
-    let cluster_id = 1;
     let table_id = 1024;
     let table_name = "foo";
     let task = test_create_table_task(table_name, table_id);
@@ -144,7 +141,7 @@ async fn test_on_datanode_drop_regions() {
 
     let task = new_drop_table_task(table_name, table_id, false);
     // Drop table
-    let mut procedure = DropTableProcedure::new(cluster_id, task, ddl_context);
+    let mut procedure = DropTableProcedure::new(task, ddl_context);
     procedure.on_prepare().await.unwrap();
     procedure.on_datanode_drop_regions().await.unwrap();
 
@@ -179,7 +176,6 @@ async fn test_on_rollback() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
     let kv_backend = Arc::new(MemoryKvBackend::new());
     let ddl_context = new_ddl_context_with_kv_backend(node_manager, kv_backend.clone());
-    let cluster_id = 1;
     // Prepares physical table metadata.
     let mut create_physical_table_task = test_create_physical_table_task("phy_table");
     let TableMetadata {
@@ -188,10 +184,7 @@ async fn test_on_rollback() {
         ..
     } = ddl_context
         .table_metadata_allocator
-        .create(
-            &TableMetadataAllocatorContext { cluster_id },
-            &create_physical_table_task,
-        )
+        .create(&TableMetadataAllocatorContext, &create_physical_table_task)
         .await
         .unwrap();
     create_physical_table_task.set_table_id(table_id);
@@ -205,12 +198,8 @@ async fn test_on_rollback() {
     let physical_table_id = table_id;
     // Creates the logical table metadata.
     let task = test_create_logical_table_task("foo");
-    let mut procedure = CreateLogicalTablesProcedure::new(
-        cluster_id,
-        vec![task],
-        physical_table_id,
-        ddl_context.clone(),
-    );
+    let mut procedure =
+        CreateLogicalTablesProcedure::new(vec![task], physical_table_id, ddl_context.clone());
     procedure.on_prepare().await.unwrap();
     let ctx = new_test_procedure_context();
     procedure.execute(&ctx).await.unwrap();
@@ -223,7 +212,7 @@ async fn test_on_rollback() {
     // Drops the physical table
     {
         let task = new_drop_table_task("phy_table", physical_table_id, false);
-        let mut procedure = DropTableProcedure::new(cluster_id, task, ddl_context.clone());
+        let mut procedure = DropTableProcedure::new(task, ddl_context.clone());
         procedure.on_prepare().await.unwrap();
         assert!(procedure.rollback_supported());
         procedure.on_delete_metadata().await.unwrap();
@@ -238,7 +227,7 @@ async fn test_on_rollback() {
 
     // Drops the logical table
     let task = new_drop_table_task("foo", table_ids[0], false);
-    let mut procedure = DropTableProcedure::new(cluster_id, task, ddl_context.clone());
+    let mut procedure = DropTableProcedure::new(task, ddl_context.clone());
     procedure.on_prepare().await.unwrap();
     assert!(!procedure.rollback_supported());
 }
@@ -255,18 +244,15 @@ fn new_drop_table_task(table_name: &str, table_id: TableId, drop_if_exists: bool
 
 #[tokio::test]
 async fn test_memory_region_keeper_guard_dropped_on_procedure_done() {
-    let cluster_id = 1;
-
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
     let kv_backend = Arc::new(MemoryKvBackend::new());
     let ddl_context = new_ddl_context_with_kv_backend(node_manager, kv_backend);
 
-    let physical_table_id = create_physical_table(&ddl_context, cluster_id, "t").await;
-    let logical_table_id =
-        create_logical_table(ddl_context.clone(), cluster_id, physical_table_id, "s").await;
+    let physical_table_id = create_physical_table(&ddl_context, "t").await;
+    let logical_table_id = create_logical_table(ddl_context.clone(), physical_table_id, "s").await;
 
     let inner_test = |task: DropTableTask| async {
-        let mut procedure = DropTableProcedure::new(cluster_id, task, ddl_context.clone());
+        let mut procedure = DropTableProcedure::new(task, ddl_context.clone());
         execute_procedure_until(&mut procedure, |p| {
             p.data.state == DropTableState::InvalidateTableCache
         })
@@ -304,14 +290,13 @@ async fn test_from_json() {
         (DropTableState::DatanodeDropRegions, 1, 1),
         (DropTableState::DeleteTombstone, 1, 0),
     ] {
-        let cluster_id = 1;
         let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
         let kv_backend = Arc::new(MemoryKvBackend::new());
         let ddl_context = new_ddl_context_with_kv_backend(node_manager, kv_backend);
 
-        let physical_table_id = create_physical_table(&ddl_context, cluster_id, "t").await;
+        let physical_table_id = create_physical_table(&ddl_context, "t").await;
         let task = new_drop_table_task("t", physical_table_id, false);
-        let mut procedure = DropTableProcedure::new(cluster_id, task, ddl_context.clone());
+        let mut procedure = DropTableProcedure::new(task, ddl_context.clone());
         execute_procedure_until(&mut procedure, |p| p.data.state == state).await;
         let data = procedure.dump().unwrap();
         assert_eq!(
@@ -334,14 +319,13 @@ async fn test_from_json() {
 
     let num_operating_regions = 0;
     let num_operating_regions_after_recovery = 0;
-    let cluster_id = 1;
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
     let kv_backend = Arc::new(MemoryKvBackend::new());
     let ddl_context = new_ddl_context_with_kv_backend(node_manager, kv_backend);
 
-    let physical_table_id = create_physical_table(&ddl_context, cluster_id, "t").await;
+    let physical_table_id = create_physical_table(&ddl_context, "t").await;
     let task = new_drop_table_task("t", physical_table_id, false);
-    let mut procedure = DropTableProcedure::new(cluster_id, task, ddl_context.clone());
+    let mut procedure = DropTableProcedure::new(task, ddl_context.clone());
     execute_procedure_until_done(&mut procedure).await;
     let data = procedure.dump().unwrap();
     assert_eq!(

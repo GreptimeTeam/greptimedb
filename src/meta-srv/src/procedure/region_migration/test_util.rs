@@ -317,7 +317,6 @@ pub fn new_persistent_context(from: u64, to: u64, region_id: RegionId) -> Persis
         from_peer: Peer::empty(from),
         to_peer: Peer::empty(to),
         region_id,
-        cluster_id: 0,
         timeout: Duration::from_secs(10),
     }
 }

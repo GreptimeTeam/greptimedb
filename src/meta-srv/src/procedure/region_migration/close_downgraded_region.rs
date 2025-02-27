@@ -62,7 +62,6 @@ impl CloseDowngradedRegion {
     async fn build_close_region_instruction(&self, ctx: &mut Context) -> Result<Instruction> {
         let pc = &ctx.persistent_ctx;
         let downgrade_leader_datanode_id = pc.from_peer.id;
-        let cluster_id = pc.cluster_id;
         let table_id = pc.region_id.table_id();
         let region_number = pc.region_id.region_number();
         let datanode_table_value = ctx.get_from_peer_datanode_table_value().await?;
@@ -70,7 +69,6 @@ impl CloseDowngradedRegion {
         let RegionInfo { engine, .. } = datanode_table_value.region_info.clone();
 
         Ok(Instruction::CloseRegion(RegionIdent {
-            cluster_id,
             datanode_id: downgrade_leader_datanode_id,
             table_id,
             region_number,

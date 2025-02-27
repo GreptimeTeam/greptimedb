@@ -18,7 +18,7 @@ use std::hash::Hash;
 use common_error::ext::BoxedError;
 use common_meta::kv_backend::KvBackend;
 use common_meta::peer::{Peer, PeerLookupService};
-use common_meta::{util, ClusterId, DatanodeId, FlownodeId};
+use common_meta::{util, DatanodeId, FlownodeId};
 use common_time::util as time_util;
 use snafu::ResultExt;
 
@@ -35,14 +35,12 @@ fn build_lease_filter(lease_secs: u64) -> impl Fn(&LeaseValue) -> bool {
 
 /// look up [`Peer`] given [`ClusterId`] and [`DatanodeId`], will only return if it's alive under given `lease_secs`
 pub async fn lookup_datanode_peer(
-    cluster_id: ClusterId,
     datanode_id: DatanodeId,
     meta_peer_client: &MetaPeerClientRef,
     lease_secs: u64,
 ) -> Result<Option<Peer>> {
     let lease_filter = build_lease_filter(lease_secs);
     let lease_key = DatanodeLeaseKey {
-        cluster_id,
         node_id: datanode_id,
     };
     let lease_key_bytes: Vec<u8> = lease_key.clone().try_into()?;
@@ -63,13 +61,12 @@ pub async fn lookup_datanode_peer(
 
 /// Find all alive datanodes
 pub async fn alive_datanodes(
-    cluster_id: ClusterId,
     meta_peer_client: &MetaPeerClientRef,
     lease_secs: u64,
 ) -> Result<HashMap<DatanodeLeaseKey, LeaseValue>> {
     let predicate = build_lease_filter(lease_secs);
     filter(
-        DatanodeLeaseKey::prefix_key_by_cluster(cluster_id),
+        DatanodeLeaseKey::prefix_key_by_cluster(),
         meta_peer_client,
         |v| predicate(v),
     )
@@ -78,14 +75,12 @@ pub async fn alive_datanodes(
 
 /// look up [`Peer`] given [`ClusterId`] and [`DatanodeId`], only return if it's alive under given `lease_secs`
 pub async fn lookup_flownode_peer(
-    cluster_id: ClusterId,
     flownode_id: FlownodeId,
     meta_peer_client: &MetaPeerClientRef,
     lease_secs: u64,
 ) -> Result<Option<Peer>> {
     let lease_filter = build_lease_filter(lease_secs);
     let lease_key = FlownodeLeaseKey {
-        cluster_id,
         node_id: flownode_id,
     };
     let lease_key_bytes: Vec<u8> = lease_key.clone().try_into()?;
@@ -107,13 +102,12 @@ pub async fn lookup_flownode_peer(
 
 /// Find all alive flownodes
 pub async fn alive_flownodes(
-    cluster_id: ClusterId,
     meta_peer_client: &MetaPeerClientRef,
     lease_secs: u64,
 ) -> Result<HashMap<FlownodeLeaseKey, LeaseValue>> {
     let predicate = build_lease_filter(lease_secs);
     filter(
-        FlownodeLeaseKey::prefix_key_by_cluster(cluster_id),
+        FlownodeLeaseKey::prefix_key_by_cluster(),
         meta_peer_client,
         |v| predicate(v),
     )
@@ -163,22 +157,14 @@ impl MetaPeerLookupService {
 
 #[async_trait::async_trait]
 impl PeerLookupService for MetaPeerLookupService {
-    async fn datanode(
-        &self,
-        cluster_id: ClusterId,
-        id: DatanodeId,
-    ) -> common_meta::error::Result<Option<Peer>> {
-        lookup_datanode_peer(cluster_id, id, &self.meta_peer_client, u64::MAX)
+    async fn datanode(&self, id: DatanodeId) -> common_meta::error::Result<Option<Peer>> {
+        lookup_datanode_peer(id, &self.meta_peer_client, u64::MAX)
             .await
             .map_err(BoxedError::new)
             .context(common_meta::error::ExternalSnafu)
     }
-    async fn flownode(
-        &self,
-        cluster_id: ClusterId,
-        id: FlownodeId,
-    ) -> common_meta::error::Result<Option<Peer>> {
-        lookup_flownode_peer(cluster_id, id, &self.meta_peer_client, u64::MAX)
+    async fn flownode(&self, id: FlownodeId) -> common_meta::error::Result<Option<Peer>> {
+        lookup_flownode_peer(id, &self.meta_peer_client, u64::MAX)
             .await
             .map_err(BoxedError::new)
             .context(common_meta::error::ExternalSnafu)

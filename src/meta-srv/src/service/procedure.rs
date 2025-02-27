@@ -87,7 +87,6 @@ impl procedure_service_server::ProcedureService for Metasrv {
         } = request.into_inner();
 
         let header = header.context(error::MissingRequestHeaderSnafu)?;
-        let cluster_id = header.cluster_id;
         let query_context = query_context
             .context(error::MissingRequiredParameterSnafu {
                 param: "query_context",
@@ -102,7 +101,6 @@ impl procedure_service_server::ProcedureService for Metasrv {
             .procedure_executor()
             .submit_ddl_task(
                 &ExecutorContext {
-                    cluster_id: Some(cluster_id),
                     tracing_context: Some(header.tracing_context),
                 },
                 SubmitDdlTaskRequest {
@@ -140,21 +138,20 @@ impl procedure_service_server::ProcedureService for Metasrv {
         } = request.into_inner();
 
         let header = header.context(error::MissingRequestHeaderSnafu)?;
-        let cluster_id = header.cluster_id;
+        let _cluster_id = header.cluster_id;
 
         let from_peer = self
-            .lookup_peer(cluster_id, from_peer)
+            .lookup_peer(from_peer)
             .await?
             .context(error::PeerUnavailableSnafu { peer_id: from_peer })?;
         let to_peer = self
-            .lookup_peer(cluster_id, to_peer)
+            .lookup_peer(to_peer)
             .await?
             .context(error::PeerUnavailableSnafu { peer_id: to_peer })?;
 
         let pid = self
             .region_migration_manager()
             .submit_procedure(RegionMigrationProcedureTask {
-                cluster_id,
                 region_id: region_id.into(),
                 from_peer,
                 to_peer,

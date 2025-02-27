@@ -172,11 +172,7 @@ mod tests {
         let detecting_regions = event.into_region_failure_detectors();
         assert_eq!(
             detecting_regions,
-            vec![(
-                ctx.persistent_ctx.cluster_id,
-                from_peer.id,
-                ctx.persistent_ctx.region_id
-            )]
+            vec![(from_peer.id, ctx.persistent_ctx.region_id)]
         );
 
         let table_route = table_metadata_manager

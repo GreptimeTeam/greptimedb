@@ -19,7 +19,7 @@ use crate::lease;
 use crate::metasrv::SelectorContext;
 use crate::selector::common::choose_items;
 use crate::selector::weighted_choose::{RandomWeightedChoose, WeightedItem};
-use crate::selector::{Namespace, Selector, SelectorOptions};
+use crate::selector::{Selector, SelectorOptions};
 
 /// Select all alive datanodes based using a random weighted choose.
 pub struct LeaseBasedSelector;
@@ -29,15 +29,10 @@ impl Selector for LeaseBasedSelector {
     type Context = SelectorContext;
     type Output = Vec<Peer>;
 
-    async fn select(
-        &self,
-        ns: Namespace,
-        ctx: &Self::Context,
-        opts: SelectorOptions,
-    ) -> Result<Self::Output> {
+    async fn select(&self, ctx: &Self::Context, opts: SelectorOptions) -> Result<Self::Output> {
         // 1. get alive datanodes.
         let lease_kvs =
-            lease::alive_datanodes(ns, &ctx.meta_peer_client, ctx.datanode_lease_secs).await?;
+            lease::alive_datanodes(&ctx.meta_peer_client, ctx.datanode_lease_secs).await?;
 
         // 2. compute weight array, but the weight of each item is the same.
         let weight_array = lease_kvs

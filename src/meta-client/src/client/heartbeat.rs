@@ -52,7 +52,7 @@ impl HeartbeatSender {
     #[inline]
     pub async fn send(&self, mut req: HeartbeatRequest) -> Result<()> {
         req.set_header(
-            self.id,
+            (0, self.id),
             self.role,
             TracingContext::from_current_span().to_w3c(),
         );
@@ -209,7 +209,7 @@ impl Inner {
         let (sender, receiver) = mpsc::channel::<HeartbeatRequest>(128);
 
         let header = RequestHeader::new(
-            self.id,
+            (0, self.id),
             self.role,
             TracingContext::from_current_span().to_w3c(),
         );
@@ -272,7 +272,7 @@ mod test {
 
     #[tokio::test]
     async fn test_already_start() {
-        let mut client = Client::new((0, 0), Role::Datanode, ChannelManager::default(), 3);
+        let mut client = Client::new(0, Role::Datanode, ChannelManager::default(), 3);
         client
             .start(&["127.0.0.1:1000", "127.0.0.1:1001"])
             .await
@@ -288,7 +288,7 @@ mod test {
     #[tokio::test]
     async fn test_heartbeat_stream() {
         let (sender, mut receiver) = mpsc::channel::<HeartbeatRequest>(100);
-        let sender = HeartbeatSender::new((8, 8), Role::Datanode, sender);
+        let sender = HeartbeatSender::new(8, Role::Datanode, sender);
         let _handle = tokio::spawn(async move {
             for _ in 0..10 {
                 sender.send(HeartbeatRequest::default()).await.unwrap();
@@ -296,7 +296,7 @@ mod test {
         });
         while let Some(req) = receiver.recv().await {
             let header = req.header.unwrap();
-            assert_eq!(8, header.cluster_id);
+            assert_eq!(0, header.cluster_id);
             assert_eq!(8, header.member_id);
         }
     }

@@ -25,8 +25,8 @@ use store_api::region_engine::{RegionRole, RegionStatistic};
 use store_api::storage::RegionId;
 use table::metadata::TableId;
 
+use crate::error;
 use crate::error::Result;
-use crate::{error, ClusterId};
 
 pub(crate) const DATANODE_LEASE_PREFIX: &str = "__meta_datanode_lease";
 const INACTIVE_REGION_PREFIX: &str = "__meta_inactive_region";
@@ -52,7 +52,6 @@ lazy_static! {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Stat {
     pub timestamp_millis: i64,
-    pub cluster_id: ClusterId,
     // The datanode Id.
     pub id: u64,
     // The datanode address.
@@ -102,10 +101,7 @@ impl Stat {
     }
 
     pub fn stat_key(&self) -> DatanodeStatKey {
-        DatanodeStatKey {
-            cluster_id: self.cluster_id,
-            node_id: self.id,
-        }
+        DatanodeStatKey { node_id: self.id }
     }
 
     /// Returns a tuple array containing [RegionId] and [RegionRole].
@@ -145,7 +141,7 @@ impl TryFrom<&HeartbeatRequest> for Stat {
         } = value;
 
         match (header, peer) {
-            (Some(header), Some(peer)) => {
+            (Some(_header), Some(peer)) => {
                 let region_stats = region_stats
                     .iter()
                     .map(RegionStat::from)
@@ -153,7 +149,6 @@ impl TryFrom<&HeartbeatRequest> for Stat {
 
                 Ok(Self {
                     timestamp_millis: time_util::current_time_millis(),
-                    cluster_id: header.cluster_id,
                     // datanode id
                     id: peer.id,
                     // datanode address
@@ -199,29 +194,21 @@ impl From<&api::v1::meta::RegionStat> for RegionStat {
 /// The format is `__meta_datanode_stat-{cluster_id}-{node_id}`.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub struct DatanodeStatKey {
-    pub cluster_id: ClusterId,
     pub node_id: u64,
 }
 
 impl DatanodeStatKey {
     /// The key prefix.
     pub fn prefix_key() -> Vec<u8> {
-        format!("{DATANODE_STAT_PREFIX}-").into_bytes()
-    }
-
-    /// The key prefix with the cluster id.
-    pub fn key_prefix_with_cluster_id(cluster_id: ClusterId) -> String {
-        format!("{DATANODE_STAT_PREFIX}-{cluster_id}-")
+        //todo(hl): remove cluster id in prefix
+        format!("{DATANODE_STAT_PREFIX}-0-").into_bytes()
     }
 }
 
 impl From<DatanodeStatKey> for Vec<u8> {
     fn from(value: DatanodeStatKey) -> Self {
-        format!(
-            "{}-{}-{}",
-            DATANODE_STAT_PREFIX, value.cluster_id, value.node_id
-        )
-        .into_bytes()
+        //todo(hl): remove cluster id in prefix
+        format!("{}-0-{}", DATANODE_STAT_PREFIX, value.node_id).into_bytes()
     }
 }
 
@@ -237,17 +224,14 @@ impl FromStr for DatanodeStatKey {
 
         let cluster_id = caps[1].to_string();
         let node_id = caps[2].to_string();
-        let cluster_id: u64 = cluster_id.parse().context(error::ParseNumSnafu {
+        let _cluster_id: u64 = cluster_id.parse().context(error::ParseNumSnafu {
             err_msg: format!("invalid cluster_id: {cluster_id}"),
         })?;
         let node_id: u64 = node_id.parse().context(error::ParseNumSnafu {
             err_msg: format!("invalid node_id: {node_id}"),
         })?;
 
-        Ok(Self {
-            cluster_id,
-            node_id,
-        })
+        Ok(Self { node_id })
     }
 }
 
@@ -321,7 +305,6 @@ mod tests {
     #[test]
     fn test_stat_key() {
         let stat = Stat {
-            cluster_id: 3,
             id: 101,
             region_num: 10,
             ..Default::default()
@@ -329,14 +312,12 @@ mod tests {
 
         let stat_key = stat.stat_key();
 
-        assert_eq!(3, stat_key.cluster_id);
         assert_eq!(101, stat_key.node_id);
     }
 
     #[test]
     fn test_stat_val_round_trip() {
         let stat = Stat {
-            cluster_id: 0,
             id: 101,
             region_num: 100,
             ..Default::default()
@@ -351,7 +332,6 @@ mod tests {
         assert_eq!(1, stats.len());
 
         let stat = stats.first().unwrap();
-        assert_eq!(0, stat.cluster_id);
         assert_eq!(101, stat.id);
         assert_eq!(100, stat.region_num);
     }
