@@ -65,11 +65,9 @@ pub async fn alive_datanodes(
     lease_secs: u64,
 ) -> Result<HashMap<DatanodeLeaseKey, LeaseValue>> {
     let predicate = build_lease_filter(lease_secs);
-    filter(
-        DatanodeLeaseKey::prefix_key_by_cluster(),
-        meta_peer_client,
-        |v| predicate(v),
-    )
+    filter(DatanodeLeaseKey::prefix_key(), meta_peer_client, |v| {
+        predicate(v)
+    })
     .await
 }
 

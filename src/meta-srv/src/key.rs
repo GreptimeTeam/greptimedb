@@ -35,12 +35,7 @@ macro_rules! impl_from_str_lease_key {
                     .context(error::InvalidLeaseKeySnafu { key })?;
 
                 ensure!(caps.len() == 3, error::InvalidLeaseKeySnafu { key });
-
-                let cluster_id = caps[1].to_string();
                 let node_id = caps[2].to_string();
-                let _cluster_id: u64 = cluster_id.parse().context(error::ParseNumSnafu {
-                    err_msg: format!("invalid cluster_id: {cluster_id}"),
-                })?;
                 let node_id: u64 = node_id.parse().context(error::ParseNumSnafu {
                     err_msg: format!("invalid node_id: {node_id}"),
                 })?;

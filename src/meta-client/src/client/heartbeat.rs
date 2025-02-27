@@ -52,7 +52,7 @@ impl HeartbeatSender {
     #[inline]
     pub async fn send(&self, mut req: HeartbeatRequest) -> Result<()> {
         req.set_header(
-            (0, self.id),
+            self.id,
             self.role,
             TracingContext::from_current_span().to_w3c(),
         );
@@ -209,7 +209,7 @@ impl Inner {
         let (sender, receiver) = mpsc::channel::<HeartbeatRequest>(128);
 
         let header = RequestHeader::new(
-            (0, self.id),
+            self.id,
             self.role,
             TracingContext::from_current_span().to_w3c(),
         );
@@ -296,7 +296,6 @@ mod test {
         });
         while let Some(req) = receiver.recv().await {
             let header = req.header.unwrap();
-            assert_eq!(0, header.cluster_id);
             assert_eq!(8, header.member_id);
         }
     }

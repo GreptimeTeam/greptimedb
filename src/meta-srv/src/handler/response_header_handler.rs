@@ -28,18 +28,15 @@ impl HeartbeatHandler for ResponseHeaderHandler {
 
     async fn handle(
         &self,
-        req: &HeartbeatRequest,
+        _req: &HeartbeatRequest,
         _ctx: &mut Context,
         acc: &mut HeartbeatAccumulator,
     ) -> Result<HandleControl> {
-        let HeartbeatRequest { header, .. } = req;
         let res_header = ResponseHeader {
             protocol_version: PROTOCOL_VERSION,
-            cluster_id: header.as_ref().map_or(0, |h| h.cluster_id),
             ..Default::default()
         };
         acc.header = Some(res_header);
-
         Ok(HandleControl::Continue)
     }
 }
@@ -90,7 +87,7 @@ mod tests {
         };
 
         let req = HeartbeatRequest {
-            header: Some(RequestHeader::new((1, 2), Role::Datanode, W3cTrace::new())),
+            header: Some(RequestHeader::new(2, Role::Datanode, W3cTrace::new())),
             ..Default::default()
         };
         let mut acc = HeartbeatAccumulator::default();
@@ -101,11 +98,10 @@ mod tests {
             .await
             .unwrap();
         let header = std::mem::take(&mut acc.header);
-        let res = HeartbeatResponse {
+        let _res = HeartbeatResponse {
             header,
             mailbox_message: acc.into_mailbox_message(),
             ..Default::default()
         };
-        assert_eq!(1, res.header.unwrap().cluster_id);
     }
 }

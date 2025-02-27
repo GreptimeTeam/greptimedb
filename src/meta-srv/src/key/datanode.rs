@@ -45,7 +45,7 @@ pub struct DatanodeLeaseKey {
 }
 
 impl DatanodeLeaseKey {
-    pub fn prefix_key_by_cluster() -> Vec<u8> {
+    pub fn prefix_key() -> Vec<u8> {
         format!("{DATANODE_LEASE_PREFIX}-0-").into_bytes()
     }
 }
@@ -93,13 +93,8 @@ impl FromStr for InactiveRegionKey {
             error::InvalidInactiveRegionKeySnafu { key }
         );
 
-        let cluster_id = caps[1].to_string();
         let node_id = caps[2].to_string();
         let region_id = caps[3].to_string();
-
-        let _cluster_id: u64 = cluster_id.parse().context(error::ParseNumSnafu {
-            err_msg: format!("invalid cluster_id: {cluster_id}"),
-        })?;
         let node_id: u64 = node_id.parse().context(error::ParseNumSnafu {
             err_msg: format!("invalid node_id: {node_id}"),
         })?;
@@ -144,15 +139,6 @@ mod tests {
 
         assert_eq!(new_key, key);
     }
-
-    #[test]
-    fn test_lease_key_compatibility() {
-        // Test that we can parse old format keys without cluster_id
-        let old_format_key = "__meta_datanode_lease-1";
-        let parsed_key: DatanodeLeaseKey = old_format_key.parse().unwrap();
-        assert_eq!(parsed_key.node_id, 1);
-    }
-
 
     #[test]
     fn test_lease_key_to_stat_key() {

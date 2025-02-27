@@ -55,7 +55,7 @@ pub trait ClusterInfo {
     // TODO(jeremy): Other info, like region status, etc.
 }
 
-/// The key of [NodeInfo] in the storage. The format is `__meta_cluster_node_info-{cluster_id}-{role}-{node_id}`.
+/// The key of [NodeInfo] in the storage. The format is `__meta_cluster_node_info-0-{role}-{node_id}`.
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub struct NodeInfoKey {
     /// The role of the node. It can be `[Role::Datanode]` or `[Role::Frontend]`.
@@ -180,15 +180,10 @@ impl FromStr for NodeInfoKey {
         let caps = CLUSTER_NODE_INFO_PREFIX_PATTERN
             .captures(key)
             .context(InvalidNodeInfoKeySnafu { key })?;
-
         ensure!(caps.len() == 4, InvalidNodeInfoKeySnafu { key });
 
-        let cluster_id = caps[1].to_string();
         let role = caps[2].to_string();
         let node_id = caps[3].to_string();
-        let _cluster_id: u64 = cluster_id.parse().context(ParseNumSnafu {
-            err_msg: format!("invalid cluster_id: {cluster_id}"),
-        })?;
         let role: i32 = role.parse().context(ParseNumSnafu {
             err_msg: format!("invalid role {role}"),
         })?;

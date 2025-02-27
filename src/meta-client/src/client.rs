@@ -548,6 +548,8 @@ impl MetaClient {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use api::v1::meta::{HeartbeatRequest, Peer};
     use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
     use rand::Rng;
@@ -681,6 +683,9 @@ mod tests {
         let tc = new_client("test_heartbeat").await;
         let (sender, mut receiver) = tc.client.heartbeat().await.unwrap();
         // send heartbeats
+
+        let request_sent = Arc::new(AtomicUsize::new(0));
+        let request_sent_clone = request_sent.clone();
         let _handle = tokio::spawn(async move {
             for _ in 0..5 {
                 let req = HeartbeatRequest {
@@ -691,14 +696,24 @@ mod tests {
                     ..Default::default()
                 };
                 sender.send(req).await.unwrap();
+                request_sent_clone.fetch_add(1, Ordering::Relaxed);
             }
         });
 
-        let _handle = tokio::spawn(async move {
-            while let Some(res) = receiver.message().await.unwrap() {
-                assert_eq!(1000, res.header.unwrap().cluster_id);
+        let heartbeat_count = Arc::new(AtomicUsize::new(0));
+        let heartbeat_count_clone = heartbeat_count.clone();
+        let handle = tokio::spawn(async move {
+            while let Some(_) = receiver.message().await.unwrap() {
+                heartbeat_count_clone.fetch_add(1, Ordering::Relaxed);
             }
         });
+
+        handle.await.unwrap();
+        //+1 for the initial response
+        assert_eq!(
+            request_sent.load(Ordering::Relaxed) + 1,
+            heartbeat_count.load(Ordering::Relaxed)
+        );
     }
 
     #[tokio::test]

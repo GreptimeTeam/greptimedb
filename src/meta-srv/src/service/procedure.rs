@@ -41,7 +41,7 @@ impl procedure_service_server::ProcedureService for Metasrv {
     ) -> GrpcResult<ProcedureStateResponse> {
         if !self.is_leader() {
             let resp = ProcedureStateResponse {
-                header: Some(ResponseHeader::failed(0, Error::is_not_leader())),
+                header: Some(ResponseHeader::failed(Error::is_not_leader())),
                 ..Default::default()
             };
 
@@ -71,7 +71,7 @@ impl procedure_service_server::ProcedureService for Metasrv {
     async fn ddl(&self, request: Request<PbDdlTaskRequest>) -> GrpcResult<PbDdlTaskResponse> {
         if !self.is_leader() {
             let resp = PbDdlTaskResponse {
-                header: Some(ResponseHeader::failed(0, Error::is_not_leader())),
+                header: Some(ResponseHeader::failed(Error::is_not_leader())),
                 ..Default::default()
             };
 
@@ -121,7 +121,7 @@ impl procedure_service_server::ProcedureService for Metasrv {
     ) -> GrpcResult<MigrateRegionResponse> {
         if !self.is_leader() {
             let resp = MigrateRegionResponse {
-                header: Some(ResponseHeader::failed(0, Error::is_not_leader())),
+                header: Some(ResponseHeader::failed(Error::is_not_leader())),
                 ..Default::default()
             };
 
@@ -137,9 +137,7 @@ impl procedure_service_server::ProcedureService for Metasrv {
             timeout_secs,
         } = request.into_inner();
 
-        let header = header.context(error::MissingRequestHeaderSnafu)?;
-        let _cluster_id = header.cluster_id;
-
+        let _header = header.context(error::MissingRequestHeaderSnafu)?;
         let from_peer = self
             .lookup_peer(from_peer)
             .await?
@@ -174,7 +172,7 @@ impl procedure_service_server::ProcedureService for Metasrv {
     ) -> GrpcResult<ProcedureDetailResponse> {
         if !self.is_leader() {
             let resp = ProcedureDetailResponse {
-                header: Some(ResponseHeader::failed(0, Error::is_not_leader())),
+                header: Some(ResponseHeader::failed(Error::is_not_leader())),
                 ..Default::default()
             };
 

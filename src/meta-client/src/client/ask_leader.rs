@@ -79,7 +79,7 @@ impl AskLeader {
 
         let req = AskLeaderRequest {
             header: Some(RequestHeader::new(
-                (0, self.id),
+                self.id,
                 self.role,
                 TracingContext::from_current_span().to_w3c(),
             )),

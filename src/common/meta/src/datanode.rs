@@ -48,7 +48,7 @@ lazy_static! {
 
 /// The key of the datanode stat in the storage.
 ///
-/// The format is `__meta_datanode_stat-{cluster_id}-{node_id}`.
+/// The format is `__meta_datanode_stat-0-{node_id}`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Stat {
     pub timestamp_millis: i64,
@@ -191,7 +191,7 @@ impl From<&api::v1::meta::RegionStat> for RegionStat {
 
 /// The key of the datanode stat in the memory store.
 ///
-/// The format is `__meta_datanode_stat-{cluster_id}-{node_id}`.
+/// The format is `__meta_datanode_stat-0-{node_id}`.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub struct DatanodeStatKey {
     pub node_id: u64,
@@ -221,12 +221,7 @@ impl FromStr for DatanodeStatKey {
             .context(error::InvalidStatKeySnafu { key })?;
 
         ensure!(caps.len() == 3, error::InvalidStatKeySnafu { key });
-
-        let cluster_id = caps[1].to_string();
         let node_id = caps[2].to_string();
-        let _cluster_id: u64 = cluster_id.parse().context(error::ParseNumSnafu {
-            err_msg: format!("invalid cluster_id: {cluster_id}"),
-        })?;
         let node_id: u64 = node_id.parse().context(error::ParseNumSnafu {
             err_msg: format!("invalid node_id: {node_id}"),
         })?;

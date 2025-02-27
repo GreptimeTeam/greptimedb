@@ -155,11 +155,10 @@ pub struct Pusher {
 impl Pusher {
     pub fn new(
         sender: Sender<std::result::Result<HeartbeatResponse, tonic::Status>>,
-        req_header: &RequestHeader,
+        _req_header: &RequestHeader,
     ) -> Self {
         let res_header = ResponseHeader {
             protocol_version: PROTOCOL_VERSION,
-            cluster_id: req_header.cluster_id,
             ..Default::default()
         };
 
