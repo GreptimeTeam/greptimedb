@@ -155,8 +155,11 @@ impl Flownode for FlowWorkerManager {
 
     #[allow(unreachable_code, unused)]
     async fn handle_inserts(&self, request: InsertRequests) -> Result<FlowResponse> {
-        return Ok(Default::default());
-
+        return self
+            .rule_engine
+            .handle_inserts(request)
+            .await
+            .map_err(to_meta_err(snafu::location!()));
         // using try_read to ensure two things:
         // 1. flush wouldn't happen until inserts before it is inserted
         // 2. inserts happening concurrently with flush wouldn't be block by flush
@@ -209,15 +212,15 @@ impl Flownode for FlowWorkerManager {
                     .collect_vec();
                 let table_col_names = table_schema.relation_desc.names;
                 let table_col_names = table_col_names
-                    .iter().enumerate()
-                    .map(|(idx,name)| match name {
-                        Some(name) => Ok(name.clone()),
-                        None => InternalSnafu {
-                            reason: format!("Expect column {idx} of table id={table_id} to have name in table schema, found None"),
-                        }
-                        .fail().map_err(BoxedError::new).context(ExternalSnafu),
-                    })
-                    .collect::<Result<Vec<_>>>()?;
+                        .iter().enumerate()
+                        .map(|(idx,name)| match name {
+                            Some(name) => Ok(name.clone()),
+                            None => InternalSnafu {
+                                reason: format!("Expect column {idx} of table id={table_id} to have name in table schema, found None"),
+                            }
+                            .fail().map_err(BoxedError::new).context(ExternalSnafu),
+                        })
+                        .collect::<Result<Vec<_>>>()?;
                 let name_to_col = HashMap::<_, _>::from_iter(
                     insert_schema
                         .iter()
