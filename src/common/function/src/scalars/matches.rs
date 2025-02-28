@@ -82,6 +82,12 @@ impl Function for MatchesFunction {
                 ),
             }
         );
+
+        let data_column = &columns[0];
+        if data_column.is_empty() {
+            return Ok(Arc::new(BooleanVector::from(Vec::<bool>::with_capacity(0))));
+        }
+
         let pattern_vector = &columns[1]
             .cast(&ConcreteDataType::string_datatype())
             .context(InvalidInputTypeSnafu {
@@ -89,12 +95,12 @@ impl Function for MatchesFunction {
             })?;
         // Safety: both length and type are checked before
         let pattern = pattern_vector.get(0).as_string().unwrap();
-        self.eval(columns[0].clone(), pattern)
+        self.eval(data_column, pattern)
     }
 }
 
 impl MatchesFunction {
-    fn eval(&self, data: VectorRef, pattern: String) -> Result<VectorRef> {
+    fn eval(&self, data: &VectorRef, pattern: String) -> Result<VectorRef> {
         let col_name = "data";
         let parser_context = ParserContext::default();
         let raw_ast = parser_context.parse_pattern(&pattern)?;
@@ -1309,7 +1315,7 @@ mod test {
             "The quick brown fox jumps over          dog",
             "The quick brown fox jumps over the      dog",
         ];
-        let input_vector = Arc::new(StringVector::from(input_data));
+        let input_vector: VectorRef = Arc::new(StringVector::from(input_data));
         let cases = [
             // basic cases
             ("quick", vec![true, false, true, true, true, true, true]),
@@ -1400,7 +1406,7 @@ mod test {
 
         let f = MatchesFunction;
         for (pattern, expected) in cases {
-            let actual: VectorRef = f.eval(input_vector.clone(), pattern.to_string()).unwrap();
+            let actual: VectorRef = f.eval(&input_vector, pattern.to_string()).unwrap();
             let expected: VectorRef = Arc::new(BooleanVector::from(expected)) as _;
             assert_eq!(expected, actual, "{pattern}");
         }

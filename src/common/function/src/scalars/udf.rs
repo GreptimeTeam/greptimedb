@@ -16,12 +16,15 @@ use std::any::Any;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
+use common_query::error::FromScalarValueSnafu;
 use common_query::prelude::ColumnarValue;
 use datafusion::logical_expr::{ScalarFunctionArgs, ScalarUDFImpl};
 use datafusion_expr::ScalarUDF;
 use datatypes::data_type::DataType;
 use datatypes::prelude::*;
+use datatypes::vectors::Helper;
 use session::context::QueryContextRef;
+use snafu::ResultExt;
 
 use crate::function::{FunctionContext, FunctionRef};
 use crate::state::FunctionState;
@@ -73,7 +76,13 @@ impl ScalarUDFImpl for ScalarUdf {
         let columns = args
             .args
             .iter()
-            .map(|x| ColumnarValue::try_from(x).and_then(|y| y.try_into_vector(args.number_rows)))
+            .map(|x| {
+                ColumnarValue::try_from(x).and_then(|y| match y {
+                    ColumnarValue::Vector(z) => Ok(z),
+                    ColumnarValue::Scalar(z) => Helper::try_from_scalar_value(z, args.number_rows)
+                        .context(FromScalarValueSnafu),
+                })
+            })
             .collect::<common_query::error::Result<Vec<_>>>()?;
         let v = self
             .function
@@ -153,7 +162,12 @@ mod tests {
             ]))),
         ];
 
-        match udf.invoke_batch(&args, 4).unwrap() {
+        let args = ScalarFunctionArgs {
+            args: &args,
+            number_rows: 4,
+            return_type: &ConcreteDataType::boolean_datatype().as_arrow_type(),
+        };
+        match udf.invoke_with_args(args).unwrap() {
             datafusion_expr::ColumnarValue::Array(x) => {
                 let x = x.as_any().downcast_ref::<BooleanArray>().unwrap();
                 assert_eq!(x.len(), 4);
