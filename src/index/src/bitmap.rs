@@ -92,6 +92,10 @@ impl Bitmap {
         }
     }
 
+    /// Inserts a range of bits into the bitmap.
+    ///
+    /// # Arguments
+    /// * `range` - Inclusive range of bits to set
     pub fn insert_range(&mut self, range: RangeInclusive<usize>) {
         match self {
             Bitmap::BitVec(bitvec) => {
@@ -140,6 +144,9 @@ impl Bitmap {
     }
 
     /// Computes the size of the serialized bitmap in bytes.
+    ///
+    /// # Arguments
+    /// * `bitmap_type` - Format of data to be serialized
     pub fn serialized_size(&self, bitmap_type: BitmapType) -> usize {
         match (self, bitmap_type) {
             (Bitmap::BitVec(bitvec), BitmapType::BitVec) => bitvec.as_raw_slice().len(),
@@ -184,26 +191,16 @@ impl Bitmap {
         }
 
         match (self, other) {
-            (Bitmap::BitVec(bitvec1), Bitmap::BitVec(bitvec2)) => {
+            (Bitmap::BitVec(bitvec1), bitmap) => {
+                let bitvec2 = bitmap.into_bitvec();
                 if bitvec1.len() > bitvec2.len() {
                     *bitvec1 |= bitvec2
                 } else {
                     *bitvec1 = bitvec2 | &*bitvec1;
                 }
             }
-            (Bitmap::Roaring(roaring1), Bitmap::Roaring(roaring2)) => {
-                *roaring1 |= roaring2;
-            }
-            (Bitmap::BitVec(bitvec1), Bitmap::Roaring(roaring)) => {
-                let bitvec2 = Self::roaring_to_bitvec(&roaring);
-                if bitvec1.len() > bitvec2.len() {
-                    *bitvec1 |= bitvec2
-                } else {
-                    *bitvec1 = bitvec2 | &*bitvec1;
-                }
-            }
-            (Bitmap::Roaring(roaring1), Bitmap::BitVec(bitvec)) => {
-                let roaring2 = Self::bitvec_to_roaring(bitvec);
+            (Bitmap::Roaring(roaring1), bitmap) => {
+                let roaring2 = bitmap.into_roaring();
                 *roaring1 |= roaring2;
             }
         }
@@ -215,27 +212,17 @@ impl Bitmap {
     /// the current bitmap's type.
     pub fn intersect(&mut self, other: Self) {
         match (self, other) {
-            (Bitmap::BitVec(bitvec1), Bitmap::BitVec(mut bitvec2)) => {
+            (Bitmap::BitVec(bitvec1), bitmap) => {
+                let mut bitvec2 = bitmap.into_bitvec();
                 let len = (bitvec1.len() - bitvec1.trailing_zeros())
                     .min(bitvec2.len() - bitvec2.trailing_zeros());
                 bitvec1.truncate(len);
                 bitvec2.truncate(len);
                 *bitvec1 &= bitvec2;
             }
-            (Bitmap::Roaring(roaring1), Bitmap::Roaring(roaring2)) => {
+            (Bitmap::Roaring(roaring1), bitmap) => {
+                let roaring2 = bitmap.into_roaring();
                 *roaring1 &= roaring2;
-            }
-            (Bitmap::BitVec(bitvec1), Bitmap::Roaring(roaring)) => {
-                let mut bitvec2 = Self::roaring_to_bitvec(&roaring);
-                let len = (bitvec1.len() - bitvec1.trailing_zeros())
-                    .min(bitvec2.len() - bitvec2.trailing_zeros());
-                bitvec1.truncate(len);
-                bitvec2.truncate(len);
-                *bitvec1 &= bitvec2;
-            }
-            (Bitmap::Roaring(roaring), Bitmap::BitVec(bitvec)) => {
-                let roaring2 = Self::bitvec_to_roaring(bitvec);
-                *roaring &= roaring2;
             }
         }
     }
@@ -276,6 +263,20 @@ impl Bitmap {
                     + stat.n_bytes_bitset_containers
                     + stat.n_bytes_run_containers) as usize
             }
+        }
+    }
+
+    fn into_bitvec(self) -> BitVec {
+        match self {
+            Bitmap::BitVec(bitvec) => bitvec,
+            Bitmap::Roaring(roaring) => Self::roaring_to_bitvec(&roaring),
+        }
+    }
+
+    fn into_roaring(self) -> RoaringBitmap {
+        match self {
+            Bitmap::Roaring(roaring) => roaring,
+            Bitmap::BitVec(bitvec) => Self::bitvec_to_roaring(bitvec),
         }
     }
 
