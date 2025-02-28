@@ -74,6 +74,7 @@ SELECT
 FROM ip_v4_data;
 
 -- Test IPv4 CIDR functions
+-- SQLNESS SORT_RESULT 3 1
 SELECT 
     `id`,
     ip_addr,
@@ -84,6 +85,7 @@ SELECT
 FROM ip_v4_data;
 
 -- Test IPv4 range checks
+-- SQLNESS SORT_RESULT 3 1
 SELECT 
     t.`id`,
     t.source_ip,
@@ -98,6 +100,7 @@ JOIN ip_v4_data d ON ipv4_in_range(t.source_ip, d.cidr_range) OR ipv4_in_range(t
 WHERE t.source_ip NOT LIKE '%:%';
 
 -- Test IPv6 string/hex conversion functions
+-- SQLNESS SORT_RESULT 3 1
 SELECT 
     `id`, 
     ip_addr, 
@@ -106,6 +109,7 @@ SELECT
 FROM ip_v6_data;
 
 -- Test IPv6 CIDR functions
+-- SQLNESS SORT_RESULT 3 1
 SELECT 
     `id`,
     ip_addr,
@@ -116,6 +120,7 @@ SELECT
 FROM ip_v6_data;
 
 -- Test IPv6 range checks
+-- SQLNESS SORT_RESULT 3 1
 SELECT 
     t.`id`,
     t.source_ip,
@@ -131,6 +136,7 @@ WHERE t.source_ip LIKE '%:%';
 
 -- Combined IPv4/IPv6 example - Security analysis
 -- Find all traffic from the same network to specific IPs
+-- SQLNESS SORT_RESULT 3 1
 SELECT 
     source_ip,
     dest_ip,
@@ -151,6 +157,7 @@ FROM network_traffic
 ORDER BY bytes_sent DESC;
 
 -- Subnet analysis - IPv4
+-- SQLNESS SORT_RESULT 3 1
 SELECT 
     ipv4_to_cidr(source_ip, arrow_cast(24,'UInt8')) AS subnet,
     COUNT(*) AS device_count,
@@ -161,6 +168,7 @@ GROUP BY ipv4_to_cidr(source_ip, arrow_cast(24,'UInt8'))
 ORDER BY total_bytes DESC;
 
 -- Subnet analysis - IPv6
+-- SQLNESS SORT_RESULT 3 1
 SELECT 
     ipv6_to_cidr(source_ip, arrow_cast(48,'UInt8')) AS subnet,
     COUNT(*) AS device_count,
