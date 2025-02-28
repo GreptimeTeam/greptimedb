@@ -45,7 +45,7 @@ impl Function for BuildFunction {
         Signature::nullary(Volatility::Immutable)
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
         let build_info = common_version::build_info().to_string();
         let v = Arc::new(StringVector::from(vec![build_info]));
         Ok(v)
@@ -67,7 +67,7 @@ mod tests {
         );
         assert_eq!(build.signature(), Signature::nullary(Volatility::Immutable));
         let build_info = common_version::build_info().to_string();
-        let vector = build.eval(FunctionContext::default(), &[]).unwrap();
+        let vector = build.eval(&FunctionContext::default(), &[]).unwrap();
         let expect: VectorRef = Arc::new(StringVector::from(vec![build_info]));
         assert_eq!(expect, vector);
     }

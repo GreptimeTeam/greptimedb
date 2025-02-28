@@ -155,14 +155,11 @@ impl ContextProvider for DfContextProviderAdapter {
         self.engine_state.udf_function(name).map_or_else(
             || self.session_state.scalar_functions().get(name).cloned(),
             |func| {
-                Some(Arc::new(
-                    create_udf(
-                        func,
-                        self.query_ctx.clone(),
-                        self.engine_state.function_state(),
-                    )
-                    .into(),
-                ))
+                Some(Arc::new(create_udf(
+                    func,
+                    self.query_ctx.clone(),
+                    self.engine_state.function_state(),
+                )))
             },
         )
     }

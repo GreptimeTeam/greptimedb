@@ -47,7 +47,7 @@ impl Function for DatabaseFunction {
         Signature::nullary(Volatility::Immutable)
     }
 
-    fn eval(&self, func_ctx: FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, func_ctx: &FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
         let db = func_ctx.query_ctx.current_schema();
 
         Ok(Arc::new(StringVector::from_slice(&[&db])) as _)
@@ -67,7 +67,7 @@ impl Function for CurrentSchemaFunction {
         Signature::uniform(0, vec![], Volatility::Immutable)
     }
 
-    fn eval(&self, func_ctx: FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, func_ctx: &FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
         let db = func_ctx.query_ctx.current_schema();
 
         Ok(Arc::new(StringVector::from_slice(&[&db])) as _)
@@ -87,7 +87,7 @@ impl Function for SessionUserFunction {
         Signature::uniform(0, vec![], Volatility::Immutable)
     }
 
-    fn eval(&self, func_ctx: FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, func_ctx: &FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
         let user = func_ctx.query_ctx.current_user();
 
         Ok(Arc::new(StringVector::from_slice(&[user.username()])) as _)
@@ -138,7 +138,7 @@ mod tests {
             query_ctx,
             ..Default::default()
         };
-        let vector = build.eval(func_ctx, &[]).unwrap();
+        let vector = build.eval(&func_ctx, &[]).unwrap();
         let expect: VectorRef = Arc::new(StringVector::from(vec!["test_db"]));
         assert_eq!(expect, vector);
     }

@@ -27,7 +27,6 @@ use common_catalog::consts::is_readonly_schema;
 use common_error::ext::BoxedError;
 use common_function::function::FunctionRef;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
-use common_query::prelude::ScalarUdf;
 use common_query::{Output, OutputData, OutputMeta};
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
@@ -453,11 +452,6 @@ impl QueryEngine for DatafusionQueryEngine {
     /// So it's better to make UDAF name lowercase when creating one.
     fn register_aggregate_function(&self, func: AggregateFunctionMetaRef) {
         self.state.register_aggregate_function(func);
-    }
-
-    /// Register a [`ScalarUdf`].
-    fn register_udf(&self, udf: ScalarUdf) {
-        self.state.register_udf(udf);
     }
 
     /// Register an UDF function.
