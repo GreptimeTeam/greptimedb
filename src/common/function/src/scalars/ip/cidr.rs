@@ -103,7 +103,7 @@ impl Function for Ipv4ToCidr {
 
                     let ip_addr = complete_and_parse_ipv4(ip_str)?;
                     // Apply the subnet mask to the IP by zeroing out the host bits
-                    let mask_bits = u32::MAX << (32 - mask);
+                    let mask_bits = u32::MAX.wrapping_shl(32 - mask as u32);
                     let masked_ip = Ipv4Addr::from(u32::from(ip_addr) & mask_bits);
 
                     Some(format!("{}/{}", masked_ip, mask))
@@ -140,7 +140,7 @@ impl Function for Ipv4ToCidr {
                     };
 
                     // Apply the subnet mask to zero out host bits
-                    let mask_bits = u32::MAX << (32 - subnet_mask);
+                    let mask_bits = u32::MAX.wrapping_shl(32 - subnet_mask as u32);
                     let masked_ip = Ipv4Addr::from(ip_bits & mask_bits);
 
                     Some(format!("{}/{}", masked_ip, subnet_mask))
