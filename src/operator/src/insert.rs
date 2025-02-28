@@ -360,11 +360,11 @@ impl Inserter {
 
         let InstantAndNormalInsertRequests {
             normal_requests,
-            instant_requests: _,
+            instant_requests,
         } = requests;
 
         // TODO(discord9): mirror some
-        /*
+
         // Mirror requests for source table to flownode asynchronously
         let flow_mirror_task = FlowMirrorTask::new(
             &self.table_flownode_set_cache,
@@ -374,7 +374,7 @@ impl Inserter {
                 .chain(instant_requests.requests.iter()),
         )
         .await?;
-        flow_mirror_task.detach(self.node_manager.clone())?;*/
+        flow_mirror_task.detach(self.node_manager.clone())?;
 
         // Write requests to datanode and wait for response
         let write_tasks = self

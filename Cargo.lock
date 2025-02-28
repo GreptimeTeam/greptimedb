@@ -4167,6 +4167,7 @@ dependencies = [
  "bytes",
  "cache",
  "catalog",
+ "chrono",
  "client",
  "common-base",
  "common-catalog",

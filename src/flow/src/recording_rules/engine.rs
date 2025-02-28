@@ -12,29 +12,40 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use api::v1::flow::FlowResponse;
+use common_error::ext::BoxedError;
 use common_meta::ddl::create_flow::FlowType;
+use common_meta::key::flow::FlowMetadataManagerRef;
+use common_meta::key::table_info::TableInfoManager;
+use common_meta::key::TableMetadataManagerRef;
 use common_telemetry::tracing::warn;
 use common_telemetry::{debug, info};
 use common_time::Timestamp;
+use datafusion::sql::unparser::expr_to_sql;
 use datafusion_common::tree_node::TreeNode;
 use datatypes::value::Value;
 use query::QueryEngineRef;
 use session::context::QueryContextRef;
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
+use store_api::storage::RegionId;
+use table::metadata::TableId;
 use tokio::sync::oneshot::error::TryRecvError;
 use tokio::sync::{oneshot, RwLock};
 use tokio::time::Instant;
 
 use super::frontend_client::FrontendClient;
-use super::{df_plan_to_sql, AddFilterRewriter};
-use crate::adapter::{CreateFlowArgs, FlowId};
-use crate::error::{DatafusionSnafu, DatatypesSnafu, FlowAlreadyExistSnafu, UnexpectedSnafu};
+use super::{df_plan_to_sql, AddFilterRewriter, TimeWindowExpr};
+use crate::adapter::{CreateFlowArgs, FlowId, TableName};
+use crate::error::{
+    DatafusionSnafu, DatatypesSnafu, ExternalSnafu, FlowAlreadyExistSnafu, InternalSnafu,
+    TimeSnafu, UnexpectedSnafu,
+};
 use crate::metrics::{METRIC_FLOW_RULE_ENGINE_QUERY_TIME, METRIC_FLOW_RULE_ENGINE_SLOW_QUERY};
-use crate::recording_rules::{find_plan_time_window_bound, sql_to_df_plan};
+use crate::recording_rules::{find_plan_time_window_bound, find_time_window_expr, sql_to_df_plan};
 use crate::Error;
 
 /// TODO(discord9): make those constants configurable
@@ -49,18 +60,74 @@ pub struct RecordingRuleEngine {
     tasks: RwLock<BTreeMap<FlowId, RecordingRuleTask>>,
     shutdown_txs: RwLock<BTreeMap<FlowId, oneshot::Sender<()>>>,
     frontend_client: Arc<FrontendClient>,
+    flow_metadata_manager: FlowMetadataManagerRef,
+    table_meta: TableMetadataManagerRef,
     engine: QueryEngineRef,
 }
 
 impl RecordingRuleEngine {
-    pub fn new(frontend_client: Arc<FrontendClient>, engine: QueryEngineRef) -> Self {
+    pub fn new(
+        frontend_client: Arc<FrontendClient>,
+        engine: QueryEngineRef,
+        flow_metadata_manager: FlowMetadataManagerRef,
+        table_meta: TableMetadataManagerRef,
+    ) -> Self {
         Self {
             tasks: Default::default(),
             shutdown_txs: Default::default(),
             frontend_client,
+            flow_metadata_manager,
+            table_meta,
             engine,
         }
     }
+
+    pub async fn handle_inserts(
+        &self,
+        request: api::v1::region::InsertRequests,
+    ) -> Result<FlowResponse, Error> {
+        let table_info_mgr = self.table_meta.table_info_manager();
+        let mut group_by_table_name: HashMap<TableName, Vec<api::v1::Rows>> = HashMap::new();
+        for r in request.requests {
+            let tid = RegionId::from(r.region_id).table_id();
+            let name = get_table_name(table_info_mgr, &tid).await?;
+            let entry = group_by_table_name.entry(name).or_default();
+            if let Some(rows) = r.rows {
+                entry.push(rows);
+            }
+        }
+
+        for (_flow_id, task) in self.tasks.read().await.iter() {
+            let src_table_names = &task.source_table_names;
+
+            for src_table_name in src_table_names {
+                if let Some(entry) = group_by_table_name.get(src_table_name) {
+                    let Some(expr) = &task.time_window_expr else {
+                        continue;
+                    };
+                    let involved_time_windows = expr.handle_rows(entry.clone()).await?;
+                    let mut state = task.state.write().await;
+                    state
+                        .dirty_time_windows
+                        .add_lower_bounds(involved_time_windows.into_iter());
+                }
+            }
+        }
+
+        Ok(Default::default())
+    }
+}
+
+async fn get_table_name(zelf: &TableInfoManager, table_id: &TableId) -> Result<TableName, Error> {
+    zelf.get(*table_id)
+        .await
+        .map_err(BoxedError::new)
+        .context(ExternalSnafu)?
+        .with_context(|| UnexpectedSnafu {
+            reason: format!("Table id = {:?}, couldn't found table name", table_id),
+        })
+        .map(|name| name.table_name())
+        .map(|name| [name.catalog_name, name.schema_name, name.table_name])
 }
 
 const MIN_REFRESH_DURATION: Duration = Duration::new(5, 0);
@@ -70,7 +137,7 @@ impl RecordingRuleEngine {
         let CreateFlowArgs {
             flow_id,
             sink_table_name,
-            source_table_ids: _,
+            source_table_ids,
             create_if_not_exists,
             or_replace,
             expire_after,
@@ -115,14 +182,46 @@ impl RecordingRuleEngine {
             }
             .fail()?
         };
+        let query_ctx = Arc::new(query_ctx);
+        let mut source_table_names = Vec::new();
+        for src_id in source_table_ids {
+            let table_name = self
+                .table_meta
+                .table_info_manager()
+                .get(src_id)
+                .await
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?
+                .with_context(|| UnexpectedSnafu {
+                    reason: format!("Table id = {:?}, couldn't found table name", src_id),
+                })
+                .map(|name| name.table_name())
+                .map(|name| [name.catalog_name, name.schema_name, name.table_name])?;
+            source_table_names.push(table_name);
+        }
 
         let (tx, rx) = oneshot::channel();
+
+        let plan = sql_to_df_plan(query_ctx.clone(), self.engine.clone(), &sql, true).await?;
+        let (column_name, time_window_expr, _, df_schema) = find_time_window_expr(
+            &plan,
+            self.engine.engine_state().catalog_manager().clone(),
+            query_ctx.clone(),
+        )
+        .await?;
+
+        let phy_expr = time_window_expr
+            .map(|expr| TimeWindowExpr::from_expr(&expr, &column_name, &df_schema))
+            .transpose()?;
+
         let task = RecordingRuleTask::new(
             flow_id,
             &sql,
+            phy_expr,
             expire_after,
             sink_table_name,
-            Arc::new(query_ctx),
+            source_table_names,
+            query_ctx,
             rx,
         );
 
@@ -171,26 +270,33 @@ impl RecordingRuleEngine {
 pub struct RecordingRuleTask {
     flow_id: FlowId,
     query: String,
+    time_window_expr: Option<TimeWindowExpr>,
     /// in seconds
     expire_after: Option<i64>,
     sink_table_name: [String; 3],
+    source_table_names: HashSet<[String; 3]>,
     state: Arc<RwLock<RecordingRuleState>>,
 }
 
 impl RecordingRuleTask {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         flow_id: FlowId,
         query: &str,
+        time_window_expr: Option<TimeWindowExpr>,
         expire_after: Option<i64>,
         sink_table_name: [String; 3],
+        source_table_names: Vec<[String; 3]>,
         query_ctx: QueryContextRef,
         shutdown_rx: oneshot::Receiver<()>,
     ) -> Self {
         Self {
             flow_id,
             query: query.to_string(),
+            time_window_expr,
             expire_after,
             sink_table_name,
+            source_table_names: source_table_names.into_iter().collect(),
             state: Arc::new(RwLock::new(RecordingRuleState::new(query_ctx, shutdown_rx))),
         }
     }
@@ -207,17 +313,20 @@ impl RecordingRuleTask {
 
         loop {
             // FIXME(discord9): test if need upper bound also works
-            let new_query = self
-                .gen_query_with_time_window(engine.clone(), false)
-                .await?;
+            let new_query = self.gen_query_with_time_window(engine.clone()).await?;
 
-            let insert_into = format!(
-                "INSERT INTO {}.{}.{} {}",
-                self.sink_table_name[0],
-                self.sink_table_name[1],
-                self.sink_table_name[2],
-                new_query
-            );
+            let insert_into = if let Some(new_query) = new_query {
+                format!(
+                    "INSERT INTO {}.{}.{} {}",
+                    self.sink_table_name[0],
+                    self.sink_table_name[1],
+                    self.sink_table_name[2],
+                    new_query
+                )
+            } else {
+                tokio::time::sleep(MIN_REFRESH_DURATION).await;
+                continue;
+            };
 
             if is_first {
                 is_first = false;
@@ -284,11 +393,11 @@ impl RecordingRuleTask {
         }
     }
 
+    /// will merge and use the first ten time window in query
     async fn gen_query_with_time_window(
         &self,
         engine: QueryEngineRef,
-        need_upper_bound: bool,
-    ) -> Result<String, Error> {
+    ) -> Result<Option<String>, Error> {
         let query_ctx = self.state.read().await.query_ctx.clone();
         let start = SystemTime::now();
         let since_the_epoch = start
@@ -299,46 +408,53 @@ impl RecordingRuleTask {
             .map(|e| since_the_epoch.as_secs() - e as u64);
 
         let Some(low_bound) = low_bound else {
-            return Ok(self.query.clone());
+            return Ok(Some(self.query.clone()));
         };
 
         let low_bound = Timestamp::new_second(low_bound as i64);
 
         let plan = sql_to_df_plan(query_ctx.clone(), engine.clone(), &self.query, true).await?;
 
+        // TODO(discord9): find more time window!
         let (col_name, lower, upper) =
             find_plan_time_window_bound(&plan, low_bound, query_ctx.clone(), engine.clone())
                 .await?;
 
         let new_sql = {
-            let to_df_literal = |value| -> Result<_, Error> {
-                let value = Value::from(value);
-                let value = value
-                    .try_to_scalar_value(&value.data_type())
-                    .with_context(|_| DatatypesSnafu {
-                        extra: format!("Failed to convert to scalar value: {}", value),
-                    })?;
-                Ok(value)
-            };
-            let lower = lower.map(to_df_literal).transpose()?;
-            let upper = upper.map(to_df_literal).transpose()?.and_then(|u| {
-                if need_upper_bound {
-                    Some(u)
-                } else {
-                    None
-                }
-            });
             let expr = {
-                use datafusion_expr::{col, lit};
                 match (lower, upper) {
-                    (Some(l), Some(u)) => col(&col_name)
-                        .gt_eq(lit(l))
-                        .and(col(&col_name).lt_eq(lit(u))),
-                    (Some(l), None) => col(&col_name).gt_eq(lit(l)),
-                    (None, Some(u)) => col(&col_name).lt(lit(u)),
-                    // no time window, direct return
-                    (None, None) => return Ok(self.query.clone()),
+                    (Some(l), Some(u)) => {
+                        let window_size = u.sub(&l).with_context(|| UnexpectedSnafu {
+                            reason: format!("Can't get window size from {u:?} - {l:?}"),
+                        })?;
+
+                        self.state
+                            .write()
+                            .await
+                            .dirty_time_windows
+                            .gen_filter_exprs(&col_name, lower, window_size)?
+                    }
+                    _ => UnexpectedSnafu {
+                        reason: format!("Can't get window size: lower={lower:?}, upper={upper:?}"),
+                    }
+                    .fail()?,
                 }
+            };
+
+            debug!(
+                "Flow id={:?}, Generated filter expr: {:?}",
+                self.flow_id,
+                expr.as_ref()
+                    .map(|expr| expr_to_sql(expr).with_context(|_| DatafusionSnafu {
+                        context: format!("Failed to generate filter expr from {expr:?}"),
+                    }))
+                    .transpose()?
+                    .map(|s| s.to_string())
+            );
+
+            let Some(expr) = expr else {
+                // no new data, hence no need to update
+                return Ok(None);
             };
 
             let mut add_filter = AddFilterRewriter::new(expr);
@@ -355,7 +471,7 @@ impl RecordingRuleTask {
             df_plan_to_sql(&plan)?
         };
 
-        Ok(new_sql)
+        Ok(Some(new_sql))
     }
 }
 
@@ -366,8 +482,141 @@ pub struct RecordingRuleState {
     last_update_time: Instant,
     /// last time query duration
     last_query_duration: Duration,
+    /// Dirty Time windows need to be updated
+    /// mapping of `start -> end` and non-overlapping
+    dirty_time_windows: DirtyTimeWindows,
     exec_state: ExecState,
     shutdown_rx: oneshot::Receiver<()>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DirtyTimeWindows {
+    windows: BTreeMap<Timestamp, Option<Timestamp>>,
+}
+
+fn to_df_literal(value: Timestamp) -> Result<datafusion_common::ScalarValue, Error> {
+    let value = Value::from(value);
+    let value = value
+        .try_to_scalar_value(&value.data_type())
+        .with_context(|_| DatatypesSnafu {
+            extra: format!("Failed to convert to scalar value: {}", value),
+        })?;
+    Ok(value)
+}
+
+impl DirtyTimeWindows {
+    /// Time window merge distance
+    const MERGE_DIST: i32 = 3;
+    /// Add lower bounds to the dirty time windows. Upper bounds are ignored.
+    ///
+    /// # Arguments
+    ///
+    /// * `lower_bounds` - An iterator of lower bounds to be added.
+    pub fn add_lower_bounds(&mut self, lower_bounds: impl Iterator<Item = Timestamp>) {
+        for lower_bound in lower_bounds {
+            let entry = self.windows.entry(lower_bound);
+            entry.or_insert(None);
+        }
+    }
+
+    /// Generate all filter expressions consuming all time windows
+    pub fn gen_filter_exprs(
+        &mut self,
+        col_name: &str,
+        expire_lower_bound: Option<Timestamp>,
+        window_size: chrono::Duration,
+    ) -> Result<Option<datafusion_expr::Expr>, Error> {
+        debug!(
+            "expire_lower_bound: {:?}, window_size: {:?}",
+            expire_lower_bound.map(|t| t.to_iso8601_string()),
+            window_size
+        );
+        self.merge_dirty_time_windows(window_size)?;
+        let mut expr_lst = vec![];
+        for (start, end) in std::mem::take(&mut self.windows).into_iter() {
+            debug!(
+                "Time window start: {:?}, end: {:?}",
+                start.to_iso8601_string(),
+                end.map(|t| t.to_iso8601_string())
+            );
+            let start = if let Some(expire) = expire_lower_bound {
+                start.max(expire)
+            } else {
+                start
+            };
+
+            // filter out expired time window
+            if let Some(end) = end {
+                if end <= start {
+                    continue;
+                }
+            }
+
+            use datafusion_expr::{col, lit};
+            let lower = to_df_literal(start)?;
+            let upper = end.map(to_df_literal).transpose()?;
+            let expr = if let Some(upper) = upper {
+                col(col_name)
+                    .gt_eq(lit(lower))
+                    .and(col(col_name).lt(lit(upper)))
+            } else {
+                col(col_name).gt_eq(lit(lower))
+            };
+            expr_lst.push(expr);
+        }
+        let expr = expr_lst.into_iter().reduce(|a, b| a.and(b));
+        Ok(expr)
+    }
+
+    /// Merge time windows that overlaps or get too close
+    pub fn merge_dirty_time_windows(&mut self, window_size: chrono::Duration) -> Result<(), Error> {
+        let mut new_windows = BTreeMap::new();
+
+        let mut prev_tw = None;
+        for (lower_bound, upper_bound) in std::mem::take(&mut self.windows) {
+            let Some(prev_tw) = &mut prev_tw else {
+                prev_tw = Some((lower_bound, upper_bound));
+                continue;
+            };
+
+            let std_window_size = window_size.to_std().map_err(|e| {
+                InternalSnafu {
+                    reason: e.to_string(),
+                }
+                .build()
+            })?;
+
+            // if cur.lower - prev.upper <= window_size * 2, merge
+            let prev_upper = prev_tw
+                .1
+                .unwrap_or(prev_tw.0.add_duration(std_window_size).context(TimeSnafu)?);
+
+            let cur_upper = upper_bound.unwrap_or(
+                lower_bound
+                    .add_duration(std_window_size)
+                    .context(TimeSnafu)?,
+            );
+
+            if lower_bound
+                .sub(&prev_upper)
+                .map(|dist| dist <= window_size * Self::MERGE_DIST)
+                .unwrap_or(false)
+            {
+                prev_tw.1 = Some(cur_upper);
+            } else {
+                new_windows.insert(prev_tw.0, prev_tw.1);
+                *prev_tw = (lower_bound, Some(cur_upper));
+            }
+        }
+
+        if let Some(prev_tw) = prev_tw {
+            new_windows.insert(prev_tw.0, prev_tw.1);
+        }
+
+        self.windows = new_windows;
+
+        Ok(())
+    }
 }
 
 impl RecordingRuleState {
@@ -376,6 +625,7 @@ impl RecordingRuleState {
             query_ctx,
             last_update_time: Instant::now(),
             last_query_duration: Duration::from_secs(0),
+            dirty_time_windows: Default::default(),
             exec_state: ExecState::Idle,
             shutdown_rx,
         }

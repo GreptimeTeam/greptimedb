@@ -54,6 +54,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Time error"))]
+    Time {
+        source: common_time::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("External error"))]
     External {
         source: BoxedError,
@@ -249,7 +256,9 @@ impl ErrorExt for Error {
             | Self::FlowNotFound { .. }
             | Self::ListFlows { .. } => StatusCode::TableNotFound,
             Self::Plan { .. } | Self::Datatypes { .. } => StatusCode::PlanQuery,
-            Self::InvalidQuery { .. } | Self::CreateFlow { .. } => StatusCode::EngineExecuteQuery,
+            Self::InvalidQuery { .. } | Self::CreateFlow { .. } | Self::Time { .. } => {
+                StatusCode::EngineExecuteQuery
+            }
             Self::Unexpected { .. } => StatusCode::Unexpected,
             Self::NotImplemented { .. } | Self::UnsupportedTemporalFilter { .. } => {
                 StatusCode::Unsupported
