@@ -17,11 +17,14 @@
 mod engine;
 mod frontend_client;
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 
+use api::helper::pb_value_to_value_ref;
+use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
 use common_recordbatch::DfRecordBatch;
+use common_telemetry::warn;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datafusion::error::Result as DfResult;
@@ -31,9 +34,10 @@ use datafusion::prelude::SessionContext;
 use datafusion::sql::unparser::Unparser;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeRewriter};
 use datafusion_common::{Column, DFSchema, TableReference};
-use datafusion_expr::LogicalPlan;
+use datafusion_expr::{ColumnarValue, LogicalPlan};
 use datafusion_physical_expr::PhysicalExprRef;
 use datatypes::prelude::{ConcreteDataType, DataType};
+use datatypes::scalars::ScalarVector;
 use datatypes::value::Value;
 use datatypes::vectors::{
     TimestampMicrosecondVector, TimestampMillisecondVector, TimestampNanosecondVector,
@@ -41,14 +45,191 @@ use datatypes::vectors::{
 };
 pub use engine::RecordingRuleEngine;
 pub use frontend_client::FrontendClient;
+use itertools::Itertools;
 use query::parser::QueryLanguageParser;
 use query::QueryEngineRef;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 
+use crate::adapter::util::from_proto_to_data_type;
 use crate::df_optimizer::apply_df_optimizer;
 use crate::error::{ArrowSnafu, DatafusionSnafu, DatatypesSnafu, ExternalSnafu, UnexpectedSnafu};
+use crate::expr::error::DataTypeSnafu;
 use crate::Error;
+
+#[derive(Debug, Clone)]
+pub struct TimeWindowExpr {
+    expr: PhysicalExprRef,
+    column_name: String,
+}
+
+impl TimeWindowExpr {
+    pub fn new(expr: PhysicalExprRef, column_name: String) -> Self {
+        Self { expr, column_name }
+    }
+
+    pub fn from_expr(expr: &Expr, column_name: &str, df_schema: &DFSchema) -> Result<Self, Error> {
+        let phy_planner = DefaultPhysicalPlanner::default();
+
+        let phy_expr: PhysicalExprRef = phy_planner
+            .create_physical_expr(expr, df_schema, &SessionContext::new().state())
+            .with_context(|_e| DatafusionSnafu {
+                context: format!(
+                    "Failed to create physical expression from {expr:?} using {df_schema:?}"
+                ),
+            })?;
+        Ok(Self {
+            expr: phy_expr,
+            column_name: column_name.to_string(),
+        })
+    }
+
+    /// Find timestamps from rows using time window expr
+    pub async fn handle_rows(
+        &self,
+        rows_list: Vec<api::v1::Rows>,
+    ) -> Result<BTreeSet<Timestamp>, Error> {
+        let mut time_windows = BTreeSet::new();
+
+        for rows in rows_list {
+            // pick the time index column and use it to eval on `self.expr`
+            let ts_col_index = rows
+                .schema
+                .iter()
+                .map(|col| col.column_name.clone())
+                .position(|name| name == self.column_name);
+            let Some(ts_col_index) = ts_col_index else {
+                warn!("can't found time index column in schema: {:?}", rows.schema);
+                continue;
+            };
+            let col_schema = &rows.schema[ts_col_index];
+            let cdt = from_proto_to_data_type(col_schema)?;
+
+            let column_values = rows
+                .rows
+                .iter()
+                .map(|row| &row.values[ts_col_index])
+                .collect_vec();
+
+            let mut vector = cdt.create_mutable_vector(column_values.len());
+            for value in column_values {
+                let value = pb_value_to_value_ref(value, &None);
+                vector.try_push_value_ref(value).context(DataTypeSnafu {
+                    msg: "Failed to convert rows to columns",
+                })?;
+            }
+            let vector = vector.to_vector();
+
+            let df_schema = create_df_schema_for_ts_column(&self.column_name, cdt)?;
+
+            let rb =
+                DfRecordBatch::try_new(df_schema.inner().clone(), vec![vector.to_arrow_array()])
+                    .with_context(|_e| ArrowSnafu {
+                        context: format!(
+                            "Failed to create record batch from {df_schema:?} and {vector:?}"
+                        ),
+                    })?;
+
+            let eval_res = self.expr.evaluate(&rb).with_context(|_| DatafusionSnafu {
+                context: format!(
+                    "Failed to evaluate physical expression {:?} on {rb:?}",
+                    self.expr
+                ),
+            })?;
+
+            let res = columnar_to_ts_vector(&eval_res)?;
+
+            for ts in res.into_iter().flatten() {
+                time_windows.insert(ts);
+            }
+        }
+
+        Ok(time_windows)
+    }
+}
+
+fn create_df_schema_for_ts_column(name: &str, cdt: ConcreteDataType) -> Result<DFSchema, Error> {
+    let arrow_schema = Arc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+        name,
+        cdt.as_arrow_type(),
+        false,
+    )]));
+
+    let df_schema = DFSchema::from_field_specific_qualified_schema(
+        vec![Some(TableReference::bare("TimeIndexOnlyTable"))],
+        &arrow_schema,
+    )
+    .with_context(|_e| DatafusionSnafu {
+        context: format!("Failed to create DFSchema from arrow schema {arrow_schema:?}"),
+    })?;
+
+    Ok(df_schema)
+}
+
+/// Convert `ColumnarValue` to `Vec<Option<Timestamp>>`
+fn columnar_to_ts_vector(columnar: &ColumnarValue) -> Result<Vec<Option<Timestamp>>, Error> {
+    let val = match columnar {
+        datafusion_expr::ColumnarValue::Array(array) => {
+            let ty = array.data_type();
+            let ty = ConcreteDataType::from_arrow_type(ty);
+            let time_unit = if let ConcreteDataType::Timestamp(ty) = ty {
+                ty.unit()
+            } else {
+                return UnexpectedSnafu {
+                    reason: format!("Non-timestamp type: {ty:?}"),
+                }
+                .fail();
+            };
+
+            match time_unit {
+                TimeUnit::Second => TimestampSecondVector::try_from_arrow_array(array.clone())
+                    .with_context(|_| DatatypesSnafu {
+                        extra: format!("Failed to create vector from arrow array {array:?}"),
+                    })?
+                    .iter_data()
+                    .map(|d| d.map(|d| d.0))
+                    .collect_vec(),
+                TimeUnit::Millisecond => {
+                    TimestampMillisecondVector::try_from_arrow_array(array.clone())
+                        .with_context(|_| DatatypesSnafu {
+                            extra: format!("Failed to create vector from arrow array {array:?}"),
+                        })?
+                        .iter_data()
+                        .map(|d| d.map(|d| d.0))
+                        .collect_vec()
+                }
+                TimeUnit::Microsecond => {
+                    TimestampMicrosecondVector::try_from_arrow_array(array.clone())
+                        .with_context(|_| DatatypesSnafu {
+                            extra: format!("Failed to create vector from arrow array {array:?}"),
+                        })?
+                        .iter_data()
+                        .map(|d| d.map(|d| d.0))
+                        .collect_vec()
+                }
+                TimeUnit::Nanosecond => {
+                    TimestampNanosecondVector::try_from_arrow_array(array.clone())
+                        .with_context(|_| DatatypesSnafu {
+                            extra: format!("Failed to create vector from arrow array {array:?}"),
+                        })?
+                        .iter_data()
+                        .map(|d| d.map(|d| d.0))
+                        .collect_vec()
+                }
+            }
+        }
+        datafusion_expr::ColumnarValue::Scalar(scalar) => {
+            let value = Value::try_from(scalar.clone()).with_context(|_| DatatypesSnafu {
+                extra: format!("Failed to convert scalar {scalar:?} to value"),
+            })?;
+            let ts = value.as_timestamp().context(UnexpectedSnafu {
+                reason: format!("Expect Timestamp, found {:?}", value),
+            })?;
+            vec![Some(ts)]
+        }
+    };
+    Ok(val)
+}
 
 /// Convert sql to datafusion logical plan
 pub async fn sql_to_df_plan(
@@ -74,25 +255,13 @@ pub async fn sql_to_df_plan(
     Ok(plan)
 }
 
-/// Find nearest lower bound for time `current` in given `plan` for the time window expr.
-/// i.e. for time window expr being `date_bin(INTERVAL '5 minutes', ts) as time_window` and `current="2021-07-01 00:01:01.000"`,
-/// return `Some("2021-07-01 00:00:00.000")`
-/// if `plan` doesn't contain a `TIME INDEX` column, return `None`
-///
-/// Time window expr is a expr that:
-/// 1. ref only to a time index column
-/// 2. is monotonic increasing
-/// 3. show up in GROUP BY clause
-///
-/// note this plan should only contain one TableScan
-pub async fn find_plan_time_window_bound(
+/// Return (the column name of time index column, the time window expr, the expected time unit of time index column, the expr's schema for evaluating the time window)
+async fn find_time_window_expr(
     plan: &LogicalPlan,
-    current: Timestamp,
+    catalog_man: CatalogManagerRef,
     query_ctx: QueryContextRef,
-    engine: QueryEngineRef,
-) -> Result<(String, Option<Timestamp>, Option<Timestamp>), Error> {
+) -> Result<(String, Option<datafusion_expr::Expr>, TimeUnit, DFSchema), Error> {
     // TODO(discord9): find the expr that do time window
-    let catalog_man = engine.engine_state().catalog_manager();
 
     let mut table_name = None;
     // first find the table source in the logical plan
@@ -199,6 +368,31 @@ pub async fn find_plan_time_window_bound(
     .with_context(|_e| DatafusionSnafu {
         context: format!("Failed to create DFSchema from arrow schema {arrow_schema:?}"),
     })?;
+    Ok((ts_col_name, time_window_expr, expected_time_unit, df_schema))
+}
+
+/// Find nearest lower bound for time `current` in given `plan` for the time window expr.
+/// i.e. for time window expr being `date_bin(INTERVAL '5 minutes', ts) as time_window` and `current="2021-07-01 00:01:01.000"`,
+/// return `Some("2021-07-01 00:00:00.000")`
+/// if `plan` doesn't contain a `TIME INDEX` column, return `None`
+///
+/// Time window expr is a expr that:
+/// 1. ref only to a time index column
+/// 2. is monotonic increasing
+/// 3. show up in GROUP BY clause
+///
+/// note this plan should only contain one TableScan
+pub async fn find_plan_time_window_bound(
+    plan: &LogicalPlan,
+    current: Timestamp,
+    query_ctx: QueryContextRef,
+    engine: QueryEngineRef,
+) -> Result<(String, Option<Timestamp>, Option<Timestamp>), Error> {
+    // TODO(discord9): find the expr that do time window
+    let catalog_man = engine.engine_state().catalog_manager();
+
+    let (ts_col_name, time_window_expr, expected_time_unit, df_schema) =
+        find_time_window_expr(plan, catalog_man.clone(), query_ctx).await?;
 
     // cast current to ts_index's type
     let new_current = current
@@ -461,59 +655,14 @@ fn eval_ts_to_ts(
         context: format!("Failed to evaluate physical expression {phy:?} on {rb:?}"),
     })?;
 
-    let val = match eval_res {
-        datafusion_expr::ColumnarValue::Array(array) => {
-            let ty = array.data_type();
-            let ty = ConcreteDataType::from_arrow_type(ty);
-            let time_unit = if let ConcreteDataType::Timestamp(ty) = ty {
-                ty.unit()
-            } else {
-                return UnexpectedSnafu {
-                    reason: format!("Physical expression {phy:?} evaluated to non-timestamp type"),
-                }
-                .fail();
-            };
-
-            match time_unit {
-                TimeUnit::Second => TimestampSecondVector::try_from_arrow_array(array.clone())
-                    .with_context(|_| DatatypesSnafu {
-                        extra: format!("Failed to create vector from arrow array {array:?}"),
-                    })?
-                    .get(0),
-                TimeUnit::Millisecond => {
-                    TimestampMillisecondVector::try_from_arrow_array(array.clone())
-                        .with_context(|_| DatatypesSnafu {
-                            extra: format!("Failed to create vector from arrow array {array:?}"),
-                        })?
-                        .get(0)
-                }
-                TimeUnit::Microsecond => {
-                    TimestampMicrosecondVector::try_from_arrow_array(array.clone())
-                        .with_context(|_| DatatypesSnafu {
-                            extra: format!("Failed to create vector from arrow array {array:?}"),
-                        })?
-                        .get(0)
-                }
-                TimeUnit::Nanosecond => {
-                    TimestampNanosecondVector::try_from_arrow_array(array.clone())
-                        .with_context(|_| DatatypesSnafu {
-                            extra: format!("Failed to create vector from arrow array {array:?}"),
-                        })?
-                        .get(0)
-                }
-            }
-        }
-        datafusion_expr::ColumnarValue::Scalar(scalar) => Value::try_from(scalar.clone())
-            .with_context(|_| DatatypesSnafu {
-                extra: format!("Failed to convert scalar {scalar:?} to value"),
-            })?,
-    };
-
-    if let Value::Timestamp(ts) = val {
-        Ok(ts)
+    if let Some(Some(ts)) = columnar_to_ts_vector(&eval_res)?.first() {
+        Ok(*ts)
     } else {
         UnexpectedSnafu {
-            reason: format!("Expected timestamp in expression {phy:?} but got {val:?}"),
+            reason: format!(
+                "Expected timestamp in expression {phy:?} but got {:?}",
+                eval_res
+            ),
         }
         .fail()?
     }

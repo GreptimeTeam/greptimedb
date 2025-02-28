@@ -453,8 +453,12 @@ impl FlownodeBuilder {
 
         let node_id = self.opts.node_id.map(|id| id as u32);
 
-        let rule_engine =
-            RecordingRuleEngine::new(self.frontend_client.clone(), query_engine.clone());
+        let rule_engine = RecordingRuleEngine::new(
+            self.frontend_client.clone(),
+            query_engine.clone(),
+            self.flow_metadata_manager.clone(),
+            table_meta.clone(),
+        );
 
         let mut man = FlowWorkerManager::new(node_id, query_engine, table_meta, rule_engine);
         for worker_id in 0..num_workers {
