@@ -65,6 +65,7 @@ INSERT INTO network_traffic (`id`, source_ip, dest_ip, bytes_sent) VALUES
 (8, '::1', '::1', 131072);
 
 -- Test IPv4 string/number conversion functions
+-- SQLNESS SORT_RESULT 3 1
 SELECT 
     `id`, 
     ip_addr, 
