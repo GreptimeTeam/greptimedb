@@ -46,6 +46,7 @@ pub fn v1_to_grpc_insert_requests(
 ) -> Result<(RowInsertRequests, usize)> {
     let spans = parse(request);
     let mut multi_table_writer = MultiTableData::default();
+
     let one_table_writer = multi_table_writer.get_or_default_table_data(
         table_name,
         APPROXIMATE_COLUMN_COUNT,

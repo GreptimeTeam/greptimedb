@@ -84,6 +84,8 @@ enum AutoCreateTableType {
     Log,
     /// A table that merges rows by `last_non_null` strategy.
     LastNonNull,
+    /// Create table that build index and default partition rules on trace_id
+    Trace,
 }
 
 impl AutoCreateTableType {
@@ -93,6 +95,7 @@ impl AutoCreateTableType {
             AutoCreateTableType::Physical => "physical",
             AutoCreateTableType::Log => "log",
             AutoCreateTableType::LastNonNull => "last_non_null",
+            AutoCreateTableType::Trace => "trace",
         }
     }
 }
@@ -167,6 +170,22 @@ impl Inserter {
             ctx,
             statement_executor,
             AutoCreateTableType::Log,
+        )
+        .await
+    }
+
+    //TODO: handle trace inserts
+    pub async fn handle_trace_inserts(
+        &self,
+        requests: RowInsertRequests,
+        ctx: QueryContextRef,
+        statement_executor: &StatementExecutor,
+    ) -> Result<Output> {
+        self.handle_row_inserts_with_create_type(
+            requests,
+            ctx,
+            statement_executor,
+            AutoCreateTableType::Trace,
         )
         .await
     }
@@ -541,6 +560,10 @@ impl Inserter {
                         .alter_table_inner(alter_expr, ctx.clone())
                         .await?;
                 }
+            }
+
+            AutoCreateTableType::Trace => {
+                todo!("create trace table, add partition rule and index on trace_id")
             }
         }
 
