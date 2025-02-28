@@ -15,6 +15,7 @@
 pub mod attributes;
 pub mod span;
 pub mod v0;
+pub mod v1;
 
 use api::v1::RowInsertRequests;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
@@ -25,6 +26,18 @@ use crate::error::{NotSupportedSnafu, Result};
 use crate::query_handler::PipelineHandlerRef;
 
 pub const TRACE_TABLE_NAME: &str = "opentelemetry_traces";
+
+pub const SERVICE_NAME_COLUMN: &str = "service_name";
+pub const TRACE_ID_COLUMN: &str = "trace_id";
+pub const TIMESTAMP_COLUMN: &str = "timestamp";
+pub const DURATION_NANO_COLUMN: &str = "duration_nano";
+pub const SPAN_ID_COLUMN: &str = "span_id";
+pub const SPAN_NAME_COLUMN: &str = "span_name";
+pub const SPAN_KIND_COLUMN: &str = "span_kind";
+pub const SPAN_ATTRIBUTES_COLUMN: &str = "span_attributes";
+/// The span kind prefix in the database.
+/// If the span kind is `server`, it will be stored as `SPAN_KIND_SERVER` in the database.
+pub const SPAN_KIND_PREFIX: &str = "SPAN_KIND_";
 
 /// Convert SpanTraces to GreptimeDB row insert requests.
 /// Returns `InsertRequests` and total number of rows to ingest
@@ -38,6 +51,14 @@ pub fn to_grpc_insert_requests(
 ) -> Result<(RowInsertRequests, usize)> {
     match pipeline {
         PipelineWay::OtlpTraceDirectV0 => v0::v0_to_grpc_insert_requests(
+            request,
+            pipeline,
+            pipeline_params,
+            table_name,
+            query_ctx,
+            pipeline_handler,
+        ),
+        PipelineWay::OtlpTraceDirectV1 => v1::v1_to_grpc_insert_requests(
             request,
             pipeline,
             pipeline_params,
