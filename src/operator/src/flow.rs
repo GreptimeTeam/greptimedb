@@ -76,7 +76,7 @@ impl FlowServiceOperator {
         flow: &str,
         ctx: QueryContextRef,
     ) -> Result<api::v1::flow::FlowResponse> {
-        let id: u32 = self
+        let id = self
             .flow_metadata_manager
             .flow_name_manager()
             .get(catalog, flow)
@@ -89,7 +89,7 @@ impl FlowServiceOperator {
             .map_err(BoxedError::new)
             .context(common_query::error::ExecuteSnafu)?
             .flow_id();
-            
+
         let all_flownode_peers = self
             .flow_metadata_manager
             .flow_route_manager()
@@ -109,9 +109,9 @@ impl FlowServiceOperator {
 
         let mut final_result: Option<api::v1::flow::FlowResponse> = None;
         for node in all_flow_nodes {
-            let res: api::v1::flow::FlowResponse = {
+            let res = {
                 use api::v1::flow::{flow_request, FlowRequest, FlushFlow};
-                let flush_req: FlowRequest = FlowRequest {
+                let flush_req = FlowRequest {
                     header: Some(FlowRequestHeader {
                         tracing_context: TracingContext::from_current_span().to_w3c(),
                         query_context: Some(

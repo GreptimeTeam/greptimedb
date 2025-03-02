@@ -13,8 +13,6 @@
 // limitations under the License.
 
 //! impl `FlowNode` trait for FlowNodeManager so standalone can call them
-use chrono::Utc;
-use common_telemetry::warn;
 use std::collections::HashMap;
 
 use api::v1::flow::{
@@ -165,7 +163,7 @@ impl Flownode for FlowWorkerManager {
 
             let (insert_schema, rows_proto) = write_request
                 .rows
-                .map(|r: api::v1::Rows| (r.schema, r.rows))
+                .map(|r| (r.schema, r.rows))
                 .unwrap_or_default();
 
             // TODO(discord9): reconsider time assignment mechanism
@@ -222,6 +220,7 @@ impl Flownode for FlowWorkerManager {
                         .enumerate()
                         .map(|(i, name)| (&name.column_name, i)),
                 );
+
                 let fetch_order: Vec<FetchFromRow> = table_col_names
                     .iter()
                     .zip(default_vals.into_iter())

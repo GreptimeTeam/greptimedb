@@ -30,7 +30,6 @@ use crate::key::{DeserializedValueWithBytes, FlowId, FlowPartitionId, MetadataKe
 use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 use crate::FlownodeId;
-use common_telemetry::warn;
 
 const FLOW_INFO_KEY_PREFIX: &str = "info";
 
@@ -283,7 +282,7 @@ impl FlowInfoManager {
         ))
     }
 
-    /// Returns the [&FlowInfoValue] of specified `flow_id`.
+    /// Update the last execution time of the flow.
     pub async fn update_last_execution_time(
         &self,
         flow_id: FlowId,
@@ -297,7 +296,6 @@ impl FlowInfoManager {
         let (create_flow_txn, _) =
             self.build_update_txn(flow_id, &prev_raw_flow_info, &new_flow_info)?;
         self.kv_backend.txn(create_flow_txn).await?;
-        warn!("todo by jiajignzhe success update");
         Ok(())
     }
 }

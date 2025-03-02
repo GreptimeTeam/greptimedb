@@ -36,7 +36,7 @@ use common_meta::peer::Peer;
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use common_query::Output;
 use common_telemetry::tracing_context::TracingContext;
-use common_telemetry::{error, info, warn};
+use common_telemetry::{error, info};
 use futures_util::future;
 use meter_macros::write_meter;
 use partition::manager::PartitionRuleManagerRef;
@@ -849,7 +849,6 @@ impl FlowMirrorTask {
 
             for (key,_) in res {
                 let flow_id = key.flow_id();
-                warn!("todo by jiajingzhe view update {}", flow_id);
                 flow_meta_manager.flow_info_manager().update_last_execution_time(flow_id, last_execution_time).await.context(RequestInsertsSnafu)?;
             }
             match src_table_reqs.get_mut(&table_id) {
