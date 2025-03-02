@@ -19,7 +19,7 @@ use chrono::{DateTime, Utc};
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use snafu::OptionExt;
+use snafu::{ensure, OptionExt};
 use table::metadata::TableId;
 use table::table_name::TableName;
 
@@ -29,7 +29,7 @@ use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{DeserializedValueWithBytes, FlowId, FlowPartitionId, MetadataKey, MetadataValue};
 use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
-use crate::FlownodeId;
+use crate::{ensure_values, FlownodeId};
 
 const FLOW_INFO_KEY_PREFIX: &str = "info";
 
@@ -293,21 +293,22 @@ impl FlowInfoManager {
 
         let mut new_flow_info = prev_flow_info.clone();
         new_flow_info.update_last_execution_time(last_execution_time);
+
         let (create_flow_txn, on_failure) =
             self.build_update_txn(flow_id, &prev_raw_flow_info, &new_flow_info)?;
         let mut r = self.kv_backend.txn(create_flow_txn).await?;
 
         if !r.succeeded {
             let mut set = TxnOpGetResponseSet::from(&mut r.responses);
-            let remote_schema_value = on_failure(&mut set)?
+            let remote_flow_info = on_failure(&mut set)?
                 .context(error::UnexpectedSnafu {
                     err_msg:
                         "Reads the empty schema name value in comparing operation of updating schema name value",
                 })?
                 .into_inner();
 
-            let op_name = "the updating schema name value";
-            ensure_values!(&remote_schema_value, new_schema_value, op_name);
+            let op_name = "the updating flow info new last_execution_time value";
+            ensure_values!(remote_flow_info, new_flow_info, op_name);
         }
 
         Ok(())
