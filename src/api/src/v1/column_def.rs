@@ -15,8 +15,8 @@
 use std::collections::HashMap;
 
 use datatypes::schema::{
-    ColumnDefaultConstraint, ColumnSchema, FulltextAnalyzer, FulltextOptions, SkippingIndexType,
-    COMMENT_KEY, FULLTEXT_KEY, INVERTED_INDEX_KEY, SKIPPING_INDEX_KEY,
+    ColumnDefaultConstraint, ColumnSchema, FulltextAnalyzer, FulltextOptions, SkippingIndexOptions,
+    SkippingIndexType, COMMENT_KEY, FULLTEXT_KEY, INVERTED_INDEX_KEY, SKIPPING_INDEX_KEY,
 };
 use greptime_proto::v1::{Analyzer, SkippingIndexType as PbSkippingIndexType};
 use snafu::ResultExt;
@@ -109,6 +109,17 @@ pub fn options_from_fulltext(fulltext: &FulltextOptions) -> Result<Option<Column
 
     let v = serde_json::to_string(fulltext).context(error::SerializeJsonSnafu)?;
     options.options.insert(FULLTEXT_GRPC_KEY.to_string(), v);
+
+    Ok((!options.options.is_empty()).then_some(options))
+}
+
+pub fn options_from_skipping_index(index: &SkippingIndexOptions) -> Result<Option<ColumnOptions>> {
+    let mut options = ColumnOptions::default();
+
+    let v = serde_json::to_string(index).context(error::SerializeJsonSnafu)?;
+    options
+        .options
+        .insert(SKIPPING_INDEX_GRPC_KEY.to_string(), v);
 
     Ok((!options.options.is_empty()).then_some(options))
 }

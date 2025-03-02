@@ -134,7 +134,7 @@ impl Instance {
         ctx: QueryContextRef,
     ) -> ServerResult<Output> {
         let _guard = if let Some(limiter) = &self.limiter {
-            let result = limiter.limit_row_inserts(&log);
+            let result = limiter.limit_row_inserts(&rows);
             if result.is_none() {
                 return InFlightWriteBytesExceededSnafu.fail();
             }

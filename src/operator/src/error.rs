@@ -799,6 +799,14 @@ pub enum Error {
 
     #[snafu(display("A cursor named {name} already exists"))]
     CursorExists { name: String },
+
+    #[snafu(display("Column options error"))]
+    ColumnOptions {
+        #[snafu(source)]
+        source: api::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -950,6 +958,8 @@ impl ErrorExt for Error {
 
             Error::UpgradeCatalogManagerRef { .. } => StatusCode::Internal,
             Error::StatementTimeout { .. } => StatusCode::Cancelled,
+
+            Error::ColumnOptions { source, .. } => source.status_code(),
         }
     }
 
