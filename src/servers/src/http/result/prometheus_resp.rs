@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! prom supply the prometheus HTTP API Server compliance
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use axum::http::HeaderValue;
 use axum::response::{IntoResponse, Response};
@@ -25,6 +25,7 @@ use common_recordbatch::RecordBatches;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVector;
 use datatypes::vectors::{Float64Vector, StringVector, TimestampMillisecondVector};
+use indexmap::IndexMap;
 use promql_parser::label::METRIC_NAME;
 use promql_parser::parser::value::ValueType;
 use serde::{Deserialize, Serialize};
@@ -229,7 +230,9 @@ impl PrometheusJsonResponse {
         })?;
 
         let metric_name = (METRIC_NAME, metric_name.as_str());
-        let mut buffer = BTreeMap::<Vec<(&str, &str)>, Vec<(f64, String)>>::new();
+        // Preserves the order of output tags.
+        // Tag order matters, e.g., after sorc and sort_desc, the output order must be kept.
+        let mut buffer = IndexMap::<Vec<(&str, &str)>, Vec<(f64, String)>>::new();
 
         let schema = batches.schema();
         for batch in batches.iter() {
