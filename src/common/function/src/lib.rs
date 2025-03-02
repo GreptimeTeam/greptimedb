@@ -21,6 +21,7 @@ pub mod scalars;
 mod system;
 mod table;
 
+pub mod aggr;
 pub mod function;
 pub mod function_registry;
 pub mod handlers;

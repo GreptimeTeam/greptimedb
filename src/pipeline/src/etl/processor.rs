@@ -27,8 +27,6 @@ pub mod regex;
 pub mod timestamp;
 pub mod urlencoding;
 
-use std::collections::BTreeMap;
-
 use cmcd::CmcdProcessor;
 use csv::CsvProcessor;
 use date::DateProcessor;
@@ -51,8 +49,8 @@ use super::error::{
     ProcessorMustBeMapSnafu, ProcessorMustHaveStringKeySnafu,
 };
 use super::field::{Field, Fields};
+use super::PipelineMap;
 use crate::etl::error::{Error, Result};
-use crate::etl::value::Value;
 use crate::etl_error::UnsupportedProcessorSnafu;
 
 const FIELD_NAME: &str = "field";
@@ -65,8 +63,6 @@ const SEPARATOR_NAME: &str = "separator";
 const TARGET_FIELDS_NAME: &str = "target_fields";
 const JSON_PATH_NAME: &str = "json_path";
 const JSON_PATH_RESULT_INDEX_NAME: &str = "result_index";
-
-pub type IntermediateStatus = BTreeMap<String, Value>;
 
 /// Processor trait defines the interface for all processors.
 ///
@@ -83,7 +79,7 @@ pub trait Processor: std::fmt::Debug + Send + Sync + 'static {
     fn ignore_missing(&self) -> bool;
 
     /// Execute the processor on a vector which be preprocessed by the pipeline
-    fn exec_mut(&self, val: &mut IntermediateStatus) -> Result<()>;
+    fn exec_mut(&self, val: &mut PipelineMap) -> Result<()>;
 }
 
 #[derive(Debug)]

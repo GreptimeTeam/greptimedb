@@ -39,6 +39,10 @@ impl NodeAddressKey {
     pub fn with_datanode(node_id: u64) -> Self {
         Self::new(Role::Datanode, node_id)
     }
+
+    pub fn with_flownode(node_id: u64) -> Self {
+        Self::new(Role::Flownode, node_id)
+    }
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]

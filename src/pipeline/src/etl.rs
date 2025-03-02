@@ -20,14 +20,10 @@ pub mod processor;
 pub mod transform;
 pub mod value;
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
-
 use error::{
     IntermediateKeyIndexSnafu, PrepareValueMustBeObjectSnafu, YamlLoadSnafu, YamlParseSnafu,
 };
-use itertools::Itertools;
-use processor::{IntermediateStatus, Processor, Processors};
+use processor::{Processor, Processors};
 use snafu::{ensure, OptionExt, ResultExt};
 use transform::{Transformer, Transforms};
 use value::Value;
@@ -35,13 +31,14 @@ use yaml_rust::YamlLoader;
 
 use crate::dispatcher::{Dispatcher, Rule};
 use crate::etl::error::Result;
-use crate::{GreptimeTransformer, PipelineVersion};
 
 const DESCRIPTION: &str = "description";
 const PROCESSORS: &str = "processors";
 const TRANSFORM: &str = "transform";
 const TRANSFORMS: &str = "transforms";
 const DISPATCHER: &str = "dispatcher";
+
+pub type PipelineMap = std::collections::BTreeMap<String, Value>;
 
 pub enum Content<'a> {
     Json(&'a str),
@@ -153,10 +150,10 @@ impl<O> PipelineExecOutput<O> {
     }
 }
 
-pub fn json_to_intermediate_state(val: serde_json::Value) -> Result<IntermediateStatus> {
+pub fn json_to_intermediate_state(val: serde_json::Value) -> Result<PipelineMap> {
     match val {
         serde_json::Value::Object(map) => {
-            let mut intermediate_state = BTreeMap::new();
+            let mut intermediate_state = PipelineMap::new();
             for (k, v) in map {
                 intermediate_state.insert(k, Value::try_from(v)?);
             }
@@ -166,9 +163,7 @@ pub fn json_to_intermediate_state(val: serde_json::Value) -> Result<Intermediate
     }
 }
 
-pub fn json_array_to_intermediate_state(
-    val: Vec<serde_json::Value>,
-) -> Result<Vec<IntermediateStatus>> {
+pub fn json_array_to_intermediate_state(val: Vec<serde_json::Value>) -> Result<Vec<PipelineMap>> {
     val.into_iter().map(json_to_intermediate_state).collect()
 }
 
@@ -176,10 +171,7 @@ impl<T> Pipeline<T>
 where
     T: Transformer,
 {
-    pub fn exec_mut(
-        &self,
-        val: &mut BTreeMap<String, Value>,
-    ) -> Result<PipelineExecOutput<T::VecOutput>> {
+    pub fn exec_mut(&self, val: &mut PipelineMap) -> Result<PipelineExecOutput<T::VecOutput>> {
         for processor in self.processors.iter() {
             processor.exec_mut(val)?;
         }
@@ -216,57 +208,6 @@ pub(crate) fn find_key_index(intermediate_keys: &[String], key: &str, kind: &str
         .iter()
         .position(|k| k == key)
         .context(IntermediateKeyIndexSnafu { kind, key })
-}
-
-/// SelectInfo is used to store the selected keys from OpenTelemetry record attrs
-/// The key is used to uplift value from the attributes and serve as column name in the table
-#[derive(Default)]
-pub struct SelectInfo {
-    pub keys: Vec<String>,
-}
-
-/// Try to convert a string to SelectInfo
-/// The string should be a comma-separated list of keys
-/// example: "key1,key2,key3"
-/// The keys will be sorted and deduplicated
-impl From<String> for SelectInfo {
-    fn from(value: String) -> Self {
-        let mut keys: Vec<String> = value.split(',').map(|s| s.to_string()).sorted().collect();
-        keys.dedup();
-
-        SelectInfo { keys }
-    }
-}
-
-impl SelectInfo {
-    pub fn is_empty(&self) -> bool {
-        self.keys.is_empty()
-    }
-}
-
-pub const GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME: &str = "greptime_identity";
-
-/// Enum for holding information of a pipeline, which is either pipeline itself,
-/// or information that be used to retrieve a pipeline from `PipelineHandler`
-pub enum PipelineDefinition {
-    Resolved(Arc<Pipeline<GreptimeTransformer>>),
-    ByNameAndValue((String, PipelineVersion)),
-    GreptimeIdentityPipeline,
-}
-
-impl PipelineDefinition {
-    pub fn from_name(name: &str, version: PipelineVersion) -> Self {
-        if name == GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME {
-            Self::GreptimeIdentityPipeline
-        } else {
-            Self::ByNameAndValue((name.to_owned(), version))
-        }
-    }
-}
-
-pub enum PipelineWay {
-    OtlpLogDirect(Box<SelectInfo>),
-    Pipeline(PipelineDefinition),
 }
 
 #[cfg(test)]
@@ -350,7 +291,7 @@ transform:
       type: timestamp, ns
       index: time"#;
         let pipeline: Pipeline<GreptimeTransformer> = parse(&Content::Yaml(pipeline_str)).unwrap();
-        let mut payload = BTreeMap::new();
+        let mut payload = PipelineMap::new();
         payload.insert("message".to_string(), Value::String(message));
         let result = pipeline
             .exec_mut(&mut payload)

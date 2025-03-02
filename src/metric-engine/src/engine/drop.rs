@@ -30,9 +30,10 @@ impl MetricEngineInner {
     pub async fn drop_region(
         &self,
         region_id: RegionId,
-        _req: RegionDropRequest,
+        req: RegionDropRequest,
     ) -> Result<AffectedRows> {
         let data_region_id = utils::to_data_region_id(region_id);
+        let fast_path = req.fast_path;
 
         // enclose the guard in a block to prevent the guard from polluting the async context
         let (is_physical_region, is_physical_region_busy) = {
@@ -52,7 +53,7 @@ impl MetricEngineInner {
 
         if is_physical_region {
             // check if there is no logical region relates to this physical region
-            if is_physical_region_busy {
+            if is_physical_region_busy && !fast_path {
                 // reject if there is any present logical region
                 return Err(PhysicalRegionBusySnafu {
                     region_id: data_region_id,
@@ -60,9 +61,21 @@ impl MetricEngineInner {
                 .build());
             }
 
-            self.drop_physical_region(data_region_id).await
+            return self.drop_physical_region(data_region_id).await;
+        }
+
+        if fast_path {
+            // for fast path, we don't delete the metadata in the metadata region.
+            // it only remove the logical region from the engine state.
+            //
+            // The drop database procedure will ensure the metadata region and data region are dropped eventually.
+            self.state
+                .write()
+                .unwrap()
+                .remove_logical_region(region_id)?;
+
+            Ok(0)
         } else {
-            // cannot merge these two `if` otherwise the stupid type checker will complain
             let metadata_region_id = self
                 .state
                 .read()
@@ -87,13 +100,16 @@ impl MetricEngineInner {
         // Since the physical regions are going to be dropped, we don't need to
         // update the contents in metadata region.
         self.mito
-            .handle_request(data_region_id, RegionRequest::Drop(RegionDropRequest {}))
+            .handle_request(
+                data_region_id,
+                RegionRequest::Drop(RegionDropRequest { fast_path: false }),
+            )
             .await
             .with_context(|_| CloseMitoRegionSnafu { region_id })?;
         self.mito
             .handle_request(
                 metadata_region_id,
-                RegionRequest::Drop(RegionDropRequest {}),
+                RegionRequest::Drop(RegionDropRequest { fast_path: false }),
             )
             .await
             .with_context(|_| CloseMitoRegionSnafu { region_id })?;

@@ -68,13 +68,15 @@ impl heartbeat_server::Heartbeat for Metasrv {
                         };
 
                         if pusher_id.is_none() {
-                            pusher_id = register_pusher(&handler_group, header, tx.clone()).await;
+                            pusher_id =
+                                Some(register_pusher(&handler_group, header, tx.clone()).await);
                         }
                         if let Some(k) = &pusher_id {
                             METRIC_META_HEARTBEAT_RECV.with_label_values(&[&k.to_string()]);
                         } else {
                             METRIC_META_HEARTBEAT_RECV.with_label_values(&["none"]);
                         }
+
                         let res = handler_group
                             .handle(req, ctx.clone())
                             .await
@@ -173,13 +175,13 @@ async fn register_pusher(
     handler_group: &HeartbeatHandlerGroup,
     header: &RequestHeader,
     sender: Sender<std::result::Result<HeartbeatResponse, tonic::Status>>,
-) -> Option<PusherId> {
+) -> PusherId {
     let role = header.role();
     let id = get_node_id(header);
     let pusher_id = PusherId::new(role, id);
     let pusher = Pusher::new(sender, header);
     handler_group.register_pusher(pusher_id, pusher).await;
-    Some(pusher_id)
+    pusher_id
 }
 
 #[cfg(test)]

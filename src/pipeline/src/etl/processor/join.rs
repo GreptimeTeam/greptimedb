@@ -14,7 +14,6 @@
 
 use snafu::OptionExt;
 
-use super::IntermediateStatus;
 use crate::etl::error::{
     Error, JoinSeparatorRequiredSnafu, KeyMustBeStringSnafu, ProcessorExpectStringSnafu,
     ProcessorMissingFieldSnafu, Result,
@@ -25,6 +24,7 @@ use crate::etl::processor::{
     IGNORE_MISSING_NAME, SEPARATOR_NAME,
 };
 use crate::etl::value::{Array, Value};
+use crate::etl::PipelineMap;
 
 pub(crate) const PROCESSOR_JOIN: &str = "join";
 
@@ -95,7 +95,7 @@ impl Processor for JoinProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, val: &mut IntermediateStatus) -> Result<()> {
+    fn exec_mut(&self, val: &mut PipelineMap) -> Result<()> {
         for field in self.fields.iter() {
             let index = field.input_field();
             match val.get(index) {

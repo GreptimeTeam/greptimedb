@@ -67,6 +67,8 @@ pub struct QueryContext {
 #[derive(Debug, Builder, Clone, Default)]
 pub struct QueryContextMutableFields {
     warning: Option<String>,
+    // TODO: remove this when format is supported in datafusion
+    explain_format: Option<String>,
 }
 
 impl Display for QueryContext {
@@ -300,6 +302,21 @@ impl QueryContext {
 
     pub fn set_warning(&self, msg: String) {
         self.mutable_query_context_data.write().unwrap().warning = Some(msg);
+    }
+
+    pub fn explain_format(&self) -> Option<String> {
+        self.mutable_query_context_data
+            .read()
+            .unwrap()
+            .explain_format
+            .clone()
+    }
+
+    pub fn set_explain_format(&self, format: String) {
+        self.mutable_query_context_data
+            .write()
+            .unwrap()
+            .explain_format = Some(format);
     }
 
     pub fn query_timeout(&self) -> Option<Duration> {

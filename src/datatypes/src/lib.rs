@@ -32,5 +32,5 @@ pub mod types;
 pub mod value;
 pub mod vectors;
 
-pub use arrow;
+pub use arrow::{self, compute};
 pub use error::{Error, Result};

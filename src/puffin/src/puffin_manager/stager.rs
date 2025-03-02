@@ -57,6 +57,7 @@ pub trait InitDirFn = FnOnce(DirWriterProviderRef) -> WriteResult;
 pub trait Stager: Send + Sync {
     type Blob: BlobGuard + Sync;
     type Dir: DirGuard;
+    type FileHandle: ToString + Clone + Send + Sync;
 
     /// Retrieves a blob, initializing it if necessary using the provided `init_fn`.
     ///
@@ -64,7 +65,7 @@ pub trait Stager: Send + Sync {
     /// The caller is responsible for holding the `BlobGuard` until they are done with the blob.
     async fn get_blob<'a>(
         &self,
-        puffin_file_name: &str,
+        handle: &Self::FileHandle,
         key: &str,
         init_factory: Box<dyn InitBlobFn + Send + Sync + 'a>,
     ) -> Result<Self::Blob>;
@@ -75,7 +76,7 @@ pub trait Stager: Send + Sync {
     /// The caller is responsible for holding the `DirGuard` until they are done with the directory.
     async fn get_dir<'a>(
         &self,
-        puffin_file_name: &str,
+        handle: &Self::FileHandle,
         key: &str,
         init_fn: Box<dyn InitDirFn + Send + Sync + 'a>,
     ) -> Result<Self::Dir>;
@@ -83,11 +84,14 @@ pub trait Stager: Send + Sync {
     /// Stores a directory in the staging area.
     async fn put_dir(
         &self,
-        puffin_file_name: &str,
+        handle: &Self::FileHandle,
         key: &str,
         dir_path: PathBuf,
         dir_size: u64,
     ) -> Result<()>;
+
+    /// Purges all content for the given puffin file from the staging area.
+    async fn purge(&self, handle: &Self::FileHandle) -> Result<()>;
 }
 
 /// `StagerNotifier` provides a way to notify the caller of the staging events.

@@ -21,7 +21,7 @@ use api::v1::SemanticType;
 use common_telemetry::info;
 use common_time::{Timestamp, FOREVER};
 use datatypes::data_type::ConcreteDataType;
-use datatypes::schema::ColumnSchema;
+use datatypes::schema::{ColumnSchema, SkippingIndexOptions};
 use datatypes::value::Value;
 use mito2::engine::MITO_ENGINE_NAME;
 use object_store::util::join_dir;
@@ -54,6 +54,8 @@ use crate::error::{
 };
 use crate::metrics::PHYSICAL_REGION_COUNT;
 use crate::utils::{self, to_data_region_id, to_metadata_region_id};
+
+const DEFAULT_TABLE_ID_SKIPPING_INDEX_GRANULARITY: u32 = 1024;
 
 impl MetricEngineInner {
     pub async fn create_regions(
@@ -160,15 +162,38 @@ impl MetricEngineInner {
         let physical_region_id = validate_create_logical_regions(&requests)?;
         let data_region_id = utils::to_data_region_id(physical_region_id);
 
+        ensure!(
+            self.state
+                .read()
+                .unwrap()
+                .exist_physical_region(data_region_id),
+            PhysicalRegionNotFoundSnafu {
+                region_id: data_region_id,
+            }
+        );
+
         // Filters out the requests that the logical region already exists
         let requests = {
             let state = self.state.read().unwrap();
-            let logical_region_exists = state.logical_region_exists_filter(data_region_id);
-            // TODO(weny): log the skipped logical regions
-            requests
-                .into_iter()
-                .filter(|(region_id, _)| !logical_region_exists(region_id))
-                .collect::<Vec<_>>()
+            let mut skipped = Vec::with_capacity(requests.len());
+            let mut kept_requests = Vec::with_capacity(requests.len());
+
+            for (region_id, request) in requests {
+                if state.is_logical_region_exist(region_id) {
+                    skipped.push(region_id);
+                } else {
+                    kept_requests.push((region_id, request));
+                }
+            }
+
+            // log skipped regions
+            if !skipped.is_empty() {
+                info!(
+                    "Skipped creating logical regions {skipped:?} because they already exist",
+                    skipped = skipped
+                );
+            }
+            kept_requests
         };
 
         // Finds new columns to add to physical region
@@ -440,6 +465,7 @@ impl MetricEngineInner {
     ///
     /// Return `[table_id_col, tsid_col]`
     fn internal_column_metadata() -> [ColumnMetadata; 2] {
+        // Safety: BloomFilter is a valid skipping index type
         let metric_name_col = ColumnMetadata {
             column_id: ReservedColumnId::table_id(),
             semantic_type: SemanticType::Tag,
@@ -448,7 +474,11 @@ impl MetricEngineInner {
                 ConcreteDataType::uint32_datatype(),
                 false,
             )
-            .with_inverted_index(true),
+            .with_skipping_options(SkippingIndexOptions {
+                granularity: DEFAULT_TABLE_ID_SKIPPING_INDEX_GRANULARITY,
+                index_type: datatypes::schema::SkippingIndexType::BloomFilter,
+            })
+            .unwrap(),
         };
         let tsid_col = ColumnMetadata {
             column_id: ReservedColumnId::tsid(),

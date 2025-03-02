@@ -51,6 +51,9 @@ tql eval (3000, 3000, '1s') histogram_quantile(0.5, histogram_bucket);
 -- SQLNESS SORT_RESULT 3 1
 tql eval (3000, 3000, '1s') histogram_quantile(0.8, histogram_bucket);
 
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3000, 3000, '1s') label_replace(histogram_quantile(0.8, histogram_bucket), "s", "$1", "s", "(.*)tive");
+
 -- More realistic with rates.
 -- This case doesn't contains value because other point are not inserted.
 -- quantile with rate is covered in other cases
@@ -160,3 +163,27 @@ insert into histogram3_bucket values
 tql eval (3000, 3005, '3s') histogram_quantile(0.5, sum by(le, s) (rate(histogram3_bucket[5m])));
 
 drop table histogram3_bucket;
+
+-- test with invalid data (unaligned buckets)
+create table histogram4_bucket (
+    ts timestamp time index,
+    le string,
+    s string,
+    val double,
+    primary key (s, le),
+);
+
+insert into histogram4_bucket values
+    (2900000, "0.1", "a", 0),
+    (2900000, "1", "a", 10),
+    (2900000, "5", "a", 20),
+    (2900000, "+Inf", "a", 150),
+    (3000000, "0.1", "a", 50),
+    (3000000, "1", "a", 70),
+    (3000000, "5", "a", 120),
+    -- INF here is missing
+;
+
+tql eval (2900, 3000, '100s') histogram_quantile(0.9, histogram4_bucket);
+
+drop table histogram4_bucket;

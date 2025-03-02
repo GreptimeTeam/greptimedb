@@ -79,3 +79,23 @@ FROM (
     UNION ALL
     SELECT '[4.0, 5.0, 6.0]' AS v
 );
+
+SELECT vec_dim('[7.0, 8.0, 9.0, 10.0]');
+
+SELECT v, vec_dim(v)
+FROM (
+         SELECT '[1.0, 2.0, 3.0]' AS v
+         UNION ALL
+         SELECT '[-1.0]' AS v
+         UNION ALL
+         SELECT '[4.0, 5.0, 6.0]' AS v
+     ) Order By vec_dim(v) ASC;
+
+SELECT v, vec_dim(v)
+FROM (
+         SELECT '[1.0, 2.0, 3.0]' AS v
+         UNION ALL
+         SELECT '[-1.0]' AS v
+         UNION ALL
+         SELECT '[7.0, 8.0, 9.0, 10.0]' AS v
+     ) Order By vec_dim(v) ASC;

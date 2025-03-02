@@ -24,7 +24,7 @@ arrow.workspace = true
 arrow-flight.workspace = true
 arrow-ipc.workspace = true
 arrow-schema.workspace = true
-async-trait = "0.1"
+async-trait.workspace = true
 auth.workspace = true
 axum = { workspace = true, features = ["multipart"] }
 axum-extra = { workspace = true, features = ["typed-header"] }
@@ -55,7 +55,7 @@ datafusion-common.workspace = true
 datafusion-expr.workspace = true
 datatypes.workspace = true
 derive_builder.workspace = true
-futures = "0.3"
+futures.workspace = true
 futures-util.workspace = true
 hashbrown = "0.15"
 headers = "0.4"
@@ -65,6 +65,7 @@ http-body = "1"
 humantime.workspace = true
 humantime-serde.workspace = true
 hyper = { workspace = true, features = ["full"] }
+indexmap = "2.7"
 influxdb_line_protocol = { git = "https://github.com/evenyag/influxdb_iox", branch = "feat/line-protocol" }
 itertools.workspace = true
 jsonb.workspace = true

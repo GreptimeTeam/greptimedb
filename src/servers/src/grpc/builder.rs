@@ -19,25 +19,18 @@ use arrow_flight::flight_service_server::FlightServiceServer;
 use auth::UserProviderRef;
 use common_grpc::error::{Error, InvalidConfigFilePathSnafu, Result};
 use common_runtime::Runtime;
-use opentelemetry_proto::tonic::collector::metrics::v1::metrics_service_server::MetricsServiceServer;
-use opentelemetry_proto::tonic::collector::trace::v1::trace_service_server::TraceServiceServer;
 use snafu::ResultExt;
 use tokio::sync::Mutex;
-use tonic::codec::CompressionEncoding;
 use tonic::service::RoutesBuilder;
 use tonic::transport::{Identity, ServerTlsConfig};
-use tower::ServiceBuilder;
 
 use super::flight::{FlightCraftRef, FlightCraftWrapper};
 use super::region_server::{RegionServerHandlerRef, RegionServerRequestHandler};
 use super::{GrpcServer, GrpcServerConfig};
-use crate::grpc::authorize::AuthMiddlewareLayer;
 use crate::grpc::database::DatabaseService;
 use crate::grpc::greptime_handler::GreptimeRequestHandler;
-use crate::grpc::otlp::OtlpService;
 use crate::grpc::prom_query_gateway::PrometheusGatewayService;
 use crate::prometheus_handler::PrometheusHandlerRef;
-use crate::query_handler::OpenTelemetryProtocolHandlerRef;
 use crate::tls::TlsOption;
 
 /// Add a gRPC service (`service`) to a `builder`([RoutesBuilder]).
@@ -124,37 +117,6 @@ impl GrpcServerBuilder {
     pub fn region_server_handler(mut self, region_server_handler: RegionServerHandlerRef) -> Self {
         let handler = RegionServerRequestHandler::new(region_server_handler, self.runtime.clone());
         add_service!(self, RegionServer::new(handler));
-        self
-    }
-
-    /// Add handler for OpenTelemetry Protocol (OTLP) requests.
-    pub fn otlp_handler(
-        mut self,
-        otlp_handler: OpenTelemetryProtocolHandlerRef,
-        user_provider: Option<UserProviderRef>,
-    ) -> Self {
-        let tracing_service = TraceServiceServer::new(OtlpService::new(otlp_handler.clone()))
-            .accept_compressed(CompressionEncoding::Gzip)
-            .accept_compressed(CompressionEncoding::Zstd)
-            .send_compressed(CompressionEncoding::Gzip)
-            .send_compressed(CompressionEncoding::Zstd);
-
-        let trace_server = ServiceBuilder::new()
-            .layer(AuthMiddlewareLayer::with(user_provider.clone()))
-            .service(tracing_service);
-        self.routes_builder.add_service(trace_server);
-
-        let metrics_service = MetricsServiceServer::new(OtlpService::new(otlp_handler))
-            .accept_compressed(CompressionEncoding::Gzip)
-            .accept_compressed(CompressionEncoding::Zstd)
-            .send_compressed(CompressionEncoding::Gzip)
-            .send_compressed(CompressionEncoding::Zstd);
-
-        let metrics_server = ServiceBuilder::new()
-            .layer(AuthMiddlewareLayer::with(user_provider))
-            .service(metrics_service);
-        self.routes_builder.add_service(metrics_server);
-
         self
     }
 

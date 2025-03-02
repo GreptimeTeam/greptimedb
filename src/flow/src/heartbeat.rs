@@ -60,12 +60,12 @@ async fn query_flow_state(
 #[derive(Clone)]
 pub struct HeartbeatTask {
     node_id: u64,
+    node_epoch: u64,
     peer_addr: String,
     meta_client: Arc<MetaClient>,
     report_interval: Duration,
     retry_interval: Duration,
     resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
-    start_time_ms: u64,
     running: Arc<AtomicBool>,
     query_stat_size: Option<SizeReportSender>,
 }
@@ -83,12 +83,12 @@ impl HeartbeatTask {
     ) -> Self {
         Self {
             node_id: opts.node_id.unwrap_or(0),
+            node_epoch: common_time::util::current_time_millis() as u64,
             peer_addr: addrs::resolve_addr(&opts.grpc.bind_addr, Some(&opts.grpc.server_addr)),
             meta_client,
             report_interval: heartbeat_opts.interval,
             retry_interval: heartbeat_opts.retry_interval,
             resp_handler_executor,
-            start_time_ms: common_time::util::current_time_millis() as u64,
             running: Arc::new(AtomicBool::new(false)),
             query_stat_size: None,
         }
@@ -103,6 +103,11 @@ impl HeartbeatTask {
             warn!("Heartbeat task started multiple times");
             return Ok(());
         }
+
+        self.create_streams().await
+    }
+
+    async fn create_streams(&self) -> Result<(), Error> {
         info!("Start to establish the heartbeat connection to metasrv.");
         let (req_sender, resp_stream) = self
             .meta_client
@@ -134,10 +139,9 @@ impl HeartbeatTask {
         }
     }
 
-    fn create_heartbeat_request(
+    fn new_heartbeat_request(
+        heartbeat_request: &HeartbeatRequest,
         message: Option<OutgoingMessage>,
-        peer: Option<Peer>,
-        start_time_ms: u64,
         latest_report: &Option<FlowStat>,
     ) -> Option<HeartbeatRequest> {
         let mailbox_message = match message.map(outgoing_message_to_mailbox_message) {
@@ -161,10 +165,8 @@ impl HeartbeatTask {
 
         Some(HeartbeatRequest {
             mailbox_message,
-            peer,
-            info: Self::build_node_info(start_time_ms),
             flow_stat,
-            ..Default::default()
+            ..heartbeat_request.clone()
         })
     }
 
@@ -174,6 +176,7 @@ impl HeartbeatTask {
             version: build_info.version.to_string(),
             git_commit: build_info.commit_short.to_string(),
             start_time_ms,
+            cpus: num_cpus::get() as u32,
         })
     }
 
@@ -183,7 +186,7 @@ impl HeartbeatTask {
         mut outgoing_rx: mpsc::Receiver<OutgoingMessage>,
     ) {
         let report_interval = self.report_interval;
-        let start_time_ms = self.start_time_ms;
+        let node_epoch = self.node_epoch;
         let self_peer = Some(Peer {
             id: self.node_id,
             addr: self.peer_addr.clone(),
@@ -198,18 +201,25 @@ impl HeartbeatTask {
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let mut latest_report = None;
 
+            let heartbeat_request = HeartbeatRequest {
+                peer: self_peer,
+                node_epoch,
+                info: Self::build_node_info(node_epoch),
+                ..Default::default()
+            };
+
             loop {
                 let req = tokio::select! {
                     message = outgoing_rx.recv() => {
                         if let Some(message) = message {
-                            Self::create_heartbeat_request(Some(message), self_peer.clone(), start_time_ms, &latest_report)
+                            Self::new_heartbeat_request(&heartbeat_request, Some(message), &latest_report)
                         } else {
                             // Receives None that means Sender was dropped, we need to break the current loop
                             break
                         }
                     }
                     _ = interval.tick() => {
-                        Self::create_heartbeat_request(None, self_peer.clone(), start_time_ms, &latest_report)
+                        Self::new_heartbeat_request(&heartbeat_request, None, &latest_report)
                     }
                 };
 
@@ -226,6 +236,8 @@ impl HeartbeatTask {
                 // set the timeout to half of the report interval so that it wouldn't delay heartbeat if something went horribly wrong
                 latest_report = query_flow_state(&query_stat_size, report_interval / 2).await;
             }
+
+            info!("flownode heartbeat task stopped.");
         });
     }
 
@@ -269,7 +281,7 @@ impl HeartbeatTask {
 
             info!("Try to re-establish the heartbeat connection to metasrv.");
 
-            if self.start().await.is_ok() {
+            if self.create_streams().await.is_ok() {
                 break;
             }
         }

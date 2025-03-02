@@ -156,7 +156,7 @@ impl DropTableProcedure {
 
     pub async fn on_datanode_drop_regions(&mut self) -> Result<Status> {
         self.executor
-            .on_drop_regions(&self.context, &self.data.physical_region_routes)
+            .on_drop_regions(&self.context, &self.data.physical_region_routes, false)
             .await?;
         self.data.state = DropTableState::DeleteTombstone;
         Ok(Status::executing(true))

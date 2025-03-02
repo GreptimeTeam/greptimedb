@@ -135,6 +135,7 @@ pub async fn open_compaction_region(
             &mito_config.index.aux_path,
             mito_config.index.staging_size.as_bytes(),
             Some(mito_config.index.write_buffer_size.as_bytes() as _),
+            mito_config.index.staging_ttl,
         )
         .await?;
         let intermediate_manager =

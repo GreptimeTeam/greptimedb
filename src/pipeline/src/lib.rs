@@ -25,10 +25,10 @@ pub use etl::transform::{GreptimeTransformer, Transformer};
 pub use etl::value::{Array, Map, Value};
 pub use etl::{
     error as etl_error, json_array_to_intermediate_state, json_to_intermediate_state, parse,
-    Content, DispatchedTo, Pipeline, PipelineDefinition, PipelineExecOutput, PipelineWay,
-    SelectInfo, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
+    Content, DispatchedTo, Pipeline, PipelineExecOutput, PipelineMap,
 };
 pub use manager::{
-    error, pipeline_operator, table, util, PipelineInfo, PipelineRef, PipelineTableRef,
-    PipelineVersion,
+    error, pipeline_operator, table, util, PipelineDefinition, PipelineInfo, PipelineRef,
+    PipelineTableRef, PipelineVersion, PipelineWay, SelectInfo,
+    GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
 };

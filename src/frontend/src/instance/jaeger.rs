@@ -36,11 +36,11 @@ use servers::error::{
     TableNotFoundSnafu,
 };
 use servers::http::jaeger::QueryTraceParams;
-use servers::otlp::trace::{
+use servers::otlp::trace::v0::{
     DURATION_NANO_COLUMN, SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN, SPAN_ID_COLUMN,
     SPAN_KIND_COLUMN, SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, TIMESTAMP_COLUMN, TRACE_ID_COLUMN,
-    TRACE_TABLE_NAME,
 };
+use servers::otlp::trace::TRACE_TABLE_NAME;
 use servers::query_handler::JaegerQueryHandler;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
