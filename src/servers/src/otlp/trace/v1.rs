@@ -17,7 +17,6 @@ use api::v1::{ColumnDataType, RowInsertRequests, Value};
 use common_grpc::precision::Precision;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::tonic::common::v1::any_value::Value as OtlpValue;
-
 use pipeline::{GreptimePipelineParams, PipelineWay};
 use session::context::QueryContextRef;
 
