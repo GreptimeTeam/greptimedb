@@ -158,7 +158,6 @@ impl Flownode for FlowWorkerManager {
         // using try_read to ensure two things:
         // 1. flush wouldn't happen until inserts before it is inserted
         // 2. inserts happening concurrently with flush wouldn't be block by flush
-        warn!("todo by jiajingzhe 22312321321");
         let _flush_lock = self.flush_lock.try_read();
         for write_request in request.requests {
             let region_id = write_request.region_id;
@@ -223,7 +222,6 @@ impl Flownode for FlowWorkerManager {
                         .enumerate()
                         .map(|(i, name)| (&name.column_name, i)),
                 );
-
                 let fetch_order: Vec<FetchFromRow> = table_col_names
                     .iter()
                     .zip(default_vals.into_iter())
@@ -278,26 +276,6 @@ impl Flownode for FlowWorkerManager {
                 common_telemetry::error!(err; "Failed to handle write request");
                 let err = to_meta_err(snafu::location!())(err);
                 return Err(err);
-            } else {
-                let flow_ids = self
-                    .node_context
-                    .read()
-                    .await
-                    .get_flow_ids(table_id)
-                    .into_iter()
-                    .flatten()
-                    .cloned()
-                    .collect_vec();
-                if let Some(handler) = &self.query_engine
-                .engine_state()
-                .function_state()
-                .flow_service_handler
-                {
-                    let time = Utc::now();
-                    for id in flow_ids {
-                        let _ = handler.update_last_execution_time(id.try_into().unwrap(), time).await;
-                    }
-                }
             }
         }
         Ok(Default::default())

@@ -133,11 +133,16 @@ impl FrontendBuilder {
                 .context(error::CacheRequiredSnafu {
                     name: TABLE_FLOWNODE_SET_CACHE_NAME,
                 })?;
+
+        let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
+        let flow_service = FlowServiceOperator::new(flow_metadata_manager, node_manager.clone());
+        
         let inserter = Arc::new(Inserter::new(
             self.catalog_manager.clone(),
             partition_manager.clone(),
             node_manager.clone(),
             table_flownode_cache,
+            flow_service.flow_metadata_manager().clone(),
         ));
         let deleter = Arc::new(Deleter::new(
             self.catalog_manager.clone(),
@@ -158,9 +163,6 @@ impl FrontendBuilder {
         let procedure_service_handler = Arc::new(ProcedureServiceOperator::new(
             self.procedure_executor.clone(),
         ));
-
-        let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
-        let flow_service = FlowServiceOperator::new(flow_metadata_manager, node_manager.clone());
 
         let query_engine = QueryEngineFactory::new_with_plugins(
             self.catalog_manager.clone(),

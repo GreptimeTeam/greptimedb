@@ -38,7 +38,7 @@ use snafu::{OptionExt, ResultExt};
 use store_api::storage::{ScanRequest, TableId};
 
 use crate::error::{
-    CreateRecordBatchSnafu, FlowInfoNotFoundSnafu, InternalSnafu, JsonSnafu, ListFlowsSnafu, Result,
+    CreateRecordBatchSnafu, FlowInfoNotFoundSnafu, InternalSnafu, JsonSnafu, ListFlowsSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
 use crate::information_schema::{Predicates, FLOWS};
 use crate::system_schema::information_schema::InformationTable;
@@ -252,13 +252,13 @@ impl InformationSchemaFlowsBuilder {
                     catalog_name: catalog_name.to_string(),
                     flow_name: flow_name.to_string(),
                 })?;
-            self.add_flow(&predicates, flow_id.flow_id(), flow_info, &flow_stat)?;
+            self.add_flow(&predicates, flow_id.flow_id(), flow_info, &flow_stat).await?;
         }
 
         self.finish()
     }
 
-    fn add_flow(
+    async fn add_flow(
         &mut self,
         predicates: &Predicates,
         flow_id: FlowId,
@@ -316,7 +316,30 @@ impl InformationSchemaFlowsBuilder {
                 .last_execution_time()
                 .map(|t| t.timestamp_millis().into()),
         );
-        self.source_table_names.push(Some("todo by jia" ));
+        
+        let mut source_table_names = vec![];
+        let catalog_name = self.catalog_name.clone();
+        let catalog_manager = self
+            .catalog_manager
+            .upgrade()
+            .context(UpgradeWeakCatalogManagerRefSnafu)?;
+        for schema_name in catalog_manager.schema_names(&catalog_name, None).await? {
+            let mut stream = catalog_manager.tables(&catalog_name, &schema_name, None);
+
+            while let Some(table) = stream.try_next().await? {
+                let table_info = table.table_info();
+                if flow_info.source_table_ids().contains(&table_info.table_id()) {
+                    source_table_names.push(table_info.full_table_name());
+                }
+            }
+        }
+    
+        self.source_table_names.push(Some(
+            &serde_json::to_string(&source_table_names).context(JsonSnafu {
+                input: format!("{:?}", source_table_names),
+            })?,
+        ));
+
         Ok(())
     }
 

@@ -42,6 +42,10 @@ impl FlowServiceOperator {
             node_manager,
         }
     }
+
+    pub fn flow_metadata_manager(&self) -> FlowMetadataManagerRef {
+        self.flow_metadata_manager.clone()
+    }
 }
 
 #[async_trait]

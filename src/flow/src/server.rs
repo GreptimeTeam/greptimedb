@@ -24,7 +24,7 @@ use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_meta::cache::{LayeredCacheRegistryRef, TableFlownodeSetCacheRef, TableRouteCacheRef};
 use common_meta::ddl::ProcedureExecutorRef;
-use common_meta::key::flow::FlowMetadataManagerRef;
+use common_meta::key::flow::{FlowMetadataManager, FlowMetadataManagerRef};
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::{Flownode, NodeManagerRef};
@@ -517,12 +517,14 @@ impl FrontendInvoker {
             layered_cache_registry.get().context(CacheRequiredSnafu {
                 name: TABLE_FLOWNODE_SET_CACHE_NAME,
             })?;
-
+        let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
+            
         let inserter = Arc::new(Inserter::new(
             catalog_manager.clone(),
             partition_manager.clone(),
             node_manager.clone(),
             table_flownode_cache,
+            flow_metadata_manager.clone(),
         ));
 
         let deleter = Arc::new(Deleter::new(

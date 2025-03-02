@@ -220,12 +220,6 @@ impl FlowInfoManager {
             .transpose()
     }
 
-    /// Returns the [&FlowInfoValue] of specified `flow_id`.
-    pub async fn get_mut(&self, flow_id: FlowId) -> Result<Option<FlowInfoValue>> {
-        let _key = FlowInfoKey::new(flow_id).to_bytes();
-        todo!("todo by jia");
-    }
-
     /// Returns the [FlowInfoValue] with original bytes of specified `flow_id`.
     pub async fn get_raw(
         &self,
