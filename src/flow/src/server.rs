@@ -518,7 +518,7 @@ impl FrontendInvoker {
                 name: TABLE_FLOWNODE_SET_CACHE_NAME,
             })?;
         let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
-            
+
         let inserter = Arc::new(Inserter::new(
             catalog_manager.clone(),
             partition_manager.clone(),

@@ -30,15 +30,16 @@ use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::value::Value;
 use datatypes::vectors::{
-    DateTimeVectorBuilder, Int64VectorBuilder, StringVectorBuilder,
-    UInt32VectorBuilder, UInt64VectorBuilder, VectorRef,
+    DateTimeVectorBuilder, Int64VectorBuilder, StringVectorBuilder, UInt32VectorBuilder,
+    UInt64VectorBuilder, VectorRef,
 };
 use futures::TryStreamExt;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{ScanRequest, TableId};
 
 use crate::error::{
-    CreateRecordBatchSnafu, FlowInfoNotFoundSnafu, InternalSnafu, JsonSnafu, ListFlowsSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
+    CreateRecordBatchSnafu, FlowInfoNotFoundSnafu, InternalSnafu, JsonSnafu, ListFlowsSnafu,
+    Result, UpgradeWeakCatalogManagerRefSnafu,
 };
 use crate::information_schema::{Predicates, FLOWS};
 use crate::system_schema::information_schema::InformationTable;
@@ -252,7 +253,8 @@ impl InformationSchemaFlowsBuilder {
                     catalog_name: catalog_name.to_string(),
                     flow_name: flow_name.to_string(),
                 })?;
-            self.add_flow(&predicates, flow_id.flow_id(), flow_info, &flow_stat).await?;
+            self.add_flow(&predicates, flow_id.flow_id(), flow_info, &flow_stat)
+                .await?;
         }
 
         self.finish()
@@ -316,7 +318,7 @@ impl InformationSchemaFlowsBuilder {
                 .last_execution_time()
                 .map(|t| t.timestamp_millis().into()),
         );
-        
+
         let mut source_table_names = vec![];
         let catalog_name = self.catalog_name.clone();
         let catalog_manager = self
@@ -328,17 +330,21 @@ impl InformationSchemaFlowsBuilder {
 
             while let Some(table) = stream.try_next().await? {
                 let table_info = table.table_info();
-                if flow_info.source_table_ids().contains(&table_info.table_id()) {
+                if flow_info
+                    .source_table_ids()
+                    .contains(&table_info.table_id())
+                {
                     source_table_names.push(table_info.full_table_name());
                 }
             }
         }
-    
-        self.source_table_names.push(Some(
-            &serde_json::to_string(&source_table_names).context(JsonSnafu {
-                input: format!("{:?}", source_table_names),
-            })?,
-        ));
+
+        self.source_table_names
+            .push(Some(&serde_json::to_string(&source_table_names).context(
+                JsonSnafu {
+                    input: format!("{:?}", source_table_names),
+                },
+            )?));
 
         Ok(())
     }

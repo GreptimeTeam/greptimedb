@@ -153,7 +153,8 @@ impl FlowServiceOperator {
         flow_id: u32,
         time: chrono::DateTime<Utc>,
     ) -> Result<()> {
-        let _ = self.flow_metadata_manager
+        let _ = self
+            .flow_metadata_manager
             .flow_info_manager()
             .update_last_execution_time(flow_id, time)
             .await

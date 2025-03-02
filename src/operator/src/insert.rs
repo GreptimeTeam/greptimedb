@@ -838,18 +838,22 @@ impl FlowMirrorTask {
             HashMap::new();
         let mut num_rows = 0;
         let last_execution_time: chrono::DateTime<Utc> = Utc::now();
-        
+
         for req in requests {
             let table_id = RegionId::from_u64(req.region_id).table_id();
             let res = flow_meta_manager
-            .table_flow_manager()
-            .flows(table_id)
-            .await
-            .context(RequestInsertsSnafu)?;
+                .table_flow_manager()
+                .flows(table_id)
+                .await
+                .context(RequestInsertsSnafu)?;
 
-            for (key,_) in res {
+            for (key, _) in res {
                 let flow_id = key.flow_id();
-                flow_meta_manager.flow_info_manager().update_last_execution_time(flow_id, last_execution_time).await.context(RequestInsertsSnafu)?;
+                flow_meta_manager
+                    .flow_info_manager()
+                    .update_last_execution_time(flow_id, last_execution_time)
+                    .await
+                    .context(RequestInsertsSnafu)?;
             }
             match src_table_reqs.get_mut(&table_id) {
                 Some(Some((_peers, reqs))) => reqs.requests.push(req.clone()),
