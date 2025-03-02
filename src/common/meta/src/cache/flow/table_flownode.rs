@@ -192,6 +192,9 @@ mod tests {
                     expire_after: Some(300),
                     comment: "comment".to_string(),
                     options: Default::default(),
+                    created_time: chrono::Utc::now(),
+                    updated_time: chrono::Utc::now(),
+                    last_execution_time: None,
                 },
                 (1..=3)
                     .map(|i| {
