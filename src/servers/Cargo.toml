@@ -65,6 +65,7 @@ http-body = "1"
 humantime.workspace = true
 humantime-serde.workspace = true
 hyper = { workspace = true, features = ["full"] }
+indexmap = "2.7"
 influxdb_line_protocol = { git = "https://github.com/evenyag/influxdb_iox", branch = "feat/line-protocol" }
 itertools.workspace = true
 jsonb.workspace = true

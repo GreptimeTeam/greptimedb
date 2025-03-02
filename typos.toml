@@ -3,6 +3,8 @@ Pn = "Pn"
 ue = "ue"
 worl = "worl"
 ot = "ot"
+typ = "typ"
+typs = "typs"
 unqualifed = "unqualifed"
 
 [files]
