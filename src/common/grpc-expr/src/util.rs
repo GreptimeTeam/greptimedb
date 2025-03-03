@@ -15,7 +15,7 @@
 use std::collections::HashSet;
 
 use api::v1::column_data_type_extension::TypeExt;
-use api::v1::column_def::contains_fulltext;
+use api::v1::column_def::{contains_fulltext, contains_skipping};
 use api::v1::{
     AddColumn, AddColumns, Column, ColumnDataType, ColumnDataTypeExtension, ColumnDef,
     ColumnOptions, ColumnSchema, CreateTableExpr, JsonTypeExtension, SemanticType,
@@ -27,7 +27,7 @@ use table::table_reference::TableReference;
 
 use crate::error::{
     self, DuplicatedColumnNameSnafu, DuplicatedTimestampColumnSnafu,
-    InvalidFulltextColumnTypeSnafu, MissingTimestampColumnSnafu, Result,
+    InvalidStringIndexColumnTypeSnafu, MissingTimestampColumnSnafu, Result,
     UnknownColumnDataTypeSnafu,
 };
 pub struct ColumnExpr<'a> {
@@ -152,8 +152,9 @@ pub fn build_create_table_expr(
         let column_type = infer_column_datatype(datatype, datatype_extension)?;
 
         ensure!(
-            !contains_fulltext(options) || column_type == ColumnDataType::String,
-            InvalidFulltextColumnTypeSnafu {
+            (!contains_fulltext(options) && !contains_skipping(options))
+                || column_type == ColumnDataType::String,
+            InvalidStringIndexColumnTypeSnafu {
                 column_name,
                 column_type,
             }

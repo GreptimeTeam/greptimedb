@@ -12,11 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::error::SerializeJsonSnafu;
 use api::v1::column_data_type_extension::TypeExt;
-use api::v1::column_def::options_from_fulltext;
+use api::v1::column_def::{options_from_fulltext, options_from_skipping};
 use api::v1::{ColumnDataTypeExtension, ColumnOptions, JsonTypeExtension};
-use datatypes::schema::{FulltextOptions, SkippingIndexOptions, SKIPPING_INDEX_KEY};
+use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
 use greptime_proto::v1::value::ValueData;
 use greptime_proto::v1::{ColumnDataType, ColumnSchema, SemanticType};
 use snafu::ResultExt;
@@ -111,17 +110,8 @@ fn coerce_options(transform: &Transform) -> Result<Option<ColumnOptions>> {
         })
         .context(ColumnOptionsSnafu),
         Some(Index::Skipping) => {
-            let mut options = ColumnOptions::default();
-            let opts_str = serde_json::to_string(&SkippingIndexOptions::default())
-                .context(SerializeJsonSnafu)
-                .context(ColumnOptionsSnafu)?;
-
-            options
-                .options
-                .insert(SKIPPING_INDEX_KEY.to_string(), opts_str);
-            Ok(Some(options))
+            options_from_skipping(&SkippingIndexOptions::default()).context(ColumnOptionsSnafu)
         }
-
         _ => Ok(None),
     }
 }
