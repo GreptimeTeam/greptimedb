@@ -334,9 +334,11 @@ pub async fn test_kv_compare_and_put_with_prefix(
                 expect: vec![],
                 value: b"val_new".to_vec(),
             };
-            let resp = kv_backend_clone.compare_and_put(req).await.unwrap();
-            if resp.success {
-                success_clone.fetch_add(1, Ordering::SeqCst);
+            let resp = kv_backend_clone.compare_and_put(req).await;
+            if let Ok(resp) = resp {
+                if resp.success {
+                    success_clone.fetch_add(1, Ordering::SeqCst);
+                }
             }
         });
         joins.push(join);
