@@ -47,7 +47,7 @@ impl Function for JsonToStringFunction {
         )
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure!(
             columns.len() == 1,
             InvalidFuncArgsSnafu {
@@ -154,7 +154,7 @@ mod tests {
         let json_vector = BinaryVector::from_vec(jsonbs);
         let args: Vec<VectorRef> = vec![Arc::new(json_vector)];
         let vector = json_to_string
-            .eval(FunctionContext::default(), &args)
+            .eval(&FunctionContext::default(), &args)
             .unwrap();
 
         assert_eq!(3, vector.len());
@@ -168,7 +168,7 @@ mod tests {
         let invalid_jsonb = vec![b"invalid json"];
         let invalid_json_vector = BinaryVector::from_vec(invalid_jsonb);
         let args: Vec<VectorRef> = vec![Arc::new(invalid_json_vector)];
-        let vector = json_to_string.eval(FunctionContext::default(), &args);
+        let vector = json_to_string.eval(&FunctionContext::default(), &args);
         assert!(vector.is_err());
     }
 }

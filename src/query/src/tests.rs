@@ -32,7 +32,6 @@ mod scipy_stats_norm_pdf;
 mod time_range_filter_test;
 
 mod function;
-mod pow;
 mod vec_product_test;
 mod vec_sum_test;
 

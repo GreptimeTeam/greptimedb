@@ -25,7 +25,6 @@ use common_function::handlers::{
 };
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::state::FunctionState;
-use common_query::prelude::ScalarUdf;
 use common_telemetry::warn;
 use datafusion::dataframe::DataFrame;
 use datafusion::error::Result as DfResult;
@@ -240,11 +239,6 @@ impl QueryEngineState {
             .keys()
             .cloned()
             .collect()
-    }
-
-    /// Register a [`ScalarUdf`].
-    pub fn register_udf(&self, udf: ScalarUdf) {
-        self.df_context.register_udf(udf.into());
     }
 
     /// Register an aggregate function.

@@ -63,7 +63,7 @@ pub trait Function: fmt::Display + Sync + Send {
     fn signature(&self) -> Signature;
 
     /// Evaluate the function, e.g. run/execute the function.
-    fn eval(&self, _func_ctx: FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef>;
+    fn eval(&self, ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef>;
 }
 
 pub type FunctionRef = Arc<dyn Function>;

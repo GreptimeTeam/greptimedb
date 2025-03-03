@@ -47,7 +47,7 @@ impl Function for ParseJsonFunction {
         )
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure!(
             columns.len() == 1,
             InvalidFuncArgsSnafu {
@@ -152,7 +152,7 @@ mod tests {
 
         let json_string_vector = StringVector::from_vec(json_strings.to_vec());
         let args: Vec<VectorRef> = vec![Arc::new(json_string_vector)];
-        let vector = parse_json.eval(FunctionContext::default(), &args).unwrap();
+        let vector = parse_json.eval(&FunctionContext::default(), &args).unwrap();
 
         assert_eq!(3, vector.len());
         for (i, gt) in jsonbs.iter().enumerate() {

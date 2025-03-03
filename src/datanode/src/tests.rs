@@ -21,7 +21,6 @@ use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_function::function::FunctionRef;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
-use common_query::prelude::ScalarUdf;
 use common_query::Output;
 use common_runtime::runtime::{BuilderBuild, RuntimeTrait};
 use common_runtime::Runtime;
@@ -76,8 +75,6 @@ impl QueryEngine for MockQueryEngine {
     ) -> query::error::Result<Output> {
         unimplemented!()
     }
-
-    fn register_udf(&self, _udf: ScalarUdf) {}
 
     fn register_aggregate_function(&self, _func: AggregateFunctionMetaRef) {}
 

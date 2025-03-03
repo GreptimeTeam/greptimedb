@@ -41,7 +41,7 @@ impl Function for TimezoneFunction {
         Signature::nullary(Volatility::Immutable)
     }
 
-    fn eval(&self, func_ctx: FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, func_ctx: &FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
         let tz = func_ctx.query_ctx.timezone().to_string();
 
         Ok(Arc::new(StringVector::from_slice(&[&tz])) as _)
@@ -77,7 +77,7 @@ mod tests {
             query_ctx,
             ..Default::default()
         };
-        let vector = build.eval(func_ctx, &[]).unwrap();
+        let vector = build.eval(&func_ctx, &[]).unwrap();
         let expect: VectorRef = Arc::new(StringVector::from(vec!["UTC"]));
         assert_eq!(expect, vector);
     }
