@@ -80,7 +80,7 @@ impl Function for RangeFunction {
         Signature::variadic_any(Volatility::Immutable)
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
         Err(DataFusionError::Internal(
             "range_fn just a empty function used in range select, It should not be eval!".into(),
         ))

@@ -159,14 +159,11 @@ mod tests {
     }
 
     fn matches_func() -> Arc<ScalarUDF> {
-        Arc::new(
-            create_udf(
-                FUNCTION_REGISTRY.get_function("matches").unwrap(),
-                QueryContext::arc(),
-                Default::default(),
-            )
-            .into(),
-        )
+        Arc::new(create_udf(
+            FUNCTION_REGISTRY.get_function("matches").unwrap(),
+            QueryContext::arc(),
+            Default::default(),
+        ))
     }
 
     #[test]

@@ -58,7 +58,7 @@ impl Function for DateAddFunction {
         )
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure!(
             columns.len() == 2,
             InvalidFuncArgsSnafu {
@@ -146,7 +146,7 @@ mod tests {
         let time_vector = TimestampSecondVector::from(times.clone());
         let interval_vector = IntervalDayTimeVector::from_vec(intervals);
         let args: Vec<VectorRef> = vec![Arc::new(time_vector), Arc::new(interval_vector)];
-        let vector = f.eval(FunctionContext::default(), &args).unwrap();
+        let vector = f.eval(&FunctionContext::default(), &args).unwrap();
 
         assert_eq!(4, vector.len());
         for (i, _t) in times.iter().enumerate() {
@@ -178,7 +178,7 @@ mod tests {
         let date_vector = DateVector::from(dates.clone());
         let interval_vector = IntervalYearMonthVector::from_vec(intervals);
         let args: Vec<VectorRef> = vec![Arc::new(date_vector), Arc::new(interval_vector)];
-        let vector = f.eval(FunctionContext::default(), &args).unwrap();
+        let vector = f.eval(&FunctionContext::default(), &args).unwrap();
 
         assert_eq!(4, vector.len());
         for (i, _t) in dates.iter().enumerate() {

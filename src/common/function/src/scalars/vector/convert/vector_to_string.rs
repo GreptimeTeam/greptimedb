@@ -46,7 +46,7 @@ impl Function for VectorToStringFunction {
         )
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure!(
             columns.len() == 1,
             InvalidFuncArgsSnafu {
@@ -129,7 +129,7 @@ mod tests {
         builder.push_null();
         let vector = builder.to_vector();
 
-        let result = func.eval(FunctionContext::default(), &[vector]).unwrap();
+        let result = func.eval(&FunctionContext::default(), &[vector]).unwrap();
 
         assert_eq!(result.len(), 3);
         assert_eq!(result.get(0), Value::String("[1,2,3]".to_string().into()));

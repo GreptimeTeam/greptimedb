@@ -53,7 +53,7 @@ impl Function for PGTableIsVisibleFunction {
         )
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         with_match_primitive_type_id!(columns[0].data_type().logical_type_id(), |$T| {
             let col = scalar_unary_op::<<$T as LogicalPrimitiveType>::Native, bool, _>(&columns[0], pg_table_is_visible, &mut EvalContext::default())?;
             Ok(Arc::new(col))

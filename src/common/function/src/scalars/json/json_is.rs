@@ -45,7 +45,7 @@ macro_rules! json_is {
                     Signature::exact(vec![ConcreteDataType::json_datatype()], Volatility::Immutable)
                 }
 
-                fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+                fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
                     ensure!(
                         columns.len() == 1,
                         InvalidFuncArgsSnafu {
@@ -202,7 +202,7 @@ mod tests {
         let args: Vec<VectorRef> = vec![Arc::new(json_vector)];
 
         for (func, expected_result) in json_is_functions.iter().zip(expected_results.iter()) {
-            let vector = func.eval(FunctionContext::default(), &args).unwrap();
+            let vector = func.eval(&FunctionContext::default(), &args).unwrap();
             assert_eq!(vector.len(), json_strings.len());
 
             for (i, expected) in expected_result.iter().enumerate() {

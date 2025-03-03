@@ -67,7 +67,7 @@ impl Function for VectorDimFunction {
 
     fn eval(
         &self,
-        _func_ctx: FunctionContext,
+        _func_ctx: &FunctionContext,
         columns: &[VectorRef],
     ) -> common_query::error::Result<VectorRef> {
         ensure!(
@@ -131,7 +131,7 @@ mod tests {
             Some("[5.0]".to_string()),
         ]));
 
-        let result = func.eval(FunctionContext::default(), &[input0]).unwrap();
+        let result = func.eval(&FunctionContext::default(), &[input0]).unwrap();
 
         let result = result.as_ref();
         assert_eq!(result.len(), 4);
@@ -157,7 +157,7 @@ mod tests {
             Some("[3.0,2.0,2.0]".to_string()),
         ]));
 
-        let result = func.eval(FunctionContext::default(), &[input0, input1]);
+        let result = func.eval(&FunctionContext::default(), &[input0, input1]);
 
         match result {
             Err(Error::InvalidFuncArgs { err_msg, .. }) => {

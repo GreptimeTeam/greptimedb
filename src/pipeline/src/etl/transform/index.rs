@@ -18,6 +18,7 @@ const INDEX_TIMESTAMP: &str = "timestamp";
 const INDEX_TIMEINDEX: &str = "time";
 const INDEX_TAG: &str = "tag";
 const INDEX_FULLTEXT: &str = "fulltext";
+const INDEX_SKIPPING: &str = "skipping";
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 #[allow(clippy::enum_variant_names)]
@@ -25,6 +26,7 @@ pub enum Index {
     Time,
     Tag,
     Fulltext,
+    Skipping,
 }
 
 impl std::fmt::Display for Index {
@@ -33,6 +35,7 @@ impl std::fmt::Display for Index {
             Index::Time => INDEX_TIMEINDEX,
             Index::Tag => INDEX_TAG,
             Index::Fulltext => INDEX_FULLTEXT,
+            Index::Skipping => INDEX_SKIPPING,
         };
 
         write!(f, "{}", index)
@@ -55,6 +58,7 @@ impl TryFrom<&str> for Index {
             INDEX_TIMESTAMP | INDEX_TIMEINDEX => Ok(Index::Time),
             INDEX_TAG => Ok(Index::Tag),
             INDEX_FULLTEXT => Ok(Index::Fulltext),
+            INDEX_SKIPPING => Ok(Index::Skipping),
             _ => UnsupportedIndexTypeSnafu { value }.fail(),
         }
     }
