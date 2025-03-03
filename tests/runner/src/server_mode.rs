@@ -308,7 +308,7 @@ impl ServerMode {
             .display()
             .to_string();
         println!(
-            "Generating id {}, {} config file in {conf_file}, full content:\n{rendered}",
+            "Generating id {}, {} config file in {conf_file}",
             id,
             self.name()
         );
