@@ -13,7 +13,6 @@
 // limitations under the License.
 
 mod diff;
-mod mean;
 mod polyval;
 mod scipy_stats_norm_cdf;
 mod scipy_stats_norm_pdf;
@@ -22,7 +21,6 @@ use std::sync::Arc;
 
 use common_query::logical_plan::AggregateFunctionCreatorRef;
 pub use diff::DiffAccumulatorCreator;
-pub use mean::MeanAccumulatorCreator;
 pub use polyval::PolyvalAccumulatorCreator;
 pub use scipy_stats_norm_cdf::ScipyStatsNormCdfAccumulatorCreator;
 pub use scipy_stats_norm_pdf::ScipyStatsNormPdfAccumulatorCreator;
@@ -76,11 +74,6 @@ impl AggregateFunctions {
             "diff",
             1,
             Arc::new(|| Arc::new(DiffAccumulatorCreator::default())),
-        )));
-        registry.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
-            "mean",
-            1,
-            Arc::new(|| Arc::new(MeanAccumulatorCreator::default())),
         )));
         registry.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
             "polyval",
