@@ -325,7 +325,7 @@ impl PromPlanner {
             .fail();
         };
 
-        // convert op and value columns to window exprs,
+        // convert op and value columns to window exprs.
         let window_exprs = self.create_window_exprs(*op, group_exprs.clone(), &input)?;
 
         let rank_columns: Vec<_> = window_exprs
