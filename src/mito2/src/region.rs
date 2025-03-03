@@ -36,7 +36,7 @@ use store_api::storage::RegionId;
 use crate::access_layer::AccessLayerRef;
 use crate::error::{
     FlushableRegionStateSnafu, RegionLeaderStateSnafu, RegionNotFoundSnafu, RegionTruncatedSnafu,
-    Result,
+    Result, UpdateManifestSnafu,
 };
 use crate::manifest::action::{RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::RegionManifestManager;
@@ -371,14 +371,30 @@ impl ManifestContext {
         // Checks state inside the lock. This is to ensure that we won't update the manifest
         // after `set_readonly_gracefully()` is called.
         let current_state = self.state.load();
-        ensure!(
-            current_state == RegionRoleState::Leader(expect_state),
-            RegionLeaderStateSnafu {
-                region_id: manifest.metadata.region_id,
-                state: current_state,
-                expect: expect_state,
-            }
-        );
+
+        // If expect_state is writable, the current state must be either writable or downgrading.
+        //
+        // A downgrading leader rejects user writes but still allows
+        // flushing the memtable and updating the manifest.
+        if expect_state == RegionLeaderState::Writable {
+            ensure!(
+                current_state == RegionRoleState::Leader(RegionLeaderState::Writable)
+                    || current_state == RegionRoleState::Leader(RegionLeaderState::Downgrading),
+                UpdateManifestSnafu {
+                    region_id: manifest.metadata.region_id,
+                    state: current_state,
+                }
+            );
+        } else {
+            ensure!(
+                current_state == RegionRoleState::Leader(expect_state),
+                RegionLeaderStateSnafu {
+                    region_id: manifest.metadata.region_id,
+                    state: current_state,
+                    expect: expect_state,
+                }
+            );
+        }
 
         for action in &action_list.actions {
             // Checks whether the edit is still applicable.
