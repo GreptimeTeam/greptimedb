@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use api::v1::alter_table_expr::Kind;
-use api::v1::column_def::options_from_skipping_index;
+use api::v1::column_def::options_from_skipping;
 use api::v1::region::{
     InsertRequest as RegionInsertRequest, InsertRequests as RegionInsertRequests,
     RegionRequestHeader,
@@ -579,7 +579,7 @@ impl Inserter {
                         .iter_mut()
                         .find(|c| c.name == "trace_id")
                     {
-                        col.options = options_from_skipping_index(&SkippingIndexOptions::default())
+                        col.options = options_from_skipping(&SkippingIndexOptions::default())
                             .context(ColumnOptionsSnafu)?;
                     };
 
