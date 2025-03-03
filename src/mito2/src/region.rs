@@ -372,13 +372,13 @@ impl ManifestContext {
         // after `set_readonly_gracefully()` is called.
         let current_state = self.state.load();
 
-        // If expect_state is writable, the current state must be either writable or downgrading.
+        // If expect_state is not downgrading, the current state must be either `expect_state` or downgrading.
         //
         // A downgrading leader rejects user writes but still allows
         // flushing the memtable and updating the manifest.
-        if expect_state == RegionLeaderState::Writable {
+        if expect_state != RegionLeaderState::Downgrading {
             ensure!(
-                current_state == RegionRoleState::Leader(RegionLeaderState::Writable)
+                current_state == RegionRoleState::Leader(expect_state)
                     || current_state == RegionRoleState::Leader(RegionLeaderState::Downgrading),
                 UpdateManifestSnafu {
                     region_id: manifest.metadata.region_id,
