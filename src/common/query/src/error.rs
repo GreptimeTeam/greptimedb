@@ -30,14 +30,6 @@ use statrs::StatsError;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
-    #[snafu(display("Failed to execute function"))]
-    ExecuteFunction {
-        #[snafu(source)]
-        error: DataFusionError,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Unsupported input datatypes {:?} in function {}", datatypes, function))]
     UnsupportedInputDataType {
         function: String,
@@ -264,9 +256,7 @@ impl ErrorExt for Error {
             | Error::ArrowCompute { .. }
             | Error::FlownodeNotFound { .. } => StatusCode::EngineExecuteQuery,
 
-            Error::ExecuteFunction { error, .. } | Error::GeneralDataFusion { error, .. } => {
-                datafusion_status_code::<Self>(error, None)
-            }
+            Error::GeneralDataFusion { error, .. } => datafusion_status_code::<Self>(error, None),
 
             Error::InvalidInputType { source, .. }
             | Error::IntoVector { source, .. }

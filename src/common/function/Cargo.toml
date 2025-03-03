@@ -29,6 +29,8 @@ common-telemetry.workspace = true
 common-time.workspace = true
 common-version.workspace = true
 datafusion.workspace = true
+datafusion-common.workspace = true
+datafusion-expr.workspace = true
 datatypes.workspace = true
 derive_more = { version = "1", default-features = false, features = ["display"] }
 geo = { version = "0.29", optional = true }

@@ -73,7 +73,7 @@ impl Function for ScalarAddFunction {
         )
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure!(
             columns.len() == 2,
             InvalidFuncArgsSnafu {
@@ -154,7 +154,7 @@ mod tests {
         ]));
 
         let result = func
-            .eval(FunctionContext::default(), &[input0, input1])
+            .eval(&FunctionContext::default(), &[input0, input1])
             .unwrap();
 
         let result = result.as_ref();

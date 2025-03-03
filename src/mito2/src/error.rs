@@ -490,6 +490,18 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Region {} is in {:?} state, which does not permit manifest updates.",
+        region_id,
+        state
+    ))]
+    UpdateManifest {
+        region_id: RegionId,
+        state: RegionRoleState,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Region {} is in {:?} state, expect: {:?}", region_id, state, expect))]
     RegionLeaderState {
         region_id: RegionId,
@@ -1055,7 +1067,7 @@ impl ErrorExt for Error {
             CompactRegion { source, .. } => source.status_code(),
             CompatReader { .. } => StatusCode::Unexpected,
             InvalidRegionRequest { source, .. } => source.status_code(),
-            RegionLeaderState { .. } => StatusCode::RegionNotReady,
+            RegionLeaderState { .. } | UpdateManifest { .. } => StatusCode::RegionNotReady,
             &FlushableRegionState { .. } => StatusCode::RegionNotReady,
             JsonOptions { .. } => StatusCode::InvalidArguments,
             EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,

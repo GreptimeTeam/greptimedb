@@ -2027,6 +2027,8 @@ dependencies = [
  "common-time",
  "common-version",
  "datafusion",
+ "datafusion-common",
+ "datafusion-expr",
  "datatypes",
  "derive_more",
  "geo",
