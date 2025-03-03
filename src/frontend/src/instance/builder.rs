@@ -142,7 +142,7 @@ impl FrontendBuilder {
             partition_manager.clone(),
             node_manager.clone(),
             table_flownode_cache,
-            flow_service.flow_metadata_manager().clone(),
+            Some(flow_service.flow_metadata_manager().clone()),
         ));
         let deleter = Arc::new(Deleter::new(
             self.catalog_manager.clone(),

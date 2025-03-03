@@ -71,7 +71,7 @@ pub struct Inserter {
     partition_manager: PartitionRuleManagerRef,
     node_manager: NodeManagerRef,
     table_flownode_set_cache: TableFlownodeSetCacheRef,
-    flow_metadata_manager: FlowMetadataManagerRef,
+    flow_metadata_manager: Option<FlowMetadataManagerRef>,
 }
 
 pub type InserterRef = Arc<Inserter>;
@@ -121,7 +121,7 @@ impl Inserter {
         partition_manager: PartitionRuleManagerRef,
         node_manager: NodeManagerRef,
         table_flownode_set_cache: TableFlownodeSetCacheRef,
-        flow_metadata_manager: FlowMetadataManagerRef,
+        flow_metadata_manager: Option<FlowMetadataManagerRef>,
     ) -> Self {
         Self {
             catalog_manager,
@@ -832,7 +832,7 @@ impl FlowMirrorTask {
     async fn new(
         cache: &TableFlownodeSetCacheRef,
         requests: impl Iterator<Item = &RegionInsertRequest>,
-        flow_meta_manager: FlowMetadataManagerRef,
+        flow_meta_manager: Option<FlowMetadataManagerRef>,
     ) -> Result<Self> {
         let mut src_table_reqs: HashMap<TableId, Option<(Vec<Peer>, RegionInsertRequests)>> =
             HashMap::new();
@@ -841,20 +841,23 @@ impl FlowMirrorTask {
 
         for req in requests {
             let table_id = RegionId::from_u64(req.region_id).table_id();
-            let res = flow_meta_manager
-                .table_flow_manager()
-                .flows(table_id)
-                .await
-                .context(RequestInsertsSnafu)?;
-
-            for (key, _) in res {
-                let flow_id = key.flow_id();
-                flow_meta_manager
-                    .flow_info_manager()
-                    .update_last_execution_time(flow_id, last_execution_time)
+            if let Some(flow_meta_manager) = &flow_meta_manager {
+                let res = flow_meta_manager
+                    .table_flow_manager()
+                    .flows(table_id)
                     .await
                     .context(RequestInsertsSnafu)?;
+
+                for (key, _) in res {
+                    let flow_id = key.flow_id();
+                    flow_meta_manager
+                        .flow_info_manager()
+                        .update_last_execution_time(flow_id, last_execution_time)
+                        .await
+                        .context(RequestInsertsSnafu)?;
+                }
             }
+
             match src_table_reqs.get_mut(&table_id) {
                 Some(Some((_peers, reqs))) => reqs.requests.push(req.clone()),
                 // already know this is not source table

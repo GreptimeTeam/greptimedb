@@ -288,29 +288,26 @@ impl FlowInfoManager {
         flow_id: FlowId,
         last_execution_time: DateTime<Utc>,
     ) -> Result<()> {
-        let prev_flow_info = self.get(flow_id).await?.unwrap();
-        let prev_raw_flow_info = self.get_raw(flow_id).await?.unwrap();
-
-        let mut new_flow_info = prev_flow_info.clone();
-        new_flow_info.update_last_execution_time(last_execution_time);
-
-        let (create_flow_txn, on_failure) =
-            self.build_update_txn(flow_id, &prev_raw_flow_info, &new_flow_info)?;
-        let mut r = self.kv_backend.txn(create_flow_txn).await?;
-
-        if !r.succeeded {
-            let mut set = TxnOpGetResponseSet::from(&mut r.responses);
-            let remote_flow_info = on_failure(&mut set)?
-                .context(error::UnexpectedSnafu {
-                    err_msg:
-                        "Reads the empty schema name value in comparing operation of updating schema name value",
-                })?
-                .into_inner();
-
-            let op_name = "the updating flow info new last_execution_time value";
-            ensure_values!(remote_flow_info, new_flow_info, op_name);
+        if let Some(prev_flow_info) = self.get(flow_id).await? {
+            if let Some(prev_raw_flow_info) = self.get_raw(flow_id).await? {
+                let mut new_flow_info = prev_flow_info.clone();
+                new_flow_info.update_last_execution_time(last_execution_time);
+                let (create_flow_txn, on_failure) =
+                    self.build_update_txn(flow_id, &prev_raw_flow_info, &new_flow_info)?;
+                let mut r = self.kv_backend.txn(create_flow_txn).await?;
+                if !r.succeeded {
+                    let mut set = TxnOpGetResponseSet::from(&mut r.responses);
+                    let remote_flow_info = on_failure(&mut set)?
+                        .context(error::UnexpectedSnafu {
+                            err_msg:
+                                "Reads the empty schema name value in comparing operation of updating schema name value",
+                        })?
+                        .into_inner();
+                    let op_name = "the updating flow info new last_execution_time value";
+                    ensure_values!(remote_flow_info, new_flow_info, op_name);
+                }
+            }
         }
-
         Ok(())
     }
 }

@@ -15,7 +15,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use common_base::AffectedRows;
 use common_meta::rpc::procedure::{MigrateRegionRequest, ProcedureStateResponse};
 use common_query::error::Result;
@@ -75,8 +74,6 @@ pub trait FlowServiceHandler: Send + Sync {
         flow: &str,
         ctx: QueryContextRef,
     ) -> Result<api::v1::flow::FlowResponse>;
-
-    async fn update_last_execution_time(&self, flow_id: u32, time: DateTime<Utc>) -> Result<()>;
 }
 
 pub type TableMutationHandlerRef = Arc<dyn TableMutationHandler>;
