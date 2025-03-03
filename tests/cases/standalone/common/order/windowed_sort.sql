@@ -158,3 +158,5 @@ FROM
   lightning
 ORDER BY
   collect_time ASC;
+
+DROP TABLE lightning;

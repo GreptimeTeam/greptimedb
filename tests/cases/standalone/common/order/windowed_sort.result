@@ -433,3 +433,7 @@ ORDER BY
 |_|_| Total rows: 8_|
 +-+-+-+
 
+DROP TABLE lightning;
+
+Affected Rows: 0
+

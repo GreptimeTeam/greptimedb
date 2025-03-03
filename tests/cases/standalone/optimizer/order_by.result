@@ -120,7 +120,9 @@ EXPLAIN ANALYZE SELECT i, t AS alias_ts FROM test_pk ORDER BY alias_ts DESC LIMI
 +-+-+-+
 | 0_| 0_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_SortExec: TopK(fetch=5), expr=[alias_ts@1 DESC], preserve_partitioning=[false] REDACTED
+| 1_| 0_|_SortPreservingMergeExec: [alias_ts@1 DESC] REDACTED
+|_|_|_WindowedSortExec: expr=alias_ts@1 DESC num_ranges=1 fetch=5 REDACTED
+|_|_|_PartSortExec: expr=alias_ts@1 DESC num_ranges=1 limit=5 REDACTED
 |_|_|_ProjectionExec: expr=[i@0 as i, t@1 as alias_ts] REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges) REDACTED
 |_|_|_|
