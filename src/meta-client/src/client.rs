@@ -703,7 +703,7 @@ mod tests {
         let heartbeat_count = Arc::new(AtomicUsize::new(0));
         let heartbeat_count_clone = heartbeat_count.clone();
         let handle = tokio::spawn(async move {
-            while let Some(_) = receiver.message().await.unwrap() {
+            while let Some(_resp) = receiver.message().await.unwrap() {
                 heartbeat_count_clone.fetch_add(1, Ordering::Relaxed);
             }
         });
