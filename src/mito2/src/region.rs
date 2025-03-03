@@ -377,6 +377,12 @@ impl ManifestContext {
         // A downgrading leader rejects user writes but still allows
         // flushing the memtable and updating the manifest.
         if expect_state != RegionLeaderState::Downgrading {
+            if current_state == RegionRoleState::Leader(RegionLeaderState::Downgrading) {
+                info!(
+                    "Region {} is in downgrading leader state, updating manifest. state is {:?}",
+                    manifest.metadata.region_id, expect_state
+                );
+            }
             ensure!(
                 current_state == RegionRoleState::Leader(expect_state)
                     || current_state == RegionRoleState::Leader(RegionLeaderState::Downgrading),
