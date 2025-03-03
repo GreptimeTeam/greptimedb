@@ -13,10 +13,10 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use api::v1::meta::MailboxMessage;
-use common_meta::distributed_time_constants::MAILBOX_RTT_SECS;
+use common_meta::distributed_time_constants::REGION_LEASE_SECS;
 use common_meta::instruction::{Instruction, InstructionReply, OpenRegion, SimpleReply};
 use common_meta::key::datanode_table::RegionInfo;
 use common_meta::RegionIdent;
@@ -31,7 +31,8 @@ use crate::procedure::region_migration::update_metadata::UpdateMetadata;
 use crate::procedure::region_migration::{Context, State};
 use crate::service::mailbox::Channel;
 
-const OPEN_CANDIDATE_REGION_TIMEOUT: Duration = Duration::from_secs(MAILBOX_RTT_SECS);
+/// Uses lease time of a region as the timeout of opening a candidate region.
+const OPEN_CANDIDATE_REGION_TIMEOUT: Duration = Duration::from_secs(REGION_LEASE_SECS);
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OpenCandidateRegion;
@@ -135,6 +136,7 @@ impl OpenCandidateRegion {
         })?;
 
         let ch = Channel::Datanode(candidate.id);
+        let now = Instant::now();
         let receiver = ctx
             .mailbox
             .send(&ch, msg, OPEN_CANDIDATE_REGION_TIMEOUT)
@@ -144,8 +146,10 @@ impl OpenCandidateRegion {
             Ok(msg) => {
                 let reply = HeartbeatMailbox::json_reply(&msg)?;
                 info!(
-                    "Received open region reply: {:?}, region: {}",
-                    reply, region_id
+                    "Received open region reply: {:?}, region: {}, elapsed: {:?}",
+                    reply,
+                    region_id,
+                    now.elapsed()
                 );
                 let InstructionReply::OpenRegion(SimpleReply { result, error }) = reply else {
                     return error::UnexpectedInstructionReplySnafu {
@@ -160,8 +164,9 @@ impl OpenCandidateRegion {
                 } else {
                     error::RetryLaterSnafu {
                         reason: format!(
-                            "Region {region_id} is not opened by datanode {:?}, error: {error:?}",
+                            "Region {region_id} is not opened by datanode {:?}, error: {error:?}, elapsed: {:?}",
                             candidate,
+                            now.elapsed()
                         ),
                     }
                     .fail()
@@ -169,8 +174,9 @@ impl OpenCandidateRegion {
             }
             Err(error::Error::MailboxTimeout { .. }) => {
                 let reason = format!(
-                    "Mailbox received timeout for open candidate region {region_id} on datanode {:?}", 
+                    "Mailbox received timeout for open candidate region {region_id} on datanode {:?}, elapsed: {:?}",
                     candidate,
+                    now.elapsed()
                 );
                 error::RetryLaterSnafu { reason }.fail()
             }

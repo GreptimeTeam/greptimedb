@@ -71,7 +71,7 @@ impl Function for HllCalcFunction {
         )
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         if columns.len() != 1 {
             return InvalidFuncArgsSnafu {
                 err_msg: format!("hll_count expects 1 argument, got {}", columns.len()),
@@ -142,7 +142,7 @@ mod tests {
         let serialized_bytes = bincode::serialize(&hll).unwrap();
         let args: Vec<VectorRef> = vec![Arc::new(BinaryVector::from(vec![Some(serialized_bytes)]))];
 
-        let result = function.eval(FunctionContext::default(), &args).unwrap();
+        let result = function.eval(&FunctionContext::default(), &args).unwrap();
         assert_eq!(result.len(), 1);
 
         // Test cardinality estimate
@@ -159,7 +159,7 @@ mod tests {
 
         // Test with invalid number of arguments
         let args: Vec<VectorRef> = vec![];
-        let result = function.eval(FunctionContext::default(), &args);
+        let result = function.eval(&FunctionContext::default(), &args);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -168,7 +168,7 @@ mod tests {
 
         // Test with invalid binary data
         let args: Vec<VectorRef> = vec![Arc::new(BinaryVector::from(vec![Some(vec![1, 2, 3])]))]; // Invalid binary data
-        let result = function.eval(FunctionContext::default(), &args).unwrap();
+        let result = function.eval(&FunctionContext::default(), &args).unwrap();
         assert_eq!(result.len(), 1);
         assert!(matches!(result.get(0), datatypes::value::Value::Null));
     }

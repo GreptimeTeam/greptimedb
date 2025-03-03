@@ -28,7 +28,6 @@ use common_function::handlers::{
     FlowServiceHandlerRef, ProcedureServiceHandlerRef, TableMutationHandlerRef,
 };
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
-use common_query::prelude::ScalarUdf;
 use common_query::Output;
 use datafusion_expr::LogicalPlan;
 use datatypes::schema::Schema;
@@ -74,9 +73,6 @@ pub trait QueryEngine: Send + Sync {
 
     /// Execute the given [`LogicalPlan`].
     async fn execute(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output>;
-
-    /// Register a [`ScalarUdf`].
-    fn register_udf(&self, udf: ScalarUdf);
 
     /// Register an aggregate function.
     ///

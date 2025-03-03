@@ -27,7 +27,7 @@ use datafusion::execution::context::SessionState;
 use datafusion::execution::registry::SerializerRegistry;
 use datafusion::execution::{FunctionRegistry, SessionStateBuilder};
 use datafusion::logical_expr::LogicalPlan;
-use datafusion_expr::{ScalarUDF, UserDefinedLogicalNode};
+use datafusion_expr::UserDefinedLogicalNode;
 use greptime_proto::substrait_extension::MergeScan as PbMergeScan;
 use prost::Message;
 use session::context::QueryContextRef;
@@ -120,9 +120,11 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
         // e.g. The default UDF `to_char()` has an alias `date_format()`, if we register a UDF with the name `date_format()`
         // before we build the session state, the UDF will be lost.
         for func in FUNCTION_REGISTRY.functions() {
-            let udf: Arc<ScalarUDF> = Arc::new(
-                create_udf(func.clone(), self.query_ctx.clone(), Default::default()).into(),
-            );
+            let udf = Arc::new(create_udf(
+                func.clone(),
+                self.query_ctx.clone(),
+                Default::default(),
+            ));
             session_state
                 .register_udf(udf)
                 .context(RegisterUdfSnafu { name: func.name() })?;

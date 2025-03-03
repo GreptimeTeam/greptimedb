@@ -97,7 +97,7 @@ impl Function for GreatestFunction {
         )
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure!(
             columns.len() == 2,
             InvalidFuncArgsSnafu {
@@ -191,7 +191,9 @@ mod tests {
             ])) as _,
         ];
 
-        let result = function.eval(FunctionContext::default(), &columns).unwrap();
+        let result = function
+            .eval(&FunctionContext::default(), &columns)
+            .unwrap();
         let result = result.as_any().downcast_ref::<DateTimeVector>().unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(
@@ -222,7 +224,9 @@ mod tests {
             Arc::new(DateVector::from_slice(vec![0, 1])) as _,
         ];
 
-        let result = function.eval(FunctionContext::default(), &columns).unwrap();
+        let result = function
+            .eval(&FunctionContext::default(), &columns)
+            .unwrap();
         let result = result.as_any().downcast_ref::<DateVector>().unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(
@@ -253,7 +257,9 @@ mod tests {
             Arc::new(DateTimeVector::from_slice(vec![0, 1])) as _,
         ];
 
-        let result = function.eval(FunctionContext::default(), &columns).unwrap();
+        let result = function
+            .eval(&FunctionContext::default(), &columns)
+            .unwrap();
         let result = result.as_any().downcast_ref::<DateTimeVector>().unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(
@@ -282,7 +288,7 @@ mod tests {
                         Arc::new([<Timestamp $unit Vector>]::from_slice(vec![0, 1])) as _,
                     ];
 
-                    let result = function.eval(FunctionContext::default(), &columns).unwrap();
+                    let result = function.eval(&FunctionContext::default(), &columns).unwrap();
                     let result = result.as_any().downcast_ref::<[<Timestamp $unit Vector>]>().unwrap();
                     assert_eq!(result.len(), 2);
                     assert_eq!(

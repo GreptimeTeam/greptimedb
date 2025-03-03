@@ -60,7 +60,7 @@ macro_rules! define_distance_function {
                 )
             }
 
-            fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+            fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
                 ensure!(
                     columns.len() == 2,
                     InvalidFuncArgsSnafu {
@@ -159,7 +159,7 @@ mod tests {
             ])) as VectorRef;
 
             let result = func
-                .eval(FunctionContext::default(), &[vec1.clone(), vec2.clone()])
+                .eval(&FunctionContext::default(), &[vec1.clone(), vec2.clone()])
                 .unwrap();
 
             assert!(!result.get(0).is_null());
@@ -168,7 +168,7 @@ mod tests {
             assert!(result.get(3).is_null());
 
             let result = func
-                .eval(FunctionContext::default(), &[vec2, vec1])
+                .eval(&FunctionContext::default(), &[vec2, vec1])
                 .unwrap();
 
             assert!(!result.get(0).is_null());
@@ -202,7 +202,7 @@ mod tests {
             ])) as VectorRef;
 
             let result = func
-                .eval(FunctionContext::default(), &[vec1.clone(), vec2.clone()])
+                .eval(&FunctionContext::default(), &[vec1.clone(), vec2.clone()])
                 .unwrap();
 
             assert!(!result.get(0).is_null());
@@ -211,7 +211,7 @@ mod tests {
             assert!(result.get(3).is_null());
 
             let result = func
-                .eval(FunctionContext::default(), &[vec2, vec1])
+                .eval(&FunctionContext::default(), &[vec2, vec1])
                 .unwrap();
 
             assert!(!result.get(0).is_null());
@@ -245,7 +245,7 @@ mod tests {
             ])) as VectorRef;
 
             let result = func
-                .eval(FunctionContext::default(), &[vec1.clone(), vec2.clone()])
+                .eval(&FunctionContext::default(), &[vec1.clone(), vec2.clone()])
                 .unwrap();
 
             assert!(!result.get(0).is_null());
@@ -254,7 +254,7 @@ mod tests {
             assert!(result.get(3).is_null());
 
             let result = func
-                .eval(FunctionContext::default(), &[vec2, vec1])
+                .eval(&FunctionContext::default(), &[vec2, vec1])
                 .unwrap();
 
             assert!(!result.get(0).is_null());
@@ -294,7 +294,7 @@ mod tests {
 
             let result = func
                 .eval(
-                    FunctionContext::default(),
+                    &FunctionContext::default(),
                     &[const_str.clone(), vec1.clone()],
                 )
                 .unwrap();
@@ -306,7 +306,7 @@ mod tests {
 
             let result = func
                 .eval(
-                    FunctionContext::default(),
+                    &FunctionContext::default(),
                     &[vec1.clone(), const_str.clone()],
                 )
                 .unwrap();
@@ -318,7 +318,7 @@ mod tests {
 
             let result = func
                 .eval(
-                    FunctionContext::default(),
+                    &FunctionContext::default(),
                     &[const_str.clone(), vec2.clone()],
                 )
                 .unwrap();
@@ -330,7 +330,7 @@ mod tests {
 
             let result = func
                 .eval(
-                    FunctionContext::default(),
+                    &FunctionContext::default(),
                     &[vec2.clone(), const_str.clone()],
                 )
                 .unwrap();
@@ -353,13 +353,13 @@ mod tests {
         for func in funcs {
             let vec1 = Arc::new(StringVector::from(vec!["[1.0]"])) as VectorRef;
             let vec2 = Arc::new(StringVector::from(vec!["[1.0, 1.0]"])) as VectorRef;
-            let result = func.eval(FunctionContext::default(), &[vec1, vec2]);
+            let result = func.eval(&FunctionContext::default(), &[vec1, vec2]);
             assert!(result.is_err());
 
             let vec1 = Arc::new(BinaryVector::from(vec![vec![0, 0, 128, 63]])) as VectorRef;
             let vec2 =
                 Arc::new(BinaryVector::from(vec![vec![0, 0, 128, 63, 0, 0, 0, 64]])) as VectorRef;
-            let result = func.eval(FunctionContext::default(), &[vec1, vec2]);
+            let result = func.eval(&FunctionContext::default(), &[vec1, vec2]);
             assert!(result.is_err());
         }
     }

@@ -160,12 +160,18 @@ impl DowngradeLeaderRegion {
         })?;
 
         let ch = Channel::Datanode(leader.id);
+        let now = Instant::now();
         let receiver = ctx.mailbox.send(&ch, msg, operation_timeout).await?;
 
         match receiver.await? {
             Ok(msg) => {
                 let reply = HeartbeatMailbox::json_reply(&msg)?;
-                info!("Downgrade region reply: {:?}", reply);
+                info!(
+                    "Received downgrade region reply: {:?}, region: {}, elapsed: {:?}",
+                    reply,
+                    region_id,
+                    now.elapsed()
+                );
                 let InstructionReply::DowngradeRegion(DowngradeRegionReply {
                     last_entry_id,
                     exists,
@@ -182,8 +188,8 @@ impl DowngradeLeaderRegion {
                 if error.is_some() {
                     return error::RetryLaterSnafu {
                         reason: format!(
-                            "Failed to downgrade the region {} on Datanode {:?}, error: {:?}",
-                            region_id, leader, error
+                            "Failed to downgrade the region {} on Datanode {:?}, error: {:?}, elapsed: {:?}",
+                            region_id, leader, error, now.elapsed()
                         ),
                     }
                     .fail();
@@ -191,13 +197,15 @@ impl DowngradeLeaderRegion {
 
                 if !exists {
                     warn!(
-                        "Trying to downgrade the region {} on Datanode {}, but region doesn't exist!",
-                        region_id, leader
+                        "Trying to downgrade the region {} on Datanode {}, but region doesn't exist!, elapsed: {:?}",
+                        region_id, leader, now.elapsed()
                     );
                 } else {
                     info!(
-                        "Region {} leader is downgraded, last_entry_id: {:?}",
-                        region_id, last_entry_id
+                        "Region {} leader is downgraded, last_entry_id: {:?}, elapsed: {:?}",
+                        region_id,
+                        last_entry_id,
+                        now.elapsed()
                     );
                 }
 
@@ -209,8 +217,9 @@ impl DowngradeLeaderRegion {
             }
             Err(error::Error::MailboxTimeout { .. }) => {
                 let reason = format!(
-                    "Mailbox received timeout for downgrade leader region {region_id} on datanode {:?}", 
+                    "Mailbox received timeout for downgrade leader region {region_id} on datanode {:?}, elapsed: {:?}", 
                     leader,
+                    now.elapsed()
                 );
                 error::RetryLaterSnafu { reason }.fail()
             }

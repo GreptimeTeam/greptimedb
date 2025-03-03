@@ -84,7 +84,7 @@ impl Function for S2LatLngToCell {
         Signature::one_of(signatures, Volatility::Stable)
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure_columns_n!(columns, 2);
 
         let lat_vec = &columns[0];
@@ -138,7 +138,7 @@ impl Function for S2CellLevel {
         signature_of_cell()
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure_columns_n!(columns, 1);
 
         let cell_vec = &columns[0];
@@ -174,7 +174,7 @@ impl Function for S2CellToToken {
         signature_of_cell()
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure_columns_n!(columns, 1);
 
         let cell_vec = &columns[0];
@@ -210,7 +210,7 @@ impl Function for S2CellParent {
         signature_of_cell_and_level()
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure_columns_n!(columns, 2);
 
         let cell_vec = &columns[0];

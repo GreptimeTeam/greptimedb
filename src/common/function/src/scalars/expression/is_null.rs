@@ -55,7 +55,7 @@ impl Function for IsNullFunction {
 
     fn eval(
         &self,
-        _func_ctx: FunctionContext,
+        _func_ctx: &FunctionContext,
         columns: &[VectorRef],
     ) -> common_query::error::Result<VectorRef> {
         ensure!(
@@ -102,7 +102,7 @@ mod tests {
         let values = vec![None, Some(3.0), None];
 
         let args: Vec<VectorRef> = vec![Arc::new(Float32Vector::from(values))];
-        let vector = is_null.eval(FunctionContext::default(), &args).unwrap();
+        let vector = is_null.eval(&FunctionContext::default(), &args).unwrap();
         let expect: VectorRef = Arc::new(BooleanVector::from_vec(vec![true, false, true]));
         assert_eq!(expect, vector);
     }
