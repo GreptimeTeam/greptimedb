@@ -12,6 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Implementation of the `uddsketch_state` UDAF that generate the state of
+//! UDDSketch for a given set of values.
+//!
+//! The generated state can be used to compute approximate quantiles using
+//! `uddsketch_calc` UDF.
+
 use std::sync::Arc;
 
 use common_query::prelude::*;

@@ -12,6 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! # Deprecate Warning:
+//!
+//! This module is deprecated and will be removed in the future.
+//! All UDAF implementation here are not maintained and should
+//! not be used before they are refactored into the `src/aggr`
+//! version.
+
 mod diff;
 mod polyval;
 mod scipy_stats_norm_cdf;
