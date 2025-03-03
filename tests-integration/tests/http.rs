@@ -1237,10 +1237,14 @@ transform:
       - id2
     type: int32
   - fields:
-      - type
-      - log
       - logger
     type: string
+  - field: type
+    type: string
+    index: skipping
+  - field: log
+    type: string
+    index: fulltext
   - field: time
     type: time
     index: timestamp
@@ -1314,11 +1318,22 @@ transform:
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
-    let encoded: String = url::form_urlencoded::byte_serialize(version_str.as_bytes()).collect();
+    // 3. check schema
 
-    // 3. remove pipeline
+    let expected_schema =  "[[\"logs1\",\"CREATE TABLE IF NOT EXISTS \\\"logs1\\\" (\\n  \\\"id1\\\" INT NULL,\\n  \\\"id2\\\" INT NULL,\\n  \\\"logger\\\" STRING NULL,\\n  \\\"type\\\" STRING NULL SKIPPING INDEX WITH(granularity = '0', type = 'BLOOM'),\\n  \\\"log\\\" STRING NULL,\\n  \\\"time\\\" TIMESTAMP(9) NOT NULL,\\n  TIME INDEX (\\\"time\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
+    validate_data(
+        "pipeline_schema",
+        &client,
+        "show create table logs1",
+        expected_schema,
+    )
+    .await;
+
+    // 4. remove pipeline
+    let encoded_ver_str: String =
+        url::form_urlencoded::byte_serialize(version_str.as_bytes()).collect();
     let res = client
-        .delete(format!("/v1/pipelines/test?version={}", encoded).as_str())
+        .delete(format!("/v1/pipelines/test?version={}", encoded_ver_str).as_str())
         .send()
         .await;
 
@@ -1334,7 +1349,7 @@ transform:
         format!(r#"[{{"name":"test","version":"{}"}}]"#, version_str).as_str()
     );
 
-    // 4. write data failed
+    // 5. write data failed
     let res = client
         .post("/v1/ingest?db=public&table=logs1&pipeline_name=test")
         .header("Content-Type", "application/json")
