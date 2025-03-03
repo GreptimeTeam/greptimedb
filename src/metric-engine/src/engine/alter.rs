@@ -17,7 +17,6 @@ mod validate;
 
 use std::collections::{HashMap, HashSet};
 
-use common_telemetry::error;
 use extract_new_columns::extract_new_columns;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::ColumnMetadata;
@@ -54,37 +53,52 @@ impl MetricEngineInner {
             let (region_id, request) = requests.pop().unwrap();
             self.alter_physical_region(region_id, request).await?;
         } else {
-            self.alter_logical_regions(requests, extension_return_value)
-                .await?;
+            let grouped_requests =
+                self.group_alter_logical_regions_requests_by_physical_region_id(requests)?;
+            for (physical_region_id, requests) in grouped_requests {
+                self.alter_logical_regions(physical_region_id, requests, extension_return_value)
+                    .await?;
+            }
         }
         Ok(0)
+    }
+
+    fn group_alter_logical_regions_requests_by_physical_region_id(
+        &self,
+        requests: Vec<(RegionId, RegionAlterRequest)>,
+    ) -> Result<HashMap<RegionId, Vec<(RegionId, RegionAlterRequest)>>> {
+        let mut result = HashMap::with_capacity(requests.len());
+        let state = self.state.read().unwrap();
+
+        for (region_id, request) in requests {
+            let physical_region_id = state
+                .get_physical_region_id(region_id)
+                .with_context(|| LogicalRegionNotFoundSnafu { region_id })?;
+            result
+                .entry(physical_region_id)
+                .or_insert_with(Vec::new)
+                .push((region_id, request));
+        }
+
+        Ok(result)
     }
 
     /// Alter multiple logical regions on the same physical region.
     pub async fn alter_logical_regions(
         &self,
+        physical_region_id: RegionId,
         requests: Vec<(RegionId, RegionAlterRequest)>,
         extension_return_value: &mut HashMap<String, Vec<u8>>,
     ) -> Result<AffectedRows> {
         // Checks all alter requests are add columns.
         validate_alter_region_requests(&requests)?;
 
-        let first_logical_region_id = requests[0].0;
-
         // Finds new columns to add
         let mut new_column_names = HashSet::new();
         let mut new_columns_to_add = vec![];
 
-        let (physical_region_id, index_options) = {
+        let index_options = {
             let state = &self.state.read().unwrap();
-            let physical_region_id = state
-                .get_physical_region_id(first_logical_region_id)
-                .with_context(|| {
-                    error!("Trying to alter an nonexistent region {first_logical_region_id}");
-                    LogicalRegionNotFoundSnafu {
-                        region_id: first_logical_region_id,
-                    }
-                })?;
             let region_state = state
                 .physical_region_states()
                 .get(&physical_region_id)
@@ -100,7 +114,7 @@ impl MetricEngineInner {
                 &mut new_columns_to_add,
             )?;
 
-            (physical_region_id, region_state.options().index)
+            region_state.options().index
         };
         let data_region_id = to_data_region_id(physical_region_id);
 
@@ -251,7 +265,11 @@ mod test {
 
         let region_id = env.default_logical_region_id();
         engine_inner
-            .alter_logical_regions(vec![(region_id, request)], &mut HashMap::new())
+            .alter_logical_regions(
+                physical_region_id,
+                vec![(region_id, request)],
+                &mut HashMap::new(),
+            )
             .await
             .unwrap();
         let semantic_type = metadata_region
