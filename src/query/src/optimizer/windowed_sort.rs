@@ -84,13 +84,16 @@ impl WindowedSortPhysicalRule {
                     let Some(scanner_info) = fetch_partition_range(sort_input.clone())? else {
                         return Ok(Transformed::no(plan));
                     };
+                    let input_schema = sort_input.schema();
 
                     if let Some(first_sort_expr) = sort_exec.expr().first()
                         && let Some(column_expr) = first_sort_expr
                             .expr
                             .as_any()
                             .downcast_ref::<PhysicalColumn>()
-                        && scanner_info.time_index.contains(column_expr.name())
+                        && scanner_info
+                            .time_index
+                            .contains(input_schema.field(column_expr.index()).name())
                     {
                     } else {
                         return Ok(Transformed::no(plan));
@@ -179,7 +182,12 @@ fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Opti
             for (expr, output_name) in projection.expr() {
                 if let Some(column_expr) = expr.as_any().downcast_ref::<PhysicalColumn>() {
                     if time_index.contains(column_expr.name()) {
+                        // time index alias to new name
                         time_index.insert(output_name.clone());
+                    } else if time_index.contains(output_name) && column_expr.name() != output_name
+                    {
+                        // other column alias to time index column name, remove from time index
+                        time_index.remove(output_name);
                     }
                 }
             }
