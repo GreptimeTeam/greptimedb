@@ -121,3 +121,45 @@ pub fn partition_rules_for_uuid(ident: &str) -> Partitions {
         exprs: rules,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use sqlparser::ast::Expr;
+    use sqlparser::dialect::GenericDialect;
+    use sqlparser::parser::Parser;
+
+    use super::*;
+
+    #[test]
+    fn test_rules() {
+        let expr = vec![
+            "trace_id < '1'",
+            "trace_id >= '1' AND trace_id < '2'",
+            "trace_id >= '2' AND trace_id < '3'",
+            "trace_id >= '3' AND trace_id < '4'",
+            "trace_id >= '4' AND trace_id < '5'",
+            "trace_id >= '5' AND trace_id < '6'",
+            "trace_id >= '6' AND trace_id < '7'",
+            "trace_id >= '7' AND trace_id < '8'",
+            "trace_id >= '8' AND trace_id < '9'",
+            "trace_id >= '9' AND trace_id < 'A'",
+            "trace_id >= 'A' AND trace_id < 'B' OR trace_id >= 'a' AND trace_id < 'b'",
+            "trace_id >= 'B' AND trace_id < 'C' OR trace_id >= 'b' AND trace_id < 'c'",
+            "trace_id >= 'C' AND trace_id < 'D' OR trace_id >= 'c' AND trace_id < 'd'",
+            "trace_id >= 'D' AND trace_id < 'E' OR trace_id >= 'd' AND trace_id < 'e'",
+            "trace_id >= 'E' AND trace_id < 'F' OR trace_id >= 'e' AND trace_id < 'f'",
+            "trace_id >= 'F' AND trace_id < 'a' OR trace_id >= 'f'",
+        ];
+
+        let dialect = GenericDialect {};
+        let results = expr
+            .into_iter()
+            .map(|s| {
+                let mut parser = Parser::new(&dialect).try_with_sql(s).unwrap();
+                parser.parse_expr().unwrap()
+            })
+            .collect::<Vec<Expr>>();
+
+        assert_eq!(results, partition_rules_for_uuid("trace_id").exprs);
+    }
+}

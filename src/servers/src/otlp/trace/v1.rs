@@ -23,8 +23,8 @@ use session::context::QueryContextRef;
 use super::attributes::Attributes;
 use super::span::{parse, TraceSpan};
 use super::{
-    DURATION_NANO_COLUMN, SERVICE_NAME_COLUMN, SPAN_ID_COLUMN, SPAN_KIND_COLUMN, SPAN_NAME_COLUMN,
-    TIMESTAMP_COLUMN, TRACE_ID_COLUMN,
+    DURATION_NANO_COLUMN, SPAN_ID_COLUMN, SPAN_KIND_COLUMN, SPAN_NAME_COLUMN, TIMESTAMP_COLUMN,
+    TRACE_ID_COLUMN,
 };
 use crate::error::Result;
 use crate::otlp::utils::{any_value_to_jsonb, make_column_data, make_string_column_data};
@@ -35,6 +35,15 @@ const APPROXIMATE_COLUMN_COUNT: usize = 30;
 
 /// Convert SpanTraces to GreptimeDB row insert requests.
 /// Returns `InsertRequests` and total number of rows to ingest
+///
+/// Compared with v0, this v1 implementation:
+/// 1. flattens all attribute data into columns.
+/// 2. treat `span_id` and `parent_trace_id` as fields.
+/// 3. removed `service_name` column because it's already in
+///    `resource_attributes.service_name`
+///
+/// For other compound data structures like span_links and span_events here we
+/// are still using `json` data structure.
 pub fn v1_to_grpc_insert_requests(
     request: ExportTraceServiceRequest,
     _pipeline: PipelineWay,
@@ -104,14 +113,6 @@ pub fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> 
         make_string_column_data("scope_version", span.scope_version),
     ];
     row_writer::write_fields(writer, fields.into_iter(), &mut row)?;
-
-    if let Some(service_name) = span.service_name {
-        row_writer::write_fields(
-            writer,
-            std::iter::once(make_string_column_data(SERVICE_NAME_COLUMN, service_name)),
-            &mut row,
-        )?;
-    }
 
     write_attributes(writer, "span_attribute", span.span_attributes, &mut row)?;
     write_attributes(writer, "scope_attribute", span.scope_attributes, &mut row)?;

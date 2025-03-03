@@ -35,7 +35,7 @@ use common_meta::peer::Peer;
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use common_query::Output;
 use common_telemetry::tracing_context::TracingContext;
-use common_telemetry::{error, info};
+use common_telemetry::{error, info, warn};
 use datatypes::schema::SkippingIndexOptions;
 use futures_util::future;
 use meter_macros::write_meter;
@@ -571,17 +571,30 @@ impl Inserter {
                 // note that auto create table shouldn't be ttl instant table
                 // for it's a very unexpected behavior and should be set by user explicitly
                 for mut create_table in create_tables {
-                    // prebuilt partition rules for uuid data
+                    // prebuilt partition rules for uuid data: see the function
+                    // for more information
                     let partitions = partition_rules_for_uuid("trace_id");
-                    // add skip index to trace_id
-                    if let Some(col) = create_table
-                        .column_defs
-                        .iter_mut()
-                        .find(|c| c.name == "trace_id")
-                    {
-                        col.options = options_from_skipping(&SkippingIndexOptions::default())
-                            .context(ColumnOptionsSnafu)?;
-                    };
+                    // add skip index to
+                    // - trace_id: when searching by trace id
+                    // - span_id: when searching particular span
+                    // - parent_span_id: when searching root span
+                    // - span_name: when searching certain types of span
+                    let index_columns = ["trace_id", "span_id", "parent_span_id", "span_name"];
+                    for index_column in index_columns {
+                        if let Some(col) = create_table
+                            .column_defs
+                            .iter_mut()
+                            .find(|c| c.name == index_column)
+                        {
+                            col.options = options_from_skipping(&SkippingIndexOptions::default())
+                                .context(ColumnOptionsSnafu)?;
+                        } else {
+                            warn!(
+                                "Column {} not found when creating index for trace table: {}.",
+                                index_column, create_table.table_name
+                            );
+                        }
+                    }
 
                     let table = self
                         .create_physical_table(
