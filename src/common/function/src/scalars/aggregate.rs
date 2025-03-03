@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod argmax;
-mod argmin;
 mod diff;
 mod mean;
 mod polyval;
@@ -22,8 +20,6 @@ mod scipy_stats_norm_pdf;
 
 use std::sync::Arc;
 
-pub use argmax::ArgmaxAccumulatorCreator;
-pub use argmin::ArgminAccumulatorCreator;
 use common_query::logical_plan::AggregateFunctionCreatorRef;
 pub use diff::DiffAccumulatorCreator;
 pub use mean::MeanAccumulatorCreator;
@@ -90,16 +86,6 @@ impl AggregateFunctions {
             "polyval",
             2,
             Arc::new(|| Arc::new(PolyvalAccumulatorCreator::default())),
-        )));
-        registry.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
-            "argmax",
-            1,
-            Arc::new(|| Arc::new(ArgmaxAccumulatorCreator::default())),
-        )));
-        registry.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
-            "argmin",
-            1,
-            Arc::new(|| Arc::new(ArgminAccumulatorCreator::default())),
         )));
         registry.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
             "scipystatsnormcdf",
