@@ -30,7 +30,7 @@ use crate::scalars::timestamp::TimestampFunction;
 use crate::scalars::uddsketch_calc::UddSketchCalcFunction;
 use crate::scalars::vector::VectorFunction;
 use crate::system::SystemFunction;
-use crate::table::TableFunction;
+use crate::admin::AdminFunction;
 
 #[derive(Default)]
 pub struct FunctionRegistry {
@@ -118,7 +118,7 @@ pub static FUNCTION_REGISTRY: Lazy<Arc<FunctionRegistry>> = Lazy::new(|| {
 
     // System and administration functions
     SystemFunction::register(&function_registry);
-    TableFunction::register(&function_registry);
+    AdminFunction::register(&function_registry);
 
     // Json related functions
     JsonFunction::register(&function_registry);
