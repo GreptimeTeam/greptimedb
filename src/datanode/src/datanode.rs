@@ -449,17 +449,9 @@ impl DatanodeBuilder {
         }
 
         let mito_engine = match &opts.wal {
-            DatanodeWalConfig::RaftEngine(raft_engine_config) => MitoEngine::new(
-                &opts.storage.data_home,
-                config,
-                Self::build_raft_engine_log_store(&opts.storage.data_home, raft_engine_config)
-                    .await?,
-                object_store_manager,
-                schema_metadata_manager,
-                plugins,
-            )
-            .await
-            .context(BuildMitoEngineSnafu)?,
+            DatanodeWalConfig::RaftEngine(_) => {
+                panic!("raft engine is not supported");
+            }
             DatanodeWalConfig::Kafka(kafka_config) => {
                 if kafka_config.create_index && opts.node_id.is_none() {
                     warn!("The WAL index creation only available in distributed mode.")

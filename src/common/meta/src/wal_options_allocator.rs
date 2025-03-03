@@ -112,7 +112,9 @@ pub async fn build_wal_options_allocator(
     kv_backend: KvBackendRef,
 ) -> Result<WalOptionsAllocator> {
     match config {
-        MetasrvWalConfig::RaftEngine => Ok(WalOptionsAllocator::RaftEngine),
+        MetasrvWalConfig::RaftEngine => {
+            panic!("raft engine is not supported")
+        }
         MetasrvWalConfig::Kafka(kafka_config) => {
             let prefix = &kafka_config.kafka_topic.topic_name_prefix;
             ensure!(
