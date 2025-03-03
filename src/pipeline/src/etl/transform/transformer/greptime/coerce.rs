@@ -104,7 +104,7 @@ fn coerce_semantic_type(transform: &Transform) -> SemanticType {
 
 fn coerce_options(transform: &Transform) -> Result<Option<ColumnOptions>> {
     match transform.index {
-        Some(Index::Tag) => options_from_fulltext(&FulltextOptions {
+        Some(Index::Fulltext) => options_from_fulltext(&FulltextOptions {
             enable: true,
             ..Default::default()
         })
