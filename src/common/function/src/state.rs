@@ -129,14 +129,6 @@ impl FunctionState {
             ) -> Result<api::v1::flow::FlowResponse> {
                 todo!()
             }
-
-            async fn update_last_execution_time(
-                &self,
-                _flow_id: u32,
-                _time: chrono::DateTime<chrono::Utc>,
-            ) -> Result<()> {
-                todo!()
-            }
         }
 
         Self {
