@@ -18,6 +18,7 @@ use std::sync::{Arc, RwLock};
 
 use once_cell::sync::Lazy;
 
+use crate::admin::AdminFunction;
 use crate::function::{AsyncFunctionRef, FunctionRef};
 use crate::scalars::aggregate::{AggregateFunctionMetaRef, AggregateFunctions};
 use crate::scalars::date::DateFunction;
@@ -30,7 +31,6 @@ use crate::scalars::timestamp::TimestampFunction;
 use crate::scalars::uddsketch_calc::UddSketchCalcFunction;
 use crate::scalars::vector::VectorFunction;
 use crate::system::SystemFunction;
-use crate::table::TableFunction;
 
 #[derive(Default)]
 pub struct FunctionRegistry {
@@ -118,7 +118,7 @@ pub static FUNCTION_REGISTRY: Lazy<Arc<FunctionRegistry>> = Lazy::new(|| {
 
     // System and administration functions
     SystemFunction::register(&function_registry);
-    TableFunction::register(&function_registry);
+    AdminFunction::register(&function_registry);
 
     // Json related functions
     JsonFunction::register(&function_registry);
