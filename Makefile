@@ -145,8 +145,7 @@ docker-image-buildx: multi-platform-buildx ## Build docker image by buildx.
 
 .PHONY: dev-builder
 dev-builder: multi-platform-buildx ## Build dev-builder image.
-	docker buildx build --no-cache --network=host \
-        --builder ${BUILDX_BUILDER_NAME} \
+	docker buildx build --progress=plain --builder ${BUILDX_BUILDER_NAME} \
 	--build-arg="RUST_TOOLCHAIN=${RUST_TOOLCHAIN}" \
 	-f docker/dev-builder/${BASE_IMAGE}/Dockerfile \
 	-t ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-${BASE_IMAGE}:${DEV_BUILDER_IMAGE_TAG} ${BUILDX_MULTI_PLATFORM_BUILD_OPTS} .
