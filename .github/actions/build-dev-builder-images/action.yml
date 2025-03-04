@@ -47,7 +47,7 @@ runs:
       run: |
         make dev-builder \
           BASE_IMAGE=ubuntu \
-          BUILDX_MULTI_PLATFORM_BUILD=amd64 \
+          BUILDX_MULTI_PLATFORM_BUILD=arm64 \
           IMAGE_REGISTRY=${{ inputs.dockerhub-image-registry }} \
           IMAGE_NAMESPACE=${{ inputs.dockerhub-image-namespace }} \
           DEV_BUILDER_IMAGE_TAG=${{ inputs.version }}
