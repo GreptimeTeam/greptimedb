@@ -119,7 +119,7 @@ impl Function for H3LatLngToCell {
         Signature::one_of(signatures, Volatility::Stable)
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure_columns_n!(columns, 3);
 
         let lat_vec = &columns[0];
@@ -191,7 +191,7 @@ impl Function for H3LatLngToCellString {
         Signature::one_of(signatures, Volatility::Stable)
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure_columns_n!(columns, 3);
 
         let lat_vec = &columns[0];
@@ -247,7 +247,7 @@ impl Function for H3CellToString {
         signature_of_cell()
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure_columns_n!(columns, 1);
 
         let cell_vec = &columns[0];
@@ -285,7 +285,7 @@ impl Function for H3StringToCell {
         )
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure_columns_n!(columns, 1);
 
         let string_vec = &columns[0];
@@ -337,7 +337,7 @@ impl Function for H3CellCenterLatLng {
         signature_of_cell()
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure_columns_n!(columns, 1);
 
         let cell_vec = &columns[0];
@@ -382,7 +382,7 @@ impl Function for H3CellResolution {
         signature_of_cell()
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure_columns_n!(columns, 1);
 
         let cell_vec = &columns[0];
@@ -418,7 +418,7 @@ impl Function for H3CellBase {
         signature_of_cell()
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure_columns_n!(columns, 1);
 
         let cell_vec = &columns[0];
@@ -454,7 +454,7 @@ impl Function for H3CellIsPentagon {
         signature_of_cell()
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure_columns_n!(columns, 1);
 
         let cell_vec = &columns[0];
@@ -490,7 +490,7 @@ impl Function for H3CellCenterChild {
         signature_of_cell_and_resolution()
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure_columns_n!(columns, 2);
 
         let cell_vec = &columns[0];
@@ -530,7 +530,7 @@ impl Function for H3CellParent {
         signature_of_cell_and_resolution()
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure_columns_n!(columns, 2);
 
         let cell_vec = &columns[0];
@@ -570,7 +570,7 @@ impl Function for H3CellToChildren {
         signature_of_cell_and_resolution()
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure_columns_n!(columns, 2);
 
         let cell_vec = &columns[0];
@@ -619,7 +619,7 @@ impl Function for H3CellToChildrenSize {
         signature_of_cell_and_resolution()
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure_columns_n!(columns, 2);
 
         let cell_vec = &columns[0];
@@ -656,7 +656,7 @@ impl Function for H3CellToChildPos {
         signature_of_cell_and_resolution()
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure_columns_n!(columns, 2);
 
         let cell_vec = &columns[0];
@@ -706,7 +706,7 @@ impl Function for H3ChildPosToCell {
         Signature::one_of(signatures, Volatility::Stable)
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure_columns_n!(columns, 3);
 
         let pos_vec = &columns[0];
@@ -747,7 +747,7 @@ impl Function for H3GridDisk {
         signature_of_cell_and_distance()
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure_columns_n!(columns, 2);
 
         let cell_vec = &columns[0];
@@ -800,7 +800,7 @@ impl Function for H3GridDiskDistances {
         signature_of_cell_and_distance()
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure_columns_n!(columns, 2);
 
         let cell_vec = &columns[0];
@@ -850,7 +850,7 @@ impl Function for H3GridDistance {
         signature_of_double_cells()
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure_columns_n!(columns, 2);
 
         let cell_this_vec = &columns[0];
@@ -906,7 +906,7 @@ impl Function for H3GridPathCells {
         signature_of_double_cells()
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure_columns_n!(columns, 2);
 
         let cell_this_vec = &columns[0];
@@ -988,7 +988,7 @@ impl Function for H3CellContains {
         Signature::one_of(signatures, Volatility::Stable)
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure_columns_n!(columns, 2);
 
         let cells_vec = &columns[0];
@@ -1042,7 +1042,7 @@ impl Function for H3CellDistanceSphereKm {
         signature_of_double_cells()
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure_columns_n!(columns, 2);
 
         let cell_this_vec = &columns[0];
@@ -1097,7 +1097,7 @@ impl Function for H3CellDistanceEuclideanDegree {
         signature_of_double_cells()
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure_columns_n!(columns, 2);
 
         let cell_this_vec = &columns[0];

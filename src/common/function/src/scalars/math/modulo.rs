@@ -58,7 +58,7 @@ impl Function for ModuloFunction {
         Signature::uniform(2, ConcreteDataType::numerics(), Volatility::Immutable)
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure!(
             columns.len() == 2,
             InvalidFuncArgsSnafu {
@@ -126,7 +126,7 @@ mod tests {
             Arc::new(Int32Vector::from_vec(nums.clone())),
             Arc::new(Int32Vector::from_vec(divs.clone())),
         ];
-        let result = function.eval(FunctionContext::default(), &args).unwrap();
+        let result = function.eval(&FunctionContext::default(), &args).unwrap();
         assert_eq!(result.len(), 4);
         for i in 0..4 {
             let p: i64 = (nums[i] % divs[i]) as i64;
@@ -158,7 +158,7 @@ mod tests {
             Arc::new(UInt32Vector::from_vec(nums.clone())),
             Arc::new(UInt32Vector::from_vec(divs.clone())),
         ];
-        let result = function.eval(FunctionContext::default(), &args).unwrap();
+        let result = function.eval(&FunctionContext::default(), &args).unwrap();
         assert_eq!(result.len(), 4);
         for i in 0..4 {
             let p: u64 = (nums[i] % divs[i]) as u64;
@@ -190,7 +190,7 @@ mod tests {
             Arc::new(Float64Vector::from_vec(nums.clone())),
             Arc::new(Float64Vector::from_vec(divs.clone())),
         ];
-        let result = function.eval(FunctionContext::default(), &args).unwrap();
+        let result = function.eval(&FunctionContext::default(), &args).unwrap();
         assert_eq!(result.len(), 4);
         for i in 0..4 {
             let p: f64 = nums[i] % divs[i];
@@ -209,7 +209,7 @@ mod tests {
             Arc::new(Int32Vector::from_vec(nums.clone())),
             Arc::new(Int32Vector::from_vec(divs.clone())),
         ];
-        let result = function.eval(FunctionContext::default(), &args);
+        let result = function.eval(&FunctionContext::default(), &args);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().output_msg();
         assert_eq!(
@@ -220,7 +220,7 @@ mod tests {
         let nums = vec![27];
 
         let args: Vec<VectorRef> = vec![Arc::new(Int32Vector::from_vec(nums.clone()))];
-        let result = function.eval(FunctionContext::default(), &args);
+        let result = function.eval(&FunctionContext::default(), &args);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().output_msg();
         assert!(
@@ -233,7 +233,7 @@ mod tests {
             Arc::new(StringVector::from(nums.clone())),
             Arc::new(StringVector::from(divs.clone())),
         ];
-        let result = function.eval(FunctionContext::default(), &args);
+        let result = function.eval(&FunctionContext::default(), &args);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().output_msg();
         assert!(err_msg.contains("Invalid arithmetic operation"));

@@ -64,7 +64,7 @@ impl Function for JsonPathExistsFunction {
         )
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure!(
             columns.len() == 2,
             InvalidFuncArgsSnafu {
@@ -204,7 +204,7 @@ mod tests {
         let path_vector = StringVector::from_vec(paths);
         let args: Vec<VectorRef> = vec![Arc::new(json_vector), Arc::new(path_vector)];
         let vector = json_path_exists
-            .eval(FunctionContext::default(), &args)
+            .eval(&FunctionContext::default(), &args)
             .unwrap();
 
         // Test for non-nulls.
@@ -222,7 +222,7 @@ mod tests {
         let illegal_path = StringVector::from_vec(vec!["$..a"]);
 
         let args: Vec<VectorRef> = vec![Arc::new(json), Arc::new(illegal_path)];
-        let err = json_path_exists.eval(FunctionContext::default(), &args);
+        let err = json_path_exists.eval(&FunctionContext::default(), &args);
         assert!(err.is_err());
 
         // Test for nulls.
@@ -235,11 +235,11 @@ mod tests {
 
         let args: Vec<VectorRef> = vec![Arc::new(null_json), Arc::new(path)];
         let result1 = json_path_exists
-            .eval(FunctionContext::default(), &args)
+            .eval(&FunctionContext::default(), &args)
             .unwrap();
         let args: Vec<VectorRef> = vec![Arc::new(json), Arc::new(null_path)];
         let result2 = json_path_exists
-            .eval(FunctionContext::default(), &args)
+            .eval(&FunctionContext::default(), &args)
             .unwrap();
 
         assert_eq!(result1.len(), 1);

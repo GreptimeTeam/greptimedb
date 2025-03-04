@@ -262,8 +262,11 @@ fn create_df_context(
     ];
 
     for udf in udfs {
-        df_context
-            .register_udf(create_udf(udf, ctx.clone(), Arc::new(FunctionState::default())).into());
+        df_context.register_udf(create_udf(
+            udf,
+            ctx.clone(),
+            Arc::new(FunctionState::default()),
+        ));
     }
 
     Ok(df_context)
