@@ -35,7 +35,7 @@ const LONGITUDE_FIELD: &str = "lng";
 const TIMESTAMP_FIELD: &str = "timestamp";
 const DEFAULT_LIST_FIELD_NAME: &str = "item";
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct GeoPathAccumulator {
     lat: Vec<Option<f64>>,
     lng: Vec<Option<f64>>,
@@ -44,11 +44,7 @@ pub struct GeoPathAccumulator {
 
 impl GeoPathAccumulator {
     pub fn new() -> Self {
-        Self {
-            lat: Vec::default(),
-            lng: Vec::default(),
-            timestamp: Vec::default(),
-        }
+        Self::default()
     }
 
     pub fn udf_impl() -> AggregateUDF {
@@ -138,6 +134,8 @@ impl DfAccumulator for GeoPathAccumulator {
         let ts_array = as_primitive_array::<TimestampNanosecondType>(&values[2])?;
 
         let size = lat_array.len();
+        self.lat.reserve(size);
+        self.lng.reserve(size);
 
         for idx in 0..size {
             self.lat.push(if lat_array.is_null(idx) {
@@ -211,8 +209,6 @@ impl DfAccumulator for GeoPathAccumulator {
         let lat_array = Arc::new(ListArray::from_iter_primitive::<Float64Type, _, _>(vec![
             Some(self.lat.clone()),
         ]));
-        //  Arc::new(Float64Array::from(self.lat.clone()));
-        // let lng_array = Arc::new(Float64Array::from(self.lng.clone()));
         let lng_array = Arc::new(ListArray::from_iter_primitive::<Float64Type, _, _>(vec![
             Some(self.lng.clone()),
         ]));
