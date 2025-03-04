@@ -24,7 +24,6 @@ use datatypes::arrow::datatypes::DataType as ArrowDatatype;
 use datatypes::error::Error as DataTypeError;
 use datatypes::prelude::ConcreteDataType;
 use snafu::{Location, Snafu};
-use statrs::StatsError;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
