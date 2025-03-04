@@ -3,7 +3,7 @@ name: Release dev-builder images
 on:
   push:
     branches:
-      - fix/dev-builder
+      - main
     paths:
       - rust-toolchain.toml
       - 'docker/dev-builder/**'

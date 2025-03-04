@@ -41,18 +41,18 @@ runs:
         username: ${{ inputs.dockerhub-image-registry-username }}
         password: ${{ inputs.dockerhub-image-registry-token }}
 
-    - name: Build and push dev-builder-ubuntu image
+    - name: Build and push dev-builder-ubuntu image # Build image for amd64 and arm64 platform.
       shell: bash
       if: ${{ inputs.build-dev-builder-ubuntu == 'true' }}
       run: |
         make dev-builder \
           BASE_IMAGE=ubuntu \
-          BUILDX_MULTI_PLATFORM_BUILD=arm64 \
+          BUILDX_MULTI_PLATFORM_BUILD=all \
           IMAGE_REGISTRY=${{ inputs.dockerhub-image-registry }} \
           IMAGE_NAMESPACE=${{ inputs.dockerhub-image-namespace }} \
           DEV_BUILDER_IMAGE_TAG=${{ inputs.version }}
 
-    - name: Build and push dev-builder-centos image
+    - name: Build and push dev-builder-centos image # Only build image for amd64 platform.
       shell: bash
       if: ${{ inputs.build-dev-builder-centos == 'true' }}
       run: |
@@ -69,8 +69,7 @@ runs:
       run: |
         make dev-builder \
           BASE_IMAGE=android \
+          BUILDX_MULTI_PLATFORM_BUILD=amd64 \
           IMAGE_REGISTRY=${{ inputs.dockerhub-image-registry }} \
           IMAGE_NAMESPACE=${{ inputs.dockerhub-image-namespace }} \
-          DEV_BUILDER_IMAGE_TAG=${{ inputs.version }} && \
-
-        docker push ${{ inputs.dockerhub-image-registry }}/${{ inputs.dockerhub-image-namespace }}/dev-builder-android:${{ inputs.version }}
+          DEV_BUILDER_IMAGE_TAG=${{ inputs.version }}
