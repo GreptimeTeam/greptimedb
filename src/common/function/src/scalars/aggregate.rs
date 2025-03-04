@@ -19,18 +19,9 @@
 //! not be used before they are refactored into the `src/aggr`
 //! version.
 
-mod diff;
-mod polyval;
-mod scipy_stats_norm_cdf;
-mod scipy_stats_norm_pdf;
-
 use std::sync::Arc;
 
 use common_query::logical_plan::AggregateFunctionCreatorRef;
-pub use diff::DiffAccumulatorCreator;
-pub use polyval::PolyvalAccumulatorCreator;
-pub use scipy_stats_norm_cdf::ScipyStatsNormCdfAccumulatorCreator;
-pub use scipy_stats_norm_pdf::ScipyStatsNormPdfAccumulatorCreator;
 
 use crate::function_registry::FunctionRegistry;
 use crate::scalars::vector::product::VectorProductCreator;
@@ -77,26 +68,6 @@ pub(crate) struct AggregateFunctions;
 
 impl AggregateFunctions {
     pub fn register(registry: &FunctionRegistry) {
-        registry.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
-            "diff",
-            1,
-            Arc::new(|| Arc::new(DiffAccumulatorCreator::default())),
-        )));
-        registry.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
-            "polyval",
-            2,
-            Arc::new(|| Arc::new(PolyvalAccumulatorCreator::default())),
-        )));
-        registry.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
-            "scipystatsnormcdf",
-            2,
-            Arc::new(|| Arc::new(ScipyStatsNormCdfAccumulatorCreator::default())),
-        )));
-        registry.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
-            "scipystatsnormpdf",
-            2,
-            Arc::new(|| Arc::new(ScipyStatsNormPdfAccumulatorCreator::default())),
-        )));
         registry.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
             "vec_sum",
             1,

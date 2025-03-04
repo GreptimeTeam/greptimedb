@@ -21,14 +21,8 @@ use table::TableRef;
 use crate::parser::QueryLanguageParser;
 use crate::{QueryEngineFactory, QueryEngineRef};
 
-mod argmax_test;
-mod argmin_test;
-mod mean_test;
 mod my_sum_udaf_example;
-mod polyval_test;
 mod query_engine_test;
-mod scipy_stats_norm_cdf_test;
-mod scipy_stats_norm_pdf;
 mod time_range_filter_test;
 
 mod function;
