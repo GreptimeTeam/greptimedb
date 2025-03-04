@@ -886,8 +886,11 @@ impl Error {
                 error: sqlx::Error::Database(database_error),
                 ..
             } => {
-                database_error.message()
-                    == "Deadlock found when trying to get lock; try restarting transaction"
+                matches!(
+                    database_error.message(),
+                    "Deadlock found when trying to get lock; try restarting transaction"
+                        | "can't serialize access for this transaction"
+                )
             }
             _ => false,
         }
