@@ -18,6 +18,9 @@ pub mod v0;
 pub mod v1;
 
 use api::v1::RowInsertRequests;
+pub use common_catalog::consts::{
+    PARENT_SPAN_ID_COLUMN, SPAN_ID_COLUMN, SPAN_NAME_COLUMN, TRACE_ID_COLUMN,
+};
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use pipeline::{GreptimePipelineParams, PipelineWay};
 use session::context::QueryContextRef;
@@ -28,11 +31,8 @@ use crate::query_handler::PipelineHandlerRef;
 pub const TRACE_TABLE_NAME: &str = "opentelemetry_traces";
 
 pub const SERVICE_NAME_COLUMN: &str = "service_name";
-pub const TRACE_ID_COLUMN: &str = "trace_id";
 pub const TIMESTAMP_COLUMN: &str = "timestamp";
 pub const DURATION_NANO_COLUMN: &str = "duration_nano";
-pub const SPAN_ID_COLUMN: &str = "span_id";
-pub const SPAN_NAME_COLUMN: &str = "span_name";
 pub const SPAN_KIND_COLUMN: &str = "span_kind";
 pub const SPAN_ATTRIBUTES_COLUMN: &str = "span_attributes";
 /// The span kind prefix in the database.

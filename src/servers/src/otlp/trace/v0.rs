@@ -21,8 +21,8 @@ use session::context::QueryContextRef;
 
 use super::span::{parse, TraceSpan};
 use super::{
-    DURATION_NANO_COLUMN, SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN, SPAN_ID_COLUMN,
-    SPAN_KIND_COLUMN, SPAN_NAME_COLUMN, TIMESTAMP_COLUMN, TRACE_ID_COLUMN,
+    DURATION_NANO_COLUMN, PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN,
+    SPAN_ID_COLUMN, SPAN_KIND_COLUMN, SPAN_NAME_COLUMN, TIMESTAMP_COLUMN, TRACE_ID_COLUMN,
 };
 use crate::error::Result;
 use crate::otlp::utils::{make_column_data, make_string_column_data};
@@ -90,7 +90,7 @@ pub fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> 
     let iter = vec![
         (TRACE_ID_COLUMN, span.trace_id),
         (SPAN_ID_COLUMN, span.span_id),
-        ("parent_span_id", span.parent_span_id),
+        (PARENT_SPAN_ID_COLUMN, span.parent_span_id),
     ]
     .into_iter()
     .map(|(col, val)| (col.to_string(), val));
