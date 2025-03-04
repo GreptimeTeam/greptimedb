@@ -167,6 +167,7 @@ pub(crate) fn get_type_by_alias(data_type: &DataType) -> Option<DataType> {
         DataType::UInt64 => Some(DataType::UnsignedBigInt(None)),
         DataType::Float32 => Some(DataType::Float(None)),
         DataType::Float64 => Some(DataType::Double),
+        DataType::Bool => Some(DataType::Boolean),
         DataType::Datetime(_) => Some(DataType::Timestamp(Some(6), TimezoneInfo::None)),
         _ => None,
     }
@@ -341,6 +342,20 @@ mod tests {
 
     fn test_timestamp_precision_type(precision: i32, expected: &str) {
         test_timestamp_alias(&format!("Timestamp({precision})"), expected);
+    }
+
+    #[test]
+    fn test_boolean_alias() {
+        let sql = "CREATE TABLE test(b bool, ts TIMESTAMP TIME INDEX)";
+        let mut stmts =
+            ParserContext::create_with_dialect(sql, &GenericDialect {}, ParseOptions::default())
+                .unwrap();
+        transform_statements(&mut stmts).unwrap();
+
+        match &stmts[0] {
+            Statement::CreateTable(c) => assert_eq!("CREATE TABLE test (\n  b BOOLEAN,\n  ts TIMESTAMP NOT NULL,\n  TIME INDEX (ts)\n)\nENGINE=mito\n", c.to_string()),
+            _ => unreachable!(),
+        }
     }
 
     #[test]
