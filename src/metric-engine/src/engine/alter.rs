@@ -53,11 +53,29 @@ impl MetricEngineInner {
             let (region_id, request) = requests.pop().unwrap();
             self.alter_physical_region(region_id, request).await?;
         } else {
-            let grouped_requests =
-                self.group_alter_logical_regions_requests_by_physical_region_id(requests)?;
-            for (physical_region_id, requests) in grouped_requests {
+            // Fast path for single logical region alter request
+            if requests.len() == 1 {
+                // Safety: requests is not empty
+                let region_id = requests.first().unwrap().0;
+                let physical_region_id = self
+                    .state
+                    .read()
+                    .unwrap()
+                    .get_physical_region_id(region_id)
+                    .with_context(|| LogicalRegionNotFoundSnafu { region_id })?;
                 self.alter_logical_regions(physical_region_id, requests, extension_return_value)
                     .await?;
+            } else {
+                let grouped_requests =
+                    self.group_alter_logical_regions_requests_by_physical_region_id(requests)?;
+                for (physical_region_id, requests) in grouped_requests {
+                    self.alter_logical_regions(
+                        physical_region_id,
+                        requests,
+                        extension_return_value,
+                    )
+                    .await?;
+                }
             }
         }
         Ok(0)

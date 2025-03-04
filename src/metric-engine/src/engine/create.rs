@@ -41,7 +41,9 @@ use store_api::region_engine::RegionEngine;
 use store_api::region_request::{AffectedRows, RegionCreateRequest, RegionRequest};
 use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::RegionId;
-use validate::group_create_logical_regions_requests_by_physical_region_id;
+use validate::{
+    group_create_logical_regions_requests_by_physical_region_id, parse_physical_region_id,
+};
 
 use crate::engine::create::extract_new_columns::extract_new_columns;
 use crate::engine::options::{set_data_region_options, PhysicalRegionOptions};
@@ -87,11 +89,22 @@ impl MetricEngineInner {
             .options
             .contains_key(LOGICAL_TABLE_METADATA_KEY)
         {
-            let grouped_requests =
-                group_create_logical_regions_requests_by_physical_region_id(requests)?;
-            for (physical_region_id, requests) in grouped_requests {
+            if requests.len() == 1 {
+                let request = &requests.first().unwrap().1;
+                let physical_region_id = parse_physical_region_id(request)?;
                 self.create_logical_regions(physical_region_id, requests, extension_return_value)
                     .await?;
+            } else {
+                let grouped_requests =
+                    group_create_logical_regions_requests_by_physical_region_id(requests)?;
+                for (physical_region_id, requests) in grouped_requests {
+                    self.create_logical_regions(
+                        physical_region_id,
+                        requests,
+                        extension_return_value,
+                    )
+                    .await?;
+                }
             }
         } else {
             return MissingRegionOptionSnafu {}.fail();
