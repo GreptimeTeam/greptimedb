@@ -19,7 +19,7 @@ use chrono::{DateTime, Utc};
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt};
+use snafu::OptionExt;
 use table::metadata::TableId;
 use table::table_name::TableName;
 
@@ -29,7 +29,7 @@ use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{DeserializedValueWithBytes, FlowId, FlowPartitionId, MetadataKey, MetadataValue};
 use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
-use crate::{ensure_values, FlownodeId};
+use crate::FlownodeId;
 
 const FLOW_INFO_KEY_PREFIX: &str = "info";
 
@@ -136,8 +136,6 @@ pub struct FlowInfoValue {
     pub(crate) created_time: DateTime<Utc>,
     /// The UpdateTime.
     pub(crate) updated_time: DateTime<Utc>,
-    /// The Last Execution Time.
-    pub(crate) last_execution_time: Option<DateTime<Utc>>,
 }
 
 impl FlowInfoValue {
@@ -185,14 +183,6 @@ impl FlowInfoValue {
 
     pub fn updated_time(&self) -> &DateTime<Utc> {
         &self.updated_time
-    }
-
-    pub fn last_execution_time(&self) -> Option<&DateTime<Utc>> {
-        self.last_execution_time.as_ref()
-    }
-
-    pub fn update_last_execution_time(&mut self, time: DateTime<Utc>) {
-        self.last_execution_time = Some(time);
     }
 }
 
@@ -280,35 +270,6 @@ impl FlowInfoManager {
             txn,
             TxnOpGetResponseSet::decode_with(TxnOpGetResponseSet::filter(key)),
         ))
-    }
-
-    /// Update the last execution time of the flow.
-    pub async fn update_last_execution_time(
-        &self,
-        flow_id: FlowId,
-        last_execution_time: DateTime<Utc>,
-    ) -> Result<()> {
-        if let Some(prev_flow_info) = self.get(flow_id).await? {
-            if let Some(prev_raw_flow_info) = self.get_raw(flow_id).await? {
-                let mut new_flow_info = prev_flow_info.clone();
-                new_flow_info.update_last_execution_time(last_execution_time);
-                let (create_flow_txn, on_failure) =
-                    self.build_update_txn(flow_id, &prev_raw_flow_info, &new_flow_info)?;
-                let mut r = self.kv_backend.txn(create_flow_txn).await?;
-                if !r.succeeded {
-                    let mut set = TxnOpGetResponseSet::from(&mut r.responses);
-                    let remote_flow_info = on_failure(&mut set)?
-                        .context(error::UnexpectedSnafu {
-                            err_msg:
-                                "Reads the empty schema name value in comparing operation of updating schema name value",
-                        })?
-                        .into_inner();
-                    let op_name = "the updating flow info new last_execution_time value";
-                    ensure_values!(remote_flow_info, new_flow_info, op_name);
-                }
-            }
-        }
-        Ok(())
     }
 }
 

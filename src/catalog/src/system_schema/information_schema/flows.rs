@@ -313,11 +313,8 @@ impl InformationSchemaFlowsBuilder {
             .push(Some(flow_info.created_time().timestamp_millis().into()));
         self.updated_time
             .push(Some(flow_info.updated_time().timestamp_millis().into()));
-        self.last_execution_time.push(
-            flow_info
-                .last_execution_time()
-                .map(|t| t.timestamp_millis().into()),
-        );
+        self.last_execution_time.push(None);
+        // TODO by jia
 
         let mut source_table_names = vec![];
         let catalog_name = self.catalog_name.clone();

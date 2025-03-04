@@ -523,7 +523,6 @@ impl FrontendInvoker {
             partition_manager.clone(),
             node_manager.clone(),
             table_flownode_cache,
-            None,
         ));
 
         let deleter = Arc::new(Deleter::new(

@@ -194,7 +194,6 @@ mod tests {
                     options: Default::default(),
                     created_time: chrono::Utc::now(),
                     updated_time: chrono::Utc::now(),
-                    last_execution_time: None,
                 },
                 (1..=3)
                     .map(|i| {

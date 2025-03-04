@@ -25,12 +25,10 @@ use api::v1::{
     RowInsertRequest, RowInsertRequests, SemanticType,
 };
 use catalog::CatalogManagerRef;
-use chrono::Utc;
 use client::{OutputData, OutputMeta};
 use common_catalog::consts::default_engine;
 use common_grpc_expr::util::ColumnExpr;
 use common_meta::cache::TableFlownodeSetCacheRef;
-use common_meta::key::flow::FlowMetadataManagerRef;
 use common_meta::node_manager::{AffectedRows, NodeManagerRef};
 use common_meta::peer::Peer;
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
@@ -71,7 +69,6 @@ pub struct Inserter {
     partition_manager: PartitionRuleManagerRef,
     node_manager: NodeManagerRef,
     table_flownode_set_cache: TableFlownodeSetCacheRef,
-    flow_metadata_manager: Option<FlowMetadataManagerRef>,
 }
 
 pub type InserterRef = Arc<Inserter>;
@@ -121,14 +118,12 @@ impl Inserter {
         partition_manager: PartitionRuleManagerRef,
         node_manager: NodeManagerRef,
         table_flownode_set_cache: TableFlownodeSetCacheRef,
-        flow_metadata_manager: Option<FlowMetadataManagerRef>,
     ) -> Self {
         Self {
             catalog_manager,
             partition_manager,
             node_manager,
             table_flownode_set_cache,
-            flow_metadata_manager,
         }
     }
 
@@ -350,7 +345,6 @@ impl Inserter {
                 .requests
                 .iter()
                 .chain(instant_requests.requests.iter()),
-            self.flow_metadata_manager.clone(),
         )
         .await?;
         flow_mirror_task.detach(self.node_manager.clone())?;
@@ -832,32 +826,13 @@ impl FlowMirrorTask {
     async fn new(
         cache: &TableFlownodeSetCacheRef,
         requests: impl Iterator<Item = &RegionInsertRequest>,
-        flow_meta_manager: Option<FlowMetadataManagerRef>,
     ) -> Result<Self> {
         let mut src_table_reqs: HashMap<TableId, Option<(Vec<Peer>, RegionInsertRequests)>> =
             HashMap::new();
         let mut num_rows = 0;
-        let last_execution_time: chrono::DateTime<Utc> = Utc::now();
 
         for req in requests {
             let table_id = RegionId::from_u64(req.region_id).table_id();
-            if let Some(flow_meta_manager) = &flow_meta_manager {
-                let res = flow_meta_manager
-                    .table_flow_manager()
-                    .flows(table_id)
-                    .await
-                    .context(RequestInsertsSnafu)?;
-
-                for (key, _) in res {
-                    let flow_id = key.flow_id();
-                    flow_meta_manager
-                        .flow_info_manager()
-                        .update_last_execution_time(flow_id, last_execution_time)
-                        .await
-                        .context(RequestInsertsSnafu)?;
-                }
-            }
-
             match src_table_reqs.get_mut(&table_id) {
                 Some(Some((_peers, reqs))) => reqs.requests.push(req.clone()),
                 // already know this is not source table

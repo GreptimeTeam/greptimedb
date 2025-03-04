@@ -463,7 +463,6 @@ mod tests {
             options: Default::default(),
             created_time: chrono::Utc::now(),
             updated_time: chrono::Utc::now(),
-            last_execution_time: None,
         }
     }
 
@@ -637,7 +636,6 @@ mod tests {
             options: Default::default(),
             created_time: chrono::Utc::now(),
             updated_time: chrono::Utc::now(),
-            last_execution_time: None,
         };
         let err = flow_metadata_manager
             .create_flow_metadata(flow_id, flow_value, flow_routes.clone())
@@ -877,7 +875,6 @@ mod tests {
             options: Default::default(),
             created_time: chrono::Utc::now(),
             updated_time: chrono::Utc::now(),
-            last_execution_time: None,
         };
         let err = flow_metadata_manager
             .update_flow_metadata(
