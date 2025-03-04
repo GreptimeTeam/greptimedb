@@ -99,15 +99,21 @@ impl TransformRule for ExpandIntervalTransformRule {
             Expr::Cast {
                 expr: cast_exp,
                 data_type,
-                ..
+                kind,
+                format,
             } => {
                 if DataType::Interval == *data_type {
                     match &**cast_exp {
                         Expr::Value(Value::SingleQuotedString(value))
                         | Expr::Value(Value::DoubleQuotedString(value)) => {
-                            let interval_name =
+                            let interval_value =
                                 normalize_interval_name(value).unwrap_or_else(|| value.to_string());
-                            *expr = create_interval(single_quoted_string_expr(interval_name));
+                            *expr = Expr::Cast {
+                                kind: kind.clone(),
+                                expr: single_quoted_string_expr(interval_value),
+                                data_type: DataType::Interval,
+                                format: std::mem::take(format),
+                            }
                         }
                         _ => {}
                     }
@@ -121,16 +127,6 @@ impl TransformRule for ExpandIntervalTransformRule {
 
 fn single_quoted_string_expr(string: String) -> Box<Expr> {
     Box::new(Expr::Value(Value::SingleQuotedString(string)))
-}
-
-fn create_interval(value: Box<Expr>) -> Expr {
-    Expr::Interval(Interval {
-        value,
-        leading_field: None,
-        leading_precision: None,
-        last_field: None,
-        fractional_seconds_precision: None,
-    })
 }
 
 fn update_existing_interval_with_value(interval: &Interval, value: Box<Expr>) -> Expr {
@@ -199,13 +195,23 @@ fn expand_interval_abbreviation(interval_str: &str) -> Option<String> {
 mod tests {
     use std::ops::ControlFlow;
 
-    use sqlparser::ast::{BinaryOperator, DataType, Expr, Interval, Value};
+    use sqlparser::ast::{BinaryOperator, CastKind, DataType, Expr, Interval, Value};
 
     use crate::statements::transform::expand_interval::{
-        create_interval, normalize_interval_name, single_quoted_string_expr,
+         normalize_interval_name, single_quoted_string_expr,
         ExpandIntervalTransformRule,
     };
     use crate::statements::transform::TransformRule;
+
+    fn create_interval(value: Box<Expr>) -> Expr {
+        Expr::Interval(Interval {
+            value,
+            leading_field: None,
+            leading_precision: None,
+            last_field: None,
+            fractional_seconds_precision: None,
+        })
+    }
 
     #[test]
     fn test_transform_interval_basic_conversions() {
@@ -379,15 +385,14 @@ mod tests {
         assert_eq!(control_flow, ControlFlow::Continue(()));
         assert_eq!(
             cast_to_interval_expr,
-            Expr::Interval(Interval {
-                value: Box::new(Expr::Value(Value::SingleQuotedString(
+            Expr::Cast {
+                kind: CastKind::Cast,
+                expr: Box::new(Expr::Value(Value::SingleQuotedString(
                     "3 years 2 months".to_string()
                 ))),
-                leading_field: None,
-                leading_precision: None,
-                last_field: None,
-                fractional_seconds_precision: None,
-            })
+                data_type: DataType::Interval,
+                format: None,
+            }
         );
 
         let mut cast_to_i64_expr = Expr::Cast {
