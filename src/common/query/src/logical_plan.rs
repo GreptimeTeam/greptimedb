@@ -15,7 +15,6 @@
 pub mod accumulator;
 mod expr;
 mod udaf;
-mod udf;
 
 use std::sync::Arc;
 
@@ -24,37 +23,13 @@ use datafusion::error::Result as DatafusionResult;
 use datafusion::logical_expr::{LogicalPlan, LogicalPlanBuilder};
 use datafusion_common::Column;
 use datafusion_expr::col;
-use datatypes::prelude::ConcreteDataType;
 pub use expr::{build_filter_from_timestamp, build_same_type_ts_filter};
 
 pub use self::accumulator::{Accumulator, AggregateFunctionCreator, AggregateFunctionCreatorRef};
 pub use self::udaf::AggregateFunction;
-pub use self::udf::ScalarUdf;
 use crate::error::Result;
-use crate::function::{ReturnTypeFunction, ScalarFunctionImplementation};
 use crate::logical_plan::accumulator::*;
 use crate::signature::{Signature, Volatility};
-
-/// Creates a new UDF with a specific signature and specific return type.
-/// This is a helper function to create a new UDF.
-/// The function `create_udf` returns a subset of all possible `ScalarFunction`:
-/// * the UDF has a fixed return type
-/// * the UDF has a fixed signature (e.g. [f64, f64])
-pub fn create_udf(
-    name: &str,
-    input_types: Vec<ConcreteDataType>,
-    return_type: Arc<ConcreteDataType>,
-    volatility: Volatility,
-    fun: ScalarFunctionImplementation,
-) -> ScalarUdf {
-    let return_type: ReturnTypeFunction = Arc::new(move |_| Ok(return_type.clone()));
-    ScalarUdf::new(
-        name,
-        &Signature::exact(input_types, volatility),
-        &return_type,
-        &fun,
-    )
-}
 
 pub fn create_aggregate_function(
     name: String,
@@ -127,101 +102,16 @@ pub type SubstraitPlanDecoderRef = Arc<dyn SubstraitPlanDecoder + Send + Sync>;
 mod tests {
     use std::sync::Arc;
 
-    use datafusion_common::DFSchema;
     use datafusion_expr::builder::LogicalTableSource;
-    use datafusion_expr::{
-        lit, ColumnarValue as DfColumnarValue, ScalarUDF as DfScalarUDF,
-        TypeSignature as DfTypeSignature,
-    };
-    use datatypes::arrow::array::BooleanArray;
+    use datafusion_expr::lit;
     use datatypes::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
     use datatypes::prelude::*;
-    use datatypes::vectors::{BooleanVector, VectorRef};
+    use datatypes::vectors::VectorRef;
 
     use super::*;
     use crate::error::Result;
-    use crate::function::{make_scalar_function, AccumulatorCreatorFunction};
-    use crate::prelude::ScalarValue;
+    use crate::function::AccumulatorCreatorFunction;
     use crate::signature::TypeSignature;
-
-    #[test]
-    fn test_create_udf() {
-        let and_fun = |args: &[VectorRef]| -> Result<VectorRef> {
-            let left = &args[0]
-                .as_any()
-                .downcast_ref::<BooleanVector>()
-                .expect("cast failed");
-            let right = &args[1]
-                .as_any()
-                .downcast_ref::<BooleanVector>()
-                .expect("cast failed");
-
-            let result = left
-                .iter_data()
-                .zip(right.iter_data())
-                .map(|(left, right)| match (left, right) {
-                    (Some(left), Some(right)) => Some(left && right),
-                    _ => None,
-                })
-                .collect::<BooleanVector>();
-            Ok(Arc::new(result) as VectorRef)
-        };
-
-        let and_fun = make_scalar_function(and_fun);
-
-        let input_types = vec![
-            ConcreteDataType::boolean_datatype(),
-            ConcreteDataType::boolean_datatype(),
-        ];
-
-        let return_type = Arc::new(ConcreteDataType::boolean_datatype());
-
-        let udf = create_udf(
-            "and",
-            input_types.clone(),
-            return_type.clone(),
-            Volatility::Immutable,
-            and_fun.clone(),
-        );
-
-        assert_eq!("and", udf.name);
-        assert!(
-            matches!(&udf.signature.type_signature, TypeSignature::Exact(ts) if ts.clone() == input_types)
-        );
-        assert_eq!(return_type, (udf.return_type)(&[]).unwrap());
-
-        // test into_df_udf
-        let df_udf: DfScalarUDF = udf.into();
-        assert_eq!("and", df_udf.name());
-
-        let types = vec![DataType::Boolean, DataType::Boolean];
-        assert!(
-            matches!(&df_udf.signature().type_signature, DfTypeSignature::Exact(ts) if ts.clone() == types)
-        );
-        assert_eq!(
-            DataType::Boolean,
-            df_udf
-                .return_type_from_exprs(&[], &DFSchema::empty(), &[])
-                .unwrap()
-        );
-
-        let args = vec![
-            DfColumnarValue::Scalar(ScalarValue::Boolean(Some(true))),
-            DfColumnarValue::Array(Arc::new(BooleanArray::from(vec![true, false, false, true]))),
-        ];
-
-        // call the function
-        let result = df_udf.invoke_batch(&args, 4).unwrap();
-        match result {
-            DfColumnarValue::Array(arr) => {
-                let arr = arr.as_any().downcast_ref::<BooleanArray>().unwrap();
-                for i in 0..4 {
-                    assert_eq!(i == 0 || i == 3, arr.value(i));
-                }
-            }
-            _ => unreachable!(),
-        }
-    }
 
     #[derive(Debug)]
     struct DummyAccumulator;

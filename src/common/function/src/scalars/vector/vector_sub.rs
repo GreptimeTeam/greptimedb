@@ -72,7 +72,7 @@ impl Function for VectorSubFunction {
 
     fn eval(
         &self,
-        _func_ctx: FunctionContext,
+        _func_ctx: &FunctionContext,
         columns: &[VectorRef],
     ) -> common_query::error::Result<VectorRef> {
         ensure!(
@@ -166,7 +166,7 @@ mod tests {
         ]));
 
         let result = func
-            .eval(FunctionContext::default(), &[input0, input1])
+            .eval(&FunctionContext::default(), &[input0, input1])
             .unwrap();
 
         let result = result.as_ref();
@@ -199,7 +199,7 @@ mod tests {
             Some("[3.0,2.0,2.0]".to_string()),
         ]));
 
-        let result = func.eval(FunctionContext::default(), &[input0, input1]);
+        let result = func.eval(&FunctionContext::default(), &[input0, input1]);
 
         match result {
             Err(Error::InvalidFuncArgs { err_msg, .. }) => {

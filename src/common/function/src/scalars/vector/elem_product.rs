@@ -68,7 +68,7 @@ impl Function for ElemProductFunction {
 
     fn eval(
         &self,
-        _func_ctx: FunctionContext,
+        _func_ctx: &FunctionContext,
         columns: &[VectorRef],
     ) -> common_query::error::Result<VectorRef> {
         ensure!(
@@ -131,7 +131,7 @@ mod tests {
             None,
         ]));
 
-        let result = func.eval(FunctionContext::default(), &[input0]).unwrap();
+        let result = func.eval(&FunctionContext::default(), &[input0]).unwrap();
 
         let result = result.as_ref();
         assert_eq!(result.len(), 3);

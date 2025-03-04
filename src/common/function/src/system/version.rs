@@ -45,7 +45,7 @@ impl Function for VersionFunction {
         Signature::nullary(Volatility::Immutable)
     }
 
-    fn eval(&self, func_ctx: FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, func_ctx: &FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
         let version = match func_ctx.query_ctx.channel() {
             Channel::Mysql => {
                 format!(

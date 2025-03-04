@@ -416,6 +416,12 @@ impl RegionSupervisor {
             )
             .await?;
         let to_peer = peers.remove(0);
+        if to_peer.id == from_peer.id {
+            warn!(
+                "Skip failover for region: {region_id}, from_peer: {from_peer}, trying to failover to the same peer."
+            );
+            return Ok(());
+        }
         let task = RegionMigrationProcedureTask {
             cluster_id,
             region_id,
