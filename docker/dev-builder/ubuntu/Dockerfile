@@ -6,9 +6,9 @@ ARG DOCKER_BUILD_ROOT=.
 ENV LANG en_US.utf8
 WORKDIR /greptimedb
 
-RUN apt-get update --no-cache && DEBIAN_FRONTEND=noninteractive apt-get install -y software-properties-common
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y software-properties-common
 # Install dependencies.
-RUN apt-get update --no-cache && DEBIAN_FRONTEND=noninteractive apt-get install -y \
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     libssl-dev \
     tzdata \
     curl \
