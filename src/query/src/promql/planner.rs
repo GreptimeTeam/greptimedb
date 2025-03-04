@@ -271,8 +271,8 @@ impl PromPlanner {
 
         let input = self.prom_expr_to_plan(expr, session_state).await?;
         match (*op).id() {
-            token::T_TOPK | token::T_BOTTOMK => {
-                self.prom_topk_bottomk_to_plan(aggr_expr, input).await
+            token::T_TOPK | token::T_BOTTOMK | token::T_QUANTILE => {
+                self.prom_rank_expr_to_plan(aggr_expr, input).await
             }
             _ => {
                 // calculate columns to group by
@@ -297,8 +297,8 @@ impl PromPlanner {
         }
     }
 
-    /// Create logical plan for PromQL topk and bottomk expr.
-    async fn prom_topk_bottomk_to_plan(
+    /// Create logical plan for PromQL topk, bottomk and quantile expr.
+    async fn prom_rank_expr_to_plan(
         &mut self,
         aggr_expr: &AggregateExpr,
         input: LogicalPlan,
@@ -310,7 +310,9 @@ impl PromPlanner {
             ..
         } = aggr_expr;
 
-        let group_exprs = self.agg_modifier_to_col(input.schema(), modifier, false)?;
+        let update_ctx = op.id() == token::T_QUANTILE;
+
+        let group_exprs = self.agg_modifier_to_col(input.schema(), modifier, update_ctx)?;
 
         let param = param
             .as_deref()
@@ -2004,14 +2006,23 @@ impl PromPlanner {
             }
         );
 
-        assert!(matches!(op.id(), token::T_TOPK | token::T_BOTTOMK));
+        assert!(matches!(
+            op.id(),
+            token::T_TOPK | token::T_BOTTOMK | token::T_QUANTILE
+        ));
 
-        let asc = matches!(op.id(), token::T_BOTTOMK);
+        let asc = matches!(op.id(), token::T_BOTTOMK | token::T_QUANTILE);
 
         let tag_sort_exprs = self
             .create_tag_column_exprs()?
             .into_iter()
             .map(|expr| expr.sort(asc, false));
+
+        let window_fn = if op.id() == token::T_QUANTILE {
+            datafusion::functions_window::rank::percent_rank_udwf()
+        } else {
+            Arc::new(RowNumber::new().into())
+        };
 
         // perform window operation to each value column
         let exprs: Vec<DfExpr> = self
@@ -2027,7 +2038,7 @@ impl PromPlanner {
                 sort_exprs.extend(tag_sort_exprs.clone());
 
                 DfExpr::WindowFunction(WindowFunction {
-                    fun: WindowFunctionDefinition::WindowUDF(Arc::new(RowNumber::new().into())),
+                    fun: WindowFunctionDefinition::WindowUDF(window_fn.clone()),
                     args: vec![],
                     partition_by: group_exprs.clone(),
                     order_by: sort_exprs,

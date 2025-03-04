@@ -37,6 +37,10 @@ TQL EVAL (0, 15, '5s') bottomk(1, sum(test) by (idc));
 
 TQL EVAL (0, 15, '5s') bottomk(2, sum(test) by (idc));
 
+TQL EVAL (0, 15, '5s') quantile(0.5, test);
+
+TQL EVAL (0, 15, '5s') quantile(0.5, test) by (idc);
+
 
 DROP table test;
 
@@ -74,5 +78,9 @@ TQL EVAL (0, 15, '5s') topk(1, sum(test{__field__='mem'}) by (idc));
 TQL EVAL (0, 15, '5s') bottomk(1, sum(test{__field__='cpu'}) by (idc));
 
 TQL EVAL (0, 15, '5s') bottomk(1, sum(test{__field__='mem'}) by (idc));
+
+TQL EVAL (0, 15, '5s') quantile(0.5, test{__field__='cpu'});
+
+TQL EVAL (0, 15, '5s') quantile(0.5, test{__field__='cpu'}) by (idc);
 
 DROP table test;
