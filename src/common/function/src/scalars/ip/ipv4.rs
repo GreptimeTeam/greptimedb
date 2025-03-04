@@ -54,7 +54,7 @@ impl Function for Ipv4NumToString {
         )
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure!(
             columns.len() == 1,
             InvalidFuncArgsSnafu {
@@ -113,7 +113,7 @@ impl Function for Ipv4StringToNum {
         )
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure!(
             columns.len() == 1,
             InvalidFuncArgsSnafu {
@@ -166,7 +166,7 @@ mod tests {
         let values = vec![167772161u32, 3232235521u32, 0u32, 4294967295u32];
         let input = Arc::new(UInt32Vector::from_vec(values)) as VectorRef;
 
-        let result = func.eval(ctx, &[input]).unwrap();
+        let result = func.eval(&ctx, &[input]).unwrap();
         let result = result.as_any().downcast_ref::<StringVector>().unwrap();
 
         assert_eq!(result.get_data(0).unwrap(), "10.0.0.1");
@@ -184,7 +184,7 @@ mod tests {
         let values = vec!["10.0.0.1", "192.168.0.1", "0.0.0.0", "255.255.255.255"];
         let input = Arc::new(StringVector::from_slice(&values)) as VectorRef;
 
-        let result = func.eval(ctx, &[input]).unwrap();
+        let result = func.eval(&ctx, &[input]).unwrap();
         let result = result.as_any().downcast_ref::<UInt32Vector>().unwrap();
 
         assert_eq!(result.get_data(0).unwrap(), 167772161);
@@ -203,8 +203,8 @@ mod tests {
         let values = vec!["10.0.0.1", "192.168.0.1", "0.0.0.0", "255.255.255.255"];
         let input = Arc::new(StringVector::from_slice(&values)) as VectorRef;
 
-        let num_result = to_num.eval(ctx.clone(), &[input]).unwrap();
-        let back_to_string = to_string.eval(ctx.clone(), &[num_result]).unwrap();
+        let num_result = to_num.eval(&ctx, &[input]).unwrap();
+        let back_to_string = to_string.eval(&ctx, &[num_result]).unwrap();
         let str_result = back_to_string
             .as_any()
             .downcast_ref::<StringVector>()

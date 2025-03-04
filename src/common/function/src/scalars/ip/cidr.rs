@@ -61,7 +61,7 @@ impl Function for Ipv4ToCidr {
         )
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure!(
             columns.len() == 1 || columns.len() == 2,
             InvalidFuncArgsSnafu {
@@ -190,7 +190,7 @@ impl Function for Ipv6ToCidr {
         )
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure!(
             columns.len() == 1 || columns.len() == 2,
             InvalidFuncArgsSnafu {
@@ -393,7 +393,7 @@ mod tests {
         let values = vec!["192.168.1.0", "10.0.0.0", "172.16", "192"];
         let input = Arc::new(StringVector::from_slice(&values)) as VectorRef;
 
-        let result = func.eval(ctx, &[input]).unwrap();
+        let result = func.eval(&ctx, &[input]).unwrap();
         let result = result.as_any().downcast_ref::<StringVector>().unwrap();
 
         assert_eq!(result.get_data(0).unwrap(), "192.168.1.0/24");
@@ -413,7 +413,7 @@ mod tests {
         let ip_input = Arc::new(StringVector::from_slice(&ip_values)) as VectorRef;
         let subnet_input = Arc::new(UInt8Vector::from_vec(subnet_values)) as VectorRef;
 
-        let result = func.eval(ctx, &[ip_input, subnet_input]).unwrap();
+        let result = func.eval(&ctx, &[ip_input, subnet_input]).unwrap();
         let result = result.as_any().downcast_ref::<StringVector>().unwrap();
 
         assert_eq!(result.get_data(0).unwrap(), "192.168.1.0/24");
@@ -430,7 +430,7 @@ mod tests {
         let values = vec!["2001:db8::", "2001:db8", "fe80::1", "::1"];
         let input = Arc::new(StringVector::from_slice(&values)) as VectorRef;
 
-        let result = func.eval(ctx, &[input]).unwrap();
+        let result = func.eval(&ctx, &[input]).unwrap();
         let result = result.as_any().downcast_ref::<StringVector>().unwrap();
 
         assert_eq!(result.get_data(0).unwrap(), "2001:db8::/32");
@@ -450,7 +450,7 @@ mod tests {
         let ip_input = Arc::new(StringVector::from_slice(&ip_values)) as VectorRef;
         let subnet_input = Arc::new(UInt8Vector::from_vec(subnet_values)) as VectorRef;
 
-        let result = func.eval(ctx, &[ip_input, subnet_input]).unwrap();
+        let result = func.eval(&ctx, &[ip_input, subnet_input]).unwrap();
         let result = result.as_any().downcast_ref::<StringVector>().unwrap();
 
         assert_eq!(result.get_data(0).unwrap(), "2001:db8::/48");
@@ -468,8 +468,8 @@ mod tests {
         let empty_values = vec![""];
         let empty_input = Arc::new(StringVector::from_slice(&empty_values)) as VectorRef;
 
-        let ipv4_result = ipv4_func.eval(ctx.clone(), &[empty_input.clone()]);
-        let ipv6_result = ipv6_func.eval(ctx.clone(), &[empty_input.clone()]);
+        let ipv4_result = ipv4_func.eval(&ctx, &[empty_input.clone()]);
+        let ipv6_result = ipv6_func.eval(&ctx, &[empty_input.clone()]);
 
         assert!(ipv4_result.is_err());
         assert!(ipv6_result.is_err());
@@ -478,7 +478,7 @@ mod tests {
         let invalid_values = vec!["not an ip", "192.168.1.256", "zzzz::ffff"];
         let invalid_input = Arc::new(StringVector::from_slice(&invalid_values)) as VectorRef;
 
-        let ipv4_result = ipv4_func.eval(ctx.clone(), &[invalid_input.clone()]);
+        let ipv4_result = ipv4_func.eval(&ctx, &[invalid_input.clone()]);
 
         assert!(ipv4_result.is_err());
     }

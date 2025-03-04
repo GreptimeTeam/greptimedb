@@ -51,7 +51,7 @@ impl Function for Ipv6NumToString {
         )
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure!(
             columns.len() == 1,
             InvalidFuncArgsSnafu {
@@ -143,7 +143,7 @@ impl Function for Ipv6StringToNum {
         )
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure!(
             columns.len() == 1,
             InvalidFuncArgsSnafu {
@@ -213,7 +213,7 @@ mod tests {
         let values = vec![hex_str1, hex_str2];
         let input = Arc::new(StringVector::from_slice(&values)) as VectorRef;
 
-        let result = func.eval(ctx, &[input]).unwrap();
+        let result = func.eval(&ctx, &[input]).unwrap();
         let result = result.as_any().downcast_ref::<StringVector>().unwrap();
 
         assert_eq!(result.get_data(0).unwrap(), "2001:db8::1");
@@ -231,7 +231,7 @@ mod tests {
         let values = vec![hex_str];
         let input = Arc::new(StringVector::from_slice(&values)) as VectorRef;
 
-        let result = func.eval(ctx, &[input]).unwrap();
+        let result = func.eval(&ctx, &[input]).unwrap();
         let result = result.as_any().downcast_ref::<StringVector>().unwrap();
 
         assert_eq!(result.get_data(0).unwrap(), "2001:db8::1");
@@ -249,7 +249,7 @@ mod tests {
         let input = Arc::new(StringVector::from_slice(&values)) as VectorRef;
 
         // Should return an error
-        let result = func.eval(ctx, &[input]);
+        let result = func.eval(&ctx, &[input]);
         assert!(result.is_err());
 
         // Check that the error message contains expected text
@@ -265,7 +265,7 @@ mod tests {
         let values = vec!["2001:db8::1", "::ffff:192.168.0.1", "192.168.0.1"];
         let input = Arc::new(StringVector::from_slice(&values)) as VectorRef;
 
-        let result = func.eval(ctx, &[input]).unwrap();
+        let result = func.eval(&ctx, &[input]).unwrap();
         let result = result.as_any().downcast_ref::<BinaryVector>().unwrap();
 
         // Expected binary for "2001:db8::1"
@@ -294,7 +294,7 @@ mod tests {
         let input = Arc::new(StringVector::from_slice(&values)) as VectorRef;
 
         // Convert IPv6 addresses to binary
-        let binary_result = to_num.eval(ctx.clone(), &[input.clone()]).unwrap();
+        let binary_result = to_num.eval(&ctx, &[input.clone()]).unwrap();
 
         // Convert binary to hex string representation (for ipv6_num_to_string)
         let mut hex_strings = Vec::new();
@@ -316,7 +316,7 @@ mod tests {
         let hex_input = Arc::new(StringVector::from_slice(&hex_str_refs)) as VectorRef;
 
         // Now convert hex to formatted string
-        let string_result = to_string.eval(ctx.clone(), &[hex_input]).unwrap();
+        let string_result = to_string.eval(&ctx, &[hex_input]).unwrap();
         let str_result = string_result
             .as_any()
             .downcast_ref::<StringVector>()
@@ -343,10 +343,10 @@ mod tests {
         let hex_input = Arc::new(StringVector::from_slice(&hex_values)) as VectorRef;
 
         // Convert hex to string representation
-        let string_result = to_string.eval(ctx.clone(), &[hex_input]).unwrap();
+        let string_result = to_string.eval(&ctx, &[hex_input]).unwrap();
 
         // Then convert string representation back to binary
-        let binary_result = to_binary.eval(ctx.clone(), &[string_result]).unwrap();
+        let binary_result = to_binary.eval(&ctx, &[string_result]).unwrap();
         let bin_result = binary_result
             .as_any()
             .downcast_ref::<BinaryVector>()

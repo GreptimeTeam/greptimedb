@@ -58,7 +58,7 @@ impl Function for Ipv4InRange {
         )
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure!(
             columns.len() == 2,
             InvalidFuncArgsSnafu {
@@ -153,7 +153,7 @@ impl Function for Ipv6InRange {
         )
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure!(
             columns.len() == 2,
             InvalidFuncArgsSnafu {
@@ -372,7 +372,7 @@ mod tests {
         let ip_input = Arc::new(StringVector::from_slice(&ip_values)) as VectorRef;
         let cidr_input = Arc::new(StringVector::from_slice(&cidr_values)) as VectorRef;
 
-        let result = func.eval(ctx, &[ip_input, cidr_input]).unwrap();
+        let result = func.eval(&ctx, &[ip_input, cidr_input]).unwrap();
         let result = result.as_any().downcast_ref::<BooleanVector>().unwrap();
 
         // Expected results
@@ -409,7 +409,7 @@ mod tests {
         let ip_input = Arc::new(StringVector::from_slice(&ip_values)) as VectorRef;
         let cidr_input = Arc::new(StringVector::from_slice(&cidr_values)) as VectorRef;
 
-        let result = func.eval(ctx, &[ip_input, cidr_input]).unwrap();
+        let result = func.eval(&ctx, &[ip_input, cidr_input]).unwrap();
         let result = result.as_any().downcast_ref::<BooleanVector>().unwrap();
 
         // Expected results
@@ -433,7 +433,7 @@ mod tests {
         let invalid_ip_input = Arc::new(StringVector::from_slice(&invalid_ip_values)) as VectorRef;
         let cidr_input = Arc::new(StringVector::from_slice(&cidr_values)) as VectorRef;
 
-        let result = ipv4_func.eval(ctx.clone(), &[invalid_ip_input, cidr_input]);
+        let result = ipv4_func.eval(&ctx, &[invalid_ip_input, cidr_input]);
         assert!(result.is_err());
 
         // Invalid CIDR notation
@@ -444,9 +444,8 @@ mod tests {
         let invalid_cidr_input =
             Arc::new(StringVector::from_slice(&invalid_cidr_values)) as VectorRef;
 
-        let ipv4_result =
-            ipv4_func.eval(ctx.clone(), &[ip_input.clone(), invalid_cidr_input.clone()]);
-        let ipv6_result = ipv6_func.eval(ctx.clone(), &[ip_input, invalid_cidr_input]);
+        let ipv4_result = ipv4_func.eval(&ctx, &[ip_input.clone(), invalid_cidr_input.clone()]);
+        let ipv6_result = ipv6_func.eval(&ctx, &[ip_input, invalid_cidr_input]);
 
         assert!(ipv4_result.is_err());
         assert!(ipv6_result.is_err());
@@ -464,7 +463,7 @@ mod tests {
         let ip_input = Arc::new(StringVector::from_slice(&ip_values)) as VectorRef;
         let cidr_input = Arc::new(StringVector::from_slice(&cidr_values)) as VectorRef;
 
-        let result = ipv4_func.eval(ctx, &[ip_input, cidr_input]).unwrap();
+        let result = ipv4_func.eval(&ctx, &[ip_input, cidr_input]).unwrap();
         let result = result.as_any().downcast_ref::<BooleanVector>().unwrap();
 
         assert!(result.get_data(0).unwrap()); // 8.8.8.8 is in 0.0.0.0/0 (matches everything)
