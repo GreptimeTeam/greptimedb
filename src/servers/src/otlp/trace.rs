@@ -67,7 +67,7 @@ pub fn to_grpc_insert_requests(
             pipeline_handler,
         ),
         _ => NotSupportedSnafu {
-            feat: "Unsupported pipeline for logs",
+            feat: "Unsupported pipeline for trace",
         }
         .fail(),
     }

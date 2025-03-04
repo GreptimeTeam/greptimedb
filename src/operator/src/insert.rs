@@ -52,9 +52,7 @@ use store_api::metric_engine_consts::{
 use store_api::mito_engine_options::{APPEND_MODE_KEY, MERGE_MODE_KEY};
 use store_api::storage::{RegionId, TableId};
 use table::metadata::TableInfo;
-use table::requests::{
-    InsertRequest as TableInsertRequest, AUTO_CREATE_TABLE_KEY, COMMENT_KEY, TTL_KEY,
-};
+use table::requests::{InsertRequest as TableInsertRequest, AUTO_CREATE_TABLE_KEY, TTL_KEY};
 use table::table_reference::TableReference;
 use table::TableRef;
 
@@ -743,10 +741,6 @@ impl Inserter {
         let request_schema = req.rows.as_ref().unwrap().schema.as_slice();
         let mut create_table_expr =
             build_create_table_expr(&table_ref, request_schema, engine_name)?;
-
-        if let Some(comment) = ctx.extension(COMMENT_KEY) {
-            create_table_expr.desc = comment.to_string();
-        }
 
         info!("Table `{table_ref}` does not exist, try creating table");
         for (k, v) in table_options {
