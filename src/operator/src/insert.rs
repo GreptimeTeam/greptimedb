@@ -28,7 +28,7 @@ use api::v1::{
 use catalog::CatalogManagerRef;
 use client::{OutputData, OutputMeta};
 use common_catalog::consts::{
-    default_engine, PARENT_SPAN_ID_COLUMN, SPAN_ID_COLUMN, SPAN_NAME_COLUMN, TRACE_ID_COLUMN,
+    default_engine, PARENT_SPAN_ID_COLUMN, SPAN_NAME_COLUMN, TRACE_ID_COLUMN,
 };
 use common_grpc_expr::util::ColumnExpr;
 use common_meta::cache::TableFlownodeSetCacheRef;
@@ -576,15 +576,9 @@ impl Inserter {
                     let partitions = partition_rule_for_hexstring(TRACE_ID_COLUMN);
                     // add skip index to
                     // - trace_id: when searching by trace id
-                    // - span_id: when searching particular span
                     // - parent_span_id: when searching root span
                     // - span_name: when searching certain types of span
-                    let index_columns = [
-                        TRACE_ID_COLUMN,
-                        SPAN_ID_COLUMN,
-                        PARENT_SPAN_ID_COLUMN,
-                        SPAN_NAME_COLUMN,
-                    ];
+                    let index_columns = [TRACE_ID_COLUMN, PARENT_SPAN_ID_COLUMN, SPAN_NAME_COLUMN];
                     for index_column in index_columns {
                         if let Some(col) = create_table
                             .column_defs
