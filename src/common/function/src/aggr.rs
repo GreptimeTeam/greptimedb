@@ -16,6 +16,7 @@ mod geo_path;
 mod hll;
 mod uddsketch_state;
 
+pub use geo_path::{GeoPathAccumulator, GEO_PATH_NAME};
 pub(crate) use hll::HllStateType;
 pub use hll::{HllState, HLL_MERGE_NAME, HLL_NAME};
 pub use uddsketch_state::{UddSketchState, UDDSKETCH_STATE_NAME};

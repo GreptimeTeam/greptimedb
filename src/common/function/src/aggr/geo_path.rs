@@ -19,9 +19,10 @@ use datafusion::common::cast::as_primitive_array;
 use datafusion::error::{DataFusionError, Result as DfResult};
 use datafusion::logical_expr::{Accumulator as DfAccumulator, AggregateUDF, Volatility};
 use datafusion::prelude::create_udaf;
-use datafusion_common::cast::as_struct_array;
+use datafusion_common::cast::{as_list_array, as_struct_array};
+use datafusion_common::utils::SingleRowListArrayBuilder;
 use datafusion_common::ScalarValue;
-use datatypes::arrow::array::{Float64Array, Int64Array, StructArray};
+use datatypes::arrow::array::{Float64Array, Int64Array, ListArray, StructArray};
 use datatypes::arrow::datatypes::{
     DataType, Field, Float64Type, Int64Type, TimeUnit, TimestampNanosecondType,
 };
@@ -32,6 +33,7 @@ pub const GEO_PATH_NAME: &str = "geo_path";
 const LATITUDE_FIELD: &str = "lat";
 const LONGITUDE_FIELD: &str = "lng";
 const TIMESTAMP_FIELD: &str = "timestamp";
+const DEFAULT_LIST_FIELD_NAME: &str = "item";
 
 #[derive(Debug)]
 pub struct GeoPathAccumulator {
@@ -64,18 +66,18 @@ impl GeoPathAccumulator {
                     Field::new(
                         LATITUDE_FIELD,
                         DataType::List(Arc::new(Field::new(
-                            LATITUDE_FIELD,
+                            DEFAULT_LIST_FIELD_NAME,
                             DataType::Float64,
-                            false,
+                            true,
                         ))),
                         false,
                     ),
                     Field::new(
                         LONGITUDE_FIELD,
                         DataType::List(Arc::new(Field::new(
-                            LONGITUDE_FIELD,
+                            DEFAULT_LIST_FIELD_NAME,
                             DataType::Float64,
-                            false,
+                            true,
                         ))),
                         false,
                     ),
@@ -86,49 +88,32 @@ impl GeoPathAccumulator {
             // Create the accumulator
             Arc::new(|_| Ok(Box::new(GeoPathAccumulator::new()))),
             // Intermediate state types
-            // Arc::new(vec![
-            //     DataType::List(Arc::new(Field::new(
-            //         LONGITUDE_FIELD,
-            //         DataType::Float64,
-            //         false,
-            //     ))),
-            //     DataType::List(Arc::new(Field::new(
-            //         LATITUDE_FIELD,
-            //         DataType::Float64,
-            //         false,
-            //     ))),
-            //     DataType::List(Arc::new(Field::new(
-            //         TIMESTAMP_FIELD,
-            //         DataType::Timestamp(TimeUnit::Nanosecond, None),
-            //         false,
-            //     ))),
-            // ]),
             Arc::new(vec![DataType::Struct(
                 vec![
                     Field::new(
                         LATITUDE_FIELD,
                         DataType::List(Arc::new(Field::new(
-                            LATITUDE_FIELD,
+                            DEFAULT_LIST_FIELD_NAME,
                             DataType::Float64,
-                            false,
+                            true,
                         ))),
                         false,
                     ),
                     Field::new(
                         LONGITUDE_FIELD,
                         DataType::List(Arc::new(Field::new(
-                            LONGITUDE_FIELD,
+                            DEFAULT_LIST_FIELD_NAME,
                             DataType::Float64,
-                            false,
+                            true,
                         ))),
                         false,
                     ),
                     Field::new(
                         TIMESTAMP_FIELD,
                         DataType::List(Arc::new(Field::new(
-                            TIMESTAMP_FIELD,
+                            DEFAULT_LIST_FIELD_NAME,
                             DataType::Int64,
-                            false,
+                            true,
                         ))),
                         false,
                     ),
@@ -183,16 +168,27 @@ impl DfAccumulator for GeoPathAccumulator {
         let ts_array = Int64Array::from(self.timestamp.clone());
 
         let ordered_indices = sort_to_indices(&ts_array, None, None)?;
-        let lng_array = compute::take(&unordered_lng_array, &ordered_indices, None)?;
         let lat_array = compute::take(&unordered_lat_array, &ordered_indices, None)?;
+        let lng_array = compute::take(&unordered_lng_array, &ordered_indices, None)?;
+
+        let lat_list = Arc::new(SingleRowListArrayBuilder::new(lat_array).build_list_array());
+        let lng_list = Arc::new(SingleRowListArrayBuilder::new(lng_array).build_list_array());
 
         let result = ScalarValue::Struct(Arc::new(StructArray::new(
             vec![
-                Field::new(LONGITUDE_FIELD, DataType::Float64, false),
-                Field::new(LATITUDE_FIELD, DataType::Float64, false),
+                Field::new(
+                    LATITUDE_FIELD,
+                    DataType::List(Arc::new(Field::new("item", DataType::Float64, true))),
+                    false,
+                ),
+                Field::new(
+                    LONGITUDE_FIELD,
+                    DataType::List(Arc::new(Field::new("item", DataType::Float64, true))),
+                    false,
+                ),
             ]
             .into(),
-            vec![lng_array, lat_array],
+            vec![lat_list, lng_list],
             None,
         )));
 
@@ -212,15 +208,35 @@ impl DfAccumulator for GeoPathAccumulator {
     }
 
     fn state(&mut self) -> datafusion::error::Result<Vec<ScalarValue>> {
-        let lat_array = Arc::new(Float64Array::from(self.lat.clone()));
-        let lng_array = Arc::new(Float64Array::from(self.lng.clone()));
-        let ts_array = Arc::new(Int64Array::from(self.timestamp.clone()));
+        let lat_array = Arc::new(ListArray::from_iter_primitive::<Float64Type, _, _>(vec![
+            Some(self.lat.clone()),
+        ]));
+        //  Arc::new(Float64Array::from(self.lat.clone()));
+        // let lng_array = Arc::new(Float64Array::from(self.lng.clone()));
+        let lng_array = Arc::new(ListArray::from_iter_primitive::<Float64Type, _, _>(vec![
+            Some(self.lng.clone()),
+        ]));
+        let ts_array = Arc::new(ListArray::from_iter_primitive::<Int64Type, _, _>(vec![
+            Some(self.timestamp.clone()),
+        ]));
 
         let state_struct = StructArray::new(
             vec![
-                Field::new(LATITUDE_FIELD, DataType::Float64, false),
-                Field::new(LONGITUDE_FIELD, DataType::Float64, false),
-                Field::new(TIMESTAMP_FIELD, DataType::Int64, false),
+                Field::new(
+                    LATITUDE_FIELD,
+                    DataType::List(Arc::new(Field::new("item", DataType::Float64, true))),
+                    false,
+                ),
+                Field::new(
+                    LONGITUDE_FIELD,
+                    DataType::List(Arc::new(Field::new("item", DataType::Float64, true))),
+                    false,
+                ),
+                Field::new(
+                    TIMESTAMP_FIELD,
+                    DataType::List(Arc::new(Field::new("item", DataType::Int64, true))),
+                    false,
+                ),
             ]
             .into(),
             vec![lat_array, lng_array, ts_array],
@@ -240,9 +256,12 @@ impl DfAccumulator for GeoPathAccumulator {
 
         for state in states {
             let state = as_struct_array(state)?;
-            let lat_array = as_primitive_array::<Float64Type>(state.column(0))?;
-            let lng_array = as_primitive_array::<Float64Type>(state.column(1))?;
-            let ts_array = as_primitive_array::<Int64Type>(state.column(2))?;
+            let lat_list = as_list_array(state.column(0))?.value(0);
+            let lat_array = as_primitive_array::<Float64Type>(&lat_list)?;
+            let lng_list = as_list_array(state.column(1))?.value(0);
+            let lng_array = as_primitive_array::<Float64Type>(&lng_list)?;
+            let ts_list = as_list_array(state.column(2))?.value(0);
+            let ts_array = as_primitive_array::<Int64Type>(&ts_list)?;
 
             self.lat.extend(lat_array);
             self.lng.extend(lng_array);
@@ -280,26 +299,28 @@ mod tests {
             // Verify structure
             let fields = struct_array.fields().clone();
             assert_eq!(fields.len(), 2);
-            assert_eq!(fields[0].name(), LONGITUDE_FIELD);
-            assert_eq!(fields[1].name(), LATITUDE_FIELD);
+            assert_eq!(fields[0].name(), LATITUDE_FIELD);
+            assert_eq!(fields[1].name(), LONGITUDE_FIELD);
 
             // Verify data
             let columns = struct_array.columns();
             assert_eq!(columns.len(), 2);
 
-            // Check longitude values
-            let lng_array = as_primitive_array::<Float64Type>(&columns[0]).unwrap();
-            assert_eq!(lng_array.len(), 3);
-            assert_eq!(lng_array.value(0), 4.0);
-            assert_eq!(lng_array.value(1), 5.0);
-            assert_eq!(lng_array.value(2), 6.0);
-
             // Check latitude values
-            let lat_array = as_primitive_array::<Float64Type>(&columns[1]).unwrap();
+            let lat_list = as_list_array(&columns[0]).unwrap().value(0);
+            let lat_array = as_primitive_array::<Float64Type>(&lat_list).unwrap();
             assert_eq!(lat_array.len(), 3);
             assert_eq!(lat_array.value(0), 1.0);
             assert_eq!(lat_array.value(1), 2.0);
             assert_eq!(lat_array.value(2), 3.0);
+
+            // Check longitude values
+            let lng_list = as_list_array(&columns[1]).unwrap().value(0);
+            let lng_array = as_primitive_array::<Float64Type>(&lng_list).unwrap();
+            assert_eq!(lng_array.len(), 3);
+            assert_eq!(lng_array.value(0), 4.0);
+            assert_eq!(lng_array.value(1), 5.0);
+            assert_eq!(lng_array.value(2), 6.0);
         } else {
             panic!("Expected Struct scalar value");
         }
@@ -325,19 +346,21 @@ mod tests {
             // Extract arrays
             let columns = struct_array.columns();
 
-            // Check longitude values (should be sorted by timestamp)
-            let lng_array = as_primitive_array::<Float64Type>(&columns[0]).unwrap();
-            assert_eq!(lng_array.len(), 3);
-            assert_eq!(lng_array.value(0), 5.0); // timestamp 100
-            assert_eq!(lng_array.value(1), 6.0); // timestamp 200
-            assert_eq!(lng_array.value(2), 4.0); // timestamp 300
-
             // Check latitude values
-            let lat_array = as_primitive_array::<Float64Type>(&columns[1]).unwrap();
+            let lat_list = as_list_array(&columns[0]).unwrap().value(0);
+            let lat_array = as_primitive_array::<Float64Type>(&lat_list).unwrap();
             assert_eq!(lat_array.len(), 3);
             assert_eq!(lat_array.value(0), 2.0); // timestamp 100
             assert_eq!(lat_array.value(1), 3.0); // timestamp 200
             assert_eq!(lat_array.value(2), 1.0); // timestamp 300
+
+            // Check longitude values (should be sorted by timestamp)
+            let lng_list = as_list_array(&columns[1]).unwrap().value(0);
+            let lng_array = as_primitive_array::<Float64Type>(&lng_list).unwrap();
+            assert_eq!(lng_array.len(), 3);
+            assert_eq!(lng_array.value(0), 5.0); // timestamp 100
+            assert_eq!(lng_array.value(1), 6.0); // timestamp 200
+            assert_eq!(lng_array.value(2), 4.0); // timestamp 300
         } else {
             panic!("Expected Struct scalar value");
         }
@@ -394,17 +417,19 @@ mod tests {
             // Extract arrays
             let columns = struct_array.columns();
 
-            // Check longitude values (should be sorted by timestamp)
-            let lng_array = as_primitive_array::<Float64Type>(&columns[0]).unwrap();
-            assert_eq!(lng_array.len(), 2);
-            assert_eq!(lng_array.value(0), 4.0); // timestamp 100
-            assert_eq!(lng_array.value(1), 5.0); // timestamp 200
-
             // Check latitude values
-            let lat_array = as_primitive_array::<Float64Type>(&columns[1]).unwrap();
+            let lat_list = as_list_array(&columns[0]).unwrap().value(0);
+            let lat_array = as_primitive_array::<Float64Type>(&lat_list).unwrap();
             assert_eq!(lat_array.len(), 2);
             assert_eq!(lat_array.value(0), 1.0); // timestamp 100
             assert_eq!(lat_array.value(1), 2.0); // timestamp 200
+
+            // Check longitude values (should be sorted by timestamp)
+            let lng_list = as_list_array(&columns[1]).unwrap().value(0);
+            let lng_array = as_primitive_array::<Float64Type>(&lng_list).unwrap();
+            assert_eq!(lng_array.len(), 2);
+            assert_eq!(lng_array.value(0), 4.0); // timestamp 100
+            assert_eq!(lng_array.value(1), 5.0); // timestamp 200
         } else {
             panic!("Expected Struct scalar value");
         }
