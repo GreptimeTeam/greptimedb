@@ -105,7 +105,7 @@ pub(crate) fn find_unique_constant(
 mod tests {
     use std::sync::Arc;
 
-    use common_time::{Date, DateTime};
+    use common_time::Date;
 
     use super::*;
     use crate::timestamp::*;
@@ -358,7 +358,6 @@ mod tests {
     #[test]
     fn test_find_unique_date_like() {
         impl_find_unique_date_like_test!(DateVector, Date, new);
-        impl_find_unique_date_like_test!(DateTimeVector, DateTime, new);
         impl_find_unique_date_like_test!(TimestampSecondVector, TimestampSecond, from);
         impl_find_unique_date_like_test!(TimestampMillisecondVector, TimestampMillisecond, from);
         impl_find_unique_date_like_test!(TimestampMicrosecondVector, TimestampMicrosecond, from);

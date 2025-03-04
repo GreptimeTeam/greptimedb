@@ -290,7 +290,9 @@ mod test {
         let mfp = MapFilterProject::new(1)
             .filter(vec![
                 ScalarExpr::Column(0)
-                    .call_unary(expr::UnaryFunc::Cast(ConcreteDataType::datetime_datatype()))
+                    .call_unary(expr::UnaryFunc::Cast(
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                    ))
                     .call_binary(
                         ScalarExpr::CallUnmaterializable(expr::UnmaterializableFunc::Now),
                         BinaryFunc::Gte,
@@ -300,7 +302,9 @@ mod test {
                         ScalarExpr::literal(4i64.into(), ConcreteDataType::int64_datatype()),
                         BinaryFunc::SubInt64,
                     )
-                    .call_unary(expr::UnaryFunc::Cast(ConcreteDataType::datetime_datatype()))
+                    .call_unary(expr::UnaryFunc::Cast(
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                    ))
                     .call_binary(
                         ScalarExpr::CallUnmaterializable(expr::UnmaterializableFunc::Now),
                         BinaryFunc::Lt,

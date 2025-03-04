@@ -20,17 +20,18 @@ use common_catalog::consts::INFORMATION_SCHEMA_PARTITIONS_TABLE_ID;
 use common_error::ext::BoxedError;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
-use common_time::datetime::DateTime;
 use datafusion::execution::TaskContext;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::PartitionStream as DfPartitionStream;
 use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
 use datatypes::prelude::{ConcreteDataType, ScalarVectorBuilder, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+use datatypes::timestamp::TimestampMillisecond;
 use datatypes::value::Value;
 use datatypes::vectors::{
-    ConstantVector, DateTimeVector, DateTimeVectorBuilder, Int64Vector, Int64VectorBuilder,
-    MutableVector, StringVector, StringVectorBuilder, UInt64VectorBuilder,
+    ConstantVector, Int64Vector, Int64VectorBuilder, MutableVector, StringVector,
+    StringVectorBuilder, TimestampMillisecondVector, TimestampMillisecondVectorBuilder,
+    UInt64VectorBuilder,
 };
 use futures::{StreamExt, TryStreamExt};
 use partition::manager::PartitionInfo;
@@ -127,9 +128,21 @@ impl InformationSchemaPartitions {
             ColumnSchema::new("max_data_length", ConcreteDataType::int64_datatype(), true),
             ColumnSchema::new("index_length", ConcreteDataType::int64_datatype(), true),
             ColumnSchema::new("data_free", ConcreteDataType::int64_datatype(), true),
-            ColumnSchema::new("create_time", ConcreteDataType::datetime_datatype(), true),
-            ColumnSchema::new("update_time", ConcreteDataType::datetime_datatype(), true),
-            ColumnSchema::new("check_time", ConcreteDataType::datetime_datatype(), true),
+            ColumnSchema::new(
+                "create_time",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                true,
+            ),
+            ColumnSchema::new(
+                "update_time",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                true,
+            ),
+            ColumnSchema::new(
+                "check_time",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                true,
+            ),
             ColumnSchema::new("checksum", ConcreteDataType::int64_datatype(), true),
             ColumnSchema::new(
                 "partition_comment",
@@ -200,7 +213,7 @@ struct InformationSchemaPartitionsBuilder {
     partition_names: StringVectorBuilder,
     partition_ordinal_positions: Int64VectorBuilder,
     partition_expressions: StringVectorBuilder,
-    create_times: DateTimeVectorBuilder,
+    create_times: TimestampMillisecondVectorBuilder,
     partition_ids: UInt64VectorBuilder,
 }
 
@@ -220,7 +233,7 @@ impl InformationSchemaPartitionsBuilder {
             partition_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             partition_ordinal_positions: Int64VectorBuilder::with_capacity(INIT_CAPACITY),
             partition_expressions: StringVectorBuilder::with_capacity(INIT_CAPACITY),
-            create_times: DateTimeVectorBuilder::with_capacity(INIT_CAPACITY),
+            create_times: TimestampMillisecondVectorBuilder::with_capacity(INIT_CAPACITY),
             partition_ids: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
         }
     }
@@ -324,7 +337,7 @@ impl InformationSchemaPartitionsBuilder {
             };
 
             self.partition_expressions.push(expressions.as_deref());
-            self.create_times.push(Some(DateTime::from(
+            self.create_times.push(Some(TimestampMillisecond::from(
                 table_info.meta.created_on.timestamp_millis(),
             )));
             self.partition_ids.push(Some(partition.id.as_u64()));
@@ -342,8 +355,8 @@ impl InformationSchemaPartitionsBuilder {
             Arc::new(Int64Vector::from(vec![None])),
             rows_num,
         ));
-        let null_datetime_vector = Arc::new(ConstantVector::new(
-            Arc::new(DateTimeVector::from(vec![None])),
+        let null_timestampmillsecond_vector = Arc::new(ConstantVector::new(
+            Arc::new(TimestampMillisecondVector::from(vec![None])),
             rows_num,
         ));
         let partition_methods = Arc::new(ConstantVector::new(
@@ -373,8 +386,8 @@ impl InformationSchemaPartitionsBuilder {
             null_i64_vector.clone(),
             Arc::new(self.create_times.finish()),
             // TODO(dennis): supports update_time
-            null_datetime_vector.clone(),
-            null_datetime_vector,
+            null_timestampmillsecond_vector.clone(),
+            null_timestampmillsecond_vector,
             null_i64_vector,
             null_string_vector.clone(),
             null_string_vector.clone(),

@@ -132,7 +132,6 @@ macro_rules! impl_data_type_for_timestamp {
                         Value::Timestamp(v) => v.convert_to(TimeUnit::$unit).map(Value::Timestamp),
                         Value::String(v) => Timestamp::from_str_utc(v.as_utf8()).map(Value::Timestamp).ok(),
                         Value::Int64(v) => Some(Value::Timestamp(Timestamp::new(v, TimeUnit::$unit))),
-                        Value::DateTime(v) => Timestamp::new_second(v.val()).convert_to(TimeUnit::$unit).map(Value::Timestamp),
                         Value::Date(v) => Timestamp::new_second(v.to_secs()).convert_to(TimeUnit::$unit).map(Value::Timestamp),
                         _ => None
                     }
@@ -202,7 +201,7 @@ impl_data_type_for_timestamp!(Microsecond);
 #[cfg(test)]
 mod tests {
     use common_time::timezone::set_default_timezone;
-    use common_time::{Date, DateTime};
+    use common_time::Date;
 
     use super::*;
 
@@ -248,13 +247,6 @@ mod tests {
             .try_cast(n)
             .unwrap();
         assert_eq!(ts, Value::Timestamp(Timestamp::new_second(1694589525)));
-
-        // Datetime -> TimestampSecond
-        let dt = Value::DateTime(DateTime::from(1234567));
-        let ts = ConcreteDataType::timestamp_second_datatype()
-            .try_cast(dt)
-            .unwrap();
-        assert_eq!(ts, Value::Timestamp(Timestamp::new_second(1234567)));
 
         // Date -> TimestampMillisecond
         let d = Value::Date(Date::from_str_utc("1970-01-01").unwrap());

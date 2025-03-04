@@ -40,9 +40,6 @@ pub enum LogicalTypeId {
     /// Date representing the elapsed time since UNIX epoch (1970-01-01)
     /// in days (32 bits).
     Date,
-    /// Datetime representing the elapsed time since UNIX epoch (1970-01-01) in
-    /// seconds/milliseconds/microseconds/nanoseconds, determined by precision.
-    DateTime,
 
     TimestampSecond,
     TimestampMillisecond,
@@ -100,7 +97,6 @@ impl LogicalTypeId {
             LogicalTypeId::String => ConcreteDataType::string_datatype(),
             LogicalTypeId::Binary => ConcreteDataType::binary_datatype(),
             LogicalTypeId::Date => ConcreteDataType::date_datatype(),
-            LogicalTypeId::DateTime => ConcreteDataType::datetime_datatype(),
             LogicalTypeId::TimestampSecond => ConcreteDataType::timestamp_second_datatype(),
             LogicalTypeId::TimestampMillisecond => {
                 ConcreteDataType::timestamp_millisecond_datatype()

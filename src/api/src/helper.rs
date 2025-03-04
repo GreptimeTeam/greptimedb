@@ -19,9 +19,7 @@ use common_decimal::decimal128::{DECIMAL128_DEFAULT_SCALE, DECIMAL128_MAX_PRECIS
 use common_decimal::Decimal128;
 use common_time::time::Time;
 use common_time::timestamp::TimeUnit;
-use common_time::{
-    Date, DateTime, IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth, Timestamp,
-};
+use common_time::{Date, IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth, Timestamp};
 use datatypes::prelude::{ConcreteDataType, ValueRef};
 use datatypes::scalars::ScalarVector;
 use datatypes::types::{
@@ -29,8 +27,8 @@ use datatypes::types::{
 };
 use datatypes::value::{OrderedF32, OrderedF64, Value};
 use datatypes::vectors::{
-    BinaryVector, BooleanVector, DateTimeVector, DateVector, Decimal128Vector, Float32Vector,
-    Float64Vector, Int32Vector, Int64Vector, IntervalDayTimeVector, IntervalMonthDayNanoVector,
+    BinaryVector, BooleanVector, DateVector, Decimal128Vector, Float32Vector, Float64Vector,
+    Int32Vector, Int64Vector, IntervalDayTimeVector, IntervalMonthDayNanoVector,
     IntervalYearMonthVector, PrimitiveVector, StringVector, TimeMicrosecondVector,
     TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector, TimestampMicrosecondVector,
     TimestampMillisecondVector, TimestampNanosecondVector, TimestampSecondVector, UInt32Vector,
@@ -118,7 +116,7 @@ impl From<ColumnDataTypeWrapper> for ConcreteDataType {
             ColumnDataType::Json => ConcreteDataType::json_datatype(),
             ColumnDataType::String => ConcreteDataType::string_datatype(),
             ColumnDataType::Date => ConcreteDataType::date_datatype(),
-            ColumnDataType::Datetime => ConcreteDataType::datetime_datatype(),
+            ColumnDataType::Datetime => ConcreteDataType::timestamp_millisecond_datatype(),
             ColumnDataType::TimestampSecond => ConcreteDataType::timestamp_second_datatype(),
             ColumnDataType::TimestampMillisecond => {
                 ConcreteDataType::timestamp_millisecond_datatype()
@@ -271,7 +269,6 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
             ConcreteDataType::Binary(_) => ColumnDataType::Binary,
             ConcreteDataType::String(_) => ColumnDataType::String,
             ConcreteDataType::Date(_) => ColumnDataType::Date,
-            ConcreteDataType::DateTime(_) => ColumnDataType::Datetime,
             ConcreteDataType::Timestamp(t) => match t {
                 TimestampType::Second(_) => ColumnDataType::TimestampSecond,
                 TimestampType::Millisecond(_) => ColumnDataType::TimestampMillisecond,
@@ -476,7 +473,6 @@ pub fn push_vals(column: &mut Column, origin_count: usize, vector: VectorRef) {
         Value::String(val) => values.string_values.push(val.as_utf8().to_string()),
         Value::Binary(val) => values.binary_values.push(val.to_vec()),
         Value::Date(val) => values.date_values.push(val.val()),
-        Value::DateTime(val) => values.datetime_values.push(val.val()),
         Value::Timestamp(val) => match val.unit() {
             TimeUnit::Second => values.timestamp_second_values.push(val.value()),
             TimeUnit::Millisecond => values.timestamp_millisecond_values.push(val.value()),
@@ -577,7 +573,6 @@ pub fn pb_value_to_value_ref<'a>(
         ValueData::BinaryValue(bytes) => ValueRef::Binary(bytes.as_slice()),
         ValueData::StringValue(string) => ValueRef::String(string.as_str()),
         ValueData::DateValue(d) => ValueRef::Date(Date::from(*d)),
-        ValueData::DatetimeValue(d) => ValueRef::DateTime(DateTime::new(*d)),
         ValueData::TimestampSecondValue(t) => ValueRef::Timestamp(Timestamp::new_second(*t)),
         ValueData::TimestampMillisecondValue(t) => {
             ValueRef::Timestamp(Timestamp::new_millisecond(*t))
@@ -589,7 +584,9 @@ pub fn pb_value_to_value_ref<'a>(
             ValueRef::Timestamp(Timestamp::new_nanosecond(*t))
         }
         ValueData::TimeSecondValue(t) => ValueRef::Time(Time::new_second(*t)),
-        ValueData::TimeMillisecondValue(t) => ValueRef::Time(Time::new_millisecond(*t)),
+        ValueData::DatetimeValue(t) | ValueData::TimeMillisecondValue(t) => {
+            ValueRef::Time(Time::new_millisecond(*t))
+        }
         ValueData::TimeMicrosecondValue(t) => ValueRef::Time(Time::new_microsecond(*t)),
         ValueData::TimeNanosecondValue(t) => ValueRef::Time(Time::new_nanosecond(*t)),
         ValueData::IntervalYearMonthValue(v) => {
@@ -651,7 +648,6 @@ pub fn pb_values_to_vector_ref(data_type: &ConcreteDataType, values: Values) -> 
         ConcreteDataType::Binary(_) => Arc::new(BinaryVector::from(values.binary_values)),
         ConcreteDataType::String(_) => Arc::new(StringVector::from_vec(values.string_values)),
         ConcreteDataType::Date(_) => Arc::new(DateVector::from_vec(values.date_values)),
-        ConcreteDataType::DateTime(_) => Arc::new(DateTimeVector::from_vec(values.datetime_values)),
         ConcreteDataType::Timestamp(unit) => match unit {
             TimestampType::Second(_) => Arc::new(TimestampSecondVector::from_vec(
                 values.timestamp_second_values,
@@ -786,11 +782,6 @@ pub fn pb_values_to_values(data_type: &ConcreteDataType, values: Values) -> Vec<
             .binary_values
             .into_iter()
             .map(|val| val.into())
-            .collect(),
-        ConcreteDataType::DateTime(_) => values
-            .datetime_values
-            .into_iter()
-            .map(|v| Value::DateTime(v.into()))
             .collect(),
         ConcreteDataType::Date(_) => values
             .date_values
@@ -947,9 +938,6 @@ pub fn to_proto_value(value: Value) -> Option<v1::Value> {
         Value::Date(v) => v1::Value {
             value_data: Some(ValueData::DateValue(v.val())),
         },
-        Value::DateTime(v) => v1::Value {
-            value_data: Some(ValueData::DatetimeValue(v.val())),
-        },
         Value::Timestamp(v) => match v.unit() {
             TimeUnit::Second => v1::Value {
                 value_data: Some(ValueData::TimestampSecondValue(v.value())),
@@ -1066,7 +1054,6 @@ pub fn value_to_grpc_value(value: Value) -> GrpcValue {
             Value::String(v) => Some(ValueData::StringValue(v.as_utf8().to_string())),
             Value::Binary(v) => Some(ValueData::BinaryValue(v.to_vec())),
             Value::Date(v) => Some(ValueData::DateValue(v.val())),
-            Value::DateTime(v) => Some(ValueData::DatetimeValue(v.val())),
             Value::Timestamp(v) => Some(match v.unit() {
                 TimeUnit::Second => ValueData::TimestampSecondValue(v.value()),
                 TimeUnit::Millisecond => ValueData::TimestampMillisecondValue(v.value()),
@@ -1248,10 +1235,6 @@ mod tests {
             ColumnDataTypeWrapper::date_datatype().into()
         );
         assert_eq!(
-            ConcreteDataType::datetime_datatype(),
-            ColumnDataTypeWrapper::datetime_datatype().into()
-        );
-        assert_eq!(
             ConcreteDataType::timestamp_millisecond_datatype(),
             ColumnDataTypeWrapper::timestamp_millisecond_datatype().into()
         );
@@ -1338,10 +1321,6 @@ mod tests {
         assert_eq!(
             ColumnDataTypeWrapper::date_datatype(),
             ConcreteDataType::date_datatype().try_into().unwrap()
-        );
-        assert_eq!(
-            ColumnDataTypeWrapper::datetime_datatype(),
-            ConcreteDataType::datetime_datatype().try_into().unwrap()
         );
         assert_eq!(
             ColumnDataTypeWrapper::timestamp_millisecond_datatype(),
@@ -1827,17 +1806,6 @@ mod tests {
             Value::Date(1.into()),
             Value::Date(2.into()),
             Value::Date(3.into())
-        ]
-    );
-
-    test_convert_values!(
-        datetime,
-        vec![1.into(), 2.into(), 3.into()],
-        datetime,
-        vec![
-            Value::DateTime(1.into()),
-            Value::DateTime(2.into()),
-            Value::DateTime(3.into())
         ]
     );
 

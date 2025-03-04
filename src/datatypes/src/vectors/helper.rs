@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, StringArray};
 use arrow::compute;
+use arrow::compute::cast;
 use arrow::compute::kernels::comparison;
 use arrow::datatypes::{DataType as ArrowDataType, TimeUnit};
 use arrow_schema::IntervalUnit;
@@ -31,7 +32,7 @@ use crate::prelude::DataType;
 use crate::scalars::{Scalar, ScalarVectorBuilder};
 use crate::value::{ListValue, ListValueRef, Value};
 use crate::vectors::{
-    BinaryVector, BooleanVector, ConstantVector, DateTimeVector, DateVector, Decimal128Vector,
+    BinaryVector, BooleanVector, ConstantVector, DateVector, Decimal128Vector,
     DurationMicrosecondVector, DurationMillisecondVector, DurationNanosecondVector,
     DurationSecondVector, Float32Vector, Float64Vector, Int16Vector, Int32Vector, Int64Vector,
     Int8Vector, IntervalDayTimeVector, IntervalMonthDayNanoVector, IntervalYearMonthVector,
@@ -180,7 +181,7 @@ impl Helper {
                 ConstantVector::new(Arc::new(DateVector::from(vec![v])), length)
             }
             ScalarValue::Date64(v) => {
-                ConstantVector::new(Arc::new(DateTimeVector::from(vec![v])), length)
+                ConstantVector::new(Arc::new(TimestampMillisecondVector::from(vec![v])), length)
             }
             ScalarValue::TimestampSecond(v, _) => {
                 // Timezone is unimplemented now.
@@ -286,7 +287,14 @@ impl Helper {
                 Arc::new(StringVector::try_from_arrow_array(array)?)
             }
             ArrowDataType::Date32 => Arc::new(DateVector::try_from_arrow_array(array)?),
-            ArrowDataType::Date64 => Arc::new(DateTimeVector::try_from_arrow_array(array)?),
+            ArrowDataType::Date64 => {
+                let array = cast(
+                    array.as_ref(),
+                    &ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+                )
+                .expect("Date64 should be castable to TimestampMillisecond");
+                Arc::new(TimestampMillisecondVector::try_from_arrow_array(array)?)
+            }
             ArrowDataType::List(_) => Arc::new(ListVector::try_from_arrow_array(array)?),
             ArrowDataType::Timestamp(unit, _) => match unit {
                 TimeUnit::Second => Arc::new(TimestampSecondVector::try_from_arrow_array(array)?),
@@ -411,20 +419,22 @@ impl Helper {
 #[cfg(test)]
 mod tests {
     use arrow::array::{
-        ArrayRef, BooleanArray, Date32Array, Date64Array, Float32Array, Float64Array, Int16Array,
-        Int32Array, Int64Array, Int8Array, LargeBinaryArray, ListArray, NullArray,
-        Time32MillisecondArray, Time32SecondArray, Time64MicrosecondArray, Time64NanosecondArray,
+        ArrayRef, BooleanArray, Date32Array, Float32Array, Float64Array, Int16Array, Int32Array,
+        Int64Array, Int8Array, LargeBinaryArray, ListArray, NullArray, Time32MillisecondArray,
+        Time32SecondArray, Time64MicrosecondArray, Time64NanosecondArray,
         TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
         TimestampSecondArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
     };
     use arrow::buffer::Buffer;
     use arrow::datatypes::{Int32Type, IntervalMonthDayNano};
-    use arrow_array::{BinaryArray, DictionaryArray, FixedSizeBinaryArray, LargeStringArray};
+    use arrow_array::{
+        BinaryArray, Date64Array, DictionaryArray, FixedSizeBinaryArray, LargeStringArray,
+    };
     use arrow_schema::DataType;
     use common_decimal::Decimal128;
     use common_time::time::Time;
     use common_time::timestamp::TimeUnit;
-    use common_time::{Date, DateTime, Duration};
+    use common_time::{Date, Duration, Timestamp};
 
     use super::*;
     use crate::value::Value;
@@ -469,10 +479,16 @@ mod tests {
     #[test]
     fn test_try_from_scalar_datetime_value() {
         let vector = Helper::try_from_scalar_value(ScalarValue::Date64(Some(42)), 3).unwrap();
-        assert_eq!(ConcreteDataType::datetime_datatype(), vector.data_type());
+        assert_eq!(
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            vector.data_type()
+        );
         assert_eq!(3, vector.len());
         for i in 0..vector.len() {
-            assert_eq!(Value::DateTime(DateTime::new(42)), vector.get(i));
+            assert_eq!(
+                Value::Timestamp(Timestamp::new_millisecond(42)),
+                vector.get(i)
+            );
         }
     }
 
@@ -591,6 +607,16 @@ mod tests {
     }
 
     #[test]
+    fn date64_check_try_into_vector() {
+        let array = Date64Array::from(vec![1, 2, 3]);
+        let array: ArrayRef = Arc::new(array);
+        let vector = Helper::try_into_vector(array.clone()).unwrap();
+        let array = TimestampMillisecondArray::from(vec![1, 2, 3]);
+        let array: ArrayRef = Arc::new(array);
+        assert_eq!(&array, &vector.to_arrow_array());
+    }
+
+    #[test]
     fn test_try_into_vector() {
         check_try_into_vector(NullArray::new(2));
         check_try_into_vector(BooleanArray::from(vec![true, false]));
@@ -606,7 +632,6 @@ mod tests {
         check_try_into_vector(Float64Array::from(vec![1.0, 2.0, 3.0]));
         check_try_into_vector(StringArray::from(vec!["hello", "world"]));
         check_try_into_vector(Date32Array::from(vec![1, 2, 3]));
-        check_try_into_vector(Date64Array::from(vec![1, 2, 3]));
         let data = vec![None, Some(vec![Some(6), Some(7)])];
         let list_array = ListArray::from_iter_primitive::<Int32Type, _, _>(data);
         check_try_into_vector(list_array);
@@ -719,6 +744,19 @@ mod tests {
     }
 
     #[test]
+    fn date64_check_into_and_from() {
+        let array = Date64Array::from(vec![1, 2, 3]);
+        let array: ArrayRef = Arc::new(array);
+        let vector = Helper::try_into_vector(array.clone()).unwrap();
+        let array = TimestampMillisecondArray::from(vec![1, 2, 3]);
+        let array: ArrayRef = Arc::new(array);
+        assert_eq!(&array, &vector.to_arrow_array());
+        let row: Vec<Value> = (0..array.len()).map(|i| vector.get(i)).collect();
+        let dt = vector.data_type();
+        check_try_from_row_to_vector(row, &dt);
+    }
+
+    #[test]
     fn test_try_from_row_to_vector() {
         check_into_and_from(NullArray::new(2));
         check_into_and_from(BooleanArray::from(vec![true, false]));
@@ -734,7 +772,6 @@ mod tests {
         check_into_and_from(Float64Array::from(vec![1.0, 2.0, 3.0]));
         check_into_and_from(StringArray::from(vec!["hello", "world"]));
         check_into_and_from(Date32Array::from(vec![1, 2, 3]));
-        check_into_and_from(Date64Array::from(vec![1, 2, 3]));
 
         check_into_and_from(TimestampSecondArray::from(vec![1, 2, 3]));
         check_into_and_from(TimestampMillisecondArray::from(vec![1, 2, 3]));
