@@ -434,10 +434,13 @@ impl RecordingRuleTask {
                             .dirty_time_windows
                             .gen_filter_exprs(&col_name, lower, window_size)?
                     }
-                    _ => UnexpectedSnafu {
-                        reason: format!("Can't get window size: lower={lower:?}, upper={upper:?}"),
+                    _ => {
+                        warn!(
+                            "Flow id = {:?}, can't get window size: lower={lower:?}, upper={upper:?}, using the same query", self.flow_id
+                        );
+                        // since no time window lower/upper bound is found, just return the original query
+                        return Ok(Some(self.query.clone()));
                     }
-                    .fail()?,
                 }
             };
 
@@ -454,6 +457,7 @@ impl RecordingRuleTask {
 
             let Some(expr) = expr else {
                 // no new data, hence no need to update
+                debug!("Flow id={:?}, no new data, not update", self.flow_id);
                 return Ok(None);
             };
 
