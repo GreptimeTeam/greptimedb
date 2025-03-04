@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod geo_path;
 mod hll;
 mod uddsketch_state;
 
