@@ -128,7 +128,7 @@ impl From<Attributes> for jsonb::Value<'static> {
 }
 
 impl Attributes {
-    pub fn get(self) -> Vec<KeyValue> {
+    pub fn take(self) -> Vec<KeyValue> {
         self.0
     }
 

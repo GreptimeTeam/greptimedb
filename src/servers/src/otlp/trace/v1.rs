@@ -95,10 +95,11 @@ pub fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> 
     row_writer::write_fields(writer, fields.into_iter(), &mut row)?;
 
     // tags
-    let iter = vec![(TRACE_ID_COLUMN, span.trace_id)]
-        .into_iter()
-        .map(|(col, val)| (col.to_string(), val));
-    row_writer::write_tags(writer, iter, &mut row)?;
+    row_writer::write_tags(
+        writer,
+        std::iter::once((TRACE_ID_COLUMN.to_string(), span.trace_id)),
+        &mut row,
+    )?;
 
     // write fields
     let fields = vec![
@@ -137,7 +138,7 @@ fn write_attributes(
     attributes: Attributes,
     row: &mut Vec<Value>,
 ) -> Result<()> {
-    for attr in attributes.get().into_iter() {
+    for attr in attributes.take().into_iter() {
         let key_suffix = attr.key;
         let key = format!("{}.{}", prefix, key_suffix);
         match attr.value.and_then(|v| v.value) {

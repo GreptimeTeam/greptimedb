@@ -48,7 +48,7 @@ macro_rules! or {
     };
 }
 
-pub fn partition_rules_for_uuid(ident: &str) -> Partitions {
+pub fn partition_rule_for_hexstring(ident: &str) -> Partitions {
     let ident = Ident::new(ident);
     let ident_expr = Expr::Identifier(ident.clone());
 
@@ -160,6 +160,6 @@ mod tests {
             })
             .collect::<Vec<Expr>>();
 
-        assert_eq!(results, partition_rules_for_uuid("trace_id").exprs);
+        assert_eq!(results, partition_rule_for_hexstring("trace_id").exprs);
     }
 }

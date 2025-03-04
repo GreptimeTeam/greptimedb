@@ -45,7 +45,7 @@ use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
 use snafu::prelude::*;
 use snafu::ResultExt;
-use sql::partition::partition_rules_for_uuid;
+use sql::partition::partition_rule_for_hexstring;
 use sql::statements::create::Partitions;
 use sql::statements::insert::Insert;
 use store_api::metric_engine_consts::{
@@ -573,7 +573,7 @@ impl Inserter {
                 for mut create_table in create_tables {
                     // prebuilt partition rules for uuid data: see the function
                     // for more information
-                    let partitions = partition_rules_for_uuid(TRACE_ID_COLUMN);
+                    let partitions = partition_rule_for_hexstring(TRACE_ID_COLUMN);
                     // add skip index to
                     // - trace_id: when searching by trace id
                     // - span_id: when searching particular span
