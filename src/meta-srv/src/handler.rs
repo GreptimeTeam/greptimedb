@@ -20,8 +20,8 @@ use std::time::{Duration, Instant};
 
 use api::v1::meta::mailbox_message::Payload;
 use api::v1::meta::{
-    HeartbeatRequest, HeartbeatResponse, MailboxMessage, RegionLease, RequestHeader,
-    ResponseHeader, Role, PROTOCOL_VERSION,
+    HeartbeatRequest, HeartbeatResponse, MailboxMessage, RegionLease, ResponseHeader, Role,
+    PROTOCOL_VERSION,
 };
 use check_leader_handler::CheckLeaderHandler;
 use collect_cluster_info_handler::{
@@ -153,10 +153,7 @@ pub struct Pusher {
 }
 
 impl Pusher {
-    pub fn new(
-        sender: Sender<std::result::Result<HeartbeatResponse, tonic::Status>>,
-        _req_header: &RequestHeader,
-    ) -> Self {
+    pub fn new(sender: Sender<std::result::Result<HeartbeatResponse, tonic::Status>>) -> Self {
         let res_header = ResponseHeader {
             protocol_version: PROTOCOL_VERSION,
             ..Default::default()
@@ -771,7 +768,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use api::v1::meta::{MailboxMessage, RequestHeader, Role, PROTOCOL_VERSION};
+    use api::v1::meta::{MailboxMessage, Role};
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::sequence::SequenceBuilder;
     use tokio::sync::mpsc;
@@ -813,12 +810,8 @@ mod tests {
     async fn push_msg_via_mailbox() -> (MailboxRef, MailboxReceiver) {
         let datanode_id = 12;
         let (pusher_tx, mut pusher_rx) = mpsc::channel(16);
-        let res_header = RequestHeader {
-            protocol_version: PROTOCOL_VERSION,
-            ..Default::default()
-        };
         let pusher_id = PusherId::new(Role::Datanode, datanode_id);
-        let pusher: Pusher = Pusher::new(pusher_tx, &res_header);
+        let pusher: Pusher = Pusher::new(pusher_tx);
         let handler_group = HeartbeatHandlerGroup::default();
         handler_group.register_pusher(pusher_id, pusher).await;
 

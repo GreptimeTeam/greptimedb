@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::mailbox_message::Payload;
-use api::v1::meta::{HeartbeatResponse, MailboxMessage, RequestHeader};
+use api::v1::meta::{HeartbeatResponse, MailboxMessage};
 use common_meta::ddl::NoopRegionFailureDetectorControl;
 use common_meta::instruction::{
     DowngradeRegionReply, InstructionReply, SimpleReply, UpgradeRegionReply,
@@ -85,7 +85,7 @@ impl MailboxContext {
         tx: Sender<std::result::Result<HeartbeatResponse, tonic::Status>>,
     ) {
         let pusher_id = channel.pusher_id();
-        let pusher = Pusher::new(tx, &RequestHeader::default());
+        let pusher = Pusher::new(tx);
         let _ = self.pushers.insert(pusher_id.string_key(), pusher).await;
     }
 

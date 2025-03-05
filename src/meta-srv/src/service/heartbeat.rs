@@ -177,7 +177,7 @@ async fn register_pusher(
     let role = header.role();
     let id = get_node_id(header);
     let pusher_id = PusherId::new(role, id);
-    let pusher = Pusher::new(sender, header);
+    let pusher = Pusher::new(sender);
     handler_group.register_pusher(pusher_id, pusher).await;
     pusher_id
 }
