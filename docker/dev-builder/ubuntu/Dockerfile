@@ -7,7 +7,7 @@ ENV LANG en_US.utf8
 WORKDIR /greptimedb
 
 RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends software-properties-common
+    DEBIAN_FRONTEND=noninteractive apt-get install -y software-properties-common
 # Install dependencies.
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     libssl-dev \

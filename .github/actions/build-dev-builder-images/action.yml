@@ -41,6 +41,13 @@ runs:
         username: ${{ inputs.dockerhub-image-registry-username }}
         password: ${{ inputs.dockerhub-image-registry-token }}
 
+    - name: Set up qemu for multi-platform builds
+      uses: docker/setup-qemu-action@v3
+      with:
+        platforms: linux/amd64,linux/arm64
+        # The latest version will lead to segmentation fault.
+        image: tonistiigi/binfmt:qemu-v7.0.0-28
+
     - name: Build and push dev-builder-ubuntu image
       shell: bash
       if: ${{ inputs.build-dev-builder-ubuntu == 'true' }}
