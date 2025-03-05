@@ -1,4 +1,4 @@
-FROM ubuntu:20.04 as builder
+FROM ubuntu:22.04 as builder
 
 ARG CARGO_PROFILE
 ARG FEATURES
