@@ -20,7 +20,6 @@ use api::v1::flow::{
 };
 use api::v1::region::InsertRequests;
 use common_error::ext::BoxedError;
-use common_meta::error::{ExternalSnafu, Result, UnexpectedSnafu};
 use common_meta::node_manager::Flownode;
 use common_telemetry::{debug, trace};
 use datatypes::value::Value;
@@ -29,7 +28,9 @@ use snafu::{IntoError, OptionExt, ResultExt};
 use store_api::storage::RegionId;
 
 use crate::adapter::{CreateFlowArgs, FlowWorkerManager};
-use crate::error::{CreateFlowSnafu, InsertIntoFlowSnafu, InternalSnafu};
+use crate::error::{
+    CreateFlowSnafu, ExternalSnafu, InsertIntoFlowSnafu, InternalSnafu, UnexpectedSnafu,
+};
 use crate::metrics::METRIC_FLOW_TASK_COUNT;
 use crate::repr::{self, DiffRow};
 
@@ -47,7 +48,31 @@ fn to_meta_err(
 
 #[async_trait::async_trait]
 impl Flownode for FlowWorkerManager {
-    async fn handle(&self, request: FlowRequest) -> Result<FlowResponse> {
+    async fn handle(
+        &self,
+        request: FlowRequest,
+    ) -> Result<FlowResponse, common_meta::error::Error> {
+        self.handle_inner(request)
+            .await
+            .map_err(to_meta_err(snafu::location!()))
+    }
+
+    #[allow(unreachable_code, unused)]
+    async fn handle_inserts(
+        &self,
+        request: InsertRequests,
+    ) -> Result<FlowResponse, common_meta::error::Error> {
+        self.handle_inserts_inner(request)
+            .await
+            .map_err(to_meta_err(snafu::location!()))
+    }
+}
+
+impl FlowWorkerManager {
+    async fn handle_inner(
+        &self,
+        request: FlowRequest,
+    ) -> Result<FlowResponse, crate::error::Error> {
         let query_ctx = request
             .header
             .and_then(|h| h.query_context)
@@ -87,8 +112,7 @@ impl Flownode for FlowWorkerManager {
                     .create_flow(args)
                     .await
                     .map_err(BoxedError::new)
-                    .with_context(|_| CreateFlowSnafu { sql: sql.clone() })
-                    .map_err(to_meta_err(snafu::location!()))?;
+                    .with_context(|_| CreateFlowSnafu { sql: sql.clone() })?;
                 METRIC_FLOW_TASK_COUNT.inc();
                 Ok(FlowResponse {
                     affected_flows: ret
@@ -101,9 +125,7 @@ impl Flownode for FlowWorkerManager {
             Some(flow_request::Body::Drop(DropRequest {
                 flow_id: Some(flow_id),
             })) => {
-                self.remove_flow(flow_id.id as u64)
-                    .await
-                    .map_err(to_meta_err(snafu::location!()))?;
+                self.remove_flow(flow_id.id as u64).await?;
                 METRIC_FLOW_TASK_COUNT.dec();
                 Ok(Default::default())
             }
@@ -115,26 +137,17 @@ impl Flownode for FlowWorkerManager {
                 // lock to make sure writes before flush are written to flow
                 // and immediately drop to prevent following writes to be blocked
                 drop(self.flush_lock.write().await);
-                let flushed_input_rows = self
-                    .node_context
-                    .read()
-                    .await
-                    .flush_all_sender()
-                    .await
-                    .map_err(to_meta_err(snafu::location!()))?;
-                let rows_send = self
-                    .run_available(true)
-                    .await
-                    .map_err(to_meta_err(snafu::location!()))?;
-                let row = self
-                    .send_writeback_requests()
-                    .await
-                    .map_err(to_meta_err(snafu::location!()))?;
+                let flushed_input_rows = self.node_context.read().await.flush_all_sender().await?;
+                let rows_send = self.run_available(true).await?;
+                let row = self.send_writeback_requests().await?;
 
                 debug!(
-                    "Done to flush flow_id={:?} with {} input rows flushed, {} rows sended and {} output rows flushed",
-                    flow_id, flushed_input_rows, rows_send, row
-                );
+                "Done to flush flow_id={:?} with {} input rows flushed, {} rows sended and {} output rows flushed",
+                flow_id, flushed_input_rows, rows_send, row
+            );
+                if self.rule_engine.flow_exist(flow_id.id as u64).await {
+                    self.rule_engine.flush_flow(flow_id.id as u64).await?;
+                }
                 Ok(FlowResponse {
                     affected_flows: vec![flow_id],
                     affected_rows: row as u64,
@@ -142,23 +155,23 @@ impl Flownode for FlowWorkerManager {
                 })
             }
             None => UnexpectedSnafu {
-                err_msg: "Missing request body",
+                reason: "Missing request body",
             }
             .fail(),
             _ => UnexpectedSnafu {
-                err_msg: "Invalid request body.",
+                reason: "Invalid request body.",
             }
             .fail(),
         }
     }
 
     #[allow(unreachable_code, unused)]
-    async fn handle_inserts(&self, request: InsertRequests) -> Result<FlowResponse> {
-        return self
-            .rule_engine
-            .handle_inserts(request)
-            .await
-            .map_err(to_meta_err(snafu::location!()));
+    async fn handle_inserts_inner(
+        &self,
+        request: InsertRequests,
+    ) -> Result<FlowResponse, crate::error::Error> {
+        // TODO(discord9): make mirror request go to both engine
+        return self.rule_engine.handle_inserts(request).await;
         // using try_read to ensure two things:
         // 1. flush wouldn't happen until inserts before it is inserted
         // 2. inserts happening concurrently with flush wouldn't be block by flush
@@ -179,11 +192,7 @@ impl Flownode for FlowWorkerManager {
                 let ctx = self.node_context.read().await;
 
                 // TODO(discord9): also check schema version so that altered table can be reported
-                let table_schema = ctx
-                    .table_source
-                    .table_from_id(&table_id)
-                    .await
-                    .map_err(to_meta_err(snafu::location!()))?;
+                let table_schema = ctx.table_source.table_from_id(&table_id).await?;
                 let default_vals = table_schema
                     .default_values
                     .iter()
@@ -219,7 +228,7 @@ impl Flownode for FlowWorkerManager {
                             }
                             .fail().map_err(BoxedError::new).context(ExternalSnafu),
                         })
-                        .collect::<Result<Vec<_>>>()?;
+                        .collect::<Result<Vec<_>,_>>()?;
                 let name_to_col = HashMap::<_, _>::from_iter(
                     insert_schema
                         .iter()
@@ -237,7 +246,7 @@ impl Flownode for FlowWorkerManager {
                             .map(FetchFromRow::Idx)
                             .or_else(|| col_default_val.clone().map(FetchFromRow::Default))
                             .with_context(|| UnexpectedSnafu {
-                                err_msg: format!(
+                                reason: format!(
                                     "Column not found: {}, default_value: {:?}",
                                     col_name, col_default_val
                                 ),
@@ -279,7 +288,6 @@ impl Flownode for FlowWorkerManager {
                 }
                 .into_error(err);
                 common_telemetry::error!(err; "Failed to handle write request");
-                let err = to_meta_err(snafu::location!())(err);
                 return Err(err);
             }
         }

@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use api::v1::flow::FlowResponse;
+use client::Output;
 use common_error::ext::BoxedError;
 use common_meta::ddl::create_flow::FlowType;
 use common_meta::key::flow::FlowMetadataManagerRef;
@@ -28,6 +29,7 @@ use common_time::Timestamp;
 use datafusion::sql::unparser::expr_to_sql;
 use datafusion_common::tree_node::TreeNode;
 use datatypes::value::Value;
+use itertools::Itertools;
 use query::QueryEngineRef;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -42,7 +44,7 @@ use super::{df_plan_to_sql, AddFilterRewriter, TimeWindowExpr};
 use crate::adapter::{CreateFlowArgs, FlowId, TableName};
 use crate::error::{
     DatafusionSnafu, DatatypesSnafu, ExternalSnafu, FlowAlreadyExistSnafu, InternalSnafu,
-    TimeSnafu, UnexpectedSnafu,
+    TableNotFoundMetaSnafu, TableNotFoundSnafu, TimeSnafu, UnexpectedSnafu,
 };
 use crate::metrics::{METRIC_FLOW_RULE_ENGINE_QUERY_TIME, METRIC_FLOW_RULE_ENGINE_SLOW_QUERY};
 use crate::recording_rules::{find_plan_time_window_bound, find_time_window_expr, sql_to_df_plan};
@@ -62,13 +64,13 @@ pub struct RecordingRuleEngine {
     frontend_client: Arc<FrontendClient>,
     flow_metadata_manager: FlowMetadataManagerRef,
     table_meta: TableMetadataManagerRef,
-    engine: QueryEngineRef,
+    query_engine: QueryEngineRef,
 }
 
 impl RecordingRuleEngine {
     pub fn new(
         frontend_client: Arc<FrontendClient>,
-        engine: QueryEngineRef,
+        query_engine: QueryEngineRef,
         flow_metadata_manager: FlowMetadataManagerRef,
         table_meta: TableMetadataManagerRef,
     ) -> Self {
@@ -78,7 +80,7 @@ impl RecordingRuleEngine {
             frontend_client,
             flow_metadata_manager,
             table_meta,
-            engine,
+            query_engine,
         }
     }
 
@@ -202,10 +204,10 @@ impl RecordingRuleEngine {
 
         let (tx, rx) = oneshot::channel();
 
-        let plan = sql_to_df_plan(query_ctx.clone(), self.engine.clone(), &sql, true).await?;
+        let plan = sql_to_df_plan(query_ctx.clone(), self.query_engine.clone(), &sql, true).await?;
         let (column_name, time_window_expr, _, df_schema) = find_time_window_expr(
             &plan,
-            self.engine.engine_state().catalog_manager().clone(),
+            self.query_engine.engine_state().catalog_manager().clone(),
             query_ctx.clone(),
         )
         .await?;
@@ -222,16 +224,19 @@ impl RecordingRuleEngine {
             sink_table_name,
             source_table_names,
             query_ctx,
+            self.table_meta.clone(),
             rx,
         );
 
         let task_inner = task.clone();
-        let engine = self.engine.clone();
+        let engine = self.query_engine.clone();
         let frontend = self.frontend_client.clone();
+
+        task.check_execute(&engine, &frontend).await?;
 
         // TODO(discord9): also save handle & use time wheel or what for better
         let _handle = common_runtime::spawn_global(async move {
-            match task_inner.start_executing(engine, frontend).await {
+            match task_inner.start_executing_loop(engine, frontend).await {
                 Ok(()) => info!("Flow {} shutdown", task_inner.flow_id),
                 Err(err) => common_telemetry::error!(
                     "Flow {} encounter unrecoverable error: {err:?}",
@@ -264,9 +269,23 @@ impl RecordingRuleEngine {
         }
         Ok(())
     }
+
+    pub async fn flush_flow(&self, flow_id: FlowId) -> Result<(), Error> {
+        let task = self.tasks.read().await.get(&flow_id).cloned();
+        let task = task.with_context(|| UnexpectedSnafu {
+            reason: format!("Can't found task for flow {flow_id}"),
+        })?;
+        task.execute_once(&self.query_engine, &self.frontend_client)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn flow_exist(&self, flow_id: FlowId) -> bool {
+        self.tasks.read().await.contains_key(&flow_id)
+    }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RecordingRuleTask {
     flow_id: FlowId,
     query: String,
@@ -275,6 +294,7 @@ pub struct RecordingRuleTask {
     expire_after: Option<i64>,
     sink_table_name: [String; 3],
     source_table_names: HashSet<[String; 3]>,
+    table_meta: TableMetadataManagerRef,
     state: Arc<RwLock<RecordingRuleState>>,
 }
 
@@ -288,6 +308,7 @@ impl RecordingRuleTask {
         sink_table_name: [String; 3],
         source_table_names: Vec<[String; 3]>,
         query_ctx: QueryContextRef,
+        table_meta: TableMetadataManagerRef,
         shutdown_rx: oneshot::Receiver<()>,
     ) -> Self {
         Self {
@@ -297,92 +318,203 @@ impl RecordingRuleTask {
             expire_after,
             sink_table_name,
             source_table_names: source_table_names.into_iter().collect(),
+            table_meta,
             state: Arc::new(RwLock::new(RecordingRuleState::new(query_ctx, shutdown_rx))),
         }
     }
 }
 impl RecordingRuleTask {
-    /// This should be called in a new tokio task
-    pub async fn start_executing(
+    /// Test execute, for check syntax or such
+    pub async fn check_execute(
+        &self,
+        engine: &QueryEngineRef,
+        frontend_client: &Arc<FrontendClient>,
+    ) -> Result<Option<(Output, Duration)>, Error> {
+        // use current time to test get a dirty time window, which should be safe
+        let start = SystemTime::now();
+        let ts = Timestamp::new_second(
+            start
+                .duration_since(UNIX_EPOCH)
+                .expect("Time went backwards")
+                .as_secs() as _,
+        );
+        self.state
+            .write()
+            .await
+            .dirty_time_windows
+            .add_lower_bounds(vec![ts].into_iter());
+        self.execute_once(engine, frontend_client).await
+    }
+
+    pub async fn gen_insert_sql(
+        &self,
+        engine: &QueryEngineRef,
+        query: &str,
+        query_schema_len: usize,
+    ) -> Result<Option<String>, Error> {
+        let new_query = self.gen_query_with_time_window(engine.clone()).await?;
+        let table_name_mgr = self.table_meta.table_name_manager();
+
+        let full_table_name = self.sink_table_name.clone().join(".");
+
+        let table_id = table_name_mgr
+            .get(common_meta::key::table_name::TableNameKey::new(
+                &self.sink_table_name[0],
+                &self.sink_table_name[1],
+                &self.sink_table_name[2],
+            ))
+            .await
+            .with_context(|_| TableNotFoundMetaSnafu {
+                msg: full_table_name.clone(),
+            })?
+            .map(|t| t.table_id())
+            .with_context(|| TableNotFoundSnafu {
+                name: full_table_name.clone(),
+            })?;
+
+        let table = self
+            .table_meta
+            .table_info_manager()
+            .get(table_id)
+            .await
+            .with_context(|_| TableNotFoundMetaSnafu {
+                msg: full_table_name.clone(),
+            })?
+            .with_context(|| TableNotFoundSnafu {
+                name: full_table_name.clone(),
+            })?
+            .into_inner();
+
+        let table_schema_len = table.table_info.meta.schema.column_schemas.len();
+
+        let insert_into = if let Some(new_query) = new_query {
+            // TODO(discord9): also assign column name to compat update_at column
+            if table_schema_len == query_schema_len {
+                format!("INSERT INTO {} {}", full_table_name, new_query)
+            } else if table_schema_len == query_schema_len + 1 {
+                // TODO(discord9): check update_at column is `DEFAULT now()`
+                let table_column_names = table
+                    .table_info
+                    .meta
+                    .schema
+                    .column_schemas
+                    .iter()
+                    .map(|col| col.name.clone())
+                    .collect_vec();
+
+                format!(
+                    "INSERT INTO {} ({}) {}",
+                    full_table_name,
+                    table_column_names.join(", "),
+                    new_query,
+                )
+            } else {
+                UnexpectedSnafu {
+                    reason: format!(
+                        "Column conut mismatch, table column count = {}, query column count = {}",
+                        table_schema_len, query_schema_len
+                    ),
+                }
+                .fail()?
+            }
+        } else {
+            return Ok(None);
+        };
+        Ok(Some(insert_into))
+    }
+
+    /// Execute the query once and return the output and the time it took
+    pub async fn execute_once(
+        &self,
+        engine: &QueryEngineRef,
+        frontend_client: &Arc<FrontendClient>,
+    ) -> Result<Option<(Output, Duration)>, Error> {
+        let new_query = self.gen_query_with_time_window(engine.clone()).await?;
+        let insert_into = if let Some(new_query) = new_query {
+            // TODO(discord9): also assign column name to compat update_at column
+            format!(
+                "INSERT INTO {}.{}.{} {}",
+                self.sink_table_name[0],
+                self.sink_table_name[1],
+                self.sink_table_name[2],
+                new_query
+            )
+        } else {
+            return Ok(None);
+        };
+
+        let instant = Instant::now();
+        let flow_id = self.flow_id;
+        let db_client = frontend_client.get_database_client().await?;
+        let peer_addr = db_client.peer.addr;
+        debug!(
+            "Executing flow {flow_id}(expire_after={:?} secs) on {:?} with query {}",
+            self.expire_after, peer_addr, &insert_into
+        );
+
+        let timer = METRIC_FLOW_RULE_ENGINE_QUERY_TIME
+            .with_label_values(&[flow_id.to_string().as_str()])
+            .start_timer();
+
+        let res = db_client.database.sql(&insert_into).await;
+        drop(timer);
+
+        let elapsed = instant.elapsed();
+        if let Ok(res1) = &res {
+            debug!(
+                "Flow {flow_id} executed, result: {res1:?}, elapsed: {:?}",
+                elapsed
+            );
+        } else if let Err(res) = &res {
+            warn!(
+                "Failed to execute Flow {flow_id} on frontend {}, result: {res:?}, elapsed: {:?} with query: {}",
+                peer_addr, elapsed, &insert_into
+            );
+        }
+
+        // record slow query
+        if elapsed >= SLOW_QUERY_THRESHOLD {
+            warn!(
+                "Flow {flow_id} on frontend {} executed for {:?} before complete, query: {}",
+                peer_addr, elapsed, &insert_into
+            );
+            METRIC_FLOW_RULE_ENGINE_SLOW_QUERY
+                .with_label_values(&[flow_id.to_string().as_str(), &insert_into, &peer_addr])
+                .observe(elapsed.as_secs_f64());
+        }
+
+        self.state
+            .write()
+            .await
+            .after_query_exec(elapsed, res.is_ok());
+
+        let res = res.map_err(BoxedError::new).context(ExternalSnafu)?;
+
+        Ok(Some((res, elapsed)))
+    }
+
+    /// start executing query in a loop, break when receive shutdown signal
+    pub async fn start_executing_loop(
         &self,
         engine: QueryEngineRef,
         frontend_client: Arc<FrontendClient>,
     ) -> Result<(), Error> {
-        // only first query don't need upper bound
-        let mut is_first = true;
-
         loop {
-            // FIXME(discord9): test if need upper bound also works
-            let new_query = self.gen_query_with_time_window(engine.clone()).await?;
-
-            let insert_into = if let Some(new_query) = new_query {
-                format!(
-                    "INSERT INTO {}.{}.{} {}",
-                    self.sink_table_name[0],
-                    self.sink_table_name[1],
-                    self.sink_table_name[2],
-                    new_query
-                )
-            } else {
+            let Some(_) = self.execute_once(&engine, &frontend_client).await? else {
+                debug!(
+                    "Flow id = {:?} found no new data, sleep for {:?} then continue",
+                    self.flow_id, MIN_REFRESH_DURATION
+                );
                 tokio::time::sleep(MIN_REFRESH_DURATION).await;
                 continue;
             };
-
-            if is_first {
-                is_first = false;
-            }
-
-            let instant = Instant::now();
-            let flow_id = self.flow_id;
-            let db_client = frontend_client.get_database_client().await?;
-            let peer_addr = db_client.peer.addr;
-            debug!(
-                "Executing flow {flow_id}(expire_after={:?} secs) on {:?} with query {}",
-                self.expire_after, peer_addr, &insert_into
-            );
-
-            let timer = METRIC_FLOW_RULE_ENGINE_QUERY_TIME
-                .with_label_values(&[flow_id.to_string().as_str()])
-                .start_timer();
-
-            let res = db_client.database.sql(&insert_into).await;
-            drop(timer);
-
-            let elapsed = instant.elapsed();
-            if let Ok(res1) = &res {
-                debug!(
-                    "Flow {flow_id} executed, result: {res1:?}, elapsed: {:?}",
-                    elapsed
-                );
-            } else if let Err(res) = &res {
-                warn!(
-                    "Failed to execute Flow {flow_id} on frontend {}, result: {res:?}, elapsed: {:?} with query: {}",
-                    peer_addr, elapsed, &insert_into
-                );
-            }
-
-            // record slow query
-            if elapsed >= SLOW_QUERY_THRESHOLD {
-                warn!(
-                    "Flow {flow_id} on frontend {} executed for {:?} before complete, query: {}",
-                    peer_addr, elapsed, &insert_into
-                );
-                METRIC_FLOW_RULE_ENGINE_SLOW_QUERY
-                    .with_label_values(&[flow_id.to_string().as_str(), &insert_into, &peer_addr])
-                    .observe(elapsed.as_secs_f64());
-            }
-
-            self.state
-                .write()
-                .await
-                .after_query_exec(elapsed, res.is_ok());
 
             let sleep_until = {
                 let mut state = self.state.write().await;
                 match state.shutdown_rx.try_recv() {
                     Ok(()) => break Ok(()),
                     Err(TryRecvError::Closed) => {
-                        warn!("Unexpected shutdown flow {flow_id}, shutdown anyway");
+                        warn!("Unexpected shutdown flow {}, shutdown anyway", self.flow_id);
                         break Ok(());
                     }
                     Err(TryRecvError::Empty) => (),
@@ -414,7 +546,7 @@ impl RecordingRuleTask {
         let low_bound = Timestamp::new_second(low_bound as i64);
 
         let plan = sql_to_df_plan(query_ctx.clone(), engine.clone(), &self.query, true).await?;
-
+        let schema_len = plan.schema().fields().len();
         // TODO(discord9): find more time window!
         let (col_name, lower, upper) =
             find_plan_time_window_bound(&plan, low_bound, query_ctx.clone(), engine.clone())
