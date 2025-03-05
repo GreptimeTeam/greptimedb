@@ -159,4 +159,26 @@ FROM
 ORDER BY
   collect_time ASC;
 
+-- also try alias with different name with time index
+SELECT
+  collect_time_utc AS collect_time_0,
+  peak_current,
+FROM
+  lightning
+ORDER BY
+  collect_time_0 ASC;
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE SELECT
+  collect_time_utc AS collect_time_0,
+  peak_current,
+FROM
+  lightning
+ORDER BY
+  collect_time_0 ASC;
+
 DROP TABLE lightning;
