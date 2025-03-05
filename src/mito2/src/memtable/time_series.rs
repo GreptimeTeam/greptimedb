@@ -39,8 +39,8 @@ use store_api::storage::{ColumnId, SequenceNumber};
 use table::predicate::Predicate;
 
 use crate::error::{
-    ComputeArrowSnafu, ConvertVectorSnafu, PrimaryKeyLengthMismatchSnafu, Result,
-    UnsupportedOperationSnafu,
+    ComputeArrowSnafu, ConvertVectorSnafu, FieldTypeMismatchSnafu, PrimaryKeyLengthMismatchSnafu,
+    Result, UnsupportedOperationSnafu,
 };
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::key_values::KeyValue;
@@ -158,7 +158,11 @@ impl TimeSeriesMemtable {
             }
         );
 
-        let primary_key_encoded = self.row_codec.encode(kv.primary_keys())?;
+        let primary_key_encoded = if kv.num_primary_keys() == 0 {
+            vec![]
+        } else {
+            self.row_codec.encode(kv.primary_keys())?
+        };
 
         let (series, series_allocated) = self.series_set.get_or_add_series(primary_key_encoded);
         stats.key_bytes += series_allocated;
@@ -194,8 +198,14 @@ impl Memtable for TimeSeriesMemtable {
 
         let mut local_stats = WriteMetrics::default();
 
-        for kv in kvs.iter() {
-            self.write_key_value(kv, &mut local_stats)?;
+        let chunks = kvs.chunk_by_primary_key(&self.row_codec)?;
+        for (primary_key, kvs) in chunks {
+            let (series, series_allocated) = self.series_set.get_or_add_series(primary_key);
+            local_stats.key_bytes += series_allocated;
+
+            let mut guard = series.write().unwrap();
+            let stats = guard.extend(kvs)?;
+            local_stats.merge(stats);
         }
         local_stats.value_bytes += kvs.num_rows() * std::mem::size_of::<Timestamp>();
         local_stats.value_bytes += kvs.num_rows() * std::mem::size_of::<OpType>();
@@ -650,6 +660,15 @@ impl Series {
         self.active.push(ts, sequence, op_type as u8, values)
     }
 
+    fn extend(&mut self, kvs: Vec<KeyValue>) -> Result<WriteMetrics> {
+        let metrics = self.active.extend(kvs)?;
+        if self.active.len() >= BUILDER_CAPACITY {
+            let region_metadata = self.region_metadata.clone();
+            self.freeze(&region_metadata);
+        }
+        Ok(metrics)
+    }
+
     fn update_pk_cache(&mut self, pk_values: Vec<Value>) {
         self.pk_cache = Some(pk_values);
     }
@@ -665,17 +684,15 @@ impl Series {
 
     /// Freezes active part to frozen part and compact frozen part to reduce memory fragmentation.
     /// Returns the frozen and compacted values.
-    fn compact(&mut self, region_metadata: &RegionMetadataRef) -> Result<Values> {
+    fn compact(&mut self, region_metadata: &RegionMetadataRef) -> Result<&Values> {
         self.freeze(region_metadata);
 
-        let mut frozen = self.frozen.clone();
+        let frozen = &self.frozen;
 
         // Each series must contain at least one row
         debug_assert!(!frozen.is_empty());
 
-        let values = if frozen.len() == 1 {
-            frozen.pop().unwrap()
-        } else {
+        if frozen.len() > 1 {
             // TODO(hl): We should keep track of min/max timestamps for each values and avoid
             // cloning and sorting when values do not overlap with each other.
 
@@ -699,10 +716,9 @@ impl Series {
 
             debug_assert_eq!(concatenated.len(), column_size);
             let values = Values::from_columns(&concatenated)?;
-            self.frozen = vec![values.clone()];
-            values
+            self.frozen = vec![values];
         };
-        Ok(values)
+        Ok(&self.frozen[0])
     }
 }
 
@@ -783,6 +799,44 @@ impl ValueBuilder {
         }
 
         size
+    }
+
+    fn extend(&mut self, kvs: Vec<KeyValue>) -> Result<WriteMetrics> {
+        self.timestamp.reserve(kvs.len());
+        self.sequence.reserve(kvs.len());
+        self.op_type.reserve(kvs.len());
+
+        let mut metrics = WriteMetrics::default();
+        for kv in kvs {
+            // safety: timestamp of kv must be both present and valid until here
+            let ts = kv.timestamp().as_timestamp().unwrap().unwrap().value();
+            metrics.min_ts = metrics.min_ts.min(ts);
+            metrics.max_ts = metrics.max_ts.max(ts);
+
+            self.timestamp.push(ts);
+            self.sequence.push(kv.sequence());
+            self.op_type.push(kv.op_type() as u8);
+
+            for (idx, field) in kv.fields().enumerate() {
+                metrics.value_bytes += field.data_size();
+
+                if field.is_null() && self.fields[idx].is_none() {
+                    // do nothing, postpone nulls filling to the next non-null value insertion
+                    continue;
+                }
+
+                let fields = self.fields[idx].get_or_insert_with(|| {
+                    let mut fields = self.field_types[idx]
+                        .create_mutable_vector(self.timestamp.len().max(INITIAL_BUILDER_CAPACITY));
+                    fields.push_nulls(self.timestamp.len() - 1);
+                    fields
+                });
+                fields
+                    .try_push_value_ref(field)
+                    .context(FieldTypeMismatchSnafu)?;
+            }
+        }
+        Ok(metrics)
     }
 
     /// Returns the length of [ValueBuilder]
@@ -1007,7 +1061,7 @@ mod tests {
         vec![ValueRef::Int64(v0), ValueRef::Float64(OrderedFloat(v1))].into_iter()
     }
 
-    fn check_values(values: Values, expect: &[(i64, u64, u8, i64, f64)]) {
+    fn check_values(values: &Values, expect: &[(i64, u64, u8, i64, f64)]) {
         let ts = values
             .timestamp
             .as_any()

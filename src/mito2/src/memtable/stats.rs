@@ -71,6 +71,13 @@ impl WriteMetrics {
             }
         }
     }
+
+    pub(crate) fn merge(&mut self, other: Self) {
+        self.key_bytes += other.key_bytes;
+        self.value_bytes += other.value_bytes;
+        self.min_ts = self.min_ts.min(other.min_ts);
+        self.max_ts = self.max_ts.max(other.max_ts);
+    }
 }
 
 impl Default for WriteMetrics {

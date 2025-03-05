@@ -18,11 +18,15 @@ use api::v1::{ColumnSchema, Mutation, OpType, Row, Rows};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::ValueRef;
 use memcomparable::Deserializer;
+use snafu::ensure;
 use store_api::codec::{infer_primary_key_encoding_from_hint, PrimaryKeyEncoding};
 use store_api::metadata::RegionMetadata;
 use store_api::storage::SequenceNumber;
 
-use crate::row_converter::{SortField, COLUMN_ID_ENCODE_SIZE};
+use crate::error::{PrimaryKeyLengthMismatchSnafu, Result};
+use crate::row_converter::{
+    DensePrimaryKeyCodec, PrimaryKeyCodecExt, SortField, COLUMN_ID_ENCODE_SIZE,
+};
 
 /// Key value view of a mutation.
 #[derive(Debug)]
@@ -70,6 +74,41 @@ impl KeyValues {
                 primary_key_encoding: self.primary_key_encoding,
             }
         })
+    }
+
+    pub fn chunk_by_primary_key(
+        &self,
+        row_codec: &DensePrimaryKeyCodec,
+    ) -> Result<HashMap<Vec<u8>, Vec<KeyValue>>> {
+        let Some(rows) = &self.mutation.rows else {
+            return Ok(HashMap::new());
+        };
+        let schema = &rows.schema;
+        let rows = &rows.rows;
+
+        let mut chunks: HashMap<Vec<u8>, Vec<KeyValue>> = HashMap::new();
+        for (row, sequence) in rows.iter().zip((self.mutation.sequence..).take(rows.len())) {
+            let kv = KeyValue {
+                row,
+                schema,
+                helper: &self.helper,
+                sequence,
+                op_type: OpType::try_from(self.mutation.op_type).expect("illegal op_type"),
+                primary_key_encoding: self.primary_key_encoding,
+            };
+
+            ensure!(
+                row_codec.num_fields() == kv.num_primary_keys(),
+                PrimaryKeyLengthMismatchSnafu {
+                    expect: row_codec.num_fields(),
+                    actual: kv.num_primary_keys(),
+                }
+            );
+
+            let primary_key = row_codec.encode(kv.primary_keys())?;
+            chunks.entry(primary_key).or_default().push(kv);
+        }
+        Ok(chunks)
     }
 
     /// Returns number of rows.

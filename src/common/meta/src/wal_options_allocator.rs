@@ -183,7 +183,7 @@ mod tests {
         let expected = regions
             .into_iter()
             .zip(vec![encoded_wal_options; num_regions as usize])
-            .collect();
+            .collect::<HashMap<_, _>>();
         assert_eq!(got, expected);
     }
 
