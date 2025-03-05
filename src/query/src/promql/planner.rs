@@ -51,8 +51,8 @@ use promql::extension_plan::{
     RangeManipulate, ScalarCalculate, SeriesDivide, SeriesNormalize, UnionDistinctOn,
 };
 use promql::functions::{
-    AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, HoltWinters, IDelta,
-    Increase, LastOverTime, MaxOverTime, MinOverTime, PredictLinear, PresentOverTime,
+    quantile_udaf, AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, HoltWinters,
+    IDelta, Increase, LastOverTime, MaxOverTime, MinOverTime, PredictLinear, PresentOverTime,
     QuantileOverTime, Rate, Resets, Round, StddevOverTime, StdvarOverTime, SumOverTime,
 };
 use promql_parser::label::{MatchOp, Matcher, Matchers, METRIC_NAME};
@@ -266,7 +266,10 @@ impl PromPlanner {
         aggr_expr: &AggregateExpr,
     ) -> Result<LogicalPlan> {
         let AggregateExpr {
-            op, expr, modifier, ..
+            op,
+            expr,
+            modifier,
+            param,
         } = aggr_expr;
 
         let input = self.prom_expr_to_plan(expr, session_state).await?;
@@ -279,7 +282,7 @@ impl PromPlanner {
                 // Need to append time index column into group by columns
                 let group_exprs = self.agg_modifier_to_col(input.schema(), modifier, true)?;
                 // convert op and value columns to aggregate exprs
-                let aggr_exprs = self.create_aggregate_exprs(*op, &input)?;
+                let aggr_exprs = self.create_aggregate_exprs(*op, param, &input)?;
 
                 // create plan
                 let group_sort_expr = group_exprs
@@ -312,18 +315,7 @@ impl PromPlanner {
 
         let group_exprs = self.agg_modifier_to_col(input.schema(), modifier, false)?;
 
-        let param = param
-            .as_deref()
-            .with_context(|| FunctionInvalidArgumentSnafu {
-                fn_name: (*op).to_string(),
-            })?;
-
-        let PromExpr::NumberLiteral(NumberLiteral { val }) = param else {
-            return FunctionInvalidArgumentSnafu {
-                fn_name: (*op).to_string(),
-            }
-            .fail();
-        };
+        let val = Self::get_param_value_as_f64(*op, param)?;
 
         // convert op and value columns to window exprs.
         let window_exprs = self.create_window_exprs(*op, group_exprs.clone(), &input)?;
@@ -341,7 +333,7 @@ impl PromPlanner {
                 let predicate = DfExpr::BinaryExpr(BinaryExpr {
                     left: Box::new(col(rank)),
                     op: Operator::LtEq,
-                    right: Box::new(lit(*val)),
+                    right: Box::new(lit(val)),
                 });
 
                 match expr {
@@ -1940,10 +1932,12 @@ impl PromPlanner {
     fn create_aggregate_exprs(
         &mut self,
         op: TokenType,
+        param: &Option<Box<PromExpr>>,
         input_plan: &LogicalPlan,
     ) -> Result<Vec<DfExpr>> {
         let aggr = match op.id() {
             token::T_SUM => sum_udaf(),
+            token::T_QUANTILE => quantile_udaf(),
             token::T_AVG => avg_udaf(),
             token::T_COUNT => count_udaf(),
             token::T_MIN => min_udaf(),
@@ -1951,12 +1945,10 @@ impl PromPlanner {
             token::T_GROUP => grouping_udaf(),
             token::T_STDDEV => stddev_pop_udaf(),
             token::T_STDVAR => var_pop_udaf(),
-            token::T_TOPK | token::T_BOTTOMK | token::T_COUNT_VALUES | token::T_QUANTILE => {
-                UnsupportedExprSnafu {
-                    name: format!("{op:?}"),
-                }
-                .fail()?
+            token::T_TOPK | token::T_BOTTOMK | token::T_COUNT_VALUES => UnsupportedExprSnafu {
+                name: format!("{op:?}"),
             }
+            .fail()?,
             _ => UnexpectedTokenSnafu { token: op }.fail()?,
         };
 
@@ -1966,16 +1958,26 @@ impl PromPlanner {
             .field_columns
             .iter()
             .map(|col| {
-                DfExpr::AggregateFunction(AggregateFunction {
+                let args = if op.id() == token::T_QUANTILE {
+                    let q = Self::get_param_value_as_f64(op, param)?;
+                    vec![
+                        DfExpr::Literal(ScalarValue::Float64(Some(q))),
+                        DfExpr::Column(Column::from_name(col)),
+                    ]
+                } else {
+                    vec![DfExpr::Column(Column::from_name(col))]
+                };
+
+                Ok(DfExpr::AggregateFunction(AggregateFunction {
                     func: aggr.clone(),
-                    args: vec![DfExpr::Column(Column::from_name(col))],
+                    args,
                     distinct: false,
                     filter: None,
                     order_by: None,
                     null_treatment: None,
-                })
+                }))
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
 
         // update value column name according to the aggregators
         let mut new_field_columns = Vec::with_capacity(self.ctx.field_columns.len());
@@ -1987,6 +1989,22 @@ impl PromPlanner {
         self.ctx.field_columns = new_field_columns;
 
         Ok(exprs)
+    }
+
+    fn get_param_value_as_f64(op: TokenType, param: &Option<Box<PromExpr>>) -> Result<f64> {
+        let param = param
+            .as_deref()
+            .with_context(|| FunctionInvalidArgumentSnafu {
+                fn_name: op.to_string(),
+            })?;
+        let PromExpr::NumberLiteral(NumberLiteral { val }) = param else {
+            return FunctionInvalidArgumentSnafu {
+                fn_name: op.to_string(),
+            }
+            .fail();
+        };
+
+        Ok(*val)
     }
 
     /// Create [DfExpr::WindowFunction] expr for each value column with given window function.

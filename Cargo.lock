@@ -8760,6 +8760,7 @@ dependencies = [
  "common-recordbatch",
  "common-telemetry",
  "datafusion",
+ "datafusion-common",
  "datafusion-expr",
  "datatypes",
  "futures",
