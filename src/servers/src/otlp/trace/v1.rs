@@ -23,8 +23,8 @@ use session::context::QueryContextRef;
 use super::attributes::Attributes;
 use super::span::{parse, TraceSpan};
 use super::{
-    DURATION_NANO_COLUMN, PARENT_SPAN_ID_COLUMN, SPAN_ID_COLUMN, SPAN_KIND_COLUMN,
-    SPAN_NAME_COLUMN, TIMESTAMP_COLUMN, TRACE_ID_COLUMN,
+    DURATION_NANO_COLUMN, PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN, SPAN_ID_COLUMN,
+    SPAN_KIND_COLUMN, SPAN_NAME_COLUMN, TIMESTAMP_COLUMN, TRACE_ID_COLUMN,
 };
 use crate::error::Result;
 use crate::otlp::utils::{any_value_to_jsonb, make_column_data, make_string_column_data};
@@ -114,6 +114,14 @@ pub fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> 
     ];
     row_writer::write_fields(writer, fields.into_iter(), &mut row)?;
 
+    if let Some(service_name) = span.service_name {
+        row_writer::write_fields(
+            writer,
+            std::iter::once(make_string_column_data(SERVICE_NAME_COLUMN, service_name)),
+            &mut row,
+        )?;
+    }
+
     write_attributes(writer, "span_attributes", span.span_attributes, &mut row)?;
     write_attributes(writer, "scope_attributes", span.scope_attributes, &mut row)?;
     write_attributes(
@@ -139,6 +147,12 @@ fn write_attributes(
 ) -> Result<()> {
     for attr in attributes.take().into_iter() {
         let key_suffix = attr.key;
+        // skip resource_attributes.service.name because its already copied to
+        // top level as `SERVICE_NAME_COLUMN`
+        if prefix == "resource_attributes" && key_suffix == "service.name" {
+            continue;
+        }
+
         let key = format!("{}.{}", prefix, key_suffix);
         match attr.value.and_then(|v| v.value) {
             Some(OtlpValue::StringValue(v)) => {
