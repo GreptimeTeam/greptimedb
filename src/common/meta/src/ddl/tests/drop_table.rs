@@ -35,7 +35,7 @@ use crate::ddl::test_util::{
     create_logical_table, create_physical_table, create_physical_table_metadata,
     test_create_logical_table_task, test_create_physical_table_task,
 };
-use crate::ddl::{TableMetadata,};
+use crate::ddl::TableMetadata;
 use crate::key::table_route::TableRouteValue;
 use crate::kv_backend::memory::MemoryKvBackend;
 use crate::peer::Peer;
@@ -184,7 +184,7 @@ async fn test_on_rollback() {
         ..
     } = ddl_context
         .table_metadata_allocator
-        .create( &create_physical_table_task)
+        .create(&create_physical_table_task)
         .await
         .unwrap();
     create_physical_table_task.set_table_id(table_id);

@@ -20,7 +20,7 @@ use common_telemetry::{debug, info};
 use snafu::ensure;
 use store_api::storage::{RegionId, RegionNumber, TableId};
 
-use crate::ddl::{TableMetadata};
+use crate::ddl::TableMetadata;
 use crate::error::{self, Result, UnsupportedSnafu};
 use crate::key::table_route::PhysicalTableRouteValue;
 use crate::peer::Peer;
@@ -146,10 +146,7 @@ impl TableMetadataAllocator {
     }
 
     /// Create VIEW metadata
-    pub async fn create_view(
-        &self,
-        table_id: &Option<api::v1::TableId>,
-    ) -> Result<TableMetadata> {
+    pub async fn create_view(&self, table_id: &Option<api::v1::TableId>) -> Result<TableMetadata> {
         let table_id = self.allocate_table_id(table_id).await?;
 
         Ok(TableMetadata {
@@ -158,12 +155,9 @@ impl TableMetadataAllocator {
         })
     }
 
-    pub async fn create(
-        &self,
-        task: &CreateTableTask,
-    ) -> Result<TableMetadata> {
+    pub async fn create(&self, task: &CreateTableTask) -> Result<TableMetadata> {
         let table_id = self.allocate_table_id(&task.create_table.table_id).await?;
-        let table_route = self.create_table_route( table_id, task).await?;
+        let table_route = self.create_table_route(table_id, task).await?;
         let region_wal_options = self.create_wal_options(&table_route)?;
 
         debug!(
@@ -185,18 +179,14 @@ pub type PeerAllocatorRef = Arc<dyn PeerAllocator>;
 #[async_trait]
 pub trait PeerAllocator: Send + Sync {
     /// Allocates `regions` size [`Peer`]s.
-    async fn alloc(&self, regions: usize)
-        -> Result<Vec<Peer>>;
+    async fn alloc(&self, regions: usize) -> Result<Vec<Peer>>;
 }
 
 struct NoopPeerAllocator;
 
 #[async_trait]
 impl PeerAllocator for NoopPeerAllocator {
-    async fn alloc(
-        &self,
-        regions: usize,
-    ) -> Result<Vec<Peer>> {
+    async fn alloc(&self, regions: usize) -> Result<Vec<Peer>> {
         Ok(vec![Peer::default(); regions])
     }
 }

@@ -56,7 +56,7 @@ pub async fn create_physical_table(ddl_context: &DdlContext, name: &str) -> Tabl
         ..
     } = ddl_context
         .table_metadata_allocator
-        .create( &create_physical_table_task)
+        .create(&create_physical_table_task)
         .await
         .unwrap();
     create_physical_table_task.set_table_id(table_id);

@@ -41,10 +41,7 @@ impl MetasrvPeerAllocator {
     /// This method is mainly a wrapper around the [`SelectorRef`]::`select` method. There is
     /// no guarantee that how the returned peers are used, like whether they are from the same
     /// table or not. So this method isn't idempotent.
-    async fn alloc(
-        &self,
-        regions: usize,
-    ) -> Result<Vec<Peer>> {
+    async fn alloc(&self, regions: usize) -> Result<Vec<Peer>> {
         ensure!(regions <= MAX_REGION_SEQ as usize, TooManyPartitionsSnafu);
 
         let mut peers = self
@@ -75,11 +72,8 @@ impl MetasrvPeerAllocator {
 
 #[async_trait]
 impl PeerAllocator for MetasrvPeerAllocator {
-    async fn alloc(
-        &self,
-        regions: usize,
-    ) -> MetaResult<Vec<Peer>> {
-        self.alloc( regions)
+    async fn alloc(&self, regions: usize) -> MetaResult<Vec<Peer>> {
+        self.alloc(regions)
             .await
             .map_err(BoxedError::new)
             .context(ExternalSnafu)

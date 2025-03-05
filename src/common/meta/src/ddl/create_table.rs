@@ -37,7 +37,7 @@ use crate::ddl::utils::{
     add_peer_context_if_needed, convert_region_routes_to_detecting_regions, handle_retry_error,
     region_storage_path,
 };
-use crate::ddl::{DdlContext, TableMetadata, };
+use crate::ddl::{DdlContext, TableMetadata};
 use crate::error::{self, Result};
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::{PhysicalTableRouteValue, TableRouteValue};
@@ -154,7 +154,7 @@ impl CreateTableProcedure {
         } = self
             .context
             .table_metadata_allocator
-            .create( &self.creator.data.task)
+            .create(&self.creator.data.task)
             .await?;
         self.creator
             .set_allocated_metadata(table_id, table_route, region_wal_options);
