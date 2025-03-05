@@ -67,7 +67,7 @@ impl MetricEngineInner {
                     .await?;
             } else {
                 let grouped_requests =
-                    self.group_alter_logical_regions_requests_by_physical_region_id(requests)?;
+                    self.group_logical_region_requests_by_physical_region_id(requests)?;
                 for (physical_region_id, requests) in grouped_requests {
                     self.alter_logical_regions(
                         physical_region_id,
@@ -81,7 +81,8 @@ impl MetricEngineInner {
         Ok(0)
     }
 
-    fn group_alter_logical_regions_requests_by_physical_region_id(
+    /// Groups the alter logical region requests by physical region id.
+    fn group_logical_region_requests_by_physical_region_id(
         &self,
         requests: Vec<(RegionId, RegionAlterRequest)>,
     ) -> Result<HashMap<RegionId, Vec<(RegionId, RegionAlterRequest)>>> {
