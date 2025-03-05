@@ -79,5 +79,5 @@ runs:
           BUILDX_MULTI_PLATFORM_BUILD=amd64 \
           IMAGE_REGISTRY=${{ inputs.dockerhub-image-registry }} \
           IMAGE_NAMESPACE=${{ inputs.dockerhub-image-namespace }} \
-          DEV_BUILDER_IMAGE_TAG=${{ inputs.version }} && \
+          DEV_BUILDER_IMAGE_TAG=${{ inputs.version }}
 
