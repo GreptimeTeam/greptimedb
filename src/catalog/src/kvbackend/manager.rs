@@ -304,6 +304,8 @@ impl CatalogManager for KvBackendCatalogManager {
             .into_values()
             .filter(|t| t.table_info.catalog_name == catalog && t.table_info.schema_name == schema)
             .map(build_table)
+            .collect::<Vec<_>>()
+            .into_iter()
             .collect::<Result<Vec<_>>>()?;
 
         Ok(tables)

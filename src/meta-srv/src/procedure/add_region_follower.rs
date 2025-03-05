@@ -1,0 +1,148 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+pub mod manager;
+
+use std::time::Duration;
+
+use common_meta::lock_key::{CatalogLock, RegionLock, SchemaLock, TableLock};
+use common_procedure::error::ToJsonSnafu;
+use common_procedure::{
+    Context as ProcedureContext, LockKey, Procedure, Result as ProcedureResult, Status, StringKey,
+};
+use manager::Context;
+use serde::{Deserialize, Serialize};
+use snafu::ResultExt;
+use store_api::storage::RegionId;
+
+use crate::error::Result;
+
+pub struct AddRegionFollowerProcedure {
+    pub data: AddRegionFollowerData,
+    pub context: Context,
+}
+
+impl AddRegionFollowerProcedure {
+    pub const TYPE_NAME: &'static str = "metasrv-procedure::AddRegionFollower";
+
+    pub fn new(
+        catalog: String,
+        schema: String,
+        region_id: RegionId,
+        peer_id: u64,
+        timeout: Duration,
+        context: Context,
+    ) -> Self {
+        Self {
+            data: AddRegionFollowerData {
+                catalog,
+                schema,
+                region_id,
+                peer_id,
+                timeout,
+                state: AddRegionFollowerState::Prepare,
+            },
+            context,
+        }
+    }
+
+    pub fn from_json(json: &str, context: Context) -> ProcedureResult<Self> {
+        let data: AddRegionFollowerData = serde_json::from_str(json).unwrap();
+        Ok(Self { data, context })
+    }
+
+    pub async fn on_prepare(&mut self) -> Result<Status> {
+        Ok(Status::executing(true))
+    }
+
+    pub async fn on_submit_request(&mut self) -> Result<Status> {
+        Ok(Status::executing(true))
+    }
+
+    pub async fn on_update_metadata(&mut self) -> Result<Status> {
+        Ok(Status::executing(true))
+    }
+
+    pub async fn on_broadcast(&mut self) -> Result<Status> {
+        Ok(Status::executing(true))
+    }
+}
+
+#[async_trait::async_trait]
+impl Procedure for AddRegionFollowerProcedure {
+    fn type_name(&self) -> &str {
+        Self::TYPE_NAME
+    }
+
+    async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
+        Ok(Status::executing(true))
+    }
+
+    fn dump(&self) -> ProcedureResult<String> {
+        serde_json::to_string(&self.data).context(ToJsonSnafu)
+    }
+
+    fn lock_key(&self) -> LockKey {
+        LockKey::new(self.data.lock_key())
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AddRegionFollowerData {
+    /// The catalog name.
+    pub(crate) catalog: String,
+    /// The schema name.
+    pub(crate) schema: String,
+    /// The region id.
+    pub(crate) region_id: RegionId,
+    /// The peer.
+    pub(crate) peer_id: u64,
+    /// The timeout.
+    #[serde(with = "humantime_serde", default = "default_timeout")]
+    pub(crate) timeout: Duration,
+    /// The state.
+    pub(crate) state: AddRegionFollowerState,
+}
+
+impl AddRegionFollowerData {
+    pub fn lock_key(&self) -> Vec<StringKey> {
+        let region_id = self.region_id;
+        let lock_key = vec![
+            CatalogLock::Read(&self.catalog).into(),
+            SchemaLock::read(&self.catalog, &self.schema).into(),
+            // The optimistic updating of table route is not working very well,
+            // so we need to use the write lock here.
+            TableLock::Write(region_id.table_id()).into(),
+            RegionLock::Write(region_id).into(),
+        ];
+
+        lock_key
+    }
+}
+
+fn default_timeout() -> Duration {
+    Duration::from_secs(10)
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum AddRegionFollowerState {
+    /// Prepares to add region follower.
+    Prepare,
+    /// Sends add region follower request to Datanode.
+    SubmitRequest,
+    /// Updates table metadata.
+    UpdateMetadata,
+    /// Broadcasts the invalidate table route cache message.
+    InvalidateTableCache,
+}
