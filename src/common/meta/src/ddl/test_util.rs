@@ -31,7 +31,7 @@ use crate::ddl::test_util::columns::TestColumnDefBuilder;
 use crate::ddl::test_util::create_table::{
     build_raw_table_info_from_expr, TestCreateTableExprBuilder,
 };
-use crate::ddl::{DdlContext, TableMetadata, TableMetadataAllocatorContext};
+use crate::ddl::{DdlContext, TableMetadata};
 use crate::key::table_route::TableRouteValue;
 use crate::rpc::ddl::CreateTableTask;
 
@@ -56,7 +56,7 @@ pub async fn create_physical_table(ddl_context: &DdlContext, name: &str) -> Tabl
         ..
     } = ddl_context
         .table_metadata_allocator
-        .create(&TableMetadataAllocatorContext, &create_physical_table_task)
+        .create( &create_physical_table_task)
         .await
         .unwrap();
     create_physical_table_task.set_table_id(table_id);

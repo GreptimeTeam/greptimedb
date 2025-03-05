@@ -24,7 +24,7 @@ use table::table_reference::TableReference;
 
 use crate::cache_invalidator::Context;
 use crate::ddl::utils::handle_retry_error;
-use crate::ddl::{DdlContext, TableMetadata, TableMetadataAllocatorContext};
+use crate::ddl::{DdlContext, TableMetadata};
 use crate::error::{self, Result};
 use crate::instruction::CacheIdent;
 use crate::key::table_name::TableNameKey;
@@ -143,7 +143,7 @@ impl CreateViewProcedure {
             let TableMetadata { table_id, .. } = self
                 .context
                 .table_metadata_allocator
-                .create_view(&TableMetadataAllocatorContext, &None)
+                .create_view(&None)
                 .await?;
             self.data.set_allocated_metadata(table_id, false);
         }

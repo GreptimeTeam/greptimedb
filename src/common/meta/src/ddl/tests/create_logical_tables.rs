@@ -26,7 +26,7 @@ use crate::ddl::test_util::datanode_handler::NaiveDatanodeHandler;
 use crate::ddl::test_util::{
     create_physical_table_metadata, test_create_logical_table_task, test_create_physical_table_task,
 };
-use crate::ddl::{TableMetadata, TableMetadataAllocatorContext};
+use crate::ddl::TableMetadata;
 use crate::error::Error;
 use crate::key::table_route::TableRouteValue;
 use crate::test_util::{new_ddl_context, MockDatanodeManager};
@@ -54,7 +54,7 @@ async fn test_on_prepare() {
         ..
     } = ddl_context
         .table_metadata_allocator
-        .create(&TableMetadataAllocatorContext, &create_physical_table_task)
+        .create(&create_physical_table_task)
         .await
         .unwrap();
     create_physical_table_task.set_table_id(table_id);
@@ -84,7 +84,7 @@ async fn test_on_prepare_logical_table_exists_err() {
         ..
     } = ddl_context
         .table_metadata_allocator
-        .create(&TableMetadataAllocatorContext, &create_physical_table_task)
+        .create(&create_physical_table_task)
         .await
         .unwrap();
     create_physical_table_task.set_table_id(table_id);
@@ -126,7 +126,7 @@ async fn test_on_prepare_with_create_if_table_exists() {
         ..
     } = ddl_context
         .table_metadata_allocator
-        .create(&TableMetadataAllocatorContext, &create_physical_table_task)
+        .create(&create_physical_table_task)
         .await
         .unwrap();
     create_physical_table_task.set_table_id(table_id);
@@ -170,7 +170,7 @@ async fn test_on_prepare_part_logical_tables_exist() {
         ..
     } = ddl_context
         .table_metadata_allocator
-        .create(&TableMetadataAllocatorContext, &create_physical_table_task)
+        .create(&create_physical_table_task)
         .await
         .unwrap();
     create_physical_table_task.set_table_id(table_id);
@@ -217,7 +217,7 @@ async fn test_on_create_metadata() {
         ..
     } = ddl_context
         .table_metadata_allocator
-        .create(&TableMetadataAllocatorContext, &create_physical_table_task)
+        .create(&create_physical_table_task)
         .await
         .unwrap();
     create_physical_table_task.set_table_id(table_id);
@@ -262,7 +262,7 @@ async fn test_on_create_metadata_part_logical_tables_exist() {
         ..
     } = ddl_context
         .table_metadata_allocator
-        .create(&TableMetadataAllocatorContext, &create_physical_table_task)
+        .create(&create_physical_table_task)
         .await
         .unwrap();
     create_physical_table_task.set_table_id(table_id);
@@ -318,7 +318,7 @@ async fn test_on_create_metadata_err() {
         ..
     } = ddl_context
         .table_metadata_allocator
-        .create(&TableMetadataAllocatorContext, &create_physical_table_task)
+        .create(&create_physical_table_task)
         .await
         .unwrap();
     create_physical_table_task.set_table_id(table_id);

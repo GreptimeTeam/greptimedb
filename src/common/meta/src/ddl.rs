@@ -89,7 +89,6 @@ pub trait ProcedureExecutor: Send + Sync {
 
 pub type ProcedureExecutorRef = Arc<dyn ProcedureExecutor>;
 
-pub struct TableMetadataAllocatorContext;
 
 /// Metadata allocated to a table.
 #[derive(Default)]

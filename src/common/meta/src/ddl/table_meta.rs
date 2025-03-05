@@ -20,7 +20,7 @@ use common_telemetry::{debug, info};
 use snafu::ensure;
 use store_api::storage::{RegionId, RegionNumber, TableId};
 
-use crate::ddl::{TableMetadata, TableMetadataAllocatorContext};
+use crate::ddl::{TableMetadata};
 use crate::error::{self, Result, UnsupportedSnafu};
 use crate::key::table_route::PhysicalTableRouteValue;
 use crate::peer::Peer;
@@ -109,7 +109,6 @@ impl TableMetadataAllocator {
 
     async fn create_table_route(
         &self,
-        ctx: &TableMetadataAllocatorContext,
         table_id: TableId,
         task: &CreateTableTask,
     ) -> Result<PhysicalTableRouteValue> {
@@ -121,7 +120,7 @@ impl TableMetadataAllocator {
             }
         );
 
-        let peers = self.peer_allocator.alloc(ctx, regions).await?;
+        let peers = self.peer_allocator.alloc(regions).await?;
         let region_routes = task
             .partitions
             .iter()
@@ -149,7 +148,6 @@ impl TableMetadataAllocator {
     /// Create VIEW metadata
     pub async fn create_view(
         &self,
-        _ctx: &TableMetadataAllocatorContext,
         table_id: &Option<api::v1::TableId>,
     ) -> Result<TableMetadata> {
         let table_id = self.allocate_table_id(table_id).await?;
@@ -162,11 +160,10 @@ impl TableMetadataAllocator {
 
     pub async fn create(
         &self,
-        ctx: &TableMetadataAllocatorContext,
         task: &CreateTableTask,
     ) -> Result<TableMetadata> {
         let table_id = self.allocate_table_id(&task.create_table.table_id).await?;
-        let table_route = self.create_table_route(ctx, table_id, task).await?;
+        let table_route = self.create_table_route( table_id, task).await?;
         let region_wal_options = self.create_wal_options(&table_route)?;
 
         debug!(
@@ -188,7 +185,7 @@ pub type PeerAllocatorRef = Arc<dyn PeerAllocator>;
 #[async_trait]
 pub trait PeerAllocator: Send + Sync {
     /// Allocates `regions` size [`Peer`]s.
-    async fn alloc(&self, ctx: &TableMetadataAllocatorContext, regions: usize)
+    async fn alloc(&self, regions: usize)
         -> Result<Vec<Peer>>;
 }
 
@@ -198,7 +195,6 @@ struct NoopPeerAllocator;
 impl PeerAllocator for NoopPeerAllocator {
     async fn alloc(
         &self,
-        _ctx: &TableMetadataAllocatorContext,
         regions: usize,
     ) -> Result<Vec<Peer>> {
         Ok(vec![Peer::default(); regions])
