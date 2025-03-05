@@ -15,9 +15,9 @@
 use std::mem::size_of;
 
 use async_trait::async_trait;
-use common_base::BitVec;
 use greptime_proto::v1::index::InvertedIndexMetas;
 
+use crate::bitmap::Bitmap;
 use crate::inverted_index::error::{IndexNotFoundSnafu, Result};
 use crate::inverted_index::format::reader::InvertedIndexReader;
 use crate::inverted_index::search::fst_apply::{
@@ -50,12 +50,11 @@ impl IndexApplier for PredicatesIndexApplier {
     ) -> Result<ApplyOutput> {
         let metadata = reader.metadata().await?;
         let mut output = ApplyOutput {
-            matched_segment_ids: BitVec::EMPTY,
+            matched_segment_ids: Bitmap::new_bitvec(),
             total_row_count: metadata.total_row_count as _,
             segment_row_count: metadata.segment_row_count as _,
         };
 
-        let mut bitmap = Self::bitmap_full_range(&metadata);
         // TODO(zhongzc): optimize the order of applying to make it quicker to return empty.
         let mut appliers = Vec::with_capacity(self.fst_appliers.len());
         let mut fst_ranges = Vec::with_capacity(self.fst_appliers.len());
@@ -81,7 +80,7 @@ impl IndexApplier for PredicatesIndexApplier {
         }
 
         if fst_ranges.is_empty() {
-            output.matched_segment_ids = bitmap;
+            output.matched_segment_ids = Self::bitmap_full_range(&metadata);
             return Ok(output);
         }
 
@@ -93,14 +92,15 @@ impl IndexApplier for PredicatesIndexApplier {
             .collect::<Vec<_>>();
 
         let mut mapper = ParallelFstValuesMapper::new(reader);
-        let bm_vec = mapper.map_values_vec(&value_and_meta_vec).await?;
+        let mut bm_vec = mapper.map_values_vec(&value_and_meta_vec).await?;
 
+        let mut bitmap = bm_vec.pop().unwrap(); // SAFETY: `fst_ranges` is not empty
         for bm in bm_vec {
-            if bitmap.count_ones() == 0 {
+            if bm.count_ones() == 0 {
                 break;
             }
 
-            bitmap &= bm;
+            bitmap.intersect(bm);
         }
 
         output.matched_segment_ids = bitmap;
@@ -146,12 +146,12 @@ impl PredicatesIndexApplier {
         Ok(PredicatesIndexApplier { fst_appliers })
     }
 
-    /// Creates a `BitVec` representing the full range of data in the index for initial scanning.
-    fn bitmap_full_range(metadata: &InvertedIndexMetas) -> BitVec {
+    /// Creates a `Bitmap` representing the full range of data in the index for initial scanning.
+    fn bitmap_full_range(metadata: &InvertedIndexMetas) -> Bitmap {
         let total_count = metadata.total_row_count;
         let segment_count = metadata.segment_row_count;
         let len = total_count.div_ceil(segment_count);
-        BitVec::repeat(true, len as _)
+        Bitmap::full_bitvec(len as _)
     }
 }
 
@@ -167,10 +167,10 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Arc;
 
-    use common_base::bit_vec::prelude::*;
-    use greptime_proto::v1::index::InvertedIndexMeta;
+    use greptime_proto::v1::index::{BitmapType, InvertedIndexMeta};
 
     use super::*;
+    use crate::bitmap::Bitmap;
     use crate::inverted_index::error::Error;
     use crate::inverted_index::format::reader::MockInvertedIndexReader;
     use crate::inverted_index::search::fst_apply::MockFstApplier;
@@ -190,6 +190,7 @@ mod tests {
             let meta = InvertedIndexMeta {
                 name: s(tag),
                 relative_fst_offset: idx,
+                bitmap_type: BitmapType::Roaring.into(),
                 ..Default::default()
             };
             metas.metas.insert(s(tag), meta);
@@ -229,10 +230,16 @@ mod tests {
             .unwrap()])
         });
 
-        mock_reader.expect_bitmap_deque().returning(|range| {
-            assert_eq!(range.len(), 1);
-            assert_eq!(range[0], 2..3);
-            Ok(VecDeque::from([bitvec![u8, Lsb0; 1, 0, 1, 0, 1, 0, 1, 0]]))
+        mock_reader.expect_bitmap_deque().returning(|arg| {
+            assert_eq!(arg.len(), 1);
+            let range = &arg[0].0;
+            let bitmap_type = arg[0].1;
+            assert_eq!(*range, 2..3);
+            assert_eq!(bitmap_type, BitmapType::Roaring);
+            Ok(VecDeque::from([Bitmap::from_lsb0_bytes(
+                &[0b10101010],
+                bitmap_type,
+            )]))
         });
         let output = applier
             .apply(SearchContext::default(), &mut mock_reader)
@@ -240,7 +247,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             output.matched_segment_ids,
-            bitvec![u8, Lsb0; 1, 0, 1, 0, 1, 0, 1, 0]
+            Bitmap::from_lsb0_bytes(&[0b10101010], BitmapType::Roaring)
         );
 
         // An index reader with a single tag "tag-0" but without value "tag-0_value-0"
@@ -292,12 +299,16 @@ mod tests {
         });
         mock_reader.expect_bitmap_deque().returning(|ranges| {
             let mut output = VecDeque::new();
-            for range in ranges {
+            for (range, bitmap_type) in ranges {
                 let offset = range.start;
                 let size = range.end - range.start;
-                match (offset, size) {
-                    (1, 1) => output.push_back(bitvec![u8, Lsb0; 1, 0, 1, 0, 1, 0, 1, 0]),
-                    (2, 1) => output.push_back(bitvec![u8, Lsb0; 1, 1, 0, 1, 1, 0, 1, 1]),
+                match (offset, size, bitmap_type) {
+                    (1, 1, BitmapType::Roaring) => {
+                        output.push_back(Bitmap::from_lsb0_bytes(&[0b10101010], *bitmap_type))
+                    }
+                    (2, 1, BitmapType::Roaring) => {
+                        output.push_back(Bitmap::from_lsb0_bytes(&[0b11011011], *bitmap_type))
+                    }
                     _ => unreachable!(),
                 }
             }
@@ -311,7 +322,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             output.matched_segment_ids,
-            bitvec![u8, Lsb0; 1, 0, 0, 0, 1, 0, 1, 0]
+            Bitmap::from_lsb0_bytes(&[0b10001010], BitmapType::Roaring)
         );
     }
 
@@ -330,10 +341,7 @@ mod tests {
             .apply(SearchContext::default(), &mut mock_reader)
             .await
             .unwrap();
-        assert_eq!(
-            output.matched_segment_ids,
-            bitvec![u8, Lsb0; 1, 1, 1, 1, 1, 1, 1, 1]
-        ); // full range to scan
+        assert_eq!(output.matched_segment_ids, Bitmap::full_bitvec(8)); // full range to scan
     }
 
     #[tokio::test]
@@ -405,10 +413,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(
-            output.matched_segment_ids,
-            bitvec![u8, Lsb0; 1, 1, 1, 1, 1, 1, 1, 1]
-        );
+        assert_eq!(output.matched_segment_ids, Bitmap::full_bitvec(8));
     }
 
     #[test]
