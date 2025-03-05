@@ -200,14 +200,14 @@ pub struct DatanodeStatKey {
 impl DatanodeStatKey {
     /// The key prefix.
     pub fn prefix_key() -> Vec<u8> {
-        //todo(hl): remove cluster id in prefix
+        // todo(hl): remove cluster id in prefix
         format!("{DATANODE_STAT_PREFIX}-0-").into_bytes()
     }
 }
 
 impl From<DatanodeStatKey> for Vec<u8> {
     fn from(value: DatanodeStatKey) -> Self {
-        //todo(hl): remove cluster id in prefix
+        // todo(hl): remove cluster id in prefix
         format!("{}-0-{}", DATANODE_STAT_PREFIX, value.node_id).into_bytes()
     }
 }
