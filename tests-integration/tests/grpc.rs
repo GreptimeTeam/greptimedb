@@ -659,21 +659,21 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
             result: PromQueryResult::Vector(vec![
                 PromSeriesVector {
                     metric: [
-                        ("k".to_string(), "a".to_string()),
-                        ("__name__".to_string(), "test".to_string()),
-                    ]
-                    .into_iter()
-                    .collect(),
-                    value: Some((5.0, "2".to_string())),
-                },
-                PromSeriesVector {
-                    metric: [
                         ("__name__".to_string(), "test".to_string()),
                         ("k".to_string(), "b".to_string()),
                     ]
                     .into_iter()
                     .collect(),
                     value: Some((5.0, "1".to_string())),
+                },
+                PromSeriesVector {
+                    metric: [
+                        ("k".to_string(), "a".to_string()),
+                        ("__name__".to_string(), "test".to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    value: Some((5.0, "2".to_string())),
                 },
             ]),
         }),
@@ -712,20 +712,20 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                 PromSeriesMatrix {
                     metric: [
                         ("__name__".to_string(), "test".to_string()),
-                        ("k".to_string(), "a".to_string()),
-                    ]
-                    .into_iter()
-                    .collect(),
-                    values: vec![(5.0, "2".to_string()), (10.0, "2".to_string())],
-                },
-                PromSeriesMatrix {
-                    metric: [
-                        ("__name__".to_string(), "test".to_string()),
                         ("k".to_string(), "b".to_string()),
                     ]
                     .into_iter()
                     .collect(),
                     values: vec![(5.0, "1".to_string()), (10.0, "1".to_string())],
+                },
+                PromSeriesMatrix {
+                    metric: [
+                        ("__name__".to_string(), "test".to_string()),
+                        ("k".to_string(), "a".to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    values: vec![(5.0, "2".to_string()), (10.0, "2".to_string())],
                 },
             ]),
         }),

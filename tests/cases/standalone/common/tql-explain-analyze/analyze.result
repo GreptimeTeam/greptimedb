@@ -22,8 +22,8 @@ TQL ANALYZE (0, 10, '5s') test;
 | 0_| 0_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [false] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["k"] REDACTED
-|_|_|_SortPreservingMergeExec: [k@2 ASC NULLS LAST] REDACTED
-|_|_|_SortExec: expr=[k@2 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
+|_|_|_SortPreservingMergeExec: [k@2 DESC NULLS LAST] REDACTED
+|_|_|_SortExec: expr=[k@2 DESC NULLS LAST], preserve_partitioning=[true] REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [k@2 DESC NULLS LAST, j@1 DESC NULLS LAST] REDACTED
@@ -52,8 +52,8 @@ TQL ANALYZE (0, 10, '1s', '2s') test;
 | 0_| 0_|_PromInstantManipulateExec: range=[0..10000], lookback=[2000], interval=[1000], time index=[j] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [false] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["k"] REDACTED
-|_|_|_SortPreservingMergeExec: [k@2 ASC NULLS LAST] REDACTED
-|_|_|_SortExec: expr=[k@2 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
+|_|_|_SortPreservingMergeExec: [k@2 DESC NULLS LAST] REDACTED
+|_|_|_SortExec: expr=[k@2 DESC NULLS LAST], preserve_partitioning=[true] REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [k@2 DESC NULLS LAST, j@1 DESC NULLS LAST] REDACTED
@@ -81,8 +81,8 @@ TQL ANALYZE ('1970-01-01T00:00:00'::timestamp, '1970-01-01T00:00:00'::timestamp 
 | 0_| 0_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [false] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["k"] REDACTED
-|_|_|_SortPreservingMergeExec: [k@2 ASC NULLS LAST] REDACTED
-|_|_|_SortExec: expr=[k@2 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
+|_|_|_SortPreservingMergeExec: [k@2 DESC NULLS LAST] REDACTED
+|_|_|_SortExec: expr=[k@2 DESC NULLS LAST], preserve_partitioning=[true] REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [k@2 DESC NULLS LAST, j@1 DESC NULLS LAST] REDACTED
@@ -112,8 +112,8 @@ TQL ANALYZE VERBOSE (0, 10, '5s') test;
 | 0_| 0_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [false] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["k"] REDACTED
-|_|_|_SortPreservingMergeExec: [k@2 ASC NULLS LAST] REDACTED
-|_|_|_SortExec: expr=[k@2 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
+|_|_|_SortPreservingMergeExec: [k@2 DESC NULLS LAST] REDACTED
+|_|_|_SortExec: expr=[k@2 DESC NULLS LAST], preserve_partitioning=[true] REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [k@2 DESC NULLS LAST, j@1 DESC NULLS LAST] REDACTED

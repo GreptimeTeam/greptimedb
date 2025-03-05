@@ -34,6 +34,7 @@ use datafusion::physical_plan::{
     SendableRecordBatchStream,
 };
 use datatypes::arrow::compute;
+use datatypes::compute::SortOptions;
 use futures::{ready, Stream, StreamExt};
 use greptime_proto::substrait_extension as pb;
 use prost::Message;
@@ -157,7 +158,10 @@ impl ExecutionPlan for SeriesDivideExec {
             .map(|tag| PhysicalSortRequirement {
                 // Safety: the tag column names is verified in the planning phase
                 expr: Arc::new(ColumnExpr::new_with_schema(tag, &input_schema).unwrap()),
-                options: None,
+                options: Some(SortOptions {
+                    descending: true,
+                    nulls_first: false,
+                }),
             })
             .collect();
         if !exprs.is_empty() {

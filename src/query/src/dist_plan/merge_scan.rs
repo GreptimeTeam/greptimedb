@@ -121,6 +121,7 @@ impl MergeScanLogicalPlan {
         &self.input
     }
 }
+
 pub struct MergeScanExec {
     table: TableName,
     regions: Vec<RegionId>,
