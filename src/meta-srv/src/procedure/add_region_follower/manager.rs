@@ -22,6 +22,7 @@ use store_api::storage::RegionId;
 use table::table_name::TableName;
 
 use super::AddRegionFollowerProcedure;
+use crate::cluster::MetaPeerClientRef;
 use crate::error::{self, Result};
 use crate::service::mailbox::MailboxRef;
 
@@ -32,6 +33,7 @@ pub struct Context {
     pub mailbox: MailboxRef,
     pub server_addr: String,
     pub cache_invalidator: CacheInvalidatorRef,
+    pub meta_peer_client: MetaPeerClientRef,
 }
 
 pub struct AddRegionFollowerManager {
@@ -69,11 +71,7 @@ impl AddRegionFollowerManager {
         &self,
         req: AddRegionFollowerRequest,
     ) -> Result<(ProcedureId, Option<Output>)> {
-        let AddRegionFollowerRequest {
-            region_id,
-            peer_id,
-            timeout,
-        } = req;
+        let AddRegionFollowerRequest { region_id, peer_id } = req;
         let region_id = RegionId::from_u64(region_id);
         let table_id = region_id.table_id();
         let ctx = self.new_context();
@@ -94,14 +92,8 @@ impl AddRegionFollowerManager {
             ..
         } = table_info.table_name();
 
-        let procedure = AddRegionFollowerProcedure::new(
-            catalog_name,
-            schema_name,
-            region_id,
-            peer_id,
-            timeout,
-            ctx,
-        );
+        let procedure =
+            AddRegionFollowerProcedure::new(catalog_name, schema_name, region_id, peer_id, ctx);
 
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
         let procedure_id = procedure_with_id.id;

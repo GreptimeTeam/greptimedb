@@ -14,19 +14,20 @@
 
 pub mod manager;
 
-use std::time::Duration;
-
+use common_meta::distributed_time_constants;
 use common_meta::lock_key::{CatalogLock, RegionLock, SchemaLock, TableLock};
 use common_procedure::error::ToJsonSnafu;
 use common_procedure::{
     Context as ProcedureContext, LockKey, Procedure, Result as ProcedureResult, Status, StringKey,
 };
+use common_telemetry::info;
 use manager::Context;
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 
-use crate::error::Result;
+use crate::error::{self, Result};
+use crate::lease::lookup_datanode_peer;
 
 pub struct AddRegionFollowerProcedure {
     pub data: AddRegionFollowerData,
@@ -41,7 +42,6 @@ impl AddRegionFollowerProcedure {
         schema: String,
         region_id: RegionId,
         peer_id: u64,
-        timeout: Duration,
         context: Context,
     ) -> Self {
         Self {
@@ -50,7 +50,6 @@ impl AddRegionFollowerProcedure {
                 schema,
                 region_id,
                 peer_id,
-                timeout,
                 state: AddRegionFollowerState::Prepare,
             },
             context,
@@ -63,6 +62,22 @@ impl AddRegionFollowerProcedure {
     }
 
     pub async fn on_prepare(&mut self) -> Result<Status> {
+        // check peer is alive
+        let datanode_peer = lookup_datanode_peer(
+            self.data.peer_id,
+            &self.context.meta_peer_client,
+            distributed_time_constants::DATANODE_LEASE_SECS,
+        )
+        .await?
+        .context(error::PeerUnavailableSnafu {
+            peer_id: self.data.peer_id,
+        })?;
+
+        info!(
+            "Add region({}) follower procedure is preparing, peer: {datanode_peer:?}",
+            self.data.region_id
+        );
+
         Ok(Status::executing(true))
     }
 
@@ -108,9 +123,6 @@ pub struct AddRegionFollowerData {
     pub(crate) region_id: RegionId,
     /// The peer.
     pub(crate) peer_id: u64,
-    /// The timeout.
-    #[serde(with = "humantime_serde", default = "default_timeout")]
-    pub(crate) timeout: Duration,
     /// The state.
     pub(crate) state: AddRegionFollowerState,
 }
@@ -129,10 +141,6 @@ impl AddRegionFollowerData {
 
         lock_key
     }
-}
-
-fn default_timeout() -> Duration {
-    Duration::from_secs(10)
 }
 
 #[derive(Debug, Serialize, Deserialize)]

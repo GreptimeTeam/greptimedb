@@ -354,6 +354,7 @@ impl MetasrvBuilder {
                 mailbox: mailbox.clone(),
                 server_addr: options.server_addr.clone(),
                 cache_invalidator: cache_invalidator.clone(),
+                meta_peer_client: meta_peer_client.clone(),
             },
         ));
         add_region_follower_manager.try_start()?;

@@ -41,8 +41,6 @@ pub struct AddRegionFollowerRequest {
     pub region_id: u64,
     /// The peer id to add follower.
     pub peer_id: u64,
-    /// The timeout for the operation.
-    pub timeout: Duration,
 }
 
 /// Cast the protobuf [`ProcedureId`] to common [`ProcedureId`].
