@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::mailbox_message::Payload;
-use api::v1::meta::{HeartbeatResponse, MailboxMessage, RequestHeader};
+use api::v1::meta::{HeartbeatResponse, MailboxMessage};
 use common_meta::ddl::NoopRegionFailureDetectorControl;
 use common_meta::instruction::{
     DowngradeRegionReply, InstructionReply, SimpleReply, UpgradeRegionReply,
@@ -85,7 +85,7 @@ impl MailboxContext {
         tx: Sender<std::result::Result<HeartbeatResponse, tonic::Status>>,
     ) {
         let pusher_id = channel.pusher_id();
-        let pusher = Pusher::new(tx, &RequestHeader::default());
+        let pusher = Pusher::new(tx);
         let _ = self.pushers.insert(pusher_id.string_key(), pusher).await;
     }
 
@@ -317,7 +317,6 @@ pub fn new_persistent_context(from: u64, to: u64, region_id: RegionId) -> Persis
         from_peer: Peer::empty(from),
         to_peer: Peer::empty(to),
         region_id,
-        cluster_id: 0,
         timeout: Duration::from_secs(10),
     }
 }

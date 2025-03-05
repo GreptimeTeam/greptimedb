@@ -37,8 +37,8 @@ use crate::instruction::{CacheIdent, DropFlow};
 use crate::key::flow::flow_info::FlowInfoValue;
 use crate::key::flow::flow_route::FlowRouteValue;
 use crate::lock_key::{CatalogLock, FlowLock};
+use crate::metrics;
 use crate::rpc::ddl::DropFlowTask;
-use crate::{metrics, ClusterId};
 
 /// The procedure for dropping a flow.
 pub struct DropFlowProcedure {
@@ -51,12 +51,11 @@ pub struct DropFlowProcedure {
 impl DropFlowProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::DropFlow";
 
-    pub fn new(cluster_id: ClusterId, task: DropFlowTask, context: DdlContext) -> Self {
+    pub fn new(task: DropFlowTask, context: DdlContext) -> Self {
         Self {
             context,
             data: DropFlowData {
                 state: DropFlowState::Prepare,
-                cluster_id,
                 task,
                 flow_info_value: None,
                 flow_route_values: vec![],
@@ -218,7 +217,6 @@ impl Procedure for DropFlowProcedure {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct DropFlowData {
     state: DropFlowState,
-    cluster_id: ClusterId,
     task: DropFlowTask,
     pub(crate) flow_info_value: Option<FlowInfoValue>,
     pub(crate) flow_route_values: Vec<FlowRouteValue>,

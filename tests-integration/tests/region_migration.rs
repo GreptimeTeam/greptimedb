@@ -35,7 +35,7 @@ use futures::future::BoxFuture;
 use meta_srv::error::Result as MetaResult;
 use meta_srv::metasrv::SelectorContext;
 use meta_srv::procedure::region_migration::RegionMigrationProcedureTask;
-use meta_srv::selector::{Namespace, Selector, SelectorOptions};
+use meta_srv::selector::{Selector, SelectorOptions};
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{QueryContext, QueryContextRef};
 use store_api::storage::RegionId;
@@ -169,7 +169,6 @@ pub async fn test_region_migration(store_type: StorageType, endpoints: Vec<Strin
     // Trigger region migration.
     let procedure = region_migration_manager
         .submit_procedure(RegionMigrationProcedureTask::new(
-            0,
             region_id,
             peer_factory(from_peer_id),
             peer_factory(to_peer_id),
@@ -216,7 +215,6 @@ pub async fn test_region_migration(store_type: StorageType, endpoints: Vec<Strin
     // Triggers again.
     let procedure = region_migration_manager
         .submit_procedure(RegionMigrationProcedureTask::new(
-            0,
             region_id,
             peer_factory(from_peer_id),
             peer_factory(to_peer_id),
@@ -473,7 +471,6 @@ pub async fn test_region_migration_by_sql(store_type: StorageType, endpoints: Ve
     // Triggers again.
     let procedure = region_migration_manager
         .submit_procedure(RegionMigrationProcedureTask::new(
-            0,
             region_id,
             peer_factory(from_peer_id),
             peer_factory(to_peer_id),
@@ -578,7 +575,6 @@ pub async fn test_region_migration_multiple_regions(
     // Trigger region migration.
     let procedure = region_migration_manager
         .submit_procedure(RegionMigrationProcedureTask::new(
-            0,
             region_id,
             peer_factory(from_peer_id),
             peer_factory(to_peer_id),
@@ -625,7 +621,6 @@ pub async fn test_region_migration_multiple_regions(
     // Triggers again.
     let procedure = region_migration_manager
         .submit_procedure(RegionMigrationProcedureTask::new(
-            0,
             region_id,
             peer_factory(from_peer_id),
             peer_factory(to_peer_id),
@@ -715,7 +710,6 @@ pub async fn test_region_migration_all_regions(store_type: StorageType, endpoint
     // Trigger region migration.
     let procedure = region_migration_manager
         .submit_procedure(RegionMigrationProcedureTask::new(
-            0,
             region_id,
             peer_factory(from_peer_id),
             peer_factory(to_peer_id),
@@ -763,7 +757,6 @@ pub async fn test_region_migration_all_regions(store_type: StorageType, endpoint
     // Triggers again.
     let procedure = region_migration_manager
         .submit_procedure(RegionMigrationProcedureTask::new(
-            0,
             region_id,
             peer_factory(from_peer_id),
             peer_factory(to_peer_id),
@@ -842,7 +835,6 @@ pub async fn test_region_migration_incorrect_from_peer(
     // Trigger region migration.
     let err = region_migration_manager
         .submit_procedure(RegionMigrationProcedureTask::new(
-            0,
             region_id,
             peer_factory(5),
             peer_factory(1),
@@ -925,7 +917,6 @@ pub async fn test_region_migration_incorrect_region_id(
     // Trigger region migration.
     let err = region_migration_manager
         .submit_procedure(RegionMigrationProcedureTask::new(
-            0,
             region_id,
             peer_factory(2),
             peer_factory(1),
@@ -957,7 +948,6 @@ impl Selector for ConstNodeSelector {
 
     async fn select(
         &self,
-        _ns: Namespace,
         _ctx: &Self::Context,
         _opts: SelectorOptions,
     ) -> MetaResult<Self::Output> {
