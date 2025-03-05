@@ -127,4 +127,26 @@ impl Instance {
             .map_err(BoxedError::new)
             .context(ExecuteGrpcRequestSnafu)
     }
+
+    pub async fn handle_trace_inserts(
+        &self,
+        rows: RowInsertRequests,
+        ctx: QueryContextRef,
+    ) -> ServerResult<Output> {
+        let _guard = if let Some(limiter) = &self.limiter {
+            let result = limiter.limit_row_inserts(&rows);
+            if result.is_none() {
+                return InFlightWriteBytesExceededSnafu.fail();
+            }
+            result
+        } else {
+            None
+        };
+
+        self.inserter
+            .handle_trace_inserts(rows, ctx, self.statement_executor.as_ref())
+            .await
+            .map_err(BoxedError::new)
+            .context(ExecuteGrpcRequestSnafu)
+    }
 }

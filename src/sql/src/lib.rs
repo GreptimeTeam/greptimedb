@@ -22,6 +22,7 @@ pub mod dialect;
 pub mod error;
 pub mod parser;
 pub mod parsers;
+pub mod partition;
 pub mod statements;
 pub mod util;
 

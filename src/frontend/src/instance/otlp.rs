@@ -101,17 +101,7 @@ impl OpenTelemetryProtocolHandler for Instance {
 
         OTLP_TRACES_ROWS.inc_by(rows as u64);
 
-        let _guard = if let Some(limiter) = &self.limiter {
-            let result = limiter.limit_row_inserts(&requests);
-            if result.is_none() {
-                return InFlightWriteBytesExceededSnafu.fail();
-            }
-            result
-        } else {
-            None
-        };
-
-        self.handle_log_inserts(requests, ctx)
+        self.handle_trace_inserts(requests, ctx)
             .await
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcQuerySnafu)
