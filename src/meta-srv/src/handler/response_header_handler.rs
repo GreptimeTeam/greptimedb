@@ -45,7 +45,7 @@ impl HeartbeatHandler for ResponseHeaderHandler {
 mod tests {
     use std::sync::Arc;
 
-    use api::v1::meta::{HeartbeatResponse, RequestHeader};
+    use api::v1::meta::RequestHeader;
     use common_meta::cache_invalidator::DummyCacheInvalidator;
     use common_meta::key::TableMetadataManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
@@ -97,11 +97,5 @@ mod tests {
             .handle(&req, &mut ctx, &mut acc)
             .await
             .unwrap();
-        let header = std::mem::take(&mut acc.header);
-        let _res = HeartbeatResponse {
-            header,
-            mailbox_message: acc.into_mailbox_message(),
-            ..Default::default()
-        };
     }
 }

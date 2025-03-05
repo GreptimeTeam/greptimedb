@@ -34,7 +34,7 @@ impl HttpHandler for NodeLeaseHandler {
         &self,
         _: &str,
         _: http::Method,
-        _params: &HashMap<String, String>,
+        _: &HashMap<String, String>,
     ) -> Result<http::Response<String>> {
         let leases = lease::alive_datanodes(&self.meta_peer_client, u64::MAX).await?;
         let leases = leases
