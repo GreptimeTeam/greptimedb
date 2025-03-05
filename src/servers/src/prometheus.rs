@@ -82,3 +82,50 @@ pub fn metric_name_matchers_to_plan(
 
     Ok(dataframe.into_parts().1)
 }
+
+#[tracing::instrument(skip_all)]
+pub fn label_values_matchers_to_plan(
+    dataframe: DataFrame,
+    matchers: Vec<Matcher>,
+    label_name: String,
+) -> Result<LogicalPlan> {
+    let mut conditions = Vec::with_capacity(matchers.len());
+
+    for m in matchers {
+        let value = &m.value;
+        match &m.op {
+            MatchOp::Equal => {
+                conditions.push(col(m.name).eq(lit(value)));
+            }
+            MatchOp::NotEqual => {
+                conditions.push(col(m.name).not_eq(lit(value)));
+            }
+            // Case sensitive regexp match
+            MatchOp::Re(regex) => {
+                conditions
+                    .push(regexp_match(col(m.name), lit(regex.to_string()), None).is_not_null());
+            }
+            // Case sensitive regexp not match
+            MatchOp::NotRe(regex) => {
+                conditions.push(regexp_match(col(m.name), lit(regex.to_string()), None).is_null());
+            }
+        }
+    }
+
+    let conditions = conditions.into_iter().reduce(Expr::and);
+    let DataFrame::DataFusion(mut dataframe) = dataframe;
+
+    if let Some(conditions) = conditions {
+        dataframe = dataframe
+            .filter(conditions)
+            .context(error::DataFrameSnafu)?;
+    }
+
+    let dataframe = dataframe
+        .select(vec![col(label_name.to_string())])
+        .context(error::DataFrameSnafu)?
+        .distinct()
+        .context(error::DataFrameSnafu)?;
+
+    Ok(dataframe.into_parts().1)
+}

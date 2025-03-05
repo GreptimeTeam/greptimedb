@@ -471,6 +471,19 @@ impl PrometheusHandler for Instance {
             .context(ExecuteQuerySnafu)
     }
 
+    async fn query_label_values(
+        &self,
+        metric: String,
+        label_name: String,
+        matchers: Vec<Matcher>,
+        ctx: &QueryContextRef,
+    ) -> server_error::Result<Vec<String>> {
+        self.handle_query_label_values(metric, label_name, matchers, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(ExecuteQuerySnafu)
+    }
+
     fn catalog_manager(&self) -> CatalogManagerRef {
         self.catalog_manager.clone()
     }
