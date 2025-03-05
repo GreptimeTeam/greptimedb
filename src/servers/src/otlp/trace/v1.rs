@@ -95,15 +95,14 @@ pub fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> 
     row_writer::write_fields(writer, fields.into_iter(), &mut row)?;
 
     // tags
-    row_writer::write_tags(
-        writer,
-        std::iter::once((TRACE_ID_COLUMN.to_string(), span.trace_id)),
-        &mut row,
-    )?;
+    let tags = vec![
+        (TRACE_ID_COLUMN.to_string(), span.trace_id),
+        (SPAN_ID_COLUMN.to_string(), span.span_id),
+    ];
+    row_writer::write_tags(writer, tags.into_iter(), &mut row)?;
 
     // write fields
     let fields = vec![
-        make_string_column_data(SPAN_ID_COLUMN, span.span_id),
         make_string_column_data(PARENT_SPAN_ID_COLUMN, span.parent_span_id),
         make_string_column_data(SPAN_KIND_COLUMN, span.span_kind),
         make_string_column_data(SPAN_NAME_COLUMN, span.span_name),
