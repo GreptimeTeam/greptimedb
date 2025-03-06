@@ -103,7 +103,6 @@ pub type BloomFilterOutput = IndexBaseOutput;
 #[derive(Default)]
 pub struct Indexer {
     file_id: FileId,
-    file_path: String,
     region_id: RegionId,
     puffin_manager: Option<SstPuffinManager>,
     inverted_indexer: Option<InvertedIndexer>,
@@ -170,7 +169,7 @@ impl Indexer {
 #[async_trait::async_trait]
 pub trait IndexerBuilder {
     /// Builds indexer of given file id to [index_file_path].
-    async fn build(&self, file_id: FileId, index_file_path: String) -> Indexer;
+    async fn build(&self, file_id: FileId) -> Indexer;
 }
 
 pub(crate) struct IndexerBuilderImpl {
@@ -188,10 +187,9 @@ pub(crate) struct IndexerBuilderImpl {
 #[async_trait::async_trait]
 impl IndexerBuilder for IndexerBuilderImpl {
     /// Sanity check for arguments and create a new [Indexer] if arguments are valid.
-    async fn build(&self, file_id: FileId, index_file_path: String) -> Indexer {
+    async fn build(&self, file_id: FileId) -> Indexer {
         let mut indexer = Indexer {
             file_id,
-            file_path: index_file_path,
             region_id: self.metadata.region_id,
             ..Default::default()
         };
@@ -392,30 +390,31 @@ mod tests {
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
 
     use super::*;
+    use crate::access_layer::FilePathProvider;
     use crate::config::{FulltextIndexConfig, Mode};
 
     struct MetaConfig {
-        with_tag: bool,
+        with_inverted: bool,
         with_fulltext: bool,
         with_skipping_bloom: bool,
     }
 
     fn mock_region_metadata(
         MetaConfig {
-            with_tag,
+            with_inverted,
             with_fulltext,
             with_skipping_bloom,
         }: MetaConfig,
     ) -> RegionMetadataRef {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 2));
+        let mut column_schema = ColumnSchema::new("a", ConcreteDataType::int64_datatype(), false);
+        if with_inverted {
+            column_schema = column_schema.with_inverted_index(true);
+        }
         builder
             .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new("a", ConcreteDataType::int64_datatype(), false),
-                semantic_type: if with_tag {
-                    SemanticType::Tag
-                } else {
-                    SemanticType::Field
-                },
+                column_schema,
+                semantic_type: SemanticType::Field,
                 column_id: 1,
             })
             .push_column_metadata(ColumnMetadata {
@@ -432,10 +431,6 @@ mod tests {
                 semantic_type: SemanticType::Timestamp,
                 column_id: 3,
             });
-
-        if with_tag {
-            builder.primary_key(vec![1]);
-        }
 
         if with_fulltext {
             let column_schema =
@@ -484,6 +479,18 @@ mod tests {
         IntermediateManager::init_fs(path).await.unwrap()
     }
 
+    struct NoopPathProvider;
+
+    impl FilePathProvider for NoopPathProvider {
+        fn build_index_file_path(&self, _file_id: FileId) -> String {
+            unreachable!()
+        }
+
+        fn build_sst_file_path(&self, _file_id: FileId) -> String {
+            unreachable!()
+        }
+    }
+
     #[tokio::test]
     async fn test_build_indexer_basic() {
         let (dir, factory) =
@@ -491,7 +498,7 @@ mod tests {
         let intm_manager = mock_intm_mgr(dir.path().to_string_lossy()).await;
 
         let metadata = mock_region_metadata(MetaConfig {
-            with_tag: true,
+            with_inverted: true,
             with_fulltext: true,
             with_skipping_bloom: true,
         });
@@ -499,14 +506,14 @@ mod tests {
             op_type: OperationType::Flush,
             metadata,
             row_group_size: 1024,
-            puffin_manager: factory.build(mock_object_store()),
+            puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
             intermediate_manager: intm_manager,
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig::default(),
             fulltext_index_config: FulltextIndexConfig::default(),
             bloom_filter_index_config: BloomFilterConfig::default(),
         }
-        .build(FileId::random(), "test".to_string())
+        .build(FileId::random())
         .await;
 
         assert!(indexer.inverted_indexer.is_some());
@@ -521,7 +528,7 @@ mod tests {
         let intm_manager = mock_intm_mgr(dir.path().to_string_lossy()).await;
 
         let metadata = mock_region_metadata(MetaConfig {
-            with_tag: true,
+            with_inverted: true,
             with_fulltext: true,
             with_skipping_bloom: true,
         });
@@ -529,7 +536,7 @@ mod tests {
             op_type: OperationType::Flush,
             metadata: metadata.clone(),
             row_group_size: 1024,
-            puffin_manager: factory.build(mock_object_store()),
+            puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
             intermediate_manager: intm_manager.clone(),
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig {
@@ -539,7 +546,7 @@ mod tests {
             fulltext_index_config: FulltextIndexConfig::default(),
             bloom_filter_index_config: BloomFilterConfig::default(),
         }
-        .build(FileId::random(), "test".to_string())
+        .build(FileId::random())
         .await;
 
         assert!(indexer.inverted_indexer.is_none());
@@ -550,7 +557,7 @@ mod tests {
             op_type: OperationType::Compact,
             metadata: metadata.clone(),
             row_group_size: 1024,
-            puffin_manager: factory.build(mock_object_store()),
+            puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
             intermediate_manager: intm_manager.clone(),
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig::default(),
@@ -560,7 +567,7 @@ mod tests {
             },
             bloom_filter_index_config: BloomFilterConfig::default(),
         }
-        .build(FileId::random(), "test".to_string())
+        .build(FileId::random())
         .await;
 
         assert!(indexer.inverted_indexer.is_some());
@@ -571,7 +578,7 @@ mod tests {
             op_type: OperationType::Compact,
             metadata,
             row_group_size: 1024,
-            puffin_manager: factory.build(mock_object_store()),
+            puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
             intermediate_manager: intm_manager,
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig::default(),
@@ -581,7 +588,7 @@ mod tests {
                 ..Default::default()
             },
         }
-        .build(FileId::random(), "test".to_string())
+        .build(FileId::random())
         .await;
 
         assert!(indexer.inverted_indexer.is_some());
@@ -596,7 +603,7 @@ mod tests {
         let intm_manager = mock_intm_mgr(dir.path().to_string_lossy()).await;
 
         let metadata = mock_region_metadata(MetaConfig {
-            with_tag: false,
+            with_inverted: false,
             with_fulltext: true,
             with_skipping_bloom: true,
         });
@@ -604,14 +611,14 @@ mod tests {
             op_type: OperationType::Flush,
             metadata: metadata.clone(),
             row_group_size: 1024,
-            puffin_manager: factory.build(mock_object_store()),
+            puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
             intermediate_manager: intm_manager.clone(),
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig::default(),
             fulltext_index_config: FulltextIndexConfig::default(),
             bloom_filter_index_config: BloomFilterConfig::default(),
         }
-        .build(FileId::random(), "test".to_string())
+        .build(FileId::random())
         .await;
 
         assert!(indexer.inverted_indexer.is_none());
@@ -619,7 +626,7 @@ mod tests {
         assert!(indexer.bloom_filter_indexer.is_some());
 
         let metadata = mock_region_metadata(MetaConfig {
-            with_tag: true,
+            with_inverted: true,
             with_fulltext: false,
             with_skipping_bloom: true,
         });
@@ -627,14 +634,14 @@ mod tests {
             op_type: OperationType::Flush,
             metadata: metadata.clone(),
             row_group_size: 1024,
-            puffin_manager: factory.build(mock_object_store()),
+            puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
             intermediate_manager: intm_manager.clone(),
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig::default(),
             fulltext_index_config: FulltextIndexConfig::default(),
             bloom_filter_index_config: BloomFilterConfig::default(),
         }
-        .build(FileId::random(), "test".to_string())
+        .build(FileId::random())
         .await;
 
         assert!(indexer.inverted_indexer.is_some());
@@ -642,7 +649,7 @@ mod tests {
         assert!(indexer.bloom_filter_indexer.is_some());
 
         let metadata = mock_region_metadata(MetaConfig {
-            with_tag: true,
+            with_inverted: true,
             with_fulltext: true,
             with_skipping_bloom: false,
         });
@@ -650,14 +657,14 @@ mod tests {
             op_type: OperationType::Flush,
             metadata: metadata.clone(),
             row_group_size: 1024,
-            puffin_manager: factory.build(mock_object_store()),
+            puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
             intermediate_manager: intm_manager,
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig::default(),
             fulltext_index_config: FulltextIndexConfig::default(),
             bloom_filter_index_config: BloomFilterConfig::default(),
         }
-        .build(FileId::random(), "test".to_string())
+        .build(FileId::random())
         .await;
 
         assert!(indexer.inverted_indexer.is_some());
@@ -672,7 +679,7 @@ mod tests {
         let intm_manager = mock_intm_mgr(dir.path().to_string_lossy()).await;
 
         let metadata = mock_region_metadata(MetaConfig {
-            with_tag: true,
+            with_inverted: true,
             with_fulltext: true,
             with_skipping_bloom: true,
         });
@@ -680,14 +687,14 @@ mod tests {
             op_type: OperationType::Flush,
             metadata,
             row_group_size: 0,
-            puffin_manager: factory.build(mock_object_store()),
+            puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
             intermediate_manager: intm_manager,
             index_options: IndexOptions::default(),
             inverted_index_config: InvertedIndexConfig::default(),
             fulltext_index_config: FulltextIndexConfig::default(),
             bloom_filter_index_config: BloomFilterConfig::default(),
         }
-        .build(FileId::random(), "test".to_string())
+        .build(FileId::random())
         .await;
 
         assert!(indexer.inverted_indexer.is_none());

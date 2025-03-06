@@ -43,6 +43,10 @@ const CURSOR_COUNT_WARNING_LIMIT: usize = 10;
 #[builder(build_fn(skip))]
 pub struct QueryContext {
     current_catalog: String,
+    /// mapping of RegionId to SequenceNumber, for snapshot read, meaning that the read should only
+    /// container data that was committed before(and include) the given sequence number
+    /// this field will only be filled if extensions contains a pair of "snapshot_read" and "true"
+    snapshot_seqs: Arc<RwLock<HashMap<u64, u64>>>,
     // we use Arc<RwLock>> for modifiable fields
     #[builder(default)]
     mutable_session_data: Arc<RwLock<MutableInner>>,
@@ -63,6 +67,8 @@ pub struct QueryContext {
 #[derive(Debug, Builder, Clone, Default)]
 pub struct QueryContextMutableFields {
     warning: Option<String>,
+    // TODO: remove this when format is supported in datafusion
+    explain_format: Option<String>,
 }
 
 impl Display for QueryContext {
@@ -116,7 +122,10 @@ impl From<&RegionRequestHeader> for QueryContext {
                 .current_schema(ctx.current_schema.clone())
                 .timezone(parse_timezone(Some(&ctx.timezone)))
                 .extensions(ctx.extensions.clone())
-                .channel(ctx.channel.into());
+                .channel(ctx.channel.into())
+                .snapshot_seqs(Arc::new(RwLock::new(
+                    ctx.snapshot_seqs.clone().unwrap_or_default().snapshot_seqs,
+                )));
         }
         builder.build()
     }
@@ -130,6 +139,9 @@ impl From<api::v1::QueryContext> for QueryContext {
             .timezone(parse_timezone(Some(&ctx.timezone)))
             .extensions(ctx.extensions)
             .channel(ctx.channel.into())
+            .snapshot_seqs(Arc::new(RwLock::new(
+                ctx.snapshot_seqs.clone().unwrap_or_default().snapshot_seqs,
+            )))
             .build()
     }
 }
@@ -141,6 +153,7 @@ impl From<QueryContext> for api::v1::QueryContext {
             mutable_session_data: mutable_inner,
             extensions,
             channel,
+            snapshot_seqs,
             ..
         }: QueryContext,
     ) -> Self {
@@ -151,6 +164,9 @@ impl From<QueryContext> for api::v1::QueryContext {
             timezone: mutable_inner.timezone.to_string(),
             extensions,
             channel: channel as u32,
+            snapshot_seqs: Some(api::v1::SnapshotSequences {
+                snapshot_seqs: snapshot_seqs.read().unwrap().clone(),
+            }),
         }
     }
 }
@@ -288,6 +304,21 @@ impl QueryContext {
         self.mutable_query_context_data.write().unwrap().warning = Some(msg);
     }
 
+    pub fn explain_format(&self) -> Option<String> {
+        self.mutable_query_context_data
+            .read()
+            .unwrap()
+            .explain_format
+            .clone()
+    }
+
+    pub fn set_explain_format(&self, format: String) {
+        self.mutable_query_context_data
+            .write()
+            .unwrap()
+            .explain_format = Some(format);
+    }
+
     pub fn query_timeout(&self) -> Option<Duration> {
         self.mutable_session_data.read().unwrap().query_timeout
     }
@@ -324,6 +355,14 @@ impl QueryContext {
         let rb = guard.cursors.get(name);
         rb.cloned()
     }
+
+    pub fn snapshots(&self) -> HashMap<u64, u64> {
+        self.snapshot_seqs.read().unwrap().clone()
+    }
+
+    pub fn get_snapshot(&self, region_id: u64) -> Option<u64> {
+        self.snapshot_seqs.read().unwrap().get(&region_id).cloned()
+    }
 }
 
 impl QueryContextBuilder {
@@ -333,6 +372,7 @@ impl QueryContextBuilder {
             current_catalog: self
                 .current_catalog
                 .unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string()),
+            snapshot_seqs: self.snapshot_seqs.unwrap_or_default(),
             mutable_session_data: self.mutable_session_data.unwrap_or_default(),
             mutable_query_context_data: self.mutable_query_context_data.unwrap_or_default(),
             sql_dialect: self

@@ -26,9 +26,9 @@ use crate::flush_flow::FlushFlowFunction;
 use crate::function_registry::FunctionRegistry;
 
 /// Table functions
-pub(crate) struct TableFunction;
+pub(crate) struct AdminFunction;
 
-impl TableFunction {
+impl AdminFunction {
     /// Register all table functions to [`FunctionRegistry`].
     pub fn register(registry: &FunctionRegistry) {
         registry.register_async(Arc::new(MigrateRegionFunction));

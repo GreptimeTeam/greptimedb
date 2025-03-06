@@ -111,9 +111,9 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Fulltext index only supports string type, column: {column_name}, unexpected type: {column_type:?}"
+        "Fulltext or Skipping index only supports string type, column: {column_name}, unexpected type: {column_type:?}"
     ))]
-    InvalidFulltextColumnType {
+    InvalidStringIndexColumnType {
         column_name: String,
         column_type: ColumnDataType,
         #[snafu(implicit)]
@@ -134,6 +134,14 @@ pub enum Error {
 
     #[snafu(display("Invalid set fulltext option request"))]
     InvalidSetFulltextOptionRequest {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: prost::UnknownEnumValue,
+    },
+
+    #[snafu(display("Invalid set skipping index option request"))]
+    InvalidSetSkippingIndexOptionRequest {
         #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
@@ -165,12 +173,13 @@ impl ErrorExt for Error {
                 StatusCode::InvalidArguments
             }
 
-            Error::UnknownColumnDataType { .. } | Error::InvalidFulltextColumnType { .. } => {
+            Error::UnknownColumnDataType { .. } | Error::InvalidStringIndexColumnType { .. } => {
                 StatusCode::InvalidArguments
             }
             Error::InvalidSetTableOptionRequest { .. }
             | Error::InvalidUnsetTableOptionRequest { .. }
             | Error::InvalidSetFulltextOptionRequest { .. }
+            | Error::InvalidSetSkippingIndexOptionRequest { .. }
             | Error::MissingAlterIndexOption { .. } => StatusCode::InvalidArguments,
         }
     }

@@ -33,7 +33,7 @@ use store_api::region_request::{
     AffectedRows, RegionCloseRequest, RegionCreateRequest, RegionDropRequest, RegionOpenRequest,
     RegionRequest,
 };
-use store_api::storage::{RegionId, ScanRequest};
+use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 use tokio::sync::Mutex;
 
 use crate::config::EngineConfig;
@@ -112,6 +112,10 @@ impl RegionEngine for FileRegionEngine {
 
     fn region_statistic(&self, _: RegionId) -> Option<RegionStatistic> {
         None
+    }
+
+    async fn get_last_seq_num(&self, _: RegionId) -> Result<Option<SequenceNumber>, BoxedError> {
+        Ok(None)
     }
 
     fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<(), BoxedError> {

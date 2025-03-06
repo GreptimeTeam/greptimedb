@@ -55,7 +55,7 @@ pub struct LogQuery {
 }
 
 /// Expression to calculate on log after filtering.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum LogExpr {
     NamedIdent(String),
     PositionalIdent(usize),
@@ -63,6 +63,7 @@ pub enum LogExpr {
     ScalarFunc {
         name: String,
         args: Vec<LogExpr>,
+        alias: Option<String>,
     },
     AggrFunc {
         name: String,
@@ -70,6 +71,7 @@ pub enum LogExpr {
         /// Optional range function parameter. Stands for the time range for both step and align.
         range: Option<String>,
         by: Vec<LogExpr>,
+        alias: Option<String>,
     },
     Decompose {
         expr: Box<LogExpr>,
@@ -289,7 +291,7 @@ pub struct ColumnFilters {
     pub filters: Vec<ContentFilter>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ContentFilter {
     // Search-based filters
     /// Only match the exact content.
@@ -310,14 +312,28 @@ pub enum ContentFilter {
     // Value-based filters
     /// Content exists, a.k.a. not null.
     Exist,
-    Between(String, String),
+    Between {
+        start: String,
+        end: String,
+        start_inclusive: bool,
+        end_inclusive: bool,
+    },
+    GreatThan {
+        value: String,
+        inclusive: bool,
+    },
+    LessThan {
+        value: String,
+        inclusive: bool,
+    },
+    In(Vec<String>),
     // TODO(ruihang): arithmetic operations
 
     // Compound filters
     Compound(Vec<ContentFilter>, BinaryOperator),
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum BinaryOperator {
     And,
     Or,

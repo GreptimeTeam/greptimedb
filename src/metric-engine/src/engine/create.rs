@@ -13,7 +13,6 @@
 // limitations under the License.
 
 mod extract_new_columns;
-mod validate;
 
 use std::collections::{HashMap, HashSet};
 
@@ -21,7 +20,7 @@ use api::v1::SemanticType;
 use common_telemetry::info;
 use common_time::{Timestamp, FOREVER};
 use datatypes::data_type::ConcreteDataType;
-use datatypes::schema::ColumnSchema;
+use datatypes::schema::{ColumnSchema, SkippingIndexOptions};
 use datatypes::value::Value;
 use mito2::engine::MITO_ENGINE_NAME;
 use object_store::util::join_dir;
@@ -41,7 +40,6 @@ use store_api::region_engine::RegionEngine;
 use store_api::region_request::{AffectedRows, RegionCreateRequest, RegionRequest};
 use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::RegionId;
-use validate::validate_create_logical_regions;
 
 use crate::engine::create::extract_new_columns::extract_new_columns;
 use crate::engine::options::{set_data_region_options, PhysicalRegionOptions};
@@ -49,11 +47,13 @@ use crate::engine::MetricEngineInner;
 use crate::error::{
     ColumnTypeMismatchSnafu, ConflictRegionOptionSnafu, CreateMitoRegionSnafu,
     InternalColumnOccupiedSnafu, InvalidMetadataSnafu, MissingRegionOptionSnafu,
-    MultipleFieldColumnSnafu, NoFieldColumnSnafu, PhysicalRegionNotFoundSnafu, Result,
-    SerializeColumnMetadataSnafu, UnexpectedRequestSnafu,
+    MultipleFieldColumnSnafu, NoFieldColumnSnafu, ParseRegionIdSnafu, PhysicalRegionNotFoundSnafu,
+    Result, SerializeColumnMetadataSnafu, UnexpectedRequestSnafu,
 };
 use crate::metrics::PHYSICAL_REGION_COUNT;
 use crate::utils::{self, to_data_region_id, to_metadata_region_id};
+
+const DEFAULT_TABLE_ID_SKIPPING_INDEX_GRANULARITY: u32 = 1024;
 
 impl MetricEngineInner {
     pub async fn create_regions(
@@ -85,8 +85,23 @@ impl MetricEngineInner {
             .options
             .contains_key(LOGICAL_TABLE_METADATA_KEY)
         {
-            self.create_logical_regions(requests, extension_return_value)
-                .await?;
+            if requests.len() == 1 {
+                let request = &requests.first().unwrap().1;
+                let physical_region_id = parse_physical_region_id(request)?;
+                self.create_logical_regions(physical_region_id, requests, extension_return_value)
+                    .await?;
+            } else {
+                let grouped_requests =
+                    group_create_logical_region_requests_by_physical_region_id(requests)?;
+                for (physical_region_id, requests) in grouped_requests {
+                    self.create_logical_regions(
+                        physical_region_id,
+                        requests,
+                        extension_return_value,
+                    )
+                    .await?;
+                }
+            }
         } else {
             return MissingRegionOptionSnafu {}.fail();
         }
@@ -154,21 +169,44 @@ impl MetricEngineInner {
     /// Create multiple logical regions on the same physical region.
     async fn create_logical_regions(
         &self,
+        physical_region_id: RegionId,
         requests: Vec<(RegionId, RegionCreateRequest)>,
         extension_return_value: &mut HashMap<String, Vec<u8>>,
     ) -> Result<()> {
-        let physical_region_id = validate_create_logical_regions(&requests)?;
         let data_region_id = utils::to_data_region_id(physical_region_id);
+
+        ensure!(
+            self.state
+                .read()
+                .unwrap()
+                .exist_physical_region(data_region_id),
+            PhysicalRegionNotFoundSnafu {
+                region_id: data_region_id,
+            }
+        );
 
         // Filters out the requests that the logical region already exists
         let requests = {
             let state = self.state.read().unwrap();
-            let logical_region_exists = state.logical_region_exists_filter(data_region_id);
-            // TODO(weny): log the skipped logical regions
-            requests
-                .into_iter()
-                .filter(|(region_id, _)| !logical_region_exists(region_id))
-                .collect::<Vec<_>>()
+            let mut skipped = Vec::with_capacity(requests.len());
+            let mut kept_requests = Vec::with_capacity(requests.len());
+
+            for (region_id, request) in requests {
+                if state.is_logical_region_exist(region_id) {
+                    skipped.push(region_id);
+                } else {
+                    kept_requests.push((region_id, request));
+                }
+            }
+
+            // log skipped regions
+            if !skipped.is_empty() {
+                info!(
+                    "Skipped creating logical regions {skipped:?} because they already exist",
+                    skipped = skipped
+                );
+            }
+            kept_requests
         };
 
         // Finds new columns to add to physical region
@@ -440,6 +478,7 @@ impl MetricEngineInner {
     ///
     /// Return `[table_id_col, tsid_col]`
     fn internal_column_metadata() -> [ColumnMetadata; 2] {
+        // Safety: BloomFilter is a valid skipping index type
         let metric_name_col = ColumnMetadata {
             column_id: ReservedColumnId::table_id(),
             semantic_type: SemanticType::Tag,
@@ -448,7 +487,11 @@ impl MetricEngineInner {
                 ConcreteDataType::uint32_datatype(),
                 false,
             )
-            .with_inverted_index(true),
+            .with_skipping_options(SkippingIndexOptions {
+                granularity: DEFAULT_TABLE_ID_SKIPPING_INDEX_GRANULARITY,
+                index_type: datatypes::schema::SkippingIndexType::BloomFilter,
+            })
+            .unwrap(),
         };
         let tsid_col = ColumnMetadata {
             column_id: ReservedColumnId::tsid(),
@@ -462,6 +505,39 @@ impl MetricEngineInner {
         };
         [metric_name_col, tsid_col]
     }
+}
+
+/// Groups the create logical region requests by physical region id.
+fn group_create_logical_region_requests_by_physical_region_id(
+    requests: Vec<(RegionId, RegionCreateRequest)>,
+) -> Result<HashMap<RegionId, Vec<(RegionId, RegionCreateRequest)>>> {
+    let mut result = HashMap::with_capacity(requests.len());
+    for (region_id, request) in requests {
+        let physical_region_id = parse_physical_region_id(&request)?;
+        result
+            .entry(physical_region_id)
+            .or_insert_with(Vec::new)
+            .push((region_id, request));
+    }
+
+    Ok(result)
+}
+
+/// Parses the physical region id from the request.
+fn parse_physical_region_id(request: &RegionCreateRequest) -> Result<RegionId> {
+    let physical_region_id_raw = request
+        .options
+        .get(LOGICAL_TABLE_METADATA_KEY)
+        .ok_or(MissingRegionOptionSnafu {}.build())?;
+
+    let physical_region_id: RegionId = physical_region_id_raw
+        .parse::<u64>()
+        .with_context(|_| ParseRegionIdSnafu {
+            raw: physical_region_id_raw,
+        })?
+        .into();
+
+    Ok(physical_region_id)
 }
 
 /// Creates the region options for metadata region in metric engine.

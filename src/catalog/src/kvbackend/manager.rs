@@ -38,6 +38,7 @@ use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
 use session::context::{Channel, QueryContext};
 use snafu::prelude::*;
 use table::dist_table::DistTable;
+use table::metadata::TableId;
 use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 use table::table_name::TableName;
 use table::TableRef;
@@ -284,6 +285,28 @@ impl CatalogManager for KvBackendCatalogManager {
         }
 
         return Ok(None);
+    }
+
+    async fn tables_by_ids(
+        &self,
+        catalog: &str,
+        schema: &str,
+        table_ids: &[TableId],
+    ) -> Result<Vec<TableRef>> {
+        let table_info_values = self
+            .table_metadata_manager
+            .table_info_manager()
+            .batch_get(table_ids)
+            .await
+            .context(TableMetadataManagerSnafu)?;
+
+        let tables = table_info_values
+            .into_values()
+            .filter(|t| t.table_info.catalog_name == catalog && t.table_info.schema_name == schema)
+            .map(build_table)
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(tables)
     }
 
     fn tables<'a>(

@@ -72,7 +72,10 @@ impl OpenTelemetryProtocolHandler for Instance {
     #[tracing::instrument(skip_all)]
     async fn traces(
         &self,
+        pipeline_handler: PipelineHandlerRef,
         request: ExportTraceServiceRequest,
+        pipeline: PipelineWay,
+        pipeline_params: GreptimePipelineParams,
         table_name: String,
         ctx: QueryContextRef,
     ) -> ServerResult<Output> {
@@ -87,23 +90,18 @@ impl OpenTelemetryProtocolHandler for Instance {
             .get::<OpenTelemetryProtocolInterceptorRef<servers::error::Error>>();
         interceptor_ref.pre_execute(ctx.clone())?;
 
-        let spans = otlp::trace::parse(request);
-
-        let (requests, rows) = otlp::trace::to_grpc_insert_requests(table_name, spans)?;
+        let (requests, rows) = otlp::trace::to_grpc_insert_requests(
+            request,
+            pipeline,
+            pipeline_params,
+            table_name,
+            &ctx,
+            pipeline_handler,
+        )?;
 
         OTLP_TRACES_ROWS.inc_by(rows as u64);
 
-        let _guard = if let Some(limiter) = &self.limiter {
-            let result = limiter.limit_row_inserts(&requests);
-            if result.is_none() {
-                return InFlightWriteBytesExceededSnafu.fail();
-            }
-            result
-        } else {
-            None
-        };
-
-        self.handle_log_inserts(requests, ctx)
+        self.handle_trace_inserts(requests, ctx)
             .await
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcQuerySnafu)

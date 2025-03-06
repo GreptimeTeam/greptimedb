@@ -45,7 +45,7 @@ impl Function for TestAndFunction {
         )
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         let col = scalar_binary_op::<bool, bool, bool, _>(
             &columns[0],
             &columns[1],

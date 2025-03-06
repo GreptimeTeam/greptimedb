@@ -21,7 +21,6 @@ use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_function::function::FunctionRef;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
-use common_query::prelude::ScalarUdf;
 use common_query::Output;
 use common_runtime::runtime::{BuilderBuild, RuntimeTrait};
 use common_runtime::Runtime;
@@ -37,7 +36,7 @@ use store_api::region_engine::{
     SettableRegionRoleState,
 };
 use store_api::region_request::{AffectedRows, RegionRequest};
-use store_api::storage::{RegionId, ScanRequest};
+use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 use table::TableRef;
 use tokio::sync::mpsc::{Receiver, Sender};
 
@@ -76,8 +75,6 @@ impl QueryEngine for MockQueryEngine {
     ) -> query::error::Result<Output> {
         unimplemented!()
     }
-
-    fn register_udf(&self, _udf: ScalarUdf) {}
 
     fn register_aggregate_function(&self, _func: AggregateFunctionMetaRef) {}
 
@@ -215,6 +212,10 @@ impl RegionEngine for MockRegionEngine {
     }
 
     fn region_statistic(&self, _region_id: RegionId) -> Option<RegionStatistic> {
+        unimplemented!()
+    }
+
+    async fn get_last_seq_num(&self, _: RegionId) -> Result<Option<SequenceNumber>, BoxedError> {
         unimplemented!()
     }
 

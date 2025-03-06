@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::str::FromStr;
 
+use api::v1::meta::HeartbeatRequest;
 use common_error::ext::ErrorExt;
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -26,7 +28,6 @@ use crate::error::{
     InvalidRoleSnafu, ParseNumSnafu, Result,
 };
 use crate::peer::Peer;
-use crate::ClusterId;
 
 const CLUSTER_NODE_INFO_PREFIX: &str = "__meta_cluster_node_info";
 
@@ -54,14 +55,9 @@ pub trait ClusterInfo {
     // TODO(jeremy): Other info, like region status, etc.
 }
 
-/// The key of [NodeInfo] in the storage. The format is `__meta_cluster_node_info-{cluster_id}-{role}-{node_id}`.
-///
-/// This key cannot be used to describe the `Metasrv` because the `Metasrv` does not have
-/// a `cluster_id`, it serves multiple clusters.
-#[derive(Debug, Clone, Eq, Hash, PartialEq, Serialize, Deserialize)]
+/// The key of [NodeInfo] in the storage. The format is `__meta_cluster_node_info-0-{role}-{node_id}`.
+#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub struct NodeInfoKey {
-    /// The cluster id.
-    pub cluster_id: ClusterId,
     /// The role of the node. It can be `[Role::Datanode]` or `[Role::Frontend]`.
     pub role: Role,
     /// The node id.
@@ -69,18 +65,38 @@ pub struct NodeInfoKey {
 }
 
 impl NodeInfoKey {
-    pub fn key_prefix_with_cluster_id(cluster_id: u64) -> String {
-        format!("{}-{}-", CLUSTER_NODE_INFO_PREFIX, cluster_id)
+    /// Try to create a `NodeInfoKey` from a "good" heartbeat request. "good" as in every needed
+    /// piece of information is provided and valid.  
+    pub fn new(request: &HeartbeatRequest) -> Option<Self> {
+        let HeartbeatRequest { header, peer, .. } = request;
+        let header = header.as_ref()?;
+        let peer = peer.as_ref()?;
+
+        let role = header.role.try_into().ok()?;
+        let node_id = match role {
+            // Because the Frontend is stateless, it's too easy to neglect choosing a unique id
+            // for it when setting up a cluster. So we calculate its id from its address.
+            Role::Frontend => calculate_node_id(&peer.addr),
+            _ => peer.id,
+        };
+
+        Some(NodeInfoKey { role, node_id })
     }
 
-    pub fn key_prefix_with_role(cluster_id: ClusterId, role: Role) -> String {
-        format!(
-            "{}-{}-{}-",
-            CLUSTER_NODE_INFO_PREFIX,
-            cluster_id,
-            i32::from(role)
-        )
+    pub fn key_prefix() -> String {
+        format!("{}-0-", CLUSTER_NODE_INFO_PREFIX)
     }
+
+    pub fn key_prefix_with_role(role: Role) -> String {
+        format!("{}-0-{}-", CLUSTER_NODE_INFO_PREFIX, i32::from(role))
+    }
+}
+
+/// Calculate (by using the DefaultHasher) the node's id from its address.
+fn calculate_node_id(addr: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    addr.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// The information of a node in the cluster.
@@ -100,7 +116,7 @@ pub struct NodeInfo {
     pub start_time_ms: u64,
 }
 
-#[derive(Debug, Clone, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub enum Role {
     Datanode,
     Frontend,
@@ -164,15 +180,10 @@ impl FromStr for NodeInfoKey {
         let caps = CLUSTER_NODE_INFO_PREFIX_PATTERN
             .captures(key)
             .context(InvalidNodeInfoKeySnafu { key })?;
-
         ensure!(caps.len() == 4, InvalidNodeInfoKeySnafu { key });
 
-        let cluster_id = caps[1].to_string();
         let role = caps[2].to_string();
         let node_id = caps[3].to_string();
-        let cluster_id: u64 = cluster_id.parse().context(ParseNumSnafu {
-            err_msg: format!("invalid cluster_id: {cluster_id}"),
-        })?;
         let role: i32 = role.parse().context(ParseNumSnafu {
             err_msg: format!("invalid role {role}"),
         })?;
@@ -181,11 +192,7 @@ impl FromStr for NodeInfoKey {
             err_msg: format!("invalid node_id: {node_id}"),
         })?;
 
-        Ok(Self {
-            cluster_id,
-            role,
-            node_id,
-        })
+        Ok(Self { role, node_id })
     }
 }
 
@@ -201,12 +208,11 @@ impl TryFrom<Vec<u8>> for NodeInfoKey {
     }
 }
 
-impl From<NodeInfoKey> for Vec<u8> {
-    fn from(key: NodeInfoKey) -> Self {
+impl From<&NodeInfoKey> for Vec<u8> {
+    fn from(key: &NodeInfoKey) -> Self {
         format!(
-            "{}-{}-{}-{}",
+            "{}-0-{}-{}",
             CLUSTER_NODE_INFO_PREFIX,
-            key.cluster_id,
             i32::from(key.role),
             key.node_id
         )
@@ -271,6 +277,7 @@ impl TryFrom<i32> for Role {
 mod tests {
     use std::assert_matches::assert_matches;
 
+    use super::*;
     use crate::cluster::Role::{Datanode, Frontend};
     use crate::cluster::{DatanodeStatus, NodeInfo, NodeInfoKey, NodeStatus};
     use crate::peer::Peer;
@@ -278,15 +285,13 @@ mod tests {
     #[test]
     fn test_node_info_key_round_trip() {
         let key = NodeInfoKey {
-            cluster_id: 1,
             role: Datanode,
             node_id: 2,
         };
 
-        let key_bytes: Vec<u8> = key.into();
+        let key_bytes: Vec<u8> = (&key).into();
         let new_key: NodeInfoKey = key_bytes.try_into().unwrap();
 
-        assert_eq!(1, new_key.cluster_id);
         assert_eq!(Datanode, new_key.role);
         assert_eq!(2, new_key.node_id);
     }
@@ -332,10 +337,32 @@ mod tests {
 
     #[test]
     fn test_node_info_key_prefix() {
-        let prefix = NodeInfoKey::key_prefix_with_cluster_id(1);
-        assert_eq!(prefix, "__meta_cluster_node_info-1-");
+        let prefix = NodeInfoKey::key_prefix();
+        assert_eq!(prefix, "__meta_cluster_node_info-0-");
 
-        let prefix = NodeInfoKey::key_prefix_with_role(2, Frontend);
-        assert_eq!(prefix, "__meta_cluster_node_info-2-1-");
+        let prefix = NodeInfoKey::key_prefix_with_role(Frontend);
+        assert_eq!(prefix, "__meta_cluster_node_info-0-1-");
+    }
+
+    #[test]
+    fn test_calculate_node_id_from_addr() {
+        // Test empty string
+        assert_eq!(calculate_node_id(""), calculate_node_id(""));
+
+        // Test same addresses return same ids
+        let addr1 = "127.0.0.1:8080";
+        let id1 = calculate_node_id(addr1);
+        let id2 = calculate_node_id(addr1);
+        assert_eq!(id1, id2);
+
+        // Test different addresses return different ids
+        let addr2 = "127.0.0.1:8081";
+        let id3 = calculate_node_id(addr2);
+        assert_ne!(id1, id3);
+
+        // Test long address
+        let long_addr = "very.long.domain.name.example.com:9999";
+        let id4 = calculate_node_id(long_addr);
+        assert!(id4 > 0);
     }
 }

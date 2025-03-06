@@ -350,11 +350,11 @@ mod tests {
     use store_api::storage::{ConcreteDataType, RegionId};
 
     use super::*;
+    use crate::access_layer::RegionFilePathFactory;
     use crate::read::{Batch, BatchColumn};
     use crate::sst::file::FileId;
     use crate::sst::index::fulltext_index::applier::FulltextIndexApplier;
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
-    use crate::sst::location;
 
     fn mock_object_store() -> ObjectStore {
         ObjectStore::new(Memory::default()).unwrap().finish()
@@ -494,7 +494,6 @@ mod tests {
         let (d, factory) = PuffinManagerFactory::new_for_test_async(prefix).await;
         let region_dir = "region0".to_string();
         let sst_file_id = FileId::random();
-        let file_path = location::index_file_path(&region_dir, sst_file_id);
         let object_store = mock_object_store();
         let region_metadata = mock_region_metadata();
         let intm_mgr = new_intm_mgr(d.path().to_string_lossy()).await;
@@ -514,8 +513,11 @@ mod tests {
         let mut batch = new_batch(rows);
         indexer.update(&mut batch).await.unwrap();
 
-        let puffin_manager = factory.build(object_store.clone());
-        let mut writer = puffin_manager.writer(&file_path).await.unwrap();
+        let puffin_manager = factory.build(
+            object_store.clone(),
+            RegionFilePathFactory::new(region_dir.clone()),
+        );
+        let mut writer = puffin_manager.writer(&sst_file_id).await.unwrap();
         let _ = indexer.finish(&mut writer).await.unwrap();
         writer.finish().await.unwrap();
 
@@ -523,6 +525,7 @@ mod tests {
             let _d = &d;
             let applier = FulltextIndexApplier::new(
                 region_dir.clone(),
+                region_metadata.region_id,
                 object_store.clone(),
                 queries
                     .into_iter()
@@ -531,7 +534,7 @@ mod tests {
                 factory.clone(),
             );
 
-            async move { applier.apply(sst_file_id).await.unwrap() }.boxed()
+            async move { applier.apply(sst_file_id, None).await.unwrap() }.boxed()
         }
     }
 

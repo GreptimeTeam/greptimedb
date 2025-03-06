@@ -198,13 +198,13 @@ impl Inner {
             }
         );
 
-        let leader = self
+        let leader_addr = self
             .ask_leader
             .as_ref()
             .unwrap()
             .get_leader()
             .context(error::NoLeaderSnafu)?;
-        let mut leader = self.make_client(leader)?;
+        let mut leader = self.make_client(&leader_addr)?;
 
         let (sender, receiver) = mpsc::channel::<HeartbeatRequest>(128);
 
@@ -236,7 +236,11 @@ impl Inner {
             .await
             .map_err(error::Error::from)?
             .context(error::CreateHeartbeatStreamSnafu)?;
-        info!("Success to create heartbeat stream to server: {:#?}", res);
+
+        info!(
+            "Success to create heartbeat stream to server: {}, response: {:#?}",
+            leader_addr, res
+        );
 
         Ok((
             HeartbeatSender::new(self.id, self.role, sender),
@@ -268,7 +272,7 @@ mod test {
 
     #[tokio::test]
     async fn test_already_start() {
-        let mut client = Client::new((0, 0), Role::Datanode, ChannelManager::default(), 3);
+        let mut client = Client::new(0, Role::Datanode, ChannelManager::default(), 3);
         client
             .start(&["127.0.0.1:1000", "127.0.0.1:1001"])
             .await
@@ -284,7 +288,7 @@ mod test {
     #[tokio::test]
     async fn test_heartbeat_stream() {
         let (sender, mut receiver) = mpsc::channel::<HeartbeatRequest>(100);
-        let sender = HeartbeatSender::new((8, 8), Role::Datanode, sender);
+        let sender = HeartbeatSender::new(8, Role::Datanode, sender);
         let _handle = tokio::spawn(async move {
             for _ in 0..10 {
                 sender.send(HeartbeatRequest::default()).await.unwrap();
@@ -292,7 +296,6 @@ mod test {
         });
         while let Some(req) = receiver.recv().await {
             let header = req.header.unwrap();
-            assert_eq!(8, header.cluster_id);
             assert_eq!(8, header.member_id);
         }
     }

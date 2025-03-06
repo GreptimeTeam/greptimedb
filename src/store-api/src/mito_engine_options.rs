@@ -23,6 +23,8 @@ pub const APPEND_MODE_KEY: &str = "append_mode";
 pub const MERGE_MODE_KEY: &str = "merge_mode";
 /// Option key for TTL(time-to-live)
 pub const TTL_KEY: &str = "ttl";
+/// Option key for snapshot read.
+pub const SNAPSHOT_READ: &str = "snapshot_read";
 /// Option key for compaction type.
 pub const COMPACTION_TYPE: &str = "compaction.type";
 /// TWCS compaction strategy.

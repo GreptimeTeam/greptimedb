@@ -203,9 +203,65 @@ tql eval (0, 2000, '400') t2 or on () t1;
 -- SQLNESS SORT_RESULT 3 1
 tql eval (0, 2000, '400') t2 or on(job) t1;
 
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') sum(t1{job="a"});
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') sum(t1{job="a"}) - sum(t1{job="e"} or vector(1));
+
 drop table t1;
 
 drop table t2;
+
+create table stats_used_bytes (
+    ts timestamp time index,
+    namespace string,
+    greptime_value double,
+    primary key (namespace)
+);
+
+create table stats_capacity_bytes (
+    ts timestamp time index,
+    namespace string,
+    greptime_value double,
+    primary key (namespace)
+);
+
+insert into stats_used_bytes values
+    (0, "namespace1", 1.0),
+    (0, "namespace2", 2.0),
+    (500000, "namespace1", 10.0),
+    (500000, "namespace2", 20.0),
+    (1000000, "namespace1", 25.0),
+    (1000000, "namespace2", 26.0);
+
+insert into stats_capacity_bytes values
+    (0, "namespace1", 30.0),
+    (0, "namespace2", 30.0),
+    (500000, "namespace1", 30.0),
+    (500000, "namespace2", 30.0),
+    (1000000, "namespace1", 30.0),
+    (1000000, "namespace2", 30.0);
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') max by (namespace) (stats_used_bytes{namespace=~".+"}) / max by (namespace) (stats_capacity_bytes{namespace=~".+"}) >= (80 / 100);
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') max by (namespace) (stats_used_bytes{namespace=~".+"}) and (max by (namespace) (stats_used_bytes{namespace=~".+"}) / (max by (namespace) (stats_capacity_bytes{namespace=~".+"})) >= (80 / 100));
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') count(max by (namespace) (stats_used_bytes{namespace=~".+"}) and (max by (namespace) (stats_used_bytes{namespace=~".+"}) / (max by (namespace) (stats_capacity_bytes{namespace=~".+"})) >= (80 / 100))) or vector(0);
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') count(max by (namespace) (stats_used_bytes{namespace=~".+"}) and (max by (namespace) (stats_used_bytes{namespace=~".+"}) / (max by (namespace) (stats_capacity_bytes{namespace=~".+"})) >= (80 / 100)));
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') count(max by (namespace) (stats_used_bytes{namespace=~".+"}) unless (max by (namespace) (stats_used_bytes{namespace=~".+"}) / (max by (namespace) (stats_capacity_bytes{namespace=~".+"})) >= (80 / 100)));
+
+drop table stats_used_bytes;
+
+drop table stats_capacity_bytes;
+
 
 create table cache_hit (
     ts timestamp time index,
@@ -239,3 +295,45 @@ tql eval (3, 4, '1s') cache_hit / (cache_miss + cache_hit);
 drop table cache_hit;
 
 drop table cache_miss;
+
+create table cache_hit_with_null_label (
+    ts timestamp time index,
+    job string,
+    null_label string null,
+    greptime_value double,
+    primary key (job, null_label)
+);
+
+create table cache_miss_with_null_label (
+    ts timestamp time index,
+    job string,
+    null_label string null,
+    greptime_value double,
+    primary key (job, null_label)
+);
+
+insert into cache_hit_with_null_label values
+    (3000, "read", null, 1.0),
+    (3000, "write", null, 2.0),
+    (4000, "read", null, 3.0),
+    (4000, "write", null, 4.0);
+
+insert into cache_miss_with_null_label values
+    (3000, "read", null, 1.0),
+    (3000, "write", null, 2.0),
+    (4000, "read", null, 1.0),
+    (4000, "write", null, 2.0);
+
+-- SQLNESS SORT_RESULT 3 1
+-- null!=null, so it will returns the empty set.
+tql eval (3, 4, '1s') cache_hit_with_null_label / (cache_miss_with_null_label + cache_hit_with_null_label);
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3, 4, '1s') cache_hit_with_null_label / ignoring(null_label) (cache_miss_with_null_label + ignoring(null_label) cache_hit_with_null_label);
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3, 4, '1s') cache_hit_with_null_label / on(job) (cache_miss_with_null_label + on(job) cache_hit_with_null_label);
+
+drop table cache_hit_with_null_label;
+
+drop table cache_miss_with_null_label;

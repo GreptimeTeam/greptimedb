@@ -15,7 +15,7 @@ api.workspace = true
 arrow.workspace = true
 arrow-schema.workspace = true
 async-stream.workspace = true
-async-trait = "0.1"
+async-trait.workspace = true
 bytes.workspace = true
 common-catalog.workspace = true
 common-error.workspace = true
@@ -31,7 +31,7 @@ common-version.workspace = true
 dashmap.workspace = true
 datafusion.workspace = true
 datatypes.workspace = true
-futures = "0.3"
+futures.workspace = true
 futures-util.workspace = true
 humantime.workspace = true
 itertools.workspace = true
@@ -39,7 +39,7 @@ lazy_static.workspace = true
 meta-client.workspace = true
 moka = { workspace = true, features = ["future", "sync"] }
 partition.workspace = true
-paste = "1.0"
+paste.workspace = true
 prometheus.workspace = true
 rustc-hash.workspace = true
 serde_json.workspace = true
@@ -49,7 +49,7 @@ sql.workspace = true
 store-api.workspace = true
 table.workspace = true
 tokio.workspace = true
-tokio-stream = "0.1"
+tokio-stream.workspace = true
 
 [dev-dependencies]
 cache.workspace = true

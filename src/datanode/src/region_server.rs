@@ -159,7 +159,12 @@ impl RegionServer {
         self.inner.handle_request(region_id, request).await
     }
 
-    async fn table_provider(&self, region_id: RegionId) -> Result<Arc<dyn TableProvider>> {
+    /// Returns a table provider for the region. Will set snapshot sequence if available in the context.
+    async fn table_provider(
+        &self,
+        region_id: RegionId,
+        ctx: Option<&session::context::QueryContext>,
+    ) -> Result<Arc<dyn TableProvider>> {
         let status = self
             .inner
             .region_map
@@ -173,7 +178,7 @@ impl RegionServer {
 
         self.inner
             .table_provider_factory
-            .create(region_id, status.into_engine())
+            .create(region_id, status.into_engine(), ctx)
             .await
             .context(ExecuteLogicalPlanSnafu)
     }
@@ -188,15 +193,16 @@ impl RegionServer {
         } else {
             None
         };
-        let region_id = RegionId::from_u64(request.region_id);
-        let provider = self.table_provider(region_id).await?;
-        let catalog_list = Arc::new(DummyCatalogList::with_table_provider(provider));
 
         let query_ctx: QueryContextRef = request
             .header
             .as_ref()
             .map(|h| Arc::new(h.into()))
             .unwrap_or_else(|| Arc::new(QueryContextBuilder::default().build()));
+
+        let region_id = RegionId::from_u64(request.region_id);
+        let provider = self.table_provider(region_id, Some(&query_ctx)).await?;
+        let catalog_list = Arc::new(DummyCatalogList::with_table_provider(provider));
 
         let decoder = self
             .inner
@@ -226,7 +232,10 @@ impl RegionServer {
         } else {
             None
         };
-        let provider = self.table_provider(request.region_id).await?;
+
+        let ctx: Option<session::context::QueryContext> = request.header.as_ref().map(|h| h.into());
+
+        let provider = self.table_provider(request.region_id, ctx.as_ref()).await?;
 
         struct RegionDataSourceInjector {
             source: Arc<dyn TableSource>,
@@ -1209,7 +1218,10 @@ mod tests {
         );
 
         let response = mock_region_server
-            .handle_request(region_id, RegionRequest::Drop(RegionDropRequest {}))
+            .handle_request(
+                region_id,
+                RegionRequest::Drop(RegionDropRequest { fast_path: false }),
+            )
             .await
             .unwrap();
         assert_eq!(response.affected_rows, 0);
@@ -1301,7 +1313,10 @@ mod tests {
             .insert(region_id, RegionEngineWithStatus::Ready(engine.clone()));
 
         mock_region_server
-            .handle_request(region_id, RegionRequest::Drop(RegionDropRequest {}))
+            .handle_request(
+                region_id,
+                RegionRequest::Drop(RegionDropRequest { fast_path: false }),
+            )
             .await
             .unwrap_err();
 

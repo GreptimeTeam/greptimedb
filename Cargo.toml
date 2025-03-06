@@ -67,7 +67,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.12.0"
+version = "0.13.0"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -129,7 +129,7 @@ etcd-client = "0.14"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "683e9d10ae7f3dfb8aaabd89082fc600c17e3795" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "d92c9ac4e90ef4abdcf5c2eaf5a164e18ba09486" }
 hex = "0.4"
 http = "1"
 humantime = "2.1"
@@ -160,7 +160,9 @@ parquet = { version = "53.0.0", default-features = false, features = ["arrow", "
 paste = "1.0"
 pin-project = "1.0"
 prometheus = { version = "0.13.3", features = ["process"] }
-promql-parser = { version = "0.4.3", features = ["ser"] }
+promql-parser = { git = "https://github.com/GreptimeTeam/promql-parser.git", features = [
+    "ser",
+], rev = "27abb8e16003a50c720f00d6c85f41f5fa2a2a8e" }
 prost = "0.13"
 raft-engine = { version = "0.4.1", default-features = false }
 rand = "0.8"

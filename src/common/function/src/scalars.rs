@@ -22,7 +22,10 @@ pub mod matches;
 pub mod math;
 pub mod vector;
 
+pub(crate) mod hll_count;
+pub mod ip;
 #[cfg(test)]
 pub(crate) mod test;
 pub(crate) mod timestamp;
+pub(crate) mod uddsketch_calc;
 pub mod udf;

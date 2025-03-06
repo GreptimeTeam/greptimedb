@@ -146,6 +146,7 @@ impl WorkerGroup {
             &config.index.aux_path,
             config.index.staging_size.as_bytes(),
             Some(config.index.write_buffer_size.as_bytes() as _),
+            config.index.staging_ttl,
         )
         .await?;
         let intermediate_manager = IntermediateManager::init_fs(&config.index.aux_path)
@@ -295,6 +296,7 @@ impl WorkerGroup {
             &config.index.aux_path,
             config.index.staging_size.as_bytes(),
             Some(config.index.write_buffer_size.as_bytes() as _),
+            config.index.staging_ttl,
         )
         .await?;
         let intermediate_manager = IntermediateManager::init_fs(&config.index.aux_path)
@@ -834,7 +836,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         for ddl in ddl_requests.drain(..) {
             let res = match ddl.request {
                 DdlRequest::Create(req) => self.handle_create_request(ddl.region_id, req).await,
-                DdlRequest::Drop(_) => self.handle_drop_request(ddl.region_id).await,
+                DdlRequest::Drop => self.handle_drop_request(ddl.region_id).await,
                 DdlRequest::Open((req, wal_entry_receiver)) => {
                     self.handle_open_request(ddl.region_id, req, wal_entry_receiver, ddl.sender)
                         .await;

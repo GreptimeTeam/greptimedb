@@ -15,9 +15,11 @@
 use datafusion_common::ScalarValue;
 use datafusion_expr::Expr;
 use object_store::ObjectStore;
+use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use store_api::metadata::RegionMetadata;
-use store_api::storage::{ColumnId, ConcreteDataType};
+use store_api::storage::{ColumnId, ConcreteDataType, RegionId};
 
+use crate::cache::file_cache::FileCacheRef;
 use crate::error::Result;
 use crate::sst::index::fulltext_index::applier::FulltextIndexApplier;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
@@ -25,25 +27,47 @@ use crate::sst::index::puffin_manager::PuffinManagerFactory;
 /// `FulltextIndexApplierBuilder` is a builder for `FulltextIndexApplier`.
 pub struct FulltextIndexApplierBuilder<'a> {
     region_dir: String,
+    region_id: RegionId,
     store: ObjectStore,
     puffin_manager_factory: PuffinManagerFactory,
     metadata: &'a RegionMetadata,
+    file_cache: Option<FileCacheRef>,
+    puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
 }
 
 impl<'a> FulltextIndexApplierBuilder<'a> {
     /// Creates a new `FulltextIndexApplierBuilder`.
     pub fn new(
         region_dir: String,
+        region_id: RegionId,
         store: ObjectStore,
         puffin_manager_factory: PuffinManagerFactory,
         metadata: &'a RegionMetadata,
     ) -> Self {
         Self {
             region_dir,
+            region_id,
             store,
             puffin_manager_factory,
             metadata,
+            file_cache: None,
+            puffin_metadata_cache: None,
         }
+    }
+
+    /// Sets the file cache to be used by the `FulltextIndexApplier`.
+    pub fn with_file_cache(mut self, file_cache: Option<FileCacheRef>) -> Self {
+        self.file_cache = file_cache;
+        self
+    }
+
+    /// Sets the puffin metadata cache to be used by the `FulltextIndexApplier`.
+    pub fn with_puffin_metadata_cache(
+        mut self,
+        puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
+    ) -> Self {
+        self.puffin_metadata_cache = puffin_metadata_cache;
+        self
     }
 
     /// Builds `SstIndexApplier` from the given expressions.
@@ -58,10 +82,13 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
         Ok((!queries.is_empty()).then(|| {
             FulltextIndexApplier::new(
                 self.region_dir,
+                self.region_id,
                 self.store,
                 queries,
                 self.puffin_manager_factory,
             )
+            .with_file_cache(self.file_cache)
+            .with_puffin_metadata_cache(self.puffin_metadata_cache)
         }))
     }
 
@@ -132,14 +159,11 @@ mod tests {
     }
 
     fn matches_func() -> Arc<ScalarUDF> {
-        Arc::new(
-            create_udf(
-                FUNCTION_REGISTRY.get_function("matches").unwrap(),
-                QueryContext::arc(),
-                Default::default(),
-            )
-            .into(),
-        )
+        Arc::new(create_udf(
+            FUNCTION_REGISTRY.get_function("matches").unwrap(),
+            QueryContext::arc(),
+            Default::default(),
+        ))
     }
 
     #[test]

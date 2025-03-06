@@ -40,6 +40,7 @@ pub struct PhysicalRegionOptions {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum IndexOptions {
     #[default]
+    None,
     Inverted,
     Skipping {
         granularity: u32,

@@ -36,7 +36,6 @@ use crate::instruction::CacheIdent;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
 use crate::rpc::router::{find_leader_regions, find_leaders, RegionRoute};
-use crate::ClusterId;
 
 /// [Control] indicated to the caller whether to go to the next step.
 #[derive(Debug)]
@@ -54,14 +53,8 @@ impl<T> Control<T> {
 
 impl DropTableExecutor {
     /// Returns the [DropTableExecutor].
-    pub fn new(
-        cluster_id: ClusterId,
-        table: TableName,
-        table_id: TableId,
-        drop_if_exists: bool,
-    ) -> Self {
+    pub fn new(table: TableName, table_id: TableId, drop_if_exists: bool) -> Self {
         Self {
-            cluster_id,
             table,
             table_id,
             drop_if_exists,
@@ -74,7 +67,6 @@ impl DropTableExecutor {
 /// - Invalidates the cache on the Frontend nodes.
 /// - Drops the regions on the Datanode nodes.
 pub struct DropTableExecutor {
-    cluster_id: ClusterId,
     table: TableName,
     table_id: TableId,
     drop_if_exists: bool,
@@ -164,7 +156,7 @@ impl DropTableExecutor {
         let detecting_regions = if table_route_value.is_physical() {
             // Safety: checked.
             let regions = table_route_value.region_routes().unwrap();
-            convert_region_routes_to_detecting_regions(self.cluster_id, regions)
+            convert_region_routes_to_detecting_regions(regions)
         } else {
             vec![]
         };
@@ -214,6 +206,7 @@ impl DropTableExecutor {
         &self,
         ctx: &DdlContext,
         region_routes: &[RegionRoute],
+        fast_path: bool,
     ) -> Result<()> {
         let leaders = find_leaders(region_routes);
         let mut drop_region_tasks = Vec::with_capacity(leaders.len());
@@ -236,6 +229,7 @@ impl DropTableExecutor {
                     }),
                     body: Some(region_request::Body::Drop(PbDropRegionRequest {
                         region_id: region_id.as_u64(),
+                        fast_path,
                     })),
                 };
                 let datanode = datanode.clone();
@@ -319,7 +313,6 @@ mod tests {
         let node_manager = Arc::new(MockDatanodeManager::new(()));
         let ctx = new_ddl_context(node_manager);
         let executor = DropTableExecutor::new(
-            0,
             TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_table"),
             1024,
             true,
@@ -329,7 +322,6 @@ mod tests {
 
         // Drops a non-exists table
         let executor = DropTableExecutor::new(
-            0,
             TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_table"),
             1024,
             false,
@@ -339,7 +331,6 @@ mod tests {
 
         // Drops a exists table
         let executor = DropTableExecutor::new(
-            0,
             TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_table"),
             1024,
             false,

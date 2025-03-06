@@ -118,10 +118,9 @@ impl HeartbeatTask {
         });
     }
 
-    fn create_heartbeat_request(
+    fn new_heartbeat_request(
+        heartbeat_request: &HeartbeatRequest,
         message: Option<OutgoingMessage>,
-        peer: Option<Peer>,
-        start_time_ms: u64,
     ) -> Option<HeartbeatRequest> {
         let mailbox_message = match message.map(outgoing_message_to_mailbox_message) {
             Some(Ok(message)) => Some(message),
@@ -134,9 +133,7 @@ impl HeartbeatTask {
 
         Some(HeartbeatRequest {
             mailbox_message,
-            peer,
-            info: Self::build_node_info(start_time_ms),
-            ..Default::default()
+            ..heartbeat_request.clone()
         })
     }
 
@@ -147,6 +144,7 @@ impl HeartbeatTask {
             version: build_info.version.to_string(),
             git_commit: build_info.commit_short.to_string(),
             start_time_ms,
+            cpus: num_cpus::get() as u32,
         })
     }
 
@@ -167,11 +165,17 @@ impl HeartbeatTask {
             let sleep = tokio::time::sleep(Duration::from_millis(0));
             tokio::pin!(sleep);
 
+            let heartbeat_request = HeartbeatRequest {
+                peer: self_peer,
+                info: Self::build_node_info(start_time_ms),
+                ..Default::default()
+            };
+
             loop {
                 let req = tokio::select! {
                     message = outgoing_rx.recv() => {
                         if let Some(message) = message {
-                            Self::create_heartbeat_request(Some(message), self_peer.clone(), start_time_ms)
+                            Self::new_heartbeat_request(&heartbeat_request, Some(message))
                         } else {
                             // Receives None that means Sender was dropped, we need to break the current loop
                             break
@@ -179,7 +183,7 @@ impl HeartbeatTask {
                     }
                     _ = &mut sleep => {
                         sleep.as_mut().reset(Instant::now() + Duration::from_millis(report_interval));
-                       Self::create_heartbeat_request(None, self_peer.clone(), start_time_ms)
+                       Self::new_heartbeat_request(&heartbeat_request, None)
                     }
                 };
 

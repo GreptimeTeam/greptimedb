@@ -40,10 +40,10 @@ use crate::ddl::DdlContext;
 use crate::error::{self, Result};
 use crate::key::table_route::TableRouteValue;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock};
+use crate::metrics;
 use crate::region_keeper::OperatingRegionGuard;
 use crate::rpc::ddl::DropTableTask;
 use crate::rpc::router::{operating_leader_regions, RegionRoute};
-use crate::{metrics, ClusterId};
 
 pub struct DropTableProcedure {
     /// The context of procedure runtime.
@@ -59,8 +59,8 @@ pub struct DropTableProcedure {
 impl DropTableProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::DropTable";
 
-    pub fn new(cluster_id: ClusterId, task: DropTableTask, context: DdlContext) -> Self {
-        let data = DropTableData::new(cluster_id, task);
+    pub fn new(task: DropTableTask, context: DdlContext) -> Self {
+        let data = DropTableData::new(task);
         let executor = data.build_executor();
         Self {
             context,
@@ -156,7 +156,7 @@ impl DropTableProcedure {
 
     pub async fn on_datanode_drop_regions(&mut self) -> Result<Status> {
         self.executor
-            .on_drop_regions(&self.context, &self.data.physical_region_routes)
+            .on_drop_regions(&self.context, &self.data.physical_region_routes, false)
             .await?;
         self.data.state = DropTableState::DeleteTombstone;
         Ok(Status::executing(true))
@@ -268,7 +268,6 @@ impl Procedure for DropTableProcedure {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DropTableData {
     pub state: DropTableState,
-    pub cluster_id: ClusterId,
     pub task: DropTableTask,
     pub physical_region_routes: Vec<RegionRoute>,
     pub physical_table_id: Option<TableId>,
@@ -279,10 +278,9 @@ pub struct DropTableData {
 }
 
 impl DropTableData {
-    pub fn new(cluster_id: ClusterId, task: DropTableTask) -> Self {
+    pub fn new(task: DropTableTask) -> Self {
         Self {
             state: DropTableState::Prepare,
-            cluster_id,
             task,
             physical_region_routes: vec![],
             physical_table_id: None,
@@ -301,7 +299,6 @@ impl DropTableData {
 
     fn build_executor(&self) -> DropTableExecutor {
         DropTableExecutor::new(
-            self.cluster_id,
             self.task.table_name(),
             self.task.table_id,
             self.task.drop_if_exists,

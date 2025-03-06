@@ -490,6 +490,18 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Region {} is in {:?} state, which does not permit manifest updates.",
+        region_id,
+        state
+    ))]
+    UpdateManifest {
+        region_id: RegionId,
+        state: RegionRoleState,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Region {} is in {:?} state, expect: {:?}", region_id, state, expect))]
     RegionLeaderState {
         region_id: RegionId,
@@ -823,6 +835,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to purge puffin stager"))]
+    PuffinPurgeStager {
+        source: puffin::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to build puffin reader"))]
     PuffinBuildReader {
         source: puffin::error::Error,
@@ -1048,7 +1067,7 @@ impl ErrorExt for Error {
             CompactRegion { source, .. } => source.status_code(),
             CompatReader { .. } => StatusCode::Unexpected,
             InvalidRegionRequest { source, .. } => source.status_code(),
-            RegionLeaderState { .. } => StatusCode::RegionNotReady,
+            RegionLeaderState { .. } | UpdateManifest { .. } => StatusCode::RegionNotReady,
             &FlushableRegionState { .. } => StatusCode::RegionNotReady,
             JsonOptions { .. } => StatusCode::InvalidArguments,
             EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,
@@ -1062,7 +1081,8 @@ impl ErrorExt for Error {
             PuffinReadBlob { source, .. }
             | PuffinAddBlob { source, .. }
             | PuffinInitStager { source, .. }
-            | PuffinBuildReader { source, .. } => source.status_code(),
+            | PuffinBuildReader { source, .. }
+            | PuffinPurgeStager { source, .. } => source.status_code(),
             CleanDir { .. } => StatusCode::Unexpected,
             InvalidConfig { .. } => StatusCode::InvalidArguments,
             StaleLogEntry { .. } => StatusCode::Unexpected,

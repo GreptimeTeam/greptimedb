@@ -17,17 +17,20 @@ use std::fmt::{self, Display};
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::add_column_location::LocationType;
-use api::v1::column_def::as_fulltext_option;
+use api::v1::column_def::{as_fulltext_option, as_skipping_index_type};
 use api::v1::region::{
     alter_request, compact_request, region_request, AlterRequest, AlterRequests, CloseRequest,
     CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest, DropRequests,
     FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
 };
-use api::v1::{self, set_index, Analyzer, Option as PbOption, Rows, SemanticType, WriteHint};
+use api::v1::{
+    self, set_index, Analyzer, Option as PbOption, Rows, SemanticType,
+    SkippingIndexType as PbSkippingIndexType, WriteHint,
+};
 pub use common_base::AffectedRows;
 use common_time::TimeToLive;
-use datatypes::data_type::ConcreteDataType;
-use datatypes::schema::FulltextOptions;
+use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use strum::{AsRefStr, IntoStaticStr};
@@ -219,7 +222,12 @@ fn make_region_creates(creates: CreateRequests) -> Result<Vec<(RegionId, RegionR
 
 fn parse_region_drop(drop: DropRequest) -> Result<(RegionId, RegionDropRequest)> {
     let region_id = drop.region_id.into();
-    Ok((region_id, RegionDropRequest {}))
+    Ok((
+        region_id,
+        RegionDropRequest {
+            fast_path: drop.fast_path,
+        },
+    ))
 }
 
 fn make_region_drop(drop: DropRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
@@ -394,8 +402,10 @@ impl RegionCreateRequest {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct RegionDropRequest {}
+#[derive(Debug, Clone)]
+pub struct RegionDropRequest {
+    pub fast_path: bool,
+}
 
 /// Open region request.
 #[derive(Debug, Clone)]
@@ -511,6 +521,10 @@ pub enum ApiSetIndexOptions {
     Inverted {
         column_name: String,
     },
+    Skipping {
+        column_name: String,
+        options: SkippingIndexOptions,
+    },
 }
 
 impl ApiSetIndexOptions {
@@ -518,6 +532,7 @@ impl ApiSetIndexOptions {
         match self {
             ApiSetIndexOptions::Fulltext { column_name, .. } => column_name,
             ApiSetIndexOptions::Inverted { column_name } => column_name,
+            ApiSetIndexOptions::Skipping { column_name, .. } => column_name,
         }
     }
 
@@ -525,6 +540,7 @@ impl ApiSetIndexOptions {
         match self {
             ApiSetIndexOptions::Fulltext { .. } => true,
             ApiSetIndexOptions::Inverted { .. } => false,
+            ApiSetIndexOptions::Skipping { .. } => false,
         }
     }
 }
@@ -533,6 +549,7 @@ impl ApiSetIndexOptions {
 pub enum ApiUnsetIndexOptions {
     Fulltext { column_name: String },
     Inverted { column_name: String },
+    Skipping { column_name: String },
 }
 
 impl ApiUnsetIndexOptions {
@@ -540,6 +557,7 @@ impl ApiUnsetIndexOptions {
         match self {
             ApiUnsetIndexOptions::Fulltext { column_name } => column_name,
             ApiUnsetIndexOptions::Inverted { column_name } => column_name,
+            ApiUnsetIndexOptions::Skipping { column_name } => column_name,
         }
     }
 
@@ -547,6 +565,7 @@ impl ApiUnsetIndexOptions {
         match self {
             ApiUnsetIndexOptions::Fulltext { .. } => true,
             ApiUnsetIndexOptions::Inverted { .. } => false,
+            ApiUnsetIndexOptions::Skipping { .. } => false,
         }
     }
 }
@@ -722,6 +741,18 @@ impl TryFrom<alter_request::Kind> for AlterKind {
                         column_name: i.column_name,
                     },
                 },
+                set_index::Options::Skipping(s) => AlterKind::SetIndex {
+                    options: ApiSetIndexOptions::Skipping {
+                        column_name: s.column_name,
+                        options: SkippingIndexOptions {
+                            index_type: as_skipping_index_type(
+                                PbSkippingIndexType::try_from(s.skipping_index_type)
+                                    .context(DecodeProtoSnafu)?,
+                            ),
+                            granularity: s.granularity as u32,
+                        },
+                    },
+                },
             },
             alter_request::Kind::UnsetIndex(o) => match o.options.unwrap() {
                 v1::unset_index::Options::Fulltext(f) => AlterKind::UnsetIndex {
@@ -732,6 +763,11 @@ impl TryFrom<alter_request::Kind> for AlterKind {
                 v1::unset_index::Options::Inverted(i) => AlterKind::UnsetIndex {
                     options: ApiUnsetIndexOptions::Inverted {
                         column_name: i.column_name,
+                    },
+                },
+                v1::unset_index::Options::Skipping(s) => AlterKind::UnsetIndex {
+                    options: ApiUnsetIndexOptions::Skipping {
+                        column_name: s.column_name,
                     },
                 },
             },
@@ -1082,6 +1118,12 @@ pub struct RegionCatchupRequest {
     pub entry_id: Option<entry::Id>,
     /// The hint for replaying memtable.
     pub location_id: Option<u64>,
+}
+
+/// Get sequences of regions by region ids.
+#[derive(Debug, Clone)]
+pub struct RegionSequencesRequest {
+    pub region_ids: Vec<RegionId>,
 }
 
 impl fmt::Display for RegionRequest {

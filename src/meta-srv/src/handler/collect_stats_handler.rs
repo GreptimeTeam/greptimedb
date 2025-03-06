@@ -21,7 +21,7 @@ use common_meta::key::node_address::{NodeAddressKey, NodeAddressValue};
 use common_meta::key::{MetadataKey, MetadataValue};
 use common_meta::peer::Peer;
 use common_meta::rpc::store::PutRequest;
-use common_telemetry::{error, warn};
+use common_telemetry::{error, info, warn};
 use dashmap::DashMap;
 use snafu::ResultExt;
 
@@ -185,6 +185,10 @@ async fn rewrite_node_address(ctx: &mut Context, stat: &Stat) {
 
         match ctx.leader_cached_kv_backend.put(put).await {
             Ok(_) => {
+                info!(
+                    "Successfully updated datanode `NodeAddressValue`: {:?}",
+                    peer
+                );
                 // broadcast invalidating cache
                 let cache_idents = stat
                     .table_ids()
@@ -200,11 +204,14 @@ async fn rewrite_node_address(ctx: &mut Context, stat: &Stat) {
                 }
             }
             Err(e) => {
-                error!(e; "Failed to update NodeAddressValue: {:?}", peer);
+                error!(e; "Failed to update datanode `NodeAddressValue`: {:?}", peer);
             }
         }
     } else {
-        warn!("Failed to serialize NodeAddressValue: {:?}", peer);
+        warn!(
+            "Failed to serialize datanode `NodeAddressValue`: {:?}",
+            peer
+        );
     }
 }
 
@@ -255,15 +262,11 @@ mod tests {
         let handler = CollectStatsHandler::default();
         handle_request_many_times(ctx.clone(), &handler, 1).await;
 
-        let key = DatanodeStatKey {
-            cluster_id: 3,
-            node_id: 101,
-        };
+        let key = DatanodeStatKey { node_id: 101 };
         let key: Vec<u8> = key.into();
         let res = ctx.in_memory.get(&key).await.unwrap();
         let kv = res.unwrap();
         let key: DatanodeStatKey = kv.key.clone().try_into().unwrap();
-        assert_eq!(3, key.cluster_id);
         assert_eq!(101, key.node_id);
         let val: DatanodeStatValue = kv.value.try_into().unwrap();
         // first new stat must be set in kv store immediately
@@ -288,7 +291,6 @@ mod tests {
         for i in 1..=loop_times {
             let mut acc = HeartbeatAccumulator {
                 stat: Some(Stat {
-                    cluster_id: 3,
                     id: 101,
                     region_num: i as _,
                     ..Default::default()

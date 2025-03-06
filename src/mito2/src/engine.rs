@@ -82,7 +82,7 @@ use store_api::region_engine::{
     SetRegionRoleStateResponse, SettableRegionRoleState,
 };
 use store_api::region_request::{AffectedRows, RegionOpenRequest, RegionRequest};
-use store_api::storage::{RegionId, ScanRequest};
+use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 use tokio::sync::{oneshot, Semaphore};
 
 use crate::cache::CacheStrategy;
@@ -424,6 +424,17 @@ impl EngineInner {
         receiver.await.context(RecvSnafu)?
     }
 
+    fn get_last_seq_num(&self, region_id: RegionId) -> Result<Option<SequenceNumber>> {
+        // Reading a region doesn't need to go through the region worker thread.
+        let region = self
+            .workers
+            .get_region(region_id)
+            .context(RegionNotFoundSnafu { region_id })?;
+        let version_ctrl = &region.version_control;
+        let seq = Some(version_ctrl.committed_sequence());
+        Ok(seq)
+    }
+
     /// Handles the scan `request` and returns a [ScanRegion].
     fn scan_region(&self, region_id: RegionId, request: ScanRequest) -> Result<ScanRegion> {
         let query_start = Instant::now();
@@ -544,6 +555,15 @@ impl RegionEngine for MitoEngine {
         self.scan_region(region_id, request)
             .map_err(BoxedError::new)?
             .region_scanner()
+            .map_err(BoxedError::new)
+    }
+
+    async fn get_last_seq_num(
+        &self,
+        region_id: RegionId,
+    ) -> Result<Option<SequenceNumber>, BoxedError> {
+        self.inner
+            .get_last_seq_num(region_id)
             .map_err(BoxedError::new)
     }
 

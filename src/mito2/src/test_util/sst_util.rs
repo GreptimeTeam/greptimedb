@@ -47,7 +47,8 @@ pub fn sst_region_metadata() -> RegionMetadata {
                 "tag_0".to_string(),
                 ConcreteDataType::string_datatype(),
                 true,
-            ),
+            )
+            .with_inverted_index(true),
             semantic_type: SemanticType::Tag,
             column_id: 0,
         })

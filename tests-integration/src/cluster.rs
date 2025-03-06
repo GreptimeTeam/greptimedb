@@ -308,11 +308,10 @@ impl GreptimeDbClusterBuilder {
         expected_datanodes: usize,
     ) {
         for _ in 0..10 {
-            let alive_datanodes =
-                meta_srv::lease::alive_datanodes(1000, meta_peer_client, u64::MAX)
-                    .await
-                    .unwrap()
-                    .len();
+            let alive_datanodes = meta_srv::lease::alive_datanodes(meta_peer_client, u64::MAX)
+                .await
+                .unwrap()
+                .len();
             if alive_datanodes == expected_datanodes {
                 return;
             }
@@ -322,10 +321,9 @@ impl GreptimeDbClusterBuilder {
     }
 
     async fn create_datanode(&self, opts: DatanodeOptions, metasrv: MockInfo) -> Datanode {
-        let mut meta_client =
-            MetaClientBuilder::datanode_default_options(1000, opts.node_id.unwrap())
-                .channel_manager(metasrv.channel_manager)
-                .build();
+        let mut meta_client = MetaClientBuilder::datanode_default_options(opts.node_id.unwrap())
+            .channel_manager(metasrv.channel_manager)
+            .build();
         meta_client.start(&[&metasrv.server_addr]).await.unwrap();
         let meta_client = Arc::new(meta_client);
 
@@ -357,7 +355,7 @@ impl GreptimeDbClusterBuilder {
         metasrv: MockInfo,
         datanode_clients: Arc<NodeClients>,
     ) -> Arc<FeInstance> {
-        let mut meta_client = MetaClientBuilder::frontend_default_options(1000)
+        let mut meta_client = MetaClientBuilder::frontend_default_options()
             .channel_manager(metasrv.channel_manager)
             .enable_access_cluster_info()
             .build();

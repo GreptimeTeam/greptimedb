@@ -1,4 +1,4 @@
-FROM ubuntu:20.04
+FROM ubuntu:22.04
 
 # The root path under which contains all the dependencies to build this Dockerfile.
 ARG DOCKER_BUILD_ROOT=.
@@ -41,7 +41,7 @@ RUN mv protoc3/include/* /usr/local/include/
 # and the repositories are pulled from trusted sources (still us, of course). Doing so does not violate the intention
 # of the Git's addition to the "safe.directory" at the first place (see the commit message here:
 # https://github.com/git/git/commit/8959555cee7ec045958f9b6dd62e541affb7e7d9).
-# There's also another solution to this, that we add the desired submodules to the safe directory, instead of using 
+# There's also another solution to this, that we add the desired submodules to the safe directory, instead of using
 # wildcard here. However, that requires the git's config files and the submodules all owned by the very same user.
 # It's troublesome to do this since the dev build runs in Docker, which is under user "root"; while outside the Docker,
 # it can be a different user that have prepared the submodules.

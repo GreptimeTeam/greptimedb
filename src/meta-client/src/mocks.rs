@@ -60,8 +60,8 @@ pub async fn mock_client_with_etcdstore(addr: &str) -> (MetaClient, MockMetaCont
 }
 
 pub async fn mock_client_by(server_addr: String, channel_manager: ChannelManager) -> MetaClient {
-    let id = (1000u64, 2000u64);
-    let mut meta_client = MetaClientBuilder::datanode_default_options(id.0, id.1)
+    let id = 2000u64;
+    let mut meta_client = MetaClientBuilder::datanode_default_options(id)
         .enable_access_cluster_info()
         .channel_manager(channel_manager)
         .build();

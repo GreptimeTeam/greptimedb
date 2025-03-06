@@ -107,7 +107,10 @@ pub trait OpenTelemetryProtocolHandler: PipelineHandler {
     /// Handling opentelemetry traces request
     async fn traces(
         &self,
+        pipeline_handler: PipelineHandlerRef,
         request: ExportTraceServiceRequest,
+        pipeline: PipelineWay,
+        pipeline_params: GreptimePipelineParams,
         table_name: String,
         ctx: QueryContextRef,
     ) -> Result<Output>;

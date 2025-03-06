@@ -15,10 +15,10 @@
 use std::collections::HashMap;
 
 use datatypes::schema::{
-    ColumnDefaultConstraint, ColumnSchema, FulltextAnalyzer, FulltextOptions, COMMENT_KEY,
-    FULLTEXT_KEY, INVERTED_INDEX_KEY, SKIPPING_INDEX_KEY,
+    ColumnDefaultConstraint, ColumnSchema, FulltextAnalyzer, FulltextOptions, SkippingIndexOptions,
+    SkippingIndexType, COMMENT_KEY, FULLTEXT_KEY, INVERTED_INDEX_KEY, SKIPPING_INDEX_KEY,
 };
-use greptime_proto::v1::Analyzer;
+use greptime_proto::v1::{Analyzer, SkippingIndexType as PbSkippingIndexType};
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
@@ -103,6 +103,13 @@ pub fn contains_fulltext(options: &Option<ColumnOptions>) -> bool {
         .is_some_and(|o| o.options.contains_key(FULLTEXT_GRPC_KEY))
 }
 
+/// Checks if the `ColumnOptions` contains skipping index options.
+pub fn contains_skipping(options: &Option<ColumnOptions>) -> bool {
+    options
+        .as_ref()
+        .is_some_and(|o| o.options.contains_key(SKIPPING_INDEX_GRPC_KEY))
+}
+
 /// Tries to construct a `ColumnOptions` from the given `FulltextOptions`.
 pub fn options_from_fulltext(fulltext: &FulltextOptions) -> Result<Option<ColumnOptions>> {
     let mut options = ColumnOptions::default();
@@ -113,11 +120,30 @@ pub fn options_from_fulltext(fulltext: &FulltextOptions) -> Result<Option<Column
     Ok((!options.options.is_empty()).then_some(options))
 }
 
+/// Tries to construct a `ColumnOptions` from the given `SkippingIndexOptions`.
+pub fn options_from_skipping(skipping: &SkippingIndexOptions) -> Result<Option<ColumnOptions>> {
+    let mut options = ColumnOptions::default();
+
+    let v = serde_json::to_string(skipping).context(error::SerializeJsonSnafu)?;
+    options
+        .options
+        .insert(SKIPPING_INDEX_GRPC_KEY.to_string(), v);
+
+    Ok((!options.options.is_empty()).then_some(options))
+}
+
 /// Tries to construct a `FulltextAnalyzer` from the given analyzer.
 pub fn as_fulltext_option(analyzer: Analyzer) -> FulltextAnalyzer {
     match analyzer {
         Analyzer::English => FulltextAnalyzer::English,
         Analyzer::Chinese => FulltextAnalyzer::Chinese,
+    }
+}
+
+/// Tries to construct a `SkippingIndexType` from the given skipping index type.
+pub fn as_skipping_index_type(skipping_index_type: PbSkippingIndexType) -> SkippingIndexType {
+    match skipping_index_type {
+        PbSkippingIndexType::BloomFilter => SkippingIndexType::BloomFilter,
     }
 }
 

@@ -187,9 +187,12 @@ impl FileCache {
     }
 
     /// Removes a file from the cache explicitly.
+    /// It always tries to remove the file from the local store because we may not have the file
+    /// in the memory index if upload is failed.
     pub(crate) async fn remove(&self, key: IndexKey) {
         let file_path = self.cache_file_path(key);
         self.memory_index.remove(&key).await;
+        // Always delete the file from the local store.
         if let Err(e) = self.local_store.delete(&file_path).await {
             warn!(e; "Failed to delete a cached file {}", file_path);
         }

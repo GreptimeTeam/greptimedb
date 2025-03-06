@@ -18,6 +18,10 @@ use std::sync::Arc;
 
 use arrow_schema::DataType;
 use catalog::table_source::DfTableSourceProvider;
+use common_function::aggr::{
+    GeoPathAccumulator, HllState, UddSketchState, GEO_PATH_NAME, HLL_MERGE_NAME, HLL_NAME,
+    UDDSKETCH_STATE_NAME,
+};
 use common_function::scalars::udf::create_udf;
 use common_query::logical_plan::create_aggregate_function;
 use datafusion::common::TableReference;
@@ -152,19 +156,26 @@ impl ContextProvider for DfContextProviderAdapter {
         self.engine_state.udf_function(name).map_or_else(
             || self.session_state.scalar_functions().get(name).cloned(),
             |func| {
-                Some(Arc::new(
-                    create_udf(
-                        func,
-                        self.query_ctx.clone(),
-                        self.engine_state.function_state(),
-                    )
-                    .into(),
-                ))
+                Some(Arc::new(create_udf(
+                    func,
+                    self.query_ctx.clone(),
+                    self.engine_state.function_state(),
+                )))
             },
         )
     }
 
     fn get_aggregate_meta(&self, name: &str) -> Option<Arc<AggregateUDF>> {
+        if name == UDDSKETCH_STATE_NAME {
+            return Some(Arc::new(UddSketchState::udf_impl()));
+        } else if name == HLL_NAME {
+            return Some(Arc::new(HllState::state_udf_impl()));
+        } else if name == HLL_MERGE_NAME {
+            return Some(Arc::new(HllState::merge_udf_impl()));
+        } else if name == GEO_PATH_NAME {
+            return Some(Arc::new(GeoPathAccumulator::udf_impl()));
+        }
+
         self.engine_state.aggregate_function(name).map_or_else(
             || self.session_state.aggregate_functions().get(name).cloned(),
             |func| {
