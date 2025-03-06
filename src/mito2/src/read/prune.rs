@@ -241,6 +241,8 @@ impl Iterator for PruneTimeIterator {
 #[cfg(test)]
 mod tests {
     use api::v1::OpType;
+    use datafusion_common::ScalarValue;
+    use datafusion_expr::{col, lit, Expr};
 
     use super::*;
     use crate::test_util::new_batch;
@@ -376,6 +378,126 @@ mod tests {
                     &[OpType::Put, OpType::Put],
                     &[117, 118],
                 ),
+            ]
+        );
+    }
+
+    fn create_time_filters(expr: &[Expr]) -> Option<Arc<Vec<SimpleFilterEvaluator>>> {
+        let filters = expr
+            .iter()
+            .map(|expr| SimpleFilterEvaluator::try_new(expr).unwrap())
+            .collect();
+        Some(Arc::new(filters))
+    }
+
+    #[test]
+    fn test_prune_time_iter_with_time_filters() {
+        let input = [
+            new_batch(
+                b"k1",
+                &[10, 11],
+                &[20, 20],
+                &[OpType::Put, OpType::Put],
+                &[110, 111],
+            ),
+            new_batch(
+                b"k1",
+                &[15, 16],
+                &[20, 20],
+                &[OpType::Put, OpType::Put],
+                &[115, 116],
+            ),
+            new_batch(
+                b"k1",
+                &[17, 18],
+                &[20, 20],
+                &[OpType::Put, OpType::Put],
+                &[117, 118],
+            ),
+        ];
+
+        let iter = input.clone().into_iter().map(Ok);
+        // We won't use the column name.
+        let time_filters = create_time_filters(&[
+            col("ts").gt_eq(lit(ScalarValue::TimestampMillisecond(Some(10), None))),
+            col("ts").lt(lit(ScalarValue::TimestampMillisecond(Some(16), None))),
+        ]);
+        let iter = PruneTimeIterator::new(
+            Box::new(iter),
+            (
+                Timestamp::new_millisecond(10),
+                Timestamp::new_millisecond(20),
+            ),
+            time_filters,
+        );
+        let actual: Vec<_> = iter.map(|batch| batch.unwrap()).collect();
+        assert_eq!(
+            actual,
+            [
+                new_batch(
+                    b"k1",
+                    &[10, 11],
+                    &[20, 20],
+                    &[OpType::Put, OpType::Put],
+                    &[110, 111],
+                ),
+                new_batch(b"k1", &[15], &[20], &[OpType::Put], &[115],),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_prune_time_iter_in_range_with_time_filters() {
+        let input = [
+            new_batch(
+                b"k1",
+                &[10, 11],
+                &[20, 20],
+                &[OpType::Put, OpType::Put],
+                &[110, 111],
+            ),
+            new_batch(
+                b"k1",
+                &[15, 16],
+                &[20, 20],
+                &[OpType::Put, OpType::Put],
+                &[115, 116],
+            ),
+            new_batch(
+                b"k1",
+                &[17, 18],
+                &[20, 20],
+                &[OpType::Put, OpType::Put],
+                &[117, 118],
+            ),
+        ];
+
+        let iter = input.clone().into_iter().map(Ok);
+        // We won't use the column name.
+        let time_filters = create_time_filters(&[
+            col("ts").gt_eq(lit(ScalarValue::TimestampMillisecond(Some(10), None))),
+            col("ts").lt(lit(ScalarValue::TimestampMillisecond(Some(16), None))),
+        ]);
+        let iter = PruneTimeIterator::new(
+            Box::new(iter),
+            (
+                Timestamp::new_millisecond(5),
+                Timestamp::new_millisecond(18),
+            ),
+            time_filters,
+        );
+        let actual: Vec<_> = iter.map(|batch| batch.unwrap()).collect();
+        assert_eq!(
+            actual,
+            [
+                new_batch(
+                    b"k1",
+                    &[10, 11],
+                    &[20, 20],
+                    &[OpType::Put, OpType::Put],
+                    &[110, 111],
+                ),
+                new_batch(b"k1", &[15], &[20], &[OpType::Put], &[115],),
             ]
         );
     }
