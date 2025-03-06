@@ -160,6 +160,7 @@ struct ScannerInfo {
 fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Option<ScannerInfo>> {
     let mut partition_ranges = None;
     let mut time_index = HashSet::new();
+    let mut alias_map = Vec::new();
     let mut tag_columns = None;
     let mut is_batch_coalesced = false;
 
@@ -177,20 +178,17 @@ fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Opti
             is_batch_coalesced = true;
         }
 
+        // TODO(discord9): do this in logical plan instead as it's lessy bugy there
         // Collects alias of the time index column.
         if let Some(projection) = plan.as_any().downcast_ref::<ProjectionExec>() {
             for (expr, output_name) in projection.expr() {
                 if let Some(column_expr) = expr.as_any().downcast_ref::<PhysicalColumn>() {
-                    if time_index.contains(column_expr.name()) {
-                        // time index alias to new name
-                        time_index.insert(output_name.clone());
-                    } else if time_index.contains(output_name) && column_expr.name() != output_name
-                    {
-                        // other column alias to time index column name, remove from time index
-                        time_index.remove(output_name);
-                    }
+                    alias_map.push((column_expr.name().to_string(), output_name.clone()));
                 }
             }
+            // resolve alias properly
+            // i.e if a is time index, alias= {a:b, b:c}, then result should be {b}(not {c})
+            time_index = resolver_alias(&alias_map, &time_index);
         }
 
         if let Some(region_scan_exec) = plan.as_any().downcast_ref::<RegionScanExec>() {
@@ -238,4 +236,81 @@ fn remove_repartition(
 
         Ok(Transformed::no(plan))
     })
+}
+
+/// Resolves alias of the time index column.
+///
+/// i.e if a is time index, alias= {a:b, b:c}, then result should be {b}(not {c})
+/// if alias={b:a} and a is time index, then return empty
+fn resolver_alias(alias_map: &[(String, String)], time_index: &HashSet<String>) -> HashSet<String> {
+    let mut untouched = time_index.clone();
+    let mut new_time_index = HashSet::new();
+    for (old, new) in alias_map {
+        if time_index.contains(old) {
+            untouched.remove(old);
+            new_time_index.insert(new.clone());
+        } else if time_index.contains(new) && old != new {
+            // other alias to time index
+            untouched.remove(new);
+            continue;
+        }
+    }
+    // add the remaining time index that is not in alias map
+    new_time_index.extend(untouched);
+    new_time_index
+}
+
+#[cfg(test)]
+mod test {
+    use itertools::Itertools;
+
+    use super::*;
+
+    #[test]
+    fn test_alias() {
+        let testcases = [
+            (
+                vec![("a", "b"), ("b", "c")],
+                HashSet::from(["a"]),
+                HashSet::from(["b"]),
+            ),
+            // alias swap
+            (
+                vec![("b", "a"), ("a", "b")],
+                HashSet::from(["a"]),
+                HashSet::from(["b"]),
+            ),
+            (
+                vec![("b", "a"), ("b", "c")],
+                HashSet::from(["a"]),
+                HashSet::from([]),
+            ),
+            // not in alias map
+            (
+                vec![("c", "d"), ("d", "c")],
+                HashSet::from(["a"]),
+                HashSet::from(["a"]),
+            ),
+            // no alias
+            (vec![], HashSet::from(["a"]), HashSet::from(["a"])),
+            // empty time index
+            (vec![], HashSet::from([]), HashSet::from([])),
+        ];
+        for (alias_map, time_index, expected) in testcases {
+            let alias_map = alias_map
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect_vec();
+            let time_index = time_index.into_iter().map(|i| i.to_string()).collect();
+            let expected: HashSet<String> = expected.into_iter().map(|i| i.to_string()).collect();
+
+            assert_eq!(
+                expected,
+                resolver_alias(&alias_map, &time_index),
+                "alias_map={:?}, time_index={:?}",
+                alias_map,
+                time_index
+            );
+        }
+    }
 }
