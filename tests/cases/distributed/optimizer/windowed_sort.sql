@@ -69,4 +69,52 @@ FROM
 ORDER BY
   collect_time_0 ASC;
 
+-- try more complex alias with time index
+SELECT
+  collect_time AS true_collect_time,
+  collect_time_utc AS collect_time,
+  peak_current,
+FROM
+  lightning
+ORDER BY
+  true_collect_time DESC;
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE SELECT
+  collect_time AS true_collect_time,
+  collect_time_utc AS collect_time,
+  peak_current,
+FROM
+  lightning
+ORDER BY
+  true_collect_time DESC;
+
+-- this should also do windowed sort
+SELECT
+  collect_time_utc AS collect_time,
+  collect_time AS true_collect_time,
+  peak_current,
+FROM
+  lightning
+ORDER BY
+  true_collect_time DESC;
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE SELECT
+  collect_time_utc AS collect_time,
+  collect_time AS true_collect_time,
+  peak_current,
+FROM
+  lightning
+ORDER BY
+  true_collect_time DESC;
+
 DROP TABLE lightning;
