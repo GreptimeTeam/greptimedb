@@ -91,6 +91,9 @@ impl QueryEngineState {
     ) -> Self {
         let runtime_env = Arc::new(RuntimeEnv::default());
         let mut session_config = SessionConfig::new().with_create_default_catalog_and_schema(false);
+
+        // todo(hl): This serves as a workaround for https://github.com/GreptimeTeam/greptimedb/issues/5659
+        // and we can add that check back once we upgrade datafusion.
         session_config
             .options_mut()
             .execution
