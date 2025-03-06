@@ -1,0 +1,232 @@
+-- test if handle aliased sort expr correctly
+CREATE TABLE IF NOT EXISTS lightning (
+  collect_time TIMESTAMP(9) NOT NULL,
+  collect_time_utc TIMESTAMP(9) NULL,
+  peak_current FLOAT NULL,
+  TIME INDEX (collect_time)
+)
+ENGINE=mito
+WITH(
+  'compaction.twcs.time_window' = '7d',
+  'compaction.type' = 'twcs'
+);
+
+Affected Rows: 0
+
+-- insert some data, with collect_time  = collect_time_utc + 8 hour
+INSERT INTO lightning VALUES 
+  ('2025-03-01 16:00:00', '2025-03-01 08:00:00', 1.0),
+  ('2025-03-01 17:00:00', '2025-03-01 09:00:00', 1.0),
+  ('2025-03-01 18:00:00', '2025-03-01 10:00:00', 1.0),
+  ('2025-03-01 19:00:00', '2025-03-01 11:00:00', 1.0),
+  ('2025-03-01 20:00:00', '2025-03-01 12:00:00', 1.0),
+  ('2025-03-01 21:00:00', '2025-03-01 13:00:00', 1.0),
+  ('2025-03-01 22:00:00', '2025-03-01 14:00:00', 1.0),
+  ('2025-03-01 23:00:00', '2025-03-01 15:00:00', 1.0)
+;
+
+Affected Rows: 8
+
+-- notice the alias make order by not applicable for window sort
+-- note due to alias there is a tiny difference in the output between standalone/distributed
+-- which is acceptable
+SELECT
+  collect_time_utc AS collect_time,
+  peak_current,
+FROM
+  lightning
+ORDER BY
+  collect_time ASC;
+
++---------------------+--------------+
+| collect_time        | peak_current |
++---------------------+--------------+
+| 2025-03-01T08:00:00 | 1.0          |
+| 2025-03-01T09:00:00 | 1.0          |
+| 2025-03-01T10:00:00 | 1.0          |
+| 2025-03-01T11:00:00 | 1.0          |
+| 2025-03-01T12:00:00 | 1.0          |
+| 2025-03-01T13:00:00 | 1.0          |
+| 2025-03-01T14:00:00 | 1.0          |
+| 2025-03-01T15:00:00 | 1.0          |
++---------------------+--------------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE SELECT
+  collect_time_utc AS collect_time,
+  peak_current,
+FROM
+  lightning
+ORDER BY
+  collect_time ASC;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[collect_time_utc@0 as collect_time, peak_current@1 as peak_current] REDACTED
+|_|_|_SortExec: expr=[collect_time_utc@0 ASC NULLS LAST], preserve_partitioning=[false] REDACTED
+|_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges) REDACTED
+|_|_|_|
+|_|_| Total rows: 8_|
++-+-+-+
+
+-- also try alias with different name with time index
+SELECT
+  collect_time_utc AS collect_time_0,
+  peak_current,
+FROM
+  lightning
+ORDER BY
+  collect_time_0 ASC;
+
++---------------------+--------------+
+| collect_time_0      | peak_current |
++---------------------+--------------+
+| 2025-03-01T08:00:00 | 1.0          |
+| 2025-03-01T09:00:00 | 1.0          |
+| 2025-03-01T10:00:00 | 1.0          |
+| 2025-03-01T11:00:00 | 1.0          |
+| 2025-03-01T12:00:00 | 1.0          |
+| 2025-03-01T13:00:00 | 1.0          |
+| 2025-03-01T14:00:00 | 1.0          |
+| 2025-03-01T15:00:00 | 1.0          |
++---------------------+--------------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE SELECT
+  collect_time_utc AS collect_time_0,
+  peak_current,
+FROM
+  lightning
+ORDER BY
+  collect_time_0 ASC;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[collect_time_utc@0 as collect_time_0, peak_current@1 as peak_current] REDACTED
+|_|_|_SortExec: expr=[collect_time_utc@0 ASC NULLS LAST], preserve_partitioning=[false] REDACTED
+|_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges) REDACTED
+|_|_|_|
+|_|_| Total rows: 8_|
++-+-+-+
+
+-- try more complex alias with time index
+SELECT
+  collect_time AS true_collect_time,
+  collect_time_utc AS collect_time,
+  peak_current,
+FROM
+  lightning
+ORDER BY
+  true_collect_time DESC;
+
++---------------------+---------------------+--------------+
+| true_collect_time   | collect_time        | peak_current |
++---------------------+---------------------+--------------+
+| 2025-03-01T23:00:00 | 2025-03-01T15:00:00 | 1.0          |
+| 2025-03-01T22:00:00 | 2025-03-01T14:00:00 | 1.0          |
+| 2025-03-01T21:00:00 | 2025-03-01T13:00:00 | 1.0          |
+| 2025-03-01T20:00:00 | 2025-03-01T12:00:00 | 1.0          |
+| 2025-03-01T19:00:00 | 2025-03-01T11:00:00 | 1.0          |
+| 2025-03-01T18:00:00 | 2025-03-01T10:00:00 | 1.0          |
+| 2025-03-01T17:00:00 | 2025-03-01T09:00:00 | 1.0          |
+| 2025-03-01T16:00:00 | 2025-03-01T08:00:00 | 1.0          |
++---------------------+---------------------+--------------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE SELECT
+  collect_time AS true_collect_time,
+  collect_time_utc AS collect_time,
+  peak_current,
+FROM
+  lightning
+ORDER BY
+  true_collect_time DESC;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[collect_time@0 as true_collect_time, collect_time_utc@1 as collect_time, peak_current@2 as peak_current] REDACTED
+|_|_|_SortPreservingMergeExec: [collect_time@0 DESC] REDACTED
+|_|_|_WindowedSortExec: expr=collect_time@0 DESC num_ranges=1 REDACTED
+|_|_|_PartSortExec: expr=collect_time@0 DESC num_ranges=1 REDACTED
+|_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges) REDACTED
+|_|_|_|
+|_|_| Total rows: 8_|
++-+-+-+
+
+-- this should also do windowed sort
+SELECT
+  collect_time_utc AS collect_time,
+  collect_time AS true_collect_time,
+  peak_current,
+FROM
+  lightning
+ORDER BY
+  true_collect_time DESC;
+
++---------------------+---------------------+--------------+
+| collect_time        | true_collect_time   | peak_current |
++---------------------+---------------------+--------------+
+| 2025-03-01T15:00:00 | 2025-03-01T23:00:00 | 1.0          |
+| 2025-03-01T14:00:00 | 2025-03-01T22:00:00 | 1.0          |
+| 2025-03-01T13:00:00 | 2025-03-01T21:00:00 | 1.0          |
+| 2025-03-01T12:00:00 | 2025-03-01T20:00:00 | 1.0          |
+| 2025-03-01T11:00:00 | 2025-03-01T19:00:00 | 1.0          |
+| 2025-03-01T10:00:00 | 2025-03-01T18:00:00 | 1.0          |
+| 2025-03-01T09:00:00 | 2025-03-01T17:00:00 | 1.0          |
+| 2025-03-01T08:00:00 | 2025-03-01T16:00:00 | 1.0          |
++---------------------+---------------------+--------------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE SELECT
+  collect_time_utc AS collect_time,
+  collect_time AS true_collect_time,
+  peak_current,
+FROM
+  lightning
+ORDER BY
+  true_collect_time DESC;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[collect_time_utc@0 as collect_time, collect_time@1 as true_collect_time, peak_current@2 as peak_current] REDACTED
+|_|_|_SortPreservingMergeExec: [collect_time@1 DESC] REDACTED
+|_|_|_WindowedSortExec: expr=collect_time@1 DESC num_ranges=1 REDACTED
+|_|_|_PartSortExec: expr=collect_time@1 DESC num_ranges=1 REDACTED
+|_|_|_ProjectionExec: expr=[collect_time_utc@1 as collect_time_utc, collect_time@0 as collect_time, peak_current@2 as peak_current] REDACTED
+|_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges) REDACTED
+|_|_|_|
+|_|_| Total rows: 8_|
++-+-+-+
+
+DROP TABLE lightning;
+
+Affected Rows: 0
+
