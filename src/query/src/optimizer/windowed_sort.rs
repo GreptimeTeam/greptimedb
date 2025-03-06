@@ -188,7 +188,7 @@ fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Opti
             }
             // resolve alias properly
             // i.e if a is time index, alias= {a:b, b:c}, then result should be {b}(not {c})
-            time_index = resolver_alias(&alias_map, &time_index);
+            time_index = resolve_alias(&alias_map, &time_index);
         }
 
         if let Some(region_scan_exec) = plan.as_any().downcast_ref::<RegionScanExec>() {
@@ -240,23 +240,23 @@ fn remove_repartition(
 
 /// Resolves alias of the time index column.
 ///
-/// i.e if a is time index, alias= {a:b, b:c}, then result should be {b}(not {c})
+/// i.e if a is time index, alias= {a:b, b:c}, then result should be {a, b}(not {a, c}) because projection is not transitive
 /// if alias={b:a} and a is time index, then return empty
-fn resolver_alias(alias_map: &[(String, String)], time_index: &HashSet<String>) -> HashSet<String> {
-    let mut untouched = time_index.clone();
+fn resolve_alias(alias_map: &[(String, String)], time_index: &HashSet<String>) -> HashSet<String> {
+    // available old name for time index
+    let mut avail_old_name = time_index.clone();
     let mut new_time_index = HashSet::new();
     for (old, new) in alias_map {
         if time_index.contains(old) {
-            untouched.remove(old);
             new_time_index.insert(new.clone());
         } else if time_index.contains(new) && old != new {
-            // other alias to time index
-            untouched.remove(new);
+            // other alias to time index, remove the old name
+            avail_old_name.remove(new);
             continue;
         }
     }
     // add the remaining time index that is not in alias map
-    new_time_index.extend(untouched);
+    new_time_index.extend(avail_old_name);
     new_time_index
 }
 
@@ -269,10 +269,11 @@ mod test {
     #[test]
     fn test_alias() {
         let testcases = [
+            // notice the old name is still in the result
             (
                 vec![("a", "b"), ("b", "c")],
                 HashSet::from(["a"]),
-                HashSet::from(["b"]),
+                HashSet::from(["a", "b"]),
             ),
             // alias swap
             (
@@ -306,7 +307,7 @@ mod test {
 
             assert_eq!(
                 expected,
-                resolver_alias(&alias_map, &time_index),
+                resolve_alias(&alias_map, &time_index),
                 "alias_map={:?}, time_index={:?}",
                 alias_map,
                 time_index
