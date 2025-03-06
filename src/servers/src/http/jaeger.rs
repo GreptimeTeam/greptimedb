@@ -189,7 +189,7 @@ pub struct Process {
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Log {
-    pub timestamp: i64,
+    pub timestamp: u64,
     pub fields: Vec<KeyValue>,
 }
 
@@ -787,7 +787,7 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
                         SPAN_KIND_TIME_FMTS
                             .iter()
                             .find_map(|fmt| chrono::NaiveDateTime::parse_from_str(s, fmt).ok())
-                            .map(|dt| dt.and_utc().timestamp_millis())
+                            .map(|dt| dt.and_utc().timestamp_millis() as u64)
                     }) else {
                         continue;
                     };
