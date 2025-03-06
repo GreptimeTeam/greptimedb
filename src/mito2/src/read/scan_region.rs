@@ -19,12 +19,17 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Instant;
 
+use api::v1::SemanticType;
 use common_error::ext::BoxedError;
+use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::{debug, error, tracing, warn};
 use common_time::range::TimestampRange;
+use datafusion_common::Column;
 use datafusion_expr::utils::expr_to_columns;
+use datafusion_expr::Expr;
 use smallvec::SmallVec;
+use store_api::metadata::RegionMetadata;
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
 use store_api::storage::{ScanRequest, TimeSeriesRowSelector};
 use table::predicate::{build_time_range_predicate, Predicate};
@@ -53,7 +58,7 @@ use crate::sst::index::fulltext_index::applier::builder::FulltextIndexApplierBui
 use crate::sst::index::fulltext_index::applier::FulltextIndexApplierRef;
 use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
 use crate::sst::index::inverted_index::applier::InvertedIndexApplierRef;
-use crate::sst::parquet::reader::ReaderMetrics;
+use crate::sst::parquet::reader::{ReaderMetrics, SimpleFilterContext};
 
 /// A scanner scans a region and returns a [SendableRecordBatchStream].
 pub(crate) enum Scanner {
@@ -913,5 +918,62 @@ impl StreamContext {
             write!(f, ", selector={}", selector)?;
         }
         Ok(())
+    }
+}
+
+/// Predicates for primary key, time index and fields.
+/// It only keeps filters that [SimpleFilterEvaluator] supports.
+struct PredicateGroup {
+    primary_key_filters: Vec<SimpleFilterContext>,
+    time_filters: Vec<SimpleFilterContext>,
+    field_filters: Vec<SimpleFilterContext>,
+}
+
+impl PredicateGroup {
+    /// Creates a new `PredicateGroup` from exprs according to the metadata.
+    pub fn new(metadata: &RegionMetadata, exprs: &[Expr]) -> Self {
+        let mut primary_key_filters = Vec::with_capacity(exprs.len());
+        let mut time_filters = Vec::with_capacity(exprs.len());
+        let mut field_filters = Vec::with_capacity(exprs.len());
+
+        // Columns in the expr.
+        let mut columns = HashSet::new();
+        for expr in exprs {
+            columns.clear();
+            let Some(filter) = Self::expr_to_filter(expr, metadata, &mut columns) else {
+                continue;
+            };
+            match filter.semantic_type() {
+                SemanticType::Tag => primary_key_filters.push(filter),
+                SemanticType::Field => time_filters.push(filter),
+                SemanticType::Timestamp => field_filters.push(filter),
+            }
+        }
+
+        Self {
+            primary_key_filters,
+            time_filters,
+            field_filters,
+        }
+    }
+
+    fn expr_to_filter(
+        expr: &Expr,
+        metadata: &RegionMetadata,
+        columns: &mut HashSet<Column>,
+    ) -> Option<SimpleFilterContext> {
+        columns.clear();
+        // `expr_to_columns` won't return error.
+        // We still ignore these expressions for safety.
+        expr_to_columns(expr, columns).ok()?;
+        if columns.len() > 1 {
+            // Simple filter doesn't support multiple columns.
+            return None;
+        }
+        let filter = SimpleFilterEvaluator::try_new(expr)?;
+        let column = columns.iter().next()?;
+        let column_meta = metadata.column_by_name(&column.name)?;
+
+        Some(SimpleFilterContext::new(filter, column_meta))
     }
 }
