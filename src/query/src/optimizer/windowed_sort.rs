@@ -251,10 +251,14 @@ fn remove_coalesce_batches_exec(
         return Ok(Transformed::no(plan));
     };
 
+    // Avoid removing multiple coalesce batches
+    let mut is_done = false;
+
     plan.transform_down(|plan| {
         if let Some(coalesce_batches_exec) = plan.as_any().downcast_ref::<CoalesceBatchesExec>() {
             let target_batch_size = coalesce_batches_exec.target_batch_size();
-            if fetch < target_batch_size {
+            if fetch < target_batch_size && !is_done {
+                is_done = true;
                 return Ok(Transformed::yes(coalesce_batches_exec.input().clone()));
             }
         }
