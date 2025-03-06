@@ -18,6 +18,7 @@ use datafusion_common::ScalarValue;
 use datafusion_expr::expr::ScalarFunction;
 use datafusion_expr::Expr;
 use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::FulltextBackend;
 use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use smallvec::SmallVec;
@@ -138,8 +139,7 @@ impl FulltextPredicate {
         let column = metadata.column_by_name(&c.name)?;
         let opt = column.column_schema.fulltext_options().ok().flatten()?;
 
-        // TODO(zhongzc): skip if use bloom filter
-        if !opt.enable {
+        if !opt.enable || opt.backend != FulltextBackend::Tantivy {
             return None;
         };
 
@@ -183,8 +183,7 @@ impl FulltextPredicate {
         let column = metadata.column_by_name(&column.name)?;
         let opt = column.column_schema.fulltext_options().ok().flatten()?;
 
-        // Skip if use bloom filter
-        if !opt.enable {
+        if !opt.enable || opt.backend != FulltextBackend::Bloom {
             return None;
         };
 
