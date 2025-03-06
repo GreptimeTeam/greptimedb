@@ -42,7 +42,7 @@ use servers::error::{AlreadyStartedSnafu, StartGrpcSnafu, TcpBindSnafu, TcpIncom
 use servers::http::{HttpServer, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
 use servers::server::Server;
-use session::context::{QueryContextBuilder, QueryContextRef};
+use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, oneshot, Mutex};
@@ -50,10 +50,10 @@ use tonic::codec::CompressionEncoding;
 use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
 
-use crate::adapter::{create_worker, CreateFlowArgs, FlowWorkerManagerRef};
+use crate::adapter::{create_worker, FlowWorkerManagerRef};
 use crate::error::{
-    to_status_with_last_err, CacheRequiredSnafu, CreateFlowSnafu, ExternalSnafu, FlowNotFoundSnafu,
-    ListFlowsSnafu, ParseAddrSnafu, ShutdownServerSnafu, StartServerSnafu, UnexpectedSnafu,
+    to_status_with_last_err, CacheRequiredSnafu, ExternalSnafu, ListFlowsSnafu, ParseAddrSnafu,
+    ShutdownServerSnafu, StartServerSnafu, UnexpectedSnafu,
 };
 use crate::heartbeat::HeartbeatTask;
 use crate::metrics::{METRIC_FLOW_PROCESSING_TIME, METRIC_FLOW_ROWS};
@@ -203,7 +203,7 @@ impl servers::server::Server for FlownodeServer {
         });
 
         let manager_ref = self.flow_service.manager.clone();
-        let _handle = manager_ref.clone().run_background(Some(rx));
+        let _handle = manager_ref.clone().start(Some(rx));
 
         Ok(addr)
     }
@@ -325,10 +325,6 @@ impl FlownodeBuilder {
                 .await?,
         );
 
-        if let Err(err) = self.recover_flows(&manager).await {
-            common_telemetry::error!(err; "Failed to recover flows");
-        }
-
         let server = FlownodeServer::new(FlowService::new(manager.clone()));
 
         let http_addr = self.opts.http.addr.parse().context(ParseAddrSnafu {
@@ -351,94 +347,6 @@ impl FlownodeBuilder {
         Ok(instance)
     }
 
-    /// recover all flow tasks in this flownode in distributed mode(nodeid is Some(<num>))
-    ///
-    /// or recover all existing flow tasks if in standalone mode(nodeid is None)
-    ///
-    /// TODO(discord9): persistent flow tasks with internal state
-    async fn recover_flows(&self, manager: &FlowWorkerManagerRef) -> Result<usize, Error> {
-        let nodeid = self.opts.node_id;
-        let to_be_recovered: Vec<_> = if let Some(nodeid) = nodeid {
-            let to_be_recover = self
-                .flow_metadata_manager
-                .flownode_flow_manager()
-                .flows(nodeid)
-                .try_collect::<Vec<_>>()
-                .await
-                .context(ListFlowsSnafu { id: Some(nodeid) })?;
-            to_be_recover.into_iter().map(|(id, _)| id).collect()
-        } else {
-            let all_catalogs = self
-                .catalog_manager
-                .catalog_names()
-                .await
-                .map_err(BoxedError::new)
-                .context(ExternalSnafu)?;
-            let mut all_flow_ids = vec![];
-            for catalog in all_catalogs {
-                let flows = self
-                    .flow_metadata_manager
-                    .flow_name_manager()
-                    .flow_names(&catalog)
-                    .await
-                    .try_collect::<Vec<_>>()
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(ExternalSnafu)?;
-
-                all_flow_ids.extend(flows.into_iter().map(|(_, id)| id.flow_id()));
-            }
-            all_flow_ids
-        };
-        let cnt = to_be_recovered.len();
-
-        // TODO(discord9): recover in parallel
-        for flow_id in to_be_recovered {
-            let info = self
-                .flow_metadata_manager
-                .flow_info_manager()
-                .get(flow_id)
-                .await
-                .map_err(BoxedError::new)
-                .context(ExternalSnafu)?
-                .context(FlowNotFoundSnafu { id: flow_id })?;
-
-            let sink_table_name = [
-                info.sink_table_name().catalog_name.clone(),
-                info.sink_table_name().schema_name.clone(),
-                info.sink_table_name().table_name.clone(),
-            ];
-            let args = CreateFlowArgs {
-                flow_id: flow_id as _,
-                sink_table_name,
-                source_table_ids: info.source_table_ids().to_vec(),
-                // because recover should only happen on restart the `create_if_not_exists` and `or_replace` can be arbitrary value(since flow doesn't exist)
-                // but for the sake of consistency and to make sure recover of flow actually happen, we set both to true
-                // (which is also fine since checks for not allow both to be true is on metasrv and we already pass that)
-                create_if_not_exists: true,
-                or_replace: true,
-                expire_after: info.expire_after(),
-                comment: Some(info.comment().clone()),
-                sql: info.raw_sql().clone(),
-                flow_options: info.options().clone(),
-                query_ctx: Some(
-                    QueryContextBuilder::default()
-                        .current_catalog(info.catalog_name().clone())
-                        .build(),
-                ),
-            };
-            manager
-                .create_flow(args)
-                .await
-                .map_err(BoxedError::new)
-                .with_context(|_| CreateFlowSnafu {
-                    sql: info.raw_sql().clone(),
-                })?;
-        }
-
-        Ok(cnt)
-    }
-
     /// build [`FlowWorkerManager`], note this doesn't take ownership of `self`,
     /// nor does it actually start running the worker.
     async fn build_manager(
@@ -446,6 +354,7 @@ impl FlownodeBuilder {
         query_engine: Arc<dyn QueryEngine>,
     ) -> Result<FlowWorkerManager, Error> {
         let table_meta = self.table_meta.clone();
+        let flow_meta = self.flow_metadata_manager.clone();
 
         register_function_to_query_engine(&query_engine);
 
@@ -460,7 +369,8 @@ impl FlownodeBuilder {
             table_meta.clone(),
         );
 
-        let mut man = FlowWorkerManager::new(node_id, query_engine, table_meta, rule_engine);
+        let mut man =
+            FlowWorkerManager::new(node_id, query_engine, table_meta, flow_meta, rule_engine);
         for worker_id in 0..num_workers {
             let (tx, rx) = oneshot::channel();
 

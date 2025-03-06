@@ -298,7 +298,9 @@ impl App for Instance {
         self.frontend.start().await.context(StartFrontendSnafu)?;
         self.flow_worker_manager
             .clone()
-            .run_background(Some(self.flow_shutdown.subscribe()));
+            .start(Some(self.flow_shutdown.subscribe()))
+            .await
+            .context(StartFlownodeSnafu)?;
         Ok(())
     }
 

@@ -23,6 +23,7 @@ use std::time::{Duration, Instant, SystemTime};
 use api::v1::{RowDeleteRequest, RowDeleteRequests, RowInsertRequest, RowInsertRequests};
 use common_config::Configurable;
 use common_error::ext::BoxedError;
+use common_meta::key::flow::FlowMetadataManagerRef;
 use common_meta::key::TableMetadataManagerRef;
 use common_runtime::JoinHandle;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
@@ -186,12 +187,10 @@ impl FlowWorkerManager {
         node_id: Option<u32>,
         query_engine: Arc<dyn QueryEngine>,
         table_meta: TableMetadataManagerRef,
+        flow_meta: FlowMetadataManagerRef,
         rule_engine: RecordingRuleEngine,
     ) -> Self {
-        let srv_map = ManagedTableSource::new(
-            table_meta.table_info_manager().clone(),
-            table_meta.table_name_manager().clone(),
-        );
+        let srv_map = ManagedTableSource::new(table_meta, flow_meta);
         let node_context = FlownodeContext::new(Box::new(srv_map.clone()) as _);
         let tick_manager = FlowTickManager::new();
         let worker_handles = Vec::new();
@@ -544,6 +543,15 @@ impl FlowWorkerManager {
         } else {
             None
         }
+    }
+
+    pub async fn start(
+        self: Arc<Self>,
+        shutdown: Option<broadcast::Receiver<()>>,
+    ) -> Result<(), Error> {
+        self.recover_flows().await?;
+        self.clone().run_background(shutdown);
+        Ok(())
     }
 
     /// run in common_runtime background runtime

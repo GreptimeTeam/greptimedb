@@ -21,18 +21,22 @@ use api::v1::flow::{
 use api::v1::region::InsertRequests;
 use common_error::ext::BoxedError;
 use common_meta::node_manager::Flownode;
-use common_telemetry::{debug, trace};
+use common_telemetry::{debug, info, trace};
 use datatypes::value::Value;
+use futures::TryStreamExt;
 use itertools::Itertools;
+use session::context::QueryContextBuilder;
 use snafu::{IntoError, OptionExt, ResultExt};
 use store_api::storage::RegionId;
 
 use crate::adapter::{CreateFlowArgs, FlowWorkerManager};
 use crate::error::{
-    CreateFlowSnafu, ExternalSnafu, InsertIntoFlowSnafu, InternalSnafu, UnexpectedSnafu,
+    CreateFlowSnafu, ExternalSnafu, FlowNotFoundSnafu, InsertIntoFlowSnafu, InternalSnafu,
+    ListFlowsSnafu, UnexpectedSnafu,
 };
 use crate::metrics::METRIC_FLOW_TASK_COUNT;
 use crate::repr::{self, DiffRow};
+use crate::Error;
 
 /// return a function to convert `crate::error::Error` to `common_meta::error::Error`
 fn to_meta_err(
@@ -292,6 +296,103 @@ impl FlowWorkerManager {
             }
         }
         Ok(Default::default())
+    }
+
+    /// recover all flow tasks in this flownode in distributed mode(nodeid is Some(<num>))
+    ///
+    /// or recover all existing flow tasks if in standalone mode(nodeid is None)
+    ///
+    /// TODO(discord9): persistent flow tasks with internal state
+    pub async fn recover_flows(&self) -> Result<usize, Error> {
+        let nodeid = self.node_id;
+        let to_be_recovered: Vec<_> = if let Some(nodeid) = nodeid {
+            let to_be_recover = self
+                .table_info_source
+                .flow_meta
+                .flownode_flow_manager()
+                .flows(nodeid.into())
+                .try_collect::<Vec<_>>()
+                .await
+                .context(ListFlowsSnafu {
+                    id: Some(nodeid.into()),
+                })?;
+            to_be_recover.into_iter().map(|(id, _)| id).collect()
+        } else {
+            let all_catalogs = self
+                .table_info_source
+                .table_meta
+                .catalog_manager()
+                .catalog_names()
+                .try_collect::<Vec<_>>()
+                .await
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?;
+            let mut all_flow_ids = vec![];
+            for catalog in all_catalogs {
+                let flows = self
+                    .table_info_source
+                    .flow_meta
+                    .flow_name_manager()
+                    .flow_names(&catalog)
+                    .await
+                    .try_collect::<Vec<_>>()
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)?;
+
+                all_flow_ids.extend(flows.into_iter().map(|(_, id)| id.flow_id()));
+            }
+            all_flow_ids
+        };
+        let cnt = to_be_recovered.len();
+
+        // TODO(discord9): recover in parallel
+        for flow_id in to_be_recovered {
+            let info = self
+                .table_info_source
+                .flow_meta
+                .flow_info_manager()
+                .get(flow_id)
+                .await
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?
+                .context(FlowNotFoundSnafu { id: flow_id })?;
+
+            let sink_table_name = [
+                info.sink_table_name().catalog_name.clone(),
+                info.sink_table_name().schema_name.clone(),
+                info.sink_table_name().table_name.clone(),
+            ];
+            let args = CreateFlowArgs {
+                flow_id: flow_id as _,
+                sink_table_name,
+                source_table_ids: info.source_table_ids().to_vec(),
+                // because recover should only happen on restart the `create_if_not_exists` and `or_replace` can be arbitrary value(since flow doesn't exist)
+                // but for the sake of consistency and to make sure recover of flow actually happen, we set both to true
+                // (which is also fine since checks for not allow both to be true is on metasrv and we already pass that)
+                create_if_not_exists: true,
+                or_replace: true,
+                expire_after: info.expire_after(),
+                comment: Some(info.comment().clone()),
+                sql: info.raw_sql().clone(),
+                flow_options: info.options().clone(),
+                query_ctx: Some(
+                    QueryContextBuilder::default()
+                        .current_catalog(info.catalog_name().clone())
+                        .build(),
+                ),
+            };
+            self.create_flow(args)
+                .await
+                .map_err(BoxedError::new)
+                .with_context(|_| CreateFlowSnafu {
+                    sql: info.raw_sql().clone(),
+                })?;
+        }
+
+        info!("Recover {} flows", cnt);
+
+        Ok(cnt)
     }
 }
 
