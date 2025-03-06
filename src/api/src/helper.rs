@@ -574,7 +574,7 @@ pub fn pb_value_to_value_ref<'a>(
         ValueData::StringValue(string) => ValueRef::String(string.as_str()),
         ValueData::DateValue(d) => ValueRef::Date(Date::from(*d)),
         ValueData::TimestampSecondValue(t) => ValueRef::Timestamp(Timestamp::new_second(*t)),
-        ValueData::TimestampMillisecondValue(t) => {
+        ValueData::DatetimeValue(t) | ValueData::TimestampMillisecondValue(t) => {
             ValueRef::Timestamp(Timestamp::new_millisecond(*t))
         }
         ValueData::TimestampMicrosecondValue(t) => {
@@ -584,9 +584,7 @@ pub fn pb_value_to_value_ref<'a>(
             ValueRef::Timestamp(Timestamp::new_nanosecond(*t))
         }
         ValueData::TimeSecondValue(t) => ValueRef::Time(Time::new_second(*t)),
-        ValueData::DatetimeValue(t) | ValueData::TimeMillisecondValue(t) => {
-            ValueRef::Time(Time::new_millisecond(*t))
-        }
+        ValueData::TimeMillisecondValue(t) => ValueRef::Time(Time::new_millisecond(*t)),
         ValueData::TimeMicrosecondValue(t) => ValueRef::Time(Time::new_microsecond(*t)),
         ValueData::TimeNanosecondValue(t) => ValueRef::Time(Time::new_nanosecond(*t)),
         ValueData::IntervalYearMonthValue(v) => {
@@ -1233,6 +1231,10 @@ mod tests {
         assert_eq!(
             ConcreteDataType::date_datatype(),
             ColumnDataTypeWrapper::date_datatype().into()
+        );
+        assert_eq!(
+            ConcreteDataType::timestamp_microsecond_datatype(),
+            ColumnDataTypeWrapper::datetime_datatype().into()
         );
         assert_eq!(
             ConcreteDataType::timestamp_millisecond_datatype(),
