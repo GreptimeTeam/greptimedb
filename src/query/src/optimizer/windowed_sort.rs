@@ -187,7 +187,6 @@ fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Opti
                 }
             }
             // resolve alias properly
-            // i.e if a is time index, alias= {a:b, b:c}, then result should be {b}(not {c})
             time_index = resolve_alias(&alias_map, &time_index);
         }
 
