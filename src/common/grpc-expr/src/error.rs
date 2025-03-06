@@ -111,9 +111,9 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Fulltext index only supports string type, column: {column_name}, unexpected type: {column_type:?}"
+        "Fulltext or Skipping index only supports string type, column: {column_name}, unexpected type: {column_type:?}"
     ))]
-    InvalidFulltextColumnType {
+    InvalidStringIndexColumnType {
         column_name: String,
         column_type: ColumnDataType,
         #[snafu(implicit)]
@@ -173,7 +173,7 @@ impl ErrorExt for Error {
                 StatusCode::InvalidArguments
             }
 
-            Error::UnknownColumnDataType { .. } | Error::InvalidFulltextColumnType { .. } => {
+            Error::UnknownColumnDataType { .. } | Error::InvalidStringIndexColumnType { .. } => {
                 StatusCode::InvalidArguments
             }
             Error::InvalidSetTableOptionRequest { .. }

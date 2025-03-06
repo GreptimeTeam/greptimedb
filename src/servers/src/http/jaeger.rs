@@ -34,11 +34,11 @@ use crate::error::{
 };
 use crate::http::HttpRecordsOutput;
 use crate::metrics::METRIC_JAEGER_QUERY_ELAPSED;
-use crate::otlp::trace::v0::{
+use crate::otlp::trace::{
     DURATION_NANO_COLUMN, SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN, SPAN_ID_COLUMN,
     SPAN_KIND_COLUMN, SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, TIMESTAMP_COLUMN, TRACE_ID_COLUMN,
+    TRACE_TABLE_NAME,
 };
-use crate::otlp::trace::TRACE_TABLE_NAME;
 use crate::query_handler::JaegerQueryHandlerRef;
 
 /// JaegerAPIResponse is the response of Jaeger HTTP API.

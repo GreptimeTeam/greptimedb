@@ -24,7 +24,6 @@ use datatypes::arrow::datatypes::DataType as ArrowDatatype;
 use datatypes::error::Error as DataTypeError;
 use datatypes::prelude::ConcreteDataType;
 use snafu::{Location, Snafu};
-use statrs::StatsError;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -34,14 +33,6 @@ pub enum Error {
     UnsupportedInputDataType {
         function: String,
         datatypes: Vec<ConcreteDataType>,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Failed to generate function"))]
-    GenerateFunction {
-        #[snafu(source)]
-        error: StatsError,
         #[snafu(implicit)]
         location: Location,
     },
@@ -93,12 +84,6 @@ pub enum Error {
         "Illegal input_types status, check if DataFusion has changed its UDAF execution logic"
     ))]
     InvalidInputState {
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("unexpected: not constant column"))]
-    InvalidInputCol {
         #[snafu(implicit)]
         location: Location,
     },
@@ -248,8 +233,6 @@ impl ErrorExt for Error {
             Error::CreateAccumulator { .. }
             | Error::DowncastVector { .. }
             | Error::InvalidInputState { .. }
-            | Error::InvalidInputCol { .. }
-            | Error::GenerateFunction { .. }
             | Error::BadAccumulatorImpl { .. }
             | Error::ToScalarValue { .. }
             | Error::GetScalarVector { .. }

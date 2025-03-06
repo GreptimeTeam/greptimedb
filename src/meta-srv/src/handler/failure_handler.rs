@@ -101,7 +101,6 @@ mod tests {
             }
         }
         acc.stat = Some(Stat {
-            cluster_id: 1,
             id: 42,
             region_stats: vec![new_region_stat(1), new_region_stat(2), new_region_stat(3)],
             timestamp_millis: 1000,

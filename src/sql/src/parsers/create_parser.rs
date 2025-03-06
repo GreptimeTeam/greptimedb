@@ -2475,4 +2475,13 @@ CREATE TABLE log (
             assert!(extensions.fulltext_index_options.is_some());
         }
     }
+
+    #[test]
+    fn test_parse_interval_cast() {
+        let s = "select '10s'::INTERVAL";
+        let stmts =
+            ParserContext::create_with_dialect(s, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!("SELECT '10 seconds'::INTERVAL", &stmts[0].to_string());
+    }
 }

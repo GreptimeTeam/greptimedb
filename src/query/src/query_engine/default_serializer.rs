@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use common_error::ext::BoxedError;
-use common_function::aggr::{HllState, UddSketchState};
+use common_function::aggr::{GeoPathAccumulator, HllState, UddSketchState};
 use common_function::function_registry::FUNCTION_REGISTRY;
 use common_function::scalars::udf::create_udf;
 use common_query::error::RegisterUdfSnafu;
@@ -131,6 +131,7 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
             let _ = session_state.register_udaf(Arc::new(UddSketchState::udf_impl()));
             let _ = session_state.register_udaf(Arc::new(HllState::state_udf_impl()));
             let _ = session_state.register_udaf(Arc::new(HllState::merge_udf_impl()));
+            let _ = session_state.register_udaf(Arc::new(GeoPathAccumulator::udf_impl()));
         }
         let logical_plan = DFLogicalSubstraitConvertor
             .decode(message, session_state)

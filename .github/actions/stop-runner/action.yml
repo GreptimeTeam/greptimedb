@@ -33,7 +33,7 @@ runs:
 
     - name: Stop EC2 runner
       if: ${{ inputs.label && inputs.ec2-instance-id }}
-      uses: machulav/ec2-github-runner@v2
+      uses: machulav/ec2-github-runner@v2.3.8
       with:
         mode: stop
         label: ${{ inputs.label }}

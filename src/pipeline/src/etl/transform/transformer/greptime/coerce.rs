@@ -13,9 +13,9 @@
 // limitations under the License.
 
 use api::v1::column_data_type_extension::TypeExt;
-use api::v1::column_def::options_from_fulltext;
+use api::v1::column_def::{options_from_fulltext, options_from_skipping};
 use api::v1::{ColumnDataTypeExtension, ColumnOptions, JsonTypeExtension};
-use datatypes::schema::FulltextOptions;
+use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
 use greptime_proto::v1::value::ValueData;
 use greptime_proto::v1::{ColumnDataType, ColumnSchema, SemanticType};
 use snafu::ResultExt;
@@ -98,19 +98,21 @@ fn coerce_semantic_type(transform: &Transform) -> SemanticType {
     match transform.index {
         Some(Index::Tag) => SemanticType::Tag,
         Some(Index::Time) => SemanticType::Timestamp,
-        Some(Index::Fulltext) | None => SemanticType::Field,
+        Some(Index::Fulltext) | Some(Index::Skipping) | None => SemanticType::Field,
     }
 }
 
 fn coerce_options(transform: &Transform) -> Result<Option<ColumnOptions>> {
-    if let Some(Index::Fulltext) = transform.index {
-        options_from_fulltext(&FulltextOptions {
+    match transform.index {
+        Some(Index::Fulltext) => options_from_fulltext(&FulltextOptions {
             enable: true,
             ..Default::default()
         })
-        .context(ColumnOptionsSnafu)
-    } else {
-        Ok(None)
+        .context(ColumnOptionsSnafu),
+        Some(Index::Skipping) => {
+            options_from_skipping(&SkippingIndexOptions::default()).context(ColumnOptionsSnafu)
+        }
+        _ => Ok(None),
     }
 }
 
