@@ -787,13 +787,13 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
                         SPAN_KIND_TIME_FMTS
                             .iter()
                             .find_map(|fmt| chrono::NaiveDateTime::parse_from_str(s, fmt).ok())
-                            .map(|dt| dt.and_utc().timestamp_millis() as u64)
+                            .and_then(|dt| dt.and_utc().timestamp_nanos_opt())
                     }) else {
                         continue;
                     };
 
                     span.logs.push(Log {
-                        timestamp: t,
+                        timestamp: t as u64,
                         fields: vec![KeyValue {
                             key: "event".to_string(),
                             value_type: ValueType::String,
