@@ -38,22 +38,32 @@ impl BloomFilterApplier {
     pub async fn search(
         &mut self,
         probes: &HashSet<Bytes>,
-        search_range: Range<usize>,
+        search_ranges: &[Range<usize>],
     ) -> Result<Vec<Range<usize>>> {
         let rows_per_segment = self.meta.rows_per_segment as usize;
-        let start_seg = search_range.start / rows_per_segment;
-        let mut end_seg = search_range.end.div_ceil(rows_per_segment);
 
-        if end_seg == self.meta.segment_loc_indices.len() + 1 {
-            // In a previous version, there was a bug where if the last segment was all null,
-            // this segment would not be written into the index. This caused the slice
-            // `self.meta.segment_loc_indices[start_seg..end_seg]` to go out of bounds due to
-            // the missing segment. Since the `search` function does not search for nulls,
-            // we can simply ignore the last segment in this buggy scenario.
-            end_seg -= 1;
+        let mut all_segments = vec![];
+        for range in search_ranges {
+            let start_seg = range.start / rows_per_segment;
+            let mut end_seg = range.end.div_ceil(rows_per_segment);
+
+            if end_seg == self.meta.segment_loc_indices.len() + 1 {
+                // In a previous version, there was a bug where if the last segment was all null,
+                // this segment would not be written into the index. This caused the slice
+                // `self.meta.segment_loc_indices[start_seg..end_seg]` to go out of bounds due to
+                // the missing segment. Since the `search` function does not search for nulls,
+                // we can simply ignore the last segment in this buggy scenario.
+                end_seg -= 1;
+            }
+            all_segments.extend(start_seg..end_seg);
         }
+        all_segments.sort_unstable();
+        all_segments.dedup();
 
-        let locs = &self.meta.segment_loc_indices[start_seg..end_seg];
+        let locs = all_segments
+            .iter()
+            .map(|&seg| self.meta.segment_loc_indices[seg])
+            .collect::<Vec<_>>();
 
         // dedup locs
         let deduped_locs = locs
@@ -63,37 +73,70 @@ impl BloomFilterApplier {
             .collect::<Vec<_>>();
         let bfs = self.reader.bloom_filter_vec(&deduped_locs).await?;
 
-        let mut ranges: Vec<Range<usize>> = Vec::with_capacity(bfs.len());
-        for ((_, mut group), bloom) in locs
+        let mut res_ranges = Vec::with_capacity(bfs.len());
+        for ((_, group), bloom) in locs
             .iter()
-            .zip(start_seg..end_seg)
+            .zip(all_segments)
             .group_by(|(x, _)| **x)
             .into_iter()
             .zip(bfs.iter())
         {
-            let start = group.next().unwrap().1 * rows_per_segment; // SAFETY: group is not empty
-            let end = group.last().map_or(start + rows_per_segment, |(_, end)| {
-                (end + 1) * rows_per_segment
-            });
-            let actual_start = start.max(search_range.start);
-            let actual_end = end.min(search_range.end);
             for probe in probes {
                 if bloom.contains(probe) {
-                    match ranges.last_mut() {
-                        Some(last) if last.end == actual_start => {
-                            last.end = actual_end;
-                        }
-                        _ => {
-                            ranges.push(actual_start..actual_end);
-                        }
+                    for (_, seg) in group {
+                        let start = seg * rows_per_segment;
+                        let end = (seg + 1) * rows_per_segment;
+                        res_ranges.push(start..end);
                     }
                     break;
                 }
             }
         }
+        res_ranges.sort_unstable_by_key(|r| r.start);
+        let merged = res_ranges
+            .into_iter()
+            .coalesce(|a, b| {
+                if a.end == b.start {
+                    Ok(a.start..b.end)
+                } else {
+                    Err((a, b))
+                }
+            })
+            .collect::<Vec<_>>();
 
-        Ok(ranges)
+        Ok(intersect_ranges(search_ranges, &merged))
     }
+}
+
+/// Intersects two lists of ranges and returns the intersection.
+///
+/// The input lists are assumed to be sorted and non-overlapping.
+fn intersect_ranges(lhs: &[Range<usize>], rhs: &[Range<usize>]) -> Vec<Range<usize>> {
+    let mut i = 0;
+    let mut j = 0;
+
+    let mut output = Vec::new();
+    while i < lhs.len() && j < rhs.len() {
+        let r1 = &lhs[i];
+        let r2 = &rhs[j];
+
+        // Find intersection if exists
+        let start = r1.start.max(r2.start);
+        let end = r1.end.min(r2.end);
+
+        if start < end {
+            output.push(start..end);
+        }
+
+        // Move forward the range that ends first
+        if r1.end < r2.end {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+
+    output
 }
 
 #[cfg(test)]
@@ -203,8 +246,59 @@ mod tests {
 
         for (probes, search_range, expected) in cases {
             let probes: HashSet<Bytes> = probes.into_iter().collect();
-            let ranges = applier.search(&probes, search_range).await.unwrap();
+            let ranges = applier.search(&probes, &[search_range]).await.unwrap();
             assert_eq!(ranges, expected);
         }
+    }
+
+    #[test]
+    #[allow(clippy::single_range_in_vec_init)]
+    fn test_intersect_ranges() {
+        // empty inputs
+        assert_eq!(intersect_ranges(&[], &[]), Vec::<Range<usize>>::new());
+        assert_eq!(intersect_ranges(&[1..5], &[]), Vec::<Range<usize>>::new());
+        assert_eq!(intersect_ranges(&[], &[1..5]), Vec::<Range<usize>>::new());
+
+        // no overlap
+        assert_eq!(
+            intersect_ranges(&[1..3, 5..7], &[3..5, 7..9]),
+            Vec::<Range<usize>>::new()
+        );
+
+        // single overlap
+        assert_eq!(intersect_ranges(&[1..5], &[3..7]), vec![3..5]);
+
+        // multiple overlaps
+        assert_eq!(
+            intersect_ranges(&[1..5, 7..10, 12..15], &[2..6, 8..13]),
+            vec![2..5, 8..10, 12..13]
+        );
+
+        // exact overlap
+        assert_eq!(
+            intersect_ranges(&[1..3, 5..7], &[1..3, 5..7]),
+            vec![1..3, 5..7]
+        );
+
+        // contained ranges
+        assert_eq!(
+            intersect_ranges(&[1..10], &[2..4, 5..7, 8..9]),
+            vec![2..4, 5..7, 8..9]
+        );
+
+        // partial overlaps
+        assert_eq!(
+            intersect_ranges(&[1..4, 6..9], &[2..7, 8..10]),
+            vec![2..4, 6..7, 8..9]
+        );
+
+        // single point overlap
+        assert_eq!(
+            intersect_ranges(&[1..3], &[3..5]),
+            Vec::<Range<usize>>::new()
+        );
+
+        // large ranges
+        assert_eq!(intersect_ranges(&[0..100], &[50..150]), vec![50..100]);
     }
 }

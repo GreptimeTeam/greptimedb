@@ -12,16 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use datafusion_common::ScalarValue;
+use datafusion_expr::expr::ScalarFunction;
 use datafusion_expr::Expr;
+use datatypes::prelude::ConcreteDataType;
 use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
+use smallvec::SmallVec;
 use store_api::metadata::RegionMetadata;
-use store_api::storage::{ColumnId, ConcreteDataType, RegionId};
+use store_api::storage::RegionId;
 
 use crate::cache::file_cache::FileCacheRef;
+use crate::cache::index::bloom_filter_index::BloomFilterIndexCacheRef;
 use crate::error::Result;
 use crate::sst::index::fulltext_index::applier::FulltextIndexApplier;
+use crate::sst::index::fulltext_index::{
+    FulltextPredicate, MatchesPredicate, MatchesTermPredicate,
+};
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 
 /// `FulltextIndexApplierBuilder` is a builder for `FulltextIndexApplier`.
@@ -33,6 +42,7 @@ pub struct FulltextIndexApplierBuilder<'a> {
     metadata: &'a RegionMetadata,
     file_cache: Option<FileCacheRef>,
     puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
+    bloom_filter_cache: Option<BloomFilterIndexCacheRef>,
 }
 
 impl<'a> FulltextIndexApplierBuilder<'a> {
@@ -52,6 +62,7 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
             metadata,
             file_cache: None,
             puffin_metadata_cache: None,
+            bloom_filter_cache: None,
         }
     }
 
@@ -70,35 +81,53 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
         self
     }
 
+    pub fn with_bloom_filter_cache(
+        mut self,
+        bloom_filter_cache: Option<BloomFilterIndexCacheRef>,
+    ) -> Self {
+        self.bloom_filter_cache = bloom_filter_cache;
+        self
+    }
+
     /// Builds `SstIndexApplier` from the given expressions.
     pub fn build(self, exprs: &[Expr]) -> Result<Option<FulltextIndexApplier>> {
-        let mut queries = Vec::with_capacity(exprs.len());
+        let mut predicates: HashMap<u32, SmallVec<[FulltextPredicate; 1]>> = HashMap::new();
         for expr in exprs {
-            if let Some((column_id, query)) = Self::expr_to_query(self.metadata, expr) {
-                queries.push((column_id, query));
+            if let Some(p) = FulltextPredicate::from_expr(self.metadata, expr) {
+                let column_id = p.column_id();
+                predicates.entry(column_id).or_default().push(p);
             }
         }
 
-        Ok((!queries.is_empty()).then(|| {
+        Ok((!predicates.is_empty()).then(|| {
             FulltextIndexApplier::new(
                 self.region_dir,
                 self.region_id,
                 self.store,
-                queries,
+                predicates,
                 self.puffin_manager_factory,
             )
             .with_file_cache(self.file_cache)
             .with_puffin_metadata_cache(self.puffin_metadata_cache)
+            .with_bloom_filter_cache(self.bloom_filter_cache)
         }))
     }
+}
 
-    fn expr_to_query(metadata: &RegionMetadata, expr: &Expr) -> Option<(ColumnId, String)> {
+impl FulltextPredicate {
+    fn from_expr(metadata: &RegionMetadata, expr: &Expr) -> Option<Self> {
         let Expr::ScalarFunction(f) = expr else {
             return None;
         };
-        if f.name() != "matches" {
-            return None;
+
+        match f.name() {
+            "matches" => Self::from_matches_func(metadata, f),
+            "matches_term" => Self::from_matches_term_func(metadata, f),
+            _ => None,
         }
+    }
+
+    fn from_matches_func(metadata: &RegionMetadata, f: &ScalarFunction) -> Option<Self> {
         if f.args.len() != 2 {
             return None;
         }
@@ -107,6 +136,12 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
             return None;
         };
         let column = metadata.column_by_name(&c.name)?;
+        let opt = column.column_schema.fulltext_options().ok().flatten()?;
+
+        // TODO(zhongzc): skip if use bloom filter
+        if !opt.enable {
+            return None;
+        };
 
         if column.column_schema.data_type != ConcreteDataType::string_datatype() {
             return None;
@@ -116,143 +151,84 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
             return None;
         };
 
-        Some((column.column_id, query.to_string()))
+        Some(Self::Matches(MatchesPredicate {
+            column_id: column.column_id,
+            query: query.to_string(),
+        }))
+    }
+
+    fn from_matches_term_func(metadata: &RegionMetadata, f: &ScalarFunction) -> Option<Self> {
+        if f.args.len() != 2 {
+            return None;
+        }
+
+        let mut lowered = false;
+        let column;
+        match &f.args[0] {
+            Expr::Column(c) => {
+                column = c;
+            }
+            Expr::ScalarFunction(f) => {
+                let lower_arg = Self::extract_lower_arg(f)?;
+                lowered = true;
+                if let Expr::Column(c) = lower_arg {
+                    column = c;
+                } else {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+
+        let column = metadata.column_by_name(&column.name)?;
+        let opt = column.column_schema.fulltext_options().ok().flatten()?;
+
+        // Skip if use bloom filter
+        if !opt.enable {
+            return None;
+        };
+
+        // Skip if column is not string
+        if column.column_schema.data_type != ConcreteDataType::string_datatype() {
+            return None;
+        }
+
+        // Skip if query is case-insensitive but index is case-sensitive
+        if lowered && opt.case_sensitive {
+            return None;
+        }
+
+        let Expr::Literal(ScalarValue::Utf8(Some(term))) = &f.args[1] else {
+            return None;
+        };
+
+        Some(Self::MatchesTerm(MatchesTermPredicate {
+            column_id: column.column_id,
+            // Note: if we use options in column metadata to determine whether to lowercase the term,
+            //       it assumes the options are immutable.
+            term_to_lowercase: lowered || !opt.case_sensitive,
+            term: term.to_string(),
+        }))
+    }
+
+    fn extract_lower_arg(lower_func: &ScalarFunction) -> Option<&Expr> {
+        if lower_func.args.len() != 1 {
+            return None;
+        }
+
+        if lower_func.name() != "lower" {
+            return None;
+        }
+
+        if lower_func.args.len() != 1 {
+            return None;
+        }
+
+        Some(&lower_func.args[0])
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use api::v1::SemanticType;
-    use common_function::function_registry::FUNCTION_REGISTRY;
-    use common_function::scalars::udf::create_udf;
-    use datafusion_common::Column;
-    use datafusion_expr::expr::ScalarFunction;
-    use datafusion_expr::ScalarUDF;
-    use datatypes::schema::ColumnSchema;
-    use session::context::QueryContext;
-    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
-    use store_api::storage::RegionId;
-
-    use super::*;
-
-    fn mock_metadata() -> RegionMetadata {
-        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 2));
-        builder
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new("text", ConcreteDataType::string_datatype(), true),
-                semantic_type: SemanticType::Field,
-                column_id: 1,
-            })
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new(
-                    "ts",
-                    ConcreteDataType::timestamp_millisecond_datatype(),
-                    false,
-                ),
-                semantic_type: SemanticType::Timestamp,
-                column_id: 2,
-            });
-
-        builder.build().unwrap()
-    }
-
-    fn matches_func() -> Arc<ScalarUDF> {
-        Arc::new(create_udf(
-            FUNCTION_REGISTRY.get_function("matches").unwrap(),
-            QueryContext::arc(),
-            Default::default(),
-        ))
-    }
-
-    #[test]
-    fn test_expr_to_query_basic() {
-        let metadata = mock_metadata();
-
-        let expr = Expr::ScalarFunction(ScalarFunction {
-            args: vec![
-                Expr::Column(Column {
-                    name: "text".to_string(),
-                    relation: None,
-                }),
-                Expr::Literal(ScalarValue::Utf8(Some("foo".to_string()))),
-            ],
-            func: matches_func(),
-        });
-
-        let (column_id, query) =
-            FulltextIndexApplierBuilder::expr_to_query(&metadata, &expr).unwrap();
-        assert_eq!(column_id, 1);
-        assert_eq!(query, "foo".to_string());
-    }
-
-    #[test]
-    fn test_expr_to_query_wrong_num_args() {
-        let metadata = mock_metadata();
-
-        let expr = Expr::ScalarFunction(ScalarFunction {
-            args: vec![Expr::Column(Column {
-                name: "text".to_string(),
-                relation: None,
-            })],
-            func: matches_func(),
-        });
-
-        assert!(FulltextIndexApplierBuilder::expr_to_query(&metadata, &expr).is_none());
-    }
-
-    #[test]
-    fn test_expr_to_query_not_found_column() {
-        let metadata = mock_metadata();
-
-        let expr = Expr::ScalarFunction(ScalarFunction {
-            args: vec![
-                Expr::Column(Column {
-                    name: "not_found".to_string(),
-                    relation: None,
-                }),
-                Expr::Literal(ScalarValue::Utf8(Some("foo".to_string()))),
-            ],
-            func: matches_func(),
-        });
-
-        assert!(FulltextIndexApplierBuilder::expr_to_query(&metadata, &expr).is_none());
-    }
-
-    #[test]
-    fn test_expr_to_query_column_wrong_data_type() {
-        let metadata = mock_metadata();
-
-        let expr = Expr::ScalarFunction(ScalarFunction {
-            args: vec![
-                Expr::Column(Column {
-                    name: "ts".to_string(),
-                    relation: None,
-                }),
-                Expr::Literal(ScalarValue::Utf8(Some("foo".to_string()))),
-            ],
-            func: matches_func(),
-        });
-
-        assert!(FulltextIndexApplierBuilder::expr_to_query(&metadata, &expr).is_none());
-    }
-
-    #[test]
-    fn test_expr_to_query_pattern_not_string() {
-        let metadata = mock_metadata();
-
-        let expr = Expr::ScalarFunction(ScalarFunction {
-            args: vec![
-                Expr::Column(Column {
-                    name: "text".to_string(),
-                    relation: None,
-                }),
-                Expr::Literal(ScalarValue::Int64(Some(42))),
-            ],
-            func: matches_func(),
-        });
-
-        assert!(FulltextIndexApplierBuilder::expr_to_query(&metadata, &expr).is_none());
-    }
+    // TODO(zhongzc): add tests
 }

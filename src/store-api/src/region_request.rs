@@ -30,7 +30,7 @@ use api::v1::{
 pub use common_base::AffectedRows;
 use common_time::TimeToLive;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
+use datatypes::schema::{FulltextBackend, FulltextOptions, SkippingIndexOptions};
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use strum::{AsRefStr, IntoStaticStr};
@@ -733,6 +733,8 @@ impl TryFrom<alter_request::Kind> for AlterKind {
                                 Analyzer::try_from(x.analyzer).context(DecodeProtoSnafu)?,
                             ),
                             case_sensitive: x.case_sensitive,
+                            // TODO(zhongzc): support backend:
+                            backend: FulltextBackend::Tantivy,
                         },
                     },
                 },
@@ -1631,6 +1633,7 @@ mod tests {
                     enable: true,
                     analyzer: FulltextAnalyzer::Chinese,
                     case_sensitive: false,
+                    backend: FulltextBackend::Tantivy,
                 },
             },
         };

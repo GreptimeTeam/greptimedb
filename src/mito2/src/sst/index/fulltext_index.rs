@@ -12,8 +12,38 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use store_api::storage::ColumnId;
+
 pub(crate) mod applier;
 pub(crate) mod creator;
 
 const INDEX_BLOB_TYPE_TANTIVY: &str = "greptime-fulltext-index-v1";
 const INDEX_BLOB_TYPE_BLOOM: &str = "greptime-fulltext-index-bloom";
+
+#[derive(Debug, Clone)]
+pub(crate) enum FulltextPredicate {
+    Matches(MatchesPredicate),
+    MatchesTerm(MatchesTermPredicate),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct MatchesPredicate {
+    column_id: ColumnId,
+    query: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct MatchesTermPredicate {
+    column_id: ColumnId,
+    term_to_lowercase: bool,
+    term: String,
+}
+
+impl FulltextPredicate {
+    pub(crate) fn column_id(&self) -> ColumnId {
+        match self {
+            FulltextPredicate::Matches(m) => m.column_id,
+            FulltextPredicate::MatchesTerm(m) => m.column_id,
+        }
+    }
+}

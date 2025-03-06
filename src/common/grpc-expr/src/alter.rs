@@ -22,7 +22,9 @@ use api::v1::{
     SkippingIndexType as PbSkippingIndexType,
 };
 use common_query::AddColumnLocation;
-use datatypes::schema::{ColumnSchema, FulltextOptions, RawSchema, SkippingIndexOptions};
+use datatypes::schema::{
+    ColumnSchema, FulltextBackend, FulltextOptions, RawSchema, SkippingIndexOptions,
+};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 use table::metadata::TableId;
@@ -131,6 +133,8 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterTableExpr) -> Result<
                                     .context(InvalidSetFulltextOptionRequestSnafu)?,
                             ),
                             case_sensitive: f.case_sensitive,
+                            // TODO(zhongzc): support backend
+                            backend: FulltextBackend::Tantivy,
                         },
                     },
                 },
