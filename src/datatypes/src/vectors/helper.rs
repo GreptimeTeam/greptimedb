@@ -292,7 +292,7 @@ impl Helper {
                     array.as_ref(),
                     &ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
                 )
-                .expect("Date64 should be castable to TimestampMillisecond");
+                .context(crate::error::ArrowComputeSnafu)?;
                 Arc::new(TimestampMillisecondVector::try_from_arrow_array(array)?)
             }
             ArrowDataType::List(_) => Arc::new(ListVector::try_from_arrow_array(array)?),
