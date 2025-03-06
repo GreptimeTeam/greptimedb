@@ -795,7 +795,7 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
                         SPAN_KIND_TIME_FMTS
                             .iter()
                             .find_map(|fmt| chrono::NaiveDateTime::parse_from_str(s, fmt).ok())
-                            .and_then(|dt| dt.and_utc().timestamp_nanos_opt())
+                            .map(|dt| dt.and_utc().timestamp_micros() as u64)
                     }) else {
                         continue;
                     };
@@ -812,7 +812,7 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
                     }
 
                     span.logs.push(Log {
-                        timestamp: t as u64,
+                        timestamp: t,
                         fields,
                     });
                 }
