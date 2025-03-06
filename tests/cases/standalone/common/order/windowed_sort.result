@@ -488,3 +488,7 @@ ORDER BY
 |_|_| Total rows: 8_|
 +-+-+-+
 
+DROP TABLE lightning_two_time;
+
+Affected Rows: 0
+

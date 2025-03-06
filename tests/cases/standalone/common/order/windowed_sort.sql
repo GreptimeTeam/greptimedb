@@ -184,3 +184,4 @@ FROM
 ORDER BY
   true_collect_time DESC;
 
+DROP TABLE lightning_two_time;
