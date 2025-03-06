@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_meta::cache_invalidator::CacheInvalidatorRef;
-use common_meta::key::TableMetadataManagerRef;
 use common_meta::rpc::procedure::AddRegionFollowerRequest;
 use common_procedure::{watcher, Output, ProcedureId, ProcedureManagerRef, ProcedureWithId};
 use common_telemetry::info;
@@ -21,27 +19,16 @@ use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use table::table_name::TableName;
 
-use super::AddRegionFollowerProcedure;
-use crate::cluster::MetaPeerClientRef;
 use crate::error::{self, Result};
-use crate::service::mailbox::MailboxRef;
+use crate::procedure::region_follower::add_region_follower::AddRegionFollowerProcedure;
+use crate::procedure::region_follower::Context;
 
-#[derive(Clone)]
-/// The context of add region follower procedure.
-pub struct Context {
-    pub table_metadata_manager: TableMetadataManagerRef,
-    pub mailbox: MailboxRef,
-    pub server_addr: String,
-    pub cache_invalidator: CacheInvalidatorRef,
-    pub meta_peer_client: MetaPeerClientRef,
-}
-
-pub struct AddRegionFollowerManager {
+pub struct RegionFollowerManager {
     procedure_manager: ProcedureManagerRef,
     default_context: Context,
 }
 
-impl AddRegionFollowerManager {
+impl RegionFollowerManager {
     pub fn new(procedure_manager: ProcedureManagerRef, default_context: Context) -> Self {
         Self {
             procedure_manager,
@@ -67,7 +54,7 @@ impl AddRegionFollowerManager {
             .context(error::RegisterProcedureLoaderSnafu { type_name })
     }
 
-    pub async fn submit_procedure(
+    pub async fn submit_add_follower_procedure(
         &self,
         req: AddRegionFollowerRequest,
     ) -> Result<(ProcedureId, Option<Output>)> {

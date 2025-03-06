@@ -12,23 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod manager;
-
 use common_meta::distributed_time_constants;
 use common_meta::lock_key::{CatalogLock, RegionLock, SchemaLock, TableLock};
+use common_meta::peer::Peer;
 use common_procedure::error::ToJsonSnafu;
 use common_procedure::{
     Context as ProcedureContext, LockKey, Procedure, Result as ProcedureResult, Status, StringKey,
 };
 use common_telemetry::info;
-use manager::Context;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 
 use crate::error::{self, Result};
 use crate::lease::lookup_datanode_peer;
-
+use crate::procedure::region_follower::Context;
 pub struct AddRegionFollowerProcedure {
     pub data: AddRegionFollowerData,
     pub context: Context,
@@ -50,6 +48,7 @@ impl AddRegionFollowerProcedure {
                 schema,
                 region_id,
                 peer_id,
+                peer: None,
                 state: AddRegionFollowerState::Prepare,
             },
             context,
@@ -77,6 +76,8 @@ impl AddRegionFollowerProcedure {
             "Add region({}) follower procedure is preparing, peer: {datanode_peer:?}",
             self.data.region_id
         );
+
+        self.data.peer = Some(datanode_peer);
 
         Ok(Status::executing(true))
     }
@@ -121,8 +122,10 @@ pub struct AddRegionFollowerData {
     pub(crate) schema: String,
     /// The region id.
     pub(crate) region_id: RegionId,
-    /// The peer.
+    /// The peer id of the datanode to add region follower.
     pub(crate) peer_id: u64,
+    /// The peer of the datanode to add region follower.
+    pub(crate) peer: Option<Peer>,
     /// The state.
     pub(crate) state: AddRegionFollowerState,
 }
