@@ -157,16 +157,16 @@ impl<'a> MySqlTemplateFactory<'a> {
                 "CREATE TABLE IF NOT EXISTS {table_name}(k VARBINARY(3072) PRIMARY KEY, v BLOB);",
             ),
             range_template: RangeTemplate {
-                point: format!("SELECT k, v FROM {table_name} WHERE k = ?;"),
-                range: format!("SELECT k, v FROM {table_name} WHERE k >= ? AND k < ? ORDER BY k;"),
-                full: format!("SELECT k, v FROM {table_name} ORDER BY k;"),
-                left_bounded: format!("SELECT k, v FROM {table_name} WHERE k >= ? ORDER BY k;"),
-                prefix: format!("SELECT k, v FROM {table_name} WHERE k LIKE ? ORDER BY k;"),
+                point: format!("SELECT k, v FROM {table_name} WHERE k = ?"),
+                range: format!("SELECT k, v FROM {table_name} WHERE k >= ? AND k < ? ORDER BY k"),
+                full: format!("SELECT k, v FROM {table_name} ? ORDER BY k"),
+                left_bounded: format!("SELECT k, v FROM {table_name} WHERE k >= ? ORDER BY k"),
+                prefix: format!("SELECT k, v FROM {table_name} WHERE k LIKE ? ORDER BY k"),
             },
             delete_template: RangeTemplate {
                 point: format!("DELETE FROM {table_name} WHERE k = ?;"),
                 range: format!("DELETE FROM {table_name} WHERE k >= ? AND k < ?;"),
-                full: format!("DELETE FROM {table_name};"),
+                full: format!("DELETE FROM {table_name}"),
                 left_bounded: format!("DELETE FROM {table_name} WHERE k >= ?;"),
                 prefix: format!("DELETE FROM {table_name} WHERE k LIKE ?;"),
             },
@@ -204,13 +204,14 @@ impl MySqlTemplateSet {
         let table_name = &self.table_name;
         let in_placeholders: Vec<String> = (1..=kv_len).map(|_| "?".to_string()).collect();
         let in_clause = in_placeholders.join(", ");
-        let values_placeholders = (0..kv_len)
-            .map(|_| "(?, ?)".to_string())
-            .collect::<Vec<String>>();
+        let mut values_placeholders = Vec::new();
+        for _ in 0..kv_len {
+            values_placeholders.push("(?, ?)".to_string());
+        }
         let values_clause = values_placeholders.join(", ");
 
         (
-            format!(r#"SELECT k, v FROM {table_name} WHERE k IN ({in_clause});"#,),
+            format!(r#"SELECT k, v FROM {table_name} WHERE k IN ({in_clause})"#,),
             format!(
                 r#"INSERT INTO {table_name} (k, v) VALUES {values_clause} ON DUPLICATE KEY UPDATE v = VALUES(v);"#,
             ),
@@ -339,7 +340,6 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
         let limit = req.limit as usize;
         debug!("query: {:?}, params: {:?}", query, params);
         let mut kvs = query_executor.query(&query, &params_ref).await?;
-        // TODO(CookiePie): Use `SELECT k FROM...` instead of `SELECT k, v FROM...` to improve performance if `keys_only` is true.
         if req.keys_only {
             kvs.iter_mut().for_each(|kv| kv.value = vec![]);
         }
