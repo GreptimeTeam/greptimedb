@@ -36,8 +36,8 @@ use crate::function_registry::FunctionRegistry;
 /// `matches_term(text: String, term: String) -> Boolean`
 ///
 /// # Arguments
-/// * `text` - String column to search (VectorRef containing String elements)
-/// * `term` - Search term/phrase (VectorRef containing String elements)
+/// * `text` - String column to search
+/// * `term` - Search term/phrase
 ///
 /// # Returns
 /// BooleanVector where each element indicates if the corresponding text
