@@ -639,19 +639,12 @@ fn error_response(err: Error) -> (HttpStatusCode, axum::Json<JaegerAPIResponse>)
         }),
     )
 }
-// Construct Jaeger traces from records.
-fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
-    let expected_schema = vec![
-        (TRACE_ID_COLUMN, "String"),
-        (TIMESTAMP_COLUMN, "TimestampNanosecond"),
-        (DURATION_NANO_COLUMN, "UInt64"),
-        (SERVICE_NAME_COLUMN, "String"),
-        (SPAN_NAME_COLUMN, "String"),
-        (SPAN_ID_COLUMN, "String"),
-        (SPAN_ATTRIBUTES_COLUMN, "Json"),
-    ];
-    check_schema(&records, &expected_schema)?;
 
+/// Construct traces OTLP trace v0 data model.
+///
+/// See otlp/trace/v0.rs . This data model is nesting attributes in
+/// `span_attributes` column
+fn traces_from_v0_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
     // maintain the mapping: trace_id -> (process_id -> service_name).
     let mut trace_id_to_processes: HashMap<String, HashMap<String, String>> = HashMap::new();
     // maintain the mapping: trace_id -> spans.
@@ -659,36 +652,99 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
 
     for row in records.rows.into_iter() {
         let mut span = Span::default();
-        let mut row_iter = row.into_iter();
+        let mut service_name = None;
 
-        // Set trace id.
-        if let Some(JsonValue::String(trace_id)) = row_iter.next() {
-            span.trace_id = trace_id.clone();
-            trace_id_to_processes.entry(trace_id).or_default();
-        }
+        for (idx, cell) in row.into_iter().enumerate() {
+            // safe to use index here
+            let column_name = &records.schema.column_schemas[idx].name;
 
-        // Convert timestamp from nanoseconds to microseconds.
-        if let Some(JsonValue::Number(timestamp)) = row_iter.next() {
-            span.start_time = timestamp.as_u64().ok_or_else(|| {
-                InvalidJaegerQuerySnafu {
-                    reason: "Failed to convert timestamp to u64".to_string(),
+            match column_name.as_str() {
+                TRACE_ID_COLUMN => {
+                    let trace_id = cell
+                        .as_str()
+                        .context(InvalidJaegerQuerySnafu {
+                            reason: "Expect trace_id as string type".to_string(),
+                        })?
+                        .to_string();
+                    span.trace_id = trace_id.clone();
+                    trace_id_to_processes.entry(trace_id).or_default();
                 }
-                .build()
-            })? / 1000;
-        }
-
-        // Convert duration from nanoseconds to microseconds.
-        if let Some(JsonValue::Number(duration)) = row_iter.next() {
-            span.duration = duration.as_u64().ok_or_else(|| {
-                InvalidJaegerQuerySnafu {
-                    reason: "Failed to convert duration to u64".to_string(),
+                TIMESTAMP_COLUMN => {
+                    span.start_time = cell.as_u64().context(InvalidJaegerQuerySnafu {
+                        reason: "Failed to convert timestamp to u64".to_string(),
+                    })? / 1000;
                 }
-                .build()
-            })? / 1000;
+                DURATION_NANO_COLUMN => {
+                    span.duration = cell.as_u64().context(InvalidJaegerQuerySnafu {
+                        reason: "Failed to convert duration to u64".to_string(),
+                    })? / 1000;
+                }
+                SERVICE_NAME_COLUMN => {
+                    service_name = Some(
+                        cell.as_str()
+                            .context(InvalidJaegerQuerySnafu {
+                                reason: "Expect service_name as string type".to_string(),
+                            })?
+                            .to_string(),
+                    );
+                }
+                SPAN_NAME_COLUMN => {
+                    let span_name = cell
+                        .as_str()
+                        .context(InvalidJaegerQuerySnafu {
+                            reason: "Expect span_name as string type".to_string(),
+                        })?
+                        .to_string();
+                    span.operation_name = span_name;
+                }
+                SPAN_ID_COLUMN => {
+                    let span_id = cell
+                        .as_str()
+                        .context(InvalidJaegerQuerySnafu {
+                            reason: "Expect span_id as string type".to_string(),
+                        })?
+                        .to_string();
+                    span.span_id = span_id;
+                }
+                SPAN_ATTRIBUTES_COLUMN => {
+                    let tags = cell
+                        .as_object()
+                        .context(InvalidJaegerQuerySnafu {
+                            reason: "Expect span_attributes as object type".to_string(),
+                        })?
+                        .to_owned();
+                    span.tags = tags
+                        .into_iter()
+                        .filter_map(|(key, value)| match value {
+                            JsonValue::String(value) => Some(KeyValue {
+                                key,
+                                value_type: ValueType::String,
+                                value: Value::String(value.to_string()),
+                            }),
+                            JsonValue::Number(value) => Some(KeyValue {
+                                key,
+                                value_type: ValueType::Int64,
+                                value: Value::Int64(value.as_i64().unwrap_or(0)),
+                            }),
+                            JsonValue::Bool(value) => Some(KeyValue {
+                                key,
+                                value_type: ValueType::Boolean,
+                                value: Value::Boolean(value),
+                            }),
+                            // FIXME(zyy17): Do we need to support other types?
+                            _ => {
+                                warn!("Unsupported value type: {:?}", value);
+                                None
+                            }
+                        })
+                        .collect();
+                }
+
+                _ => {}
+            }
         }
 
-        // Collect services to construct processes.
-        if let Some(JsonValue::String(service_name)) = row_iter.next() {
+        if let Some(service_name) = service_name {
             if let Some(process) = trace_id_to_processes.get_mut(&span.trace_id) {
                 if let Some(process_id) = process.get(&service_name) {
                     span.process_id = process_id.clone();
@@ -699,46 +755,6 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
                     span.process_id = process_id;
                 }
             }
-        }
-
-        // Set operation name. In Jaeger, the operation name is the span name.
-        if let Some(JsonValue::String(span_name)) = row_iter.next() {
-            span.operation_name = span_name;
-        }
-
-        // Set span id.
-        if let Some(JsonValue::String(span_id)) = row_iter.next() {
-            span.span_id = span_id;
-        }
-
-        // Convert span attributes to tags.
-        if let Some(JsonValue::Object(object)) = row_iter.next() {
-            let tags = object
-                .into_iter()
-                .filter_map(|(key, value)| match value {
-                    JsonValue::String(value) => Some(KeyValue {
-                        key,
-                        value_type: ValueType::String,
-                        value: Value::String(value.to_string()),
-                    }),
-                    JsonValue::Number(value) => Some(KeyValue {
-                        key,
-                        value_type: ValueType::Int64,
-                        value: Value::Int64(value.as_i64().unwrap_or(0)),
-                    }),
-                    JsonValue::Bool(value) => Some(KeyValue {
-                        key,
-                        value_type: ValueType::Boolean,
-                        value: Value::Boolean(value),
-                    }),
-                    // FIXME(zyy17): Do we need to support other types?
-                    _ => {
-                        warn!("Unsupported value type: {:?}", value);
-                        None
-                    }
-                })
-                .collect();
-            span.tags = tags;
         }
 
         if let Some(spans) = trace_id_to_spans.get_mut(&span.trace_id) {
@@ -773,6 +789,24 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
     }
 
     Ok(traces)
+}
+
+fn traces_from_v1_records(_records: HttpRecordsOutput) -> Result<Vec<Trace>> {
+    todo!()
+}
+
+// Construct Jaeger traces from records.
+fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
+    if records
+        .schema
+        .column_schemas
+        .iter()
+        .any(|c| c.name == SPAN_ATTRIBUTES_COLUMN)
+    {
+        traces_from_v0_records(records)
+    } else {
+        traces_from_v1_records(records)
+    }
 }
 
 fn services_from_records(records: HttpRecordsOutput) -> Result<Vec<String>> {

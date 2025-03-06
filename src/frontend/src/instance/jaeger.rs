@@ -28,7 +28,7 @@ use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use datafusion::dataframe::DataFrame;
 use datafusion::execution::context::SessionContext;
 use datafusion::execution::SessionStateBuilder;
-use datafusion_expr::{col, lit, lit_timestamp_nano, Expr};
+use datafusion_expr::{col, lit, lit_timestamp_nano, wildcard, Expr};
 use query::QueryEngineRef;
 use serde_json::Value as JsonValue;
 use servers::error::{
@@ -103,15 +103,7 @@ impl JaegerQueryHandler for Instance {
 
     async fn get_trace(&self, ctx: QueryContextRef, trace_id: &str) -> ServerResult<Output> {
         // It's equivalent to `SELECT trace_id, timestamp, duration_nano, service_name, span_name, span_id, span_attributes FROM {db}.{trace_table} WHERE trace_id = '{trace_id}'`.
-        let selects = vec![
-            col(TRACE_ID_COLUMN),
-            col(TIMESTAMP_COLUMN),
-            col(DURATION_NANO_COLUMN),
-            col(SERVICE_NAME_COLUMN),
-            col(SPAN_NAME_COLUMN),
-            col(SPAN_ID_COLUMN),
-            col(SPAN_ATTRIBUTES_COLUMN),
-        ];
+        let selects = vec![wildcard()];
 
         let filters = vec![col(TRACE_ID_COLUMN).eq(lit(trace_id))];
 
@@ -133,15 +125,7 @@ impl JaegerQueryHandler for Instance {
         ctx: QueryContextRef,
         query_params: QueryTraceParams,
     ) -> ServerResult<Output> {
-        let selects = vec![
-            col(TRACE_ID_COLUMN),
-            col(TIMESTAMP_COLUMN),
-            col(DURATION_NANO_COLUMN),
-            col(SERVICE_NAME_COLUMN),
-            col(SPAN_NAME_COLUMN),
-            col(SPAN_ID_COLUMN),
-            col(SPAN_ATTRIBUTES_COLUMN),
-        ];
+        let selects = vec![wildcard()];
 
         let mut filters = vec![];
 
