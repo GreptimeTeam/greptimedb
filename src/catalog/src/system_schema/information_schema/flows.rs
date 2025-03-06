@@ -22,6 +22,7 @@ use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::FlowId;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{DfSendableRecordBatchStream, RecordBatch, SendableRecordBatchStream};
+use common_time::DateTime;
 use datafusion::execution::TaskContext;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::PartitionStream as DfPartitionStream;
@@ -313,8 +314,13 @@ impl InformationSchemaFlowsBuilder {
             .push(Some(flow_info.created_time().timestamp_millis().into()));
         self.updated_time
             .push(Some(flow_info.updated_time().timestamp_millis().into()));
-        self.last_execution_time.push(None);
-        // TODO by jia
+        self.last_execution_time
+            .push(flow_stat.as_ref().and_then(|state| {
+                state
+                    .last_exec_time_map
+                    .get(&flow_id)
+                    .map(|v| DateTime::from(*v))
+            }));
 
         let mut source_table_names = vec![];
         let catalog_name = self.catalog_name.clone();

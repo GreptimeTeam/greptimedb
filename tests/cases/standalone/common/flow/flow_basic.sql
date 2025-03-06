@@ -59,6 +59,8 @@ SELECT
 FROM
     out_num_cnt_basic;
 
+select * from INFORMATION_SCHEMA.flows;
+
 DROP FLOW test_numbers_basic;
 
 DROP TABLE numbers_input_basic;
@@ -80,6 +82,8 @@ FROM
     input_basic;
 
 SHOW CREATE TABLE out_basic;
+
+select * from INFORMATION_SCHEMA.flows;
 
 DROP FLOW test_wildcard_basic;
 
@@ -104,6 +108,8 @@ ADMIN FLUSH_FLOW('test_wildcard_basic');
 SHOW CREATE TABLE out_basic;
 
 SELECT wildcard FROM out_basic;
+
+select * from INFORMATION_SCHEMA.flows;
 
 DROP FLOW test_wildcard_basic;
 DROP TABLE out_basic;
@@ -165,6 +171,8 @@ SELECT
     dis
 FROM
     out_distinct_basic;
+
+select * from INFORMATION_SCHEMA.flows;
 
 DROP FLOW test_distinct_basic;
 
@@ -260,6 +268,8 @@ FROM
 
 DROP TABLE bytes_log;
 
+select * from INFORMATION_SCHEMA.flows;
+
 DROP FLOW find_approx_rate;
 
 DROP TABLE approx_rate;
@@ -321,6 +331,8 @@ SELECT
     country
 FROM
     ngx_country;
+
+select * from INFORMATION_SCHEMA.flows;
 
 DROP FLOW calc_ngx_country;
 
@@ -391,6 +403,8 @@ SELECT
     time_window
 FROM
     ngx_country;
+
+select * from INFORMATION_SCHEMA.flows;
 
 DROP FLOW calc_ngx_country;
 
@@ -470,6 +484,8 @@ SELECT
 FROM
     temp_alerts;
 
+select * from INFORMATION_SCHEMA.flows;
+
 DROP FLOW temp_monitoring;
 
 DROP TABLE temp_sensor_data;
@@ -543,6 +559,8 @@ SELECT
     time_window
 FROM
     ngx_distribution;
+
+select * from INFORMATION_SCHEMA.flows;
 
 DROP FLOW calc_ngx_distribution;
 
@@ -640,6 +658,8 @@ SELECT
 FROM
     requests_without_ip;
 
+select * from INFORMATION_SCHEMA.flows;
+
 DROP FLOW requests_long_term;
 
 DROP TABLE requests_without_ip;
@@ -693,6 +713,8 @@ INSERT INTO android_log values
 ADMIN FLUSH_FLOW('calc_android_log_abnormal');
 
 SELECT crash, fatal, backtrace, anr FROM android_log_abnormal;
+
+select * from INFORMATION_SCHEMA.flows;
 
 DROP FLOW calc_android_log_abnormal;
 
@@ -748,6 +770,8 @@ ADMIN FLUSH_FLOW('calc_android_log_abnormal');
 
 SELECT crash, fatal, backtrace, anr FROM android_log_abnormal;
 
+select * from INFORMATION_SCHEMA.flows;
+
 DROP FLOW calc_android_log_abnormal;
 
 DROP TABLE android_log_abnormal;
@@ -794,6 +818,8 @@ VALUES
 
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_numbers_basic');
+
+select * from INFORMATION_SCHEMA.flows;
 
 DROP FLOW test_numbers_basic;
 DROP TABLE numbers_input_basic;
@@ -874,6 +900,8 @@ SELECT device_model,
   max_first_frame_time,
   ok_conection_rate,
   record_time_window FROM live_connection_statistics_detail;
+
+select * from INFORMATION_SCHEMA.flows;
 
 DROP FLOW live_connection_aggregation_detail;
 DROP TABLE live_connection_log;
