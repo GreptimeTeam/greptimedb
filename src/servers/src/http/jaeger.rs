@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -19,11 +20,14 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode as HttpStatusCode;
 use axum::response::IntoResponse;
 use axum::Extension;
+use common_catalog::consts::PARENT_SPAN_ID_COLUMN;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::{Output, OutputData};
 use common_recordbatch::util;
 use common_telemetry::{debug, error, tracing, warn};
+use datafusion_expr::{col, Expr};
+use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use session::context::{Channel, QueryContext};
@@ -35,11 +39,42 @@ use crate::error::{
 use crate::http::HttpRecordsOutput;
 use crate::metrics::METRIC_JAEGER_QUERY_ELAPSED;
 use crate::otlp::trace::{
-    DURATION_NANO_COLUMN, SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN, SPAN_ID_COLUMN,
-    SPAN_KIND_COLUMN, SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, TIMESTAMP_COLUMN, TRACE_ID_COLUMN,
-    TRACE_TABLE_NAME,
+    DURATION_NANO_COLUMN, KEY_SERVICE_NAME, RESOURCE_ATTRIBUTES_COLUMN, SERVICE_NAME_COLUMN,
+    SPAN_ATTRIBUTES_COLUMN, SPAN_EVENTS_COLUMN, SPAN_ID_COLUMN, SPAN_KIND_COLUMN, SPAN_KIND_PREFIX,
+    SPAN_NAME_COLUMN, TIMESTAMP_COLUMN, TRACE_ID_COLUMN, TRACE_TABLE_NAME,
 };
 use crate::query_handler::JaegerQueryHandlerRef;
+
+lazy_static! {
+    pub static ref FIND_TRACES_COLS: Vec<Expr> = vec![
+        col(TRACE_ID_COLUMN),
+        col(TIMESTAMP_COLUMN),
+        col(DURATION_NANO_COLUMN),
+        col(SERVICE_NAME_COLUMN),
+        col(SPAN_NAME_COLUMN),
+        col(SPAN_ID_COLUMN),
+        col(SPAN_ATTRIBUTES_COLUMN),
+        col(RESOURCE_ATTRIBUTES_COLUMN),
+        col(PARENT_SPAN_ID_COLUMN),
+        col(SPAN_EVENTS_COLUMN),
+    ];
+    static ref FIND_TRACES_SCHEMA: Vec<(&'static str, &'static str)> = vec![
+        (TRACE_ID_COLUMN, "String"),
+        (TIMESTAMP_COLUMN, "TimestampNanosecond"),
+        (DURATION_NANO_COLUMN, "UInt64"),
+        (SERVICE_NAME_COLUMN, "String"),
+        (SPAN_NAME_COLUMN, "String"),
+        (SPAN_ID_COLUMN, "String"),
+        (SPAN_ATTRIBUTES_COLUMN, "Json"),
+        (RESOURCE_ATTRIBUTES_COLUMN, "Json"),
+        (PARENT_SPAN_ID_COLUMN, "String"),
+        (SPAN_EVENTS_COLUMN, "Json"),
+    ];
+}
+
+const REF_TYPE_CHILD_OF: &str = "CHILD_OF";
+
+const SPAN_KIND_TIME_FMTS: [&str; 2] = ["%Y-%m-%d %H:%M:%S%.6f%z", "%Y-%m-%d %H:%M:%S%.9f%z"];
 
 /// JaegerAPIResponse is the response of Jaeger HTTP API.
 /// The original version is `structuredResponse` which is defined in https://github.com/jaegertracing/jaeger/blob/main/cmd/query/app/http_handler.go.
@@ -387,29 +422,35 @@ pub async fn handle_get_trace(
         .with_label_values(&[&db, "/api/traces"])
         .start_timer();
 
-    match handler.get_trace(query_ctx, &trace_id).await {
-        Ok(output) => match covert_to_records(output).await {
-            Ok(Some(records)) => match traces_from_records(records) {
-                Ok(traces) => (
-                    HttpStatusCode::OK,
-                    axum::Json(JaegerAPIResponse {
-                        data: Some(JaegerData::Traces(traces)),
-                        ..Default::default()
-                    }),
-                ),
-                Err(err) => {
-                    error!("Failed to get trace '{}': {:?}", trace_id, err);
-                    error_response(err)
-                }
-            },
-            Ok(None) => (HttpStatusCode::OK, axum::Json(JaegerAPIResponse::default())),
+    let output = match handler.get_trace(query_ctx, &trace_id).await {
+        Ok(output) => output,
+        Err(err) => {
+            return handle_query_error(
+                err,
+                &format!("Failed to get trace for '{}'", trace_id),
+                &db,
+            );
+        }
+    };
+
+    match covert_to_records(output).await {
+        Ok(Some(records)) => match traces_from_records(records) {
+            Ok(traces) => (
+                HttpStatusCode::OK,
+                axum::Json(JaegerAPIResponse {
+                    data: Some(JaegerData::Traces(traces)),
+                    ..Default::default()
+                }),
+            ),
             Err(err) => {
                 error!("Failed to get trace '{}': {:?}", trace_id, err);
                 error_response(err)
             }
         },
+        Ok(None) => (HttpStatusCode::OK, axum::Json(JaegerAPIResponse::default())),
         Err(err) => {
-            handle_query_error(err, &format!("Failed to get trace for '{}'", trace_id), &db)
+            error!("Failed to get trace '{}': {:?}", trace_id, err);
+            error_response(err)
         }
     }
 }
@@ -641,21 +682,15 @@ fn error_response(err: Error) -> (HttpStatusCode, axum::Json<JaegerAPIResponse>)
 }
 // Construct Jaeger traces from records.
 fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
-    let expected_schema = vec![
-        (TRACE_ID_COLUMN, "String"),
-        (TIMESTAMP_COLUMN, "TimestampNanosecond"),
-        (DURATION_NANO_COLUMN, "UInt64"),
-        (SERVICE_NAME_COLUMN, "String"),
-        (SPAN_NAME_COLUMN, "String"),
-        (SPAN_ID_COLUMN, "String"),
-        (SPAN_ATTRIBUTES_COLUMN, "Json"),
-    ];
+    let expected_schema = FIND_TRACES_SCHEMA.clone();
     check_schema(&records, &expected_schema)?;
 
     // maintain the mapping: trace_id -> (process_id -> service_name).
     let mut trace_id_to_processes: HashMap<String, HashMap<String, String>> = HashMap::new();
     // maintain the mapping: trace_id -> spans.
     let mut trace_id_to_spans: HashMap<String, Vec<Span>> = HashMap::new();
+    // maintain the mapping: service.name -> resource.attributes.
+    let mut service_to_resource_attributes: HashMap<String, Vec<KeyValue>> = HashMap::new();
 
     for row in records.rows.into_iter() {
         let mut span = Span::default();
@@ -713,32 +748,60 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
 
         // Convert span attributes to tags.
         if let Some(JsonValue::Object(object)) = row_iter.next() {
-            let tags = object
-                .into_iter()
-                .filter_map(|(key, value)| match value {
-                    JsonValue::String(value) => Some(KeyValue {
-                        key,
-                        value_type: ValueType::String,
-                        value: Value::String(value.to_string()),
-                    }),
-                    JsonValue::Number(value) => Some(KeyValue {
-                        key,
-                        value_type: ValueType::Int64,
-                        value: Value::Int64(value.as_i64().unwrap_or(0)),
-                    }),
-                    JsonValue::Bool(value) => Some(KeyValue {
-                        key,
-                        value_type: ValueType::Boolean,
-                        value: Value::Boolean(value),
-                    }),
-                    // FIXME(zyy17): Do we need to support other types?
-                    _ => {
-                        warn!("Unsupported value type: {:?}", value);
-                        None
+            span.tags = object_to_tags(object);
+        }
+
+        // Save resource attributes with service name.
+        if let Some(JsonValue::Object(mut object)) = row_iter.next() {
+            if let Some(service_name) = object
+                .remove_entry(KEY_SERVICE_NAME)
+                .and_then(|(_, v)| v.as_str().map(|s| s.to_string()))
+            {
+                match service_to_resource_attributes.entry(service_name) {
+                    Occupied(_) => {}
+                    Vacant(vacant) => {
+                        let _ = vacant.insert(object_to_tags(object));
                     }
-                })
-                .collect();
-            span.tags = tags;
+                }
+            }
+        }
+
+        // Set parent span id.
+        if let Some(JsonValue::String(parent_span_id)) = row_iter.next() {
+            span.references.push(Reference {
+                trace_id: span.trace_id.clone(),
+                span_id: parent_span_id,
+                ref_type: REF_TYPE_CHILD_OF.to_string(),
+            });
+        }
+
+        // Set span events to logs.
+        if let Some(JsonValue::Array(events)) = row_iter.next() {
+            for event in events {
+                if let JsonValue::Object(obj) = event {
+                    let Some(action) = obj.get("name").and_then(|v| v.as_str()) else {
+                        continue;
+                    };
+
+                    let Some(t) = obj.get("time").and_then(|t| t.as_str()).and_then(|s| {
+                        SPAN_KIND_TIME_FMTS
+                            .iter()
+                            .find_map(|fmt| chrono::NaiveDateTime::parse_from_str(s, fmt).ok())
+                            .map(|dt| dt.and_utc().timestamp_millis())
+                    }) else {
+                        continue;
+                    };
+
+                    span.logs.push(Log {
+                        timestamp: t,
+                        fields: vec![KeyValue {
+                            key: "event".to_string(),
+                            value_type: ValueType::String,
+                            value: Value::String(action.to_string()),
+                        }],
+                    });
+                }
+            }
         }
 
         if let Some(spans) = trace_id_to_spans.get_mut(&span.trace_id) {
@@ -759,13 +822,10 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
         if let Some(processes) = trace_id_to_processes.remove(&trace.trace_id) {
             let mut process_id_to_process = HashMap::new();
             for (service_name, process_id) in processes.into_iter() {
-                process_id_to_process.insert(
-                    process_id,
-                    Process {
-                        service_name,
-                        tags: vec![],
-                    },
-                );
+                let tags = service_to_resource_attributes
+                    .remove(&service_name)
+                    .unwrap_or_default();
+                process_id_to_process.insert(process_id, Process { service_name, tags });
             }
             trace.processes = process_id_to_process;
         }
@@ -773,6 +833,35 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
     }
 
     Ok(traces)
+}
+
+#[inline]
+fn object_to_tags(object: serde_json::map::Map<String, JsonValue>) -> Vec<KeyValue> {
+    object
+        .into_iter()
+        .filter_map(|(key, value)| match value {
+            JsonValue::String(value) => Some(KeyValue {
+                key,
+                value_type: ValueType::String,
+                value: Value::String(value.to_string()),
+            }),
+            JsonValue::Number(value) => Some(KeyValue {
+                key,
+                value_type: ValueType::Int64,
+                value: Value::Int64(value.as_i64().unwrap_or(0)),
+            }),
+            JsonValue::Bool(value) => Some(KeyValue {
+                key,
+                value_type: ValueType::Boolean,
+                value: Value::Boolean(value),
+            }),
+            // FIXME(zyy17): Do we need to support other types?
+            _ => {
+                warn!("Unsupported value type: {:?}", value);
+                None
+            }
+        })
+        .collect()
 }
 
 fn services_from_records(records: HttpRecordsOutput) -> Result<Vec<String>> {
@@ -826,6 +915,7 @@ fn operations_from_records(
 }
 
 // Check whether the schema of the records is correct.
+// Note: expected_schema can be larger than the actual schema.
 fn check_schema(records: &HttpRecordsOutput, expected_schema: &[(&str, &str)]) -> Result<()> {
     for (i, column) in records.schema.column_schemas.iter().enumerate() {
         if column.name != expected_schema[i].0 || column.data_type != expected_schema[i].1 {

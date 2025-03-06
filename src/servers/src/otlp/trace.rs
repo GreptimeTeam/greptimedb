@@ -35,6 +35,13 @@ pub const TIMESTAMP_COLUMN: &str = "timestamp";
 pub const DURATION_NANO_COLUMN: &str = "duration_nano";
 pub const SPAN_KIND_COLUMN: &str = "span_kind";
 pub const SPAN_ATTRIBUTES_COLUMN: &str = "span_attributes";
+pub const SPAN_EVENTS_COLUMN: &str = "span_events";
+
+pub const RESOURCE_ATTRIBUTES_COLUMN: &str = "resource_attributes";
+
+// const keys
+pub const KEY_SERVICE_NAME: &str = "service.name";
+
 /// The span kind prefix in the database.
 /// If the span kind is `server`, it will be stored as `SPAN_KIND_SERVER` in the database.
 pub const SPAN_KIND_PREFIX: &str = "SPAN_KIND_";
