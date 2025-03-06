@@ -84,7 +84,7 @@ impl CloseDowngradedRegion {
         let downgrade_leader_datanode = &pc.from_peer;
         let msg = MailboxMessage::json_message(
             &format!("Close downgraded region: {}", region_id),
-            &format!("Meta@{}", ctx.server_addr()),
+            &format!("Metasrv@{}", ctx.server_addr()),
             &format!(
                 "Datanode-{}@{}",
                 downgrade_leader_datanode.id, downgrade_leader_datanode.addr

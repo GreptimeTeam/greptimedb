@@ -15,6 +15,8 @@
 pub mod manager;
 
 pub mod add_region_follower;
+mod create;
+mod test_util;
 
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::key::TableMetadataManagerRef;

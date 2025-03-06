@@ -24,9 +24,10 @@ use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 
+use super::create::CreateFollower;
+use super::Context;
 use crate::error::{self, Result};
 use crate::lease::lookup_datanode_peer;
-use crate::procedure::region_follower::Context;
 pub struct AddRegionFollowerProcedure {
     pub data: AddRegionFollowerData,
     pub context: Context,
@@ -83,6 +84,17 @@ impl AddRegionFollowerProcedure {
     }
 
     pub async fn on_submit_request(&mut self) -> Result<Status> {
+        let region_id = self.data.region_id;
+        // Safety: we have already set the peer in `on_prepare``.
+        let peer = self.data.peer.clone().unwrap();
+        let create_follower = CreateFollower::new(region_id, peer);
+        let instruction = create_follower
+            .build_open_region_instruction(&self.context)
+            .await?;
+        create_follower
+            .send_open_region_instruction(&self.context, instruction)
+            .await?;
+
         Ok(Status::executing(true))
     }
 
