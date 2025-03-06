@@ -764,8 +764,8 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
         // Save resource attributes with service name.
         if let Some(JsonValue::Object(mut object)) = row_iter.next() {
             if let Some(service_name) = object
-                .remove_entry(KEY_SERVICE_NAME)
-                .and_then(|(_, v)| v.as_str().map(|s| s.to_string()))
+                .remove(KEY_SERVICE_NAME)
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
             {
                 match service_to_resource_attributes.entry(service_name) {
                     Occupied(_) => {}
@@ -777,7 +777,9 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
         }
 
         // Set parent span id.
-        if let Some(JsonValue::String(parent_span_id)) = row_iter.next() {
+        if let Some(JsonValue::String(parent_span_id)) = row_iter.next()
+            && !parent_span_id.is_empty()
+        {
             span.references.push(Reference {
                 trace_id: span.trace_id.clone(),
                 span_id: parent_span_id,
@@ -857,6 +859,7 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
         // Set span status code.
         if let Some(JsonValue::String(span_status_code)) = row_iter.next()
             && span_status_code != SPAN_STATUS_UNSET
+            && !span_status_code.is_empty()
         {
             span.tags.push(KeyValue {
                 key: KEY_OTEL_STATUS_CODE.to_string(),
@@ -916,7 +919,6 @@ fn object_to_tags(object: serde_json::map::Map<String, JsonValue>) -> Vec<KeyVal
                 value_type: ValueType::Boolean,
                 value: Value::Boolean(value),
             }),
-            // TODO(shuiyisong): quick fix
             JsonValue::Array(value) => Some(KeyValue {
                 key,
                 value_type: ValueType::String,
@@ -987,7 +989,6 @@ fn operations_from_records(
 }
 
 // Check whether the schema of the records is correct.
-// Note: expected_schema can be larger than the actual schema.
 fn check_schema(records: &HttpRecordsOutput, expected_schema: &[(&str, &str)]) -> Result<()> {
     for (i, column) in records.schema.column_schemas.iter().enumerate() {
         if column.name != expected_schema[i].0 || column.data_type != expected_schema[i].1 {
