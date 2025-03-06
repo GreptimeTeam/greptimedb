@@ -1937,7 +1937,10 @@ impl PromPlanner {
     ) -> Result<Vec<DfExpr>> {
         let aggr = match op.id() {
             token::T_SUM => sum_udaf(),
-            token::T_QUANTILE => quantile_udaf(),
+            token::T_QUANTILE => {
+                let q = Self::get_param_value_as_f64(op, param)?;
+                quantile_udaf(q)
+            }
             token::T_AVG => avg_udaf(),
             token::T_COUNT => count_udaf(),
             token::T_MIN => min_udaf(),
@@ -1958,19 +1961,9 @@ impl PromPlanner {
             .field_columns
             .iter()
             .map(|col| {
-                let args = if op.id() == token::T_QUANTILE {
-                    let q = Self::get_param_value_as_f64(op, param)?;
-                    vec![
-                        DfExpr::Literal(ScalarValue::Float64(Some(q))),
-                        DfExpr::Column(Column::from_name(col)),
-                    ]
-                } else {
-                    vec![DfExpr::Column(Column::from_name(col))]
-                };
-
                 Ok(DfExpr::AggregateFunction(AggregateFunction {
                     func: aggr.clone(),
-                    args,
+                    args: vec![DfExpr::Column(Column::from_name(col))],
                     distinct: false,
                     filter: None,
                     order_by: None,

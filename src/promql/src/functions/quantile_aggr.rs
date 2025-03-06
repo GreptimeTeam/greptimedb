@@ -16,19 +16,18 @@ use std::sync::Arc;
 
 use datafusion::arrow::array::{ArrayRef, AsArray};
 use datafusion::common::cast::{as_list_array, as_primitive_array, as_struct_array};
-use datafusion::error::{DataFusionError, Result as DfResult};
+use datafusion::error::Result as DfResult;
 use datafusion::logical_expr::{Accumulator as DfAccumulator, AggregateUDF, Volatility};
 use datafusion::prelude::create_udaf;
 use datafusion_common::ScalarValue;
-use datatypes::arrow::array::{Float64Array, ListArray, StructArray};
+use datatypes::arrow::array::{ListArray, StructArray};
 use datatypes::arrow::datatypes::{DataType, Field, Float64Type};
 
 use crate::functions::quantile::quantile_impl;
 
-const FN_NAME: &str = "quantile";
+const QUANTILE_NAME: &str = "quantile";
 
-const Q_FIELD_NAME: &str = "q";
-const HEAP_FIELD_NAME: &str = "heap";
+const VALUES_FIELD_NAME: &str = "values";
 const DEFAULT_LIST_FIELD_NAME: &str = "item";
 
 #[derive(Debug, Default)]
@@ -37,52 +36,46 @@ pub struct QuantileAccumulator {
     values: Vec<Option<f64>>,
 }
 
-/// Create a quantile `AggregateUDF`.
-pub fn quantile_udaf() -> Arc<AggregateUDF> {
+/// Create a quantile `AggregateUDF` for PromQL quantile operator,
+/// which calculates φ-quantile (0 ≤ φ ≤ 1) over dimensions
+pub fn quantile_udaf(q: f64) -> Arc<AggregateUDF> {
     Arc::new(create_udaf(
-        FN_NAME,
-        // Input type: (q, values)
-        vec![DataType::Float64, DataType::Float64],
+        QUANTILE_NAME,
+        // Input type: (values)
+        vec![DataType::Float64],
         // Output type: the φ-quantile
         Arc::new(DataType::Float64),
         Volatility::Immutable,
         // Create the accumulator
-        Arc::new(|_| Ok(Box::new(QuantileAccumulator::new()))),
+        Arc::new(move |_| Ok(Box::new(QuantileAccumulator::new(q)))),
         // Intermediate state types
         Arc::new(vec![DataType::Struct(
-            vec![
-                Field::new(Q_FIELD_NAME, DataType::Float64, false),
-                Field::new(
-                    HEAP_FIELD_NAME,
-                    DataType::List(Arc::new(Field::new(
-                        DEFAULT_LIST_FIELD_NAME,
-                        DataType::Float64,
-                        true,
-                    ))),
-                    false,
-                ),
-            ]
+            vec![Field::new(
+                VALUES_FIELD_NAME,
+                DataType::List(Arc::new(Field::new(
+                    DEFAULT_LIST_FIELD_NAME,
+                    DataType::Float64,
+                    true,
+                ))),
+                false,
+            )]
             .into(),
         )]),
     ))
 }
 
 impl QuantileAccumulator {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(q: f64) -> Self {
+        Self {
+            q,
+            ..Default::default()
+        }
     }
 }
 
 impl DfAccumulator for QuantileAccumulator {
-    fn update_batch(&mut self, values: &[ArrayRef]) -> datafusion::error::Result<()> {
-        self.q = values[0]
-            .as_primitive::<Float64Type>()
-            .iter()
-            .flatten()
-            .next()
-            .unwrap();
-
-        let f64_array = values[1].as_primitive::<Float64Type>();
+    fn update_batch(&mut self, values: &[ArrayRef]) -> DfResult<()> {
+        let f64_array = values[0].as_primitive::<Float64Type>();
 
         self.values.extend(f64_array);
 
@@ -98,53 +91,44 @@ impl DfAccumulator for QuantileAccumulator {
     }
 
     fn size(&self) -> usize {
-        std::mem::size_of_val(&self.q) + std::mem::size_of_val(&self.values)
+        std::mem::size_of::<Self>() + self.values.capacity() * std::mem::size_of::<Option<f64>>()
     }
 
-    fn state(&mut self) -> datafusion::error::Result<Vec<ScalarValue>> {
-        let q_array = Arc::new(Float64Array::from_iter([self.q]));
-        let heap_array = Arc::new(ListArray::from_iter_primitive::<Float64Type, _, _>(vec![
+    fn state(&mut self) -> DfResult<Vec<ScalarValue>> {
+        let values_array = Arc::new(ListArray::from_iter_primitive::<Float64Type, _, _>(vec![
             Some(self.values.clone()),
         ]));
 
         let state_struct = StructArray::new(
-            vec![
-                Field::new(Q_FIELD_NAME, DataType::Float64, false),
-                Field::new(
-                    HEAP_FIELD_NAME,
-                    DataType::List(Arc::new(Field::new(
-                        DEFAULT_LIST_FIELD_NAME,
-                        DataType::Float64,
-                        true,
-                    ))),
-                    false,
-                ),
-            ]
+            vec![Field::new(
+                VALUES_FIELD_NAME,
+                DataType::List(Arc::new(Field::new(
+                    DEFAULT_LIST_FIELD_NAME,
+                    DataType::Float64,
+                    true,
+                ))),
+                false,
+            )]
             .into(),
-            vec![q_array, heap_array],
+            vec![values_array],
             None,
         );
 
         Ok(vec![ScalarValue::Struct(Arc::new(state_struct))])
     }
 
-    fn merge_batch(&mut self, states: &[ArrayRef]) -> datafusion::error::Result<()> {
-        if states.len() != 1 {
-            return Err(DataFusionError::Internal(format!(
-                "Expected 1 states for quantile, got {}",
-                states.len()
-            )));
+    fn merge_batch(&mut self, states: &[ArrayRef]) -> DfResult<()> {
+        if states.is_empty() {
+            return Ok(());
         }
 
         for state in states {
             let state = as_struct_array(state)?;
-            let q_array = as_primitive_array::<Float64Type>(state.column(0))?.clone();
-            let heap_list = as_list_array(state.column(1))?.value(0);
-            let f64_array = as_primitive_array::<Float64Type>(&heap_list)?.clone();
 
-            self.q = q_array.iter().flatten().next().unwrap();
-
-            self.values.extend(&f64_array);
+            for list in as_list_array(state.column(0))?.iter().flatten() {
+                let f64_array = as_primitive_array::<Float64Type>(&list)?.clone();
+                self.values.extend(&f64_array);
+            }
         }
 
         Ok(())
