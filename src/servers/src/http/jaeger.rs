@@ -39,11 +39,11 @@ use crate::error::{
 use crate::http::HttpRecordsOutput;
 use crate::metrics::METRIC_JAEGER_QUERY_ELAPSED;
 use crate::otlp::trace::{
-    DURATION_NANO_COLUMN, KEY_OTEL_SCOPE_NAME, KEY_OTEL_SCOPE_VERSION, KEY_SERVICE_NAME,
-    KEY_SPAN_KIND, RESOURCE_ATTRIBUTES_COLUMN, SCOPE_NAME_COLUMN, SCOPE_VERSION_COLUMN,
-    SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN, SPAN_EVENTS_COLUMN, SPAN_ID_COLUMN,
-    SPAN_KIND_COLUMN, SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, TIMESTAMP_COLUMN, TRACE_ID_COLUMN,
-    TRACE_TABLE_NAME,
+    DURATION_NANO_COLUMN, KEY_OTEL_SCOPE_NAME, KEY_OTEL_SCOPE_VERSION, KEY_OTEL_STATUS_CODE,
+    KEY_SERVICE_NAME, KEY_SPAN_KIND, RESOURCE_ATTRIBUTES_COLUMN, SCOPE_NAME_COLUMN,
+    SCOPE_VERSION_COLUMN, SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN, SPAN_EVENTS_COLUMN,
+    SPAN_ID_COLUMN, SPAN_KIND_COLUMN, SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, SPAN_STATUS_CODE,
+    SPAN_STATUS_PREFIX, SPAN_STATUS_UNSET, TIMESTAMP_COLUMN, TRACE_ID_COLUMN, TRACE_TABLE_NAME,
 };
 use crate::query_handler::JaegerQueryHandlerRef;
 
@@ -62,6 +62,7 @@ lazy_static! {
         col(SCOPE_NAME_COLUMN),
         col(SCOPE_VERSION_COLUMN),
         col(SPAN_KIND_COLUMN),
+        col(SPAN_STATUS_CODE),
     ];
     static ref FIND_TRACES_SCHEMA: Vec<(&'static str, &'static str)> = vec![
         (TRACE_ID_COLUMN, "String"),
@@ -77,6 +78,7 @@ lazy_static! {
         (SCOPE_NAME_COLUMN, "String"),
         (SCOPE_VERSION_COLUMN, "String"),
         (SPAN_KIND_COLUMN, "String"),
+        (SPAN_STATUS_CODE, "String"),
     ];
 }
 
@@ -820,7 +822,9 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
         }
 
         // Set scope name.
-        if let Some(JsonValue::String(scope_name)) = row_iter.next() {
+        if let Some(JsonValue::String(scope_name)) = row_iter.next()
+            && !scope_name.is_empty()
+        {
             span.tags.push(KeyValue {
                 key: KEY_OTEL_SCOPE_NAME.to_string(),
                 value_type: ValueType::String,
@@ -829,7 +833,9 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
         }
 
         // Set scope version.
-        if let Some(JsonValue::String(scope_version)) = row_iter.next() {
+        if let Some(JsonValue::String(scope_version)) = row_iter.next()
+            && !scope_version.is_empty()
+        {
             span.tags.push(KeyValue {
                 key: KEY_OTEL_SCOPE_VERSION.to_string(),
                 value_type: ValueType::String,
@@ -838,11 +844,24 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
         }
 
         // Set span kind.
-        if let Some(JsonValue::String(span_kind)) = row_iter.next() {
+        if let Some(JsonValue::String(span_kind)) = row_iter.next()
+            && !span_kind.is_empty()
+        {
             span.tags.push(KeyValue {
                 key: KEY_SPAN_KIND.to_string(),
                 value_type: ValueType::String,
                 value: Value::String(normalize_span_kind(&span_kind)),
+            });
+        }
+
+        // Set span status code.
+        if let Some(JsonValue::String(span_status_code)) = row_iter.next()
+            && span_status_code != SPAN_STATUS_UNSET
+        {
+            span.tags.push(KeyValue {
+                key: KEY_OTEL_STATUS_CODE.to_string(),
+                value_type: ValueType::String,
+                value: Value::String(normalize_status_code(&span_status_code)),
             });
         }
 
@@ -990,6 +1009,18 @@ fn normalize_span_kind(span_kind: &str) -> String {
     } else {
         // It's unlikely to happen. However, we still convert it to lowercase for consistency.
         span_kind.to_lowercase()
+    }
+}
+
+// By default, the status code is stored as `STATUS_CODE_<code>` in GreptimeDB.
+// However, in Jaeger API, the status code is returned as `<code>` without the `STATUS_CODE_` prefix.
+fn normalize_status_code(status_code: &str) -> String {
+    // If the span_kind starts with `SPAN_KIND_` prefix, remove it and convert to lowercase.
+    if let Some(stripped) = status_code.strip_prefix(SPAN_STATUS_PREFIX) {
+        stripped.to_string()
+    } else {
+        // It's unlikely to happen
+        status_code.to_string()
     }
 }
 

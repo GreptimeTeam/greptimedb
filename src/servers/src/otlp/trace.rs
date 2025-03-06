@@ -34,6 +34,7 @@ pub const SERVICE_NAME_COLUMN: &str = "service_name";
 pub const TIMESTAMP_COLUMN: &str = "timestamp";
 pub const DURATION_NANO_COLUMN: &str = "duration_nano";
 pub const SPAN_KIND_COLUMN: &str = "span_kind";
+pub const SPAN_STATUS_CODE: &str = "span_status_code";
 pub const SPAN_ATTRIBUTES_COLUMN: &str = "span_attributes";
 pub const SPAN_EVENTS_COLUMN: &str = "span_events";
 pub const SCOPE_NAME_COLUMN: &str = "scope_name";
@@ -47,11 +48,15 @@ pub const KEY_SERVICE_NAME: &str = "service.name";
 // jaeger const keys, not sure if they are general
 pub const KEY_OTEL_SCOPE_NAME: &str = "otel.scope.name";
 pub const KEY_OTEL_SCOPE_VERSION: &str = "otel.scope.version";
+pub const KEY_OTEL_STATUS_CODE: &str = "otel.status_code";
 pub const KEY_SPAN_KIND: &str = "span.kind";
 
 /// The span kind prefix in the database.
 /// If the span kind is `server`, it will be stored as `SPAN_KIND_SERVER` in the database.
 pub const SPAN_KIND_PREFIX: &str = "SPAN_KIND_";
+
+pub const SPAN_STATUS_PREFIX: &str = "STATUS_CODE_";
+pub const SPAN_STATUS_UNSET: &str = "STATUS_CODE_UNSET";
 
 /// Convert SpanTraces to GreptimeDB row insert requests.
 /// Returns `InsertRequests` and total number of rows to ingest
