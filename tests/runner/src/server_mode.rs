@@ -33,7 +33,7 @@ fn get_used_ports() -> &'static Mutex<HashSet<u16>> {
 fn get_unique_random_port() -> u16 {
     loop {
         let p = util::get_random_port();
-        // Safty: We are the only one that can access the used ports
+        // Safety: We are the only one that can access the used ports
         let mut used = get_used_ports().lock().unwrap();
         if !used.contains(&p) {
             used.insert(p);
