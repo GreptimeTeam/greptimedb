@@ -39,9 +39,11 @@ use crate::error::{
 use crate::http::HttpRecordsOutput;
 use crate::metrics::METRIC_JAEGER_QUERY_ELAPSED;
 use crate::otlp::trace::{
-    DURATION_NANO_COLUMN, KEY_SERVICE_NAME, RESOURCE_ATTRIBUTES_COLUMN, SERVICE_NAME_COLUMN,
-    SPAN_ATTRIBUTES_COLUMN, SPAN_EVENTS_COLUMN, SPAN_ID_COLUMN, SPAN_KIND_COLUMN, SPAN_KIND_PREFIX,
-    SPAN_NAME_COLUMN, TIMESTAMP_COLUMN, TRACE_ID_COLUMN, TRACE_TABLE_NAME,
+    DURATION_NANO_COLUMN, KEY_OTEL_SCOPE_NAME, KEY_OTEL_SCOPE_VERSION, KEY_SERVICE_NAME,
+    KEY_SPAN_KIND, RESOURCE_ATTRIBUTES_COLUMN, SCOPE_NAME_COLUMN, SCOPE_VERSION_COLUMN,
+    SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN, SPAN_EVENTS_COLUMN, SPAN_ID_COLUMN,
+    SPAN_KIND_COLUMN, SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, TIMESTAMP_COLUMN, TRACE_ID_COLUMN,
+    TRACE_TABLE_NAME,
 };
 use crate::query_handler::JaegerQueryHandlerRef;
 
@@ -57,6 +59,9 @@ lazy_static! {
         col(RESOURCE_ATTRIBUTES_COLUMN),
         col(PARENT_SPAN_ID_COLUMN),
         col(SPAN_EVENTS_COLUMN),
+        col(SCOPE_NAME_COLUMN),
+        col(SCOPE_VERSION_COLUMN),
+        col(SPAN_KIND_COLUMN),
     ];
     static ref FIND_TRACES_SCHEMA: Vec<(&'static str, &'static str)> = vec![
         (TRACE_ID_COLUMN, "String"),
@@ -69,6 +74,9 @@ lazy_static! {
         (RESOURCE_ATTRIBUTES_COLUMN, "Json"),
         (PARENT_SPAN_ID_COLUMN, "String"),
         (SPAN_EVENTS_COLUMN, "Json"),
+        (SCOPE_NAME_COLUMN, "String"),
+        (SCOPE_VERSION_COLUMN, "String"),
+        (SPAN_KIND_COLUMN, "String"),
     ];
 }
 
@@ -778,7 +786,7 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
         // Set span events to logs.
         if let Some(JsonValue::Array(events)) = row_iter.next() {
             for event in events {
-                if let JsonValue::Object(obj) = event {
+                if let JsonValue::Object(mut obj) = event {
                     let Some(action) = obj.get("name").and_then(|v| v.as_str()) else {
                         continue;
                     };
@@ -792,16 +800,50 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
                         continue;
                     };
 
+                    let mut fields = vec![KeyValue {
+                        key: "event".to_string(),
+                        value_type: ValueType::String,
+                        value: Value::String(action.to_string()),
+                    }];
+
+                    // Add event attributes as fields
+                    if let Some(JsonValue::Object(attrs)) = obj.remove("attributes") {
+                        fields.extend(object_to_tags(attrs));
+                    }
+
                     span.logs.push(Log {
                         timestamp: t as u64,
-                        fields: vec![KeyValue {
-                            key: "event".to_string(),
-                            value_type: ValueType::String,
-                            value: Value::String(action.to_string()),
-                        }],
+                        fields,
                     });
                 }
             }
+        }
+
+        // Set scope name.
+        if let Some(JsonValue::String(scope_name)) = row_iter.next() {
+            span.tags.push(KeyValue {
+                key: KEY_OTEL_SCOPE_NAME.to_string(),
+                value_type: ValueType::String,
+                value: Value::String(scope_name),
+            });
+        }
+
+        // Set scope version.
+        if let Some(JsonValue::String(scope_version)) = row_iter.next() {
+            span.tags.push(KeyValue {
+                key: KEY_OTEL_SCOPE_VERSION.to_string(),
+                value_type: ValueType::String,
+                value: Value::String(scope_version),
+            });
+        }
+
+        // Set span kind.
+        if let Some(JsonValue::String(span_kind)) = row_iter.next() {
+            span.tags.push(KeyValue {
+                key: KEY_SPAN_KIND.to_string(),
+                value_type: ValueType::String,
+                value: Value::String(normalize_span_kind(&span_kind)),
+            });
         }
 
         if let Some(spans) = trace_id_to_spans.get_mut(&span.trace_id) {
@@ -854,6 +896,17 @@ fn object_to_tags(object: serde_json::map::Map<String, JsonValue>) -> Vec<KeyVal
                 key,
                 value_type: ValueType::Boolean,
                 value: Value::Boolean(value),
+            }),
+            // TODO(shuiyisong): quick fix
+            JsonValue::Array(value) => Some(KeyValue {
+                key,
+                value_type: ValueType::String,
+                value: Value::String(serde_json::to_string(&value).unwrap()),
+            }),
+            JsonValue::Object(value) => Some(KeyValue {
+                key,
+                value_type: ValueType::String,
+                value: Value::String(serde_json::to_string(&value).unwrap()),
             }),
             // FIXME(zyy17): Do we need to support other types?
             _ => {
