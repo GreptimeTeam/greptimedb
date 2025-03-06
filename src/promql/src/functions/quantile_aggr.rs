@@ -134,8 +134,165 @@ impl DfAccumulator for QuantileAccumulator {
         Ok(())
     }
 }
-
 #[cfg(test)]
 mod tests {
-    // TODO
+    use std::sync::Arc;
+
+    use datafusion::arrow::array::{ArrayRef, Float64Array};
+    use datafusion_common::ScalarValue;
+
+    use super::*;
+
+    fn create_f64_array(values: Vec<Option<f64>>) -> ArrayRef {
+        Arc::new(Float64Array::from(values)) as ArrayRef
+    }
+
+    #[test]
+    fn test_quantile_accumulator_empty() {
+        let mut accumulator = QuantileAccumulator::new(0.5);
+
+        let result = accumulator.evaluate().unwrap();
+
+        match result {
+            ScalarValue::Float64(_) => (),
+            _ => panic!("Expected Float64 scalar value"),
+        }
+    }
+
+    #[test]
+    fn test_quantile_accumulator_single_value() {
+        let mut accumulator = QuantileAccumulator::new(0.5);
+        let input = create_f64_array(vec![Some(10.0)]);
+
+        accumulator.update_batch(&[input]).unwrap();
+        let result = accumulator.evaluate().unwrap();
+
+        assert_eq!(result, ScalarValue::Float64(Some(10.0)));
+    }
+
+    #[test]
+    fn test_quantile_accumulator_multiple_values() {
+        let mut accumulator = QuantileAccumulator::new(0.5);
+        let input = create_f64_array(vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0), Some(5.0)]);
+
+        accumulator.update_batch(&[input]).unwrap();
+        let result = accumulator.evaluate().unwrap();
+
+        // 中位数应该是 3.0
+        assert_eq!(result, ScalarValue::Float64(Some(3.0)));
+    }
+
+    #[test]
+    fn test_quantile_accumulator_with_nulls() {
+        let mut accumulator = QuantileAccumulator::new(0.5);
+        let input = create_f64_array(vec![Some(1.0), None, Some(3.0), Some(4.0), Some(5.0)]);
+
+        accumulator.update_batch(&[input]).unwrap();
+
+        let result = accumulator.evaluate().unwrap();
+        assert_eq!(result, ScalarValue::Float64(Some(3.0)));
+    }
+
+    #[test]
+    fn test_quantile_accumulator_multiple_batches() {
+        let mut accumulator = QuantileAccumulator::new(0.5);
+        let input1 = create_f64_array(vec![Some(1.0), Some(2.0)]);
+        let input2 = create_f64_array(vec![Some(3.0), Some(4.0), Some(5.0)]);
+
+        accumulator.update_batch(&[input1]).unwrap();
+        accumulator.update_batch(&[input2]).unwrap();
+
+        let result = accumulator.evaluate().unwrap();
+        assert_eq!(result, ScalarValue::Float64(Some(3.0)));
+    }
+
+    #[test]
+    fn test_quantile_accumulator_different_quantiles() {
+        let mut min_accumulator = QuantileAccumulator::new(0.0);
+        let input = create_f64_array(vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0), Some(5.0)]);
+        min_accumulator.update_batch(&[input.clone()]).unwrap();
+        assert_eq!(
+            min_accumulator.evaluate().unwrap(),
+            ScalarValue::Float64(Some(1.0))
+        );
+
+        let mut q1_accumulator = QuantileAccumulator::new(0.25);
+        q1_accumulator.update_batch(&[input.clone()]).unwrap();
+        assert_eq!(
+            q1_accumulator.evaluate().unwrap(),
+            ScalarValue::Float64(Some(2.0))
+        );
+
+        let mut q3_accumulator = QuantileAccumulator::new(0.75);
+        q3_accumulator.update_batch(&[input.clone()]).unwrap();
+        assert_eq!(
+            q3_accumulator.evaluate().unwrap(),
+            ScalarValue::Float64(Some(4.0))
+        );
+
+        let mut max_accumulator = QuantileAccumulator::new(1.0);
+        max_accumulator.update_batch(&[input]).unwrap();
+        assert_eq!(
+            max_accumulator.evaluate().unwrap(),
+            ScalarValue::Float64(Some(5.0))
+        );
+    }
+
+    #[test]
+    fn test_quantile_accumulator_size() {
+        let mut accumulator = QuantileAccumulator::new(0.5);
+        let input = create_f64_array(vec![Some(1.0), Some(2.0), Some(3.0)]);
+
+        let initial_size = accumulator.size();
+        accumulator.update_batch(&[input]).unwrap();
+        let after_update_size = accumulator.size();
+
+        assert!(after_update_size >= initial_size);
+    }
+
+    #[test]
+    fn test_quantile_accumulator_state_and_merge() -> DfResult<()> {
+        let mut acc1 = QuantileAccumulator::new(0.5);
+        let input1 = create_f64_array(vec![Some(1.0), Some(2.0)]);
+        acc1.update_batch(&[input1])?;
+
+        let state1 = acc1.state()?;
+
+        let mut acc2 = QuantileAccumulator::new(0.5);
+        let input2 = create_f64_array(vec![Some(3.0), Some(4.0), Some(5.0)]);
+        acc2.update_batch(&[input2])?;
+
+        let mut struct_builders = vec![];
+        for scalar in &state1 {
+            if let ScalarValue::Struct(struct_array) = scalar {
+                struct_builders.push(struct_array.clone() as ArrayRef);
+            }
+        }
+
+        acc2.merge_batch(&struct_builders)?;
+
+        let result = acc2.evaluate()?;
+
+        assert_eq!(result, ScalarValue::Float64(Some(3.0)));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_quantile_accumulator_with_extreme_values() {
+        let mut accumulator = QuantileAccumulator::new(0.5);
+        let input = create_f64_array(vec![Some(f64::MAX), Some(f64::MIN), Some(0.0)]);
+
+        accumulator.update_batch(&[input]).unwrap();
+        let _result = accumulator.evaluate().unwrap();
+    }
+
+    #[test]
+    fn test_quantile_udaf_creation() {
+        let q = 0.5;
+        let udaf = quantile_udaf(q);
+
+        assert_eq!(udaf.name(), QUANTILE_NAME);
+        assert_eq!(udaf.return_type(&[]).unwrap(), DataType::Float64);
+    }
 }
