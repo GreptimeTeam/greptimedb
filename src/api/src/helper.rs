@@ -116,7 +116,7 @@ impl From<ColumnDataTypeWrapper> for ConcreteDataType {
             ColumnDataType::Json => ConcreteDataType::json_datatype(),
             ColumnDataType::String => ConcreteDataType::string_datatype(),
             ColumnDataType::Date => ConcreteDataType::date_datatype(),
-            ColumnDataType::Datetime => ConcreteDataType::timestamp_millisecond_datatype(),
+            ColumnDataType::Datetime => ConcreteDataType::timestamp_microsecond_datatype(),
             ColumnDataType::TimestampSecond => ConcreteDataType::timestamp_second_datatype(),
             ColumnDataType::TimestampMillisecond => {
                 ConcreteDataType::timestamp_millisecond_datatype()
