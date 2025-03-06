@@ -1,0 +1,39 @@
+CREATE TABLE grpc_latencies
+(
+    ts      TIMESTAMP TIME INDEX,
+    host    VARCHAR(255),
+    latency FLOAT,
+    PRIMARY KEY (host),
+);
+
+Affected Rows: 0
+
+INSERT INTO grpc_latencies
+VALUES ('2023-10-01 10:00:00', 'host1', 120),
+       ('2023-10-01 10:00:00', 'host2', 150),
+       ('2023-10-01 10:00:05', 'host1', 130);
+
+Affected Rows: 3
+
+WITH latencies AS (SELECT ts,
+                          host,
+                          AVG(latency) RANGE '2s' AS avg_latency
+                   FROM grpc_latencies ALIGN '2s' BY (host) FILL PREV
+    )
+SELECT latencies.ts,
+       AVG(latencies.avg_latency)
+FROM latencies
+GROUP BY latencies.ts ORDER BY latencies.ts;
+
++---------------------+----------------------------+
+| ts                  | avg(latencies.avg_latency) |
++---------------------+----------------------------+
+| 2023-10-01T10:00:00 | 135.0                      |
+| 2023-10-01T10:00:02 | 120.0                      |
+| 2023-10-01T10:00:04 | 130.0                      |
++---------------------+----------------------------+
+
+DROP TABLE grpc_latencies;
+
+Affected Rows: 0
+
