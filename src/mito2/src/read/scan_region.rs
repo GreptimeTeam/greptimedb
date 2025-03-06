@@ -344,7 +344,7 @@ impl ScanRegion {
         let inverted_index_applier = self.build_invereted_index_applier();
         let bloom_filter_applier = self.build_bloom_filter_applier();
         let fulltext_index_applier = self.build_fulltext_index_applier();
-        let predicate = Predicate::new(self.request.filters.clone());
+        let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters);
         // The mapper always computes projected column ids as the schema of SSTs may change.
         let mapper = match &self.request.projection {
             Some(p) => ProjectionMapper::new(&self.version.metadata, p.iter().copied())?,
@@ -356,7 +356,7 @@ impl ScanRegion {
             .map(|mem| {
                 let ranges = mem.ranges(
                     Some(mapper.column_ids()),
-                    Some(predicate.clone()),
+                    predicate.clone(),
                     self.request.sequence,
                 );
                 MemRangeBuilder::new(ranges)
@@ -365,7 +365,7 @@ impl ScanRegion {
 
         let input = ScanInput::new(self.access_layer, mapper)
             .with_time_range(Some(time_range))
-            .with_predicate(Some(predicate))
+            .with_predicate(predicate)
             .with_memtables(memtables)
             .with_files(files)
             .with_cache(self.cache_strategy)
@@ -532,7 +532,7 @@ pub(crate) struct ScanInput {
     /// Time range filter for time index.
     time_range: Option<TimestampRange>,
     /// Predicate to push down.
-    pub(crate) predicate: Option<Predicate>,
+    pub(crate) predicate: PredicateGroup,
     /// Memtable range builders for memtables in the time range..
     pub(crate) memtables: Vec<MemRangeBuilder>,
     /// Handles to SST files to scan.
@@ -567,7 +567,7 @@ impl ScanInput {
             access_layer,
             mapper: Arc::new(mapper),
             time_range: None,
-            predicate: None,
+            predicate: PredicateGroup::default(),
             memtables: Vec::new(),
             files: Vec::new(),
             cache_strategy: CacheStrategy::Disabled,
@@ -593,7 +593,7 @@ impl ScanInput {
 
     /// Sets predicate to push down.
     #[must_use]
-    pub(crate) fn with_predicate(mut self, predicate: Option<Predicate>) -> Self {
+    pub(crate) fn with_predicate(mut self, predicate: PredicateGroup) -> Self {
         self.predicate = predicate;
         self
     }
@@ -746,7 +746,7 @@ impl ScanInput {
         let res = self
             .access_layer
             .read_sst(file.clone())
-            .predicate(self.predicate.clone())
+            .predicate(self.predicate.predicate().cloned())
             .projection(Some(self.mapper.column_ids().to_vec()))
             .cache(self.cache_strategy.clone())
             .inverted_index_applier(self.inverted_index_applier.clone())
@@ -817,8 +817,9 @@ impl ScanInput {
         rows_in_files + rows_in_memtables
     }
 
-    pub(crate) fn predicate(&self) -> Option<Predicate> {
-        self.predicate.clone()
+    /// Returns table predicate of all exprs.
+    pub(crate) fn predicate(&self) -> Option<&Predicate> {
+        self.predicate.predicate()
     }
 
     /// Returns number of memtables to scan.
@@ -923,10 +924,15 @@ impl StreamContext {
 
 /// Predicates for primary key, time index and fields.
 /// It only keeps filters that [SimpleFilterEvaluator] supports.
-struct PredicateGroup {
-    primary_key_filters: Vec<SimpleFilterContext>,
-    time_filters: Vec<SimpleFilterContext>,
-    field_filters: Vec<SimpleFilterContext>,
+#[derive(Clone, Default)]
+pub struct PredicateGroup {
+    primary_key_filters: Option<Arc<Vec<SimpleFilterContext>>>,
+    time_filters: Option<Arc<Vec<SimpleFilterContext>>>,
+    field_filters: Option<Arc<Vec<SimpleFilterContext>>>,
+
+    /// Table predicate for all logical exprs to evaluate.
+    /// Parquet reader uses it to prune row groups.
+    predicate: Option<Predicate>,
 }
 
 impl PredicateGroup {
@@ -949,12 +955,34 @@ impl PredicateGroup {
                 SemanticType::Timestamp => field_filters.push(filter),
             }
         }
+        let primary_key_filters = if primary_key_filters.is_empty() {
+            None
+        } else {
+            Some(Arc::new(primary_key_filters))
+        };
+        let time_filters = if time_filters.is_empty() {
+            None
+        } else {
+            Some(Arc::new(time_filters))
+        };
+        let field_filters = if field_filters.is_empty() {
+            None
+        } else {
+            Some(Arc::new(field_filters))
+        };
+        let predicate = Predicate::new(exprs.to_vec());
 
         Self {
             primary_key_filters,
             time_filters,
             field_filters,
+            predicate: Some(predicate),
         }
+    }
+
+    /// Returns predicate of all exprs.
+    pub(crate) fn predicate(&self) -> Option<&Predicate> {
+        self.predicate.as_ref()
     }
 
     fn expr_to_filter(

@@ -35,6 +35,7 @@ use crate::memtable::partition_tree::{PartitionTreeConfig, PartitionTreeMemtable
 use crate::memtable::time_series::TimeSeriesMemtableBuilder;
 use crate::metrics::WRITE_BUFFER_BYTES;
 use crate::read::prune::PruneTimeIterator;
+use crate::read::scan_region::PredicateGroup;
 use crate::read::Batch;
 use crate::region::options::{MemtableOptions, MergeMode};
 use crate::sst::file::FileTimeRange;
@@ -155,7 +156,7 @@ pub trait Memtable: Send + Sync + fmt::Debug {
     fn ranges(
         &self,
         projection: Option<&[ColumnId]>,
-        predicate: Option<Predicate>,
+        predicate: PredicateGroup,
         sequence: Option<SequenceNumber>,
     ) -> MemtableRanges;
 
@@ -346,14 +347,20 @@ pub struct MemtableRangeContext {
     id: MemtableId,
     /// Iterator builder.
     builder: BoxedIterBuilder,
+    /// All filters.
+    predicate: PredicateGroup,
 }
 
 pub type MemtableRangeContextRef = Arc<MemtableRangeContext>;
 
 impl MemtableRangeContext {
     /// Creates a new [MemtableRangeContext].
-    pub fn new(id: MemtableId, builder: BoxedIterBuilder) -> Self {
-        Self { id, builder }
+    pub fn new(id: MemtableId, builder: BoxedIterBuilder, predicate: PredicateGroup) -> Self {
+        Self {
+            id,
+            builder,
+            predicate,
+        }
     }
 }
 
