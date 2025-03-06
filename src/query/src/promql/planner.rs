@@ -288,7 +288,7 @@ impl PromPlanner {
                 // create plan
                 if op.id() == token::T_COUNT_VALUES {
                     let label = Self::get_param_value_as_str(*op, param)?;
-                    // `count_values` must be groupped by fields,
+                    // `count_values` must be grouped by fields,
                     // and project the fields to the new label.
                     group_exprs.extend(extra_group_exprs.clone());
                     let project_fields = self
@@ -2011,7 +2011,7 @@ impl PromPlanner {
                 new_field_columns.push(expr.schema_name().to_string());
             }
 
-            // if the aggregator is `count_values`, it must be groupped by current fields.
+            // if the aggregator is `count_values`, it must be grouped by current fields.
             let extra_group_by = if op.id() == token::T_COUNT_VALUES {
                 let prev_field_exprs: Vec<_> = self
                     .ctx
