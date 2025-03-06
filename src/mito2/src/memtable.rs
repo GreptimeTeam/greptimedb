@@ -383,10 +383,16 @@ impl MemtableRange {
     }
 
     /// Builds an iterator to read the range.
-    /// Filters the result by the specific time range.
+    /// Filters the result by the specific time range, this ensures memtable won't return
+    /// rows out of the time range when new rows are inserted.
     pub fn build_iter(&self, time_range: FileTimeRange) -> Result<BoxedBatchIterator> {
         let iter = self.context.builder.build()?;
-        Ok(Box::new(PruneTimeIterator::new(iter, time_range)))
+        let time_filters = self.context.predicate.time_filters();
+        Ok(Box::new(PruneTimeIterator::new(
+            iter,
+            time_range,
+            time_filters,
+        )))
     }
 }
 

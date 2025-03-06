@@ -34,7 +34,7 @@ use parquet::arrow::{parquet_to_arrow_field_levels, FieldLevels, ProjectionMask}
 use parquet::file::metadata::ParquetMetaData;
 use parquet::format::KeyValue;
 use snafu::{OptionExt, ResultExt};
-use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
+use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 
@@ -985,16 +985,6 @@ impl SimpleFilterContext {
             semantic_type: column_metadata.semantic_type,
             data_type: column_metadata.column_schema.data_type.clone(),
         })
-    }
-
-    /// Creates a new context for the `filter` and column metadata.
-    pub(crate) fn new(filter: SimpleFilterEvaluator, column_metadata: &ColumnMetadata) -> Self {
-        Self {
-            filter,
-            column_id: column_metadata.column_id,
-            semantic_type: column_metadata.semantic_type,
-            data_type: column_metadata.column_schema.data_type.clone(),
-        }
     }
 
     /// Returns the filter to evaluate.

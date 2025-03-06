@@ -58,7 +58,7 @@ use crate::sst::index::fulltext_index::applier::builder::FulltextIndexApplierBui
 use crate::sst::index::fulltext_index::applier::FulltextIndexApplierRef;
 use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
 use crate::sst::index::inverted_index::applier::InvertedIndexApplierRef;
-use crate::sst::parquet::reader::{ReaderMetrics, SimpleFilterContext};
+use crate::sst::parquet::reader::ReaderMetrics;
 
 /// A scanner scans a region and returns a [SendableRecordBatchStream].
 pub(crate) enum Scanner {
@@ -922,13 +922,11 @@ impl StreamContext {
     }
 }
 
-/// Predicates for primary key, time index and fields.
+/// Predicates to evaluate.
 /// It only keeps filters that [SimpleFilterEvaluator] supports.
 #[derive(Clone, Default)]
 pub struct PredicateGroup {
-    primary_key_filters: Option<Arc<Vec<SimpleFilterContext>>>,
-    time_filters: Option<Arc<Vec<SimpleFilterContext>>>,
-    field_filters: Option<Arc<Vec<SimpleFilterContext>>>,
+    time_filters: Option<Arc<Vec<SimpleFilterEvaluator>>>,
 
     /// Table predicate for all logical exprs to evaluate.
     /// Parquet reader uses it to prune row groups.
@@ -938,10 +936,7 @@ pub struct PredicateGroup {
 impl PredicateGroup {
     /// Creates a new `PredicateGroup` from exprs according to the metadata.
     pub fn new(metadata: &RegionMetadata, exprs: &[Expr]) -> Self {
-        let mut primary_key_filters = Vec::with_capacity(exprs.len());
         let mut time_filters = Vec::with_capacity(exprs.len());
-        let mut field_filters = Vec::with_capacity(exprs.len());
-
         // Columns in the expr.
         let mut columns = HashSet::new();
         for expr in exprs {
@@ -949,35 +944,24 @@ impl PredicateGroup {
             let Some(filter) = Self::expr_to_filter(expr, metadata, &mut columns) else {
                 continue;
             };
-            match filter.semantic_type() {
-                SemanticType::Tag => primary_key_filters.push(filter),
-                SemanticType::Field => time_filters.push(filter),
-                SemanticType::Timestamp => field_filters.push(filter),
-            }
+            time_filters.push(filter);
         }
-        let primary_key_filters = if primary_key_filters.is_empty() {
-            None
-        } else {
-            Some(Arc::new(primary_key_filters))
-        };
         let time_filters = if time_filters.is_empty() {
             None
         } else {
             Some(Arc::new(time_filters))
         };
-        let field_filters = if field_filters.is_empty() {
-            None
-        } else {
-            Some(Arc::new(field_filters))
-        };
         let predicate = Predicate::new(exprs.to_vec());
 
         Self {
-            primary_key_filters,
             time_filters,
-            field_filters,
             predicate: Some(predicate),
         }
+    }
+
+    /// Returns time filters.
+    pub(crate) fn time_filters(&self) -> Option<Arc<Vec<SimpleFilterEvaluator>>> {
+        self.time_filters.clone()
     }
 
     /// Returns predicate of all exprs.
@@ -989,7 +973,7 @@ impl PredicateGroup {
         expr: &Expr,
         metadata: &RegionMetadata,
         columns: &mut HashSet<Column>,
-    ) -> Option<SimpleFilterContext> {
+    ) -> Option<SimpleFilterEvaluator> {
         columns.clear();
         // `expr_to_columns` won't return error.
         // We still ignore these expressions for safety.
@@ -998,10 +982,12 @@ impl PredicateGroup {
             // Simple filter doesn't support multiple columns.
             return None;
         }
-        let filter = SimpleFilterEvaluator::try_new(expr)?;
         let column = columns.iter().next()?;
         let column_meta = metadata.column_by_name(&column.name)?;
-
-        Some(SimpleFilterContext::new(filter, column_meta))
+        if column_meta.semantic_type == SemanticType::Timestamp {
+            SimpleFilterEvaluator::try_new(expr)
+        } else {
+            None
+        }
     }
 }
