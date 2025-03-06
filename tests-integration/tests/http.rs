@@ -28,6 +28,7 @@ use loki_proto::prost_types::Timestamp;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+use pipeline::GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME;
 use prost::Message;
 use serde_json::{json, Value};
 use servers::http::handler::HealthResponse;
@@ -105,6 +106,7 @@ macro_rules! http_tests {
                 test_elasticsearch_logs_with_index,
                 test_log_query,
                 test_jaeger_query_api,
+                test_jaeger_query_api_for_trace_v1,
             );
         )*
     };
@@ -2130,7 +2132,6 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
     // init
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_otlp_traces").await;
-    const TRACE_V1: &str = "greptime_trace_v1";
 
     let content = r#"
 {"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"telemetrygen"}}],"droppedAttributesCount":0},"scopeSpans":[{"scope":{"name":"telemetrygen","version":"","attributes":[],"droppedAttributesCount":0},"spans":[{"traceId":"c05d7a4ec8e1f231f02ed6e8da8655b4","spanId":"9630f2916e2f7909","traceState":"","parentSpanId":"d24f921c75f68e23","flags":256,"name":"okey-dokey-0","kind":2,"startTimeUnixNano":"1736480942444376000","endTimeUnixNano":"1736480942444499000","attributes":[{"key":"net.peer.ip","value":{"stringValue":"1.2.3.4"}},{"key":"peer.service","value":{"stringValue":"telemetrygen-client"}}],"droppedAttributesCount":0,"events":[],"droppedEventsCount":0,"links":[],"droppedLinksCount":0,"status":{"message":"","code":0}},{"traceId":"c05d7a4ec8e1f231f02ed6e8da8655b4","spanId":"d24f921c75f68e23","traceState":"","parentSpanId":"","flags":256,"name":"lets-go","kind":3,"startTimeUnixNano":"1736480942444376000","endTimeUnixNano":"1736480942444499000","attributes":[{"key":"net.peer.ip","value":{"stringValue":"1.2.3.4"}},{"key":"peer.service","value":{"stringValue":"telemetrygen-server"}}],"droppedAttributesCount":0,"events":[],"droppedEventsCount":0,"links":[],"droppedLinksCount":0,"status":{"message":"","code":0}},{"traceId":"cc9e0991a2e63d274984bd44ee669203","spanId":"8f847259b0f6e1ab","traceState":"","parentSpanId":"eba7be77e3558179","flags":256,"name":"okey-dokey-0","kind":2,"startTimeUnixNano":"1736480942444589000","endTimeUnixNano":"1736480942444712000","attributes":[{"key":"net.peer.ip","value":{"stringValue":"1.2.3.4"}},{"key":"peer.service","value":{"stringValue":"telemetrygen-client"}}],"droppedAttributesCount":0,"events":[],"droppedEventsCount":0,"links":[],"droppedLinksCount":0,"status":{"message":"","code":0}},{"traceId":"cc9e0991a2e63d274984bd44ee669203","spanId":"eba7be77e3558179","traceState":"","parentSpanId":"","flags":256,"name":"lets-go","kind":3,"startTimeUnixNano":"1736480942444589000","endTimeUnixNano":"1736480942444712000","attributes":[{"key":"net.peer.ip","value":{"stringValue":"1.2.3.4"}},{"key":"peer.service","value":{"stringValue":"telemetrygen-server"}}],"droppedAttributesCount":0,"events":[],"droppedEventsCount":0,"links":[],"droppedLinksCount":0,"status":{"message":"","code":0}}],"schemaUrl":""}],"schemaUrl":"https://opentelemetry.io/schemas/1.4.0"}]}
@@ -2152,7 +2153,7 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
             ),
             (
                 HeaderName::from_static("x-greptime-log-pipeline-name"),
-                HeaderValue::from_static(TRACE_V1),
+                HeaderValue::from_static(GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME),
             ),
             (
                 HeaderName::from_static("x-greptime-trace-table-name"),
@@ -2193,7 +2194,7 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
             ),
             (
                 HeaderName::from_static("x-greptime-log-pipeline-name"),
-                HeaderValue::from_static(TRACE_V1),
+                HeaderValue::from_static(GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME),
             ),
             (
                 HeaderName::from_static("x-greptime-trace-table-name"),
@@ -2784,6 +2785,369 @@ pub async fn test_jaeger_query_api(store_type: StorageType) {
             HeaderName::from_static("content-type"),
             HeaderValue::from_static("application/x-protobuf"),
         )],
+        "/v1/otlp/v1/traces",
+        body.clone(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    // Test `/api/services` API.
+    let res = client.get("/v1/jaeger/api/services").send().await;
+    assert_eq!(StatusCode::OK, res.status());
+    let expected = r#"
+    {
+        "data": [
+            "test-jaeger-query-api"
+        ],
+        "total": 1,
+        "limit": 0,
+        "offset": 0,
+        "errors": []
+    }
+    "#;
+    let resp: Value = serde_json::from_str(&res.text().await).unwrap();
+    let expected: Value = serde_json::from_str(expected).unwrap();
+    assert_eq!(resp, expected);
+
+    // Test `/api/operations` API.
+    let res = client
+        .get("/v1/jaeger/api/operations?service=test-jaeger-query-api")
+        .send()
+        .await;
+    assert_eq!(StatusCode::OK, res.status());
+    let expected = r#"
+    {
+        "data": [
+            {
+                "name": "access-mysql",
+                "spanKind": "server"
+            },
+            {
+                "name": "access-redis",
+                "spanKind": "server"
+            }
+        ],
+        "total": 2,
+        "limit": 0,
+        "offset": 0,
+        "errors": []
+    }
+    "#;
+    let resp: Value = serde_json::from_str(&res.text().await).unwrap();
+    let expected: Value = serde_json::from_str(expected).unwrap();
+    assert_eq!(resp, expected);
+
+    // Test `/api/services/{service_name}/operations` API.
+    let res = client
+        .get("/v1/jaeger/api/services/test-jaeger-query-api/operations")
+        .send()
+        .await;
+    assert_eq!(StatusCode::OK, res.status());
+    let expected = r#"
+    {
+        "data": [
+            "access-mysql",
+            "access-redis"
+        ],
+        "total": 2,
+        "limit": 0,
+        "offset": 0,
+        "errors": []
+    }
+    "#;
+    let resp: Value = serde_json::from_str(&res.text().await).unwrap();
+    let expected: Value = serde_json::from_str(expected).unwrap();
+    assert_eq!(resp, expected);
+
+    // Test `/api/traces/{trace_id}` API.
+    let res = client
+        .get("/v1/jaeger/api/traces/5611dce1bc9ebed65352d99a027b08ea")
+        .send()
+        .await;
+    assert_eq!(StatusCode::OK, res.status());
+    let expected = r#"
+    {
+      "data": [
+        {
+          "traceID": "5611dce1bc9ebed65352d99a027b08ea",
+          "spans": [
+            {
+              "traceID": "5611dce1bc9ebed65352d99a027b08ea",
+              "spanID": "008421dbbd33a3e9",
+              "operationName": "access-mysql",
+              "references": [],
+              "startTime": 1738726754492422,
+              "duration": 100000,
+              "tags": [
+                {
+                  "key": "net.peer.ip",
+                  "type": "string",
+                  "value": "1.2.3.4"
+                },
+                {
+                  "key": "operation.type",
+                  "type": "string",
+                  "value": "access-mysql"
+                },
+                {
+                  "key": "peer.service",
+                  "type": "string",
+                  "value": "test-jaeger-query-api"
+                }
+              ],
+              "logs": [],
+              "processID": "p1"
+            },
+            {
+              "traceID": "5611dce1bc9ebed65352d99a027b08ea",
+              "spanID": "ffa03416a7b9ea48",
+              "operationName": "access-redis",
+              "references": [],
+              "startTime": 1738726754492422,
+              "duration": 100000,
+              "tags": [
+                {
+                  "key": "net.peer.ip",
+                  "type": "string",
+                  "value": "1.2.3.4"
+                },
+                {
+                  "key": "operation.type",
+                  "type": "string",
+                  "value": "access-redis"
+                },
+                {
+                  "key": "peer.service",
+                  "type": "string",
+                  "value": "test-jaeger-query-api"
+                }
+              ],
+              "logs": [],
+              "processID": "p1"
+            }
+          ],
+          "processes": {
+            "p1": {
+              "serviceName": "test-jaeger-query-api",
+              "tags": []
+            }
+          }
+        }
+      ],
+      "total": 0,
+      "limit": 0,
+      "offset": 0,
+      "errors": []
+    }
+    "#;
+
+    let resp: Value = serde_json::from_str(&res.text().await).unwrap();
+    let expected: Value = serde_json::from_str(expected).unwrap();
+    assert_eq!(resp, expected);
+
+    // Test `/api/traces` API.
+    let res = client
+        .get("/v1/jaeger/api/traces?service=test-jaeger-query-api&operation=access-mysql&start=1738726754492422&end=1738726754642422&tags=%7B%22operation.type%22%3A%22access-mysql%22%7D")
+        .send()
+        .await;
+    assert_eq!(StatusCode::OK, res.status());
+    let expected = r#"
+    {
+      "data": [
+        {
+          "traceID": "5611dce1bc9ebed65352d99a027b08ea",
+          "spans": [
+            {
+              "traceID": "5611dce1bc9ebed65352d99a027b08ea",
+              "spanID": "008421dbbd33a3e9",
+              "operationName": "access-mysql",
+              "references": [],
+              "startTime": 1738726754492422,
+              "duration": 100000,
+              "tags": [
+                {
+                  "key": "net.peer.ip",
+                  "type": "string",
+                  "value": "1.2.3.4"
+                },
+                {
+                  "key": "operation.type",
+                  "type": "string",
+                  "value": "access-mysql"
+                },
+                {
+                  "key": "peer.service",
+                  "type": "string",
+                  "value": "test-jaeger-query-api"
+                }
+              ],
+              "logs": [],
+              "processID": "p1"
+            }
+          ],
+          "processes": {
+            "p1": {
+              "serviceName": "test-jaeger-query-api",
+              "tags": []
+            }
+          }
+        }
+      ],
+      "total": 0,
+      "limit": 0,
+      "offset": 0,
+      "errors": []
+    }
+    "#;
+
+    let resp: Value = serde_json::from_str(&res.text().await).unwrap();
+    let expected: Value = serde_json::from_str(expected).unwrap();
+    assert_eq!(resp, expected);
+
+    guard.remove_all().await;
+}
+
+pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_jaeger_query_api_v1").await;
+
+    let client = TestClient::new(app).await;
+
+    // Test empty response for `/api/services` API before writing any traces.
+    let res = client.get("/v1/jaeger/api/services").send().await;
+    assert_eq!(StatusCode::OK, res.status());
+    let expected = r#"
+    {
+        "data": null,
+        "total": 0,
+        "limit": 0,
+        "offset": 0,
+        "errors": []
+    }
+    "#;
+    let resp: Value = serde_json::from_str(&res.text().await).unwrap();
+    let expected: Value = serde_json::from_str(expected).unwrap();
+    assert_eq!(resp, expected);
+
+    let content = r#"
+    {
+        "resourceSpans": [
+            {
+                "resource": {
+                    "attributes": [
+                        {
+                            "key": "service.name",
+                            "value": {
+                                "stringValue": "test-jaeger-query-api"
+                            }
+                        }
+                    ]
+                },
+                "scopeSpans": [
+                    {
+                        "scope": {
+                        "name": "test-jaeger-query-api",
+                        "version": "1.0.0"
+                        },
+                        "spans": [
+                            {
+                                "traceId": "5611dce1bc9ebed65352d99a027b08ea",
+                                "spanId": "008421dbbd33a3e9",
+                                "name": "access-mysql",
+                                "kind": 2,
+                                "startTimeUnixNano": "1738726754492422000",
+                                "endTimeUnixNano": "1738726754592422000",
+                                "attributes": [
+                                    {
+                                        "key": "operation.type",
+                                        "value": {
+                                        "stringValue": "access-mysql"
+                                        }
+                                    },
+                                    {
+                                        "key": "net.peer.ip",
+                                        "value": {
+                                        "stringValue": "1.2.3.4"
+                                        }
+                                    },
+                                    {
+                                        "key": "peer.service",
+                                        "value": {
+                                        "stringValue": "test-jaeger-query-api"
+                                        }
+                                    }
+                                ],
+                                "status": {
+                                    "message": "success",
+                                    "code": 0
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        "scope": {
+                        "name": "test-jaeger-query-api",
+                        "version": "1.0.0"
+                        },
+                        "spans": [
+                            {
+                                "traceId": "5611dce1bc9ebed65352d99a027b08ea",
+                                "spanId": "ffa03416a7b9ea48",
+                                "name": "access-redis",
+                                "kind": 2,
+                                "startTimeUnixNano": "1738726754492422000",
+                                "endTimeUnixNano": "1738726754592422000",
+                                "attributes": [
+                                    {
+                                        "key": "operation.type",
+                                        "value": {
+                                        "stringValue": "access-redis"
+                                        }
+                                    },
+                                    {
+                                        "key": "net.peer.ip",
+                                        "value": {
+                                        "stringValue": "1.2.3.4"
+                                        }
+                                    },
+                                    {
+                                        "key": "peer.service",
+                                        "value": {
+                                        "stringValue": "test-jaeger-query-api"
+                                        }
+                                    }
+                                ],
+                                "status": {
+                                    "message": "success",
+                                    "code": 0
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "schemaUrl": "https://opentelemetry.io/schemas/1.4.0"
+            }
+        ]
+    }
+    "#;
+
+    let req: ExportTraceServiceRequest = serde_json::from_str(content).unwrap();
+    let body = req.encode_to_vec();
+    // write traces data.
+    let res = send_req(
+        &client,
+        vec![
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/x-protobuf"),
+            ),
+            (
+                HeaderName::from_static("x-greptime-log-pipeline-name"),
+                HeaderValue::from_static(GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME),
+            ),
+        ],
         "/v1/otlp/v1/traces",
         body.clone(),
         false,

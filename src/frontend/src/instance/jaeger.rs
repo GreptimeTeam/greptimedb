@@ -37,9 +37,8 @@ use servers::error::{
 };
 use servers::http::jaeger::QueryTraceParams;
 use servers::otlp::trace::{
-    DURATION_NANO_COLUMN, SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN, SPAN_ID_COLUMN,
-    SPAN_KIND_COLUMN, SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, TIMESTAMP_COLUMN, TRACE_ID_COLUMN,
-    TRACE_TABLE_NAME,
+    DURATION_NANO_COLUMN, SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN, SPAN_KIND_COLUMN,
+    SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, TIMESTAMP_COLUMN, TRACE_ID_COLUMN, TRACE_TABLE_NAME,
 };
 use servers::query_handler::JaegerQueryHandler;
 use session::context::QueryContextRef;
@@ -174,15 +173,19 @@ async fn query_trace_table(
     tags: Option<HashMap<String, JsonValue>>,
     distinct: bool,
 ) -> ServerResult<Output> {
-    let db = ctx.get_db_string();
     let table = catalog_manager
-        .table(ctx.current_catalog(), &db, TRACE_TABLE_NAME, Some(&ctx))
+        .table(
+            ctx.current_catalog(),
+            &ctx.current_schema(),
+            TRACE_TABLE_NAME,
+            Some(&ctx),
+        )
         .await
         .context(CatalogSnafu)?
         .with_context(|| TableNotFoundSnafu {
             table: TRACE_TABLE_NAME,
             catalog: ctx.current_catalog(),
-            schema: db,
+            schema: ctx.current_schema(),
         })?;
 
     let df_context = create_df_context(query_engine, ctx.clone())?;
@@ -205,7 +208,10 @@ async fn query_trace_table(
     let dataframe = if distinct {
         dataframe.distinct().context(DataFusionSnafu)?
     } else {
+        // for non distinct query, sort by timestamp to make results stable
         dataframe
+            .sort_by(vec![col(TIMESTAMP_COLUMN)])
+            .context(DataFusionSnafu)?
     };
 
     // Apply the limit if needed.
@@ -256,6 +262,7 @@ fn create_df_context(
     Ok(df_context)
 }
 
+// TODO: adopte this to new model
 fn tags_filters(
     dataframe: &DataFrame,
     tags: HashMap<String, JsonValue>,

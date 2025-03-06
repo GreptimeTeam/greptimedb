@@ -640,15 +640,17 @@ fn error_response(err: Error) -> (HttpStatusCode, axum::Json<JaegerAPIResponse>)
     )
 }
 
-/// Construct traces OTLP trace v0 data model.
-///
-/// See otlp/trace/v0.rs . This data model is nesting attributes in
-/// `span_attributes` column
-fn traces_from_v0_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
+fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
     // maintain the mapping: trace_id -> (process_id -> service_name).
     let mut trace_id_to_processes: HashMap<String, HashMap<String, String>> = HashMap::new();
     // maintain the mapping: trace_id -> spans.
     let mut trace_id_to_spans: HashMap<String, Vec<Span>> = HashMap::new();
+
+    let is_span_attributes_flatten = !records
+        .schema
+        .column_schemas
+        .iter()
+        .any(|c| c.name == SPAN_ATTRIBUTES_COLUMN);
 
     for row in records.rows.into_iter() {
         let mut span = Span::default();
@@ -707,6 +709,8 @@ fn traces_from_v0_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
                     span.span_id = span_id;
                 }
                 SPAN_ATTRIBUTES_COLUMN => {
+                    // for v0 data model
+
                     let tags = cell
                         .as_object()
                         .context(InvalidJaegerQuerySnafu {
@@ -740,7 +744,45 @@ fn traces_from_v0_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
                         .collect();
                 }
 
-                _ => {}
+                _ => {
+                    // this this v1 data model
+                    if is_span_attributes_flatten {
+                        const PREFIX: &str = "span_attributes.";
+                        // a span attributes column
+                        if column_name.starts_with(PREFIX) {
+                            match cell {
+                                JsonValue::String(value) => span.tags.push(KeyValue {
+                                    key: column_name
+                                        .strip_prefix(PREFIX)
+                                        .unwrap_or_default()
+                                        .to_string(),
+                                    value_type: ValueType::String,
+                                    value: Value::String(value.to_string()),
+                                }),
+                                JsonValue::Number(value) => span.tags.push(KeyValue {
+                                    key: column_name
+                                        .strip_prefix(PREFIX)
+                                        .unwrap_or_default()
+                                        .to_string(),
+                                    value_type: ValueType::Int64,
+                                    value: Value::Int64(value.as_i64().unwrap_or(0)),
+                                }),
+                                JsonValue::Bool(value) => span.tags.push(KeyValue {
+                                    key: column_name
+                                        .strip_prefix(PREFIX)
+                                        .unwrap_or_default()
+                                        .to_string(),
+                                    value_type: ValueType::Boolean,
+                                    value: Value::Boolean(value),
+                                }),
+                                // FIXME(zyy17): Do we need to support other types?
+                                _ => {
+                                    warn!("Unsupported value type: {:?}", cell);
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -789,24 +831,6 @@ fn traces_from_v0_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
     }
 
     Ok(traces)
-}
-
-fn traces_from_v1_records(_records: HttpRecordsOutput) -> Result<Vec<Trace>> {
-    todo!()
-}
-
-// Construct Jaeger traces from records.
-fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
-    if records
-        .schema
-        .column_schemas
-        .iter()
-        .any(|c| c.name == SPAN_ATTRIBUTES_COLUMN)
-    {
-        traces_from_v0_records(records)
-    } else {
-        traces_from_v1_records(records)
-    }
 }
 
 fn services_from_records(records: HttpRecordsOutput) -> Result<Vec<String>> {
@@ -861,6 +885,7 @@ fn operations_from_records(
 
 // Check whether the schema of the records is correct.
 fn check_schema(records: &HttpRecordsOutput, expected_schema: &[(&str, &str)]) -> Result<()> {
+    dbg!(records);
     for (i, column) in records.schema.column_schemas.iter().enumerate() {
         if column.name != expected_schema[i].0 || column.data_type != expected_schema[i].1 {
             InvalidJaegerQuerySnafu {
@@ -1139,6 +1164,151 @@ mod tests {
                             value_type: ValueType::String,
                             value: Value::String("access-redis".to_string()),
                         }],
+                        process_id: "p1".to_string(),
+                        ..Default::default()
+                    },
+                ],
+                processes: HashMap::from([(
+                    "p1".to_string(),
+                    Process {
+                        service_name: "test-service-0".to_string(),
+                        tags: vec![],
+                    },
+                )]),
+                ..Default::default()
+            }],
+        )];
+
+        for (records, expected) in tests {
+            let traces = traces_from_records(records).unwrap();
+            assert_eq!(traces, expected);
+        }
+    }
+
+    #[test]
+    fn test_traces_from_v1_records() {
+        // The tests is the tuple of `(test_records, expected)`.
+        let tests = vec![(
+            HttpRecordsOutput {
+                schema: OutputSchema {
+                    column_schemas: vec![
+                        ColumnSchema {
+                            name: "trace_id".to_string(),
+                            data_type: "String".to_string(),
+                        },
+                        ColumnSchema {
+                            name: "timestamp".to_string(),
+                            data_type: "TimestampNanosecond".to_string(),
+                        },
+                        ColumnSchema {
+                            name: "duration_nano".to_string(),
+                            data_type: "UInt64".to_string(),
+                        },
+                        ColumnSchema {
+                            name: "service_name".to_string(),
+                            data_type: "String".to_string(),
+                        },
+                        ColumnSchema {
+                            name: "span_name".to_string(),
+                            data_type: "String".to_string(),
+                        },
+                        ColumnSchema {
+                            name: "span_id".to_string(),
+                            data_type: "String".to_string(),
+                        },
+                        ColumnSchema {
+                            name: "span_attributes.http.request.method".to_string(),
+                            data_type: "String".to_string(),
+                        },
+                        ColumnSchema {
+                            name: "span_attributes.http.request.url".to_string(),
+                            data_type: "String".to_string(),
+                        },
+                        ColumnSchema {
+                            name: "span_attributes.http.status_code".to_string(),
+                            data_type: "UInt64".to_string(),
+                        },
+                    ],
+                },
+                rows: vec![
+                    vec![
+                        JsonValue::String("5611dce1bc9ebed65352d99a027b08ea".to_string()),
+                        JsonValue::Number(Number::from_u128(1738726754492422000).unwrap()),
+                        JsonValue::Number(Number::from_u128(100000000).unwrap()),
+                        JsonValue::String("test-service-0".to_string()),
+                        JsonValue::String("access-mysql".to_string()),
+                        JsonValue::String("008421dbbd33a3e9".to_string()),
+                        JsonValue::String("GET".to_string()),
+                        JsonValue::String("/data".to_string()),
+                        JsonValue::Number(Number::from_u128(200).unwrap()),
+                    ],
+                    vec![
+                        JsonValue::String("5611dce1bc9ebed65352d99a027b08ea".to_string()),
+                        JsonValue::Number(Number::from_u128(1738726754642422000).unwrap()),
+                        JsonValue::Number(Number::from_u128(100000000).unwrap()),
+                        JsonValue::String("test-service-0".to_string()),
+                        JsonValue::String("access-redis".to_string()),
+                        JsonValue::String("ffa03416a7b9ea48".to_string()),
+                        JsonValue::String("POST".to_string()),
+                        JsonValue::String("/create".to_string()),
+                        JsonValue::Number(Number::from_u128(400).unwrap()),
+                    ],
+                ],
+                total_rows: 2,
+                metrics: HashMap::new(),
+            },
+            vec![Trace {
+                trace_id: "5611dce1bc9ebed65352d99a027b08ea".to_string(),
+                spans: vec![
+                    Span {
+                        trace_id: "5611dce1bc9ebed65352d99a027b08ea".to_string(),
+                        span_id: "008421dbbd33a3e9".to_string(),
+                        operation_name: "access-mysql".to_string(),
+                        start_time: 1738726754492422,
+                        duration: 100000,
+                        tags: vec![
+                            KeyValue {
+                                key: "http.request.method".to_string(),
+                                value_type: ValueType::String,
+                                value: Value::String("GET".to_string()),
+                            },
+                            KeyValue {
+                                key: "http.request.url".to_string(),
+                                value_type: ValueType::String,
+                                value: Value::String("/data".to_string()),
+                            },
+                            KeyValue {
+                                key: "http.status_code".to_string(),
+                                value_type: ValueType::Int64,
+                                value: Value::Int64(200),
+                            },
+                        ],
+                        process_id: "p1".to_string(),
+                        ..Default::default()
+                    },
+                    Span {
+                        trace_id: "5611dce1bc9ebed65352d99a027b08ea".to_string(),
+                        span_id: "ffa03416a7b9ea48".to_string(),
+                        operation_name: "access-redis".to_string(),
+                        start_time: 1738726754642422,
+                        duration: 100000,
+                        tags: vec![
+                            KeyValue {
+                                key: "http.request.method".to_string(),
+                                value_type: ValueType::String,
+                                value: Value::String("POST".to_string()),
+                            },
+                            KeyValue {
+                                key: "http.request.url".to_string(),
+                                value_type: ValueType::String,
+                                value: Value::String("/create".to_string()),
+                            },
+                            KeyValue {
+                                key: "http.status_code".to_string(),
+                                value_type: ValueType::Int64,
+                                value: Value::Int64(400),
+                            },
+                        ],
                         process_id: "p1".to_string(),
                         ..Default::default()
                     },

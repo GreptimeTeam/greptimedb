@@ -215,7 +215,7 @@ impl PlanRewriter {
         }
 
         for col in container {
-            self.column_requirements.insert(col.flat_name());
+            self.column_requirements.insert(col.quoted_flat_name());
         }
     }
 
