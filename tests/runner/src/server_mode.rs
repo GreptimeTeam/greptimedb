@@ -31,15 +31,22 @@ fn get_used_ports() -> &'static Mutex<HashSet<u16>> {
 }
 
 fn get_unique_random_port() -> u16 {
-    loop {
+    // Tricky loop 100 times to find an unused port instead of infinite loop.
+    const MAX_ATTEMPTS: usize = 100;
+
+    for _ in 0..MAX_ATTEMPTS {
         let p = util::get_random_port();
-        // Safety: We are the only one that can access the used ports
         let mut used = get_used_ports().lock().unwrap();
         if !used.contains(&p) {
             used.insert(p);
             return p;
         }
     }
+
+    panic!(
+        "Failed to find an unused port after {} attempts",
+        MAX_ATTEMPTS
+    );
 }
 
 #[derive(Clone)]
