@@ -282,48 +282,41 @@ impl PromPlanner {
                 // Need to append time index column into group by columns
                 let mut group_exprs = self.agg_modifier_to_col(input.schema(), modifier, true)?;
                 // convert op and value columns to aggregate exprs
-                let (aggr_exprs, extra_group_exprs) =
+                let (aggr_exprs, prev_field_exprs) =
                     self.create_aggregate_exprs(*op, param, &input)?;
 
                 // create plan
-                if op.id() == token::T_COUNT_VALUES {
+                let builder = LogicalPlanBuilder::from(input);
+                let builder = if op.id() == token::T_COUNT_VALUES {
                     let label = Self::get_param_value_as_str(*op, param)?;
                     // `count_values` must be grouped by fields,
                     // and project the fields to the new label.
-                    group_exprs.extend(extra_group_exprs.clone());
+                    group_exprs.extend(prev_field_exprs.clone());
                     let project_fields = self
                         .create_field_column_exprs()?
                         .into_iter()
                         .chain(self.create_tag_column_exprs()?)
                         .chain(Some(self.create_time_index_column_expr()?))
-                        .chain(extra_group_exprs.into_iter().map(|expr| expr.alias(label)));
+                        .chain(prev_field_exprs.into_iter().map(|expr| expr.alias(label)));
 
-                    let sort_expr = group_exprs
-                        .clone()
-                        .into_iter()
-                        .map(|expr| expr.sort(true, false));
-                    LogicalPlanBuilder::from(input)
-                        .aggregate(group_exprs, aggr_exprs)
-                        .context(DataFusionPlanningSnafu)?
-                        .sort(sort_expr)
+                    builder
+                        .aggregate(group_exprs.clone(), aggr_exprs)
                         .context(DataFusionPlanningSnafu)?
                         .project(project_fields)
                         .context(DataFusionPlanningSnafu)?
-                        .build()
-                        .context(DataFusionPlanningSnafu)
                 } else {
-                    let sort_expr = group_exprs
-                        .clone()
-                        .into_iter()
-                        .map(|expr| expr.sort(true, false));
-                    LogicalPlanBuilder::from(input)
-                        .aggregate(group_exprs, aggr_exprs)
+                    builder
+                        .aggregate(group_exprs.clone(), aggr_exprs)
                         .context(DataFusionPlanningSnafu)?
-                        .sort(sort_expr)
-                        .context(DataFusionPlanningSnafu)?
-                        .build()
-                        .context(DataFusionPlanningSnafu)
-                }
+                };
+
+                let sort_expr = group_exprs.into_iter().map(|expr| expr.sort(true, false));
+
+                builder
+                    .sort(sort_expr)
+                    .context(DataFusionPlanningSnafu)?
+                    .build()
+                    .context(DataFusionPlanningSnafu)
             }
         }
     }
@@ -2000,43 +1993,38 @@ impl PromPlanner {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        // update value column name according to the aggregators,
-        let extra_group_exprs = {
-            let len = self.ctx.field_columns.len();
-            let mut new_field_columns = Vec::with_capacity(len);
+        // if the aggregator is `count_values`, it must be grouped by current fields.
+        let prev_field_exprs = if op.id() == token::T_COUNT_VALUES {
+            let prev_field_exprs: Vec<_> = self
+                .ctx
+                .field_columns
+                .iter()
+                .map(|col| DfExpr::Column(Column::from_name(col)))
+                .collect();
 
-            let normalized_exprs = normalize_cols(exprs.iter().cloned(), input_plan)
-                .context(DataFusionPlanningSnafu)?;
-            for expr in normalized_exprs {
-                new_field_columns.push(expr.schema_name().to_string());
-            }
+            ensure!(
+                self.ctx.field_columns.len() == 1,
+                UnsupportedExprSnafu {
+                    name: "count_values on multi-value input"
+                }
+            );
 
-            // if the aggregator is `count_values`, it must be grouped by current fields.
-            let extra_group_by = if op.id() == token::T_COUNT_VALUES {
-                let prev_field_exprs: Vec<_> = self
-                    .ctx
-                    .field_columns
-                    .iter()
-                    .map(|col| DfExpr::Column(Column::from_name(col)))
-                    .collect();
-
-                ensure!(
-                    self.ctx.field_columns.len() == 1,
-                    UnsupportedExprSnafu {
-                        name: "count_values on multi-value input"
-                    }
-                );
-
-                prev_field_exprs
-            } else {
-                vec![]
-            };
-
-            self.ctx.field_columns = new_field_columns;
-            extra_group_by
+            prev_field_exprs
+        } else {
+            vec![]
         };
 
-        Ok((exprs, extra_group_exprs))
+        // update value column name according to the aggregators,
+        let mut new_field_columns = Vec::with_capacity(self.ctx.field_columns.len());
+
+        let normalized_exprs =
+            normalize_cols(exprs.iter().cloned(), input_plan).context(DataFusionPlanningSnafu)?;
+        for expr in normalized_exprs {
+            new_field_columns.push(expr.schema_name().to_string());
+        }
+        self.ctx.field_columns = new_field_columns;
+
+        Ok((exprs, prev_field_exprs))
     }
 
     fn get_param_value_as_str(op: TokenType, param: &Option<Box<PromExpr>>) -> Result<&str> {
@@ -4340,15 +4328,16 @@ mod test {
         let plan = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
             .await
             .unwrap();
-        let expected = r#"Projection: count(prometheus_tsdb_head_series.greptime_value), prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, prometheus_tsdb_head_series.greptime_value AS series [count(prometheus_tsdb_head_series.greptime_value):Int64, ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), series:Float64;N]
-  Sort: prometheus_tsdb_head_series.ip ASC NULLS LAST, prometheus_tsdb_head_series.greptime_timestamp ASC NULLS LAST, prometheus_tsdb_head_series.greptime_value ASC NULLS LAST [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N, count(prometheus_tsdb_head_series.greptime_value):Int64]
-    Aggregate: groupBy=[[prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, prometheus_tsdb_head_series.greptime_value]], aggr=[[count(prometheus_tsdb_head_series.greptime_value)]] [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N, count(prometheus_tsdb_head_series.greptime_value):Int64]
-      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[greptime_timestamp] [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]
-        PromSeriesNormalize: offset=[0], time index=[greptime_timestamp], filter NaN: [false] [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]
-          PromSeriesDivide: tags=["ip"] [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]
-            Sort: prometheus_tsdb_head_series.ip DESC NULLS LAST, prometheus_tsdb_head_series.greptime_timestamp DESC NULLS LAST [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]
-              Filter: prometheus_tsdb_head_series.ip ~ Utf8("(10\.0\.160\.237:8080|10\.0\.160\.237:9090)") AND prometheus_tsdb_head_series.greptime_timestamp >= TimestampMillisecond(-1000, None) AND prometheus_tsdb_head_series.greptime_timestamp <= TimestampMillisecond(100001000, None) [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]
-                TableScan: prometheus_tsdb_head_series [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]"#;
+        let expected = r#"Projection: count(prometheus_tsdb_head_series.greptime_value), prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, series [count(prometheus_tsdb_head_series.greptime_value):Int64, ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), series:Float64;N]
+  Sort: prometheus_tsdb_head_series.ip ASC NULLS LAST, prometheus_tsdb_head_series.greptime_timestamp ASC NULLS LAST, prometheus_tsdb_head_series.greptime_value ASC NULLS LAST [count(prometheus_tsdb_head_series.greptime_value):Int64, ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), series:Float64;N, greptime_value:Float64;N]
+    Projection: count(prometheus_tsdb_head_series.greptime_value), prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, prometheus_tsdb_head_series.greptime_value AS series, prometheus_tsdb_head_series.greptime_value [count(prometheus_tsdb_head_series.greptime_value):Int64, ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), series:Float64;N, greptime_value:Float64;N]
+      Aggregate: groupBy=[[prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, prometheus_tsdb_head_series.greptime_value]], aggr=[[count(prometheus_tsdb_head_series.greptime_value)]] [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N, count(prometheus_tsdb_head_series.greptime_value):Int64]
+        PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[greptime_timestamp] [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]
+          PromSeriesNormalize: offset=[0], time index=[greptime_timestamp], filter NaN: [false] [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]
+            PromSeriesDivide: tags=["ip"] [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]
+              Sort: prometheus_tsdb_head_series.ip DESC NULLS LAST, prometheus_tsdb_head_series.greptime_timestamp DESC NULLS LAST [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]
+                Filter: prometheus_tsdb_head_series.ip ~ Utf8("(10\.0\.160\.237:8080|10\.0\.160\.237:9090)") AND prometheus_tsdb_head_series.greptime_timestamp >= TimestampMillisecond(-1000, None) AND prometheus_tsdb_head_series.greptime_timestamp <= TimestampMillisecond(100001000, None) [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]
+                  TableScan: prometheus_tsdb_head_series [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]"#;
 
         assert_eq!(plan.display_indent_schema().to_string(), expected);
     }
