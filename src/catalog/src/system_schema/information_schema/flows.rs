@@ -322,7 +322,7 @@ impl InformationSchemaFlowsBuilder {
                     .map(|v| DateTime::from(*v))
             }));
 
-        let mut source_table_names = vec![];
+        let mut source_table_names: Vec<String> = vec![];
         let catalog_name = self.catalog_name.clone();
         let catalog_manager = self
             .catalog_manager
@@ -334,8 +334,7 @@ impl InformationSchemaFlowsBuilder {
                     .tables_by_ids(&catalog_name, &schema_name, flow_info.source_table_ids())
                     .await?
                     .into_iter()
-                    .map(|table| table.table_info().full_table_name())
-                    .collect(),
+                    .map(|table| table.table_info().full_table_name()),
             );
         }
 
