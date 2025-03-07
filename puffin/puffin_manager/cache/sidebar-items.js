@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["PUFFIN_METADATA_TYPE"],"fn":["puffin_metadata_weight"],"struct":["PuffinMetadataCache"],"type":["PuffinMetadataCacheRef"]};
