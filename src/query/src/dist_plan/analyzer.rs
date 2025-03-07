@@ -326,8 +326,7 @@ impl TreeNodeRewriter for EnforceDistRequirementRewriter {
                 return Ok(Transformed::no(node));
             }
 
-            let mut new_exprs: HashSet<Expr> =
-                HashSet::from_iter(projection.expr.clone().into_iter());
+            let mut new_exprs: HashSet<Expr> = HashSet::from_iter(projection.expr.clone());
             for col in &column_requirements {
                 new_exprs.insert(col_fn(col));
             }
