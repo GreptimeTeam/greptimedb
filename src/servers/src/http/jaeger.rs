@@ -19,6 +19,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode as HttpStatusCode;
 use axum::response::IntoResponse;
 use axum::Extension;
+use common_catalog::consts::PARENT_SPAN_ID_COLUMN;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::{Output, OutputData};
@@ -35,13 +36,18 @@ use crate::error::{
 use crate::http::HttpRecordsOutput;
 use crate::metrics::METRIC_JAEGER_QUERY_ELAPSED;
 use crate::otlp::trace::{
-    DURATION_NANO_COLUMN, SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN, SPAN_ID_COLUMN,
-    SPAN_KIND_COLUMN, SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, TIMESTAMP_COLUMN, TRACE_ID_COLUMN,
-    TRACE_TABLE_NAME,
+    DURATION_NANO_COLUMN, KEY_OTEL_SCOPE_NAME, KEY_OTEL_SCOPE_VERSION, KEY_OTEL_STATUS_CODE,
+    KEY_SPAN_KIND, RESOURCE_ATTRIBUTES_COLUMN, SCOPE_NAME_COLUMN, SCOPE_VERSION_COLUMN,
+    SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN, SPAN_EVENTS_COLUMN, SPAN_ID_COLUMN,
+    SPAN_KIND_COLUMN, SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, SPAN_STATUS_CODE, SPAN_STATUS_PREFIX,
+    SPAN_STATUS_UNSET, TIMESTAMP_COLUMN, TRACE_ID_COLUMN, TRACE_TABLE_NAME,
 };
 use crate::query_handler::JaegerQueryHandlerRef;
 
 pub const JAEGER_QUERY_TABLE_NAME_KEY: &str = "jaeger_query_table_name";
+
+const REF_TYPE_CHILD_OF: &str = "CHILD_OF";
+const SPAN_KIND_TIME_FMTS: [&str; 2] = ["%Y-%m-%d %H:%M:%S%.6f%z", "%Y-%m-%d %H:%M:%S%.9f%z"];
 
 /// JaegerAPIResponse is the response of Jaeger HTTP API.
 /// The original version is `structuredResponse` which is defined in https://github.com/jaegertracing/jaeger/blob/main/cmd/query/app/http_handler.go.
@@ -156,7 +162,7 @@ pub struct Process {
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Log {
-    pub timestamp: i64,
+    pub timestamp: u64,
     pub fields: Vec<KeyValue>,
 }
 
@@ -397,29 +403,35 @@ pub async fn handle_get_trace(
         .with_label_values(&[&db, "/api/traces"])
         .start_timer();
 
-    match handler.get_trace(query_ctx, &trace_id).await {
-        Ok(output) => match covert_to_records(output).await {
-            Ok(Some(records)) => match traces_from_records(records) {
-                Ok(traces) => (
-                    HttpStatusCode::OK,
-                    axum::Json(JaegerAPIResponse {
-                        data: Some(JaegerData::Traces(traces)),
-                        ..Default::default()
-                    }),
-                ),
-                Err(err) => {
-                    error!("Failed to get trace '{}': {:?}", trace_id, err);
-                    error_response(err)
-                }
-            },
-            Ok(None) => (HttpStatusCode::OK, axum::Json(JaegerAPIResponse::default())),
+    let output = match handler.get_trace(query_ctx, &trace_id).await {
+        Ok(output) => output,
+        Err(err) => {
+            return handle_query_error(
+                err,
+                &format!("Failed to get trace for '{}'", trace_id),
+                &db,
+            );
+        }
+    };
+
+    match covert_to_records(output).await {
+        Ok(Some(records)) => match traces_from_records(records) {
+            Ok(traces) => (
+                HttpStatusCode::OK,
+                axum::Json(JaegerAPIResponse {
+                    data: Some(JaegerData::Traces(traces)),
+                    ..Default::default()
+                }),
+            ),
             Err(err) => {
                 error!("Failed to get trace '{}': {:?}", trace_id, err);
                 error_response(err)
             }
         },
+        Ok(None) => (HttpStatusCode::OK, axum::Json(JaegerAPIResponse::default())),
         Err(err) => {
-            handle_query_error(err, &format!("Failed to get trace for '{}'", trace_id), &db)
+            error!("Failed to get trace '{}': {:?}", trace_id, err);
+            error_response(err)
         }
     }
 }
@@ -657,6 +669,8 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
     let mut trace_id_to_processes: HashMap<String, HashMap<String, String>> = HashMap::new();
     // maintain the mapping: trace_id -> spans.
     let mut trace_id_to_spans: HashMap<String, Vec<Span>> = HashMap::new();
+    // maintain the mapping: service.name -> resource.attributes.
+    let mut service_to_resource_attributes: HashMap<String, Vec<KeyValue>> = HashMap::new();
 
     let is_span_attributes_flatten = !records
         .schema
@@ -667,6 +681,7 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
     for row in records.rows.into_iter() {
         let mut span = Span::default();
         let mut service_name = None;
+        let mut resource_tags = None;
 
         for (idx, cell) in row.into_iter().enumerate() {
             // safe to use index here
@@ -674,14 +689,10 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
 
             match column_name.as_str() {
                 TRACE_ID_COLUMN => {
-                    let trace_id = cell
-                        .as_str()
-                        .context(InvalidJaegerQuerySnafu {
-                            reason: "Expect trace_id as string type".to_string(),
-                        })?
-                        .to_string();
-                    span.trace_id = trace_id.clone();
-                    trace_id_to_processes.entry(trace_id).or_default();
+                    if let JsonValue::String(trace_id) = cell {
+                        span.trace_id = trace_id.clone();
+                        trace_id_to_processes.entry(trace_id).or_default();
+                    }
                 }
                 TIMESTAMP_COLUMN => {
                     span.start_time = cell.as_u64().context(InvalidJaegerQuerySnafu {
@@ -694,78 +705,135 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
                     })? / 1000;
                 }
                 SERVICE_NAME_COLUMN => {
-                    service_name = Some(
-                        cell.as_str()
-                            .context(InvalidJaegerQuerySnafu {
-                                reason: "Expect service_name as string type".to_string(),
-                            })?
-                            .to_string(),
-                    );
+                    if let JsonValue::String(name) = cell {
+                        service_name = Some(name);
+                    }
                 }
                 SPAN_NAME_COLUMN => {
-                    let span_name = cell
-                        .as_str()
-                        .context(InvalidJaegerQuerySnafu {
-                            reason: "Expect span_name as string type".to_string(),
-                        })?
-                        .to_string();
-                    span.operation_name = span_name;
+                    if let JsonValue::String(span_name) = cell {
+                        span.operation_name = span_name;
+                    }
                 }
                 SPAN_ID_COLUMN => {
-                    let span_id = cell
-                        .as_str()
-                        .context(InvalidJaegerQuerySnafu {
-                            reason: "Expect span_id as string type".to_string(),
-                        })?
-                        .to_string();
-                    span.span_id = span_id;
+                    if let JsonValue::String(span_id) = cell {
+                        span.span_id = span_id;
+                    }
                 }
                 SPAN_ATTRIBUTES_COLUMN => {
-                    // for v0 data model
+                    // for v0 data model, span_attributes are nested as a json
+                    // data structure
 
-                    let tags = cell
-                        .as_object()
-                        .context(InvalidJaegerQuerySnafu {
-                            reason: "Expect span_attributes as object type".to_string(),
-                        })?
-                        .to_owned();
-                    span.tags = tags
-                        .into_iter()
-                        .filter_map(|(key, value)| match value {
-                            JsonValue::String(value) => Some(KeyValue {
-                                key,
-                                value_type: ValueType::String,
-                                value: Value::String(value.to_string()),
-                            }),
-                            JsonValue::Number(value) => Some(KeyValue {
-                                key,
-                                value_type: ValueType::Int64,
-                                value: Value::Int64(value.as_i64().unwrap_or(0)),
-                            }),
-                            JsonValue::Bool(value) => Some(KeyValue {
-                                key,
-                                value_type: ValueType::Boolean,
-                                value: Value::Boolean(value),
-                            }),
-                            // FIXME(zyy17): Do we need to support other types?
-                            _ => {
-                                warn!("Unsupported value type: {:?}", value);
-                                None
+                    if let JsonValue::Object(span_attrs) = cell {
+                        span.tags = object_to_tags(span_attrs);
+                    }
+                }
+                RESOURCE_ATTRIBUTES_COLUMN => {
+                    // for v0 data model, resource_attributes are nested as a json
+                    // data structure
+
+                    if let JsonValue::Object(resource_attrs) = cell {
+                        resource_tags = Some(object_to_tags(resource_attrs));
+                    }
+                }
+                PARENT_SPAN_ID_COLUMN => {
+                    if let JsonValue::String(parent_span_id) = cell {
+                        span.references.push(Reference {
+                            trace_id: span.trace_id.clone(),
+                            span_id: parent_span_id,
+                            ref_type: REF_TYPE_CHILD_OF.to_string(),
+                        });
+                    }
+                }
+                SPAN_EVENTS_COLUMN => {
+                    if let JsonValue::Array(events) = cell {
+                        for event in events {
+                            if let JsonValue::Object(mut obj) = event {
+                                let Some(action) = obj.get("name").and_then(|v| v.as_str()) else {
+                                    continue;
+                                };
+
+                                let Some(t) =
+                                    obj.get("time").and_then(|t| t.as_str()).and_then(|s| {
+                                        SPAN_KIND_TIME_FMTS
+                                            .iter()
+                                            .find_map(|fmt| {
+                                                chrono::DateTime::parse_from_str(s, fmt).ok()
+                                            })
+                                            .map(|dt| dt.timestamp_micros() as u64)
+                                    })
+                                else {
+                                    continue;
+                                };
+
+                                let mut fields = vec![KeyValue {
+                                    key: "event".to_string(),
+                                    value_type: ValueType::String,
+                                    value: Value::String(action.to_string()),
+                                }];
+
+                                // Add event attributes as fields
+                                if let Some(JsonValue::Object(attrs)) = obj.remove("attributes") {
+                                    fields.extend(object_to_tags(attrs));
+                                }
+
+                                span.logs.push(Log {
+                                    timestamp: t,
+                                    fields,
+                                });
                             }
-                        })
-                        .collect();
+                        }
+                    }
+                }
+                SCOPE_NAME_COLUMN => {
+                    if let JsonValue::String(scope_name) = cell {
+                        span.tags.push(KeyValue {
+                            key: KEY_OTEL_SCOPE_NAME.to_string(),
+                            value_type: ValueType::String,
+                            value: Value::String(scope_name),
+                        });
+                    }
+                }
+                SCOPE_VERSION_COLUMN => {
+                    if let JsonValue::String(scope_version) = cell {
+                        span.tags.push(KeyValue {
+                            key: KEY_OTEL_SCOPE_VERSION.to_string(),
+                            value_type: ValueType::String,
+                            value: Value::String(scope_version),
+                        });
+                    }
+                }
+                SPAN_KIND_COLUMN => {
+                    if let JsonValue::String(span_kind) = cell {
+                        span.tags.push(KeyValue {
+                            key: KEY_SPAN_KIND.to_string(),
+                            value_type: ValueType::String,
+                            value: Value::String(normalize_span_kind(&span_kind)),
+                        });
+                    }
+                }
+                SPAN_STATUS_CODE => {
+                    if let JsonValue::String(span_status) = cell {
+                        if span_status != SPAN_STATUS_UNSET {
+                            span.tags.push(KeyValue {
+                                key: KEY_OTEL_STATUS_CODE.to_string(),
+                                value_type: ValueType::String,
+                                value: Value::String(normalize_status_code(&span_status)),
+                            });
+                        }
+                    }
                 }
 
                 _ => {
                     // this this v1 data model
                     if is_span_attributes_flatten {
-                        const PREFIX: &str = "span_attributes.";
+                        const SPAN_ATTR_PREFIX: &str = "span_attributes.";
+                        const RESOURCE_ATTR_PREFIX: &str = "resource_attributes.";
                         // a span attributes column
-                        if column_name.starts_with(PREFIX) {
+                        if column_name.starts_with(SPAN_ATTR_PREFIX) {
                             match cell {
                                 JsonValue::String(value) => span.tags.push(KeyValue {
                                     key: column_name
-                                        .strip_prefix(PREFIX)
+                                        .strip_prefix(SPAN_ATTR_PREFIX)
                                         .unwrap_or_default()
                                         .to_string(),
                                     value_type: ValueType::String,
@@ -773,7 +841,7 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
                                 }),
                                 JsonValue::Number(value) => span.tags.push(KeyValue {
                                     key: column_name
-                                        .strip_prefix(PREFIX)
+                                        .strip_prefix(SPAN_ATTR_PREFIX)
                                         .unwrap_or_default()
                                         .to_string(),
                                     value_type: ValueType::Int64,
@@ -781,7 +849,7 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
                                 }),
                                 JsonValue::Bool(value) => span.tags.push(KeyValue {
                                     key: column_name
-                                        .strip_prefix(PREFIX)
+                                        .strip_prefix(SPAN_ATTR_PREFIX)
                                         .unwrap_or_default()
                                         .to_string(),
                                     value_type: ValueType::Boolean,
@@ -793,12 +861,22 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
                                 }
                             }
                         }
+
+                        if column_name.starts_with(RESOURCE_ATTR_PREFIX) {
+                            todo!("resource attributes")
+                        }
                     }
                 }
             }
         }
 
         if let Some(service_name) = service_name {
+            if let Some(resource_tags) = resource_tags {
+                if !service_to_resource_attributes.contains_key(&service_name) {
+                    service_to_resource_attributes.insert(service_name.clone(), resource_tags);
+                }
+            }
+
             if let Some(process) = trace_id_to_processes.get_mut(&span.trace_id) {
                 if let Some(process_id) = process.get(&service_name) {
                     span.process_id = process_id.clone();
@@ -829,13 +907,10 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
         if let Some(processes) = trace_id_to_processes.remove(&trace.trace_id) {
             let mut process_id_to_process = HashMap::new();
             for (service_name, process_id) in processes.into_iter() {
-                process_id_to_process.insert(
-                    process_id,
-                    Process {
-                        service_name,
-                        tags: vec![],
-                    },
-                );
+                let tags = service_to_resource_attributes
+                    .remove(&service_name)
+                    .unwrap_or_default();
+                process_id_to_process.insert(process_id, Process { service_name, tags });
             }
             trace.processes = process_id_to_process;
         }
@@ -843,6 +918,45 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
     }
 
     Ok(traces)
+}
+
+#[inline]
+fn object_to_tags(object: serde_json::map::Map<String, JsonValue>) -> Vec<KeyValue> {
+    object
+        .into_iter()
+        .filter_map(|(key, value)| match value {
+            JsonValue::String(value) => Some(KeyValue {
+                key,
+                value_type: ValueType::String,
+                value: Value::String(value.to_string()),
+            }),
+            JsonValue::Number(value) => Some(KeyValue {
+                key,
+                value_type: ValueType::Int64,
+                value: Value::Int64(value.as_i64().unwrap_or(0)),
+            }),
+            JsonValue::Bool(value) => Some(KeyValue {
+                key,
+                value_type: ValueType::Boolean,
+                value: Value::Boolean(value),
+            }),
+            JsonValue::Array(value) => Some(KeyValue {
+                key,
+                value_type: ValueType::String,
+                value: Value::String(serde_json::to_string(&value).unwrap()),
+            }),
+            JsonValue::Object(value) => Some(KeyValue {
+                key,
+                value_type: ValueType::String,
+                value: Value::String(serde_json::to_string(&value).unwrap()),
+            }),
+            // FIXME(zyy17): Do we need to support other types?
+            _ => {
+                warn!("Unsupported value type: {:?}", value);
+                None
+            }
+        })
+        .collect()
 }
 
 fn services_from_records(records: HttpRecordsOutput) -> Result<Vec<String>> {
@@ -917,6 +1031,18 @@ fn normalize_span_kind(span_kind: &str) -> String {
     } else {
         // It's unlikely to happen. However, we still convert it to lowercase for consistency.
         span_kind.to_lowercase()
+    }
+}
+
+// By default, the status code is stored as `STATUS_CODE_<code>` in GreptimeDB.
+// However, in Jaeger API, the status code is returned as `<code>` without the `STATUS_CODE_` prefix.
+fn normalize_status_code(status_code: &str) -> String {
+    // If the span_kind starts with `SPAN_KIND_` prefix, remove it and convert to lowercase.
+    if let Some(stripped) = status_code.strip_prefix(SPAN_STATUS_PREFIX) {
+        stripped.to_string()
+    } else {
+        // It's unlikely to happen
+        status_code.to_string()
     }
 }
 
