@@ -41,11 +41,11 @@ SHOW CREATE FLOW filter_numbers_show;
 
 SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name='filter_numbers_show';
 
-+---------------------+---------------+---------------------------------------------------------+----------------------------------------+
-| flow_name           | table_catalog | flow_definition                                         | source_table_names                     |
-+---------------------+---------------+---------------------------------------------------------+----------------------------------------+
-| filter_numbers_show | greptime      | SELECT number FROM numbers_input_show WHERE number > 10 | ["greptime.public.numbers_input_show"] |
-+---------------------+---------------+---------------------------------------------------------+----------------------------------------+
++---------------------+---------------+---------------------------------------------------------+------------------------------------+
+| flow_name           | table_catalog | flow_definition                                         | source_table_names                 |
++---------------------+---------------+---------------------------------------------------------+------------------------------------+
+| filter_numbers_show | greptime      | SELECT number FROM numbers_input_show WHERE number > 10 | greptime.public.numbers_input_show |
++---------------------+---------------+---------------------------------------------------------+------------------------------------+
 
 SHOW FLOWS LIKE 'filter_numbers_show';
 
@@ -77,11 +77,11 @@ Affected Rows: 0
 
 SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name='filter_numbers_show';
 
-+---------------------+---------------+-------------------------------------------------------------+----------------------------------------+
-| flow_name           | table_catalog | flow_definition                                             | source_table_names                     |
-+---------------------+---------------+-------------------------------------------------------------+----------------------------------------+
-| filter_numbers_show | greptime      | SELECT number, ts FROM numbers_input_show WHERE number > 10 | ["greptime.public.numbers_input_show"] |
-+---------------------+---------------+-------------------------------------------------------------+----------------------------------------+
++---------------------+---------------+-------------------------------------------------------------+------------------------------------+
+| flow_name           | table_catalog | flow_definition                                             | source_table_names                 |
++---------------------+---------------+-------------------------------------------------------------+------------------------------------+
+| filter_numbers_show | greptime      | SELECT number, ts FROM numbers_input_show WHERE number > 10 | greptime.public.numbers_input_show |
++---------------------+---------------+-------------------------------------------------------------+------------------------------------+
 
 -- this one should error out
 -- (flow exists, replace, if not exists)=(true, false, false)
@@ -91,11 +91,11 @@ Error: 8000(FlowAlreadyExists), Flow already exists: greptime.filter_numbers_sho
 
 SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name='filter_numbers_show';
 
-+---------------------+---------------+-------------------------------------------------------------+----------------------------------------+
-| flow_name           | table_catalog | flow_definition                                             | source_table_names                     |
-+---------------------+---------------+-------------------------------------------------------------+----------------------------------------+
-| filter_numbers_show | greptime      | SELECT number, ts FROM numbers_input_show WHERE number > 10 | ["greptime.public.numbers_input_show"] |
-+---------------------+---------------+-------------------------------------------------------------+----------------------------------------+
++---------------------+---------------+-------------------------------------------------------------+------------------------------------+
+| flow_name           | table_catalog | flow_definition                                             | source_table_names                 |
++---------------------+---------------+-------------------------------------------------------------+------------------------------------+
+| filter_numbers_show | greptime      | SELECT number, ts FROM numbers_input_show WHERE number > 10 | greptime.public.numbers_input_show |
++---------------------+---------------+-------------------------------------------------------------+------------------------------------+
 
 -- makesure it's not replaced in flownode
 INSERT INTO numbers_input_show VALUES (10, 0),(15, 1),(16, 2);
@@ -128,11 +128,11 @@ Affected Rows: 0
 
 SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name='filter_numbers_show';
 
-+---------------------+---------------+-------------------------------------------------------------+----------------------------------------+
-| flow_name           | table_catalog | flow_definition                                             | source_table_names                     |
-+---------------------+---------------+-------------------------------------------------------------+----------------------------------------+
-| filter_numbers_show | greptime      | SELECT number, ts FROM numbers_input_show WHERE number > 10 | ["greptime.public.numbers_input_show"] |
-+---------------------+---------------+-------------------------------------------------------------+----------------------------------------+
++---------------------+---------------+-------------------------------------------------------------+------------------------------------+
+| flow_name           | table_catalog | flow_definition                                             | source_table_names                 |
++---------------------+---------------+-------------------------------------------------------------+------------------------------------+
+| filter_numbers_show | greptime      | SELECT number, ts FROM numbers_input_show WHERE number > 10 | greptime.public.numbers_input_show |
++---------------------+---------------+-------------------------------------------------------------+------------------------------------+
 
 -- makesure it's not replaced in flownode
 INSERT INTO numbers_input_show VALUES (4,4),(5,4),(10, 3),(11, 4);
@@ -166,11 +166,11 @@ Affected Rows: 0
 
 SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name='filter_numbers_show';
 
-+---------------------+---------------+------------------------------------------------------------+----------------------------------------+
-| flow_name           | table_catalog | flow_definition                                            | source_table_names                     |
-+---------------------+---------------+------------------------------------------------------------+----------------------------------------+
-| filter_numbers_show | greptime      | SELECT number, ts FROM numbers_input_show WHERE number > 3 | ["greptime.public.numbers_input_show"] |
-+---------------------+---------------+------------------------------------------------------------+----------------------------------------+
++---------------------+---------------+------------------------------------------------------------+------------------------------------+
+| flow_name           | table_catalog | flow_definition                                            | source_table_names                 |
++---------------------+---------------+------------------------------------------------------------+------------------------------------+
+| filter_numbers_show | greptime      | SELECT number, ts FROM numbers_input_show WHERE number > 3 | greptime.public.numbers_input_show |
++---------------------+---------------+------------------------------------------------------------+------------------------------------+
 
 -- makesure it's replaced in flownode
 INSERT INTO numbers_input_show VALUES (3, 1),(4, 2),(10, 3),(11, 4);
@@ -206,11 +206,11 @@ Error: 1001(Unsupported), Unsupported operation Create flow with both `IF NOT EX
 
 SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name='filter_numbers_show';
 
-+---------------------+---------------+------------------------------------------------------------+----------------------------------------+
-| flow_name           | table_catalog | flow_definition                                            | source_table_names                     |
-+---------------------+---------------+------------------------------------------------------------+----------------------------------------+
-| filter_numbers_show | greptime      | SELECT number, ts FROM numbers_input_show WHERE number > 3 | ["greptime.public.numbers_input_show"] |
-+---------------------+---------------+------------------------------------------------------------+----------------------------------------+
++---------------------+---------------+------------------------------------------------------------+------------------------------------+
+| flow_name           | table_catalog | flow_definition                                            | source_table_names                 |
++---------------------+---------------+------------------------------------------------------------+------------------------------------+
+| filter_numbers_show | greptime      | SELECT number, ts FROM numbers_input_show WHERE number > 3 | greptime.public.numbers_input_show |
++---------------------+---------------+------------------------------------------------------------+------------------------------------+
 
 DROP FLOW filter_numbers_show;
 
@@ -238,11 +238,11 @@ Affected Rows: 0
 
 SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name='filter_numbers_show';
 
-+---------------------+---------------+-------------------------------------------------------------+----------------------------------------+
-| flow_name           | table_catalog | flow_definition                                             | source_table_names                     |
-+---------------------+---------------+-------------------------------------------------------------+----------------------------------------+
-| filter_numbers_show | greptime      | SELECT number, ts FROM numbers_input_show WHERE number > -2 | ["greptime.public.numbers_input_show"] |
-+---------------------+---------------+-------------------------------------------------------------+----------------------------------------+
++---------------------+---------------+-------------------------------------------------------------+------------------------------------+
+| flow_name           | table_catalog | flow_definition                                             | source_table_names                 |
++---------------------+---------------+-------------------------------------------------------------+------------------------------------+
+| filter_numbers_show | greptime      | SELECT number, ts FROM numbers_input_show WHERE number > -2 | greptime.public.numbers_input_show |
++---------------------+---------------+-------------------------------------------------------------+------------------------------------+
 
 DROP FLOW filter_numbers_show;
 
@@ -255,21 +255,21 @@ Affected Rows: 0
 
 SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name='filter_numbers_show';
 
-+---------------------+---------------+-------------------------------------------------------------+----------------------------------------+
-| flow_name           | table_catalog | flow_definition                                             | source_table_names                     |
-+---------------------+---------------+-------------------------------------------------------------+----------------------------------------+
-| filter_numbers_show | greptime      | SELECT number, ts FROM numbers_input_show WHERE number > -3 | ["greptime.public.numbers_input_show"] |
-+---------------------+---------------+-------------------------------------------------------------+----------------------------------------+
++---------------------+---------------+-------------------------------------------------------------+------------------------------------+
+| flow_name           | table_catalog | flow_definition                                             | source_table_names                 |
++---------------------+---------------+-------------------------------------------------------------+------------------------------------+
+| filter_numbers_show | greptime      | SELECT number, ts FROM numbers_input_show WHERE number > -3 | greptime.public.numbers_input_show |
++---------------------+---------------+-------------------------------------------------------------+------------------------------------+
 
 -- makesure after recover should be the same
 -- SQLNESS ARG restart=true
 SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name='filter_numbers_show';
 
-+---------------------+---------------+-------------------------------------------------------------+----------------------------------------+
-| flow_name           | table_catalog | flow_definition                                             | source_table_names                     |
-+---------------------+---------------+-------------------------------------------------------------+----------------------------------------+
-| filter_numbers_show | greptime      | SELECT number, ts FROM numbers_input_show WHERE number > -3 | ["greptime.public.numbers_input_show"] |
-+---------------------+---------------+-------------------------------------------------------------+----------------------------------------+
++---------------------+---------------+-------------------------------------------------------------+------------------------------------+
+| flow_name           | table_catalog | flow_definition                                             | source_table_names                 |
++---------------------+---------------+-------------------------------------------------------------+------------------------------------+
+| filter_numbers_show | greptime      | SELECT number, ts FROM numbers_input_show WHERE number > -3 | greptime.public.numbers_input_show |
++---------------------+---------------+-------------------------------------------------------------+------------------------------------+
 
 SELECT * FROM out_num_cnt_show;
 
@@ -377,11 +377,11 @@ Error: 3001(EngineExecuteQuery), Invalid query: Column 1(name is 'ts', flow infe
 
 SELECT flow_definition, source_table_names FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name='filter_numbers_show';
 
-+---------------------------------------------------------------+----------------------------------------+
-| flow_definition                                               | source_table_names                     |
-+---------------------------------------------------------------+----------------------------------------+
-| SELECT number AS n1 FROM numbers_input_show WHERE number > 10 | ["greptime.public.numbers_input_show"] |
-+---------------------------------------------------------------+----------------------------------------+
++---------------------------------------------------------------+------------------------------------+
+| flow_definition                                               | source_table_names                 |
++---------------------------------------------------------------+------------------------------------+
+| SELECT number AS n1 FROM numbers_input_show WHERE number > 10 | greptime.public.numbers_input_show |
++---------------------------------------------------------------+------------------------------------+
 
 INSERT INTO numbers_input_show VALUES (10, 6),(11, 8),(15, 7),(18, 3);
 
