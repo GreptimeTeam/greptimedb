@@ -1944,12 +1944,21 @@ impl PromPlanner {
         })
     }
 
-    /// Create [DfExpr::AggregateFunction] expr for each value column with given aggregate function.
+    /// Creates a set of DataFusion `DfExpr::AggregateFunction` expressions for each value column using the specified aggregate function.
     ///
-    /// # Side effect
+    /// # Side Effects
     ///
-    /// This method will update value columns in context to the new value columns created by
-    /// aggregate function.
+    /// This method modifies the value columns in the context by replacing them with the new columns
+    /// created by the aggregate function application.
+    ///
+    /// # Returns
+    ///
+    /// Returns a tuple of `(aggregate_expressions, previous_field_expressions)` where:
+    /// - `aggregate_expressions`: Expressions that apply the aggregate function to the original fields
+    /// - `previous_field_expressions`: Original field expressions before aggregation. This is non-empty
+    ///   only when the operation is `count_values`, as this operation requires preserving the original
+    ///   values for grouping.
+    ///
     fn create_aggregate_exprs(
         &mut self,
         op: TokenType,

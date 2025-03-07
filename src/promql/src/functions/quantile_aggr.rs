@@ -178,7 +178,6 @@ mod tests {
         accumulator.update_batch(&[input]).unwrap();
         let result = accumulator.evaluate().unwrap();
 
-        // 中位数应该是 3.0
         assert_eq!(result, ScalarValue::Float64(Some(3.0)));
     }
 
