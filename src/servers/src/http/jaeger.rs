@@ -248,20 +248,16 @@ impl JaegerQueryParams {
 
 impl QueryTraceParams {
     fn from_jaeger_query_params(query_params: JaegerQueryParams) -> Result<Self> {
-        let mut internal_query_params: QueryTraceParams = QueryTraceParams::default();
-
-        internal_query_params.service_name =
-            query_params.service_name.context(InvalidJaegerQuerySnafu {
+        let mut internal_query_params: QueryTraceParams = QueryTraceParams {
+            service_name: query_params.service_name.context(InvalidJaegerQuerySnafu {
                 reason: "service_name is required".to_string(),
-            })?;
-
-        internal_query_params.operation_name = query_params.operation_name;
-
-        // Convert start time from microseconds to nanoseconds.
-        internal_query_params.start_time = query_params.start.map(|start| start * 1000);
-
-        // Convert end time from microseconds to nanoseconds.
-        internal_query_params.end_time = query_params.end.map(|end| end * 1000);
+            })?,
+            operation_name: query_params.operation_name,
+            // Convert start time from microseconds to nanoseconds.
+            start_time: query_params.start.map(|start| start * 1000),
+            end_time: query_params.end.map(|end| end * 1000),
+            ..Default::default()
+        };
 
         if let Some(max_duration) = query_params.max_duration {
             let duration = humantime::parse_duration(&max_duration).map_err(|e| {

@@ -101,7 +101,7 @@ impl JaegerQueryHandler for Instance {
     }
 
     async fn get_trace(&self, ctx: QueryContextRef, trace_id: &str) -> ServerResult<Output> {
-        // It's equivalent to `SELECT trace_id, timestamp, duration_nano, service_name, span_name, span_id, span_attributes FROM {db}.{trace_table} WHERE trace_id = '{trace_id}'`.
+        // It's equivalent to `SELECT * FROM {db}.{trace_table} WHERE trace_id = '{trace_id}'`.
         let selects = vec![wildcard()];
 
         let filters = vec![col(TRACE_ID_COLUMN).eq(lit(trace_id))];
