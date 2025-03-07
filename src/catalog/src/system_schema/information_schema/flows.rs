@@ -322,7 +322,7 @@ impl InformationSchemaFlowsBuilder {
                     .map(|v| DateTime::from(*v))
             }));
 
-        let mut source_table_names: Vec<String> = vec![];
+        let mut source_table_names = vec![];
         let catalog_name = self.catalog_name.clone();
         let catalog_manager = self
             .catalog_manager
@@ -338,12 +338,8 @@ impl InformationSchemaFlowsBuilder {
             );
         }
 
-        self.source_table_names
-            .push(Some(&serde_json::to_string(&source_table_names).context(
-                JsonSnafu {
-                    input: format!("{:?}", source_table_names),
-                },
-            )?));
+        let source_table_names = source_table_names.join(",");
+        self.source_table_names.push(Some(&source_table_names));
 
         Ok(())
     }
