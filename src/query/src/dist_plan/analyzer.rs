@@ -276,7 +276,14 @@ impl PlanRewriter {
         on_node = on_node.rewrite(&mut rewriter)?.data;
 
         // add merge scan as the new root
-        let mut node = MergeScanLogicalPlan::new(on_node, false).into_logical_plan();
+        let mut node = MergeScanLogicalPlan::new(
+            on_node,
+            false,
+            // at this stage, the partition cols should be set
+            // treat it as non-partitioned if None
+            self.partition_cols.clone().unwrap_or_default(),
+        )
+        .into_logical_plan();
 
         // expand stages
         for new_stage in self.stage.drain(..) {
