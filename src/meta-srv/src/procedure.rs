@@ -20,6 +20,7 @@ use snafu::ResultExt;
 
 pub mod region_follower;
 pub mod region_migration;
+#[cfg(test)]
 mod test_util;
 #[cfg(test)]
 mod tests;

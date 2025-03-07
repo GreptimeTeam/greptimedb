@@ -749,6 +749,33 @@ pub enum Error {
         location: Location,
         source: common_meta::error::Error,
     },
+
+    #[snafu(display("Logical table cannot add follower: {table_id}"))]
+    LogicalTableCannotAddFollower {
+        table_id: TableId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "A region follower cannot be placed on the same node as the leader: {region_id}, {peer_id}"
+    ))]
+    RegionFollowerLeaderConflict {
+        region_id: RegionId,
+        peer_id: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Multiple region followers cannot be placed on the same node: {region_id}, {peer_id}"
+    ))]
+    MultipleRegionFollowersOnSameNode {
+        region_id: RegionId,
+        peer_id: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl Error {
@@ -818,6 +845,9 @@ impl ErrorExt for Error {
             | Error::ProcedureNotFound { .. }
             | Error::TooManyPartitions { .. }
             | Error::TomlFormat { .. }
+            | Error::LogicalTableCannotAddFollower { .. }
+            | Error::RegionFollowerLeaderConflict { .. }
+            | Error::MultipleRegionFollowersOnSameNode { .. }
             | Error::HandlerNotFound { .. } => StatusCode::InvalidArguments,
             Error::LeaseKeyFromUtf8 { .. }
             | Error::LeaseValueFromUtf8 { .. }

@@ -97,3 +97,27 @@ impl RegionFollowerManager {
         Ok((procedure_id, output))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::assert_matches::assert_matches;
+
+    use super::*;
+    use crate::procedure::region_follower::test_util::TestingEnv;
+
+    #[tokio::test]
+    async fn test_submit_add_follower_procedure_table_not_found() {
+        let env = TestingEnv::new();
+        let ctx = env.new_context();
+        let region_follower_manager = RegionFollowerManager::new(env.procedure_manager(), ctx);
+        let req = AddRegionFollowerRequest {
+            region_id: 1,
+            peer_id: 2,
+        };
+        let err = region_follower_manager
+            .submit_add_follower_procedure(req)
+            .await
+            .unwrap_err();
+        assert_matches!(err, error::Error::TableInfoNotFound { .. });
+    }
+}

@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
-use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
+use common_meta::kv_backend::ResettableKvBackendRef;
 use common_meta::sequence::SequenceBuilder;
 use common_meta::state_store::KvStateStore;
 use common_procedure::local::{LocalManager, ManagerConfig};
@@ -34,7 +34,6 @@ pub struct TestingEnv {
     mailbox_ctx: MailboxContext,
     server_addr: String,
     procedure_manager: ProcedureManagerRef,
-    kv_backend: KvBackendRef,
     in_memory: ResettableKvBackendRef,
 }
 
@@ -55,7 +54,7 @@ impl TestingEnv {
 
         let mailbox_ctx = MailboxContext::new(mailbox_sequence);
 
-        let state_store = Arc::new(KvStateStore::new(kv_backend.clone()));
+        let state_store = Arc::new(KvStateStore::new(kv_backend));
         let procedure_manager = Arc::new(LocalManager::new(ManagerConfig::default(), state_store));
 
         Self {
@@ -63,7 +62,6 @@ impl TestingEnv {
             mailbox_ctx,
             server_addr: "localhost".to_string(),
             procedure_manager,
-            kv_backend,
             in_memory,
         }
     }
@@ -91,5 +89,9 @@ impl TestingEnv {
 
     pub fn mailbox_context_mut(&mut self) -> &mut MailboxContext {
         &mut self.mailbox_ctx
+    }
+
+    pub fn procedure_manager(&self) -> ProcedureManagerRef {
+        self.procedure_manager.clone()
     }
 }

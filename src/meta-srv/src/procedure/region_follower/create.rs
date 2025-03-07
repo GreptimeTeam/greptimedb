@@ -238,6 +238,37 @@ mod tests {
         assert!(!err.is_retryable());
     }
 
+    #[tokio::test]
+    async fn test_instruction_exceeded_deadline() {
+        let mut env = TestingEnv::new();
+        let ctx = env.new_context();
+        let mailbox_ctx = env.mailbox_context_mut();
+        let mailbox = mailbox_ctx.mailbox().clone();
+
+        let region_id = RegionId::new(1, 1);
+        let peer = Peer::new(1, "127.0.0.1:8080");
+
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+
+        mailbox_ctx
+            .insert_heartbeat_response_receiver(Channel::Datanode(peer.id), tx)
+            .await;
+
+        // Sends an timeout error.
+        send_mock_reply(mailbox, rx, |id| {
+            Err(error::MailboxTimeoutSnafu { id }.build())
+        });
+
+        let create_follower = CreateFollower::new(region_id, peer.clone());
+        let instruction = mock_open_region_instruction(peer.id, region_id);
+        let err = create_follower
+            .send_open_region_instruction(&ctx, instruction)
+            .await
+            .unwrap_err();
+        assert_matches!(err, Error::RetryLater { .. });
+        assert!(err.is_retryable());
+    }
+
     fn mock_open_region_instruction(datanode_id: DatanodeId, region_id: RegionId) -> Instruction {
         Instruction::OpenRegion(OpenRegion {
             region_ident: RegionIdent {

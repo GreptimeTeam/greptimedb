@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use common_meta::distributed_time_constants;
+use common_meta::key::table_route::PhysicalTableRouteValue;
 use common_meta::lock_key::{CatalogLock, RegionLock, SchemaLock, TableLock};
 use common_meta::peer::Peer;
 use common_procedure::error::ToJsonSnafu;
@@ -21,7 +22,7 @@ use common_procedure::{
 };
 use common_telemetry::info;
 use serde::{Deserialize, Serialize};
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::RegionId;
 
 use super::create::CreateFollower;
@@ -50,6 +51,7 @@ impl AddRegionFollowerProcedure {
                 region_id,
                 peer_id,
                 peer: None,
+                table_route: None,
                 state: AddRegionFollowerState::Prepare,
             },
             context,
@@ -73,12 +75,57 @@ impl AddRegionFollowerProcedure {
             peer_id: self.data.peer_id,
         })?;
 
+        // get the table route of the region
+        let table_id = self.data.region_id.table_id();
+        let (physical_table_id, table_route) = self
+            .context
+            .table_metadata_manager
+            .table_route_manager()
+            .get_physical_table_route(table_id)
+            .await
+            .context(error::TableMetadataManagerSnafu)?;
+
+        // logical table cannot add a follower
+        ensure!(
+            physical_table_id == table_id,
+            error::LogicalTableCannotAddFollowerSnafu { table_id }
+        );
+
+        // check if the destination peer is already a leader/follower of the region
+        for region_route in &table_route.region_routes {
+            let Some(leader_peer) = &region_route.leader_peer else {
+                continue;
+            };
+            // check if the destination peer is already a leader of the region
+            if leader_peer.id == datanode_peer.id {
+                return error::RegionFollowerLeaderConflictSnafu {
+                    region_id: self.data.region_id,
+                    peer_id: datanode_peer.id,
+                }
+                .fail();
+            }
+
+            // check if the destination peer is already a follower of the region
+            if region_route
+                .follower_peers
+                .iter()
+                .any(|peer| peer.id == datanode_peer.id)
+            {
+                return error::MultipleRegionFollowersOnSameNodeSnafu {
+                    region_id: self.data.region_id,
+                    peer_id: datanode_peer.id,
+                }
+                .fail();
+            }
+        }
+
         info!(
             "Add region({}) follower procedure is preparing, peer: {datanode_peer:?}",
             self.data.region_id
         );
 
         self.data.peer = Some(datanode_peer);
+        self.data.table_route = Some(table_route);
 
         Ok(Status::executing(true))
     }
@@ -138,6 +185,8 @@ pub struct AddRegionFollowerData {
     pub(crate) peer_id: u64,
     /// The peer of the datanode to add region follower.
     pub(crate) peer: Option<Peer>,
+    /// The physical table route of the region.
+    pub(crate) table_route: Option<PhysicalTableRouteValue>,
     /// The state.
     pub(crate) state: AddRegionFollowerState,
 }
