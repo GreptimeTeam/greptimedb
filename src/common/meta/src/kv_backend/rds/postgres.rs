@@ -153,6 +153,7 @@ impl<'a> PgSqlTemplateFactory<'a> {
     /// Builds the template set for the given table name.
     fn build(&self) -> PgSqlTemplateSet {
         let table_name = self.table_name;
+        // Some of queries don't end with `;`, because we need to add `LIMIT` clause.
         PgSqlTemplateSet {
             table_name: table_name.to_string(),
             create_table_statement: format!(
