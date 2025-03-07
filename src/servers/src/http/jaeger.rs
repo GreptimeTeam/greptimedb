@@ -798,8 +798,8 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
                     let Some(t) = obj.get("time").and_then(|t| t.as_str()).and_then(|s| {
                         SPAN_KIND_TIME_FMTS
                             .iter()
-                            .find_map(|fmt| chrono::NaiveDateTime::parse_from_str(s, fmt).ok())
-                            .map(|dt| dt.and_utc().timestamp_micros() as u64)
+                            .find_map(|fmt| chrono::DateTime::parse_from_str(s, fmt).ok())
+                            .map(|dt| dt.timestamp_micros() as u64)
                     }) else {
                         continue;
                     };
