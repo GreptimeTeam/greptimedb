@@ -132,7 +132,6 @@ EXPLAIN ANALYZE SELECT * FROM test where i > 2 ORDER BY t LIMIT 4;
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [t@1 ASC NULLS LAST], fetch=4 REDACTED
 |_|_|_WindowedSortExec: expr=t@1 ASC NULLS LAST num_ranges=4 fetch=4 REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: i@0 > 2 REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=4 (1 memtable ranges, 3 file 3 ranges) REDACTED
 |_|_|_|
@@ -166,7 +165,6 @@ EXPLAIN ANALYZE SELECT * FROM test where i > 2 ORDER BY t DESC LIMIT 4;
 | 1_| 0_|_SortPreservingMergeExec: [t@1 DESC], fetch=4 REDACTED
 |_|_|_WindowedSortExec: expr=t@1 DESC num_ranges=4 fetch=4 REDACTED
 |_|_|_PartSortExec: expr=t@1 DESC num_ranges=4 limit=4 REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: i@0 > 2 REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=4 (1 memtable ranges, 3 file 3 ranges) REDACTED
 |_|_|_|
@@ -200,7 +198,6 @@ EXPLAIN ANALYZE SELECT * FROM test where t > 8 ORDER BY t DESC LIMIT 4;
 | 1_| 0_|_SortPreservingMergeExec: [t@1 DESC], fetch=4 REDACTED
 |_|_|_WindowedSortExec: expr=t@1 DESC num_ranges=2 fetch=4 REDACTED
 |_|_|_PartSortExec: expr=t@1 DESC num_ranges=2 limit=4 REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: t@1 > 8 REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=2 (1 memtable ranges, 1 file 1 ranges) REDACTED
 |_|_|_|
