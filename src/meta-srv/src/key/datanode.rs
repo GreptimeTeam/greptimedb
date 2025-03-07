@@ -15,7 +15,6 @@
 use std::str::FromStr;
 
 use common_meta::datanode::DatanodeStatKey;
-use common_meta::ClusterId;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -42,20 +41,18 @@ lazy_static! {
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub struct DatanodeLeaseKey {
-    pub cluster_id: ClusterId,
     pub node_id: u64,
 }
 
 impl DatanodeLeaseKey {
-    pub fn prefix_key_by_cluster(cluster_id: ClusterId) -> Vec<u8> {
-        format!("{DATANODE_LEASE_PREFIX}-{cluster_id}-").into_bytes()
+    pub fn prefix_key() -> Vec<u8> {
+        format!("{DATANODE_LEASE_PREFIX}-0-").into_bytes()
     }
 }
 
 impl From<&DatanodeLeaseKey> for DatanodeStatKey {
     fn from(lease_key: &DatanodeLeaseKey) -> Self {
         DatanodeStatKey {
-            cluster_id: lease_key.cluster_id,
             node_id: lease_key.node_id,
         }
     }
@@ -63,22 +60,21 @@ impl From<&DatanodeLeaseKey> for DatanodeStatKey {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct InactiveRegionKey {
-    pub cluster_id: ClusterId,
     pub node_id: u64,
     pub region_id: u64,
 }
 
 impl InactiveRegionKey {
-    pub fn get_prefix_by_cluster(cluster_id: u64) -> Vec<u8> {
-        format!("{}-{}-", INACTIVE_REGION_PREFIX, cluster_id).into_bytes()
+    pub fn get_prefix_by_cluster() -> Vec<u8> {
+        format!("{}-0-", INACTIVE_REGION_PREFIX).into_bytes()
     }
 }
 
 impl From<InactiveRegionKey> for Vec<u8> {
     fn from(value: InactiveRegionKey) -> Self {
         format!(
-            "{}-{}-{}-{}",
-            INACTIVE_REGION_PREFIX, value.cluster_id, value.node_id, value.region_id
+            "{}-0-{}-{}",
+            INACTIVE_REGION_PREFIX, value.node_id, value.region_id
         )
         .into_bytes()
     }
@@ -97,13 +93,8 @@ impl FromStr for InactiveRegionKey {
             error::InvalidInactiveRegionKeySnafu { key }
         );
 
-        let cluster_id = caps[1].to_string();
         let node_id = caps[2].to_string();
         let region_id = caps[3].to_string();
-
-        let cluster_id: u64 = cluster_id.parse().context(error::ParseNumSnafu {
-            err_msg: format!("invalid cluster_id: {cluster_id}"),
-        })?;
         let node_id: u64 = node_id.parse().context(error::ParseNumSnafu {
             err_msg: format!("invalid node_id: {node_id}"),
         })?;
@@ -111,11 +102,7 @@ impl FromStr for InactiveRegionKey {
             err_msg: format!("invalid region_id: {region_id}"),
         })?;
 
-        Ok(Self {
-            cluster_id,
-            node_id,
-            region_id,
-        })
+        Ok(Self { node_id, region_id })
     }
 }
 
@@ -135,24 +122,17 @@ mod tests {
 
     #[test]
     fn test_stat_key_round_trip() {
-        let key = DatanodeStatKey {
-            cluster_id: 0,
-            node_id: 1,
-        };
+        let key = DatanodeStatKey { node_id: 1 };
 
         let key_bytes: Vec<u8> = key.into();
         let new_key: DatanodeStatKey = key_bytes.try_into().unwrap();
 
-        assert_eq!(0, new_key.cluster_id);
         assert_eq!(1, new_key.node_id);
     }
 
     #[test]
     fn test_lease_key_round_trip() {
-        let key = DatanodeLeaseKey {
-            cluster_id: 0,
-            node_id: 1,
-        };
+        let key = DatanodeLeaseKey { node_id: 1 };
 
         let key_bytes: Vec<u8> = key.clone().try_into().unwrap();
         let new_key: DatanodeLeaseKey = key_bytes.try_into().unwrap();
@@ -162,21 +142,16 @@ mod tests {
 
     #[test]
     fn test_lease_key_to_stat_key() {
-        let lease_key = DatanodeLeaseKey {
-            cluster_id: 1,
-            node_id: 101,
-        };
+        let lease_key = DatanodeLeaseKey { node_id: 101 };
 
         let stat_key: DatanodeStatKey = (&lease_key).into();
 
-        assert_eq!(1, stat_key.cluster_id);
         assert_eq!(101, stat_key.node_id);
     }
 
     #[test]
     fn test_inactive_region_key_round_trip() {
         let key = InactiveRegionKey {
-            cluster_id: 0,
             node_id: 1,
             region_id: 2,
         };

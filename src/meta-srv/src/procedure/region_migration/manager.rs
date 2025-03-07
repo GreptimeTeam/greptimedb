@@ -22,7 +22,6 @@ use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::RegionRoute;
-use common_meta::ClusterId;
 use common_procedure::{watcher, ProcedureId, ProcedureManagerRef, ProcedureWithId};
 use common_telemetry::{error, info};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -101,7 +100,6 @@ impl Drop for RegionMigrationProcedureGuard {
 
 #[derive(Debug, Clone)]
 pub struct RegionMigrationProcedureTask {
-    pub(crate) cluster_id: ClusterId,
     pub(crate) region_id: RegionId,
     pub(crate) from_peer: Peer,
     pub(crate) to_peer: Peer,
@@ -109,15 +107,8 @@ pub struct RegionMigrationProcedureTask {
 }
 
 impl RegionMigrationProcedureTask {
-    pub fn new(
-        cluster_id: ClusterId,
-        region_id: RegionId,
-        from_peer: Peer,
-        to_peer: Peer,
-        timeout: Duration,
-    ) -> Self {
+    pub fn new(region_id: RegionId, from_peer: Peer, to_peer: Peer, timeout: Duration) -> Self {
         Self {
-            cluster_id,
             region_id,
             from_peer,
             to_peer,
@@ -130,8 +121,8 @@ impl Display for RegionMigrationProcedureTask {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "cluster: {}, region: {}, from_peer: {}, to_peer: {}",
-            self.cluster_id, self.region_id, self.from_peer, self.to_peer
+            "region: {}, from_peer: {}, to_peer: {}",
+            self.region_id, self.from_peer, self.to_peer
         )
     }
 }
@@ -331,7 +322,6 @@ impl RegionMigrationManager {
             .with_label_values(&["desc", &task.to_peer.id.to_string()])
             .inc();
         let RegionMigrationProcedureTask {
-            cluster_id,
             region_id,
             from_peer,
             to_peer,
@@ -341,7 +331,6 @@ impl RegionMigrationManager {
             PersistentContext {
                 catalog: catalog_name,
                 schema: schema_name,
-                cluster_id,
                 region_id,
                 from_peer,
                 to_peer,
@@ -394,7 +383,6 @@ mod test {
         let manager = RegionMigrationManager::new(env.procedure_manager().clone(), context_factory);
         let region_id = RegionId::new(1024, 1);
         let task = RegionMigrationProcedureTask {
-            cluster_id: 1,
             region_id,
             from_peer: Peer::empty(2),
             to_peer: Peer::empty(1),
@@ -419,7 +407,6 @@ mod test {
         let manager = RegionMigrationManager::new(env.procedure_manager().clone(), context_factory);
         let region_id = RegionId::new(1024, 1);
         let task = RegionMigrationProcedureTask {
-            cluster_id: 1,
             region_id,
             from_peer: Peer::empty(1),
             to_peer: Peer::empty(1),
@@ -437,7 +424,6 @@ mod test {
         let manager = RegionMigrationManager::new(env.procedure_manager().clone(), context_factory);
         let region_id = RegionId::new(1024, 1);
         let task = RegionMigrationProcedureTask {
-            cluster_id: 1,
             region_id,
             from_peer: Peer::empty(1),
             to_peer: Peer::empty(2),
@@ -455,7 +441,6 @@ mod test {
         let manager = RegionMigrationManager::new(env.procedure_manager().clone(), context_factory);
         let region_id = RegionId::new(1024, 1);
         let task = RegionMigrationProcedureTask {
-            cluster_id: 1,
             region_id,
             from_peer: Peer::empty(1),
             to_peer: Peer::empty(2),
@@ -483,7 +468,6 @@ mod test {
         let manager = RegionMigrationManager::new(env.procedure_manager().clone(), context_factory);
         let region_id = RegionId::new(1024, 1);
         let task = RegionMigrationProcedureTask {
-            cluster_id: 1,
             region_id,
             from_peer: Peer::empty(1),
             to_peer: Peer::empty(2),
@@ -515,7 +499,6 @@ mod test {
         let manager = RegionMigrationManager::new(env.procedure_manager().clone(), context_factory);
         let region_id = RegionId::new(1024, 1);
         let task = RegionMigrationProcedureTask {
-            cluster_id: 1,
             region_id,
             from_peer: Peer::empty(1),
             to_peer: Peer::empty(2),
@@ -542,7 +525,6 @@ mod test {
         let manager = RegionMigrationManager::new(env.procedure_manager().clone(), context_factory);
         let region_id = RegionId::new(1024, 1);
         let task = RegionMigrationProcedureTask {
-            cluster_id: 1,
             region_id,
             from_peer: Peer::empty(1),
             to_peer: Peer::empty(2),

@@ -45,9 +45,9 @@ use crate::instruction::CacheIdent;
 use crate::key::table_info::TableInfoValue;
 use crate::key::{DeserializedValueWithBytes, RegionDistribution};
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
+use crate::metrics;
 use crate::rpc::ddl::AlterTableTask;
 use crate::rpc::router::{find_leader_regions, find_leaders, region_distribution};
-use crate::{metrics, ClusterId};
 
 /// The alter table procedure
 pub struct AlterTableProcedure {
@@ -64,16 +64,11 @@ pub struct AlterTableProcedure {
 impl AlterTableProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::AlterTable";
 
-    pub fn new(
-        cluster_id: ClusterId,
-        table_id: TableId,
-        task: AlterTableTask,
-        context: DdlContext,
-    ) -> Result<Self> {
+    pub fn new(table_id: TableId, task: AlterTableTask, context: DdlContext) -> Result<Self> {
         task.validate()?;
         Ok(Self {
             context,
-            data: AlterTableData::new(task, table_id, cluster_id),
+            data: AlterTableData::new(task, table_id),
             new_table_info: None,
         })
     }
@@ -307,7 +302,6 @@ enum AlterTableState {
 // The serialized data of alter table.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AlterTableData {
-    cluster_id: ClusterId,
     state: AlterTableState,
     task: AlterTableTask,
     table_id: TableId,
@@ -318,12 +312,11 @@ pub struct AlterTableData {
 }
 
 impl AlterTableData {
-    pub fn new(task: AlterTableTask, table_id: TableId, cluster_id: u64) -> Self {
+    pub fn new(task: AlterTableTask, table_id: TableId) -> Self {
         Self {
             state: AlterTableState::Prepare,
             task,
             table_id,
-            cluster_id,
             table_info_value: None,
             region_distribution: None,
         }

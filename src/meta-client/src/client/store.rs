@@ -255,7 +255,7 @@ mod test {
 
     #[tokio::test]
     async fn test_already_start() {
-        let mut client = Client::new((0, 0), Role::Frontend, ChannelManager::default());
+        let mut client = Client::new(0, Role::Frontend, ChannelManager::default());
         client
             .start(&["127.0.0.1:1000", "127.0.0.1:1001"])
             .await
@@ -270,7 +270,7 @@ mod test {
 
     #[tokio::test]
     async fn test_start_with_duplicate_peers() {
-        let mut client = Client::new((0, 0), Role::Frontend, ChannelManager::default());
+        let mut client = Client::new(0, Role::Frontend, ChannelManager::default());
         client
             .start(&["127.0.0.1:1000", "127.0.0.1:1000", "127.0.0.1:1000"])
             .await

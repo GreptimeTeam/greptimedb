@@ -167,10 +167,9 @@ mod tests {
     use crate::test_util::{new_ddl_context, MockDatanodeManager};
 
     /// Prepares a region with schema `[ts: Timestamp, host: Tag, cpu: Field]`.
-    async fn prepare_ddl_context() -> (DdlContext, u64, TableId, RegionId, String) {
+    async fn prepare_ddl_context() -> (DdlContext, TableId, RegionId, String) {
         let datanode_manager = Arc::new(MockDatanodeManager::new(()));
         let ddl_context = new_ddl_context(datanode_manager);
-        let cluster_id = 1;
         let table_id = 1024;
         let region_id = RegionId::new(table_id, 1);
         let table_name = "foo";
@@ -225,19 +224,12 @@ mod tests {
             )
             .await
             .unwrap();
-        (
-            ddl_context,
-            cluster_id,
-            table_id,
-            region_id,
-            table_name.to_string(),
-        )
+        (ddl_context, table_id, region_id, table_name.to_string())
     }
 
     #[tokio::test]
     async fn test_make_alter_region_request() {
-        let (ddl_context, cluster_id, table_id, region_id, table_name) =
-            prepare_ddl_context().await;
+        let (ddl_context, table_id, region_id, table_name) = prepare_ddl_context().await;
 
         let task = AlterTableTask {
             alter_table: AlterTableExpr {
@@ -265,8 +257,7 @@ mod tests {
             },
         };
 
-        let mut procedure =
-            AlterTableProcedure::new(cluster_id, table_id, task, ddl_context).unwrap();
+        let mut procedure = AlterTableProcedure::new(table_id, task, ddl_context).unwrap();
         procedure.on_prepare().await.unwrap();
         let alter_kind = procedure.make_region_alter_kind().unwrap();
         let Some(Body::Alter(alter_region_request)) = procedure
@@ -307,8 +298,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_make_alter_column_type_region_request() {
-        let (ddl_context, cluster_id, table_id, region_id, table_name) =
-            prepare_ddl_context().await;
+        let (ddl_context, table_id, region_id, table_name) = prepare_ddl_context().await;
 
         let task = AlterTableTask {
             alter_table: AlterTableExpr {
@@ -325,8 +315,7 @@ mod tests {
             },
         };
 
-        let mut procedure =
-            AlterTableProcedure::new(cluster_id, table_id, task, ddl_context).unwrap();
+        let mut procedure = AlterTableProcedure::new(table_id, task, ddl_context).unwrap();
         procedure.on_prepare().await.unwrap();
         let alter_kind = procedure.make_region_alter_kind().unwrap();
         let Some(Body::Alter(alter_region_request)) = procedure

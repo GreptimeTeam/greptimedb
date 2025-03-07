@@ -37,9 +37,9 @@ use crate::key::table_info::TableInfoValue;
 use crate::key::table_route::PhysicalTableRouteValue;
 use crate::key::DeserializedValueWithBytes;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock};
+use crate::metrics;
 use crate::rpc::ddl::AlterTableTask;
 use crate::rpc::router::find_leaders;
-use crate::{metrics, ClusterId};
 
 pub struct AlterLogicalTablesProcedure {
     pub context: DdlContext,
@@ -50,7 +50,6 @@ impl AlterLogicalTablesProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::AlterLogicalTables";
 
     pub fn new(
-        cluster_id: ClusterId,
         tasks: Vec<AlterTableTask>,
         physical_table_id: TableId,
         context: DdlContext,
@@ -58,7 +57,6 @@ impl AlterLogicalTablesProcedure {
         Self {
             context,
             data: AlterTablesData {
-                cluster_id,
                 state: AlterTablesState::Prepare,
                 tasks,
                 table_info_values: vec![],
@@ -240,7 +238,6 @@ impl Procedure for AlterLogicalTablesProcedure {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AlterTablesData {
-    cluster_id: ClusterId,
     state: AlterTablesState,
     tasks: Vec<AlterTableTask>,
     /// Table info values before the alter operation.

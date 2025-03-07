@@ -47,8 +47,6 @@ pub mod test_util;
 pub mod util;
 pub mod wal_options_allocator;
 
-// The id of the cluster.
-pub type ClusterId = u64;
 // The id of the datanode.
 pub type DatanodeId = u64;
 // The id of the flownode.

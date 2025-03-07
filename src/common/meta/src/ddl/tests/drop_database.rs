@@ -31,7 +31,6 @@ use crate::test_util::{new_ddl_context, MockDatanodeManager};
 #[tokio::test]
 async fn test_drop_database_with_logical_tables() {
     common_telemetry::init_default_ut_logging();
-    let cluster_id = 1;
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
     let ddl_context = new_ddl_context(node_manager);
     ddl_context
@@ -45,11 +44,11 @@ async fn test_drop_database_with_logical_tables() {
         .await
         .unwrap();
     // Creates physical table
-    let phy_id = create_physical_table(&ddl_context, cluster_id, "phy").await;
+    let phy_id = create_physical_table(&ddl_context, "phy").await;
     // Creates 3 logical tables
-    create_logical_table(ddl_context.clone(), cluster_id, phy_id, "table1").await;
-    create_logical_table(ddl_context.clone(), cluster_id, phy_id, "table2").await;
-    create_logical_table(ddl_context.clone(), cluster_id, phy_id, "table3").await;
+    create_logical_table(ddl_context.clone(), phy_id, "table1").await;
+    create_logical_table(ddl_context.clone(), phy_id, "table2").await;
+    create_logical_table(ddl_context.clone(), phy_id, "table3").await;
 
     let mut procedure = DropDatabaseProcedure::new(
         DEFAULT_CATALOG_NAME.to_string(),
@@ -80,7 +79,6 @@ async fn test_drop_database_with_logical_tables() {
 #[tokio::test]
 async fn test_drop_database_retryable_error() {
     common_telemetry::init_default_ut_logging();
-    let cluster_id = 1;
     let node_manager = Arc::new(MockDatanodeManager::new(RetryErrorDatanodeHandler));
     let ddl_context = new_ddl_context(node_manager);
     ddl_context
@@ -94,11 +92,11 @@ async fn test_drop_database_retryable_error() {
         .await
         .unwrap();
     // Creates physical table
-    let phy_id = create_physical_table(&ddl_context, cluster_id, "phy").await;
+    let phy_id = create_physical_table(&ddl_context, "phy").await;
     // Creates 3 logical tables
-    create_logical_table(ddl_context.clone(), cluster_id, phy_id, "table1").await;
-    create_logical_table(ddl_context.clone(), cluster_id, phy_id, "table2").await;
-    create_logical_table(ddl_context.clone(), cluster_id, phy_id, "table3").await;
+    create_logical_table(ddl_context.clone(), phy_id, "table1").await;
+    create_logical_table(ddl_context.clone(), phy_id, "table2").await;
+    create_logical_table(ddl_context.clone(), phy_id, "table3").await;
 
     let mut procedure = DropDatabaseProcedure::new(
         DEFAULT_CATALOG_NAME.to_string(),
@@ -128,7 +126,6 @@ async fn test_drop_database_retryable_error() {
 #[tokio::test]
 async fn test_drop_database_recover() {
     common_telemetry::init_default_ut_logging();
-    let cluster_id = 1;
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
     let ddl_context = new_ddl_context(node_manager);
     ddl_context
@@ -142,9 +139,9 @@ async fn test_drop_database_recover() {
         .await
         .unwrap();
     // Creates a physical table
-    let phy_id = create_physical_table(&ddl_context, cluster_id, "phy").await;
+    let phy_id = create_physical_table(&ddl_context, "phy").await;
     // Creates a logical tables
-    create_logical_table(ddl_context.clone(), cluster_id, phy_id, "table1").await;
+    create_logical_table(ddl_context.clone(), phy_id, "table1").await;
     let mut procedure = DropDatabaseProcedure::new(
         DEFAULT_CATALOG_NAME.to_string(),
         DEFAULT_SCHEMA_NAME.to_string(),
