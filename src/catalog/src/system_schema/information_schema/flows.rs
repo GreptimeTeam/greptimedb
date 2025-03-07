@@ -329,12 +329,14 @@ impl InformationSchemaFlowsBuilder {
             .upgrade()
             .context(UpgradeWeakCatalogManagerRefSnafu)?;
         for schema_name in catalog_manager.schema_names(&catalog_name, None).await? {
-            source_table_names = catalog_manager
-                .tables_by_ids(&catalog_name, &schema_name, flow_info.source_table_ids())
-                .await?
-                .into_iter()
-                .map(|table| table.table_info().full_table_name())
-                .collect();
+            source_table_names.extend(
+                catalog_manager
+                    .tables_by_ids(&catalog_name, &schema_name, flow_info.source_table_ids())
+                    .await?
+                    .into_iter()
+                    .map(|table| table.table_info().full_table_name())
+                    .collect(),
+            );
         }
 
         self.source_table_names
