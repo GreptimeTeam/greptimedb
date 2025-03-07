@@ -327,7 +327,7 @@ impl ExecutionPlan for RangeManipulateExec {
     }
 
     fn required_input_distribution(&self) -> Vec<Distribution> {
-        vec![Distribution::SinglePartition]
+        self.input.required_input_distribution()
     }
 
     fn with_new_children(

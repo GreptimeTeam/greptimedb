@@ -301,7 +301,7 @@ impl ExecutionPlan for ScalarCalculateExec {
     }
 
     fn required_input_distribution(&self) -> Vec<Distribution> {
-        vec![Distribution::SinglePartition]
+        self.input.required_input_distribution()
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {

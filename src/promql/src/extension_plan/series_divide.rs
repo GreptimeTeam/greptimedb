@@ -147,7 +147,14 @@ impl ExecutionPlan for SeriesDivideExec {
     }
 
     fn required_input_distribution(&self) -> Vec<Distribution> {
-        vec![Distribution::SinglePartition]
+        let schema = self.input.schema();
+        vec![Distribution::HashPartitioned(
+            self.tag_columns
+                .iter()
+                // Safety: the tag column names is verified in the planning phase
+                .map(|tag| Arc::new(ColumnExpr::new_with_schema(tag, &schema).unwrap()) as _)
+                .collect(),
+        )]
     }
 
     fn required_input_ordering(&self) -> Vec<Option<LexRequirement>> {

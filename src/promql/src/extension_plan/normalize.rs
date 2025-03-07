@@ -23,6 +23,7 @@ use datafusion::common::{DFSchema, DFSchemaRef, Result as DataFusionResult, Stat
 use datafusion::error::DataFusionError;
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogicalNodeCore};
+use datafusion::physical_plan::expressions::Column as ColumnExpr;
 use datafusion::physical_plan::metrics::{
     BaselineMetrics, Count, ExecutionPlanMetricsSet, MetricBuilder, MetricValue, MetricsSet,
 };
@@ -55,6 +56,7 @@ pub struct SeriesNormalize {
     offset: Millisecond,
     time_index_column_name: String,
     need_filter_out_nan: bool,
+    tag_columns: Vec<String>,
 
     input: LogicalPlan,
 }
@@ -100,6 +102,7 @@ impl UserDefinedLogicalNodeCore for SeriesNormalize {
             time_index_column_name: self.time_index_column_name.clone(),
             need_filter_out_nan: self.need_filter_out_nan,
             input: inputs.into_iter().next().unwrap(),
+            tag_columns: self.tag_columns.clone(),
         })
     }
 }
@@ -109,12 +112,14 @@ impl SeriesNormalize {
         offset: Millisecond,
         time_index_column_name: N,
         need_filter_out_nan: bool,
+        tag_columns: Vec<String>,
         input: LogicalPlan,
     ) -> Self {
         Self {
             offset,
             time_index_column_name: time_index_column_name.as_ref().to_string(),
             need_filter_out_nan,
+            tag_columns,
             input,
         }
     }
@@ -129,6 +134,7 @@ impl SeriesNormalize {
             time_index_column_name: self.time_index_column_name.clone(),
             need_filter_out_nan: self.need_filter_out_nan,
             input: exec_input,
+            tag_columns: self.tag_columns.clone(),
             metric: ExecutionPlanMetricsSet::new(),
         })
     }
@@ -138,6 +144,7 @@ impl SeriesNormalize {
             offset: self.offset,
             time_index: self.time_index_column_name.clone(),
             filter_nan: self.need_filter_out_nan,
+            tag_columns: self.tag_columns.clone(),
         }
         .encode_to_vec()
     }
@@ -152,6 +159,7 @@ impl SeriesNormalize {
             pb_normalize.offset,
             pb_normalize.time_index,
             pb_normalize.filter_nan,
+            pb_normalize.tag_columns,
             placeholder_plan,
         ))
     }
@@ -162,6 +170,7 @@ pub struct SeriesNormalizeExec {
     offset: Millisecond,
     time_index_column_name: String,
     need_filter_out_nan: bool,
+    tag_columns: Vec<String>,
 
     input: Arc<dyn ExecutionPlan>,
     metric: ExecutionPlanMetricsSet,
@@ -177,7 +186,14 @@ impl ExecutionPlan for SeriesNormalizeExec {
     }
 
     fn required_input_distribution(&self) -> Vec<Distribution> {
-        vec![Distribution::SinglePartition]
+        let schema = self.input.schema();
+        vec![Distribution::HashPartitioned(
+            self.tag_columns
+                .iter()
+                // Safety: the tag column names is verified in the planning phase
+                .map(|tag| Arc::new(ColumnExpr::new_with_schema(tag, &schema).unwrap()) as _)
+                .collect(),
+        )]
     }
 
     fn properties(&self) -> &PlanProperties {
@@ -198,6 +214,7 @@ impl ExecutionPlan for SeriesNormalizeExec {
             time_index_column_name: self.time_index_column_name.clone(),
             need_filter_out_nan: self.need_filter_out_nan,
             input: children[0].clone(),
+            tag_columns: self.tag_columns.clone(),
             metric: self.metric.clone(),
         }))
     }
@@ -399,6 +416,7 @@ mod test {
             time_index_column_name: TIME_INDEX_COLUMN.to_string(),
             need_filter_out_nan: true,
             input: memory_exec,
+            tag_columns: vec!["path".to_string()],
             metric: ExecutionPlanMetricsSet::new(),
         });
         let session_context = SessionContext::default();
@@ -428,11 +446,12 @@ mod test {
     async fn test_offset_record_batch() {
         let memory_exec = Arc::new(prepare_test_data());
         let normalize_exec = Arc::new(SeriesNormalizeExec {
-            offset: 1_000, // offset 1s
+            offset: 1_000,
             time_index_column_name: TIME_INDEX_COLUMN.to_string(),
             need_filter_out_nan: true,
             input: memory_exec,
             metric: ExecutionPlanMetricsSet::new(),
+            tag_columns: vec!["path".to_string()],
         });
         let session_context = SessionContext::default();
         let result = datafusion::physical_plan::collect(normalize_exec, session_context.task_ctx())
