@@ -681,7 +681,7 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
     for row in records.rows.into_iter() {
         let mut span = Span::default();
         let mut service_name = None;
-        let mut resource_tags = None;
+        let mut resource_tags = vec![];
 
         for (idx, cell) in row.into_iter().enumerate() {
             // safe to use index here
@@ -732,7 +732,7 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
                     // data structure
 
                     if let JsonValue::Object(resource_attrs) = cell {
-                        resource_tags = Some(object_to_tags(resource_attrs));
+                        resource_tags = object_to_tags(resource_attrs);
                     }
                 }
                 PARENT_SPAN_ID_COLUMN => {
@@ -830,40 +830,25 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
                         const RESOURCE_ATTR_PREFIX: &str = "resource_attributes.";
                         // a span attributes column
                         if column_name.starts_with(SPAN_ATTR_PREFIX) {
-                            match cell {
-                                JsonValue::String(value) => span.tags.push(KeyValue {
-                                    key: column_name
-                                        .strip_prefix(SPAN_ATTR_PREFIX)
-                                        .unwrap_or_default()
-                                        .to_string(),
-                                    value_type: ValueType::String,
-                                    value: Value::String(value.to_string()),
-                                }),
-                                JsonValue::Number(value) => span.tags.push(KeyValue {
-                                    key: column_name
-                                        .strip_prefix(SPAN_ATTR_PREFIX)
-                                        .unwrap_or_default()
-                                        .to_string(),
-                                    value_type: ValueType::Int64,
-                                    value: Value::Int64(value.as_i64().unwrap_or(0)),
-                                }),
-                                JsonValue::Bool(value) => span.tags.push(KeyValue {
-                                    key: column_name
-                                        .strip_prefix(SPAN_ATTR_PREFIX)
-                                        .unwrap_or_default()
-                                        .to_string(),
-                                    value_type: ValueType::Boolean,
-                                    value: Value::Boolean(value),
-                                }),
-                                // FIXME(zyy17): Do we need to support other types?
-                                _ => {
-                                    warn!("Unsupported value type: {:?}", cell);
-                                }
+                            if let Some(keyvalue) = to_keyvalue(
+                                column_name
+                                    .strip_prefix(SPAN_ATTR_PREFIX)
+                                    .unwrap_or_default()
+                                    .to_string(),
+                                cell,
+                            ) {
+                                span.tags.push(keyvalue);
                             }
-                        }
-
-                        if column_name.starts_with(RESOURCE_ATTR_PREFIX) {
-                            todo!("resource attributes")
+                        } else if column_name.starts_with(RESOURCE_ATTR_PREFIX) {
+                            if let Some(keyvalue) = to_keyvalue(
+                                column_name
+                                    .strip_prefix(RESOURCE_ATTR_PREFIX)
+                                    .unwrap_or_default()
+                                    .to_string(),
+                                cell,
+                            ) {
+                                resource_tags.push(keyvalue);
+                            }
                         }
                     }
                 }
@@ -871,10 +856,8 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
         }
 
         if let Some(service_name) = service_name {
-            if let Some(resource_tags) = resource_tags {
-                if !service_to_resource_attributes.contains_key(&service_name) {
-                    service_to_resource_attributes.insert(service_name.clone(), resource_tags);
-                }
+            if !service_to_resource_attributes.contains_key(&service_name) {
+                service_to_resource_attributes.insert(service_name.clone(), resource_tags);
             }
 
             if let Some(process) = trace_id_to_processes.get_mut(&span.trace_id) {
@@ -920,42 +903,41 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
     Ok(traces)
 }
 
-#[inline]
+fn to_keyvalue(key: String, value: JsonValue) -> Option<KeyValue> {
+    match value {
+        JsonValue::String(value) => Some(KeyValue {
+            key,
+            value_type: ValueType::String,
+            value: Value::String(value.to_string()),
+        }),
+        JsonValue::Number(value) => Some(KeyValue {
+            key,
+            value_type: ValueType::Int64,
+            value: Value::Int64(value.as_i64().unwrap_or(0)),
+        }),
+        JsonValue::Bool(value) => Some(KeyValue {
+            key,
+            value_type: ValueType::Boolean,
+            value: Value::Boolean(value),
+        }),
+        JsonValue::Array(value) => Some(KeyValue {
+            key,
+            value_type: ValueType::String,
+            value: Value::String(serde_json::to_string(&value).unwrap()),
+        }),
+        JsonValue::Object(value) => Some(KeyValue {
+            key,
+            value_type: ValueType::String,
+            value: Value::String(serde_json::to_string(&value).unwrap()),
+        }),
+        JsonValue::Null => None,
+    }
+}
+
 fn object_to_tags(object: serde_json::map::Map<String, JsonValue>) -> Vec<KeyValue> {
     object
         .into_iter()
-        .filter_map(|(key, value)| match value {
-            JsonValue::String(value) => Some(KeyValue {
-                key,
-                value_type: ValueType::String,
-                value: Value::String(value.to_string()),
-            }),
-            JsonValue::Number(value) => Some(KeyValue {
-                key,
-                value_type: ValueType::Int64,
-                value: Value::Int64(value.as_i64().unwrap_or(0)),
-            }),
-            JsonValue::Bool(value) => Some(KeyValue {
-                key,
-                value_type: ValueType::Boolean,
-                value: Value::Boolean(value),
-            }),
-            JsonValue::Array(value) => Some(KeyValue {
-                key,
-                value_type: ValueType::String,
-                value: Value::String(serde_json::to_string(&value).unwrap()),
-            }),
-            JsonValue::Object(value) => Some(KeyValue {
-                key,
-                value_type: ValueType::String,
-                value: Value::String(serde_json::to_string(&value).unwrap()),
-            }),
-            // FIXME(zyy17): Do we need to support other types?
-            _ => {
-                warn!("Unsupported value type: {:?}", value);
-                None
-            }
-        })
+        .filter_map(|(key, value)| to_keyvalue(key, value))
         .collect()
 }
 
