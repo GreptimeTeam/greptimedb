@@ -23,6 +23,7 @@ use opentelemetry_proto::tonic::trace::v1::{Span, Status};
 use serde::Serialize;
 
 use super::attributes::Attributes;
+use crate::otlp::trace::KEY_SERVICE_NAME;
 use crate::otlp::utils::bytes_to_hex_string;
 
 #[derive(Debug, Clone)]
@@ -251,7 +252,7 @@ pub fn parse(request: ExportTraceServiceRequest) -> TraceSpans {
             .unwrap_or_default();
         let service_name = resource_attrs
             .iter()
-            .find_or_first(|kv| kv.key == "service.name")
+            .find_or_first(|kv| kv.key == KEY_SERVICE_NAME)
             .and_then(|kv| kv.value.clone())
             .and_then(|v| match v.value {
                 Some(any_value::Value::StringValue(s)) => Some(s),

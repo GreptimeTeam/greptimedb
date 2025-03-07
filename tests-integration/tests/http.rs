@@ -2866,82 +2866,113 @@ pub async fn test_jaeger_query_api(store_type: StorageType) {
         .await;
     assert_eq!(StatusCode::OK, res.status());
     let expected = r#"
+{
+  "data": [
     {
-      "data": [
+      "traceID": "5611dce1bc9ebed65352d99a027b08ea",
+      "spans": [
         {
           "traceID": "5611dce1bc9ebed65352d99a027b08ea",
-          "spans": [
+          "spanID": "008421dbbd33a3e9",
+          "operationName": "access-mysql",
+          "references": [],
+          "startTime": 1738726754492422,
+          "duration": 100000,
+          "tags": [
             {
-              "traceID": "5611dce1bc9ebed65352d99a027b08ea",
-              "spanID": "008421dbbd33a3e9",
-              "operationName": "access-mysql",
-              "references": [],
-              "startTime": 1738726754492422,
-              "duration": 100000,
-              "tags": [
-                {
-                  "key": "net.peer.ip",
-                  "type": "string",
-                  "value": "1.2.3.4"
-                },
-                {
-                  "key": "operation.type",
-                  "type": "string",
-                  "value": "access-mysql"
-                },
-                {
-                  "key": "peer.service",
-                  "type": "string",
-                  "value": "test-jaeger-query-api"
-                }
-              ],
-              "logs": [],
-              "processID": "p1"
+              "key": "net.peer.ip",
+              "type": "string",
+              "value": "1.2.3.4"
             },
             {
-              "traceID": "5611dce1bc9ebed65352d99a027b08ea",
-              "spanID": "ffa03416a7b9ea48",
-              "operationName": "access-redis",
-              "references": [],
-              "startTime": 1738726754492422,
-              "duration": 100000,
-              "tags": [
-                {
-                  "key": "net.peer.ip",
-                  "type": "string",
-                  "value": "1.2.3.4"
-                },
-                {
-                  "key": "operation.type",
-                  "type": "string",
-                  "value": "access-redis"
-                },
-                {
-                  "key": "peer.service",
-                  "type": "string",
-                  "value": "test-jaeger-query-api"
-                }
-              ],
-              "logs": [],
-              "processID": "p1"
+              "key": "operation.type",
+              "type": "string",
+              "value": "access-mysql"
+            },
+            {
+              "key": "peer.service",
+              "type": "string",
+              "value": "test-jaeger-query-api"
+            },
+            {
+              "key": "otel.scope.name",
+              "type": "string",
+              "value": "test-jaeger-query-api"
+            },
+            {
+              "key": "otel.scope.version",
+              "type": "string",
+              "value": "1.0.0"
+            },
+            {
+              "key": "span.kind",
+              "type": "string",
+              "value": "server"
             }
           ],
-          "processes": {
-            "p1": {
-              "serviceName": "test-jaeger-query-api",
-              "tags": []
+          "logs": [],
+          "processID": "p1"
+        },
+        {
+          "traceID": "5611dce1bc9ebed65352d99a027b08ea",
+          "spanID": "ffa03416a7b9ea48",
+          "operationName": "access-redis",
+          "references": [],
+          "startTime": 1738726754492422,
+          "duration": 100000,
+          "tags": [
+            {
+              "key": "net.peer.ip",
+              "type": "string",
+              "value": "1.2.3.4"
+            },
+            {
+              "key": "operation.type",
+              "type": "string",
+              "value": "access-redis"
+            },
+            {
+              "key": "peer.service",
+              "type": "string",
+              "value": "test-jaeger-query-api"
+            },
+            {
+              "key": "otel.scope.name",
+              "type": "string",
+              "value": "test-jaeger-query-api"
+            },
+            {
+              "key": "otel.scope.version",
+              "type": "string",
+              "value": "1.0.0"
+            },
+            {
+              "key": "span.kind",
+              "type": "string",
+              "value": "server"
             }
-          }
+          ],
+          "logs": [],
+          "processID": "p1"
         }
       ],
-      "total": 0,
-      "limit": 0,
-      "offset": 0,
-      "errors": []
+      "processes": {
+        "p1": {
+          "serviceName": "test-jaeger-query-api",
+          "tags": []
+        }
+      }
     }
+  ],
+  "total": 0,
+  "limit": 0,
+  "offset": 0,
+  "errors": []
+}
     "#;
 
-    let resp: Value = serde_json::from_str(&res.text().await).unwrap();
+    let resp_txt = &res.text().await;
+    let resp: Value = serde_json::from_str(resp_txt).unwrap();
     let expected: Value = serde_json::from_str(expected).unwrap();
     assert_eq!(resp, expected);
 
@@ -2952,55 +2983,71 @@ pub async fn test_jaeger_query_api(store_type: StorageType) {
         .await;
     assert_eq!(StatusCode::OK, res.status());
     let expected = r#"
+{
+  "data": [
     {
-      "data": [
+      "traceID": "5611dce1bc9ebed65352d99a027b08ea",
+      "spans": [
         {
           "traceID": "5611dce1bc9ebed65352d99a027b08ea",
-          "spans": [
+          "spanID": "008421dbbd33a3e9",
+          "operationName": "access-mysql",
+          "references": [],
+          "startTime": 1738726754492422,
+          "duration": 100000,
+          "tags": [
             {
-              "traceID": "5611dce1bc9ebed65352d99a027b08ea",
-              "spanID": "008421dbbd33a3e9",
-              "operationName": "access-mysql",
-              "references": [],
-              "startTime": 1738726754492422,
-              "duration": 100000,
-              "tags": [
-                {
-                  "key": "net.peer.ip",
-                  "type": "string",
-                  "value": "1.2.3.4"
-                },
-                {
-                  "key": "operation.type",
-                  "type": "string",
-                  "value": "access-mysql"
-                },
-                {
-                  "key": "peer.service",
-                  "type": "string",
-                  "value": "test-jaeger-query-api"
-                }
-              ],
-              "logs": [],
-              "processID": "p1"
+              "key": "net.peer.ip",
+              "type": "string",
+              "value": "1.2.3.4"
+            },
+            {
+              "key": "operation.type",
+              "type": "string",
+              "value": "access-mysql"
+            },
+            {
+              "key": "peer.service",
+              "type": "string",
+              "value": "test-jaeger-query-api"
+            },
+            {
+              "key": "otel.scope.name",
+              "type": "string",
+              "value": "test-jaeger-query-api"
+            },
+            {
+              "key": "otel.scope.version",
+              "type": "string",
+              "value": "1.0.0"
+            },
+            {
+              "key": "span.kind",
+              "type": "string",
+              "value": "server"
             }
           ],
-          "processes": {
-            "p1": {
-              "serviceName": "test-jaeger-query-api",
-              "tags": []
-            }
-          }
+          "logs": [],
+          "processID": "p1"
         }
       ],
-      "total": 0,
-      "limit": 0,
-      "offset": 0,
-      "errors": []
+      "processes": {
+        "p1": {
+          "serviceName": "test-jaeger-query-api",
+          "tags": []
+        }
+      }
     }
+  ],
+  "total": 0,
+  "limit": 0,
+  "offset": 0,
+  "errors": []
+}
     "#;
 
-    let resp: Value = serde_json::from_str(&res.text().await).unwrap();
+    let resp_txt = &res.text().await;
+    let resp: Value = serde_json::from_str(resp_txt).unwrap();
     let expected: Value = serde_json::from_str(expected).unwrap();
     assert_eq!(resp, expected);
 
