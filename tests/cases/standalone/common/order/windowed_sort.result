@@ -198,7 +198,6 @@ EXPLAIN ANALYZE SELECT * FROM test where t > 8 ORDER BY t DESC LIMIT 4;
 | 1_| 0_|_SortPreservingMergeExec: [t@1 DESC], fetch=4 REDACTED
 |_|_|_WindowedSortExec: expr=t@1 DESC num_ranges=2 fetch=4 REDACTED
 |_|_|_PartSortExec: expr=t@1 DESC num_ranges=2 limit=4 REDACTED
-|_|_|_FilterExec: t@1 > 8 REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=2 (1 memtable ranges, 1 file 1 ranges) REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
