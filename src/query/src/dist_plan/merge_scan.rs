@@ -16,7 +16,7 @@ use std::any::Any;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use arrow_schema::{Schema as ArrowSchema, SchemaRef as ArrowSchemaRef};
+use arrow_schema::{Schema as ArrowSchema, SchemaRef as ArrowSchemaRef, SortOptions};
 use async_stream::stream;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::BoxedError;
@@ -28,16 +28,16 @@ use common_recordbatch::{
     DfSendableRecordBatchStream, RecordBatch, RecordBatchStreamWrapper, SendableRecordBatchStream,
 };
 use common_telemetry::tracing_context::TracingContext;
-use datafusion::execution::TaskContext;
+use datafusion::execution::{SessionState, TaskContext};
 use datafusion::physical_plan::metrics::{
     Count, ExecutionPlanMetricsSet, Gauge, MetricBuilder, MetricsSet, Time,
 };
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, Partitioning, PlanProperties,
 };
-use datafusion_common::Result;
-use datafusion_expr::{Extension, LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion_physical_expr::EquivalenceProperties;
+use datafusion_common::{Column, Result};
+use datafusion_expr::{Expr, Extension, LogicalPlan, UserDefinedLogicalNodeCore};
+use datafusion_physical_expr::{EquivalenceProperties, LexOrdering, PhysicalSortExpr};
 use datatypes::schema::{Schema, SchemaRef};
 use futures_util::StreamExt;
 use greptime_proto::v1::region::RegionRequestHeader;
@@ -59,6 +59,7 @@ pub struct MergeScanLogicalPlan {
     input: LogicalPlan,
     /// If this plan is a placeholder
     is_placeholder: bool,
+    partition_cols: Vec<String>,
 }
 
 impl UserDefinedLogicalNodeCore for MergeScanLogicalPlan {
@@ -95,10 +96,11 @@ impl UserDefinedLogicalNodeCore for MergeScanLogicalPlan {
 }
 
 impl MergeScanLogicalPlan {
-    pub fn new(input: LogicalPlan, is_placeholder: bool) -> Self {
+    pub fn new(input: LogicalPlan, is_placeholder: bool, partition_cols: Vec<String>) -> Self {
         Self {
             input,
             is_placeholder,
+            partition_cols,
         }
     }
 
@@ -119,6 +121,10 @@ impl MergeScanLogicalPlan {
 
     pub fn input(&self) -> &LogicalPlan {
         &self.input
+    }
+
+    pub fn partition_cols(&self) -> &[String] {
+        &self.partition_cols
     }
 }
 
@@ -148,7 +154,9 @@ impl std::fmt::Debug for MergeScanExec {
 }
 
 impl MergeScanExec {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
+        session_state: &SessionState,
         table: TableName,
         regions: Vec<RegionId>,
         plan: LogicalPlan,
@@ -156,16 +164,52 @@ impl MergeScanExec {
         region_query_handler: RegionQueryHandlerRef,
         query_ctx: QueryContextRef,
         target_partition: usize,
+        partition_cols: Vec<String>,
     ) -> Result<Self> {
         // TODO(CookiePieWw): Initially we removed the metadata from the schema in #2000, but we have to
         // keep it for #4619 to identify json type in src/datatypes/src/schema/column_schema.rs.
         // Reconsider if it's possible to remove it.
         let arrow_schema = Arc::new(arrow_schema.clone());
-        let properties = PlanProperties::new(
-            EquivalenceProperties::new(arrow_schema.clone()),
-            Partitioning::UnknownPartitioning(target_partition),
-            ExecutionMode::Bounded,
-        );
+
+        let eq_properties = if let LogicalPlan::Sort(sort) = &plan
+            && target_partition >= regions.len()
+        {
+            let lex_ordering = sort
+                .expr
+                .iter()
+                .map(|sort_expr| {
+                    let physical_expr = session_state
+                        .create_physical_expr(sort_expr.expr.clone(), plan.schema())
+                        // todo: handle error
+                        .unwrap();
+                    PhysicalSortExpr::new(
+                        physical_expr,
+                        SortOptions {
+                            descending: !sort_expr.asc,
+                            nulls_first: sort_expr.nulls_first,
+                        },
+                    )
+                })
+                .collect();
+            EquivalenceProperties::new_with_orderings(
+                arrow_schema.clone(),
+                &[LexOrdering::new(lex_ordering)],
+            )
+        } else {
+            EquivalenceProperties::new(arrow_schema.clone())
+        };
+
+        let partition_exprs = partition_cols
+            .into_iter()
+            .map(|col| {
+                session_state
+                    .create_physical_expr(Expr::Column(Column::new_unqualified(col)), plan.schema())
+                    .unwrap()
+            })
+            .collect();
+        let partitioning = Partitioning::Hash(partition_exprs, target_partition);
+
+        let properties = PlanProperties::new(eq_properties, partitioning, ExecutionMode::Bounded);
         let schema = Self::arrow_schema_to_schema(arrow_schema.clone())?;
         Ok(Self {
             table,
