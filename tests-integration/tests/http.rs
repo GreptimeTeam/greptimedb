@@ -2778,6 +2778,7 @@ pub async fn test_jaeger_query_api(store_type: StorageType) {
 
     let req: ExportTraceServiceRequest = serde_json::from_str(content).unwrap();
     let body = req.encode_to_vec();
+
     // write traces data.
     let res = send_req(
         &client,
@@ -3016,7 +3017,10 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     let client = TestClient::new(app).await;
 
     // Test empty response for `/api/services` API before writing any traces.
-    let res = client.get("/v1/jaeger/api/services").send().await;
+    let res = client
+        .get("/v1/jaeger/api/services?table=mytable")
+        .send()
+        .await;
     assert_eq!(StatusCode::OK, res.status());
     let expected = r#"
     {
@@ -3147,6 +3151,10 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
                 HeaderName::from_static("x-greptime-log-pipeline-name"),
                 HeaderValue::from_static(GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME),
             ),
+            (
+                HeaderName::from_static("x-greptime-trace-table-name"),
+                HeaderValue::from_static("mytable"),
+            ),
         ],
         "/v1/otlp/v1/traces",
         body.clone(),
@@ -3156,7 +3164,10 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     assert_eq!(StatusCode::OK, res.status());
 
     // Test `/api/services` API.
-    let res = client.get("/v1/jaeger/api/services").send().await;
+    let res = client
+        .get("/v1/jaeger/api/services?table=mytable")
+        .send()
+        .await;
     assert_eq!(StatusCode::OK, res.status());
     let expected = r#"
     {
@@ -3175,7 +3186,7 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
 
     // Test `/api/operations` API.
     let res = client
-        .get("/v1/jaeger/api/operations?service=test-jaeger-query-api")
+        .get("/v1/jaeger/api/operations?service=test-jaeger-query-api&table=mytable")
         .send()
         .await;
     assert_eq!(StatusCode::OK, res.status());
@@ -3203,7 +3214,7 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
 
     // Test `/api/services/{service_name}/operations` API.
     let res = client
-        .get("/v1/jaeger/api/services/test-jaeger-query-api/operations")
+        .get("/v1/jaeger/api/services/test-jaeger-query-api/operations?table=mytable")
         .send()
         .await;
     assert_eq!(StatusCode::OK, res.status());
@@ -3225,7 +3236,7 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
 
     // Test `/api/traces/{trace_id}` API.
     let res = client
-        .get("/v1/jaeger/api/traces/5611dce1bc9ebed65352d99a027b08ea")
+        .get("/v1/jaeger/api/traces/5611dce1bc9ebed65352d99a027b08ea?table=mytable")
         .send()
         .await;
     assert_eq!(StatusCode::OK, res.status());
@@ -3311,7 +3322,7 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
 
     // Test `/api/traces` API.
     let res = client
-        .get("/v1/jaeger/api/traces?service=test-jaeger-query-api&operation=access-mysql&start=1738726754492422&end=1738726754642422&tags=%7B%22operation.type%22%3A%22access-mysql%22%7D")
+        .get("/v1/jaeger/api/traces?service=test-jaeger-query-api&operation=access-mysql&start=1738726754492422&end=1738726754642422&tags=%7B%22operation.type%22%3A%22access-mysql%22%7D&table=mytable")
         .send()
         .await;
     assert_eq!(StatusCode::OK, res.status());

@@ -35,7 +35,7 @@ use servers::error::{
     CatalogSnafu, CollectRecordbatchSnafu, DataFusionSnafu, Result as ServerResult,
     TableNotFoundSnafu,
 };
-use servers::http::jaeger::QueryTraceParams;
+use servers::http::jaeger::{QueryTraceParams, JAEGER_QUERY_TABLE_NAME_KEY};
 use servers::otlp::trace::{
     DURATION_NANO_COLUMN, SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN, SPAN_KIND_COLUMN,
     SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, TIMESTAMP_COLUMN, TRACE_ID_COLUMN, TRACE_TABLE_NAME,
@@ -173,17 +173,21 @@ async fn query_trace_table(
     tags: Option<HashMap<String, JsonValue>>,
     distinct: bool,
 ) -> ServerResult<Output> {
+    let table_name = ctx
+        .extension(JAEGER_QUERY_TABLE_NAME_KEY)
+        .unwrap_or(TRACE_TABLE_NAME);
+
     let table = catalog_manager
         .table(
             ctx.current_catalog(),
             &ctx.current_schema(),
-            TRACE_TABLE_NAME,
+            table_name,
             Some(&ctx),
         )
         .await
         .context(CatalogSnafu)?
         .with_context(|| TableNotFoundSnafu {
-            table: TRACE_TABLE_NAME,
+            table: table_name,
             catalog: ctx.current_catalog(),
             schema: ctx.current_schema(),
         })?;

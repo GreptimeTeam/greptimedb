@@ -41,6 +41,8 @@ use crate::otlp::trace::{
 };
 use crate::query_handler::JaegerQueryHandlerRef;
 
+pub const JAEGER_QUERY_TABLE_NAME_KEY: &str = "jaeger_query_table_name";
+
 /// JaegerAPIResponse is the response of Jaeger HTTP API.
 /// The original version is `structuredResponse` which is defined in https://github.com/jaegertracing/jaeger/blob/main/cmd/query/app/http_handler.go.
 #[derive(Default, Debug, Serialize, Deserialize, PartialEq)]
@@ -198,6 +200,9 @@ pub struct JaegerQueryParams {
     /// Database that the trace data stored in.
     pub db: Option<String>,
 
+    /// Table name that trace data stored
+    pub table: Option<String>,
+
     /// Service name of the trace.
     #[serde(rename = "service")]
     pub service_name: Option<String>,
@@ -230,12 +235,20 @@ pub struct JaegerQueryParams {
     pub span_kind: Option<String>,
 }
 
+impl JaegerQueryParams {
+    fn update_query_context(&self, query_ctx: &mut QueryContext) {
+        // db should be already handled by middlewares
+
+        query_ctx.set_channel(Channel::Jaeger);
+        if let Some(table) = &self.table {
+            query_ctx.set_extension(JAEGER_QUERY_TABLE_NAME_KEY, table.clone());
+        }
+    }
+}
+
 impl QueryTraceParams {
-    fn from_jaeger_query_params(db: &str, query_params: JaegerQueryParams) -> Result<Self> {
-        let mut internal_query_params: QueryTraceParams = QueryTraceParams {
-            db: db.to_string(),
-            ..Default::default()
-        };
+    fn from_jaeger_query_params(query_params: JaegerQueryParams) -> Result<Self> {
+        let mut internal_query_params: QueryTraceParams = QueryTraceParams::default();
 
         internal_query_params.service_name =
             query_params.service_name.context(InvalidJaegerQuerySnafu {
@@ -298,7 +311,6 @@ impl QueryTraceParams {
 
 #[derive(Debug, Default, PartialEq)]
 pub struct QueryTraceParams {
-    pub db: String,
     pub service_name: String,
     pub operation_name: Option<String>,
 
@@ -327,7 +339,8 @@ pub async fn handle_get_services(
         "Received Jaeger '/api/services' request, query_params: {:?}, query_ctx: {:?}",
         query_params, query_ctx
     );
-    query_ctx.set_channel(Channel::Jaeger);
+
+    query_params.update_query_context(&mut query_ctx);
     let query_ctx = Arc::new(query_ctx);
     let db = query_ctx.get_db_string();
 
@@ -378,7 +391,8 @@ pub async fn handle_get_trace(
         "Received Jaeger '/api/traces/{}' request, query_params: {:?}, query_ctx: {:?}",
         trace_id, query_params, query_ctx
     );
-    query_ctx.set_channel(Channel::Jaeger);
+
+    query_params.update_query_context(&mut query_ctx);
     let query_ctx = Arc::new(query_ctx);
     let db = query_ctx.get_db_string();
 
@@ -426,7 +440,8 @@ pub async fn handle_find_traces(
         "Received Jaeger '/api/traces' request, query_params: {:?}, query_ctx: {:?}",
         query_params, query_ctx
     );
-    query_ctx.set_channel(Channel::Jaeger);
+
+    query_params.update_query_context(&mut query_ctx);
     let query_ctx = Arc::new(query_ctx);
     let db = query_ctx.get_db_string();
 
@@ -435,7 +450,7 @@ pub async fn handle_find_traces(
         .with_label_values(&[&db, "/api/traces"])
         .start_timer();
 
-    match QueryTraceParams::from_jaeger_query_params(&db, query_params) {
+    match QueryTraceParams::from_jaeger_query_params(query_params) {
         Ok(query_params) => {
             let output = handler.find_traces(query_ctx, query_params).await;
             match output {
@@ -475,8 +490,8 @@ pub async fn handle_get_operations(
         "Received Jaeger '/api/operations' request, query_params: {:?}, query_ctx: {:?}",
         query_params, query_ctx
     );
-    if let Some(service_name) = query_params.service_name {
-        query_ctx.set_channel(Channel::Jaeger);
+    if let Some(service_name) = &query_params.service_name {
+        query_params.update_query_context(&mut query_ctx);
         let query_ctx = Arc::new(query_ctx);
         let db = query_ctx.get_db_string();
 
@@ -486,7 +501,7 @@ pub async fn handle_get_operations(
             .start_timer();
 
         match handler
-            .get_operations(query_ctx, &service_name, query_params.span_kind.as_deref())
+            .get_operations(query_ctx, service_name, query_params.span_kind.as_deref())
             .await
         {
             Ok(output) => match covert_to_records(output).await {
@@ -547,7 +562,8 @@ pub async fn handle_get_operations_by_service(
         "Received Jaeger '/api/services/{}/operations' request, query_params: {:?}, query_ctx: {:?}",
         service_name, query_params, query_ctx
     );
-    query_ctx.set_channel(Channel::Jaeger);
+
+    query_params.update_query_context(&mut query_ctx);
     let query_ctx = Arc::new(query_ctx);
     let db = query_ctx.get_db_string();
 
@@ -885,7 +901,6 @@ fn operations_from_records(
 
 // Check whether the schema of the records is correct.
 fn check_schema(records: &HttpRecordsOutput, expected_schema: &[(&str, &str)]) -> Result<()> {
-    dbg!(records);
     for (i, column) in records.schema.column_schemas.iter().enumerate() {
         if column.name != expected_schema[i].0 || column.data_type != expected_schema[i].1 {
             InvalidJaegerQuerySnafu {
@@ -939,7 +954,6 @@ fn convert_string_to_boolean(input: &serde_json::Value) -> Option<serde_json::Va
 
 #[cfg(test)]
 mod tests {
-    use common_catalog::consts::DEFAULT_SCHEMA_NAME;
     use serde_json::{json, Number, Value as JsonValue};
 
     use super::*;
@@ -1340,7 +1354,6 @@ mod tests {
                     ..Default::default()
                 },
                 QueryTraceParams {
-                    db: DEFAULT_SCHEMA_NAME.to_string(),
                     service_name: "test-service-0".to_string(),
                     ..Default::default()
                 },
@@ -1358,7 +1371,6 @@ mod tests {
                     ..Default::default()
                 },
                 QueryTraceParams {
-                    db: DEFAULT_SCHEMA_NAME.to_string(),
                     service_name: "test-service-0".to_string(),
                     operation_name: Some("access-mysql".to_string()),
                     start_time: Some(1738726754492422000),
@@ -1378,9 +1390,7 @@ mod tests {
         ];
 
         for (query_params, expected) in tests {
-            let query_params =
-                QueryTraceParams::from_jaeger_query_params(DEFAULT_SCHEMA_NAME, query_params)
-                    .unwrap();
+            let query_params = QueryTraceParams::from_jaeger_query_params(query_params).unwrap();
             assert_eq!(query_params, expected);
         }
     }
