@@ -179,18 +179,16 @@ impl MergeScanExec {
                 .iter()
                 .map(|sort_expr| {
                     let physical_expr = session_state
-                        .create_physical_expr(sort_expr.expr.clone(), plan.schema())
-                        // todo: handle error
-                        .unwrap();
-                    PhysicalSortExpr::new(
+                        .create_physical_expr(sort_expr.expr.clone(), plan.schema())?;
+                    Ok(PhysicalSortExpr::new(
                         physical_expr,
                         SortOptions {
                             descending: !sort_expr.asc,
                             nulls_first: sort_expr.nulls_first,
                         },
-                    )
+                    ))
                 })
-                .collect();
+                .collect::<Result<Vec<_>>>()?;
             EquivalenceProperties::new_with_orderings(
                 arrow_schema.clone(),
                 &[LexOrdering::new(lex_ordering)],
