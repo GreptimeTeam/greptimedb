@@ -151,7 +151,7 @@ impl FlowStateManager {
 pub struct FlowStat {
     /// For each key, the bytes of the state in memory
     pub state_size: BTreeMap<u32, usize>,
-    /// For each key, the last_exec_time of flow
+    /// For each key, the last execution time of flow in unix timestamp milliseconds.
     pub last_exec_time_map: BTreeMap<FlowId, i64>,
 }
 
