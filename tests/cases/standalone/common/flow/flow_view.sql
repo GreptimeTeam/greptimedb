@@ -70,3 +70,7 @@ INSERT INTO ngx_access_log VALUES ('192.168.1.1', 'GET', '/index.html', 200, 512
 
 
 SELECT created_time < last_execution_time, created_time IS NOT NULL, last_execution_time IS NOT NULL FROM information_schema.flows WHERE flow_name = 'user_agent_flow';
+
+DROP TABLE ngx_access_log;
+DROP TABLE user_agent_statistics;
+DROP FLOW user_agent_flow;

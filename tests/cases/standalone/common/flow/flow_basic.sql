@@ -59,7 +59,7 @@ SELECT
 FROM
     out_num_cnt_basic;
 
-select * from INFORMATION_SCHEMA.flows;
+select flow_name, flow_id, state_size, table_catalog, flow_definition, comment, expire_after, source_table_ids, sink_table_name, flownode_ids, options, source_table_names FROM information_schema.flows;
 
 DROP FLOW test_numbers_basic;
 
@@ -83,7 +83,7 @@ FROM
 
 SHOW CREATE TABLE out_basic;
 
-select * from INFORMATION_SCHEMA.flows;
+select flow_name, flow_id, state_size, table_catalog, flow_definition, comment, expire_after, source_table_ids, sink_table_name, flownode_ids, options, source_table_names FROM information_schema.flows;
 
 DROP FLOW test_wildcard_basic;
 
@@ -109,7 +109,7 @@ SHOW CREATE TABLE out_basic;
 
 SELECT wildcard FROM out_basic;
 
-select * from INFORMATION_SCHEMA.flows;
+select flow_name, flow_id, state_size, table_catalog, flow_definition, comment, expire_after, source_table_ids, sink_table_name, flownode_ids, options, source_table_names FROM information_schema.flows;
 
 DROP FLOW test_wildcard_basic;
 DROP TABLE out_basic;
@@ -172,7 +172,7 @@ SELECT
 FROM
     out_distinct_basic;
 
-select * from INFORMATION_SCHEMA.flows;
+select flow_name, flow_id, state_size, table_catalog, flow_definition, comment, expire_after, source_table_ids, sink_table_name, flownode_ids, options, source_table_names FROM information_schema.flows;
 
 DROP FLOW test_distinct_basic;
 
@@ -268,7 +268,7 @@ FROM
 
 DROP TABLE bytes_log;
 
-select * from INFORMATION_SCHEMA.flows;
+select flow_name, flow_id, state_size, table_catalog, flow_definition, comment, expire_after, source_table_ids, sink_table_name, flownode_ids, options, source_table_names FROM information_schema.flows;
 
 DROP FLOW find_approx_rate;
 
@@ -332,7 +332,7 @@ SELECT
 FROM
     ngx_country;
 
-select * from INFORMATION_SCHEMA.flows;
+select flow_name, flow_id, state_size, table_catalog, flow_definition, comment, expire_after, source_table_ids, sink_table_name, flownode_ids, options, source_table_names FROM information_schema.flows;
 
 DROP FLOW calc_ngx_country;
 
@@ -404,7 +404,7 @@ SELECT
 FROM
     ngx_country;
 
-select * from INFORMATION_SCHEMA.flows;
+select flow_name, flow_id, state_size, table_catalog, flow_definition, comment, expire_after, source_table_ids, sink_table_name, flownode_ids, options, source_table_names FROM information_schema.flows;
 
 DROP FLOW calc_ngx_country;
 
@@ -484,7 +484,7 @@ SELECT
 FROM
     temp_alerts;
 
-select * from INFORMATION_SCHEMA.flows;
+select flow_name, flow_id, state_size, table_catalog, flow_definition, comment, expire_after, source_table_ids, sink_table_name, flownode_ids, options, source_table_names FROM information_schema.flows;
 
 DROP FLOW temp_monitoring;
 
@@ -560,7 +560,7 @@ SELECT
 FROM
     ngx_distribution;
 
-select * from INFORMATION_SCHEMA.flows;
+select flow_name, flow_id, state_size, table_catalog, flow_definition, comment, expire_after, source_table_ids, sink_table_name, flownode_ids, options, source_table_names FROM information_schema.flows;
 
 DROP FLOW calc_ngx_distribution;
 
@@ -658,7 +658,7 @@ SELECT
 FROM
     requests_without_ip;
 
-select * from INFORMATION_SCHEMA.flows;
+select flow_name, flow_id, state_size, table_catalog, flow_definition, comment, expire_after, source_table_ids, sink_table_name, flownode_ids, options, source_table_names FROM information_schema.flows;
 
 DROP FLOW requests_long_term;
 
@@ -714,7 +714,7 @@ ADMIN FLUSH_FLOW('calc_android_log_abnormal');
 
 SELECT crash, fatal, backtrace, anr FROM android_log_abnormal;
 
-select * from INFORMATION_SCHEMA.flows;
+select flow_name, flow_id, state_size, table_catalog, flow_definition, comment, expire_after, source_table_ids, sink_table_name, flownode_ids, options, source_table_names FROM information_schema.flows;
 
 DROP FLOW calc_android_log_abnormal;
 
@@ -770,7 +770,7 @@ ADMIN FLUSH_FLOW('calc_android_log_abnormal');
 
 SELECT crash, fatal, backtrace, anr FROM android_log_abnormal;
 
-select * from INFORMATION_SCHEMA.flows;
+select flow_name, flow_id, state_size, table_catalog, flow_definition, comment, expire_after, source_table_ids, sink_table_name, flownode_ids, options, source_table_names FROM information_schema.flows;
 
 DROP FLOW calc_android_log_abnormal;
 
@@ -819,7 +819,7 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_numbers_basic');
 
-select * from INFORMATION_SCHEMA.flows;
+select flow_name, flow_id, state_size, table_catalog, flow_definition, comment, expire_after, source_table_ids, sink_table_name, flownode_ids, options, source_table_names FROM information_schema.flows;
 
 DROP FLOW test_numbers_basic;
 DROP TABLE numbers_input_basic;
@@ -901,7 +901,7 @@ SELECT device_model,
   ok_conection_rate,
   record_time_window FROM live_connection_statistics_detail;
 
-select * from INFORMATION_SCHEMA.flows;
+select flow_name, flow_id, state_size, table_catalog, flow_definition, comment, expire_after, source_table_ids, sink_table_name, flownode_ids, options, source_table_names FROM information_schema.flows;
 
 DROP FLOW live_connection_aggregation_detail;
 DROP TABLE live_connection_log;

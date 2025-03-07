@@ -162,3 +162,15 @@ SELECT created_time < last_execution_time, created_time IS NOT NULL, last_execut
 | true                                                                                 | true                                              | true                                                     |
 +--------------------------------------------------------------------------------------+---------------------------------------------------+----------------------------------------------------------+
 
+DROP TABLE ngx_access_log;
+
+Affected Rows: 0
+
+DROP TABLE user_agent_statistics;
+
+Affected Rows: 0
+
+DROP FLOW user_agent_flow;
+
+Affected Rows: 0
+
