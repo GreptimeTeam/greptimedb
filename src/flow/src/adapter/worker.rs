@@ -225,7 +225,7 @@ impl WorkerHandle {
         ret.into_query_last_exec_time_map().map_err(|ret| {
             InternalSnafu {
                 reason: format!(
-                    "Flow Node/Worker itc failed, expect Response::QueryLastExecTimeMap, found {ret:?}"
+                    "Flow Node/Worker get_last_exec_time_map failed, expect Response::QueryLastExecTimeMap, found {ret:?}"
                 ),
             }
             .build()
