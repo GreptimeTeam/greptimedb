@@ -97,7 +97,7 @@ impl<'a> MetadataKey<'a, FlowStateKey> for FlowStateKey {
 pub struct FlowStateValue {
     /// For each key, the bytes of the state in memory
     pub state_size: BTreeMap<FlowId, usize>,
-    /// For each key, the last_exec_time of flow
+    /// For each key, the last execution time of flow in unix timestamp milliseconds.
     pub last_exec_time_map: BTreeMap<FlowId, i64>,
 }
 
