@@ -326,14 +326,17 @@ impl TreeNodeRewriter for EnforceDistRequirementRewriter {
                 return Ok(Transformed::no(node));
             }
 
-            let mut new_exprs: HashSet<Expr> = HashSet::from_iter(projection.expr.clone());
+            let mut existing: HashSet<Expr> = HashSet::from_iter(projection.expr.clone());
+            let mut new_exprs = projection.expr.clone();
             for col in &column_requirements {
-                new_exprs.insert(col_fn(col));
+                let expr = col_fn(col);
+                if !existing.contains(&expr) {
+                    existing.insert(expr.clone());
+                    new_exprs.push(expr);
+                }
             }
-            let new_node = node.with_new_exprs(
-                new_exprs.into_iter().collect(),
-                node.inputs().into_iter().cloned().collect(),
-            )?;
+            let new_node =
+                node.with_new_exprs(new_exprs, node.inputs().into_iter().cloned().collect())?;
             return Ok(Transformed::yes(new_node));
         }
 
