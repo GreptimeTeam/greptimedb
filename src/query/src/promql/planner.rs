@@ -1034,6 +1034,7 @@ impl PromPlanner {
                     table: table_ref.to_quoted_string(),
                 })?,
             is_range_selector,
+            self.ctx.tag_columns.clone(),
             divide_plan,
         );
         let logical_plan = LogicalPlan::Extension(Extension {
