@@ -40,5 +40,13 @@ pub trait PrometheusHandler {
         ctx: &QueryContextRef,
     ) -> Result<Vec<String>>;
 
+    async fn query_label_values(
+        &self,
+        metric: String,
+        label_name: String,
+        matchers: Vec<Matcher>,
+        ctx: &QueryContextRef,
+    ) -> Result<Vec<String>>;
+
     fn catalog_manager(&self) -> CatalogManagerRef;
 }
