@@ -71,23 +71,22 @@ pub enum MetaClientType {
 pub type MetaClientRef = Arc<client::MetaClient>;
 
 pub async fn create_meta_client(
-    cluster_id: u64,
     client_type: MetaClientType,
     meta_client_options: &MetaClientOptions,
 ) -> error::Result<MetaClientRef> {
     info!(
-        "Creating {:?} instance from cluster {} with Metasrv addrs {:?}",
-        client_type, cluster_id, meta_client_options.metasrv_addrs
+        "Creating {:?} instance with Metasrv addrs {:?}",
+        client_type, meta_client_options.metasrv_addrs
     );
 
     let mut builder = match client_type {
         MetaClientType::Datanode { member_id } => {
-            MetaClientBuilder::datanode_default_options(cluster_id, member_id)
+            MetaClientBuilder::datanode_default_options(member_id)
         }
         MetaClientType::Flownode { member_id } => {
-            MetaClientBuilder::flownode_default_options(cluster_id, member_id)
+            MetaClientBuilder::flownode_default_options(member_id)
         }
-        MetaClientType::Frontend => MetaClientBuilder::frontend_default_options(cluster_id),
+        MetaClientType::Frontend => MetaClientBuilder::frontend_default_options(),
     };
 
     let base_config = ChannelConfig::new()

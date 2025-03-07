@@ -24,13 +24,13 @@ use table::table_reference::TableReference;
 
 use crate::cache_invalidator::Context;
 use crate::ddl::utils::handle_retry_error;
-use crate::ddl::{DdlContext, TableMetadata, TableMetadataAllocatorContext};
+use crate::ddl::{DdlContext, TableMetadata};
 use crate::error::{self, Result};
 use crate::instruction::CacheIdent;
 use crate::key::table_name::TableNameKey;
 use crate::lock_key::{CatalogLock, SchemaLock, TableNameLock};
+use crate::metrics;
 use crate::rpc::ddl::CreateViewTask;
-use crate::{metrics, ClusterId};
 
 // The procedure to execute `[CreateViewTask]`.
 pub struct CreateViewProcedure {
@@ -41,12 +41,11 @@ pub struct CreateViewProcedure {
 impl CreateViewProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::CreateView";
 
-    pub fn new(cluster_id: ClusterId, task: CreateViewTask, context: DdlContext) -> Self {
+    pub fn new(task: CreateViewTask, context: DdlContext) -> Self {
         Self {
             context,
             data: CreateViewData {
                 state: CreateViewState::Prepare,
-                cluster_id,
                 task,
                 need_update: false,
             },
@@ -144,12 +143,7 @@ impl CreateViewProcedure {
             let TableMetadata { table_id, .. } = self
                 .context
                 .table_metadata_allocator
-                .create_view(
-                    &TableMetadataAllocatorContext {
-                        cluster_id: self.data.cluster_id,
-                    },
-                    &None,
-                )
+                .create_view(&None)
                 .await?;
             self.data.set_allocated_metadata(table_id, false);
         }
@@ -285,7 +279,6 @@ pub enum CreateViewState {
 pub struct CreateViewData {
     pub state: CreateViewState,
     pub task: CreateViewTask,
-    pub cluster_id: ClusterId,
     /// Whether to update the view info.
     pub need_update: bool,
 }
