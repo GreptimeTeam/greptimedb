@@ -22,7 +22,6 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use datafusion::common::Result;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::context::SessionState;
-use datafusion::execution::session_state;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner};
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion, TreeNodeVisitor};
@@ -163,7 +162,6 @@ impl ExtensionPlanner for DistExtensionPlanner {
             .get_extension()
             .unwrap_or_else(QueryContext::arc);
         let merge_scan_plan = MergeScanExec::new(
-            session_state,
             table_name,
             regions,
             input_plan.clone(),
