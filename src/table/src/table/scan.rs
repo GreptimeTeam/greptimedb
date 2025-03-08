@@ -32,10 +32,15 @@ use datafusion::physical_plan::{
 };
 use datafusion_common::stats::Precision;
 use datafusion_common::{ColumnStatistics, DataFusionError, Statistics};
-use datafusion_physical_expr::{EquivalenceProperties, Partitioning, PhysicalSortExpr};
+use datafusion_physical_expr::expressions::Column;
+use datafusion_physical_expr::{
+    EquivalenceProperties, LexOrdering, Partitioning, PhysicalSortExpr,
+};
 use datatypes::arrow::datatypes::SchemaRef as ArrowSchemaRef;
+use datatypes::compute::SortOptions;
 use futures::{Stream, StreamExt};
 use store_api::region_engine::{PartitionRange, PrepareRequest, RegionScannerRef};
+use store_api::storage::{ScanRequest, TimeSeriesDistribution};
 
 use crate::table::metrics::StreamMetrics;
 
@@ -54,7 +59,7 @@ pub struct RegionScanExec {
 }
 
 impl RegionScanExec {
-    pub fn new(scanner: RegionScannerRef) -> Self {
+    pub fn new(scanner: RegionScannerRef, request: ScanRequest) -> DfResult<Self> {
         let arrow_schema = scanner.schema().arrow_schema().clone();
         let scanner_props = scanner.properties();
         let mut num_output_partition = scanner_props.num_partitions();
@@ -64,14 +69,60 @@ impl RegionScanExec {
         if num_output_partition == 0 {
             num_output_partition = 1;
         }
+
+        let metadata = scanner.metadata();
+        let mut pk_columns: Vec<PhysicalSortExpr> = metadata
+            .primary_key_columns()
+            .map(|col| {
+                Ok(PhysicalSortExpr::new(
+                    Arc::new(Column::new_with_schema(
+                        &col.column_schema.name,
+                        &arrow_schema,
+                    )?) as _,
+                    SortOptions {
+                        descending: true,
+                        nulls_first: false,
+                    },
+                ))
+            })
+            .collect::<DfResult<Vec<_>>>()?;
+        let ts_col = PhysicalSortExpr::new(
+            Arc::new(Column::new_with_schema(
+                &metadata.time_index_column().column_schema.name,
+                &arrow_schema,
+            )?) as _,
+            SortOptions {
+                descending: true,
+                nulls_first: false,
+            },
+        );
+
+        let eq_props = match request.distribution {
+            Some(TimeSeriesDistribution::PerSeries) => {
+                pk_columns.push(ts_col);
+                EquivalenceProperties::new_with_orderings(
+                    arrow_schema.clone(),
+                    &[LexOrdering::new(pk_columns)],
+                )
+            }
+            Some(TimeSeriesDistribution::TimeWindowed) => {
+                pk_columns.insert(0, ts_col);
+                EquivalenceProperties::new_with_orderings(
+                    arrow_schema.clone(),
+                    &[LexOrdering::new(pk_columns)],
+                )
+            }
+            None => EquivalenceProperties::new(arrow_schema.clone()),
+        };
+
         let properties = PlanProperties::new(
-            EquivalenceProperties::new(arrow_schema.clone()),
+            eq_props,
             Partitioning::UnknownPartitioning(num_output_partition),
             ExecutionMode::Bounded,
         );
         let append_mode = scanner_props.append_mode();
         let total_rows = scanner_props.total_rows();
-        Self {
+        Ok(Self {
             scanner: Arc::new(Mutex::new(scanner)),
             arrow_schema,
             output_ordering: None,
@@ -80,7 +131,7 @@ impl RegionScanExec {
             append_mode,
             total_rows,
             is_partition_set: false,
-        }
+        })
     }
 
     /// Get the partition ranges of the scanner. This method will collapse the ranges into
@@ -388,7 +439,7 @@ mod test {
         let region_metadata = Arc::new(builder.build().unwrap());
 
         let scanner = Box::new(SinglePartitionScanner::new(stream, false, region_metadata));
-        let plan = RegionScanExec::new(scanner);
+        let plan = RegionScanExec::new(scanner, ScanRequest::default()).unwrap();
         let actual: SchemaRef = Arc::new(
             plan.properties
                 .eq_properties
