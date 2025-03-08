@@ -786,34 +786,40 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
                 }
                 SCOPE_NAME_COLUMN => {
                     if let JsonValue::String(scope_name) = cell {
-                        span.tags.push(KeyValue {
-                            key: KEY_OTEL_SCOPE_NAME.to_string(),
-                            value_type: ValueType::String,
-                            value: Value::String(scope_name),
-                        });
+                        if !scope_name.is_empty() {
+                            span.tags.push(KeyValue {
+                                key: KEY_OTEL_SCOPE_NAME.to_string(),
+                                value_type: ValueType::String,
+                                value: Value::String(scope_name),
+                            });
+                        }
                     }
                 }
                 SCOPE_VERSION_COLUMN => {
                     if let JsonValue::String(scope_version) = cell {
-                        span.tags.push(KeyValue {
-                            key: KEY_OTEL_SCOPE_VERSION.to_string(),
-                            value_type: ValueType::String,
-                            value: Value::String(scope_version),
-                        });
+                        if !scope_version.is_empty() {
+                            span.tags.push(KeyValue {
+                                key: KEY_OTEL_SCOPE_VERSION.to_string(),
+                                value_type: ValueType::String,
+                                value: Value::String(scope_version),
+                            });
+                        }
                     }
                 }
                 SPAN_KIND_COLUMN => {
                     if let JsonValue::String(span_kind) = cell {
-                        span.tags.push(KeyValue {
-                            key: KEY_SPAN_KIND.to_string(),
-                            value_type: ValueType::String,
-                            value: Value::String(normalize_span_kind(&span_kind)),
-                        });
+                        if !span_kind.is_empty() {
+                            span.tags.push(KeyValue {
+                                key: KEY_SPAN_KIND.to_string(),
+                                value_type: ValueType::String,
+                                value: Value::String(normalize_span_kind(&span_kind)),
+                            });
+                        }
                     }
                 }
                 SPAN_STATUS_CODE => {
                     if let JsonValue::String(span_status) = cell {
-                        if span_status != SPAN_STATUS_UNSET {
+                        if span_status != SPAN_STATUS_UNSET && !span_status.is_empty() {
                             span.tags.push(KeyValue {
                                 key: KEY_OTEL_STATUS_CODE.to_string(),
                                 value_type: ValueType::String,
