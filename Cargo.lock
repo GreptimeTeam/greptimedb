@@ -11209,6 +11209,7 @@ version = "0.13.0"
 dependencies = [
  "mito2",
  "object-store",
+ "snafu 0.8.5",
  "store-api",
 ]
 

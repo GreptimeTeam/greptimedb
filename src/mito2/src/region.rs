@@ -14,7 +14,7 @@
 
 //! Mito region.
 
-pub(crate) mod opener;
+pub mod opener;
 pub mod options;
 pub(crate) mod version;
 

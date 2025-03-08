@@ -15,7 +15,7 @@
 //! Region opener.
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicI64;
+use std::sync::atomic::{AtomicI64, AtomicU64};
 use std::sync::Arc;
 
 use common_telemetry::{debug, error, info, warn};
@@ -27,7 +27,9 @@ use object_store::util::{join_dir, normalize_dir};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::logstore::provider::Provider;
 use store_api::logstore::LogStore;
-use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
+use store_api::metadata::{
+    ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
+};
 use store_api::region_engine::RegionRole;
 use store_api::storage::{ColumnId, RegionId};
 
@@ -203,11 +205,16 @@ impl RegionOpener {
         }
         // Safety: must be set before calling this method.
         let options = self.options.take().unwrap();
-        let object_store = self.object_store(&options.storage)?.clone();
+        let object_store = get_object_store(&options.storage, &self.object_store_manager)?.clone();
         let provider = self.provider(&options.wal_options);
         let metadata = Arc::new(metadata);
         // Create a manifest manager for this region and writes regions to the manifest file.
-        let region_manifest_options = self.manifest_options(config, &options)?;
+        let region_manifest_options = Self::manifest_options(
+            config,
+            &options,
+            &self.region_dir,
+            &self.object_store_manager,
+        )?;
         let manifest_manager = RegionManifestManager::new(
             metadata.clone(),
             region_manifest_options,
@@ -312,7 +319,12 @@ impl RegionOpener {
     ) -> Result<Option<MitoRegion>> {
         let region_options = self.options.as_ref().unwrap().clone();
 
-        let region_manifest_options = self.manifest_options(config, &region_options)?;
+        let region_manifest_options = Self::manifest_options(
+            config,
+            &region_options,
+            &self.region_dir,
+            &self.object_store_manager,
+        )?;
         let Some(manifest_manager) = RegionManifestManager::open(
             region_manifest_options,
             self.stats.total_manifest_size.clone(),
@@ -332,7 +344,7 @@ impl RegionOpener {
             .take()
             .unwrap_or_else(|| wal.wal_entry_reader(&provider, region_id, None));
         let on_region_opened = wal.on_region_opened();
-        let object_store = self.object_store(&region_options.storage)?.clone();
+        let object_store = get_object_store(&region_options.storage, &self.object_store_manager)?;
 
         debug!("Open region {} with options: {:?}", region_id, self.options);
 
@@ -422,13 +434,14 @@ impl RegionOpener {
 
     /// Returns a new manifest options.
     fn manifest_options(
-        &self,
         config: &MitoConfig,
         options: &RegionOptions,
+        region_dir: &str,
+        object_store_manager: &ObjectStoreManagerRef,
     ) -> Result<RegionManifestOptions> {
-        let object_store = self.object_store(&options.storage)?.clone();
+        let object_store = get_object_store(&options.storage, object_store_manager)?;
         Ok(RegionManifestOptions {
-            manifest_dir: new_manifest_dir(&self.region_dir),
+            manifest_dir: new_manifest_dir(region_dir),
             object_store,
             // We don't allow users to set the compression algorithm as we use it as a file suffix.
             // Currently, the manifest storage doesn't have good support for changing compression algorithms.
@@ -436,19 +449,61 @@ impl RegionOpener {
             checkpoint_distance: config.manifest_checkpoint_distance,
         })
     }
+}
 
-    /// Returns an object store corresponding to `name`. If `name` is `None`, this method returns the default object store.
-    fn object_store(&self, name: &Option<String>) -> Result<&object_store::ObjectStore> {
-        if let Some(name) = name {
-            Ok(self
-                .object_store_manager
-                .find(name)
-                .context(ObjectStoreNotFoundSnafu {
-                    object_store: name.to_string(),
-                })?)
-        } else {
-            Ok(self.object_store_manager.default_object_store())
+/// Returns an object store corresponding to `name`. If `name` is `None`, this method returns the default object store.
+pub fn get_object_store(
+    name: &Option<String>,
+    object_store_manager: &ObjectStoreManagerRef,
+) -> Result<object_store::ObjectStore> {
+    if let Some(name) = name {
+        Ok(object_store_manager
+            .find(name)
+            .context(ObjectStoreNotFoundSnafu {
+                object_store: name.to_string(),
+            })?
+            .clone())
+    } else {
+        Ok(object_store_manager.default_object_store().clone())
+    }
+}
+
+/// A loader for loading metadata from a region dir.
+pub struct RegionMetadataLoader {
+    config: Arc<MitoConfig>,
+    object_store_manager: ObjectStoreManagerRef,
+}
+
+impl RegionMetadataLoader {
+    /// Creates a new `RegionOpenerBuilder`.
+    pub fn new(config: Arc<MitoConfig>, object_store_manager: ObjectStoreManagerRef) -> Self {
+        Self {
+            config,
+            object_store_manager,
         }
+    }
+
+    /// Loads the metadata of the region from the region dir.
+    pub async fn load(
+        &self,
+        region_dir: &str,
+        region_options: &RegionOptions,
+    ) -> Result<Option<RegionMetadataRef>> {
+        let region_manifest_options = RegionOpener::manifest_options(
+            &self.config,
+            region_options,
+            region_dir,
+            &self.object_store_manager,
+        )?;
+        let Some(manifest_manager) =
+            RegionManifestManager::open(region_manifest_options, Arc::new(AtomicU64::new(0)))
+                .await?
+        else {
+            return Ok(None);
+        };
+
+        let manifest = manifest_manager.manifest();
+        Ok(Some(manifest.metadata.clone()))
     }
 }
 

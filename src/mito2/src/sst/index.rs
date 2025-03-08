@@ -16,9 +16,9 @@ pub(crate) mod bloom_filter;
 mod codec;
 pub(crate) mod fulltext_index;
 mod indexer;
-pub(crate) mod intermediate;
+pub mod intermediate;
 pub(crate) mod inverted_index;
-pub(crate) mod puffin_manager;
+pub mod puffin_manager;
 mod statistics;
 pub(crate) mod store;
 

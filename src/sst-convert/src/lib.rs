@@ -14,4 +14,4 @@
 
 mod reader;
 mod table;
-mod writer;
+pub mod writer;
