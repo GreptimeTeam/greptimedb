@@ -65,7 +65,9 @@ impl Function for VectorKthElemFunction {
                 ConcreteDataType::string_datatype(),
                 ConcreteDataType::binary_datatype(),
             ],
-            vec![ConcreteDataType::uint64_datatype()],
+            vec![
+                ConcreteDataType::int64_datatype(),
+            ],
         )
     }
 
@@ -107,15 +109,25 @@ impl Function for VectorKthElemFunction {
                 continue;
             };
 
+            ensure!(
+                arg1 >= 1.0 && arg1.fract() == 0.0,
+                InvalidFuncArgsSnafu {
+                    err_msg: format!(
+                        "Invalid argument: k must be a positive integer, but got k = {}.",
+                        arg1
+                    ),
+                }
+            );
+
             let k = arg1 as usize;
 
             ensure!(
-                k > 0 && k <= arg0.len(),
+                k <= arg0.len(),
                 InvalidFuncArgsSnafu {
                     err_msg: format!(
-                        "Invalid function args: Invalid k: {}. k must be in the range [1, {}]",
-                        k,
-                        arg0.len()
+                        "Out of range: k must be in the range [1, {}], but got k = {}.",
+                        arg0.len(),
+                        k
                     ),
                 }
             );
@@ -174,14 +186,14 @@ mod tests {
             error::Error::InvalidFuncArgs { err_msg, .. } => {
                 assert_eq!(
                     err_msg,
-                    format!("Invalid function args: Invalid k: 4. k must be in the range [1, 3]")
+                    format!("Out of range: k must be in the range [1, 3], but got k = 4.")
                 )
             }
             _ => unreachable!(),
         }
 
         let input0 = Arc::new(StringVector::from(vec![Some("[1.0,2.0,3.0]".to_string())]));
-        let input1 = Arc::new(Int64Vector::from(vec![Some(0)]));
+        let input1 = Arc::new(Int64Vector::from(vec![Some(-1)]));
 
         let err = func
             .eval(&FunctionContext::default(), &[input0, input1])
@@ -190,7 +202,7 @@ mod tests {
             error::Error::InvalidFuncArgs { err_msg, .. } => {
                 assert_eq!(
                     err_msg,
-                    format!("Invalid function args: Invalid k: 0. k must be in the range [1, 3]")
+                    format!("Invalid argument: k must be a positive integer, but got k = -1.")
                 )
             }
             _ => unreachable!(),
