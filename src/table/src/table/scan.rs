@@ -80,7 +80,7 @@ impl RegionScanExec {
                         &arrow_schema,
                     )?) as _,
                     SortOptions {
-                        descending: true,
+                        descending: false,
                         nulls_first: false,
                     },
                 ))
@@ -92,7 +92,7 @@ impl RegionScanExec {
                 &arrow_schema,
             )?) as _,
             SortOptions {
-                descending: true,
+                descending: false,
                 nulls_first: false,
             },
         );
