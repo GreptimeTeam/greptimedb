@@ -13,7 +13,6 @@
 // limitations under the License.
 
 //! impl `FlowNode` trait for FlowNodeManager so standalone can call them
-
 use std::collections::HashMap;
 
 use api::v1::flow::{
