@@ -50,7 +50,7 @@ impl Function for JsonPathMatchFunction {
         )
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure!(
             columns.len() == 2,
             InvalidFuncArgsSnafu {
@@ -180,7 +180,7 @@ mod tests {
         let path_vector = StringVector::from(paths);
         let args: Vec<VectorRef> = vec![Arc::new(json_vector), Arc::new(path_vector)];
         let vector = json_path_match
-            .eval(FunctionContext::default(), &args)
+            .eval(&FunctionContext::default(), &args)
             .unwrap();
 
         assert_eq!(7, vector.len());

@@ -36,6 +36,7 @@ use crate::memtable::{
     BoxedBatchIterator, BulkPart, KeyValues, Memtable, MemtableBuilder, MemtableId, MemtableRanges,
     MemtableRef, MemtableStats,
 };
+use crate::read::scan_region::PredicateGroup;
 use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt, SortField};
 
 /// Empty memtable for test.
@@ -92,7 +93,7 @@ impl Memtable for EmptyMemtable {
     fn ranges(
         &self,
         _projection: Option<&[ColumnId]>,
-        _predicate: Option<Predicate>,
+        _predicate: PredicateGroup,
         _sequence: Option<SequenceNumber>,
     ) -> MemtableRanges {
         MemtableRanges::default()

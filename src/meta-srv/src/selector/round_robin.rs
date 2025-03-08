@@ -20,7 +20,7 @@ use snafu::ensure;
 use crate::error::{NoEnoughAvailableNodeSnafu, Result};
 use crate::lease;
 use crate::metasrv::{SelectTarget, SelectorContext};
-use crate::selector::{Namespace, Selector, SelectorOptions};
+use crate::selector::{Selector, SelectorOptions};
 
 /// Round-robin selector that returns the next peer in the list in sequence.
 /// Datanodes are ordered by their node_id.
@@ -53,7 +53,6 @@ impl RoundRobinSelector {
 
     async fn get_peers(
         &self,
-        ns: Namespace,
         min_required_items: usize,
         ctx: &SelectorContext,
     ) -> Result<Vec<Peer>> {
@@ -61,8 +60,7 @@ impl RoundRobinSelector {
             SelectTarget::Datanode => {
                 // 1. get alive datanodes.
                 let lease_kvs =
-                    lease::alive_datanodes(ns, &ctx.meta_peer_client, ctx.datanode_lease_secs)
-                        .await?;
+                    lease::alive_datanodes(&ctx.meta_peer_client, ctx.datanode_lease_secs).await?;
 
                 // 2. map into peers
                 lease_kvs
@@ -73,8 +71,7 @@ impl RoundRobinSelector {
             SelectTarget::Flownode => {
                 // 1. get alive flownodes.
                 let lease_kvs =
-                    lease::alive_flownodes(ns, &ctx.meta_peer_client, ctx.flownode_lease_secs)
-                        .await?;
+                    lease::alive_flownodes(&ctx.meta_peer_client, ctx.flownode_lease_secs).await?;
 
                 // 2. map into peers
                 lease_kvs
@@ -105,13 +102,8 @@ impl Selector for RoundRobinSelector {
     type Context = SelectorContext;
     type Output = Vec<Peer>;
 
-    async fn select(
-        &self,
-        ns: Namespace,
-        ctx: &Self::Context,
-        opts: SelectorOptions,
-    ) -> Result<Vec<Peer>> {
-        let peers = self.get_peers(ns, opts.min_required_items, ctx).await?;
+    async fn select(&self, ctx: &Self::Context, opts: SelectorOptions) -> Result<Vec<Peer>> {
+        let peers = self.get_peers(opts.min_required_items, ctx).await?;
         // choose peers
         let mut selected = Vec::with_capacity(opts.min_required_items);
         for _ in 0..opts.min_required_items {
@@ -135,8 +127,6 @@ mod test {
     async fn test_round_robin_selector() {
         let selector = RoundRobinSelector::default();
         let ctx = create_selector_context();
-        let ns = 0;
-
         // add three nodes
         let peer1 = Peer {
             id: 2,
@@ -151,11 +141,10 @@ mod test {
             addr: "node3".to_string(),
         };
         let peers = vec![peer1.clone(), peer2.clone(), peer3.clone()];
-        put_datanodes(ns, &ctx.meta_peer_client, peers).await;
+        put_datanodes(&ctx.meta_peer_client, peers).await;
 
         let peers = selector
             .select(
-                ns,
                 &ctx,
                 SelectorOptions {
                     min_required_items: 4,
@@ -172,7 +161,6 @@ mod test {
 
         let peers = selector
             .select(
-                ns,
                 &ctx,
                 SelectorOptions {
                     min_required_items: 2,

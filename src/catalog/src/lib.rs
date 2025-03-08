@@ -87,6 +87,14 @@ pub trait CatalogManager: Send + Sync {
         query_ctx: Option<&QueryContext>,
     ) -> Result<Option<TableRef>>;
 
+    /// Returns the tables by table ids.
+    async fn tables_by_ids(
+        &self,
+        catalog: &str,
+        schema: &str,
+        table_ids: &[TableId],
+    ) -> Result<Vec<TableRef>>;
+
     /// Returns all tables with a stream by catalog and schema.
     fn tables<'a>(
         &'a self,

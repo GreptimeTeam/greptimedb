@@ -40,12 +40,11 @@ fn test_drop_flow_task(flow_name: &str, flow_id: u32, drop_if_exists: bool) -> D
 
 #[tokio::test]
 async fn test_drop_flow_not_found() {
-    let cluster_id = 1;
     let flow_id = 1024;
     let node_manager = Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler));
     let ddl_context = new_ddl_context(node_manager);
     let task = test_drop_flow_task("my_flow", flow_id, false);
-    let mut procedure = DropFlowProcedure::new(cluster_id, task, ddl_context);
+    let mut procedure = DropFlowProcedure::new(task, ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err, error::Error::FlowNotFound { .. });
 }
@@ -53,7 +52,6 @@ async fn test_drop_flow_not_found() {
 #[tokio::test]
 async fn test_drop_flow() {
     // create a flow
-    let cluster_id = 1;
     let table_id = 1024;
     let source_table_names = vec![TableName::new(
         DEFAULT_CATALOG_NAME,
@@ -75,27 +73,21 @@ async fn test_drop_flow() {
         )
         .await
         .unwrap();
-    let flow_id = create_test_flow(
-        &ddl_context,
-        cluster_id,
-        "my_flow",
-        source_table_names,
-        sink_table_name,
-    )
-    .await;
+    let flow_id =
+        create_test_flow(&ddl_context, "my_flow", source_table_names, sink_table_name).await;
     // Drops the flows
     let task = test_drop_flow_task("my_flow", flow_id, false);
-    let mut procedure = DropFlowProcedure::new(cluster_id, task, ddl_context.clone());
+    let mut procedure = DropFlowProcedure::new(task, ddl_context.clone());
     execute_procedure_until_done(&mut procedure).await;
 
     // Drops if not exists
     let task = test_drop_flow_task("my_flow", flow_id, true);
-    let mut procedure = DropFlowProcedure::new(cluster_id, task, ddl_context.clone());
+    let mut procedure = DropFlowProcedure::new(task, ddl_context.clone());
     execute_procedure_until_done(&mut procedure).await;
 
     // Drops again
     let task = test_drop_flow_task("my_flow", flow_id, false);
-    let mut procedure = DropFlowProcedure::new(cluster_id, task, ddl_context);
+    let mut procedure = DropFlowProcedure::new(task, ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err, error::Error::FlowNotFound { .. });
 }

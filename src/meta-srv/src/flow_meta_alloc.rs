@@ -15,7 +15,6 @@
 use common_error::ext::BoxedError;
 use common_meta::ddl::flow_meta::PartitionPeerAllocator;
 use common_meta::peer::Peer;
-use common_meta::ClusterId;
 use snafu::ResultExt;
 
 use crate::metasrv::{SelectorContext, SelectorRef};
@@ -34,14 +33,9 @@ impl FlowPeerAllocator {
 
 #[async_trait::async_trait]
 impl PartitionPeerAllocator for FlowPeerAllocator {
-    async fn alloc(
-        &self,
-        cluster_id: ClusterId,
-        partitions: usize,
-    ) -> common_meta::error::Result<Vec<Peer>> {
+    async fn alloc(&self, partitions: usize) -> common_meta::error::Result<Vec<Peer>> {
         self.selector
             .select(
-                cluster_id,
                 &self.ctx,
                 SelectorOptions {
                     min_required_items: partitions,

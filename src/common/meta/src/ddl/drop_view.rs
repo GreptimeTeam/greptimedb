@@ -31,8 +31,8 @@ use crate::error::{self, Result};
 use crate::instruction::CacheIdent;
 use crate::key::table_name::TableNameKey;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock};
+use crate::metrics;
 use crate::rpc::ddl::DropViewTask;
-use crate::{metrics, ClusterId};
 
 /// The procedure for dropping a view.
 pub struct DropViewProcedure {
@@ -45,12 +45,11 @@ pub struct DropViewProcedure {
 impl DropViewProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::DropView";
 
-    pub fn new(cluster_id: ClusterId, task: DropViewTask, context: DdlContext) -> Self {
+    pub fn new(task: DropViewTask, context: DdlContext) -> Self {
         Self {
             context,
             data: DropViewData {
                 state: DropViewState::Prepare,
-                cluster_id,
                 task,
             },
         }
@@ -216,7 +215,6 @@ impl Procedure for DropViewProcedure {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct DropViewData {
     state: DropViewState,
-    cluster_id: ClusterId,
     task: DropViewTask,
 }
 

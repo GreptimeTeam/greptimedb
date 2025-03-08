@@ -92,7 +92,7 @@ impl Function for ToUnixtimeFunction {
         )
     }
 
-    fn eval(&self, func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure!(
             columns.len() == 1,
             InvalidFuncArgsSnafu {
@@ -108,7 +108,7 @@ impl Function for ToUnixtimeFunction {
         match columns[0].data_type() {
             ConcreteDataType::String(_) => Ok(Arc::new(Int64Vector::from(
                 (0..vector.len())
-                    .map(|i| convert_to_seconds(&vector.get(i).to_string(), &func_ctx))
+                    .map(|i| convert_to_seconds(&vector.get(i).to_string(), ctx))
                     .collect::<Vec<_>>(),
             ))),
             ConcreteDataType::Int64(_) | ConcreteDataType::Int32(_) => {
@@ -187,7 +187,7 @@ mod tests {
         ];
         let results = [Some(1677652502), None, Some(1656633600), None];
         let args: Vec<VectorRef> = vec![Arc::new(StringVector::from(times.clone()))];
-        let vector = f.eval(FunctionContext::default(), &args).unwrap();
+        let vector = f.eval(&FunctionContext::default(), &args).unwrap();
         assert_eq!(4, vector.len());
         for (i, _t) in times.iter().enumerate() {
             let v = vector.get(i);
@@ -211,7 +211,7 @@ mod tests {
         let times = vec![Some(3_i64), None, Some(5_i64), None];
         let results = [Some(3), None, Some(5), None];
         let args: Vec<VectorRef> = vec![Arc::new(Int64Vector::from(times.clone()))];
-        let vector = f.eval(FunctionContext::default(), &args).unwrap();
+        let vector = f.eval(&FunctionContext::default(), &args).unwrap();
         assert_eq!(4, vector.len());
         for (i, _t) in times.iter().enumerate() {
             let v = vector.get(i);
@@ -236,7 +236,7 @@ mod tests {
         let results = [Some(10627200), None, Some(3628800), None];
         let date_vector = DateVector::from(times.clone());
         let args: Vec<VectorRef> = vec![Arc::new(date_vector)];
-        let vector = f.eval(FunctionContext::default(), &args).unwrap();
+        let vector = f.eval(&FunctionContext::default(), &args).unwrap();
         assert_eq!(4, vector.len());
         for (i, _t) in times.iter().enumerate() {
             let v = vector.get(i);
@@ -261,7 +261,7 @@ mod tests {
         let results = [Some(123), None, Some(42), None];
         let date_vector = DateTimeVector::from(times.clone());
         let args: Vec<VectorRef> = vec![Arc::new(date_vector)];
-        let vector = f.eval(FunctionContext::default(), &args).unwrap();
+        let vector = f.eval(&FunctionContext::default(), &args).unwrap();
         assert_eq!(4, vector.len());
         for (i, _t) in times.iter().enumerate() {
             let v = vector.get(i);
@@ -286,7 +286,7 @@ mod tests {
         let results = [Some(123), None, Some(42), None];
         let ts_vector = TimestampSecondVector::from(times.clone());
         let args: Vec<VectorRef> = vec![Arc::new(ts_vector)];
-        let vector = f.eval(FunctionContext::default(), &args).unwrap();
+        let vector = f.eval(&FunctionContext::default(), &args).unwrap();
         assert_eq!(4, vector.len());
         for (i, _t) in times.iter().enumerate() {
             let v = vector.get(i);
@@ -306,7 +306,7 @@ mod tests {
         let results = [Some(123), None, Some(42), None];
         let ts_vector = TimestampMillisecondVector::from(times.clone());
         let args: Vec<VectorRef> = vec![Arc::new(ts_vector)];
-        let vector = f.eval(FunctionContext::default(), &args).unwrap();
+        let vector = f.eval(&FunctionContext::default(), &args).unwrap();
         assert_eq!(4, vector.len());
         for (i, _t) in times.iter().enumerate() {
             let v = vector.get(i);

@@ -153,3 +153,14 @@ CREATE TABLE test_column_constrain_composite_indexes (
 show create table test_column_constrain_composite_indexes;
 
 drop table test_column_constrain_composite_indexes;
+
+
+CREATE TABLE `table_comment_in_cjk` (
+    `ts` TIMESTAMP(3) NOT NULL COMMENT '时间戳',
+    `val` DOUBLE NULL COMMENT '值',
+    TIME INDEX ("ts"),
+) WITH (comment = '你好\nこんにちは\n안녕하세요');
+
+show create table table_comment_in_cjk;
+
+drop table table_comment_in_cjk;

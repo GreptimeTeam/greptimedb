@@ -43,6 +43,7 @@ use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{
     AllocTracker, BoxedBatchIterator, BulkPart, IterBuilder, KeyValues, Memtable, MemtableBuilder,
     MemtableId, MemtableRange, MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats,
+    PredicateGroup,
 };
 use crate::region::options::MergeMode;
 use crate::row_converter::{build_primary_key_codec, PrimaryKeyCodec};
@@ -195,17 +196,17 @@ impl Memtable for PartitionTreeMemtable {
     fn ranges(
         &self,
         projection: Option<&[ColumnId]>,
-        predicate: Option<Predicate>,
+        predicate: PredicateGroup,
         sequence: Option<SequenceNumber>,
     ) -> MemtableRanges {
         let projection = projection.map(|ids| ids.to_vec());
         let builder = Box::new(PartitionTreeIterBuilder {
             tree: self.tree.clone(),
             projection,
-            predicate,
+            predicate: predicate.predicate().cloned(),
             sequence,
         });
-        let context = Arc::new(MemtableRangeContext::new(self.id, builder));
+        let context = Arc::new(MemtableRangeContext::new(self.id, builder, predicate));
 
         MemtableRanges {
             ranges: [(0, MemtableRange::new(context))].into(),

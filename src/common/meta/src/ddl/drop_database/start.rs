@@ -89,7 +89,6 @@ mod tests {
         let ddl_context = new_ddl_context(node_manager);
         let mut step = DropDatabaseStart;
         let mut ctx = DropDatabaseContext {
-            cluster_id: 0,
             catalog: "foo".to_string(),
             schema: "bar".to_string(),
             drop_if_exists: false,
@@ -105,7 +104,6 @@ mod tests {
         let ddl_context = new_ddl_context(node_manager);
         let mut state = DropDatabaseStart;
         let mut ctx = DropDatabaseContext {
-            cluster_id: 0,
             catalog: "foo".to_string(),
             schema: "bar".to_string(),
             drop_if_exists: true,
@@ -128,7 +126,6 @@ mod tests {
             .unwrap();
         let mut state = DropDatabaseStart;
         let mut ctx = DropDatabaseContext {
-            cluster_id: 0,
             catalog: "foo".to_string(),
             schema: "bar".to_string(),
             drop_if_exists: false,

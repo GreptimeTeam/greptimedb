@@ -375,13 +375,9 @@ mod tests {
 
     #[test]
     fn test_to_stat_kv_map() {
-        let stat_key = DatanodeStatKey {
-            cluster_id: 0,
-            node_id: 100,
-        };
+        let stat_key = DatanodeStatKey { node_id: 100 };
 
         let stat = Stat {
-            cluster_id: 0,
             id: 100,
             addr: "127.0.0.1:3001".to_string(),
             ..Default::default()
@@ -400,7 +396,6 @@ mod tests {
         let stat_val = kv_map.get(&stat_key).unwrap();
         let stat = stat_val.stats.first().unwrap();
 
-        assert_eq!(0, stat.cluster_id);
         assert_eq!(100, stat.id);
         assert_eq!("127.0.0.1:3001", stat.addr);
     }

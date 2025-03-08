@@ -50,6 +50,9 @@ use_memory_store = false
 ## - Using shared storage (e.g., s3).
 enable_region_failover = false
 
+## Max allowed idle time before removing node info from metasrv memory.
+node_max_idle_time = "24hours"
+
 ## Whether to enable greptimedb telemetry. Enabled by default.
 #+ enable_telemetry = true
 

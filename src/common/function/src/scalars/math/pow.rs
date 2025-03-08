@@ -44,7 +44,7 @@ impl Function for PowFunction {
         Signature::uniform(2, ConcreteDataType::numerics(), Volatility::Immutable)
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         with_match_primitive_type_id!(columns[0].data_type().logical_type_id(), |$S| {
             with_match_primitive_type_id!(columns[1].data_type().logical_type_id(), |$T| {
                 let col = scalar_binary_op::<<$S as LogicalPrimitiveType>::Native, <$T as LogicalPrimitiveType>::Native, f64, _>(&columns[0], &columns[1], scalar_pow, &mut EvalContext::default())?;
@@ -109,7 +109,7 @@ mod tests {
             Arc::new(Int8Vector::from_vec(bases.clone())),
         ];
 
-        let vector = pow.eval(FunctionContext::default(), &args).unwrap();
+        let vector = pow.eval(&FunctionContext::default(), &args).unwrap();
         assert_eq!(3, vector.len());
 
         for i in 0..3 {

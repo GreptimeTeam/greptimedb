@@ -193,7 +193,11 @@ impl TableProvider for DummyTableProvider {
                     if self
                         .metadata
                         .column_by_name(simple_filter.column_name())
-                        .and_then(|c| (c.semantic_type == SemanticType::Tag).then_some(()))
+                        .and_then(|c| {
+                            (c.semantic_type == SemanticType::Tag
+                                || c.semantic_type == SemanticType::Timestamp)
+                                .then_some(())
+                        })
                         .is_some()
                     {
                         TableProviderFilterPushDown::Exact

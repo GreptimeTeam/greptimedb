@@ -13,10 +13,10 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use api::v1::meta::MailboxMessage;
-use common_meta::distributed_time_constants::MAILBOX_RTT_SECS;
+use common_meta::distributed_time_constants::REGION_LEASE_SECS;
 use common_meta::instruction::{Instruction, InstructionReply, OpenRegion, SimpleReply};
 use common_meta::key::datanode_table::RegionInfo;
 use common_meta::RegionIdent;
@@ -31,7 +31,8 @@ use crate::procedure::region_migration::update_metadata::UpdateMetadata;
 use crate::procedure::region_migration::{Context, State};
 use crate::service::mailbox::Channel;
 
-const OPEN_CANDIDATE_REGION_TIMEOUT: Duration = Duration::from_secs(MAILBOX_RTT_SECS);
+/// Uses lease time of a region as the timeout of opening a candidate region.
+const OPEN_CANDIDATE_REGION_TIMEOUT: Duration = Duration::from_secs(REGION_LEASE_SECS);
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OpenCandidateRegion;
@@ -61,7 +62,6 @@ impl OpenCandidateRegion {
     /// - Datanode Table is not found.
     async fn build_open_region_instruction(&self, ctx: &mut Context) -> Result<Instruction> {
         let pc = &ctx.persistent_ctx;
-        let cluster_id = pc.cluster_id;
         let table_id = pc.region_id.table_id();
         let region_number = pc.region_id.region_number();
         let candidate_id = pc.to_peer.id;
@@ -76,7 +76,6 @@ impl OpenCandidateRegion {
 
         let open_instruction = Instruction::OpenRegion(OpenRegion::new(
             RegionIdent {
-                cluster_id,
                 datanode_id: candidate_id,
                 table_id,
                 region_number,
@@ -137,6 +136,7 @@ impl OpenCandidateRegion {
         })?;
 
         let ch = Channel::Datanode(candidate.id);
+        let now = Instant::now();
         let receiver = ctx
             .mailbox
             .send(&ch, msg, OPEN_CANDIDATE_REGION_TIMEOUT)
@@ -146,8 +146,10 @@ impl OpenCandidateRegion {
             Ok(msg) => {
                 let reply = HeartbeatMailbox::json_reply(&msg)?;
                 info!(
-                    "Received open region reply: {:?}, region: {}",
-                    reply, region_id
+                    "Received open region reply: {:?}, region: {}, elapsed: {:?}",
+                    reply,
+                    region_id,
+                    now.elapsed()
                 );
                 let InstructionReply::OpenRegion(SimpleReply { result, error }) = reply else {
                     return error::UnexpectedInstructionReplySnafu {
@@ -162,8 +164,9 @@ impl OpenCandidateRegion {
                 } else {
                     error::RetryLaterSnafu {
                         reason: format!(
-                            "Region {region_id} is not opened by datanode {:?}, error: {error:?}",
+                            "Region {region_id} is not opened by datanode {:?}, error: {error:?}, elapsed: {:?}",
                             candidate,
+                            now.elapsed()
                         ),
                     }
                     .fail()
@@ -171,8 +174,9 @@ impl OpenCandidateRegion {
             }
             Err(error::Error::MailboxTimeout { .. }) => {
                 let reason = format!(
-                    "Mailbox received timeout for open candidate region {region_id} on datanode {:?}", 
+                    "Mailbox received timeout for open candidate region {region_id} on datanode {:?}, elapsed: {:?}",
                     candidate,
+                    now.elapsed()
                 );
                 error::RetryLaterSnafu { reason }.fail()
             }
@@ -208,7 +212,6 @@ mod tests {
     fn new_mock_open_instruction(datanode_id: DatanodeId, region_id: RegionId) -> Instruction {
         Instruction::OpenRegion(OpenRegion {
             region_ident: RegionIdent {
-                cluster_id: 0,
                 datanode_id,
                 table_id: region_id.table_id(),
                 region_number: region_id.region_number(),
