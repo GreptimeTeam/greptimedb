@@ -16,6 +16,7 @@ use std::any::Any;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use ahash::HashSet;
 use arrow_schema::{Schema as ArrowSchema, SchemaRef as ArrowSchemaRef, SortOptions};
 use async_stream::stream;
 use common_catalog::parse_catalog_and_schema_from_db_string;
@@ -35,9 +36,12 @@ use datafusion::physical_plan::metrics::{
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, Partitioning, PlanProperties,
 };
-use datafusion_common::{Column, Result};
+use datafusion_common::{Column as ColumnExpr, Result};
 use datafusion_expr::{Expr, Extension, LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion_physical_expr::{EquivalenceProperties, LexOrdering, PhysicalSortExpr};
+use datafusion_physical_expr::expressions::Column;
+use datafusion_physical_expr::{
+    Distribution, EquivalenceProperties, LexOrdering, PhysicalSortExpr,
+};
 use datatypes::schema::{Schema, SchemaRef};
 use futures_util::StreamExt;
 use greptime_proto::v1::region::RegionRequestHeader;
@@ -141,6 +145,7 @@ pub struct MergeScanExec {
     sub_stage_metrics: Arc<Mutex<Vec<RecordBatchMetrics>>>,
     query_ctx: QueryContextRef,
     target_partition: usize,
+    partition_cols: Vec<String>,
 }
 
 impl std::fmt::Debug for MergeScanExec {
@@ -198,10 +203,13 @@ impl MergeScanExec {
         };
 
         let partition_exprs = partition_cols
-            .into_iter()
+            .iter()
             .map(|col| {
                 session_state
-                    .create_physical_expr(Expr::Column(Column::new_unqualified(col)), plan.schema())
+                    .create_physical_expr(
+                        Expr::Column(ColumnExpr::new_unqualified(col)),
+                        plan.schema(),
+                    )
                     .unwrap()
             })
             .collect();
@@ -221,6 +229,7 @@ impl MergeScanExec {
             properties,
             query_ctx,
             target_partition,
+            partition_cols,
         })
     }
 
@@ -331,6 +340,52 @@ impl MergeScanExec {
             output_ordering: None,
             metrics: Default::default(),
         }))
+    }
+
+    pub fn try_with_new_distribution(&self, distribution: Distribution) -> Option<Self> {
+        let Distribution::HashPartitioned(hash_exprs) = distribution else {
+            // not applicable
+            return None;
+        };
+
+        if let Partitioning::Hash(curr_dist, _) = &self.properties.partitioning
+            && curr_dist == &hash_exprs
+        {
+            // No need to change the distribution
+            return None;
+        }
+
+        let mut hash_cols = HashSet::default();
+        for expr in &hash_exprs {
+            if let Some(col_expr) = expr.as_any().downcast_ref::<Column>() {
+                hash_cols.insert(col_expr.name());
+            }
+        }
+        for col in &self.partition_cols {
+            if !hash_cols.contains(col.as_str()) {
+                // The partitioning columns are not the same
+                return None;
+            }
+        }
+
+        Some(Self {
+            table: self.table.clone(),
+            regions: self.regions.clone(),
+            plan: self.plan.clone(),
+            schema: self.schema.clone(),
+            arrow_schema: self.arrow_schema.clone(),
+            region_query_handler: self.region_query_handler.clone(),
+            metric: self.metric.clone(),
+            properties: PlanProperties::new(
+                self.properties.eq_properties.clone(),
+                Partitioning::Hash(hash_exprs, self.target_partition),
+                self.properties.execution_mode.clone(),
+            ),
+            sub_stage_metrics: self.sub_stage_metrics.clone(),
+            query_ctx: self.query_ctx.clone(),
+            target_partition: self.target_partition,
+            partition_cols: self.partition_cols.clone(),
+        })
     }
 
     fn arrow_schema_to_schema(arrow_schema: ArrowSchemaRef) -> Result<SchemaRef> {
