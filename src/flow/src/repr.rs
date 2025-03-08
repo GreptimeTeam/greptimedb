@@ -68,13 +68,10 @@ pub fn value_to_internal_ts(value: Value) -> Result<i64, EvalError> {
         let ty = arg.data_type();
         matches!(
             ty,
-            ConcreteDataType::Date(..)
-                | ConcreteDataType::DateTime(..)
-                | ConcreteDataType::Timestamp(..)
+            ConcreteDataType::Date(..) | ConcreteDataType::Timestamp(..)
         )
     };
     match value {
-        Value::DateTime(ts) => Ok(ts.val()),
         Value::Int64(ts) => Ok(ts),
         arg if is_supported_time_type(&arg) => {
             let arg_ty = arg.data_type();
@@ -214,7 +211,7 @@ impl From<Row> for ProtoRow {
 }
 #[cfg(test)]
 mod test {
-    use common_time::{Date, DateTime};
+    use common_time::{Date, Timestamp};
 
     use super::*;
 
@@ -244,7 +241,7 @@ mod test {
         {
             let a = Value::from(1i32);
             let b = Value::from(1i64);
-            let c = Value::DateTime(DateTime::new(1i64));
+            let c = Value::Timestamp(Timestamp::new_millisecond(1i64));
             let d = Value::from(1.0);
 
             assert!(value_to_internal_ts(a).is_err());

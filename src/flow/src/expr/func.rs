@@ -554,8 +554,6 @@ fn get_ts_as_millisecond(arg: Value) -> Result<repr::Timestamp, EvalError> {
         ts.convert_to(TimeUnit::Millisecond)
             .context(OverflowSnafu)?
             .value()
-    } else if let Some(ts) = arg.as_datetime() {
-        ts.val()
     } else {
         InvalidArgumentSnafu {
             reason: "Expect input to be timestamp or datetime type",

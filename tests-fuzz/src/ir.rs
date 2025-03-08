@@ -26,7 +26,7 @@ use std::time::Duration;
 
 pub use alter_expr::{AlterTableExpr, AlterTableOption};
 use common_time::timestamp::TimeUnit;
-use common_time::{Date, DateTime, Timestamp};
+use common_time::{Date, Timestamp};
 pub use create_expr::{CreateDatabaseExpr, CreateTableExpr};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::types::TimestampType;
@@ -157,7 +157,6 @@ pub fn generate_random_value<R: Rng>(
             None => Value::from(rng.gen::<char>().to_string()),
         },
         ConcreteDataType::Date(_) => generate_random_date(rng),
-        ConcreteDataType::DateTime(_) => generate_random_datetime(rng),
 
         _ => unimplemented!("unsupported type: {datatype}"),
     }
@@ -243,16 +242,6 @@ pub fn generate_random_timestamp_for_mysql<R: Rng>(rng: &mut R, ts_type: Timesta
         }
     };
     Value::from(v)
-}
-
-fn generate_random_datetime<R: Rng>(rng: &mut R) -> Value {
-    let min = i64::from(Timestamp::MIN_MILLISECOND);
-    let max = i64::from(Timestamp::MAX_MILLISECOND);
-    let value = rng.gen_range(min..=max);
-    let datetime = Timestamp::new_millisecond(value)
-        .to_chrono_datetime()
-        .unwrap();
-    Value::from(DateTime::from(datetime))
 }
 
 fn generate_random_date<R: Rng>(rng: &mut R) -> Value {

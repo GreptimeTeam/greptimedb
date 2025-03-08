@@ -15,7 +15,7 @@
 use std::any::Any;
 
 use common_decimal::Decimal128;
-use common_time::{Date, DateTime};
+use common_time::Date;
 
 use crate::types::{
     Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, UInt16Type, UInt32Type,
@@ -23,8 +23,8 @@ use crate::types::{
 };
 use crate::value::{ListValue, ListValueRef, Value};
 use crate::vectors::{
-    BinaryVector, BooleanVector, DateTimeVector, DateVector, Decimal128Vector, ListVector,
-    MutableVector, PrimitiveVector, StringVector, Vector,
+    BinaryVector, BooleanVector, DateVector, Decimal128Vector, ListVector, MutableVector,
+    PrimitiveVector, StringVector, Vector,
 };
 
 fn get_iter_capacity<T, I: Iterator<Item = T>>(iter: &I) -> usize {
@@ -302,27 +302,6 @@ impl ScalarRef<'_> for Decimal128 {
     }
 }
 
-impl Scalar for DateTime {
-    type VectorType = DateTimeVector;
-    type RefType<'a> = DateTime;
-
-    fn as_scalar_ref(&self) -> Self::RefType<'_> {
-        *self
-    }
-
-    fn upcast_gat<'short, 'long: 'short>(long: Self::RefType<'long>) -> Self::RefType<'short> {
-        long
-    }
-}
-
-impl ScalarRef<'_> for DateTime {
-    type ScalarType = DateTime;
-
-    fn to_owned_scalar(&self) -> Self::ScalarType {
-        *self
-    }
-}
-
 // Timestamp types implement Scalar and ScalarRef in `src/timestamp.rs`.
 
 impl Scalar for ListValue {
@@ -426,13 +405,6 @@ mod tests {
         let decimal = Decimal128::new(1, 1, 1);
         assert_eq!(decimal, decimal.as_scalar_ref());
         assert_eq!(decimal, decimal.to_owned_scalar());
-    }
-
-    #[test]
-    fn test_datetime_scalar() {
-        let dt = DateTime::new(123);
-        assert_eq!(dt, dt.as_scalar_ref());
-        assert_eq!(dt, dt.to_owned_scalar());
     }
 
     #[test]
