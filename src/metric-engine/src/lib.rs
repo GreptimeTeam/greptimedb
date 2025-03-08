@@ -59,7 +59,7 @@ pub mod engine;
 pub mod error;
 mod metadata_region;
 mod metrics;
-mod row_modifier;
+pub mod row_modifier;
 #[cfg(test)]
 mod test_util;
 mod utils;
