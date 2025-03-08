@@ -58,6 +58,7 @@ members = [
     "src/servers",
     "src/session",
     "src/sql",
+    "src/sst-convert",
     "src/store-api",
     "src/table",
     "tests-fuzz",
@@ -271,6 +272,7 @@ query = { path = "src/query" }
 servers = { path = "src/servers" }
 session = { path = "src/session" }
 sql = { path = "src/sql" }
+sst-convert = { path = "src/sst-convert" }
 store-api = { path = "src/store-api" }
 substrait = { path = "src/common/substrait" }
 table = { path = "src/table" }

@@ -11204,6 +11204,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sst-convert"
+version = "0.13.0"
+dependencies = [
+ "mito2",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

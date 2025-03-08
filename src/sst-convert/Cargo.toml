@@ -1,0 +1,11 @@
+[package]
+name = "sst-convert"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mito2.workspace = true
+
+[lints]
+workspace = true
