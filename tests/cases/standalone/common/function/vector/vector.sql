@@ -99,3 +99,16 @@ FROM (
          UNION ALL
          SELECT '[7.0, 8.0, 9.0, 10.0]' AS v
      ) Order By vec_dim(v) ASC;
+
+
+SELECT vec_kth_elem('[1.0, 2.0, 3.0]', 2);
+
+SELECT v, vec_kth_elem(v, 1) AS first_elem
+FROM (
+         SELECT '[1.0, 2.0, 3.0]' AS v
+         UNION ALL
+         SELECT '[4.0, 5.0, 6.0, 7.0]' AS v
+         UNION ALL
+         SELECT '[8.0]' AS v
+     )
+WHERE vec_kth_elem(v, 1) > 2.0;
