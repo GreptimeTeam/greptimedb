@@ -226,6 +226,16 @@ pub enum Error {
     },
 }
 
+impl Error {
+    pub fn is_blob_not_found(&self) -> bool {
+        match self {
+            Error::BlobNotFound { .. } => true,
+            Error::CacheGet { source } => source.is_blob_not_found(),
+            _ => false,
+        }
+    }
+}
+
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         use Error::*;
