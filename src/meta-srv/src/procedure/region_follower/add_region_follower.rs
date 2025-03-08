@@ -14,6 +14,7 @@
 
 use common_error::ext::BoxedError;
 use common_meta::distributed_time_constants;
+use common_meta::instruction::CacheIdent;
 use common_meta::key::datanode_table::{DatanodeTableKey, DatanodeTableValue, RegionInfo};
 use common_meta::key::table_route::{PhysicalTableRouteValue, TableRouteValue};
 use common_meta::key::DeserializedValueWithBytes;
@@ -21,17 +22,20 @@ use common_meta::lock_key::{CatalogLock, RegionLock, SchemaLock, TableLock};
 use common_meta::peer::Peer;
 use common_procedure::error::ToJsonSnafu;
 use common_procedure::{
-    Context as ProcedureContext, LockKey, Procedure, Result as ProcedureResult, Status, StringKey,
+    Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
+    Result as ProcedureResult, Status, StringKey,
 };
 use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::RegionId;
+use strum::AsRefStr;
 
 use super::create::CreateFollower;
 use super::Context;
 use crate::error::{self, Result};
 use crate::lease::lookup_datanode_peer;
+use crate::metrics;
 pub struct AddRegionFollowerProcedure {
     pub data: AddRegionFollowerData,
     pub context: Context,
@@ -168,6 +172,14 @@ impl AddRegionFollowerProcedure {
     }
 
     pub async fn on_broadcast(&mut self) -> Result<Status> {
+        let table_id = self.data.region_id.table_id();
+        // ignore the result
+        let ctx = common_meta::cache_invalidator::Context::default();
+        let _ = self
+            .context
+            .cache_invalidator
+            .invalidate(&ctx, &[CacheIdent::TableId(table_id)])
+            .await;
         Ok(Status::executing(true))
     }
 }
@@ -179,7 +191,25 @@ impl Procedure for AddRegionFollowerProcedure {
     }
 
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
-        Ok(Status::executing(true))
+        let state = &self.data.state;
+
+        let _timer = metrics::METRIC_META_ADD_REGION_FOLLOWER_EXECUTE
+            .with_label_values(&[state.as_ref()])
+            .start_timer();
+
+        match state {
+            AddRegionFollowerState::Prepare => self.on_prepare().await,
+            AddRegionFollowerState::SubmitRequest => self.on_submit_request().await,
+            AddRegionFollowerState::UpdateMetadata => self.on_update_metadata().await,
+            AddRegionFollowerState::InvalidateTableCache => self.on_broadcast().await,
+        }
+        .map_err(|e| {
+            if e.is_retryable() {
+                ProcedureError::retry_later(e)
+            } else {
+                ProcedureError::external(e)
+            }
+        })
     }
 
     fn dump(&self) -> ProcedureResult<String> {
@@ -313,7 +343,7 @@ impl AddRegionFollowerData {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, AsRefStr)]
 pub enum AddRegionFollowerState {
     /// Prepares to add region follower.
     Prepare,
