@@ -166,7 +166,7 @@ impl ExecutionPlan for SeriesDivideExec {
                 // Safety: the tag column names is verified in the planning phase
                 expr: Arc::new(ColumnExpr::new_with_schema(tag, &input_schema).unwrap()),
                 options: Some(SortOptions {
-                    descending: true,
+                    descending: false,
                     nulls_first: false,
                 }),
             })
