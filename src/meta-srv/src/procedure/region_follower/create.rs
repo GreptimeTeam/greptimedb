@@ -15,14 +15,13 @@
 use std::time::{Duration, Instant};
 
 use api::v1::meta::MailboxMessage;
-use common_error::ext::BoxedError;
 use common_meta::distributed_time_constants::REGION_LEASE_SECS;
 use common_meta::instruction::{Instruction, InstructionReply, OpenRegion, SimpleReply};
-use common_meta::key::datanode_table::{DatanodeTableKey, RegionInfo};
+use common_meta::key::datanode_table::RegionInfo;
 use common_meta::peer::Peer;
 use common_meta::RegionIdent;
 use common_telemetry::info;
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 use store_api::storage::RegionId;
 
 use super::Context;
@@ -45,36 +44,20 @@ impl CreateFollower {
     }
 
     /// Builds the open region instruction for the region follower.
-    pub(crate) async fn build_open_region_instruction(&self, ctx: &Context) -> Result<Instruction> {
+    pub(crate) async fn build_open_region_instruction(
+        &self,
+        region_info: RegionInfo,
+    ) -> Result<Instruction> {
         let datanode_id = self.peer.id;
         let table_id = self.region_id.table_id();
         let region_number = self.region_id.region_number();
-        let datanode_table_key = DatanodeTableKey {
-            datanode_id,
-            table_id,
-        };
-
-        let datanode_table_value = ctx
-            .table_metadata_manager
-            .datanode_table_manager()
-            .get(&datanode_table_key)
-            .await
-            .context(error::TableMetadataManagerSnafu)
-            .map_err(BoxedError::new)
-            .with_context(|_| error::RetryLaterWithSourceSnafu {
-                reason: format!("Failed to get DatanodeTable: ({datanode_id},{table_id})"),
-            })?
-            .context(error::DatanodeTableNotFoundSnafu {
-                table_id,
-                datanode_id,
-            })?;
 
         let RegionInfo {
             region_storage_path,
             region_options,
             region_wal_options,
             engine,
-        } = datanode_table_value.region_info;
+        } = region_info;
 
         let region_ident = RegionIdent {
             datanode_id,
@@ -173,24 +156,6 @@ mod tests {
     use crate::error::Error;
     use crate::procedure::region_follower::test_util::TestingEnv;
     use crate::procedure::test_util::{new_close_region_reply, send_mock_reply};
-
-    #[tokio::test]
-    async fn test_datanode_table_not_found() {
-        let env = TestingEnv::new();
-        let ctx = env.new_context();
-
-        let create_follower =
-            CreateFollower::new(RegionId::new(1, 1), Peer::new(1, "127.0.0.1:8080"));
-        let instruction = create_follower
-            .build_open_region_instruction(&ctx)
-            .await
-            .unwrap();
-        let err = create_follower
-            .send_open_region_instruction(&ctx, instruction)
-            .await
-            .unwrap_err();
-        assert_matches!(err, Error::DatanodeTableNotFound { .. });
-    }
 
     #[tokio::test]
     async fn test_datanode_is_unreachable() {
