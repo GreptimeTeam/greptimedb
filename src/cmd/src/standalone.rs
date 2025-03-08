@@ -54,7 +54,10 @@ use datanode::config::{DatanodeOptions, ProcedureConfig, RegionEngineConfig, Sto
 use datanode::datanode::{Datanode, DatanodeBuilder};
 use datanode::region_server::RegionServer;
 use file_engine::config::EngineConfig as FileEngineConfig;
-use flow::{FlowConfig, FlowWorkerManager, FlownodeBuilder, FlownodeOptions, FrontendInvoker};
+use flow::{
+    FlowConfig, FlowWorkerManager, FlownodeBuilder, FlownodeOptions, FrontendClient,
+    FrontendInvoker,
+};
 use frontend::frontend::FrontendOptions;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance as FeInstance, StandaloneDatanodeManager};
@@ -533,12 +536,16 @@ impl StartCommand {
             flow: opts.flow.clone(),
             ..Default::default()
         };
+
+        let fe_server_addr = fe_opts.grpc.bind_addr.clone();
+        let frontend_client = FrontendClient::from_static_grpc_addr(fe_server_addr);
         let flow_builder = FlownodeBuilder::new(
             flownode_options,
             plugins.clone(),
             table_metadata_manager.clone(),
             catalog_manager.clone(),
             flow_metadata_manager.clone(),
+            Arc::new(frontend_client),
         );
         let flownode = Arc::new(
             flow_builder

@@ -86,7 +86,8 @@ pub fn create_test_query_engine() -> Arc<dyn QueryEngine> {
 
     let schema = vec![
         datatypes::schema::ColumnSchema::new("number", CDT::uint32_datatype(), false),
-        datatypes::schema::ColumnSchema::new("ts", CDT::timestamp_millisecond_datatype(), false),
+        datatypes::schema::ColumnSchema::new("ts", CDT::timestamp_millisecond_datatype(), false)
+            .with_time_index(true),
     ];
     let mut columns = vec![];
     let numbers = (1..=10).collect_vec();

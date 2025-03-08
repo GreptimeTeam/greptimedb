@@ -16,6 +16,7 @@ async-trait.workspace = true
 bytes.workspace = true
 cache.workspace = true
 catalog.workspace = true
+chrono.workspace = true
 client.workspace = true
 common-base.workspace = true
 common-config.workspace = true
