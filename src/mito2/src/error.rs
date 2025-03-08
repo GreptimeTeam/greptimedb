@@ -42,6 +42,13 @@ use crate::worker::WorkerId;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("External error, context: {}", context))]
+    External {
+        source: BoxedError,
+        context: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
     #[snafu(display("Failed to encode sparse primary key, reason: {}", reason))]
     EncodeSparsePrimaryKey {
         reason: String,
@@ -1085,7 +1092,7 @@ impl ErrorExt for Error {
             | PuffinPurgeStager { source, .. } => source.status_code(),
             CleanDir { .. } => StatusCode::Unexpected,
             InvalidConfig { .. } => StatusCode::InvalidArguments,
-            StaleLogEntry { .. } => StatusCode::Unexpected,
+            StaleLogEntry { .. } | External { .. } => StatusCode::Unexpected,
 
             FilterRecordBatch { source, .. } => source.status_code(),
 

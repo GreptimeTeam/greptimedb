@@ -15,3 +15,5 @@
 mod reader;
 mod table;
 pub mod writer;
+
+pub use reader::parquet::{OpenDALParquetReader, RawParquetReader};

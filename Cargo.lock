@@ -8070,6 +8070,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "parquet_opendal"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4140ae96f37c170f8d684a544711fabdac1d94adcbd97e8b033329bd37f40446"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures",
+ "opendal",
+ "parquet",
+]
+
+[[package]]
 name = "parse-zoneinfo"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11207,11 +11220,20 @@ dependencies = [
 name = "sst-convert"
 version = "0.13.0"
 dependencies = [
+ "api",
+ "arrow-array",
+ "async-trait",
  "catalog",
+ "common-error",
  "common-meta",
+ "common-recordbatch",
+ "datatypes",
+ "futures-util",
  "meta-client",
  "mito2",
  "object-store",
+ "parquet",
+ "parquet_opendal",
  "snafu 0.8.5",
  "store-api",
  "table",

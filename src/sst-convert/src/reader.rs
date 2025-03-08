@@ -14,5 +14,5 @@
 
 //! Reader to read input data in different formats.
 
-mod parquet;
+pub(crate) mod parquet;
 mod remote_write;

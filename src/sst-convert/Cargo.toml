@@ -5,11 +5,20 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+api.workspace = true
+arrow-array.workspace = true
+async-trait.workspace = true
 catalog.workspace = true
+common-error.workspace = true
 common-meta.workspace = true
+common-recordbatch.workspace = true
+datatypes.workspace = true
+futures-util.workspace = true
 meta-client.workspace = true
 mito2.workspace = true
 object-store.workspace = true
+parquet.workspace = true
+parquet_opendal = "0.3.0"
 snafu.workspace = true
 store-api.workspace = true
 table.workspace = true
