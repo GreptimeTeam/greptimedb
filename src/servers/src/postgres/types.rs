@@ -500,7 +500,7 @@ pub(super) fn type_pg_to_gt(origin: &Type) -> Result<ConcreteDataType> {
         )),
         &Type::DATE => Ok(ConcreteDataType::date_datatype()),
         &Type::TIME => Ok(ConcreteDataType::timestamp_datatype(
-            common_time::timestamp::TimeUnit::Millisecond,
+            common_time::timestamp::TimeUnit::Microsecond,
         )),
         &Type::CHAR_ARRAY => Ok(ConcreteDataType::list_datatype(
             ConcreteDataType::int8_datatype(),

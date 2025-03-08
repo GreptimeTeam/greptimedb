@@ -357,11 +357,11 @@ mod tests {
         let expr = Expr::Value(ValueExpr::SingleQuotedString(
             "2001-01-02 03:04:05".to_string(),
         ));
-        let t = ConcreteDataType::timestamp_millisecond_datatype();
+        let t = ConcreteDataType::timestamp_microsecond_datatype();
         let v = convert_expr_to_scalar_value(&expr, &t).unwrap();
         let scalar_v = ScalarValue::Utf8(Some("2001-01-02 03:04:05".to_string()))
             .cast_to(&arrow_schema::DataType::Timestamp(
-                arrow_schema::TimeUnit::Millisecond,
+                arrow_schema::TimeUnit::Microsecond,
                 None,
             ))
             .unwrap();

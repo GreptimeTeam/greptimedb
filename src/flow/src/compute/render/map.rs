@@ -291,7 +291,7 @@ mod test {
             .filter(vec![
                 ScalarExpr::Column(0)
                     .call_unary(expr::UnaryFunc::Cast(
-                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        ConcreteDataType::timestamp_microsecond_datatype(),
                     ))
                     .call_binary(
                         ScalarExpr::CallUnmaterializable(expr::UnmaterializableFunc::Now),
@@ -303,7 +303,7 @@ mod test {
                         BinaryFunc::SubInt64,
                     )
                     .call_unary(expr::UnaryFunc::Cast(
-                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        ConcreteDataType::timestamp_microsecond_datatype(),
                     ))
                     .call_binary(
                         ScalarExpr::CallUnmaterializable(expr::UnmaterializableFunc::Now),

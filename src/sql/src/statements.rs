@@ -579,7 +579,7 @@ pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Co
         | SqlDataType::Blob(_)
         | SqlDataType::Bytea
         | SqlDataType::Varbinary(_) => Ok(ConcreteDataType::binary_datatype()),
-        SqlDataType::Datetime(_) => Ok(ConcreteDataType::timestamp_millisecond_datatype()),
+        SqlDataType::Datetime(_) => Ok(ConcreteDataType::timestamp_microsecond_datatype()),
         SqlDataType::Timestamp(precision, _) => Ok(precision
             .as_ref()
             .map(|v| TimestampType::try_from(*v))
@@ -750,7 +750,7 @@ mod tests {
         );
         check_type(
             SqlDataType::Datetime(None),
-            ConcreteDataType::timestamp_millisecond_datatype(),
+            ConcreteDataType::timestamp_microsecond_datatype(),
         );
         check_type(
             SqlDataType::Interval,

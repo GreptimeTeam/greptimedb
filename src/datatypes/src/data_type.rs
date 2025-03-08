@@ -437,7 +437,6 @@ impl TryFrom<&ArrowDataType> for ConcreteDataType {
             ArrowDataType::Float32 => Self::float32_datatype(),
             ArrowDataType::Float64 => Self::float64_datatype(),
             ArrowDataType::Date32 => Self::date_datatype(),
-            ArrowDataType::Date64 => Self::timestamp_millisecond_datatype(),
             ArrowDataType::Timestamp(u, _) => ConcreteDataType::from_arrow_time_unit(u),
             ArrowDataType::Interval(u) => ConcreteDataType::from_arrow_interval_unit(u),
             ArrowDataType::Binary | ArrowDataType::LargeBinary => Self::binary_datatype(),

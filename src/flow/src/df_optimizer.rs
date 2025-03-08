@@ -479,7 +479,7 @@ impl ScalarUDFImpl for TumbleExpand {
         match (arg_types.first(), arg_types.get(1), arg_types.get(2)) {
             (Some(ts), Some(window), opt) => {
                 use arrow_schema::DataType::*;
-                if !matches!(ts, Date32 | Date64 | Timestamp(_, _)) {
+                if !matches!(ts, Date32 | Timestamp(_, _)) {
                     return Err(DataFusionError::Plan(
                         format!("Expect timestamp column as first arg for tumble_start, found {:?}", ts)
                     ));
@@ -491,7 +491,7 @@ impl ScalarUDFImpl for TumbleExpand {
                 }
 
                 if let Some(start_time) = opt{
-                    if !matches!(start_time,  Utf8 | Date32 | Date64 | Timestamp(_, _)){
+                    if !matches!(start_time,  Utf8 | Date32 | Timestamp(_, _)){
                         return Err(DataFusionError::Plan(
                             format!("Expect start_time to either be date, timestamp or string, found {:?}", start_time)
                         ));

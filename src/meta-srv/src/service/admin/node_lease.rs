@@ -41,7 +41,7 @@ impl HttpHandler for NodeLeaseHandler {
             .into_iter()
             .map(|(k, v)| HumanLease {
                 name: k,
-                human_time: common_time::Timestamp::new_millisecond(v.timestamp_millis)
+                human_time: common_time::Timestamp::new_microsecond(v.timestamp_millis)
                     .to_local_string(),
                 lease: v,
             })

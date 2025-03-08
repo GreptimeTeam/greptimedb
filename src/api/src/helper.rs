@@ -574,10 +574,10 @@ pub fn pb_value_to_value_ref<'a>(
         ValueData::StringValue(string) => ValueRef::String(string.as_str()),
         ValueData::DateValue(d) => ValueRef::Date(Date::from(*d)),
         ValueData::TimestampSecondValue(t) => ValueRef::Timestamp(Timestamp::new_second(*t)),
-        ValueData::DatetimeValue(t) | ValueData::TimestampMillisecondValue(t) => {
+        ValueData::TimestampMillisecondValue(t) => {
             ValueRef::Timestamp(Timestamp::new_millisecond(*t))
         }
-        ValueData::TimestampMicrosecondValue(t) => {
+        ValueData::DatetimeValue(t) | ValueData::TimestampMicrosecondValue(t) => {
             ValueRef::Timestamp(Timestamp::new_microsecond(*t))
         }
         ValueData::TimestampNanosecondValue(t) => {
