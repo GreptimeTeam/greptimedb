@@ -5,10 +5,14 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+catalog.workspace = true
+common-meta.workspace = true
+meta-client.workspace = true
 mito2.workspace = true
 object-store.workspace = true
 snafu.workspace = true
 store-api.workspace = true
+table.workspace = true
 
 [lints]
 workspace = true

@@ -11207,10 +11207,14 @@ dependencies = [
 name = "sst-convert"
 version = "0.13.0"
 dependencies = [
+ "catalog",
+ "common-meta",
+ "meta-client",
  "mito2",
  "object-store",
  "snafu 0.8.5",
  "store-api",
+ "table",
 ]
 
 [[package]]
