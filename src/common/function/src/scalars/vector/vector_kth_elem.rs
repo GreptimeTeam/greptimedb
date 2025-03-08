@@ -19,8 +19,7 @@ use common_query::error::{InvalidFuncArgsSnafu, Result};
 use common_query::prelude::Signature;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVectorBuilder;
-use datatypes::vectors::{ Float32VectorBuilder, MutableVector, VectorRef};
-
+use datatypes::vectors::{Float32VectorBuilder, MutableVector, VectorRef};
 use snafu::ensure;
 
 use crate::function::{Function, FunctionContext};
@@ -28,8 +27,6 @@ use crate::helper;
 use crate::scalars::vector::impl_conv::{as_veclit, as_veclit_if_const};
 
 const NAME: &str = "vec_kth_elem";
-
-
 
 /// Returns the k-th element of the vector.
 ///
@@ -45,7 +42,7 @@ const NAME: &str = "vec_kth_elem";
 /// +---------+
 ///
 /// ```
-/// 
+///
 
 #[derive(Debug, Clone, Default)]
 pub struct VectorKthElemFunction;
@@ -95,7 +92,6 @@ impl Function for VectorKthElemFunction {
         let arg0_const = as_veclit_if_const(arg0)?;
 
         for i in 0..len {
-
             let arg0 = match arg0_const.as_ref() {
                 Some(arg0) => Some(Cow::Borrowed(arg0.as_ref())),
                 None => as_veclit(arg0.get_ref(i))?,
@@ -116,17 +112,19 @@ impl Function for VectorKthElemFunction {
             ensure!(
                 k > 0 && k <= arg0.len(),
                 InvalidFuncArgsSnafu {
-                    err_msg: format!("Invalid function args: Invalid k: {}. k must be in the range [1, {}]", k, arg0.len()),
+                    err_msg: format!(
+                        "Invalid function args: Invalid k: {}. k must be in the range [1, {}]",
+                        k,
+                        arg0.len()
+                    ),
                 }
             );
-            
-            let value=arg0[k -1];
+
+            let value = arg0[k - 1];
 
             result.push(Some(value));
-  
-        };
+        }
         Ok(result.to_vector())
-        
     }
 }
 
@@ -146,7 +144,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_vec_kth_elem(){
+    fn test_vec_kth_elem() {
         let func = VectorKthElemFunction;
 
         let input0 = Arc::new(StringVector::from(vec![
@@ -154,13 +152,11 @@ mod tests {
             Some("[7.0,8.0,9.0]".to_string()),
             None,
         ]));
-        let input1 = Arc::new(Int64Vector::from(vec![
-            Some(2),
-            None,
-            Some(2),
-        ]));
+        let input1 = Arc::new(Int64Vector::from(vec![Some(2), None, Some(2)]));
 
-        let result = func.eval(&FunctionContext::default(), &[input0, input1]).unwrap();
+        let result = func
+            .eval(&FunctionContext::default(), &[input0, input1])
+            .unwrap();
 
         let result = result.as_ref();
         assert_eq!(result.len(), 3);
@@ -168,13 +164,8 @@ mod tests {
         assert!(result.get_ref(1).is_null());
         assert!(result.get_ref(2).is_null());
 
-
-        let input0 = Arc::new(StringVector::from(vec![
-            Some("[1.0,2.0,3.0]".to_string()),
-        ]));
-        let input1 = Arc::new(Int64Vector::from(vec![
-            Some(4),
-        ]));
+        let input0 = Arc::new(StringVector::from(vec![Some("[1.0,2.0,3.0]".to_string())]));
+        let input1 = Arc::new(Int64Vector::from(vec![Some(4)]));
 
         let err = func
             .eval(&FunctionContext::default(), &[input0, input1])
@@ -183,20 +174,14 @@ mod tests {
             error::Error::InvalidFuncArgs { err_msg, .. } => {
                 assert_eq!(
                     err_msg,
-                    format!(
-                        "Invalid function args: Invalid k: 4. k must be in the range [1, 3]"
-                    )
+                    format!("Invalid function args: Invalid k: 4. k must be in the range [1, 3]")
                 )
             }
             _ => unreachable!(),
         }
 
-        let input0 = Arc::new(StringVector::from(vec![
-            Some("[1.0,2.0,3.0]".to_string()),
-        ]));
-        let input1 = Arc::new(Int64Vector::from(vec![
-            Some(0),
-        ]));
+        let input0 = Arc::new(StringVector::from(vec![Some("[1.0,2.0,3.0]".to_string())]));
+        let input1 = Arc::new(Int64Vector::from(vec![Some(0)]));
 
         let err = func
             .eval(&FunctionContext::default(), &[input0, input1])
@@ -205,17 +190,10 @@ mod tests {
             error::Error::InvalidFuncArgs { err_msg, .. } => {
                 assert_eq!(
                     err_msg,
-                    format!(
-                        "Invalid function args: Invalid k: 0. k must be in the range [1, 3]"
-                    )
+                    format!("Invalid function args: Invalid k: 0. k must be in the range [1, 3]")
                 )
             }
             _ => unreachable!(),
         }
-
-
-
     }
-
 }
-
