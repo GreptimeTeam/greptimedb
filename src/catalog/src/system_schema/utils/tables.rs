@@ -51,10 +51,10 @@ pub fn bigint_column(name: &str) -> ColumnSchema {
     )
 }
 
-pub fn datetime_column(name: &str) -> ColumnSchema {
+pub fn timestamp_micro_column(name: &str) -> ColumnSchema {
     ColumnSchema::new(
         str::to_lowercase(name),
-        ConcreteDataType::timestamp_millisecond_datatype(),
+        ConcreteDataType::timestamp_microsecond_datatype(),
         false,
     )
 }

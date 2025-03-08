@@ -19,7 +19,6 @@ use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, StringArray};
 use arrow::compute;
-use arrow::compute::cast;
 use arrow::compute::kernels::comparison;
 use arrow::datatypes::{DataType as ArrowDataType, TimeUnit};
 use arrow_schema::IntervalUnit;
@@ -180,9 +179,6 @@ impl Helper {
             ScalarValue::Date32(v) => {
                 ConstantVector::new(Arc::new(DateVector::from(vec![v])), length)
             }
-            ScalarValue::Date64(v) => {
-                ConstantVector::new(Arc::new(TimestampMillisecondVector::from(vec![v])), length)
-            }
             ScalarValue::TimestampSecond(v, _) => {
                 // Timezone is unimplemented now.
                 ConstantVector::new(Arc::new(TimestampSecondVector::from(vec![v])), length)
@@ -245,7 +241,8 @@ impl Helper {
             | ScalarValue::Float16(_)
             | ScalarValue::Utf8View(_)
             | ScalarValue::BinaryView(_)
-            | ScalarValue::Map(_) => {
+            | ScalarValue::Map(_)
+            | ScalarValue::Date64(_) => {
                 return error::ConversionSnafu {
                     from: format!("Unsupported scalar value: {value}"),
                 }
@@ -287,14 +284,6 @@ impl Helper {
                 Arc::new(StringVector::try_from_arrow_array(array)?)
             }
             ArrowDataType::Date32 => Arc::new(DateVector::try_from_arrow_array(array)?),
-            ArrowDataType::Date64 => {
-                let array = cast(
-                    array.as_ref(),
-                    &ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
-                )
-                .context(crate::error::ArrowComputeSnafu)?;
-                Arc::new(TimestampMillisecondVector::try_from_arrow_array(array)?)
-            }
             ArrowDataType::List(_) => Arc::new(ListVector::try_from_arrow_array(array)?),
             ArrowDataType::Timestamp(unit, _) => match unit {
                 TimeUnit::Second => Arc::new(TimestampSecondVector::try_from_arrow_array(array)?),
@@ -370,7 +359,8 @@ impl Helper {
             | ArrowDataType::BinaryView
             | ArrowDataType::Utf8View
             | ArrowDataType::ListView(_)
-            | ArrowDataType::LargeListView(_) => {
+            | ArrowDataType::LargeListView(_)
+            | ArrowDataType::Date64 => {
                 return error::UnsupportedArrowTypeSnafu {
                     arrow_type: array.as_ref().data_type().clone(),
                 }
@@ -427,14 +417,12 @@ mod tests {
     };
     use arrow::buffer::Buffer;
     use arrow::datatypes::{Int32Type, IntervalMonthDayNano};
-    use arrow_array::{
-        BinaryArray, Date64Array, DictionaryArray, FixedSizeBinaryArray, LargeStringArray,
-    };
+    use arrow_array::{BinaryArray, DictionaryArray, FixedSizeBinaryArray, LargeStringArray};
     use arrow_schema::DataType;
     use common_decimal::Decimal128;
     use common_time::time::Time;
     use common_time::timestamp::TimeUnit;
-    use common_time::{Date, Duration, Timestamp};
+    use common_time::{Date, Duration};
 
     use super::*;
     use crate::value::Value;
@@ -473,22 +461,6 @@ mod tests {
         assert_eq!(3, vector.len());
         for i in 0..vector.len() {
             assert_eq!(Value::Date(Date::new(42)), vector.get(i));
-        }
-    }
-
-    #[test]
-    fn test_try_from_scalar_datetime_value() {
-        let vector = Helper::try_from_scalar_value(ScalarValue::Date64(Some(42)), 3).unwrap();
-        assert_eq!(
-            ConcreteDataType::timestamp_millisecond_datatype(),
-            vector.data_type()
-        );
-        assert_eq!(3, vector.len());
-        for i in 0..vector.len() {
-            assert_eq!(
-                Value::Timestamp(Timestamp::new_millisecond(42)),
-                vector.get(i)
-            );
         }
     }
 
@@ -603,16 +575,6 @@ mod tests {
     fn check_try_into_vector(array: impl Array + 'static) {
         let array: ArrayRef = Arc::new(array);
         let vector = Helper::try_into_vector(array.clone()).unwrap();
-        assert_eq!(&array, &vector.to_arrow_array());
-    }
-
-    #[test]
-    fn date64_check_try_into_vector() {
-        let array = Date64Array::from(vec![1, 2, 3]);
-        let array: ArrayRef = Arc::new(array);
-        let vector = Helper::try_into_vector(array.clone()).unwrap();
-        let array = TimestampMillisecondArray::from(vec![1, 2, 3]);
-        let array: ArrayRef = Arc::new(array);
         assert_eq!(&array, &vector.to_arrow_array());
     }
 
@@ -737,19 +699,6 @@ mod tests {
     fn check_into_and_from(array: impl Array + 'static) {
         let array: ArrayRef = Arc::new(array);
         let vector = Helper::try_into_vector(array.clone()).unwrap();
-        assert_eq!(&array, &vector.to_arrow_array());
-        let row: Vec<Value> = (0..array.len()).map(|i| vector.get(i)).collect();
-        let dt = vector.data_type();
-        check_try_from_row_to_vector(row, &dt);
-    }
-
-    #[test]
-    fn date64_check_into_and_from() {
-        let array = Date64Array::from(vec![1, 2, 3]);
-        let array: ArrayRef = Arc::new(array);
-        let vector = Helper::try_into_vector(array.clone()).unwrap();
-        let array = TimestampMillisecondArray::from(vec![1, 2, 3]);
-        let array: ArrayRef = Arc::new(array);
         assert_eq!(&array, &vector.to_arrow_array());
         let row: Vec<Value> = (0..array.len()).map(|i| vector.get(i)).collect();
         let dt = vector.data_type();

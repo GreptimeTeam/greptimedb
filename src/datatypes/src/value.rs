@@ -912,9 +912,6 @@ impl TryFrom<ScalarValue> for Value {
                 Value::List(ListValue::new(items, datatype))
             }
             ScalarValue::Date32(d) => d.map(|x| Value::Date(Date::new(x))).unwrap_or(Value::Null),
-            ScalarValue::Date64(d) => d
-                .map(|x| Value::Timestamp(Timestamp::new_millisecond(x)))
-                .unwrap_or(Value::Null),
             ScalarValue::TimestampSecond(t, _) => t
                 .map(|x| Value::Timestamp(Timestamp::new(x, TimeUnit::Second)))
                 .unwrap_or(Value::Null),
@@ -973,7 +970,8 @@ impl TryFrom<ScalarValue> for Value {
             | ScalarValue::Float16(_)
             | ScalarValue::Utf8View(_)
             | ScalarValue::BinaryView(_)
-            | ScalarValue::Map(_) => {
+            | ScalarValue::Map(_)
+            | ScalarValue::Date64(_) => {
                 return error::UnsupportedArrowTypeSnafu {
                     arrow_type: v.data_type(),
                 }
@@ -1432,7 +1430,7 @@ pub fn column_data_to_json(data: ValueData) -> JsonValue {
         ValueData::StringValue(s) => JsonValue::String(s),
         ValueData::DateValue(d) => JsonValue::String(Date::from(d).to_string()),
         ValueData::DatetimeValue(d) => {
-            JsonValue::String(Timestamp::new_millisecond(d).to_iso8601_string())
+            JsonValue::String(Timestamp::new_microsecond(d).to_iso8601_string())
         }
         ValueData::TimeSecondValue(d) => JsonValue::String(Time::new_second(d).to_iso8601_string()),
         ValueData::TimeMillisecondValue(d) => {
@@ -1482,6 +1480,7 @@ mod tests {
 
     #[test]
     fn test_column_data_to_json() {
+        set_default_timezone(Some("Asia/Shanghai")).unwrap();
         assert_eq!(
             column_data_to_json(ValueData::BinaryValue(b"hello".to_vec())),
             JsonValue::String("aGVsbG8=".to_string())
@@ -1540,31 +1539,31 @@ mod tests {
         );
         assert_eq!(
             column_data_to_json(ValueData::DatetimeValue(456)),
-            JsonValue::String("1970-01-01 00:00:00.456+0000".to_string())
+            JsonValue::String("1970-01-01 08:00:00.000456+0800".to_string())
         );
         assert_eq!(
             column_data_to_json(ValueData::TimeSecondValue(789)),
-            JsonValue::String("00:13:09+0000".to_string())
+            JsonValue::String("08:13:09+0800".to_string())
         );
         assert_eq!(
             column_data_to_json(ValueData::TimeMillisecondValue(789)),
-            JsonValue::String("00:00:00.789+0000".to_string())
+            JsonValue::String("08:00:00.789+0800".to_string())
         );
         assert_eq!(
             column_data_to_json(ValueData::TimeMicrosecondValue(789)),
-            JsonValue::String("00:00:00.000789+0000".to_string())
+            JsonValue::String("08:00:00.000789+0800".to_string())
         );
         assert_eq!(
             column_data_to_json(ValueData::TimestampMillisecondValue(1234567890)),
-            JsonValue::String("1970-01-15 06:56:07.890+0000".to_string())
+            JsonValue::String("1970-01-15 14:56:07.890+0800".to_string())
         );
         assert_eq!(
             column_data_to_json(ValueData::TimestampNanosecondValue(1234567890123456789)),
-            JsonValue::String("2009-02-13 23:31:30.123456789+0000".to_string())
+            JsonValue::String("2009-02-14 07:31:30.123456789+0800".to_string())
         );
         assert_eq!(
             column_data_to_json(ValueData::TimestampSecondValue(1234567890)),
-            JsonValue::String("2009-02-13 23:31:30+0000".to_string())
+            JsonValue::String("2009-02-14 07:31:30+0800".to_string())
         );
         assert_eq!(
             column_data_to_json(ValueData::IntervalYearMonthValue(12)),
@@ -1728,8 +1727,6 @@ mod tests {
             ScalarValue::Date32(Some(123)).try_into().unwrap()
         );
         assert_eq!(Value::Null, ScalarValue::Date32(None).try_into().unwrap());
-
-        assert_eq!(Value::Null, ScalarValue::Date64(None).try_into().unwrap());
 
         assert_eq!(
             Value::Timestamp(Timestamp::new(1, TimeUnit::Second)),
