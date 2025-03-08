@@ -11208,6 +11208,8 @@ name = "sst-convert"
 version = "0.13.0"
 dependencies = [
  "mito2",
+ "object-store",
+ "store-api",
 ]
 
 [[package]]

@@ -6,6 +6,8 @@ license.workspace = true
 
 [dependencies]
 mito2.workspace = true
+object-store.workspace = true
+store-api.workspace = true
 
 [lints]
 workspace = true
