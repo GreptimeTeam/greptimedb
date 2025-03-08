@@ -12,11 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_time::Timestamp;
-use datatypes::scalars::ScalarVectorBuilder;
-use datatypes::vectors::BooleanVectorBuilder;
+use std::ops::BitAnd;
+use std::sync::Arc;
 
-use crate::error::Result;
+use common_recordbatch::filter::SimpleFilterEvaluator;
+use common_time::Timestamp;
+use datatypes::arrow::array::BooleanArray;
+use datatypes::arrow::buffer::BooleanBuffer;
+use snafu::ResultExt;
+
+use crate::error::{FilterRecordBatchSnafu, Result};
 use crate::memtable::BoxedBatchIterator;
 use crate::read::last_row::RowGroupLastRowCachedReader;
 use crate::read::{Batch, BatchReader};
@@ -133,16 +138,26 @@ impl PruneReader {
 pub(crate) struct PruneTimeIterator {
     iter: BoxedBatchIterator,
     time_range: FileTimeRange,
+    /// Precise time filters.
+    time_filters: Option<Arc<Vec<SimpleFilterEvaluator>>>,
 }
 
 impl PruneTimeIterator {
     /// Creates a new `PruneTimeIterator` with the given iterator and time range.
-    pub(crate) fn new(iter: BoxedBatchIterator, time_range: FileTimeRange) -> Self {
-        Self { iter, time_range }
+    pub(crate) fn new(
+        iter: BoxedBatchIterator,
+        time_range: FileTimeRange,
+        time_filters: Option<Arc<Vec<SimpleFilterEvaluator>>>,
+    ) -> Self {
+        Self {
+            iter,
+            time_range,
+            time_filters,
+        }
     }
 
     /// Prune batch by time range.
-    fn prune(&self, mut batch: Batch) -> Result<Batch> {
+    fn prune(&self, batch: Batch) -> Result<Batch> {
         if batch.is_empty() {
             return Ok(batch);
         }
@@ -152,7 +167,7 @@ impl PruneTimeIterator {
         if self.time_range.0 <= batch.first_timestamp().unwrap()
             && batch.last_timestamp().unwrap() <= self.time_range.1
         {
-            return Ok(batch);
+            return self.prune_by_time_filters(batch, Vec::new());
         }
 
         // slow path, prune the batch by time range.
@@ -164,19 +179,41 @@ impl PruneTimeIterator {
             .as_timestamp()
             .unwrap()
             .unit();
-        let mut filter_builder = BooleanVectorBuilder::with_capacity(batch.timestamps().len());
+        let mut mask = Vec::with_capacity(batch.timestamps().len());
         let timestamps = batch.timestamps_native().unwrap();
         for ts in timestamps {
             let ts = Timestamp::new(*ts, unit);
             if self.time_range.0 <= ts && ts <= self.time_range.1 {
-                filter_builder.push(Some(true));
+                mask.push(true);
             } else {
-                filter_builder.push(Some(false));
+                mask.push(false);
             }
         }
-        let filter = filter_builder.finish();
 
-        batch.filter(&filter)?;
+        self.prune_by_time_filters(batch, mask)
+    }
+
+    /// Prunes the batch by time filters.
+    /// Also applies existing mask to the batch if the mask is not empty.
+    fn prune_by_time_filters(&self, mut batch: Batch, existing_mask: Vec<bool>) -> Result<Batch> {
+        if let Some(filters) = &self.time_filters {
+            let mut mask = BooleanBuffer::new_set(batch.num_rows());
+            for filter in filters.iter() {
+                let result = filter
+                    .evaluate_vector(batch.timestamps())
+                    .context(FilterRecordBatchSnafu)?;
+                mask = mask.bitand(&result);
+            }
+
+            if !existing_mask.is_empty() {
+                mask = mask.bitand(&BooleanBuffer::from(existing_mask));
+            }
+
+            batch.filter(&BooleanArray::from(mask).into())?;
+        } else if !existing_mask.is_empty() {
+            batch.filter(&BooleanArray::from(existing_mask).into())?;
+        }
+
         Ok(batch)
     }
 
@@ -204,6 +241,8 @@ impl Iterator for PruneTimeIterator {
 #[cfg(test)]
 mod tests {
     use api::v1::OpType;
+    use datafusion_common::ScalarValue;
+    use datafusion_expr::{col, lit, Expr};
 
     use super::*;
     use crate::test_util::new_batch;
@@ -218,6 +257,7 @@ mod tests {
                 Timestamp::new_millisecond(0),
                 Timestamp::new_millisecond(1000),
             ),
+            None,
         );
         let actual: Vec<_> = iter.map(|batch| batch.unwrap()).collect();
         assert!(actual.is_empty());
@@ -256,6 +296,7 @@ mod tests {
                 Timestamp::new_millisecond(10),
                 Timestamp::new_millisecond(15),
             ),
+            None,
         );
         let actual: Vec<_> = iter.map(|batch| batch.unwrap()).collect();
         assert_eq!(
@@ -279,6 +320,7 @@ mod tests {
                 Timestamp::new_millisecond(11),
                 Timestamp::new_millisecond(20),
             ),
+            None,
         );
         let actual: Vec<_> = iter.map(|batch| batch.unwrap()).collect();
         assert_eq!(
@@ -309,6 +351,7 @@ mod tests {
                 Timestamp::new_millisecond(10),
                 Timestamp::new_millisecond(18),
             ),
+            None,
         );
         let actual: Vec<_> = iter.map(|batch| batch.unwrap()).collect();
         assert_eq!(
@@ -335,6 +378,126 @@ mod tests {
                     &[OpType::Put, OpType::Put],
                     &[117, 118],
                 ),
+            ]
+        );
+    }
+
+    fn create_time_filters(expr: &[Expr]) -> Option<Arc<Vec<SimpleFilterEvaluator>>> {
+        let filters = expr
+            .iter()
+            .map(|expr| SimpleFilterEvaluator::try_new(expr).unwrap())
+            .collect();
+        Some(Arc::new(filters))
+    }
+
+    #[test]
+    fn test_prune_time_iter_with_time_filters() {
+        let input = [
+            new_batch(
+                b"k1",
+                &[10, 11],
+                &[20, 20],
+                &[OpType::Put, OpType::Put],
+                &[110, 111],
+            ),
+            new_batch(
+                b"k1",
+                &[15, 16],
+                &[20, 20],
+                &[OpType::Put, OpType::Put],
+                &[115, 116],
+            ),
+            new_batch(
+                b"k1",
+                &[17, 18],
+                &[20, 20],
+                &[OpType::Put, OpType::Put],
+                &[117, 118],
+            ),
+        ];
+
+        let iter = input.clone().into_iter().map(Ok);
+        // We won't use the column name.
+        let time_filters = create_time_filters(&[
+            col("ts").gt_eq(lit(ScalarValue::TimestampMillisecond(Some(10), None))),
+            col("ts").lt(lit(ScalarValue::TimestampMillisecond(Some(16), None))),
+        ]);
+        let iter = PruneTimeIterator::new(
+            Box::new(iter),
+            (
+                Timestamp::new_millisecond(10),
+                Timestamp::new_millisecond(20),
+            ),
+            time_filters,
+        );
+        let actual: Vec<_> = iter.map(|batch| batch.unwrap()).collect();
+        assert_eq!(
+            actual,
+            [
+                new_batch(
+                    b"k1",
+                    &[10, 11],
+                    &[20, 20],
+                    &[OpType::Put, OpType::Put],
+                    &[110, 111],
+                ),
+                new_batch(b"k1", &[15], &[20], &[OpType::Put], &[115],),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_prune_time_iter_in_range_with_time_filters() {
+        let input = [
+            new_batch(
+                b"k1",
+                &[10, 11],
+                &[20, 20],
+                &[OpType::Put, OpType::Put],
+                &[110, 111],
+            ),
+            new_batch(
+                b"k1",
+                &[15, 16],
+                &[20, 20],
+                &[OpType::Put, OpType::Put],
+                &[115, 116],
+            ),
+            new_batch(
+                b"k1",
+                &[17, 18],
+                &[20, 20],
+                &[OpType::Put, OpType::Put],
+                &[117, 118],
+            ),
+        ];
+
+        let iter = input.clone().into_iter().map(Ok);
+        // We won't use the column name.
+        let time_filters = create_time_filters(&[
+            col("ts").gt_eq(lit(ScalarValue::TimestampMillisecond(Some(10), None))),
+            col("ts").lt(lit(ScalarValue::TimestampMillisecond(Some(16), None))),
+        ]);
+        let iter = PruneTimeIterator::new(
+            Box::new(iter),
+            (
+                Timestamp::new_millisecond(5),
+                Timestamp::new_millisecond(18),
+            ),
+            time_filters,
+        );
+        let actual: Vec<_> = iter.map(|batch| batch.unwrap()).collect();
+        assert_eq!(
+            actual,
+            [
+                new_batch(
+                    b"k1",
+                    &[10, 11],
+                    &[20, 20],
+                    &[OpType::Put, OpType::Put],
+                    &[110, 111],
+                ),
+                new_batch(b"k1", &[15], &[20], &[OpType::Put], &[115],),
             ]
         );
     }

@@ -25,6 +25,7 @@ use super::{
     SPAN_ID_COLUMN, SPAN_KIND_COLUMN, SPAN_NAME_COLUMN, TIMESTAMP_COLUMN, TRACE_ID_COLUMN,
 };
 use crate::error::Result;
+use crate::otlp::trace::SPAN_EVENTS_COLUMN;
 use crate::otlp::utils::{make_column_data, make_string_column_data};
 use crate::query_handler::PipelineHandlerRef;
 use crate::row_writer::{self, MultiTableData, TableData};
@@ -112,7 +113,12 @@ pub fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> 
         span.span_attributes.into(),
         &mut row,
     )?;
-    row_writer::write_json(writer, "span_events", span.span_events.into(), &mut row)?;
+    row_writer::write_json(
+        writer,
+        SPAN_EVENTS_COLUMN,
+        span.span_events.into(),
+        &mut row,
+    )?;
     row_writer::write_json(writer, "span_links", span.span_links.into(), &mut row)?;
 
     // write fields

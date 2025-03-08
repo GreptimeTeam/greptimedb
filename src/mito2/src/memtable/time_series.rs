@@ -48,6 +48,7 @@ use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{
     AllocTracker, BoxedBatchIterator, BulkPart, IterBuilder, KeyValues, Memtable, MemtableBuilder,
     MemtableId, MemtableRange, MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats,
+    PredicateGroup,
 };
 use crate::metrics::{READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
 use crate::read::dedup::LastNonNullIter;
@@ -267,7 +268,7 @@ impl Memtable for TimeSeriesMemtable {
     fn ranges(
         &self,
         projection: Option<&[ColumnId]>,
-        predicate: Option<Predicate>,
+        predicate: PredicateGroup,
         sequence: Option<SequenceNumber>,
     ) -> MemtableRanges {
         let projection = if let Some(projection) = projection {
@@ -281,12 +282,12 @@ impl Memtable for TimeSeriesMemtable {
         let builder = Box::new(TimeSeriesIterBuilder {
             series_set: self.series_set.clone(),
             projection,
-            predicate,
+            predicate: predicate.predicate().cloned(),
             dedup: self.dedup,
             merge_mode: self.merge_mode,
             sequence,
         });
-        let context = Arc::new(MemtableRangeContext::new(self.id, builder));
+        let context = Arc::new(MemtableRangeContext::new(self.id, builder, predicate));
 
         MemtableRanges {
             ranges: [(0, MemtableRange::new(context))].into(),
