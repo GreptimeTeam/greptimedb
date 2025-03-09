@@ -166,7 +166,7 @@ mod tests {
     use crate::procedure::region_follower::test_util::TestingEnv;
 
     #[tokio::test]
-    async fn test_submit_add_follower_procedure_table_not_found() {
+    async fn test_submit_procedure_table_not_found() {
         let env = TestingEnv::new();
         let ctx = env.new_context();
         let region_follower_manager = RegionFollowerManager::new(env.procedure_manager(), ctx);
@@ -176,6 +176,16 @@ mod tests {
         };
         let err = region_follower_manager
             .submit_add_follower_procedure(req)
+            .await
+            .unwrap_err();
+        assert_matches!(err, error::Error::TableInfoNotFound { .. });
+
+        let req = RemoveRegionFollowerRequest {
+            region_id: 1,
+            peer_id: 2,
+        };
+        let err = region_follower_manager
+            .submit_remove_follower_procedure(req)
             .await
             .unwrap_err();
         assert_matches!(err, error::Error::TableInfoNotFound { .. });
