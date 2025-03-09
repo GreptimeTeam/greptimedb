@@ -16,19 +16,19 @@
 
 use std::sync::Arc;
 
-use datanode::config::{FileConfig, StorageConfig};
+use datanode::config::StorageConfig;
 use datanode::datanode::DatanodeBuilder;
-use datanode::store::fs::new_fs_object_store;
 use meta_client::MetaClientOptions;
 use mito2::access_layer::SstInfoArray;
 use mito2::config::MitoConfig;
 use mito2::read::Source;
 use mito2::sst::parquet::WriteOptions;
 use object_store::manager::ObjectStoreManagerRef;
+use object_store::services::Fs;
 use object_store::ObjectStore;
 use snafu::ResultExt;
 
-use crate::error::{DatanodeSnafu, MitoSnafu, Result};
+use crate::error::{DatanodeSnafu, MitoSnafu, ObjectStoreSnafu, Result};
 use crate::reader::InputReaderBuilder;
 use crate::table::TableMetadataHelper;
 use crate::writer::RegionWriterBuilder;
@@ -191,7 +191,10 @@ pub async fn new_object_store_manager(config: &StorageConfig) -> Result<ObjectSt
 
 /// Creates a input store from a path.
 pub async fn new_input_store(path: &str) -> Result<ObjectStore> {
-    new_fs_object_store(path, &FileConfig::default())
-        .await
-        .context(DatanodeSnafu)
+    let builder = Fs::default().root(path);
+
+    let object_store = ObjectStore::new(builder)
+        .context(ObjectStoreSnafu)?
+        .finish();
+    Ok(object_store)
 }
