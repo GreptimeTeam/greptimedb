@@ -15,7 +15,7 @@
 //! object storage utilities
 
 mod azblob;
-mod fs;
+pub mod fs;
 mod gcs;
 mod oss;
 mod s3;

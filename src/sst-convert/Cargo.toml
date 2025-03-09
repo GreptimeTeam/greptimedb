@@ -13,6 +13,7 @@ common-error.workspace = true
 common-macro.workspace = true
 common-meta.workspace = true
 common-recordbatch.workspace = true
+datanode.workspace = true
 datatypes.workspace = true
 futures.workspace = true
 futures-util.workspace = true

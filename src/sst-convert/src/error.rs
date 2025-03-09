@@ -73,6 +73,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Datanode error"))]
+    Datanode {
+        source: datanode::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -87,6 +94,7 @@ impl ErrorExt for Error {
             Error::MissingTable { .. } => StatusCode::TableNotFound,
             Error::MissingColumn { .. } => StatusCode::TableColumnNotFound,
             Error::Mito { source, .. } => source.status_code(),
+            Error::Datanode { source, .. } => source.status_code(),
         }
     }
 

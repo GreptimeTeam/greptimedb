@@ -11228,6 +11228,7 @@ dependencies = [
  "common-macro",
  "common-meta",
  "common-recordbatch",
+ "datanode",
  "datatypes",
  "futures",
  "futures-util",
