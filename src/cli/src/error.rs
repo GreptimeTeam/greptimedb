@@ -276,6 +276,24 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("OpenDAL operator failed"))]
+    OpenDal {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: opendal::Error,
+    },
+    #[snafu(display("S3 config need be set"))]
+    S3ConfigNotSet {
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Output directory not set"))]
+    OutputDirNotSet {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -319,6 +337,9 @@ impl ErrorExt for Error {
             | Error::BuildClient { .. } => StatusCode::Unexpected,
 
             Error::Other { source, .. } => source.status_code(),
+            Error::OpenDal { .. } => StatusCode::Internal,
+            Error::S3ConfigNotSet { .. } => StatusCode::InvalidArguments,
+            Error::OutputDirNotSet { .. } => StatusCode::InvalidArguments,
 
             Error::BuildRuntime { source, .. } => source.status_code(),
 
