@@ -163,11 +163,16 @@ impl SstConverterBuilder {
     }
 
     /// Builds a SST converter.
-    pub async fn build(self) -> Result<SstConverter> {
+    pub async fn build(mut self) -> Result<SstConverter> {
+        self.config
+            .sanitize(&self.storage_config.data_home)
+            .context(MitoSnafu)?;
+
         common_telemetry::info!(
-            "Building SST converter, input_path: {}, storage_config: {:?}",
+            "Building SST converter, input_path: {}, storage_config: {:?}, config: {:?}",
             self.input_path,
-            self.storage_config
+            self.storage_config,
+            self.config
         );
 
         let input_store = new_input_store(&self.input_path).await?;
