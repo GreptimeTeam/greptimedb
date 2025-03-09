@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use api::v1::meta::MailboxMessage;
 use common_meta::distributed_time_constants::REGION_LEASE_SECS;
-use common_meta::instruction::{Instruction, InstructionReply, OpenRegion, SimpleReply};
+use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
 use common_meta::key::datanode_table::RegionInfo;
 use common_meta::peer::Peer;
 use common_meta::RegionIdent;
@@ -29,22 +29,22 @@ use crate::error::{self, Result};
 use crate::handler::HeartbeatMailbox;
 use crate::service::mailbox::Channel;
 
-/// Uses lease time of a region as the timeout of opening a follower region.
-const OPEN_REGION_FOLLOWER_TIMEOUT: Duration = Duration::from_secs(REGION_LEASE_SECS);
+/// Uses lease time of a region as the timeout of closing a follower region.
+const CLOSE_REGION_FOLLOWER_TIMEOUT: Duration = Duration::from_secs(REGION_LEASE_SECS);
 
-pub(crate) struct CreateFollower {
+pub(crate) struct RemoveFollower {
     region_id: RegionId,
     // The peer of the datanode to add region follower.
     peer: Peer,
 }
 
-impl CreateFollower {
+impl RemoveFollower {
     pub fn new(region_id: RegionId, peer: Peer) -> Self {
         Self { region_id, peer }
     }
 
-    /// Builds the open region instruction for the region follower.
-    pub(crate) async fn build_open_region_instruction(
+    /// Builds the close region instruction for the region follower.
+    pub(crate) async fn build_close_region_instruction(
         &self,
         region_info: RegionInfo,
     ) -> Result<Instruction> {
@@ -52,12 +52,7 @@ impl CreateFollower {
         let table_id = self.region_id.table_id();
         let region_number = self.region_id.region_number();
 
-        let RegionInfo {
-            region_storage_path,
-            region_options,
-            region_wal_options,
-            engine,
-        } = region_info;
+        let RegionInfo { engine, .. } = region_info;
 
         let region_ident = RegionIdent {
             datanode_id,
@@ -66,25 +61,19 @@ impl CreateFollower {
             engine,
         };
 
-        let open_instruction = Instruction::OpenRegion(OpenRegion::new(
-            region_ident,
-            &region_storage_path,
-            region_options,
-            region_wal_options,
-            true,
-        ));
+        let close_instruction = Instruction::CloseRegion(region_ident);
 
-        Ok(open_instruction)
+        Ok(close_instruction)
     }
 
-    /// Sends the open region instruction to the datanode.
-    pub(crate) async fn send_open_region_instruction(
+    /// Sends the close region instruction to the datanode.
+    pub(crate) async fn send_close_region_instruction(
         &self,
         ctx: &Context,
         instruction: Instruction,
     ) -> Result<()> {
         let msg = MailboxMessage::json_message(
-            &format!("Open a follower region: {}", self.region_id),
+            &format!("Close a follower region: {}", self.region_id),
             &format!("Metasrv@{}", ctx.server_addr),
             &format!("Datanode-{}@{}", self.peer.id, self.peer.addr),
             common_time::util::current_time_millis(),
@@ -98,22 +87,22 @@ impl CreateFollower {
         let now = Instant::now();
         let receiver = ctx
             .mailbox
-            .send(&ch, msg, OPEN_REGION_FOLLOWER_TIMEOUT)
+            .send(&ch, msg, CLOSE_REGION_FOLLOWER_TIMEOUT)
             .await?;
 
         match receiver.await? {
             Ok(msg) => {
                 let reply = HeartbeatMailbox::json_reply(&msg)?;
                 info!(
-                    "Received open region follower reply: {:?}, region: {}, elapsed: {:?}",
+                    "Received close region follower reply: {:?}, region: {}, elapsed: {:?}",
                     reply,
                     self.region_id,
                     now.elapsed()
                 );
-                let InstructionReply::OpenRegion(SimpleReply { result, error }) = reply else {
+                let InstructionReply::CloseRegion(SimpleReply { result, error }) = reply else {
                     return error::UnexpectedInstructionReplySnafu {
                         mailbox_message: msg.to_string(),
-                        reason: "expect open region follower reply",
+                        reason: "expect close region follower reply",
                     }
                     .fail();
                 };
@@ -123,7 +112,7 @@ impl CreateFollower {
                 } else {
                     error::RetryLaterSnafu {
                         reason: format!(
-                            "Region {} is not opened by datanode {:?}, error: {error:?}, elapsed: {:?}",
+                            "Region {} is not closed by datanode {:?}, error: {error:?}, elapsed: {:?}",
                             self.region_id,
                             &self.peer,
                             now.elapsed()
@@ -134,7 +123,7 @@ impl CreateFollower {
             }
             Err(error::Error::MailboxTimeout { .. }) => {
                 let reason = format!(
-                    "Mailbox received timeout for open region follower {} on datanode {:?}, elapsed: {:?}",
+                    "Mailbox received timeout for close region follower {} on datanode {:?}, elapsed: {:?}",
                     self.region_id,
                     &self.peer,
                     now.elapsed()
@@ -155,7 +144,7 @@ mod tests {
     use super::*;
     use crate::error::Error;
     use crate::procedure::region_follower::test_util::TestingEnv;
-    use crate::procedure::test_util::{new_close_region_reply, send_mock_reply};
+    use crate::procedure::test_util::{new_open_region_reply, send_mock_reply};
 
     #[tokio::test]
     async fn test_datanode_is_unreachable() {
@@ -164,10 +153,10 @@ mod tests {
 
         let region_id = RegionId::new(1, 1);
         let peer = Peer::new(1, "127.0.0.1:8080");
-        let create_follower = CreateFollower::new(region_id, peer.clone());
-        let instruction = mock_open_region_instruction(peer.id, region_id);
-        let err = create_follower
-            .send_open_region_instruction(&ctx, instruction)
+        let remove_follower = RemoveFollower::new(region_id, peer.clone());
+        let instruction = mock_close_region_instruction(peer.id, region_id);
+        let err = remove_follower
+            .send_close_region_instruction(&ctx, instruction)
             .await
             .unwrap_err();
         assert_matches!(err, Error::PusherNotFound { .. });
@@ -191,12 +180,12 @@ mod tests {
             .await;
 
         // Sends an timeout error.
-        send_mock_reply(mailbox, rx, |id| Ok(new_close_region_reply(id)));
+        send_mock_reply(mailbox, rx, |id| Ok(new_open_region_reply(id, false, None)));
 
-        let create_follower = CreateFollower::new(region_id, peer.clone());
-        let instruction = mock_open_region_instruction(peer.id, region_id);
-        let err = create_follower
-            .send_open_region_instruction(&ctx, instruction)
+        let remove_follower = RemoveFollower::new(region_id, peer.clone());
+        let instruction = mock_close_region_instruction(peer.id, region_id);
+        let err = remove_follower
+            .send_close_region_instruction(&ctx, instruction)
             .await
             .unwrap_err();
         assert_matches!(err, Error::UnexpectedInstructionReply { .. });
@@ -224,28 +213,22 @@ mod tests {
             Err(error::MailboxTimeoutSnafu { id }.build())
         });
 
-        let create_follower = CreateFollower::new(region_id, peer.clone());
-        let instruction = mock_open_region_instruction(peer.id, region_id);
-        let err = create_follower
-            .send_open_region_instruction(&ctx, instruction)
+        let remove_follower = RemoveFollower::new(region_id, peer.clone());
+        let instruction = mock_close_region_instruction(peer.id, region_id);
+        let err = remove_follower
+            .send_close_region_instruction(&ctx, instruction)
             .await
             .unwrap_err();
         assert_matches!(err, Error::RetryLater { .. });
         assert!(err.is_retryable());
     }
 
-    fn mock_open_region_instruction(datanode_id: DatanodeId, region_id: RegionId) -> Instruction {
-        Instruction::OpenRegion(OpenRegion {
-            region_ident: RegionIdent {
-                datanode_id,
-                table_id: region_id.table_id(),
-                region_number: region_id.region_number(),
-                engine: "mito2".to_string(),
-            },
-            region_storage_path: "/tmp".to_string(),
-            region_options: Default::default(),
-            region_wal_options: Default::default(),
-            skip_wal_replay: true,
+    fn mock_close_region_instruction(datanode_id: DatanodeId, region_id: RegionId) -> Instruction {
+        Instruction::CloseRegion(RegionIdent {
+            datanode_id,
+            table_id: region_id.table_id(),
+            region_number: region_id.region_number(),
+            engine: "mito2".to_string(),
         })
     }
 }

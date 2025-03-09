@@ -12,32 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_error::ext::BoxedError;
-use common_meta::distributed_time_constants;
 use common_meta::instruction::CacheIdent;
-use common_meta::key::datanode_table::{DatanodeTableKey, DatanodeTableValue, RegionInfo};
-use common_meta::key::table_route::{PhysicalTableRouteValue, TableRouteValue};
-use common_meta::key::DeserializedValueWithBytes;
-use common_meta::lock_key::{CatalogLock, RegionLock, SchemaLock, TableLock};
-use common_meta::peer::Peer;
 use common_procedure::error::ToJsonSnafu;
 use common_procedure::{
     Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
-    Result as ProcedureResult, Status, StringKey,
+    Result as ProcedureResult, Status,
 };
 use common_telemetry::info;
-use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::ResultExt;
 use store_api::storage::RegionId;
-use strum::AsRefStr;
 
 use super::create::CreateFollower;
-use super::Context;
+use super::{AlterRegionFollowerData, AlterRegionFollowerState, Context};
 use crate::error::{self, Result};
-use crate::lease::lookup_datanode_peer;
 use crate::metrics;
 pub struct AddRegionFollowerProcedure {
-    pub data: AddRegionFollowerData,
+    pub data: AlterRegionFollowerData,
     pub context: Context,
 }
 
@@ -52,7 +42,7 @@ impl AddRegionFollowerProcedure {
         context: Context,
     ) -> Self {
         Self {
-            data: AddRegionFollowerData {
+            data: AlterRegionFollowerData {
                 catalog,
                 schema,
                 region_id,
@@ -60,14 +50,14 @@ impl AddRegionFollowerProcedure {
                 peer: None,
                 datanode_table_value: None,
                 table_route: None,
-                state: AddRegionFollowerState::Prepare,
+                state: AlterRegionFollowerState::Prepare,
             },
             context,
         }
     }
 
     pub fn from_json(json: &str, context: Context) -> ProcedureResult<Self> {
-        let data: AddRegionFollowerData = serde_json::from_str(json).unwrap();
+        let data: AlterRegionFollowerData = serde_json::from_str(json).unwrap();
         Ok(Self { data, context })
     }
 
@@ -198,10 +188,10 @@ impl Procedure for AddRegionFollowerProcedure {
             .start_timer();
 
         match state {
-            AddRegionFollowerState::Prepare => self.on_prepare().await,
-            AddRegionFollowerState::SubmitRequest => self.on_submit_request().await,
-            AddRegionFollowerState::UpdateMetadata => self.on_update_metadata().await,
-            AddRegionFollowerState::InvalidateTableCache => self.on_broadcast().await,
+            AlterRegionFollowerState::Prepare => self.on_prepare().await,
+            AlterRegionFollowerState::SubmitRequest => self.on_submit_request().await,
+            AlterRegionFollowerState::UpdateMetadata => self.on_update_metadata().await,
+            AlterRegionFollowerState::InvalidateTableCache => self.on_broadcast().await,
         }
         .map_err(|e| {
             if e.is_retryable() {
@@ -221,144 +211,13 @@ impl Procedure for AddRegionFollowerProcedure {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct AddRegionFollowerData {
-    /// The catalog name.
-    pub(crate) catalog: String,
-    /// The schema name.
-    pub(crate) schema: String,
-    /// The region id.
-    pub(crate) region_id: RegionId,
-    /// The peer id of the datanode to add region follower.
-    pub(crate) peer_id: u64,
-    /// The peer of the datanode to add region follower.
-    pub(crate) peer: Option<Peer>,
-    /// The datanode table value of the region.
-    pub(crate) datanode_table_value: Option<DatanodeTableValue>,
-    /// The physical table route of the region.
-    pub(crate) table_route: Option<(
-        DeserializedValueWithBytes<TableRouteValue>,
-        PhysicalTableRouteValue,
-    )>,
-    /// The state.
-    pub(crate) state: AddRegionFollowerState,
-}
-
-impl AddRegionFollowerData {
-    pub fn lock_key(&self) -> Vec<StringKey> {
-        let region_id = self.region_id;
-        let lock_key = vec![
-            CatalogLock::Read(&self.catalog).into(),
-            SchemaLock::read(&self.catalog, &self.schema).into(),
-            // The optimistic updating of table route is not working very well,
-            // so we need to use the write lock here.
-            TableLock::Write(region_id.table_id()).into(),
-            RegionLock::Write(region_id).into(),
-        ];
-
-        lock_key
-    }
-
-    /// Returns the region info of the region.
-    pub fn region_info(&self) -> Option<RegionInfo> {
-        self.datanode_table_value
-            .as_ref()
-            .map(|datanode_table_value| datanode_table_value.region_info.clone())
-    }
-
-    /// Loads the datanode peer.
-    pub async fn load_datanode_peer(&mut self, ctx: &Context) -> Result<Peer> {
-        let peer = lookup_datanode_peer(
-            self.peer_id,
-            &ctx.meta_peer_client,
-            distributed_time_constants::DATANODE_LEASE_SECS,
-        )
-        .await?
-        .context(error::PeerUnavailableSnafu {
-            peer_id: self.peer_id,
-        })?;
-
-        self.peer = Some(peer);
-
-        Ok(self.peer.clone().unwrap())
-    }
-
-    /// Loads the datanode table value of the region.
-    pub async fn load_datanode_table_value(
-        &mut self,
-        ctx: &Context,
-    ) -> Result<&DatanodeTableValue> {
-        let table_id = self.region_id.table_id();
-        let datanode_id = self.peer_id;
-        let datanode_table_key = DatanodeTableKey {
-            datanode_id,
-            table_id,
-        };
-
-        let datanode_table_value = ctx
-            .table_metadata_manager
-            .datanode_table_manager()
-            .get(&datanode_table_key)
-            .await
-            .context(error::TableMetadataManagerSnafu)
-            .map_err(BoxedError::new)
-            .with_context(|_| error::RetryLaterWithSourceSnafu {
-                reason: format!("Failed to get DatanodeTable: ({datanode_id},{table_id})"),
-            })?
-            .context(error::DatanodeTableNotFoundSnafu {
-                table_id,
-                datanode_id,
-            })?;
-
-        self.datanode_table_value = Some(datanode_table_value);
-
-        Ok(self.datanode_table_value.as_ref().unwrap())
-    }
-
-    /// Loads the table route of the region, returns the physical table id.
-    pub async fn load_table_route(&mut self, ctx: &Context) -> Result<PhysicalTableRouteValue> {
-        let table_id = self.region_id.table_id();
-        let raw_table_route = ctx
-            .table_metadata_manager
-            .table_route_manager()
-            .table_route_storage()
-            .get_with_raw_bytes(table_id)
-            .await
-            .context(error::TableMetadataManagerSnafu)
-            .map_err(BoxedError::new)
-            .with_context(|_| error::RetryLaterWithSourceSnafu {
-                reason: format!("Failed to get TableRoute: {table_id}"),
-            })?
-            .context(error::TableRouteNotFoundSnafu { table_id })?;
-        let table_route = raw_table_route.clone().into_inner();
-
-        ensure!(
-            table_route.is_physical(),
-            error::LogicalTableCannotAddFollowerSnafu { table_id }
-        );
-
-        self.table_route = Some((raw_table_route, table_route.into_physical_table_route()));
-
-        Ok(self.table_route.clone().unwrap().1)
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, AsRefStr)]
-pub enum AddRegionFollowerState {
-    /// Prepares to add region follower.
-    Prepare,
-    /// Sends add region follower request to Datanode.
-    SubmitRequest,
-    /// Updates table metadata.
-    UpdateMetadata,
-    /// Broadcasts the invalidate table route cache message.
-    InvalidateTableCache,
-}
-
 #[cfg(test)]
 mod tests {
+    use common_meta::lock_key::{CatalogLock, RegionLock, SchemaLock, TableLock};
+
     use super::*;
     use crate::procedure::region_follower::test_util::TestingEnv;
+    use crate::procedure::region_follower::AlterRegionFollowerState;
 
     #[tokio::test]
     async fn test_lock_key() {
@@ -385,7 +244,7 @@ mod tests {
 
     #[test]
     fn test_data_serialization() {
-        let data = AddRegionFollowerData {
+        let data = AlterRegionFollowerData {
             catalog: "test_catalog".to_string(),
             schema: "test_schema".to_string(),
             region_id: RegionId::new(1, 1),
@@ -393,7 +252,7 @@ mod tests {
             peer: None,
             datanode_table_value: None,
             table_route: None,
-            state: AddRegionFollowerState::Prepare,
+            state: AlterRegionFollowerState::Prepare,
         };
 
         assert_eq!(data.region_id.as_u64(), 4294967297);
