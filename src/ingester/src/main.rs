@@ -16,6 +16,7 @@ use clap::Parser;
 use common_time::timestamp::TimeUnit;
 use datanode::config::StorageConfig;
 use meta_client::MetaClientOptions;
+use mito2::config::MitoConfig;
 use mito2::sst::file::IndexType;
 use mito2::sst::parquet::SstInfo;
 use serde::{Deserialize, Serialize};
@@ -33,12 +34,9 @@ struct Args {
     /// Directory of input json files, relative to input_dir
     #[arg(short, long)]
     json_dir: Option<String>,
-    /// Output storage config file
+    /// Config file
     #[arg(short, long)]
-    output_storage_config_file: String,
-    /// Meta client config file
-    #[arg(short, long)]
-    meta_client_config_file: String,
+    cfg: String,
     /// DB HTTP address
     #[arg(short, long)]
     db_http_addr: String,
@@ -51,26 +49,26 @@ struct Args {
     sst_output_path: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct IngesterConfig {
+    meta_client: MetaClientOptions,
+    storage: StorageConfig,
+    mito: MitoConfig,
+}
+
 #[allow(unreachable_code)]
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
 
-    let meta_client_config = std::fs::read_to_string(&args.meta_client_config_file)
-        .expect("Failed to read meta client config file");
-    let meta_options: MetaClientOptions =
-        toml::from_str(&meta_client_config).expect("Failed to parse meta client config");
+    let cfg_file = std::fs::read_to_string(&args.cfg).expect("Failed to read config file");
+    let cfg: IngesterConfig = toml::from_str(&cfg_file).expect("Failed to parse config");
 
-    let storage_config = std::fs::read_to_string(&args.output_storage_config_file)
-        .expect("Failed to read storage config file");
-    let storage_config: StorageConfig =
-        toml::from_str(&storage_config).expect("Failed to parse storage config");
-
-    // TODO: build sst converter
     let mut sst_converter = {
         let mut builder = SstConverterBuilder::new_fs(args.input_dir)
-            .with_meta_options(meta_options)
-            .with_storage_config(storage_config);
+            .with_meta_options(cfg.meta_client)
+            .with_storage_config(cfg.storage)
+            .with_config(cfg.mito);
 
         if let Some(output_path) = args.sst_output_path {
             builder = builder.with_output_path(output_path);

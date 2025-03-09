@@ -1,0 +1,35 @@
+## The metasrv client options.
+[meta_client]
+## The addresses of the metasrv.
+metasrv_addrs = ["127.0.0.1:3002", "127.0.0.1:3003"]
+
+## Operation timeout.
+timeout = "3s"
+
+## Heartbeat timeout.
+heartbeat_timeout = "500ms"
+
+## DDL timeout.
+ddl_timeout = "10s"
+
+## Connect server timeout.
+connect_timeout = "1s"
+
+## `TCP_NODELAY` option for accepted connections.
+tcp_nodelay = true
+
+## The configuration about the cache of the metadata.
+metadata_cache_max_capacity = 100000
+
+## TTL of the metadata cache.
+metadata_cache_ttl = "10m"
+
+# TTI of the metadata cache.
+metadata_cache_tti = "5m"
+
+## The data storage options.
+[storage]
+## The working home directory.
+data_home = "/tmp/greptimedb/"
+type = "File"
+[mito]
