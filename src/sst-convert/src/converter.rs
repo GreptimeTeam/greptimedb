@@ -80,11 +80,16 @@ pub struct SstConverter {
 impl SstConverter {
     /// Converts a list of input to a list of outputs.
     pub async fn convert(&mut self, input: &[InputFile]) -> Result<Vec<OutputSst>> {
+        common_telemetry::info!("Converting input {} files", input.len());
+
         let mut outputs = Vec::with_capacity(input.len());
         for file in input {
             let output = self.convert_one(file).await?;
             outputs.push(output);
         }
+
+        common_telemetry::info!("Converted {} files", outputs.len());
+
         Ok(outputs)
     }
 
