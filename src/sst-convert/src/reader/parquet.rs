@@ -14,7 +14,7 @@
 
 //! Parquet file format support.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -212,10 +212,12 @@ pub fn extract_to_batches(
         builder.push_row(&row).map_err(BoxedError::new)?;
     }
 
-    let mut batches = Vec::new();
+    // sort batches by primary key
+    let mut batches = BTreeMap::new();
     for (pk, builder) in pk_to_batchs {
-        batches.push(builder.finish(pk).map_err(BoxedError::new)?);
+        batches.insert(pk.clone(), builder.finish(pk).map_err(BoxedError::new)?);
     }
+    let batches = batches.into_values().collect();
     Ok(batches)
 }
 
