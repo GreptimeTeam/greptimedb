@@ -1,0 +1,22 @@
+[package]
+name = "ingester"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+clap.workspace = true
+common-time.workspace = true
+datanode.workspace = true
+meta-client.workspace = true
+mito2.workspace = true
+object-store.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sst-convert.workspace = true
+tokio.workspace = true
+toml.workspace = true
+
+[lints]
+workspace = true

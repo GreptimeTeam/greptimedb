@@ -5629,6 +5629,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "ingester"
+version = "0.13.0"
+dependencies = [
+ "clap 4.5.19",
+ "common-time",
+ "datanode",
+ "meta-client",
+ "mito2",
+ "object-store",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sst-convert",
+ "tokio",
+ "toml 0.8.19",
+]
+
+[[package]]
 name = "inotify"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"

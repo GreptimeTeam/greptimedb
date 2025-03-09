@@ -59,7 +59,7 @@ pub struct OutputSst {
 /// SST converter takes a list of source files and converts them to SST files.
 pub struct SstConverter {
     /// Object store for input files.
-    input_store: ObjectStore,
+    pub input_store: ObjectStore,
     /// Object store manager for output files.
     output_store_manager: ObjectStoreManagerRef,
     /// Helper to get table meta.

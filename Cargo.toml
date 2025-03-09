@@ -41,6 +41,7 @@ members = [
     "src/flow",
     "src/frontend",
     "src/index",
+    "src/ingester",
     "src/log-query",
     "src/log-store",
     "src/meta-client",
