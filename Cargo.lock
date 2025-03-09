@@ -5633,6 +5633,7 @@ name = "ingester"
 version = "0.13.0"
 dependencies = [
  "clap 4.5.19",
+ "common-telemetry",
  "common-time",
  "datanode",
  "meta-client",

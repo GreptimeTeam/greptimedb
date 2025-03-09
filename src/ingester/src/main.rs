@@ -56,9 +56,17 @@ struct IngesterConfig {
     mito: MitoConfig,
 }
 
-#[allow(unreachable_code)]
+pub const APP_NAME: &str = "greptime-ingester";
+
 #[tokio::main]
 async fn main() {
+    let _guard = common_telemetry::init_global_logging(
+        APP_NAME,
+        &Default::default(),
+        &Default::default(),
+        None,
+    );
+
     let args = Args::parse();
 
     let cfg_file = std::fs::read_to_string(&args.cfg).expect("Failed to read config file");

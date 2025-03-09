@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 clap.workspace = true
+common-telemetry.workspace = true
 common-time.workspace = true
 datanode.workspace = true
 meta-client.workspace = true
