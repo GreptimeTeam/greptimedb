@@ -23,7 +23,7 @@ use datafusion_common::{Column, Result};
 use datafusion_expr::expr::Sort;
 use datafusion_expr::{utils, Expr, LogicalPlan};
 use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
-use store_api::storage::TimeSeriesRowSelector;
+use store_api::storage::{TimeSeriesDistribution, TimeSeriesRowSelector};
 
 use crate::dummy_catalog::DummyTableProvider;
 
@@ -121,6 +121,30 @@ impl ScanHintRule {
             });
         }
         adapter.with_ordering_hint(&opts);
+
+        let mut sort_expr_cursor = order_expr.iter().map(|s| s.expr.try_as_col()).flatten();
+        let region_metadata = adapter.region_metadata();
+        let mut pk_column_iter = region_metadata.primary_key_columns();
+        let mut curr_sort_expr = sort_expr_cursor.next();
+        let mut curr_pk_col = pk_column_iter.next();
+
+        while let (Some(sort_expr), Some(pk_col)) = (curr_sort_expr, curr_pk_col) {
+            if sort_expr.name == pk_col.column_schema.name {
+                curr_sort_expr = sort_expr_cursor.next();
+            }
+            curr_pk_col = pk_column_iter.next();
+        }
+
+        let next_remaining = sort_expr_cursor.next();
+        match (curr_sort_expr, next_remaining) {
+            (Some(expr), None)
+                if expr.name == region_metadata.time_index_column().column_schema.name =>
+            {
+                adapter.with_distribution(TimeSeriesDistribution::PerSeries);
+            }
+            (None, _) => adapter.with_distribution(TimeSeriesDistribution::PerSeries),
+            (Some(_), _) => {}
+        }
     }
 
     fn set_time_series_row_selector_hint(

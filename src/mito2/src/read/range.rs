@@ -21,6 +21,7 @@ use common_time::Timestamp;
 use parquet::arrow::arrow_reader::RowSelection;
 use smallvec::{smallvec, SmallVec};
 use store_api::region_engine::PartitionRange;
+use store_api::storage::TimeSeriesDistribution;
 
 use crate::cache::CacheStrategy;
 use crate::error::Result;
@@ -98,8 +99,8 @@ impl RangeMeta {
         Self::push_seq_file_ranges(input.memtables.len(), &input.files, &mut ranges);
 
         let ranges = group_ranges_for_seq_scan(ranges);
-        if compaction {
-            // We don't split ranges in compaction.
+        if compaction || input.distribution == Some(TimeSeriesDistribution::PerSeries) {
+            // We don't split ranges in compaction or TimeSeriesDistribution::PerSeries.
             return ranges;
         }
         maybe_split_ranges_for_seq_scan(ranges)

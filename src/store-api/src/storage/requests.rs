@@ -25,6 +25,17 @@ pub enum TimeSeriesRowSelector {
     LastRow,
 }
 
+/// A hint on how to distribute time-series data on the scan output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display)]
+pub enum TimeSeriesDistribution {
+    /// Data are distributed by time window first. The scanner will
+    /// return all data within one time window before moving to the next one.
+    TimeWindowed,
+    /// Data are organized by time-series first. The scanner will return
+    /// all data for one time-series before moving to the next one.
+    PerSeries,
+}
+
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct ScanRequest {
     /// Indices of columns to read, `None` to read all columns. This indices is
@@ -45,4 +56,6 @@ pub struct ScanRequest {
     /// If set, only rows with a sequence number lesser or equal to this value
     /// will be returned.
     pub sequence: Option<SequenceNumber>,
+    /// Optional hint for the distribution of time-series data.
+    pub distribution: Option<TimeSeriesDistribution>,
 }
