@@ -21,20 +21,22 @@ use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_name::TableNameKey;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use meta_client::{MetaClientOptions, MetaClientType};
+use snafu::ResultExt;
 
-// TODO(yingwen): Error handling.
+use crate::error::{MetaClientSnafu, MetaSnafu, Result};
+
 #[derive(Clone)]
 pub struct TableMetadataHelper {
     table_metadata_manager: TableMetadataManagerRef,
 }
 
 impl TableMetadataHelper {
-    pub async fn new(meta_options: &MetaClientOptions) -> Self {
-        let backend = build_kv_backend(meta_options).await;
+    pub async fn new(meta_options: &MetaClientOptions) -> Result<Self> {
+        let backend = build_kv_backend(meta_options).await?;
         let table_metadata_manager = Arc::new(TableMetadataManager::new(Arc::new(backend)));
-        Self {
+        Ok(Self {
             table_metadata_manager,
-        }
+        })
     }
 
     /// Get table info.
@@ -43,30 +45,34 @@ impl TableMetadataHelper {
         catalog: &str,
         schema: &str,
         table: &str,
-    ) -> Option<TableInfoValue> {
+    ) -> Result<Option<TableInfoValue>> {
         let table_name = TableNameKey::new(catalog, schema, table);
-        let table_id = self
+        let Some(table_id) = self
             .table_metadata_manager
             .table_name_manager()
             .get(table_name)
             .await
-            .unwrap()
+            .context(MetaSnafu)?
             .map(|v| v.table_id())
-            .unwrap();
+        else {
+            return Ok(None);
+        };
 
-        self.table_metadata_manager
+        let value = self
+            .table_metadata_manager
             .table_info_manager()
             .get(table_id)
             .await
-            .unwrap()
-            .map(|v| v.into_inner())
+            .context(MetaSnafu)?
+            .map(|v| v.into_inner());
+        Ok(value)
     }
 }
 
-async fn build_kv_backend(meta_options: &MetaClientOptions) -> MetaKvBackend {
+async fn build_kv_backend(meta_options: &MetaClientOptions) -> Result<MetaKvBackend> {
     let meta_client = meta_client::create_meta_client(MetaClientType::Frontend, meta_options)
         .await
-        .unwrap();
+        .context(MetaClientSnafu)?;
 
-    MetaKvBackend::new(meta_client)
+    Ok(MetaKvBackend::new(meta_client))
 }

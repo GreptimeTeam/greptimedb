@@ -80,6 +80,20 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Meta error"))]
+    Meta {
+        source: common_meta::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Meta client error"))]
+    MetaClient {
+        source: meta_client::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -95,6 +109,8 @@ impl ErrorExt for Error {
             Error::MissingColumn { .. } => StatusCode::TableColumnNotFound,
             Error::Mito { source, .. } => source.status_code(),
             Error::Datanode { source, .. } => source.status_code(),
+            Error::Meta { source, .. } => source.status_code(),
+            Error::MetaClient { source, .. } => source.status_code(),
         }
     }
 

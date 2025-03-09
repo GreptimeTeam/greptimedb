@@ -226,7 +226,7 @@ impl PrimaryKeyEncoder {
                 let table_info = self
                     .table_helper
                     .get_table(&self.catalog, &self.schema, &name_label.name)
-                    .await
+                    .await?
                     .context(MissingTableSnafu {
                         table_name: &name_label.name,
                     })?;
