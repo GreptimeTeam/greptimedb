@@ -36,9 +36,13 @@ pub enum InputFileType {
 
 /// Description of a file to convert.
 pub struct InputFile {
+    /// Catalog of the table.
+    pub catalog: String,
+    /// Schema of the table.
+    pub schema: String,
     /// Table to write.
     /// For metric engine, it needs to be the physical table name.
-    pub table_name: String,
+    pub table: String,
     /// Path to the file.
     pub path: String,
     /// Type of the input file.
@@ -70,6 +74,29 @@ pub struct SstConverter {
 impl SstConverter {
     /// Converts a list of input to a list of outputs.
     pub async fn convert(&self, input: &[InputFile]) -> Result<Vec<OutputSst>> {
+        let mut outputs = Vec::with_capacity(input.len());
+        for file in input {
+            let output = self.convert_one(file).await?;
+            outputs.push(output);
+        }
+        Ok(outputs)
+    }
+
+    /// Converts one input.
+    async fn convert_one(&self, input: &InputFile) -> Result<OutputSst> {
+        match input.file_type {
+            InputFileType::Parquet => self.convert_parquet(input).await,
+            InputFileType::RemoteWrite => self.convert_remote_write(input).await,
+        }
+    }
+
+    /// Converts a parquet input.
+    async fn convert_parquet(&self, input: &InputFile) -> Result<OutputSst> {
+        todo!()
+    }
+
+    /// Converts a remote write input.
+    async fn convert_remote_write(&self, input: &InputFile) -> Result<OutputSst> {
         todo!()
     }
 }
