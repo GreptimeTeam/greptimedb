@@ -11902,6 +11902,7 @@ dependencies = [
  "operator",
  "partition",
  "paste",
+ "pipeline",
  "prost 0.13.3",
  "query",
  "rand",

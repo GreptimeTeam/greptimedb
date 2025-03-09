@@ -28,14 +28,14 @@ use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use datafusion::dataframe::DataFrame;
 use datafusion::execution::context::SessionContext;
 use datafusion::execution::SessionStateBuilder;
-use datafusion_expr::{col, lit, lit_timestamp_nano, Expr};
+use datafusion_expr::{col, lit, lit_timestamp_nano, wildcard, Expr};
 use query::QueryEngineRef;
 use serde_json::Value as JsonValue;
 use servers::error::{
     CatalogSnafu, CollectRecordbatchSnafu, DataFusionSnafu, Result as ServerResult,
     TableNotFoundSnafu,
 };
-use servers::http::jaeger::{QueryTraceParams, FIND_TRACES_COLS};
+use servers::http::jaeger::{QueryTraceParams, JAEGER_QUERY_TABLE_NAME_KEY};
 use servers::otlp::trace::{
     DURATION_NANO_COLUMN, SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN, SPAN_KIND_COLUMN,
     SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, TIMESTAMP_COLUMN, TRACE_ID_COLUMN, TRACE_TABLE_NAME,
@@ -101,9 +101,8 @@ impl JaegerQueryHandler for Instance {
     }
 
     async fn get_trace(&self, ctx: QueryContextRef, trace_id: &str) -> ServerResult<Output> {
-        // It's equivalent to `SELECT trace_id, timestamp, duration_nano, service_name, span_name, span_id, span_attributes, resource_attributes, parent_span_id
-        // FROM {db}.{trace_table} WHERE trace_id = '{trace_id}'`.
-        let selects: Vec<Expr> = FIND_TRACES_COLS.clone();
+        // It's equivalent to `SELECT * FROM {db}.{trace_table} WHERE trace_id = '{trace_id}'`.
+        let selects = vec![wildcard()];
 
         let filters = vec![col(TRACE_ID_COLUMN).eq(lit(trace_id))];
 
@@ -125,7 +124,7 @@ impl JaegerQueryHandler for Instance {
         ctx: QueryContextRef,
         query_params: QueryTraceParams,
     ) -> ServerResult<Output> {
-        let selects: Vec<Expr> = FIND_TRACES_COLS.clone();
+        let selects = vec![wildcard()];
 
         let mut filters = vec![];
 
@@ -174,15 +173,23 @@ async fn query_trace_table(
     tags: Option<HashMap<String, JsonValue>>,
     distinct: bool,
 ) -> ServerResult<Output> {
-    let db = ctx.get_db_string();
+    let table_name = ctx
+        .extension(JAEGER_QUERY_TABLE_NAME_KEY)
+        .unwrap_or(TRACE_TABLE_NAME);
+
     let table = catalog_manager
-        .table(ctx.current_catalog(), &db, TRACE_TABLE_NAME, Some(&ctx))
+        .table(
+            ctx.current_catalog(),
+            &ctx.current_schema(),
+            table_name,
+            Some(&ctx),
+        )
         .await
         .context(CatalogSnafu)?
         .with_context(|| TableNotFoundSnafu {
-            table: TRACE_TABLE_NAME,
+            table: table_name,
             catalog: ctx.current_catalog(),
-            schema: db,
+            schema: ctx.current_schema(),
         })?;
 
     let df_context = create_df_context(query_engine, ctx.clone())?;
@@ -205,7 +212,10 @@ async fn query_trace_table(
     let dataframe = if distinct {
         dataframe.distinct().context(DataFusionSnafu)?
     } else {
+        // for non distinct query, sort by timestamp to make results stable
         dataframe
+            .sort_by(vec![col(TIMESTAMP_COLUMN)])
+            .context(DataFusionSnafu)?
     };
 
     // Apply the limit if needed.
@@ -256,6 +266,7 @@ fn create_df_context(
     Ok(df_context)
 }
 
+// TODO: adopte this to new model
 fn tags_filters(
     dataframe: &DataFrame,
     tags: HashMap<String, JsonValue>,
