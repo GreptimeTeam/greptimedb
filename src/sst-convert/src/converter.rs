@@ -90,6 +90,12 @@ impl SstConverter {
 
     /// Converts one input.
     async fn convert_one(&mut self, input: &InputFile) -> Result<OutputSst> {
+        common_telemetry::info!(
+            "Converting input file, input_path: {}, output_path: {}",
+            input.path,
+            self.output_path.as_deref().unwrap_or(&input.path)
+        );
+
         let reader_info = self.reader_builder.read_input(input).await?;
         let source = Source::Reader(reader_info.reader);
         let output_dir = self
@@ -158,6 +164,12 @@ impl SstConverterBuilder {
 
     /// Builds a SST converter.
     pub async fn build(self) -> Result<SstConverter> {
+        common_telemetry::info!(
+            "Building SST converter, input_path: {}, storage_config: {:?}",
+            self.input_path,
+            self.storage_config
+        );
+
         let input_store = new_input_store(&self.input_path).await?;
         let output_store_manager = new_object_store_manager(&self.storage_config).await?;
         let table_helper = TableMetadataHelper::new(&self.meta_options).await?;

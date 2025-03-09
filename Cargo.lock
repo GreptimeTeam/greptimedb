@@ -11247,6 +11247,7 @@ dependencies = [
  "common-macro",
  "common-meta",
  "common-recordbatch",
+ "common-telemetry",
  "datanode",
  "datatypes",
  "futures",
