@@ -53,8 +53,16 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Table not found"))]
+    #[snafu(display("Table not found: {}", table_name))]
     MissingTable {
+        table_name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Column not found: {}", column_name))]
+    MissingColumn {
+        column_name: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -71,7 +79,15 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
-        StatusCode::Unexpected
+        match self {
+            Error::ObjectStore { .. } => StatusCode::StorageUnavailable,
+            Error::Io { .. } => StatusCode::StorageUnavailable,
+            Error::Json { .. } => StatusCode::InvalidArguments,
+            Error::MissingMetricName { .. } => StatusCode::InvalidArguments,
+            Error::MissingTable { .. } => StatusCode::TableNotFound,
+            Error::MissingColumn { .. } => StatusCode::TableColumnNotFound,
+            Error::Mito { source, .. } => source.status_code(),
+        }
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
