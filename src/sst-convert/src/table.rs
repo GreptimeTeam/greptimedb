@@ -22,6 +22,7 @@ use common_meta::key::table_name::TableNameKey;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use meta_client::{MetaClientOptions, MetaClientType};
 
+// TODO(yingwen): Error handling.
 #[derive(Clone)]
 pub struct TableMetadataHelper {
     table_metadata_manager: TableMetadataManagerRef,
