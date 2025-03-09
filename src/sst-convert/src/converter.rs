@@ -16,6 +16,7 @@
 
 use std::sync::Arc;
 
+use common_telemetry::info;
 use datanode::config::StorageConfig;
 use datanode::datanode::DatanodeBuilder;
 use meta_client::MetaClientOptions;
@@ -214,9 +215,10 @@ pub async fn new_object_store_manager(config: &StorageConfig) -> Result<ObjectSt
 /// Creates a input store from a path.
 pub async fn new_input_store(path: &str) -> Result<ObjectStore> {
     let builder = Fs::default().root(path);
-
+    info!("Creating input store, path: {}", path);
     let object_store = ObjectStore::new(builder)
         .context(ObjectStoreSnafu)?
         .finish();
+    info!("Created input store: {:?}", object_store);
     Ok(object_store)
 }

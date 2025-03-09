@@ -30,6 +30,6 @@ metadata_cache_tti = "5m"
 ## The data storage options.
 [storage]
 ## The working home directory.
-data_home = "/tmp/greptimedb/"
+data_home = "/tmp/greptimedb-cluster/datanode0"
 type = "File"
 [mito]
