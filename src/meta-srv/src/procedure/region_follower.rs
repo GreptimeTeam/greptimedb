@@ -17,6 +17,7 @@ pub mod manager;
 pub mod add_region_follower;
 mod create;
 mod remove;
+pub mod remove_region_follower;
 #[cfg(test)]
 mod test_util;
 
@@ -186,4 +187,28 @@ pub enum AlterRegionFollowerState {
     UpdateMetadata,
     /// Broadcasts the invalidate table route cache message.
     InvalidateTableCache,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_data_serialization() {
+        let data = AlterRegionFollowerData {
+            catalog: "test_catalog".to_string(),
+            schema: "test_schema".to_string(),
+            region_id: RegionId::new(1, 1),
+            peer_id: 1,
+            peer: None,
+            datanode_table_value: None,
+            table_route: None,
+            state: AlterRegionFollowerState::Prepare,
+        };
+
+        assert_eq!(data.region_id.as_u64(), 4294967297);
+        let serialized = serde_json::to_string(&data).unwrap();
+        let expected = r#"{"catalog":"test_catalog","schema":"test_schema","region_id":4294967297,"peer_id":1,"peer":null,"datanode_table_value":null,"table_route":null,"state":"Prepare"}"#;
+        assert_eq!(expected, serialized);
+    }
 }

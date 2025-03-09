@@ -776,6 +776,14 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Region follower not exists: {region_id}, {peer_id}"))]
+    RegionFollowerNotExists {
+        region_id: RegionId,
+        peer_id: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl Error {
@@ -848,6 +856,7 @@ impl ErrorExt for Error {
             | Error::LogicalTableCannotAddFollower { .. }
             | Error::RegionFollowerLeaderConflict { .. }
             | Error::MultipleRegionFollowersOnSameNode { .. }
+            | Error::RegionFollowerNotExists { .. }
             | Error::HandlerNotFound { .. } => StatusCode::InvalidArguments,
             Error::LeaseKeyFromUtf8 { .. }
             | Error::LeaseValueFromUtf8 { .. }

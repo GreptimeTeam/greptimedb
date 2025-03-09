@@ -19,20 +19,20 @@ use common_procedure::{
     Result as ProcedureResult, Status,
 };
 use common_telemetry::info;
-use snafu::ResultExt;
+use snafu::{ensure, ResultExt};
 use store_api::storage::RegionId;
 
-use super::create::CreateFollower;
+use super::remove::RemoveFollower;
 use super::{AlterRegionFollowerData, AlterRegionFollowerState, Context};
 use crate::error::{self, Result};
 use crate::metrics;
-pub struct AddRegionFollowerProcedure {
+pub struct RemoveRegionFollowerProcedure {
     pub data: AlterRegionFollowerData,
     pub context: Context,
 }
 
-impl AddRegionFollowerProcedure {
-    pub const TYPE_NAME: &'static str = "metasrv-procedure::AddRegionFollower";
+impl RemoveRegionFollowerProcedure {
+    pub const TYPE_NAME: &'static str = "metasrv-procedure::RemoveRegionFollower";
 
     pub fn new(
         catalog: String,
@@ -71,40 +71,25 @@ impl AddRegionFollowerProcedure {
         // loads the table route of the region
         let table_route = self.data.load_table_route(&self.context).await?;
 
-        // check if the destination peer is already a leader/follower of the region
+        // check if the destination peer has this region
         for region_route in &table_route.region_routes {
             if region_route.region.id != self.data.region_id {
                 continue;
             }
-            let Some(leader_peer) = &region_route.leader_peer else {
-                continue;
-            };
-
-            // check if the destination peer is already a leader of the region
-            if leader_peer.id == datanode_peer.id {
-                return error::RegionFollowerLeaderConflictSnafu {
+            ensure!(
+                !region_route
+                    .follower_peers
+                    .iter()
+                    .any(|peer| peer.id == self.data.peer_id),
+                error::RegionFollowerNotExistsSnafu {
                     region_id: self.data.region_id,
-                    peer_id: datanode_peer.id,
+                    peer_id: self.data.peer_id,
                 }
-                .fail();
-            }
-
-            // check if the destination peer is already a follower of the region
-            if region_route
-                .follower_peers
-                .iter()
-                .any(|peer| peer.id == datanode_peer.id)
-            {
-                return error::MultipleRegionFollowersOnSameNodeSnafu {
-                    region_id: self.data.region_id,
-                    peer_id: datanode_peer.id,
-                }
-                .fail();
-            }
+            );
         }
 
         info!(
-            "Add region({}) follower procedure is preparing, peer: {datanode_peer:?}",
+            "Remove region({}) follower procedure is preparing, peer: {datanode_peer:?}",
             self.data.region_id
         );
 
@@ -115,12 +100,12 @@ impl AddRegionFollowerProcedure {
         let region_id = self.data.region_id;
         // Safety: we have already set the peer in `on_prepare``.
         let peer = self.data.peer.clone().unwrap();
-        let create_follower = CreateFollower::new(region_id, peer);
-        let instruction = create_follower
-            .build_open_region_instruction(self.data.region_info().unwrap())
+        let remove_follower = RemoveFollower::new(region_id, peer);
+        let instruction = remove_follower
+            .build_close_region_instruction(self.data.region_info().unwrap())
             .await?;
-        create_follower
-            .send_open_region_instruction(&self.context, instruction)
+        remove_follower
+            .send_close_region_instruction(&self.context, instruction)
             .await?;
 
         Ok(Status::executing(true))
@@ -135,9 +120,10 @@ impl AddRegionFollowerProcedure {
             if region_route.region.id != self.data.region_id {
                 continue;
             }
+            // remove the follower peer from the region route
             region_route
                 .follower_peers
-                .push(self.data.peer.clone().unwrap());
+                .retain(|peer| peer.id != self.data.peer_id);
         }
 
         // Safety: we have already load the region info in `on_prepare`.
@@ -175,7 +161,7 @@ impl AddRegionFollowerProcedure {
 }
 
 #[async_trait::async_trait]
-impl Procedure for AddRegionFollowerProcedure {
+impl Procedure for RemoveRegionFollowerProcedure {
     fn type_name(&self) -> &str {
         Self::TYPE_NAME
     }
@@ -183,7 +169,7 @@ impl Procedure for AddRegionFollowerProcedure {
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
         let state = &self.data.state;
 
-        let _timer = metrics::METRIC_META_ADD_REGION_FOLLOWER_EXECUTE
+        let _timer = metrics::METRIC_META_REMOVE_REGION_FOLLOWER_EXECUTE
             .with_label_values(&[state.as_ref()])
             .start_timer();
 
@@ -223,7 +209,7 @@ mod tests {
         let env = TestingEnv::new();
         let context = env.new_context();
 
-        let procedure = AddRegionFollowerProcedure::new(
+        let procedure = RemoveRegionFollowerProcedure::new(
             "test_catalog".to_string(),
             "test_schema".to_string(),
             RegionId::new(1, 1),

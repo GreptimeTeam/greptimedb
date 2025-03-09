@@ -43,6 +43,15 @@ pub struct AddRegionFollowerRequest {
     pub peer_id: u64,
 }
 
+/// A request to remove region follower.
+#[derive(Debug, Clone)]
+pub struct RemoveRegionFollowerRequest {
+    /// The region id to remove follower.
+    pub region_id: u64,
+    /// The peer id to remove follower.
+    pub peer_id: u64,
+}
+
 /// Cast the protobuf [`ProcedureId`] to common [`ProcedureId`].
 pub fn pb_pid_to_pid(pid: &PbProcedureId) -> Result<ProcedureId> {
     ProcedureId::parse_str(&String::from_utf8_lossy(&pid.key)).with_context(|_| {
