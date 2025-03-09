@@ -54,7 +54,10 @@ use store_api::metric_engine_consts::{
 use store_api::mito_engine_options::{APPEND_MODE_KEY, MERGE_MODE_KEY};
 use store_api::storage::{RegionId, TableId};
 use table::metadata::TableInfo;
-use table::requests::{InsertRequest as TableInsertRequest, AUTO_CREATE_TABLE_KEY, TTL_KEY};
+use table::requests::{
+    InsertRequest as TableInsertRequest, AUTO_CREATE_TABLE_KEY, TABLE_DATA_MODEL,
+    TABLE_DATA_MODEL_TRACE_V1, TTL_KEY,
+};
 use table::table_reference::TableReference;
 use table::TableRef;
 
@@ -594,6 +597,12 @@ impl Inserter {
                             );
                         }
                     }
+
+                    // use table_options to mark table model version
+                    create_table.table_options.insert(
+                        TABLE_DATA_MODEL.to_string(),
+                        TABLE_DATA_MODEL_TRACE_V1.to_string(),
+                    );
 
                     let table = self
                         .create_physical_table(

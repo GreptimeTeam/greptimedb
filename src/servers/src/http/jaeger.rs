@@ -37,10 +37,10 @@ use crate::http::HttpRecordsOutput;
 use crate::metrics::METRIC_JAEGER_QUERY_ELAPSED;
 use crate::otlp::trace::{
     DURATION_NANO_COLUMN, KEY_OTEL_SCOPE_NAME, KEY_OTEL_SCOPE_VERSION, KEY_OTEL_STATUS_CODE,
-    KEY_SPAN_KIND, RESOURCE_ATTRIBUTES_COLUMN, SCOPE_NAME_COLUMN, SCOPE_VERSION_COLUMN,
-    SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN, SPAN_EVENTS_COLUMN, SPAN_ID_COLUMN,
-    SPAN_KIND_COLUMN, SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, SPAN_STATUS_CODE, SPAN_STATUS_PREFIX,
-    SPAN_STATUS_UNSET, TIMESTAMP_COLUMN, TRACE_ID_COLUMN, TRACE_TABLE_NAME,
+    KEY_SERVICE_NAME, KEY_SPAN_KIND, RESOURCE_ATTRIBUTES_COLUMN, SCOPE_NAME_COLUMN,
+    SCOPE_VERSION_COLUMN, SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN, SPAN_EVENTS_COLUMN,
+    SPAN_ID_COLUMN, SPAN_KIND_COLUMN, SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, SPAN_STATUS_CODE,
+    SPAN_STATUS_PREFIX, SPAN_STATUS_UNSET, TIMESTAMP_COLUMN, TRACE_ID_COLUMN, TRACE_TABLE_NAME,
 };
 use crate::query_handler::JaegerQueryHandlerRef;
 
@@ -722,7 +722,6 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
                 SPAN_ATTRIBUTES_COLUMN => {
                     // for v0 data model, span_attributes are nested as a json
                     // data structure
-
                     if let JsonValue::Object(span_attrs) = cell {
                         span.tags = object_to_tags(span_attrs);
                     }
@@ -731,17 +730,20 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
                     // for v0 data model, resource_attributes are nested as a json
                     // data structure
 
-                    if let JsonValue::Object(resource_attrs) = cell {
+                    if let JsonValue::Object(mut resource_attrs) = cell {
+                        resource_attrs.remove(KEY_SERVICE_NAME);
                         resource_tags = object_to_tags(resource_attrs);
                     }
                 }
                 PARENT_SPAN_ID_COLUMN => {
                     if let JsonValue::String(parent_span_id) = cell {
-                        span.references.push(Reference {
-                            trace_id: span.trace_id.clone(),
-                            span_id: parent_span_id,
-                            ref_type: REF_TYPE_CHILD_OF.to_string(),
-                        });
+                        if !parent_span_id.is_empty() {
+                            span.references.push(Reference {
+                                trace_id: span.trace_id.clone(),
+                                span_id: parent_span_id,
+                                ref_type: REF_TYPE_CHILD_OF.to_string(),
+                            });
+                        }
                     }
                 }
                 SPAN_EVENTS_COLUMN => {
