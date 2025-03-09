@@ -36,7 +36,7 @@ use crate::table::TableMetadataHelper;
 use crate::OpenDALParquetReader;
 
 pub(crate) mod parquet;
-mod remote_write;
+pub mod remote_write;
 
 /// Reader and context.
 pub struct ReaderInfo {

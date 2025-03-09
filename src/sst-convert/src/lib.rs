@@ -14,7 +14,7 @@
 
 pub mod converter;
 pub mod error;
-mod reader;
+pub mod reader;
 mod table;
 pub mod writer;
 
