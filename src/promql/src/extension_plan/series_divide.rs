@@ -361,7 +361,7 @@ impl SeriesDivideStream {
             let mut result_index = num_rows;
 
             // check if the first row is the same with last batch's last row
-            if resumed_batch_index > self.inspect_start {
+            if resumed_batch_index > self.inspect_start.checked_sub(1).unwrap_or_default() {
                 let last_batch = &self.buffer[resumed_batch_index - 1];
                 let last_row = last_batch.num_rows() - 1;
                 for index in &self.tag_indices {
@@ -386,7 +386,7 @@ impl SeriesDivideStream {
                     let current_value = current_string_array.value(0);
                     let last_value = last_string_array.value(last_row);
                     if current_value != last_value {
-                        return Ok(Some((resumed_batch_index, 0)));
+                        return Ok(Some((resumed_batch_index - 1, last_batch.num_rows())));
                     }
                 }
             }

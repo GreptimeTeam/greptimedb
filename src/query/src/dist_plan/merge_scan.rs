@@ -379,7 +379,7 @@ impl MergeScanExec {
             properties: PlanProperties::new(
                 self.properties.eq_properties.clone(),
                 Partitioning::Hash(hash_exprs, self.target_partition),
-                self.properties.execution_mode.clone(),
+                self.properties.execution_mode,
             ),
             sub_stage_metrics: self.sub_stage_metrics.clone(),
             query_ctx: self.query_ctx.clone(),

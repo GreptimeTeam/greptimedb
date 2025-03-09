@@ -58,7 +58,7 @@ impl PassDistribution {
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
         let mut distribution_requirement = None;
         let result = plan.transform_down(|plan| {
-            if let Some(distribution) = plan.required_input_distribution().get(0)
+            if let Some(distribution) = plan.required_input_distribution().first()
                 && !matches!(distribution, Distribution::UnspecifiedDistribution)
             {
                 distribution_requirement = Some(distribution.clone());
