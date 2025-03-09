@@ -26,6 +26,7 @@ use sst_convert::converter::{InputFile, InputFileType, SstConverter, SstConverte
 #[command(version, about = "Greptime Ingester", long_about = None)]
 struct Args {
     /// Input directory
+    #[arg(short, long)]
     input_dir: String,
     /// Directory of input parquet files, relative to input_dir
     #[arg(short, long)]
@@ -42,6 +43,13 @@ struct Args {
     /// DB HTTP address
     #[arg(short, long)]
     db_http_addr: String,
+
+    /// Output path for the converted SST files.
+    /// If it is not None, the converted SST files will be written to the specified path
+    /// in the `input_store`.
+    /// This is for debugging purposes.
+    #[arg(short, long)]
+    sst_output_path: Option<String>,
 }
 
 #[allow(unreachable_code)]
@@ -60,12 +68,20 @@ async fn main() {
         toml::from_str(&storage_config).expect("Failed to parse storage config");
 
     // TODO: build sst converter
-    let sst_converter = SstConverterBuilder::new_fs(args.input_dir)
-        .with_meta_options(meta_options)
-        .with_storage_config(storage_config)
-        .build()
-        .await
-        .expect("Failed to build sst converter");
+    let sst_converter = {
+        let mut builder = SstConverterBuilder::new_fs(args.input_dir)
+            .with_meta_options(meta_options)
+            .with_storage_config(storage_config);
+
+        if let Some(output_path) = args.sst_output_path {
+            builder = builder.with_output_path(output_path);
+        }
+
+        builder
+            .build()
+            .await
+            .expect("Failed to build sst converter")
+    };
 
     let input_store: &ObjectStore = &sst_converter.input_store;
 
