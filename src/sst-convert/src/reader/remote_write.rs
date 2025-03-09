@@ -46,7 +46,7 @@ const METRIC_NAME_LABEL: &str = "__name__";
 const GREPTIME_VALUE: &str = "greptime_value";
 
 /// A reader that reads remote write file, sorts and outputs timeseries in the primary key order.
-struct RemoteWriteReader {
+pub struct RemoteWriteReader {
     /// Timeseries sorted by primary key in reverse order.
     /// So we can pop the series.
     series: Vec<(Vec<u8>, TimeSeries)>,
@@ -60,8 +60,8 @@ impl RemoteWriteReader {
     pub async fn open(
         operator: ObjectStore,
         path: &str,
-        catalog: String,
-        schema: String,
+        catalog: &str,
+        schema: &str,
         metadata: RegionMetadataRef,
         table_helper: TableMetadataHelper,
     ) -> Result<Self> {
@@ -73,8 +73,8 @@ impl RemoteWriteReader {
             })?
             .column_id;
         let encoder = PrimaryKeyEncoder {
-            catalog,
-            schema,
+            catalog: catalog.to_string(),
+            schema: schema.to_string(),
             metadata,
             table_helper,
             table_ids: HashMap::new(),

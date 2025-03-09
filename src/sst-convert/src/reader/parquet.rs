@@ -29,7 +29,7 @@ use datatypes::schema::Schema;
 use datatypes::value::Value;
 use datatypes::vectors::{MutableVector, UInt64VectorBuilder, UInt8VectorBuilder};
 use futures_util::StreamExt;
-use mito2::error::{OpenDalSnafu, ReadParquetSnafu};
+use mito2::error::ReadParquetSnafu;
 use mito2::read::{Batch, BatchColumn, BatchReader};
 use mito2::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodec, SparsePrimaryKeyCodec};
 use object_store::ObjectStore;
@@ -39,6 +39,8 @@ use parquet_opendal::AsyncReader;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, SequenceNumber};
+
+use crate::error::{MitoSnafu, ObjectStoreSnafu, Result};
 
 pub struct OpenDALParquetReader {
     inner: RawParquetReader<AsyncReader>,
@@ -50,28 +52,23 @@ impl OpenDALParquetReader {
         path: &str,
         metadata: RegionMetadataRef,
         override_sequence: Option<SequenceNumber>,
-    ) -> Result<Self, BoxedError> {
-        let reader = operator
-            .reader_with(path)
-            .await
-            .context(OpenDalSnafu)
-            .map_err(BoxedError::new)?;
+    ) -> Result<Self> {
+        let reader = operator.reader_with(path).await.context(ObjectStoreSnafu)?;
 
         let content_len = operator
             .stat(path)
             .await
-            .context(OpenDalSnafu)
-            .map_err(BoxedError::new)?
+            .context(ObjectStoreSnafu)?
             .content_length();
 
         let reader = AsyncReader::new(reader, content_len).with_prefetch_footer_size(512 * 1024);
         let stream = ParquetRecordBatchStreamBuilder::new(reader)
             .await
             .context(ReadParquetSnafu { path })
-            .map_err(BoxedError::new)?
+            .context(MitoSnafu)?
             .build()
             .context(ReadParquetSnafu { path })
-            .map_err(BoxedError::new)?;
+            .context(MitoSnafu)?;
         Ok(Self {
             inner: RawParquetReader::new(stream, metadata, override_sequence, path),
         })

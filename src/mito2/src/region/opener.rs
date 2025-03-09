@@ -40,6 +40,7 @@ use crate::error::{
     EmptyRegionDirSnafu, InvalidMetadataSnafu, ObjectStoreNotFoundSnafu, RegionCorruptedSnafu,
     Result, StaleLogEntrySnafu,
 };
+use crate::manifest::action::RegionManifest;
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::manifest::storage::manifest_compress_type;
 use crate::memtable::time_partition::TimePartitions;
@@ -489,6 +490,16 @@ impl RegionMetadataLoader {
         region_dir: &str,
         region_options: &RegionOptions,
     ) -> Result<Option<RegionMetadataRef>> {
+        let manifest = self.load_manifest(region_dir, region_options).await?;
+        Ok(manifest.map(|m| m.metadata.clone()))
+    }
+
+    /// Loads the manifest of the region from the region dir.
+    pub async fn load_manifest(
+        &self,
+        region_dir: &str,
+        region_options: &RegionOptions,
+    ) -> Result<Option<Arc<RegionManifest>>> {
         let region_manifest_options = RegionOpener::manifest_options(
             &self.config,
             region_options,
@@ -503,7 +514,7 @@ impl RegionMetadataLoader {
         };
 
         let manifest = manifest_manager.manifest();
-        Ok(Some(manifest.metadata.clone()))
+        Ok(Some(manifest))
     }
 }
 

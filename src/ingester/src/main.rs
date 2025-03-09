@@ -18,7 +18,6 @@ use datanode::config::StorageConfig;
 use meta_client::MetaClientOptions;
 use mito2::sst::file::IndexType;
 use mito2::sst::parquet::SstInfo;
-use object_store::ObjectStore;
 use serde::{Deserialize, Serialize};
 use sst_convert::converter::{InputFile, InputFileType, SstConverter, SstConverterBuilder};
 
@@ -68,7 +67,7 @@ async fn main() {
         toml::from_str(&storage_config).expect("Failed to parse storage config");
 
     // TODO: build sst converter
-    let sst_converter = {
+    let mut sst_converter = {
         let mut builder = SstConverterBuilder::new_fs(args.input_dir)
             .with_meta_options(meta_options)
             .with_storage_config(storage_config);
@@ -83,7 +82,7 @@ async fn main() {
             .expect("Failed to build sst converter")
     };
 
-    let input_store: &ObjectStore = &sst_converter.input_store;
+    let input_store = sst_converter.input_store.clone();
 
     if let Some(parquet_dir) = args.parquet_dir {
         // using opendal to read parquet files in given input object store
@@ -111,7 +110,7 @@ async fn main() {
             })
             .collect::<Vec<_>>();
 
-        convert_and_send(&input_files, &sst_converter, &args.db_http_addr).await;
+        convert_and_send(&input_files, &mut sst_converter, &args.db_http_addr).await;
     }
 
     if let Some(json_dir) = args.json_dir {
@@ -140,13 +139,13 @@ async fn main() {
             })
             .collect::<Vec<_>>();
 
-        convert_and_send(&input_files, &sst_converter, &args.db_http_addr).await;
+        convert_and_send(&input_files, &mut sst_converter, &args.db_http_addr).await;
     }
 }
 
 async fn convert_and_send(
     input_files: &[InputFile],
-    sst_converter: &SstConverter,
+    sst_converter: &mut SstConverter,
     db_http_addr: &str,
 ) {
     let table_names = input_files

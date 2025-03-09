@@ -14,17 +14,24 @@
 
 //! SST converter.
 
+use std::sync::Arc;
+
 use datanode::config::{FileConfig, StorageConfig};
 use datanode::datanode::DatanodeBuilder;
 use datanode::store::fs::new_fs_object_store;
 use meta_client::MetaClientOptions;
 use mito2::access_layer::SstInfoArray;
+use mito2::config::MitoConfig;
+use mito2::read::Source;
+use mito2::sst::parquet::WriteOptions;
 use object_store::manager::ObjectStoreManagerRef;
 use object_store::ObjectStore;
 use snafu::ResultExt;
 
-use crate::error::{DatanodeSnafu, Result};
+use crate::error::{DatanodeSnafu, MitoSnafu, Result};
+use crate::reader::InputReaderBuilder;
 use crate::table::TableMetadataHelper;
+use crate::writer::RegionWriterBuilder;
 
 /// Input file type.
 pub enum InputFileType {
@@ -60,20 +67,19 @@ pub struct OutputSst {
 pub struct SstConverter {
     /// Object store for input files.
     pub input_store: ObjectStore,
-    /// Object store manager for output files.
-    output_store_manager: ObjectStoreManagerRef,
-    /// Helper to get table meta.
-    table_helper: TableMetadataHelper,
     /// Output path for the converted SST files.
     /// If it is not None, the converted SST files will be written to the specified path
     /// in the `input_store`.
     /// This is for debugging purposes.
     output_path: Option<String>,
+    reader_builder: InputReaderBuilder,
+    writer_builder: RegionWriterBuilder,
+    write_opts: WriteOptions,
 }
 
 impl SstConverter {
     /// Converts a list of input to a list of outputs.
-    pub async fn convert(&self, input: &[InputFile]) -> Result<Vec<OutputSst>> {
+    pub async fn convert(&mut self, input: &[InputFile]) -> Result<Vec<OutputSst>> {
         let mut outputs = Vec::with_capacity(input.len());
         for file in input {
             let output = self.convert_one(file).await?;
@@ -83,21 +89,24 @@ impl SstConverter {
     }
 
     /// Converts one input.
-    async fn convert_one(&self, input: &InputFile) -> Result<OutputSst> {
-        match input.file_type {
-            InputFileType::Parquet => self.convert_parquet(input).await,
-            InputFileType::RemoteWrite => self.convert_remote_write(input).await,
-        }
-    }
+    async fn convert_one(&mut self, input: &InputFile) -> Result<OutputSst> {
+        let reader_info = self.reader_builder.read_input(input).await?;
+        let source = Source::Reader(reader_info.reader);
+        let output_dir = self
+            .output_path
+            .as_deref()
+            .unwrap_or(&reader_info.region_dir);
+        let writer = self
+            .writer_builder
+            .build(reader_info.metadata, output_dir, reader_info.region_options)
+            .await
+            .context(MitoSnafu)?;
 
-    /// Converts a parquet input.
-    async fn convert_parquet(&self, input: &InputFile) -> Result<OutputSst> {
-        todo!()
-    }
-
-    /// Converts a remote write input.
-    async fn convert_remote_write(&self, input: &InputFile) -> Result<OutputSst> {
-        todo!()
+        let ssts = writer
+            .write_sst(source, &self.write_opts)
+            .await
+            .context(MitoSnafu)?;
+        Ok(OutputSst { ssts })
     }
 }
 
@@ -107,6 +116,7 @@ pub struct SstConverterBuilder {
     meta_options: MetaClientOptions,
     storage_config: StorageConfig,
     output_path: Option<String>,
+    config: MitoConfig,
 }
 
 impl SstConverterBuilder {
@@ -117,6 +127,7 @@ impl SstConverterBuilder {
             meta_options: MetaClientOptions::default(),
             storage_config: StorageConfig::default(),
             output_path: None,
+            config: MitoConfig::default(),
         }
     }
 
@@ -139,17 +150,34 @@ impl SstConverterBuilder {
         self
     }
 
+    /// Sets the config for the converted SST files.
+    pub fn with_config(mut self, config: MitoConfig) -> Self {
+        self.config = config;
+        self
+    }
+
     /// Builds a SST converter.
     pub async fn build(self) -> Result<SstConverter> {
         let input_store = new_input_store(&self.input_path).await?;
         let output_store_manager = new_object_store_manager(&self.storage_config).await?;
         let table_helper = TableMetadataHelper::new(&self.meta_options).await?;
+        let config = Arc::new(self.config);
+        let reader_builder = InputReaderBuilder::new(
+            input_store.clone(),
+            table_helper,
+            output_store_manager.clone(),
+            config.clone(),
+        );
+        let writer_builder = RegionWriterBuilder::new(config, output_store_manager)
+            .await
+            .context(MitoSnafu)?;
 
         Ok(SstConverter {
             input_store,
-            output_store_manager,
-            table_helper,
             output_path: self.output_path,
+            reader_builder,
+            writer_builder,
+            write_opts: WriteOptions::default(),
         })
     }
 }
