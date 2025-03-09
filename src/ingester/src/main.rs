@@ -91,6 +91,11 @@ async fn main() {
             .await
             .expect("Failed to list parquet files");
 
+        let all_parquets = all_parquets
+            .iter()
+            .filter(|parquet| parquet.name().ends_with(".parquet") && parquet.metadata().is_file())
+            .collect::<Vec<_>>();
+
         let input_files = all_parquets
             .iter()
             .map(|parquet| {
@@ -119,6 +124,11 @@ async fn main() {
             .list(&json_dir)
             .await
             .expect("Failed to list json files");
+
+        let all_jsons = all_jsons
+            .iter()
+            .filter(|json| json.name().ends_with(".json") && json.metadata().is_file())
+            .collect::<Vec<_>>();
 
         let input_files = all_jsons
             .iter()
