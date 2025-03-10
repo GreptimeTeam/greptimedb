@@ -28,6 +28,7 @@ use crate::error::{RegionBusySnafu, RegionNotFoundSnafu, Result};
 use crate::manifest::action::{
     RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionTruncate,
 };
+use crate::metrics::WRITE_CACHE_INFLIGHT_DOWNLOAD;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{
     BackgroundNotify, OptionOutputTx, RegionChangeResult, RegionEditRequest, RegionEditResult,
@@ -158,6 +159,8 @@ impl<S> RegionWorkerLoop<S> {
         // Now the region is in editing state.
         // Updates manifest in background.
         common_runtime::spawn_global(async move {
+            WRITE_CACHE_INFLIGHT_DOWNLOAD.add(1);
+
             let result = edit_region(&region, edit.clone(), cache_manager, listener).await;
             let notify = WorkerRequest::Background {
                 region_id,
@@ -175,6 +178,8 @@ impl<S> RegionWorkerLoop<S> {
                     region_id, res
                 );
             }
+
+            WRITE_CACHE_INFLIGHT_DOWNLOAD.sub(1);
         });
     }
 
