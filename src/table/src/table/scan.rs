@@ -56,6 +56,8 @@ pub struct RegionScanExec {
     append_mode: bool,
     total_rows: usize,
     is_partition_set: bool,
+    // TODO(ruihang): handle TimeWindowed dist via this parameter
+    distribution: Option<TimeSeriesDistribution>,
 }
 
 impl RegionScanExec {
@@ -73,40 +75,47 @@ impl RegionScanExec {
         let metadata = scanner.metadata();
         let mut pk_columns: Vec<PhysicalSortExpr> = metadata
             .primary_key_columns()
-            .map(|col| {
-                Ok(PhysicalSortExpr::new(
-                    Arc::new(Column::new_with_schema(
-                        &col.column_schema.name,
-                        &arrow_schema,
-                    )?) as _,
+            .filter_map(|col| {
+                Some(PhysicalSortExpr::new(
+                    Arc::new(Column::new_with_schema(&col.column_schema.name, &arrow_schema).ok()?)
+                        as _,
                     SortOptions {
                         descending: false,
                         nulls_first: false,
                     },
                 ))
             })
-            .collect::<DfResult<Vec<_>>>()?;
-        let ts_col = PhysicalSortExpr::new(
-            Arc::new(Column::new_with_schema(
-                &metadata.time_index_column().column_schema.name,
-                &arrow_schema,
-            )?) as _,
-            SortOptions {
-                descending: false,
-                nulls_first: false,
-            },
-        );
+            .collect::<Vec<_>>();
+        let ts_col: Option<PhysicalSortExpr> = try {
+            PhysicalSortExpr::new(
+                Arc::new(
+                    Column::new_with_schema(
+                        &metadata.time_index_column().column_schema.name,
+                        &arrow_schema,
+                    )
+                    .ok()?,
+                ) as _,
+                SortOptions {
+                    descending: false,
+                    nulls_first: false,
+                },
+            )
+        };
 
         let eq_props = match request.distribution {
             Some(TimeSeriesDistribution::PerSeries) => {
-                pk_columns.push(ts_col);
+                if let Some(ts) = ts_col {
+                    pk_columns.push(ts);
+                }
                 EquivalenceProperties::new_with_orderings(
                     arrow_schema.clone(),
                     &[LexOrdering::new(pk_columns)],
                 )
             }
             Some(TimeSeriesDistribution::TimeWindowed) => {
-                pk_columns.insert(0, ts_col);
+                if let Some(ts_col) = ts_col {
+                    pk_columns.insert(0, ts_col);
+                }
                 EquivalenceProperties::new_with_orderings(
                     arrow_schema.clone(),
                     &[LexOrdering::new(pk_columns)],
@@ -131,6 +140,7 @@ impl RegionScanExec {
             append_mode,
             total_rows,
             is_partition_set: false,
+            distribution: request.distribution,
         })
     }
 
@@ -191,7 +201,12 @@ impl RegionScanExec {
             append_mode: self.append_mode,
             total_rows: self.total_rows,
             is_partition_set: true,
+            distribution: self.distribution,
         })
+    }
+
+    pub fn distribution(&self) -> Option<TimeSeriesDistribution> {
+        self.distribution
     }
 
     pub fn with_distinguish_partition_range(&self, distinguish_partition_range: bool) {

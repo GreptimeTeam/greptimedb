@@ -124,6 +124,10 @@ impl ScanHintRule {
 
         let mut sort_expr_cursor = order_expr.iter().map(|s| s.expr.try_as_col()).flatten();
         let region_metadata = adapter.region_metadata();
+        // ignore table without pk
+        if region_metadata.primary_key.is_empty() {
+            return;
+        }
         let mut pk_column_iter = region_metadata.primary_key_columns();
         let mut curr_sort_expr = sort_expr_cursor.next();
         let mut curr_pk_col = pk_column_iter.next();
@@ -131,8 +135,10 @@ impl ScanHintRule {
         while let (Some(sort_expr), Some(pk_col)) = (curr_sort_expr, curr_pk_col) {
             if sort_expr.name == pk_col.column_schema.name {
                 curr_sort_expr = sort_expr_cursor.next();
+                curr_pk_col = pk_column_iter.next();
+            } else {
+                return;
             }
-            curr_pk_col = pk_column_iter.next();
         }
 
         let next_remaining = sort_expr_cursor.next();
