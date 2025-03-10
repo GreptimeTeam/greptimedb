@@ -122,7 +122,7 @@ impl ScanHintRule {
         }
         adapter.with_ordering_hint(&opts);
 
-        let mut sort_expr_cursor = order_expr.iter().map(|s| s.expr.try_as_col()).flatten();
+        let mut sort_expr_cursor = order_expr.iter().filter_map(|s| s.expr.try_as_col());
         let region_metadata = adapter.region_metadata();
         // ignore table without pk
         if region_metadata.primary_key.is_empty() {
