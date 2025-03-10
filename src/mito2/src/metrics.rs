@@ -242,6 +242,11 @@ lazy_static! {
         // 0.1 ~ 10000
         exponential_buckets(0.1, 10.0, 6).unwrap(),
     ).unwrap();
+    /// Number of inflight download tasks.
+    pub static ref WRITE_CACHE_INFLIGHT_DOWNLOAD: IntGauge = register_int_gauge!(
+        "mito_write_cache_inflight_download_count",
+        "mito write cache inflight download tasks",
+    ).unwrap();
     /// Upload bytes counter.
     pub static ref UPLOAD_BYTES_TOTAL: IntCounter = register_int_counter!(
         "mito_upload_bytes_total",
