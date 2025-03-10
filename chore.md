@@ -40,13 +40,16 @@ RUST_LOG="debug" cargo run --bin=ingester -- --input-dir="/home/discord9/greptim
 
 # metrics!!!!!!!
 ```bash
-mysql --host=127.0.0.1 --port=19195 --database=public < output.sql
+mysql --host=127.0.0.1 --port=19195 --database=public < public.greptime_physical_table-create-tables.sql
 ```
 
 ## then ingest
 ```bash
 RUST_LOG="debug" 
 cargo run --bin=ingester -- --input-dir="/home/discord9/greptimedb/parquet_store_bk/" --remote-write-dir="metrics_parquet/" --cfg="ingester.toml" --db-http-addr="http://127.0.0.1:4000/v1/sst/ingest_json"
+# perf it
+cargo build --release ---bin=ingester
+samply record target/release/ingester --input-dir="/home/discord9/greptimedb/parquet_store_bk/" --remote-write-dir="metrics_parquet/" --cfg="ingester.toml" --db-http-addr="http://127.0.0.1:4000/v1/sst/ingest_json"
 ```
 
 ## check data

@@ -21,7 +21,8 @@ use mito2::config::MitoConfig;
 use mito2::sst::file::IndexType;
 use mito2::sst::parquet::SstInfo;
 use serde::{Deserialize, Serialize};
-use sst_convert::converter::{InputFile, InputFileType, SstConverter, SstConverterBuilder};
+use sst_convert::converter::{InputFile, InputFileType, SstConverterBuilder};
+use tokio::sync::oneshot;
 
 #[derive(Parser, Debug)]
 #[command(version, about = "Greptime Ingester", long_about = None)]
@@ -73,7 +74,7 @@ async fn main() {
     let cfg_file = std::fs::read_to_string(&args.cfg).expect("Failed to read config file");
     let cfg: IngesterConfig = toml::from_str(&cfg_file).expect("Failed to parse config");
 
-    let mut sst_converter = {
+    let sst_builder = {
         let mut builder = SstConverterBuilder::new_fs(args.input_dir)
             .with_meta_options(cfg.meta_client)
             .with_storage_config(cfg.storage)
@@ -84,10 +85,13 @@ async fn main() {
         }
 
         builder
-            .build()
-            .await
-            .expect("Failed to build sst converter")
     };
+
+    let sst_converter = sst_builder
+        .clone()
+        .build()
+        .await
+        .expect("Failed to build sst converter");
 
     let input_store = sst_converter.input_store.clone();
 
@@ -124,7 +128,7 @@ async fn main() {
             })
             .collect::<Vec<_>>();
 
-        convert_and_send(&input_files, &mut sst_converter, &args.db_http_addr).await;
+        convert_and_send(&input_files, sst_builder.clone(), &args.db_http_addr).await;
     }
 
     if let Some(remote_write_dir) = args.remote_write_dir {
@@ -159,24 +163,47 @@ async fn main() {
             })
             .collect::<Vec<_>>();
 
-        convert_and_send(&input_files, &mut sst_converter, &args.db_http_addr).await;
+        convert_and_send(&input_files, sst_builder.clone(), &args.db_http_addr).await;
     }
 }
 
 async fn convert_and_send(
     input_files: &[InputFile],
-    sst_converter: &mut SstConverter,
+    sst_builder: SstConverterBuilder,
     db_http_addr: &str,
 ) {
     let table_names = input_files
         .iter()
         .map(|f| (f.schema.clone(), f.table.clone()))
         .collect::<Vec<_>>();
+    let mut rxs = Vec::new();
 
-    let sst_infos = sst_converter
-        .convert(input_files)
-        .await
-        .expect("Failed to convert parquet files");
+    // Spawn a task for each input file
+    info!("Spawning tasks for {} input files", input_files.len());
+    for input_file in input_files.iter() {
+        let (tx, rx) = oneshot::channel();
+        let sst_builder = sst_builder.clone();
+        let input_file = (*input_file).clone();
+        tokio::task::spawn(async move {
+            let mut sst_converter = sst_builder
+                .build()
+                .await
+                .expect("Failed to build sst converter");
+            let sst_info = sst_converter
+                .convert_one(&input_file)
+                .await
+                .expect("Failed to convert parquet files");
+            tx.send(sst_info).unwrap();
+        });
+        rxs.push(rx);
+    }
+
+    let mut sst_infos = Vec::new();
+    for rx in rxs {
+        sst_infos.push(rx.await.unwrap());
+    }
+
+    info!("Converted {} input files", sst_infos.len());
 
     let ingest_reqs = table_names
         .iter()

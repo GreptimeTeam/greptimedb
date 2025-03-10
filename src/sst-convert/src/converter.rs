@@ -35,7 +35,7 @@ use crate::table::TableMetadataHelper;
 use crate::writer::RegionWriterBuilder;
 
 /// Input file type.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputFileType {
     /// File type is Parquet.
     Parquet,
@@ -44,6 +44,7 @@ pub enum InputFileType {
 }
 
 /// Description of a file to convert.
+#[derive(Debug, Clone)]
 pub struct InputFile {
     /// Catalog of the table.
     pub catalog: String,
@@ -60,6 +61,7 @@ pub struct InputFile {
 
 /// Description of converted files for an input file.
 /// A input file can be converted to multiple output files.
+#[derive(Debug)]
 pub struct OutputSst {
     /// Meta of output SST files.
     pub ssts: SstInfoArray,
@@ -99,7 +101,7 @@ impl SstConverter {
     }
 
     /// Converts one input.
-    async fn convert_one(&mut self, input: &InputFile) -> Result<OutputSst> {
+    pub async fn convert_one(&mut self, input: &InputFile) -> Result<OutputSst> {
         common_telemetry::info!(
             "Converting input file, input_path: {}, output_path: {}",
             input.path,
@@ -122,11 +124,13 @@ impl SstConverter {
             .write_sst(source, &self.write_opts)
             .await
             .context(MitoSnafu)?;
+        common_telemetry::info!("Converted input file, input_path: {}", input.path);
         Ok(OutputSst { ssts })
     }
 }
 
 /// Builder to build a SST converter.
+#[derive(Clone)]
 pub struct SstConverterBuilder {
     input_path: String,
     meta_options: MetaClientOptions,
