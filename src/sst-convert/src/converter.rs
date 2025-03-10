@@ -35,6 +35,7 @@ use crate::table::TableMetadataHelper;
 use crate::writer::RegionWriterBuilder;
 
 /// Input file type.
+#[derive(Clone, PartialEq, Eq)]
 pub enum InputFileType {
     /// File type is Parquet.
     Parquet,

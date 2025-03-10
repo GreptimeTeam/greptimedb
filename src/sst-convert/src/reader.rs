@@ -22,6 +22,7 @@ use mito2::read::BoxedBatchReader;
 use mito2::region::opener::RegionMetadataLoader;
 use mito2::region::options::RegionOptions;
 use object_store::manager::ObjectStoreManagerRef;
+use object_store::util::join_dir;
 use object_store::ObjectStore;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
@@ -139,7 +140,11 @@ impl InputReaderBuilder {
         let opts = table_info.table_info.to_region_options();
         // TODO(yingwen): We ignore WAL options now. We should `prepare_wal_options()` in the future.
         let region_options = RegionOptions::try_from(&opts).context(MitoSnafu)?;
-        let region_dir = region_dir(&table_info.region_storage_path(), region_id);
+        let mut region_dir = region_dir(&table_info.region_storage_path(), region_id);
+        if input.file_type == InputFileType::RemoteWrite {
+            // metric engine has two internal regions.
+            region_dir = join_dir(&region_dir, "data");
+        }
         let manifest = self
             .region_loader
             .load_manifest(&region_dir, &region_options)
