@@ -14,6 +14,14 @@ Set the GreptimeDB MySQL address.
 ```
 GT_MYSQL_ADDR = localhost:4002
 ```
+and http address:
+```
+GT_HTTP_ADDR=localhost:4000
+```
+and fuzz build path when compiling the fuzzer using `cargo fuzz`(if you want to keep the build dir  clean):
+```
+CARGO_TARGET_DIR="fuzz_build"
+```
 
 ### For unstable fuzz tests
 Set the binary path of the GreptimeDB:
