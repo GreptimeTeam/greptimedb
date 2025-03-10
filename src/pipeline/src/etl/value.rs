@@ -290,6 +290,7 @@ impl Value {
         }
     }
 
+    // ref https://github.com/serde-rs/json/blob/master/src/value/mod.rs#L779
     pub fn pointer(&self, pointer: &str) -> Option<&Value> {
         if pointer.is_empty() {
             return Some(self);
@@ -308,6 +309,7 @@ impl Value {
             })
     }
 
+    // ref https://github.com/serde-rs/json/blob/master/src/value/mod.rs#L834
     pub fn pointer_mut(&mut self, pointer: &str) -> Option<&mut Value> {
         if pointer.is_empty() {
             return Some(self);
@@ -327,6 +329,7 @@ impl Value {
     }
 }
 
+// ref https://github.com/serde-rs/json/blob/master/src/value/mod.rs#L259
 fn parse_index(s: &str) -> Option<usize> {
     if s.starts_with('+') || (s.starts_with('0') && s.len() != 1) {
         return None;
@@ -861,6 +864,7 @@ impl JsonLike for Value {
         Value::Null
     }
 
+    // ref https://github.com/besok/jsonpath-rust/blob/main/src/path/mod.rs#L423
     fn reference<T>(
         &self,
         path: T,
@@ -871,6 +875,7 @@ impl JsonLike for Value {
         Ok(self.pointer(&path_to_json_path(path.into())?))
     }
 
+    // https://github.com/besok/jsonpath-rust/blob/main/src/path/mod.rs#L430
     fn reference_mut<T>(
         &mut self,
         path: T,
@@ -882,10 +887,12 @@ impl JsonLike for Value {
     }
 }
 
+// ref https://github.com/besok/jsonpath-rust/blob/main/src/path/mod.rs#L438
 fn path_to_json_path(path: JsonPathStr) -> StdResult<String, JsonPathParserError> {
     convert_part(&parse_json_path(path.as_str())?)
 }
 
+// https://github.com/besok/jsonpath-rust/blob/main/src/path/mod.rs#L442
 fn convert_part(path: &JsonPath) -> StdResult<String, JsonPathParserError> {
     match path {
         JsonPath::Chain(elems) => elems
