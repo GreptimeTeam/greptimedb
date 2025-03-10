@@ -81,7 +81,7 @@ impl RegionScanExec {
                         as _,
                     SortOptions {
                         descending: false,
-                        nulls_first: false,
+                        nulls_first: true,
                     },
                 ))
             })
@@ -97,7 +97,7 @@ impl RegionScanExec {
                 ) as _,
                 SortOptions {
                     descending: false,
-                    nulls_first: false,
+                    nulls_first: true,
                 },
             )
         };
