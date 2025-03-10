@@ -167,7 +167,7 @@ impl ExecutionPlan for SeriesDivideExec {
                 expr: Arc::new(ColumnExpr::new_with_schema(tag, &input_schema).unwrap()),
                 options: Some(SortOptions {
                     descending: false,
-                    nulls_first: false,
+                    nulls_first: true,
                 }),
             })
             .collect();
@@ -278,9 +278,9 @@ impl Stream for SeriesDivideStream {
     type Item = DataFusionResult<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let timer = std::time::Instant::now();
         loop {
             if !self.buffer.is_empty() {
+                let timer = std::time::Instant::now();
                 let cut_at = match self.find_first_diff_row() {
                     Ok(cut_at) => cut_at,
                     Err(e) => return Poll::Ready(Some(Err(e))),
@@ -298,7 +298,11 @@ impl Stream for SeriesDivideStream {
                         .drain(0..batch_index)
                         .chain([half_batch_of_first_series])
                         .collect::<Vec<_>>();
-                    self.buffer[0] = half_batch_of_second_series;
+                    if half_batch_of_second_series.num_rows() > 0 {
+                        self.buffer[0] = half_batch_of_second_series;
+                    } else {
+                        self.buffer.remove(0);
+                    }
                     let result_batch = compute::concat_batches(&self.schema, &result_batches)?;
 
                     self.inspect_start = 0;
@@ -306,8 +310,10 @@ impl Stream for SeriesDivideStream {
                     self.metric.elapsed_compute().add_elapsed(timer);
                     return Poll::Ready(Some(Ok(result_batch)));
                 } else {
+                    self.metric.elapsed_compute().add_elapsed(timer);
                     // continue to fetch next batch as the current buffer only contains one time series.
                     let next_batch = ready!(self.as_mut().fetch_next_batch(cx)).transpose()?;
+                    let timer = std::time::Instant::now();
                     if let Some(next_batch) = next_batch {
                         self.buffer.push(next_batch);
                         continue;
@@ -386,9 +392,32 @@ impl SeriesDivideStream {
                     let current_value = current_string_array.value(0);
                     let last_value = last_string_array.value(last_row);
                     if current_value != last_value {
-                        return Ok(Some((resumed_batch_index - 1, last_batch.num_rows())));
+                        return Ok(Some((resumed_batch_index - 1, last_batch.num_rows() - 1)));
                     }
                 }
+            }
+
+            // quick check if all rows are the same by comparing the first and last row in this batch
+            let mut all_same = true;
+            for index in &self.tag_indices {
+                let array = batch.column(*index);
+                let string_array =
+                    array
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .ok_or_else(|| {
+                            datafusion::error::DataFusionError::Internal(
+                                "Failed to downcast tag column to StringArray".to_string(),
+                            )
+                        })?;
+                if string_array.value(0) != string_array.value(num_rows - 1) {
+                    all_same = false;
+                    break;
+                }
+            }
+            if all_same {
+                resumed_batch_index += 1;
+                continue;
             }
 
             // check column by column

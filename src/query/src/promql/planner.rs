@@ -1025,6 +1025,9 @@ impl PromPlanner {
         });
 
         // make series_normalize plan
+        if !is_range_selector && offset_duration == 0 {
+            return Ok(divide_plan);
+        }
         let series_normalize = SeriesNormalize::new(
             offset_duration,
             self.ctx
@@ -1883,9 +1886,9 @@ impl PromPlanner {
             .ctx
             .tag_columns
             .iter()
-            .map(|col| DfExpr::Column(Column::from_name(col)).sort(true, false))
+            .map(|col| DfExpr::Column(Column::from_name(col)).sort(true, true))
             .collect::<Vec<_>>();
-        result.push(self.create_time_index_column_expr()?.sort(true, false));
+        result.push(self.create_time_index_column_expr()?.sort(true, true));
         Ok(result)
     }
 
@@ -1893,7 +1896,7 @@ impl PromPlanner {
         self.ctx
             .field_columns
             .iter()
-            .map(|col| DfExpr::Column(Column::from_name(col)).sort(asc, false))
+            .map(|col| DfExpr::Column(Column::from_name(col)).sort(asc, true))
             .collect::<Vec<_>>()
     }
 
@@ -2012,7 +2015,7 @@ impl PromPlanner {
         let tag_sort_exprs = self
             .create_tag_column_exprs()?
             .into_iter()
-            .map(|expr| expr.sort(asc, false));
+            .map(|expr| expr.sort(asc, true));
 
         // perform window operation to each value column
         let exprs: Vec<DfExpr> = self
@@ -2022,7 +2025,7 @@ impl PromPlanner {
             .map(|col| {
                 let mut sort_exprs = Vec::with_capacity(self.ctx.tag_columns.len() + 1);
                 // Order by value in the specific order
-                sort_exprs.push(DfExpr::Column(Column::from(col)).sort(asc, false));
+                sort_exprs.push(DfExpr::Column(Column::from(col)).sort(asc, true));
                 // Then tags if the values are equal,
                 // Try to ensure the relative stability of the output results.
                 sort_exprs.extend(tag_sort_exprs.clone());
