@@ -29,10 +29,10 @@ CREATE TABLE IF NOT EXISTS `app1` (
 
 select count(*) from app1;
 
-SELECT * FROM app1 ORDER BY greptime_timestamp ASC LIMIT 10\G
+SELECT * FROM app1 ORDER BY greptime_timestamp DESC LIMIT 10\G
 ```
 
 # then ingest
 ```bash
-RUST_LOG="debug" cargo run --bin=ingester -- --input-dir="/home/discord9/greptimedb/" --parquet-dir="parquet_store/" --cfg="ingester.toml" --db-http-addr="http://127.0.0.1:4000/v1/sst/ingest_json"
+RUST_LOG="debug" cargo run --bin=ingester -- --input-dir="/home/discord9/greptimedb/parquet_store_bk/" --parquet-dir="parquet_store/" --cfg="ingester.toml" --db-http-addr="http://127.0.0.1:4000/v1/sst/ingest_json"
 ```
