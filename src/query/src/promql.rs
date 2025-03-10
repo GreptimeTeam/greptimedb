@@ -12,5 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub(crate) mod error;
+pub mod error;
+pub mod label_values;
 pub mod planner;

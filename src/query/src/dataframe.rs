@@ -13,10 +13,19 @@
 // limitations under the License.
 
 use datafusion::dataframe::DataFrame as DfDataFrame;
+use datafusion_expr::LogicalPlan;
 
 /// DataFrame represents a logical set of rows with the same named columns.
 /// Similar to a Pandas DataFrame or Spark DataFrame
 #[derive(Clone)]
 pub enum DataFrame {
     DataFusion(DfDataFrame),
+}
+
+impl DataFrame {
+    pub fn into_logical_plan(self) -> LogicalPlan {
+        match self {
+            Self::DataFusion(dataframe) => dataframe.into_parts().1,
+        }
+    }
 }
