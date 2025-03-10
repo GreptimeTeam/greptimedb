@@ -880,6 +880,9 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
             }
         }
 
+        // ensure span tags order
+        span.tags.sort_by(|a, b| a.key.cmp(&b.key));
+
         if let Some(spans) = trace_id_to_spans.get_mut(&span.trace_id) {
             spans.push(span);
         } else {

@@ -43,6 +43,7 @@ use servers::otlp::trace::{
 use servers::query_handler::JaegerQueryHandler;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
+use table::requests::{TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1};
 use table::table::adapter::DfTableProviderAdapter;
 
 use super::Instance;
@@ -192,6 +193,15 @@ async fn query_trace_table(
             schema: ctx.current_schema(),
         })?;
 
+    let is_data_model_v1 = table
+        .table_info()
+        .meta
+        .options
+        .extra_options
+        .get(TABLE_DATA_MODEL)
+        .map(|s| s.as_str())
+        == Some(TABLE_DATA_MODEL_TRACE_V1);
+
     let df_context = create_df_context(query_engine, ctx.clone())?;
 
     let dataframe = df_context
@@ -203,7 +213,9 @@ async fn query_trace_table(
     // Apply all filters.
     let dataframe = filters
         .into_iter()
-        .chain(tags.map_or(Ok(vec![]), |t| tags_filters(&dataframe, t))?)
+        .chain(tags.map_or(Ok(vec![]), |t| {
+            tags_filters(&dataframe, t, is_data_model_v1)
+        })?)
         .try_fold(dataframe, |df, expr| {
             df.filter(expr).context(DataFusionSnafu)
         })?;
@@ -266,8 +278,7 @@ fn create_df_context(
     Ok(df_context)
 }
 
-// TODO: adopte this to new model
-fn tags_filters(
+fn json_tag_filters(
     dataframe: &DataFrame,
     tags: HashMap<String, JsonValue>,
 ) -> ServerResult<Vec<Expr>> {
@@ -332,4 +343,41 @@ fn tags_filters(
     }
 
     Ok(filters)
+}
+
+fn flatten_tag_filters(tags: HashMap<String, JsonValue>) -> ServerResult<Vec<Expr>> {
+    let filters = tags
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let key = format!("\"span_attributes.{}\"", key);
+            match value {
+                JsonValue::String(value) => Some(col(key).eq(lit(value))),
+                JsonValue::Number(value) => {
+                    if value.is_f64() {
+                        // safe to unwrap as checked previously
+                        Some(col(key).eq(lit(value.as_f64().unwrap())))
+                    } else {
+                        Some(col(key).eq(lit(value.as_i64().unwrap())))
+                    }
+                }
+                JsonValue::Bool(value) => Some(col(key).eq(lit(value))),
+                JsonValue::Null => Some(col(key).is_null()),
+                JsonValue::Array(_value) => None,
+                JsonValue::Object(_value) => None,
+            }
+        })
+        .collect();
+    Ok(filters)
+}
+
+fn tags_filters(
+    dataframe: &DataFrame,
+    tags: HashMap<String, JsonValue>,
+    is_data_model_v1: bool,
+) -> ServerResult<Vec<Expr>> {
+    if is_data_model_v1 {
+        flatten_tag_filters(tags)
+    } else {
+        json_tag_filters(dataframe, tags)
+    }
 }
