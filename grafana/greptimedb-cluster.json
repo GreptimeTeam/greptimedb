@@ -23,7 +23,7 @@
       "type": "grafana",
       "id": "grafana",
       "name": "Grafana",
-      "version": "11.1.3"
+      "version": "10.2.3"
     },
     {
       "type": "datasource",
@@ -7414,6 +7414,6 @@
   "timezone": "",
   "title": "GreptimeDB Cluster Metrics",
   "uid": "ce3q6xwn3xa0qs",
-  "version": 1,
+  "version": 10,
   "weekStart": ""
 }
