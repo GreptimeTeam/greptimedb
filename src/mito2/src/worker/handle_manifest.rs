@@ -28,6 +28,7 @@ use crate::error::{RegionBusySnafu, RegionNotFoundSnafu, Result};
 use crate::manifest::action::{
     RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionTruncate,
 };
+use crate::metrics::WRITE_CACHE_INFLIGHT_DOWNLOAD;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{
     BackgroundNotify, OptionOutputTx, RegionChangeResult, RegionEditRequest, RegionEditResult,
@@ -340,6 +341,8 @@ async fn edit_region(
 
             let file_size = file_meta.file_size;
             common_runtime::spawn_global(async move {
+                WRITE_CACHE_INFLIGHT_DOWNLOAD.add(1);
+
                 if write_cache
                     .download(index_key, &remote_path, layer.object_store(), file_size)
                     .await
@@ -370,6 +373,8 @@ async fn edit_region(
                         );
                     }
                 }
+
+                WRITE_CACHE_INFLIGHT_DOWNLOAD.sub(1);
             });
         }
     }
