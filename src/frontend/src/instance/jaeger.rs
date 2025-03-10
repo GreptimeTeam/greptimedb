@@ -83,7 +83,19 @@ impl JaegerQueryHandler for Instance {
             ))));
         }
 
-        // It's equivalent to `SELECT span_name, span_kind FROM {db}.{trace_table} WHERE service_name = '{service_name}'`.
+        // It's equivalent to
+        //
+        // ```
+        // SELECT
+        //   span_name,
+        //   span_kind
+        // FROM
+        //   {db}.{trace_table}
+        // WHERE
+        //   service_name = '{service_name}'
+        // ORDER BY
+        //   timestamp
+        // ```.
         Ok(query_trace_table(
             ctx,
             self.catalog_manager(),
@@ -102,7 +114,18 @@ impl JaegerQueryHandler for Instance {
     }
 
     async fn get_trace(&self, ctx: QueryContextRef, trace_id: &str) -> ServerResult<Output> {
-        // It's equivalent to `SELECT * FROM {db}.{trace_table} WHERE trace_id = '{trace_id}'`.
+        // It's equivalent to
+        //
+        // ```
+        // SELECT
+        //   *
+        // FROM
+        //   {db}.{trace_table}
+        // WHERE
+        //   trace_id = '{trace_id}'
+        // ORDER BY
+        //   timestamp
+        // ```.
         let selects = vec![wildcard()];
 
         let filters = vec![col(TRACE_ID_COLUMN).eq(lit(trace_id))];
@@ -259,7 +282,7 @@ fn create_df_context(
         SessionStateBuilder::new_from_existing(query_engine.engine_state().session_state()).build(),
     );
 
-    // The following JSON UDFs will be used for tags filters.
+    // The following JSON UDFs will be used for tags filters on v0 data model.
     let udfs: Vec<FunctionRef> = vec![
         Arc::new(JsonGetInt),
         Arc::new(JsonGetFloat),
@@ -362,6 +385,7 @@ fn flatten_tag_filters(tags: HashMap<String, JsonValue>) -> ServerResult<Vec<Exp
                 }
                 JsonValue::Bool(value) => Some(col(key).eq(lit(value))),
                 JsonValue::Null => Some(col(key).is_null()),
+                // not supported at the moment
                 JsonValue::Array(_value) => None,
                 JsonValue::Object(_value) => None,
             }
