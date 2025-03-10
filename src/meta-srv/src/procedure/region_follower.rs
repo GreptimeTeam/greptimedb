@@ -93,15 +93,25 @@ impl AlterRegionFollowerData {
         lock_key
     }
 
+    pub(crate) fn datanode_peer(&self) -> Option<&Peer> {
+        self.peer.as_ref()
+    }
+
+    pub(crate) fn physical_table_route(&self) -> Option<&PhysicalTableRouteValue> {
+        self.table_route
+            .as_ref()
+            .map(|(_, table_route)| table_route)
+    }
+
     /// Returns the region info of the region.
-    pub fn region_info(&self) -> Option<RegionInfo> {
+    pub(crate) fn region_info(&self) -> Option<RegionInfo> {
         self.datanode_table_value
             .as_ref()
             .map(|datanode_table_value| datanode_table_value.region_info.clone())
     }
 
     /// Loads the datanode peer.
-    pub async fn load_datanode_peer(&mut self, ctx: &Context) -> Result<Peer> {
+    pub(crate) async fn load_datanode_peer(&self, ctx: &Context) -> Result<Option<Peer>> {
         let peer = lookup_datanode_peer(
             self.peer_id,
             &ctx.meta_peer_client,
@@ -112,16 +122,14 @@ impl AlterRegionFollowerData {
             peer_id: self.peer_id,
         })?;
 
-        self.peer = Some(peer);
-
-        Ok(self.peer.clone().unwrap())
+        Ok(Some(peer))
     }
 
     /// Loads the datanode table value of the region.
-    pub async fn load_datanode_table_value(
-        &mut self,
+    pub(crate) async fn load_datanode_table_value(
+        &self,
         ctx: &Context,
-    ) -> Result<&DatanodeTableValue> {
+    ) -> Result<Option<DatanodeTableValue>> {
         let table_id = self.region_id.table_id();
         let datanode_id = self.peer_id;
         let datanode_table_key = DatanodeTableKey {
@@ -144,13 +152,19 @@ impl AlterRegionFollowerData {
                 datanode_id,
             })?;
 
-        self.datanode_table_value = Some(datanode_table_value);
-
-        Ok(self.datanode_table_value.as_ref().unwrap())
+        Ok(Some(datanode_table_value))
     }
 
     /// Loads the table route of the region, returns the physical table id.
-    pub async fn load_table_route(&mut self, ctx: &Context) -> Result<PhysicalTableRouteValue> {
+    pub(crate) async fn load_table_route(
+        &self,
+        ctx: &Context,
+    ) -> Result<
+        Option<(
+            DeserializedValueWithBytes<TableRouteValue>,
+            PhysicalTableRouteValue,
+        )>,
+    > {
         let table_id = self.region_id.table_id();
         let raw_table_route = ctx
             .table_metadata_manager
@@ -171,9 +185,10 @@ impl AlterRegionFollowerData {
             error::LogicalTableCannotAddFollowerSnafu { table_id }
         );
 
-        self.table_route = Some((raw_table_route, table_route.into_physical_table_route()));
-
-        Ok(self.table_route.clone().unwrap().1)
+        Ok(Some((
+            raw_table_route,
+            table_route.into_physical_table_route(),
+        )))
     }
 }
 

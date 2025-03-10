@@ -63,13 +63,14 @@ impl RemoveRegionFollowerProcedure {
 
     pub async fn on_prepare(&mut self) -> Result<Status> {
         // loads the datanode peer and check peer is alive
-        let datanode_peer = self.data.load_datanode_peer(&self.context).await?;
+        self.data.peer = self.data.load_datanode_peer(&self.context).await?;
 
         // loads the datanode table value
-        let _ = self.data.load_datanode_table_value(&self.context).await?;
+        self.data.datanode_table_value = self.data.load_datanode_table_value(&self.context).await?;
 
         // loads the table route of the region
-        let table_route = self.data.load_table_route(&self.context).await?;
+        self.data.table_route = self.data.load_table_route(&self.context).await?;
+        let table_route = self.data.physical_table_route().unwrap();
 
         // check if the destination peer has this region
         for region_route in &table_route.region_routes {
@@ -89,8 +90,9 @@ impl RemoveRegionFollowerProcedure {
         }
 
         info!(
-            "Remove region({}) follower procedure is preparing, peer: {datanode_peer:?}",
-            self.data.region_id
+            "Remove region({}) follower procedure is preparing, peer: {:?}",
+            self.data.region_id,
+            self.data.datanode_peer()
         );
 
         Ok(Status::executing(true))
