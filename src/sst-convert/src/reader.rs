@@ -26,6 +26,7 @@ use object_store::util::join_dir;
 use object_store::ObjectStore;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
+use store_api::metric_engine_consts::DATA_REGION_SUBDIR;
 use store_api::path_utils::region_dir;
 use store_api::storage::{RegionId, SequenceNumber};
 use table::metadata::TableId;
@@ -143,7 +144,7 @@ impl InputReaderBuilder {
         let mut region_dir = region_dir(&table_info.region_storage_path(), region_id);
         if input.file_type == InputFileType::RemoteWrite {
             // metric engine has two internal regions.
-            region_dir = join_dir(&region_dir, "data");
+            region_dir = join_dir(&region_dir, DATA_REGION_SUBDIR);
         }
         let manifest = self
             .region_loader
