@@ -27,6 +27,7 @@ use crate::scalars::hll_count::HllCalcFunction;
 use crate::scalars::ip::IpFunctions;
 use crate::scalars::json::JsonFunction;
 use crate::scalars::matches::MatchesFunction;
+use crate::scalars::matches_term::MatchesTermFunction;
 use crate::scalars::math::MathFunction;
 use crate::scalars::timestamp::TimestampFunction;
 use crate::scalars::uddsketch_calc::UddSketchCalcFunction;
@@ -116,6 +117,9 @@ pub static FUNCTION_REGISTRY: Lazy<Arc<FunctionRegistry>> = Lazy::new(|| {
 
     // Full text search function
     MatchesFunction::register(&function_registry);
+
+    // Matches term function
+    MatchesTermFunction::register(&function_registry);
 
     // System and administration functions
     SystemFunction::register(&function_registry);
