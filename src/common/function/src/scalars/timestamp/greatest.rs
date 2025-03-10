@@ -23,7 +23,7 @@ use datatypes::arrow::array::AsArray;
 use datatypes::arrow::compute::cast;
 use datatypes::arrow::compute::kernels::zip;
 use datatypes::arrow::datatypes::{
-    DataType as ArrowDataType, Date32Type, Date64Type, TimestampMicrosecondType,
+    DataType as ArrowDataType, Date32Type, TimeUnit, TimestampMicrosecondType,
     TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType,
 };
 use datatypes::prelude::ConcreteDataType;
@@ -69,9 +69,8 @@ impl Function for GreatestFunction {
         );
 
         match &input_types[0] {
-            ConcreteDataType::String(_) => Ok(ConcreteDataType::datetime_datatype()),
+            ConcreteDataType::String(_) => Ok(ConcreteDataType::timestamp_millisecond_datatype()),
             ConcreteDataType::Date(_) => Ok(ConcreteDataType::date_datatype()),
-            ConcreteDataType::DateTime(_) => Ok(ConcreteDataType::datetime_datatype()),
             ConcreteDataType::Timestamp(ts_type) => Ok(ConcreteDataType::Timestamp(*ts_type)),
             _ => UnsupportedInputDataTypeSnafu {
                 function: NAME,
@@ -87,7 +86,6 @@ impl Function for GreatestFunction {
             vec![
                 ConcreteDataType::string_datatype(),
                 ConcreteDataType::date_datatype(),
-                ConcreteDataType::datetime_datatype(),
                 ConcreteDataType::timestamp_nanosecond_datatype(),
                 ConcreteDataType::timestamp_microsecond_datatype(),
                 ConcreteDataType::timestamp_millisecond_datatype(),
@@ -109,20 +107,24 @@ impl Function for GreatestFunction {
         );
         match columns[0].data_type() {
             ConcreteDataType::String(_) => {
-                // Treats string as `DateTime` type.
-                let column1 = cast(&columns[0].to_arrow_array(), &ArrowDataType::Date64)
-                    .context(ArrowComputeSnafu)?;
-                let column1 = column1.as_primitive::<Date64Type>();
-                let column2 = cast(&columns[1].to_arrow_array(), &ArrowDataType::Date64)
-                    .context(ArrowComputeSnafu)?;
-                let column2 = column2.as_primitive::<Date64Type>();
+                let column1 = cast(
+                    &columns[0].to_arrow_array(),
+                    &ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+                )
+                .context(ArrowComputeSnafu)?;
+                let column1 = column1.as_primitive::<TimestampMillisecondType>();
+                let column2 = cast(
+                    &columns[1].to_arrow_array(),
+                    &ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+                )
+                .context(ArrowComputeSnafu)?;
+                let column2 = column2.as_primitive::<TimestampMillisecondType>();
                 let boolean_array = gt(&column1, &column2).context(ArrowComputeSnafu)?;
                 let result =
                     zip::zip(&boolean_array, &column1, &column2).context(ArrowComputeSnafu)?;
                 Ok(Helper::try_into_vector(&result).context(error::FromArrowArraySnafu)?)
             }
             ConcreteDataType::Date(_) => gt_time_types!(Date32Type, columns),
-            ConcreteDataType::DateTime(_) => gt_time_types!(Date64Type, columns),
             ConcreteDataType::Timestamp(ts_type) => match ts_type {
                 TimestampType::Second(_) => gt_time_types!(TimestampSecondType, columns),
                 TimestampType::Millisecond(_) => {
@@ -155,15 +157,15 @@ mod tests {
     use std::sync::Arc;
 
     use common_time::timestamp::TimeUnit;
-    use common_time::{Date, DateTime, Timestamp};
+    use common_time::{Date, Timestamp};
     use datatypes::types::{
-        DateTimeType, DateType, TimestampMicrosecondType, TimestampMillisecondType,
-        TimestampNanosecondType, TimestampSecondType,
+        DateType, TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
+        TimestampSecondType,
     };
     use datatypes::value::Value;
     use datatypes::vectors::{
-        DateTimeVector, DateVector, StringVector, TimestampMicrosecondVector,
-        TimestampMillisecondVector, TimestampNanosecondVector, TimestampSecondVector, Vector,
+        DateVector, StringVector, TimestampMicrosecondVector, TimestampMillisecondVector,
+        TimestampNanosecondVector, TimestampSecondVector, Vector,
     };
     use paste::paste;
 
@@ -178,7 +180,7 @@ mod tests {
                     ConcreteDataType::string_datatype()
                 ])
                 .unwrap(),
-            ConcreteDataType::DateTime(DateTimeType)
+            ConcreteDataType::timestamp_millisecond_datatype()
         );
         let columns = vec![
             Arc::new(StringVector::from(vec![
@@ -194,15 +196,18 @@ mod tests {
         let result = function
             .eval(&FunctionContext::default(), &columns)
             .unwrap();
-        let result = result.as_any().downcast_ref::<DateTimeVector>().unwrap();
+        let result = result
+            .as_any()
+            .downcast_ref::<TimestampMillisecondVector>()
+            .unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(
             result.get(0),
-            Value::DateTime(DateTime::from_str("2001-02-01 00:00:00", None).unwrap())
+            Value::Timestamp(Timestamp::from_str("2001-02-01 00:00:00", None).unwrap())
         );
         assert_eq!(
             result.get(1),
-            Value::DateTime(DateTime::from_str("2012-12-23 00:00:00", None).unwrap())
+            Value::Timestamp(Timestamp::from_str("2012-12-23 00:00:00", None).unwrap())
         );
     }
 
@@ -245,30 +250,33 @@ mod tests {
         assert_eq!(
             function
                 .return_type(&[
-                    ConcreteDataType::datetime_datatype(),
-                    ConcreteDataType::datetime_datatype()
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    ConcreteDataType::timestamp_millisecond_datatype()
                 ])
                 .unwrap(),
-            ConcreteDataType::DateTime(DateTimeType)
+            ConcreteDataType::timestamp_millisecond_datatype()
         );
 
         let columns = vec![
-            Arc::new(DateTimeVector::from_slice(vec![-1, 2])) as _,
-            Arc::new(DateTimeVector::from_slice(vec![0, 1])) as _,
+            Arc::new(TimestampMillisecondVector::from_slice(vec![-1, 2])) as _,
+            Arc::new(TimestampMillisecondVector::from_slice(vec![0, 1])) as _,
         ];
 
         let result = function
             .eval(&FunctionContext::default(), &columns)
             .unwrap();
-        let result = result.as_any().downcast_ref::<DateTimeVector>().unwrap();
+        let result = result
+            .as_any()
+            .downcast_ref::<TimestampMillisecondVector>()
+            .unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(
             result.get(0),
-            Value::DateTime(DateTime::from_str("1970-01-01 00:00:00", None).unwrap())
+            Value::Timestamp(Timestamp::from_str("1970-01-01 00:00:00", None).unwrap())
         );
         assert_eq!(
             result.get(1),
-            Value::DateTime(DateTime::from_str("1970-01-01 00:00:00.002", None).unwrap())
+            Value::Timestamp(Timestamp::from_str("1970-01-01 00:00:00.002", None).unwrap())
         );
     }
 

@@ -32,7 +32,7 @@ pub(crate) use filter_non_constant;
 mod tests {
     use std::sync::Arc;
 
-    use common_time::{Date, DateTime};
+    use common_time::Date;
 
     use crate::scalars::ScalarVector;
     use crate::timestamp::{
@@ -127,8 +127,6 @@ mod tests {
     #[test]
     fn test_filter_date_like() {
         impl_filter_date_like_test!(DateVector, Date, new);
-        impl_filter_date_like_test!(DateTimeVector, DateTime, new);
-
         impl_filter_date_like_test!(TimestampSecondVector, TimestampSecond, from_native);
         impl_filter_date_like_test!(
             TimestampMillisecondVector,

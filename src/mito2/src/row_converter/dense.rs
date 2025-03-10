@@ -64,7 +64,6 @@ impl SortField {
             | ConcreteDataType::Vector(_) => 11,
             ConcreteDataType::String(_) => 11, // a non-empty string takes at least 11 bytes.
             ConcreteDataType::Date(_) => 5,
-            ConcreteDataType::DateTime(_) => 9,
             ConcreteDataType::Timestamp(_) => 10,
             ConcreteDataType::Time(_) => 10,
             ConcreteDataType::Duration(_) => 10,
@@ -153,7 +152,6 @@ impl SortField {
             Float64, f64,
             String, string,
             Date, date,
-            DateTime, datetime,
             Time, time,
             Duration, duration,
             Decimal128, decimal128,
@@ -165,7 +163,6 @@ impl SortField {
     }
 
     pub(crate) fn deserialize<B: Buf>(&self, deserializer: &mut Deserializer<B>) -> Result<Value> {
-        use common_time::DateTime;
         macro_rules! deserialize_and_build_value {
             (
                 $self: ident;
@@ -240,7 +237,6 @@ impl SortField {
             String, String,
             Date, Date,
             Time, Time,
-            DateTime, DateTime,
             Duration, Duration,
             Decimal128, Decimal128
         )
@@ -289,7 +285,6 @@ impl SortField {
                 return Ok(deserializer.position() - pos_before);
             }
             ConcreteDataType::Date(_) => 5,
-            ConcreteDataType::DateTime(_) => 9,
             ConcreteDataType::Timestamp(_) => 9, // We treat timestamp as Option<i64>
             ConcreteDataType::Time(_) => 10,     // i64 and 1 byte time unit
             ConcreteDataType::Duration(_) => 10,
@@ -502,9 +497,7 @@ impl PrimaryKeyCodec for DensePrimaryKeyCodec {
 #[cfg(test)]
 mod tests {
     use common_base::bytes::StringBytes;
-    use common_time::{
-        DateTime, IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth, Timestamp,
-    };
+    use common_time::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth, Timestamp};
     use datatypes::value::Value;
 
     use super::*;
@@ -676,7 +669,6 @@ mod tests {
                 ConcreteDataType::binary_datatype(),
                 ConcreteDataType::string_datatype(),
                 ConcreteDataType::date_datatype(),
-                ConcreteDataType::datetime_datatype(),
                 ConcreteDataType::timestamp_millisecond_datatype(),
                 ConcreteDataType::time_millisecond_datatype(),
                 ConcreteDataType::duration_millisecond_datatype(),
@@ -701,7 +693,6 @@ mod tests {
                 Value::Binary(b"hello"[..].into()),
                 Value::String("world".into()),
                 Value::Date(Date::new(10)),
-                Value::DateTime(DateTime::new(11)),
                 Value::Timestamp(Timestamp::new_millisecond(12)),
                 Value::Time(Time::new_millisecond(13)),
                 Value::Duration(Duration::new_millisecond(14)),

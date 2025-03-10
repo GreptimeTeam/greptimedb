@@ -30,7 +30,8 @@ use datatypes::prelude::{ConcreteDataType, ScalarVectorBuilder, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::value::Value;
 use datatypes::vectors::{
-    DateTimeVectorBuilder, StringVectorBuilder, UInt32VectorBuilder, UInt64VectorBuilder,
+    StringVectorBuilder, TimestampMicrosecondVectorBuilder, UInt32VectorBuilder,
+    UInt64VectorBuilder,
 };
 use futures::TryStreamExt;
 use snafu::{OptionExt, ResultExt};
@@ -105,9 +106,21 @@ impl InformationSchemaTables {
             ColumnSchema::new(TABLE_ROWS, ConcreteDataType::uint64_datatype(), true),
             ColumnSchema::new(DATA_FREE, ConcreteDataType::uint64_datatype(), true),
             ColumnSchema::new(AUTO_INCREMENT, ConcreteDataType::uint64_datatype(), true),
-            ColumnSchema::new(CREATE_TIME, ConcreteDataType::datetime_datatype(), true),
-            ColumnSchema::new(UPDATE_TIME, ConcreteDataType::datetime_datatype(), true),
-            ColumnSchema::new(CHECK_TIME, ConcreteDataType::datetime_datatype(), true),
+            ColumnSchema::new(
+                CREATE_TIME,
+                ConcreteDataType::timestamp_microsecond_datatype(),
+                true,
+            ),
+            ColumnSchema::new(
+                UPDATE_TIME,
+                ConcreteDataType::timestamp_microsecond_datatype(),
+                true,
+            ),
+            ColumnSchema::new(
+                CHECK_TIME,
+                ConcreteDataType::timestamp_microsecond_datatype(),
+                true,
+            ),
             ColumnSchema::new(TABLE_COLLATION, ConcreteDataType::string_datatype(), true),
             ColumnSchema::new(CHECKSUM, ConcreteDataType::uint64_datatype(), true),
             ColumnSchema::new(CREATE_OPTIONS, ConcreteDataType::string_datatype(), true),
@@ -182,9 +195,9 @@ struct InformationSchemaTablesBuilder {
     max_index_length: UInt64VectorBuilder,
     data_free: UInt64VectorBuilder,
     auto_increment: UInt64VectorBuilder,
-    create_time: DateTimeVectorBuilder,
-    update_time: DateTimeVectorBuilder,
-    check_time: DateTimeVectorBuilder,
+    create_time: TimestampMicrosecondVectorBuilder,
+    update_time: TimestampMicrosecondVectorBuilder,
+    check_time: TimestampMicrosecondVectorBuilder,
     table_collation: StringVectorBuilder,
     checksum: UInt64VectorBuilder,
     create_options: StringVectorBuilder,
@@ -219,9 +232,9 @@ impl InformationSchemaTablesBuilder {
             max_index_length: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
             data_free: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
             auto_increment: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
-            create_time: DateTimeVectorBuilder::with_capacity(INIT_CAPACITY),
-            update_time: DateTimeVectorBuilder::with_capacity(INIT_CAPACITY),
-            check_time: DateTimeVectorBuilder::with_capacity(INIT_CAPACITY),
+            create_time: TimestampMicrosecondVectorBuilder::with_capacity(INIT_CAPACITY),
+            update_time: TimestampMicrosecondVectorBuilder::with_capacity(INIT_CAPACITY),
+            check_time: TimestampMicrosecondVectorBuilder::with_capacity(INIT_CAPACITY),
             table_collation: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             checksum: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
             create_options: StringVectorBuilder::with_capacity(INIT_CAPACITY),
