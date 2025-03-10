@@ -337,6 +337,7 @@ pub enum FlowType {
 impl FlowType {
     pub const RECORDING_RULE: &str = "recording_rule";
     pub const STREAMING: &str = "streaming";
+    pub const FLOW_TYPE_KEY: &str = "flow_type";
 }
 
 impl Default for FlowType {
@@ -391,7 +392,8 @@ impl From<&CreateFlowData> for CreateRequest {
         };
 
         let flow_type = value.flow_type.unwrap_or_default().to_string();
-        req.flow_options.insert("flow_type".to_string(), flow_type);
+        req.flow_options
+            .insert(FlowType::FLOW_TYPE_KEY.to_string(), flow_type);
         req
     }
 }
@@ -423,7 +425,7 @@ impl From<&CreateFlowData> for (FlowInfoValue, Vec<(FlowPartitionId, FlowRouteVa
             .collect::<Vec<_>>();
 
         let flow_type = value.flow_type.unwrap_or_default().to_string();
-        options.insert("flow_type".to_string(), flow_type);
+        options.insert(FlowType::FLOW_TYPE_KEY.to_string(), flow_type);
 
         let flow_info = FlowInfoValue {
             source_table_ids: value.source_table_ids.clone(),

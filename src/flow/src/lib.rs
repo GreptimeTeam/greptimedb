@@ -33,6 +33,7 @@ mod expr;
 pub mod heartbeat;
 mod metrics;
 mod plan;
+mod recording_rules;
 mod repr;
 mod server;
 mod transform;
@@ -43,4 +44,5 @@ mod test_utils;
 
 pub use adapter::{FlowConfig, FlowWorkerManager, FlowWorkerManagerRef, FlownodeOptions};
 pub use error::{Error, Result};
+pub use recording_rules::FrontendClient;
 pub use server::{FlownodeBuilder, FlownodeInstance, FlownodeServer, FrontendInvoker};
