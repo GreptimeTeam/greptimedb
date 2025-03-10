@@ -33,9 +33,15 @@ use crate::rpc::store::{
 };
 use crate::rpc::KeyValue;
 
+#[cfg(feature = "pg_kvbackend")]
 mod postgres;
-
+#[cfg(feature = "pg_kvbackend")]
 pub use postgres::PgStore;
+
+#[cfg(feature = "mysql_kvbackend")]
+mod mysql;
+#[cfg(feature = "mysql_kvbackend")]
+pub use mysql::MySqlStore;
 
 const RDS_STORE_TXN_RETRY_COUNT: usize = 3;
 
@@ -103,6 +109,14 @@ impl<T: Executor> ExecutorImpl<'_, T> {
         match self {
             Self::Default(executor) => executor.query(query, params).await,
             Self::Txn(executor) => executor.query(query, params).await,
+        }
+    }
+
+    #[warn(dead_code)] // Used in #[cfg(feature = "mysql_kvbackend")]
+    async fn execute(&mut self, query: &str, params: &Vec<&Vec<u8>>) -> Result<()> {
+        match self {
+            Self::Default(executor) => executor.execute(query, params).await,
+            Self::Txn(executor) => executor.execute(query, params).await,
         }
     }
 
