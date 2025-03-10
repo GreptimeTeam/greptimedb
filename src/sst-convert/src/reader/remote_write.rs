@@ -315,7 +315,7 @@ impl PrimaryKeyEncoder {
             .iter()
             .find(|label| label.name == METRIC_NAME_LABEL)
             .context(MissingMetricNameSnafu)?;
-        let table_id = match self.table_ids.get(&name_label.name) {
+        let table_id = match self.table_ids.get(&name_label.value) {
             Some(id) => *id,
             None => {
                 let table_info = self
@@ -326,7 +326,7 @@ impl PrimaryKeyEncoder {
                         table_name: &name_label.value,
                     })?;
                 let id = table_info.table_info.ident.table_id;
-                self.table_ids.insert(name_label.name.clone(), id);
+                self.table_ids.insert(name_label.value.clone(), id);
 
                 id
             }
