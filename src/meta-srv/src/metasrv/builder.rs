@@ -345,8 +345,8 @@ impl MetasrvBuilder {
             .context(error::InitDdlManagerSnafu)?,
         );
 
-        // add region follower manager
-        let add_region_follower_manager = Arc::new(RegionFollowerManager::new(
+        // alter region follower manager
+        let region_follower_manager = Arc::new(RegionFollowerManager::new(
             procedure_manager.clone(),
             ArfContext {
                 table_metadata_manager: table_metadata_manager.clone(),
@@ -356,7 +356,7 @@ impl MetasrvBuilder {
                 meta_peer_client: meta_peer_client.clone(),
             },
         ));
-        add_region_follower_manager.try_start()?;
+        region_follower_manager.try_start()?;
 
         let handler_group_builder = match handler_group_builder {
             Some(handler_group_builder) => handler_group_builder,
