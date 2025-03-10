@@ -21,6 +21,8 @@ use async_trait::async_trait;
 use clap::{Parser, ValueEnum};
 use common_error::ext::BoxedError;
 use common_telemetry::{debug, error, info};
+use opendal::layers::LoggingLayer;
+use opendal::{services, Operator};
 use serde_json::Value;
 use snafu::{OptionExt, ResultExt};
 use tokio::fs::File;
@@ -29,7 +31,10 @@ use tokio::sync::Semaphore;
 use tokio::time::Instant;
 
 use crate::database::{parse_proxy_opts, DatabaseClient};
-use crate::error::{EmptyResultSnafu, Error, FileIoSnafu, Result, SchemaNotFoundSnafu};
+use crate::error::{
+    EmptyResultSnafu, Error, FileIoSnafu, OpenDalSnafu, OutputDirNotSetSnafu, Result,
+    S3ConfigNotSetSnafu, SchemaNotFoundSnafu,
+};
 use crate::{database, Tool};
 
 type TableReference = (String, String, String);
@@ -52,8 +57,9 @@ pub struct ExportCommand {
     addr: String,
 
     /// Directory to put the exported data. E.g.: /tmp/greptimedb-export
+    /// for local export.
     #[clap(long)]
-    output_dir: String,
+    output_dir: Option<String>,
 
     /// The name of the catalog to export.
     #[clap(long, default_value = "greptime-*")]
@@ -101,10 +107,51 @@ pub struct ExportCommand {
     /// Disable proxy server, if set, will not use any proxy.
     #[clap(long)]
     no_proxy: bool,
+
+    /// if export data to s3
+    #[clap(long)]
+    s3: bool,
+
+    /// The s3 bucket name
+    /// if s3 is set, this is required
+    #[clap(long)]
+    s3_bucket: Option<String>,
+
+    /// The s3 endpoint
+    /// if s3 is set, this is required
+    #[clap(long)]
+    s3_endpoint: Option<String>,
+
+    /// The s3 access key
+    /// if s3 is set, this is required
+    #[clap(long)]
+    s3_access_key: Option<String>,
+
+    /// The s3 secret key
+    /// if s3 is set, this is required
+    #[clap(long)]
+    s3_secret_key: Option<String>,
+
+    /// The s3 region
+    /// if s3 is set, this is required
+    #[clap(long)]
+    s3_region: Option<String>,
 }
 
 impl ExportCommand {
     pub async fn build(&self) -> std::result::Result<Box<dyn Tool>, BoxedError> {
+        if self.s3
+            && (self.s3_bucket.is_none()
+                || self.s3_endpoint.is_none()
+                || self.s3_access_key.is_none()
+                || self.s3_secret_key.is_none()
+                || self.s3_region.is_none())
+        {
+            return Err(BoxedError::new(S3ConfigNotSetSnafu {}.build()));
+        }
+        if !self.s3 && self.output_dir.is_none() {
+            return Err(BoxedError::new(OutputDirNotSetSnafu {}.build()));
+        }
         let (catalog, schema) =
             database::split_database(&self.database).map_err(BoxedError::new)?;
         let proxy = parse_proxy_opts(self.proxy.clone(), self.no_proxy)?;
@@ -126,24 +173,43 @@ impl ExportCommand {
             target: self.target.clone(),
             start_time: self.start_time.clone(),
             end_time: self.end_time.clone(),
+            s3: self.s3,
+            s3_bucket: self.s3_bucket.clone(),
+            s3_endpoint: self.s3_endpoint.clone(),
+            s3_access_key: self.s3_access_key.clone(),
+            s3_secret_key: self.s3_secret_key.clone(),
+            s3_region: self.s3_region.clone(),
         }))
     }
 }
 
+#[derive(Clone)]
 pub struct Export {
     catalog: String,
     schema: Option<String>,
     database_client: DatabaseClient,
-    output_dir: String,
+    output_dir: Option<String>,
     parallelism: usize,
     target: ExportTarget,
     start_time: Option<String>,
     end_time: Option<String>,
+    s3: bool,
+    s3_bucket: Option<String>,
+    s3_endpoint: Option<String>,
+    s3_access_key: Option<String>,
+    s3_secret_key: Option<String>,
+    s3_region: Option<String>,
 }
 
 impl Export {
     fn catalog_path(&self) -> PathBuf {
-        PathBuf::from(&self.output_dir).join(&self.catalog)
+        if self.s3 {
+            PathBuf::from(&self.catalog)
+        } else if let Some(dir) = &self.output_dir {
+            PathBuf::from(dir).join(&self.catalog)
+        } else {
+            unreachable!("catalog_path: output_dir must be set when not using s3")
+        }
     }
 
     async fn get_db_names(&self) -> Result<Vec<String>> {
@@ -300,19 +366,47 @@ impl Export {
         let timer = Instant::now();
         let db_names = self.get_db_names().await?;
         let db_count = db_names.len();
+        let s3_operator = if self.s3 {
+            Some(self.build_s3_operator().await?)
+        } else {
+            None
+        };
+
         for schema in db_names {
-            let db_dir = self.catalog_path().join(format!("{schema}/"));
-            tokio::fs::create_dir_all(&db_dir)
-                .await
-                .context(FileIoSnafu)?;
-            let file = db_dir.join("create_database.sql");
-            let mut file = File::create(file).await.context(FileIoSnafu)?;
             let create_database = self
                 .show_create("DATABASE", &self.catalog, &schema, None)
                 .await?;
-            file.write_all(create_database.as_bytes())
-                .await
-                .context(FileIoSnafu)?;
+
+            if let Some(op) = &s3_operator {
+                let create_file_key = format!("{}/{}/create_database.sql", self.catalog, schema);
+                let content = create_database.into_bytes();
+                op.write(&create_file_key, content)
+                    .await
+                    .context(OpenDalSnafu)?;
+                info!(
+                    "Exported {}.{} database creation SQL to s3://{}/{}",
+                    self.catalog,
+                    schema,
+                    self.s3_bucket.as_ref().unwrap(),
+                    create_file_key
+                );
+            } else {
+                let db_dir = self.catalog_path().join(format!("{schema}/"));
+                tokio::fs::create_dir_all(&db_dir)
+                    .await
+                    .context(FileIoSnafu)?;
+                let file = db_dir.join("create_database.sql");
+                let mut file = File::create(file).await.context(FileIoSnafu)?;
+                file.write_all(create_database.as_bytes())
+                    .await
+                    .context(FileIoSnafu)?;
+                info!(
+                    "Exported {}.{} database creation SQL to {}",
+                    self.catalog,
+                    schema,
+                    db_dir.join("create_database.sql").to_string_lossy()
+                );
+            }
         }
 
         let elapsed = timer.elapsed();
@@ -326,44 +420,88 @@ impl Export {
         let semaphore = Arc::new(Semaphore::new(self.parallelism));
         let db_names = self.get_db_names().await?;
         let db_count = db_names.len();
+        let s3_operator = if self.s3 {
+            Some(Arc::new(self.build_s3_operator().await?))
+        } else {
+            None
+        };
         let mut tasks = Vec::with_capacity(db_names.len());
         for schema in db_names {
             let semaphore_moved = semaphore.clone();
+            let export_self = self.clone();
+            let s3_operator = s3_operator.clone();
             tasks.push(async move {
                 let _permit = semaphore_moved.acquire().await.unwrap();
-                let (metric_physical_tables, remaining_tables, views) =
-                    self.get_table_list(&self.catalog, &schema).await?;
-                let table_count =
-                    metric_physical_tables.len() + remaining_tables.len() + views.len();
-                let db_dir = self.catalog_path().join(format!("{schema}/"));
-                tokio::fs::create_dir_all(&db_dir)
-                    .await
-                    .context(FileIoSnafu)?;
-                let file = db_dir.join("create_tables.sql");
-                let mut file = File::create(file).await.context(FileIoSnafu)?;
-                for (c, s, t) in metric_physical_tables.into_iter().chain(remaining_tables) {
-                    let create_table = self.show_create("TABLE", &c, &s, Some(&t)).await?;
-                    file.write_all(create_table.as_bytes())
-                        .await
-                        .context(FileIoSnafu)?;
-                }
-                for (c, s, v) in views {
-                    let create_view = self.show_create("VIEW", &c, &s, Some(&v)).await?;
-                    file.write_all(create_view.as_bytes())
-                        .await
-                        .context(FileIoSnafu)?;
-                }
+                let (metric_physical_tables, remaining_tables, views) = export_self
+                    .get_table_list(&export_self.catalog, &schema)
+                    .await?;
 
+                if export_self.s3 {
+                    let op = s3_operator.unwrap().clone();
+                    let create_file_key =
+                        format!("{}/{}/create_tables.sql", export_self.catalog, schema);
+                    let mut content = Vec::new();
+                    for (c, s, t) in metric_physical_tables.iter().chain(&remaining_tables) {
+                        let create_table = export_self.show_create("TABLE", c, s, Some(t)).await?;
+                        content.extend_from_slice(create_table.as_bytes());
+                    }
+                    for (c, s, v) in &views {
+                        let create_view = export_self.show_create("VIEW", c, s, Some(v)).await?;
+                        content.extend_from_slice(create_view.as_bytes());
+                    }
+                    op.write(&create_file_key, content)
+                        .await
+                        .context(OpenDalSnafu)?;
+                } else {
+                    let db_dir = export_self.catalog_path().join(format!("{schema}/"));
+                    tokio::fs::create_dir_all(&db_dir)
+                        .await
+                        .context(FileIoSnafu)?;
+                    let file = db_dir.join("create_tables.sql");
+                    let mut file = File::create(file).await.context(FileIoSnafu)?;
+                    for (c, s, t) in metric_physical_tables.iter().chain(remaining_tables.iter()) {
+                        let create_table = export_self.show_create("TABLE", c, s, Some(t)).await?;
+                        file.write_all(create_table.as_bytes())
+                            .await
+                            .context(FileIoSnafu)?;
+                    }
+                    for (c, s, v) in views.iter() {
+                        let create_view = export_self.show_create("VIEW", c, s, Some(v)).await?;
+                        file.write_all(create_view.as_bytes())
+                            .await
+                            .context(FileIoSnafu)?;
+                    }
+                    info!(
+                        "Finished exporting {}.{schema} with {} table schemas to path: {}",
+                        export_self.catalog,
+                        metric_physical_tables.len() + remaining_tables.len() + views.len(),
+                        export_self
+                            .catalog_path()
+                            .join(format!("{schema}/"))
+                            .to_string_lossy()
+                    );
+                }
                 info!(
-                    "Finished exporting {}.{schema} with {table_count} table schemas to path: {}",
-                    self.catalog,
-                    db_dir.to_string_lossy()
+                    "Finished exporting {}.{schema} with {} table schemas to path: {}",
+                    export_self.catalog,
+                    metric_physical_tables.len() + remaining_tables.len() + views.len(),
+                    if export_self.s3 {
+                        format!(
+                            "s3://{}/{}/create_tables.sql",
+                            export_self.s3_bucket.clone().unwrap(),
+                            schema
+                        )
+                    } else {
+                        export_self
+                            .catalog_path()
+                            .join(format!("{schema}/"))
+                            .to_string_lossy()
+                            .to_string()
+                    }
                 );
-
                 Ok::<(), Error>(())
             });
         }
-
         let success = futures::future::join_all(tasks)
             .await
             .into_iter()
@@ -375,11 +513,39 @@ impl Export {
                 }
             })
             .count();
-
         let elapsed = timer.elapsed();
         info!("Success {success}/{db_count} jobs, cost: {elapsed:?}");
-
         Ok(())
+    }
+
+    async fn build_s3_operator(&self) -> Result<Operator> {
+        let mut builder = services::S3::default().root("").bucket(
+            self.s3_bucket
+                .as_ref()
+                .expect("s3_bucket must be provided when s3 is enabled"),
+        );
+
+        if let Some(endpoint) = self.s3_endpoint.as_ref() {
+            builder = builder.endpoint(endpoint);
+        }
+
+        if let Some(region) = self.s3_region.as_ref() {
+            builder = builder.region(region);
+        }
+
+        if let Some(key_id) = self.s3_access_key.as_ref() {
+            builder = builder.access_key_id(key_id);
+        }
+
+        if let Some(secret_key) = self.s3_secret_key.as_ref() {
+            builder = builder.secret_access_key(secret_key);
+        }
+
+        let op = Operator::new(builder)
+            .context(OpenDalSnafu)?
+            .layer(LoggingLayer::default())
+            .finish();
+        Ok(op)
     }
 
     async fn export_database_data(&self) -> Result<()> {
@@ -388,71 +554,108 @@ impl Export {
         let db_names = self.get_db_names().await?;
         let db_count = db_names.len();
         let mut tasks = Vec::with_capacity(db_count);
+        let s3_operator = if self.s3 {
+            Some(Arc::new(self.build_s3_operator().await?))
+        } else {
+            None
+        };
+
+        let with_options = build_with_options(&self.start_time, &self.end_time);
+
         for schema in db_names {
             let semaphore_moved = semaphore.clone();
+            let export_self = self.clone();
+            let with_options_clone = with_options.clone();
+            let s3_operator = s3_operator.clone();
             tasks.push(async move {
                 let _permit = semaphore_moved.acquire().await.unwrap();
-                let db_dir = self.catalog_path().join(format!("{schema}/"));
+
+                let db_dir = export_self.catalog_path().join(&schema);
                 tokio::fs::create_dir_all(&db_dir)
                     .await
                     .context(FileIoSnafu)?;
 
-                let with_options = match (&self.start_time, &self.end_time) {
-                    (Some(start_time), Some(end_time)) => {
-                        format!(
-                            "WITH (FORMAT='parquet', start_time='{}', end_time='{}')",
-                            start_time, end_time
-                        )
-                    }
-                    (Some(start_time), None) => {
-                        format!("WITH (FORMAT='parquet', start_time='{}')", start_time)
-                    }
-                    (None, Some(end_time)) => {
-                        format!("WITH (FORMAT='parquet', end_time='{}')", end_time)
-                    }
-                    (None, None) => "WITH (FORMAT='parquet')".to_string(),
+                let (path, connection_part) = if export_self.s3 {
+                    let s3_path = format!(
+                        "s3://{}/{}/{}/",
+                        export_self.s3_bucket.as_ref().unwrap(),
+                        export_self.catalog,
+                        schema
+                    );
+                    // endpoint is optional
+                    let endpoint_option = if let Some(endpoint) = export_self.s3_endpoint.as_ref() {
+                        format!(", ENDPOINT='{}'", endpoint)
+                    } else {
+                        String::new()
+                    };
+                    let connection_options = format!(
+                        "ACCESS_KEY_ID='{}', SECRET_ACCESS_KEY='{}', REGION='{}'{}",
+                        export_self.s3_access_key.as_ref().unwrap(),
+                        export_self.s3_secret_key.as_ref().unwrap(),
+                        export_self.s3_region.as_ref().unwrap(),
+                        endpoint_option
+                    );
+                    (s3_path, format!(" CONNECTION ({})", connection_options))
+                } else {
+                    (
+                        export_self
+                            .catalog_path()
+                            .join(format!("{schema}/"))
+                            .to_string_lossy()
+                            .to_string(),
+                        String::new(),
+                    )
                 };
 
                 let sql = format!(
-                    r#"COPY DATABASE "{}"."{}" TO '{}' {};"#,
-                    self.catalog,
-                    schema,
-                    db_dir.to_str().unwrap(),
-                    with_options
+                    r#"COPY DATABASE "{}"."{}" TO '{}' WITH ({}){};"#,
+                    export_self.catalog, schema, path, with_options_clone, connection_part
                 );
-
                 info!("Executing sql: {sql}");
-
-                self.database_client.sql_in_public(&sql).await?;
-
+                export_self.database_client.sql_in_public(&sql).await?;
                 info!(
-                    "Finished exporting {}.{schema} data into path: {}",
-                    self.catalog,
-                    db_dir.to_string_lossy()
+                    "Finished exporting {}.{} data to {}",
+                    export_self.catalog, schema, path
                 );
 
-                // The export copy from sql
-                let copy_from_file = db_dir.join("copy_from.sql");
-                let mut writer =
-                    BufWriter::new(File::create(copy_from_file).await.context(FileIoSnafu)?);
                 let copy_database_from_sql = format!(
-                    r#"COPY DATABASE "{}"."{}" FROM '{}' WITH (FORMAT='parquet');"#,
-                    self.catalog,
-                    schema,
-                    db_dir.to_str().unwrap()
+                    r#"COPY DATABASE "{}"."{}" FROM '{}' WITH ({}){};"#,
+                    export_self.catalog, schema, path, with_options_clone, connection_part
                 );
-                writer
-                    .write(copy_database_from_sql.as_bytes())
-                    .await
-                    .context(FileIoSnafu)?;
-                writer.flush().await.context(FileIoSnafu)?;
 
-                info!("Finished exporting {}.{schema} copy_from.sql", self.catalog);
+                // for copy_from.sql
+                if let Some(op) = s3_operator {
+                    let copy_from_key = format!("{}/{}/copy_from.sql", export_self.catalog, schema);
+                    op.write(&copy_from_key, copy_database_from_sql.into_bytes())
+                        .await
+                        .context(OpenDalSnafu)?;
+                    info!(
+                        "Finished exporting {}.{} copy_from.sql to s3://{}/{}",
+                        export_self.catalog,
+                        schema,
+                        export_self.s3_bucket.as_ref().unwrap(),
+                        copy_from_key
+                    );
+                } else {
+                    let copy_from_file = db_dir.join("copy_from.sql");
+                    let mut writer =
+                        BufWriter::new(File::create(&copy_from_file).await.context(FileIoSnafu)?);
+                    writer
+                        .write_all(copy_database_from_sql.as_bytes())
+                        .await
+                        .context(FileIoSnafu)?;
+                    writer.flush().await.context(FileIoSnafu)?;
+                    info!(
+                        "Finished exporting {}.{} copy_from.sql to local path: {}",
+                        export_self.catalog,
+                        schema,
+                        copy_from_file.to_string_lossy()
+                    );
+                }
 
                 Ok::<(), Error>(())
-            })
+            });
         }
-
         let success = futures::future::join_all(tasks)
             .await
             .into_iter()
@@ -465,7 +668,6 @@ impl Export {
             })
             .count();
         let elapsed = timer.elapsed();
-
         info!("Success {success}/{db_count} jobs, costs: {elapsed:?}");
 
         Ok(())
@@ -492,4 +694,16 @@ impl Tool for Export {
             }
         }
     }
+}
+
+/// Builds the WITH options string for SQL commands, assuming consistent syntax across S3 and local exports.
+fn build_with_options(start_time: &Option<String>, end_time: &Option<String>) -> String {
+    let mut options = vec!["format = 'parquet'".to_string()];
+    if let Some(start) = start_time {
+        options.push(format!("start_time = '{}'", start));
+    }
+    if let Some(end) = end_time {
+        options.push(format!("end_time = '{}'", end));
+    }
+    options.join(", ")
 }
