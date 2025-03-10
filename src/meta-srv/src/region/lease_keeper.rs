@@ -19,7 +19,7 @@ use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::region_keeper::MemoryRegionKeeperRef;
 use common_meta::rpc::router::RegionRoute;
-use common_meta::{ClusterId, DatanodeId};
+use common_meta::DatanodeId;
 use common_telemetry::warn;
 use snafu::ResultExt;
 use store_api::region_engine::RegionRole;
@@ -167,7 +167,6 @@ impl RegionLeaseKeeper {
     /// and corresponding regions will be added to `non_exists` of [RenewRegionLeasesResponse].
     pub async fn renew_region_leases(
         &self,
-        _cluster_id: ClusterId,
         datanode_id: DatanodeId,
         regions: &[(RegionId, RegionRole)],
     ) -> Result<RenewRegionLeasesResponse> {
@@ -282,7 +281,6 @@ mod tests {
             renewed,
         } = keeper
             .renew_region_leases(
-                0,
                 1,
                 &[
                     (RegionId::new(1024, 1), RegionRole::Follower),
@@ -384,7 +382,7 @@ mod tests {
                 non_exists,
                 renewed,
             } = keeper
-                .renew_region_leases(0, 1, &[(region_id, RegionRole::Follower)])
+                .renew_region_leases(1, &[(region_id, RegionRole::Follower)])
                 .await
                 .unwrap();
             assert!(renewed.is_empty());
@@ -397,7 +395,7 @@ mod tests {
                 non_exists,
                 renewed,
             } = keeper
-                .renew_region_leases(0, leader_peer_id, &[(region_id, role)])
+                .renew_region_leases(leader_peer_id, &[(region_id, role)])
                 .await
                 .unwrap();
 
@@ -411,7 +409,7 @@ mod tests {
                 non_exists,
                 renewed,
             } = keeper
-                .renew_region_leases(0, follower_peer_id, &[(region_id, role)])
+                .renew_region_leases(follower_peer_id, &[(region_id, role)])
                 .await
                 .unwrap();
 
@@ -432,7 +430,7 @@ mod tests {
                 non_exists,
                 renewed,
             } = keeper
-                .renew_region_leases(0, leader_peer_id, &[(opening_region_id, role)])
+                .renew_region_leases(leader_peer_id, &[(opening_region_id, role)])
                 .await
                 .unwrap();
 
@@ -465,7 +463,6 @@ mod tests {
                 renewed,
             } = keeper
                 .renew_region_leases(
-                    0,
                     1,
                     &[
                         (region_id, RegionRole::Follower),
@@ -513,7 +510,7 @@ mod tests {
                 non_exists,
                 renewed,
             } = keeper
-                .renew_region_leases(0, follower_peer_id, &[(region_id, role)])
+                .renew_region_leases(follower_peer_id, &[(region_id, role)])
                 .await
                 .unwrap();
 

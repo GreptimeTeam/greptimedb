@@ -20,7 +20,7 @@ lazy_static! {
     pub static ref METRIC_META_KV_REQUEST_ELAPSED: HistogramVec = register_histogram_vec!(
         "greptime_meta_kv_request_elapsed",
         "meta kv request",
-        &["target", "op", "cluster_id"]
+        &["target", "op"]
     )
     .unwrap();
     /// The heartbeat connection gauge.

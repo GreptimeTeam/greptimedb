@@ -54,7 +54,7 @@ impl Function for STDistance {
         )
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure_columns_n!(columns, 2);
 
         let wkt_this_vec = &columns[0];
@@ -108,7 +108,7 @@ impl Function for STDistanceSphere {
         )
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure_columns_n!(columns, 2);
 
         let wkt_this_vec = &columns[0];
@@ -169,7 +169,7 @@ impl Function for STArea {
         )
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure_columns_n!(columns, 1);
 
         let wkt_vec = &columns[0];

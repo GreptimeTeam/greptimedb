@@ -35,11 +35,10 @@ use servers::error::{
     CatalogSnafu, CollectRecordbatchSnafu, DataFusionSnafu, Result as ServerResult,
     TableNotFoundSnafu,
 };
-use servers::http::jaeger::QueryTraceParams;
+use servers::http::jaeger::{QueryTraceParams, FIND_TRACES_COLS};
 use servers::otlp::trace::{
-    DURATION_NANO_COLUMN, SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN, SPAN_ID_COLUMN,
-    SPAN_KIND_COLUMN, SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, TIMESTAMP_COLUMN, TRACE_ID_COLUMN,
-    TRACE_TABLE_NAME,
+    DURATION_NANO_COLUMN, SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN, SPAN_KIND_COLUMN,
+    SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, TIMESTAMP_COLUMN, TRACE_ID_COLUMN, TRACE_TABLE_NAME,
 };
 use servers::query_handler::JaegerQueryHandler;
 use session::context::QueryContextRef;
@@ -102,16 +101,9 @@ impl JaegerQueryHandler for Instance {
     }
 
     async fn get_trace(&self, ctx: QueryContextRef, trace_id: &str) -> ServerResult<Output> {
-        // It's equivalent to `SELECT trace_id, timestamp, duration_nano, service_name, span_name, span_id, span_attributes FROM {db}.{trace_table} WHERE trace_id = '{trace_id}'`.
-        let selects = vec![
-            col(TRACE_ID_COLUMN),
-            col(TIMESTAMP_COLUMN),
-            col(DURATION_NANO_COLUMN),
-            col(SERVICE_NAME_COLUMN),
-            col(SPAN_NAME_COLUMN),
-            col(SPAN_ID_COLUMN),
-            col(SPAN_ATTRIBUTES_COLUMN),
-        ];
+        // It's equivalent to `SELECT trace_id, timestamp, duration_nano, service_name, span_name, span_id, span_attributes, resource_attributes, parent_span_id
+        // FROM {db}.{trace_table} WHERE trace_id = '{trace_id}'`.
+        let selects: Vec<Expr> = FIND_TRACES_COLS.clone();
 
         let filters = vec![col(TRACE_ID_COLUMN).eq(lit(trace_id))];
 
@@ -133,15 +125,7 @@ impl JaegerQueryHandler for Instance {
         ctx: QueryContextRef,
         query_params: QueryTraceParams,
     ) -> ServerResult<Output> {
-        let selects = vec![
-            col(TRACE_ID_COLUMN),
-            col(TIMESTAMP_COLUMN),
-            col(DURATION_NANO_COLUMN),
-            col(SERVICE_NAME_COLUMN),
-            col(SPAN_NAME_COLUMN),
-            col(SPAN_ID_COLUMN),
-            col(SPAN_ATTRIBUTES_COLUMN),
-        ];
+        let selects: Vec<Expr> = FIND_TRACES_COLS.clone();
 
         let mut filters = vec![];
 
@@ -262,8 +246,11 @@ fn create_df_context(
     ];
 
     for udf in udfs {
-        df_context
-            .register_udf(create_udf(udf, ctx.clone(), Arc::new(FunctionState::default())).into());
+        df_context.register_udf(create_udf(
+            udf,
+            ctx.clone(),
+            Arc::new(FunctionState::default()),
+        ));
     }
 
     Ok(df_context)

@@ -29,8 +29,7 @@ use opentelemetry_proto::tonic::collector::metrics::v1::{
 use opentelemetry_proto::tonic::collector::trace::v1::{
     ExportTraceServiceRequest, ExportTraceServiceResponse,
 };
-use pipeline::util::to_pipeline_version;
-use pipeline::{PipelineDefinition, PipelineWay};
+use pipeline::PipelineWay;
 use prost::Message;
 use session::context::{Channel, QueryContext};
 use snafu::prelude::*;
@@ -75,6 +74,7 @@ pub async fn metrics(
 pub async fn traces(
     State(handler): State<OpenTelemetryProtocolHandlerRef>,
     TraceTableName(table_name): TraceTableName,
+    pipeline_info: PipelineInfo,
     Extension(mut query_ctx): Extension<QueryContext>,
     bytes: Bytes,
 ) -> Result<OtlpResponse<ExportTraceServiceResponse>> {
@@ -88,8 +88,29 @@ pub async fn traces(
         .start_timer();
     let request =
         ExportTraceServiceRequest::decode(bytes).context(error::DecodeOtlpRequestSnafu)?;
+
+    let pipeline = PipelineWay::from_name_and_default(
+        pipeline_info.pipeline_name.as_deref(),
+        pipeline_info.pipeline_version.as_deref(),
+        PipelineWay::OtlpTraceDirectV0,
+    )
+    .context(PipelineSnafu)?;
+
+    let pipeline_params = pipeline_info.pipeline_params;
+
+    // here we use nightly feature `trait_upcasting` to convert handler to
+    // pipeline_handler
+    let pipeline_handler: Arc<dyn PipelineHandler + Send + Sync> = handler.clone();
+
     handler
-        .traces(request, table_name, query_ctx)
+        .traces(
+            pipeline_handler,
+            request,
+            pipeline,
+            pipeline_params,
+            table_name,
+            query_ctx,
+        )
         .await
         .map(|o| OtlpResponse {
             resp_body: ExportTraceServiceResponse {
@@ -118,15 +139,12 @@ pub async fn logs(
         .start_timer();
     let request = ExportLogsServiceRequest::decode(bytes).context(error::DecodeOtlpRequestSnafu)?;
 
-    let pipeline = if let Some(pipeline_name) = pipeline_info.pipeline_name {
-        PipelineWay::Pipeline(PipelineDefinition::from_name(
-            &pipeline_name,
-            to_pipeline_version(pipeline_info.pipeline_version).context(PipelineSnafu)?,
-        ))
-    } else {
-        PipelineWay::OtlpLogDirect(Box::new(select_info))
-    };
-
+    let pipeline = PipelineWay::from_name_and_default(
+        pipeline_info.pipeline_name.as_deref(),
+        pipeline_info.pipeline_version.as_deref(),
+        PipelineWay::OtlpLogDirect(Box::new(select_info)),
+    )
+    .context(PipelineSnafu)?;
     let pipeline_params = pipeline_info.pipeline_params;
 
     // here we use nightly feature `trait_upcasting` to convert handler to

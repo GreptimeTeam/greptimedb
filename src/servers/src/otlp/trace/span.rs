@@ -16,12 +16,14 @@ use std::fmt::Display;
 
 use common_time::timestamp::Timestamp;
 use itertools::Itertools;
-use opentelemetry_proto::tonic::common::v1::{InstrumentationScope, KeyValue};
+use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+use opentelemetry_proto::tonic::common::v1::{any_value, InstrumentationScope, KeyValue};
 use opentelemetry_proto::tonic::trace::v1::span::{Event, Link};
 use opentelemetry_proto::tonic::trace::v1::{Span, Status};
 use serde::Serialize;
 
 use super::attributes::Attributes;
+use crate::otlp::trace::KEY_SERVICE_NAME;
 use crate::otlp::utils::bytes_to_hex_string;
 
 #[derive(Debug, Clone)]
@@ -228,6 +230,51 @@ pub fn status_to_string(status: &Option<Status>) -> (String, String) {
         Some(status) => (status.code().as_str_name().into(), status.message.clone()),
         None => ("".into(), "".into()),
     }
+}
+
+/// Convert OpenTelemetry traces to SpanTraces
+///
+/// See
+/// <https://github.com/open-telemetry/opentelemetry-proto/blob/main/opentelemetry/proto/trace/v1/trace.proto>
+/// for data structure of OTLP traces.
+pub fn parse(request: ExportTraceServiceRequest) -> TraceSpans {
+    let span_size = request
+        .resource_spans
+        .iter()
+        .flat_map(|res| res.scope_spans.iter())
+        .flat_map(|scope| scope.spans.iter())
+        .count();
+    let mut spans = Vec::with_capacity(span_size);
+    for resource_spans in request.resource_spans {
+        let resource_attrs = resource_spans
+            .resource
+            .map(|r| r.attributes)
+            .unwrap_or_default();
+        let service_name = resource_attrs
+            .iter()
+            .find_or_first(|kv| kv.key == KEY_SERVICE_NAME)
+            .and_then(|kv| kv.value.clone())
+            .and_then(|v| match v.value {
+                Some(any_value::Value::StringValue(s)) => Some(s),
+                Some(any_value::Value::BytesValue(b)) => {
+                    Some(String::from_utf8_lossy(&b).to_string())
+                }
+                _ => None,
+            });
+
+        for scope_spans in resource_spans.scope_spans {
+            let scope = scope_spans.scope.unwrap_or_default();
+            for span in scope_spans.spans {
+                spans.push(parse_span(
+                    service_name.clone(),
+                    &resource_attrs,
+                    &scope,
+                    span,
+                ));
+            }
+        }
+    }
+    spans
 }
 
 #[cfg(test)]

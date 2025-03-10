@@ -48,7 +48,7 @@ impl Function for RateFunction {
         Signature::uniform(2, ConcreteDataType::numerics(), Volatility::Immutable)
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         let val = &columns[0].to_arrow_array();
         let val_0 = val.slice(0, val.len() - 1);
         let val_1 = val.slice(1, val.len() - 1);
@@ -100,7 +100,7 @@ mod tests {
             Arc::new(Float32Vector::from_vec(values)),
             Arc::new(Int64Vector::from_vec(ts)),
         ];
-        let vector = rate.eval(FunctionContext::default(), &args).unwrap();
+        let vector = rate.eval(&FunctionContext::default(), &args).unwrap();
         let expect: VectorRef = Arc::new(Float64Vector::from_vec(vec![2.0, 3.0]));
         assert_eq!(expect, vector);
     }

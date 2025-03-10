@@ -15,7 +15,6 @@
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_meta::ddl::table_meta::PeerAllocator;
-use common_meta::ddl::TableMetadataAllocatorContext;
 use common_meta::error::{ExternalSnafu, Result as MetaResult};
 use common_meta::peer::Peer;
 use snafu::{ensure, ResultExt};
@@ -36,24 +35,18 @@ impl MetasrvPeerAllocator {
         Self { ctx, selector }
     }
 
-    /// Allocates a specified number (by `regions`) of [`Peer`] instances based on the given
-    /// [`TableMetadataAllocatorContext`] and number of regions. The returned peers will have
-    /// the same length as the number of regions.
+    /// Allocates a specified number (by `regions`) of [`Peer`] instances based on the number of
+    /// regions. The returned peers will have the same length as the number of regions.
     ///
     /// This method is mainly a wrapper around the [`SelectorRef`]::`select` method. There is
     /// no guarantee that how the returned peers are used, like whether they are from the same
     /// table or not. So this method isn't idempotent.
-    async fn alloc(
-        &self,
-        ctx: &TableMetadataAllocatorContext,
-        regions: usize,
-    ) -> Result<Vec<Peer>> {
+    async fn alloc(&self, regions: usize) -> Result<Vec<Peer>> {
         ensure!(regions <= MAX_REGION_SEQ as usize, TooManyPartitionsSnafu);
 
         let mut peers = self
             .selector
             .select(
-                ctx.cluster_id,
                 &self.ctx,
                 SelectorOptions {
                     min_required_items: regions,
@@ -79,12 +72,8 @@ impl MetasrvPeerAllocator {
 
 #[async_trait]
 impl PeerAllocator for MetasrvPeerAllocator {
-    async fn alloc(
-        &self,
-        ctx: &TableMetadataAllocatorContext,
-        regions: usize,
-    ) -> MetaResult<Vec<Peer>> {
-        self.alloc(ctx, regions)
+    async fn alloc(&self, regions: usize) -> MetaResult<Vec<Peer>> {
+        self.alloc(regions)
             .await
             .map_err(BoxedError::new)
             .context(ExternalSnafu)

@@ -597,7 +597,7 @@ impl fmt::Display for FulltextAnalyzer {
 }
 
 /// Skipping options for a column.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Visit, VisitMut)]
 #[serde(rename_all = "kebab-case")]
 pub struct SkippingIndexOptions {
     /// The granularity of the skip index.
@@ -605,6 +605,15 @@ pub struct SkippingIndexOptions {
     /// The type of the skip index.
     #[serde(default)]
     pub index_type: SkippingIndexType,
+}
+
+impl Default for SkippingIndexOptions {
+    fn default() -> Self {
+        Self {
+            granularity: DEFAULT_GRANULARITY,
+            index_type: SkippingIndexType::default(),
+        }
+    }
 }
 
 impl fmt::Display for SkippingIndexOptions {

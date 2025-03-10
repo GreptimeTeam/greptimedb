@@ -40,7 +40,6 @@ use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{RegionId, TableId};
-use table::predicate::Predicate;
 use task::MAX_PARALLEL_COMPACTION;
 use tokio::sync::mpsc::{self, Sender};
 
@@ -57,7 +56,7 @@ use crate::error::{
 };
 use crate::metrics::{COMPACTION_STAGE_ELAPSED, INFLIGHT_COMPACTION_COUNT};
 use crate::read::projection::ProjectionMapper;
-use crate::read::scan_region::ScanInput;
+use crate::read::scan_region::{PredicateGroup, ScanInput};
 use crate::read::seq_scan::SeqScan;
 use crate::read::BoxedBatchReader;
 use crate::region::options::MergeMode;
@@ -657,7 +656,7 @@ impl CompactionSstReaderBuilder<'_> {
 fn time_range_to_predicate(
     range: TimestampRange,
     metadata: &RegionMetadataRef,
-) -> Result<Option<Predicate>> {
+) -> Result<PredicateGroup> {
     let ts_col = metadata.time_index_column();
 
     // safety: time index column's type must be a valid timestamp type.
@@ -687,10 +686,12 @@ fn time_range_to_predicate(
                 .lt(ts_to_lit(*end, ts_col_unit)?)]
         }
         (None, None) => {
-            return Ok(None);
+            return Ok(PredicateGroup::default());
         }
     };
-    Ok(Some(Predicate::new(exprs)))
+
+    let predicate = PredicateGroup::new(metadata, &exprs);
+    Ok(predicate)
 }
 
 fn ts_to_lit(ts: Timestamp, ts_col_unit: TimeUnit) -> Result<Expr> {

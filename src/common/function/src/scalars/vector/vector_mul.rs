@@ -68,7 +68,7 @@ impl Function for VectorMulFunction {
         )
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure!(
             columns.len() == 2,
             InvalidFuncArgsSnafu {
@@ -155,7 +155,7 @@ mod tests {
         let input1 = Arc::new(StringVector::from(vec![Some(format!("{vec1:?}"))]));
 
         let err = func
-            .eval(FunctionContext::default(), &[input0, input1])
+            .eval(&FunctionContext::default(), &[input0, input1])
             .unwrap_err();
 
         match err {
@@ -186,7 +186,7 @@ mod tests {
         ]));
 
         let result = func
-            .eval(FunctionContext::default(), &[input0, input1])
+            .eval(&FunctionContext::default(), &[input0, input1])
             .unwrap();
 
         let result = result.as_ref();

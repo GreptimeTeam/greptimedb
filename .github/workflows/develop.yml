@@ -23,7 +23,7 @@ concurrency:
 jobs:
   check-typos-and-docs:
     name: Check typos and docs
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
@@ -36,7 +36,7 @@ jobs:
           || (echo "'config/config.md' is not up-to-date, please run 'make config-docs'." && exit 1)
 
   license-header-check:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     name: Check License Header
     steps:
       - uses: actions/checkout@v4
@@ -49,7 +49,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ ubuntu-20.04 ]
+        os: [ ubuntu-latest ]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -72,7 +72,7 @@ jobs:
 
   toml:
     name: Toml Check
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -89,7 +89,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ ubuntu-20.04 ]
+        os: [ ubuntu-latest ]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -248,7 +248,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ ubuntu-20.04 ]
+        os: [ ubuntu-latest ]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -568,7 +568,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ ubuntu-20.04 ]
+        os: [ ubuntu-latest ]
         mode:
           - name: "Basic"
             opts: ""
@@ -607,7 +607,7 @@ jobs:
 
   fmt:
     name: Rustfmt
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -624,7 +624,7 @@ jobs:
 
   clippy:
     name: Clippy
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -710,7 +710,7 @@ jobs:
 
   coverage:
     if: github.event_name == 'merge_group'
-    runs-on: ubuntu-20.04-8-cores
+    runs-on: ubuntu-22.04-8-cores
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -770,7 +770,7 @@ jobs:
   # compat:
   #   name: Compatibility Test
   #   needs: build
-  #   runs-on: ubuntu-20.04
+  #   runs-on: ubuntu-22.04
   #   timeout-minutes: 60
   #   steps:
   #     - uses: actions/checkout@v4

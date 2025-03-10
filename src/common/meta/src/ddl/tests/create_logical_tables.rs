@@ -26,7 +26,7 @@ use crate::ddl::test_util::datanode_handler::NaiveDatanodeHandler;
 use crate::ddl::test_util::{
     create_physical_table_metadata, test_create_logical_table_task, test_create_physical_table_task,
 };
-use crate::ddl::{TableMetadata, TableMetadataAllocatorContext};
+use crate::ddl::TableMetadata;
 use crate::error::Error;
 use crate::key::table_route::TableRouteValue;
 use crate::test_util::{new_ddl_context, MockDatanodeManager};
@@ -35,11 +35,9 @@ use crate::test_util::{new_ddl_context, MockDatanodeManager};
 async fn test_on_prepare_physical_table_not_found() {
     let node_manager = Arc::new(MockDatanodeManager::new(()));
     let ddl_context = new_ddl_context(node_manager);
-    let cluster_id = 1;
     let tasks = vec![test_create_logical_table_task("foo")];
     let physical_table_id = 1024u32;
-    let mut procedure =
-        CreateLogicalTablesProcedure::new(cluster_id, tasks, physical_table_id, ddl_context);
+    let mut procedure = CreateLogicalTablesProcedure::new(tasks, physical_table_id, ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err, Error::TableRouteNotFound { .. });
 }
@@ -48,7 +46,6 @@ async fn test_on_prepare_physical_table_not_found() {
 async fn test_on_prepare() {
     let node_manager = Arc::new(MockDatanodeManager::new(()));
     let ddl_context = new_ddl_context(node_manager);
-    let cluster_id = 1;
     // Prepares physical table metadata.
     let mut create_physical_table_task = test_create_physical_table_task("phy_table");
     let TableMetadata {
@@ -57,10 +54,7 @@ async fn test_on_prepare() {
         ..
     } = ddl_context
         .table_metadata_allocator
-        .create(
-            &TableMetadataAllocatorContext { cluster_id },
-            &create_physical_table_task,
-        )
+        .create(&create_physical_table_task)
         .await
         .unwrap();
     create_physical_table_task.set_table_id(table_id);
@@ -73,8 +67,7 @@ async fn test_on_prepare() {
     // The create logical table procedure.
     let tasks = vec![test_create_logical_table_task("foo")];
     let physical_table_id = table_id;
-    let mut procedure =
-        CreateLogicalTablesProcedure::new(cluster_id, tasks, physical_table_id, ddl_context);
+    let mut procedure = CreateLogicalTablesProcedure::new(tasks, physical_table_id, ddl_context);
     let status = procedure.on_prepare().await.unwrap();
     assert_matches!(status, Status::Executing { persist: true });
 }
@@ -83,7 +76,6 @@ async fn test_on_prepare() {
 async fn test_on_prepare_logical_table_exists_err() {
     let node_manager = Arc::new(MockDatanodeManager::new(()));
     let ddl_context = new_ddl_context(node_manager);
-    let cluster_id = 1;
     // Prepares physical table metadata.
     let mut create_physical_table_task = test_create_physical_table_task("phy_table");
     let TableMetadata {
@@ -92,10 +84,7 @@ async fn test_on_prepare_logical_table_exists_err() {
         ..
     } = ddl_context
         .table_metadata_allocator
-        .create(
-            &TableMetadataAllocatorContext { cluster_id },
-            &create_physical_table_task,
-        )
+        .create(&create_physical_table_task)
         .await
         .unwrap();
     create_physical_table_task.set_table_id(table_id);
@@ -119,7 +108,7 @@ async fn test_on_prepare_logical_table_exists_err() {
     // The create logical table procedure.
     let physical_table_id = table_id;
     let mut procedure =
-        CreateLogicalTablesProcedure::new(cluster_id, vec![task], physical_table_id, ddl_context);
+        CreateLogicalTablesProcedure::new(vec![task], physical_table_id, ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err, Error::TableAlreadyExists { .. });
     assert_eq!(err.status_code(), StatusCode::TableAlreadyExists);
@@ -129,7 +118,6 @@ async fn test_on_prepare_logical_table_exists_err() {
 async fn test_on_prepare_with_create_if_table_exists() {
     let node_manager = Arc::new(MockDatanodeManager::new(()));
     let ddl_context = new_ddl_context(node_manager);
-    let cluster_id = 1;
     // Prepares physical table metadata.
     let mut create_physical_table_task = test_create_physical_table_task("phy_table");
     let TableMetadata {
@@ -138,10 +126,7 @@ async fn test_on_prepare_with_create_if_table_exists() {
         ..
     } = ddl_context
         .table_metadata_allocator
-        .create(
-            &TableMetadataAllocatorContext { cluster_id },
-            &create_physical_table_task,
-        )
+        .create(&create_physical_table_task)
         .await
         .unwrap();
     create_physical_table_task.set_table_id(table_id);
@@ -167,7 +152,7 @@ async fn test_on_prepare_with_create_if_table_exists() {
     // Sets `create_if_not_exists`
     task.create_table.create_if_not_exists = true;
     let mut procedure =
-        CreateLogicalTablesProcedure::new(cluster_id, vec![task], physical_table_id, ddl_context);
+        CreateLogicalTablesProcedure::new(vec![task], physical_table_id, ddl_context);
     let status = procedure.on_prepare().await.unwrap();
     let output = status.downcast_output_ref::<Vec<u32>>().unwrap();
     assert_eq!(*output, vec![8192]);
@@ -177,7 +162,6 @@ async fn test_on_prepare_with_create_if_table_exists() {
 async fn test_on_prepare_part_logical_tables_exist() {
     let node_manager = Arc::new(MockDatanodeManager::new(()));
     let ddl_context = new_ddl_context(node_manager);
-    let cluster_id = 1;
     // Prepares physical table metadata.
     let mut create_physical_table_task = test_create_physical_table_task("phy_table");
     let TableMetadata {
@@ -186,10 +170,7 @@ async fn test_on_prepare_part_logical_tables_exist() {
         ..
     } = ddl_context
         .table_metadata_allocator
-        .create(
-            &TableMetadataAllocatorContext { cluster_id },
-            &create_physical_table_task,
-        )
+        .create(&create_physical_table_task)
         .await
         .unwrap();
     create_physical_table_task.set_table_id(table_id);
@@ -216,7 +197,6 @@ async fn test_on_prepare_part_logical_tables_exist() {
     task.create_table.create_if_not_exists = true;
     let non_exist_task = test_create_logical_table_task("non_exists");
     let mut procedure = CreateLogicalTablesProcedure::new(
-        cluster_id,
         vec![task, non_exist_task],
         physical_table_id,
         ddl_context,
@@ -229,7 +209,6 @@ async fn test_on_prepare_part_logical_tables_exist() {
 async fn test_on_create_metadata() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
     let ddl_context = new_ddl_context(node_manager);
-    let cluster_id = 1;
     // Prepares physical table metadata.
     let mut create_physical_table_task = test_create_physical_table_task("phy_table");
     let TableMetadata {
@@ -238,10 +217,7 @@ async fn test_on_create_metadata() {
         ..
     } = ddl_context
         .table_metadata_allocator
-        .create(
-            &TableMetadataAllocatorContext { cluster_id },
-            &create_physical_table_task,
-        )
+        .create(&create_physical_table_task)
         .await
         .unwrap();
     create_physical_table_task.set_table_id(table_id);
@@ -257,7 +233,6 @@ async fn test_on_create_metadata() {
     let task = test_create_logical_table_task("foo");
     let yet_another_task = test_create_logical_table_task("bar");
     let mut procedure = CreateLogicalTablesProcedure::new(
-        cluster_id,
         vec![task, yet_another_task],
         physical_table_id,
         ddl_context,
@@ -279,7 +254,6 @@ async fn test_on_create_metadata() {
 async fn test_on_create_metadata_part_logical_tables_exist() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
     let ddl_context = new_ddl_context(node_manager);
-    let cluster_id = 1;
     // Prepares physical table metadata.
     let mut create_physical_table_task = test_create_physical_table_task("phy_table");
     let TableMetadata {
@@ -288,10 +262,7 @@ async fn test_on_create_metadata_part_logical_tables_exist() {
         ..
     } = ddl_context
         .table_metadata_allocator
-        .create(
-            &TableMetadataAllocatorContext { cluster_id },
-            &create_physical_table_task,
-        )
+        .create(&create_physical_table_task)
         .await
         .unwrap();
     create_physical_table_task.set_table_id(table_id);
@@ -318,7 +289,6 @@ async fn test_on_create_metadata_part_logical_tables_exist() {
     task.create_table.create_if_not_exists = true;
     let non_exist_task = test_create_logical_table_task("non_exists");
     let mut procedure = CreateLogicalTablesProcedure::new(
-        cluster_id,
         vec![task, non_exist_task],
         physical_table_id,
         ddl_context,
@@ -340,7 +310,6 @@ async fn test_on_create_metadata_part_logical_tables_exist() {
 async fn test_on_create_metadata_err() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
     let ddl_context = new_ddl_context(node_manager);
-    let cluster_id = 1;
     // Prepares physical table metadata.
     let mut create_physical_table_task = test_create_physical_table_task("phy_table");
     let TableMetadata {
@@ -349,10 +318,7 @@ async fn test_on_create_metadata_err() {
         ..
     } = ddl_context
         .table_metadata_allocator
-        .create(
-            &TableMetadataAllocatorContext { cluster_id },
-            &create_physical_table_task,
-        )
+        .create(&create_physical_table_task)
         .await
         .unwrap();
     create_physical_table_task.set_table_id(table_id);
@@ -368,7 +334,6 @@ async fn test_on_create_metadata_err() {
     let task = test_create_logical_table_task("foo");
     let yet_another_task = test_create_logical_table_task("bar");
     let mut procedure = CreateLogicalTablesProcedure::new(
-        cluster_id,
         vec![task.clone(), yet_another_task],
         physical_table_id,
         ddl_context.clone(),

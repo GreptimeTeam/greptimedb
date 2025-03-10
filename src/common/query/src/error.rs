@@ -24,32 +24,15 @@ use datatypes::arrow::datatypes::DataType as ArrowDatatype;
 use datatypes::error::Error as DataTypeError;
 use datatypes::prelude::ConcreteDataType;
 use snafu::{Location, Snafu};
-use statrs::StatsError;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
-    #[snafu(display("Failed to execute function"))]
-    ExecuteFunction {
-        #[snafu(source)]
-        error: DataFusionError,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Unsupported input datatypes {:?} in function {}", datatypes, function))]
     UnsupportedInputDataType {
         function: String,
         datatypes: Vec<ConcreteDataType>,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Failed to generate function"))]
-    GenerateFunction {
-        #[snafu(source)]
-        error: StatsError,
         #[snafu(implicit)]
         location: Location,
     },
@@ -101,12 +84,6 @@ pub enum Error {
         "Illegal input_types status, check if DataFusion has changed its UDAF execution logic"
     ))]
     InvalidInputState {
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("unexpected: not constant column"))]
-    InvalidInputCol {
         #[snafu(implicit)]
         location: Location,
     },
@@ -256,17 +233,13 @@ impl ErrorExt for Error {
             Error::CreateAccumulator { .. }
             | Error::DowncastVector { .. }
             | Error::InvalidInputState { .. }
-            | Error::InvalidInputCol { .. }
-            | Error::GenerateFunction { .. }
             | Error::BadAccumulatorImpl { .. }
             | Error::ToScalarValue { .. }
             | Error::GetScalarVector { .. }
             | Error::ArrowCompute { .. }
             | Error::FlownodeNotFound { .. } => StatusCode::EngineExecuteQuery,
 
-            Error::ExecuteFunction { error, .. } | Error::GeneralDataFusion { error, .. } => {
-                datafusion_status_code::<Self>(error, None)
-            }
+            Error::GeneralDataFusion { error, .. } => datafusion_status_code::<Self>(error, None),
 
             Error::InvalidInputType { source, .. }
             | Error::IntoVector { source, .. }

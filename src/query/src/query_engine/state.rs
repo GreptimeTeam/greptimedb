@@ -25,7 +25,6 @@ use common_function::handlers::{
 };
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::state::FunctionState;
-use common_query::prelude::ScalarUdf;
 use common_telemetry::warn;
 use datafusion::dataframe::DataFrame;
 use datafusion::error::Result as DfResult;
@@ -91,7 +90,15 @@ impl QueryEngineState {
         plugins: Plugins,
     ) -> Self {
         let runtime_env = Arc::new(RuntimeEnv::default());
-        let session_config = SessionConfig::new().with_create_default_catalog_and_schema(false);
+        let mut session_config = SessionConfig::new().with_create_default_catalog_and_schema(false);
+
+        // todo(hl): This serves as a workaround for https://github.com/GreptimeTeam/greptimedb/issues/5659
+        // and we can add that check back once we upgrade datafusion.
+        session_config
+            .options_mut()
+            .execution
+            .skip_physical_aggregate_schema_check = true;
+
         // Apply extension rules
         let mut extension_rules = Vec::new();
 
@@ -240,11 +247,6 @@ impl QueryEngineState {
             .keys()
             .cloned()
             .collect()
-    }
-
-    /// Register a [`ScalarUdf`].
-    pub fn register_udf(&self, udf: ScalarUdf) {
-        self.df_context.register_udf(udf.into());
     }
 
     /// Register an aggregate function.

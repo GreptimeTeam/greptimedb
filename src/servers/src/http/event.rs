@@ -205,7 +205,7 @@ pub async fn delete_pipeline(
         reason: "version is required",
     })?;
 
-    let version = to_pipeline_version(Some(version_str.clone())).context(PipelineSnafu)?;
+    let version = to_pipeline_version(Some(&version_str)).context(PipelineSnafu)?;
 
     query_ctx.set_channel(Channel::Http);
     let query_ctx = Arc::new(query_ctx);
@@ -445,8 +445,8 @@ pub async fn pipeline_dryrun(
 
             match params.pipeline {
                 None => {
-                    let version =
-                        to_pipeline_version(params.pipeline_version).context(PipelineSnafu)?;
+                    let version = to_pipeline_version(params.pipeline_version.as_deref())
+                        .context(PipelineSnafu)?;
                     let pipeline_name = check_pipeline_name_exists(params.pipeline_name)?;
                     let pipeline = handler
                         .get_pipeline(&pipeline_name, version, query_ctx.clone())
@@ -486,7 +486,8 @@ pub async fn pipeline_dryrun(
             // is specified using query param.
             let pipeline_name = check_pipeline_name_exists(query_params.pipeline_name)?;
 
-            let version = to_pipeline_version(query_params.version).context(PipelineSnafu)?;
+            let version =
+                to_pipeline_version(query_params.version.as_deref()).context(PipelineSnafu)?;
 
             let ignore_errors = query_params.ignore_errors.unwrap_or(false);
 
@@ -532,7 +533,7 @@ pub async fn log_ingester(
         reason: "table is required",
     })?;
 
-    let version = to_pipeline_version(query_params.version).context(PipelineSnafu)?;
+    let version = to_pipeline_version(query_params.version.as_deref()).context(PipelineSnafu)?;
 
     let ignore_errors = query_params.ignore_errors.unwrap_or(false);
 

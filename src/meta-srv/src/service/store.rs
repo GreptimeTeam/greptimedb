@@ -28,10 +28,10 @@ use common_meta::rpc::store::{
     BatchDeleteRequest, BatchGetRequest, BatchPutRequest, CompareAndPutRequest, DeleteRangeRequest,
     PutRequest, RangeRequest,
 };
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 use tonic::{Request, Response};
 
-use crate::error::{self, MissingRequestHeaderSnafu};
+use crate::error::{self};
 use crate::metasrv::Metasrv;
 use crate::metrics::METRIC_META_KV_REQUEST_ELAPSED;
 use crate::service::GrpcResult;
@@ -41,15 +41,8 @@ impl store_server::Store for Metasrv {
     async fn range(&self, req: Request<PbRangeRequest>) -> GrpcResult<PbRangeResponse> {
         let req = req.into_inner();
 
-        let cluster_id = req
-            .header
-            .as_ref()
-            .context(MissingRequestHeaderSnafu)?
-            .cluster_id;
-        let cluster_id_str = cluster_id.to_string();
-
         let _timer = METRIC_META_KV_REQUEST_ELAPSED
-            .with_label_values(&[self.kv_backend().name(), "range", cluster_id_str.as_str()])
+            .with_label_values(&[self.kv_backend().name(), "range"])
             .start_timer();
 
         let req: RangeRequest = req.into();
@@ -60,22 +53,14 @@ impl store_server::Store for Metasrv {
             .await
             .context(error::KvBackendSnafu)?;
 
-        let res = res.to_proto_resp(ResponseHeader::success(cluster_id));
+        let res = res.to_proto_resp(ResponseHeader::success());
         Ok(Response::new(res))
     }
 
     async fn put(&self, req: Request<PbPutRequest>) -> GrpcResult<PbPutResponse> {
         let req = req.into_inner();
-
-        let cluster_id = req
-            .header
-            .as_ref()
-            .context(MissingRequestHeaderSnafu)?
-            .cluster_id;
-        let cluster_id_str = cluster_id.to_string();
-
         let _timer = METRIC_META_KV_REQUEST_ELAPSED
-            .with_label_values(&[self.kv_backend().name(), "put", cluster_id_str.as_str()])
+            .with_label_values(&[self.kv_backend().name(), "put"])
             .start_timer();
 
         let req: PutRequest = req.into();
@@ -86,26 +71,14 @@ impl store_server::Store for Metasrv {
             .await
             .context(error::KvBackendSnafu)?;
 
-        let res = res.to_proto_resp(ResponseHeader::success(cluster_id));
+        let res = res.to_proto_resp(ResponseHeader::success());
         Ok(Response::new(res))
     }
 
     async fn batch_get(&self, req: Request<PbBatchGetRequest>) -> GrpcResult<PbBatchGetResponse> {
         let req = req.into_inner();
-
-        let cluster_id = req
-            .header
-            .as_ref()
-            .context(MissingRequestHeaderSnafu)?
-            .cluster_id;
-        let cluster_id_str = cluster_id.to_string();
-
         let _timer = METRIC_META_KV_REQUEST_ELAPSED
-            .with_label_values(&[
-                self.kv_backend().name(),
-                "batch_get",
-                cluster_id_str.as_str(),
-            ])
+            .with_label_values(&[self.kv_backend().name(), "batch_get"])
             .start_timer();
 
         let req: BatchGetRequest = req.into();
@@ -116,26 +89,15 @@ impl store_server::Store for Metasrv {
             .await
             .context(error::KvBackendSnafu)?;
 
-        let res = res.to_proto_resp(ResponseHeader::success(cluster_id));
+        let res = res.to_proto_resp(ResponseHeader::success());
         Ok(Response::new(res))
     }
 
     async fn batch_put(&self, req: Request<PbBatchPutRequest>) -> GrpcResult<PbBatchPutResponse> {
         let req = req.into_inner();
 
-        let cluster_id = req
-            .header
-            .as_ref()
-            .context(MissingRequestHeaderSnafu)?
-            .cluster_id;
-        let cluster_id_str = cluster_id.to_string();
-
         let _timer = METRIC_META_KV_REQUEST_ELAPSED
-            .with_label_values(&[
-                self.kv_backend().name(),
-                "batch_pub",
-                cluster_id_str.as_str(),
-            ])
+            .with_label_values(&[self.kv_backend().name(), "batch_pub"])
             .start_timer();
 
         let req: BatchPutRequest = req.into();
@@ -146,7 +108,7 @@ impl store_server::Store for Metasrv {
             .await
             .context(error::KvBackendSnafu)?;
 
-        let res = res.to_proto_resp(ResponseHeader::success(cluster_id));
+        let res = res.to_proto_resp(ResponseHeader::success());
         Ok(Response::new(res))
     }
 
@@ -156,19 +118,8 @@ impl store_server::Store for Metasrv {
     ) -> GrpcResult<PbBatchDeleteResponse> {
         let req = req.into_inner();
 
-        let cluster_id = req
-            .header
-            .as_ref()
-            .context(MissingRequestHeaderSnafu)?
-            .cluster_id;
-        let cluster_id_str = cluster_id.to_string();
-
         let _timer = METRIC_META_KV_REQUEST_ELAPSED
-            .with_label_values(&[
-                self.kv_backend().name(),
-                "batch_delete",
-                cluster_id_str.as_str(),
-            ])
+            .with_label_values(&[self.kv_backend().name(), "batch_delete"])
             .start_timer();
 
         let req: BatchDeleteRequest = req.into();
@@ -179,7 +130,7 @@ impl store_server::Store for Metasrv {
             .await
             .context(error::KvBackendSnafu)?;
 
-        let res = res.to_proto_resp(ResponseHeader::success(cluster_id));
+        let res = res.to_proto_resp(ResponseHeader::success());
         Ok(Response::new(res))
     }
 
@@ -189,19 +140,8 @@ impl store_server::Store for Metasrv {
     ) -> GrpcResult<PbCompareAndPutResponse> {
         let req = req.into_inner();
 
-        let cluster_id = req
-            .header
-            .as_ref()
-            .context(MissingRequestHeaderSnafu)?
-            .cluster_id;
-        let cluster_id_str = cluster_id.to_string();
-
         let _timer = METRIC_META_KV_REQUEST_ELAPSED
-            .with_label_values(&[
-                self.kv_backend().name(),
-                "compare_and_put",
-                cluster_id_str.as_str(),
-            ])
+            .with_label_values(&[self.kv_backend().name(), "compare_and_put"])
             .start_timer();
 
         let req: CompareAndPutRequest = req.into();
@@ -212,7 +152,7 @@ impl store_server::Store for Metasrv {
             .await
             .context(error::KvBackendSnafu)?;
 
-        let res = res.to_proto_resp(ResponseHeader::success(cluster_id));
+        let res = res.to_proto_resp(ResponseHeader::success());
         Ok(Response::new(res))
     }
 
@@ -222,19 +162,8 @@ impl store_server::Store for Metasrv {
     ) -> GrpcResult<PbDeleteRangeResponse> {
         let req = req.into_inner();
 
-        let cluster_id = req
-            .header
-            .as_ref()
-            .context(MissingRequestHeaderSnafu)?
-            .cluster_id;
-        let cluster_id_str = cluster_id.to_string();
-
         let _timer = METRIC_META_KV_REQUEST_ELAPSED
-            .with_label_values(&[
-                self.kv_backend().name(),
-                "delete_range",
-                cluster_id_str.as_str(),
-            ])
+            .with_label_values(&[self.kv_backend().name(), "delete_range"])
             .start_timer();
 
         let req: DeleteRangeRequest = req.into();
@@ -245,7 +174,7 @@ impl store_server::Store for Metasrv {
             .await
             .context(error::KvBackendSnafu)?;
 
-        let res = res.to_proto_resp(ResponseHeader::success(cluster_id));
+        let res = res.to_proto_resp(ResponseHeader::success());
         Ok(Response::new(res))
     }
 }
@@ -276,7 +205,7 @@ mod tests {
         let metasrv = new_metasrv().await;
 
         let mut req = RangeRequest::default();
-        req.set_header((1, 1), Role::Datanode, W3cTrace::new());
+        req.set_header(1, Role::Datanode, W3cTrace::new());
         let res = metasrv.range(req.into_request()).await;
 
         let _ = res.unwrap();
@@ -287,7 +216,7 @@ mod tests {
         let metasrv = new_metasrv().await;
 
         let mut req = PutRequest::default();
-        req.set_header((1, 1), Role::Datanode, W3cTrace::new());
+        req.set_header(1, Role::Datanode, W3cTrace::new());
         let res = metasrv.put(req.into_request()).await;
 
         let _ = res.unwrap();
@@ -298,7 +227,7 @@ mod tests {
         let metasrv = new_metasrv().await;
 
         let mut req = BatchGetRequest::default();
-        req.set_header((1, 1), Role::Datanode, W3cTrace::new());
+        req.set_header(1, Role::Datanode, W3cTrace::new());
         let res = metasrv.batch_get(req.into_request()).await;
 
         let _ = res.unwrap();
@@ -310,7 +239,7 @@ mod tests {
         let metasrv = new_metasrv().await;
 
         let mut req = BatchPutRequest::default();
-        req.set_header((1, 1), Role::Datanode, W3cTrace::new());
+        req.set_header(1, Role::Datanode, W3cTrace::new());
         let res = metasrv.batch_put(req.into_request()).await;
 
         let _ = res.unwrap();
@@ -321,7 +250,7 @@ mod tests {
         let metasrv = new_metasrv().await;
 
         let mut req = BatchDeleteRequest::default();
-        req.set_header((1, 1), Role::Datanode, W3cTrace::new());
+        req.set_header(1, Role::Datanode, W3cTrace::new());
         let res = metasrv.batch_delete(req.into_request()).await;
 
         let _ = res.unwrap();
@@ -332,7 +261,7 @@ mod tests {
         let metasrv = new_metasrv().await;
 
         let mut req = CompareAndPutRequest::default();
-        req.set_header((1, 1), Role::Datanode, W3cTrace::new());
+        req.set_header(1, Role::Datanode, W3cTrace::new());
         let res = metasrv.compare_and_put(req.into_request()).await;
 
         let _ = res.unwrap();
@@ -343,7 +272,7 @@ mod tests {
         let metasrv = new_metasrv().await;
 
         let mut req = DeleteRangeRequest::default();
-        req.set_header((1, 1), Role::Datanode, W3cTrace::new());
+        req.set_header(1, Role::Datanode, W3cTrace::new());
         let res = metasrv.delete_range(req.into_request()).await;
 
         let _ = res.unwrap();
