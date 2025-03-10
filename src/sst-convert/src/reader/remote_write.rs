@@ -92,8 +92,7 @@ impl RemoteWriteReader {
         };
         let mut sorter = TimeSeriesSorter::new(encoder);
 
-        let reader = operator.reader(path).await.context(ObjectStoreSnafu)?;
-        let mut reader = TimeSeriesReader::new(reader).await?;
+        let mut reader = TimeSeriesParquetReader::new(operator, path).await?;
         while let Some(series) = reader.next_series().await? {
             sorter.push(series).await?;
         }
