@@ -61,13 +61,13 @@ impl Function for VectorSubvectorFunction {
             vec![
                 TypeSignature::Exact(vec![
                     ConcreteDataType::string_datatype(),
-                    ConcreteDataType::uint64_datatype(),
-                    ConcreteDataType::uint64_datatype(),
+                    ConcreteDataType::int64_datatype(),
+                    ConcreteDataType::int64_datatype(),
                 ]),
                 TypeSignature::Exact(vec![
                     ConcreteDataType::binary_datatype(),
-                    ConcreteDataType::uint64_datatype(),
-                    ConcreteDataType::uint64_datatype(),
+                    ConcreteDataType::int64_datatype(),
+                    ConcreteDataType::int64_datatype(),
                 ]),
             ],
             Volatility::Immutable,
@@ -114,15 +114,15 @@ impl Function for VectorSubvectorFunction {
                 Some(arg0) => Some(Cow::Borrowed(arg0.as_ref())),
                 None => as_veclit(arg0.get_ref(i))?,
             };
-            let arg1 = arg1.get(i).as_u64();
-            let arg2 = arg2.get(i).as_u64();
+            let arg1 = arg1.get(i).as_i64();
+            let arg2 = arg2.get(i).as_i64();
             let (Some(arg0), Some(arg1), Some(arg2)) = (arg0, arg1, arg2) else {
                 result.push_null();
                 continue;
             };
 
             ensure!(
-                arg1 <= arg2 && arg2 <= arg0.len() as u64,
+                0 <= arg1 && arg1 <= arg2 && arg2 as usize <= arg0.len(),
                 InvalidFuncArgsSnafu {
                     err_msg: format!(
                         "Invalid start and end indices: start={}, end={}, vec_len={}",
@@ -153,7 +153,7 @@ mod tests {
     use std::sync::Arc;
 
     use common_query::error::Error;
-    use datatypes::vectors::{StringVector, UInt64Vector};
+    use datatypes::vectors::{Int64Vector, StringVector};
 
     use super::*;
     use crate::function::FunctionContext;
@@ -167,8 +167,8 @@ mod tests {
             None,
             Some("[11.0, 12.0, 13.0]".to_string()),
         ]));
-        let input1 = Arc::new(UInt64Vector::from(vec![Some(1), Some(0), Some(0), Some(1)]));
-        let input2 = Arc::new(UInt64Vector::from(vec![Some(3), Some(5), Some(2), Some(3)]));
+        let input1 = Arc::new(Int64Vector::from(vec![Some(1), Some(0), Some(0), Some(1)]));
+        let input2 = Arc::new(Int64Vector::from(vec![Some(3), Some(5), Some(2), Some(3)]));
 
         let result = func
             .eval(&FunctionContext::default(), &[input0, input1, input2])
@@ -198,8 +198,8 @@ mod tests {
             Some("[1.0, 2.0, 3.0]".to_string()),
             Some("[4.0, 5.0, 6.0]".to_string()),
         ]));
-        let input1 = Arc::new(UInt64Vector::from(vec![Some(1), Some(2)]));
-        let input2 = Arc::new(UInt64Vector::from(vec![Some(3)]));
+        let input1 = Arc::new(Int64Vector::from(vec![Some(1), Some(2)]));
+        let input2 = Arc::new(Int64Vector::from(vec![Some(3)]));
 
         let result = func.eval(&FunctionContext::default(), &[input0, input1, input2]);
 
@@ -222,8 +222,8 @@ mod tests {
             Some("[1.0, 2.0, 3.0]".to_string()),
             Some("[4.0, 5.0, 6.0]".to_string()),
         ]));
-        let input1 = Arc::new(UInt64Vector::from(vec![Some(1), Some(3)]));
-        let input2 = Arc::new(UInt64Vector::from(vec![Some(3), Some(4)]));
+        let input1 = Arc::new(Int64Vector::from(vec![Some(1), Some(3)]));
+        let input2 = Arc::new(Int64Vector::from(vec![Some(3), Some(4)]));
 
         let result = func.eval(&FunctionContext::default(), &[input0, input1, input2]);
 
