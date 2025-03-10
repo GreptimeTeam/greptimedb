@@ -94,6 +94,14 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Decode error"))]
+    Decode {
+        #[snafu(source)]
+        error: prost::DecodeError,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -111,6 +119,7 @@ impl ErrorExt for Error {
             Error::Datanode { source, .. } => source.status_code(),
             Error::Meta { source, .. } => source.status_code(),
             Error::MetaClient { source, .. } => source.status_code(),
+            Error::Decode { .. } => StatusCode::InvalidArguments,
         }
     }
 
