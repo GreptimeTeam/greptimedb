@@ -150,7 +150,7 @@ impl DowngradeLeaderRegion {
         let leader = &ctx.persistent_ctx.from_peer;
         let msg = MailboxMessage::json_message(
             &format!("Downgrade leader region: {}", region_id),
-            &format!("Meta@{}", ctx.server_addr()),
+            &format!("Metasrv@{}", ctx.server_addr()),
             &format!("Datanode-{}@{}", leader.id, leader.addr),
             common_time::util::current_time_millis(),
             &downgrade_instruction,
@@ -282,10 +282,11 @@ mod tests {
 
     use super::*;
     use crate::error::Error;
-    use crate::procedure::region_migration::test_util::{
-        new_close_region_reply, new_downgrade_region_reply, send_mock_reply, TestingEnv,
-    };
+    use crate::procedure::region_migration::test_util::TestingEnv;
     use crate::procedure::region_migration::{ContextFactory, PersistentContext};
+    use crate::procedure::test_util::{
+        new_close_region_reply, new_downgrade_region_reply, send_mock_reply,
+    };
 
     fn new_persistent_context() -> PersistentContext {
         PersistentContext {

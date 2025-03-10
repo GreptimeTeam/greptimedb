@@ -6717,6 +6717,7 @@ dependencies = [
  "session",
  "snafu 0.8.5",
  "store-api",
+ "strum 0.25.0",
  "table",
  "tokio",
  "tokio-postgres",
