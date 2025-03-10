@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["to_df_return_type"],"type":["AccumulatorCreatorFunction","AccumulatorFunctionImpl","ReturnTypeFunction","StateTypeFunction"]};

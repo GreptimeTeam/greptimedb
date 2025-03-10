@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"macro":["for_all_primitive_types","with_match_primitive_type_id"],"mod":["arrow_array","compute","data_type","duration","error","interval","macros","prelude","scalars","schema","serialize","time","timestamp","type_id","types","value","vectors"]};

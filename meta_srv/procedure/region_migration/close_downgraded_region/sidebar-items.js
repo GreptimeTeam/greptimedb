@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CLOSE_DOWNGRADED_REGION_TIMEOUT"],"struct":["CloseDowngradedRegion"]};

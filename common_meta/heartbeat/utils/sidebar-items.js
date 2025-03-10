@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["mailbox_message_to_incoming_message","outgoing_message_to_mailbox_message"]};

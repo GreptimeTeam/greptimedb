@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["FS_SCHEMA","S3_SCHEMA"],"fn":["build_backend","handle_windows_path","parse_url"],"mod":["fs","s3"],"struct":["DISK_SYMBOL_PATTERN"]};
