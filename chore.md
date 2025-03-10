@@ -1,4 +1,5 @@
-# first create table
+# log
+## first create table
 ```bash
 mysql --host=127.0.0.1 --port=19195 --database=public;
 ```
@@ -32,7 +33,41 @@ select count(*) from app1;
 SELECT * FROM app1 ORDER BY greptime_timestamp DESC LIMIT 10\G
 ```
 
-# then ingest
+## then ingest
 ```bash
 RUST_LOG="debug" cargo run --bin=ingester -- --input-dir="/home/discord9/greptimedb/parquet_store_bk/" --parquet-dir="parquet_store/" --cfg="ingester.toml" --db-http-addr="http://127.0.0.1:4000/v1/sst/ingest_json"
 ```
+
+# metrics!!!!!!!
+```bash
+mysql --host=127.0.0.1 --port=19195 --database=public < output.sql
+```
+
+## then ingest
+```bash
+RUST_LOG="debug" 
+cargo run --bin=ingester -- --input-dir="/home/discord9/greptimedb/parquet_store_bk/" --remote-write-dir="metrics_parquet/" --cfg="ingester.toml" --db-http-addr="http://127.0.0.1:4000/v1/sst/ingest_json"
+```
+
+## check data
+```sql
+select count(*) from greptime_physical_table;
++----------+
+| count(*) |
++----------+
+|    36200 |
++----------+
+1 row in set (0.06 sec)
+
+select count(*) from storage_operation_errors_total;
++----------+
+| count(*) |
++----------+
+|       10 |
++----------+
+1 row in set (0.03 sec)
+```
+
+
+# with oss
+the same, only different is change storage config in `ingester.toml`
