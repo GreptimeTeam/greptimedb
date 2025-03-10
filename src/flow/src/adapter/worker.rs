@@ -98,6 +98,10 @@ impl<'subgraph> ActiveDataflowState<'subgraph> {
         self.state.set_current_ts(ts);
     }
 
+    pub fn set_last_exec_time(&mut self, ts: repr::Timestamp) {
+        self.state.set_last_exec_time(ts);
+    }
+
     /// Run all available subgraph
     ///
     /// return true if any subgraph actually executed
@@ -207,6 +211,21 @@ impl WorkerHandle {
             InternalSnafu {
                 reason: format!(
                     "Flow Node/Worker itc failed, expect Response::QueryStateSize, found {ret:?}"
+                ),
+            }
+            .build()
+        })
+    }
+
+    pub async fn get_last_exec_time_map(&self) -> Result<BTreeMap<FlowId, i64>, Error> {
+        let ret = self
+            .itc_client
+            .call_with_resp(Request::QueryLastExecTimeMap)
+            .await?;
+        ret.into_query_last_exec_time_map().map_err(|ret| {
+            InternalSnafu {
+                reason: format!(
+                    "Flow Node/Worker get_last_exec_time_map failed, expect Response::QueryLastExecTimeMap, found {ret:?}"
                 ),
             }
             .build()
@@ -335,6 +354,7 @@ impl<'s> Worker<'s> {
     pub fn run_tick(&mut self, now: repr::Timestamp) {
         for (_flow_id, task_state) in self.task_states.iter_mut() {
             task_state.set_current_ts(now);
+            task_state.set_last_exec_time(now);
             task_state.run_available();
         }
     }
@@ -395,6 +415,15 @@ impl<'s> Worker<'s> {
                 }
                 Some(Response::QueryStateSize { result: ret })
             }
+            Request::QueryLastExecTimeMap => {
+                let mut ret = BTreeMap::new();
+                for (flow_id, task_state) in self.task_states.iter() {
+                    if let Some(last_exec_time) = task_state.state.last_exec_time() {
+                        ret.insert(*flow_id, last_exec_time);
+                    }
+                }
+                Some(Response::QueryLastExecTimeMap { result: ret })
+            }
         };
         Ok(ret)
     }
@@ -427,6 +456,7 @@ pub enum Request {
     },
     Shutdown,
     QueryStateSize,
+    QueryLastExecTimeMap,
 }
 
 #[derive(Debug, EnumAsInner)]
@@ -445,6 +475,10 @@ enum Response {
     QueryStateSize {
         /// each flow tasks' state size
         result: BTreeMap<FlowId, usize>,
+    },
+    QueryLastExecTimeMap {
+        /// each flow tasks' last execution time
+        result: BTreeMap<FlowId, i64>,
     },
 }
 

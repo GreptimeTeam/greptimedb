@@ -22,6 +22,7 @@ use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::FlowId;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{DfSendableRecordBatchStream, RecordBatch, SendableRecordBatchStream};
+use common_time::DateTime;
 use datafusion::execution::TaskContext;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::PartitionStream as DfPartitionStream;
@@ -30,14 +31,16 @@ use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::value::Value;
 use datatypes::vectors::{
-    Int64VectorBuilder, StringVectorBuilder, UInt32VectorBuilder, UInt64VectorBuilder, VectorRef,
+    DateTimeVectorBuilder, Int64VectorBuilder, StringVectorBuilder, UInt32VectorBuilder,
+    UInt64VectorBuilder, VectorRef,
 };
 use futures::TryStreamExt;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{ScanRequest, TableId};
 
 use crate::error::{
-    CreateRecordBatchSnafu, FlowInfoNotFoundSnafu, InternalSnafu, JsonSnafu, ListFlowsSnafu, Result,
+    CreateRecordBatchSnafu, FlowInfoNotFoundSnafu, InternalSnafu, JsonSnafu, ListFlowsSnafu,
+    Result, UpgradeWeakCatalogManagerRefSnafu,
 };
 use crate::information_schema::{Predicates, FLOWS};
 use crate::system_schema::information_schema::InformationTable;
@@ -59,6 +62,10 @@ pub const SOURCE_TABLE_IDS: &str = "source_table_ids";
 pub const SINK_TABLE_NAME: &str = "sink_table_name";
 pub const FLOWNODE_IDS: &str = "flownode_ids";
 pub const OPTIONS: &str = "options";
+pub const CREATED_TIME: &str = "created_time";
+pub const UPDATED_TIME: &str = "updated_time";
+pub const LAST_EXECUTION_TIME: &str = "last_execution_time";
+pub const SOURCE_TABLE_NAMES: &str = "source_table_names";
 
 /// The `information_schema.flows` to provides information about flows in databases.
 #[derive(Debug)]
@@ -99,6 +106,10 @@ impl InformationSchemaFlows {
                 (SINK_TABLE_NAME, CDT::string_datatype(), false),
                 (FLOWNODE_IDS, CDT::string_datatype(), true),
                 (OPTIONS, CDT::string_datatype(), true),
+                (CREATED_TIME, CDT::datetime_datatype(), false),
+                (UPDATED_TIME, CDT::datetime_datatype(), false),
+                (LAST_EXECUTION_TIME, CDT::datetime_datatype(), true),
+                (SOURCE_TABLE_NAMES, CDT::string_datatype(), true),
             ]
             .into_iter()
             .map(|(name, ty, nullable)| ColumnSchema::new(name, ty, nullable))
@@ -170,6 +181,10 @@ struct InformationSchemaFlowsBuilder {
     sink_table_names: StringVectorBuilder,
     flownode_id_groups: StringVectorBuilder,
     option_groups: StringVectorBuilder,
+    created_time: DateTimeVectorBuilder,
+    updated_time: DateTimeVectorBuilder,
+    last_execution_time: DateTimeVectorBuilder,
+    source_table_names: StringVectorBuilder,
 }
 
 impl InformationSchemaFlowsBuilder {
@@ -196,6 +211,10 @@ impl InformationSchemaFlowsBuilder {
             sink_table_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             flownode_id_groups: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             option_groups: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            created_time: DateTimeVectorBuilder::with_capacity(INIT_CAPACITY),
+            updated_time: DateTimeVectorBuilder::with_capacity(INIT_CAPACITY),
+            last_execution_time: DateTimeVectorBuilder::with_capacity(INIT_CAPACITY),
+            source_table_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
         }
     }
 
@@ -235,13 +254,14 @@ impl InformationSchemaFlowsBuilder {
                     catalog_name: catalog_name.to_string(),
                     flow_name: flow_name.to_string(),
                 })?;
-            self.add_flow(&predicates, flow_id.flow_id(), flow_info, &flow_stat)?;
+            self.add_flow(&predicates, flow_id.flow_id(), flow_info, &flow_stat)
+                .await?;
         }
 
         self.finish()
     }
 
-    fn add_flow(
+    async fn add_flow(
         &mut self,
         predicates: &Predicates,
         flow_id: FlowId,
@@ -290,6 +310,36 @@ impl InformationSchemaFlowsBuilder {
                     input: format!("{:?}", flow_info.options()),
                 },
             )?));
+        self.created_time
+            .push(Some(flow_info.created_time().timestamp_millis().into()));
+        self.updated_time
+            .push(Some(flow_info.updated_time().timestamp_millis().into()));
+        self.last_execution_time
+            .push(flow_stat.as_ref().and_then(|state| {
+                state
+                    .last_exec_time_map
+                    .get(&flow_id)
+                    .map(|v| DateTime::from(*v))
+            }));
+
+        let mut source_table_names = vec![];
+        let catalog_name = self.catalog_name.clone();
+        let catalog_manager = self
+            .catalog_manager
+            .upgrade()
+            .context(UpgradeWeakCatalogManagerRefSnafu)?;
+        for schema_name in catalog_manager.schema_names(&catalog_name, None).await? {
+            source_table_names.extend(
+                catalog_manager
+                    .tables_by_ids(&catalog_name, &schema_name, flow_info.source_table_ids())
+                    .await?
+                    .into_iter()
+                    .map(|table| table.table_info().full_table_name()),
+            );
+        }
+
+        let source_table_names = source_table_names.join(",");
+        self.source_table_names.push(Some(&source_table_names));
 
         Ok(())
     }
@@ -307,6 +357,10 @@ impl InformationSchemaFlowsBuilder {
             Arc::new(self.sink_table_names.finish()),
             Arc::new(self.flownode_id_groups.finish()),
             Arc::new(self.option_groups.finish()),
+            Arc::new(self.created_time.finish()),
+            Arc::new(self.updated_time.finish()),
+            Arc::new(self.last_execution_time.finish()),
+            Arc::new(self.source_table_names.finish()),
         ];
         RecordBatch::new(self.schema.clone(), columns).context(CreateRecordBatchSnafu)
     }
