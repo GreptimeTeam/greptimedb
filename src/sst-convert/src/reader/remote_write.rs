@@ -320,10 +320,10 @@ impl PrimaryKeyEncoder {
             None => {
                 let table_info = self
                     .table_helper
-                    .get_table(&self.catalog, &self.schema, &name_label.name)
+                    .get_table(&self.catalog, &self.schema, &name_label.value)
                     .await?
                     .context(MissingTableSnafu {
-                        table_name: &name_label.name,
+                        table_name: &name_label.value,
                     })?;
                 let id = table_info.table_info.ident.table_id;
                 self.table_ids.insert(name_label.name.clone(), id);
