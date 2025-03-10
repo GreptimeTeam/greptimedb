@@ -31,7 +31,7 @@ use datafusion_expr::Expr;
 use smallvec::SmallVec;
 use store_api::metadata::RegionMetadata;
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
-use store_api::storage::{ScanRequest, TimeSeriesRowSelector};
+use store_api::storage::{ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector};
 use table::predicate::{build_time_range_predicate, Predicate};
 use tokio::sync::{mpsc, Semaphore};
 use tokio_stream::wrappers::ReceiverStream;
@@ -287,9 +287,16 @@ impl ScanRegion {
 
     /// Returns true if the region can use unordered scan for current request.
     fn use_unordered_scan(&self) -> bool {
-        // If table is append only and there is no series row selector, we use unordered scan in query.
+        // We use unordered scan when:
+        // 1. The region is in append mode.
+        // 2. There is no series row selector.
+        // 3. The required distribution is None or TimeSeriesDistribution::TimeWindowed.
+        //
         // We still use seq scan in compaction.
-        self.version.options.append_mode && self.request.series_row_selector.is_none()
+        self.version.options.append_mode
+            && self.request.series_row_selector.is_none()
+            && (self.request.distribution.is_none()
+                || self.request.distribution == Some(TimeSeriesDistribution::TimeWindowed))
     }
 
     /// Creates a scan input.
@@ -377,7 +384,8 @@ impl ScanRegion {
             .with_append_mode(self.version.options.append_mode)
             .with_filter_deleted(filter_deleted)
             .with_merge_mode(self.version.options.merge_mode())
-            .with_series_row_selector(self.request.series_row_selector);
+            .with_series_row_selector(self.request.series_row_selector)
+            .with_distribution(self.request.distribution);
         Ok(input)
     }
 
@@ -557,6 +565,8 @@ pub(crate) struct ScanInput {
     pub(crate) merge_mode: MergeMode,
     /// Hint to select rows from time series.
     pub(crate) series_row_selector: Option<TimeSeriesRowSelector>,
+    /// Hint for the required distribution of the scanner.
+    pub(crate) distribution: Option<TimeSeriesDistribution>,
 }
 
 impl ScanInput {
@@ -581,6 +591,7 @@ impl ScanInput {
             filter_deleted: true,
             merge_mode: MergeMode::default(),
             series_row_selector: None,
+            distribution: None,
         }
     }
 
@@ -690,6 +701,16 @@ impl ScanInput {
     #[must_use]
     pub(crate) fn with_merge_mode(mut self, merge_mode: MergeMode) -> Self {
         self.merge_mode = merge_mode;
+        self
+    }
+
+    /// Sets the distribution hint.
+    #[must_use]
+    pub(crate) fn with_distribution(
+        mut self,
+        distribution: Option<TimeSeriesDistribution>,
+    ) -> Self {
+        self.distribution = distribution;
         self
     }
 
