@@ -87,7 +87,7 @@ impl InputReaderBuilder {
             self.input_store.clone(),
             &input.path,
             region_info.metadata.clone(),
-            Some(region_info.flushed_sequence + 1),
+            Some(region_info.flushed_sequence),
         )
         .await?;
 
@@ -112,7 +112,7 @@ impl InputReaderBuilder {
             self.table_helper.clone(),
         )
         .await?
-        .with_sequence(region_info.flushed_sequence + 1);
+        .with_sequence(region_info.flushed_sequence);
 
         Ok(ReaderInfo {
             reader: Box::new(reader),
