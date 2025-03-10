@@ -5567,6 +5567,7 @@ dependencies = [
  "rand",
  "regex",
  "regex-automata 0.4.8",
+ "roaring",
  "serde",
  "serde_json",
  "snafu 0.8.5",
@@ -5898,15 +5899,15 @@ dependencies = [
 
 [[package]]
 name = "jsonpath-rust"
-version = "0.7.3"
+version = "0.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69a61b87f6a55cc6c28fed5739dd36b9642321ce63e4a5e4a4715d69106f4a10"
+checksum = "0c00ae348f9f8fd2d09f82a98ca381c60df9e0820d8d79fce43e649b4dc3128b"
 dependencies = [
  "pest",
  "pest_derive",
  "regex",
  "serde_json",
- "thiserror 1.0.64",
+ "thiserror 2.0.12",
 ]
 
 [[package]]
@@ -8271,7 +8272,7 @@ dependencies = [
  "rand",
  "ring",
  "rust_decimal",
- "thiserror 2.0.6",
+ "thiserror 2.0.12",
  "tokio",
  "tokio-rustls 0.26.0",
  "tokio-util",
@@ -8383,7 +8384,7 @@ dependencies = [
  "greptime-proto",
  "itertools 0.10.5",
  "jsonb",
- "jsonpath-rust 0.7.3",
+ "jsonpath-rust 0.7.5",
  "lazy_static",
  "moka",
  "once_cell",
@@ -8761,6 +8762,7 @@ dependencies = [
  "common-recordbatch",
  "common-telemetry",
  "datafusion",
+ "datafusion-common",
  "datafusion-expr",
  "datatypes",
  "futures",
@@ -9631,6 +9633,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 1.0.109",
+]
+
+[[package]]
+name = "roaring"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41589aba99537475bf697f2118357cad1c31590c5a1b9f6d9fc4ad6d07503661"
+dependencies = [
+ "bytemuck",
+ "byteorder",
 ]
 
 [[package]]
@@ -11052,7 +11064,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "smallvec",
- "thiserror 2.0.6",
+ "thiserror 2.0.12",
  "tokio",
  "tokio-stream",
  "tracing",
@@ -11137,7 +11149,7 @@ dependencies = [
  "smallvec",
  "sqlx-core",
  "stringprep",
- "thiserror 2.0.6",
+ "thiserror 2.0.12",
  "tracing",
  "whoami",
 ]
@@ -11175,7 +11187,7 @@ dependencies = [
  "smallvec",
  "sqlx-core",
  "stringprep",
- "thiserror 2.0.6",
+ "thiserror 2.0.12",
  "tracing",
  "whoami",
 ]
@@ -11956,11 +11968,11 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "2.0.6"
+version = "2.0.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fec2a1820ebd077e2b90c4df007bebf344cd394098a13c563957d0afc83ea47"
+checksum = "567b8a2dae586314f7be2a752ec7474332959c6460e02bde30d702a66d488708"
 dependencies = [
- "thiserror-impl 2.0.6",
+ "thiserror-impl 2.0.12",
 ]
 
 [[package]]
@@ -11976,9 +11988,9 @@ dependencies = [
 
 [[package]]
 name = "thiserror-impl"
-version = "2.0.6"
+version = "2.0.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d65750cab40f4ff1929fb1ba509e9914eb756131cef4210da8d5d700d26f6312"
+checksum = "7f7cf42b4507d8ea322120659672cf1b9dbb93f8f2d4ecfd6e51350ff5b17a1d"
 dependencies = [
  "proc-macro2",
  "quote",

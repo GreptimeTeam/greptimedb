@@ -40,15 +40,17 @@ pub enum Error {
         actual: String,
     },
 
-    #[snafu(display("Failed to start log store gc task"))]
-    StartGcTask {
+    #[snafu(display("Failed to start log store task: {}", name))]
+    StartWalTask {
+        name: String,
         #[snafu(implicit)]
         location: Location,
         source: RuntimeError,
     },
 
-    #[snafu(display("Failed to stop log store gc task"))]
-    StopGcTask {
+    #[snafu(display("Failed to stop log store task: {}", name))]
+    StopWalTask {
+        name: String,
         #[snafu(implicit)]
         location: Location,
         source: RuntimeError,
