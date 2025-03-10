@@ -723,7 +723,7 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
                     // for v0 data model, span_attributes are nested as a json
                     // data structure
                     if let JsonValue::Object(span_attrs) = cell {
-                        span.tags = object_to_tags(span_attrs);
+                        span.tags.extend(object_to_tags(span_attrs));
                     }
                 }
                 RESOURCE_ATTRIBUTES_COLUMN => {
