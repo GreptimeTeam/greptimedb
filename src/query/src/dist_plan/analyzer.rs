@@ -153,7 +153,7 @@ struct PlanRewriter {
     status: RewriterStatus,
     /// Partition columns of the table in current pass
     partition_cols: Option<Vec<String>>,
-    column_requirements: HashSet<String>,
+    column_requirements: HashSet<Column>,
 }
 
 impl PlanRewriter {
@@ -216,7 +216,7 @@ impl PlanRewriter {
         }
 
         for col in container {
-            self.column_requirements.insert(col.quoted_flat_name());
+            self.column_requirements.insert(col);
         }
     }
 
@@ -313,7 +313,7 @@ impl PlanRewriter {
 /// - Enforce column requirements for `LogicalPlan::Projection` nodes. Makes sure the
 ///   required columns are available in the sub plan.
 struct EnforceDistRequirementRewriter {
-    column_requirements: HashSet<String>,
+    column_requirements: HashSet<Column>,
 }
 
 impl TreeNodeRewriter for EnforceDistRequirementRewriter {
@@ -327,7 +327,9 @@ impl TreeNodeRewriter for EnforceDistRequirementRewriter {
             }
 
             for expr in &projection.expr {
-                column_requirements.remove(&expr.name_for_alias()?);
+                let (qualifier, name) = expr.qualified_name();
+                let column = Column::new(qualifier, name);
+                column_requirements.remove(&column);
             }
             if column_requirements.is_empty() {
                 return Ok(Transformed::no(node));
@@ -335,7 +337,7 @@ impl TreeNodeRewriter for EnforceDistRequirementRewriter {
 
             let mut new_exprs = projection.expr.clone();
             for col in &column_requirements {
-                new_exprs.push(col_fn(col));
+                new_exprs.push(Expr::Column(col.clone()));
             }
             let new_node =
                 node.with_new_exprs(new_exprs, node.inputs().into_iter().cloned().collect())?;

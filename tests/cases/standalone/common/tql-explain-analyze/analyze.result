@@ -26,11 +26,7 @@ TQL ANALYZE (0, 10, '5s') test;
 |_|_|_SortExec: expr=[k@2 DESC NULLS LAST], preserve_partitioning=[true] REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_SortPreservingMergeExec: [k@2 DESC NULLS LAST, j@1 DESC NULLS LAST] REDACTED
-|_|_|_SortExec: expr=[k@2 DESC NULLS LAST, j@1 DESC NULLS LAST], preserve_partitioning=[true] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_FilterExec: j@1 >= -300000 AND j@1 <= 310000 REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
+| 1_| 0_|_SortExec: expr=[k@2 DESC NULLS LAST, j@1 DESC NULLS LAST], preserve_partitioning=[false] REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges) REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
@@ -56,11 +52,7 @@ TQL ANALYZE (0, 10, '1s', '2s') test;
 |_|_|_SortExec: expr=[k@2 DESC NULLS LAST], preserve_partitioning=[true] REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_SortPreservingMergeExec: [k@2 DESC NULLS LAST, j@1 DESC NULLS LAST] REDACTED
-|_|_|_SortExec: expr=[k@2 DESC NULLS LAST, j@1 DESC NULLS LAST], preserve_partitioning=[true] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_FilterExec: j@1 >= -2000 AND j@1 <= 12000 REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
+| 1_| 0_|_SortExec: expr=[k@2 DESC NULLS LAST, j@1 DESC NULLS LAST], preserve_partitioning=[false] REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges) REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
@@ -85,11 +77,7 @@ TQL ANALYZE ('1970-01-01T00:00:00'::timestamp, '1970-01-01T00:00:00'::timestamp 
 |_|_|_SortExec: expr=[k@2 DESC NULLS LAST], preserve_partitioning=[true] REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_SortPreservingMergeExec: [k@2 DESC NULLS LAST, j@1 DESC NULLS LAST] REDACTED
-|_|_|_SortExec: expr=[k@2 DESC NULLS LAST, j@1 DESC NULLS LAST], preserve_partitioning=[true] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_FilterExec: j@1 >= -300000 AND j@1 <= 310000 REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
+| 1_| 0_|_SortExec: expr=[k@2 DESC NULLS LAST, j@1 DESC NULLS LAST], preserve_partitioning=[false] REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges) REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
@@ -116,17 +104,49 @@ TQL ANALYZE VERBOSE (0, 10, '5s') test;
 |_|_|_SortExec: expr=[k@2 DESC NULLS LAST], preserve_partitioning=[true] REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_SortPreservingMergeExec: [k@2 DESC NULLS LAST, j@1 DESC NULLS LAST] REDACTED
-|_|_|_SortExec: expr=[k@2 DESC NULLS LAST, j@1 DESC NULLS LAST], preserve_partitioning=[true] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_FilterExec: j@1 >= -300000 AND j@1 <= 310000 REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
+| 1_| 0_|_SortExec: expr=[k@2 DESC NULLS LAST, j@1 DESC NULLS LAST], preserve_partitioning=[false] REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges) REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
 +-+-+-+
 
 DROP TABLE test;
+
+Affected Rows: 0
+
+-- partition table
+CREATE TABLE test(i DOUBLE, j TIMESTAMP TIME INDEX, k STRING, l STRING, PRIMARY KEY(k, l)) PARTITION ON COLUMNS (k) (k < 'a', k >= 'a');
+
+Affected Rows: 0
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+TQL ANALYZE (0, 10, '5s') test;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j] REDACTED
+|_|_|_PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [false] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["k", "l"] REDACTED
+|_|_|_SortPreservingMergeExec: [k@2 ASC NULLS LAST, l@3 ASC NULLS LAST] REDACTED
+|_|_|_SortExec: expr=[k@2 ASC NULLS LAST, l@3 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_SortExec: expr=[k@2 DESC NULLS LAST, l@3 DESC NULLS LAST, j@1 DESC NULLS LAST], preserve_partitioning=[false] REDACTED
+|_|_|_SeqScan: region=REDACTED, partition_count=0 (0 memtable ranges, 0 file 0 ranges) REDACTED
+|_|_|_|
+| 1_| 1_|_SortExec: expr=[k@2 DESC NULLS LAST, l@3 DESC NULLS LAST, j@1 DESC NULLS LAST], preserve_partitioning=[false] REDACTED
+|_|_|_SeqScan: region=REDACTED, partition_count=0 (0 memtable ranges, 0 file 0 ranges) REDACTED
+|_|_|_|
+|_|_| Total rows: 0_|
++-+-+-+
+
+drop table test;
 
 Affected Rows: 0
 

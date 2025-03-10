@@ -338,6 +338,7 @@ impl MetadataRegion {
             limit: None,
             series_row_selector: None,
             sequence: None,
+            distribution: None,
         }
     }
 
@@ -527,6 +528,7 @@ impl MetadataRegion {
             limit: None,
             series_row_selector: None,
             sequence: None,
+            distribution: None,
         };
         let record_batch_stream = self
             .mito

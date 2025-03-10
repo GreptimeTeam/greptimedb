@@ -110,6 +110,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to decode bitmap"))]
+    DecodeBitmap {
+        #[snafu(source)]
+        error: IoError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to decode protobuf"))]
     DecodeProto {
         #[snafu(source)]
@@ -240,6 +248,7 @@ impl ErrorExt for Error {
             | CommonIo { .. }
             | UnknownIntermediateCodecMagic { .. }
             | FstCompile { .. }
+            | DecodeBitmap { .. }
             | InvalidFooterPayloadSize { .. }
             | BlobSizeTooSmall { .. } => StatusCode::Unexpected,
 

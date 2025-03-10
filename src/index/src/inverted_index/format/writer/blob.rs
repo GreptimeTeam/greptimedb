@@ -15,12 +15,12 @@
 use std::num::NonZeroUsize;
 
 use async_trait::async_trait;
-use common_base::BitVec;
 use futures::{AsyncWrite, AsyncWriteExt};
 use greptime_proto::v1::index::InvertedIndexMetas;
 use prost::Message;
 use snafu::ResultExt;
 
+use crate::bitmap::{Bitmap, BitmapType};
 use crate::inverted_index::error::{CloseSnafu, FlushSnafu, Result, WriteSnafu};
 use crate::inverted_index::format::writer::single::SingleIndexWriter;
 use crate::inverted_index::format::writer::{InvertedIndexWriter, ValueStream};
@@ -43,8 +43,9 @@ impl<W: AsyncWrite + Send + Unpin> InvertedIndexWriter for InvertedIndexBlobWrit
     async fn add_index(
         &mut self,
         name: String,
-        null_bitmap: BitVec,
+        null_bitmap: Bitmap,
         values: ValueStream,
+        bitmap_type: BitmapType,
     ) -> Result<()> {
         let single_writer = SingleIndexWriter::new(
             name.clone(),
@@ -52,6 +53,7 @@ impl<W: AsyncWrite + Send + Unpin> InvertedIndexWriter for InvertedIndexBlobWrit
             null_bitmap,
             values,
             &mut self.blob_writer,
+            bitmap_type,
         );
         let metadata = single_writer.write().await?;
 
@@ -100,6 +102,7 @@ impl<W: AsyncWrite + Send + Unpin> InvertedIndexBlobWriter<W> {
 #[cfg(test)]
 mod tests {
     use futures::stream;
+    use greptime_proto::v1::index::BitmapType;
 
     use super::*;
     use crate::inverted_index::format::reader::{InvertedIndexBlobReader, InvertedIndexReader};
@@ -132,24 +135,44 @@ mod tests {
         writer
             .add_index(
                 "tag0".to_string(),
-                BitVec::from_slice(&[0b0000_0001, 0b0000_0000]),
+                Bitmap::from_lsb0_bytes(&[0b0000_0001, 0b0000_0000], BitmapType::Roaring),
                 Box::new(stream::iter(vec![
-                    Ok((Bytes::from("a"), BitVec::from_slice(&[0b0000_0001]))),
-                    Ok((Bytes::from("b"), BitVec::from_slice(&[0b0010_0000]))),
-                    Ok((Bytes::from("c"), BitVec::from_slice(&[0b0000_0001]))),
+                    Ok((
+                        Bytes::from("a"),
+                        Bitmap::from_lsb0_bytes(&[0b0000_0001], BitmapType::Roaring),
+                    )),
+                    Ok((
+                        Bytes::from("b"),
+                        Bitmap::from_lsb0_bytes(&[0b0010_0000], BitmapType::Roaring),
+                    )),
+                    Ok((
+                        Bytes::from("c"),
+                        Bitmap::from_lsb0_bytes(&[0b0000_0001], BitmapType::Roaring),
+                    )),
                 ])),
+                BitmapType::Roaring,
             )
             .await
             .unwrap();
         writer
             .add_index(
                 "tag1".to_string(),
-                BitVec::from_slice(&[0b0000_0001, 0b0000_0000]),
+                Bitmap::from_lsb0_bytes(&[0b0000_0001, 0b0000_0000], BitmapType::Roaring),
                 Box::new(stream::iter(vec![
-                    Ok((Bytes::from("x"), BitVec::from_slice(&[0b0000_0001]))),
-                    Ok((Bytes::from("y"), BitVec::from_slice(&[0b0010_0000]))),
-                    Ok((Bytes::from("z"), BitVec::from_slice(&[0b0000_0001]))),
+                    Ok((
+                        Bytes::from("x"),
+                        Bitmap::from_lsb0_bytes(&[0b0000_0001], BitmapType::Roaring),
+                    )),
+                    Ok((
+                        Bytes::from("y"),
+                        Bitmap::from_lsb0_bytes(&[0b0010_0000], BitmapType::Roaring),
+                    )),
+                    Ok((
+                        Bytes::from("z"),
+                        Bitmap::from_lsb0_bytes(&[0b0000_0001], BitmapType::Roaring),
+                    )),
                 ])),
+                BitmapType::Roaring,
             )
             .await
             .unwrap();
@@ -181,22 +204,31 @@ mod tests {
         assert_eq!(fst0.len(), 3);
         let [offset, size] = unpack(fst0.get(b"a").unwrap());
         let bitmap = reader
-            .bitmap(tag0.base_offset + offset as u64, size)
+            .bitmap(tag0.base_offset + offset as u64, size, BitmapType::Roaring)
             .await
             .unwrap();
-        assert_eq!(bitmap, BitVec::from_slice(&[0b0000_0001]));
+        assert_eq!(
+            bitmap,
+            Bitmap::from_lsb0_bytes(&[0b0000_0001], BitmapType::Roaring)
+        );
         let [offset, size] = unpack(fst0.get(b"b").unwrap());
         let bitmap = reader
-            .bitmap(tag0.base_offset + offset as u64, size)
+            .bitmap(tag0.base_offset + offset as u64, size, BitmapType::Roaring)
             .await
             .unwrap();
-        assert_eq!(bitmap, BitVec::from_slice(&[0b0010_0000]));
+        assert_eq!(
+            bitmap,
+            Bitmap::from_lsb0_bytes(&[0b0010_0000], BitmapType::Roaring)
+        );
         let [offset, size] = unpack(fst0.get(b"c").unwrap());
         let bitmap = reader
-            .bitmap(tag0.base_offset + offset as u64, size)
+            .bitmap(tag0.base_offset + offset as u64, size, BitmapType::Roaring)
             .await
             .unwrap();
-        assert_eq!(bitmap, BitVec::from_slice(&[0b0000_0001]));
+        assert_eq!(
+            bitmap,
+            Bitmap::from_lsb0_bytes(&[0b0000_0001], BitmapType::Roaring)
+        );
 
         // tag1
         let tag1 = metadata.metas.get("tag1").unwrap();
@@ -215,21 +247,30 @@ mod tests {
         assert_eq!(fst1.len(), 3);
         let [offset, size] = unpack(fst1.get(b"x").unwrap());
         let bitmap = reader
-            .bitmap(tag1.base_offset + offset as u64, size)
+            .bitmap(tag1.base_offset + offset as u64, size, BitmapType::Roaring)
             .await
             .unwrap();
-        assert_eq!(bitmap, BitVec::from_slice(&[0b0000_0001]));
+        assert_eq!(
+            bitmap,
+            Bitmap::from_lsb0_bytes(&[0b0000_0001], BitmapType::Roaring)
+        );
         let [offset, size] = unpack(fst1.get(b"y").unwrap());
         let bitmap = reader
-            .bitmap(tag1.base_offset + offset as u64, size)
+            .bitmap(tag1.base_offset + offset as u64, size, BitmapType::Roaring)
             .await
             .unwrap();
-        assert_eq!(bitmap, BitVec::from_slice(&[0b0010_0000]));
+        assert_eq!(
+            bitmap,
+            Bitmap::from_lsb0_bytes(&[0b0010_0000], BitmapType::Roaring)
+        );
         let [offset, size] = unpack(fst1.get(b"z").unwrap());
         let bitmap = reader
-            .bitmap(tag1.base_offset + offset as u64, size)
+            .bitmap(tag1.base_offset + offset as u64, size, BitmapType::Roaring)
             .await
             .unwrap();
-        assert_eq!(bitmap, BitVec::from_slice(&[0b0000_0001]));
+        assert_eq!(
+            bitmap,
+            Bitmap::from_lsb0_bytes(&[0b0000_0001], BitmapType::Roaring)
+        );
     }
 }
