@@ -335,7 +335,7 @@ impl MetricEngine {
         }
     }
 
-    pub fn mito(&self) -> MitoEngine{
+    pub fn mito(&self) -> MitoEngine {
         self.inner.mito.clone()
     }
 
