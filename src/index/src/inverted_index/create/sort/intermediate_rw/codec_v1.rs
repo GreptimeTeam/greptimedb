@@ -16,9 +16,10 @@ use std::io;
 
 use asynchronous_codec::{BytesMut, Decoder, Encoder};
 use bytes::{Buf, BufMut};
-use common_base::BitVec;
+use greptime_proto::v1::index::BitmapType;
 use snafu::ResultExt;
 
+use crate::bitmap::Bitmap;
 use crate::inverted_index::error::{CommonIoSnafu, Error, Result};
 use crate::Bytes;
 
@@ -28,37 +29,42 @@ const U64_LENGTH: usize = std::mem::size_of::<u64>();
 pub const CODEC_V1_MAGIC: &[u8; 4] = b"im01";
 
 /// Serializes items of external sorting intermediate files.
-pub struct IntermediateItemEncoderV1;
+pub struct IntermediateItemEncoderV1 {
+    pub bitmap_type: BitmapType,
+}
 
 /// [`FramedWrite`] requires the [`Encoder`] trait to be implemented.
 impl Encoder for IntermediateItemEncoderV1 {
-    type Item<'a> = (Bytes, BitVec);
+    type Item<'a> = (Bytes, Bitmap);
     type Error = Error;
 
-    fn encode(&mut self, item: (Bytes, BitVec), dst: &mut BytesMut) -> Result<()> {
+    fn encode(&mut self, item: (Bytes, Bitmap), dst: &mut BytesMut) -> Result<()> {
         let value_bytes = item.0;
-        let bitmap_bytes = item.1.into_vec();
+        let bitmap_size = item.1.serialized_size(self.bitmap_type);
 
-        dst.reserve(U64_LENGTH * 2 + value_bytes.len() + bitmap_bytes.len());
+        dst.reserve(U64_LENGTH * 2 + value_bytes.len() + bitmap_size);
         dst.put_u64_le(value_bytes.len() as u64);
         dst.extend_from_slice(&value_bytes);
-        dst.put_u64_le(bitmap_bytes.len() as u64);
-        dst.extend_from_slice(&bitmap_bytes);
+        dst.put_u64_le(bitmap_size as u64);
+        item.1
+            .serialize_into(self.bitmap_type, &mut dst.writer())
+            .context(CommonIoSnafu)?;
+
         Ok(())
     }
 }
 
 /// Deserializes items of external sorting intermediate files.
 pub struct IntermediateItemDecoderV1 {
-    pub(crate) bitmap_leading_zeros: u32,
+    pub bitmap_type: BitmapType,
 }
 
 /// [`FramedRead`] requires the [`Decoder`] trait to be implemented.
 impl Decoder for IntermediateItemDecoderV1 {
-    type Item = (Bytes, BitVec);
+    type Item = (Bytes, Bitmap);
     type Error = Error;
 
-    /// Decodes the `src` into `(Bytes, BitVec)`. Returns `None` if
+    /// Decodes the `src` into `(Bytes, RoaringBitmap)`. Returns `None` if
     /// the `src` does not contain enough data for a complete item.
     ///
     /// Only after successful decoding, the `src` is advanced. Otherwise,
@@ -92,8 +98,8 @@ impl Decoder for IntermediateItemDecoderV1 {
             return Ok(None);
         }
 
-        let mut bitmap = BitVec::repeat(false, self.bitmap_leading_zeros as _);
-        bitmap.extend_from_raw_slice(&buf[..bitmap_len]);
+        let bitmap = Bitmap::deserialize_from(&buf[..bitmap_len], self.bitmap_type)
+            .context(CommonIoSnafu)?;
 
         let item = (value_bytes.to_vec(), bitmap);
 
@@ -113,25 +119,29 @@ impl From<io::Error> for Error {
 
 #[cfg(test)]
 mod tests {
-    use common_base::bit_vec::prelude::{bitvec, Lsb0};
-
     use super::*;
+
+    fn bitmap(bytes: &[u8]) -> Bitmap {
+        Bitmap::from_lsb0_bytes(bytes, BitmapType::Roaring)
+    }
 
     #[test]
     fn test_intermediate_codec_basic() {
-        let mut encoder = IntermediateItemEncoderV1;
+        let mut encoder = IntermediateItemEncoderV1 {
+            bitmap_type: BitmapType::Roaring,
+        };
         let mut buf = BytesMut::new();
 
-        let item = (b"hello".to_vec(), BitVec::from_slice(&[0b10101010]));
+        let item = (b"hello".to_vec(), bitmap(&[0b10101010]));
         encoder.encode(item.clone(), &mut buf).unwrap();
 
         let mut decoder = IntermediateItemDecoderV1 {
-            bitmap_leading_zeros: 0,
+            bitmap_type: BitmapType::Roaring,
         };
         assert_eq!(decoder.decode(&mut buf).unwrap().unwrap(), item);
         assert_eq!(decoder.decode(&mut buf).unwrap(), None);
 
-        let item1 = (b"world".to_vec(), BitVec::from_slice(&[0b01010101]));
+        let item1 = (b"world".to_vec(), bitmap(&[0b01010101]));
         encoder.encode(item.clone(), &mut buf).unwrap();
         encoder.encode(item1.clone(), &mut buf).unwrap();
         assert_eq!(decoder.decode(&mut buf).unwrap().unwrap(), item);
@@ -142,14 +152,16 @@ mod tests {
 
     #[test]
     fn test_intermediate_codec_empty_item() {
-        let mut encoder = IntermediateItemEncoderV1;
+        let mut encoder = IntermediateItemEncoderV1 {
+            bitmap_type: BitmapType::Roaring,
+        };
         let mut buf = BytesMut::new();
 
-        let item = (b"".to_vec(), BitVec::from_slice(&[]));
+        let item = (b"".to_vec(), bitmap(&[]));
         encoder.encode(item.clone(), &mut buf).unwrap();
 
         let mut decoder = IntermediateItemDecoderV1 {
-            bitmap_leading_zeros: 0,
+            bitmap_type: BitmapType::Roaring,
         };
         assert_eq!(decoder.decode(&mut buf).unwrap().unwrap(), item);
         assert_eq!(decoder.decode(&mut buf).unwrap(), None);
@@ -158,43 +170,24 @@ mod tests {
 
     #[test]
     fn test_intermediate_codec_partial() {
-        let mut encoder = IntermediateItemEncoderV1;
+        let mut encoder = IntermediateItemEncoderV1 {
+            bitmap_type: BitmapType::Roaring,
+        };
         let mut buf = BytesMut::new();
 
-        let item = (b"hello".to_vec(), BitVec::from_slice(&[0b10101010]));
+        let item = (b"hello".to_vec(), bitmap(&[0b10101010]));
         encoder.encode(item.clone(), &mut buf).unwrap();
 
         let partial_length = U64_LENGTH + 3;
         let mut partial_bytes = buf.split_to(partial_length);
 
         let mut decoder = IntermediateItemDecoderV1 {
-            bitmap_leading_zeros: 0,
+            bitmap_type: BitmapType::Roaring,
         };
         assert_eq!(decoder.decode(&mut partial_bytes).unwrap(), None); // not enough data
         partial_bytes.extend_from_slice(&buf[..]);
         assert_eq!(decoder.decode(&mut partial_bytes).unwrap().unwrap(), item);
         assert_eq!(decoder.decode(&mut partial_bytes).unwrap(), None);
         assert!(partial_bytes.is_empty());
-    }
-
-    #[test]
-    fn test_intermediate_codec_prefix_zeros() {
-        let mut encoder = IntermediateItemEncoderV1;
-        let mut buf = BytesMut::new();
-
-        let item = (b"hello".to_vec(), bitvec![u8, Lsb0; 1, 0, 1, 0, 1, 0, 1, 0]);
-        encoder.encode(item.clone(), &mut buf).unwrap();
-
-        let mut decoder = IntermediateItemDecoderV1 {
-            bitmap_leading_zeros: 3,
-        };
-        let decoded_item = decoder.decode(&mut buf).unwrap().unwrap();
-        assert_eq!(decoded_item.0, b"hello");
-        assert_eq!(
-            decoded_item.1,
-            bitvec![u8, Lsb0; 0, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0]
-        );
-        assert_eq!(decoder.decode(&mut buf).unwrap(), None);
-        assert!(buf.is_empty());
     }
 }

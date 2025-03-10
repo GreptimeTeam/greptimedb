@@ -5566,6 +5566,7 @@ dependencies = [
  "rand",
  "regex",
  "regex-automata 0.4.8",
+ "roaring",
  "serde",
  "serde_json",
  "snafu 0.8.5",
@@ -9630,6 +9631,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 1.0.109",
+]
+
+[[package]]
+name = "roaring"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41589aba99537475bf697f2118357cad1c31590c5a1b9f6d9fc4ad6d07503661"
+dependencies = [
+ "bytemuck",
+ "byteorder",
 ]
 
 [[package]]
