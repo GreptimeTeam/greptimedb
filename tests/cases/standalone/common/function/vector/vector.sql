@@ -103,7 +103,7 @@ FROM (
 
 SELECT vec_kth_elem('[1.0, 2.0, 3.0]', 2);
 
-SELECT v, vec_kth_elem(v, 1) AS first_elem
+SELECT v, vec_kth_elem(v, 0) AS first_elem
 FROM (
          SELECT '[1.0, 2.0, 3.0]' AS v
          UNION ALL
@@ -111,4 +111,4 @@ FROM (
          UNION ALL
          SELECT '[8.0]' AS v
      )
-WHERE vec_kth_elem(v, 1) > 2.0;
+WHERE vec_kth_elem(v, 0) > 2.0;

@@ -28,12 +28,12 @@ use crate::scalars::vector::impl_conv::{as_veclit, as_veclit_if_const};
 
 const NAME: &str = "vec_kth_elem";
 
-/// Returns the k-th element of the vector.
+/// Returns the k-th(0-based index) element of the vector.
 ///
 /// # Example
 ///
 /// ```sql
-/// SELECT vec_kth_elem("[2, 4, 6]",2) as result;
+/// SELECT vec_kth_elem("[2, 4, 6]",1) as result;
 ///
 /// +---------+
 /// | result  |
@@ -110,10 +110,10 @@ impl Function for VectorKthElemFunction {
             };
 
             ensure!(
-                arg1 >= 1.0 && arg1.fract() == 0.0,
+                arg1 >= 0.0 && arg1.fract() == 0.0,
                 InvalidFuncArgsSnafu {
                     err_msg: format!(
-                        "Invalid argument: k must be a positive integer, but got k = {}.",
+                        "Invalid argument: k must be a non-negative integer, but got k = {}.",
                         arg1
                     ),
                 }
@@ -122,17 +122,17 @@ impl Function for VectorKthElemFunction {
             let k = arg1 as usize;
 
             ensure!(
-                k <= arg0.len(),
+                k < arg0.len(),
                 InvalidFuncArgsSnafu {
                     err_msg: format!(
-                        "Out of range: k must be in the range [1, {}], but got k = {}.",
-                        arg0.len(),
+                        "Out of range: k must be in the range [0, {}], but got k = {}.",
+                        arg0.len() - 1 ,
                         k
                     ),
                 }
             );
 
-            let value = arg0[k - 1];
+            let value = arg0[k];
 
             result.push(Some(value));
         }
@@ -161,23 +161,25 @@ mod tests {
 
         let input0 = Arc::new(StringVector::from(vec![
             Some("[1.0,2.0,3.0]".to_string()),
+            Some("[4.0,5.0,6.0]".to_string()),
             Some("[7.0,8.0,9.0]".to_string()),
             None,
         ]));
-        let input1 = Arc::new(Int64Vector::from(vec![Some(2), None, Some(2)]));
+        let input1 = Arc::new(Int64Vector::from(vec![Some(0), Some(2), None, Some(1)]));
 
         let result = func
             .eval(&FunctionContext::default(), &[input0, input1])
             .unwrap();
 
         let result = result.as_ref();
-        assert_eq!(result.len(), 3);
-        assert_eq!(result.get_ref(0).as_f32().unwrap(), Some(2.0));
-        assert!(result.get_ref(1).is_null());
+        assert_eq!(result.len(), 4);
+        assert_eq!(result.get_ref(0).as_f32().unwrap(), Some(1.0));
+        assert_eq!(result.get_ref(1).as_f32().unwrap(), Some(6.0));
         assert!(result.get_ref(2).is_null());
+        assert!(result.get_ref(3).is_null());
 
         let input0 = Arc::new(StringVector::from(vec![Some("[1.0,2.0,3.0]".to_string())]));
-        let input1 = Arc::new(Int64Vector::from(vec![Some(4)]));
+        let input1 = Arc::new(Int64Vector::from(vec![Some(3)]));
 
         let err = func
             .eval(&FunctionContext::default(), &[input0, input1])
@@ -186,7 +188,7 @@ mod tests {
             error::Error::InvalidFuncArgs { err_msg, .. } => {
                 assert_eq!(
                     err_msg,
-                    format!("Out of range: k must be in the range [1, 3], but got k = 4.")
+                    format!("Out of range: k must be in the range [0, 2], but got k = 3.")
                 )
             }
             _ => unreachable!(),
@@ -202,7 +204,7 @@ mod tests {
             error::Error::InvalidFuncArgs { err_msg, .. } => {
                 assert_eq!(
                     err_msg,
-                    format!("Invalid argument: k must be a positive integer, but got k = -1.")
+                    format!("Invalid argument: k must be a non-negative integer, but got k = -1.")
                 )
             }
             _ => unreachable!(),
