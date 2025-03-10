@@ -18,6 +18,7 @@ datanode.workspace = true
 datatypes.workspace = true
 futures.workspace = true
 futures-util.workspace = true
+indicatif = "0.17.0"
 meta-client.workspace = true
 metric-engine.workspace = true
 mito2.workspace = true

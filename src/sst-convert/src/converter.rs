@@ -84,10 +84,13 @@ impl SstConverter {
         common_telemetry::info!("Converting input {} files", input.len());
 
         let mut outputs = Vec::with_capacity(input.len());
+        let bar = indicatif::ProgressBar::new(input.len() as u64);
         for file in input {
             let output = self.convert_one(file).await?;
             outputs.push(output);
+            bar.inc(1);
         }
+        bar.finish();
 
         common_telemetry::info!("Converted {} files", outputs.len());
 
