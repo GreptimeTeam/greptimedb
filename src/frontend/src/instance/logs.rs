@@ -75,7 +75,7 @@ impl LogQueryHandler for Instance {
         table: &str,
     ) -> std::result::Result<Option<Arc<Table>>, catalog::error::Error> {
         self.catalog_manager
-            .table(catalog, &schema, table, None)
+            .table(catalog, schema, table, None)
             .await
     }
 
