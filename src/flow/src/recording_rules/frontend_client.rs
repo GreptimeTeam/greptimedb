@@ -92,8 +92,8 @@ impl FrontendClient {
             .cluster_client()
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;
-        let cluster_id = meta_client.id().0;
-        let prefix = NodeInfoKey::key_prefix_with_role(cluster_id, Role::Frontend);
+
+        let prefix = NodeInfoKey::key_prefix_with_role(Role::Frontend);
         let req = RangeRequest::new().with_prefix(prefix);
         let resp = cluster_client
             .range(req)
