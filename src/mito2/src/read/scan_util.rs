@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use async_stream::try_stream;
 use common_telemetry::debug;
+use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder};
 use futures::Stream;
 use prometheus::IntGauge;
 use store_api::storage::RegionId;
@@ -150,6 +151,13 @@ impl PartitionMetrics {
     pub(crate) fn on_finish(&self) {
         let mut inner = self.0.lock().unwrap();
         inner.on_finish();
+    }
+
+    pub(crate) fn report_metrics_to(&self, metrics_set: &ExecutionPlanMetricsSet) {
+        let inner = self.0.lock().unwrap();
+        inner
+            .metrics
+            .report_metrics_to(metrics_set, inner.partition);
     }
 }
 

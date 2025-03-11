@@ -33,6 +33,7 @@ use std::time::Duration;
 use api::v1::OpType;
 use async_trait::async_trait;
 use common_time::Timestamp;
+use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder};
 use datafusion_common::arrow::array::UInt8Array;
 use datatypes::arrow;
 use datatypes::arrow::array::{Array, ArrayRef, UInt64Array};
@@ -48,6 +49,7 @@ use datatypes::vectors::{
 };
 use futures::stream::BoxStream;
 use futures::TryStreamExt;
+use rskafka::build_info;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::RegionMetadata;
 use store_api::storage::{ColumnId, SequenceNumber};
@@ -1059,6 +1061,39 @@ impl ScannerMetrics {
         self.num_rows += other.num_rows;
         self.num_mem_ranges += other.num_mem_ranges;
         self.num_file_ranges += other.num_file_ranges;
+    }
+
+    fn report_metrics_to(&self, metrics_set: &ExecutionPlanMetricsSet, partition: usize) {
+        MetricBuilder::new(metrics_set)
+            .subset_time("prepare_scan_cost", partition)
+            .add_duration(self.build_parts_cost);
+        MetricBuilder::new(metrics_set)
+            .subset_time("build_parts_cost", partition)
+            .add_duration(self.build_parts_cost);
+        MetricBuilder::new(metrics_set)
+            .subset_time("build_reader_cost", partition)
+            .add_duration(self.build_reader_cost);
+        MetricBuilder::new(metrics_set)
+            .subset_time("scan_cost", partition)
+            .add_duration(self.scan_cost);
+        MetricBuilder::new(metrics_set)
+            .subset_time("convert_cost", partition)
+            .add_duration(self.convert_cost);
+        MetricBuilder::new(metrics_set)
+            .subset_time("yield_cost", partition)
+            .add_duration(self.yield_cost);
+        MetricBuilder::new(metrics_set)
+            .subset_time("total_cost", partition)
+            .add_duration(self.total_cost);
+        MetricBuilder::new(metrics_set)
+            .counter("num_batches", partition)
+            .add(self.num_batches);
+        MetricBuilder::new(metrics_set)
+            .counter("num_mem_ranges", partition)
+            .add(self.num_mem_ranges);
+        MetricBuilder::new(metrics_set)
+            .counter("num_file_ranges", partition)
+            .add(self.num_file_ranges);
     }
 }
 
