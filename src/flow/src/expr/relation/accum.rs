@@ -759,7 +759,7 @@ fn ty_eq_without_precision(left: ConcreteDataType, right: ConcreteDataType) -> b
 #[allow(clippy::too_many_lines)]
 #[cfg(test)]
 mod test {
-    use common_time::DateTime;
+    use common_time::Timestamp;
 
     use super::*;
 
@@ -813,13 +813,13 @@ mod test {
             (
                 AggregateFunc::MaxDateTime,
                 vec![
-                    (Value::DateTime(DateTime::from(0)), 1),
-                    (Value::DateTime(DateTime::from(1)), 1),
+                    (Value::Timestamp(Timestamp::from(0)), 1),
+                    (Value::Timestamp(Timestamp::from(1)), 1),
                     (Value::Null, 1),
                 ],
                 (
-                    Value::DateTime(DateTime::from(1)),
-                    vec![Value::DateTime(DateTime::from(1)), 2i64.into()],
+                    Value::Timestamp(Timestamp::from(1)),
+                    vec![Value::Timestamp(Timestamp::from(1)), 2i64.into()],
                 ),
             ),
             (

@@ -434,6 +434,10 @@ impl RegionScanner for SeqScan {
         self.stream_ctx.input.mapper.output_schema()
     }
 
+    fn metadata(&self) -> RegionMetadataRef {
+        self.stream_ctx.input.mapper.metadata().clone()
+    }
+
     fn scan_partition(&self, partition: usize) -> Result<SendableRecordBatchStream, BoxedError> {
         self.scan_partition_impl(partition)
     }
@@ -448,8 +452,8 @@ impl RegionScanner for SeqScan {
         predicate.map(|p| !p.exprs().is_empty()).unwrap_or(false)
     }
 
-    fn metadata(&self) -> RegionMetadataRef {
-        self.stream_ctx.input.mapper.metadata().clone()
+    fn set_logical_region(&mut self, logical_region: bool) {
+        self.properties.set_logical_region(logical_region);
     }
 }
 
