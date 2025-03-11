@@ -16,10 +16,13 @@ pub mod array;
 pub mod map;
 pub mod time;
 
+use std::result::Result as StdResult;
+
 pub use array::Array;
 use jsonb::{Number as JsonbNumber, Object as JsonbObject, Value as JsonbValue};
+use jsonpath_rust::parser::{parse_json_path, JsonPathIndex};
 use jsonpath_rust::path::{JsonLike, Path};
-use jsonpath_rust::{jsp_idx, jsp_obj};
+use jsonpath_rust::{jsp_idx, jsp_obj, JsonPath, JsonPathParserError, JsonPathStr};
 pub use map::Map;
 use regex::Regex;
 use snafu::{OptionExt, ResultExt};
@@ -286,6 +289,52 @@ impl Value {
             _ => None,
         }
     }
+
+    // ref https://github.com/serde-rs/json/blob/master/src/value/mod.rs#L779
+    pub fn pointer(&self, pointer: &str) -> Option<&Value> {
+        if pointer.is_empty() {
+            return Some(self);
+        }
+        if !pointer.starts_with('/') {
+            return None;
+        }
+        pointer
+            .split('/')
+            .skip(1)
+            .map(|x| x.replace("~1", "/").replace("~0", "~"))
+            .try_fold(self, |target, token| match target {
+                Value::Map(map) => map.get(&token),
+                Value::Array(list) => parse_index(&token).and_then(|x| list.get(x)),
+                _ => None,
+            })
+    }
+
+    // ref https://github.com/serde-rs/json/blob/master/src/value/mod.rs#L834
+    pub fn pointer_mut(&mut self, pointer: &str) -> Option<&mut Value> {
+        if pointer.is_empty() {
+            return Some(self);
+        }
+        if !pointer.starts_with('/') {
+            return None;
+        }
+        pointer
+            .split('/')
+            .skip(1)
+            .map(|x| x.replace("~1", "/").replace("~0", "~"))
+            .try_fold(self, |target, token| match target {
+                Value::Map(map) => map.get_mut(&token),
+                Value::Array(list) => parse_index(&token).and_then(move |x| list.get_mut(x)),
+                _ => None,
+            })
+    }
+}
+
+// ref https://github.com/serde-rs/json/blob/master/src/value/mod.rs#L259
+fn parse_index(s: &str) -> Option<usize> {
+    if s.starts_with('+') || (s.starts_with('0') && s.len() != 1) {
+        return None;
+    }
+    s.parse().ok()
 }
 
 impl std::fmt::Display for Value {
@@ -813,5 +862,47 @@ impl JsonLike for Value {
 
     fn null() -> Self {
         Value::Null
+    }
+
+    // ref https://github.com/besok/jsonpath-rust/blob/main/src/path/mod.rs#L423
+    fn reference<T>(
+        &self,
+        path: T,
+    ) -> std::result::Result<std::option::Option<&Value>, JsonPathParserError>
+    where
+        T: Into<JsonPathStr>,
+    {
+        Ok(self.pointer(&path_to_json_path(path.into())?))
+    }
+
+    // https://github.com/besok/jsonpath-rust/blob/main/src/path/mod.rs#L430
+    fn reference_mut<T>(
+        &mut self,
+        path: T,
+    ) -> std::result::Result<std::option::Option<&mut Value>, JsonPathParserError>
+    where
+        T: Into<JsonPathStr>,
+    {
+        Ok(self.pointer_mut(&path_to_json_path(path.into())?))
+    }
+}
+
+// ref https://github.com/besok/jsonpath-rust/blob/main/src/path/mod.rs#L438
+fn path_to_json_path(path: JsonPathStr) -> StdResult<String, JsonPathParserError> {
+    convert_part(&parse_json_path(path.as_str())?)
+}
+
+// https://github.com/besok/jsonpath-rust/blob/main/src/path/mod.rs#L442
+fn convert_part(path: &JsonPath) -> StdResult<String, JsonPathParserError> {
+    match path {
+        JsonPath::Chain(elems) => elems
+            .iter()
+            .map(convert_part)
+            .collect::<StdResult<String, JsonPathParserError>>(),
+
+        JsonPath::Index(JsonPathIndex::Single(v)) => Ok(format!("/{}", v)),
+        JsonPath::Field(e) => Ok(format!("/{}", e)),
+        JsonPath::Root => Ok("".to_string()),
+        e => Err(JsonPathParserError::InvalidJsonPath(e.to_string())),
     }
 }

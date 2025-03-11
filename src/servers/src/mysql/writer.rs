@@ -222,10 +222,7 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                         }
                     },
                     Value::Date(v) => row_writer.write_col(v.to_chrono_date())?,
-                    // convert datetime and timestamp to timezone of current connection
-                    Value::DateTime(v) => row_writer.write_col(
-                        v.to_chrono_datetime_with_timezone(Some(&query_context.timezone())),
-                    )?,
+                    // convert timestamp to timezone of current connection
                     Value::Timestamp(v) => row_writer.write_col(
                         v.to_chrono_datetime_with_timezone(Some(&query_context.timezone())),
                     )?,
@@ -293,7 +290,6 @@ pub(crate) fn create_mysql_column(
         ConcreteDataType::Timestamp(_) => Ok(ColumnType::MYSQL_TYPE_TIMESTAMP),
         ConcreteDataType::Time(_) => Ok(ColumnType::MYSQL_TYPE_TIME),
         ConcreteDataType::Date(_) => Ok(ColumnType::MYSQL_TYPE_DATE),
-        ConcreteDataType::DateTime(_) => Ok(ColumnType::MYSQL_TYPE_DATETIME),
         ConcreteDataType::Interval(_) => Ok(ColumnType::MYSQL_TYPE_VARCHAR),
         ConcreteDataType::Duration(_) => Ok(ColumnType::MYSQL_TYPE_TIME),
         ConcreteDataType::Decimal128(_) => Ok(ColumnType::MYSQL_TYPE_DECIMAL),

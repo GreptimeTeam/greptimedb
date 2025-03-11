@@ -33,7 +33,7 @@ mod tests {
     use std::sync::Arc;
 
     use arrow::array::{PrimitiveArray, UInt32Array};
-    use common_time::{Date, DateTime};
+    use common_time::Date;
 
     use crate::prelude::VectorRef;
     use crate::scalars::ScalarVector;
@@ -105,7 +105,6 @@ mod tests {
 
         // test date like type
         take_time_like_test!(DateVector, Date, new);
-        take_time_like_test!(DateTimeVector, DateTime, new);
         take_time_like_test!(TimestampSecondVector, TimestampSecond, from_native);
         take_time_like_test!(
             TimestampMillisecondVector,
