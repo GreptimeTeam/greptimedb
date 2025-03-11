@@ -22,17 +22,17 @@ use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::FlowId;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{DfSendableRecordBatchStream, RecordBatch, SendableRecordBatchStream};
-use common_time::DateTime;
 use datafusion::execution::TaskContext;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::PartitionStream as DfPartitionStream;
 use datatypes::prelude::ConcreteDataType as CDT;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+use datatypes::timestamp::TimestampMillisecond;
 use datatypes::value::Value;
 use datatypes::vectors::{
-    DateTimeVectorBuilder, Int64VectorBuilder, StringVectorBuilder, UInt32VectorBuilder,
-    UInt64VectorBuilder, VectorRef,
+    Int64VectorBuilder, StringVectorBuilder, TimestampMillisecondVectorBuilder,
+    UInt32VectorBuilder, UInt64VectorBuilder, VectorRef,
 };
 use futures::TryStreamExt;
 use snafu::{OptionExt, ResultExt};
@@ -106,9 +106,13 @@ impl InformationSchemaFlows {
                 (SINK_TABLE_NAME, CDT::string_datatype(), false),
                 (FLOWNODE_IDS, CDT::string_datatype(), true),
                 (OPTIONS, CDT::string_datatype(), true),
-                (CREATED_TIME, CDT::datetime_datatype(), false),
-                (UPDATED_TIME, CDT::datetime_datatype(), false),
-                (LAST_EXECUTION_TIME, CDT::datetime_datatype(), true),
+                (CREATED_TIME, CDT::timestamp_millisecond_datatype(), false),
+                (UPDATED_TIME, CDT::timestamp_millisecond_datatype(), false),
+                (
+                    LAST_EXECUTION_TIME,
+                    CDT::timestamp_millisecond_datatype(),
+                    true,
+                ),
                 (SOURCE_TABLE_NAMES, CDT::string_datatype(), true),
             ]
             .into_iter()
@@ -181,9 +185,9 @@ struct InformationSchemaFlowsBuilder {
     sink_table_names: StringVectorBuilder,
     flownode_id_groups: StringVectorBuilder,
     option_groups: StringVectorBuilder,
-    created_time: DateTimeVectorBuilder,
-    updated_time: DateTimeVectorBuilder,
-    last_execution_time: DateTimeVectorBuilder,
+    created_time: TimestampMillisecondVectorBuilder,
+    updated_time: TimestampMillisecondVectorBuilder,
+    last_execution_time: TimestampMillisecondVectorBuilder,
     source_table_names: StringVectorBuilder,
 }
 
@@ -211,9 +215,9 @@ impl InformationSchemaFlowsBuilder {
             sink_table_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             flownode_id_groups: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             option_groups: StringVectorBuilder::with_capacity(INIT_CAPACITY),
-            created_time: DateTimeVectorBuilder::with_capacity(INIT_CAPACITY),
-            updated_time: DateTimeVectorBuilder::with_capacity(INIT_CAPACITY),
-            last_execution_time: DateTimeVectorBuilder::with_capacity(INIT_CAPACITY),
+            created_time: TimestampMillisecondVectorBuilder::with_capacity(INIT_CAPACITY),
+            updated_time: TimestampMillisecondVectorBuilder::with_capacity(INIT_CAPACITY),
+            last_execution_time: TimestampMillisecondVectorBuilder::with_capacity(INIT_CAPACITY),
             source_table_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
         }
     }
@@ -319,7 +323,7 @@ impl InformationSchemaFlowsBuilder {
                 state
                     .last_exec_time_map
                     .get(&flow_id)
-                    .map(|v| DateTime::from(*v))
+                    .map(|v| TimestampMillisecond::new(*v))
             }));
 
         let mut source_table_names = vec![];
