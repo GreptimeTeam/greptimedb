@@ -88,10 +88,9 @@ impl Display for RowValue {
         match self {
             RowValue::Value(v) => match v {
                 Value::Null => write!(f, "NULL"),
-                v @ (Value::String(_)
-                | Value::Timestamp(_)
-                | Value::DateTime(_)
-                | Value::Date(_)) => write!(f, "'{}'", v),
+                v @ (Value::String(_) | Value::Timestamp(_) | Value::Date(_)) => {
+                    write!(f, "'{}'", v)
+                }
                 v => write!(f, "{}", v),
             },
             RowValue::Default => write!(f, "DEFAULT"),
@@ -104,10 +103,9 @@ impl Debug for RowValue {
         match self {
             RowValue::Value(v) => match v {
                 Value::Null => write!(f, "NULL"),
-                v @ (Value::String(_)
-                | Value::Timestamp(_)
-                | Value::DateTime(_)
-                | Value::Date(_)) => write!(f, "'{}'", v),
+                v @ (Value::String(_) | Value::Timestamp(_) | Value::Date(_)) => {
+                    write!(f, "'{}'", v)
+                }
                 v => write!(f, "{}", v),
             },
             RowValue::Default => write!(f, "DEFAULT"),

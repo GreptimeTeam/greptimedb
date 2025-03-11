@@ -365,10 +365,6 @@ impl InformationSchemaColumnsBuilder {
             self.numeric_scales.push(None);
 
             match &column_schema.data_type {
-                ConcreteDataType::DateTime(datetime_type) => {
-                    self.datetime_precisions
-                        .push(Some(datetime_type.precision() as i64));
-                }
                 ConcreteDataType::Timestamp(ts_type) => {
                     self.datetime_precisions
                         .push(Some(ts_type.precision() as i64));
