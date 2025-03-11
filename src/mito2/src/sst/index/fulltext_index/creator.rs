@@ -292,7 +292,7 @@ impl SingleCreator {
     }
 }
 
-#[allow(dead_code, clippy::large_enum_variant)]
+#[allow(clippy::large_enum_variant)]
 /// `AltFulltextCreator` is an alternative fulltext index creator that can be either Tantivy or BloomFilter.
 enum AltFulltextCreator {
     Tantivy(TantivyFulltextIndexCreator),
@@ -397,14 +397,10 @@ mod tests {
         })
     }
 
-    fn matches_term_pred(
-        column_id: ColumnId,
-        term_to_lowercase: bool,
-        term: &str,
-    ) -> FulltextPredicate {
+    fn matches_term_pred(column_id: ColumnId, col_lowered: bool, term: &str) -> FulltextPredicate {
         FulltextPredicate::MatchesTerm(MatchesTermPredicate {
             column_id,
-            term_to_lowercase,
+            col_lowered,
             term: term.to_string(),
         })
     }
@@ -613,6 +609,20 @@ mod tests {
             "test_fulltext_index_basic_",
             FulltextBackend::Tantivy,
             &[
+                // Config:
+                // +-------------------+---------------------+---------+
+                // |       col 1       |       col 2         |  col 3  |
+                // +-------------------+---------------------+---------+
+                // | English Sensitive | English Insensitive | Chinese |
+                // +-------------------+---------------------+---------+
+                //
+                // Rows:
+                // +-------------------+---------------------+----------+
+                // | hello             |                     | 你好      |
+                // | world             | world               |          |
+                // |                   | World               | 世界      |
+                // | Hello, World      | Hello, World        | 你好，世界 |
+                // +-------------------+---------------------+----------+
                 (Some("hello"), None, Some("你好")),
                 (Some("world"), Some("world"), None),
                 (None, Some("World"), Some("世界")),
@@ -650,6 +660,20 @@ mod tests {
             "test_fulltext_index_multi_columns_",
             FulltextBackend::Tantivy,
             &[
+                // Config:
+                // +-------------------+---------------------+---------+
+                // |       col 1       |       col 2         |  col 3  |
+                // +-------------------+---------------------+---------+
+                // | English Sensitive | English Insensitive | Chinese |
+                // +-------------------+---------------------+---------+
+                //
+                // Rows:
+                // +-------------------+---------------------+----------+
+                // | hello             |                     | 你好      |
+                // | world             | world               |          |
+                // |                   | World               | 世界      |
+                // | Hello, World      | Hello, World        | 你好，世界 |
+                // +-------------------+---------------------+----------+
                 (Some("hello"), None, Some("你好")),
                 (Some("world"), Some("world"), None),
                 (None, Some("World"), Some("世界")),
@@ -681,7 +705,20 @@ mod tests {
             "test_fulltext_index_bloom_backend_",
             FulltextBackend::Bloom,
             &[
-                // English Sensitive / English Insensitive / Chinese
+                // Config:
+                // +-------------------+---------------------+---------+
+                // |       col 1       |       col 2         |  col 3  |
+                // +-------------------+---------------------+---------+
+                // | English Sensitive | English Insensitive | Chinese |
+                // +-------------------+---------------------+---------+
+                //
+                // Rows:
+                // +-------------------+---------------------+----------+
+                // | hello             |                     | 你好      |
+                // | world             | world               |          |
+                // |                   | World               | 世界      |
+                // | Hello, World      | Hello, World        | 你好，世界 |
+                // +-------------------+---------------------+----------+
                 (Some("hello"), None, Some("你好")),
                 (Some("world"), Some("world"), None),
                 (None, Some("World"), Some("世界")),
@@ -694,18 +731,19 @@ mod tests {
         )
         .await;
 
-        let to_lowercase = false;
-        let row_ids = applier_factory(vec![matches_term_pred(1, to_lowercase, "hello")]).await;
+        let lower_col = false;
+        let row_ids = applier_factory(vec![matches_term_pred(1, lower_col, "hello")]).await;
         assert_eq!(row_ids, vec![0]);
 
-        let row_ids = applier_factory(vec![matches_term_pred(1, to_lowercase, "Hello")]).await;
+        let row_ids = applier_factory(vec![matches_term_pred(1, lower_col, "Hello")]).await;
         assert_eq!(row_ids, vec![3]);
 
-        let row_ids = applier_factory(vec![matches_term_pred(1, to_lowercase, "world")]).await;
+        let row_ids = applier_factory(vec![matches_term_pred(1, lower_col, "world")]).await;
         assert_eq!(row_ids, vec![1]);
 
-        // lowered && opt.case_sensitive is invalid, this case should not be passed to the backend
-        // let row_ids = applier_factory(vec![matches_term_pred(1, true, "hello")]).await;
+        // If user specifies case-insensitive and pred is case-sensitive, searcher will skip the pred.
+        let row_ids = applier_factory(vec![matches_term_pred(1, true, "hello")]).await;
+        assert_eq!(row_ids, vec![0, 1, 2, 3]);
 
         let row_ids = applier_factory(vec![matches_term_pred(2, true, "hello")]).await;
         assert_eq!(row_ids, vec![3]);

@@ -304,7 +304,12 @@ impl BloomFilterIndexer {
         let blob_name = format!("{}-{}", INDEX_BLOB_TYPE, col_id);
         let (index_finish, puffin_add_blob) = futures::join!(
             creator.finish(tx.compat_write()),
-            puffin_writer.put_blob(&blob_name, rx.compat(), PutOptions::default())
+            puffin_writer.put_blob(
+                &blob_name,
+                rx.compat(),
+                PutOptions::default(),
+                Default::default()
+            )
         );
 
         match (

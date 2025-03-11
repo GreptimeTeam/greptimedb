@@ -250,7 +250,12 @@ mod tests {
         );
         let mut writer = puffin_manager.writer(&file_id).await.unwrap();
         writer
-            .put_blob(INDEX_BLOB_TYPE, Cursor::new(vec![]), Default::default())
+            .put_blob(
+                INDEX_BLOB_TYPE,
+                Cursor::new(vec![]),
+                Default::default(),
+                Default::default(),
+            )
             .await
             .unwrap();
         writer.finish().await.unwrap();
@@ -298,7 +303,12 @@ mod tests {
         );
         let mut writer = puffin_manager.writer(&file_id).await.unwrap();
         writer
-            .put_blob("invalid_blob_type", Cursor::new(vec![]), Default::default())
+            .put_blob(
+                "invalid_blob_type",
+                Cursor::new(vec![]),
+                Default::default(),
+                Default::default(),
+            )
             .await
             .unwrap();
         writer.finish().await.unwrap();

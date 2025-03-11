@@ -278,7 +278,12 @@ impl InvertedIndexer {
 
         let (index_finish, puffin_add_blob) = futures::join!(
             self.index_creator.finish(&mut index_writer),
-            puffin_writer.put_blob(INDEX_BLOB_TYPE, rx.compat(), PutOptions::default())
+            puffin_writer.put_blob(
+                INDEX_BLOB_TYPE,
+                rx.compat(),
+                PutOptions::default(),
+                Default::default()
+            )
         );
 
         match (

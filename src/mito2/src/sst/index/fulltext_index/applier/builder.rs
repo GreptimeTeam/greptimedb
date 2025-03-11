@@ -18,7 +18,6 @@ use datafusion_common::ScalarValue;
 use datafusion_expr::expr::ScalarFunction;
 use datafusion_expr::Expr;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::FulltextBackend;
 use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use smallvec::SmallVec;
@@ -136,13 +135,8 @@ impl FulltextPredicate {
         let Expr::Column(c) = &f.args[0] else {
             return None;
         };
+
         let column = metadata.column_by_name(&c.name)?;
-        let opt = column.column_schema.fulltext_options().ok().flatten()?;
-
-        if !opt.enable || opt.backend != FulltextBackend::Tantivy {
-            return None;
-        };
-
         if column.column_schema.data_type != ConcreteDataType::string_datatype() {
             return None;
         }
@@ -181,19 +175,11 @@ impl FulltextPredicate {
         }
 
         let column = metadata.column_by_name(&column.name)?;
-        let opt = column.column_schema.fulltext_options().ok().flatten()?;
-
-        if !opt.enable || opt.backend != FulltextBackend::Bloom {
-            return None;
-        };
-
-        // Skip if column is not string
         if column.column_schema.data_type != ConcreteDataType::string_datatype() {
             return None;
         }
 
-        // Skip if query is case-insensitive but index is case-sensitive
-        if lowered && opt.case_sensitive {
+        if lowered {
             return None;
         }
 
@@ -203,9 +189,7 @@ impl FulltextPredicate {
 
         Some(Self::MatchesTerm(MatchesTermPredicate {
             column_id: column.column_id,
-            // Note: if we use options in column metadata to determine whether to lowercase the term,
-            //       it assumes the options are immutable.
-            term_to_lowercase: lowered || !opt.case_sensitive,
+            col_lowered: lowered,
             term: term.to_string(),
         }))
     }

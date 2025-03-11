@@ -20,10 +20,11 @@ use common_base::range_read::RangeReader;
 use common_telemetry::warn;
 use index::bloom_filter::applier::BloomFilterApplier;
 use index::bloom_filter::reader::BloomFilterReaderImpl;
+use index::fulltext_index::create::read_fulltext_config;
 use index::fulltext_index::search::{FulltextIndexSearcher, RowId, TantivyFulltextIndexSearcher};
 use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
-use puffin::puffin_manager::{DirGuard, PuffinManager, PuffinReader};
+use puffin::puffin_manager::{BlobWithMetadata, DirGuard, PuffinManager, PuffinReader};
 use smallvec::SmallVec;
 use snafu::ResultExt;
 use store_api::storage::{ColumnId, RegionId};
@@ -34,43 +35,28 @@ use crate::cache::index::bloom_filter_index::{
     BloomFilterIndexCacheRef, CachedBloomFilterIndexBlobReader,
 };
 use crate::error::{
-    ApplyFulltextIndexSnafu, Error, MetadataSnafu, PuffinBuildReaderSnafu, PuffinReadBlobSnafu,
-    Result,
+    ApplyFulltextIndexSnafu, MetadataSnafu, PuffinBuildReaderSnafu, PuffinReadBlobSnafu, Result,
 };
 use crate::metrics::INDEX_APPLY_ELAPSED;
 use crate::sst::file::FileId;
 use crate::sst::index::fulltext_index::{
     FulltextPredicate, INDEX_BLOB_TYPE_BLOOM, INDEX_BLOB_TYPE_TANTIVY,
 };
-use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory, SstPuffinDir};
+use crate::sst::index::puffin_manager::{
+    PuffinManagerFactory, SstPuffinBlob, SstPuffinDir, SstPuffinReader,
+};
 use crate::sst::index::TYPE_FULLTEXT_INDEX;
 
 pub mod builder;
 
 /// `FulltextIndexApplier` is responsible for applying fulltext index to the provided SST files
 pub struct FulltextIndexApplier {
-    /// The root directory of the region.
-    region_dir: String,
-
-    /// The region ID.
-    region_id: RegionId,
-
     predicates: HashMap<ColumnId, SmallVec<[FulltextPredicate; 1]>>,
-
-    /// The puffin manager factory.
-    puffin_manager_factory: PuffinManagerFactory,
-
-    /// Store responsible for accessing index files.
-    store: ObjectStore,
-
-    /// File cache to be used by the `FulltextIndexApplier`.
-    file_cache: Option<FileCacheRef>,
-
-    /// The puffin metadata cache.
-    puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
 
     /// Cache for bloom filter index.
     bloom_filter_index_cache: Option<BloomFilterIndexCacheRef>,
+
+    index_source: IndexSource,
 }
 
 pub type FulltextIndexApplierRef = Arc<FulltextIndexApplier>;
@@ -84,21 +70,17 @@ impl FulltextIndexApplier {
         predicates: HashMap<ColumnId, SmallVec<[FulltextPredicate; 1]>>,
         puffin_manager_factory: PuffinManagerFactory,
     ) -> Self {
+        let index_source = IndexSource::new(region_dir, region_id, puffin_manager_factory, store);
         Self {
-            region_dir,
-            region_id,
-            store,
             predicates,
-            puffin_manager_factory,
-            file_cache: None,
-            puffin_metadata_cache: None,
             bloom_filter_index_cache: None,
+            index_source,
         }
     }
 
     /// Sets the file cache.
     pub fn with_file_cache(mut self, file_cache: Option<FileCacheRef>) -> Self {
-        self.file_cache = file_cache;
+        self.index_source.set_file_cache(file_cache);
         self
     }
 
@@ -107,7 +89,8 @@ impl FulltextIndexApplier {
         mut self,
         puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
     ) -> Self {
-        self.puffin_metadata_cache = puffin_metadata_cache;
+        self.index_source
+            .set_puffin_metadata_cache(puffin_metadata_cache);
         self
     }
 
@@ -172,9 +155,12 @@ impl FulltextIndexApplier {
         column_id: ColumnId,
         predicates: &[FulltextPredicate],
     ) -> Result<Option<BTreeSet<RowId>>> {
+        let blob_key = format!("{INDEX_BLOB_TYPE_TANTIVY}-{column_id}");
         let dir = self
-            .tantivy_dir_path(file_id, column_id, file_size_hint)
+            .index_source
+            .dir(file_id, &blob_key, file_size_hint)
             .await?;
+
         let path = match &dir {
             Some(dir) => dir.path(),
             None => {
@@ -204,98 +190,6 @@ impl FulltextIndexApplier {
         }
 
         Ok(Some(row_ids))
-    }
-
-    /// Returns `None` if the index not found.
-    async fn tantivy_dir_path(
-        &self,
-        file_id: FileId,
-        column_id: ColumnId,
-        file_size_hint: Option<u64>,
-    ) -> Result<Option<SstPuffinDir>> {
-        let blob_key = format!("{INDEX_BLOB_TYPE_TANTIVY}-{column_id}");
-
-        // FAST PATH: Try to read the index from the file cache.
-        if let Some(file_cache) = &self.file_cache {
-            let index_key = IndexKey::new(self.region_id, file_id, FileType::Puffin);
-            if file_cache.get(index_key).await.is_some() {
-                match self
-                    .get_tantivy_dir_from_file_cache(file_cache, file_id, file_size_hint, &blob_key)
-                    .await
-                {
-                    Ok(dir) => return Ok(dir),
-                    Err(err) => {
-                        warn!(err; "An unexpected error occurred while reading the cached index file. Fallback to remote index file.")
-                    }
-                }
-            }
-        }
-
-        // SLOW PATH: Try to read the index from the remote file.
-        let dir = self
-            .get_tantivy_dir_from_remote_file(file_id, file_size_hint, &blob_key)
-            .await;
-        match dir {
-            Ok(dir) => Ok(dir),
-            Err(err) => {
-                if is_blob_not_found(&err) {
-                    Ok(None)
-                } else {
-                    Err(err)
-                }
-            }
-        }
-    }
-
-    async fn get_tantivy_dir_from_file_cache(
-        &self,
-        file_cache: &FileCacheRef,
-        file_id: FileId,
-        file_size_hint: Option<u64>,
-        blob_key: &str,
-    ) -> Result<Option<SstPuffinDir>> {
-        match self
-            .puffin_manager_factory
-            .build(
-                file_cache.local_store(),
-                WriteCachePathProvider::new(self.region_id, file_cache.clone()),
-            )
-            .reader(&file_id)
-            .await
-            .context(PuffinBuildReaderSnafu)?
-            .with_file_size_hint(file_size_hint)
-            .dir(blob_key)
-            .await
-        {
-            Ok(dir) => Ok(Some(dir)),
-            Err(err) if err.is_blob_not_found() => Ok(None),
-            Err(err) => Err(err).context(PuffinReadBlobSnafu),
-        }
-    }
-
-    async fn get_tantivy_dir_from_remote_file(
-        &self,
-        file_id: FileId,
-        file_size_hint: Option<u64>,
-        blob_key: &str,
-    ) -> Result<Option<SstPuffinDir>> {
-        match self
-            .puffin_manager_factory
-            .build(
-                self.store.clone(),
-                RegionFilePathFactory::new(self.region_dir.clone()),
-            )
-            .reader(&file_id)
-            .await
-            .context(PuffinBuildReaderSnafu)?
-            .with_file_size_hint(file_size_hint)
-            .dir(blob_key)
-            .await
-        {
-            Ok(dir) => Ok(Some(dir)),
-            Err(err) if err.is_blob_not_found() => Ok(None),
-            Err(err) => Err(err).context(PuffinReadBlobSnafu),
-        }
     }
 }
 
@@ -367,24 +261,32 @@ impl FulltextIndexApplier {
         file_size_hint: Option<u64>,
         output: &mut [(usize, Vec<Range<usize>>)],
     ) -> Result<()> {
-        let bloom = self
-            .bloom_blob_reader(file_id, column_id, file_size_hint)
-            .await
-            .unwrap();
-
-        let Some(reader) = bloom else {
+        let blob_key = format!("{INDEX_BLOB_TYPE_BLOOM}-{column_id}");
+        let Some(reader) = self
+            .index_source
+            .blob(file_id, &blob_key, file_size_hint)
+            .await?
+        else {
             return Ok(());
         };
+
+        let blob_metadata = reader.metadata();
+        let fulltext_config =
+            read_fulltext_config(blob_metadata).context(ApplyFulltextIndexSnafu)?;
 
         let mut probes = HashSet::new();
         for predicate in predicates {
             if let FulltextPredicate::MatchesTerm(pred) = predicate {
+                if fulltext_config.case_sensitive && pred.col_lowered {
+                    // The index is useless since lowercased column is not indexed.
+                    continue;
+                }
                 let ps = pred
                     .term
                     .split(|c: char| !c.is_alphanumeric())
                     .filter(|&t| !t.is_empty())
                     .map(|t| {
-                        if pred.term_to_lowercase {
+                        if !fulltext_config.case_sensitive {
                             t.to_lowercase()
                         } else {
                             t.to_string()
@@ -399,8 +301,9 @@ impl FulltextIndexApplier {
             return Ok(());
         }
 
+        let range_reader = reader.reader().await.context(PuffinBuildReaderSnafu)?;
         let reader = if let Some(bloom_filter_cache) = &self.bloom_filter_index_cache {
-            let blob_size = reader
+            let blob_size = range_reader
                 .metadata()
                 .await
                 .context(MetadataSnafu)?
@@ -409,12 +312,12 @@ impl FulltextIndexApplier {
                 file_id,
                 column_id,
                 blob_size,
-                BloomFilterReaderImpl::new(reader),
+                BloomFilterReaderImpl::new(range_reader),
                 bloom_filter_cache.clone(),
             );
             Box::new(reader) as _
         } else {
-            Box::new(BloomFilterReaderImpl::new(reader)) as _
+            Box::new(BloomFilterReaderImpl::new(range_reader)) as _
         };
 
         let mut applier = BloomFilterApplier::new(reader).await.unwrap();
@@ -429,54 +332,130 @@ impl FulltextIndexApplier {
 
         Ok(())
     }
+}
 
-    /// Creates a blob reader from the cached or remote index file.
-    ///
-    /// Returus `None` if the column does not have an index.
-    async fn bloom_blob_reader(
-        &self,
-        file_id: FileId,
-        column_id: ColumnId,
-        file_size_hint: Option<u64>,
-    ) -> Result<Option<BlobReader>> {
-        let reader = match self
-            .bloom_cached_blob_reader(file_id, column_id, file_size_hint)
-            .await
-        {
-            Ok(Some(puffin_reader)) => puffin_reader,
-            other => {
-                if let Err(err) = other {
-                    // Blob not found means no index for this column
-                    if is_blob_not_found(&err) {
-                        return Ok(None);
-                    }
-                    warn!(err; "An unexpected error occurred while reading the cached index file. Fallback to remote index file.")
-                }
-                let res = self
-                    .bloom_remote_blob_reader(file_id, column_id, file_size_hint)
-                    .await;
-                if let Err(err) = res {
-                    // Blob not found means no index for this column
-                    if is_blob_not_found(&err) {
-                        return Ok(None);
-                    }
-                    return Err(err);
-                }
+struct IndexSource {
+    region_dir: String,
+    region_id: RegionId,
 
-                res?
-            }
-        };
+    /// The puffin manager factory.
+    puffin_manager_factory: PuffinManagerFactory,
 
-        Ok(Some(reader))
+    /// Store responsible for accessing remote index files.
+    remote_store: ObjectStore,
+
+    /// Local file cache.
+    file_cache: Option<FileCacheRef>,
+
+    /// The puffin metadata cache.
+    puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
+}
+
+impl IndexSource {
+    fn new(
+        region_dir: String,
+        region_id: RegionId,
+        puffin_manager_factory: PuffinManagerFactory,
+        remote_store: ObjectStore,
+    ) -> Self {
+        Self {
+            region_dir,
+            region_id,
+            puffin_manager_factory,
+            remote_store,
+            file_cache: None,
+            puffin_metadata_cache: None,
+        }
     }
 
-    /// Creates a blob reader from the cached index file
-    async fn bloom_cached_blob_reader(
+    fn set_file_cache(&mut self, file_cache: Option<FileCacheRef>) {
+        self.file_cache = file_cache;
+    }
+
+    fn set_puffin_metadata_cache(&mut self, puffin_metadata_cache: Option<PuffinMetadataCacheRef>) {
+        self.puffin_metadata_cache = puffin_metadata_cache;
+    }
+
+    /// Returns the blob with the specified key from local cache or remote store.
+    ///
+    /// Returns `None` if the blob is not found.
+    async fn blob(
         &self,
         file_id: FileId,
-        column_id: ColumnId,
+        key: &str,
         file_size_hint: Option<u64>,
-    ) -> Result<Option<BlobReader>> {
+    ) -> Result<Option<BlobWithMetadata<SstPuffinBlob>>> {
+        let (reader, fallbacked) = self.ensure_reader(file_id, file_size_hint).await?;
+        let res = reader.blob(key).await;
+        match res {
+            Ok(blob) => Ok(Some(blob)),
+            Err(err) if err.is_blob_not_found() => Ok(None),
+            Err(err) => {
+                if fallbacked {
+                    Err(err).context(PuffinReadBlobSnafu)
+                } else {
+                    warn!(err; "An unexpected error occurred while reading the cached index file. Fallback to remote index file.");
+                    let reader = self.build_remote(file_id, file_size_hint).await?;
+                    let res = reader.blob(key).await;
+                    match res {
+                        Ok(blob) => Ok(Some(blob)),
+                        Err(err) if err.is_blob_not_found() => Ok(None),
+                        Err(err) => Err(err).context(PuffinReadBlobSnafu),
+                    }
+                }
+            }
+        }
+    }
+
+    /// Returns the directory with the specified key from local cache or remote store.
+    ///
+    /// Returns `None` if the directory is not found.
+    async fn dir(
+        &self,
+        file_id: FileId,
+        key: &str,
+        file_size_hint: Option<u64>,
+    ) -> Result<Option<SstPuffinDir>> {
+        let (reader, fallbacked) = self.ensure_reader(file_id, file_size_hint).await?;
+        let res = reader.dir(key).await;
+        match res {
+            Ok(dir) => Ok(Some(dir)),
+            Err(err) if err.is_blob_not_found() => Ok(None),
+            Err(err) => {
+                if fallbacked {
+                    Err(err).context(PuffinReadBlobSnafu)
+                } else {
+                    warn!(err; "An unexpected error occurred while reading the cached index file. Fallback to remote index file.");
+                    let reader = self.build_remote(file_id, file_size_hint).await?;
+                    let res = reader.dir(key).await;
+                    match res {
+                        Ok(dir) => Ok(Some(dir)),
+                        Err(err) if err.is_blob_not_found() => Ok(None),
+                        Err(err) => Err(err).context(PuffinReadBlobSnafu),
+                    }
+                }
+            }
+        }
+    }
+
+    /// Return reader and whether it is fallbacked to remote store.
+    async fn ensure_reader(
+        &self,
+        file_id: FileId,
+        file_size_hint: Option<u64>,
+    ) -> Result<(SstPuffinReader, bool)> {
+        match self.build_local_cache(file_id, file_size_hint).await {
+            Ok(Some(r)) => Ok((r, false)),
+            Ok(None) => Ok((self.build_remote(file_id, file_size_hint).await?, true)),
+            Err(err) => Err(err),
+        }
+    }
+
+    async fn build_local_cache(
+        &self,
+        file_id: FileId,
+        file_size_hint: Option<u64>,
+    ) -> Result<Option<SstPuffinReader>> {
         let Some(file_cache) = &self.file_cache else {
             return Ok(None);
         };
@@ -486,60 +465,40 @@ impl FulltextIndexApplier {
             return Ok(None);
         };
 
-        let puffin_manager = self.puffin_manager_factory.build(
-            file_cache.local_store(),
-            WriteCachePathProvider::new(self.region_id, file_cache.clone()),
-        );
+        let puffin_manager = self
+            .puffin_manager_factory
+            .build(
+                file_cache.local_store(),
+                WriteCachePathProvider::new(self.region_id, file_cache.clone()),
+            )
+            .with_puffin_metadata_cache(self.puffin_metadata_cache.clone());
         let reader = puffin_manager
             .reader(&file_id)
             .await
             .context(PuffinBuildReaderSnafu)?
-            .with_file_size_hint(file_size_hint)
-            .blob(&Self::column_blob_name(column_id))
-            .await
-            .context(PuffinReadBlobSnafu)?
-            .reader()
-            .await
-            .context(PuffinBuildReaderSnafu)?;
+            .with_file_size_hint(file_size_hint);
         Ok(Some(reader))
     }
 
-    fn column_blob_name(column_id: ColumnId) -> String {
-        format!("{INDEX_BLOB_TYPE_BLOOM}-{column_id}")
-    }
-
-    /// Creates a blob reader from the remote index file
-    async fn bloom_remote_blob_reader(
+    async fn build_remote(
         &self,
         file_id: FileId,
-        column_id: ColumnId,
         file_size_hint: Option<u64>,
-    ) -> Result<BlobReader> {
+    ) -> Result<SstPuffinReader> {
         let puffin_manager = self
             .puffin_manager_factory
             .build(
-                self.store.clone(),
+                self.remote_store.clone(),
                 RegionFilePathFactory::new(self.region_dir.clone()),
             )
             .with_puffin_metadata_cache(self.puffin_metadata_cache.clone());
 
-        puffin_manager
+        let reader = puffin_manager
             .reader(&file_id)
             .await
             .context(PuffinBuildReaderSnafu)?
-            .with_file_size_hint(file_size_hint)
-            .blob(&Self::column_blob_name(column_id))
-            .await
-            .context(PuffinReadBlobSnafu)?
-            .reader()
-            .await
-            .context(PuffinBuildReaderSnafu)
-    }
-}
+            .with_file_size_hint(file_size_hint);
 
-fn is_blob_not_found(err: &Error) -> bool {
-    match err {
-        Error::PuffinReadBlob { source, .. } => source.is_blob_not_found(),
-        _ => false,
+        Ok(reader)
     }
 }

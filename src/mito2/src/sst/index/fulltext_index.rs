@@ -35,7 +35,7 @@ pub(crate) struct MatchesPredicate {
 #[derive(Debug, Clone)]
 pub(crate) struct MatchesTermPredicate {
     column_id: ColumnId,
-    term_to_lowercase: bool,
+    col_lowered: bool,
     term: String,
 }
 

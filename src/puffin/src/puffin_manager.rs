@@ -20,6 +20,7 @@ pub mod stager;
 #[cfg(test)]
 mod tests;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -50,7 +51,13 @@ pub trait PuffinManager {
 pub trait PuffinWriter {
     /// Writes a blob associated with the specified `key` to the Puffin file.
     /// Returns the number of bytes written.
-    async fn put_blob<R>(&mut self, key: &str, raw_data: R, options: PutOptions) -> Result<u64>
+    async fn put_blob<R>(
+        &mut self,
+        key: &str,
+        raw_data: R,
+        options: PutOptions,
+        properties: HashMap<String, String>,
+    ) -> Result<u64>
     where
         R: AsyncRead + Send;
 

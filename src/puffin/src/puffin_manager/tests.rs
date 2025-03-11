@@ -281,6 +281,7 @@ async fn put_blob(
             PutOptions {
                 compression: compression_codec,
             },
+            Default::default(),
         )
         .await
         .unwrap();

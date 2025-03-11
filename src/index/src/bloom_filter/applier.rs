@@ -34,7 +34,7 @@ impl BloomFilterApplier {
         Ok(Self { reader, meta })
     }
 
-    /// Searches ranges of rows that match the given probes in the given search range.
+    /// Searches ranges of rows that match all the probes in the given search ranges.
     pub async fn search(
         &mut self,
         probes: &HashSet<Bytes>,
@@ -206,14 +206,14 @@ mod tests {
             (vec![b"row05".to_vec()], 4..8, vec![4..8]),  // search one row in partial range
             (vec![b"row03".to_vec()], 4..8, vec![]), // search for a row that doesn't exist in the partial range
             (
-                vec![b"row01".to_vec(), b"row06".to_vec()],
+                vec![b"overl".to_vec(), b"row06".to_vec()],
                 0..28,
-                vec![0..8],
+                vec![4..8],
             ), // search multiple rows in multiple ranges
             (
-                vec![b"row01".to_vec(), b"row11".to_vec()],
+                vec![b"seg01".to_vec(), b"overp".to_vec()],
                 0..28,
-                vec![0..4, 8..12],
+                vec![4..8],
             ), // search multiple rows in multiple ranges
             (vec![b"row99".to_vec()], 0..28, vec![]), // search for a row that doesn't exist in the full range
             (vec![b"row00".to_vec()], 12..12, vec![]), // search in an empty range

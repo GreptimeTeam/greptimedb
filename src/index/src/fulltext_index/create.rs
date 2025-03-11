@@ -18,7 +18,9 @@ mod tantivy;
 use async_trait::async_trait;
 use puffin::puffin_manager::{PuffinWriter, PutOptions};
 
-pub use crate::fulltext_index::create::bloom_filter::BloomFilterFulltextIndexCreator;
+pub use crate::fulltext_index::create::bloom_filter::{
+    read_fulltext_config, BloomFilterFulltextIndexCreator,
+};
 pub use crate::fulltext_index::create::tantivy::{
     TantivyFulltextIndexCreator, ROWID_FIELD_NAME, TEXT_FIELD_NAME,
 };
