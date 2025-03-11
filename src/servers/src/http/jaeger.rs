@@ -33,6 +33,7 @@ use snafu::{OptionExt, ResultExt};
 use crate::error::{
     status_code_to_http_status, CollectRecordbatchSnafu, Error, InvalidJaegerQuerySnafu, Result,
 };
+use crate::http::extractor::TraceTableName;
 use crate::http::HttpRecordsOutput;
 use crate::metrics::METRIC_JAEGER_QUERY_ELAPSED;
 use crate::otlp::trace::{
@@ -203,12 +204,6 @@ pub enum ValueType {
 #[derive(Default, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JaegerQueryParams {
-    /// Database that the trace data stored in.
-    pub db: Option<String>,
-
-    /// Table name that trace data stored
-    pub table: Option<String>,
-
     /// Service name of the trace.
     #[serde(rename = "service")]
     pub service_name: Option<String>,
@@ -241,14 +236,11 @@ pub struct JaegerQueryParams {
     pub span_kind: Option<String>,
 }
 
-impl JaegerQueryParams {
-    fn update_query_context(&self, query_ctx: &mut QueryContext) {
-        // db should be already handled by middlewares
-
-        query_ctx.set_channel(Channel::Jaeger);
-        if let Some(table) = &self.table {
-            query_ctx.set_extension(JAEGER_QUERY_TABLE_NAME_KEY, table.clone());
-        }
+fn update_query_context(query_ctx: &mut QueryContext, table_name: Option<String>) {
+    // db should be already handled by middlewares
+    query_ctx.set_channel(Channel::Jaeger);
+    if let Some(table) = table_name {
+        query_ctx.set_extension(JAEGER_QUERY_TABLE_NAME_KEY, table);
     }
 }
 
@@ -336,13 +328,14 @@ pub async fn handle_get_services(
     State(handler): State<JaegerQueryHandlerRef>,
     Query(query_params): Query<JaegerQueryParams>,
     Extension(mut query_ctx): Extension<QueryContext>,
+    TraceTableName(table_name): TraceTableName,
 ) -> impl IntoResponse {
     debug!(
         "Received Jaeger '/api/services' request, query_params: {:?}, query_ctx: {:?}",
         query_params, query_ctx
     );
 
-    query_params.update_query_context(&mut query_ctx);
+    update_query_context(&mut query_ctx, table_name);
     let query_ctx = Arc::new(query_ctx);
     let db = query_ctx.get_db_string();
 
@@ -388,13 +381,14 @@ pub async fn handle_get_trace(
     Path(trace_id): Path<String>,
     Query(query_params): Query<JaegerQueryParams>,
     Extension(mut query_ctx): Extension<QueryContext>,
+    TraceTableName(table_name): TraceTableName,
 ) -> impl IntoResponse {
     debug!(
         "Received Jaeger '/api/traces/{}' request, query_params: {:?}, query_ctx: {:?}",
         trace_id, query_params, query_ctx
     );
 
-    query_params.update_query_context(&mut query_ctx);
+    update_query_context(&mut query_ctx, table_name);
     let query_ctx = Arc::new(query_ctx);
     let db = query_ctx.get_db_string();
 
@@ -443,13 +437,14 @@ pub async fn handle_find_traces(
     State(handler): State<JaegerQueryHandlerRef>,
     Query(query_params): Query<JaegerQueryParams>,
     Extension(mut query_ctx): Extension<QueryContext>,
+    TraceTableName(table_name): TraceTableName,
 ) -> impl IntoResponse {
     debug!(
         "Received Jaeger '/api/traces' request, query_params: {:?}, query_ctx: {:?}",
         query_params, query_ctx
     );
 
-    query_params.update_query_context(&mut query_ctx);
+    update_query_context(&mut query_ctx, table_name);
     let query_ctx = Arc::new(query_ctx);
     let db = query_ctx.get_db_string();
 
@@ -493,13 +488,14 @@ pub async fn handle_get_operations(
     State(handler): State<JaegerQueryHandlerRef>,
     Query(query_params): Query<JaegerQueryParams>,
     Extension(mut query_ctx): Extension<QueryContext>,
+    TraceTableName(table_name): TraceTableName,
 ) -> impl IntoResponse {
     debug!(
         "Received Jaeger '/api/operations' request, query_params: {:?}, query_ctx: {:?}",
         query_params, query_ctx
     );
     if let Some(service_name) = &query_params.service_name {
-        query_params.update_query_context(&mut query_ctx);
+        update_query_context(&mut query_ctx, table_name);
         let query_ctx = Arc::new(query_ctx);
         let db = query_ctx.get_db_string();
 
@@ -565,13 +561,14 @@ pub async fn handle_get_operations_by_service(
     Path(service_name): Path<String>,
     Query(query_params): Query<JaegerQueryParams>,
     Extension(mut query_ctx): Extension<QueryContext>,
+    TraceTableName(table_name): TraceTableName,
 ) -> impl IntoResponse {
     debug!(
         "Received Jaeger '/api/services/{}/operations' request, query_params: {:?}, query_ctx: {:?}",
         service_name, query_params, query_ctx
     );
 
-    query_params.update_query_context(&mut query_ctx);
+    update_query_context(&mut query_ctx, table_name);
     let query_ctx = Arc::new(query_ctx);
     let db = query_ctx.get_db_string();
 

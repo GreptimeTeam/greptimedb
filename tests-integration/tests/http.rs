@@ -3065,7 +3065,8 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
 
     // Test empty response for `/api/services` API before writing any traces.
     let res = client
-        .get("/v1/jaeger/api/services?table=mytable")
+        .get("/v1/jaeger/api/services")
+        .header("x-greptime-trace-table-name", "mytable")
         .send()
         .await;
     assert_eq!(StatusCode::OK, res.status());
@@ -3212,7 +3213,8 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
 
     // Test `/api/services` API.
     let res = client
-        .get("/v1/jaeger/api/services?table=mytable")
+        .get("/v1/jaeger/api/services")
+        .header("x-greptime-trace-table-name", "mytable")
         .send()
         .await;
     assert_eq!(StatusCode::OK, res.status());
@@ -3233,7 +3235,8 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
 
     // Test `/api/operations` API.
     let res = client
-        .get("/v1/jaeger/api/operations?service=test-jaeger-query-api&table=mytable")
+        .get("/v1/jaeger/api/operations?service=test-jaeger-query-api")
+        .header("x-greptime-trace-table-name", "mytable")
         .send()
         .await;
     assert_eq!(StatusCode::OK, res.status());
@@ -3261,7 +3264,8 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
 
     // Test `/api/services/{service_name}/operations` API.
     let res = client
-        .get("/v1/jaeger/api/services/test-jaeger-query-api/operations?table=mytable")
+        .get("/v1/jaeger/api/services/test-jaeger-query-api/operations")
+        .header("x-greptime-trace-table-name", "mytable")
         .send()
         .await;
     assert_eq!(StatusCode::OK, res.status());
@@ -3283,7 +3287,8 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
 
     // Test `/api/traces/{trace_id}` API.
     let res = client
-        .get("/v1/jaeger/api/traces/5611dce1bc9ebed65352d99a027b08ea?table=mytable")
+        .get("/v1/jaeger/api/traces/5611dce1bc9ebed65352d99a027b08ea")
+        .header("x-greptime-trace-table-name", "mytable")
         .send()
         .await;
     assert_eq!(StatusCode::OK, res.status());
@@ -3398,7 +3403,8 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
 
     // Test `/api/traces` API.
     let res = client
-        .get("/v1/jaeger/api/traces?service=test-jaeger-query-api&operation=access-mysql&start=1738726754492421&end=1738726754642422&tags=%7B%22operation.type%22%3A%22access-mysql%22%7D&table=mytable")
+        .get("/v1/jaeger/api/traces?service=test-jaeger-query-api&operation=access-mysql&start=1738726754492421&end=1738726754642422&tags=%7B%22operation.type%22%3A%22access-mysql%22%7D")
+        .header("x-greptime-trace-table-name", "mytable")
         .send()
         .await;
     assert_eq!(StatusCode::OK, res.status());
