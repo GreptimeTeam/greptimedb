@@ -564,7 +564,7 @@ impl RangeManipulateStream {
         let mut ranges = vec![];
 
         // calculate for every aligned timestamp (`curr_ts`), assume the ts column is ordered.
-        let mut range_start_index = 0;
+        let mut range_start_index = 0usize;
         for curr_ts in (self.start..=self.end).step_by(self.interval as _) {
             let mut range_start = ts_column.len();
             let mut range_end = 0;
@@ -573,11 +573,12 @@ impl RangeManipulateStream {
                 let ts = ts_column.value(cursor);
                 if ts + self.range >= curr_ts {
                     range_start = range_start.min(cursor);
-                    range_start_index = cursor;
+                    range_start_index = range_start;
                 }
                 if ts <= curr_ts {
                     range_end = range_end.max(cursor);
                 } else {
+                    range_start_index = range_start_index.checked_sub(1usize).unwrap_or_default();
                     break;
                 }
                 cursor += 1;

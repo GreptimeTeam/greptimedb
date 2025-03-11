@@ -204,13 +204,13 @@ impl MergeScanExec {
 
         let partition_exprs = partition_cols
             .iter()
-            .map(|col| {
+            .filter_map(|col| {
                 session_state
                     .create_physical_expr(
                         Expr::Column(ColumnExpr::new_unqualified(col)),
                         plan.schema(),
                     )
-                    .unwrap()
+                    .ok()
             })
             .collect();
         let partitioning = Partitioning::Hash(partition_exprs, target_partition);

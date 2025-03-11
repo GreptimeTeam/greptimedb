@@ -45,6 +45,7 @@ CREATE TABLE test (`Field_I` DOUBLE, `Ts_J` TIMESTAMP TIME INDEX, `Tag_K` STRING
 
 INSERT INTO test VALUES (1, 1, "a"), (1, 1, "b"), (2, 2, "a");
 
+-- SQLNESS SORT_RESULT 2 1
 TQL EVAL (0, 10, '5s') test{__field__="Field_I"};
 
 TQL EVAL (0, 10, '5s') test{__field__="field_i"};

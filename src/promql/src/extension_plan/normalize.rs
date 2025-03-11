@@ -306,15 +306,12 @@ impl SeriesNormalizeStream {
         let ts_column_biased = if self.offset == 0 {
             Arc::new(ts_column.clone()) as _
         } else {
-            datafusion::arrow::compute::kernels::numeric::add(
-                &ts_column,
-                &datafusion::arrow::array::TimestampMillisecondArray::new_scalar(
-                    self.offset as i64,
-                ),
-            )?
+            Arc::new(TimestampMillisecondArray::from_iter(
+                ts_column.iter().map(|ts| ts.map(|ts| ts + self.offset)),
+            ))
         };
         let mut columns = input.columns().to_vec();
-        columns[self.time_index] = Arc::new(ts_column_biased);
+        columns[self.time_index] = ts_column_biased;
 
         let result_batch = RecordBatch::try_new(input.schema(), columns)?;
         if !self.need_filter_out_nan {
@@ -426,11 +423,11 @@ mod test {
             "+---------------------+--------+------+\
             \n| timestamp           | value  | path |\
             \n+---------------------+--------+------+\
+            \n| 1970-01-01T00:01:00 | 0.0    | foo  |\
+            \n| 1970-01-01T00:02:00 | 1.0    | foo  |\
             \n| 1970-01-01T00:00:00 | 10.0   | foo  |\
             \n| 1970-01-01T00:00:30 | 100.0  | foo  |\
-            \n| 1970-01-01T00:01:00 | 0.0    | foo  |\
             \n| 1970-01-01T00:01:30 | 1000.0 | foo  |\
-            \n| 1970-01-01T00:02:00 | 1.0    | foo  |\
             \n+---------------------+--------+------+",
         );
 
@@ -460,11 +457,11 @@ mod test {
             "+---------------------+--------+------+\
             \n| timestamp           | value  | path |\
             \n+---------------------+--------+------+\
+            \n| 1970-01-01T00:01:01 | 0.0    | foo  |\
+            \n| 1970-01-01T00:02:01 | 1.0    | foo  |\
             \n| 1970-01-01T00:00:01 | 10.0   | foo  |\
             \n| 1970-01-01T00:00:31 | 100.0  | foo  |\
-            \n| 1970-01-01T00:01:01 | 0.0    | foo  |\
             \n| 1970-01-01T00:01:31 | 1000.0 | foo  |\
-            \n| 1970-01-01T00:02:01 | 1.0    | foo  |\
             \n+---------------------+--------+------+",
         );
 

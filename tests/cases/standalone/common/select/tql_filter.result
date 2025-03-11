@@ -18,14 +18,10 @@ tql analyze (1, 3, '1s') t1{ a = "a" };
 | stage | node | plan_|
 +-+-+-+
 | 0_| 0_|_PromInstantManipulateExec: range=[1000..3000], lookback=[300000], interval=[1000], time index=[b] REDACTED
-|_|_|_PromSeriesNormalizeExec: offset=[0], time index=[b], filter NaN: [false] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a"] REDACTED
-|_|_|_SortPreservingMergeExec: [a@0 DESC NULLS LAST] REDACTED
-|_|_|_SortExec: expr=[a@0 DESC NULLS LAST], preserve_partitioning=[true] REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_SortExec: expr=[a@0 DESC NULLS LAST, b@1 DESC NULLS LAST], preserve_partitioning=[false] REDACTED
-|_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges) REDACTED
+| 1_| 0_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges) REDACTED
 |_|_|_|
 |_|_| Total rows: 3_|
 +-+-+-+
@@ -42,14 +38,10 @@ tql analyze (1, 3, '1s') t1{ a =~ ".*" };
 | stage | node | plan_|
 +-+-+-+
 | 0_| 0_|_PromInstantManipulateExec: range=[1000..3000], lookback=[300000], interval=[1000], time index=[b] REDACTED
-|_|_|_PromSeriesNormalizeExec: offset=[0], time index=[b], filter NaN: [false] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a"] REDACTED
-|_|_|_SortPreservingMergeExec: [a@0 DESC NULLS LAST] REDACTED
-|_|_|_SortExec: expr=[a@0 DESC NULLS LAST], preserve_partitioning=[true] REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_SortExec: expr=[a@0 DESC NULLS LAST, b@1 DESC NULLS LAST], preserve_partitioning=[false] REDACTED
-|_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges) REDACTED
+| 1_| 0_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges) REDACTED
 |_|_|_|
 |_|_| Total rows: 6_|
 +-+-+-+
@@ -66,14 +58,10 @@ tql analyze (1, 3, '1s') t1{ a =~ "a.*" };
 | stage | node | plan_|
 +-+-+-+
 | 0_| 0_|_PromInstantManipulateExec: range=[1000..3000], lookback=[300000], interval=[1000], time index=[b] REDACTED
-|_|_|_PromSeriesNormalizeExec: offset=[0], time index=[b], filter NaN: [false] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a"] REDACTED
-|_|_|_SortPreservingMergeExec: [a@0 DESC NULLS LAST] REDACTED
-|_|_|_SortExec: expr=[a@0 DESC NULLS LAST], preserve_partitioning=[true] REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_SortPreservingMergeExec: [a@0 DESC NULLS LAST, b@1 DESC NULLS LAST] REDACTED
-|_|_|_SortExec: expr=[a@0 DESC NULLS LAST, b@1 DESC NULLS LAST], preserve_partitioning=[true] REDACTED
+| 1_| 0_|_SortPreservingMergeExec: [a@0 ASC, b@1 ASC] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: a@0 ~ a.* REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
