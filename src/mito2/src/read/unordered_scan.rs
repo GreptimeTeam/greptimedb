@@ -248,8 +248,8 @@ impl RegionScanner for UnorderedScan {
         predicate.map(|p| !p.exprs().is_empty()).unwrap_or(false)
     }
 
-    fn set_logical_table(&mut self, logical_table: bool) {
-        self.properties.set_logical_table(logical_table);
+    fn set_logical_region(&mut self, logical_region: bool) {
+        self.properties.set_logical_region(logical_region);
     }
 }
 

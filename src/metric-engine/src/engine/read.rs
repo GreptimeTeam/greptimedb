@@ -84,7 +84,7 @@ impl MetricEngineInner {
             .handle_query(data_region_id, request)
             .await
             .context(MitoReadOperationSnafu)?;
-        scanner.set_logical_table(true);
+        scanner.set_logical_region(true);
 
         Ok(scanner)
     }
