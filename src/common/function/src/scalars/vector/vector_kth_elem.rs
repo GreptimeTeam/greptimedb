@@ -54,7 +54,7 @@ impl Function for VectorKthElemFunction {
 
     fn return_type(
         &self,
-        _imput_types: &[ConcreteDataType],
+        _input_types: &[ConcreteDataType],
     ) -> common_query::error::Result<ConcreteDataType> {
         Ok(ConcreteDataType::float32_datatype())
     }
@@ -65,9 +65,7 @@ impl Function for VectorKthElemFunction {
                 ConcreteDataType::string_datatype(),
                 ConcreteDataType::binary_datatype(),
             ],
-            vec![
-                ConcreteDataType::int64_datatype(),
-            ],
+            vec![ConcreteDataType::int64_datatype()],
         )
     }
 
@@ -126,7 +124,7 @@ impl Function for VectorKthElemFunction {
                 InvalidFuncArgsSnafu {
                     err_msg: format!(
                         "Out of range: k must be in the range [0, {}], but got k = {}.",
-                        arg0.len() - 1 ,
+                        arg0.len() - 1,
                         k
                     ),
                 }
