@@ -230,6 +230,10 @@ impl RegionScanner for UnorderedScan {
         self.stream_ctx.input.mapper.output_schema()
     }
 
+    fn metadata(&self) -> RegionMetadataRef {
+        self.stream_ctx.input.mapper.metadata().clone()
+    }
+
     fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {
         self.properties.prepare(request);
         Ok(())
@@ -244,8 +248,8 @@ impl RegionScanner for UnorderedScan {
         predicate.map(|p| !p.exprs().is_empty()).unwrap_or(false)
     }
 
-    fn metadata(&self) -> RegionMetadataRef {
-        self.stream_ctx.input.mapper.metadata().clone()
+    fn set_logical_table(&mut self, logical_table: bool) {
+        self.properties.set_logical_table(logical_table);
     }
 }
 
