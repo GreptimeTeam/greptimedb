@@ -30,8 +30,8 @@ use tokio::time::Instant;
 
 use crate::database::{parse_proxy_opts, DatabaseClient};
 use crate::error::{
-    EmptyResultSnafu, Error, OpenDalSnafu, OutputDirNotSetSnafu, Result,
-    S3ConfigNotSetSnafu, SchemaNotFoundSnafu,
+    EmptyResultSnafu, Error, OpenDalSnafu, OutputDirNotSetSnafu, Result, S3ConfigNotSetSnafu,
+    SchemaNotFoundSnafu,
 };
 use crate::{database, Tool};
 
@@ -364,50 +364,23 @@ impl Export {
         let timer = Instant::now();
         let db_names = self.get_db_names().await?;
         let db_count = db_names.len();
-        let operator = if self.s3 {
-            Some(self.build_s3_operator().await?)
-        } else {
-            Some(self.build_fs_operator().await?)
-        };
+        let operator = self.build_operator().await?;
 
         for schema in db_names {
             let create_database = self
                 .show_create("DATABASE", &self.catalog, &schema, None)
                 .await?;
 
-            let op = operator.as_ref().unwrap();
-            if self.s3 {
-                let create_file_key = format!("{}/{}/create_database.sql", self.catalog, schema);
-                let content = create_database.into_bytes();
-                op.write(&create_file_key, content)
-                    .await
-                    .context(OpenDalSnafu)?;
-                info!(
-                    "Exported {}.{} database creation SQL to s3://{}/{}",
-                    self.catalog,
-                    schema,
-                    self.s3_bucket.as_ref().unwrap(),
-                    create_file_key
-                );
-            } else {
-                let db_dir = format!("{}/{}/", self.catalog, schema);
-                op.create_dir(&db_dir).await.context(OpenDalSnafu)?;
-                let file_path = format!("{}/create_database.sql", db_dir.trim_end_matches('/'));
-                op.write(&file_path, create_database.into_bytes())
-                    .await
-                    .context(OpenDalSnafu)?;
-                info!(
-                    "Exported {}.{} database creation SQL to {}",
-                    self.catalog,
-                    schema,
-                    self.output_dir
-                        .as_ref()
-                        .unwrap_or(&String::new())
-                        .to_owned()
-                        + "/"
-                        + &file_path
-                );
-            }
+            let file_path = self.get_file_path(&schema, "create_database.sql");
+            self.write_to_storage(&operator, &file_path, create_database.into_bytes())
+                .await?;
+
+            info!(
+                "Exported {}.{} database creation SQL to {}",
+                self.catalog,
+                schema,
+                self.format_output_path(&file_path)
+            );
         }
 
         let elapsed = timer.elapsed();
@@ -421,12 +394,9 @@ impl Export {
         let semaphore = Arc::new(Semaphore::new(self.parallelism));
         let db_names = self.get_db_names().await?;
         let db_count = db_names.len();
-        let operator = if self.s3 {
-            Some(Arc::new(self.build_s3_operator().await?))
-        } else {
-            Some(Arc::new(self.build_fs_operator().await?))
-        };
+        let operator = Arc::new(self.build_operator().await?);
         let mut tasks = Vec::with_capacity(db_names.len());
+
         for schema in db_names {
             let semaphore_moved = semaphore.clone();
             let export_self = self.clone();
@@ -436,95 +406,57 @@ impl Export {
                 let (metric_physical_tables, remaining_tables, views) = export_self
                     .get_table_list(&export_self.catalog, &schema)
                     .await?;
-                // Safety: operator must be fs or s3
-                let op = operator.unwrap();
-                if export_self.s3 {
-                    let create_file_key =
-                        format!("{}/{}/create_tables.sql", export_self.catalog, schema);
-                    let mut content = Vec::new();
-                    for (c, s, t) in metric_physical_tables.iter().chain(&remaining_tables) {
-                        let create_table = export_self.show_create("TABLE", c, s, Some(t)).await?;
-                        content.extend_from_slice(create_table.as_bytes());
-                    }
-                    for (c, s, v) in &views {
-                        let create_view = export_self.show_create("VIEW", c, s, Some(v)).await?;
-                        content.extend_from_slice(create_view.as_bytes());
-                    }
-                    op.write(&create_file_key, content)
-                        .await
-                        .context(OpenDalSnafu)?;
-                } else {
+
+                // Create directory if needed for file system storage
+                if !export_self.s3 {
                     let db_dir = format!("{}/{}/", export_self.catalog, schema);
-                    op.create_dir(&db_dir).await.context(OpenDalSnafu)?;
-                    let file_path = format!("{}/create_tables.sql", db_dir.trim_end_matches('/'));
-
-                    let mut content = Vec::new();
-                    for (c, s, t) in metric_physical_tables.iter().chain(remaining_tables.iter()) {
-                        let create_table = export_self.show_create("TABLE", c, s, Some(t)).await?;
-                        content.extend_from_slice(create_table.as_bytes());
-                    }
-                    for (c, s, v) in views.iter() {
-                        let create_view = export_self.show_create("VIEW", c, s, Some(v)).await?;
-                        content.extend_from_slice(create_view.as_bytes());
-                    }
-
-                    op.write(&file_path, content).await.context(OpenDalSnafu)?;
-
-                    info!(
-                        "Finished exporting {}.{schema} with {} table schemas to path: {}",
-                        export_self.catalog,
-                        metric_physical_tables.len() + remaining_tables.len() + views.len(),
-                        export_self
-                            .output_dir
-                            .as_ref()
-                            .unwrap_or(&String::new())
-                            .to_owned()
-                            + "/"
-                            + &db_dir
-                    );
+                    operator.create_dir(&db_dir).await.context(OpenDalSnafu)?;
                 }
+
+                let file_path = export_self.get_file_path(&schema, "create_tables.sql");
+                let mut content = Vec::new();
+
+                // Add table creation SQL
+                for (c, s, t) in metric_physical_tables.iter().chain(&remaining_tables) {
+                    let create_table = export_self.show_create("TABLE", c, s, Some(t)).await?;
+                    content.extend_from_slice(create_table.as_bytes());
+                }
+
+                // Add view creation SQL
+                for (c, s, v) in &views {
+                    let create_view = export_self.show_create("VIEW", c, s, Some(v)).await?;
+                    content.extend_from_slice(create_view.as_bytes());
+                }
+
+                // Write to storage
+                export_self
+                    .write_to_storage(&operator, &file_path, content)
+                    .await?;
+
                 info!(
                     "Finished exporting {}.{schema} with {} table schemas to path: {}",
                     export_self.catalog,
                     metric_physical_tables.len() + remaining_tables.len() + views.len(),
-                    if export_self.s3 {
-                        format!(
-                            "s3://{}/{}/{}/create_tables.sql",
-                            // Safety: s3 options are required
-                            export_self.s3_bucket.clone().unwrap(),
-                            export_self.catalog,
-                            schema
-                        )
-                    } else {
-                        export_self
-                            .output_dir
-                            .as_ref()
-                            .unwrap_or(&String::new())
-                            .to_owned()
-                            + "/"
-                            + &export_self.catalog
-                            + "/"
-                            + &schema
-                            + "/create_tables.sql"
-                    }
+                    export_self.format_output_path(&file_path)
                 );
+
                 Ok::<(), Error>(())
             });
         }
-        let success = futures::future::join_all(tasks)
-            .await
-            .into_iter()
-            .filter(|r| match r {
-                Ok(_) => true,
-                Err(e) => {
-                    error!(e; "export schema job failed");
-                    false
-                }
-            })
-            .count();
+
+        let success = self.execute_tasks(tasks).await;
         let elapsed = timer.elapsed();
         info!("Success {success}/{db_count} jobs, cost: {elapsed:?}");
+
         Ok(())
+    }
+
+    async fn build_operator(&self) -> Result<Operator> {
+        if self.s3 {
+            self.build_s3_operator().await
+        } else {
+            self.build_fs_operator().await
+        }
     }
 
     async fn build_s3_operator(&self) -> Result<Operator> {
@@ -576,62 +508,27 @@ impl Export {
         let db_names = self.get_db_names().await?;
         let db_count = db_names.len();
         let mut tasks = Vec::with_capacity(db_count);
-        let s3_operator = if self.s3 {
-            Some(Arc::new(self.build_s3_operator().await?))
-        } else {
-            None
-        };
-
+        let operator = Arc::new(self.build_operator().await?);
         let with_options = build_with_options(&self.start_time, &self.end_time);
 
         for schema in db_names {
             let semaphore_moved = semaphore.clone();
             let export_self = self.clone();
             let with_options_clone = with_options.clone();
-            let s3_operator = s3_operator.clone();
+            let operator = operator.clone();
+
             tasks.push(async move {
                 let _permit = semaphore_moved.acquire().await.unwrap();
 
-                let db_dir = format!("{}/{}/", export_self.catalog, schema);
+                // Create directory if not using S3
                 if !export_self.s3 {
-                    let op = Arc::new(export_self.build_fs_operator().await?);
-                    op.create_dir(&db_dir).await.context(OpenDalSnafu)?;
+                    let db_dir = format!("{}/{}/", export_self.catalog, schema);
+                    operator.create_dir(&db_dir).await.context(OpenDalSnafu)?;
                 }
 
-                let (path, connection_part) = if export_self.s3 {
-                    let s3_path = format!(
-                        "s3://{}/{}/{}/",
-                        // Safety: s3 options are required
-                        export_self.s3_bucket.as_ref().unwrap(),
-                        export_self.catalog,
-                        schema
-                    );
-                    // endpoint is optional
-                    let endpoint_option = if let Some(endpoint) = export_self.s3_endpoint.as_ref() {
-                        format!(", ENDPOINT='{}'", endpoint)
-                    } else {
-                        String::new()
-                    };
-                    // Safety: all s3 options are required
-                    let connection_options = format!(
-                        "ACCESS_KEY_ID='{}', SECRET_ACCESS_KEY='{}', REGION='{}'{}",
-                        export_self.s3_access_key.as_ref().unwrap(),
-                        export_self.s3_secret_key.as_ref().unwrap(),
-                        export_self.s3_region.as_ref().unwrap(),
-                        endpoint_option
-                    );
-                    (s3_path, format!(" CONNECTION ({})", connection_options))
-                } else {
-                    (
-                        export_self
-                            .catalog_path()
-                            .join(format!("{schema}/"))
-                            .to_string_lossy()
-                            .to_string(),
-                        String::new(),
-                    )
-                };
+                let (path, connection_part) = export_self.get_storage_params(&schema);
 
+                // Execute COPY DATABASE TO command
                 let sql = format!(
                     r#"COPY DATABASE "{}"."{}" TO '{}' WITH ({}){};"#,
                     export_self.catalog, schema, path, with_options_clone, connection_part
@@ -643,63 +540,121 @@ impl Export {
                     export_self.catalog, schema, path
                 );
 
+                // Create copy_from.sql file
                 let copy_database_from_sql = format!(
                     r#"COPY DATABASE "{}"."{}" FROM '{}' WITH ({}){};"#,
                     export_self.catalog, schema, path, with_options_clone, connection_part
                 );
 
-                // for copy_from.sql
-                if let Some(op) = s3_operator {
-                    let copy_from_key = format!("{}/{}/copy_from.sql", export_self.catalog, schema);
-                    op.write(&copy_from_key, copy_database_from_sql.into_bytes())
-                        .await
-                        .context(OpenDalSnafu)?;
-                    info!(
-                        "Finished exporting {}.{} copy_from.sql to s3://{}/{}",
-                        export_self.catalog,
-                        schema,
-                        export_self.s3_bucket.as_ref().unwrap(),
-                        copy_from_key
-                    );
-                } else {
-                    let op = Arc::new(export_self.build_fs_operator().await?);
-                    let copy_from_path =
-                        format!("{}/{}/copy_from.sql", export_self.catalog, schema);
-                    op.write(&copy_from_path, copy_database_from_sql.into_bytes())
-                        .await
-                        .context(OpenDalSnafu)?;
-                    info!(
-                        "Finished exporting {}.{} copy_from.sql to local path: {}",
-                        export_self.catalog,
-                        schema,
-                        export_self
-                            .output_dir
-                            .as_ref()
-                            .unwrap_or(&String::new())
-                            .to_owned()
-                            + "/"
-                            + &copy_from_path
-                    );
-                }
+                let copy_from_path = export_self.get_file_path(&schema, "copy_from.sql");
+                export_self
+                    .write_to_storage(
+                        &operator,
+                        &copy_from_path,
+                        copy_database_from_sql.into_bytes(),
+                    )
+                    .await?;
+
+                info!(
+                    "Finished exporting {}.{} copy_from.sql to {}",
+                    export_self.catalog,
+                    schema,
+                    export_self.format_output_path(&copy_from_path)
+                );
 
                 Ok::<(), Error>(())
             });
         }
-        let success = futures::future::join_all(tasks)
+
+        let success = self.execute_tasks(tasks).await;
+        let elapsed = timer.elapsed();
+        info!("Success {success}/{db_count} jobs, costs: {elapsed:?}");
+
+        Ok(())
+    }
+
+    fn get_file_path(&self, schema: &str, file_name: &str) -> String {
+        format!("{}/{}/{}", self.catalog, schema, file_name)
+    }
+
+    fn format_output_path(&self, file_path: &str) -> String {
+        if self.s3 {
+            format!(
+                "s3://{}/{}",
+                self.s3_bucket.as_ref().unwrap_or(&String::new()),
+                file_path
+            )
+        } else {
+            format!(
+                "{}/{}",
+                self.output_dir.as_ref().unwrap_or(&String::new()),
+                file_path
+            )
+        }
+    }
+
+    async fn write_to_storage(
+        &self,
+        op: &Operator,
+        file_path: &str,
+        content: Vec<u8>,
+    ) -> Result<()> {
+        op.write(file_path, content).await.context(OpenDalSnafu)
+    }
+
+    fn get_storage_params(&self, schema: &str) -> (String, String) {
+        if self.s3 {
+            let s3_path = format!(
+                "s3://{}/{}/{}/",
+                // Safety: s3_bucket is required when s3 is enabled
+                self.s3_bucket.as_ref().unwrap(),
+                self.catalog,
+                schema
+            );
+
+            // endpoint is optional
+            let endpoint_option = if let Some(endpoint) = self.s3_endpoint.as_ref() {
+                format!(", ENDPOINT='{}'", endpoint)
+            } else {
+                String::new()
+            };
+
+            // Safety: All s3 options are required
+            let connection_options = format!(
+                "ACCESS_KEY_ID='{}', SECRET_ACCESS_KEY='{}', REGION='{}'{}",
+                self.s3_access_key.as_ref().unwrap(),
+                self.s3_secret_key.as_ref().unwrap(),
+                self.s3_region.as_ref().unwrap(),
+                endpoint_option
+            );
+
+            (s3_path, format!(" CONNECTION ({})", connection_options))
+        } else {
+            (
+                self.catalog_path()
+                    .join(format!("{schema}/"))
+                    .to_string_lossy()
+                    .to_string(),
+                String::new(),
+            )
+        }
+    }
+
+    async fn execute_tasks(
+        &self,
+        tasks: Vec<impl std::future::Future<Output = Result<()>>>,
+    ) -> usize {
+        futures::future::join_all(tasks)
             .await
             .into_iter()
             .filter(|r| match r {
                 Ok(_) => true,
                 Err(e) => {
-                    error!(e; "export database job failed");
+                    error!(e; "export job failed");
                     false
                 }
             })
-            .count();
-        let elapsed = timer.elapsed();
-        info!("Success {success}/{db_count} jobs, costs: {elapsed:?}");
-
-        Ok(())
+            .count()
     }
 }
 
