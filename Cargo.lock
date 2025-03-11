@@ -2016,6 +2016,7 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "bincode",
+ "chrono",
  "common-base",
  "common-catalog",
  "common-error",
@@ -4168,6 +4169,7 @@ dependencies = [
  "bytes",
  "cache",
  "catalog",
+ "chrono",
  "client",
  "common-base",
  "common-catalog",
@@ -4702,7 +4704,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=d92c9ac4e90ef4abdcf5c2eaf5a164e18ba09486#d92c9ac4e90ef4abdcf5c2eaf5a164e18ba09486"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=c5419bbd20cb42e568ec325a4d71a3c94cc327e1#c5419bbd20cb42e568ec325a4d71a3c94cc327e1"
 dependencies = [
  "prost 0.13.3",
  "serde",

@@ -461,6 +461,8 @@ mod tests {
             expire_after: Some(300),
             comment: "hi".to_string(),
             options: Default::default(),
+            created_time: chrono::Utc::now(),
+            updated_time: chrono::Utc::now(),
         }
     }
 
@@ -632,6 +634,8 @@ mod tests {
             expire_after: Some(300),
             comment: "hi".to_string(),
             options: Default::default(),
+            created_time: chrono::Utc::now(),
+            updated_time: chrono::Utc::now(),
         };
         let err = flow_metadata_manager
             .create_flow_metadata(flow_id, flow_value, flow_routes.clone())
@@ -869,6 +873,8 @@ mod tests {
             expire_after: Some(300),
             comment: "hi".to_string(),
             options: Default::default(),
+            created_time: chrono::Utc::now(),
+            updated_time: chrono::Utc::now(),
         };
         let err = flow_metadata_manager
             .update_flow_metadata(
