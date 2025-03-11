@@ -28,12 +28,12 @@ use crate::scalars::vector::impl_conv::{as_veclit, as_veclit_if_const, veclit_to
 
 const NAME: &str = "vec_subvector";
 
-/// Returns a subvector from start to end index.
+/// Returns a subvector from start(included) to end(excluded) index.
 ///
 /// # Example
 ///
 /// ```sql
-/// SELECT vec_subvector("[1, 2, 3, 4, 5]", 1, 3) as result;
+/// SELECT vec_to_string(vec_subvector("[1, 2, 3, 4, 5]", 1, 3)) as result;
 ///
 /// +---------+
 /// | result  |
