@@ -5669,7 +5669,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "p95 of write-ahead logs write size as second",
+      "description": "Write-ahead logs write size as bytes. This chart includes stats of p95 and p99 size by instance, total WAL write rate.",
       "fieldConfig": {
         "defaults": {
           "color": {
