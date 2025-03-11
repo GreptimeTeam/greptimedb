@@ -23,7 +23,7 @@ use index::bloom_filter::reader::BloomFilterReaderImpl;
 use index::fulltext_index::search::{FulltextIndexSearcher, RowId, TantivyFulltextIndexSearcher};
 use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
-use puffin::puffin_manager::{BlobGuard, DirGuard, PuffinManager, PuffinReader};
+use puffin::puffin_manager::{DirGuard, PuffinManager, PuffinReader};
 use smallvec::SmallVec;
 use snafu::ResultExt;
 use store_api::storage::{ColumnId, RegionId};

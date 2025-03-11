@@ -24,7 +24,7 @@ use index::inverted_index::search::index_apply::{
 };
 use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
-use puffin::puffin_manager::{BlobGuard, PuffinManager, PuffinReader};
+use puffin::puffin_manager::{PuffinManager, PuffinReader};
 use snafu::ResultExt;
 use store_api::storage::RegionId;
 
