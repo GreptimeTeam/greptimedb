@@ -68,6 +68,27 @@ impl Drop for PartitionMetricsInner {
     }
 }
 
+/// List of PartitionMetrics.
+#[derive(Default)]
+pub(crate) struct PartitionMetricsList(Mutex<Vec<Option<PartitionMetrics>>>);
+
+impl PartitionMetricsList {
+    /// Gets a [PartitionMetrics] at the specified partition.
+    pub(crate) fn get(&self, partition: usize) -> Option<PartitionMetrics> {
+        let list = self.0.lock().unwrap();
+        list.get(partition)?.clone()
+    }
+
+    /// Sets a new [PartitionMetrics] at the specified partition.
+    pub(crate) fn set(&self, partition: usize, metrics: PartitionMetrics) {
+        let mut list = self.0.lock().unwrap();
+        if list.len() <= partition {
+            list.resize(partition + 1, None);
+        }
+        list[partition] = Some(metrics);
+    }
+}
+
 /// Metrics while reading a partition.
 #[derive(Clone)]
 pub(crate) struct PartitionMetrics(Arc<Mutex<PartitionMetricsInner>>);

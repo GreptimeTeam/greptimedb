@@ -38,7 +38,9 @@ use crate::read::last_row::LastRowReader;
 use crate::read::merge::MergeReaderBuilder;
 use crate::read::range::RangeBuilderList;
 use crate::read::scan_region::{ScanInput, StreamContext};
-use crate::read::scan_util::{scan_file_ranges, scan_mem_ranges, PartitionMetrics};
+use crate::read::scan_util::{
+    scan_file_ranges, scan_mem_ranges, PartitionMetrics, PartitionMetricsList,
+};
 use crate::read::{BatchReader, BoxedBatchReader, ScannerMetrics, Source};
 use crate::region::options::MergeMode;
 
@@ -53,6 +55,9 @@ pub struct SeqScan {
     stream_ctx: Arc<StreamContext>,
     /// The scanner is used for compaction.
     compaction: bool,
+    /// Metrics for each partition.
+    /// The scanner only sets in query and keeps it empty during compaction.
+    metrics_list: PartitionMetricsList,
 }
 
 impl SeqScan {
@@ -69,6 +74,7 @@ impl SeqScan {
             properties,
             stream_ctx,
             compaction,
+            metrics_list: PartitionMetricsList::default(),
         }
     }
 
@@ -92,16 +98,7 @@ impl SeqScan {
     pub async fn build_reader_for_compaction(&self) -> Result<BoxedBatchReader> {
         assert!(self.compaction);
 
-        let part_metrics = PartitionMetrics::new(
-            self.stream_ctx.input.mapper.metadata().region_id,
-            0,
-            get_scanner_type(self.compaction),
-            self.stream_ctx.query_start,
-            ScannerMetrics {
-                prepare_scan_cost: self.stream_ctx.query_start.elapsed(),
-                ..Default::default()
-            },
-        );
+        let part_metrics = self.new_partition_metrics(0);
         debug_assert_eq!(1, self.properties.partitions.len());
         let partition_ranges = &self.properties.partitions[0];
 
@@ -411,8 +408,10 @@ impl SeqScan {
         }
     }
 
+    /// Creates a new partition metrics instance.
+    /// Sets the partition metrics for the given partition if it is not for compaction.
     fn new_partition_metrics(&self, partition: usize) -> PartitionMetrics {
-        PartitionMetrics::new(
+        let metrics = PartitionMetrics::new(
             self.stream_ctx.input.mapper.metadata().region_id,
             partition,
             get_scanner_type(self.compaction),
@@ -421,7 +420,13 @@ impl SeqScan {
                 prepare_scan_cost: self.stream_ctx.query_start.elapsed(),
                 ..Default::default()
             },
-        )
+        );
+
+        if !self.compaction {
+            self.metrics_list.set(partition, metrics.clone());
+        }
+
+        metrics
     }
 }
 

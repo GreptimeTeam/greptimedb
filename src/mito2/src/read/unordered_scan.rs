@@ -32,7 +32,9 @@ use store_api::region_engine::{PrepareRequest, RegionScanner, ScannerProperties}
 use crate::error::{PartitionOutOfRangeSnafu, Result};
 use crate::read::range::RangeBuilderList;
 use crate::read::scan_region::{ScanInput, StreamContext};
-use crate::read::scan_util::{scan_file_ranges, scan_mem_ranges, PartitionMetrics};
+use crate::read::scan_util::{
+    scan_file_ranges, scan_mem_ranges, PartitionMetrics, PartitionMetricsList,
+};
 use crate::read::{Batch, ScannerMetrics};
 
 /// Scans a region without providing any output ordering guarantee.
@@ -43,6 +45,8 @@ pub struct UnorderedScan {
     properties: ScannerProperties,
     /// Context of streams.
     stream_ctx: Arc<StreamContext>,
+    /// Metrics for each partition.
+    metrics_list: PartitionMetricsList,
 }
 
 impl UnorderedScan {
@@ -57,6 +61,7 @@ impl UnorderedScan {
         Self {
             properties,
             stream_ctx,
+            metrics_list: PartitionMetricsList::default(),
         }
     }
 
@@ -141,6 +146,7 @@ impl UnorderedScan {
                 ..Default::default()
             },
         );
+        self.metrics_list.set(partition, part_metrics.clone());
         let stream_ctx = self.stream_ctx.clone();
         let part_ranges = self.properties.partitions[partition].clone();
         let distinguish_range = self.properties.distinguish_partition_range;
