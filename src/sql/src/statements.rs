@@ -92,16 +92,6 @@ fn parse_string_to_value(
                 .fail()
             }
         }
-        ConcreteDataType::DateTime(_) => {
-            if let Ok(datetime) = common_time::datetime::DateTime::from_str(&s, timezone) {
-                Ok(Value::DateTime(datetime))
-            } else {
-                ParseSqlValueSnafu {
-                    msg: format!("Failed to parse {s} to DateTime value"),
-                }
-                .fail()
-            }
-        }
         ConcreteDataType::Timestamp(t) => {
             if let Ok(ts) = Timestamp::from_str(&s, timezone) {
                 Ok(Value::Timestamp(ts.convert_to(t.unit()).context(
@@ -321,7 +311,6 @@ pub fn sql_value_to_value(
             | Value::Float64(_)
             | Value::Decimal128(_)
             | Value::Date(_)
-            | Value::DateTime(_)
             | Value::Timestamp(_)
             | Value::Time(_)
             | Value::Duration(_)
@@ -367,7 +356,6 @@ pub fn value_to_sql_value(val: &Value) -> Result<SqlValue> {
         Value::Float64(v) => SqlValue::Number(v.to_string(), false),
         Value::Boolean(b) => SqlValue::Boolean(*b),
         Value::Date(d) => SqlValue::SingleQuotedString(d.to_string()),
-        Value::DateTime(d) => SqlValue::SingleQuotedString(d.to_string()),
         Value::Timestamp(ts) => SqlValue::SingleQuotedString(ts.to_iso8601_string()),
         Value::String(s) => SqlValue::SingleQuotedString(s.as_utf8().to_string()),
         Value::Null => SqlValue::Null,
@@ -591,7 +579,7 @@ pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Co
         | SqlDataType::Blob(_)
         | SqlDataType::Bytea
         | SqlDataType::Varbinary(_) => Ok(ConcreteDataType::binary_datatype()),
-        SqlDataType::Datetime(_) => Ok(ConcreteDataType::datetime_datatype()),
+        SqlDataType::Datetime(_) => Ok(ConcreteDataType::timestamp_microsecond_datatype()),
         SqlDataType::Timestamp(precision, _) => Ok(precision
             .as_ref()
             .map(|v| TimestampType::try_from(*v))
@@ -651,7 +639,6 @@ pub fn concrete_data_type_to_sql_data_type(data_type: &ConcreteDataType) -> Resu
         ConcreteDataType::Float64(_) => Ok(SqlDataType::Double),
         ConcreteDataType::Boolean(_) => Ok(SqlDataType::Boolean),
         ConcreteDataType::Date(_) => Ok(SqlDataType::Date),
-        ConcreteDataType::DateTime(_) => Ok(SqlDataType::Datetime(None)),
         ConcreteDataType::Timestamp(ts_type) => Ok(SqlDataType::Timestamp(
             Some(ts_type.precision()),
             TimezoneInfo::None,
@@ -687,7 +674,6 @@ mod tests {
 
     use api::v1::ColumnDataType;
     use common_time::timestamp::TimeUnit;
-    use common_time::timezone::set_default_timezone;
     use datatypes::schema::{
         FulltextAnalyzer, COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE,
     };
@@ -764,7 +750,7 @@ mod tests {
         );
         check_type(
             SqlDataType::Datetime(None),
-            ConcreteDataType::datetime_datatype(),
+            ConcreteDataType::timestamp_microsecond_datatype(),
         );
         check_type(
             SqlDataType::Interval,
@@ -992,37 +978,6 @@ mod tests {
         } else {
             unreachable!()
         }
-    }
-
-    #[test]
-    pub fn test_parse_datetime_literal() {
-        set_default_timezone(Some("Asia/Shanghai")).unwrap();
-        let value = sql_value_to_value(
-            "datetime_col",
-            &ConcreteDataType::datetime_datatype(),
-            &SqlValue::DoubleQuotedString("2022-02-22 00:01:03+0800".to_string()),
-            None,
-            None,
-        )
-        .unwrap();
-        assert_eq!(ConcreteDataType::datetime_datatype(), value.data_type());
-        if let Value::DateTime(d) = value {
-            assert_eq!("2022-02-22 00:01:03+0800", d.to_string());
-        } else {
-            unreachable!()
-        }
-    }
-
-    #[test]
-    pub fn test_parse_illegal_datetime_literal() {
-        assert!(sql_value_to_value(
-            "datetime_col",
-            &ConcreteDataType::datetime_datatype(),
-            &SqlValue::DoubleQuotedString("2022-02-22 00:01:61".to_string()),
-            None,
-            None
-        )
-        .is_err());
     }
 
     #[test]

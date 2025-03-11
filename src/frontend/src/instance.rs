@@ -26,6 +26,7 @@ mod region_query;
 pub mod standalone;
 
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
@@ -466,6 +467,21 @@ impl PrometheusHandler for Instance {
         ctx: &QueryContextRef,
     ) -> server_error::Result<Vec<String>> {
         self.handle_query_metric_names(matchers, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(ExecuteQuerySnafu)
+    }
+
+    async fn query_label_values(
+        &self,
+        metric: String,
+        label_name: String,
+        matchers: Vec<Matcher>,
+        start: SystemTime,
+        end: SystemTime,
+        ctx: &QueryContextRef,
+    ) -> server_error::Result<Vec<String>> {
+        self.handle_query_label_values(metric, label_name, matchers, start, end, ctx)
             .await
             .map_err(BoxedError::new)
             .context(ExecuteQuerySnafu)

@@ -35,7 +35,7 @@ use common_runtime::RepeatedTask;
 use raft_engine::{Config, Engine, LogBatch, ReadableSize, RecoveryMode};
 use snafu::{IntoError, ResultExt};
 
-use crate::error::{self, Error, IoSnafu, RaftEngineSnafu, StartGcTaskSnafu};
+use crate::error::{self, Error, IoSnafu, RaftEngineSnafu, StartWalTaskSnafu};
 use crate::raft_engine::log_store::PurgeExpiredFilesFunction;
 
 pub(crate) const SYSTEM_NAMESPACE: u64 = 0;
@@ -93,7 +93,8 @@ impl RaftEngineBackend {
         );
         gc_task
             .start(common_runtime::global_runtime())
-            .context(StartGcTaskSnafu)?;
+            .context(StartWalTaskSnafu { name: "gc_task" })?;
+
         Ok(Self {
             engine: RwLock::new(engine),
             _gc_task: gc_task,

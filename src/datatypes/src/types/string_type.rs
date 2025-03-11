@@ -75,7 +75,6 @@ impl DataType for StringType {
             Value::Float64(v) => Some(Value::String(StringBytes::from(v.to_string()))),
             Value::String(v) => Some(Value::String(v)),
             Value::Date(v) => Some(Value::String(StringBytes::from(v.to_string()))),
-            Value::DateTime(v) => Some(Value::String(StringBytes::from(v.to_string()))),
             Value::Timestamp(v) => Some(Value::String(StringBytes::from(v.to_iso8601_string()))),
             Value::Time(v) => Some(Value::String(StringBytes::from(v.to_iso8601_string()))),
             Value::IntervalYearMonth(v) => {

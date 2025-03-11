@@ -579,6 +579,9 @@ mod tests {
     use crate::handler::HeartbeatMailbox;
     use crate::procedure::region_migration::open_candidate_region::OpenCandidateRegion;
     use crate::procedure::region_migration::test_util::*;
+    use crate::procedure::test_util::{
+        new_downgrade_region_reply, new_open_region_reply, new_upgrade_region_reply,
+    };
     use crate::service::mailbox::Channel;
 
     fn new_persistent_context() -> PersistentContext {

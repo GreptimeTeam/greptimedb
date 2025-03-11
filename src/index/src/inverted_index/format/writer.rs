@@ -18,14 +18,14 @@ mod single;
 use std::num::NonZeroUsize;
 
 use async_trait::async_trait;
-use common_base::BitVec;
 use futures::Stream;
 
+use crate::bitmap::{Bitmap, BitmapType};
 use crate::inverted_index::error::Result;
 pub use crate::inverted_index::format::writer::blob::InvertedIndexBlobWriter;
 use crate::Bytes;
 
-pub type ValueStream = Box<dyn Stream<Item = Result<(Bytes, BitVec)>> + Send + Unpin>;
+pub type ValueStream = Box<dyn Stream<Item = Result<(Bytes, Bitmap)>> + Send + Unpin>;
 
 /// Trait for writing inverted index data to underlying storage.
 #[mockall::automock]
@@ -37,11 +37,13 @@ pub trait InvertedIndexWriter: Send {
     /// * `null_bitmap` marks positions of null entries.
     /// * `values` is a stream of values and their locations, yielded lexicographically.
     ///    Errors occur if the values are out of order.
+    /// * `bitmap_type` is the type of bitmap to encode.
     async fn add_index(
         &mut self,
         name: String,
-        null_bitmap: BitVec,
+        null_bitmap: Bitmap,
         values: ValueStream,
+        bitmap_type: BitmapType,
     ) -> Result<()>;
 
     /// Finalizes the index writing process, ensuring all data is written.
