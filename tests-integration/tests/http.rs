@@ -666,6 +666,32 @@ pub async fn test_prom_http_api(store_type: StorageType) {
         serde_json::from_value::<PrometheusResponse>(json!(["host1", "host2"])).unwrap()
     );
 
+    // single match[]
+    let res = client
+        .get("/v1/prometheus/api/v1/label/host/values?match[]=demo&start=0&end=300")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = serde_json::from_str::<PrometheusJsonResponse>(&res.text().await).unwrap();
+    assert_eq!(body.status, "success");
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PrometheusResponse>(json!(["host1"])).unwrap()
+    );
+
+    // single match[]
+    let res = client
+        .get("/v1/prometheus/api/v1/label/idc/values?match[]=demo_metrics_with_nanos&start=0&end=600")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = serde_json::from_str::<PrometheusJsonResponse>(&res.text().await).unwrap();
+    assert_eq!(body.status, "success");
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PrometheusResponse>(json!(["idc1"])).unwrap()
+    );
+
     // search field name
     let res = client
         .get("/v1/prometheus/api/v1/label/__field__/values?match[]=demo")
@@ -745,6 +771,7 @@ pub async fn test_prom_http_api(store_type: StorageType) {
         PrometheusResponse::Labels(vec![
             "demo".to_string(),
             "demo_metrics".to_string(),
+            "demo_metrics_with_nanos".to_string(),
             "logic_table".to_string(),
             "numbers".to_string()
         ])

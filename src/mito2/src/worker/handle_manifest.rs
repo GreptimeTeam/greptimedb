@@ -329,6 +329,15 @@ async fn edit_region(
 
             let index_key = IndexKey::new(region_id, file_meta.file_id, FileType::Parquet);
             let remote_path = location::sst_file_path(layer.region_dir(), file_meta.file_id);
+
+            let is_index_exist = file_meta.exists_index();
+            let index_file_size = file_meta.index_file_size();
+
+            let index_file_index_key =
+                IndexKey::new(region_id, file_meta.file_id, FileType::Puffin);
+            let index_remote_path =
+                location::index_file_path(layer.region_dir(), file_meta.file_id);
+
             let file_size = file_meta.file_size;
             common_runtime::spawn_global(async move {
                 if write_cache
@@ -344,6 +353,22 @@ async fn edit_region(
                         .await;
 
                     listener.on_file_cache_filled(index_key.file_id);
+                }
+                if is_index_exist {
+                    // also download puffin file
+                    if let Err(err) = write_cache
+                        .download(
+                            index_file_index_key,
+                            &index_remote_path,
+                            layer.object_store(),
+                            index_file_size,
+                        )
+                        .await
+                    {
+                        common_telemetry::error!(
+                            err; "Failed to download puffin file, region_id: {}, index_file_index_key: {:?}, index_remote_path: {}", region_id, index_file_index_key, index_remote_path
+                        );
+                    }
                 }
             });
         }
