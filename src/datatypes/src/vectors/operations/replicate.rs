@@ -41,7 +41,7 @@ mod tests {
     use std::sync::Arc;
 
     use common_time::timestamp::TimeUnit;
-    use common_time::{Date, DateTime, Timestamp};
+    use common_time::{Date, Timestamp};
     use paste::paste;
 
     use super::*;
@@ -161,8 +161,6 @@ mod tests {
     #[test]
     fn test_replicate_date_like() {
         impl_replicate_date_like_test!(DateVector, Date, new);
-        impl_replicate_date_like_test!(DateTimeVector, DateTime, new);
-
         impl_replicate_timestamp_test!(Second);
         impl_replicate_timestamp_test!(Millisecond);
         impl_replicate_timestamp_test!(Microsecond);

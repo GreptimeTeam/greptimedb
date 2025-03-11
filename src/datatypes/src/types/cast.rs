@@ -119,10 +119,6 @@ pub fn can_cast_type(src_value: &Value, dest_type: &ConcreteDataType) -> bool {
         (Date(_), Int32(_) | Timestamp(_) | String(_)) => true,
         (Int32(_) | String(_) | Timestamp(_), Date(_)) => true,
         (Date(_), Date(_)) => true,
-        // DateTime type
-        (DateTime(_), Int64(_) | Timestamp(_) | String(_)) => true,
-        (Int64(_) | Timestamp(_) | String(_), DateTime(_)) => true,
-        (DateTime(_), DateTime(_)) => true,
         // Timestamp type
         (Timestamp(_), Int64(_) | String(_)) => true,
         (Int64(_) | String(_), Timestamp(_)) => true,
@@ -175,7 +171,7 @@ mod tests {
     use common_base::bytes::StringBytes;
     use common_time::time::Time;
     use common_time::timezone::set_default_timezone;
-    use common_time::{Date, DateTime, Timestamp};
+    use common_time::{Date, Timestamp};
     use ordered_float::OrderedFloat;
 
     use super::*;
@@ -274,7 +270,6 @@ mod tests {
             null_datatype,
             boolean_datatype,
             date_datatype,
-            datetime_datatype,
             timestamp_second_datatype,
             binary_datatype
         );
@@ -287,23 +282,12 @@ mod tests {
             timestamp_second_datatype,
             string_datatype
         );
-
-        // datetime -> other types
-        test_can_cast!(
-            Value::DateTime(DateTime::from_str_system("2021-01-01 00:00:00").unwrap()),
-            null_datatype,
-            int64_datatype,
-            timestamp_second_datatype,
-            string_datatype
-        );
-
         // timestamp -> other types
         test_can_cast!(
             Value::Timestamp(Timestamp::from_str_utc("2021-01-01 00:00:00").unwrap()),
             null_datatype,
             int64_datatype,
             date_datatype,
-            datetime_datatype,
             string_datatype
         );
 

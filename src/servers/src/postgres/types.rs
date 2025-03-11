@@ -254,32 +254,6 @@ fn encode_array(
                 .collect::<PgWireResult<Vec<Option<StylingDate>>>>()?;
             builder.encode_field(&array)
         }
-        &ConcreteDataType::DateTime(_) => {
-            let array = value_list
-                .items()
-                .iter()
-                .map(|v| match v {
-                    Value::Null => Ok(None),
-                    Value::DateTime(v) => {
-                        if let Some(datetime) =
-                            v.to_chrono_datetime_with_timezone(Some(&query_ctx.timezone()))
-                        {
-                            let (style, order) =
-                                *query_ctx.configuration_parameter().pg_datetime_style();
-                            Ok(Some(StylingDateTime(datetime, style, order)))
-                        } else {
-                            Err(PgWireError::ApiError(Box::new(Error::Internal {
-                                err_msg: format!("Failed to convert date to postgres type {v:?}",),
-                            })))
-                        }
-                    }
-                    _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
-                        err_msg: format!("Invalid list item type, find {v:?}, expected date",),
-                    }))),
-                })
-                .collect::<PgWireResult<Vec<Option<StylingDateTime>>>>()?;
-            builder.encode_field(&array)
-        }
         &ConcreteDataType::Timestamp(_) => {
             let array = value_list
                 .items()
@@ -423,17 +397,6 @@ pub(super) fn encode_value(
                 })))
             }
         }
-        Value::DateTime(v) => {
-            if let Some(datetime) = v.to_chrono_datetime_with_timezone(Some(&query_ctx.timezone()))
-            {
-                let (style, order) = *query_ctx.configuration_parameter().pg_datetime_style();
-                builder.encode_field(&StylingDateTime(datetime, style, order))
-            } else {
-                Err(PgWireError::ApiError(Box::new(Error::Internal {
-                    err_msg: format!("Failed to convert date to postgres type {v:?}",),
-                })))
-            }
-        }
         Value::Timestamp(v) => {
             if let Some(datetime) = v.to_chrono_datetime_with_timezone(Some(&query_ctx.timezone()))
             {
@@ -481,7 +444,7 @@ pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
         &ConcreteDataType::Binary(_) | &ConcreteDataType::Vector(_) => Ok(Type::BYTEA),
         &ConcreteDataType::String(_) => Ok(Type::VARCHAR),
         &ConcreteDataType::Date(_) => Ok(Type::DATE),
-        &ConcreteDataType::DateTime(_) | &ConcreteDataType::Timestamp(_) => Ok(Type::TIMESTAMP),
+        &ConcreteDataType::Timestamp(_) => Ok(Type::TIMESTAMP),
         &ConcreteDataType::Time(_) => Ok(Type::TIME),
         &ConcreteDataType::Interval(_) => Ok(Type::INTERVAL),
         &ConcreteDataType::Decimal128(_) => Ok(Type::NUMERIC),
@@ -498,9 +461,7 @@ pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
             &ConcreteDataType::Binary(_) => Ok(Type::BYTEA_ARRAY),
             &ConcreteDataType::String(_) => Ok(Type::VARCHAR_ARRAY),
             &ConcreteDataType::Date(_) => Ok(Type::DATE_ARRAY),
-            &ConcreteDataType::DateTime(_) | &ConcreteDataType::Timestamp(_) => {
-                Ok(Type::TIMESTAMP_ARRAY)
-            }
+            &ConcreteDataType::Timestamp(_) => Ok(Type::TIMESTAMP_ARRAY),
             &ConcreteDataType::Time(_) => Ok(Type::TIME_ARRAY),
             &ConcreteDataType::Interval(_) => Ok(Type::INTERVAL_ARRAY),
             &ConcreteDataType::Decimal128(_) => Ok(Type::NUMERIC_ARRAY),
@@ -538,7 +499,9 @@ pub(super) fn type_pg_to_gt(origin: &Type) -> Result<ConcreteDataType> {
             common_time::timestamp::TimeUnit::Millisecond,
         )),
         &Type::DATE => Ok(ConcreteDataType::date_datatype()),
-        &Type::TIME => Ok(ConcreteDataType::datetime_datatype()),
+        &Type::TIME => Ok(ConcreteDataType::timestamp_datatype(
+            common_time::timestamp::TimeUnit::Microsecond,
+        )),
         &Type::CHAR_ARRAY => Ok(ConcreteDataType::list_datatype(
             ConcreteDataType::int8_datatype(),
         )),
@@ -717,9 +680,6 @@ pub(super) fn parameters_to_scalar_values(
                         ConcreteDataType::Timestamp(unit) => {
                             to_timestamp_scalar_value(data, unit, server_type)?
                         }
-                        ConcreteDataType::DateTime(_) => {
-                            ScalarValue::Date64(data.map(|d| d as i64))
-                        }
                         _ => {
                             return Err(invalid_parameter_error(
                                 "invalid_parameter_type",
@@ -745,9 +705,6 @@ pub(super) fn parameters_to_scalar_values(
                         ConcreteDataType::UInt64(_) => ScalarValue::UInt64(data.map(|n| n as u64)),
                         ConcreteDataType::Timestamp(unit) => {
                             to_timestamp_scalar_value(data, unit, server_type)?
-                        }
-                        ConcreteDataType::DateTime(_) => {
-                            ScalarValue::Date64(data.map(|d| d as i64))
                         }
                         _ => {
                             return Err(invalid_parameter_error(
@@ -775,7 +732,6 @@ pub(super) fn parameters_to_scalar_values(
                         ConcreteDataType::Timestamp(unit) => {
                             to_timestamp_scalar_value(data, unit, server_type)?
                         }
-                        ConcreteDataType::DateTime(_) => ScalarValue::Date64(data),
                         _ => {
                             return Err(invalid_parameter_error(
                                 "invalid_parameter_type",
@@ -863,9 +819,6 @@ pub(super) fn parameters_to_scalar_values(
                                 None,
                             ),
                         },
-                        ConcreteDataType::DateTime(_) => {
-                            ScalarValue::Date64(data.map(|d| d.and_utc().timestamp_millis()))
-                        }
                         _ => {
                             return Err(invalid_parameter_error(
                                 "invalid_parameter_type",
@@ -1245,13 +1198,6 @@ mod test {
             FieldInfo::new("dates".into(), None, None, Type::DATE, FieldFormat::Text),
             FieldInfo::new("times".into(), None, None, Type::TIME, FieldFormat::Text),
             FieldInfo::new(
-                "datetimes".into(),
-                None,
-                None,
-                Type::TIMESTAMP,
-                FieldFormat::Text,
-            ),
-            FieldInfo::new(
                 "timestamps".into(),
                 None,
                 None,
@@ -1334,7 +1280,6 @@ mod test {
             ConcreteDataType::binary_datatype(),
             ConcreteDataType::date_datatype(),
             ConcreteDataType::time_datatype(TimeUnit::Second),
-            ConcreteDataType::datetime_datatype(),
             ConcreteDataType::timestamp_datatype(TimeUnit::Second),
             ConcreteDataType::interval_datatype(IntervalUnit::YearMonth),
             ConcreteDataType::interval_datatype(IntervalUnit::DayTime),
@@ -1369,7 +1314,6 @@ mod test {
             Value::Binary("greptime".as_bytes().into()),
             Value::Date(1001i32.into()),
             Value::Time(1001i64.into()),
-            Value::DateTime(1000001i64.into()),
             Value::Timestamp(1000001i64.into()),
             Value::IntervalYearMonth(IntervalYearMonth::new(1)),
             Value::IntervalDayTime(IntervalDayTime::new(1, 10)),

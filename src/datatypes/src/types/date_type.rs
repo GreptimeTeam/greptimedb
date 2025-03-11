@@ -55,7 +55,6 @@ impl DataType for DateType {
             Value::Int32(v) => Some(Value::Date(Date::from(v))),
             Value::String(v) => Date::from_str_utc(v.as_utf8()).map(Value::Date).ok(),
             Value::Timestamp(v) => v.to_chrono_date().map(|date| Value::Date(date.into())),
-            Value::DateTime(v) => Some(Value::DateTime(v)),
             _ => None,
         }
     }
