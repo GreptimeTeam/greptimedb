@@ -39,7 +39,9 @@ use crate::read::last_row::LastRowReader;
 use crate::read::merge::MergeReaderBuilder;
 use crate::read::range::RangeBuilderList;
 use crate::read::scan_region::{ScanInput, StreamContext};
-use crate::read::scan_util::{scan_file_ranges, scan_mem_ranges, PartitionMetrics};
+use crate::read::scan_util::{
+    scan_file_ranges, scan_mem_ranges, PartitionMetrics, PartitionMetricsList,
+};
 use crate::read::{BatchReader, BoxedBatchReader, ScannerMetrics, Source};
 use crate::region::options::MergeMode;
 
@@ -54,6 +56,9 @@ pub struct SeqScan {
     stream_ctx: Arc<StreamContext>,
     /// The scanner is used for compaction.
     compaction: bool,
+    /// Metrics for each partition.
+    /// The scanner only sets in query and keeps it empty during compaction.
+    metrics_list: PartitionMetricsList,
 }
 
 impl SeqScan {
@@ -70,6 +75,7 @@ impl SeqScan {
             properties,
             stream_ctx,
             compaction,
+            metrics_list: PartitionMetricsList::default(),
         }
     }
 
@@ -414,13 +420,19 @@ impl SeqScan {
         metrics_set: &ExecutionPlanMetricsSet,
         partition: usize,
     ) -> PartitionMetrics {
-        PartitionMetrics::new(
+        let metrics = PartitionMetrics::new(
             self.stream_ctx.input.mapper.metadata().region_id,
             partition,
             get_scanner_type(self.compaction),
             self.stream_ctx.query_start,
             metrics_set,
-        )
+        );
+
+        if !self.compaction {
+            self.metrics_list.set(partition, metrics.clone());
+        }
+
+        metrics
     }
 }
 
