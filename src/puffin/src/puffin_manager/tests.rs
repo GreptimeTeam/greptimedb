@@ -23,9 +23,7 @@ use crate::blob_metadata::CompressionCodec;
 use crate::puffin_manager::file_accessor::MockFileAccessor;
 use crate::puffin_manager::fs_puffin_manager::FsPuffinManager;
 use crate::puffin_manager::stager::BoundedStager;
-use crate::puffin_manager::{
-    BlobGuard, DirGuard, PuffinManager, PuffinReader, PuffinWriter, PutOptions,
-};
+use crate::puffin_manager::{DirGuard, PuffinManager, PuffinReader, PuffinWriter, PutOptions};
 
 async fn new_bounded_stager(prefix: &str, capacity: u64) -> (TempDir, Arc<BoundedStager<String>>) {
     let staging_dir = create_temp_dir(prefix);

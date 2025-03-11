@@ -27,7 +27,7 @@ use async_trait::async_trait;
 use common_base::range_read::RangeReader;
 use futures::AsyncRead;
 
-use crate::blob_metadata::CompressionCodec;
+use crate::blob_metadata::{BlobMetadata, CompressionCodec};
 use crate::error::Result;
 use crate::file_metadata::FileMetadata;
 
@@ -87,9 +87,9 @@ pub trait PuffinReader {
 
     /// Reads a blob from the Puffin file.
     ///
-    /// The returned `BlobGuard` is used to access the blob data.
+    /// The returned `BlobWithMetadata` is used to access the blob data and its metadata.
     /// Users should hold the `BlobGuard` until they are done with the blob data.
-    async fn blob(&self, key: &str) -> Result<Self::Blob>;
+    async fn blob(&self, key: &str) -> Result<BlobWithMetadata<Self::Blob>>;
 
     /// Reads a directory from the Puffin file.
     ///
@@ -105,6 +105,28 @@ pub trait PuffinReader {
 pub trait BlobGuard {
     type Reader: RangeReader;
     async fn reader(&self) -> Result<Self::Reader>;
+}
+
+/// `BlobWithMetadata` provides access to the blob data and its metadata.
+pub struct BlobWithMetadata<B> {
+    blob: B,
+    metadata: BlobMetadata,
+}
+
+impl<B: BlobGuard> BlobWithMetadata<B> {
+    pub fn new(blob: B, metadata: BlobMetadata) -> Self {
+        Self { blob, metadata }
+    }
+
+    /// Returns the reader for the blob data.
+    pub async fn reader(&self) -> Result<B::Reader> {
+        self.blob.reader().await
+    }
+
+    /// Returns the metadata of the blob.
+    pub fn metadata(&self) -> &BlobMetadata {
+        &self.metadata
+    }
 }
 
 /// `DirGuard` is provided by the `PuffinReader` to access the directory in the filesystem.

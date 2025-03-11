@@ -675,7 +675,8 @@ mod tests {
     use api::v1::ColumnDataType;
     use common_time::timestamp::TimeUnit;
     use datatypes::schema::{
-        FulltextAnalyzer, COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE,
+        FulltextAnalyzer, COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_BACKEND,
+        COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE,
     };
     use datatypes::types::BooleanType;
     use datatypes::value::OrderedFloat;
@@ -1450,6 +1451,10 @@ mod tests {
                         (
                             COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE.to_string(),
                             "true".to_string(),
+                        ),
+                        (
+                            COLUMN_FULLTEXT_OPT_KEY_BACKEND.to_string(),
+                            "tantivy".to_string(),
                         ),
                     ])
                     .into(),

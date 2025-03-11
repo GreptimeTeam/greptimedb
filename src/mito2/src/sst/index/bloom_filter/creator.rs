@@ -351,7 +351,7 @@ pub(crate) mod tests {
     use index::bloom_filter::reader::{BloomFilterReader, BloomFilterReaderImpl};
     use object_store::services::Memory;
     use object_store::ObjectStore;
-    use puffin::puffin_manager::{BlobGuard, PuffinManager, PuffinReader};
+    use puffin::puffin_manager::{PuffinManager, PuffinReader};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
 

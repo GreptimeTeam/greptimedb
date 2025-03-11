@@ -151,7 +151,7 @@ pub fn as_skipping_index_type(skipping_index_type: PbSkippingIndexType) -> Skipp
 mod tests {
 
     use datatypes::data_type::ConcreteDataType;
-    use datatypes::schema::FulltextAnalyzer;
+    use datatypes::schema::{FulltextAnalyzer, FulltextBackend};
 
     use super::*;
     use crate::v1::ColumnDataType;
@@ -210,13 +210,14 @@ mod tests {
                 enable: true,
                 analyzer: FulltextAnalyzer::English,
                 case_sensitive: false,
+                backend: FulltextBackend::Tantivy,
             })
             .unwrap();
         schema.set_inverted_index(true);
         let options = options_from_column_schema(&schema).unwrap();
         assert_eq!(
             options.options.get(FULLTEXT_GRPC_KEY).unwrap(),
-            "{\"enable\":true,\"analyzer\":\"English\",\"case-sensitive\":false}"
+            "{\"enable\":true,\"analyzer\":\"English\",\"case-sensitive\":false,\"backend\":\"tantivy\"}"
         );
         assert_eq!(
             options.options.get(INVERTED_INDEX_GRPC_KEY).unwrap(),
@@ -230,11 +231,12 @@ mod tests {
             enable: true,
             analyzer: FulltextAnalyzer::English,
             case_sensitive: false,
+            backend: FulltextBackend::Tantivy,
         };
         let options = options_from_fulltext(&fulltext).unwrap().unwrap();
         assert_eq!(
             options.options.get(FULLTEXT_GRPC_KEY).unwrap(),
-            "{\"enable\":true,\"analyzer\":\"English\",\"case-sensitive\":false}"
+            "{\"enable\":true,\"analyzer\":\"English\",\"case-sensitive\":false,\"backend\":\"tantivy\"}"
         );
     }
 
