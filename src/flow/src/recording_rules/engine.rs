@@ -17,7 +17,6 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use api::v1::flow::FlowResponse;
-use client::Output;
 use common_error::ext::BoxedError;
 use common_meta::ddl::create_flow::FlowType;
 use common_meta::key::flow::FlowMetadataManagerRef;
@@ -35,6 +34,7 @@ use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use table::metadata::TableId;
+use table::requests::AUTO_CREATE_TABLE_KEY;
 use tokio::sync::oneshot::error::TryRecvError;
 use tokio::sync::{oneshot, RwLock};
 use tokio::time::Instant;
@@ -44,7 +44,7 @@ use super::{df_plan_to_sql, AddFilterRewriter, TimeWindowExpr};
 use crate::adapter::{CreateFlowArgs, FlowId, TableName};
 use crate::error::{
     DatafusionSnafu, DatatypesSnafu, ExternalSnafu, FlowAlreadyExistSnafu, InternalSnafu,
-    TableNotFoundMetaSnafu, TableNotFoundSnafu, TimeSnafu, UnexpectedSnafu,
+    InvalidRequestSnafu, TableNotFoundMetaSnafu, TableNotFoundSnafu, TimeSnafu, UnexpectedSnafu,
 };
 use crate::metrics::{METRIC_FLOW_RULE_ENGINE_QUERY_TIME, METRIC_FLOW_RULE_ENGINE_SLOW_QUERY};
 use crate::recording_rules::{find_plan_time_window_bound, find_time_window_expr, sql_to_df_plan};
@@ -329,7 +329,7 @@ impl RecordingRuleTask {
         &self,
         engine: &QueryEngineRef,
         frontend_client: &Arc<FrontendClient>,
-    ) -> Result<Option<(Output, Duration)>, Error> {
+    ) -> Result<Option<(u32, Duration)>, Error> {
         // use current time to test get a dirty time window, which should be safe
         let start = SystemTime::now();
         let ts = Timestamp::new_second(
@@ -346,12 +346,7 @@ impl RecordingRuleTask {
         self.execute_once(engine, frontend_client).await
     }
 
-    pub async fn gen_insert_sql(
-        &self,
-        engine: &QueryEngineRef,
-        query: &str,
-        query_schema_len: usize,
-    ) -> Result<Option<String>, Error> {
+    pub async fn gen_insert_sql(&self, engine: &QueryEngineRef) -> Result<Option<String>, Error> {
         let new_query = self.gen_query_with_time_window(engine.clone()).await?;
         let table_name_mgr = self.table_meta.table_name_manager();
 
@@ -387,11 +382,11 @@ impl RecordingRuleTask {
 
         let table_schema_len = table.table_info.meta.schema.column_schemas.len();
 
-        let insert_into = if let Some(new_query) = new_query {
+        let insert_into = if let Some((new_query, column_cnt)) = new_query {
             // TODO(discord9): also assign column name to compat update_at column
-            if table_schema_len == query_schema_len {
+            if table_schema_len == column_cnt {
                 format!("INSERT INTO {} {}", full_table_name, new_query)
-            } else if table_schema_len == query_schema_len + 1 {
+            } else if table_schema_len == column_cnt + 1 {
                 // TODO(discord9): check update_at column is `DEFAULT now()`
                 let table_column_names = table
                     .table_info
@@ -401,18 +396,22 @@ impl RecordingRuleTask {
                     .iter()
                     .map(|col| col.name.clone())
                     .collect_vec();
+                let minus_last_one = table_column_names
+                    .into_iter()
+                    .take(table_schema_len - 1)
+                    .collect_vec();
 
                 format!(
                     "INSERT INTO {} ({}) {}",
                     full_table_name,
-                    table_column_names.join(", "),
+                    minus_last_one.join(", "),
                     new_query,
                 )
             } else {
                 UnexpectedSnafu {
                     reason: format!(
                         "Column conut mismatch, table column count = {}, query column count = {}",
-                        table_schema_len, query_schema_len
+                        table_schema_len, column_cnt
                     ),
                 }
                 .fail()?
@@ -428,17 +427,10 @@ impl RecordingRuleTask {
         &self,
         engine: &QueryEngineRef,
         frontend_client: &Arc<FrontendClient>,
-    ) -> Result<Option<(Output, Duration)>, Error> {
-        let new_query = self.gen_query_with_time_window(engine.clone()).await?;
+    ) -> Result<Option<(u32, Duration)>, Error> {
+        let new_query = self.gen_insert_sql(engine).await?;
         let insert_into = if let Some(new_query) = new_query {
-            // TODO(discord9): also assign column name to compat update_at column
-            format!(
-                "INSERT INTO {}.{}.{} {}",
-                self.sink_table_name[0],
-                self.sink_table_name[1],
-                self.sink_table_name[2],
-                new_query
-            )
+            new_query
         } else {
             return Ok(None);
         };
@@ -456,7 +448,14 @@ impl RecordingRuleTask {
             .with_label_values(&[flow_id.to_string().as_str()])
             .start_timer();
 
-        let res = db_client.database.sql(&insert_into).await;
+        let req = api::v1::greptime_request::Request::Query(api::v1::QueryRequest {
+            query: Some(api::v1::query_request::Query::Sql(insert_into.clone())),
+        });
+
+        let res = db_client
+            .database
+            .handle_with_hints(req, &[(AUTO_CREATE_TABLE_KEY, "true")])
+            .await;
         drop(timer);
 
         let elapsed = instant.elapsed();
@@ -488,7 +487,12 @@ impl RecordingRuleTask {
             .await
             .after_query_exec(elapsed, res.is_ok());
 
-        let res = res.map_err(BoxedError::new).context(ExternalSnafu)?;
+        let res = res.context(InvalidRequestSnafu {
+            context: format!(
+                "Failed to execute query for flow={}: \'{}\'",
+                self.flow_id, &insert_into
+            ),
+        })?;
 
         Ok(Some((res, elapsed)))
     }
@@ -529,7 +533,7 @@ impl RecordingRuleTask {
     async fn gen_query_with_time_window(
         &self,
         engine: QueryEngineRef,
-    ) -> Result<Option<String>, Error> {
+    ) -> Result<Option<(String, usize)>, Error> {
         let query_ctx = self.state.read().await.query_ctx.clone();
         let start = SystemTime::now();
         let since_the_epoch = start
@@ -537,16 +541,13 @@ impl RecordingRuleTask {
             .expect("Time went backwards");
         let low_bound = self
             .expire_after
-            .map(|e| since_the_epoch.as_secs() - e as u64);
-
-        let Some(low_bound) = low_bound else {
-            return Ok(Some(self.query.clone()));
-        };
-
-        let low_bound = Timestamp::new_second(low_bound as i64);
+            .map(|e| since_the_epoch.as_secs() - e as u64)
+            .unwrap_or(u64::MIN);
 
         let plan = sql_to_df_plan(query_ctx.clone(), engine.clone(), &self.query, true).await?;
         let schema_len = plan.schema().fields().len();
+
+        let low_bound = Timestamp::new_second(low_bound as i64);
         // TODO(discord9): find more time window!
         let (col_name, lower, upper) =
             find_plan_time_window_bound(&plan, low_bound, query_ctx.clone(), engine.clone())
@@ -571,7 +572,7 @@ impl RecordingRuleTask {
                             "Flow id = {:?}, can't get window size: lower={lower:?}, upper={upper:?}, using the same query", self.flow_id
                         );
                         // since no time window lower/upper bound is found, just return the original query
-                        return Ok(Some(self.query.clone()));
+                        return Ok(Some((self.query.clone(), schema_len)));
                     }
                 }
             };
@@ -607,7 +608,7 @@ impl RecordingRuleTask {
             df_plan_to_sql(&plan)?
         };
 
-        Ok(Some(new_sql))
+        Ok(Some((new_sql, schema_len)))
     }
 }
 
@@ -675,7 +676,7 @@ impl DirtyTimeWindows {
 
         if self.windows.len() > Self::MAX_FILTER_NUM {
             warn!(
-                "Too many time windows: {}, only the first {} are taken for this query, the group by expression might be wrong",
+                "Too many time windows: {}, only the first {} are taken for this query, the group by expression could be wrong",
                 self.windows.len(),
                 Self::MAX_FILTER_NUM
             );

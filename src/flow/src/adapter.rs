@@ -545,6 +545,7 @@ impl FlowWorkerManager {
         }
     }
 
+    /// Start flow worker manager by first recover all flows then run in background
     pub async fn start(
         self: Arc<Self>,
         shutdown: Option<broadcast::Receiver<()>>,

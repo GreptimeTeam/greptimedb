@@ -203,7 +203,12 @@ impl servers::server::Server for FlownodeServer {
         });
 
         let manager_ref = self.flow_service.manager.clone();
-        let _handle = manager_ref.clone().start(Some(rx));
+        manager_ref
+            .clone()
+            .start(Some(rx))
+            .await
+            .map_err(BoxedError::new)
+            .context(servers::error::OtherSnafu)?;
 
         Ok(addr)
     }

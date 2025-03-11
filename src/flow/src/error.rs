@@ -223,6 +223,14 @@ pub enum Error {
         location: Location,
         name: String,
     },
+
+    #[snafu(display("Invalid request: {context}"))]
+    InvalidRequest {
+        context: String,
+        source: client::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 /// the outer message is the full error stack, and inner message in header is the last error message that can be show directly to user
@@ -256,9 +264,10 @@ impl ErrorExt for Error {
             | Self::FlowNotFound { .. }
             | Self::ListFlows { .. } => StatusCode::TableNotFound,
             Self::Plan { .. } | Self::Datatypes { .. } => StatusCode::PlanQuery,
-            Self::InvalidQuery { .. } | Self::CreateFlow { .. } | Self::Time { .. } => {
-                StatusCode::EngineExecuteQuery
-            }
+            Self::InvalidQuery { .. }
+            | Self::CreateFlow { .. }
+            | Self::Time { .. }
+            | Self::InvalidRequest { .. } => StatusCode::EngineExecuteQuery,
             Self::Unexpected { .. } => StatusCode::Unexpected,
             Self::NotImplemented { .. } | Self::UnsupportedTemporalFilter { .. } => {
                 StatusCode::Unsupported
