@@ -81,15 +81,15 @@ impl BloomFilterApplier {
             .into_iter()
             .zip(bfs.iter())
         {
-            for probe in probes {
-                if bloom.contains(probe) {
-                    for (_, seg) in group {
-                        let start = seg * rows_per_segment;
-                        let end = (seg + 1) * rows_per_segment;
-                        res_ranges.push(start..end);
-                    }
-                    break;
-                }
+            let contains_probe = probes.iter().all(|probe| bloom.contains(probe));
+            if !contains_probe {
+                continue;
+            }
+
+            for (_, seg) in group {
+                let start = seg * rows_per_segment;
+                let end = (seg + 1) * rows_per_segment;
+                res_ranges.push(start..end);
             }
         }
         res_ranges.sort_unstable_by_key(|r| r.start);

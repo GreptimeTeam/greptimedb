@@ -645,7 +645,7 @@ impl ParquetReaderBuilder {
             return false;
         };
 
-        if !self.file_handle.meta_ref().bloom_filter_index_available() {
+        if !self.file_handle.meta_ref().fulltext_index_available() {
             return false;
         }
 
@@ -688,8 +688,8 @@ impl ParquetReaderBuilder {
                 .into_iter()
                 .map(|(rg, ranges)| (rg, ranges.into_iter())),
             output,
-            &mut metrics.rg_bloom_filtered,
-            &mut metrics.rows_bloom_filtered,
+            &mut metrics.rg_fulltext_filtered,
+            &mut metrics.rows_fulltext_filtered,
         );
 
         true

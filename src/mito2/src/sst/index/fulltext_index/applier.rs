@@ -134,6 +134,13 @@ impl FulltextIndexApplier {
         let mut row_ids: Option<BTreeSet<RowId>> = None;
 
         for (column_id, predicates) in &self.predicates {
+            if !predicates
+                .iter()
+                .any(|p| matches!(p, FulltextPredicate::Matches(_)))
+            {
+                continue;
+            }
+
             let Some(result) = self
                 .apply_matches_one_col(file_size_hint, file_id, *column_id, predicates)
                 .await?
@@ -322,6 +329,13 @@ impl FulltextIndexApplier {
             .collect::<Vec<_>>();
 
         for (column_id, predicates) in &self.predicates {
+            if !predicates
+                .iter()
+                .any(|p| matches!(p, FulltextPredicate::MatchesTerm(_)))
+            {
+                continue;
+            }
+
             self.apply_matches_term_one_col(
                 file_id,
                 *column_id,
@@ -365,18 +379,20 @@ impl FulltextIndexApplier {
         let mut probes = HashSet::new();
         for predicate in predicates {
             if let FulltextPredicate::MatchesTerm(pred) = predicate {
-                probes.extend(
-                    pred.term
-                        .split(|c: char| !c.is_alphanumeric())
-                        .map(|t| {
-                            if pred.term_to_lowercase {
-                                t.to_lowercase()
-                            } else {
-                                t.to_string()
-                            }
-                        })
-                        .map(|t| t.into_bytes()),
-                );
+                let ps = pred
+                    .term
+                    .split(|c: char| !c.is_alphanumeric())
+                    .filter(|&t| !t.is_empty())
+                    .map(|t| {
+                        if pred.term_to_lowercase {
+                            t.to_lowercase()
+                        } else {
+                            t.to_string()
+                        }
+                        .into_bytes()
+                    });
+
+                probes.extend(ps);
             }
         }
         if probes.is_empty() {

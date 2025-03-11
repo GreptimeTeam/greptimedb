@@ -176,25 +176,36 @@ impl Function for MatchesTermFunction {
 /// ```
 pub fn contains_term(text: &str, term: &str) -> bool {
     if term.is_empty() {
-        return false;
+        return text.is_empty();
     }
+
+    let starts_with_non_alnum = term.chars().next().is_some_and(|c| !c.is_alphanumeric());
+    let ends_with_non_alnum = term.chars().last().is_some_and(|c| !c.is_alphanumeric());
 
     for (i, _) in text.match_indices(term) {
         let term_len = term.len();
 
         // Check preceding character
-        let prev_ok = text[..i]
-            .chars()
-            .last()
-            .map(|c| !c.is_alphanumeric())
-            .unwrap_or(true); // Beginning of text
+        let prev_ok = if starts_with_non_alnum {
+            true
+        } else {
+            text[..i]
+                .chars()
+                .last()
+                .map(|c| !c.is_alphanumeric())
+                .unwrap_or(true) // Beginning of text
+        };
 
         // Check following character
-        let next_ok = text[i + term_len..]
-            .chars()
-            .next()
-            .map(|c| !c.is_alphanumeric())
-            .unwrap_or(true); // End of text
+        let next_ok = if ends_with_non_alnum {
+            true
+        } else {
+            text[i + term_len..]
+                .chars()
+                .next()
+                .map(|c| !c.is_alphanumeric())
+                .unwrap_or(true) // End of text
+        };
 
         if prev_ok && next_ok {
             return true;
@@ -268,5 +279,19 @@ mod tests {
     fn adjacent_alphanumeric_fails() {
         assert!(!contains_term("cat5", "cat"));
         assert!(!contains_term("dogcat", "cat"));
+    }
+
+    #[test]
+    fn empty_term_text() {
+        assert!(!contains_term("text", ""));
+        assert!(contains_term("", ""));
+        assert!(!contains_term("", "text"));
+    }
+
+    #[test]
+    fn leading_non_alphanumeric() {
+        assert!(contains_term("dog/cat", "/cat"));
+        assert!(contains_term("dog/cat", "dog/"));
+        assert!(contains_term("dog/cat", "dog/cat"));
     }
 }
