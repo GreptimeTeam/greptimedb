@@ -26,6 +26,8 @@ use super::create::CreateFollower;
 use super::{AlterRegionFollowerData, AlterRegionFollowerState, Context};
 use crate::error::{self, Result};
 use crate::metrics;
+
+/// The procedure to add a region follower.
 pub struct AddRegionFollowerProcedure {
     pub data: AlterRegionFollowerData,
     pub context: Context,

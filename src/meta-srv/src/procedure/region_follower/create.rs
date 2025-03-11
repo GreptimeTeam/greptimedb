@@ -83,6 +83,7 @@ impl CreateFollower {
         ctx: &Context,
         instruction: Instruction,
     ) -> Result<()> {
+        // TODO(jeremy): register the opening_region_keeper
         let msg = MailboxMessage::json_message(
             &format!("Open a follower region: {}", self.region_id),
             &format!("Metasrv@{}", ctx.server_addr),

@@ -26,6 +26,8 @@ use super::remove::RemoveFollower;
 use super::{AlterRegionFollowerData, AlterRegionFollowerState, Context};
 use crate::error::{self, Result};
 use crate::metrics;
+
+/// The procedure to remove a region follower.
 pub struct RemoveRegionFollowerProcedure {
     pub data: AlterRegionFollowerData,
     pub context: Context,
