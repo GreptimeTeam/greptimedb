@@ -1,0 +1,47 @@
+name: Check Grafana Panels
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'grafana/**'  # Trigger only when files under the grafana/ directory change
+
+jobs:
+  check-panels:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Check out the repository
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Install jq (required for the script)
+      - name: Install jq
+        run: sudo apt-get install -y jq
+
+      # Make the check.sh script executable
+      - name: Make check.sh executable
+        run: chmod +x grafana/check.sh
+
+      # Run the check.sh script
+      - name: Run check.sh
+        run: ./grafana/check.sh
+
+      # Run the summary.sh script and capture its output
+      - name: Run summary.sh
+        id: summary
+        run: |
+          OUTPUT=$(./grafana/summary.sh)
+          echo "summary_output<<EOF" >> $GITHUB_OUTPUT
+          echo "$OUTPUT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      # Post the summary output as a comment on the pull request
+      - name: Post summary as comment
+        uses: peter-evans/create-or-update-comment@v3
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          body: |
+            ### Summary of Grafana Panels
+            ${{ steps.summary.outputs.summary_output }}
