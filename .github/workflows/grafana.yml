@@ -1,7 +1,7 @@
 name: Check Grafana Panels
 
 on:
-  pull_request:
+  pull_request_target:
     branches:
       - main
     paths:
@@ -28,20 +28,25 @@ jobs:
       - name: Run check.sh
         run: ./grafana/check.sh
 
-      # Run the summary.sh script and capture its output
-      - name: Run summary.sh
-        id: summary
+      # Only run summary.sh for pull_request events (not for merge queues or final pushes)
+      - name: Check if this is a pull request
+        id: check-pr
         run: |
-          OUTPUT=$(./grafana/summary.sh)
-          echo "summary_output<<EOF" >> $GITHUB_OUTPUT
-          echo "$OUTPUT" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            echo "is_pull_request=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_pull_request=false" >> $GITHUB_OUTPUT
+          fi
 
-      # Post the summary output as a comment on the pull request
-      - name: Post summary as comment
-        uses: peter-evans/create-or-update-comment@v3
-        with:
-          issue-number: ${{ github.event.pull_request.number }}
-          body: |
-            ### Summary of Grafana Panels
-            ${{ steps.summary.outputs.summary_output }}
+      # Make the summary.sh script executable
+      - name: Make summary.sh executable
+        if: steps.check-pr.outputs.is_pull_request == 'true'
+        run: chmod +x grafana/summary.sh
+
+      # Run the summary.sh script and add its output to the GitHub Job Summary
+      - name: Run summary.sh and add to Job Summary
+        if: steps.check-pr.outputs.is_pull_request == 'true'
+        run: |
+          SUMMARY=$(./grafana/summary.sh)
+          echo "### Summary of Grafana Panels" >> $GITHUB_STEP_SUMMARY
+          echo "$SUMMARY" >> $GITHUB_STEP_SUMMARY
