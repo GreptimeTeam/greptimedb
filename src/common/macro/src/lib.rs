@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 mod admin_fn;
 mod aggr_func;
 mod print_caller;
@@ -22,12 +21,12 @@ mod utils;
 
 use aggr_func::{impl_aggr_func_type_store, impl_as_aggr_func_creator};
 use print_caller::process_print_caller;
-use proc_macro::{ TokenStream};
+use proc_macro::TokenStream;
+use quote::quote;
 use range_fn::process_range_fn;
 use syn::{parse_macro_input, Data, DeriveInput, Fields};
-use quote::quote;
-use crate::admin_fn::process_admin_fn;
 
+use crate::admin_fn::process_admin_fn;
 
 /// Make struct implemented trait [AggrFuncTypeStore], which is necessary when writing UDAF.
 /// This derive macro is expect to be used along with attribute macro [macro@as_aggr_func_creator].
@@ -140,7 +139,7 @@ pub fn stack_trace_debug(args: TokenStream, input: TokenStream) -> TokenStream {
     stack_trace_debug::stack_trace_style_impl(args.into(), input.into()).into()
 }
 
-
+/// Generates implementation for `From<&TableMeta> for TableMetaBuilder`
 #[proc_macro_derive(ToMetaBuilder)]
 pub fn derive_meta_builder(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -151,7 +150,7 @@ pub fn derive_meta_builder(input: TokenStream) -> TokenStream {
     let Fields::Named(fields) = data_struct.fields else {
         panic!("ToMetaBuilder can only be derived for structs with named fields");
     };
-    
+
     let field_assignments = fields.named.iter().map(|field| {
         let field_name = field.ident.as_ref().unwrap();
         quote! {
