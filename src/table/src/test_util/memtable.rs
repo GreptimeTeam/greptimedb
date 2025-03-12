@@ -67,7 +67,7 @@ impl MemTable {
     ) -> TableRef {
         let schema = recordbatch.schema.clone();
 
-        let meta = TableMetaBuilder::default()
+        let meta = TableMetaBuilder::empty()
             .schema(schema)
             .primary_key_indices(vec![])
             .value_indices(vec![])
