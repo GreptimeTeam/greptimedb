@@ -19,18 +19,232 @@ use std::time::{Duration, Instant};
 
 use async_stream::try_stream;
 use common_telemetry::debug;
-use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder};
+use datafusion::physical_plan::metrics::{Count, ExecutionPlanMetricsSet, MetricBuilder, Time};
 use futures::Stream;
 use prometheus::IntGauge;
 use store_api::storage::RegionId;
 
 use crate::error::Result;
-use crate::metrics::IN_PROGRESS_SCAN;
+use crate::metrics::{
+    IN_PROGRESS_SCAN, PRECISE_FILTER_ROWS_TOTAL, READ_BATCHES_RETURN, READ_ROWS_IN_ROW_GROUP_TOTAL,
+    READ_ROWS_RETURN, READ_ROW_GROUPS_TOTAL, READ_STAGE_ELAPSED,
+};
 use crate::read::range::{RangeBuilderList, RowGroupIndex};
 use crate::read::scan_region::StreamContext;
 use crate::read::{Batch, ScannerMetrics, Source};
 use crate::sst::file::FileTimeRange;
 use crate::sst::parquet::reader::ReaderMetrics;
+
+/// Scan metrics to report to the execution metrics.
+#[derive(Debug)]
+struct ScanMetricsSet {
+    /// Duration to prepare the scan task.
+    prepare_scan_cost: Time,
+    /// Duration to build the (merge) reader.
+    build_reader_cost: Time,
+    /// Duration to scan data.
+    scan_cost: Time,
+    /// Duration to convert batches.
+    convert_cost: Time,
+    /// Duration while waiting for `yield`.
+    yield_cost: Time,
+    /// Duration of the scan.
+    total_cost: Time,
+    /// Number of rows returned.
+    num_rows: Count,
+    /// Number of batches returned.
+    num_batches: Count,
+    /// Number of mem ranges scanned.
+    num_mem_ranges: Count,
+    /// Number of file ranges scanned.
+    num_file_ranges: Count,
+
+    // SST related metrics:
+    /// Duration to build file ranges.
+    build_parts_cost: Time,
+    /// Number of row groups before filtering.
+    rg_total: Count,
+    /// Number of row groups filtered by fulltext index.
+    rg_fulltext_filtered: Count,
+    /// Number of row groups filtered by inverted index.
+    rg_inverted_filtered: Count,
+    /// Number of row groups filtered by min-max index.
+    rg_minmax_filtered: Count,
+    /// Number of row groups filtered by bloom filter index.
+    rg_bloom_filtered: Count,
+    /// Number of rows in row group before filtering.
+    rows_before_filter: Count,
+    /// Number of rows in row group filtered by fulltext index.
+    rows_fulltext_filtered: Count,
+    /// Number of rows in row group filtered by inverted index.
+    rows_inverted_filtered: Count,
+    /// Number of rows in row group filtered by bloom filter index.
+    rows_bloom_filtered: Count,
+    /// Number of rows filtered by precise filter.
+    rows_precise_filtered: Count,
+    /// Number of record batches read from SST.
+    num_sst_record_batches: Count,
+    /// Number of batches decoded from SST.
+    num_sst_batches: Count,
+    /// Number of rows read from SST.
+    num_sst_rows: Count,
+
+    /// Elapsed time before the first poll operation.
+    first_poll: Time,
+}
+
+impl ScanMetricsSet {
+    /// Creates a metrics set from an execution metrics.
+    fn new(metrics_set: &ExecutionPlanMetricsSet, partition: usize) -> Self {
+        Self {
+            prepare_scan_cost: MetricBuilder::new(metrics_set)
+                .subset_time("prepare_scan_cost", partition),
+            build_parts_cost: MetricBuilder::new(metrics_set)
+                .subset_time("build_parts_cost", partition),
+            build_reader_cost: MetricBuilder::new(metrics_set)
+                .subset_time("build_reader_cost", partition),
+            scan_cost: MetricBuilder::new(metrics_set).subset_time("scan_cost", partition),
+            convert_cost: MetricBuilder::new(metrics_set).subset_time("convert_cost", partition),
+            yield_cost: MetricBuilder::new(metrics_set).subset_time("yield_cost", partition),
+            total_cost: MetricBuilder::new(metrics_set).subset_time("total_cost", partition),
+            num_rows: MetricBuilder::new(metrics_set).counter("num_rows", partition),
+            num_batches: MetricBuilder::new(metrics_set).counter("num_batches", partition),
+            num_mem_ranges: MetricBuilder::new(metrics_set).counter("num_mem_ranges", partition),
+            num_file_ranges: MetricBuilder::new(metrics_set).counter("num_file_ranges", partition),
+            rg_total: MetricBuilder::new(metrics_set).counter("rg_total", partition),
+            rg_fulltext_filtered: MetricBuilder::new(metrics_set)
+                .counter("rg_fulltext_filtered", partition),
+            rg_inverted_filtered: MetricBuilder::new(metrics_set)
+                .counter("rg_inverted_filtered", partition),
+            rg_minmax_filtered: MetricBuilder::new(metrics_set)
+                .counter("rg_minmax_filtered", partition),
+            rg_bloom_filtered: MetricBuilder::new(metrics_set)
+                .counter("rg_bloom_filtered", partition),
+            rows_before_filter: MetricBuilder::new(metrics_set)
+                .counter("rows_before_filter", partition),
+            rows_fulltext_filtered: MetricBuilder::new(metrics_set)
+                .counter("rows_fulltext_filtered", partition),
+            rows_inverted_filtered: MetricBuilder::new(metrics_set)
+                .counter("rows_inverted_filtered", partition),
+            rows_bloom_filtered: MetricBuilder::new(metrics_set)
+                .counter("rows_bloom_filtered", partition),
+            rows_precise_filtered: MetricBuilder::new(metrics_set)
+                .counter("rows_precise_filtered", partition),
+            num_sst_record_batches: MetricBuilder::new(metrics_set)
+                .counter("num_sst_record_batches", partition),
+            num_sst_batches: MetricBuilder::new(metrics_set).counter("num_sst_batches", partition),
+            num_sst_rows: MetricBuilder::new(metrics_set).counter("num_sst_rows", partition),
+            first_poll: MetricBuilder::new(metrics_set).subset_time("first_poll", partition),
+        }
+    }
+
+    /// Merges the local scanner metrics.
+    fn merge_scanner_metrics(&self, other: &ScannerMetrics) {
+        self.prepare_scan_cost.add_duration(other.prepare_scan_cost);
+        self.build_reader_cost.add_duration(other.build_reader_cost);
+        self.scan_cost.add_duration(other.scan_cost);
+        self.convert_cost.add_duration(other.convert_cost);
+        self.yield_cost.add_duration(other.yield_cost);
+        self.total_cost.add_duration(other.total_cost);
+        self.num_rows.add(other.num_rows);
+        self.num_batches.add(other.num_batches);
+        self.num_mem_ranges.add(other.num_mem_ranges);
+        self.num_file_ranges.add(other.num_file_ranges);
+    }
+
+    /// Merges the local reader metrics.
+    fn merge_reader_metrics(&self, other: &ReaderMetrics) {
+        self.build_parts_cost.add_duration(other.build_cost);
+
+        self.rg_total.add(other.filter_metrics.rg_total);
+        self.rg_fulltext_filtered
+            .add(other.filter_metrics.rg_fulltext_filtered);
+        self.rg_inverted_filtered
+            .add(other.filter_metrics.rg_inverted_filtered);
+        self.rg_minmax_filtered
+            .add(other.filter_metrics.rg_minmax_filtered);
+        self.rg_bloom_filtered
+            .add(other.filter_metrics.rg_bloom_filtered);
+
+        self.rows_before_filter.add(other.filter_metrics.rows_total);
+        self.rows_fulltext_filtered
+            .add(other.filter_metrics.rows_fulltext_filtered);
+        self.rows_inverted_filtered
+            .add(other.filter_metrics.rows_inverted_filtered);
+        self.rows_bloom_filtered
+            .add(other.filter_metrics.rows_bloom_filtered);
+        self.rows_precise_filtered
+            .add(other.filter_metrics.rows_precise_filtered);
+
+        self.num_sst_record_batches.add(other.num_record_batches);
+        self.num_sst_batches.add(other.num_batches);
+        self.num_sst_rows.add(other.num_rows);
+    }
+
+    /// Observes metrics.
+    fn observe_metrics(&self) {
+        READ_STAGE_ELAPSED
+            .with_label_values(&["prepare_scan"])
+            .observe(time_to_secs_f64(&self.prepare_scan_cost));
+        READ_STAGE_ELAPSED
+            .with_label_values(&["build_reader"])
+            .observe(time_to_secs_f64(&self.build_reader_cost));
+        READ_STAGE_ELAPSED
+            .with_label_values(&["convert_rb"])
+            .observe(time_to_secs_f64(&self.convert_cost));
+        READ_STAGE_ELAPSED
+            .with_label_values(&["scan"])
+            .observe(time_to_secs_f64(&self.scan_cost));
+        READ_STAGE_ELAPSED
+            .with_label_values(&["yield"])
+            .observe(time_to_secs_f64(&self.yield_cost));
+        READ_STAGE_ELAPSED
+            .with_label_values(&["total"])
+            .observe(time_to_secs_f64(&self.total_cost));
+        READ_ROWS_RETURN.observe(self.num_rows.value() as f64);
+        READ_BATCHES_RETURN.observe(self.num_batches.value() as f64);
+
+        READ_STAGE_ELAPSED
+            .with_label_values(&["build_parts"])
+            .observe(time_to_secs_f64(&self.build_parts_cost));
+
+        READ_ROW_GROUPS_TOTAL
+            .with_label_values(&["before_filtering"])
+            .inc_by(self.rg_total.value() as u64);
+        READ_ROW_GROUPS_TOTAL
+            .with_label_values(&["fulltext_index_filtered"])
+            .inc_by(self.rg_fulltext_filtered.value() as u64);
+        READ_ROW_GROUPS_TOTAL
+            .with_label_values(&["inverted_index_filtered"])
+            .inc_by(self.rg_inverted_filtered.value() as u64);
+        READ_ROW_GROUPS_TOTAL
+            .with_label_values(&["minmax_index_filtered"])
+            .inc_by(self.rg_minmax_filtered.value() as u64);
+        READ_ROW_GROUPS_TOTAL
+            .with_label_values(&["bloom_filter_index_filtered"])
+            .inc_by(self.rg_bloom_filtered.value() as u64);
+
+        PRECISE_FILTER_ROWS_TOTAL
+            .with_label_values(&["parquet"])
+            .inc_by(self.rows_precise_filtered.value() as u64);
+        READ_ROWS_IN_ROW_GROUP_TOTAL
+            .with_label_values(&["before_filtering"])
+            .inc_by(self.rows_before_filter.value() as u64);
+        READ_ROWS_IN_ROW_GROUP_TOTAL
+            .with_label_values(&["fulltext_index_filtered"])
+            .inc_by(self.rows_fulltext_filtered.value() as u64);
+        READ_ROWS_IN_ROW_GROUP_TOTAL
+            .with_label_values(&["inverted_index_filtered"])
+            .inc_by(self.rows_inverted_filtered.value() as u64);
+        READ_ROWS_IN_ROW_GROUP_TOTAL
+            .with_label_values(&["bloom_filter_index_filtered"])
+            .inc_by(self.rows_bloom_filtered.value() as u64);
+    }
+}
+
+fn time_to_secs_f64(cost: &Time) -> f64 {
+    Duration::from_nanos(cost.value() as u64).as_secs_f64()
+}
 
 struct PartitionMetricsInner {
     region_id: RegionId,
@@ -42,17 +256,15 @@ struct PartitionMetricsInner {
     query_start: Instant,
     /// Elapsed time before the first poll operation.
     first_poll: Duration,
-    metrics: ScannerMetrics,
-    reader_metrics: ReaderMetrics,
+    metrics: ScanMetricsSet,
     in_progress_scan: IntGauge,
 }
 
 impl PartitionMetricsInner {
-    fn on_finish(&mut self) {
-        if self.metrics.total_cost.is_zero() {
-            self.metrics.total_cost = self.query_start.elapsed();
+    fn on_finish(&self) {
+        if self.metrics.total_cost.value() == 0 {
+            self.metrics.total_cost.add_elapsed(self.query_start);
         }
-        self.metrics.build_parts_cost = self.reader_metrics.build_cost;
     }
 }
 
@@ -63,8 +275,8 @@ impl Drop for PartitionMetricsInner {
         self.in_progress_scan.dec();
 
         debug!(
-            "{} finished, region_id: {}, partition: {}, first_poll: {:?}, metrics: {:?}, reader_metrics: {:?}",
-            self.scanner_type, self.region_id, self.partition, self.first_poll, self.metrics, self.reader_metrics
+            "{} finished, region_id: {}, partition: {}, metrics: {:?}",
+            self.scanner_type, self.region_id, self.partition, self.metrics
         );
     }
 }
@@ -92,7 +304,7 @@ impl PartitionMetricsList {
 
 /// Metrics while reading a partition.
 #[derive(Clone)]
-pub(crate) struct PartitionMetrics(Arc<Mutex<PartitionMetricsInner>>);
+pub(crate) struct PartitionMetrics(Arc<PartitionMetricsInner>);
 
 impl PartitionMetrics {
     pub(crate) fn new(
@@ -100,7 +312,7 @@ impl PartitionMetrics {
         partition: usize,
         scanner_type: &'static str,
         query_start: Instant,
-        metrics: ScannerMetrics,
+        metrics_set: &ExecutionPlanMetricsSet,
     ) -> Self {
         let partition_str = partition.to_string();
         let in_progress_scan = IN_PROGRESS_SCAN.with_label_values(&[scanner_type, &partition_str]);
@@ -111,53 +323,39 @@ impl PartitionMetrics {
             scanner_type,
             query_start,
             first_poll: Duration::default(),
-            metrics,
-            reader_metrics: ReaderMetrics::default(),
+            metrics: ScanMetricsSet::new(metrics_set, partition),
             in_progress_scan,
         };
-        Self(Arc::new(Mutex::new(inner)))
+        inner.metrics.prepare_scan_cost.add_elapsed(query_start);
+        Self(Arc::new(inner))
     }
 
     pub(crate) fn on_first_poll(&self) {
-        let mut inner = self.0.lock().unwrap();
-        inner.first_poll = inner.query_start.elapsed();
+        self.0.metrics.first_poll.add_elapsed(self.0.query_start);
     }
 
     pub(crate) fn inc_num_mem_ranges(&self, num: usize) {
-        let mut inner = self.0.lock().unwrap();
-        inner.metrics.num_mem_ranges += num;
+        self.0.metrics.num_mem_ranges.add(num);
     }
 
     pub(crate) fn inc_num_file_ranges(&self, num: usize) {
-        let mut inner = self.0.lock().unwrap();
-        inner.metrics.num_file_ranges += num;
+        self.0.metrics.num_file_ranges.add(num);
     }
 
     pub(crate) fn inc_build_reader_cost(&self, cost: Duration) {
-        let mut inner = self.0.lock().unwrap();
-        inner.metrics.build_reader_cost += cost;
+        self.0.metrics.build_reader_cost.add_duration(cost);
     }
 
     pub(crate) fn merge_metrics(&self, metrics: &ScannerMetrics) {
-        let mut inner = self.0.lock().unwrap();
-        inner.metrics.merge_from(metrics);
+        self.0.metrics.merge_scanner_metrics(metrics);
     }
 
     pub(crate) fn merge_reader_metrics(&self, metrics: &ReaderMetrics) {
-        let mut inner = self.0.lock().unwrap();
-        inner.reader_metrics.merge_from(metrics);
+        self.0.metrics.merge_reader_metrics(metrics);
     }
 
     pub(crate) fn on_finish(&self) {
-        let mut inner = self.0.lock().unwrap();
-        inner.on_finish();
-    }
-
-    pub(crate) fn report_metrics_to(&self, metrics_set: &ExecutionPlanMetricsSet) {
-        let inner = self.0.lock().unwrap();
-        inner
-            .metrics
-            .report_metrics_to(metrics_set, inner.partition);
+        self.0.on_finish();
     }
 }
 

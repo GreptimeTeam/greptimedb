@@ -998,8 +998,8 @@ impl<T: BatchReader + ?Sized> BatchReader for Box<T> {
 pub(crate) struct ScannerMetrics {
     /// Duration to prepare the scan task.
     prepare_scan_cost: Duration,
-    /// Duration to build file ranges.
-    build_parts_cost: Duration,
+    // /// Duration to build file ranges.
+    // build_parts_cost: Duration,
     /// Duration to build the (merge) reader.
     build_reader_cost: Duration,
     /// Duration to scan data.
@@ -1026,9 +1026,10 @@ impl ScannerMetrics {
         READ_STAGE_ELAPSED
             .with_label_values(&["prepare_scan"])
             .observe(self.prepare_scan_cost.as_secs_f64());
-        READ_STAGE_ELAPSED
-            .with_label_values(&["build_parts"])
-            .observe(self.build_parts_cost.as_secs_f64());
+        // FIXME(yingwen): Implement build_parts_cost observation
+        // READ_STAGE_ELAPSED
+        //     .with_label_values(&["build_parts"])
+        //     .observe(self.build_parts_cost.as_secs_f64());
         READ_STAGE_ELAPSED
             .with_label_values(&["build_reader"])
             .observe(self.build_reader_cost.as_secs_f64());
@@ -1051,7 +1052,7 @@ impl ScannerMetrics {
     /// Merges metrics from another [ScannerMetrics].
     fn merge_from(&mut self, other: &ScannerMetrics) {
         self.prepare_scan_cost += other.prepare_scan_cost;
-        self.build_parts_cost += other.build_parts_cost;
+        // self.build_parts_cost += other.build_parts_cost;
         self.build_reader_cost += other.build_reader_cost;
         self.scan_cost += other.scan_cost;
         self.convert_cost += other.convert_cost;
@@ -1061,39 +1062,6 @@ impl ScannerMetrics {
         self.num_rows += other.num_rows;
         self.num_mem_ranges += other.num_mem_ranges;
         self.num_file_ranges += other.num_file_ranges;
-    }
-
-    fn report_metrics_to(&self, metrics_set: &ExecutionPlanMetricsSet, partition: usize) {
-        MetricBuilder::new(metrics_set)
-            .subset_time("prepare_scan_cost", partition)
-            .add_duration(self.build_parts_cost);
-        MetricBuilder::new(metrics_set)
-            .subset_time("build_parts_cost", partition)
-            .add_duration(self.build_parts_cost);
-        MetricBuilder::new(metrics_set)
-            .subset_time("build_reader_cost", partition)
-            .add_duration(self.build_reader_cost);
-        MetricBuilder::new(metrics_set)
-            .subset_time("scan_cost", partition)
-            .add_duration(self.scan_cost);
-        MetricBuilder::new(metrics_set)
-            .subset_time("convert_cost", partition)
-            .add_duration(self.convert_cost);
-        MetricBuilder::new(metrics_set)
-            .subset_time("yield_cost", partition)
-            .add_duration(self.yield_cost);
-        MetricBuilder::new(metrics_set)
-            .subset_time("total_cost", partition)
-            .add_duration(self.total_cost);
-        MetricBuilder::new(metrics_set)
-            .counter("num_batches", partition)
-            .add(self.num_batches);
-        MetricBuilder::new(metrics_set)
-            .counter("num_mem_ranges", partition)
-            .add(self.num_mem_ranges);
-        MetricBuilder::new(metrics_set)
-            .counter("num_file_ranges", partition)
-            .add(self.num_file_ranges);
     }
 }
 
