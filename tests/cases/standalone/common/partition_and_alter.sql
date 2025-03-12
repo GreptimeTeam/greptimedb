@@ -18,4 +18,6 @@ SELECT COUNT(*) from `molestiAe`;
 
 ALTER TABLE `molestiAe` SET 'ttl' = '1d';
 
+SELECT COUNT(*) from `molestiAe`;
+
 DROP TABLE `molestiAe`;
