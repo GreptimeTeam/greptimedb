@@ -136,12 +136,6 @@ humantime = "2.1"
 humantime-serde = "1.1"
 hyper = "1.1"
 hyper-util = "0.1"
-sqlx = { version = "0.8", features = [
-    "runtime-tokio-rustls",
-    "mysql",
-    "postgres",
-    "chrono",
-] }
 itertools = "0.10"
 jsonb = { git = "https://github.com/databendlabs/jsonb.git", rev = "8c8d2fc294a39f3ff08909d60f718639cfba3875", default-features = false }
 lazy_static = "1.4"

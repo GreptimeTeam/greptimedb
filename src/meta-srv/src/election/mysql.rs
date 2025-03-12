@@ -279,7 +279,7 @@ impl Executor<'_> {
                 txn.commit().await.context(MySqlExecutionSnafu)?;
                 Ok(())
             }
-            _ => return Ok(()),
+            _ => Ok(()),
         }
     }
 }

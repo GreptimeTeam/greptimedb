@@ -437,8 +437,8 @@ impl ServerMode {
                     args.extend(vec!["--backend".to_string(), "postgres-store".to_string()]);
                     args.extend(vec!["--store-addrs".to_string(), pg_server_addr]);
                 } else if db_ctx.store_config().setup_mysql {
-                    let client_ports = self
-                        .store_config
+                    let client_ports = db_ctx
+                        .store_config()
                         .store_addrs
                         .iter()
                         .map(|s| s.split(':').nth(1).unwrap().parse::<u16>().unwrap())
