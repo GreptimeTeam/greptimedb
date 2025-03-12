@@ -33,7 +33,6 @@ use std::time::Duration;
 use api::v1::OpType;
 use async_trait::async_trait;
 use common_time::Timestamp;
-use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder};
 use datafusion_common::arrow::array::UInt8Array;
 use datatypes::arrow;
 use datatypes::arrow::array::{Array, ArrayRef, UInt64Array};
@@ -49,7 +48,6 @@ use datatypes::vectors::{
 };
 use futures::stream::BoxStream;
 use futures::TryStreamExt;
-use rskafka::build_info;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::RegionMetadata;
 use store_api::storage::{ColumnId, SequenceNumber};
