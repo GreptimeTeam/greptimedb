@@ -16,6 +16,7 @@
 
 mod engine;
 mod frontend_client;
+pub(crate) mod utils;
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
