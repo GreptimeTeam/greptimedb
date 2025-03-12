@@ -27,6 +27,7 @@ use common_telemetry::{debug, info};
 use common_time::Timestamp;
 use datafusion::sql::unparser::expr_to_sql;
 use datafusion_common::tree_node::TreeNode;
+use datatypes::prelude::ConcreteDataType;
 use datatypes::value::Value;
 use itertools::Itertools;
 use query::QueryEngineRef;
@@ -47,6 +48,7 @@ use crate::error::{
     InvalidRequestSnafu, TableNotFoundMetaSnafu, TableNotFoundSnafu, TimeSnafu, UnexpectedSnafu,
 };
 use crate::metrics::{METRIC_FLOW_RULE_ENGINE_QUERY_TIME, METRIC_FLOW_RULE_ENGINE_SLOW_QUERY};
+use crate::recording_rules::utils::FindGroupByFinalName;
 use crate::recording_rules::{find_plan_time_window_bound, find_time_window_expr, sql_to_df_plan};
 use crate::Error;
 
@@ -275,7 +277,8 @@ impl RecordingRuleEngine {
         let task = task.with_context(|| UnexpectedSnafu {
             reason: format!("Can't found task for flow {flow_id}"),
         })?;
-        task.execute_once(&self.query_engine, &self.frontend_client)
+
+        task.gen_exec_once(&self.query_engine, &self.frontend_client)
             .await?;
         Ok(())
     }
@@ -343,7 +346,22 @@ impl RecordingRuleTask {
             .await
             .dirty_time_windows
             .add_lower_bounds(vec![ts].into_iter());
-        self.execute_once(engine, frontend_client).await
+        let create_table = self.gen_create_table_sql(engine.clone()).await?;
+        self.execute_sql(frontend_client, &create_table).await?;
+
+        self.gen_exec_once(engine, frontend_client).await
+    }
+
+    pub async fn gen_exec_once(
+        &self,
+        engine: &QueryEngineRef,
+        frontend_client: &Arc<FrontendClient>,
+    ) -> Result<Option<(u32, Duration)>, Error> {
+        if let Some(new_query) = self.gen_insert_sql(engine).await? {
+            self.execute_sql(frontend_client, &new_query).await
+        } else {
+            Ok(None)
+        }
     }
 
     pub async fn gen_insert_sql(&self, engine: &QueryEngineRef) -> Result<Option<String>, Error> {
@@ -423,25 +441,18 @@ impl RecordingRuleTask {
     }
 
     /// Execute the query once and return the output and the time it took
-    pub async fn execute_once(
+    pub async fn execute_sql(
         &self,
-        engine: &QueryEngineRef,
         frontend_client: &Arc<FrontendClient>,
+        sql: &str,
     ) -> Result<Option<(u32, Duration)>, Error> {
-        let new_query = self.gen_insert_sql(engine).await?;
-        let insert_into = if let Some(new_query) = new_query {
-            new_query
-        } else {
-            return Ok(None);
-        };
-
         let instant = Instant::now();
         let flow_id = self.flow_id;
         let db_client = frontend_client.get_database_client().await?;
         let peer_addr = db_client.peer.addr;
         debug!(
             "Executing flow {flow_id}(expire_after={:?} secs) on {:?} with query {}",
-            self.expire_after, peer_addr, &insert_into
+            self.expire_after, peer_addr, &sql
         );
 
         let timer = METRIC_FLOW_RULE_ENGINE_QUERY_TIME
@@ -449,7 +460,7 @@ impl RecordingRuleTask {
             .start_timer();
 
         let req = api::v1::greptime_request::Request::Query(api::v1::QueryRequest {
-            query: Some(api::v1::query_request::Query::Sql(insert_into.clone())),
+            query: Some(api::v1::query_request::Query::Sql(sql.to_string())),
         });
 
         let res = db_client
@@ -467,7 +478,7 @@ impl RecordingRuleTask {
         } else if let Err(res) = &res {
             warn!(
                 "Failed to execute Flow {flow_id} on frontend {}, result: {res:?}, elapsed: {:?} with query: {}",
-                peer_addr, elapsed, &insert_into
+                peer_addr, elapsed, &sql
             );
         }
 
@@ -475,10 +486,10 @@ impl RecordingRuleTask {
         if elapsed >= SLOW_QUERY_THRESHOLD {
             warn!(
                 "Flow {flow_id} on frontend {} executed for {:?} before complete, query: {}",
-                peer_addr, elapsed, &insert_into
+                peer_addr, elapsed, &sql
             );
             METRIC_FLOW_RULE_ENGINE_SLOW_QUERY
-                .with_label_values(&[flow_id.to_string().as_str(), &insert_into, &peer_addr])
+                .with_label_values(&[flow_id.to_string().as_str(), sql, &peer_addr])
                 .observe(elapsed.as_secs_f64());
         }
 
@@ -490,7 +501,7 @@ impl RecordingRuleTask {
         let res = res.context(InvalidRequestSnafu {
             context: format!(
                 "Failed to execute query for flow={}: \'{}\'",
-                self.flow_id, &insert_into
+                self.flow_id, &sql
             ),
         })?;
 
@@ -504,7 +515,7 @@ impl RecordingRuleTask {
         frontend_client: Arc<FrontendClient>,
     ) -> Result<(), Error> {
         loop {
-            let Some(_) = self.execute_once(&engine, &frontend_client).await? else {
+            let Some(_) = self.gen_exec_once(&engine, &frontend_client).await? else {
                 debug!(
                     "Flow id = {:?} found no new data, sleep for {:?} then continue",
                     self.flow_id, MIN_REFRESH_DURATION
@@ -527,6 +538,63 @@ impl RecordingRuleTask {
             };
             tokio::time::sleep_until(sleep_until).await;
         }
+    }
+
+    /// Generate the create table SQL
+    ///
+    /// the auto created table will automatically added a `update_at` Milliseconds DEFAULT now() column in the end
+    /// (for compatibility with flow streaming mode)
+    ///
+    /// and it will use first timestamp column as time index, all other columns will be added as normal columns and nullable
+    async fn gen_create_table_sql(&self, engine: QueryEngineRef) -> Result<String, Error> {
+        let query_ctx = self.state.read().await.query_ctx.clone();
+        let plan = sql_to_df_plan(query_ctx.clone(), engine.clone(), &self.query, true).await?;
+        let schema = plan.schema().fields();
+
+        let mut pk_names = FindGroupByFinalName::default();
+
+        plan.visit(&mut pk_names)
+            .with_context(|_| DatafusionSnafu {
+                context: format!("Can't find aggr expr in plan {plan:?}"),
+            })?;
+
+        let pk_final_names = pk_names.group_expr_names.unwrap_or_default();
+        let all_pk_cols: Vec<_> = schema
+            .iter()
+            .filter(|f| pk_final_names.contains(f.name()))
+            .map(|f| f.name())
+            .collect();
+        let pk_part_in_sql = if all_pk_cols.is_empty() {
+            "".to_string()
+        } else {
+            format!("PRIMARY KEY ({})", all_pk_cols.into_iter().join(","))
+        };
+
+        // auto create table use first timestamp column as time index
+        let first_time_stamp = schema
+            .iter()
+            .find(|f| ConcreteDataType::from_arrow_type(f.data_type()).is_timestamp());
+
+        let mut schema_in_sql: Vec<String> = Vec::new();
+        for field in schema {
+            let ty = ConcreteDataType::from_arrow_type(field.data_type());
+            if first_time_stamp == Some(field) {
+                schema_in_sql.push(format!("\"{}\" {} TIME INDEX,", field.name(), ty));
+            } else {
+                schema_in_sql.push(format!("\"{}\" {} NULL,", field.name(), ty));
+            }
+        }
+        schema_in_sql.push("\"update_at\" Milliseconds default now() NULL,".to_string());
+
+        let col_defs = schema_in_sql.join(" ") + &pk_part_in_sql;
+
+        let create_table_sql = format!(
+            "CREATE TABLE IF NOT EXISTS {} ({})",
+            self.sink_table_name.join("."),
+            col_defs
+        );
+
+        Ok(create_table_sql)
     }
 
     /// will merge and use the first ten time window in query
