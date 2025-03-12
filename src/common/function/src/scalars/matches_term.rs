@@ -20,6 +20,7 @@ use datafusion_expr::Volatility;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::vectors::{BooleanVector, BooleanVectorBuilder, MutableVector, VectorRef};
+use memchr::memmem;
 use snafu::ensure;
 
 use crate::function::{Function, FunctionContext};
@@ -179,37 +180,41 @@ pub fn contains_term(text: &str, term: &str) -> bool {
         return text.is_empty();
     }
 
+    if text.len() < term.len() {
+        return false;
+    }
+
     let starts_with_non_alnum = term.chars().next().is_some_and(|c| !c.is_alphanumeric());
     let ends_with_non_alnum = term.chars().last().is_some_and(|c| !c.is_alphanumeric());
 
-    for (i, _) in text.match_indices(term) {
-        let term_len = term.len();
+    let finder = memmem::Finder::new(term);
 
-        // Check preceding character
-        let prev_ok = if starts_with_non_alnum {
-            true
-        } else {
-            text[..i]
+    let mut pos = 0;
+    while let Some(found_pos) = finder.find(text[pos..].as_bytes()) {
+        let actual_pos = pos + found_pos;
+
+        let prev_ok = starts_with_non_alnum
+            || text[..actual_pos]
                 .chars()
                 .last()
                 .map(|c| !c.is_alphanumeric())
-                .unwrap_or(true) // Beginning of text
-        };
+                .unwrap_or(true);
 
-        // Check following character
-        let next_ok = if ends_with_non_alnum {
-            true
-        } else {
-            text[i + term_len..]
-                .chars()
-                .next()
-                .map(|c| !c.is_alphanumeric())
-                .unwrap_or(true) // End of text
-        };
+        if prev_ok {
+            let next_pos = actual_pos + term.len();
+            let next_ok = ends_with_non_alnum
+                || text[next_pos..]
+                    .chars()
+                    .next()
+                    .map(|c| !c.is_alphanumeric())
+                    .unwrap_or(true);
 
-        if prev_ok && next_ok {
-            return true;
+            if next_ok {
+                return true;
+            }
         }
+
+        pos = actual_pos + 1;
     }
 
     false

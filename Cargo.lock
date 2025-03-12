@@ -2036,6 +2036,7 @@ dependencies = [
  "h3o",
  "hyperloglogplus",
  "jsonb",
+ "memchr",
  "nalgebra 0.33.2",
  "num",
  "num-traits",
