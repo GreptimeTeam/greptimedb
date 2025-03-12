@@ -113,7 +113,6 @@ pub struct TableIdent {
 /// The table metadata.
 ///
 /// Note: if you add new fields to this struct, please ensure 'new_meta_builder' function works.
-/// TODO(dennis): find a better way to ensure 'new_meta_builder' works when adding new fields.
 #[derive(Clone, Debug, Builder, PartialEq, Eq, ToMetaBuilder)]
 #[builder(pattern = "mutable")]
 pub struct TableMeta {
@@ -495,7 +494,10 @@ impl TableMeta {
 
     /// Create a [`TableMetaBuilder`] from the current TableMeta.
     fn new_meta_builder(&self) -> TableMetaBuilder {
-        self.into()
+        let mut builder = TableMetaBuilder::from(self);
+        // Manually remove value_indices.
+        builder.value_indices = None;
+        builder
     }
 
     // TODO(yingwen): Tests add if not exists.

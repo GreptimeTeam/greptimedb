@@ -143,6 +143,7 @@ pub fn stack_trace_debug(args: TokenStream, input: TokenStream) -> TokenStream {
 #[proc_macro_derive(ToMetaBuilder)]
 pub fn derive_meta_builder(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
+
     let Data::Struct(data_struct) = input.data else {
         panic!("ToMetaBuilder can only be derived for structs");
     };
@@ -150,6 +151,11 @@ pub fn derive_meta_builder(input: TokenStream) -> TokenStream {
     let Fields::Named(fields) = data_struct.fields else {
         panic!("ToMetaBuilder can only be derived for structs with named fields");
     };
+
+    // Check that this is being applied to TableMeta struct
+    if input.ident != "TableMeta" {
+        panic!("ToMetaBuilder can only be derived for TableMeta struct");
+    }
 
     let field_assignments = fields.named.iter().map(|field| {
         let field_name = field.ident.as_ref().unwrap();
