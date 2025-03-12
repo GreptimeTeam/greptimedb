@@ -133,8 +133,10 @@ pub struct FlowInfoValue {
     /// The options.
     pub(crate) options: HashMap<String, String>,
     /// The created time
+    #[serde(default)]
     pub(crate) created_time: DateTime<Utc>,
     /// The updated time.
+    #[serde(default)]
     pub(crate) updated_time: DateTime<Utc>,
 }
 
