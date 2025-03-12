@@ -729,6 +729,33 @@ pub enum Error {
         location: Location,
     },
 
+    #[cfg(feature = "mysql_kvbackend")]
+    #[snafu(display("Failed to execute via mysql"))]
+    MySqlExecution {
+        #[snafu(source)]
+        error: sqlx::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "mysql_kvbackend")]
+    #[snafu(display("Failed to create mysql pool"))]
+    CreateMySqlPool {
+        #[snafu(source)]
+        error: sqlx::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "mysql_kvbackend")]
+    #[snafu(display("Failed to connect to mysql"))]
+    ConnectMySql {
+        #[snafu(source)]
+        error: sqlx::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Handler not found: {}", name))]
     HandlerNotFound {
         name: String,
@@ -911,6 +938,10 @@ impl ErrorExt for Error {
             | Error::GetPostgresConnection { .. }
             | Error::PostgresExecution { .. }
             | Error::ConnectPostgres { .. } => StatusCode::Internal,
+            #[cfg(feature = "mysql_kvbackend")]
+            Error::MySqlExecution { .. }
+            | Error::CreateMySqlPool { .. }
+            | Error::ConnectMySql { .. } => StatusCode::Internal,
         }
     }
 

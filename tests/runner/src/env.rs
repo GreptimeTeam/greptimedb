@@ -72,6 +72,7 @@ pub struct StoreConfig {
     pub store_addrs: Vec<String>,
     pub setup_etcd: bool,
     pub setup_pg: bool,
+    pub setup_mysql: bool,
 }
 
 #[derive(Clone)]
@@ -171,6 +172,7 @@ impl Env {
             self.setup_wal();
             self.setup_etcd();
             self.setup_pg();
+            // self.setup_mysql().await;
 
             let mut db_ctx = GreptimeDBContext::new(self.wal.clone(), self.store_config.clone());
 
@@ -535,7 +537,13 @@ impl Env {
         println!("Going to build the DB...");
         let output = Command::new("cargo")
             .current_dir(util::get_workspace_root())
-            .args(["build", "--bin", "greptime"])
+            .args([
+                "build",
+                "--bin",
+                "greptime",
+                "--features",
+                "pg_kvbackend,mysql_kvbackend",
+            ])
             .output()
             .expect("Failed to start GreptimeDB");
         if !output.status.success() {

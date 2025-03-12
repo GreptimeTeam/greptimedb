@@ -579,6 +579,9 @@ jobs:
           - name: "Pg Kvbackend"
             opts: "--setup-pg"
             kafka: false
+          - name: "Mysql Kvbackend"
+            opts: "--setup-mysql"
+            kafka: false
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4

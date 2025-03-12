@@ -23,6 +23,8 @@ use common_config::Configurable;
 use common_meta::kv_backend::chroot::ChrootKvBackend;
 use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::memory::MemoryKvBackend;
+#[cfg(feature = "mysql_kvbackend")]
+use common_meta::kv_backend::rds::MySqlStore;
 #[cfg(feature = "pg_kvbackend")]
 use common_meta::kv_backend::rds::PgStore;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
@@ -38,9 +40,13 @@ use servers::export_metrics::ExportMetricsTask;
 use servers::http::{HttpServer, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
 use servers::server::Server;
-#[cfg(feature = "pg_kvbackend")]
+#[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
 use snafu::OptionExt;
 use snafu::ResultExt;
+#[cfg(feature = "mysql_kvbackend")]
+use sqlx::mysql::{MySqlConnection, MySqlPool};
+#[cfg(feature = "mysql_kvbackend")]
+use sqlx::Connection;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 #[cfg(feature = "pg_kvbackend")]
@@ -49,9 +55,11 @@ use tonic::codec::CompressionEncoding;
 use tonic::transport::server::{Router, TcpIncoming};
 
 use crate::election::etcd::EtcdElection;
+#[cfg(feature = "mysql_kvbackend")]
+use crate::election::mysql::MySqlElection;
 #[cfg(feature = "pg_kvbackend")]
 use crate::election::postgres::PgElection;
-#[cfg(feature = "pg_kvbackend")]
+#[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
 use crate::election::CANDIDATE_LEASE_SECS;
 use crate::metasrv::builder::MetasrvBuilder;
 use crate::metasrv::{BackendImpl, Metasrv, MetasrvOptions, SelectorRef};
@@ -229,7 +237,6 @@ pub async fn metasrv_builder(
         #[cfg(feature = "pg_kvbackend")]
         (None, BackendImpl::PostgresStore) => {
             let pool = create_postgres_pool(opts).await?;
-            // TODO(CookiePie): use table name from config.
             let kv_backend = PgStore::with_pg_pool(pool, &opts.meta_table_name, opts.max_txn_ops)
                 .await
                 .context(error::KvBackendSnafu)?;
@@ -242,6 +249,25 @@ pub async fn metasrv_builder(
                 CANDIDATE_LEASE_SECS,
                 &opts.meta_table_name,
                 opts.meta_election_lock_id,
+            )
+            .await?;
+            (kv_backend, Some(election))
+        }
+        #[cfg(feature = "mysql_kvbackend")]
+        (None, BackendImpl::MysqlStore) => {
+            let pool = create_mysql_pool(opts).await?;
+            let kv_backend =
+                MySqlStore::with_mysql_pool(pool, &opts.meta_table_name, opts.max_txn_ops)
+                    .await
+                    .context(error::KvBackendSnafu)?;
+            let election_table_name = opts.meta_table_name.clone() + "_election";
+            let election_client = create_mysql_client(opts).await?;
+            let election = MySqlElection::with_mysql_client(
+                opts.server_addr.clone(),
+                election_client,
+                opts.store_key_prefix.clone(),
+                CANDIDATE_LEASE_SECS,
+                &election_table_name,
             )
             .await?;
             (kv_backend, Some(election))
@@ -322,4 +348,32 @@ async fn create_postgres_pool(opts: &MetasrvOptions) -> Result<deadpool_postgres
         .create_pool(Some(Runtime::Tokio1), NoTls)
         .context(error::CreatePostgresPoolSnafu)?;
     Ok(pool)
+}
+
+#[cfg(feature = "mysql_kvbackend")]
+async fn create_mysql_pool(opts: &MetasrvOptions) -> Result<MySqlPool> {
+    let mysql_url = opts
+        .store_addrs
+        .first()
+        .context(error::InvalidArgumentsSnafu {
+            err_msg: "empty store addrs",
+        })?;
+    let pool = MySqlPool::connect(mysql_url)
+        .await
+        .context(error::CreateMySqlPoolSnafu)?;
+    Ok(pool)
+}
+
+#[cfg(feature = "mysql_kvbackend")]
+async fn create_mysql_client(opts: &MetasrvOptions) -> Result<MySqlConnection> {
+    let mysql_url = opts
+        .store_addrs
+        .first()
+        .context(error::InvalidArgumentsSnafu {
+            err_msg: "empty store addrs",
+        })?;
+    let client = MySqlConnection::connect(mysql_url)
+        .await
+        .context(error::ConnectMySqlSnafu)?;
+    Ok(client)
 }

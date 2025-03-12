@@ -436,6 +436,18 @@ impl ServerMode {
                     );
                     args.extend(vec!["--backend".to_string(), "postgres-store".to_string()]);
                     args.extend(vec!["--store-addrs".to_string(), pg_server_addr]);
+                } else if db_ctx.store_config().setup_mysql {
+                    let client_ports = self
+                        .store_config
+                        .store_addrs
+                        .iter()
+                        .map(|s| s.split(':').nth(1).unwrap().parse::<u16>().unwrap())
+                        .collect::<Vec<_>>();
+                    let client_port = client_ports.first().unwrap_or(&3306);
+                    let mysql_server_addr =
+                        format!("mysql://greptimedb:admin@127.0.0.1:{}/mysql", client_port);
+                    args.extend(vec!["--backend".to_string(), "mysql-store".to_string()]);
+                    args.extend(vec!["--store-addrs".to_string(), mysql_server_addr]);
                 } else if db_ctx.store_config().store_addrs.is_empty() {
                     args.extend(vec!["--backend".to_string(), "memory-store".to_string()])
                 }
