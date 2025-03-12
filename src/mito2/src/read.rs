@@ -990,7 +990,7 @@ impl<T: BatchReader + ?Sized> BatchReader for Box<T> {
     }
 }
 
-/// Metrics for scanners.
+/// Local metrics for scanners.
 #[derive(Debug, Default)]
 pub(crate) struct ScannerMetrics {
     /// Duration to prepare the scan task.
@@ -1003,8 +1003,6 @@ pub(crate) struct ScannerMetrics {
     convert_cost: Duration,
     /// Duration while waiting for `yield`.
     yield_cost: Duration,
-    /// Duration of the scan.
-    total_cost: Duration,
     /// Number of batches returned.
     num_batches: usize,
     /// Number of rows returned.

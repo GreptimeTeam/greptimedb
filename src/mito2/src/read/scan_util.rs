@@ -36,7 +36,6 @@ use crate::sst::file::FileTimeRange;
 use crate::sst::parquet::reader::ReaderMetrics;
 
 /// Scan metrics to report to the execution metrics.
-#[derive(Debug)]
 struct ScanMetricsSet {
     /// Duration to prepare the scan task.
     prepare_scan_cost: Time,
@@ -93,6 +92,71 @@ struct ScanMetricsSet {
     first_poll: Time,
 }
 
+impl std::fmt::Debug for ScanMetricsSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScanMetricsSet")
+            .field(
+                "prepare_scan_cost",
+                &Duration::from_nanos(self.prepare_scan_cost.value() as u64),
+            )
+            .field(
+                "build_reader_cost",
+                &Duration::from_nanos(self.build_reader_cost.value() as u64),
+            )
+            .field(
+                "scan_cost",
+                &Duration::from_nanos(self.scan_cost.value() as u64),
+            )
+            .field(
+                "convert_cost",
+                &Duration::from_nanos(self.convert_cost.value() as u64),
+            )
+            .field(
+                "yield_cost",
+                &Duration::from_nanos(self.yield_cost.value() as u64),
+            )
+            .field(
+                "total_cost",
+                &Duration::from_nanos(self.total_cost.value() as u64),
+            )
+            .field("num_rows", &self.num_rows.value())
+            .field("num_batches", &self.num_batches.value())
+            .field("num_mem_ranges", &self.num_mem_ranges.value())
+            .field("num_file_ranges", &self.num_file_ranges.value())
+            .field(
+                "build_parts_cost",
+                &Duration::from_nanos(self.build_parts_cost.value() as u64),
+            )
+            .field("rg_total", &self.rg_total.value())
+            .field("rg_fulltext_filtered", &self.rg_fulltext_filtered.value())
+            .field("rg_inverted_filtered", &self.rg_inverted_filtered.value())
+            .field("rg_minmax_filtered", &self.rg_minmax_filtered.value())
+            .field("rg_bloom_filtered", &self.rg_bloom_filtered.value())
+            .field("rows_before_filter", &self.rows_before_filter.value())
+            .field(
+                "rows_fulltext_filtered",
+                &self.rows_fulltext_filtered.value(),
+            )
+            .field(
+                "rows_inverted_filtered",
+                &self.rows_inverted_filtered.value(),
+            )
+            .field("rows_bloom_filtered", &self.rows_bloom_filtered.value())
+            .field("rows_precise_filtered", &self.rows_precise_filtered.value())
+            .field(
+                "num_sst_record_batches",
+                &self.num_sst_record_batches.value(),
+            )
+            .field("num_sst_batches", &self.num_sst_batches.value())
+            .field("num_sst_rows", &self.num_sst_rows.value())
+            .field(
+                "first_poll",
+                &Duration::from_nanos(self.first_poll.value() as u64),
+            )
+            .finish()
+    }
+}
+
 impl ScanMetricsSet {
     /// Creates a metrics set from an execution metrics.
     fn new(metrics_set: &ExecutionPlanMetricsSet, partition: usize) -> Self {
@@ -145,7 +209,6 @@ impl ScanMetricsSet {
         self.scan_cost.add_duration(other.scan_cost);
         self.convert_cost.add_duration(other.convert_cost);
         self.yield_cost.add_duration(other.yield_cost);
-        self.total_cost.add_duration(other.total_cost);
         self.num_rows.add(other.num_rows);
         self.num_batches.add(other.num_batches);
         self.num_mem_ranges.add(other.num_mem_ranges);
