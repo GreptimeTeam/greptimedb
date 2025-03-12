@@ -17,7 +17,7 @@
 use std::collections::BTreeSet;
 
 use datafusion_common::tree_node::{TreeNodeRecursion, TreeNodeVisitor};
-use datafusion_expr::LogicalPlan;
+use datafusion_expr::{Distinct, LogicalPlan};
 
 /// Helper to find the innermost group by expr in schema, return None if no group by expr
 #[derive(Debug, Clone, Default)]
@@ -37,7 +37,29 @@ impl TreeNodeVisitor<'_> for FindGroupByFinalName {
                     .map(|e| e.name_for_alias())
                     .collect::<Result<_, _>>()?,
             );
-        };
+        } else if let LogicalPlan::Distinct(distinct) = node {
+            match distinct {
+                Distinct::All(input) => {
+                    self.group_expr_names = Some(
+                        input
+                            .schema()
+                            .fields()
+                            .iter()
+                            .map(|f| f.name().clone())
+                            .collect(),
+                    )
+                }
+                Distinct::On(distinct_on) => {
+                    self.group_expr_names = Some(
+                        distinct_on
+                            .on_expr
+                            .iter()
+                            .map(|e| e.name_for_alias())
+                            .collect::<Result<_, _>>()?,
+                    )
+                }
+            }
+        }
 
         Ok(TreeNodeRecursion::Continue)
     }

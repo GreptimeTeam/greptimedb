@@ -344,7 +344,7 @@ impl FlowWorkerManager {
             }
             all_flow_ids
         };
-        let cnt = to_be_recovered.len();
+        let mut cnt = 0;
 
         // TODO(discord9): recover in parallel
         for flow_id in to_be_recovered {
@@ -382,12 +382,18 @@ impl FlowWorkerManager {
                         .build(),
                 ),
             };
-            self.create_flow(args)
+            if let Err(err) = self
+                .create_flow(args)
                 .await
                 .map_err(BoxedError::new)
                 .with_context(|_| CreateFlowSnafu {
                     sql: info.raw_sql().clone(),
-                })?;
+                })
+            {
+                common_telemetry::error!(err; "Failed to create flow (flow_id = {flow_id}) on reboot")
+            } else {
+                cnt += 1;
+            }
         }
 
         info!("Recover {} flows", cnt);
