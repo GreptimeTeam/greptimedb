@@ -493,6 +493,7 @@ impl TableMeta {
     }
 
     /// Create a [`TableMetaBuilder`] from the current TableMeta.
+    /// Note: please always use this function to create the builder.
     fn new_meta_builder(&self) -> TableMetaBuilder {
         let mut builder = TableMetaBuilder::from(self);
         // Manually remove value_indices.
