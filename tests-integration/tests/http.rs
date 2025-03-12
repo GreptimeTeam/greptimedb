@@ -1098,6 +1098,7 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
         "root =",
         "endpoint =",
         "region =",
+        "enable_virtual_host_style =",
         "cache_path =",
         "cache_capacity =",
         "sas_token =",
