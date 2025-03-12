@@ -21,6 +21,7 @@ use common_error::ext::BoxedError;
 use common_meta::ddl::create_flow::FlowType;
 use common_meta::key::flow::FlowMetadataManagerRef;
 use common_meta::key::table_info::TableInfoManager;
+use common_meta::key::table_name::{TableNameKey, TableNameValue};
 use common_meta::key::TableMetadataManagerRef;
 use common_telemetry::tracing::warn;
 use common_telemetry::{debug, info};
@@ -42,7 +43,7 @@ use tokio::time::Instant;
 
 use super::frontend_client::FrontendClient;
 use super::{df_plan_to_sql, AddFilterRewriter, TimeWindowExpr};
-use crate::adapter::{CreateFlowArgs, FlowId, TableName};
+use crate::adapter::{CreateFlowArgs, FlowId, TableName, AUTO_CREATED_PLACEHOLDER_TS_COL};
 use crate::error::{
     DatafusionSnafu, DatatypesSnafu, ExternalSnafu, FlowAlreadyExistSnafu, InternalSnafu,
     InvalidRequestSnafu, TableNotFoundMetaSnafu, TableNotFoundSnafu, TimeSnafu, UnexpectedSnafu,
@@ -346,10 +347,34 @@ impl RecordingRuleTask {
             .await
             .dirty_time_windows
             .add_lower_bounds(vec![ts].into_iter());
-        let create_table = self.gen_create_table_sql(engine.clone()).await?;
-        self.execute_sql(frontend_client, &create_table).await?;
 
+        if !self.is_table_exist(&self.sink_table_name).await? {
+            let create_table = self.gen_create_table_sql(engine.clone()).await?;
+            info!(
+                "Try creating sink table(if not exists) with query: {}",
+                create_table
+            );
+            self.execute_sql(frontend_client, &create_table).await?;
+            info!(
+                "Sink table {}(if not exists) created",
+                self.sink_table_name.join(".")
+            );
+        }
         self.gen_exec_once(engine, frontend_client).await
+    }
+
+    async fn is_table_exist(&self, table_name: &[String; 3]) -> Result<bool, Error> {
+        self.table_meta
+            .table_name_manager()
+            .get(TableNameKey {
+                catalog: &table_name[0],
+                schema: &table_name[1],
+                table: &table_name[2],
+            })
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)
+            .map(|v| v.is_some())
     }
 
     pub async fn gen_exec_once(
@@ -398,13 +423,14 @@ impl RecordingRuleTask {
             })?
             .into_inner();
 
-        let table_schema_len = table.table_info.meta.schema.column_schemas.len();
+        let table_schema = &table.table_info.meta.schema.column_schemas;
 
         let insert_into = if let Some((new_query, column_cnt)) = new_query {
             // TODO(discord9): also assign column name to compat update_at column
-            if table_schema_len == column_cnt {
+            if table_schema.len() == column_cnt {
                 format!("INSERT INTO {} {}", full_table_name, new_query)
-            } else if table_schema_len == column_cnt + 1 {
+            } else if table_schema.len() <= column_cnt + 2 {
+                // update_at & __ts_placeholder column
                 // TODO(discord9): check update_at column is `DEFAULT now()`
                 let table_column_names = table
                     .table_info
@@ -416,7 +442,7 @@ impl RecordingRuleTask {
                     .collect_vec();
                 let minus_last_one = table_column_names
                     .into_iter()
-                    .take(table_schema_len - 1)
+                    .take(column_cnt)
                     .collect_vec();
 
                 format!(
@@ -428,8 +454,8 @@ impl RecordingRuleTask {
             } else {
                 UnexpectedSnafu {
                     reason: format!(
-                        "Column conut mismatch, table column count = {}, query column count = {}",
-                        table_schema_len, column_cnt
+                        "Column conut mismatch, table column = {:?}, query column count = {}",
+                        table_schema, column_cnt
                     ),
                 }
                 .fail()?
@@ -564,28 +590,42 @@ impl RecordingRuleTask {
             .filter(|f| pk_final_names.contains(f.name()))
             .map(|f| f.name())
             .collect();
-        let pk_part_in_sql = if all_pk_cols.is_empty() {
-            "".to_string()
-        } else {
-            format!("PRIMARY KEY ({})", all_pk_cols.into_iter().join(","))
-        };
 
         // auto create table use first timestamp column as time index
         let first_time_stamp = schema
             .iter()
-            .find(|f| ConcreteDataType::from_arrow_type(f.data_type()).is_timestamp());
+            .find(|f| ConcreteDataType::from_arrow_type(f.data_type()).is_timestamp())
+            .map(|f| f.name().clone());
+
+        let all_pk_cols: Vec<_> = all_pk_cols
+            .into_iter()
+            .filter(|col| first_time_stamp != Some(col.to_string()))
+            .collect();
 
         let mut schema_in_sql: Vec<String> = Vec::new();
         for field in schema {
             let ty = ConcreteDataType::from_arrow_type(field.data_type());
-            if first_time_stamp == Some(field) {
+            if first_time_stamp == Some(field.name().clone()) {
                 schema_in_sql.push(format!("\"{}\" {} TIME INDEX,", field.name(), ty));
             } else {
                 schema_in_sql.push(format!("\"{}\" {} NULL,", field.name(), ty));
             }
         }
-        schema_in_sql.push("\"update_at\" Milliseconds default now() NULL,".to_string());
+        if first_time_stamp.is_none() {
+            schema_in_sql.push("\"update_at\" TimestampMillisecond default now(),".to_string());
+            schema_in_sql.push(format!(
+                "\"{}\" TimestampMillisecond TIME INDEX default 0,",
+                AUTO_CREATED_PLACEHOLDER_TS_COL
+            ));
+        } else {
+            schema_in_sql.push("\"update_at\" TimestampMillisecond default now(),".to_string());
+        }
 
+        let pk_part_in_sql = if all_pk_cols.is_empty() {
+            "".to_string()
+        } else {
+            format!("PRIMARY KEY ({})", all_pk_cols.iter().join(","))
+        };
         let col_defs = schema_in_sql.join(" ") + &pk_part_in_sql;
 
         let create_table_sql = format!(
@@ -636,7 +676,7 @@ impl RecordingRuleTask {
                             .gen_filter_exprs(&col_name, lower, window_size)?
                     }
                     _ => {
-                        warn!(
+                        debug!(
                             "Flow id = {:?}, can't get window size: lower={lower:?}, upper={upper:?}, using the same query", self.flow_id
                         );
                         // since no time window lower/upper bound is found, just return the original query
