@@ -28,7 +28,8 @@ pub(crate) const PROCESSOR_SIMPLE_EXTRACT: &str = "simple_extract";
 #[derive(Debug, Default)]
 pub struct SimpleExtractProcessor {
     fields: Fields,
-    // a.b -> [a, b]
+    /// simple keys to extract nested JSON field
+    /// key `a.b` is saved as  ['a', 'b'], each key represents a level of the JSON tree
     key: Vec<String>,
     ignore_missing: bool,
 }
@@ -108,7 +109,6 @@ impl Processor for SimpleExtractProcessor {
                     val.insert(output_index.to_string(), processed);
                 }
                 None => {
-                    // warn!("[DEBUG]pipeline_map {:?}, index: {}", val, index);
                     if !self.ignore_missing {
                         return ProcessorMissingFieldSnafu {
                             processor: self.kind(),
@@ -120,5 +120,28 @@ impl Processor for SimpleExtractProcessor {
             }
         }
         Ok(())
+    }
+}
+
+mod test {
+
+    #[test]
+    fn test_json_path() {
+        use super::*;
+        use crate::{Map, Value};
+
+        let processor = SimpleExtractProcessor {
+            key: vec!["hello".to_string()],
+            ..Default::default()
+        };
+
+        let result = processor
+            .process_field(&Value::Map(Map::one(
+                "hello",
+                Value::String("world".to_string()),
+            )))
+            .unwrap();
+
+        assert_eq!(result, Value::String("world".to_string()));
     }
 }
