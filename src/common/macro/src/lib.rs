@@ -157,19 +157,24 @@ pub fn derive_meta_builder(input: TokenStream) -> TokenStream {
         panic!("ToMetaBuilder can only be derived for TableMeta struct");
     }
 
+    let field_names = fields.named.iter().map(|field| {
+        field.ident.as_ref().unwrap()
+    });
+    
     let field_assignments = fields.named.iter().map(|field| {
         let field_name = field.ident.as_ref().unwrap();
         quote! {
-            builder.#field_name(meta.#field_name.clone());
+            #field_name: meta.#field_name.clone()
         }
     });
 
     let gen = quote! {
         impl From<&TableMeta> for TableMetaBuilder {
             fn from(meta: &TableMeta) -> Self {
-                let mut builder = TableMetaBuilder::default();
-                #(#field_assignments)*
-                builder
+                Self {
+                    #(#field_name: Default::default(),)*
+                    #(#field_assignments)*
+                }
             }
         }
     };
