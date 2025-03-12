@@ -14,7 +14,7 @@
 
 //! Utilities for scanners.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_stream::try_stream;
@@ -254,8 +254,6 @@ struct PartitionMetricsInner {
     scanner_type: &'static str,
     /// Query start time.
     query_start: Instant,
-    /// Elapsed time before the first poll operation.
-    first_poll: Duration,
     metrics: ScanMetricsSet,
     in_progress_scan: IntGauge,
 }
@@ -281,27 +279,6 @@ impl Drop for PartitionMetricsInner {
     }
 }
 
-/// List of PartitionMetrics.
-#[derive(Default)]
-pub(crate) struct PartitionMetricsList(Mutex<Vec<Option<PartitionMetrics>>>);
-
-impl PartitionMetricsList {
-    /// Gets a [PartitionMetrics] at the specified partition.
-    pub(crate) fn get(&self, partition: usize) -> Option<PartitionMetrics> {
-        let list = self.0.lock().unwrap();
-        list.get(partition)?.clone()
-    }
-
-    /// Sets a new [PartitionMetrics] at the specified partition.
-    pub(crate) fn set(&self, partition: usize, metrics: PartitionMetrics) {
-        let mut list = self.0.lock().unwrap();
-        if list.len() <= partition {
-            list.resize(partition + 1, None);
-        }
-        list[partition] = Some(metrics);
-    }
-}
-
 /// Metrics while reading a partition.
 #[derive(Clone)]
 pub(crate) struct PartitionMetrics(Arc<PartitionMetricsInner>);
@@ -322,7 +299,6 @@ impl PartitionMetrics {
             partition,
             scanner_type,
             query_start,
-            first_poll: Duration::default(),
             metrics: ScanMetricsSet::new(metrics_set, partition),
             in_progress_scan,
         };
