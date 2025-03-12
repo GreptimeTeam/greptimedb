@@ -59,7 +59,7 @@ session.workspace = true
 snafu.workspace = true
 store-api.workspace = true
 strum.workspace = true
-table.workspace = true
+table = { workspace = true, features = ["testing"] }
 tokio.workspace = true
 tokio-postgres = { workspace = true, optional = true }
 tonic.workspace = true

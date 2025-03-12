@@ -114,7 +114,7 @@ pub struct TableIdent {
 ///
 /// Note: if you add new fields to this struct, please ensure 'new_meta_builder' function works.
 #[derive(Clone, Debug, Builder, PartialEq, Eq, ToMetaBuilder)]
-#[builder(pattern = "mutable")]
+#[builder(pattern = "mutable", custom_constructor)]
 pub struct TableMeta {
     pub schema: SchemaRef,
     /// The indices of columns in primary key. Note that the index of timestamp column
@@ -137,6 +137,23 @@ pub struct TableMeta {
 }
 
 impl TableMetaBuilder {
+    #[cfg(any(test, feature = "testing"))]
+    pub fn default() -> Self {
+        Self {
+            schema: None,
+            primary_key_indices: None,
+            value_indices: None,
+            engine: None,
+            region_numbers: None,
+            next_column_id: None,
+            options: None,
+            created_on: None,
+            partition_key_indices: None,
+        }
+    }
+}
+
+impl TableMetaBuilder {
     fn default_value_indices(&self) -> std::result::Result<Vec<usize>, String> {
         match (&self.primary_key_indices, &self.schema) {
             (Some(v), Some(schema)) => {
@@ -151,11 +168,15 @@ impl TableMetaBuilder {
 
     pub fn new_external_table() -> Self {
         Self {
+            schema: None,
             primary_key_indices: Some(Vec::new()),
             value_indices: Some(Vec::new()),
+            engine: None,
             region_numbers: Some(Vec::new()),
             next_column_id: Some(0),
-            ..Default::default()
+            options: None,
+            created_on: None,
+            partition_key_indices: None,
         }
     }
 }
@@ -493,7 +514,6 @@ impl TableMeta {
     }
 
     /// Create a [`TableMetaBuilder`] from the current TableMeta.
-    /// Note: please always use this function to create the builder.
     fn new_meta_builder(&self) -> TableMetaBuilder {
         let mut builder = TableMetaBuilder::from(self);
         // Manually remove value_indices.
