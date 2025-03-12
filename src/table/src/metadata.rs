@@ -31,7 +31,7 @@ use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use store_api::mito_engine_options::{COMPACTION_TYPE, COMPACTION_TYPE_TWCS};
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId, RegionId};
-
+use common_macro::ToMetaBuilder;
 use crate::error::{self, Result};
 use crate::requests::{
     AddColumnRequest, AlterKind, ModifyColumnTypeRequest, SetIndexOptions, TableOptions,
@@ -113,7 +113,7 @@ pub struct TableIdent {
 ///
 /// Note: if you add new fields to this struct, please ensure 'new_meta_builder' function works.
 /// TODO(dennis): find a better way to ensure 'new_meta_builder' works when adding new fields.
-#[derive(Clone, Debug, Builder, PartialEq, Eq)]
+#[derive(Clone, Debug, Builder, PartialEq, Eq, ToMetaBuilder)]
 #[builder(pattern = "mutable")]
 pub struct TableMeta {
     pub schema: SchemaRef,
@@ -492,21 +492,9 @@ impl TableMeta {
         Ok(desc)
     }
 
-    /// Create a [`TableMetaBuilder`].
-    ///
-    /// Note: please always use this function to create the builder.
+    /// Create a [`TableMetaBuilder`] from the current TableMeta.
     fn new_meta_builder(&self) -> TableMetaBuilder {
-        let mut builder = TableMetaBuilder::default();
-        let _ = builder
-            .schema(self.schema.clone())
-            .primary_key_indices(self.primary_key_indices.clone())
-            .engine(&self.engine)
-            .options(self.options.clone())
-            .created_on(self.created_on)
-            .region_numbers(self.region_numbers.clone())
-            .next_column_id(self.next_column_id);
-
-        builder
+        self.into()
     }
 
     // TODO(yingwen): Tests add if not exists.
