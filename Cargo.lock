@@ -2903,7 +2903,7 @@ checksum = "e8566979429cf69b49a5c740c60791108e86440e8be149bbea4fe54d2c32d6e2"
 [[package]]
 name = "datafusion"
 version = "43.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=2464703c84c400a09cc59277018813f0e797bb4e#2464703c84c400a09cc59277018813f0e797bb4e"
+source = "git+https://github.com/WenyXu/arrow-datafusion.git?rev=b81c1d7e51be6a31cd293513a2f998841234841d#b81c1d7e51be6a31cd293513a2f998841234841d"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -2954,7 +2954,7 @@ dependencies = [
 [[package]]
 name = "datafusion-catalog"
 version = "43.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=2464703c84c400a09cc59277018813f0e797bb4e#2464703c84c400a09cc59277018813f0e797bb4e"
+source = "git+https://github.com/WenyXu/arrow-datafusion.git?rev=b81c1d7e51be6a31cd293513a2f998841234841d#b81c1d7e51be6a31cd293513a2f998841234841d"
 dependencies = [
  "arrow-schema",
  "async-trait",
@@ -2968,7 +2968,7 @@ dependencies = [
 [[package]]
 name = "datafusion-common"
 version = "43.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=2464703c84c400a09cc59277018813f0e797bb4e#2464703c84c400a09cc59277018813f0e797bb4e"
+source = "git+https://github.com/WenyXu/arrow-datafusion.git?rev=b81c1d7e51be6a31cd293513a2f998841234841d#b81c1d7e51be6a31cd293513a2f998841234841d"
 dependencies = [
  "ahash 0.8.11",
  "arrow",
@@ -2992,7 +2992,7 @@ dependencies = [
 [[package]]
 name = "datafusion-common-runtime"
 version = "43.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=2464703c84c400a09cc59277018813f0e797bb4e#2464703c84c400a09cc59277018813f0e797bb4e"
+source = "git+https://github.com/WenyXu/arrow-datafusion.git?rev=b81c1d7e51be6a31cd293513a2f998841234841d#b81c1d7e51be6a31cd293513a2f998841234841d"
 dependencies = [
  "log",
  "tokio",
@@ -3001,12 +3001,12 @@ dependencies = [
 [[package]]
 name = "datafusion-doc"
 version = "43.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=2464703c84c400a09cc59277018813f0e797bb4e#2464703c84c400a09cc59277018813f0e797bb4e"
+source = "git+https://github.com/WenyXu/arrow-datafusion.git?rev=b81c1d7e51be6a31cd293513a2f998841234841d#b81c1d7e51be6a31cd293513a2f998841234841d"
 
 [[package]]
 name = "datafusion-execution"
 version = "43.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=2464703c84c400a09cc59277018813f0e797bb4e#2464703c84c400a09cc59277018813f0e797bb4e"
+source = "git+https://github.com/WenyXu/arrow-datafusion.git?rev=b81c1d7e51be6a31cd293513a2f998841234841d#b81c1d7e51be6a31cd293513a2f998841234841d"
 dependencies = [
  "arrow",
  "chrono",
@@ -3025,7 +3025,7 @@ dependencies = [
 [[package]]
 name = "datafusion-expr"
 version = "43.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=2464703c84c400a09cc59277018813f0e797bb4e#2464703c84c400a09cc59277018813f0e797bb4e"
+source = "git+https://github.com/WenyXu/arrow-datafusion.git?rev=b81c1d7e51be6a31cd293513a2f998841234841d#b81c1d7e51be6a31cd293513a2f998841234841d"
 dependencies = [
  "ahash 0.8.11",
  "arrow",
@@ -3050,7 +3050,7 @@ dependencies = [
 [[package]]
 name = "datafusion-expr-common"
 version = "43.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=2464703c84c400a09cc59277018813f0e797bb4e#2464703c84c400a09cc59277018813f0e797bb4e"
+source = "git+https://github.com/WenyXu/arrow-datafusion.git?rev=b81c1d7e51be6a31cd293513a2f998841234841d#b81c1d7e51be6a31cd293513a2f998841234841d"
 dependencies = [
  "arrow",
  "datafusion-common",
@@ -3061,7 +3061,7 @@ dependencies = [
 [[package]]
 name = "datafusion-functions"
 version = "43.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=2464703c84c400a09cc59277018813f0e797bb4e#2464703c84c400a09cc59277018813f0e797bb4e"
+source = "git+https://github.com/WenyXu/arrow-datafusion.git?rev=b81c1d7e51be6a31cd293513a2f998841234841d#b81c1d7e51be6a31cd293513a2f998841234841d"
 dependencies = [
  "arrow",
  "arrow-buffer",
@@ -3089,7 +3089,7 @@ dependencies = [
 [[package]]
 name = "datafusion-functions-aggregate"
 version = "43.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=2464703c84c400a09cc59277018813f0e797bb4e#2464703c84c400a09cc59277018813f0e797bb4e"
+source = "git+https://github.com/WenyXu/arrow-datafusion.git?rev=b81c1d7e51be6a31cd293513a2f998841234841d#b81c1d7e51be6a31cd293513a2f998841234841d"
 dependencies = [
  "ahash 0.8.11",
  "arrow",
@@ -3110,7 +3110,7 @@ dependencies = [
 [[package]]
 name = "datafusion-functions-aggregate-common"
 version = "43.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=2464703c84c400a09cc59277018813f0e797bb4e#2464703c84c400a09cc59277018813f0e797bb4e"
+source = "git+https://github.com/WenyXu/arrow-datafusion.git?rev=b81c1d7e51be6a31cd293513a2f998841234841d#b81c1d7e51be6a31cd293513a2f998841234841d"
 dependencies = [
  "ahash 0.8.11",
  "arrow",
@@ -3123,7 +3123,7 @@ dependencies = [
 [[package]]
 name = "datafusion-functions-nested"
 version = "43.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=2464703c84c400a09cc59277018813f0e797bb4e#2464703c84c400a09cc59277018813f0e797bb4e"
+source = "git+https://github.com/WenyXu/arrow-datafusion.git?rev=b81c1d7e51be6a31cd293513a2f998841234841d#b81c1d7e51be6a31cd293513a2f998841234841d"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -3145,7 +3145,7 @@ dependencies = [
 [[package]]
 name = "datafusion-functions-table"
 version = "43.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=2464703c84c400a09cc59277018813f0e797bb4e#2464703c84c400a09cc59277018813f0e797bb4e"
+source = "git+https://github.com/WenyXu/arrow-datafusion.git?rev=b81c1d7e51be6a31cd293513a2f998841234841d#b81c1d7e51be6a31cd293513a2f998841234841d"
 dependencies = [
  "ahash 0.8.11",
  "arrow",
@@ -3169,7 +3169,7 @@ dependencies = [
 [[package]]
 name = "datafusion-functions-window"
 version = "43.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=2464703c84c400a09cc59277018813f0e797bb4e#2464703c84c400a09cc59277018813f0e797bb4e"
+source = "git+https://github.com/WenyXu/arrow-datafusion.git?rev=b81c1d7e51be6a31cd293513a2f998841234841d#b81c1d7e51be6a31cd293513a2f998841234841d"
 dependencies = [
  "datafusion-common",
  "datafusion-expr",
@@ -3183,7 +3183,7 @@ dependencies = [
 [[package]]
 name = "datafusion-functions-window-common"
 version = "43.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=2464703c84c400a09cc59277018813f0e797bb4e#2464703c84c400a09cc59277018813f0e797bb4e"
+source = "git+https://github.com/WenyXu/arrow-datafusion.git?rev=b81c1d7e51be6a31cd293513a2f998841234841d#b81c1d7e51be6a31cd293513a2f998841234841d"
 dependencies = [
  "datafusion-common",
  "datafusion-physical-expr-common",
@@ -3192,7 +3192,7 @@ dependencies = [
 [[package]]
 name = "datafusion-macros"
 version = "43.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=2464703c84c400a09cc59277018813f0e797bb4e#2464703c84c400a09cc59277018813f0e797bb4e"
+source = "git+https://github.com/WenyXu/arrow-datafusion.git?rev=b81c1d7e51be6a31cd293513a2f998841234841d#b81c1d7e51be6a31cd293513a2f998841234841d"
 dependencies = [
  "datafusion-doc",
  "proc-macro2",
@@ -3203,7 +3203,7 @@ dependencies = [
 [[package]]
 name = "datafusion-optimizer"
 version = "43.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=2464703c84c400a09cc59277018813f0e797bb4e#2464703c84c400a09cc59277018813f0e797bb4e"
+source = "git+https://github.com/WenyXu/arrow-datafusion.git?rev=b81c1d7e51be6a31cd293513a2f998841234841d#b81c1d7e51be6a31cd293513a2f998841234841d"
 dependencies = [
  "arrow",
  "async-trait",
@@ -3222,7 +3222,7 @@ dependencies = [
 [[package]]
 name = "datafusion-physical-expr"
 version = "43.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=2464703c84c400a09cc59277018813f0e797bb4e#2464703c84c400a09cc59277018813f0e797bb4e"
+source = "git+https://github.com/WenyXu/arrow-datafusion.git?rev=b81c1d7e51be6a31cd293513a2f998841234841d#b81c1d7e51be6a31cd293513a2f998841234841d"
 dependencies = [
  "ahash 0.8.11",
  "arrow",
@@ -3246,7 +3246,7 @@ dependencies = [
 [[package]]
 name = "datafusion-physical-expr-common"
 version = "43.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=2464703c84c400a09cc59277018813f0e797bb4e#2464703c84c400a09cc59277018813f0e797bb4e"
+source = "git+https://github.com/WenyXu/arrow-datafusion.git?rev=b81c1d7e51be6a31cd293513a2f998841234841d#b81c1d7e51be6a31cd293513a2f998841234841d"
 dependencies = [
  "ahash 0.8.11",
  "arrow",
@@ -3259,7 +3259,7 @@ dependencies = [
 [[package]]
 name = "datafusion-physical-optimizer"
 version = "43.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=2464703c84c400a09cc59277018813f0e797bb4e#2464703c84c400a09cc59277018813f0e797bb4e"
+source = "git+https://github.com/WenyXu/arrow-datafusion.git?rev=b81c1d7e51be6a31cd293513a2f998841234841d#b81c1d7e51be6a31cd293513a2f998841234841d"
 dependencies = [
  "arrow",
  "datafusion-common",
@@ -3275,7 +3275,7 @@ dependencies = [
 [[package]]
 name = "datafusion-physical-plan"
 version = "43.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=2464703c84c400a09cc59277018813f0e797bb4e#2464703c84c400a09cc59277018813f0e797bb4e"
+source = "git+https://github.com/WenyXu/arrow-datafusion.git?rev=b81c1d7e51be6a31cd293513a2f998841234841d#b81c1d7e51be6a31cd293513a2f998841234841d"
 dependencies = [
  "ahash 0.8.11",
  "arrow",
@@ -3308,7 +3308,7 @@ dependencies = [
 [[package]]
 name = "datafusion-sql"
 version = "43.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=2464703c84c400a09cc59277018813f0e797bb4e#2464703c84c400a09cc59277018813f0e797bb4e"
+source = "git+https://github.com/WenyXu/arrow-datafusion.git?rev=b81c1d7e51be6a31cd293513a2f998841234841d#b81c1d7e51be6a31cd293513a2f998841234841d"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -3325,7 +3325,7 @@ dependencies = [
 [[package]]
 name = "datafusion-substrait"
 version = "43.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=2464703c84c400a09cc59277018813f0e797bb4e#2464703c84c400a09cc59277018813f0e797bb4e"
+source = "git+https://github.com/WenyXu/arrow-datafusion.git?rev=b81c1d7e51be6a31cd293513a2f998841234841d#b81c1d7e51be6a31cd293513a2f998841234841d"
 dependencies = [
  "arrow-buffer",
  "async-recursion",

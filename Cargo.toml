@@ -112,15 +112,15 @@ clap = { version = "4.4", features = ["derive"] }
 config = "0.13.0"
 crossbeam-utils = "0.8"
 dashmap = "5.4"
-datafusion = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
-datafusion-common = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
-datafusion-expr = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
-datafusion-functions = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
-datafusion-optimizer = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
-datafusion-physical-expr = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
-datafusion-physical-plan = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
-datafusion-sql = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
-datafusion-substrait = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
+datafusion = { git = "https://github.com/WenyXu/arrow-datafusion.git", rev = "b81c1d7e51be6a31cd293513a2f998841234841d" }
+datafusion-common = { git = "https://github.com/WenyXu/arrow-datafusion.git", rev = "b81c1d7e51be6a31cd293513a2f998841234841d" }
+datafusion-expr = { git = "https://github.com/WenyXu/arrow-datafusion.git", rev = "b81c1d7e51be6a31cd293513a2f998841234841d" }
+datafusion-functions = { git = "https://github.com/WenyXu/arrow-datafusion.git", rev = "b81c1d7e51be6a31cd293513a2f998841234841d" }
+datafusion-optimizer = { git = "https://github.com/WenyXu/arrow-datafusion.git", rev = "b81c1d7e51be6a31cd293513a2f998841234841d" }
+datafusion-physical-expr = { git = "https://github.com/WenyXu/arrow-datafusion.git", rev = "b81c1d7e51be6a31cd293513a2f998841234841d" }
+datafusion-physical-plan = { git = "https://github.com/WenyXu/arrow-datafusion.git", rev = "b81c1d7e51be6a31cd293513a2f998841234841d" }
+datafusion-sql = { git = "https://github.com/WenyXu/arrow-datafusion.git", rev = "b81c1d7e51be6a31cd293513a2f998841234841d" }
+datafusion-substrait = { git = "https://github.com/WenyXu/arrow-datafusion.git", rev = "b81c1d7e51be6a31cd293513a2f998841234841d" }
 deadpool = "0.10"
 deadpool-postgres = "0.12"
 derive_builder = "0.12"

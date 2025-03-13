@@ -94,7 +94,7 @@ impl Categorizer {
                 }
             }
             LogicalPlan::Extension(extension) => {
-                Self::check_extension_plan(extension.node.as_ref() as _)
+                Self::check_extension_plan(extension.node.as_ref() as _, &partition_cols)
             }
             LogicalPlan::Distinct(_) => Commutativity::Unimplemented,
             LogicalPlan::Unnest(_) => Commutativity::Commutative,
@@ -110,14 +110,25 @@ impl Categorizer {
         }
     }
 
-    pub fn check_extension_plan(plan: &dyn UserDefinedLogicalNode) -> Commutativity {
+    pub fn check_extension_plan(
+        plan: &dyn UserDefinedLogicalNode,
+        partition_cols: &[String],
+    ) -> Commutativity {
         match plan.name() {
             name if name == EmptyMetric::name()
                 || name == InstantManipulate::name()
                 || name == SeriesNormalize::name()
                 || name == RangeManipulate::name()
-                || name == SeriesDivide::name()
-                || name == MergeScanLogicalPlan::name()
+                || name == SeriesDivide::name() =>
+            {
+                if partition_cols.is_empty() {
+                    Commutativity::Commutative
+                } else {
+                    Commutativity::Unimplemented
+                }
+            }
+
+            name if name == MergeScanLogicalPlan::name()
                 || name == MergeSortLogicalPlan::name() =>
             {
                 Commutativity::Unimplemented
