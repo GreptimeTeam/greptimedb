@@ -123,6 +123,7 @@ impl Processor for SimpleExtractProcessor {
     }
 }
 
+#[cfg(test)]
 mod test {
 
     #[test]
