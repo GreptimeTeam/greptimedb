@@ -357,6 +357,16 @@ impl ScanRegion {
             Some(p) => ProjectionMapper::new(&self.version.metadata, p.iter().copied())?,
             None => ProjectionMapper::all(&self.version.metadata)?,
         };
+
+        // This is incorrect, but we temporarily sets the tag only hint for test.
+        let tag_only_distinct = match self.request.projection {
+            // TODO(yingwen): index bound check
+            Some(p) => p.iter().all(|idx| {
+                self.version.metadata.column_metadatas[*idx].semantic_type == SemanticType::Tag
+            }),
+            None => false,
+        };
+
         // Get memtable ranges to scan.
         let memtables = memtables
             .into_iter()
@@ -385,7 +395,8 @@ impl ScanRegion {
             .with_filter_deleted(filter_deleted)
             .with_merge_mode(self.version.options.merge_mode())
             .with_series_row_selector(self.request.series_row_selector)
-            .with_distribution(self.request.distribution);
+            .with_distribution(self.request.distribution)
+            .with_tag_only_distinct(tag_only_distinct);
         Ok(input)
     }
 
@@ -567,6 +578,8 @@ pub(crate) struct ScanInput {
     pub(crate) series_row_selector: Option<TimeSeriesRowSelector>,
     /// Hint for the required distribution of the scanner.
     pub(crate) distribution: Option<TimeSeriesDistribution>,
+    /// Hint for tag-only distinct scan.
+    pub(crate) tag_only_distinct: bool,
 }
 
 impl ScanInput {
@@ -592,6 +605,7 @@ impl ScanInput {
             merge_mode: MergeMode::default(),
             series_row_selector: None,
             distribution: None,
+            tag_only_distinct: false,
         }
     }
 
@@ -721,6 +735,13 @@ impl ScanInput {
         series_row_selector: Option<TimeSeriesRowSelector>,
     ) -> Self {
         self.series_row_selector = series_row_selector;
+        self
+    }
+
+    /// Sets the tag-only distinct scan hint.
+    #[must_use]
+    pub(crate) fn with_tag_only_distinct(mut self, tag_only_distinct: bool) -> Self {
+        self.tag_only_distinct = tag_only_distinct;
         self
     }
 
