@@ -104,7 +104,7 @@ mod tests {
     use tokio_util::compat::FuturesAsyncWriteCompatExt;
 
     use super::*;
-    use crate::access_layer::FilePathProvider;
+    use crate::access_layer::{FilePathProvider, RegionFilePathFactory};
     use crate::cache::{CacheManager, CacheStrategy, PageKey};
     use crate::read::BatchReader;
     use crate::sst::index::{Indexer, IndexerBuilder};
@@ -563,7 +563,7 @@ mod tests {
             ..Default::default()
         };
 
-        let path_provider = RegionFilePathProvider {
+        let path_provider = RegionFilePathFactory {
             region_dir: "test".to_string(),
         };
         let mut writer = ParquetWriter::new_with_object_store(
