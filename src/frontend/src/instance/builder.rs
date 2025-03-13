@@ -133,6 +133,7 @@ impl FrontendBuilder {
                 .context(error::CacheRequiredSnafu {
                     name: TABLE_FLOWNODE_SET_CACHE_NAME,
                 })?;
+
         let inserter = Arc::new(Inserter::new(
             self.catalog_manager.clone(),
             partition_manager.clone(),

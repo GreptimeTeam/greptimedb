@@ -30,7 +30,7 @@ use store_api::data_source::DataSource;
 use store_api::storage::ScanRequest;
 
 use crate::metadata::{
-    FilterPushDownType, TableId, TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType,
+    FilterPushDownType, TableId, TableInfoBuilder, TableInfoRef, TableMeta, TableType,
 };
 use crate::{Table, TableRef};
 
@@ -71,14 +71,18 @@ impl NumbersTable {
     }
 
     pub fn table_info(table_id: TableId, name: String, engine: String) -> TableInfoRef {
-        let table_meta = TableMetaBuilder::default()
-            .schema(Self::schema())
-            .region_numbers(vec![0])
-            .primary_key_indices(vec![0])
-            .next_column_id(1)
-            .engine(engine)
-            .build()
-            .unwrap();
+        let table_meta = TableMeta {
+            schema: Self::schema(),
+            primary_key_indices: vec![0],
+            value_indices: vec![],
+            engine,
+            region_numbers: vec![0],
+            next_column_id: 1,
+            options: Default::default(),
+            created_on: Default::default(),
+            partition_key_indices: vec![],
+        };
+
         let table_info = TableInfoBuilder::default()
             .table_id(table_id)
             .name(name)

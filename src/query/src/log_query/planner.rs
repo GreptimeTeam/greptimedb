@@ -433,7 +433,7 @@ mod tests {
         let catalog_list = MemoryCatalogManager::with_default_setup();
         for (schema_name, table_name) in table_name_tuples {
             let schema = mock_schema();
-            let table_meta = TableMetaBuilder::default()
+            let table_meta = TableMetaBuilder::empty()
                 .schema(schema)
                 .primary_key_indices(vec![2])
                 .value_indices(vec![0])

@@ -291,7 +291,7 @@ mod tests {
             .extra_options
             .insert("compaction.type".to_string(), "twcs".to_string());
 
-        let meta = TableMetaBuilder::default()
+        let meta = TableMetaBuilder::empty()
             .schema(table_schema)
             .primary_key_indices(vec![0, 1])
             .value_indices(vec![2, 3])
@@ -362,7 +362,7 @@ WITH(
         let _ = options
             .extra_options
             .insert(FILE_TABLE_FORMAT_KEY.to_string(), "csv".to_string());
-        let meta = TableMetaBuilder::default()
+        let meta = TableMetaBuilder::empty()
             .schema(table_schema)
             .primary_key_indices(vec![])
             .engine("file".to_string())

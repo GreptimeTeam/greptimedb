@@ -40,7 +40,7 @@ pub fn new_test_table_info_with_name<I: IntoIterator<Item = u32>>(
         .build()
         .unwrap();
 
-    let meta = TableMetaBuilder::default()
+    let meta = TableMetaBuilder::empty()
         .schema(Arc::new(schema))
         .primary_key_indices(vec![0])
         .engine("engine")
