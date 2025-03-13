@@ -115,6 +115,37 @@ pub fn create_test_query_engine() -> Arc<dyn QueryEngine> {
     };
     catalog_list.register_table_sync(req_with_ts).unwrap();
 
+    let schema = vec![
+        datatypes::schema::ColumnSchema::new("NUMBER", CDT::uint32_datatype(), false),
+        datatypes::schema::ColumnSchema::new("ts", CDT::timestamp_millisecond_datatype(), false)
+            .with_time_index(true),
+    ];
+    let mut columns = vec![];
+    let numbers = (1..=10).collect_vec();
+    let column: VectorRef = Arc::new(<u32 as Scalar>::VectorType::from_vec(numbers));
+    columns.push(column);
+
+    let ts = (1..=10).collect_vec();
+    let mut builder = TimestampMillisecondVectorBuilder::with_capacity(10);
+    ts.into_iter()
+        .map(|v| builder.push(Some(TimestampMillisecond::new(v))))
+        .count();
+    let column: VectorRef = builder.to_vector_cloned();
+    columns.push(column);
+
+    let schema = Arc::new(Schema::new(schema));
+    let recordbatch = common_recordbatch::RecordBatch::new(schema, columns).unwrap();
+    let table = MemTable::table("UPPERCASE_NUMBERS_WITH_TS", recordbatch);
+
+    let req_with_ts = RegisterTableRequest {
+        catalog: DEFAULT_CATALOG_NAME.to_string(),
+        schema: DEFAULT_SCHEMA_NAME.to_string(),
+        table_name: "UPPERCASE_NUMBERS_WITH_TS".to_string(),
+        table_id: 1025,
+        table,
+    };
+    catalog_list.register_table_sync(req_with_ts).unwrap();
+
     let factory = query::QueryEngineFactory::new(catalog_list, None, None, None, None, false);
 
     let engine = factory.query_engine();

@@ -50,7 +50,7 @@ use crate::error::{
 };
 use crate::metrics::{METRIC_FLOW_RULE_ENGINE_QUERY_TIME, METRIC_FLOW_RULE_ENGINE_SLOW_QUERY};
 use crate::recording_rules::utils::FindGroupByFinalName;
-use crate::recording_rules::{find_plan_time_window_bound, find_time_window_expr, sql_to_df_plan};
+use crate::recording_rules::{find_time_window_expr, sql_to_df_plan};
 use crate::Error;
 
 /// TODO(discord9): make those constants configurable
@@ -219,6 +219,8 @@ impl RecordingRuleEngine {
             .map(|expr| TimeWindowExpr::from_expr(&expr, &column_name, &df_schema))
             .transpose()?;
 
+        info!("Flow id={}, found time window expr={:?}", flow_id, phy_expr);
+
         let task = RecordingRuleTask::new(
             flow_id,
             &sql,
@@ -291,11 +293,11 @@ impl RecordingRuleEngine {
 
 #[derive(Clone)]
 pub struct RecordingRuleTask {
-    flow_id: FlowId,
+    pub flow_id: FlowId,
     query: String,
-    time_window_expr: Option<TimeWindowExpr>,
+    pub time_window_expr: Option<TimeWindowExpr>,
     /// in seconds
-    expire_after: Option<i64>,
+    pub expire_after: Option<i64>,
     sink_table_name: [String; 3],
     source_table_names: HashSet<[String; 3]>,
     table_meta: TableMetadataManagerRef,
@@ -652,32 +654,40 @@ impl RecordingRuleTask {
             .map(|e| since_the_epoch.as_secs() - e as u64)
             .unwrap_or(u64::MIN);
 
-        let plan = sql_to_df_plan(query_ctx.clone(), engine.clone(), &self.query, true).await?;
-        let schema_len = plan.schema().fields().len();
-
-        let low_bound = Timestamp::new_second(low_bound as i64);
-        // TODO(discord9): find more time window!
-        let (col_name, lower, upper) =
-            find_plan_time_window_bound(&plan, low_bound, query_ctx.clone(), engine.clone())
-                .await?;
+        // TODO(discord9): use time window expr to get the precise expire lower bound
+        let expire_time_window_bound = self
+            .time_window_expr
+            .as_ref()
+            .map(|expr| expr.eval(low_bound))
+            .transpose()?;
 
         let new_sql = {
             let expr = {
-                match (lower, upper) {
-                    (Some(l), Some(u)) => {
+                match expire_time_window_bound {
+                    Some((Some(l), Some(u))) => {
                         let window_size = u.sub(&l).with_context(|| UnexpectedSnafu {
                             reason: format!("Can't get window size from {u:?} - {l:?}"),
                         })?;
+                        let col_name = self
+                            .time_window_expr
+                            .as_ref()
+                            .map(|expr| expr.column_name.clone())
+                            .with_context(|| UnexpectedSnafu {
+                                reason: format!(
+                                    "Flow id={:?}, Failed to get column name from time window expr",
+                                    self.flow_id
+                                ),
+                            })?;
 
                         self.state
                             .write()
                             .await
                             .dirty_time_windows
-                            .gen_filter_exprs(&col_name, lower, window_size)?
+                            .gen_filter_exprs(&col_name, Some(l), window_size, self)?
                     }
                     _ => {
-                        debug!(
-                            "Flow id = {:?}, can't get window size: lower={lower:?}, upper={upper:?}, using the same query", self.flow_id
+                        warn!(
+                            "Flow id = {:?}, can't get window size: precise_lower_bound={expire_time_window_bound:?}, using the same query", self.flow_id
                         );
                         // since no time window lower/upper bound is found, just return the original query
                         return Ok(Some((self.query.clone(), schema_len)));
@@ -774,19 +784,28 @@ impl DirtyTimeWindows {
         col_name: &str,
         expire_lower_bound: Option<Timestamp>,
         window_size: chrono::Duration,
+        task_ctx: &RecordingRuleTask,
     ) -> Result<Option<datafusion_expr::Expr>, Error> {
         debug!(
             "expire_lower_bound: {:?}, window_size: {:?}",
             expire_lower_bound.map(|t| t.to_iso8601_string()),
             window_size
         );
-        self.merge_dirty_time_windows(window_size)?;
+        self.merge_dirty_time_windows(window_size, expire_lower_bound)?;
 
         if self.windows.len() > Self::MAX_FILTER_NUM {
+            let first_time_window = self.windows.first_key_value();
+            let last_time_window = self.windows.last_key_value();
             warn!(
-                "Too many time windows: {}, only the first {} are taken for this query, the group by expression could be wrong",
+                "Flow id = {:?}, too many time windows: {}, only the first {} are taken for this query, the group by expression might be wrong. Time window expr={:?}, expire_after={:?}, first_time_window={:?}, last_time_window={:?}, the original query: {:?}",
+                task_ctx.flow_id,
                 self.windows.len(),
-                Self::MAX_FILTER_NUM
+                Self::MAX_FILTER_NUM,
+                task_ctx.time_window_expr,
+                task_ctx.expire_after,
+                first_time_window,
+                last_time_window,
+                task_ctx.query
             );
         }
 
@@ -814,18 +833,6 @@ impl DirtyTimeWindows {
                 start.to_iso8601_string(),
                 end.map(|t| t.to_iso8601_string())
             );
-            let start = if let Some(expire) = expire_lower_bound {
-                start.max(expire)
-            } else {
-                start
-            };
-
-            // filter out expired time window
-            if let Some(end) = end {
-                if end <= start {
-                    continue;
-                }
-            }
 
             use datafusion_expr::{col, lit};
             let lower = to_df_literal(start)?;
@@ -844,11 +851,22 @@ impl DirtyTimeWindows {
     }
 
     /// Merge time windows that overlaps or get too close
-    pub fn merge_dirty_time_windows(&mut self, window_size: chrono::Duration) -> Result<(), Error> {
+    pub fn merge_dirty_time_windows(
+        &mut self,
+        window_size: chrono::Duration,
+        expire_lower_bound: Option<Timestamp>,
+    ) -> Result<(), Error> {
         let mut new_windows = BTreeMap::new();
 
         let mut prev_tw = None;
         for (lower_bound, upper_bound) in std::mem::take(&mut self.windows) {
+            // filter out expired time window
+            if let Some(expire_lower_bound) = expire_lower_bound {
+                if lower_bound <= expire_lower_bound {
+                    continue;
+                }
+            }
+
             let Some(prev_tw) = &mut prev_tw else {
                 prev_tw = Some((lower_bound, upper_bound));
                 continue;
@@ -949,7 +967,7 @@ mod test {
             .into_iter(),
         );
         dirty
-            .merge_dirty_time_windows(chrono::Duration::seconds(5 * 60))
+            .merge_dirty_time_windows(chrono::Duration::seconds(5 * 60), None)
             .unwrap();
         // just enough to merge
         assert_eq!(
@@ -972,7 +990,7 @@ mod test {
             .into_iter(),
         );
         dirty
-            .merge_dirty_time_windows(chrono::Duration::seconds(5 * 60))
+            .merge_dirty_time_windows(chrono::Duration::seconds(5 * 60), None)
             .unwrap();
         // just enough to merge
         assert_eq!(
@@ -1001,7 +1019,7 @@ mod test {
             .into_iter(),
         );
         dirty
-            .merge_dirty_time_windows(chrono::Duration::seconds(5 * 60))
+            .merge_dirty_time_windows(chrono::Duration::seconds(5 * 60), None)
             .unwrap();
         // just enough to merge
         assert_eq!(
@@ -1013,5 +1031,25 @@ mod test {
             ),]),
             dirty.windows
         );
+
+        // expired
+        let mut dirty = DirtyTimeWindows::default();
+        dirty.add_lower_bounds(
+            vec![
+                Timestamp::new_second(0),
+                Timestamp::new_second((DirtyTimeWindows::MERGE_DIST as i64) * 5 * 60),
+            ]
+            .into_iter(),
+        );
+        dirty
+            .merge_dirty_time_windows(
+                chrono::Duration::seconds(5 * 60),
+                Some(Timestamp::new_second(
+                    (DirtyTimeWindows::MERGE_DIST as i64) * 6 * 60,
+                )),
+            )
+            .unwrap();
+        // just enough to merge
+        assert_eq!(BTreeMap::from([]), dirty.windows);
     }
 }

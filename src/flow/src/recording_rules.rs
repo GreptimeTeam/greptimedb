@@ -61,15 +61,13 @@ use crate::Error;
 
 #[derive(Debug, Clone)]
 pub struct TimeWindowExpr {
-    expr: PhysicalExprRef,
+    phy_expr: PhysicalExprRef,
     column_name: String,
+    logical_expr: Expr,
+    df_schema: DFSchema,
 }
 
 impl TimeWindowExpr {
-    pub fn new(expr: PhysicalExprRef, column_name: String) -> Self {
-        Self { expr, column_name }
-    }
-
     pub fn from_expr(expr: &Expr, column_name: &str, df_schema: &DFSchema) -> Result<Self, Error> {
         let phy_planner = DefaultPhysicalPlanner::default();
 
@@ -81,9 +79,22 @@ impl TimeWindowExpr {
                 ),
             })?;
         Ok(Self {
-            expr: phy_expr,
+            phy_expr,
             column_name: column_name.to_string(),
+            logical_expr: expr.clone(),
+            df_schema: df_schema.clone(),
         })
+    }
+
+    pub fn eval(
+        &self,
+        current: Timestamp,
+    ) -> Result<(Option<Timestamp>, Option<Timestamp>), Error> {
+        let lower_bound =
+            find_expr_time_window_lower_bound(&self.logical_expr, &self.df_schema, current)?;
+        let upper_bound =
+            find_expr_time_window_upper_bound(&self.logical_expr, &self.df_schema, current)?;
+        Ok((lower_bound, upper_bound))
     }
 
     /// Find timestamps from rows using time window expr
@@ -132,12 +143,15 @@ impl TimeWindowExpr {
                         ),
                     })?;
 
-            let eval_res = self.expr.evaluate(&rb).with_context(|_| DatafusionSnafu {
-                context: format!(
-                    "Failed to evaluate physical expression {:?} on {rb:?}",
-                    self.expr
-                ),
-            })?;
+            let eval_res = self
+                .phy_expr
+                .evaluate(&rb)
+                .with_context(|_| DatafusionSnafu {
+                    context: format!(
+                        "Failed to evaluate physical expression {:?} on {rb:?}",
+                        self.phy_expr
+                    ),
+                })?;
 
             let res = columnar_to_ts_vector(&eval_res)?;
 
@@ -448,6 +462,7 @@ pub async fn find_plan_time_window_bound(
 ///
 /// i.e. for `current="2021-07-01 00:01:01.000"` and `expr=date_bin(INTERVAL '5 minutes', ts) as time_window` and `ts_col=ts`,
 /// return `Some("2021-07-01 00:00:00.000")` since it's the lower bound
+/// return `Some("2021-07-01 00:00:00.000")` since it's the lower bound
 /// of current time window given the current timestamp
 ///
 /// if return None, meaning this time window have no lower bound
@@ -657,7 +672,19 @@ impl TreeNodeRewriter for AddFilterRewriter {
 }
 
 fn df_plan_to_sql(plan: &LogicalPlan) -> Result<String, Error> {
-    let unparser = Unparser::default();
+    /// A dialect that forces all identifiers to be quoted
+    struct ForceQuoteIdentifiers;
+    impl datafusion::sql::unparser::dialect::Dialect for ForceQuoteIdentifiers {
+        fn identifier_quote_style(&self, identifier: &str) -> Option<char> {
+            if identifier.to_lowercase() != identifier {
+                Some('"')
+            } else {
+                None
+            }
+        }
+    }
+    let unparser = Unparser::new(&ForceQuoteIdentifiers);
+    // first make all column qualified
     let sql = unparser
         .plan_to_sql(plan)
         .with_context(|_e| DatafusionSnafu {
@@ -675,6 +702,22 @@ mod test {
     use super::{sql_to_df_plan, *};
     use crate::recording_rules::{df_plan_to_sql, AddFilterRewriter};
     use crate::test_utils::create_test_query_engine;
+
+    #[tokio::test]
+    async fn test_sql_plan_convert() {
+        let query_engine = create_test_query_engine();
+        let ctx = QueryContext::arc();
+        let old = r#"SELECT "NUMBER" FROM "UPPERCASE_NUMBERS_WITH_TS""#;
+        let new = sql_to_df_plan(ctx.clone(), query_engine.clone(), old, false)
+            .await
+            .unwrap();
+        let new_sql = df_plan_to_sql(&new).unwrap();
+
+        assert_eq!(
+            r#"SELECT "UPPERCASE_NUMBERS_WITH_TS"."NUMBER" FROM "UPPERCASE_NUMBERS_WITH_TS""#,
+            new_sql
+        );
+    }
 
     #[tokio::test]
     async fn test_add_filter() {
@@ -724,7 +767,7 @@ mod test {
                     Some(Timestamp::new(1740394109000, TimeUnit::Millisecond)),
                     Some(Timestamp::new(1740394109001, TimeUnit::Millisecond)),
                 ),
-                "SELECT arrow_cast(date_bin(INTERVAL '1 MINS', numbers_with_ts.ts), 'Timestamp(Second, None)') AS ts FROM numbers_with_ts WHERE ((ts >= CAST('2025-02-24 10:48:29' AS TIMESTAMP)) AND (ts <= CAST('2025-02-24 10:48:29.001' AS TIMESTAMP))) GROUP BY numbers_with_ts.ts"
+                r#"SELECT arrow_cast(date_bin(INTERVAL '1 MINS', numbers_with_ts.ts), 'Timestamp(Second, None)') AS ts FROM numbers_with_ts WHERE ((ts >= CAST('2025-02-24 10:48:29' AS TIMESTAMP)) AND (ts <= CAST('2025-02-24 10:48:29.001' AS TIMESTAMP))) GROUP BY numbers_with_ts.ts"#
             ),
             // complex time window index
             (
