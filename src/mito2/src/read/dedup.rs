@@ -582,13 +582,13 @@ impl<I: Iterator<Item = Result<Batch>>> Iterator for LastNonNullIter<I> {
 }
 
 /// A reader that only returns tags for select distinct.
-pub(crate) struct TagsOnlyReader {
+pub(crate) struct TagOnlyReader {
     source: BoxedBatchReader,
     /// Batch to return.
     to_return: Option<Batch>,
 }
 
-impl TagsOnlyReader {
+impl TagOnlyReader {
     /// Creates a new tags only reader.
     pub(crate) fn new(source: BoxedBatchReader) -> Self {
         Self {
@@ -599,7 +599,7 @@ impl TagsOnlyReader {
 }
 
 #[async_trait]
-impl BatchReader for TagsOnlyReader {
+impl BatchReader for TagOnlyReader {
     async fn next_batch(&mut self) -> Result<Option<Batch>> {
         while let Some(batch) = self.source.next_batch().await? {
             if let Some(to_return) = self.to_return.take() {

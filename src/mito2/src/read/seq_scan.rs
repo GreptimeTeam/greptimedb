@@ -33,7 +33,7 @@ use store_api::storage::{TimeSeriesDistribution, TimeSeriesRowSelector};
 use tokio::sync::Semaphore;
 
 use crate::error::{PartitionOutOfRangeSnafu, Result};
-use crate::read::dedup::{DedupReader, LastNonNull, LastRow};
+use crate::read::dedup::{DedupReader, LastNonNull, LastRow, TagOnlyReader};
 use crate::read::last_row::LastRowReader;
 use crate::read::merge::MergeReaderBuilder;
 use crate::read::range::RangeBuilderList;
@@ -216,6 +216,7 @@ impl SeqScan {
         let compaction = self.compaction;
         let distinguish_range = self.properties.distinguish_partition_range;
         let part_metrics = self.new_partition_metrics(partition);
+        let tag_only = self.stream_ctx.input.tag_only_distinct;
 
         let stream = try_stream! {
             part_metrics.on_first_poll();
@@ -241,6 +242,9 @@ impl SeqScan {
                         .await
                         .map_err(BoxedError::new)
                         .context(ExternalSnafu)?;
+                if tag_only {
+                    reader = Box::new(TagOnlyReader::new(reader));
+                }
                 let cache = &stream_ctx.input.cache_strategy;
                 let mut metrics = ScannerMetrics::default();
                 let mut fetch_start = Instant::now();
