@@ -591,7 +591,22 @@ fn eval_ts_to_ts(
     df_schema: &DFSchema,
     input_value: Timestamp,
 ) -> Result<Timestamp, Error> {
-    let ts_vector = match input_value.unit() {
+    let schema_ty = df_schema.field(0).data_type();
+    let schema_cdt = ConcreteDataType::from_arrow_type(schema_ty);
+    let schema_unit = if let ConcreteDataType::Timestamp(ts) = schema_cdt {
+        ts.unit()
+    } else {
+        return UnexpectedSnafu {
+            reason: format!("Expect Timestamp, found {:?}", schema_cdt),
+        }
+        .fail();
+    };
+    let input_value = input_value
+        .convert_to(schema_unit)
+        .with_context(|| UnexpectedSnafu {
+            reason: format!("Failed to convert timestamp {input_value:?} to {schema_unit}"),
+        })?;
+    let ts_vector = match schema_unit {
         TimeUnit::Second => {
             TimestampSecondVector::from_vec(vec![input_value.value()]).to_arrow_array()
         }
