@@ -137,6 +137,7 @@ pub struct TableMeta {
 }
 
 impl TableMetaBuilder {
+    ///Note: Please always use [new_meta_builder] to create new [TableMetaBuilder].
     #[cfg(any(test, feature = "testing"))]
     pub fn empty() -> Self {
         Self {
