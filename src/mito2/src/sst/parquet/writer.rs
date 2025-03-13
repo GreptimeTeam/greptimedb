@@ -185,19 +185,6 @@ where
         Ok(())
     }
 
-    async fn get_or_create_indexer(&mut self) -> &mut Indexer {
-        match self.current_indexer {
-            None => {
-                self.current_file = FileId::random();
-                let indexer = self.indexer_builder.build(self.current_file).await;
-                self.current_indexer = Some(indexer);
-                // safety: self.current_indexer already set above.
-                self.current_indexer.as_mut().unwrap()
-            }
-            Some(ref mut indexer) => indexer,
-        }
-    }
-
     /// Iterates source and writes all rows to Parquet file.
     ///
     /// Returns the [SstInfo] if the SST is written.
@@ -221,7 +208,11 @@ where
                 Ok(mut batch) => {
                     stats.update(&batch);
                     // safety: self.current_indexer must be set when first batch has been written.
-                    self.current_indexer.as_mut().unwrap().update(&batch).await;
+                    self.current_indexer
+                        .as_mut()
+                        .unwrap()
+                        .update(&mut batch)
+                        .await;
                     if let Some(max_file_size) = opts.max_file_size
                         && self.bytes_written.load(Ordering::Relaxed) > max_file_size
                     {
@@ -238,8 +229,6 @@ where
         }
 
         self.finish_current_file(&mut results, &mut stats).await?;
-
-        let file_id = self.current_file;
 
         // object_store.write will make sure all bytes are written or an error is raised.
         Ok(results)
@@ -314,11 +303,7 @@ where
                     .context(WriteParquetSnafu)?;
             self.writer = Some(arrow_writer);
 
-            let index_file_path = self.path_provider.build_index_file_path(self.current_file);
-            let indexer = self
-                .indexer_builder
-                .build(self.current_file, index_file_path)
-                .await;
+            let indexer = self.indexer_builder.build(self.current_file).await;
             self.current_indexer = Some(indexer);
 
             // safety: self.writer is assigned above

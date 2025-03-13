@@ -278,7 +278,7 @@ impl FilePathProvider for WriteCachePathProvider {
 /// Path provider that builds paths in region storage path.
 #[derive(Clone, Debug)]
 pub(crate) struct RegionFilePathFactory {
-    region_dir: String,
+    pub(crate) region_dir: String,
 }
 
 impl RegionFilePathFactory {
