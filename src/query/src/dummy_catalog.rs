@@ -247,6 +247,10 @@ impl DummyTableProvider {
         self.scan_request.lock().unwrap().sequence = Some(sequence);
     }
 
+    pub fn with_tag_only_distinct(&self, tag_only_distinct: bool) {
+        self.scan_request.lock().unwrap().tag_only_distinct = tag_only_distinct;
+    }
+
     /// Gets the scan request of the provider.
     #[cfg(test)]
     pub fn scan_request(&self) -> ScanRequest {

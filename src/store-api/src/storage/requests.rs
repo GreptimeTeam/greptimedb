@@ -58,4 +58,6 @@ pub struct ScanRequest {
     pub sequence: Option<SequenceNumber>,
     /// Optional hint for the distribution of time-series data.
     pub distribution: Option<TimeSeriesDistribution>,
+    /// Optional hint for the tag-only distinct operation.
+    pub tag_only_distinct: bool,
 }

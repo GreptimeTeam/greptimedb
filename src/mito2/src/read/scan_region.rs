@@ -358,15 +358,6 @@ impl ScanRegion {
             None => ProjectionMapper::all(&self.version.metadata)?,
         };
 
-        // This is incorrect, but we temporarily sets the tag only hint for test.
-        let tag_only_distinct = match self.request.projection {
-            // TODO(yingwen): index bound check
-            Some(p) => p.iter().all(|idx| {
-                self.version.metadata.column_metadatas[*idx].semantic_type == SemanticType::Tag
-            }),
-            None => false,
-        };
-
         // Get memtable ranges to scan.
         let memtables = memtables
             .into_iter()
@@ -396,7 +387,7 @@ impl ScanRegion {
             .with_merge_mode(self.version.options.merge_mode())
             .with_series_row_selector(self.request.series_row_selector)
             .with_distribution(self.request.distribution)
-            .with_tag_only_distinct(tag_only_distinct);
+            .with_tag_only_distinct(self.request.tag_only_distinct);
         Ok(input)
     }
 
