@@ -132,6 +132,15 @@ pub fn options_from_skipping(skipping: &SkippingIndexOptions) -> Result<Option<C
     Ok((!options.options.is_empty()).then_some(options))
 }
 
+/// Tries to construct a `ColumnOptions` for inverted index.
+pub fn options_from_inverted() -> ColumnOptions {
+    let mut options = ColumnOptions::default();
+    options
+        .options
+        .insert(INVERTED_INDEX_GRPC_KEY.to_string(), "true".to_string());
+    options
+}
+
 /// Tries to construct a `FulltextAnalyzer` from the given analyzer.
 pub fn as_fulltext_option(analyzer: Analyzer) -> FulltextAnalyzer {
     match analyzer {
