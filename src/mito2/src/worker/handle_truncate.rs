@@ -20,6 +20,7 @@ use store_api::storage::RegionId;
 
 use crate::error::RegionNotFoundSnafu;
 use crate::manifest::action::RegionTruncate;
+use crate::manifest::notifier::ManifestChangeEvent;
 use crate::region::RegionLeaderState;
 use crate::request::{OptionOutputTx, TruncateResult};
 use crate::worker::RegionWorkerLoop;
@@ -66,13 +67,17 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         region.switch_state_to_writable(RegionLeaderState::Truncating);
 
         match truncate_result.result {
-            Ok(()) => {
+            Ok(manifest) => {
                 // Applies the truncate action to the region.
                 region.version_control.truncate(
                     truncate_result.truncated_entry_id,
                     truncate_result.truncated_sequence,
                     &region.memtable_builder,
                 );
+
+                // Notifies the manifest change to the downstream.
+                self.notify_manifest_change(&region, manifest, ManifestChangeEvent::Truncate)
+                    .await;
             }
             Err(e) => {
                 // Unable to truncate the region.

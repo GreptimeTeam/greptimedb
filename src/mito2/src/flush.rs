@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use common_telemetry::{debug, error, info, trace};
 use snafu::ResultExt;
+use store_api::manifest::ManifestVersion;
 use store_api::storage::RegionId;
 use strum::IntoStaticStr;
 use tokio::sync::{mpsc, watch};
@@ -281,7 +282,7 @@ impl RegionFlushTask {
         self.listener.on_flush_begin(self.region_id).await;
 
         let worker_request = match self.flush_memtables(&version_data).await {
-            Ok(edit) => {
+            Ok((manifest_version, edit)) => {
                 let memtables_to_remove = version_data
                     .version
                     .memtables
@@ -296,6 +297,7 @@ impl RegionFlushTask {
                     senders: std::mem::take(&mut self.senders),
                     _timer: timer,
                     edit,
+                    manifest_version,
                     memtables_to_remove,
                 };
                 WorkerRequest::Background {
@@ -320,8 +322,11 @@ impl RegionFlushTask {
     }
 
     /// Flushes memtables to level 0 SSTs and updates the manifest.
-    /// Returns the [RegionEdit] to apply.
-    async fn flush_memtables(&self, version_data: &VersionControlData) -> Result<RegionEdit> {
+    /// Returns the [RegionEdit] to apply and the manifest version.
+    async fn flush_memtables(
+        &self,
+        version_data: &VersionControlData,
+    ) -> Result<(ManifestVersion, RegionEdit)> {
         // We must use the immutable memtables list and entry ids from the `version_data`
         // for consistency as others might already modify the version in the `version_control`.
         let version = &version_data.version;
@@ -432,7 +437,7 @@ impl RegionFlushTask {
             self.reason.as_str()
         );
 
-        Ok(edit)
+        Ok((version, edit))
     }
 
     /// Notify flush job status.

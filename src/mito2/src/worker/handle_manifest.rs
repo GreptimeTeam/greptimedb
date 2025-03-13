@@ -20,6 +20,7 @@ use std::collections::{HashMap, VecDeque};
 
 use common_telemetry::{info, warn};
 use store_api::logstore::LogStore;
+use store_api::manifest::ManifestVersion;
 use store_api::storage::RegionId;
 
 use crate::cache::file_cache::{FileType, IndexKey};
@@ -28,6 +29,7 @@ use crate::error::{RegionBusySnafu, RegionNotFoundSnafu, Result};
 use crate::manifest::action::{
     RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionTruncate,
 };
+use crate::manifest::notifier::ManifestChangeEvent;
 use crate::metrics::WRITE_CACHE_INFLIGHT_DOWNLOAD;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{
@@ -96,7 +98,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
         };
 
-        if change_result.result.is_ok() {
+        if let Ok(manifest) = change_result.result {
             // Apply the metadata to region's version.
             region
                 .version_control
@@ -107,6 +109,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 "Region {} is altered, metadata is {:?}, options: {:?}",
                 region.region_id, version.metadata, version.options,
             );
+
+            // Notifies the manifest change to the downstream.
+            self.notify_manifest_change(&region, manifest, ManifestChangeEvent::RegionChange)
+                .await;
         }
 
         // Sets the region as writable.
@@ -120,7 +126,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     }
 }
 
-impl<S> RegionWorkerLoop<S> {
+impl<S: LogStore> RegionWorkerLoop<S> {
     /// Handles region edit request.
     pub(crate) async fn handle_region_edit(&mut self, request: RegionEditRequest) {
         let region_id = request.region_id;
@@ -197,17 +203,21 @@ impl<S> RegionWorkerLoop<S> {
         let need_compaction =
             edit_result.result.is_ok() && !edit_result.edit.files_to_add.is_empty();
 
-        if edit_result.result.is_ok() {
+        if let Ok(manifest) = edit_result.result {
             // Applies the edit to the region.
             region
                 .version_control
                 .apply_edit(edit_result.edit, &[], region.file_purger.clone());
+
+            // Notifies the manifest change to the downstream.
+            self.notify_manifest_change(&region, manifest, ManifestChangeEvent::RegionEdit)
+                .await;
         }
 
         // Sets the region as writable.
         region.switch_state_to_writable(RegionLeaderState::Editing);
 
-        let _ = edit_result.sender.send(edit_result.result);
+        let _ = edit_result.sender.send(edit_result.result.map(|_| ()));
 
         if let Some(edit_queue) = self.region_edit_queues.get_mut(&edit_result.region_id) {
             if let Some(request) = edit_queue.dequeue() {
@@ -246,8 +256,7 @@ impl<S> RegionWorkerLoop<S> {
 
             let result = manifest_ctx
                 .update_manifest(RegionLeaderState::Truncating, action_list)
-                .await
-                .map(|_| ());
+                .await;
 
             // Sends the result back to the request sender.
             let truncate_result = TruncateResult {
@@ -289,8 +298,7 @@ impl<S> RegionWorkerLoop<S> {
             let result = region
                 .manifest_ctx
                 .update_manifest(RegionLeaderState::Altering, action_list)
-                .await
-                .map(|_| ());
+                .await;
             let notify = WorkerRequest::Background {
                 region_id: region.region_id,
                 notify: BackgroundNotify::RegionChange(RegionChangeResult {
@@ -320,7 +328,7 @@ async fn edit_region(
     edit: RegionEdit,
     cache_manager: CacheManagerRef,
     listener: WorkerListener,
-) -> Result<()> {
+) -> Result<ManifestVersion> {
     let region_id = region.region_id;
     if let Some(write_cache) = cache_manager.write_cache() {
         for file_meta in &edit.files_to_add {
@@ -386,5 +394,4 @@ async fn edit_region(
         .manifest_ctx
         .update_manifest(RegionLeaderState::Editing, action_list)
         .await
-        .map(|_| ())
 }

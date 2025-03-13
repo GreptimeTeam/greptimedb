@@ -41,6 +41,7 @@ use prometheus::IntGauge;
 use rand::{thread_rng, Rng};
 use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
+use store_api::manifest::ManifestVersion;
 use store_api::region_engine::{SetRegionRoleStateResponse, SettableRegionRoleState};
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -52,6 +53,9 @@ use crate::compaction::CompactionScheduler;
 use crate::config::MitoConfig;
 use crate::error::{CreateDirSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
+use crate::manifest::notifier::{
+    ManifestChangeEvent, ManifestChangeNotifierRef, NoopManifestChangeNotifier,
+};
 use crate::memtable::MemtableBuilderProvider;
 use crate::metrics::{REGION_COUNT, WRITE_STALL_TOTAL};
 use crate::region::{MitoRegionRef, OpeningRegions, OpeningRegionsRef, RegionMap, RegionMapRef};
@@ -197,6 +201,8 @@ impl WorkerGroup {
                     flush_receiver: flush_receiver.clone(),
                     plugins: plugins.clone(),
                     schema_metadata_manager: schema_metadata_manager.clone(),
+                    // TODO(weny): build a manifest change notifier.
+                    manifest_change_notifier: Arc::new(NoopManifestChangeNotifier),
                 }
                 .start()
             })
@@ -337,6 +343,7 @@ impl WorkerGroup {
                     flush_receiver: flush_receiver.clone(),
                     plugins: Plugins::new(),
                     schema_metadata_manager: schema_metadata_manager.clone(),
+                    manifest_change_notifier: Arc::new(NoopManifestChangeNotifier),
                 }
                 .start()
             })
@@ -415,6 +422,7 @@ struct WorkerStarter<S> {
     flush_receiver: watch::Receiver<()>,
     plugins: Plugins,
     schema_metadata_manager: SchemaMetadataManagerRef,
+    manifest_change_notifier: ManifestChangeNotifierRef,
 }
 
 impl<S: LogStore> WorkerStarter<S> {
@@ -466,6 +474,7 @@ impl<S: LogStore> WorkerStarter<S> {
             region_count: REGION_COUNT.with_label_values(&[&id_string]),
             region_edit_queues: RegionEditQueues::default(),
             schema_metadata_manager: self.schema_metadata_manager,
+            manifest_change_notifier: self.manifest_change_notifier,
         };
         let handle = common_runtime::spawn_global(async move {
             worker_thread.run().await;
@@ -684,6 +693,8 @@ struct RegionWorkerLoop<S> {
     region_edit_queues: RegionEditQueues,
     /// Database level metadata manager.
     schema_metadata_manager: SchemaMetadataManagerRef,
+    /// Manifest change notifier.
+    manifest_change_notifier: ManifestChangeNotifierRef,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -911,6 +922,22 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 self.handle_manifest_region_change_result(req).await
             }
             BackgroundNotify::RegionEdit(req) => self.handle_region_edit_result(req).await,
+        }
+    }
+
+    /// Notifies the manifest change to the downstream.
+    pub(crate) async fn notify_manifest_change(
+        &mut self,
+        region: &MitoRegionRef,
+        manifest_version: ManifestVersion,
+        event: ManifestChangeEvent,
+    ) {
+        if let Err(err) = self
+            .manifest_change_notifier
+            .notify(region, manifest_version)
+            .await
+        {
+            error!(err; "Failed to notify manifest change, region: {}, next manifest_version: {}, event: {}", region.region_id, manifest_version, event.as_ref());
         }
     }
 

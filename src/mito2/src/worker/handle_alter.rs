@@ -21,6 +21,7 @@ use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, info};
 use humantime_serde::re::humantime;
 use snafu::ResultExt;
+use store_api::logstore::LogStore;
 use store_api::metadata::{
     InvalidSetRegionOptionRequestSnafu, MetadataError, RegionMetadata, RegionMetadataBuilder,
     RegionMetadataRef,
@@ -41,7 +42,7 @@ use crate::region::MitoRegionRef;
 use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest};
 use crate::worker::RegionWorkerLoop;
 
-impl<S> RegionWorkerLoop<S> {
+impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) async fn handle_alter_request(
         &mut self,
         region_id: RegionId,

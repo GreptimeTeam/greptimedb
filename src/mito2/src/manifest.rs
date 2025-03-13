@@ -17,6 +17,7 @@
 pub mod action;
 mod checkpointer;
 pub mod manager;
+pub mod notifier;
 pub mod storage;
 #[cfg(test)]
 mod tests;

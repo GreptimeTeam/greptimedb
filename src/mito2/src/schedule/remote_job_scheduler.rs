@@ -19,6 +19,7 @@ use std::time::Instant;
 use common_telemetry::error;
 use serde::{Deserialize, Serialize};
 use snafu::{Location, ResultExt, Snafu};
+use store_api::manifest::ManifestVersion;
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::Sender;
 use uuid::Uuid;
@@ -124,7 +125,7 @@ pub struct CompactionJobResult {
     pub job_id: JobId,
     pub region_id: RegionId,
     pub start_time: Instant,
-    pub region_edit: Result<RegionEdit>,
+    pub region_edit: Result<(ManifestVersion, RegionEdit)>,
 }
 
 /// DefaultNotifier is a default implementation of Notifier that sends WorkerRequest to the mito engine.
@@ -150,12 +151,15 @@ impl Notifier for DefaultNotifier {
             RemoteJobResult::CompactionJobResult(result) => {
                 let notify = {
                     match result.region_edit {
-                        Ok(edit) => BackgroundNotify::CompactionFinished(CompactionFinished {
-                            region_id: result.region_id,
-                            senders: waiters,
-                            start_time: result.start_time,
-                            edit,
-                        }),
+                        Ok((manifest_version, edit)) => {
+                            BackgroundNotify::CompactionFinished(CompactionFinished {
+                                region_id: result.region_id,
+                                senders: waiters,
+                                start_time: result.start_time,
+                                edit,
+                                manifest_version,
+                            })
+                        }
                         Err(err) => {
                             error!(
                                 "Compaction failed for region {}: {:?}",
