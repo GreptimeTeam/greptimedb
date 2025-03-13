@@ -323,8 +323,7 @@ mod tests {
 
     use super::*;
     use crate::compaction::test_util::{new_file_handle, new_file_handles};
-    use crate::sst::file::{FileId, FileMeta, Level};
-    use crate::test_util::NoopFilePurger;
+    use crate::sst::file::{FileId, Level};
 
     #[test]
     fn test_get_latest_window_in_seconds() {
