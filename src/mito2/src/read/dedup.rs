@@ -602,11 +602,17 @@ impl TagOnlyReader {
 impl BatchReader for TagOnlyReader {
     async fn next_batch(&mut self) -> Result<Option<Batch>> {
         while let Some(batch) = self.source.next_batch().await? {
+            if batch.is_empty() {
+                // Ensure that the batch is not empty before proceeding.
+                continue;
+            }
+
             if let Some(to_return) = self.to_return.take() {
                 if to_return.primary_key() != batch.primary_key() {
                     self.to_return = Some(batch);
                     // A new key, store the batch and returns the previous one.
-                    return Ok(Some(to_return));
+                    // Safety: The batch is not empty, so it has at least one row.
+                    return Ok(Some(to_return.slice(0, 1)));
                 } else {
                     // The same key, override the batch.
                     self.to_return = Some(batch);
