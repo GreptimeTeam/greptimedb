@@ -447,7 +447,7 @@ impl RecordingRuleTask {
                             .gen_filter_exprs(&col_name, Some(l), window_size, self)?
                     }
                     _ => {
-                        warn!(
+                        debug!(
                             "Flow id = {:?}, can't get window size: precise_lower_bound={expire_time_window_bound:?}, using the same query", self.flow_id
                         );
                         // since no time window lower/upper bound is found, just return the original query
