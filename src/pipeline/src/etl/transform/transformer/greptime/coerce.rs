@@ -95,6 +95,10 @@ pub(crate) fn coerce_columns(transform: &Transform) -> Result<Vec<ColumnSchema>>
 }
 
 fn coerce_semantic_type(transform: &Transform) -> SemanticType {
+    if transform.tag {
+        return SemanticType::Tag;
+    }
+
     match transform.index {
         Some(Index::Tag) => SemanticType::Tag,
         Some(Index::Time) => SemanticType::Timestamp,
@@ -478,6 +482,7 @@ mod tests {
             default: None,
             index: None,
             on_failure: None,
+            tag: false,
         };
 
         // valid string
@@ -503,6 +508,7 @@ mod tests {
             default: None,
             index: None,
             on_failure: Some(OnFailure::Ignore),
+            tag: false,
         };
 
         let val = Value::String("hello".to_string());
@@ -518,6 +524,7 @@ mod tests {
             default: None,
             index: None,
             on_failure: Some(OnFailure::Default),
+            tag: false,
         };
 
         // with no explicit default value
