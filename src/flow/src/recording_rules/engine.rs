@@ -21,13 +21,14 @@ use common_error::ext::BoxedError;
 use common_meta::ddl::create_flow::FlowType;
 use common_meta::key::flow::FlowMetadataManagerRef;
 use common_meta::key::table_info::TableInfoManager;
-use common_meta::key::table_name::{TableNameKey, TableNameValue};
+use common_meta::key::table_name::TableNameKey;
 use common_meta::key::TableMetadataManagerRef;
 use common_telemetry::tracing::warn;
 use common_telemetry::{debug, info};
 use common_time::Timestamp;
 use datafusion::sql::unparser::expr_to_sql;
 use datafusion_common::tree_node::TreeNode;
+use datafusion_expr::LogicalPlan;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::Value;
 use itertools::Itertools;
@@ -224,6 +225,7 @@ impl RecordingRuleEngine {
         let task = RecordingRuleTask::new(
             flow_id,
             &sql,
+            plan,
             phy_expr,
             expire_after,
             sink_table_name,
@@ -295,6 +297,7 @@ impl RecordingRuleEngine {
 pub struct RecordingRuleTask {
     pub flow_id: FlowId,
     query: String,
+    plan: LogicalPlan,
     pub time_window_expr: Option<TimeWindowExpr>,
     /// in seconds
     pub expire_after: Option<i64>,
@@ -309,6 +312,7 @@ impl RecordingRuleTask {
     pub fn new(
         flow_id: FlowId,
         query: &str,
+        plan: LogicalPlan,
         time_window_expr: Option<TimeWindowExpr>,
         expire_after: Option<i64>,
         sink_table_name: [String; 3],
@@ -320,6 +324,7 @@ impl RecordingRuleTask {
         Self {
             flow_id,
             query: query.to_string(),
+            plan,
             time_window_expr,
             expire_after,
             sink_table_name,
@@ -653,6 +658,9 @@ impl RecordingRuleTask {
             .expire_after
             .map(|e| since_the_epoch.as_secs() - e as u64)
             .unwrap_or(u64::MIN);
+
+        let low_bound = Timestamp::new_second(low_bound as i64);
+        let schema_len = self.plan.schema().fields().len();
 
         // TODO(discord9): use time window expr to get the precise expire lower bound
         let expire_time_window_bound = self
