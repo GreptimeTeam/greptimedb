@@ -39,7 +39,7 @@ use crate::ddl::utils::handle_retry_error;
 use crate::ddl::DdlContext;
 use crate::error::{self, Result};
 use crate::key::table_route::TableRouteValue;
-use crate::lock_key::{CatalogLock, SchemaLock, TableLock};
+use crate::lock_key::{CatalogLock, RemoteWalLock, SchemaLock, TableLock};
 use crate::metrics;
 use crate::region_keeper::OperatingRegionGuard;
 use crate::rpc::ddl::DropTableTask;
@@ -233,6 +233,7 @@ impl Procedure for DropTableProcedure {
             CatalogLock::Read(table_ref.catalog).into(),
             SchemaLock::read(table_ref.catalog, table_ref.schema).into(),
             TableLock::Write(table_id).into(),
+            RemoteWalLock::Write.into(),
         ];
 
         LockKey::new(lock_key)
