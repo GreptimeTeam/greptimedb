@@ -403,8 +403,6 @@ pub fn setup_mysql(mysql_port: u16, mysql_version: Option<&str>) {
     } else if let Ok(status) = status {
         if status.success() {
             println!("Started MySQL with port {}", mysql_port);
-        } else if status.code().unwrap() == 32000 {
-            println!("MySQL container already exists");
         } else {
             panic!("Failed to start MySQL: {:?}", status);
         }
