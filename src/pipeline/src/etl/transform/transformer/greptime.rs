@@ -96,6 +96,7 @@ impl GreptimeTransformer {
             default,
             index: Some(Index::Time),
             on_failure: Some(crate::etl::transform::OnFailure::Default),
+            tag: false,
         };
         transforms.push(transform);
     }

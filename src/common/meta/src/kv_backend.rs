@@ -31,7 +31,7 @@ use crate::rpc::KeyValue;
 pub mod chroot;
 pub mod etcd;
 pub mod memory;
-#[cfg(feature = "pg_kvbackend")]
+#[cfg(any(feature = "mysql_kvbackend", feature = "pg_kvbackend"))]
 pub mod rds;
 pub mod test;
 pub mod txn;

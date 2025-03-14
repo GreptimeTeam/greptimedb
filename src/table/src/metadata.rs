@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_macro::ToMetaBuilder;
 use common_query::AddColumnLocation;
 use datafusion_expr::TableProviderFilterPushDown;
 pub use datatypes::error::{Error as ConvertError, Result as ConvertResult};
@@ -112,9 +113,8 @@ pub struct TableIdent {
 /// The table metadata.
 ///
 /// Note: if you add new fields to this struct, please ensure 'new_meta_builder' function works.
-/// TODO(dennis): find a better way to ensure 'new_meta_builder' works when adding new fields.
-#[derive(Clone, Debug, Builder, PartialEq, Eq)]
-#[builder(pattern = "mutable")]
+#[derive(Clone, Debug, Builder, PartialEq, Eq, ToMetaBuilder)]
+#[builder(pattern = "mutable", custom_constructor)]
 pub struct TableMeta {
     pub schema: SchemaRef,
     /// The indices of columns in primary key. Note that the index of timestamp column
@@ -137,6 +137,24 @@ pub struct TableMeta {
 }
 
 impl TableMetaBuilder {
+    /// Note: Please always use [new_meta_builder] to create new [TableMetaBuilder].
+    #[cfg(any(test, feature = "testing"))]
+    pub fn empty() -> Self {
+        Self {
+            schema: None,
+            primary_key_indices: None,
+            value_indices: None,
+            engine: None,
+            region_numbers: None,
+            next_column_id: None,
+            options: None,
+            created_on: None,
+            partition_key_indices: None,
+        }
+    }
+}
+
+impl TableMetaBuilder {
     fn default_value_indices(&self) -> std::result::Result<Vec<usize>, String> {
         match (&self.primary_key_indices, &self.schema) {
             (Some(v), Some(schema)) => {
@@ -151,11 +169,15 @@ impl TableMetaBuilder {
 
     pub fn new_external_table() -> Self {
         Self {
+            schema: None,
             primary_key_indices: Some(Vec::new()),
             value_indices: Some(Vec::new()),
+            engine: None,
             region_numbers: Some(Vec::new()),
             next_column_id: Some(0),
-            ..Default::default()
+            options: None,
+            created_on: None,
+            partition_key_indices: None,
         }
     }
 }
@@ -492,20 +514,11 @@ impl TableMeta {
         Ok(desc)
     }
 
-    /// Create a [`TableMetaBuilder`].
-    ///
-    /// Note: please always use this function to create the builder.
+    /// Create a [`TableMetaBuilder`] from the current TableMeta.
     fn new_meta_builder(&self) -> TableMetaBuilder {
-        let mut builder = TableMetaBuilder::default();
-        let _ = builder
-            .schema(self.schema.clone())
-            .primary_key_indices(self.primary_key_indices.clone())
-            .engine(&self.engine)
-            .options(self.options.clone())
-            .created_on(self.created_on)
-            .region_numbers(self.region_numbers.clone())
-            .next_column_id(self.next_column_id);
-
+        let mut builder = TableMetaBuilder::from(self);
+        // Manually remove value_indices.
+        builder.value_indices = None;
         builder
     }
 
@@ -1246,7 +1259,7 @@ mod tests {
     #[test]
     fn test_raw_convert() {
         let schema = Arc::new(new_test_schema());
-        let meta = TableMetaBuilder::default()
+        let meta = TableMetaBuilder::empty()
             .schema(schema)
             .primary_key_indices(vec![0])
             .engine("engine")
@@ -1328,7 +1341,7 @@ mod tests {
     #[test]
     fn test_add_columns() {
         let schema = Arc::new(new_test_schema());
-        let meta = TableMetaBuilder::default()
+        let meta = TableMetaBuilder::empty()
             .schema(schema)
             .primary_key_indices(vec![0])
             .engine("engine")
@@ -1353,7 +1366,7 @@ mod tests {
     #[test]
     fn test_add_columns_multiple_times() {
         let schema = Arc::new(new_test_schema());
-        let meta = TableMetaBuilder::default()
+        let meta = TableMetaBuilder::empty()
             .schema(schema)
             .primary_key_indices(vec![0])
             .engine("engine")
@@ -1395,7 +1408,7 @@ mod tests {
     #[test]
     fn test_remove_columns() {
         let schema = Arc::new(new_test_schema());
-        let meta = TableMetaBuilder::default()
+        let meta = TableMetaBuilder::empty()
             .schema(schema.clone())
             .primary_key_indices(vec![0])
             .engine("engine")
@@ -1451,7 +1464,7 @@ mod tests {
                 .build()
                 .unwrap(),
         );
-        let meta = TableMetaBuilder::default()
+        let meta = TableMetaBuilder::empty()
             .schema(schema.clone())
             .primary_key_indices(vec![1])
             .engine("engine")
@@ -1487,7 +1500,7 @@ mod tests {
     #[test]
     fn test_add_existing_column() {
         let schema = Arc::new(new_test_schema());
-        let meta = TableMetaBuilder::default()
+        let meta = TableMetaBuilder::empty()
             .schema(schema)
             .primary_key_indices(vec![0])
             .engine("engine")
@@ -1534,7 +1547,7 @@ mod tests {
     #[test]
     fn test_add_different_type_column() {
         let schema = Arc::new(new_test_schema());
-        let meta = TableMetaBuilder::default()
+        let meta = TableMetaBuilder::empty()
             .schema(schema)
             .primary_key_indices(vec![0])
             .engine("engine")
@@ -1561,7 +1574,7 @@ mod tests {
     #[test]
     fn test_add_invalid_column() {
         let schema = Arc::new(new_test_schema());
-        let meta = TableMetaBuilder::default()
+        let meta = TableMetaBuilder::empty()
             .schema(schema)
             .primary_key_indices(vec![0])
             .engine("engine")
@@ -1593,7 +1606,7 @@ mod tests {
     #[test]
     fn test_remove_unknown_column() {
         let schema = Arc::new(new_test_schema());
-        let meta = TableMetaBuilder::default()
+        let meta = TableMetaBuilder::empty()
             .schema(schema)
             .primary_key_indices(vec![0])
             .engine("engine")
@@ -1615,7 +1628,7 @@ mod tests {
     #[test]
     fn test_change_unknown_column_data_type() {
         let schema = Arc::new(new_test_schema());
-        let meta = TableMetaBuilder::default()
+        let meta = TableMetaBuilder::empty()
             .schema(schema)
             .primary_key_indices(vec![0])
             .engine("engine")
@@ -1640,7 +1653,7 @@ mod tests {
     #[test]
     fn test_remove_key_column() {
         let schema = Arc::new(new_test_schema());
-        let meta = TableMetaBuilder::default()
+        let meta = TableMetaBuilder::empty()
             .schema(schema)
             .primary_key_indices(vec![0])
             .engine("engine")
@@ -1674,7 +1687,7 @@ mod tests {
     #[test]
     fn test_change_key_column_data_type() {
         let schema = Arc::new(new_test_schema());
-        let meta = TableMetaBuilder::default()
+        let meta = TableMetaBuilder::empty()
             .schema(schema)
             .primary_key_indices(vec![0])
             .engine("engine")
@@ -1714,7 +1727,7 @@ mod tests {
     #[test]
     fn test_alloc_new_column() {
         let schema = Arc::new(new_test_schema());
-        let mut meta = TableMetaBuilder::default()
+        let mut meta = TableMetaBuilder::empty()
             .schema(schema)
             .primary_key_indices(vec![0])
             .engine("engine")
@@ -1733,7 +1746,7 @@ mod tests {
     #[test]
     fn test_add_columns_with_location() {
         let schema = Arc::new(new_test_schema());
-        let meta = TableMetaBuilder::default()
+        let meta = TableMetaBuilder::empty()
             .schema(schema)
             .primary_key_indices(vec![0])
             .engine("engine")
@@ -1761,7 +1774,7 @@ mod tests {
     #[test]
     fn test_modify_column_fulltext_options() {
         let schema = Arc::new(new_test_schema());
-        let meta = TableMetaBuilder::default()
+        let meta = TableMetaBuilder::empty()
             .schema(schema)
             .primary_key_indices(vec![0])
             .engine("engine")

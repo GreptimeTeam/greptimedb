@@ -91,7 +91,10 @@ pub fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> 
     let iter = vec![
         (TRACE_ID_COLUMN, span.trace_id),
         (SPAN_ID_COLUMN, span.span_id),
-        (PARENT_SPAN_ID_COLUMN, span.parent_span_id),
+        (
+            PARENT_SPAN_ID_COLUMN,
+            span.parent_span_id.unwrap_or_default(),
+        ),
     ]
     .into_iter()
     .map(|(col, val)| (col.to_string(), val));

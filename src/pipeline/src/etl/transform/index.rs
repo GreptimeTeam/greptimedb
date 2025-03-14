@@ -19,14 +19,17 @@ const INDEX_TIMEINDEX: &str = "time";
 const INDEX_TAG: &str = "tag";
 const INDEX_FULLTEXT: &str = "fulltext";
 const INDEX_SKIPPING: &str = "skipping";
+const INDEX_INVERTED: &str = "inverted";
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 #[allow(clippy::enum_variant_names)]
 pub enum Index {
     Time,
+    // deprecated, use Inverted instead
     Tag,
     Fulltext,
     Skipping,
+    Inverted,
 }
 
 impl std::fmt::Display for Index {
@@ -36,6 +39,7 @@ impl std::fmt::Display for Index {
             Index::Tag => INDEX_TAG,
             Index::Fulltext => INDEX_FULLTEXT,
             Index::Skipping => INDEX_SKIPPING,
+            Index::Inverted => INDEX_INVERTED,
         };
 
         write!(f, "{}", index)
@@ -59,6 +63,7 @@ impl TryFrom<&str> for Index {
             INDEX_TAG => Ok(Index::Tag),
             INDEX_FULLTEXT => Ok(Index::Fulltext),
             INDEX_SKIPPING => Ok(Index::Skipping),
+            INDEX_INVERTED => Ok(Index::Inverted),
             _ => UnsupportedIndexTypeSnafu { value }.fail(),
         }
     }
