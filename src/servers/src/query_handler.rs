@@ -173,6 +173,17 @@ pub trait PipelineHandler {
 #[async_trait]
 pub trait LogQueryHandler {
     async fn query(&self, query: LogQuery, ctx: QueryContextRef) -> Result<Output>;
+    async fn get_table(
+        &self,
+        catalog: &str,
+        schema: &str,
+        table: &str,
+    ) -> std::result::Result<Option<Arc<table::Table>>, catalog::error::Error>;
+    async fn table_names(
+        &self,
+        catalog: &str,
+        schema: &str,
+    ) -> std::result::Result<Vec<String>, catalog::error::Error>;
 }
 
 /// Handle Jaeger query requests.
