@@ -28,7 +28,7 @@ use api::v1::{
 use catalog::CatalogManagerRef;
 use client::{OutputData, OutputMeta};
 use common_catalog::consts::{
-    default_engine, PARENT_SPAN_ID_COLUMN, SPAN_NAME_COLUMN, TRACE_ID_COLUMN,
+    default_engine, PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN, TRACE_ID_COLUMN,
 };
 use common_grpc_expr::util::ColumnExpr;
 use common_meta::cache::TableFlownodeSetCacheRef;
@@ -54,7 +54,10 @@ use store_api::metric_engine_consts::{
 use store_api::mito_engine_options::{APPEND_MODE_KEY, MERGE_MODE_KEY};
 use store_api::storage::{RegionId, TableId};
 use table::metadata::TableInfo;
-use table::requests::{InsertRequest as TableInsertRequest, AUTO_CREATE_TABLE_KEY, TTL_KEY};
+use table::requests::{
+    InsertRequest as TableInsertRequest, AUTO_CREATE_TABLE_KEY, TABLE_DATA_MODEL,
+    TABLE_DATA_MODEL_TRACE_V1, TTL_KEY,
+};
 use table::table_reference::TableReference;
 use table::TableRef;
 
@@ -578,7 +581,8 @@ impl Inserter {
                     // - trace_id: when searching by trace id
                     // - parent_span_id: when searching root span
                     // - span_name: when searching certain types of span
-                    let index_columns = [TRACE_ID_COLUMN, PARENT_SPAN_ID_COLUMN, SPAN_NAME_COLUMN];
+                    let index_columns =
+                        [TRACE_ID_COLUMN, PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN];
                     for index_column in index_columns {
                         if let Some(col) = create_table
                             .column_defs
@@ -594,6 +598,12 @@ impl Inserter {
                             );
                         }
                     }
+
+                    // use table_options to mark table model version
+                    create_table.table_options.insert(
+                        TABLE_DATA_MODEL.to_string(),
+                        TABLE_DATA_MODEL_TRACE_V1.to_string(),
+                    );
 
                     let table = self
                         .create_physical_table(

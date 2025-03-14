@@ -90,6 +90,8 @@ impl OpenTelemetryProtocolHandler for Instance {
             .get::<OpenTelemetryProtocolInterceptorRef<servers::error::Error>>();
         interceptor_ref.pre_execute(ctx.clone())?;
 
+        let is_trace_v1_model = matches!(pipeline, PipelineWay::OtlpTraceDirectV1);
+
         let (requests, rows) = otlp::trace::to_grpc_insert_requests(
             request,
             pipeline,
@@ -101,10 +103,17 @@ impl OpenTelemetryProtocolHandler for Instance {
 
         OTLP_TRACES_ROWS.inc_by(rows as u64);
 
-        self.handle_trace_inserts(requests, ctx)
-            .await
-            .map_err(BoxedError::new)
-            .context(error::ExecuteGrpcQuerySnafu)
+        if is_trace_v1_model {
+            self.handle_trace_inserts(requests, ctx)
+                .await
+                .map_err(BoxedError::new)
+                .context(error::ExecuteGrpcQuerySnafu)
+        } else {
+            self.handle_log_inserts(requests, ctx)
+                .await
+                .map_err(BoxedError::new)
+                .context(error::ExecuteGrpcQuerySnafu)
+        }
     }
 
     #[tracing::instrument(skip_all)]

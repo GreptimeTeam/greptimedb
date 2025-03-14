@@ -28,14 +28,14 @@ use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use datafusion::dataframe::DataFrame;
 use datafusion::execution::context::SessionContext;
 use datafusion::execution::SessionStateBuilder;
-use datafusion_expr::{col, lit, lit_timestamp_nano, Expr};
+use datafusion_expr::{col, lit, lit_timestamp_nano, wildcard, Expr};
 use query::QueryEngineRef;
 use serde_json::Value as JsonValue;
 use servers::error::{
     CatalogSnafu, CollectRecordbatchSnafu, DataFusionSnafu, Result as ServerResult,
     TableNotFoundSnafu,
 };
-use servers::http::jaeger::{QueryTraceParams, FIND_TRACES_COLS};
+use servers::http::jaeger::{QueryTraceParams, JAEGER_QUERY_TABLE_NAME_KEY};
 use servers::otlp::trace::{
     DURATION_NANO_COLUMN, SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN, SPAN_KIND_COLUMN,
     SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, TIMESTAMP_COLUMN, TRACE_ID_COLUMN, TRACE_TABLE_NAME,
@@ -43,6 +43,7 @@ use servers::otlp::trace::{
 use servers::query_handler::JaegerQueryHandler;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
+use table::requests::{TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1};
 use table::table::adapter::DfTableProviderAdapter;
 
 use super::Instance;
@@ -82,7 +83,19 @@ impl JaegerQueryHandler for Instance {
             ))));
         }
 
-        // It's equivalent to `SELECT span_name, span_kind FROM {db}.{trace_table} WHERE service_name = '{service_name}'`.
+        // It's equivalent to
+        //
+        // ```
+        // SELECT
+        //   span_name,
+        //   span_kind
+        // FROM
+        //   {db}.{trace_table}
+        // WHERE
+        //   service_name = '{service_name}'
+        // ORDER BY
+        //   timestamp
+        // ```.
         Ok(query_trace_table(
             ctx,
             self.catalog_manager(),
@@ -101,9 +114,19 @@ impl JaegerQueryHandler for Instance {
     }
 
     async fn get_trace(&self, ctx: QueryContextRef, trace_id: &str) -> ServerResult<Output> {
-        // It's equivalent to `SELECT trace_id, timestamp, duration_nano, service_name, span_name, span_id, span_attributes, resource_attributes, parent_span_id
-        // FROM {db}.{trace_table} WHERE trace_id = '{trace_id}'`.
-        let selects: Vec<Expr> = FIND_TRACES_COLS.clone();
+        // It's equivalent to
+        //
+        // ```
+        // SELECT
+        //   *
+        // FROM
+        //   {db}.{trace_table}
+        // WHERE
+        //   trace_id = '{trace_id}'
+        // ORDER BY
+        //   timestamp
+        // ```.
+        let selects = vec![wildcard()];
 
         let filters = vec![col(TRACE_ID_COLUMN).eq(lit(trace_id))];
 
@@ -125,7 +148,7 @@ impl JaegerQueryHandler for Instance {
         ctx: QueryContextRef,
         query_params: QueryTraceParams,
     ) -> ServerResult<Output> {
-        let selects: Vec<Expr> = FIND_TRACES_COLS.clone();
+        let selects = vec![wildcard()];
 
         let mut filters = vec![];
 
@@ -174,16 +197,33 @@ async fn query_trace_table(
     tags: Option<HashMap<String, JsonValue>>,
     distinct: bool,
 ) -> ServerResult<Output> {
-    let db = ctx.get_db_string();
+    let table_name = ctx
+        .extension(JAEGER_QUERY_TABLE_NAME_KEY)
+        .unwrap_or(TRACE_TABLE_NAME);
+
     let table = catalog_manager
-        .table(ctx.current_catalog(), &db, TRACE_TABLE_NAME, Some(&ctx))
+        .table(
+            ctx.current_catalog(),
+            &ctx.current_schema(),
+            table_name,
+            Some(&ctx),
+        )
         .await
         .context(CatalogSnafu)?
         .with_context(|| TableNotFoundSnafu {
-            table: TRACE_TABLE_NAME,
+            table: table_name,
             catalog: ctx.current_catalog(),
-            schema: db,
+            schema: ctx.current_schema(),
         })?;
+
+    let is_data_model_v1 = table
+        .table_info()
+        .meta
+        .options
+        .extra_options
+        .get(TABLE_DATA_MODEL)
+        .map(|s| s.as_str())
+        == Some(TABLE_DATA_MODEL_TRACE_V1);
 
     let df_context = create_df_context(query_engine, ctx.clone())?;
 
@@ -196,7 +236,9 @@ async fn query_trace_table(
     // Apply all filters.
     let dataframe = filters
         .into_iter()
-        .chain(tags.map_or(Ok(vec![]), |t| tags_filters(&dataframe, t))?)
+        .chain(tags.map_or(Ok(vec![]), |t| {
+            tags_filters(&dataframe, t, is_data_model_v1)
+        })?)
         .try_fold(dataframe, |df, expr| {
             df.filter(expr).context(DataFusionSnafu)
         })?;
@@ -205,7 +247,10 @@ async fn query_trace_table(
     let dataframe = if distinct {
         dataframe.distinct().context(DataFusionSnafu)?
     } else {
+        // for non distinct query, sort by timestamp to make results stable
         dataframe
+            .sort_by(vec![col(TIMESTAMP_COLUMN)])
+            .context(DataFusionSnafu)?
     };
 
     // Apply the limit if needed.
@@ -237,7 +282,7 @@ fn create_df_context(
         SessionStateBuilder::new_from_existing(query_engine.engine_state().session_state()).build(),
     );
 
-    // The following JSON UDFs will be used for tags filters.
+    // The following JSON UDFs will be used for tags filters on v0 data model.
     let udfs: Vec<FunctionRef> = vec![
         Arc::new(JsonGetInt),
         Arc::new(JsonGetFloat),
@@ -256,7 +301,7 @@ fn create_df_context(
     Ok(df_context)
 }
 
-fn tags_filters(
+fn json_tag_filters(
     dataframe: &DataFrame,
     tags: HashMap<String, JsonValue>,
 ) -> ServerResult<Vec<Expr>> {
@@ -321,4 +366,42 @@ fn tags_filters(
     }
 
     Ok(filters)
+}
+
+fn flatten_tag_filters(tags: HashMap<String, JsonValue>) -> ServerResult<Vec<Expr>> {
+    let filters = tags
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let key = format!("\"span_attributes.{}\"", key);
+            match value {
+                JsonValue::String(value) => Some(col(key).eq(lit(value))),
+                JsonValue::Number(value) => {
+                    if value.is_f64() {
+                        // safe to unwrap as checked previously
+                        Some(col(key).eq(lit(value.as_f64().unwrap())))
+                    } else {
+                        Some(col(key).eq(lit(value.as_i64().unwrap())))
+                    }
+                }
+                JsonValue::Bool(value) => Some(col(key).eq(lit(value))),
+                JsonValue::Null => Some(col(key).is_null()),
+                // not supported at the moment
+                JsonValue::Array(_value) => None,
+                JsonValue::Object(_value) => None,
+            }
+        })
+        .collect();
+    Ok(filters)
+}
+
+fn tags_filters(
+    dataframe: &DataFrame,
+    tags: HashMap<String, JsonValue>,
+    is_data_model_v1: bool,
+) -> ServerResult<Vec<Expr>> {
+    if is_data_model_v1 {
+        flatten_tag_filters(tags)
+    } else {
+        json_tag_filters(dataframe, tags)
+    }
 }
