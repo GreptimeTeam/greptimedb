@@ -126,6 +126,7 @@ deadpool-postgres = "0.12"
 derive_builder = "0.12"
 dotenv = "0.15"
 etcd-client = "0.14"
+flate2 = { version = "1.1.0", default-features = false, features = ["zlib-rs"] }
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
