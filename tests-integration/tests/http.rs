@@ -2181,7 +2181,7 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
                 HeaderValue::from_static("application/x-protobuf"),
             ),
             (
-                HeaderName::from_static("x-greptime-log-pipeline-name"),
+                HeaderName::from_static("x-greptime-pipeline-name"),
                 HeaderValue::from_static(TRACE_V1),
             ),
             (
@@ -2222,7 +2222,7 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
                 HeaderValue::from_static("application/x-protobuf"),
             ),
             (
-                HeaderName::from_static("x-greptime-log-pipeline-name"),
+                HeaderName::from_static("x-greptime-pipeline-name"),
                 HeaderValue::from_static(TRACE_V1),
             ),
             (
