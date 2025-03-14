@@ -512,6 +512,10 @@ impl TableMetadataManager {
         &self.table_route_manager
     }
 
+    pub fn topic_region_manager(&self) -> &TopicRegionManager {
+        &self.topic_region_manager
+    }
+
     #[cfg(feature = "testing")]
     pub fn kv_backend(&self) -> &KvBackendRef {
         &self.kv_backend

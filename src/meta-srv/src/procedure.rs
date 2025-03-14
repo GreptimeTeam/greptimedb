@@ -25,6 +25,7 @@ mod test_util;
 #[cfg(test)]
 mod tests;
 pub mod utils;
+pub mod wal_prune;
 
 #[derive(Clone)]
 pub struct ProcedureManagerListenerAdapter(pub ProcedureManagerRef);
