@@ -34,6 +34,7 @@ use datafusion::physical_plan::{
     SendableRecordBatchStream,
 };
 use datatypes::arrow::compute;
+use datatypes::compute::SortOptions;
 use futures::{ready, Stream, StreamExt};
 use greptime_proto::substrait_extension as pb;
 use prost::Message;
@@ -146,7 +147,14 @@ impl ExecutionPlan for SeriesDivideExec {
     }
 
     fn required_input_distribution(&self) -> Vec<Distribution> {
-        vec![Distribution::SinglePartition]
+        let schema = self.input.schema();
+        vec![Distribution::HashPartitioned(
+            self.tag_columns
+                .iter()
+                // Safety: the tag column names is verified in the planning phase
+                .map(|tag| Arc::new(ColumnExpr::new_with_schema(tag, &schema).unwrap()) as _)
+                .collect(),
+        )]
     }
 
     fn required_input_ordering(&self) -> Vec<Option<LexRequirement>> {
@@ -157,7 +165,10 @@ impl ExecutionPlan for SeriesDivideExec {
             .map(|tag| PhysicalSortRequirement {
                 // Safety: the tag column names is verified in the planning phase
                 expr: Arc::new(ColumnExpr::new_with_schema(tag, &input_schema).unwrap()),
-                options: None,
+                options: Some(SortOptions {
+                    descending: false,
+                    nulls_first: true,
+                }),
             })
             .collect();
         if !exprs.is_empty() {
@@ -267,9 +278,9 @@ impl Stream for SeriesDivideStream {
     type Item = DataFusionResult<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let timer = std::time::Instant::now();
         loop {
             if !self.buffer.is_empty() {
+                let timer = std::time::Instant::now();
                 let cut_at = match self.find_first_diff_row() {
                     Ok(cut_at) => cut_at,
                     Err(e) => return Poll::Ready(Some(Err(e))),
@@ -287,7 +298,11 @@ impl Stream for SeriesDivideStream {
                         .drain(0..batch_index)
                         .chain([half_batch_of_first_series])
                         .collect::<Vec<_>>();
-                    self.buffer[0] = half_batch_of_second_series;
+                    if half_batch_of_second_series.num_rows() > 0 {
+                        self.buffer[0] = half_batch_of_second_series;
+                    } else {
+                        self.buffer.remove(0);
+                    }
                     let result_batch = compute::concat_batches(&self.schema, &result_batches)?;
 
                     self.inspect_start = 0;
@@ -295,8 +310,10 @@ impl Stream for SeriesDivideStream {
                     self.metric.elapsed_compute().add_elapsed(timer);
                     return Poll::Ready(Some(Ok(result_batch)));
                 } else {
+                    self.metric.elapsed_compute().add_elapsed(timer);
                     // continue to fetch next batch as the current buffer only contains one time series.
                     let next_batch = ready!(self.as_mut().fetch_next_batch(cx)).transpose()?;
+                    let timer = std::time::Instant::now();
                     if let Some(next_batch) = next_batch {
                         self.buffer.push(next_batch);
                         continue;
@@ -338,61 +355,139 @@ impl SeriesDivideStream {
     /// Return the position to cut buffer.
     /// None implies the current buffer only contains one time series.
     fn find_first_diff_row(&mut self) -> DataFusionResult<Option<(usize, usize)>> {
-        // fast path: no tag columns means all data belongs to the same series.
+        // Fast path: no tag columns means all data belongs to the same series
         if self.tag_indices.is_empty() {
             return Ok(None);
         }
 
         let mut resumed_batch_index = self.inspect_start;
 
-        for batch in &self.buffer[resumed_batch_index..] {
+        for batch_offset in 0..self.buffer.len() - resumed_batch_index {
+            let batch_index = resumed_batch_index + batch_offset;
+            let batch = &self.buffer[batch_index];
             let num_rows = batch.num_rows();
-            let mut result_index = num_rows;
 
-            // check if the first row is the same with last batch's last row
-            if resumed_batch_index > self.inspect_start {
-                let last_batch = &self.buffer[resumed_batch_index - 1];
-                let last_row = last_batch.num_rows() - 1;
-                for index in &self.tag_indices {
-                    let current_array = batch.column(*index);
-                    let last_array = last_batch.column(*index);
-                    let current_string_array = current_array
-                        .as_any()
-                        .downcast_ref::<StringArray>()
-                        .ok_or_else(|| {
-                            datafusion::error::DataFusionError::Internal(
-                                "Failed to downcast tag column to StringArray".to_string(),
-                            )
-                        })?;
-                    let last_string_array = last_array
-                        .as_any()
-                        .downcast_ref::<StringArray>()
-                        .ok_or_else(|| {
-                            datafusion::error::DataFusionError::Internal(
-                                "Failed to downcast tag column to StringArray".to_string(),
-                            )
-                        })?;
-                    let current_value = current_string_array.value(0);
-                    let last_value = last_string_array.value(last_row);
-                    if current_value != last_value {
-                        return Ok(Some((resumed_batch_index, 0)));
-                    }
+            // Skip empty batches
+            if num_rows == 0 {
+                resumed_batch_index += 1;
+                continue;
+            }
+
+            // Check if the first row matches the last row of previous batch
+            if batch_index > 0 {
+                let prev_batch = &self.buffer[batch_index - 1];
+                let prev_last_row = prev_batch.num_rows() - 1;
+
+                // Early detection of series boundary between batches
+                if self.rows_have_different_tags(prev_batch, prev_last_row, batch, 0)? {
+                    return Ok(Some((batch_index - 1, prev_last_row)));
                 }
             }
 
-            // check column by column
-            for index in &self.tag_indices {
-                let array = batch.column(*index);
-                let string_array =
-                    array
-                        .as_any()
-                        .downcast_ref::<StringArray>()
-                        .ok_or_else(|| {
-                            datafusion::error::DataFusionError::Internal(
-                                "Failed to downcast tag column to StringArray".to_string(),
-                            )
-                        })?;
-                // the first row number that not equal to the next row.
+            // Quick check if all rows in this batch belong to same series
+            if num_rows > 1 && self.rows_have_different_tags(batch, 0, batch, num_rows - 1)? {
+                // Use binary search to find the boundary more efficiently
+                let cut_index = self.find_boundary_with_binary_search(batch)?;
+                return Ok(Some((batch_index, cut_index)));
+            }
+
+            // All rows in this batch belong to the same series
+            resumed_batch_index += 1;
+        }
+
+        self.inspect_start = resumed_batch_index;
+        Ok(None)
+    }
+
+    // Helper method to check if two rows have different tag values
+    fn rows_have_different_tags(
+        &self,
+        batch1: &RecordBatch,
+        row1: usize,
+        batch2: &RecordBatch,
+        row2: usize,
+    ) -> DataFusionResult<bool> {
+        for &index in &self.tag_indices {
+            let array1 = batch1.column(index);
+            let array2 = batch2.column(index);
+
+            let string_array1 = array1
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or_else(|| {
+                    datafusion::error::DataFusionError::Internal(
+                        "Failed to downcast tag column to StringArray".to_string(),
+                    )
+                })?;
+
+            let string_array2 = array2
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or_else(|| {
+                    datafusion::error::DataFusionError::Internal(
+                        "Failed to downcast tag column to StringArray".to_string(),
+                    )
+                })?;
+
+            if string_array1.value(row1) != string_array2.value(row2) {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+
+    // Use binary search to efficiently find the boundary between series
+    fn find_boundary_with_binary_search(&self, batch: &RecordBatch) -> DataFusionResult<usize> {
+        let num_rows = batch.num_rows();
+
+        // For each tag column, find the earliest boundary
+        let mut earliest_boundary = num_rows - 1;
+
+        for &index in &self.tag_indices {
+            let array = batch.column(index);
+            let string_array = array
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or_else(|| {
+                    datafusion::error::DataFusionError::Internal(
+                        "Failed to downcast tag column to StringArray".to_string(),
+                    )
+                })?;
+
+            // Binary search approach
+            let mut left = 0;
+            let mut right = num_rows - 1;
+
+            // Early optimization: check if column has any differences
+            if string_array.value(left) == string_array.value(right) {
+                continue; // This column has the same value throughout, skip it
+            }
+
+            // Perform binary search to find first boundary
+            while left < right {
+                if left + 1 == right {
+                    // Found adjacent rows, check if they differ
+                    if string_array.value(left) != string_array.value(right) {
+                        earliest_boundary = earliest_boundary.min(left);
+                        break;
+                    }
+                    break;
+                }
+
+                let mid = left + (right - left) / 2;
+
+                if string_array.value(left) != string_array.value(mid) {
+                    // Boundary is in first half
+                    right = mid;
+                } else {
+                    // Boundary is in second half
+                    left = mid;
+                }
+            }
+
+            // Fall back to linear scan if binary search doesn't find the boundary
+            if left >= right {
                 let mut same_until = 0;
                 while same_until < num_rows - 1 {
                     if string_array.value(same_until) != string_array.value(same_until + 1) {
@@ -400,19 +495,11 @@ impl SeriesDivideStream {
                     }
                     same_until += 1;
                 }
-                result_index = result_index.min(same_until);
-            }
-
-            if result_index + 1 >= num_rows {
-                // all rows are the same, inspect next batch
-                resumed_batch_index += 1;
-            } else {
-                return Ok(Some((resumed_batch_index, result_index)));
+                earliest_boundary = earliest_boundary.min(same_until);
             }
         }
 
-        self.inspect_start = resumed_batch_index;
-        Ok(None)
+        Ok(earliest_boundary)
     }
 }
 
