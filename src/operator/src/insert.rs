@@ -74,6 +74,7 @@ pub struct Inserter {
     catalog_manager: CatalogManagerRef,
     partition_manager: PartitionRuleManagerRef,
     node_manager: NodeManagerRef,
+    #[allow(unused)]
     table_flownode_set_cache: TableFlownodeSetCacheRef,
 }
 
@@ -361,6 +362,8 @@ impl Inserter {
             normal_requests,
             instant_requests,
         } = requests;
+
+        // TODO(discord9): mirror some
 
         // Mirror requests for source table to flownode asynchronously
         let flow_mirror_task = FlowMirrorTask::new(
@@ -895,12 +898,14 @@ struct CreateAlterTableResult {
     table_infos: HashMap<TableId, Arc<TableInfo>>,
 }
 
+#[allow(unused)]
 struct FlowMirrorTask {
     requests: HashMap<Peer, RegionInsertRequests>,
     num_rows: usize,
 }
 
 impl FlowMirrorTask {
+    #[allow(unused)]
     async fn new(
         cache: &TableFlownodeSetCacheRef,
         requests: impl Iterator<Item = &RegionInsertRequest>,
@@ -974,6 +979,7 @@ impl FlowMirrorTask {
         })
     }
 
+    #[allow(unused)]
     fn detach(self, node_manager: NodeManagerRef) -> Result<()> {
         crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.add(self.num_rows as i64);
         for (peer, inserts) in self.requests {

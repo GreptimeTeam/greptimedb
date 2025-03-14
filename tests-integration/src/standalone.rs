@@ -40,7 +40,7 @@ use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use datanode::datanode::DatanodeBuilder;
-use flow::FlownodeBuilder;
+use flow::{FlownodeBuilder, FrontendClient};
 use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance, StandaloneDatanodeManager};
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
@@ -164,12 +164,15 @@ impl GreptimeDbStandaloneBuilder {
             Some(procedure_manager.clone()),
         );
 
+        let fe_server_addr = opts.frontend_options().grpc.bind_addr.clone();
+        let frontend_client = FrontendClient::from_static_grpc_addr(fe_server_addr);
         let flow_builder = FlownodeBuilder::new(
             Default::default(),
             plugins.clone(),
             table_metadata_manager.clone(),
             catalog_manager.clone(),
             flow_metadata_manager.clone(),
+            Arc::new(frontend_client),
         );
         let flownode = Arc::new(flow_builder.build().await.unwrap());
 
