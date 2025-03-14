@@ -29,6 +29,7 @@ use tokio::time::{Interval, MissedTickBehavior};
 
 use crate::election::{
     listen_leader_change, Election, LeaderChangeMessage, LeaderKey, CANDIDATES_ROOT, ELECTION_KEY,
+    IDLE_SESSION_TIMEOUT,
 };
 use crate::error::{
     DeserializeFromJsonSnafu, MySqlExecutionSnafu, NoLeaderSnafu, Result, SerializeToJsonSnafu,
@@ -106,7 +107,7 @@ impl<'a> ElectionSqlFactory<'a> {
     // Currently the session timeout is longer than the leader lease time, so the leader lease may expire while the session is still alive.
     // Either the leader reconnects and step down or the session expires and the lock is released.
     fn set_idle_session_timeout_sql(&self) -> String {
-        format!("SET SESSION wait_timeout = {};", 10)
+        format!("SET SESSION wait_timeout = {};", IDLE_SESSION_TIMEOUT)
     }
 
     fn set_lock_wait_timeout_sql(&self) -> String {
@@ -323,11 +324,8 @@ impl MySqlElection {
             .execute(&mut client)
             .await
             .context(MySqlExecutionSnafu)?;
+        // Insert at least one row for `SELECT * FOR UPDATE` to work.
         sqlx::query(&sql_factory.insert_once())
-            .execute(&mut client)
-            .await
-            .context(MySqlExecutionSnafu)?;
-        sqlx::query(&sql_factory.create_table_sql())
             .execute(&mut client)
             .await
             .context(MySqlExecutionSnafu)?;
