@@ -352,9 +352,9 @@ impl Stream for InstantManipulateStream {
     type Item = DataFusionResult<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let timer = std::time::Instant::now();
         let poll = match ready!(self.input.poll_next_unpin(cx)) {
             Some(Ok(batch)) => {
+                let timer = std::time::Instant::now();
                 self.num_series.add(1);
                 let result = Ok(batch).and_then(|batch| self.manipulate(batch));
                 self.metric.elapsed_compute().add_elapsed(timer);
