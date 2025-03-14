@@ -18,6 +18,7 @@ use std::num::NonZeroUsize;
 use async_trait::async_trait;
 use snafu::ensure;
 
+use crate::bitmap::BitmapType;
 use crate::inverted_index::create::sort::{SortOutput, Sorter};
 use crate::inverted_index::create::InvertedIndexCreator;
 use crate::inverted_index::error::{InconsistentRowCountSnafu, Result};
@@ -68,7 +69,11 @@ impl InvertedIndexCreator for SortIndexCreator {
     }
 
     /// Finalizes the sorting for all indexes and writes them using the inverted index writer
-    async fn finish(&mut self, writer: &mut dyn InvertedIndexWriter) -> Result<()> {
+    async fn finish(
+        &mut self,
+        writer: &mut dyn InvertedIndexWriter,
+        bitmap_type: BitmapType,
+    ) -> Result<()> {
         let mut output_row_count = None;
         for (index_name, mut sorter) in self.sorters.drain() {
             let SortOutput {
@@ -88,7 +93,7 @@ impl InvertedIndexCreator for SortIndexCreator {
             );
 
             writer
-                .add_index(index_name, segment_null_bitmap, sorted_stream)
+                .add_index(index_name, segment_null_bitmap, sorted_stream, bitmap_type)
                 .await?;
         }
 
@@ -117,9 +122,9 @@ mod tests {
     use futures::{stream, StreamExt};
 
     use super::*;
-    use crate::inverted_index::create::sort::SortedStream;
+    use crate::bitmap::Bitmap;
     use crate::inverted_index::error::Error;
-    use crate::inverted_index::format::writer::MockInvertedIndexWriter;
+    use crate::inverted_index::format::writer::{MockInvertedIndexWriter, ValueStream};
     use crate::Bytes;
 
     #[tokio::test]
@@ -143,11 +148,10 @@ mod tests {
         }
 
         let mut mock_writer = MockInvertedIndexWriter::new();
-        mock_writer
-            .expect_add_index()
-            .times(3)
-            .returning(|name, null_bitmap, stream| {
+        mock_writer.expect_add_index().times(3).returning(
+            |name, null_bitmap, stream, bitmap_type| {
                 assert!(null_bitmap.is_empty());
+                assert_eq!(bitmap_type, BitmapType::Roaring);
                 match name.as_str() {
                     "a" => assert_eq!(stream_to_values(stream), vec![b"1", b"2", b"3"]),
                     "b" => assert_eq!(stream_to_values(stream), vec![b"4", b"5", b"6"]),
@@ -155,7 +159,8 @@ mod tests {
                     _ => panic!("unexpected index name: {}", name),
                 }
                 Ok(())
-            });
+            },
+        );
         mock_writer
             .expect_finish()
             .times(1)
@@ -165,7 +170,10 @@ mod tests {
                 Ok(())
             });
 
-        creator.finish(&mut mock_writer).await.unwrap();
+        creator
+            .finish(&mut mock_writer, BitmapType::Roaring)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -191,8 +199,9 @@ mod tests {
         let mut mock_writer = MockInvertedIndexWriter::new();
         mock_writer
             .expect_add_index()
-            .returning(|name, null_bitmap, stream| {
+            .returning(|name, null_bitmap, stream, bitmap_type| {
                 assert!(null_bitmap.is_empty());
+                assert_eq!(bitmap_type, BitmapType::Roaring);
                 match name.as_str() {
                     "a" => assert_eq!(stream_to_values(stream), vec![b"1", b"2", b"3"]),
                     "b" => assert_eq!(stream_to_values(stream), vec![b"4", b"5", b"6"]),
@@ -203,7 +212,7 @@ mod tests {
             });
         mock_writer.expect_finish().never();
 
-        let res = creator.finish(&mut mock_writer).await;
+        let res = creator.finish(&mut mock_writer, BitmapType::Roaring).await;
         assert!(matches!(res, Err(Error::InconsistentRowCount { .. })));
     }
 
@@ -219,8 +228,9 @@ mod tests {
         let mut mock_writer = MockInvertedIndexWriter::new();
         mock_writer
             .expect_add_index()
-            .returning(|name, null_bitmap, stream| {
+            .returning(|name, null_bitmap, stream, bitmap_type| {
                 assert!(null_bitmap.is_empty());
+                assert_eq!(bitmap_type, BitmapType::Roaring);
                 assert!(matches!(name.as_str(), "a" | "b" | "c"));
                 assert!(stream_to_values(stream).is_empty());
                 Ok(())
@@ -234,7 +244,10 @@ mod tests {
                 Ok(())
             });
 
-        creator.finish(&mut mock_writer).await.unwrap();
+        creator
+            .finish(&mut mock_writer, BitmapType::Roaring)
+            .await
+            .unwrap();
     }
 
     fn set_bit(bit_vec: &mut BitVec, index: usize) {
@@ -283,20 +296,21 @@ mod tests {
 
         async fn output(&mut self) -> Result<SortOutput> {
             let segment_null_bitmap = self.values.remove(&None).unwrap_or_default();
+            let segment_null_bitmap = Bitmap::BitVec(segment_null_bitmap);
 
             Ok(SortOutput {
                 segment_null_bitmap,
                 sorted_stream: Box::new(stream::iter(
                     std::mem::take(&mut self.values)
                         .into_iter()
-                        .map(|(v, b)| Ok((v.unwrap(), b))),
+                        .map(|(v, b)| Ok((v.unwrap(), Bitmap::BitVec(b)))),
                 )),
                 total_row_count: self.total_row_count,
             })
         }
     }
 
-    fn stream_to_values(stream: SortedStream) -> Vec<Bytes> {
+    fn stream_to_values(stream: ValueStream) -> Vec<Bytes> {
         futures::executor::block_on(async {
             stream.map(|r| r.unwrap().0).collect::<Vec<Bytes>>().await
         })

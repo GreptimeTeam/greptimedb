@@ -42,12 +42,20 @@ impl HeartbeatHandler for FlowStateHandler {
         _ctx: &mut Context,
         _acc: &mut HeartbeatAccumulator,
     ) -> Result<HandleControl> {
-        if let Some(FlowStat { flow_stat_size }) = &req.flow_stat {
+        if let Some(FlowStat {
+            flow_stat_size,
+            flow_last_exec_time_map,
+        }) = &req.flow_stat
+        {
             let state_size = flow_stat_size
                 .iter()
                 .map(|(k, v)| (*k, *v as usize))
                 .collect();
-            let value = FlowStateValue::new(state_size);
+            let last_exec_time_map = flow_last_exec_time_map
+                .iter()
+                .map(|(k, v)| (*k, *v))
+                .collect();
+            let value: FlowStateValue = FlowStateValue::new(state_size, last_exec_time_map);
             self.flow_state_manager
                 .put(value)
                 .await

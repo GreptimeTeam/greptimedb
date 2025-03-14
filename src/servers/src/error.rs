@@ -410,6 +410,15 @@ pub enum Error {
         source: query::error::Error,
     },
 
+    #[snafu(display("Failed to parse timestamp: {}", timestamp))]
+    ParseTimestamp {
+        timestamp: String,
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: query::error::Error,
+    },
+
     #[snafu(display("{}", reason))]
     UnexpectedResult {
         reason: String,
@@ -685,7 +694,8 @@ impl ErrorExt for Error {
             | PrepareStatementNotFound { .. }
             | FailedToParseQuery { .. }
             | InvalidElasticsearchInput { .. }
-            | InvalidJaegerQuery { .. } => StatusCode::InvalidArguments,
+            | InvalidJaegerQuery { .. }
+            | ParseTimestamp { .. } => StatusCode::InvalidArguments,
 
             Catalog { source, .. } => source.status_code(),
             RowWriter { source, .. } => source.status_code(),

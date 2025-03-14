@@ -15,17 +15,17 @@
 mod predicates_apply;
 
 use async_trait::async_trait;
-use common_base::BitVec;
 pub use predicates_apply::PredicatesIndexApplier;
 
+use crate::bitmap::Bitmap;
 use crate::inverted_index::error::Result;
 use crate::inverted_index::format::reader::InvertedIndexReader;
 
 /// The output of an apply operation.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ApplyOutput {
     /// Bitmap of indices that match the predicates.
-    pub matched_segment_ids: BitVec,
+    pub matched_segment_ids: Bitmap,
 
     /// The total number of rows in the index.
     pub total_row_count: usize,

@@ -18,7 +18,10 @@ use common_meta::leadership_notifier::LeadershipChangeListener;
 use common_procedure::ProcedureManagerRef;
 use snafu::ResultExt;
 
+pub mod region_follower;
 pub mod region_migration;
+#[cfg(test)]
+mod test_util;
 #[cfg(test)]
 mod tests;
 pub mod utils;

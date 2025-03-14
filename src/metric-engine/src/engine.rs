@@ -335,6 +335,10 @@ impl MetricEngine {
         }
     }
 
+    pub fn mito(&self) -> MitoEngine {
+        self.inner.mito.clone()
+    }
+
     pub async fn logical_regions(&self, physical_region_id: RegionId) -> Result<Vec<RegionId>> {
         self.inner
             .metadata_region

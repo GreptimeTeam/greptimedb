@@ -14,13 +14,11 @@
 
 use std::any::Any;
 use std::collections::BTreeMap;
-use std::fmt::{Display, Formatter};
 use std::marker::PhantomData;
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
-use serde::Serializer;
 
 use super::{KvBackendRef, ResettableKvBackend};
 use crate::kv_backend::txn::{Txn, TxnOp, TxnOpResponse, TxnRequest, TxnResponse};
@@ -36,19 +34,6 @@ use crate::rpc::KeyValue;
 pub struct MemoryKvBackend<T> {
     kvs: RwLock<BTreeMap<Vec<u8>, Vec<u8>>>,
     _phantom: PhantomData<T>,
-}
-
-impl<T> Display for MemoryKvBackend<T> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let kvs = self.kvs.read().unwrap();
-        for (k, v) in kvs.iter() {
-            f.serialize_str(&String::from_utf8_lossy(k))?;
-            f.serialize_str(" -> ")?;
-            f.serialize_str(&String::from_utf8_lossy(v))?;
-            f.serialize_str("\n")?;
-        }
-        Ok(())
-    }
 }
 
 impl<T> Default for MemoryKvBackend<T> {

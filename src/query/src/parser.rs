@@ -188,7 +188,7 @@ impl QueryLanguageParser {
         Ok(QueryStatement::Promql(eval_stmt))
     }
 
-    fn parse_promql_timestamp(timestamp: &str) -> Result<SystemTime> {
+    pub fn parse_promql_timestamp(timestamp: &str) -> Result<SystemTime> {
         // try rfc3339 format
         let rfc3339_result = DateTime::parse_from_rfc3339(timestamp)
             .context(ParseTimestampSnafu { raw: timestamp })

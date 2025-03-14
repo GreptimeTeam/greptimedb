@@ -97,3 +97,26 @@ select tag from t where num > 6 order by ts;
 explain analyze select tag from t where num > 6 order by ts desc limit 2;
 
 drop table t;
+
+-- ORDER BY with projections
+CREATE TABLE test (
+  c1 INTEGER,
+  c2 INTEGER,
+  c3 STRING,
+  c4 DOUBLE,
+  ts TIMESTAMP TIME INDEX,
+  PRIMARY KEY (c1, c3, c2)
+);
+
+INSERT INTO test VALUES (1, NULL, 'a', 3.0, 1), (2, 3, 'b', 4.0, 2), (3, 4, 'c', 5.0, 3);
+
+SELECT c1, c3 FROM test ORDER BY c2;
+
+SELECT c1, c3 FROM test ORDER BY c2 NULLS FIRST;
+
+SELECT c1, c3 FROM test ORDER BY c3, c1;
+
+SELECT c2 FROM test ORDER BY ts;
+
+drop table test;
+

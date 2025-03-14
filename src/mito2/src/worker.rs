@@ -583,6 +583,8 @@ type RequestBuffer = Vec<WorkerRequest>;
 #[derive(Default)]
 pub(crate) struct StalledRequests {
     /// Stalled requests.
+    /// Remember to use `StalledRequests::stalled_count()` to get the total number of stalled requests
+    /// instead of `StalledRequests::requests.len()`.
     ///
     /// Key: RegionId
     /// Value: (estimated size, stalled requests)
@@ -616,6 +618,11 @@ impl StalledRequests {
         } else {
             vec![]
         }
+    }
+
+    /// Returns the total number of all stalled requests.
+    pub(crate) fn stalled_count(&self) -> usize {
+        self.requests.values().map(|reqs| reqs.1.len()).sum()
     }
 }
 

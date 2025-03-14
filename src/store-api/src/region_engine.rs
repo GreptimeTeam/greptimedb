@@ -212,6 +212,9 @@ pub struct ScannerProperties {
 
     /// The target partitions of the scanner. 0 indicates using the number of partitions as target partitions.
     target_partitions: usize,
+
+    /// Whether the scanner is scanning a logical region.
+    logical_region: bool,
 }
 
 impl ScannerProperties {
@@ -235,6 +238,7 @@ impl ScannerProperties {
             total_rows,
             distinguish_partition_range: false,
             target_partitions: 0,
+            logical_region: false,
         }
     }
 
@@ -264,6 +268,11 @@ impl ScannerProperties {
         self.total_rows
     }
 
+    /// Returns whether the scanner is scanning a logical region.
+    pub fn is_logical_region(&self) -> bool {
+        self.logical_region
+    }
+
     /// Returns the target partitions of the scanner. If it is not set, returns the number of partitions.
     pub fn target_partitions(&self) -> usize {
         if self.target_partitions == 0 {
@@ -271,6 +280,11 @@ impl ScannerProperties {
         } else {
             self.target_partitions
         }
+    }
+
+    /// Sets whether the scanner is reading a logical region.
+    pub fn set_logical_region(&mut self, logical_region: bool) {
+        self.logical_region = logical_region;
     }
 }
 
@@ -332,6 +346,9 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
 
     /// Check if there is any predicate that may be executed in this scanner.
     fn has_predicate(&self) -> bool;
+
+    /// Sets whether the scanner is reading a logical region.
+    fn set_logical_region(&mut self, logical_region: bool);
 }
 
 pub type RegionScannerRef = Box<dyn RegionScanner>;
@@ -561,6 +578,10 @@ impl RegionScanner for SinglePartitionScanner {
 
     fn metadata(&self) -> RegionMetadataRef {
         self.metadata.clone()
+    }
+
+    fn set_logical_region(&mut self, logical_region: bool) {
+        self.properties.set_logical_region(logical_region);
     }
 }
 

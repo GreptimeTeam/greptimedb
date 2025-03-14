@@ -16,7 +16,7 @@ use std::cmp::Ordering;
 use std::fmt;
 
 use arrow::datatypes::{ArrowNativeType, ArrowPrimitiveType, DataType as ArrowDataType};
-use common_time::{Date, DateTime};
+use common_time::Date;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 
@@ -25,7 +25,7 @@ use crate::error::{self, Result};
 use crate::scalars::{Scalar, ScalarRef, ScalarVectorBuilder};
 use crate::type_id::LogicalTypeId;
 use crate::types::boolean_type::bool_to_numeric;
-use crate::types::{DateTimeType, DateType};
+use crate::types::DateType;
 use crate::value::{Value, ValueRef};
 use crate::vectors::{MutableVector, PrimitiveVector, PrimitiveVectorBuilder, Vector};
 
@@ -153,19 +153,6 @@ impl WrapperType for Date {
     }
 
     fn into_native(self) -> i32 {
-        self.val()
-    }
-}
-
-impl WrapperType for DateTime {
-    type LogicalType = DateTimeType;
-    type Native = i64;
-
-    fn from_native(value: Self::Native) -> Self {
-        DateTime::new(value)
-    }
-
-    fn into_native(self) -> Self::Native {
         self.val()
     }
 }
@@ -362,7 +349,6 @@ impl DataType for Int64Type {
             Value::Float32(v) => num::cast::cast(v).map(Value::Int64),
             Value::Float64(v) => num::cast::cast(v).map(Value::Int64),
             Value::String(v) => v.as_utf8().parse::<i64>().map(Value::Int64).ok(),
-            Value::DateTime(v) => Some(Value::Int64(v.val())),
             Value::Timestamp(v) => Some(Value::Int64(v.value())),
             Value::Time(v) => Some(Value::Int64(v.value())),
             // We don't allow casting interval type to int.

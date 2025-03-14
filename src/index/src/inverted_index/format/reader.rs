@@ -18,11 +18,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use common_base::BitVec;
 use greptime_proto::v1::index::InvertedIndexMetas;
 use snafu::ResultExt;
 
-use crate::inverted_index::error::{DecodeFstSnafu, Result};
+use crate::bitmap::{Bitmap, BitmapType};
+use crate::inverted_index::error::{DecodeBitmapSnafu, DecodeFstSnafu, Result};
 pub use crate::inverted_index::format::reader::blob::InvertedIndexBlobReader;
 use crate::inverted_index::FstMap;
 
@@ -67,17 +67,25 @@ pub trait InvertedIndexReader: Send + Sync {
     }
 
     /// Retrieves the bitmap from the given offset and size.
-    async fn bitmap(&self, offset: u64, size: u32) -> Result<BitVec> {
-        self.range_read(offset, size).await.map(BitVec::from_vec)
+    async fn bitmap(&self, offset: u64, size: u32, bitmap_type: BitmapType) -> Result<Bitmap> {
+        self.range_read(offset, size).await.and_then(|bytes| {
+            Bitmap::deserialize_from(&bytes, bitmap_type).context(DecodeBitmapSnafu)
+        })
     }
 
     /// Retrieves the multiple bitmaps from the given ranges.
-    async fn bitmap_deque(&mut self, ranges: &[Range<u64>]) -> Result<VecDeque<BitVec>> {
-        Ok(self
-            .read_vec(ranges)
-            .await?
+    async fn bitmap_deque(
+        &mut self,
+        ranges: &[(Range<u64>, BitmapType)],
+    ) -> Result<VecDeque<Bitmap>> {
+        let (ranges, types): (Vec<_>, Vec<_>) = ranges.iter().cloned().unzip();
+        let bytes = self.read_vec(&ranges).await?;
+        bytes
             .into_iter()
-            .map(|bytes| BitVec::from_slice(bytes.as_ref()))
-            .collect::<VecDeque<_>>())
+            .zip(types)
+            .map(|(bytes, bitmap_type)| {
+                Bitmap::deserialize_from(&bytes, bitmap_type).context(DecodeBitmapSnafu)
+            })
+            .collect::<Result<VecDeque<_>>>()
     }
 }

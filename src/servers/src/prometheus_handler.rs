@@ -15,6 +15,7 @@
 //! prom supply the prometheus HTTP API Server compliance
 
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
@@ -37,6 +38,16 @@ pub trait PrometheusHandler {
     async fn query_metric_names(
         &self,
         matchers: Vec<Matcher>,
+        ctx: &QueryContextRef,
+    ) -> Result<Vec<String>>;
+
+    async fn query_label_values(
+        &self,
+        metric: String,
+        label_name: String,
+        matchers: Vec<Matcher>,
+        start: SystemTime,
+        end: SystemTime,
         ctx: &QueryContextRef,
     ) -> Result<Vec<String>>;
 

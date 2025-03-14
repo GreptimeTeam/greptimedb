@@ -14,7 +14,7 @@
 
 use chrono::{DateTime as ChronoDateTime, NaiveDate, NaiveDateTime, Utc};
 use common_time::date::Date;
-use common_time::{DateTime, Timestamp};
+use common_time::Timestamp;
 use datatypes::value::Value;
 use snafu::{ensure, ResultExt};
 use sqlx::mysql::MySqlRow;
@@ -112,9 +112,15 @@ where
                         )
                         .unwrap(),
                     )),
-                    "DATETIME" => RowValue::Value(Value::DateTime(DateTime::from(
-                        fetched_row.try_get::<NaiveDateTime, usize>(idx).unwrap(),
-                    ))),
+                    "DATETIME" => RowValue::Value(Value::Timestamp(
+                        Timestamp::from_chrono_datetime(
+                            fetched_row
+                                .try_get::<ChronoDateTime<Utc>, usize>(idx)
+                                .unwrap()
+                                .naive_utc(),
+                        )
+                        .unwrap(),
+                    )),
                     "DATE" => RowValue::Value(Value::Date(Date::from(
                         fetched_row.try_get::<NaiveDate, usize>(idx).unwrap(),
                     ))),

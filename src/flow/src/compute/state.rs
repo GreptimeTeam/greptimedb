@@ -45,6 +45,8 @@ pub struct DataflowState {
     arrange_used: Vec<ArrangeHandler>,
     /// the time arrangement need to be expired after a certain time in milliseconds
     expire_after: Option<Timestamp>,
+    /// the last time each subgraph executed
+    last_exec_time: Option<Timestamp>,
 }
 
 impl DataflowState {
@@ -113,6 +115,14 @@ impl DataflowState {
 
     pub fn get_state_size(&self) -> usize {
         self.arrange_used.iter().map(|x| x.read().get_size()).sum()
+    }
+
+    pub fn set_last_exec_time(&mut self, time: Timestamp) {
+        self.last_exec_time = Some(time);
+    }
+
+    pub fn last_exec_time(&self) -> Option<Timestamp> {
+        self.last_exec_time
     }
 }
 

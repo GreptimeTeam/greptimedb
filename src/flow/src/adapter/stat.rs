@@ -21,19 +21,31 @@ use crate::FlowWorkerManager;
 impl FlowWorkerManager {
     pub async fn gen_state_report(&self) -> FlowStat {
         let mut full_report = BTreeMap::new();
+        let mut last_exec_time_map = BTreeMap::new();
         for worker in self.worker_handles.iter() {
             match worker.get_state_size().await {
                 Ok(state_size) => {
-                    full_report.extend(state_size.into_iter().map(|(k, v)| (k as u32, v)))
+                    full_report.extend(state_size.into_iter().map(|(k, v)| (k as u32, v)));
                 }
                 Err(err) => {
                     common_telemetry::error!(err; "Get flow stat size error");
+                }
+            }
+
+            match worker.get_last_exec_time_map().await {
+                Ok(last_exec_time) => {
+                    last_exec_time_map
+                        .extend(last_exec_time.into_iter().map(|(k, v)| (k as u32, v)));
+                }
+                Err(err) => {
+                    common_telemetry::error!(err; "Get last exec time error");
                 }
             }
         }
 
         FlowStat {
             state_size: full_report,
+            last_exec_time_map,
         }
     }
 }

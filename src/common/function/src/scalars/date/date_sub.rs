@@ -118,11 +118,6 @@ mod tests {
             ConcreteDataType::date_datatype(),
             f.return_type(&[ConcreteDataType::date_datatype()]).unwrap()
         );
-        assert_eq!(
-            ConcreteDataType::datetime_datatype(),
-            f.return_type(&[ConcreteDataType::datetime_datatype()])
-                .unwrap()
-        );
         assert!(
             matches!(f.signature(),
                          Signature {

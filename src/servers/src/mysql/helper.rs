@@ -186,7 +186,6 @@ pub fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> Result<ScalarV
                 .timestamp_millis();
 
             match t {
-                ConcreteDataType::DateTime(_) => Ok(ScalarValue::Date64(Some(timestamp_millis))),
                 ConcreteDataType::Timestamp(_) => Ok(ScalarValue::TimestampMillisecond(
                     Some(timestamp_millis),
                     None,
@@ -358,10 +357,13 @@ mod tests {
         let expr = Expr::Value(ValueExpr::SingleQuotedString(
             "2001-01-02 03:04:05".to_string(),
         ));
-        let t = ConcreteDataType::datetime_datatype();
+        let t = ConcreteDataType::timestamp_microsecond_datatype();
         let v = convert_expr_to_scalar_value(&expr, &t).unwrap();
         let scalar_v = ScalarValue::Utf8(Some("2001-01-02 03:04:05".to_string()))
-            .cast_to(&arrow_schema::DataType::Date64)
+            .cast_to(&arrow_schema::DataType::Timestamp(
+                arrow_schema::TimeUnit::Microsecond,
+                None,
+            ))
             .unwrap();
         assert_eq!(scalar_v, v);
 

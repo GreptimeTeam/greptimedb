@@ -975,6 +975,9 @@ pub enum Error {
 
     #[snafu(display("Manual compaction is override by following operations."))]
     ManualCompactionOverride {},
+
+    #[snafu(display("Incompatible WAL provider change. This is typically caused by changing WAL provider in database config file without completely cleaning existing files. Global provider: {}, region provider: {}", global, region))]
+    IncompatibleWalProviderChange { global: String, region: String },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -1121,6 +1124,8 @@ impl ErrorExt for Error {
             }
 
             ManualCompactionOverride {} => StatusCode::Cancelled,
+
+            IncompatibleWalProviderChange { .. } => StatusCode::InvalidArguments,
         }
     }
 

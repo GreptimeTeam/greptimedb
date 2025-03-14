@@ -80,6 +80,7 @@ async fn test_scan_projection() {
         limit: None,
         series_row_selector: None,
         sequence: None,
+        distribution: None,
     };
     let stream = engine.scan_to_stream(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();

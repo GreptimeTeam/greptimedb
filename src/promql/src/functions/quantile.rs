@@ -125,7 +125,7 @@ impl QuantileOverTime {
 }
 
 /// Refer to <https://github.com/prometheus/prometheus/blob/6e2905a4d4ff9b47b1f6d201333f5bd53633f921/promql/quantile.go#L357-L386>
-fn quantile_impl(values: &[f64], quantile: f64) -> Option<f64> {
+pub(crate) fn quantile_impl(values: &[f64], quantile: f64) -> Option<f64> {
     if quantile.is_nan() || values.is_empty() {
         return Some(f64::NAN);
     }

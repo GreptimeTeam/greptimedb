@@ -41,10 +41,13 @@ pub(crate) async fn new_s3_object_store(s3_config: &S3Config) -> Result<ObjectSt
 
     if s3_config.endpoint.is_some() {
         builder = builder.endpoint(s3_config.endpoint.as_ref().unwrap());
-    };
+    }
     if s3_config.region.is_some() {
         builder = builder.region(s3_config.region.as_ref().unwrap());
-    };
+    }
+    if s3_config.enable_virtual_host_style {
+        builder = builder.enable_virtual_host_style();
+    }
 
     Ok(ObjectStore::new(builder)
         .context(error::InitBackendSnafu)?

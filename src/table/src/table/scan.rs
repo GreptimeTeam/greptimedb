@@ -32,10 +32,15 @@ use datafusion::physical_plan::{
 };
 use datafusion_common::stats::Precision;
 use datafusion_common::{ColumnStatistics, DataFusionError, Statistics};
-use datafusion_physical_expr::{EquivalenceProperties, Partitioning, PhysicalSortExpr};
+use datafusion_physical_expr::expressions::Column;
+use datafusion_physical_expr::{
+    EquivalenceProperties, LexOrdering, Partitioning, PhysicalSortExpr,
+};
 use datatypes::arrow::datatypes::SchemaRef as ArrowSchemaRef;
+use datatypes::compute::SortOptions;
 use futures::{Stream, StreamExt};
 use store_api::region_engine::{PartitionRange, PrepareRequest, RegionScannerRef};
+use store_api::storage::{ScanRequest, TimeSeriesDistribution};
 
 use crate::table::metrics::StreamMetrics;
 
@@ -51,10 +56,12 @@ pub struct RegionScanExec {
     append_mode: bool,
     total_rows: usize,
     is_partition_set: bool,
+    // TODO(ruihang): handle TimeWindowed dist via this parameter
+    distribution: Option<TimeSeriesDistribution>,
 }
 
 impl RegionScanExec {
-    pub fn new(scanner: RegionScannerRef) -> Self {
+    pub fn new(scanner: RegionScannerRef, request: ScanRequest) -> DfResult<Self> {
         let arrow_schema = scanner.schema().arrow_schema().clone();
         let scanner_props = scanner.properties();
         let mut num_output_partition = scanner_props.num_partitions();
@@ -64,14 +71,67 @@ impl RegionScanExec {
         if num_output_partition == 0 {
             num_output_partition = 1;
         }
+
+        let metadata = scanner.metadata();
+        let mut pk_columns: Vec<PhysicalSortExpr> = metadata
+            .primary_key_columns()
+            .filter_map(|col| {
+                Some(PhysicalSortExpr::new(
+                    Arc::new(Column::new_with_schema(&col.column_schema.name, &arrow_schema).ok()?)
+                        as _,
+                    SortOptions {
+                        descending: false,
+                        nulls_first: true,
+                    },
+                ))
+            })
+            .collect::<Vec<_>>();
+        let ts_col: Option<PhysicalSortExpr> = try {
+            PhysicalSortExpr::new(
+                Arc::new(
+                    Column::new_with_schema(
+                        &metadata.time_index_column().column_schema.name,
+                        &arrow_schema,
+                    )
+                    .ok()?,
+                ) as _,
+                SortOptions {
+                    descending: false,
+                    nulls_first: true,
+                },
+            )
+        };
+
+        let eq_props = match request.distribution {
+            Some(TimeSeriesDistribution::PerSeries) => {
+                if let Some(ts) = ts_col {
+                    pk_columns.push(ts);
+                }
+                EquivalenceProperties::new_with_orderings(
+                    arrow_schema.clone(),
+                    &[LexOrdering::new(pk_columns)],
+                )
+            }
+            Some(TimeSeriesDistribution::TimeWindowed) => {
+                if let Some(ts_col) = ts_col {
+                    pk_columns.insert(0, ts_col);
+                }
+                EquivalenceProperties::new_with_orderings(
+                    arrow_schema.clone(),
+                    &[LexOrdering::new(pk_columns)],
+                )
+            }
+            None => EquivalenceProperties::new(arrow_schema.clone()),
+        };
+
         let properties = PlanProperties::new(
-            EquivalenceProperties::new(arrow_schema.clone()),
+            eq_props,
             Partitioning::UnknownPartitioning(num_output_partition),
             ExecutionMode::Bounded,
         );
         let append_mode = scanner_props.append_mode();
         let total_rows = scanner_props.total_rows();
-        Self {
+        Ok(Self {
             scanner: Arc::new(Mutex::new(scanner)),
             arrow_schema,
             output_ordering: None,
@@ -80,7 +140,8 @@ impl RegionScanExec {
             append_mode,
             total_rows,
             is_partition_set: false,
-        }
+            distribution: request.distribution,
+        })
     }
 
     /// Get the partition ranges of the scanner. This method will collapse the ranges into
@@ -140,7 +201,12 @@ impl RegionScanExec {
             append_mode: self.append_mode,
             total_rows: self.total_rows,
             is_partition_set: true,
+            distribution: self.distribution,
         })
+    }
+
+    pub fn distribution(&self) -> Option<TimeSeriesDistribution> {
+        self.distribution
     }
 
     pub fn with_distinguish_partition_range(&self, distinguish_partition_range: bool) {
@@ -388,7 +454,7 @@ mod test {
         let region_metadata = Arc::new(builder.build().unwrap());
 
         let scanner = Box::new(SinglePartitionScanner::new(stream, false, region_metadata));
-        let plan = RegionScanExec::new(scanner);
+        let plan = RegionScanExec::new(scanner, ScanRequest::default()).unwrap();
         let actual: SchemaRef = Arc::new(
             plan.properties
                 .eq_properties

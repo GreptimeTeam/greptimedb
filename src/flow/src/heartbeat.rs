@@ -154,14 +154,18 @@ impl HeartbeatTask {
         };
         let flow_stat = latest_report
             .as_ref()
-            .map(|report| {
-                report
+            .map(|report| api::v1::meta::FlowStat {
+                flow_stat_size: report
                     .state_size
                     .iter()
                     .map(|(k, v)| (*k, *v as u64))
-                    .collect()
-            })
-            .map(|f| api::v1::meta::FlowStat { flow_stat_size: f });
+                    .collect(),
+                flow_last_exec_time_map: report
+                    .last_exec_time_map
+                    .iter()
+                    .map(|(k, v)| (*k, *v))
+                    .collect(),
+            });
 
         Some(HeartbeatRequest {
             mailbox_message,

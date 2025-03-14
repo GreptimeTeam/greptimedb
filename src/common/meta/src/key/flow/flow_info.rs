@@ -15,6 +15,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -131,6 +132,12 @@ pub struct FlowInfoValue {
     pub(crate) comment: String,
     /// The options.
     pub(crate) options: HashMap<String, String>,
+    /// The created time
+    #[serde(default)]
+    pub(crate) created_time: DateTime<Utc>,
+    /// The updated time.
+    #[serde(default)]
+    pub(crate) updated_time: DateTime<Utc>,
 }
 
 impl FlowInfoValue {
@@ -170,6 +177,14 @@ impl FlowInfoValue {
 
     pub fn options(&self) -> &HashMap<String, String> {
         &self.options
+    }
+
+    pub fn created_time(&self) -> &DateTime<Utc> {
+        &self.created_time
+    }
+
+    pub fn updated_time(&self) -> &DateTime<Utc> {
+        &self.updated_time
     }
 }
 

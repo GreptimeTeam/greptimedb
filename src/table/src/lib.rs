@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #![feature(assert_matches)]
+#![feature(try_blocks)]
 
 pub mod dist_table;
 pub mod error;
