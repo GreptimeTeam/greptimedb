@@ -88,8 +88,8 @@ impl SimpleFilterEvaluator {
                     | Operator::Gt
                     | Operator::GtEq => {}
                     Operator::Or => {
-                        let lhs = Self::try_new(&*binary.left)?;
-                        let rhs = Self::try_new(&*binary.right)?;
+                        let lhs = Self::try_new(&binary.left)?;
+                        let rhs = Self::try_new(&binary.right)?;
                         if lhs.column_name != rhs.column_name
                             || !matches!(lhs.op, Operator::Eq | Operator::Or)
                             || !matches!(rhs.op, Operator::Eq | Operator::Or)
