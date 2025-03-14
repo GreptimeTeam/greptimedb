@@ -285,6 +285,20 @@ impl Value {
         }
     }
 
+    /// Cast Value to i64. Return None if value is not a valid int64 data type.
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            Value::Int8(v) => Some(*v as _),
+            Value::Int16(v) => Some(*v as _),
+            Value::Int32(v) => Some(*v as _),
+            Value::Int64(v) => Some(*v),
+            Value::UInt8(v) => Some(*v as _),
+            Value::UInt16(v) => Some(*v as _),
+            Value::UInt32(v) => Some(*v as _),
+            _ => None,
+        }
+    }
+
     /// Cast Value to u64. Return None if value is not a valid uint64 data type.
     pub fn as_u64(&self) -> Option<u64> {
         match self {
@@ -295,7 +309,6 @@ impl Value {
             _ => None,
         }
     }
-
     /// Cast Value to f64. Return None if it's not castable;
     pub fn as_f64_lossy(&self) -> Option<f64> {
         match self {
