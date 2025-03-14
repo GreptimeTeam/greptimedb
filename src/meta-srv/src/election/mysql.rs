@@ -109,6 +109,10 @@ impl<'a> ElectionSqlFactory<'a> {
         format!("SET SESSION wait_timeout = {};", 10)
     }
 
+    fn set_lock_wait_timeout_sql(&self) -> String {
+        format!("SET innodb_lock_wait_timeout = {};", 1)
+    }
+
     fn create_table_sql(&self) -> String {
         format!(
             r#"
@@ -305,12 +309,17 @@ impl MySqlElection {
         table_name: &str,
     ) -> Result<ElectionRef> {
         let sql_factory = ElectionSqlFactory::new(table_name);
-        // Set idle session timeout to IDLE_SESSION_TIMEOUT to avoid dead advisory lock.
         sqlx::query(&sql_factory.create_table_sql())
             .execute(&mut client)
             .await
             .context(MySqlExecutionSnafu)?;
+        // Set idle session timeout to IDLE_SESSION_TIMEOUT to avoid dead lock.
         sqlx::query(&sql_factory.set_idle_session_timeout_sql())
+            .execute(&mut client)
+            .await
+            .context(MySqlExecutionSnafu)?;
+        // Set lock wait timeout to LOCK_WAIT_TIMEOUT to avoid waiting too long.
+        sqlx::query(&sql_factory.set_lock_wait_timeout_sql())
             .execute(&mut client)
             .await
             .context(MySqlExecutionSnafu)?;
@@ -895,7 +904,7 @@ mod tests {
         let mut a = client.lock().await;
         let txn = a.begin().await.unwrap();
         let mut executor = Executor::Txn(txn);
-        let query = format!("SELECT * FROM {} FOR UPDATE NOWAIT;", table_name);
+        let query = format!("SELECT * FROM {} FOR UPDATE;", table_name);
         let query = sqlx::query(&query);
         let _ = executor.query(query).await.unwrap();
         std::mem::drop(executor);
@@ -1098,7 +1107,7 @@ mod tests {
         let mut client = leader_mysql_election.client.lock().await;
         let txn = client.begin().await.unwrap();
         let mut executor = Executor::Txn(txn);
-        let query = format!("SELECT * FROM {} FOR UPDATE NOWAIT;", table_name);
+        let query = format!("SELECT * FROM {} FOR UPDATE;", table_name);
         let query = sqlx::query(&query);
         let _ = executor.query(query).await.unwrap();
         leader_mysql_election.elected(&mut executor).await.unwrap();
@@ -1223,7 +1232,7 @@ mod tests {
         let mut client = leader_mysql_election.client.lock().await;
         let txn = client.begin().await.unwrap();
         let mut executor = Executor::Txn(txn);
-        let query = format!("SELECT * FROM {} FOR UPDATE NOWAIT;", table_name);
+        let query = format!("SELECT * FROM {} FOR UPDATE;", table_name);
         let query = sqlx::query(&query);
         executor.query(query).await.unwrap();
         leader_mysql_election.leader_action(executor).await.unwrap();
@@ -1253,7 +1262,7 @@ mod tests {
         // Step 2: As a leader, renew the lease.
         std::mem::drop(executor);
         let mut client = leader_mysql_election.client.lock().await;
-        let query = format!("SELECT * FROM {} FOR UPDATE NOWAIT;", table_name);
+        let query = format!("SELECT * FROM {} FOR UPDATE;", table_name);
         let query = sqlx::query(&query);
         let txn = client.begin().await.unwrap();
         let mut executor = Executor::Txn(txn);
@@ -1273,7 +1282,7 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(META_LEASE_SECS)).await;
         std::mem::drop(executor);
         let mut client = leader_mysql_election.client.lock().await;
-        let query = format!("SELECT * FROM {} FOR UPDATE NOWAIT;", table_name);
+        let query = format!("SELECT * FROM {} FOR UPDATE;", table_name);
         let query = sqlx::query(&query);
         let txn = client.begin().await.unwrap();
         let mut executor = Executor::Txn(txn);
@@ -1302,7 +1311,7 @@ mod tests {
         // Step 4: Re-elect itself.
         std::mem::drop(executor);
         let mut client = leader_mysql_election.client.lock().await;
-        let query = format!("SELECT * FROM {} FOR UPDATE NOWAIT;", table_name);
+        let query = format!("SELECT * FROM {} FOR UPDATE;", table_name);
         let query = sqlx::query(&query);
         let txn = client.begin().await.unwrap();
         let mut executor = Executor::Txn(txn);
@@ -1338,7 +1347,7 @@ mod tests {
             .unwrap();
         std::mem::drop(executor);
         let mut client = leader_mysql_election.client.lock().await;
-        let query = format!("SELECT * FROM {} FOR UPDATE NOWAIT;", table_name);
+        let query = format!("SELECT * FROM {} FOR UPDATE;", table_name);
         let query = sqlx::query(&query);
         let txn = client.begin().await.unwrap();
         let mut executor = Executor::Txn(txn);
@@ -1368,7 +1377,7 @@ mod tests {
         // Step 6: Re-elect itself.
         std::mem::drop(executor);
         let mut client = leader_mysql_election.client.lock().await;
-        let query = format!("SELECT * FROM {} FOR UPDATE NOWAIT;", table_name);
+        let query = format!("SELECT * FROM {} FOR UPDATE;", table_name);
         let query = sqlx::query(&query);
         let txn = client.begin().await.unwrap();
         let mut executor = Executor::Txn(txn);
@@ -1400,7 +1409,7 @@ mod tests {
         // Step 7: Something wrong, the leader key changed by others.
         std::mem::drop(executor);
         let mut client = leader_mysql_election.client.lock().await;
-        let query = format!("SELECT * FROM {} FOR UPDATE NOWAIT;", table_name);
+        let query = format!("SELECT * FROM {} FOR UPDATE;", table_name);
         let query = sqlx::query(&query);
         let txn = client.begin().await.unwrap();
         let mut executor = Executor::Txn(txn);
