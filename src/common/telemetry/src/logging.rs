@@ -111,7 +111,7 @@ impl Eq for LoggingOptions {}
 impl Default for LoggingOptions {
     fn default() -> Self {
         Self {
-            dir: "/tmp/greptimedb/logs".to_string(),
+            dir: "./greptimedb_data/logs".to_string(),
             level: None,
             log_format: LogFormat::Text,
             enable_otlp_tracing: false,

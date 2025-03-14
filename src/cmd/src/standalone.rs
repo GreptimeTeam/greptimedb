@@ -852,7 +852,7 @@ mod tests {
 
             [wal]
             provider = "raft_engine"
-            dir = "/tmp/greptimedb/test/wal"
+            dir = "./greptimedb_data/test/wal"
             file_size = "1GB"
             purge_threshold = "50GB"
             purge_interval = "10m"
@@ -860,7 +860,7 @@ mod tests {
             sync_write = false
 
             [storage]
-            data_home = "/tmp/greptimedb/"
+            data_home = "./greptimedb_data/"
             type = "File"
 
             [[storage.providers]]
@@ -892,7 +892,7 @@ mod tests {
 
             [logging]
             level = "debug"
-            dir = "/tmp/greptimedb/test/logs"
+            dir = "./greptimedb_data/test/logs"
         "#;
         write!(file, "{}", toml_str).unwrap();
         let cmd = StartCommand {
@@ -922,7 +922,10 @@ mod tests {
         let DatanodeWalConfig::RaftEngine(raft_engine_config) = dn_opts.wal else {
             unreachable!()
         };
-        assert_eq!("/tmp/greptimedb/test/wal", raft_engine_config.dir.unwrap());
+        assert_eq!(
+            "./greptimedb_data/test/wal",
+            raft_engine_config.dir.unwrap()
+        );
 
         assert!(matches!(
             &dn_opts.storage.store,
@@ -946,7 +949,7 @@ mod tests {
         }
 
         assert_eq!("debug", logging_opts.level.as_ref().unwrap());
-        assert_eq!("/tmp/greptimedb/test/logs".to_string(), logging_opts.dir);
+        assert_eq!("./greptimedb_data/test/logs".to_string(), logging_opts.dir);
     }
 
     #[test]
@@ -958,7 +961,7 @@ mod tests {
 
         let opts = cmd
             .load_options(&GlobalOptions {
-                log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
+                log_dir: Some("./greptimedb_data/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
 
                 #[cfg(feature = "tokio-console")]
@@ -967,7 +970,7 @@ mod tests {
             .unwrap()
             .component;
 
-        assert_eq!("/tmp/greptimedb/test/logs", opts.logging.dir);
+        assert_eq!("./greptimedb_data/test/logs", opts.logging.dir);
         assert_eq!("debug", opts.logging.level.unwrap());
     }
 

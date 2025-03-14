@@ -36,7 +36,7 @@ use servers::Mode;
 pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize::gb(5);
 
 /// Default data home in file storage
-const DEFAULT_DATA_HOME: &str = "/tmp/greptimedb";
+const DEFAULT_DATA_HOME: &str = "./greptimedb_data";
 
 /// Object storage config
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

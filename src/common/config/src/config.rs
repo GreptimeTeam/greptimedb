@@ -161,7 +161,7 @@ mod tests {
 
             [wal]
             provider = "raft_engine"
-            dir = "/tmp/greptimedb/wal"
+            dir = "./greptimedb_data/wal"
             file_size = "1GB"
             purge_threshold = "50GB"
             purge_interval = "10m"
@@ -170,7 +170,7 @@ mod tests {
 
             [logging]
             level = "debug"
-            dir = "/tmp/greptimedb/test/logs"
+            dir = "./greptimedb_data/test/logs"
         "#;
         write!(file, "{}", toml_str).unwrap();
 
@@ -246,7 +246,7 @@ mod tests {
                 let DatanodeWalConfig::RaftEngine(raft_engine_config) = opts.wal else {
                     unreachable!()
                 };
-                assert_eq!(raft_engine_config.dir.unwrap(), "/tmp/greptimedb/wal");
+                assert_eq!(raft_engine_config.dir.unwrap(), "./greptimedb_data/wal");
 
                 // Should be default values.
                 assert_eq!(opts.node_id, None);

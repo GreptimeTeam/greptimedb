@@ -56,13 +56,13 @@ fn test_load_datanode_example_config() {
                 metadata_cache_tti: Duration::from_secs(300),
             }),
             wal: DatanodeWalConfig::RaftEngine(RaftEngineConfig {
-                dir: Some("/tmp/greptimedb/wal".to_string()),
+                dir: Some("./greptimedb_data/wal".to_string()),
                 sync_period: Some(Duration::from_secs(10)),
                 recovery_parallelism: 2,
                 ..Default::default()
             }),
             storage: StorageConfig {
-                data_home: "/tmp/greptimedb/".to_string(),
+                data_home: "./greptimedb_data/".to_string(),
                 ..Default::default()
             },
             region_engine: vec![
@@ -159,10 +159,10 @@ fn test_load_metasrv_example_config() {
     let expected = GreptimeOptions::<MetasrvOptions> {
         component: MetasrvOptions {
             selector: SelectorType::default(),
-            data_home: "/tmp/metasrv/".to_string(),
+            data_home: "./greptimedb_data/metasrv/".to_string(),
             server_addr: "127.0.0.1:3002".to_string(),
             logging: LoggingOptions {
-                dir: "/tmp/greptimedb/logs".to_string(),
+                dir: "./greptimedb_data/logs".to_string(),
                 level: Some("info".to_string()),
                 otlp_endpoint: Some(DEFAULT_OTLP_ENDPOINT.to_string()),
                 tracing_sample_ratio: Some(Default::default()),
@@ -202,7 +202,7 @@ fn test_load_standalone_example_config() {
         component: StandaloneOptions {
             default_timezone: Some("UTC".to_string()),
             wal: DatanodeWalConfig::RaftEngine(RaftEngineConfig {
-                dir: Some("/tmp/greptimedb/wal".to_string()),
+                dir: Some("./greptimedb_data/wal".to_string()),
                 sync_period: Some(Duration::from_secs(10)),
                 recovery_parallelism: 2,
                 ..Default::default()
@@ -219,7 +219,7 @@ fn test_load_standalone_example_config() {
                 }),
             ],
             storage: StorageConfig {
-                data_home: "/tmp/greptimedb/".to_string(),
+                data_home: "./greptimedb_data/".to_string(),
                 ..Default::default()
             },
             logging: LoggingOptions {

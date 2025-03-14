@@ -25,7 +25,7 @@ services:
       - --initial-cluster-state=new
       - *etcd_initial_cluster_token
     volumes:
-      - /tmp/greptimedb-cluster-docker-compose/etcd0:/var/lib/etcd
+      - ./greptimedb-cluster-docker-compose/etcd0:/var/lib/etcd
     healthcheck:
       test: [ "CMD", "etcdctl", "--endpoints=http://etcd0:2379", "endpoint", "health" ]
       interval: 5s
@@ -68,12 +68,13 @@ services:
       - datanode
       - start
       - --node-id=0
+      - --data-home=/greptimedb_data
       - --rpc-bind-addr=0.0.0.0:3001
       - --rpc-server-addr=datanode0:3001
       - --metasrv-addrs=metasrv:3002
       - --http-addr=0.0.0.0:5000
     volumes:
-      - /tmp/greptimedb-cluster-docker-compose/datanode0:/tmp/greptimedb
+      - ./greptimedb-cluster-docker-compose/datanode0:/greptimedb_data
     healthcheck:
       test: [ "CMD", "curl", "-fv", "http://datanode0:5000/health" ]
       interval: 5s

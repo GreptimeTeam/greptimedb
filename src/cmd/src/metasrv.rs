@@ -337,7 +337,7 @@ mod tests {
 
             [logging]
             level = "debug"
-            dir = "/tmp/greptimedb/test/logs"
+            dir = "./greptimedb_data/test/logs"
 
             [failure_detector]
             threshold = 8.0
@@ -358,7 +358,10 @@ mod tests {
         assert_eq!(vec!["127.0.0.1:2379".to_string()], options.store_addrs);
         assert_eq!(SelectorType::LeaseBased, options.selector);
         assert_eq!("debug", options.logging.level.as_ref().unwrap());
-        assert_eq!("/tmp/greptimedb/test/logs".to_string(), options.logging.dir);
+        assert_eq!(
+            "./greptimedb_data/test/logs".to_string(),
+            options.logging.dir
+        );
         assert_eq!(8.0, options.failure_detector.threshold);
         assert_eq!(
             100.0,
@@ -396,7 +399,7 @@ mod tests {
 
         let options = cmd
             .load_options(&GlobalOptions {
-                log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
+                log_dir: Some("./greptimedb_data/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
 
                 #[cfg(feature = "tokio-console")]
@@ -406,7 +409,7 @@ mod tests {
             .component;
 
         let logging_opt = options.logging;
-        assert_eq!("/tmp/greptimedb/test/logs", logging_opt.dir);
+        assert_eq!("./greptimedb_data/test/logs", logging_opt.dir);
         assert_eq!("debug", logging_opt.level.as_ref().unwrap());
     }
 
@@ -424,7 +427,7 @@ mod tests {
 
             [logging]
             level = "debug"
-            dir = "/tmp/greptimedb/test/logs"
+            dir = "./greptimedb_data/test/logs"
         "#;
         write!(file, "{}", toml_str).unwrap();
 

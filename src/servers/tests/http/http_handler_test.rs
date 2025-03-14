@@ -391,7 +391,7 @@ async fn test_config() {
 
             [logging]
             level = "debug"
-            dir = "/tmp/greptimedb/test/logs"
+            dir = "./greptimedb_data/test/logs"
         "#;
     let rs = http_handler::config(State(GreptimeOptionsConfigState {
         greptime_config_options: toml_str.to_string(),

@@ -76,7 +76,7 @@ retry_interval = "3s"
 ## The logging options.
 [logging]
 ## The directory to store the log files. If set to empty, logs will not be written to files.
-dir = "/tmp/greptimedb/logs"
+dir = "./greptimedb_data/logs"
 
 ## The log level. Can be `info`/`debug`/`warn`/`error`.
 ## @toml2docs:none-default
@@ -121,4 +121,3 @@ sample_ratio = 1.0
 ## The tokio console address.
 ## @toml2docs:none-default
 #+ tokio_console_addr = "127.0.0.1"
-
