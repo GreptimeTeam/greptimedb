@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["INIT_CAPACITY","NSPNAME"],"mod":["oid_map"],"struct":["PGNamespace","PGNamespaceBuilder"]};

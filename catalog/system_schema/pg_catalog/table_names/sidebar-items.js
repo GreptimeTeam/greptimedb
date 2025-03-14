@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["PG_CLASS","PG_DATABASE","PG_NAMESPACE","PG_TYPE"]};

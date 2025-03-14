@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["calc_trend_value","holt_winter_impl"],"struct":["HoltWinters"]};

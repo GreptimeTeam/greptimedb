@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CLOSE_REGION_FOLLOWER_TIMEOUT"],"struct":["RemoveFollower"]};

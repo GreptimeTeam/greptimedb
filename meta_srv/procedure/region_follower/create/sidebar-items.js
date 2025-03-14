@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["OPEN_REGION_FOLLOWER_TIMEOUT"],"struct":["CreateFollower"]};

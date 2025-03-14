@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["AlterRegionFollowerState"],"mod":["add_region_follower","create","manager","remove","remove_region_follower"],"struct":["AlterRegionFollowerData","Context"]};
