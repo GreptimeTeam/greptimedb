@@ -461,7 +461,7 @@ mod tests {
         let fe_opts = command.load_options(&Default::default()).unwrap().component;
 
         assert_eq!("127.0.0.1:4000".to_string(), fe_opts.http.addr);
-        assert_eq!(Duration::from_secs(30), fe_opts.http.timeout);
+        assert_eq!(Duration::from_secs(0), fe_opts.http.timeout);
 
         assert_eq!(ReadableSize::gb(2), fe_opts.http.body_limit);
 
