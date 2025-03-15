@@ -430,27 +430,33 @@ impl PgElection {
             .context(PostgresExecutionSnafu)?;
 
         if res.is_empty() {
-            return Ok(None);
-        }
-        // Safety: Checked if res is empty above.
-        let current_time_str = String::from_utf8_lossy(res[0].try_get(1).unwrap());
-        let current_time = match Timestamp::from_str(&current_time_str, None) {
-            Ok(ts) => ts,
-            Err(_) => UnexpectedSnafu {
-                violated: format!("Invalid timestamp: {}", current_time_str),
-            }
-            .fail()?,
-        };
-        // Safety: Checked if res is empty above.
-        let value_and_expire_time = String::from_utf8_lossy(res[0].try_get(0).unwrap_or_default());
-        let (value, expire_time) = parse_value_and_expire_time(&value_and_expire_time)?;
-
-        let origin = if with_origin {
-            Some(value_and_expire_time.to_string())
+            Ok(None)
         } else {
-            None
-        };
-        Ok(Some((value, expire_time, current_time, origin)))
+            // Safety: Checked if res is empty above.
+            let current_time_str = res[0].try_get(1).unwrap_or_default();
+            let current_time = match Timestamp::from_str(current_time_str, None) {
+                Ok(ts) => ts,
+                Err(_) => UnexpectedSnafu {
+                    violated: format!("Invalid timestamp: {}", current_time_str),
+                }
+                .fail()?,
+            };
+            // Safety: Checked if res is empty above.
+            let value_and_expire_time =
+                String::from_utf8_lossy(res[0].try_get(0).unwrap_or_default());
+            let (value, expire_time) = parse_value_and_expire_time(&value_and_expire_time)?;
+
+            if with_origin {
+                Ok(Some((
+                    value,
+                    expire_time,
+                    current_time,
+                    Some(value_and_expire_time.to_string()),
+                )))
+            } else {
+                Ok(Some((value, expire_time, current_time, None)))
+            }
+        }
     }
 
     /// Returns all values and expire time with the given key prefix. Also returns the current time.

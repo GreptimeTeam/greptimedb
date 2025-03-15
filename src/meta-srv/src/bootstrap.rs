@@ -260,6 +260,7 @@ pub async fn metasrv_builder(
                 MySqlStore::with_mysql_pool(pool, &opts.meta_table_name, opts.max_txn_ops)
                     .await
                     .context(error::KvBackendSnafu)?;
+            // Since election will acquire a lock of the table, we need a separate table for election.
             let election_table_name = opts.meta_table_name.clone() + "_election";
             let election_client = create_mysql_client(opts).await?;
             let election = MySqlElection::with_mysql_client(
@@ -360,6 +361,7 @@ async fn create_mysql_pool(opts: &MetasrvOptions) -> Result<MySqlPool> {
         .context(error::InvalidArgumentsSnafu {
             err_msg: "empty store addrs",
         })?;
+    // Avoid `SET` commands in sqlx
     let opts: MySqlConnectOptions = mysql_url
         .parse()
         .context(error::ParseMySqlUrlSnafu { mysql_url })?;
@@ -384,6 +386,7 @@ async fn create_mysql_client(opts: &MetasrvOptions) -> Result<MySqlConnection> {
         .context(error::InvalidArgumentsSnafu {
             err_msg: "empty store addrs",
         })?;
+    // Avoid `SET` commands in sqlx
     let opts: MySqlConnectOptions = mysql_url
         .parse()
         .context(error::ParseMySqlUrlSnafu { mysql_url })?;
