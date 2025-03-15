@@ -40,7 +40,7 @@ use datatypes::vectors::{StringVectorBuilder, VectorRef};
 use mysql::prelude::Queryable;
 use mysql::{Conn as MySqlClient, Row as MySqlRow};
 use sqlness::{Database, EnvController, QueryContext};
-use tokio::sync::{Mutex as TokioMutex, OnceCell};
+use tokio::sync::Mutex as TokioMutex;
 use tokio_postgres::{Client as PgClient, SimpleQueryMessage as PgRow};
 
 use crate::protocol_interceptor::{MYSQL, PROTOCOL_KEY};
@@ -55,8 +55,6 @@ const SERVER_MODE_METASRV_IDX: usize = 0;
 const SERVER_MODE_DATANODE_START_IDX: usize = 1;
 const SERVER_MODE_FRONTEND_IDX: usize = 4;
 const SERVER_MODE_FLOWNODE_IDX: usize = 5;
-
-static INIT: OnceCell<()> = OnceCell::const_new();
 
 #[derive(Clone)]
 pub enum WalConfig {
@@ -147,11 +145,8 @@ impl Env {
         if self.server_addrs.server_addr.is_some() {
             self.connect_db(&self.server_addrs, id).await
         } else {
-            INIT.get_or_init(|| async {
-                self.build_db();
-                self.setup_wal();
-            })
-            .await;
+            self.build_db();
+            self.setup_wal();
             let mut db_ctx = GreptimeDBContext::new(self.wal.clone(), self.store_config.clone());
 
             let server_mode = ServerMode::random_standalone();
@@ -172,14 +167,11 @@ impl Env {
         if self.server_addrs.server_addr.is_some() {
             self.connect_db(&self.server_addrs, id).await
         } else {
-            INIT.get_or_init(|| async {
-                self.build_db();
-                self.setup_wal();
-                self.setup_etcd();
-                self.setup_pg();
-                self.setup_mysql().await;
-            })
-            .await;
+            self.build_db();
+            self.setup_wal();
+            self.setup_etcd();
+            self.setup_pg();
+            self.setup_mysql().await;
             let mut db_ctx = GreptimeDBContext::new(self.wal.clone(), self.store_config.clone());
 
             // start a distributed GreptimeDB

@@ -869,7 +869,7 @@ mod tests {
         let mut client = MySqlConnection::connect(&endpoint).await.unwrap();
         if let Some(table_name) = table_name {
             let create_table_sql = format!(
-                "CREATE TABLE IF NOT EXISTS {}(k VARCHAR(255) PRIMARY KEY, v BLOB);",
+                "CREATE TABLE IF NOT EXISTS {}(k VARBINARY(3072) PRIMARY KEY, v BLOB);",
                 table_name
             );
             sqlx::query(&create_table_sql)

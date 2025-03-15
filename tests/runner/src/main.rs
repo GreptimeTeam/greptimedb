@@ -147,13 +147,15 @@ async fn main() {
     }
 
     // normalize parallelism to 1 if any of the following conditions are met:
+    // Note: parallelism in pg and mysql is possible, but need configuration.
     if args.server_addr.server_addr.is_some()
         || args.setup_etcd
         || args.setup_pg
+        || args.setup_mysql
         || args.kafka_wal_broker_endpoints.is_some()
     {
         args.jobs = 1;
-        println!("Normalizing parallelism to 1 due to server addresses or etcd/pg setup");
+        println!("Normalizing parallelism to 1 due to server addresses or etcd/pg/mysql setup");
     }
 
     let config = ConfigBuilder::default()
