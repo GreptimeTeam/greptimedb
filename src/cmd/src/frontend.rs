@@ -440,7 +440,7 @@ mod tests {
 
             [http]
             addr = "127.0.0.1:4000"
-            timeout = "30s"
+            timeout = "0"
             body_limit = "2GB"
 
             [opentsdb]

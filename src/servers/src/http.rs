@@ -154,7 +154,7 @@ impl Default for HttpOptions {
     fn default() -> Self {
         Self {
             addr: "127.0.0.1:4000".to_string(),
-            timeout: Duration::from_secs(30),
+            timeout: Duration::from_secs(0),
             disable_dashboard: false,
             body_limit: DEFAULT_BODY_LIMIT,
             is_strict_mode: false,

@@ -26,7 +26,7 @@ retry_interval = "3s"
 ## The address to bind the HTTP server.
 addr = "127.0.0.1:4000"
 ## HTTP request timeout. Set to 0 to disable timeout.
-timeout = "30s"
+timeout = "0"
 ## HTTP request body limit.
 ## The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.
 ## Set to 0 to disable limit.
