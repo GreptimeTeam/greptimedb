@@ -386,7 +386,7 @@ async fn test_config() {
 
             [http]
             addr = "127.0.0.1:4000"
-            timeout = "0"
+            timeout = "0s"
             body_limit = "2GB"
 
             [logging]
