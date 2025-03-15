@@ -6730,6 +6730,7 @@ dependencies = [
  "servers",
  "session",
  "snafu 0.8.5",
+ "sqlx",
  "store-api",
  "strum 0.25.0",
  "table",

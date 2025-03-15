@@ -28,6 +28,7 @@ use tokio_postgres::Client;
 
 use crate::election::{
     listen_leader_change, Election, LeaderChangeMessage, LeaderKey, CANDIDATES_ROOT, ELECTION_KEY,
+    IDLE_SESSION_TIMEOUT,
 };
 use crate::error::{
     DeserializeFromJsonSnafu, NoLeaderSnafu, PostgresExecutionSnafu, Result, SerializeToJsonSnafu,
@@ -111,8 +112,8 @@ impl<'a> ElectionSqlFactory<'a> {
 
     // Currently the session timeout is longer than the leader lease time, so the leader lease may expire while the session is still alive.
     // Either the leader reconnects and step down or the session expires and the lock is released.
-    fn set_idle_session_timeout_sql(&self) -> &str {
-        "SET idle_session_timeout = '10s';"
+    fn set_idle_session_timeout_sql(&self) -> String {
+        format!("SET idle_session_timeout = '{}s';", IDLE_SESSION_TIMEOUT)
     }
 
     fn campaign_sql(&self) -> String {
@@ -241,7 +242,7 @@ impl PgElection {
         let sql_factory = ElectionSqlFactory::new(lock_id, table_name);
         // Set idle session timeout to IDLE_SESSION_TIMEOUT to avoid dead advisory lock.
         client
-            .execute(sql_factory.set_idle_session_timeout_sql(), &[])
+            .execute(&sql_factory.set_idle_session_timeout_sql(), &[])
             .await
             .context(PostgresExecutionSnafu)?;
 
@@ -317,7 +318,9 @@ impl Election for PgElection {
                 prev_expire_time > current_time,
                 UnexpectedSnafu {
                     violated: format!(
-                        "Candidate lease expired, key: {:?}",
+                        "Candidate lease expired at {:?} (current time {:?}), key: {:?}",
+                        prev_expire_time,
+                        current_time,
                         String::from_utf8_lossy(&key.into_bytes())
                     ),
                 }
@@ -369,23 +372,19 @@ impl Election for PgElection {
                 .query(&self.sql_set.campaign, &[])
                 .await
                 .context(PostgresExecutionSnafu)?;
-            if let Some(row) = res.first() {
-                match row.try_get(0) {
-                    Ok(true) => self.leader_action().await?,
-                    Ok(false) => self.follower_action().await?,
-                    Err(_) => {
-                        return UnexpectedSnafu {
-                            violated: "Failed to get the result of acquiring advisory lock"
-                                .to_string(),
-                        }
-                        .fail();
-                    }
+            let row = res.first().context(UnexpectedSnafu {
+                violated: "Failed to get the result of acquiring advisory lock",
+            })?;
+            let is_leader = row.try_get(0).map_err(|_| {
+                UnexpectedSnafu {
+                    violated: "Failed to get the result of get lock",
                 }
+                .build()
+            })?;
+            if is_leader {
+                self.leader_action().await?;
             } else {
-                return UnexpectedSnafu {
-                    violated: "Failed to get the result of acquiring advisory lock".to_string(),
-                }
-                .fail();
+                self.follower_action().await?;
             }
             let _ = keep_alive_interval.tick().await;
         }
