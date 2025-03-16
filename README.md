@@ -112,7 +112,7 @@ Start a GreptimeDB container with:
 
 ```shell
 docker run -p 127.0.0.1:4000-4003:4000-4003 \
-  -v "$(pwd)/greptimedb:/tmp/greptimedb" \
+  -v "$(pwd)/greptimedb:./greptimedb_data" \
   --name greptime --rm \
   greptime/greptimedb:latest standalone start \
   --http-addr 0.0.0.0:4000 \
