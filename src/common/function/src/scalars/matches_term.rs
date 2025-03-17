@@ -61,7 +61,7 @@ use crate::function_registry::FunctionRegistry;
 /// SELECT matches_term(column, 'critical error') FROM logs;
 /// -- Match in: "ERROR:critical error!"
 /// -- No match: "critical_errors"
-pub(crate) struct MatchesTermFunction;
+pub struct MatchesTermFunction;
 
 impl MatchesTermFunction {
     pub fn register(registry: &FunctionRegistry) {
@@ -111,7 +111,7 @@ impl Function for MatchesTermFunction {
         }
 
         let term_column = &columns[1];
-        let const_term = if term_column.is_const() {
+        let compiled_finder = if term_column.is_const() {
             let term = term_column.get_ref(0).as_string().unwrap();
             match term {
                 None => {
@@ -119,7 +119,7 @@ impl Function for MatchesTermFunction {
                         iter::repeat(None).take(text_column.len()),
                     )));
                 }
-                term => term,
+                Some(term) => Some(MatchesTermFinder::new(term)),
             }
         } else {
             None
@@ -134,18 +134,19 @@ impl Function for MatchesTermFunction {
                 continue;
             };
 
-            let term = match const_term {
-                Some(term) => term,
-                None => match term_column.get_ref(i).as_string().unwrap() {
-                    None => {
-                        result.push_null();
-                        continue;
-                    }
-                    Some(term) => term,
-                },
+            let contains = match &compiled_finder {
+                Some(finder) => finder.find(text),
+                None => {
+                    let term = match term_column.get_ref(i).as_string().unwrap() {
+                        None => {
+                            result.push_null();
+                            continue;
+                        }
+                        Some(term) => term,
+                    };
+                    MatchesTermFinder::new(term).find(text)
+                }
             };
-
-            let contains = contains_term(text, term);
             result.push(Some(contains));
         }
 
@@ -153,7 +154,8 @@ impl Function for MatchesTermFunction {
     }
 }
 
-/// Checks if a text contains a term as a whole word/phrase with non-alphanumeric boundaries.
+/// A compiled finder for `matches_term` function that holds the compiled term
+/// and its metadata for efficient matching.
 ///
 /// A term is considered matched when:
 /// 1. The exact sequence appears in the text
@@ -161,142 +163,156 @@ impl Function for MatchesTermFunction {
 ///    - At the start/end of text with adjacent non-alphanumeric character
 ///    - Surrounded by non-alphanumeric characters
 ///
-/// # Arguments
-/// * `text` - The text to search in
-/// * `term` - The term/phrase to search for
-///
-/// # Returns
-/// * `true` if the term appears as a whole word/phrase, `false` otherwise
-///
 /// # Examples
 /// ```
-/// assert!(contains_term("cat!", "cat"));      // Term at end with punctuation
-/// assert!(contains_term("dog,cat", "cat"));   // Term preceded by comma
-/// assert!(!contains_term("category", "cat")); // Partial match rejected
-/// assert!(contains_term("hello-world", "world")); // Hyphen boundary
+/// let finder = MatchesTermFinder::new("cat");
+/// assert!(finder.find("cat!"));      // Term at end with punctuation
+/// assert!(finder.find("dog,cat"));   // Term preceded by comma
+/// assert!(!finder.find("category")); // Partial match rejected
+///
+/// let finder = MatchesTermFinder::new("world");
+/// assert!(finder.find("hello-world")); // Hyphen boundary
 /// ```
-pub fn contains_term(text: &str, term: &str) -> bool {
-    if term.is_empty() {
-        return text.is_empty();
+#[derive(Clone, Debug)]
+pub struct MatchesTermFinder {
+    finder: memmem::Finder<'static>,
+    term: String,
+    starts_with_non_alnum: bool,
+    ends_with_non_alnum: bool,
+}
+
+impl MatchesTermFinder {
+    /// Create a new `MatchesTermFinder` for the given term.
+    pub fn new(term: &str) -> Self {
+        let starts_with_non_alnum = term.chars().next().is_some_and(|c| !c.is_alphanumeric());
+        let ends_with_non_alnum = term.chars().last().is_some_and(|c| !c.is_alphanumeric());
+
+        Self {
+            finder: memmem::Finder::new(term).into_owned(),
+            term: term.to_string(),
+            starts_with_non_alnum,
+            ends_with_non_alnum,
+        }
     }
 
-    if text.len() < term.len() {
-        return false;
-    }
+    /// Find the term in the text.
+    pub fn find(&self, text: &str) -> bool {
+        if self.term.is_empty() {
+            return text.is_empty();
+        }
 
-    let starts_with_non_alnum = term.chars().next().is_some_and(|c| !c.is_alphanumeric());
-    let ends_with_non_alnum = term.chars().last().is_some_and(|c| !c.is_alphanumeric());
+        if text.len() < self.term.len() {
+            return false;
+        }
 
-    let finder = memmem::Finder::new(term);
+        let mut pos = 0;
+        while let Some(found_pos) = self.finder.find(text[pos..].as_bytes()) {
+            let actual_pos = pos + found_pos;
 
-    let mut pos = 0;
-    while let Some(found_pos) = finder.find(text[pos..].as_bytes()) {
-        let actual_pos = pos + found_pos;
-
-        let prev_ok = starts_with_non_alnum
-            || text[..actual_pos]
-                .chars()
-                .last()
-                .map(|c| !c.is_alphanumeric())
-                .unwrap_or(true);
-
-        if prev_ok {
-            let next_pos = actual_pos + term.len();
-            let next_ok = ends_with_non_alnum
-                || text[next_pos..]
+            let prev_ok = self.starts_with_non_alnum
+                || text[..actual_pos]
                     .chars()
-                    .next()
+                    .last()
                     .map(|c| !c.is_alphanumeric())
                     .unwrap_or(true);
 
-            if next_ok {
-                return true;
+            if prev_ok {
+                let next_pos = actual_pos + self.finder.needle().len();
+                let next_ok = self.ends_with_non_alnum
+                    || text[next_pos..]
+                        .chars()
+                        .next()
+                        .map(|c| !c.is_alphanumeric())
+                        .unwrap_or(true);
+
+                if next_ok {
+                    return true;
+                }
             }
+
+            pos = actual_pos + 1;
         }
 
-        pos = actual_pos + 1;
+        false
     }
-
-    false
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // Normal cases
     #[test]
     fn matches_term_with_punctuation() {
-        assert!(contains_term("cat!", "cat"));
-        assert!(contains_term("!dog", "dog"));
+        assert!(MatchesTermFinder::new("cat").find("cat!"));
+        assert!(MatchesTermFinder::new("dog").find("!dog"));
     }
 
     #[test]
     fn matches_phrase_with_boundaries() {
-        assert!(contains_term("hello-world", "hello-world"));
-        assert!(contains_term("test: 'foo bar'", "'foo bar'"));
+        assert!(MatchesTermFinder::new("hello-world").find("hello-world"));
+        assert!(MatchesTermFinder::new("'foo bar'").find("test: 'foo bar'"));
     }
 
     #[test]
     fn matches_at_text_boundaries() {
-        assert!(contains_term("start...", "start"));
-        assert!(contains_term("...end", "end"));
+        assert!(MatchesTermFinder::new("start").find("start..."));
+        assert!(MatchesTermFinder::new("end").find("...end"));
     }
 
     // Negative cases
     #[test]
     fn rejects_partial_matches() {
-        assert!(!contains_term("category", "cat"));
-        assert!(!contains_term("rebooted", "boot"));
+        assert!(!MatchesTermFinder::new("cat").find("category"));
+        assert!(!MatchesTermFinder::new("boot").find("rebooted"));
     }
 
     #[test]
     fn rejects_missing_term() {
-        assert!(!contains_term("hello world", "foo"));
+        assert!(!MatchesTermFinder::new("foo").find("hello world"));
     }
 
     // Edge cases
     #[test]
     fn handles_empty_inputs() {
-        assert!(!contains_term("", "test"));
-        assert!(!contains_term("text", ""));
+        assert!(!MatchesTermFinder::new("test").find(""));
+        assert!(!MatchesTermFinder::new("").find("text"));
     }
 
     #[test]
     fn different_unicode_boundaries() {
-        assert!(contains_term("café>", "café"));
-        assert!(contains_term("русский!", "русский"));
+        assert!(MatchesTermFinder::new("café").find("café>"));
+        assert!(MatchesTermFinder::new("русский").find("русский!"));
     }
 
     #[test]
     fn case_sensitive_matching() {
-        assert!(!contains_term("Cat", "cat"));
-        assert!(contains_term("CaT", "CaT"));
+        assert!(!MatchesTermFinder::new("cat").find("Cat"));
+        assert!(MatchesTermFinder::new("CaT").find("CaT"));
     }
 
     #[test]
     fn numbers_in_term() {
-        assert!(contains_term("v1.0!", "v1.0"));
-        assert!(!contains_term("v1.0a", "v1.0"));
+        assert!(MatchesTermFinder::new("v1.0").find("v1.0!"));
+        assert!(!MatchesTermFinder::new("v1.0").find("v1.0a"));
     }
 
     #[test]
     fn adjacent_alphanumeric_fails() {
-        assert!(!contains_term("cat5", "cat"));
-        assert!(!contains_term("dogcat", "cat"));
+        assert!(!MatchesTermFinder::new("cat").find("cat5"));
+        assert!(!MatchesTermFinder::new("dog").find("dogcat"));
     }
 
     #[test]
     fn empty_term_text() {
-        assert!(!contains_term("text", ""));
-        assert!(contains_term("", ""));
-        assert!(!contains_term("", "text"));
+        assert!(!MatchesTermFinder::new("").find("text"));
+        assert!(MatchesTermFinder::new("").find(""));
+        assert!(!MatchesTermFinder::new("text").find(""));
     }
 
     #[test]
     fn leading_non_alphanumeric() {
-        assert!(contains_term("dog/cat", "/cat"));
-        assert!(contains_term("dog/cat", "dog/"));
-        assert!(contains_term("dog/cat", "dog/cat"));
+        assert!(MatchesTermFinder::new("/cat").find("dog/cat"));
+        assert!(MatchesTermFinder::new("dog/").find("dog/cat"));
+        assert!(MatchesTermFinder::new("dog/cat").find("dog/cat"));
     }
 }
