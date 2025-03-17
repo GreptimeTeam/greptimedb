@@ -482,7 +482,7 @@ pub fn get_object_store(
     if let Some(name) = name {
         Ok(object_store_manager
             .find(name)
-            .context(ObjectStoreNotFoundSnafu {
+            .with_context(|| ObjectStoreNotFoundSnafu {
                 object_store: name.to_string(),
             })?
             .clone())

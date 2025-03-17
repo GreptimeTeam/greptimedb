@@ -49,6 +49,7 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
     #[snafu(display("Failed to encode sparse primary key, reason: {}", reason))]
     EncodeSparsePrimaryKey {
         reason: String,
@@ -1095,7 +1096,9 @@ impl ErrorExt for Error {
             | PuffinPurgeStager { source, .. } => source.status_code(),
             CleanDir { .. } => StatusCode::Unexpected,
             InvalidConfig { .. } => StatusCode::InvalidArguments,
-            StaleLogEntry { .. } | External { .. } => StatusCode::Unexpected,
+            StaleLogEntry { .. } => StatusCode::Unexpected,
+
+            External { source, .. } => source.status_code(),
 
             FilterRecordBatch { source, .. } => source.status_code(),
 
