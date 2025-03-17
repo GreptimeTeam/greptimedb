@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
+use std::ops::Deref;
 
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use client::Output;
@@ -22,9 +22,8 @@ use server_error::Result as ServerResult;
 use servers::error::{self as server_error, AuthSnafu, ExecuteQuerySnafu};
 use servers::interceptor::{LogQueryInterceptor, LogQueryInterceptorRef};
 use servers::query_handler::LogQueryHandler;
-use session::context::QueryContextRef;
+use session::context::{QueryContext, QueryContextRef};
 use snafu::ResultExt;
-use table::Table;
 use tonic::async_trait;
 
 use super::Instance;
@@ -68,24 +67,12 @@ impl LogQueryHandler for Instance {
         Ok(interceptor.as_ref().post_query(output, ctx.clone())?)
     }
 
-    async fn get_table(
-        &self,
-        catalog: &str,
-        schema: &str,
-        table: &str,
-    ) -> std::result::Result<Option<Arc<Table>>, catalog::error::Error> {
-        self.catalog_manager
-            .table(catalog, schema, table, None)
-            .await
-    }
-
-    async fn table_names(
-        &self,
-        catalog: &str,
-        schema: &str,
-    ) -> std::result::Result<Vec<String>, catalog::error::Error> {
-        self.catalog_manager
-            .table_names(catalog, schema, None)
-            .await
+    fn catalog_manager(&self, ctx: &QueryContext) -> ServerResult<&dyn catalog::CatalogManager> {
+        self.plugins
+            .get::<PermissionCheckerRef>()
+            .as_ref()
+            .check_permission(ctx.current_user(), PermissionReq::LogQuery)
+            .context(AuthSnafu)?;
+        Ok(self.catalog_manager.deref())
     }
 }
