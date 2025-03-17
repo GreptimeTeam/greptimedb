@@ -44,6 +44,8 @@ use servers::server::Server;
 use snafu::OptionExt;
 use snafu::ResultExt;
 #[cfg(feature = "mysql_kvbackend")]
+use sqlx::mysql::MySqlConnectOptions;
+#[cfg(feature = "mysql_kvbackend")]
 use sqlx::mysql::{MySqlConnection, MySqlPool};
 #[cfg(feature = "mysql_kvbackend")]
 use sqlx::Connection;
@@ -352,9 +354,7 @@ async fn create_postgres_pool(opts: &MetasrvOptions) -> Result<deadpool_postgres
 }
 
 #[cfg(feature = "mysql_kvbackend")]
-async fn create_mysql_pool(opts: &MetasrvOptions) -> Result<MySqlPool> {
-    use sqlx::mysql::MySqlConnectOptions;
-
+async fn setup_mysql_options(opts: &MetasrvOptions) -> Result<MySqlConnectOptions> {
     let mysql_url = opts
         .store_addrs
         .first()
@@ -370,6 +370,12 @@ async fn create_mysql_pool(opts: &MetasrvOptions) -> Result<MySqlPool> {
         .pipes_as_concat(false)
         .timezone(None)
         .set_names(false);
+    Ok(opts)
+}
+
+#[cfg(feature = "mysql_kvbackend")]
+async fn create_mysql_pool(opts: &MetasrvOptions) -> Result<MySqlPool> {
+    let opts = setup_mysql_options(opts).await?;
     let pool = MySqlPool::connect_with(opts)
         .await
         .context(error::CreateMySqlPoolSnafu)?;
@@ -378,23 +384,7 @@ async fn create_mysql_pool(opts: &MetasrvOptions) -> Result<MySqlPool> {
 
 #[cfg(feature = "mysql_kvbackend")]
 async fn create_mysql_client(opts: &MetasrvOptions) -> Result<MySqlConnection> {
-    use sqlx::mysql::MySqlConnectOptions;
-
-    let mysql_url = opts
-        .store_addrs
-        .first()
-        .context(error::InvalidArgumentsSnafu {
-            err_msg: "empty store addrs",
-        })?;
-    // Avoid `SET` commands in sqlx
-    let opts: MySqlConnectOptions = mysql_url
-        .parse()
-        .context(error::ParseMySqlUrlSnafu { mysql_url })?;
-    let opts = opts
-        .no_engine_substitution(false)
-        .pipes_as_concat(false)
-        .timezone(None)
-        .set_names(false);
+    let opts = setup_mysql_options(opts).await?;
     let client = MySqlConnection::connect_with(&opts)
         .await
         .context(error::ConnectMySqlSnafu)?;
