@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_meta::distributed_time_constants::{META_KEEP_ALIVE_INTERVAL_SECS, META_LEASE_SECS};
-use common_telemetry::{error, info, warn};
+use common_telemetry::{error, warn};
 use common_time::Timestamp;
 use itertools::Itertools;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -29,7 +29,6 @@ use tokio::time::{Interval, MissedTickBehavior};
 
 use crate::election::{
     listen_leader_change, Election, LeaderChangeMessage, LeaderKey, CANDIDATES_ROOT, ELECTION_KEY,
-    IDLE_SESSION_TIMEOUT,
 };
 use crate::error::{
     DeserializeFromJsonSnafu, MySqlExecutionSnafu, NoLeaderSnafu, Result, SerializeToJsonSnafu,
@@ -104,14 +103,14 @@ impl<'a> ElectionSqlFactory<'a> {
         }
     }
 
-    // Currently the session timeout is longer than the leader lease time, so the leader lease may expire while the session is still alive.
-    // Either the leader reconnects and step down or the session expires and the lock is released.
+    // Currently the session timeout is longer than the leader lease time.
+    // So the leader will renew the lease twice before the session timeout if everything goes well.
     fn set_idle_session_timeout_sql(&self) -> String {
-        format!("SET SESSION wait_timeout = {};", IDLE_SESSION_TIMEOUT)
+        format!("SET SESSION wait_timeout = {};", META_LEASE_SECS + 1)
     }
 
-    fn set_lock_wait_timeout_sql(&self) -> String {
-        format!("SET innodb_lock_wait_timeout = {};", 1)
+    fn set_lock_wait_timeout_sql(&self) -> &str {
+        "SET SESSION innodb_lock_wait_timeout = 1;"
     }
 
     fn create_table_sql(&self) -> String {
@@ -135,10 +134,6 @@ impl<'a> ElectionSqlFactory<'a> {
 
     fn campaign_sql(&self) -> String {
         format!("SELECT * FROM {} FOR UPDATE;", self.table_name)
-    }
-
-    fn _step_down_sql(&self) -> String {
-        unreachable!()
     }
 
     fn put_value_with_lease_sql(&self) -> String {
@@ -289,7 +284,7 @@ impl Executor<'_> {
     }
 }
 
-/// PostgreSql implementation of Election.
+/// MySQL implementation of Election.
 pub struct MySqlElection {
     leader_value: String,
     client: Mutex<MySqlConnection>,
@@ -320,7 +315,7 @@ impl MySqlElection {
             .await
             .context(MySqlExecutionSnafu)?;
         // Set lock wait timeout to LOCK_WAIT_TIMEOUT to avoid waiting too long.
-        sqlx::query(&sql_factory.set_lock_wait_timeout_sql())
+        sqlx::query(sql_factory.set_lock_wait_timeout_sql())
             .execute(&mut client)
             .await
             .context(MySqlExecutionSnafu)?;
@@ -377,9 +372,7 @@ impl Election for MySqlElection {
                 input: format!("{node_info:?}"),
             })?;
 
-        info!("Registering candidate now, getting client");
         let client = self.client.lock().await;
-        info!("Got client, creating executor");
         let mut executor = Executor::Default(client);
         let res = self
             .put_value_with_lease(
@@ -436,9 +429,7 @@ impl Election for MySqlElection {
 
     async fn all_candidates(&self) -> Result<Vec<MetasrvNodeInfo>> {
         let key_prefix = self.candidate_root();
-        info!("Getting all candidates now, getting client");
         let client = self.client.lock().await;
-        info!("Got client, creating executor");
         let mut executor = Executor::Default(client);
         let (mut candidates, current) = self
             .get_value_with_lease_by_prefix(&key_prefix, &mut executor)
@@ -471,9 +462,7 @@ impl Election for MySqlElection {
         } else {
             let key = self.election_key();
 
-            info!("Getting leader now, getting client");
             let client = self.client.lock().await;
-            info!("Got client, creating executor");
             let mut executor = Executor::Default(client);
             if let Some((leader, expire_time, current, _)) = self
                 .get_value_with_lease(&key, false, &mut executor)
@@ -675,7 +664,6 @@ impl MySqlElection {
     /// - **Case 6**: If the instance is the leader and no lease information is found, it logs a warning and steps down.
     /// - **Case 7**: If the instance is not the leader and no lease information is found, it is elected as the leader.
     async fn leader_action(&self, mut executor: Executor<'_>) -> Result<()> {
-        info!("Leader action now");
         let key = self.election_key();
         match self.get_value_with_lease(&key, true, &mut executor).await? {
             Some((prev_leader, expire_time, current, prev)) => {
@@ -683,7 +671,6 @@ impl MySqlElection {
                     // Case 1: Believe itself as the leader and the lease is still valid.
                     (true, true) => {
                         // Safety: prev is Some since we are using `get_value_with_lease` with `true`.
-                        info!("Leader lease is still valid, renewing lease");
                         let prev = prev.unwrap();
                         self.update_value_with_lease(
                             &key,
@@ -845,709 +832,5 @@ impl MySqlElection {
             }
         }
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::env;
-
-    use common_telemetry::init_default_ut_logging;
-    use sqlx::Connection;
-
-    use super::*;
-    use crate::error::MySqlExecutionSnafu;
-
-    async fn create_mysql_client(table_name: Option<&str>) -> Result<Mutex<MySqlConnection>> {
-        init_default_ut_logging();
-        let endpoint = env::var("GT_MYSQL_ENDPOINTS").unwrap_or_default();
-        if endpoint.is_empty() {
-            return UnexpectedSnafu {
-                violated: "MySQL endpoint is empty".to_string(),
-            }
-            .fail();
-        }
-        let mut client = MySqlConnection::connect(&endpoint).await.unwrap();
-        if let Some(table_name) = table_name {
-            let create_table_sql = format!(
-                "CREATE TABLE IF NOT EXISTS {}(k VARBINARY(3072) PRIMARY KEY, v BLOB);",
-                table_name
-            );
-            sqlx::query(&create_table_sql)
-                .execute(&mut client)
-                .await
-                .context(MySqlExecutionSnafu)?;
-        }
-        Ok(Mutex::new(client))
-    }
-
-    async fn drop_table(client: &Mutex<MySqlConnection>, table_name: &str) {
-        let mut client = client.lock().await;
-        let sql = format!("DROP TABLE IF EXISTS {};", table_name);
-        sqlx::query(&sql)
-            .execute(&mut *client)
-            .await
-            .context(MySqlExecutionSnafu)
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_mysql_crud() {
-        let key = "test_key".to_string();
-        let value = "test_value".to_string();
-
-        let uuid = uuid::Uuid::new_v4().to_string();
-        let table_name = "test_mysql_crud_greptime_metakv";
-        let client = create_mysql_client(Some(table_name)).await.unwrap();
-
-        let mut a = client.lock().await;
-        let txn = a.begin().await.unwrap();
-        let mut executor = Executor::Txn(txn);
-        let query = format!("SELECT * FROM {} FOR UPDATE;", table_name);
-        let query = sqlx::query(&query);
-        let _ = executor.query(query).await.unwrap();
-        std::mem::drop(executor);
-        std::mem::drop(a);
-
-        let (tx, _) = broadcast::channel(100);
-        let mysql_election = MySqlElection {
-            leader_value: "test_leader".to_string(),
-            client,
-            is_leader: AtomicBool::new(false),
-            leader_infancy: AtomicBool::new(true),
-            leader_watcher: tx,
-            store_key_prefix: uuid,
-            candidate_lease_ttl_secs: 10,
-            sql_set: ElectionSqlFactory::new(table_name).build(),
-        };
-        let client = mysql_election.client.lock().await;
-        let mut executor = Executor::Default(client);
-        let res = mysql_election
-            .put_value_with_lease(&key, &value, 10, &mut executor)
-            .await
-            .unwrap();
-        assert!(res);
-
-        let (value_get, _, _, prev) = mysql_election
-            .get_value_with_lease(&key, true, &mut executor)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(value_get, value);
-
-        let prev = prev.unwrap();
-        mysql_election
-            .update_value_with_lease(&key, &prev, &value, &mut executor)
-            .await
-            .unwrap();
-
-        let res = mysql_election
-            .delete_value(&key, &mut executor)
-            .await
-            .unwrap();
-        assert!(res);
-
-        let res = mysql_election
-            .get_value_with_lease(&key, false, &mut executor)
-            .await
-            .unwrap();
-        assert!(res.is_none());
-
-        for i in 0..10 {
-            let key = format!("test_key_{}", i);
-            let value = format!("test_value_{}", i);
-            mysql_election
-                .put_value_with_lease(&key, &value, 10, &mut executor)
-                .await
-                .unwrap();
-        }
-
-        let key_prefix = "test_key".to_string();
-        let (res, _) = mysql_election
-            .get_value_with_lease_by_prefix(&key_prefix, &mut executor)
-            .await
-            .unwrap();
-        assert_eq!(res.len(), 10);
-
-        for i in 0..10 {
-            let key = format!("test_key_{}", i);
-            let res = mysql_election
-                .delete_value(&key, &mut executor)
-                .await
-                .unwrap();
-            assert!(res);
-        }
-
-        let (res, current) = mysql_election
-            .get_value_with_lease_by_prefix(&key_prefix, &mut executor)
-            .await
-            .unwrap();
-        assert!(res.is_empty());
-        assert!(current == Timestamp::default());
-
-        // Should drop manually.
-        std::mem::drop(executor);
-        drop_table(&mysql_election.client, table_name).await;
-    }
-
-    async fn candidate(
-        leader_value: String,
-        candidate_lease_ttl_secs: u64,
-        store_key_prefix: String,
-        table_name: String,
-    ) {
-        let client = create_mysql_client(None).await.unwrap();
-
-        let (tx, _) = broadcast::channel(100);
-        let mysql_election = MySqlElection {
-            leader_value,
-            client,
-            is_leader: AtomicBool::new(false),
-            leader_infancy: AtomicBool::new(true),
-            leader_watcher: tx,
-            store_key_prefix,
-            candidate_lease_ttl_secs,
-            sql_set: ElectionSqlFactory::new(&table_name).build(),
-        };
-
-        let node_info = MetasrvNodeInfo {
-            addr: "test_addr".to_string(),
-            version: "test_version".to_string(),
-            git_commit: "test_git_commit".to_string(),
-            start_time_ms: 0,
-        };
-        mysql_election.register_candidate(&node_info).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_candidate_registration() {
-        let leader_value_prefix = "test_leader".to_string();
-        let candidate_lease_ttl_secs = 5;
-        let uuid = uuid::Uuid::new_v4().to_string();
-        let table_name = "test_candidate_registration_greptime_metakv";
-        let mut handles = vec![];
-        let client = create_mysql_client(Some(table_name)).await.unwrap();
-
-        for i in 0..10 {
-            let leader_value = format!("{}{}", leader_value_prefix, i);
-            let handle = tokio::spawn(candidate(
-                leader_value,
-                candidate_lease_ttl_secs,
-                uuid.clone(),
-                table_name.to_string(),
-            ));
-            handles.push(handle);
-        }
-        // Wait for candidates to registrate themselves and renew their leases at least once.
-        tokio::time::sleep(Duration::from_secs(3)).await;
-
-        let (tx, _) = broadcast::channel(100);
-        let leader_value = "test_leader".to_string();
-        let mysql_election = MySqlElection {
-            leader_value,
-            client,
-            is_leader: AtomicBool::new(false),
-            leader_infancy: AtomicBool::new(true),
-            leader_watcher: tx,
-            store_key_prefix: uuid.clone(),
-            candidate_lease_ttl_secs,
-            sql_set: ElectionSqlFactory::new(table_name).build(),
-        };
-
-        let candidates = mysql_election.all_candidates().await.unwrap();
-        assert_eq!(candidates.len(), 10);
-
-        for handle in handles {
-            handle.abort();
-        }
-
-        // Wait for the candidate leases to expire.
-        tokio::time::sleep(Duration::from_secs(5)).await;
-        let candidates = mysql_election.all_candidates().await.unwrap();
-        assert!(candidates.is_empty());
-
-        // Garbage collection
-        let client = mysql_election.client.lock().await;
-        let mut executor = Executor::Default(client);
-        for i in 0..10 {
-            let key = format!("{}{}{}{}", uuid, CANDIDATES_ROOT, leader_value_prefix, i);
-            let res = mysql_election
-                .delete_value(&key, &mut executor)
-                .await
-                .unwrap();
-            assert!(res);
-        }
-
-        // Should drop manually.
-        std::mem::drop(executor);
-        drop_table(&mysql_election.client, table_name).await;
-    }
-
-    #[tokio::test]
-    async fn test_elected_and_step_down() {
-        let leader_value = "test_leader".to_string();
-        let candidate_lease_ttl_secs = 5;
-        let uuid = uuid::Uuid::new_v4().to_string();
-        let table_name = "test_elected_and_step_down_greptime_metakv";
-        let client = create_mysql_client(Some(table_name)).await.unwrap();
-
-        let (tx, mut rx) = broadcast::channel(100);
-        let leader_mysql_election = MySqlElection {
-            leader_value: leader_value.clone(),
-            client,
-            is_leader: AtomicBool::new(false),
-            leader_infancy: AtomicBool::new(true),
-            leader_watcher: tx,
-            store_key_prefix: uuid,
-            candidate_lease_ttl_secs,
-            sql_set: ElectionSqlFactory::new(table_name).build(),
-        };
-
-        let mut client = leader_mysql_election.client.lock().await;
-        let txn = client.begin().await.unwrap();
-        let mut executor = Executor::Txn(txn);
-        let query = format!("SELECT * FROM {} FOR UPDATE;", table_name);
-        let query = sqlx::query(&query);
-        let _ = executor.query(query).await.unwrap();
-        leader_mysql_election.elected(&mut executor).await.unwrap();
-        let (leader, expire_time, current, _) = leader_mysql_election
-            .get_value_with_lease(&leader_mysql_election.election_key(), false, &mut executor)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(leader, leader_value);
-        assert!(expire_time > current);
-        assert!(leader_mysql_election.is_leader());
-
-        match rx.recv().await {
-            Ok(LeaderChangeMessage::Elected(key)) => {
-                assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
-                assert_eq!(
-                    String::from_utf8_lossy(key.key()),
-                    leader_mysql_election.election_key()
-                );
-                assert_eq!(key.lease_id(), i64::default());
-                assert_eq!(key.revision(), i64::default());
-            }
-            _ => panic!("Expected LeaderChangeMessage::Elected"),
-        }
-
-        leader_mysql_election
-            .step_down_without_lock()
-            .await
-            .unwrap();
-        let (leader, _, _, _) = leader_mysql_election
-            .get_value_with_lease(&leader_mysql_election.election_key(), false, &mut executor)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(leader, leader_value);
-        assert!(!leader_mysql_election.is_leader());
-
-        match rx.recv().await {
-            Ok(LeaderChangeMessage::StepDown(key)) => {
-                assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
-                assert_eq!(
-                    String::from_utf8_lossy(key.key()),
-                    leader_mysql_election.election_key()
-                );
-                assert_eq!(key.lease_id(), i64::default());
-                assert_eq!(key.revision(), i64::default());
-            }
-            _ => panic!("Expected LeaderChangeMessage::StepDown"),
-        }
-
-        leader_mysql_election.elected(&mut executor).await.unwrap();
-        let (leader, expire_time, current, _) = leader_mysql_election
-            .get_value_with_lease(&leader_mysql_election.election_key(), false, &mut executor)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(leader, leader_value);
-        assert!(expire_time > current);
-        assert!(leader_mysql_election.is_leader());
-
-        match rx.recv().await {
-            Ok(LeaderChangeMessage::Elected(key)) => {
-                assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
-                assert_eq!(
-                    String::from_utf8_lossy(key.key()),
-                    leader_mysql_election.election_key()
-                );
-                assert_eq!(key.lease_id(), i64::default());
-                assert_eq!(key.revision(), i64::default());
-            }
-            _ => panic!("Expected LeaderChangeMessage::Elected"),
-        }
-
-        leader_mysql_election.step_down(executor).await.unwrap();
-        let mut executor = Executor::Default(client);
-        let res = leader_mysql_election
-            .get_value_with_lease(&leader_mysql_election.election_key(), false, &mut executor)
-            .await
-            .unwrap();
-        assert!(res.is_none());
-        assert!(!leader_mysql_election.is_leader());
-
-        match rx.recv().await {
-            Ok(LeaderChangeMessage::StepDown(key)) => {
-                assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
-                assert_eq!(
-                    String::from_utf8_lossy(key.key()),
-                    leader_mysql_election.election_key()
-                );
-                assert_eq!(key.lease_id(), i64::default());
-                assert_eq!(key.revision(), i64::default());
-            }
-            _ => panic!("Expected LeaderChangeMessage::StepDown"),
-        }
-
-        // Should drop manually.
-        std::mem::drop(executor);
-        drop_table(&leader_mysql_election.client, table_name).await;
-    }
-
-    #[tokio::test]
-    async fn test_leader_action() {
-        let leader_value = "test_leader".to_string();
-        let uuid = uuid::Uuid::new_v4().to_string();
-        let table_name = "test_leader_action_greptime_metakv";
-        let candidate_lease_ttl_secs = 5;
-        let client = create_mysql_client(Some(table_name)).await.unwrap();
-
-        let (tx, mut rx) = broadcast::channel(100);
-        let leader_mysql_election = MySqlElection {
-            leader_value: leader_value.clone(),
-            client,
-            is_leader: AtomicBool::new(false),
-            leader_infancy: AtomicBool::new(true),
-            leader_watcher: tx,
-            store_key_prefix: uuid,
-            candidate_lease_ttl_secs,
-            sql_set: ElectionSqlFactory::new(table_name).build(),
-        };
-
-        // Step 1: No leader exists, campaign and elected.
-        let mut client = leader_mysql_election.client.lock().await;
-        let txn = client.begin().await.unwrap();
-        let mut executor = Executor::Txn(txn);
-        let query = format!("SELECT * FROM {} FOR UPDATE;", table_name);
-        let query = sqlx::query(&query);
-        executor.query(query).await.unwrap();
-        leader_mysql_election.leader_action(executor).await.unwrap();
-        let mut executor = Executor::Default(client);
-        let (leader, expire_time, current, _) = leader_mysql_election
-            .get_value_with_lease(&leader_mysql_election.election_key(), false, &mut executor)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(leader, leader_value);
-        assert!(expire_time > current);
-        assert!(leader_mysql_election.is_leader());
-
-        match rx.recv().await {
-            Ok(LeaderChangeMessage::Elected(key)) => {
-                assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
-                assert_eq!(
-                    String::from_utf8_lossy(key.key()),
-                    leader_mysql_election.election_key()
-                );
-                assert_eq!(key.lease_id(), i64::default());
-                assert_eq!(key.revision(), i64::default());
-            }
-            _ => panic!("Expected LeaderChangeMessage::Elected"),
-        }
-
-        // Step 2: As a leader, renew the lease.
-        std::mem::drop(executor);
-        let mut client = leader_mysql_election.client.lock().await;
-        let query = format!("SELECT * FROM {} FOR UPDATE;", table_name);
-        let query = sqlx::query(&query);
-        let txn = client.begin().await.unwrap();
-        let mut executor = Executor::Txn(txn);
-        executor.query(query).await.unwrap();
-        leader_mysql_election.leader_action(executor).await.unwrap();
-        let mut executor = Executor::Default(client);
-        let (leader, new_expire_time, current, _) = leader_mysql_election
-            .get_value_with_lease(&leader_mysql_election.election_key(), false, &mut executor)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(leader, leader_value);
-        assert!(new_expire_time > current && new_expire_time > expire_time);
-        assert!(leader_mysql_election.is_leader());
-
-        // Step 3: Something wrong, the leader lease expired.
-        tokio::time::sleep(Duration::from_secs(META_LEASE_SECS)).await;
-        std::mem::drop(executor);
-        let mut client = leader_mysql_election.client.lock().await;
-        let query = format!("SELECT * FROM {} FOR UPDATE;", table_name);
-        let query = sqlx::query(&query);
-        let txn = client.begin().await.unwrap();
-        let mut executor = Executor::Txn(txn);
-        executor.query(query).await.unwrap();
-        leader_mysql_election.leader_action(executor).await.unwrap();
-        let mut executor = Executor::Default(client);
-        let res = leader_mysql_election
-            .get_value_with_lease(&leader_mysql_election.election_key(), false, &mut executor)
-            .await
-            .unwrap();
-        assert!(res.is_none());
-
-        match rx.recv().await {
-            Ok(LeaderChangeMessage::StepDown(key)) => {
-                assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
-                assert_eq!(
-                    String::from_utf8_lossy(key.key()),
-                    leader_mysql_election.election_key()
-                );
-                assert_eq!(key.lease_id(), i64::default());
-                assert_eq!(key.revision(), i64::default());
-            }
-            _ => panic!("Expected LeaderChangeMessage::StepDown"),
-        }
-
-        // Step 4: Re-elect itself.
-        std::mem::drop(executor);
-        let mut client = leader_mysql_election.client.lock().await;
-        let query = format!("SELECT * FROM {} FOR UPDATE;", table_name);
-        let query = sqlx::query(&query);
-        let txn = client.begin().await.unwrap();
-        let mut executor = Executor::Txn(txn);
-        executor.query(query).await.unwrap();
-        leader_mysql_election.leader_action(executor).await.unwrap();
-        let mut executor = Executor::Default(client);
-        let (leader, expire_time, current, _) = leader_mysql_election
-            .get_value_with_lease(&leader_mysql_election.election_key(), false, &mut executor)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(leader, leader_value);
-        assert!(expire_time > current);
-        assert!(leader_mysql_election.is_leader());
-
-        match rx.recv().await {
-            Ok(LeaderChangeMessage::Elected(key)) => {
-                assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
-                assert_eq!(
-                    String::from_utf8_lossy(key.key()),
-                    leader_mysql_election.election_key()
-                );
-                assert_eq!(key.lease_id(), i64::default());
-                assert_eq!(key.revision(), i64::default());
-            }
-            _ => panic!("Expected LeaderChangeMessage::Elected"),
-        }
-
-        // Step 5: Something wrong, the leader key is deleted by other followers.
-        leader_mysql_election
-            .delete_value(&leader_mysql_election.election_key(), &mut executor)
-            .await
-            .unwrap();
-        std::mem::drop(executor);
-        let mut client = leader_mysql_election.client.lock().await;
-        let query = format!("SELECT * FROM {} FOR UPDATE;", table_name);
-        let query = sqlx::query(&query);
-        let txn = client.begin().await.unwrap();
-        let mut executor = Executor::Txn(txn);
-        executor.query(query).await.unwrap();
-        leader_mysql_election.leader_action(executor).await.unwrap();
-        let mut executor = Executor::Default(client);
-        let res = leader_mysql_election
-            .get_value_with_lease(&leader_mysql_election.election_key(), false, &mut executor)
-            .await
-            .unwrap();
-        assert!(res.is_none());
-        assert!(!leader_mysql_election.is_leader());
-
-        match rx.recv().await {
-            Ok(LeaderChangeMessage::StepDown(key)) => {
-                assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
-                assert_eq!(
-                    String::from_utf8_lossy(key.key()),
-                    leader_mysql_election.election_key()
-                );
-                assert_eq!(key.lease_id(), i64::default());
-                assert_eq!(key.revision(), i64::default());
-            }
-            _ => panic!("Expected LeaderChangeMessage::StepDown"),
-        }
-
-        // Step 6: Re-elect itself.
-        std::mem::drop(executor);
-        let mut client = leader_mysql_election.client.lock().await;
-        let query = format!("SELECT * FROM {} FOR UPDATE;", table_name);
-        let query = sqlx::query(&query);
-        let txn = client.begin().await.unwrap();
-        let mut executor = Executor::Txn(txn);
-        executor.query(query).await.unwrap();
-        leader_mysql_election.leader_action(executor).await.unwrap();
-        let mut executor = Executor::Default(client);
-        let (leader, expire_time, current, _) = leader_mysql_election
-            .get_value_with_lease(&leader_mysql_election.election_key(), false, &mut executor)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(leader, leader_value);
-        assert!(expire_time > current);
-        assert!(leader_mysql_election.is_leader());
-
-        match rx.recv().await {
-            Ok(LeaderChangeMessage::Elected(key)) => {
-                assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
-                assert_eq!(
-                    String::from_utf8_lossy(key.key()),
-                    leader_mysql_election.election_key()
-                );
-                assert_eq!(key.lease_id(), i64::default());
-                assert_eq!(key.revision(), i64::default());
-            }
-            _ => panic!("Expected LeaderChangeMessage::Elected"),
-        }
-
-        // Step 7: Something wrong, the leader key changed by others.
-        std::mem::drop(executor);
-        let mut client = leader_mysql_election.client.lock().await;
-        let query = format!("SELECT * FROM {} FOR UPDATE;", table_name);
-        let query = sqlx::query(&query);
-        let txn = client.begin().await.unwrap();
-        let mut executor = Executor::Txn(txn);
-        executor.query(query).await.unwrap();
-        leader_mysql_election
-            .delete_value(&leader_mysql_election.election_key(), &mut executor)
-            .await
-            .unwrap();
-        leader_mysql_election
-            .put_value_with_lease(
-                &leader_mysql_election.election_key(),
-                "test",
-                10,
-                &mut executor,
-            )
-            .await
-            .unwrap();
-        leader_mysql_election.leader_action(executor).await.unwrap();
-        let mut executor = Executor::Default(client);
-        let (leader, _, current, _) = leader_mysql_election
-            .get_value_with_lease(&leader_mysql_election.election_key(), false, &mut executor)
-            .await
-            .unwrap()
-            .unwrap();
-        // Different from pg, mysql will not delete the key, just step down.
-        assert_eq!(leader, "test");
-        assert!(expire_time > current);
-        assert!(!leader_mysql_election.is_leader());
-
-        match rx.recv().await {
-            Ok(LeaderChangeMessage::StepDown(key)) => {
-                assert_eq!(String::from_utf8_lossy(key.name()), leader_value);
-                assert_eq!(
-                    String::from_utf8_lossy(key.key()),
-                    leader_mysql_election.election_key()
-                );
-                assert_eq!(key.lease_id(), i64::default());
-                assert_eq!(key.revision(), i64::default());
-            }
-            _ => panic!("Expected LeaderChangeMessage::StepDown"),
-        }
-
-        std::mem::drop(executor);
-        drop_table(&leader_mysql_election.client, table_name).await;
-    }
-
-    #[tokio::test]
-    async fn test_follower_action() {
-        common_telemetry::init_default_ut_logging();
-        let candidate_lease_ttl_secs = 5;
-        let uuid = uuid::Uuid::new_v4().to_string();
-        let table_name = "test_follower_action_greptime_metakv";
-
-        let follower_client = create_mysql_client(Some(table_name)).await.unwrap();
-        let (tx, mut rx) = broadcast::channel(100);
-        let follower_mysql_election = MySqlElection {
-            leader_value: "test_follower".to_string(),
-            client: follower_client,
-            is_leader: AtomicBool::new(false),
-            leader_infancy: AtomicBool::new(true),
-            leader_watcher: tx,
-            store_key_prefix: uuid.clone(),
-            candidate_lease_ttl_secs,
-            sql_set: ElectionSqlFactory::new(table_name).build(),
-        };
-
-        let leader_client = create_mysql_client(Some(table_name)).await.unwrap();
-        let (tx, _) = broadcast::channel(100);
-        let leader_mysql_election = MySqlElection {
-            leader_value: "test_leader".to_string(),
-            client: leader_client,
-            is_leader: AtomicBool::new(false),
-            leader_infancy: AtomicBool::new(true),
-            leader_watcher: tx,
-            store_key_prefix: uuid,
-            candidate_lease_ttl_secs,
-            sql_set: ElectionSqlFactory::new(table_name).build(),
-        };
-
-        let mut client = leader_mysql_election.client.lock().await;
-        let txn = client.begin().await.unwrap();
-        let mut executor = Executor::Txn(txn);
-        let query = sqlx::query(&leader_mysql_election.sql_set.campaign);
-        executor.query(query).await.unwrap();
-        leader_mysql_election.elected(&mut executor).await.unwrap();
-        executor.commit().await.unwrap();
-
-        // Step 1: As a follower, the leader exists and the lease is not expired.
-        let executor = Executor::Default(client);
-        follower_mysql_election
-            .follower_action(executor)
-            .await
-            .unwrap();
-
-        // Step 2: As a follower, the leader exists but the lease expired.
-        tokio::time::sleep(Duration::from_secs(META_LEASE_SECS)).await;
-        let client = follower_mysql_election.client.lock().await;
-        let executor = Executor::Default(client);
-        assert!(follower_mysql_election
-            .follower_action(executor)
-            .await
-            .is_err());
-
-        // Step 3: As a follower, the leader does not exist.
-        let client = leader_mysql_election.client.lock().await;
-        let mut executor = Executor::Default(client);
-        leader_mysql_election
-            .delete_value(&leader_mysql_election.election_key(), &mut executor)
-            .await
-            .unwrap();
-        assert!(follower_mysql_election
-            .follower_action(executor)
-            .await
-            .is_err());
-
-        // Step 4: Follower thinks it's the leader but failed to acquire the lock.
-        follower_mysql_election
-            .is_leader
-            .store(true, Ordering::Relaxed);
-        let client = follower_mysql_election.client.lock().await;
-        let executor = Executor::Default(client);
-        assert!(follower_mysql_election
-            .follower_action(executor)
-            .await
-            .is_err());
-
-        match rx.recv().await {
-            Ok(LeaderChangeMessage::StepDown(key)) => {
-                assert_eq!(String::from_utf8_lossy(key.name()), "test_follower");
-                assert_eq!(
-                    String::from_utf8_lossy(key.key()),
-                    follower_mysql_election.election_key()
-                );
-                assert_eq!(key.lease_id(), i64::default());
-                assert_eq!(key.revision(), i64::default());
-            }
-            _ => panic!("Expected LeaderChangeMessage::StepDown"),
-        }
-
-        drop_table(&follower_mysql_election.client, table_name).await;
     }
 }

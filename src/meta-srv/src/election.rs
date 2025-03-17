@@ -31,8 +31,6 @@ use crate::metasrv::MetasrvNodeInfo;
 pub const ELECTION_KEY: &str = "__metasrv_election";
 pub const CANDIDATES_ROOT: &str = "__metasrv_election_candidates/";
 
-#[cfg(any(feature = "mysql_kvbackend", feature = "pg_kvbackend"))]
-pub(crate) const IDLE_SESSION_TIMEOUT: u64 = 10;
 pub(crate) const CANDIDATE_LEASE_SECS: u64 = 600;
 const KEEP_ALIVE_INTERVAL_SECS: u64 = CANDIDATE_LEASE_SECS / 2;
 

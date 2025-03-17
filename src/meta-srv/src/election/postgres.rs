@@ -28,7 +28,6 @@ use tokio_postgres::Client;
 
 use crate::election::{
     listen_leader_change, Election, LeaderChangeMessage, LeaderKey, CANDIDATES_ROOT, ELECTION_KEY,
-    IDLE_SESSION_TIMEOUT,
 };
 use crate::error::{
     DeserializeFromJsonSnafu, NoLeaderSnafu, PostgresExecutionSnafu, Result, SerializeToJsonSnafu,
@@ -110,10 +109,10 @@ impl<'a> ElectionSqlFactory<'a> {
         }
     }
 
-    // Currently the session timeout is longer than the leader lease time, so the leader lease may expire while the session is still alive.
-    // Either the leader reconnects and step down or the session expires and the lock is released.
+    // Currently the session timeout is longer than the leader lease time.
+    // So the leader will renew the lease twice before the session timeout if everything goes well.
     fn set_idle_session_timeout_sql(&self) -> String {
-        format!("SET idle_session_timeout = '{}s';", IDLE_SESSION_TIMEOUT)
+        format!("SET idle_session_timeout = '{}s';", META_LEASE_SECS + 1)
     }
 
     fn campaign_sql(&self) -> String {
