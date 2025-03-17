@@ -31,22 +31,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("I/O error"))]
-    Io {
-        #[snafu(source)]
-        error: std::io::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("JSON error"))]
-    Json {
-        #[snafu(source)]
-        error: serde_json::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Missing __name__ label"))]
     MissingMetricName {
         #[snafu(implicit)]
@@ -110,8 +94,6 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::ObjectStore { .. } => StatusCode::StorageUnavailable,
-            Error::Io { .. } => StatusCode::StorageUnavailable,
-            Error::Json { .. } => StatusCode::InvalidArguments,
             Error::MissingMetricName { .. } => StatusCode::InvalidArguments,
             Error::MissingTable { .. } => StatusCode::TableNotFound,
             Error::MissingColumn { .. } => StatusCode::TableColumnNotFound,

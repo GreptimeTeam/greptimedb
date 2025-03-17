@@ -11280,8 +11280,6 @@ dependencies = [
  "parquet",
  "parquet_opendal",
  "prost 0.13.3",
- "serde",
- "serde_json",
  "snafu 0.8.5",
  "store-api",
  "table",

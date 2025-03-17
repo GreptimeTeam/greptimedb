@@ -14,9 +14,10 @@
 
 //! Prometheus remote write support.
 //!
-//! The Prometheus remote write format is a Parquet representation of the Prometheus remote write protocol.
-//! - Each Line contains a single timeseries.
-//! - Each series only occurs once.
+//! Prometheus remote write protocol in parquet format.
+//! - Each row contains a protobuf binary representation of a single timeseries.
+//! - Each series only occurs once in the file.
+//! - Each timeseries must has a the `__name__` label.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -27,12 +28,12 @@ use arrow_array::{
     Array, BinaryArray, Float64Array, TimestampMillisecondArray, UInt64Array, UInt8Array,
 };
 use datatypes::value::ValueRef;
-use futures::{AsyncBufReadExt, StreamExt};
+use futures::StreamExt;
 use metric_engine::row_modifier::TsidGenerator;
 use mito2::error::ReadParquetSnafu;
 use mito2::read::{Batch, BatchBuilder, BatchReader};
 use mito2::row_converter::SparsePrimaryKeyCodec;
-use object_store::{FuturesAsyncReader, ObjectStore, Reader};
+use object_store::ObjectStore;
 use parquet::arrow::async_reader::ParquetRecordBatchStream;
 use parquet::arrow::ParquetRecordBatchStreamBuilder;
 use parquet_opendal::AsyncReader;
@@ -44,8 +45,8 @@ use store_api::storage::{ColumnId, SequenceNumber};
 use table::metadata::TableId;
 
 use crate::error::{
-    DecodeSnafu, IoSnafu, JsonSnafu, MissingColumnSnafu, MissingMetricNameSnafu, MissingTableSnafu,
-    MitoSnafu, ObjectStoreSnafu, Result,
+    DecodeSnafu, MissingColumnSnafu, MissingMetricNameSnafu, MissingTableSnafu, MitoSnafu,
+    ObjectStoreSnafu, Result,
 };
 use crate::table::TableMetadataHelper;
 
@@ -154,42 +155,6 @@ impl SeriesConverter {
             .op_types_array(Arc::new(UInt8Array::from(op_types)))?
             .push_field_array(self.value_id, Arc::new(Float64Array::from(values)))?;
         builder.build()
-    }
-}
-
-/// Prometheus remote write NDJSON reader.
-pub struct TimeSeriesReader {
-    reader: FuturesAsyncReader,
-    buffer: String,
-}
-
-impl TimeSeriesReader {
-    /// Creates a new [`TimeSeriesReader`] from a [`Reader`].
-    pub async fn new(reader: Reader) -> Result<Self> {
-        let reader = reader
-            .into_futures_async_read(..)
-            .await
-            .context(ObjectStoreSnafu)?;
-
-        Ok(Self {
-            reader,
-            buffer: String::new(),
-        })
-    }
-
-    /// Reads the next timeseries from the reader.
-    pub async fn next_series(&mut self) -> Result<Option<TimeSeries>> {
-        self.buffer.clear();
-        self.reader
-            .read_line(&mut self.buffer)
-            .await
-            .context(IoSnafu)?;
-        if self.buffer.is_empty() {
-            return Ok(None);
-        }
-
-        let time_series = serde_json::from_str(&self.buffer).context(JsonSnafu)?;
-        Ok(Some(time_series))
     }
 }
 
