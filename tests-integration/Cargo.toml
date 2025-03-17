@@ -37,16 +37,16 @@ common-telemetry.workspace = true
 common-test-util.workspace = true
 common-time.workspace = true
 common-wal.workspace = true
-datanode.workspace = true
+datanode = { workspace = true }
 datatypes.workspace = true
 dotenv.workspace = true
-flate2.workspace = true
+flate2 = "1.0"
 flow.workspace = true
 frontend = { workspace = true, features = ["testing"] }
 futures.workspace = true
 futures-util.workspace = true
 hyper-util = { workspace = true, features = ["tokio"] }
-log-query.workspace = true
+log-query = { workspace = true }
 loki-proto.workspace = true
 meta-client.workspace = true
 meta-srv = { workspace = true, features = ["mock"] }
@@ -97,5 +97,5 @@ prost.workspace = true
 rand.workspace = true
 session = { workspace = true, features = ["testing"] }
 store-api.workspace = true
-tokio-postgres.workspace = true
+tokio-postgres = { workspace = true }
 url = "2.3"
