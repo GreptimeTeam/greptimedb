@@ -164,7 +164,7 @@ provider = "raft_engine"
 ## The directory to store the WAL files.
 ## **It's only used when the provider is `raft_engine`**.
 ## @toml2docs:none-default
-dir = "/tmp/greptimedb/wal"
+dir = "./greptimedb_data/wal"
 
 ## The size of the WAL segment file.
 ## **It's only used when the provider is `raft_engine`**.
@@ -318,6 +318,7 @@ retry_delay = "500ms"
 # secret_access_key = "123456"
 # endpoint = "https://s3.amazonaws.com"
 # region = "us-west-2"
+# enable_virtual_host_style = false
 
 # Example of using Oss as the storage.
 # [storage]
@@ -351,7 +352,7 @@ retry_delay = "500ms"
 ## The data storage options.
 [storage]
 ## The working home directory.
-data_home = "/tmp/greptimedb/"
+data_home = "./greptimedb_data/"
 
 ## The storage type used to store the data.
 ## - `File`: the data is stored in the local file system.
@@ -704,7 +705,7 @@ experimental_sparse_primary_key_encoding = false
 ## The logging options.
 [logging]
 ## The directory to store the log files. If set to empty, logs will not be written to files.
-dir = "/tmp/greptimedb/logs"
+dir = "./greptimedb_data/logs"
 
 ## The log level. Can be `info`/`debug`/`warn`/`error`.
 ## @toml2docs:none-default

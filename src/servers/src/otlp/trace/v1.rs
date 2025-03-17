@@ -103,8 +103,18 @@ pub fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> 
     row_writer::write_tags(writer, tags.into_iter(), &mut row)?;
 
     // write fields
+    if let Some(parent_span_id) = span.parent_span_id {
+        row_writer::write_fields(
+            writer,
+            std::iter::once(make_string_column_data(
+                PARENT_SPAN_ID_COLUMN,
+                parent_span_id,
+            )),
+            &mut row,
+        )?;
+    }
+
     let fields = vec![
-        make_string_column_data(PARENT_SPAN_ID_COLUMN, span.parent_span_id),
         make_string_column_data(SPAN_KIND_COLUMN, span.span_kind),
         make_string_column_data(SPAN_NAME_COLUMN, span.span_name),
         make_string_column_data("span_status_code", span.span_status_code),

@@ -183,7 +183,7 @@ mod tests {
 
     pub fn new_table_info() -> TableInfo {
         let schema = Arc::new(new_test_schema());
-        let meta = TableMetaBuilder::default()
+        let meta = TableMetaBuilder::empty()
             .schema(schema)
             .primary_key_indices(vec![0])
             .engine("engine")

@@ -67,7 +67,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.13.0"
+version = "0.14.0"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -126,10 +126,11 @@ deadpool-postgres = "0.12"
 derive_builder = "0.12"
 dotenv = "0.15"
 etcd-client = "0.14"
+flate2 = { version = "1.1.0", default-features = false, features = ["zlib-rs"] }
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "d92c9ac4e90ef4abdcf5c2eaf5a164e18ba09486" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "c5419bbd20cb42e568ec325a4d71a3c94cc327e1" }
 hex = "0.4"
 http = "1"
 humantime = "2.1"
@@ -188,6 +189,10 @@ shadow-rs = "0.38"
 similar-asserts = "1.6.0"
 smallvec = { version = "1", features = ["serde"] }
 snafu = "0.8"
+sqlx = { version = "0.8", features = [
+    "runtime-tokio-rustls",
+    "mysql",
+] }
 sysinfo = "0.30"
 # on branch v0.52.x
 sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "71dd86058d2af97b9925093d40c4e03360403170", features = [

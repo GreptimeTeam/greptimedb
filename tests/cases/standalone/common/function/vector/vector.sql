@@ -100,7 +100,6 @@ FROM (
          SELECT '[7.0, 8.0, 9.0, 10.0]' AS v
      ) Order By vec_dim(v) ASC;
 
-
 SELECT vec_kth_elem('[1.0, 2.0, 3.0]', 2);
 
 SELECT v, vec_kth_elem(v, 0) AS first_elem
@@ -112,3 +111,25 @@ FROM (
          SELECT '[8.0]' AS v
      )
 WHERE vec_kth_elem(v, 0) > 2.0;
+
+SELECT vec_to_string(vec_subvector('[1.0,2.0,3.0,4.0,5.0]', 0, 3));
+
+SELECT vec_to_string(vec_subvector('[1.0,2.0,3.0,4.0,5.0]', 5, 5));
+
+SELECT v, vec_to_string(vec_subvector(v, 3, 5))
+FROM (
+     SELECT '[1.0, 2.0, 3.0, 4.0, 5.0]' AS v
+     UNION ALL
+     SELECT '[-1.0, -2.0, -3.0, -4.0, -5.0, -6.0]' AS v
+     UNION ALL
+     SELECT '[4.0, 5.0, 6.0, 10, -8, 100]' AS v
+) ORDER BY v;
+
+SELECT vec_to_string(vec_subvector(v, 0, 5))
+FROM (
+     SELECT '[1.1, 2.2, 3.3, 4.4, 5.5]' AS v
+     UNION ALL
+     SELECT '[-1.1, -2.1, -3.1, -4.1, -5.1, -6.1]' AS v
+     UNION ALL
+     SELECT '[4.0, 5.0, 6.0, 10, -8, 100]' AS v
+) ORDER BY v;
