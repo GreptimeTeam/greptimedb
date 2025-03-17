@@ -32,6 +32,7 @@ use std::sync::Arc;
 use api::prom_store::remote::ReadRequest;
 use api::v1::RowInsertRequests;
 use async_trait::async_trait;
+use catalog::CatalogManager;
 use common_query::Output;
 use headers::HeaderValue;
 use log_query::LogQuery;
@@ -172,7 +173,11 @@ pub trait PipelineHandler {
 /// Handle log query requests.
 #[async_trait]
 pub trait LogQueryHandler {
+    /// Execute a log query.
     async fn query(&self, query: LogQuery, ctx: QueryContextRef) -> Result<Output>;
+
+    /// Get catalog manager.
+    fn catalog_manager(&self, ctx: &QueryContext) -> Result<&dyn CatalogManager>;
 }
 
 /// Handle Jaeger query requests.
