@@ -71,8 +71,6 @@ When restarting a region, it should query the `last_purged_entry_id` from metasr
 
 No retry mechanism and persisted states are needed since we will always retry the purge procedure after a period of time and it affects nothing until the last step.
 
-Purge procedure may stuck at waiting for high watermark check responses. We can set a timeout for the check requests and directly go to the next step if timeout.
-
 # Alternatives
 
 Purge time can depend on the size of the WAL entries instead of a fixed period of time, which may be more efficient.
