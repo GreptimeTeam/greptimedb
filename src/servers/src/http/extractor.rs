@@ -39,9 +39,7 @@ where
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         let headers = &parts.headers;
-        string_value_from_header(headers, GREPTIME_LOG_TABLE_NAME_HEADER_NAME)
-            .transpose()
-            .map(LogTableName)
+        string_value_from_header(headers, &[GREPTIME_LOG_TABLE_NAME_HEADER_NAME]).map(LogTableName)
     }
 }
 
@@ -57,8 +55,7 @@ where
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         let headers = &parts.headers;
-        string_value_from_header(headers, GREPTIME_TRACE_TABLE_NAME_HEADER_NAME)
-            .transpose()
+        string_value_from_header(headers, &[GREPTIME_TRACE_TABLE_NAME_HEADER_NAME])
             .map(TraceTableName)
     }
 }
@@ -76,8 +73,7 @@ where
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         let select =
-            string_value_from_header(&parts.headers, GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME)
-                .transpose()?;
+            string_value_from_header(&parts.headers, &[GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME])?;
 
         match select {
             Some(name) => {
@@ -108,18 +104,22 @@ where
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         let headers = &parts.headers;
-        let pipeline_name =
-            string_value_from_header(headers, GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME)
-                .or_else(|| string_value_from_header(headers, GREPTIME_PIPELINE_NAME_HEADER_NAME))
-                .transpose()?;
-        let pipeline_version =
-            string_value_from_header(headers, GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME)
-                .or_else(|| {
-                    string_value_from_header(headers, GREPTIME_PIPELINE_VERSION_HEADER_NAME)
-                })
-                .transpose()?;
+        let pipeline_name = string_value_from_header(
+            headers,
+            &[
+                GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME,
+                GREPTIME_PIPELINE_NAME_HEADER_NAME,
+            ],
+        )?;
+        let pipeline_version = string_value_from_header(
+            headers,
+            &[
+                GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME,
+                GREPTIME_PIPELINE_VERSION_HEADER_NAME,
+            ],
+        )?;
         let pipeline_parameters =
-            string_value_from_header(headers, GREPTIME_PIPELINE_PARAMS_HEADER).transpose()?;
+            string_value_from_header(headers, &[GREPTIME_PIPELINE_PARAMS_HEADER])?;
 
         Ok(PipelineInfo {
             pipeline_name,
@@ -132,14 +132,19 @@ where
 #[inline]
 fn string_value_from_header(
     headers: &HeaderMap,
-    header_key: &str,
-) -> Option<Result<String, (StatusCode, String)>> {
-    headers.get(header_key).map(|value| {
-        String::from_utf8(value.as_bytes().to_vec()).map_err(|_| {
-            (
-                StatusCode::BAD_REQUEST,
-                format!("`{}` header is not valid UTF-8 string type.", header_key),
-            )
-        })
-    })
+    header_keys: &[&str],
+) -> Result<Option<String>, (StatusCode, String)> {
+    for header_key in header_keys {
+        if let Some(value) = headers.get(*header_key) {
+            return Some(String::from_utf8(value.as_bytes().to_vec()).map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("`{}` header is not valid UTF-8 string type.", header_key),
+                )
+            }))
+            .transpose();
+        }
+    }
+
+    Ok(None)
 }
