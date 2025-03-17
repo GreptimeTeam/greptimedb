@@ -24,7 +24,8 @@ use crate::config::FileConfig;
 use crate::error::{self, Result};
 use crate::store;
 
-pub(crate) async fn new_fs_object_store(
+/// A helper function to create a file system object store.
+pub async fn new_fs_object_store(
     data_home: &str,
     _file_config: &FileConfig,
 ) -> Result<ObjectStore> {
