@@ -46,8 +46,6 @@ The states are maintained through:
 
 We can better handle locks utilizing current procedure. It's quite similar to the region migration procedure.
 
-During purge, the procedure should hold a lock to prevent other procedures from modifying the topic-region map of existing regions, which only happens when dropping tables currently.
-
 After a period of time, metasrv will submit a purge procedure to ProcedureManager. The purge will apply to all topics.
 
 The procedure is divided into following stages:
@@ -60,6 +58,7 @@ The procedure is divided into following stages:
 3. Purge:
    - Choose proper entry id to delete for each topic. The entry should be the smallest `last_entry_id - 1` among all regions. 
    - Delete legacy entries in Kafka.
+   - Store the `last_purged_entry_id` in kvbackend. It should be locked to prevent other regions from replaying the purged entries.
 
 ### After purge
 
@@ -69,7 +68,9 @@ When restarting a region, it should query the `last_purged_entry_id` from metasr
 
 ### Error handling
 
-No retry mechanism and persisted states are needed since we will always retry the purge procedure after a period of time and it affects nothing until the last step.
+No persisted states are needed since all states are maintained in kvbackend.
+
+Retry when failed to retrieving metadata from kvbackend.
 
 # Alternatives
 
