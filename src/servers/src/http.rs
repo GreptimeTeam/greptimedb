@@ -1384,7 +1384,7 @@ mod test {
     fn test_http_options_default() {
         let default = HttpOptions::default();
         assert_eq!("127.0.0.1:4000".to_string(), default.addr);
-        assert_eq!(Duration::from_secs(30), default.timeout)
+        assert_eq!(Duration::from_secs(0), default.timeout)
     }
 
     #[tokio::test]
