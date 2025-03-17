@@ -67,12 +67,7 @@ impl LogQueryHandler for Instance {
         Ok(interceptor.as_ref().post_query(output, ctx.clone())?)
     }
 
-    fn catalog_manager(&self, ctx: &QueryContext) -> ServerResult<&dyn catalog::CatalogManager> {
-        self.plugins
-            .get::<PermissionCheckerRef>()
-            .as_ref()
-            .check_permission(ctx.current_user(), PermissionReq::LogQuery)
-            .context(AuthSnafu)?;
+    fn catalog_manager(&self, _ctx: &QueryContext) -> ServerResult<&dyn catalog::CatalogManager> {
         Ok(self.catalog_manager.deref())
     }
 }
