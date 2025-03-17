@@ -116,7 +116,7 @@ impl<'a> ElectionSqlFactory<'a> {
     fn create_table_sql(&self) -> String {
         format!(
             r#"
-            CREATE TABLE IF NOT EXISTS {} (
+            CREATE TABLE IF NOT EXISTS `{}` (
                 k VARBINARY(3072) PRIMARY KEY,
                 v BLOB
             );
