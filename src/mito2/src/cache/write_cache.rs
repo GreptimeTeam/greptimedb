@@ -263,6 +263,16 @@ impl WriteCache {
         Ok(())
     }
 
+    /// Returns the available space in the write cache.
+    pub(crate) fn available_space(&self) -> u64 {
+        self.file_cache.available_space()
+    }
+
+    /// Returns the capacity of the write cache.
+    pub(crate) fn capacity(&self) -> u64 {
+        self.file_cache.capacity()
+    }
+
     /// Uploads a Parquet file or a Puffin file to the remote object store.
     async fn upload(
         &self,

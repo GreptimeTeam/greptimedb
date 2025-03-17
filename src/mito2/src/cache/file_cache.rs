@@ -53,6 +53,8 @@ pub(crate) struct FileCache {
     ///
     /// File id is enough to identity a file uniquely.
     memory_index: Cache<IndexKey, IndexValue>,
+    /// Capacity of the cache.
+    capacity: ReadableSize,
 }
 
 pub(crate) type FileCacheRef = Arc<FileCache>;
@@ -103,6 +105,7 @@ impl FileCache {
         FileCache {
             local_store,
             memory_index,
+            capacity,
         }
     }
 
@@ -196,6 +199,20 @@ impl FileCache {
         if let Err(e) = self.local_store.delete(&file_path).await {
             warn!(e; "Failed to delete a cached file {}", file_path);
         }
+    }
+
+    /// Returns the available space in the file cache.
+    pub(crate) fn available_space(&self) -> u64 {
+        if self.capacity.as_bytes() > self.memory_index.weighted_size() {
+            self.capacity.as_bytes() - self.memory_index.weighted_size()
+        } else {
+            0
+        }
+    }
+
+    /// Returns the capacity of the file cache.
+    pub(crate) fn capacity(&self) -> u64 {
+        self.capacity.as_bytes()
     }
 
     async fn recover_inner(&self) -> Result<()> {
