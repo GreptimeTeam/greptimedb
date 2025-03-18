@@ -23,8 +23,8 @@
 #[cfg_attr(feature = "test", allow(unused))]
 pub mod test_util;
 
-mod access_layer;
-mod cache;
+pub mod access_layer;
+pub mod cache;
 pub mod compaction;
 pub mod config;
 pub mod engine;

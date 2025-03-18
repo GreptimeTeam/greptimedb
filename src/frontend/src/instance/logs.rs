@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::ops::Deref;
+
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use client::Output;
 use common_error::ext::BoxedError;
@@ -20,7 +22,7 @@ use server_error::Result as ServerResult;
 use servers::error::{self as server_error, AuthSnafu, ExecuteQuerySnafu};
 use servers::interceptor::{LogQueryInterceptor, LogQueryInterceptorRef};
 use servers::query_handler::LogQueryHandler;
-use session::context::QueryContextRef;
+use session::context::{QueryContext, QueryContextRef};
 use snafu::ResultExt;
 use tonic::async_trait;
 
@@ -63,5 +65,9 @@ impl LogQueryHandler for Instance {
             .context(ExecuteQuerySnafu)?;
 
         Ok(interceptor.as_ref().post_query(output, ctx.clone())?)
+    }
+
+    fn catalog_manager(&self, _ctx: &QueryContext) -> ServerResult<&dyn catalog::CatalogManager> {
+        Ok(self.catalog_manager.deref())
     }
 }

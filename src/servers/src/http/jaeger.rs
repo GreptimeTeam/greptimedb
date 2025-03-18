@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -26,8 +25,6 @@ use common_error::status_code::StatusCode;
 use common_query::{Output, OutputData};
 use common_recordbatch::util;
 use common_telemetry::{debug, error, tracing, warn};
-use datafusion_expr::{col, Expr};
-use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use session::context::{Channel, QueryContext};
@@ -36,6 +33,7 @@ use snafu::{OptionExt, ResultExt};
 use crate::error::{
     status_code_to_http_status, CollectRecordbatchSnafu, Error, InvalidJaegerQuerySnafu, Result,
 };
+use crate::http::extractor::TraceTableName;
 use crate::http::HttpRecordsOutput;
 use crate::metrics::METRIC_JAEGER_QUERY_ELAPSED;
 use crate::otlp::trace::{
@@ -47,43 +45,9 @@ use crate::otlp::trace::{
 };
 use crate::query_handler::JaegerQueryHandlerRef;
 
-lazy_static! {
-    pub static ref FIND_TRACES_COLS: Vec<Expr> = vec![
-        col(TRACE_ID_COLUMN),
-        col(TIMESTAMP_COLUMN),
-        col(DURATION_NANO_COLUMN),
-        col(SERVICE_NAME_COLUMN),
-        col(SPAN_NAME_COLUMN),
-        col(SPAN_ID_COLUMN),
-        col(SPAN_ATTRIBUTES_COLUMN),
-        col(RESOURCE_ATTRIBUTES_COLUMN),
-        col(PARENT_SPAN_ID_COLUMN),
-        col(SPAN_EVENTS_COLUMN),
-        col(SCOPE_NAME_COLUMN),
-        col(SCOPE_VERSION_COLUMN),
-        col(SPAN_KIND_COLUMN),
-        col(SPAN_STATUS_CODE),
-    ];
-    static ref FIND_TRACES_SCHEMA: Vec<(&'static str, &'static str)> = vec![
-        (TRACE_ID_COLUMN, "String"),
-        (TIMESTAMP_COLUMN, "TimestampNanosecond"),
-        (DURATION_NANO_COLUMN, "UInt64"),
-        (SERVICE_NAME_COLUMN, "String"),
-        (SPAN_NAME_COLUMN, "String"),
-        (SPAN_ID_COLUMN, "String"),
-        (SPAN_ATTRIBUTES_COLUMN, "Json"),
-        (RESOURCE_ATTRIBUTES_COLUMN, "Json"),
-        (PARENT_SPAN_ID_COLUMN, "String"),
-        (SPAN_EVENTS_COLUMN, "Json"),
-        (SCOPE_NAME_COLUMN, "String"),
-        (SCOPE_VERSION_COLUMN, "String"),
-        (SPAN_KIND_COLUMN, "String"),
-        (SPAN_STATUS_CODE, "String"),
-    ];
-}
+pub const JAEGER_QUERY_TABLE_NAME_KEY: &str = "jaeger_query_table_name";
 
 const REF_TYPE_CHILD_OF: &str = "CHILD_OF";
-
 const SPAN_KIND_TIME_FMTS: [&str; 2] = ["%Y-%m-%d %H:%M:%S%.6f%z", "%Y-%m-%d %H:%M:%S%.9f%z"];
 
 /// JaegerAPIResponse is the response of Jaeger HTTP API.
@@ -240,9 +204,6 @@ pub enum ValueType {
 #[derive(Default, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JaegerQueryParams {
-    /// Database that the trace data stored in.
-    pub db: Option<String>,
-
     /// Service name of the trace.
     #[serde(rename = "service")]
     pub service_name: Option<String>,
@@ -275,25 +236,26 @@ pub struct JaegerQueryParams {
     pub span_kind: Option<String>,
 }
 
+fn update_query_context(query_ctx: &mut QueryContext, table_name: Option<String>) {
+    // db should be already handled by middlewares
+    query_ctx.set_channel(Channel::Jaeger);
+    if let Some(table) = table_name {
+        query_ctx.set_extension(JAEGER_QUERY_TABLE_NAME_KEY, table);
+    }
+}
+
 impl QueryTraceParams {
-    fn from_jaeger_query_params(db: &str, query_params: JaegerQueryParams) -> Result<Self> {
+    fn from_jaeger_query_params(query_params: JaegerQueryParams) -> Result<Self> {
         let mut internal_query_params: QueryTraceParams = QueryTraceParams {
-            db: db.to_string(),
+            service_name: query_params.service_name.context(InvalidJaegerQuerySnafu {
+                reason: "service_name is required".to_string(),
+            })?,
+            operation_name: query_params.operation_name,
+            // Convert start time from microseconds to nanoseconds.
+            start_time: query_params.start.map(|start| start * 1000),
+            end_time: query_params.end.map(|end| end * 1000),
             ..Default::default()
         };
-
-        internal_query_params.service_name =
-            query_params.service_name.context(InvalidJaegerQuerySnafu {
-                reason: "service_name is required".to_string(),
-            })?;
-
-        internal_query_params.operation_name = query_params.operation_name;
-
-        // Convert start time from microseconds to nanoseconds.
-        internal_query_params.start_time = query_params.start.map(|start| start * 1000);
-
-        // Convert end time from microseconds to nanoseconds.
-        internal_query_params.end_time = query_params.end.map(|end| end * 1000);
 
         if let Some(max_duration) = query_params.max_duration {
             let duration = humantime::parse_duration(&max_duration).map_err(|e| {
@@ -343,7 +305,6 @@ impl QueryTraceParams {
 
 #[derive(Debug, Default, PartialEq)]
 pub struct QueryTraceParams {
-    pub db: String,
     pub service_name: String,
     pub operation_name: Option<String>,
 
@@ -367,12 +328,14 @@ pub async fn handle_get_services(
     State(handler): State<JaegerQueryHandlerRef>,
     Query(query_params): Query<JaegerQueryParams>,
     Extension(mut query_ctx): Extension<QueryContext>,
+    TraceTableName(table_name): TraceTableName,
 ) -> impl IntoResponse {
     debug!(
         "Received Jaeger '/api/services' request, query_params: {:?}, query_ctx: {:?}",
         query_params, query_ctx
     );
-    query_ctx.set_channel(Channel::Jaeger);
+
+    update_query_context(&mut query_ctx, table_name);
     let query_ctx = Arc::new(query_ctx);
     let db = query_ctx.get_db_string();
 
@@ -418,12 +381,14 @@ pub async fn handle_get_trace(
     Path(trace_id): Path<String>,
     Query(query_params): Query<JaegerQueryParams>,
     Extension(mut query_ctx): Extension<QueryContext>,
+    TraceTableName(table_name): TraceTableName,
 ) -> impl IntoResponse {
     debug!(
         "Received Jaeger '/api/traces/{}' request, query_params: {:?}, query_ctx: {:?}",
         trace_id, query_params, query_ctx
     );
-    query_ctx.set_channel(Channel::Jaeger);
+
+    update_query_context(&mut query_ctx, table_name);
     let query_ctx = Arc::new(query_ctx);
     let db = query_ctx.get_db_string();
 
@@ -472,12 +437,14 @@ pub async fn handle_find_traces(
     State(handler): State<JaegerQueryHandlerRef>,
     Query(query_params): Query<JaegerQueryParams>,
     Extension(mut query_ctx): Extension<QueryContext>,
+    TraceTableName(table_name): TraceTableName,
 ) -> impl IntoResponse {
     debug!(
         "Received Jaeger '/api/traces' request, query_params: {:?}, query_ctx: {:?}",
         query_params, query_ctx
     );
-    query_ctx.set_channel(Channel::Jaeger);
+
+    update_query_context(&mut query_ctx, table_name);
     let query_ctx = Arc::new(query_ctx);
     let db = query_ctx.get_db_string();
 
@@ -486,7 +453,7 @@ pub async fn handle_find_traces(
         .with_label_values(&[&db, "/api/traces"])
         .start_timer();
 
-    match QueryTraceParams::from_jaeger_query_params(&db, query_params) {
+    match QueryTraceParams::from_jaeger_query_params(query_params) {
         Ok(query_params) => {
             let output = handler.find_traces(query_ctx, query_params).await;
             match output {
@@ -521,13 +488,14 @@ pub async fn handle_get_operations(
     State(handler): State<JaegerQueryHandlerRef>,
     Query(query_params): Query<JaegerQueryParams>,
     Extension(mut query_ctx): Extension<QueryContext>,
+    TraceTableName(table_name): TraceTableName,
 ) -> impl IntoResponse {
     debug!(
         "Received Jaeger '/api/operations' request, query_params: {:?}, query_ctx: {:?}",
         query_params, query_ctx
     );
-    if let Some(service_name) = query_params.service_name {
-        query_ctx.set_channel(Channel::Jaeger);
+    if let Some(service_name) = &query_params.service_name {
+        update_query_context(&mut query_ctx, table_name);
         let query_ctx = Arc::new(query_ctx);
         let db = query_ctx.get_db_string();
 
@@ -537,7 +505,7 @@ pub async fn handle_get_operations(
             .start_timer();
 
         match handler
-            .get_operations(query_ctx, &service_name, query_params.span_kind.as_deref())
+            .get_operations(query_ctx, service_name, query_params.span_kind.as_deref())
             .await
         {
             Ok(output) => match covert_to_records(output).await {
@@ -593,12 +561,14 @@ pub async fn handle_get_operations_by_service(
     Path(service_name): Path<String>,
     Query(query_params): Query<JaegerQueryParams>,
     Extension(mut query_ctx): Extension<QueryContext>,
+    TraceTableName(table_name): TraceTableName,
 ) -> impl IntoResponse {
     debug!(
         "Received Jaeger '/api/services/{}/operations' request, query_params: {:?}, query_ctx: {:?}",
         service_name, query_params, query_ctx
     );
-    query_ctx.set_channel(Channel::Jaeger);
+
+    update_query_context(&mut query_ctx, table_name);
     let query_ctx = Arc::new(query_ctx);
     let db = query_ctx.get_db_string();
 
@@ -690,11 +660,8 @@ fn error_response(err: Error) -> (HttpStatusCode, axum::Json<JaegerAPIResponse>)
         }),
     )
 }
-// Construct Jaeger traces from records.
-fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
-    let expected_schema = FIND_TRACES_SCHEMA.clone();
-    check_schema(&records, &expected_schema)?;
 
+fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
     // maintain the mapping: trace_id -> (process_id -> service_name).
     let mut trace_id_to_processes: HashMap<String, HashMap<String, String>> = HashMap::new();
     // maintain the mapping: trace_id -> spans.
@@ -702,38 +669,202 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
     // maintain the mapping: service.name -> resource.attributes.
     let mut service_to_resource_attributes: HashMap<String, Vec<KeyValue>> = HashMap::new();
 
+    let is_span_attributes_flatten = !records
+        .schema
+        .column_schemas
+        .iter()
+        .any(|c| c.name == SPAN_ATTRIBUTES_COLUMN);
+
     for row in records.rows.into_iter() {
         let mut span = Span::default();
-        let mut row_iter = row.into_iter();
+        let mut service_name = None;
+        let mut resource_tags = vec![];
 
-        // Set trace id.
-        if let Some(JsonValue::String(trace_id)) = row_iter.next() {
-            span.trace_id = trace_id.clone();
-            trace_id_to_processes.entry(trace_id).or_default();
-        }
+        for (idx, cell) in row.into_iter().enumerate() {
+            // safe to use index here
+            let column_name = &records.schema.column_schemas[idx].name;
 
-        // Convert timestamp from nanoseconds to microseconds.
-        if let Some(JsonValue::Number(timestamp)) = row_iter.next() {
-            span.start_time = timestamp.as_u64().ok_or_else(|| {
-                InvalidJaegerQuerySnafu {
-                    reason: "Failed to convert timestamp to u64".to_string(),
+            match column_name.as_str() {
+                TRACE_ID_COLUMN => {
+                    if let JsonValue::String(trace_id) = cell {
+                        span.trace_id = trace_id.clone();
+                        trace_id_to_processes.entry(trace_id).or_default();
+                    }
                 }
-                .build()
-            })? / 1000;
-        }
-
-        // Convert duration from nanoseconds to microseconds.
-        if let Some(JsonValue::Number(duration)) = row_iter.next() {
-            span.duration = duration.as_u64().ok_or_else(|| {
-                InvalidJaegerQuerySnafu {
-                    reason: "Failed to convert duration to u64".to_string(),
+                TIMESTAMP_COLUMN => {
+                    span.start_time = cell.as_u64().context(InvalidJaegerQuerySnafu {
+                        reason: "Failed to convert timestamp to u64".to_string(),
+                    })? / 1000;
                 }
-                .build()
-            })? / 1000;
+                DURATION_NANO_COLUMN => {
+                    span.duration = cell.as_u64().context(InvalidJaegerQuerySnafu {
+                        reason: "Failed to convert duration to u64".to_string(),
+                    })? / 1000;
+                }
+                SERVICE_NAME_COLUMN => {
+                    if let JsonValue::String(name) = cell {
+                        service_name = Some(name);
+                    }
+                }
+                SPAN_NAME_COLUMN => {
+                    if let JsonValue::String(span_name) = cell {
+                        span.operation_name = span_name;
+                    }
+                }
+                SPAN_ID_COLUMN => {
+                    if let JsonValue::String(span_id) = cell {
+                        span.span_id = span_id;
+                    }
+                }
+                SPAN_ATTRIBUTES_COLUMN => {
+                    // for v0 data model, span_attributes are nested as a json
+                    // data structure
+                    if let JsonValue::Object(span_attrs) = cell {
+                        span.tags.extend(object_to_tags(span_attrs));
+                    }
+                }
+                RESOURCE_ATTRIBUTES_COLUMN => {
+                    // for v0 data model, resource_attributes are nested as a json
+                    // data structure
+
+                    if let JsonValue::Object(mut resource_attrs) = cell {
+                        resource_attrs.remove(KEY_SERVICE_NAME);
+                        resource_tags = object_to_tags(resource_attrs);
+                    }
+                }
+                PARENT_SPAN_ID_COLUMN => {
+                    if let JsonValue::String(parent_span_id) = cell {
+                        if !parent_span_id.is_empty() {
+                            span.references.push(Reference {
+                                trace_id: span.trace_id.clone(),
+                                span_id: parent_span_id,
+                                ref_type: REF_TYPE_CHILD_OF.to_string(),
+                            });
+                        }
+                    }
+                }
+                SPAN_EVENTS_COLUMN => {
+                    if let JsonValue::Array(events) = cell {
+                        for event in events {
+                            if let JsonValue::Object(mut obj) = event {
+                                let Some(action) = obj.get("name").and_then(|v| v.as_str()) else {
+                                    continue;
+                                };
+
+                                let Some(t) =
+                                    obj.get("time").and_then(|t| t.as_str()).and_then(|s| {
+                                        SPAN_KIND_TIME_FMTS
+                                            .iter()
+                                            .find_map(|fmt| {
+                                                chrono::DateTime::parse_from_str(s, fmt).ok()
+                                            })
+                                            .map(|dt| dt.timestamp_micros() as u64)
+                                    })
+                                else {
+                                    continue;
+                                };
+
+                                let mut fields = vec![KeyValue {
+                                    key: "event".to_string(),
+                                    value_type: ValueType::String,
+                                    value: Value::String(action.to_string()),
+                                }];
+
+                                // Add event attributes as fields
+                                if let Some(JsonValue::Object(attrs)) = obj.remove("attributes") {
+                                    fields.extend(object_to_tags(attrs));
+                                }
+
+                                span.logs.push(Log {
+                                    timestamp: t,
+                                    fields,
+                                });
+                            }
+                        }
+                    }
+                }
+                SCOPE_NAME_COLUMN => {
+                    if let JsonValue::String(scope_name) = cell {
+                        if !scope_name.is_empty() {
+                            span.tags.push(KeyValue {
+                                key: KEY_OTEL_SCOPE_NAME.to_string(),
+                                value_type: ValueType::String,
+                                value: Value::String(scope_name),
+                            });
+                        }
+                    }
+                }
+                SCOPE_VERSION_COLUMN => {
+                    if let JsonValue::String(scope_version) = cell {
+                        if !scope_version.is_empty() {
+                            span.tags.push(KeyValue {
+                                key: KEY_OTEL_SCOPE_VERSION.to_string(),
+                                value_type: ValueType::String,
+                                value: Value::String(scope_version),
+                            });
+                        }
+                    }
+                }
+                SPAN_KIND_COLUMN => {
+                    if let JsonValue::String(span_kind) = cell {
+                        if !span_kind.is_empty() {
+                            span.tags.push(KeyValue {
+                                key: KEY_SPAN_KIND.to_string(),
+                                value_type: ValueType::String,
+                                value: Value::String(normalize_span_kind(&span_kind)),
+                            });
+                        }
+                    }
+                }
+                SPAN_STATUS_CODE => {
+                    if let JsonValue::String(span_status) = cell {
+                        if span_status != SPAN_STATUS_UNSET && !span_status.is_empty() {
+                            span.tags.push(KeyValue {
+                                key: KEY_OTEL_STATUS_CODE.to_string(),
+                                value_type: ValueType::String,
+                                value: Value::String(normalize_status_code(&span_status)),
+                            });
+                        }
+                    }
+                }
+
+                _ => {
+                    // this this v1 data model
+                    if is_span_attributes_flatten {
+                        const SPAN_ATTR_PREFIX: &str = "span_attributes.";
+                        const RESOURCE_ATTR_PREFIX: &str = "resource_attributes.";
+                        // a span attributes column
+                        if column_name.starts_with(SPAN_ATTR_PREFIX) {
+                            if let Some(keyvalue) = to_keyvalue(
+                                column_name
+                                    .strip_prefix(SPAN_ATTR_PREFIX)
+                                    .unwrap_or_default()
+                                    .to_string(),
+                                cell,
+                            ) {
+                                span.tags.push(keyvalue);
+                            }
+                        } else if column_name.starts_with(RESOURCE_ATTR_PREFIX) {
+                            if let Some(keyvalue) = to_keyvalue(
+                                column_name
+                                    .strip_prefix(RESOURCE_ATTR_PREFIX)
+                                    .unwrap_or_default()
+                                    .to_string(),
+                                cell,
+                            ) {
+                                resource_tags.push(keyvalue);
+                            }
+                        }
+                    }
+                }
+            }
         }
 
-        // Collect services to construct processes.
-        if let Some(JsonValue::String(service_name)) = row_iter.next() {
+        if let Some(service_name) = service_name {
+            if !service_to_resource_attributes.contains_key(&service_name) {
+                service_to_resource_attributes.insert(service_name.clone(), resource_tags);
+            }
+
             if let Some(process) = trace_id_to_processes.get_mut(&span.trace_id) {
                 if let Some(process_id) = process.get(&service_name) {
                     span.process_id = process_id.clone();
@@ -746,127 +877,8 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
             }
         }
 
-        // Set operation name. In Jaeger, the operation name is the span name.
-        if let Some(JsonValue::String(span_name)) = row_iter.next() {
-            span.operation_name = span_name;
-        }
-
-        // Set span id.
-        if let Some(JsonValue::String(span_id)) = row_iter.next() {
-            span.span_id = span_id;
-        }
-
-        // Convert span attributes to tags.
-        if let Some(JsonValue::Object(object)) = row_iter.next() {
-            span.tags = object_to_tags(object);
-        }
-
-        // Save resource attributes with service name.
-        if let Some(JsonValue::Object(mut object)) = row_iter.next() {
-            if let Some(service_name) = object
-                .remove(KEY_SERVICE_NAME)
-                .and_then(|v| v.as_str().map(|s| s.to_string()))
-            {
-                match service_to_resource_attributes.entry(service_name) {
-                    Occupied(_) => {}
-                    Vacant(vacant) => {
-                        let _ = vacant.insert(object_to_tags(object));
-                    }
-                }
-            }
-        }
-
-        // Set parent span id.
-        if let Some(JsonValue::String(parent_span_id)) = row_iter.next()
-            && !parent_span_id.is_empty()
-        {
-            span.references.push(Reference {
-                trace_id: span.trace_id.clone(),
-                span_id: parent_span_id,
-                ref_type: REF_TYPE_CHILD_OF.to_string(),
-            });
-        }
-
-        // Set span events to logs.
-        if let Some(JsonValue::Array(events)) = row_iter.next() {
-            for event in events {
-                if let JsonValue::Object(mut obj) = event {
-                    let Some(action) = obj.get("name").and_then(|v| v.as_str()) else {
-                        continue;
-                    };
-
-                    let Some(t) = obj.get("time").and_then(|t| t.as_str()).and_then(|s| {
-                        SPAN_KIND_TIME_FMTS
-                            .iter()
-                            .find_map(|fmt| chrono::DateTime::parse_from_str(s, fmt).ok())
-                            .map(|dt| dt.timestamp_micros() as u64)
-                    }) else {
-                        continue;
-                    };
-
-                    let mut fields = vec![KeyValue {
-                        key: "event".to_string(),
-                        value_type: ValueType::String,
-                        value: Value::String(action.to_string()),
-                    }];
-
-                    // Add event attributes as fields
-                    if let Some(JsonValue::Object(attrs)) = obj.remove("attributes") {
-                        fields.extend(object_to_tags(attrs));
-                    }
-
-                    span.logs.push(Log {
-                        timestamp: t,
-                        fields,
-                    });
-                }
-            }
-        }
-
-        // Set scope name.
-        if let Some(JsonValue::String(scope_name)) = row_iter.next()
-            && !scope_name.is_empty()
-        {
-            span.tags.push(KeyValue {
-                key: KEY_OTEL_SCOPE_NAME.to_string(),
-                value_type: ValueType::String,
-                value: Value::String(scope_name),
-            });
-        }
-
-        // Set scope version.
-        if let Some(JsonValue::String(scope_version)) = row_iter.next()
-            && !scope_version.is_empty()
-        {
-            span.tags.push(KeyValue {
-                key: KEY_OTEL_SCOPE_VERSION.to_string(),
-                value_type: ValueType::String,
-                value: Value::String(scope_version),
-            });
-        }
-
-        // Set span kind.
-        if let Some(JsonValue::String(span_kind)) = row_iter.next()
-            && !span_kind.is_empty()
-        {
-            span.tags.push(KeyValue {
-                key: KEY_SPAN_KIND.to_string(),
-                value_type: ValueType::String,
-                value: Value::String(normalize_span_kind(&span_kind)),
-            });
-        }
-
-        // Set span status code.
-        if let Some(JsonValue::String(span_status_code)) = row_iter.next()
-            && span_status_code != SPAN_STATUS_UNSET
-            && !span_status_code.is_empty()
-        {
-            span.tags.push(KeyValue {
-                key: KEY_OTEL_STATUS_CODE.to_string(),
-                value_type: ValueType::String,
-                value: Value::String(normalize_status_code(&span_status_code)),
-            });
-        }
+        // ensure span tags order
+        span.tags.sort_by(|a, b| a.key.cmp(&b.key));
 
         if let Some(spans) = trace_id_to_spans.get_mut(&span.trace_id) {
             spans.push(span);
@@ -899,42 +911,41 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
     Ok(traces)
 }
 
-#[inline]
+fn to_keyvalue(key: String, value: JsonValue) -> Option<KeyValue> {
+    match value {
+        JsonValue::String(value) => Some(KeyValue {
+            key,
+            value_type: ValueType::String,
+            value: Value::String(value.to_string()),
+        }),
+        JsonValue::Number(value) => Some(KeyValue {
+            key,
+            value_type: ValueType::Int64,
+            value: Value::Int64(value.as_i64().unwrap_or(0)),
+        }),
+        JsonValue::Bool(value) => Some(KeyValue {
+            key,
+            value_type: ValueType::Boolean,
+            value: Value::Boolean(value),
+        }),
+        JsonValue::Array(value) => Some(KeyValue {
+            key,
+            value_type: ValueType::String,
+            value: Value::String(serde_json::to_string(&value).unwrap()),
+        }),
+        JsonValue::Object(value) => Some(KeyValue {
+            key,
+            value_type: ValueType::String,
+            value: Value::String(serde_json::to_string(&value).unwrap()),
+        }),
+        JsonValue::Null => None,
+    }
+}
+
 fn object_to_tags(object: serde_json::map::Map<String, JsonValue>) -> Vec<KeyValue> {
     object
         .into_iter()
-        .filter_map(|(key, value)| match value {
-            JsonValue::String(value) => Some(KeyValue {
-                key,
-                value_type: ValueType::String,
-                value: Value::String(value.to_string()),
-            }),
-            JsonValue::Number(value) => Some(KeyValue {
-                key,
-                value_type: ValueType::Int64,
-                value: Value::Int64(value.as_i64().unwrap_or(0)),
-            }),
-            JsonValue::Bool(value) => Some(KeyValue {
-                key,
-                value_type: ValueType::Boolean,
-                value: Value::Boolean(value),
-            }),
-            JsonValue::Array(value) => Some(KeyValue {
-                key,
-                value_type: ValueType::String,
-                value: Value::String(serde_json::to_string(&value).unwrap()),
-            }),
-            JsonValue::Object(value) => Some(KeyValue {
-                key,
-                value_type: ValueType::String,
-                value: Value::String(serde_json::to_string(&value).unwrap()),
-            }),
-            // FIXME(zyy17): Do we need to support other types?
-            _ => {
-                warn!("Unsupported value type: {:?}", value);
-                None
-            }
-        })
+        .filter_map(|(key, value)| to_keyvalue(key, value))
         .collect()
 }
 
@@ -1055,7 +1066,6 @@ fn convert_string_to_boolean(input: &serde_json::Value) -> Option<serde_json::Va
 
 #[cfg(test)]
 mod tests {
-    use common_catalog::consts::DEFAULT_SCHEMA_NAME;
     use serde_json::{json, Number, Value as JsonValue};
 
     use super::*;
@@ -1302,6 +1312,151 @@ mod tests {
     }
 
     #[test]
+    fn test_traces_from_v1_records() {
+        // The tests is the tuple of `(test_records, expected)`.
+        let tests = vec![(
+            HttpRecordsOutput {
+                schema: OutputSchema {
+                    column_schemas: vec![
+                        ColumnSchema {
+                            name: "trace_id".to_string(),
+                            data_type: "String".to_string(),
+                        },
+                        ColumnSchema {
+                            name: "timestamp".to_string(),
+                            data_type: "TimestampNanosecond".to_string(),
+                        },
+                        ColumnSchema {
+                            name: "duration_nano".to_string(),
+                            data_type: "UInt64".to_string(),
+                        },
+                        ColumnSchema {
+                            name: "service_name".to_string(),
+                            data_type: "String".to_string(),
+                        },
+                        ColumnSchema {
+                            name: "span_name".to_string(),
+                            data_type: "String".to_string(),
+                        },
+                        ColumnSchema {
+                            name: "span_id".to_string(),
+                            data_type: "String".to_string(),
+                        },
+                        ColumnSchema {
+                            name: "span_attributes.http.request.method".to_string(),
+                            data_type: "String".to_string(),
+                        },
+                        ColumnSchema {
+                            name: "span_attributes.http.request.url".to_string(),
+                            data_type: "String".to_string(),
+                        },
+                        ColumnSchema {
+                            name: "span_attributes.http.status_code".to_string(),
+                            data_type: "UInt64".to_string(),
+                        },
+                    ],
+                },
+                rows: vec![
+                    vec![
+                        JsonValue::String("5611dce1bc9ebed65352d99a027b08ea".to_string()),
+                        JsonValue::Number(Number::from_u128(1738726754492422000).unwrap()),
+                        JsonValue::Number(Number::from_u128(100000000).unwrap()),
+                        JsonValue::String("test-service-0".to_string()),
+                        JsonValue::String("access-mysql".to_string()),
+                        JsonValue::String("008421dbbd33a3e9".to_string()),
+                        JsonValue::String("GET".to_string()),
+                        JsonValue::String("/data".to_string()),
+                        JsonValue::Number(Number::from_u128(200).unwrap()),
+                    ],
+                    vec![
+                        JsonValue::String("5611dce1bc9ebed65352d99a027b08ea".to_string()),
+                        JsonValue::Number(Number::from_u128(1738726754642422000).unwrap()),
+                        JsonValue::Number(Number::from_u128(100000000).unwrap()),
+                        JsonValue::String("test-service-0".to_string()),
+                        JsonValue::String("access-redis".to_string()),
+                        JsonValue::String("ffa03416a7b9ea48".to_string()),
+                        JsonValue::String("POST".to_string()),
+                        JsonValue::String("/create".to_string()),
+                        JsonValue::Number(Number::from_u128(400).unwrap()),
+                    ],
+                ],
+                total_rows: 2,
+                metrics: HashMap::new(),
+            },
+            vec![Trace {
+                trace_id: "5611dce1bc9ebed65352d99a027b08ea".to_string(),
+                spans: vec![
+                    Span {
+                        trace_id: "5611dce1bc9ebed65352d99a027b08ea".to_string(),
+                        span_id: "008421dbbd33a3e9".to_string(),
+                        operation_name: "access-mysql".to_string(),
+                        start_time: 1738726754492422,
+                        duration: 100000,
+                        tags: vec![
+                            KeyValue {
+                                key: "http.request.method".to_string(),
+                                value_type: ValueType::String,
+                                value: Value::String("GET".to_string()),
+                            },
+                            KeyValue {
+                                key: "http.request.url".to_string(),
+                                value_type: ValueType::String,
+                                value: Value::String("/data".to_string()),
+                            },
+                            KeyValue {
+                                key: "http.status_code".to_string(),
+                                value_type: ValueType::Int64,
+                                value: Value::Int64(200),
+                            },
+                        ],
+                        process_id: "p1".to_string(),
+                        ..Default::default()
+                    },
+                    Span {
+                        trace_id: "5611dce1bc9ebed65352d99a027b08ea".to_string(),
+                        span_id: "ffa03416a7b9ea48".to_string(),
+                        operation_name: "access-redis".to_string(),
+                        start_time: 1738726754642422,
+                        duration: 100000,
+                        tags: vec![
+                            KeyValue {
+                                key: "http.request.method".to_string(),
+                                value_type: ValueType::String,
+                                value: Value::String("POST".to_string()),
+                            },
+                            KeyValue {
+                                key: "http.request.url".to_string(),
+                                value_type: ValueType::String,
+                                value: Value::String("/create".to_string()),
+                            },
+                            KeyValue {
+                                key: "http.status_code".to_string(),
+                                value_type: ValueType::Int64,
+                                value: Value::Int64(400),
+                            },
+                        ],
+                        process_id: "p1".to_string(),
+                        ..Default::default()
+                    },
+                ],
+                processes: HashMap::from([(
+                    "p1".to_string(),
+                    Process {
+                        service_name: "test-service-0".to_string(),
+                        tags: vec![],
+                    },
+                )]),
+                ..Default::default()
+            }],
+        )];
+
+        for (records, expected) in tests {
+            let traces = traces_from_records(records).unwrap();
+            assert_eq!(traces, expected);
+        }
+    }
+
+    #[test]
     fn test_from_jaeger_query_params() {
         // The tests is the tuple of `(test_query_params, expected)`.
         let tests = vec![
@@ -1311,7 +1466,6 @@ mod tests {
                     ..Default::default()
                 },
                 QueryTraceParams {
-                    db: DEFAULT_SCHEMA_NAME.to_string(),
                     service_name: "test-service-0".to_string(),
                     ..Default::default()
                 },
@@ -1329,7 +1483,6 @@ mod tests {
                     ..Default::default()
                 },
                 QueryTraceParams {
-                    db: DEFAULT_SCHEMA_NAME.to_string(),
                     service_name: "test-service-0".to_string(),
                     operation_name: Some("access-mysql".to_string()),
                     start_time: Some(1738726754492422000),
@@ -1349,9 +1502,7 @@ mod tests {
         ];
 
         for (query_params, expected) in tests {
-            let query_params =
-                QueryTraceParams::from_jaeger_query_params(DEFAULT_SCHEMA_NAME, query_params)
-                    .unwrap();
+            let query_params = QueryTraceParams::from_jaeger_query_params(query_params).unwrap();
             assert_eq!(query_params, expected);
         }
     }
