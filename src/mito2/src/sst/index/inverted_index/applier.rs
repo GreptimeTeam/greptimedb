@@ -228,8 +228,8 @@ impl Drop for InvertedIndexApplier {
 
 #[cfg(test)]
 mod tests {
-    use common_base::BitVec;
     use futures::io::Cursor;
+    use index::bitmap::Bitmap;
     use index::inverted_index::search::index_apply::MockIndexApplier;
     use object_store::services::Memory;
     use puffin::puffin_manager::PuffinWriter;
@@ -264,7 +264,7 @@ mod tests {
         mock_index_applier.expect_memory_usage().returning(|| 100);
         mock_index_applier.expect_apply().returning(|_, _| {
             Ok(ApplyOutput {
-                matched_segment_ids: BitVec::EMPTY,
+                matched_segment_ids: Bitmap::new_bitvec(),
                 total_row_count: 100,
                 segment_row_count: 10,
             })
@@ -281,7 +281,7 @@ mod tests {
         assert_eq!(
             output,
             ApplyOutput {
-                matched_segment_ids: BitVec::EMPTY,
+                matched_segment_ids: Bitmap::new_bitvec(),
                 total_row_count: 100,
                 segment_row_count: 10,
             }

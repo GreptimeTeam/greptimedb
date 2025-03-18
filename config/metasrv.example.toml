@@ -1,5 +1,5 @@
 ## The working home directory.
-data_home = "/tmp/metasrv/"
+data_home = "./greptimedb_data/metasrv/"
 
 ## The bind address of metasrv.
 bind_addr = "127.0.0.1:3002"
@@ -177,7 +177,7 @@ backoff_deadline = "5mins"
 ## The logging options.
 [logging]
 ## The directory to store the log files. If set to empty, logs will not be written to files.
-dir = "/tmp/greptimedb/logs"
+dir = "./greptimedb_data/logs"
 
 ## The log level. Can be `info`/`debug`/`warn`/`error`.
 ## @toml2docs:none-default

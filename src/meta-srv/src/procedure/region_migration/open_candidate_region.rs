@@ -62,7 +62,6 @@ impl OpenCandidateRegion {
     /// - Datanode Table is not found.
     async fn build_open_region_instruction(&self, ctx: &mut Context) -> Result<Instruction> {
         let pc = &ctx.persistent_ctx;
-        let cluster_id = pc.cluster_id;
         let table_id = pc.region_id.table_id();
         let region_number = pc.region_id.region_number();
         let candidate_id = pc.to_peer.id;
@@ -77,7 +76,6 @@ impl OpenCandidateRegion {
 
         let open_instruction = Instruction::OpenRegion(OpenRegion::new(
             RegionIdent {
-                cluster_id,
                 datanode_id: candidate_id,
                 table_id,
                 region_number,
@@ -128,7 +126,7 @@ impl OpenCandidateRegion {
 
         let msg = MailboxMessage::json_message(
             &format!("Open candidate region: {}", region_id),
-            &format!("Meta@{}", ctx.server_addr()),
+            &format!("Metasrv@{}", ctx.server_addr()),
             &format!("Datanode-{}@{}", candidate.id, candidate.addr),
             common_time::util::current_time_millis(),
             &open_instruction,
@@ -202,10 +200,11 @@ mod tests {
 
     use super::*;
     use crate::error::Error;
-    use crate::procedure::region_migration::test_util::{
-        self, new_close_region_reply, new_open_region_reply, send_mock_reply, TestingEnv,
-    };
+    use crate::procedure::region_migration::test_util::{self, TestingEnv};
     use crate::procedure::region_migration::{ContextFactory, PersistentContext};
+    use crate::procedure::test_util::{
+        new_close_region_reply, new_open_region_reply, send_mock_reply,
+    };
 
     fn new_persistent_context() -> PersistentContext {
         test_util::new_persistent_context(1, 2, RegionId::new(1024, 1))
@@ -214,7 +213,6 @@ mod tests {
     fn new_mock_open_instruction(datanode_id: DatanodeId, region_id: RegionId) -> Instruction {
         Instruction::OpenRegion(OpenRegion {
             region_ident: RegionIdent {
-                cluster_id: 0,
                 datanode_id,
                 table_id: region_id.table_id(),
                 region_number: region_id.region_number(),

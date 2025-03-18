@@ -46,9 +46,9 @@ use crate::key::flow::flow_route::FlowRouteValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::{DeserializedValueWithBytes, FlowId, FlowPartitionId};
 use crate::lock_key::{CatalogLock, FlowNameLock, TableNameLock};
+use crate::metrics;
 use crate::peer::Peer;
 use crate::rpc::ddl::{CreateFlowTask, QueryContext};
-use crate::{metrics, ClusterId};
 
 /// The procedure of flow creation.
 pub struct CreateFlowProcedure {
@@ -60,16 +60,10 @@ impl CreateFlowProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::CreateFlow";
 
     /// Returns a new [CreateFlowProcedure].
-    pub fn new(
-        cluster_id: ClusterId,
-        task: CreateFlowTask,
-        query_context: QueryContext,
-        context: DdlContext,
-    ) -> Self {
+    pub fn new(task: CreateFlowTask, query_context: QueryContext, context: DdlContext) -> Self {
         Self {
             context,
             data: CreateFlowData {
-                cluster_id,
                 task,
                 flow_id: None,
                 peers: vec![],
@@ -363,7 +357,6 @@ impl fmt::Display for FlowType {
 /// The serializable data.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateFlowData {
-    pub(crate) cluster_id: ClusterId,
     pub(crate) state: CreateFlowState,
     pub(crate) task: CreateFlowTask,
     pub(crate) flow_id: Option<FlowId>,
@@ -432,7 +425,14 @@ impl From<&CreateFlowData> for (FlowInfoValue, Vec<(FlowPartitionId, FlowRouteVa
         let flow_type = value.flow_type.unwrap_or_default().to_string();
         options.insert("flow_type".to_string(), flow_type);
 
-        let flow_info = FlowInfoValue {
+        let mut create_time = chrono::Utc::now();
+        if let Some(prev_flow_value) = value.prev_flow_info_value.as_ref()
+            && value.task.or_replace
+        {
+            create_time = prev_flow_value.get_inner_ref().created_time;
+        }
+
+        let flow_info: FlowInfoValue = FlowInfoValue {
             source_table_ids: value.source_table_ids.clone(),
             sink_table_name,
             flownode_ids,
@@ -442,6 +442,8 @@ impl From<&CreateFlowData> for (FlowInfoValue, Vec<(FlowPartitionId, FlowRouteVa
             expire_after,
             comment,
             options,
+            created_time: create_time,
+            updated_time: chrono::Utc::now(),
         };
 
         (flow_info, flow_routes)

@@ -277,7 +277,9 @@ impl InvertedIndexer {
         let mut index_writer = InvertedIndexBlobWriter::new(tx.compat_write());
 
         let (index_finish, puffin_add_blob) = futures::join!(
-            self.index_creator.finish(&mut index_writer),
+            // TODO(zhongzc): config bitmap type
+            self.index_creator
+                .finish(&mut index_writer, index::bitmap::BitmapType::Roaring),
             puffin_writer.put_blob(
                 INDEX_BLOB_TYPE,
                 rx.compat(),

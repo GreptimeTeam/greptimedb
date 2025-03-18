@@ -42,6 +42,14 @@ use crate::worker::WorkerId;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("External error, context: {}", context))]
+    External {
+        source: BoxedError,
+        context: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to encode sparse primary key, reason: {}", reason))]
     EncodeSparsePrimaryKey {
         reason: String,
@@ -968,6 +976,9 @@ pub enum Error {
 
     #[snafu(display("Manual compaction is override by following operations."))]
     ManualCompactionOverride {},
+
+    #[snafu(display("Incompatible WAL provider change. This is typically caused by changing WAL provider in database config file without completely cleaning existing files. Global provider: {}, region provider: {}", global, region))]
+    IncompatibleWalProviderChange { global: String, region: String },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -1087,6 +1098,8 @@ impl ErrorExt for Error {
             InvalidConfig { .. } => StatusCode::InvalidArguments,
             StaleLogEntry { .. } => StatusCode::Unexpected,
 
+            External { source, .. } => source.status_code(),
+
             FilterRecordBatch { source, .. } => source.status_code(),
 
             Download { .. } | Upload { .. } => StatusCode::StorageUnavailable,
@@ -1114,6 +1127,8 @@ impl ErrorExt for Error {
             }
 
             ManualCompactionOverride {} => StatusCode::Cancelled,
+
+            IncompatibleWalProviderChange { .. } => StatusCode::InvalidArguments,
         }
     }
 

@@ -266,7 +266,7 @@ mod tests {
         ];
 
         let schema = Arc::new(datatypes::schema::Schema::new(columns));
-        let table_meta = TableMetaBuilder::default()
+        let table_meta = TableMetaBuilder::empty()
             .schema(schema)
             .primary_key_indices(vec![])
             .value_indices(vec![0])

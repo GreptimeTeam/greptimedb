@@ -91,7 +91,15 @@ impl QueryEngineState {
         plugins: Plugins,
     ) -> Self {
         let runtime_env = Arc::new(RuntimeEnv::default());
-        let session_config = SessionConfig::new().with_create_default_catalog_and_schema(false);
+        let mut session_config = SessionConfig::new().with_create_default_catalog_and_schema(false);
+
+        // todo(hl): This serves as a workaround for https://github.com/GreptimeTeam/greptimedb/issues/5659
+        // and we can add that check back once we upgrade datafusion.
+        session_config
+            .options_mut()
+            .execution
+            .skip_physical_aggregate_schema_check = true;
+
         // Apply extension rules
         let mut extension_rules = Vec::new();
 

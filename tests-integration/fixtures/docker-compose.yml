@@ -67,6 +67,18 @@ services:
       - POSTGRES_DB=postgres
       - POSTGRES_PASSWORD=admin
 
+  mysql:
+    image: bitnami/mysql:5.7
+    ports:
+      - 3306:3306
+    volumes:
+      - ~/apps/mysql:/var/lib/mysql
+    environment:
+      - MYSQL_DATABASE=mysql
+      - MYSQL_USER=greptimedb
+      - MYSQL_PASSWORD=admin
+      - MYSQL_ROOT_PASSWORD=admin
+
 volumes:
   minio_data:
     driver: local

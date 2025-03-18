@@ -37,7 +37,7 @@ use crate::peer::{Peer, PeerLookupService};
 use crate::region_keeper::MemoryRegionKeeper;
 use crate::sequence::SequenceBuilder;
 use crate::wal_options_allocator::WalOptionsAllocator;
-use crate::{ClusterId, DatanodeId, FlownodeId};
+use crate::{DatanodeId, FlownodeId};
 
 #[async_trait::async_trait]
 pub trait MockDatanodeHandler: Sync + Send + Clone {
@@ -189,11 +189,11 @@ pub struct NoopPeerLookupService;
 
 #[async_trait::async_trait]
 impl PeerLookupService for NoopPeerLookupService {
-    async fn datanode(&self, _cluster_id: ClusterId, id: DatanodeId) -> Result<Option<Peer>> {
+    async fn datanode(&self, id: DatanodeId) -> Result<Option<Peer>> {
         Ok(Some(Peer::empty(id)))
     }
 
-    async fn flownode(&self, _cluster_id: ClusterId, id: FlownodeId) -> Result<Option<Peer>> {
+    async fn flownode(&self, id: FlownodeId) -> Result<Option<Peer>> {
         Ok(Some(Peer::empty(id)))
     }
 }

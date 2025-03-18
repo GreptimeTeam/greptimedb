@@ -295,14 +295,10 @@ impl StartCommand {
         let cache_ttl = meta_client_options.metadata_cache_ttl;
         let cache_tti = meta_client_options.metadata_cache_tti;
 
-        let cluster_id = 0; // (TODO: jeremy): It is currently a reserved field and has not been enabled.
-        let meta_client = meta_client::create_meta_client(
-            cluster_id,
-            MetaClientType::Frontend,
-            meta_client_options,
-        )
-        .await
-        .context(MetaClientInitSnafu)?;
+        let meta_client =
+            meta_client::create_meta_client(MetaClientType::Frontend, meta_client_options)
+                .await
+                .context(MetaClientInitSnafu)?;
 
         // TODO(discord9): add helper function to ease the creation of cache registry&such
         let cached_meta_backend =
@@ -444,7 +440,7 @@ mod tests {
 
             [http]
             addr = "127.0.0.1:4000"
-            timeout = "30s"
+            timeout = "0s"
             body_limit = "2GB"
 
             [opentsdb]
@@ -452,7 +448,7 @@ mod tests {
 
             [logging]
             level = "debug"
-            dir = "/tmp/greptimedb/test/logs"
+            dir = "./greptimedb_data/test/logs"
         "#;
         write!(file, "{}", toml_str).unwrap();
 
@@ -465,12 +461,15 @@ mod tests {
         let fe_opts = command.load_options(&Default::default()).unwrap().component;
 
         assert_eq!("127.0.0.1:4000".to_string(), fe_opts.http.addr);
-        assert_eq!(Duration::from_secs(30), fe_opts.http.timeout);
+        assert_eq!(Duration::from_secs(0), fe_opts.http.timeout);
 
         assert_eq!(ReadableSize::gb(2), fe_opts.http.body_limit);
 
         assert_eq!("debug", fe_opts.logging.level.as_ref().unwrap());
-        assert_eq!("/tmp/greptimedb/test/logs".to_string(), fe_opts.logging.dir);
+        assert_eq!(
+            "./greptimedb_data/test/logs".to_string(),
+            fe_opts.logging.dir
+        );
         assert!(!fe_opts.opentsdb.enable);
     }
 
@@ -509,7 +508,7 @@ mod tests {
 
         let options = cmd
             .load_options(&GlobalOptions {
-                log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
+                log_dir: Some("./greptimedb_data/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
 
                 #[cfg(feature = "tokio-console")]
@@ -519,7 +518,7 @@ mod tests {
             .component;
 
         let logging_opt = options.logging;
-        assert_eq!("/tmp/greptimedb/test/logs", logging_opt.dir);
+        assert_eq!("./greptimedb_data/test/logs", logging_opt.dir);
         assert_eq!("debug", logging_opt.level.as_ref().unwrap());
     }
 

@@ -287,7 +287,6 @@ impl StartCommand {
             .await
             .context(StartDatanodeSnafu)?;
 
-        let cluster_id = 0; // TODO(hl): read from config
         let member_id = opts
             .node_id
             .context(MissingConfigSnafu { msg: "'node_id'" })?;
@@ -296,13 +295,10 @@ impl StartCommand {
             msg: "'meta_client_options'",
         })?;
 
-        let meta_client = meta_client::create_meta_client(
-            cluster_id,
-            MetaClientType::Datanode { member_id },
-            meta_config,
-        )
-        .await
-        .context(MetaClientInitSnafu)?;
+        let meta_client =
+            meta_client::create_meta_client(MetaClientType::Datanode { member_id }, meta_config)
+                .await
+                .context(MetaClientInitSnafu)?;
 
         let meta_backend = Arc::new(MetaKvBackend {
             client: meta_client.clone(),
@@ -410,7 +406,7 @@ mod tests {
             sync_write = false
 
             [storage]
-            data_home = "/tmp/greptimedb/"
+            data_home = "./greptimedb_data/"
             type = "File"
 
             [[storage.providers]]
@@ -424,7 +420,7 @@ mod tests {
 
             [logging]
             level = "debug"
-            dir = "/tmp/greptimedb/test/logs"
+            dir = "./greptimedb_data/test/logs"
         "#;
         write!(file, "{}", toml_str).unwrap();
 
@@ -471,7 +467,7 @@ mod tests {
         assert_eq!(10000, ddl_timeout.as_millis());
         assert_eq!(3000, timeout.as_millis());
         assert!(tcp_nodelay);
-        assert_eq!("/tmp/greptimedb/", options.storage.data_home);
+        assert_eq!("./greptimedb_data/", options.storage.data_home);
         assert!(matches!(
             &options.storage.store,
             ObjectStoreConfig::File(FileConfig { .. })
@@ -487,7 +483,10 @@ mod tests {
         ));
 
         assert_eq!("debug", options.logging.level.unwrap());
-        assert_eq!("/tmp/greptimedb/test/logs".to_string(), options.logging.dir);
+        assert_eq!(
+            "./greptimedb_data/test/logs".to_string(),
+            options.logging.dir
+        );
     }
 
     #[test]
@@ -530,7 +529,7 @@ mod tests {
 
         let options = cmd
             .load_options(&GlobalOptions {
-                log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
+                log_dir: Some("./greptimedb_data/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
 
                 #[cfg(feature = "tokio-console")]
@@ -540,7 +539,7 @@ mod tests {
             .component;
 
         let logging_opt = options.logging;
-        assert_eq!("/tmp/greptimedb/test/logs", logging_opt.dir);
+        assert_eq!("./greptimedb_data/test/logs", logging_opt.dir);
         assert_eq!("debug", logging_opt.level.as_ref().unwrap());
     }
 
@@ -569,11 +568,11 @@ mod tests {
 
             [storage]
             type = "File"
-            data_home = "/tmp/greptimedb/"
+            data_home = "./greptimedb_data/"
 
             [logging]
             level = "debug"
-            dir = "/tmp/greptimedb/test/logs"
+            dir = "./greptimedb_data/test/logs"
         "#;
         write!(file, "{}", toml_str).unwrap();
 

@@ -31,7 +31,7 @@ use datatypes::arrow::datatypes::SchemaRef;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::RegionEngineRef;
-use store_api::storage::{RegionId, ScanRequest, TimeSeriesRowSelector};
+use store_api::storage::{RegionId, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector};
 use table::table::scan::RegionScanExec;
 
 use crate::error::{GetRegionMetadataSnafu, Result};
@@ -175,10 +175,10 @@ impl TableProvider for DummyTableProvider {
 
         let scanner = self
             .engine
-            .handle_query(self.region_id, request)
+            .handle_query(self.region_id, request.clone())
             .await
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
-        Ok(Arc::new(RegionScanExec::new(scanner)))
+        Ok(Arc::new(RegionScanExec::new(scanner, request)?))
     }
 
     fn supports_filters_pushdown(
@@ -193,7 +193,11 @@ impl TableProvider for DummyTableProvider {
                     if self
                         .metadata
                         .column_by_name(simple_filter.column_name())
-                        .and_then(|c| (c.semantic_type == SemanticType::Tag).then_some(()))
+                        .and_then(|c| {
+                            (c.semantic_type == SemanticType::Tag
+                                || c.semantic_type == SemanticType::Timestamp)
+                                .then_some(())
+                        })
                         .is_some()
                     {
                         TableProviderFilterPushDown::Exact
@@ -227,6 +231,11 @@ impl DummyTableProvider {
     /// Sets the ordering hint of the query to the provider.
     pub fn with_ordering_hint(&self, order_opts: &[OrderOption]) {
         self.scan_request.lock().unwrap().output_ordering = Some(order_opts.to_vec());
+    }
+
+    /// Sets the distribution hint of the query to the provider.
+    pub fn with_distribution(&self, distribution: TimeSeriesDistribution) {
+        self.scan_request.lock().unwrap().distribution = Some(distribution);
     }
 
     /// Sets the time series selector hint of the query to the provider.

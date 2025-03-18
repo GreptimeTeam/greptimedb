@@ -24,7 +24,6 @@ use common_base::bytes::{Bytes, StringBytes};
 use common_decimal::Decimal128;
 use common_telemetry::error;
 use common_time::date::Date;
-use common_time::datetime::DateTime;
 use common_time::interval::IntervalUnit;
 use common_time::time::Time;
 use common_time::timestamp::{TimeUnit, Timestamp};
@@ -75,7 +74,6 @@ pub enum Value {
 
     // Date & Time types:
     Date(Date),
-    DateTime(DateTime),
     Timestamp(Timestamp),
     Time(Time),
     Duration(Duration),
@@ -112,7 +110,6 @@ impl Display for Value {
                 write!(f, "{hex}")
             }
             Value::Date(v) => write!(f, "{v}"),
-            Value::DateTime(v) => write!(f, "{v}"),
             Value::Timestamp(v) => write!(f, "{}", v.to_iso8601_string()),
             Value::Time(t) => write!(f, "{}", t.to_iso8601_string()),
             Value::IntervalYearMonth(v) => {
@@ -162,7 +159,6 @@ macro_rules! define_data_type_func {
                 $struct::String(_) => ConcreteDataType::string_datatype(),
                 $struct::Binary(_) => ConcreteDataType::binary_datatype(),
                 $struct::Date(_) => ConcreteDataType::date_datatype(),
-                $struct::DateTime(_) => ConcreteDataType::datetime_datatype(),
                 $struct::Time(t) => ConcreteDataType::time_datatype(*t.unit()),
                 $struct::Timestamp(v) => ConcreteDataType::timestamp_datatype(v.unit()),
                 $struct::IntervalYearMonth(_) => {
@@ -222,7 +218,6 @@ impl Value {
             Value::String(v) => ValueRef::String(v.as_utf8()),
             Value::Binary(v) => ValueRef::Binary(v),
             Value::Date(v) => ValueRef::Date(*v),
-            Value::DateTime(v) => ValueRef::DateTime(*v),
             Value::List(v) => ValueRef::List(ListValueRef::Ref { val: v }),
             Value::Timestamp(v) => ValueRef::Timestamp(*v),
             Value::Time(v) => ValueRef::Time(*v),
@@ -254,14 +249,6 @@ impl Value {
     pub fn as_date(&self) -> Option<Date> {
         match self {
             Value::Date(t) => Some(*t),
-            _ => None,
-        }
-    }
-
-    /// Cast Value to DateTime. Return None if value is not a valid datetime data type.
-    pub fn as_datetime(&self) -> Option<DateTime> {
-        match self {
-            Value::DateTime(t) => Some(*t),
             _ => None,
         }
     }
@@ -298,6 +285,20 @@ impl Value {
         }
     }
 
+    /// Cast Value to i64. Return None if value is not a valid int64 data type.
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            Value::Int8(v) => Some(*v as _),
+            Value::Int16(v) => Some(*v as _),
+            Value::Int32(v) => Some(*v as _),
+            Value::Int64(v) => Some(*v),
+            Value::UInt8(v) => Some(*v as _),
+            Value::UInt16(v) => Some(*v as _),
+            Value::UInt32(v) => Some(*v as _),
+            _ => None,
+        }
+    }
+
     /// Cast Value to u64. Return None if value is not a valid uint64 data type.
     pub fn as_u64(&self) -> Option<u64> {
         match self {
@@ -308,7 +309,6 @@ impl Value {
             _ => None,
         }
     }
-
     /// Cast Value to f64. Return None if it's not castable;
     pub fn as_f64_lossy(&self) -> Option<f64> {
         match self {
@@ -345,7 +345,6 @@ impl Value {
             Value::Binary(_) => LogicalTypeId::Binary,
             Value::List(_) => LogicalTypeId::List,
             Value::Date(_) => LogicalTypeId::Date,
-            Value::DateTime(_) => LogicalTypeId::DateTime,
             Value::Timestamp(t) => match t.unit() {
                 TimeUnit::Second => LogicalTypeId::TimestampSecond,
                 TimeUnit::Millisecond => LogicalTypeId::TimestampMillisecond,
@@ -401,7 +400,6 @@ impl Value {
             Value::String(v) => ScalarValue::Utf8(Some(v.as_utf8().to_string())),
             Value::Binary(v) => ScalarValue::Binary(Some(v.to_vec())),
             Value::Date(v) => ScalarValue::Date32(Some(v.val())),
-            Value::DateTime(v) => ScalarValue::Date64(Some(v.val())),
             Value::Null => to_null_scalar_value(output_type)?,
             Value::List(list) => {
                 // Safety: The logical type of the value and output_type are the same.
@@ -463,7 +461,6 @@ impl Value {
             Value::Float64(x) => Some(Value::Float64(-*x)),
             Value::Decimal128(x) => Some(Value::Decimal128(x.negative())),
             Value::Date(x) => Some(Value::Date(x.negative())),
-            Value::DateTime(x) => Some(Value::DateTime(x.negative())),
             Value::Timestamp(x) => Some(Value::Timestamp(x.negative())),
             Value::Time(x) => Some(Value::Time(x.negative())),
             Value::Duration(x) => Some(Value::Duration(x.negative())),
@@ -525,7 +522,6 @@ pub fn to_null_scalar_value(output_type: &ConcreteDataType) -> Result<ScalarValu
         }
         ConcreteDataType::String(_) => ScalarValue::Utf8(None),
         ConcreteDataType::Date(_) => ScalarValue::Date32(None),
-        ConcreteDataType::DateTime(_) => ScalarValue::Date64(None),
         ConcreteDataType::Timestamp(t) => timestamp_to_scalar_value(t.unit(), None),
         ConcreteDataType::Interval(v) => match v {
             IntervalType::YearMonth(_) => ScalarValue::IntervalYearMonth(None),
@@ -631,7 +627,6 @@ macro_rules! impl_ord_for_value_like {
                 ($Type::String(v1), $Type::String(v2)) => v1.cmp(v2),
                 ($Type::Binary(v1), $Type::Binary(v2)) => v1.cmp(v2),
                 ($Type::Date(v1), $Type::Date(v2)) => v1.cmp(v2),
-                ($Type::DateTime(v1), $Type::DateTime(v2)) => v1.cmp(v2),
                 ($Type::Timestamp(v1), $Type::Timestamp(v2)) => v1.cmp(v2),
                 ($Type::Time(v1), $Type::Time(v2)) => v1.cmp(v2),
                 ($Type::IntervalYearMonth(v1), $Type::IntervalYearMonth(v2)) => v1.cmp(v2),
@@ -712,7 +707,6 @@ impl_try_from_value!(String, StringBytes);
 impl_try_from_value!(Binary, Bytes);
 impl_try_from_value!(Date, Date);
 impl_try_from_value!(Time, Time);
-impl_try_from_value!(DateTime, DateTime);
 impl_try_from_value!(Timestamp, Timestamp);
 impl_try_from_value!(IntervalYearMonth, IntervalYearMonth);
 impl_try_from_value!(IntervalDayTime, IntervalDayTime);
@@ -756,7 +750,6 @@ impl_value_from!(String, StringBytes);
 impl_value_from!(Binary, Bytes);
 impl_value_from!(Date, Date);
 impl_value_from!(Time, Time);
-impl_value_from!(DateTime, DateTime);
 impl_value_from!(Timestamp, Timestamp);
 impl_value_from!(IntervalYearMonth, IntervalYearMonth);
 impl_value_from!(IntervalDayTime, IntervalDayTime);
@@ -803,7 +796,6 @@ impl TryFrom<Value> for serde_json::Value {
             Value::String(bytes) => serde_json::Value::String(bytes.into_string()),
             Value::Binary(bytes) => serde_json::to_value(bytes)?,
             Value::Date(v) => serde_json::Value::Number(v.val().into()),
-            Value::DateTime(v) => serde_json::Value::Number(v.val().into()),
             Value::List(v) => serde_json::to_value(v)?,
             Value::Timestamp(v) => serde_json::to_value(v.value())?,
             Value::Time(v) => serde_json::to_value(v.value())?,
@@ -933,9 +925,6 @@ impl TryFrom<ScalarValue> for Value {
                 Value::List(ListValue::new(items, datatype))
             }
             ScalarValue::Date32(d) => d.map(|x| Value::Date(Date::new(x))).unwrap_or(Value::Null),
-            ScalarValue::Date64(d) => d
-                .map(|x| Value::DateTime(DateTime::new(x)))
-                .unwrap_or(Value::Null),
             ScalarValue::TimestampSecond(t, _) => t
                 .map(|x| Value::Timestamp(Timestamp::new(x, TimeUnit::Second)))
                 .unwrap_or(Value::Null),
@@ -994,7 +983,8 @@ impl TryFrom<ScalarValue> for Value {
             | ScalarValue::Float16(_)
             | ScalarValue::Utf8View(_)
             | ScalarValue::BinaryView(_)
-            | ScalarValue::Map(_) => {
+            | ScalarValue::Map(_)
+            | ScalarValue::Date64(_) => {
                 return error::UnsupportedArrowTypeSnafu {
                     arrow_type: v.data_type(),
                 }
@@ -1023,7 +1013,6 @@ impl From<ValueRef<'_>> for Value {
             ValueRef::String(v) => Value::String(v.into()),
             ValueRef::Binary(v) => Value::Binary(v.into()),
             ValueRef::Date(v) => Value::Date(v),
-            ValueRef::DateTime(v) => Value::DateTime(v),
             ValueRef::Timestamp(v) => Value::Timestamp(v),
             ValueRef::Time(v) => Value::Time(v),
             ValueRef::IntervalYearMonth(v) => Value::IntervalYearMonth(v),
@@ -1063,7 +1052,6 @@ pub enum ValueRef<'a> {
 
     // Date & Time types:
     Date(Date),
-    DateTime(DateTime),
     Timestamp(Timestamp),
     Time(Time),
     Duration(Duration),
@@ -1175,11 +1163,6 @@ impl<'a> ValueRef<'a> {
         impl_as_for_value_ref!(self, Date)
     }
 
-    /// Cast itself to [DateTime].
-    pub fn as_datetime(&self) -> Result<Option<DateTime>> {
-        impl_as_for_value_ref!(self, DateTime)
-    }
-
     /// Cast itself to [Timestamp].
     pub fn as_timestamp(&self) -> Result<Option<Timestamp>> {
         impl_as_for_value_ref!(self, Timestamp)
@@ -1263,7 +1246,6 @@ impl_value_ref_from!(Int64, i64);
 impl_value_ref_from!(Float32, f32);
 impl_value_ref_from!(Float64, f64);
 impl_value_ref_from!(Date, Date);
-impl_value_ref_from!(DateTime, DateTime);
 impl_value_ref_from!(Timestamp, Timestamp);
 impl_value_ref_from!(Time, Time);
 impl_value_ref_from!(IntervalYearMonth, IntervalYearMonth);
@@ -1327,7 +1309,6 @@ pub fn transform_value_ref_to_json_value<'a>(
             }
         }
         ValueRef::Date(v) => serde_json::Value::Number(v.val().into()),
-        ValueRef::DateTime(v) => serde_json::Value::Number(v.val().into()),
         ValueRef::List(v) => serde_json::to_value(v)?,
         ValueRef::Timestamp(v) => serde_json::to_value(v.value())?,
         ValueRef::Time(v) => serde_json::to_value(v.value())?,
@@ -1426,7 +1407,6 @@ impl ValueRef<'_> {
             ValueRef::String(v) => std::mem::size_of_val(v),
             ValueRef::Binary(v) => std::mem::size_of_val(v),
             ValueRef::Date(_) => 4,
-            ValueRef::DateTime(_) => 8,
             ValueRef::Timestamp(_) => 16,
             ValueRef::Time(_) => 16,
             ValueRef::Duration(_) => 16,
@@ -1462,7 +1442,9 @@ pub fn column_data_to_json(data: ValueData) -> JsonValue {
             .unwrap_or(JsonValue::Null),
         ValueData::StringValue(s) => JsonValue::String(s),
         ValueData::DateValue(d) => JsonValue::String(Date::from(d).to_string()),
-        ValueData::DatetimeValue(d) => JsonValue::String(DateTime::from(d).to_string()),
+        ValueData::DatetimeValue(d) => {
+            JsonValue::String(Timestamp::new_microsecond(d).to_iso8601_string())
+        }
         ValueData::TimeSecondValue(d) => JsonValue::String(Time::new_second(d).to_iso8601_string()),
         ValueData::TimeMillisecondValue(d) => {
             JsonValue::String(Time::new_millisecond(d).to_iso8601_string())
@@ -1511,6 +1493,7 @@ mod tests {
 
     #[test]
     fn test_column_data_to_json() {
+        set_default_timezone(Some("Asia/Shanghai")).unwrap();
         assert_eq!(
             column_data_to_json(ValueData::BinaryValue(b"hello".to_vec())),
             JsonValue::String("aGVsbG8=".to_string())
@@ -1569,31 +1552,31 @@ mod tests {
         );
         assert_eq!(
             column_data_to_json(ValueData::DatetimeValue(456)),
-            JsonValue::String("1970-01-01 00:00:00.456+0000".to_string())
+            JsonValue::String("1970-01-01 08:00:00.000456+0800".to_string())
         );
         assert_eq!(
             column_data_to_json(ValueData::TimeSecondValue(789)),
-            JsonValue::String("00:13:09+0000".to_string())
+            JsonValue::String("08:13:09+0800".to_string())
         );
         assert_eq!(
             column_data_to_json(ValueData::TimeMillisecondValue(789)),
-            JsonValue::String("00:00:00.789+0000".to_string())
+            JsonValue::String("08:00:00.789+0800".to_string())
         );
         assert_eq!(
             column_data_to_json(ValueData::TimeMicrosecondValue(789)),
-            JsonValue::String("00:00:00.000789+0000".to_string())
+            JsonValue::String("08:00:00.000789+0800".to_string())
         );
         assert_eq!(
             column_data_to_json(ValueData::TimestampMillisecondValue(1234567890)),
-            JsonValue::String("1970-01-15 06:56:07.890+0000".to_string())
+            JsonValue::String("1970-01-15 14:56:07.890+0800".to_string())
         );
         assert_eq!(
             column_data_to_json(ValueData::TimestampNanosecondValue(1234567890123456789)),
-            JsonValue::String("2009-02-13 23:31:30.123456789+0000".to_string())
+            JsonValue::String("2009-02-14 07:31:30.123456789+0800".to_string())
         );
         assert_eq!(
             column_data_to_json(ValueData::TimestampSecondValue(1234567890)),
-            JsonValue::String("2009-02-13 23:31:30+0000".to_string())
+            JsonValue::String("2009-02-14 07:31:30+0800".to_string())
         );
         assert_eq!(
             column_data_to_json(ValueData::IntervalYearMonthValue(12)),
@@ -1757,12 +1740,6 @@ mod tests {
             ScalarValue::Date32(Some(123)).try_into().unwrap()
         );
         assert_eq!(Value::Null, ScalarValue::Date32(None).try_into().unwrap());
-
-        assert_eq!(
-            Value::DateTime(DateTime::new(456)),
-            ScalarValue::Date64(Some(456)).try_into().unwrap()
-        );
-        assert_eq!(Value::Null, ScalarValue::Date64(None).try_into().unwrap());
 
         assert_eq!(
             Value::Timestamp(Timestamp::new(1, TimeUnit::Second)),
@@ -2028,10 +2005,6 @@ mod tests {
             &Value::Date(Date::new(1)),
         );
         check_type_and_value(
-            &ConcreteDataType::datetime_datatype(),
-            &Value::DateTime(DateTime::new(1)),
-        );
-        check_type_and_value(
             &ConcreteDataType::timestamp_millisecond_datatype(),
             &Value::Timestamp(Timestamp::new_millisecond(1)),
         );
@@ -2170,11 +2143,6 @@ mod tests {
             to_json(Value::Date(Date::new(5000)))
         );
         assert_eq!(
-            serde_json::Value::Number(5000i64.into()),
-            to_json(Value::DateTime(DateTime::new(5000)))
-        );
-
-        assert_eq!(
             serde_json::Value::Number(1.into()),
             to_json(Value::Timestamp(Timestamp::new_millisecond(1)))
         );
@@ -2259,7 +2227,6 @@ mod tests {
         );
 
         check_as_value_ref!(Date, Date::new(103));
-        check_as_value_ref!(DateTime, DateTime::new(1034));
 
         let list = ListValue {
             items: vec![],
@@ -2291,7 +2258,6 @@ mod tests {
         check_as_null!(as_string);
         check_as_null!(as_boolean);
         check_as_null!(as_date);
-        check_as_null!(as_datetime);
         check_as_null!(as_list);
 
         macro_rules! check_as_correct {
@@ -2304,7 +2270,6 @@ mod tests {
         check_as_correct!("hello".as_bytes(), Binary, as_binary);
         check_as_correct!(true, Boolean, as_boolean);
         check_as_correct!(Date::new(123), Date, as_date);
-        check_as_correct!(DateTime::new(12), DateTime, as_datetime);
         check_as_correct!(Time::new_second(12), Time, as_time);
         check_as_correct!(Duration::new_second(12), Duration, as_duration);
         let list = ListValue {
@@ -2318,7 +2283,6 @@ mod tests {
         assert!(wrong_value.as_string().is_err());
         assert!(wrong_value.as_boolean().is_err());
         assert!(wrong_value.as_date().is_err());
-        assert!(wrong_value.as_datetime().is_err());
         assert!(wrong_value.as_list().is_err());
         assert!(wrong_value.as_time().is_err());
         assert!(wrong_value.as_timestamp().is_err());
@@ -2346,10 +2310,6 @@ mod tests {
             "010203"
         );
         assert_eq!(Value::Date(Date::new(0)).to_string(), "1970-01-01");
-        assert_eq!(
-            Value::DateTime(DateTime::new(0)).to_string(),
-            "1970-01-01 08:00:00+0800"
-        );
         assert_eq!(
             Value::Timestamp(Timestamp::new(1000, TimeUnit::Millisecond)).to_string(),
             "1970-01-01 08:00:01+0800"
@@ -2755,7 +2715,6 @@ mod tests {
         check_value_ref_size_eq(&ValueRef::String("greptimedb"), 10);
         check_value_ref_size_eq(&ValueRef::Binary(b"greptimedb"), 10);
         check_value_ref_size_eq(&ValueRef::Date(Date::new(1)), 4);
-        check_value_ref_size_eq(&ValueRef::DateTime(DateTime::new(1)), 8);
         check_value_ref_size_eq(&ValueRef::Timestamp(Timestamp::new_millisecond(1)), 16);
         check_value_ref_size_eq(&ValueRef::Time(Time::new_millisecond(1)), 16);
         check_value_ref_size_eq(&ValueRef::IntervalYearMonth(IntervalYearMonth::new(1)), 4);

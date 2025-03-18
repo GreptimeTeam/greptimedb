@@ -91,7 +91,7 @@ env:
   # The scheduled version is '${{ env.NEXT_RELEASE_VERSION }}-nightly-YYYYMMDD', like v0.2.0-nigthly-20230313;
   NIGHTLY_RELEASE_PREFIX: nightly
   # Note: The NEXT_RELEASE_VERSION should be modified manually by every formal release.
-  NEXT_RELEASE_VERSION: v0.13.0
+  NEXT_RELEASE_VERSION: v0.14.0
 
 jobs:
   allocate-runners:

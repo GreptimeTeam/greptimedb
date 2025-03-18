@@ -19,14 +19,19 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Instant;
 
+use api::v1::SemanticType;
 use common_error::ext::BoxedError;
+use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::{debug, error, tracing, warn};
 use common_time::range::TimestampRange;
+use datafusion_common::Column;
 use datafusion_expr::utils::expr_to_columns;
+use datafusion_expr::Expr;
 use smallvec::SmallVec;
+use store_api::metadata::RegionMetadata;
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
-use store_api::storage::{ScanRequest, TimeSeriesRowSelector};
+use store_api::storage::{ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector};
 use table::predicate::{build_time_range_predicate, Predicate};
 use tokio::sync::{mpsc, Semaphore};
 use tokio_stream::wrappers::ReceiverStream;
@@ -282,9 +287,16 @@ impl ScanRegion {
 
     /// Returns true if the region can use unordered scan for current request.
     fn use_unordered_scan(&self) -> bool {
-        // If table is append only and there is no series row selector, we use unordered scan in query.
+        // We use unordered scan when:
+        // 1. The region is in append mode.
+        // 2. There is no series row selector.
+        // 3. The required distribution is None or TimeSeriesDistribution::TimeWindowed.
+        //
         // We still use seq scan in compaction.
-        self.version.options.append_mode && self.request.series_row_selector.is_none()
+        self.version.options.append_mode
+            && self.request.series_row_selector.is_none()
+            && (self.request.distribution.is_none()
+                || self.request.distribution == Some(TimeSeriesDistribution::TimeWindowed))
     }
 
     /// Creates a scan input.
@@ -339,7 +351,7 @@ impl ScanRegion {
         let inverted_index_applier = self.build_invereted_index_applier();
         let bloom_filter_applier = self.build_bloom_filter_applier();
         let fulltext_index_applier = self.build_fulltext_index_applier();
-        let predicate = Predicate::new(self.request.filters.clone());
+        let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters);
         // The mapper always computes projected column ids as the schema of SSTs may change.
         let mapper = match &self.request.projection {
             Some(p) => ProjectionMapper::new(&self.version.metadata, p.iter().copied())?,
@@ -351,7 +363,7 @@ impl ScanRegion {
             .map(|mem| {
                 let ranges = mem.ranges(
                     Some(mapper.column_ids()),
-                    Some(predicate.clone()),
+                    predicate.clone(),
                     self.request.sequence,
                 );
                 MemRangeBuilder::new(ranges)
@@ -360,7 +372,7 @@ impl ScanRegion {
 
         let input = ScanInput::new(self.access_layer, mapper)
             .with_time_range(Some(time_range))
-            .with_predicate(Some(predicate))
+            .with_predicate(predicate)
             .with_memtables(memtables)
             .with_files(files)
             .with_cache(self.cache_strategy)
@@ -372,7 +384,8 @@ impl ScanRegion {
             .with_append_mode(self.version.options.append_mode)
             .with_filter_deleted(filter_deleted)
             .with_merge_mode(self.version.options.merge_mode())
-            .with_series_row_selector(self.request.series_row_selector);
+            .with_series_row_selector(self.request.series_row_selector)
+            .with_distribution(self.request.distribution);
         Ok(input)
     }
 
@@ -529,7 +542,7 @@ pub(crate) struct ScanInput {
     /// Time range filter for time index.
     time_range: Option<TimestampRange>,
     /// Predicate to push down.
-    pub(crate) predicate: Option<Predicate>,
+    pub(crate) predicate: PredicateGroup,
     /// Memtable range builders for memtables in the time range..
     pub(crate) memtables: Vec<MemRangeBuilder>,
     /// Handles to SST files to scan.
@@ -554,6 +567,8 @@ pub(crate) struct ScanInput {
     pub(crate) merge_mode: MergeMode,
     /// Hint to select rows from time series.
     pub(crate) series_row_selector: Option<TimeSeriesRowSelector>,
+    /// Hint for the required distribution of the scanner.
+    pub(crate) distribution: Option<TimeSeriesDistribution>,
 }
 
 impl ScanInput {
@@ -564,7 +579,7 @@ impl ScanInput {
             access_layer,
             mapper: Arc::new(mapper),
             time_range: None,
-            predicate: None,
+            predicate: PredicateGroup::default(),
             memtables: Vec::new(),
             files: Vec::new(),
             cache_strategy: CacheStrategy::Disabled,
@@ -578,6 +593,7 @@ impl ScanInput {
             filter_deleted: true,
             merge_mode: MergeMode::default(),
             series_row_selector: None,
+            distribution: None,
         }
     }
 
@@ -590,7 +606,7 @@ impl ScanInput {
 
     /// Sets predicate to push down.
     #[must_use]
-    pub(crate) fn with_predicate(mut self, predicate: Option<Predicate>) -> Self {
+    pub(crate) fn with_predicate(mut self, predicate: PredicateGroup) -> Self {
         self.predicate = predicate;
         self
     }
@@ -690,6 +706,16 @@ impl ScanInput {
         self
     }
 
+    /// Sets the distribution hint.
+    #[must_use]
+    pub(crate) fn with_distribution(
+        mut self,
+        distribution: Option<TimeSeriesDistribution>,
+    ) -> Self {
+        self.distribution = distribution;
+        self
+    }
+
     /// Sets the time series row selector.
     #[must_use]
     pub(crate) fn with_series_row_selector(
@@ -743,7 +769,7 @@ impl ScanInput {
         let res = self
             .access_layer
             .read_sst(file.clone())
-            .predicate(self.predicate.clone())
+            .predicate(self.predicate.predicate().cloned())
             .projection(Some(self.mapper.column_ids().to_vec()))
             .cache(self.cache_strategy.clone())
             .inverted_index_applier(self.inverted_index_applier.clone())
@@ -814,8 +840,9 @@ impl ScanInput {
         rows_in_files + rows_in_memtables
     }
 
-    pub(crate) fn predicate(&self) -> Option<Predicate> {
-        self.predicate.clone()
+    /// Returns table predicate of all exprs.
+    pub(crate) fn predicate(&self) -> Option<&Predicate> {
+        self.predicate.predicate()
     }
 
     /// Returns number of memtables to scan.
@@ -915,5 +942,75 @@ impl StreamContext {
             write!(f, ", selector={}", selector)?;
         }
         Ok(())
+    }
+}
+
+/// Predicates to evaluate.
+/// It only keeps filters that [SimpleFilterEvaluator] supports.
+#[derive(Clone, Default)]
+pub struct PredicateGroup {
+    time_filters: Option<Arc<Vec<SimpleFilterEvaluator>>>,
+
+    /// Table predicate for all logical exprs to evaluate.
+    /// Parquet reader uses it to prune row groups.
+    predicate: Option<Predicate>,
+}
+
+impl PredicateGroup {
+    /// Creates a new `PredicateGroup` from exprs according to the metadata.
+    pub fn new(metadata: &RegionMetadata, exprs: &[Expr]) -> Self {
+        let mut time_filters = Vec::with_capacity(exprs.len());
+        // Columns in the expr.
+        let mut columns = HashSet::new();
+        for expr in exprs {
+            columns.clear();
+            let Some(filter) = Self::expr_to_filter(expr, metadata, &mut columns) else {
+                continue;
+            };
+            time_filters.push(filter);
+        }
+        let time_filters = if time_filters.is_empty() {
+            None
+        } else {
+            Some(Arc::new(time_filters))
+        };
+        let predicate = Predicate::new(exprs.to_vec());
+
+        Self {
+            time_filters,
+            predicate: Some(predicate),
+        }
+    }
+
+    /// Returns time filters.
+    pub(crate) fn time_filters(&self) -> Option<Arc<Vec<SimpleFilterEvaluator>>> {
+        self.time_filters.clone()
+    }
+
+    /// Returns predicate of all exprs.
+    pub(crate) fn predicate(&self) -> Option<&Predicate> {
+        self.predicate.as_ref()
+    }
+
+    fn expr_to_filter(
+        expr: &Expr,
+        metadata: &RegionMetadata,
+        columns: &mut HashSet<Column>,
+    ) -> Option<SimpleFilterEvaluator> {
+        columns.clear();
+        // `expr_to_columns` won't return error.
+        // We still ignore these expressions for safety.
+        expr_to_columns(expr, columns).ok()?;
+        if columns.len() > 1 {
+            // Simple filter doesn't support multiple columns.
+            return None;
+        }
+        let column = columns.iter().next()?;
+        let column_meta = metadata.column_by_name(&column.name)?;
+        if column_meta.semantic_type == SemanticType::Timestamp {
+            SimpleFilterEvaluator::try_new(expr)
+        } else {
+            None
+        }
     }
 }

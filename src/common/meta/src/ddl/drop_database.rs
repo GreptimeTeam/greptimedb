@@ -35,7 +35,6 @@ use crate::ddl::DdlContext;
 use crate::error::Result;
 use crate::key::table_name::TableNameValue;
 use crate::lock_key::{CatalogLock, SchemaLock};
-use crate::ClusterId;
 
 pub struct DropDatabaseProcedure {
     /// The context of procedure runtime.
@@ -54,7 +53,6 @@ pub(crate) enum DropTableTarget {
 
 /// Context of [DropDatabaseProcedure] execution.
 pub(crate) struct DropDatabaseContext {
-    cluster_id: ClusterId,
     catalog: String,
     schema: String,
     drop_if_exists: bool,
@@ -87,7 +85,6 @@ impl DropDatabaseProcedure {
         Self {
             runtime_context: context,
             context: DropDatabaseContext {
-                cluster_id: 0,
                 catalog,
                 schema,
                 drop_if_exists,
@@ -108,7 +105,6 @@ impl DropDatabaseProcedure {
         Ok(Self {
             runtime_context,
             context: DropDatabaseContext {
-                cluster_id: 0,
                 catalog,
                 schema,
                 drop_if_exists,

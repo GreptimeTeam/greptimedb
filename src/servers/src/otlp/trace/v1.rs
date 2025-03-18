@@ -27,6 +27,7 @@ use super::{
     SPAN_KIND_COLUMN, SPAN_NAME_COLUMN, TIMESTAMP_COLUMN, TRACE_ID_COLUMN,
 };
 use crate::error::Result;
+use crate::otlp::trace::{KEY_SERVICE_NAME, SPAN_EVENTS_COLUMN};
 use crate::otlp::utils::{any_value_to_jsonb, make_column_data, make_string_column_data};
 use crate::query_handler::PipelineHandlerRef;
 use crate::row_writer::{self, MultiTableData, TableData};
@@ -102,8 +103,18 @@ pub fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> 
     row_writer::write_tags(writer, tags.into_iter(), &mut row)?;
 
     // write fields
+    if let Some(parent_span_id) = span.parent_span_id {
+        row_writer::write_fields(
+            writer,
+            std::iter::once(make_string_column_data(
+                PARENT_SPAN_ID_COLUMN,
+                parent_span_id,
+            )),
+            &mut row,
+        )?;
+    }
+
     let fields = vec![
-        make_string_column_data(PARENT_SPAN_ID_COLUMN, span.parent_span_id),
         make_string_column_data(SPAN_KIND_COLUMN, span.span_kind),
         make_string_column_data(SPAN_NAME_COLUMN, span.span_name),
         make_string_column_data("span_status_code", span.span_status_code),
@@ -131,7 +142,12 @@ pub fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> 
         &mut row,
     )?;
 
-    row_writer::write_json(writer, "span_events", span.span_events.into(), &mut row)?;
+    row_writer::write_json(
+        writer,
+        SPAN_EVENTS_COLUMN,
+        span.span_events.into(),
+        &mut row,
+    )?;
     row_writer::write_json(writer, "span_links", span.span_links.into(), &mut row)?;
 
     writer.add_row(row);
@@ -149,7 +165,7 @@ fn write_attributes(
         let key_suffix = attr.key;
         // skip resource_attributes.service.name because its already copied to
         // top level as `SERVICE_NAME_COLUMN`
-        if prefix == "resource_attributes" && key_suffix == "service.name" {
+        if prefix == "resource_attributes" && key_suffix == KEY_SERVICE_NAME {
             continue;
         }
 

@@ -23,6 +23,7 @@ use opentelemetry_proto::tonic::trace::v1::{Span, Status};
 use serde::Serialize;
 
 use super::attributes::Attributes;
+use crate::otlp::trace::KEY_SERVICE_NAME;
 use crate::otlp::utils::bytes_to_hex_string;
 
 #[derive(Debug, Clone)]
@@ -31,22 +32,22 @@ pub struct TraceSpan {
     pub service_name: Option<String>,
     pub trace_id: String,
     pub span_id: String,
-    pub parent_span_id: String,
+    pub parent_span_id: Option<String>,
 
     // the following are fields
-    pub resource_attributes: Attributes, // TODO(yuanbohan): Map in the future
+    pub resource_attributes: Attributes,
     pub scope_name: String,
     pub scope_version: String,
-    pub scope_attributes: Attributes, // TODO(yuanbohan): Map in the future
+    pub scope_attributes: Attributes,
     pub trace_state: String,
     pub span_name: String,
     pub span_kind: String,
     pub span_status_code: String,
     pub span_status_message: String,
-    pub span_attributes: Attributes, // TODO(yuanbohan): Map in the future
-    pub span_events: SpanEvents,     // TODO(yuanbohan): List in the future
-    pub span_links: SpanLinks,       // TODO(yuanbohan): List in the future
-    pub start_in_nanosecond: u64,    // this is also the Timestamp Index
+    pub span_attributes: Attributes,
+    pub span_events: SpanEvents,  // TODO(yuanbohan): List in the future
+    pub span_links: SpanLinks,    // TODO(yuanbohan): List in the future
+    pub start_in_nanosecond: u64, // this is also the Timestamp Index
     pub end_in_nanosecond: u64,
 }
 
@@ -202,7 +203,11 @@ pub fn parse_span(
         service_name,
         trace_id: bytes_to_hex_string(&span.trace_id),
         span_id: bytes_to_hex_string(&span.span_id),
-        parent_span_id: bytes_to_hex_string(&span.parent_span_id),
+        parent_span_id: if span.parent_span_id.is_empty() {
+            None
+        } else {
+            Some(bytes_to_hex_string(&span.parent_span_id))
+        },
 
         resource_attributes: Attributes::from(resource_attrs),
         trace_state: span.trace_state,
@@ -251,7 +256,7 @@ pub fn parse(request: ExportTraceServiceRequest) -> TraceSpans {
             .unwrap_or_default();
         let service_name = resource_attrs
             .iter()
-            .find_or_first(|kv| kv.key == "service.name")
+            .find_or_first(|kv| kv.key == KEY_SERVICE_NAME)
             .and_then(|kv| kv.value.clone())
             .and_then(|v| match v.value {
                 Some(any_value::Value::StringValue(s)) => Some(s),

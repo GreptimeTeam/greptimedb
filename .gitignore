@@ -54,3 +54,6 @@ tests-fuzz/corpus/
 # Nix
 .direnv
 .envrc
+
+## default data home
+greptimedb_data

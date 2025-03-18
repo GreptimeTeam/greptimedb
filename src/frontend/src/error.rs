@@ -238,6 +238,13 @@ pub enum Error {
         source: servers::error::Error,
     },
 
+    #[snafu(display("Failed to create logical plan for prometheus label values query"))]
+    PrometheusLabelValuesQueryPlan {
+        #[snafu(implicit)]
+        location: Location,
+        source: query::promql::error::Error,
+    },
+
     #[snafu(display("Failed to describe schema for given statement"))]
     DescribeStatement {
         #[snafu(implicit)]
@@ -365,6 +372,8 @@ impl ErrorExt for Error {
             Error::PromStoreRemoteQueryPlan { source, .. }
             | Error::PrometheusMetricNamesQueryPlan { source, .. }
             | Error::ExecutePromql { source, .. } => source.status_code(),
+
+            Error::PrometheusLabelValuesQueryPlan { source, .. } => source.status_code(),
 
             Error::CollectRecordbatch { .. } => StatusCode::EngineExecuteQuery,
 

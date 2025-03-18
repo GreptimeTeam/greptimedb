@@ -67,7 +67,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.13.0"
+version = "0.14.0"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -129,7 +129,7 @@ etcd-client = "0.14"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "072ce580502e015df1a6b03a185b60309a7c2a7a" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "c5419bbd20cb42e568ec325a4d71a3c94cc327e1" }
 hex = "0.4"
 http = "1"
 humantime = "2.1"
@@ -160,9 +160,7 @@ parquet = { version = "53.0.0", default-features = false, features = ["arrow", "
 paste = "1.0"
 pin-project = "1.0"
 prometheus = { version = "0.13.3", features = ["process"] }
-promql-parser = { git = "https://github.com/GreptimeTeam/promql-parser.git", features = [
-    "ser",
-], rev = "27abb8e16003a50c720f00d6c85f41f5fa2a2a8e" }
+promql-parser = { version = "0.5", features = ["ser"] }
 prost = "0.13"
 raft-engine = { version = "0.4.1", default-features = false }
 rand = "0.8"
@@ -190,6 +188,10 @@ shadow-rs = "0.38"
 similar-asserts = "1.6.0"
 smallvec = { version = "1", features = ["serde"] }
 snafu = "0.8"
+sqlx = { version = "0.8", features = [
+    "runtime-tokio-rustls",
+    "mysql",
+] }
 sysinfo = "0.30"
 # on branch v0.52.x
 sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "71dd86058d2af97b9925093d40c4e03360403170", features = [

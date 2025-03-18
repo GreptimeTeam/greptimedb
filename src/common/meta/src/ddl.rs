@@ -30,7 +30,7 @@ use crate::node_manager::NodeManagerRef;
 use crate::region_keeper::MemoryRegionKeeperRef;
 use crate::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use crate::rpc::procedure::{MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse};
-use crate::{ClusterId, DatanodeId};
+use crate::DatanodeId;
 
 pub mod alter_database;
 pub mod alter_logical_tables;
@@ -57,7 +57,6 @@ pub mod utils;
 
 #[derive(Debug, Default)]
 pub struct ExecutorContext {
-    pub cluster_id: Option<u64>,
     pub tracing_context: Option<W3cTrace>,
 }
 
@@ -90,10 +89,6 @@ pub trait ProcedureExecutor: Send + Sync {
 
 pub type ProcedureExecutorRef = Arc<dyn ProcedureExecutor>;
 
-pub struct TableMetadataAllocatorContext {
-    pub cluster_id: ClusterId,
-}
-
 /// Metadata allocated to a table.
 #[derive(Default)]
 pub struct TableMetadata {
@@ -108,7 +103,7 @@ pub struct TableMetadata {
 
 pub type RegionFailureDetectorControllerRef = Arc<dyn RegionFailureDetectorController>;
 
-pub type DetectingRegion = (ClusterId, DatanodeId, RegionId);
+pub type DetectingRegion = (DatanodeId, RegionId);
 
 /// Used for actively registering Region failure detectors.
 ///

@@ -45,8 +45,15 @@ pub mod constants {
     pub const GREPTIME_DB_HEADER_NAME: &str = "x-greptime-db-name";
     pub const GREPTIME_TIMEZONE_HEADER_NAME: &str = "x-greptime-timezone";
     pub const GREPTIME_DB_HEADER_ERROR_CODE: &str = common_error::GREPTIME_DB_HEADER_ERROR_CODE;
+
+    // Deprecated: pipeline is also used with trace, so we remove log from it.
     pub const GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME: &str = "x-greptime-log-pipeline-name";
     pub const GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME: &str = "x-greptime-log-pipeline-version";
+
+    // More generic pipeline header name
+    pub const GREPTIME_PIPELINE_NAME_HEADER_NAME: &str = "x-greptime-pipeline-name";
+    pub const GREPTIME_PIPELINE_VERSION_HEADER_NAME: &str = "x-greptime-pipeline-version";
+
     pub const GREPTIME_LOG_TABLE_NAME_HEADER_NAME: &str = "x-greptime-log-table-name";
     pub const GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME: &str = "x-greptime-log-extract-keys";
     pub const GREPTIME_TRACE_TABLE_NAME_HEADER_NAME: &str = "x-greptime-trace-table-name";
@@ -72,6 +79,8 @@ pub static GREPTIME_TIMEZONE_HEADER_NAME: HeaderName =
 pub static CONTENT_TYPE_PROTOBUF_STR: &str = "application/x-protobuf";
 pub static CONTENT_TYPE_PROTOBUF: HeaderValue = HeaderValue::from_static(CONTENT_TYPE_PROTOBUF_STR);
 pub static CONTENT_ENCODING_SNAPPY: HeaderValue = HeaderValue::from_static("snappy");
+
+pub static CONTENT_TYPE_NDJSON_STR: &str = "application/x-ndjson";
 
 pub struct GreptimeDbName(Option<String>);
 

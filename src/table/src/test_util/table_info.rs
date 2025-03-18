@@ -23,7 +23,7 @@ pub fn test_table_info(
     catalog_name: &str,
     schema: SchemaRef,
 ) -> TableInfo {
-    let meta = TableMetaBuilder::default()
+    let meta = TableMetaBuilder::empty()
         .schema(schema)
         .primary_key_indices(vec![])
         .value_indices(vec![])

@@ -17,22 +17,23 @@ mod intermediate_rw;
 mod merge_stream;
 
 use async_trait::async_trait;
-use common_base::BitVec;
 use futures::Stream;
 
+use crate::bitmap::Bitmap;
 use crate::inverted_index::error::Result;
+use crate::inverted_index::format::writer::ValueStream;
 use crate::{Bytes, BytesRef};
 
 /// A stream of sorted values along with their associated bitmap
-pub type SortedStream = Box<dyn Stream<Item = Result<(Bytes, BitVec)>> + Send + Unpin>;
+pub type SortedStream = Box<dyn Stream<Item = Result<(Bytes, Bitmap)>> + Send + Unpin>;
 
 /// Output of a sorting operation, encapsulating a bitmap for null values and a stream of sorted items
 pub struct SortOutput {
     /// Bitmap indicating which segments have null values
-    pub segment_null_bitmap: BitVec,
+    pub segment_null_bitmap: Bitmap,
 
     /// Stream of sorted items
-    pub sorted_stream: SortedStream,
+    pub sorted_stream: ValueStream,
 
     /// Total number of rows in the sorted data
     pub total_row_count: usize,

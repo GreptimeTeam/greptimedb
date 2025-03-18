@@ -28,6 +28,7 @@ use crate::error::{RegionBusySnafu, RegionNotFoundSnafu, Result};
 use crate::manifest::action::{
     RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionTruncate,
 };
+use crate::metrics::WRITE_CACHE_INFLIGHT_DOWNLOAD;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{
     BackgroundNotify, OptionOutputTx, RegionChangeResult, RegionEditRequest, RegionEditResult,
@@ -329,8 +330,19 @@ async fn edit_region(
 
             let index_key = IndexKey::new(region_id, file_meta.file_id, FileType::Parquet);
             let remote_path = location::sst_file_path(layer.region_dir(), file_meta.file_id);
+
+            let is_index_exist = file_meta.exists_index();
+            let index_file_size = file_meta.index_file_size();
+
+            let index_file_index_key =
+                IndexKey::new(region_id, file_meta.file_id, FileType::Puffin);
+            let index_remote_path =
+                location::index_file_path(layer.region_dir(), file_meta.file_id);
+
             let file_size = file_meta.file_size;
             common_runtime::spawn_global(async move {
+                WRITE_CACHE_INFLIGHT_DOWNLOAD.add(1);
+
                 if write_cache
                     .download(index_key, &remote_path, layer.object_store(), file_size)
                     .await
@@ -345,6 +357,24 @@ async fn edit_region(
 
                     listener.on_file_cache_filled(index_key.file_id);
                 }
+                if is_index_exist {
+                    // also download puffin file
+                    if let Err(err) = write_cache
+                        .download(
+                            index_file_index_key,
+                            &index_remote_path,
+                            layer.object_store(),
+                            index_file_size,
+                        )
+                        .await
+                    {
+                        common_telemetry::error!(
+                            err; "Failed to download puffin file, region_id: {}, index_file_index_key: {:?}, index_remote_path: {}", region_id, index_file_index_key, index_remote_path
+                        );
+                    }
+                }
+
+                WRITE_CACHE_INFLIGHT_DOWNLOAD.sub(1);
             });
         }
     }

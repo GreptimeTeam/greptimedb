@@ -25,6 +25,6 @@ pub mod heartbeat;
 pub mod metrics;
 pub mod region_server;
 pub mod service;
-mod store;
+pub mod store;
 #[cfg(any(test, feature = "testing"))]
 pub mod tests;
