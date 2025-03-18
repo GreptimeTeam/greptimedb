@@ -18,6 +18,8 @@ use std::time::Duration;
 use chrono::NaiveDate;
 use common_query::prelude::ScalarValue;
 use common_time::Timestamp;
+use datafusion_common::tree_node::{Transformed, TreeNode};
+use datafusion_expr::LogicalPlan;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::types::TimestampType;
 use datatypes::value::{self, Value};
@@ -28,7 +30,7 @@ use sql::ast::{visit_expressions_mut, Expr, Value as ValueExpr, VisitMut};
 use sql::statements::sql_value_to_value;
 use sql::statements::statement::Statement;
 
-use crate::error::{self, Result};
+use crate::error::{self, DataFusionSnafu, Result};
 
 /// Returns the placeholder string "$i".
 pub fn format_placeholder(i: usize) -> String {
@@ -75,6 +77,41 @@ pub fn transform_placeholders(stmt: Statement) -> Statement {
         }
         stmt => stmt,
     }
+}
+
+/// Give placeholder in skip and limit `int64` data type if it is not specified
+pub fn fix_placeholder_types(plan: LogicalPlan) -> Result<LogicalPlan> {
+    let give_placeholder_types = |mut e| {
+        if let datafusion_expr::Expr::Placeholder(ph) = &mut e {
+            if ph.data_type.is_none() {
+                ph.data_type = Some(arrow_schema::DataType::Int64);
+                Ok(Transformed::yes(e))
+            } else {
+                Ok(Transformed::no(e))
+            }
+        } else {
+            Ok(Transformed::no(e))
+        }
+    };
+    let plan = plan
+        .transform(|p| {
+            let LogicalPlan::Limit(mut limit) = p else {
+                return Ok(Transformed::no(p));
+            };
+
+            if let Some(fetch) = &mut limit.fetch {
+                *fetch = Box::new(fetch.clone().transform(give_placeholder_types)?.data);
+            }
+
+            if let Some(skip) = &mut limit.skip {
+                *skip = Box::new(skip.clone().transform(give_placeholder_types)?.data);
+            }
+
+            Ok(Transformed::yes(LogicalPlan::Limit(limit)))
+        })
+        .context(DataFusionSnafu)?
+        .data;
+    Ok(plan)
 }
 
 fn visit_placeholders<V>(v: &mut V)
