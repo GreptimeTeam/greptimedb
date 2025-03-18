@@ -46,6 +46,7 @@ const INDEX_CREATE_MEM_THRESHOLD_FACTOR: u64 = 16;
 pub(crate) const FETCH_OPTION_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Configuration for [MitoEngine](crate::engine::MitoEngine).
+/// Before using the config, make sure to call `MitoConfig::validate()` to check if the config is valid.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(default)]
 pub struct MitoConfig {
