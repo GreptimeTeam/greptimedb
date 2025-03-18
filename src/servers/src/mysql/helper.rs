@@ -106,6 +106,7 @@ pub fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> Result<ScalarV
             ConcreteDataType::UInt64(_) => Ok(ScalarValue::UInt64(Some(i as u64))),
             ConcreteDataType::Float32(_) => Ok(ScalarValue::Float32(Some(i as f32))),
             ConcreteDataType::Float64(_) => Ok(ScalarValue::Float64(Some(i as f64))),
+            ConcreteDataType::Boolean(_) => Ok(ScalarValue::Boolean(Some(i != 0))),
             ConcreteDataType::Timestamp(ts_type) => Value::Timestamp(ts_type.create_timestamp(i))
                 .try_to_scalar_value(t)
                 .context(error::ConvertScalarValueSnafu),
@@ -127,6 +128,7 @@ pub fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> Result<ScalarV
             ConcreteDataType::UInt64(_) => Ok(ScalarValue::UInt64(Some(u))),
             ConcreteDataType::Float32(_) => Ok(ScalarValue::Float32(Some(u as f32))),
             ConcreteDataType::Float64(_) => Ok(ScalarValue::Float64(Some(u as f64))),
+            ConcreteDataType::Boolean(_) => Ok(ScalarValue::Boolean(Some(u != 0))),
             ConcreteDataType::Timestamp(ts_type) => {
                 Value::Timestamp(ts_type.create_timestamp(u as i64))
                     .try_to_scalar_value(t)
