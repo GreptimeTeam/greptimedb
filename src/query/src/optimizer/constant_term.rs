@@ -29,10 +29,10 @@ use datafusion_expr::ColumnarValue;
 use datafusion_physical_expr::expressions::Literal;
 use datafusion_physical_expr::{PhysicalExpr, ScalarFunctionExpr};
 
-/// A physical expression that uses a pre-compiled pattern finder for the `matches_term` function.
+/// A physical expression that uses a pre-compiled term finder for the `matches_term` function.
 ///
-/// This expression optimizes the `matches_term` function by pre-compiling the pattern
-/// when the term is a constant value. This avoids recompiling the pattern for each row
+/// This expression optimizes the `matches_term` function by pre-compiling the term
+/// when the term is a constant value. This avoids recompiling the term for each row
 /// during execution.
 #[derive(Debug)]
 pub struct PreCompiledMatchesTermExpr {
@@ -40,7 +40,7 @@ pub struct PreCompiledMatchesTermExpr {
     text: Arc<dyn PhysicalExpr>,
     /// The constant term to search for
     term: String,
-    /// The pre-compiled pattern finder
+    /// The pre-compiled term finder
     finder: MatchesTermFinder,
 }
 
@@ -122,29 +122,29 @@ impl PhysicalExpr for PreCompiledMatchesTermExpr {
     }
 }
 
-/// Optimizer rule that pre-compiles constant patterns in `matches_term` function.
+/// Optimizer rule that pre-compiles constant term in `matches_term` function.
 ///
 /// This optimizer looks for `matches_term` function calls where the second argument
-/// (the pattern to match) is a constant value. When found, it replaces the function
+/// (the term to match) is a constant value. When found, it replaces the function
 /// call with a specialized `PreCompiledMatchesTermExpr` that uses a pre-compiled
-/// pattern finder.
+/// term finder.
 ///
 /// Example:
 /// ```sql
 /// -- Before optimization:
-/// matches_term(text_column, 'constant_pattern')
+/// matches_term(text_column, 'constant_term')
 ///
 /// -- After optimization:
-/// PreCompiledMatchesTermExpr(text_column, 'constant_pattern')
+/// PreCompiledMatchesTermExpr(text_column, 'constant_term')
 /// ```
 ///
 /// This optimization improves performance by:
-/// 1. Pre-compiling the pattern once instead of for each row
+/// 1. Pre-compiling the term once instead of for each row
 /// 2. Using a specialized expression that avoids function call overhead
 #[derive(Debug)]
-pub struct MatchesTermConstantOptimizer;
+pub struct MatchesConstantTermOptimizer;
 
-impl PhysicalOptimizerRule for MatchesTermConstantOptimizer {
+impl PhysicalOptimizerRule for MatchesConstantTermOptimizer {
     fn optimize(
         &self,
         plan: Arc<dyn ExecutionPlan>,
@@ -197,7 +197,7 @@ impl PhysicalOptimizerRule for MatchesTermConstantOptimizer {
     }
 
     fn name(&self) -> &str {
-        "matches_term_constant_optimizer"
+        "MatchesConstantTerm"
     }
 
     fn schema_check(&self) -> bool {
@@ -323,7 +323,7 @@ mod tests {
         let filter = FilterExec::try_new(predicate, input).unwrap();
 
         // Apply the optimizer
-        let optimizer = MatchesTermConstantOptimizer;
+        let optimizer = MatchesConstantTermOptimizer;
         let optimized_plan = optimizer
             .optimize(Arc::new(filter), &Default::default())
             .unwrap();
@@ -362,7 +362,7 @@ mod tests {
             Arc::new(MemoryExec::try_new(&[vec![batch.clone()]], batch.schema(), None).unwrap());
         let filter = FilterExec::try_new(predicate, input).unwrap();
 
-        let optimizer = MatchesTermConstantOptimizer;
+        let optimizer = MatchesConstantTermOptimizer;
         let optimized_plan = optimizer
             .optimize(Arc::new(filter), &Default::default())
             .unwrap();
