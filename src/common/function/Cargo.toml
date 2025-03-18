@@ -39,6 +39,7 @@ geohash = { version = "0.13", optional = true }
 h3o = { version = "0.6", optional = true }
 hyperloglogplus = "0.4"
 jsonb.workspace = true
+memchr = "2.7"
 nalgebra.workspace = true
 num = "0.4"
 num-traits = "0.2"
@@ -55,7 +56,6 @@ store-api.workspace = true
 table.workspace = true
 uddsketch = { git = "https://github.com/GreptimeTeam/timescaledb-toolkit.git", rev = "84828fe8fb494a6a61412a3da96517fc80f7bb20" }
 wkt = { version = "0.11", optional = true }
-memchr = "2.7"
 
 [dev-dependencies]
 approx = "0.5"
