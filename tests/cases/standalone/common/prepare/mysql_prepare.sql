@@ -37,3 +37,14 @@ EXECUTE stmt USING 1, 'hello';
 
 -- SQLNESS PROTOCOL MYSQL
 DEALLOCATE stmt;
+
+-- test if placeholder at limit and offset are parsed correctly
+-- SQLNESS PROTOCOL MYSQL
+PREPARE stmt FROM 'SELECT 1 LIMIT ? OFFSET ?;';
+
+-- SQLNESS PROTOCOL MYSQL
+EXECUTE stmt USING 1, 2;
+
+-- SQLNESS PROTOCOL MYSQL
+DEALLOCATE stmt;
+
