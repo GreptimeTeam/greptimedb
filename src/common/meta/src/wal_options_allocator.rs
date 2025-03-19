@@ -54,7 +54,11 @@ impl WalOptionsAllocator {
     }
 
     /// Allocates a batch of wal options where each wal options goes to a region.
-    pub fn alloc_batch(&self, num_regions: usize) -> Result<Vec<WalOptions>> {
+    /// If skip_wal is true, the wal options will be set to Noop regardless of the allocator type.
+    pub fn alloc_batch(&self, num_regions: usize, skip_wal: bool) -> Result<Vec<WalOptions>> {
+        if skip_wal {
+            return Ok(vec![WalOptions::Noop; num_regions]);
+        }
         match self {
             WalOptionsAllocator::RaftEngine => Ok(vec![WalOptions::RaftEngine; num_regions]),
             WalOptionsAllocator::Kafka(topic_manager) => {
@@ -117,9 +121,10 @@ pub async fn build_wal_options_allocator(
 pub fn allocate_region_wal_options(
     regions: Vec<RegionNumber>,
     wal_options_allocator: &WalOptionsAllocator,
+    skip_wal: bool,
 ) -> Result<HashMap<RegionNumber, String>> {
     let wal_options = wal_options_allocator
-        .alloc_batch(regions.len())?
+        .alloc_batch(regions.len(), skip_wal)?
         .into_iter()
         .map(|wal_options| {
             serde_json::to_string(&wal_options).context(EncodeWalOptionsSnafu { wal_options })
@@ -164,7 +169,7 @@ mod tests {
 
         let num_regions = 32;
         let regions = (0..num_regions).collect::<Vec<_>>();
-        let got = allocate_region_wal_options(regions.clone(), &allocator).unwrap();
+        let got = allocate_region_wal_options(regions.clone(), &allocator, false).unwrap();
 
         let encoded_wal_options = serde_json::to_string(&WalOptions::RaftEngine).unwrap();
         let expected = regions
@@ -224,7 +229,7 @@ mod tests {
 
                 let num_regions = 32;
                 let regions = (0..num_regions).collect::<Vec<_>>();
-                let got = allocate_region_wal_options(regions.clone(), &allocator).unwrap();
+                let got = allocate_region_wal_options(regions.clone(), &allocator, false).unwrap();
 
                 // Check the allocated wal options contain the expected topics.
                 let expected = (0..num_regions)
@@ -239,5 +244,21 @@ mod tests {
             })
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn test_allocator_with_skip_wal() {
+        let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
+        let wal_config = MetasrvWalConfig::RaftEngine;
+        let allocator = WalOptionsAllocator::new(wal_config, kv_backend);
+        allocator.start().await.unwrap();
+
+        let num_regions = 32;
+        let regions = (0..num_regions).collect::<Vec<_>>();
+        let got = allocate_region_wal_options(regions.clone(), &allocator, true).unwrap();
+        assert_eq!(got.len(), num_regions as usize);
+        for wal_options in got.values() {
+            assert_eq!(wal_options, &"{\"wal.provider\":\"noop\"}");
+        }
     }
 }
