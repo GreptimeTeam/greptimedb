@@ -19,10 +19,10 @@ use datatypes::timestamp::TimestampNanosecond;
 use itertools::Itertools;
 use util::to_pipeline_version;
 
+use crate::error::Result;
 use crate::table::PipelineTable;
 use crate::{GreptimeTransformer, Pipeline};
 
-pub mod error;
 pub mod pipeline_operator;
 pub mod table;
 pub mod util;
@@ -99,7 +99,7 @@ impl PipelineWay {
         name: Option<&str>,
         version: Option<&str>,
         default_pipeline: PipelineWay,
-    ) -> error::Result<PipelineWay> {
+    ) -> Result<PipelineWay> {
         if let Some(pipeline_name) = name {
             if pipeline_name == GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME {
                 Ok(PipelineWay::OtlpTraceDirectV1)

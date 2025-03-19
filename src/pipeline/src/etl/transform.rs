@@ -17,7 +17,14 @@ pub mod transformer;
 
 use snafu::OptionExt;
 
-use crate::etl::error::{Error, Result};
+use super::field::Fields;
+use super::processor::{yaml_new_field, yaml_new_fields, yaml_string};
+use super::value::Timestamp;
+use super::PipelineMap;
+use crate::error::{
+    Error, KeyMustBeStringSnafu, Result, TransformElementMustBeMapSnafu,
+    TransformOnFailureInvalidValueSnafu, TransformTypeMustBeSetSnafu,
+};
 use crate::etl::processor::yaml_bool;
 use crate::etl::transform::index::Index;
 use crate::etl::value::Value;
@@ -31,15 +38,6 @@ const TRANSFORM_DEFAULT: &str = "default";
 const TRANSFORM_ON_FAILURE: &str = "on_failure";
 
 pub use transformer::greptime::GreptimeTransformer;
-
-use super::error::{
-    KeyMustBeStringSnafu, TransformElementMustBeMapSnafu, TransformOnFailureInvalidValueSnafu,
-    TransformTypeMustBeSetSnafu,
-};
-use super::field::Fields;
-use super::processor::{yaml_new_field, yaml_new_fields, yaml_string};
-use super::value::Timestamp;
-use super::PipelineMap;
 
 pub trait Transformer: std::fmt::Debug + Sized + Send + Sync + 'static {
     type Output;

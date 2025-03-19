@@ -19,7 +19,7 @@ use chrono_tz::Tz;
 use lazy_static::lazy_static;
 use snafu::{OptionExt, ResultExt};
 
-use crate::etl::error::{
+use crate::error::{
     DateFailedToGetLocalTimezoneSnafu, DateFailedToGetTimestampSnafu, DateInvalidFormatSnafu,
     DateParseSnafu, DateParseTimezoneSnafu, EpochInvalidResolutionSnafu, Error,
     KeyMustBeStringSnafu, ProcessorFailedToParseStringSnafu, ProcessorMissingFieldSnafu,
