@@ -1471,7 +1471,8 @@ mod tests {
             new_test_table_info(region_routes.iter().map(|r| r.region.id.region_number())).into();
         let wal_allocator = WalOptionsAllocator::RaftEngine;
         let regions = (0..16).collect();
-        let region_wal_options = allocate_region_wal_options(regions, &wal_allocator, false).unwrap();
+        let region_wal_options =
+            allocate_region_wal_options(regions, &wal_allocator, false).unwrap();
         create_physical_table_metadata(
             &table_metadata_manager,
             table_info.clone(),
