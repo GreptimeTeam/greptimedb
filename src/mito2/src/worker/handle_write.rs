@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use api::v1::OpType;
 use common_telemetry::{debug, error};
+use common_wal::options::WalOptions;
 use snafu::ensure;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::logstore::LogStore;
@@ -75,6 +76,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 .start_timer();
             let mut wal_writer = self.wal.writer();
             for region_ctx in region_ctxs.values_mut() {
+                if let WalOptions::Noop = &region_ctx.version().options.wal_options {
+                    // Skip wal write for noop region.
+                    continue;
+                }
                 if let Err(e) = region_ctx.add_wal_entry(&mut wal_writer).map_err(Arc::new) {
                     region_ctx.set_error(e);
                 }

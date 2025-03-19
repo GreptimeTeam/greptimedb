@@ -24,6 +24,7 @@ use std::sync::Arc;
 
 use api::v1::WalEntry;
 use common_error::ext::BoxedError;
+use entry_reader::NoopEntryReader;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use prost::Message;
@@ -87,6 +88,9 @@ impl<S: LogStore> Wal<S> {
     ) -> impl FnOnce(RegionId, EntryId, &Provider) -> BoxFuture<Result<()>> {
         let store = self.store.clone();
         move |region_id, last_entry_id, provider| -> BoxFuture<'_, Result<()>> {
+            if let Provider::Noop = provider {
+                return Box::pin(async move { Ok(()) });
+            }
             Box::pin(async move {
                 store
                     .obsolete(provider, region_id, last_entry_id)
@@ -120,26 +124,29 @@ impl<S: LogStore> Wal<S> {
                     reader, region_id,
                 )))
             }
+            Provider::Noop => Box::new(NoopEntryReader),
         }
     }
 
     /// Scan entries of specific region starting from `start_id` (inclusive).
+    /// Currently only used in tests.
     pub fn scan<'a>(
         &'a self,
         region_id: RegionId,
         start_id: EntryId,
-        namespace: &'a Provider,
+        provider: &'a Provider,
     ) -> Result<WalEntryStream<'a>> {
-        match namespace {
+        match provider {
             Provider::RaftEngine(_) => {
                 LogStoreEntryReader::new(LogStoreRawEntryReader::new(self.store.clone()))
-                    .read(namespace, start_id)
+                    .read(provider, start_id)
             }
             Provider::Kafka(_) => LogStoreEntryReader::new(RegionRawEntryReader::new(
                 LogStoreRawEntryReader::new(self.store.clone()),
                 region_id,
             ))
-            .read(namespace, start_id),
+            .read(provider, start_id),
+            Provider::Noop => Ok(Box::pin(futures::stream::empty())),
         }
     }
 
@@ -150,6 +157,9 @@ impl<S: LogStore> Wal<S> {
         last_id: EntryId,
         provider: &Provider,
     ) -> Result<()> {
+        if let Provider::Noop = provider {
+            return Ok(());
+        }
         self.store
             .obsolete(provider, region_id, last_id)
             .await
