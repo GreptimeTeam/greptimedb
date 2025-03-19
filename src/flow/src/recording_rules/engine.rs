@@ -36,7 +36,7 @@ use query::QueryEngineRef;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::RegionId;
-use table::metadata::TableId;
+use table::metadata::{RawTableMeta, TableId};
 use table::requests::AUTO_CREATE_TABLE_KEY;
 use tokio::sync::oneshot::error::TryRecvError;
 use tokio::sync::{oneshot, RwLock};
@@ -51,7 +51,7 @@ use crate::error::{
 };
 use crate::metrics::{METRIC_FLOW_RULE_ENGINE_QUERY_TIME, METRIC_FLOW_RULE_ENGINE_SLOW_QUERY};
 use crate::recording_rules::utils::FindGroupByFinalName;
-use crate::recording_rules::{find_time_window_expr, sql_to_df_plan};
+use crate::recording_rules::{find_time_window_expr, sql_to_df_plan, AddAutoColumnRewriter};
 use crate::Error;
 
 /// TODO(discord9): make those constants configurable
@@ -397,7 +397,6 @@ impl RecordingRuleTask {
     }
 
     pub async fn gen_insert_sql(&self, engine: &QueryEngineRef) -> Result<Option<String>, Error> {
-        let new_query = self.gen_query_with_time_window(engine.clone()).await?;
         let table_name_mgr = self.table_meta.table_name_manager();
 
         let full_table_name = self.sink_table_name.clone().join(".");
@@ -432,41 +431,13 @@ impl RecordingRuleTask {
 
         let table_schema = &table.table_info.meta.schema.column_schemas;
 
-        let insert_into = if let Some((new_query, column_cnt)) = new_query {
-            // TODO(discord9): also assign column name to compat update_at column
-            if table_schema.len() == column_cnt {
-                format!("INSERT INTO {} {}", full_table_name, new_query)
-            } else if table_schema.len() <= column_cnt + 2 {
-                // update_at & __ts_placeholder column
-                // TODO(discord9): check update_at column is `DEFAULT now()`
-                let table_column_names = table
-                    .table_info
-                    .meta
-                    .schema
-                    .column_schemas
-                    .iter()
-                    .map(|col| col.name.clone())
-                    .collect_vec();
-                let minus_last_one = table_column_names
-                    .into_iter()
-                    .take(column_cnt)
-                    .collect_vec();
+        let new_query = self
+            .gen_query_with_time_window(engine.clone(), &table.table_info.meta)
+            .await?;
 
-                format!(
-                    "INSERT INTO {} ({}) {}",
-                    full_table_name,
-                    minus_last_one.join(", "),
-                    new_query,
-                )
-            } else {
-                UnexpectedSnafu {
-                    reason: format!(
-                        "Column conut mismatch, table column = {:?}, query column count = {}",
-                        table_schema, column_cnt
-                    ),
-                }
-                .fail()?
-            }
+        let insert_into = if let Some((new_query, _column_cnt)) = new_query {
+            // TODO(discord9): also assign column name to compat update_at column
+            format!("INSERT INTO {} {}", full_table_name, new_query)
         } else {
             return Ok(None);
         };
@@ -591,7 +562,7 @@ impl RecordingRuleTask {
                 context: format!("Can't find aggr expr in plan {plan:?}"),
             })?;
 
-        let pk_final_names = pk_names.group_expr_names.unwrap_or_default();
+        let pk_final_names = pk_names.get_group_expr_names().unwrap_or_default();
         let all_pk_cols: Vec<_> = schema
             .iter()
             .filter(|f| pk_final_names.contains(f.name()))
@@ -648,6 +619,7 @@ impl RecordingRuleTask {
     async fn gen_query_with_time_window(
         &self,
         engine: QueryEngineRef,
+        sink_table_meta: &RawTableMeta,
     ) -> Result<Option<(String, usize)>, Error> {
         let query_ctx = self.state.read().await.query_ctx.clone();
         let start = SystemTime::now();
@@ -661,6 +633,8 @@ impl RecordingRuleTask {
 
         let low_bound = Timestamp::new_second(low_bound as i64);
         let schema_len = self.plan.schema().fields().len();
+
+        // TODO(discord9): use sink_table_meta to add to query the `update_at` and `__ts_placeholder` column's value too
 
         // TODO(discord9): use time window expr to get the precise expire lower bound
         let expire_time_window_bound = self
@@ -697,8 +671,25 @@ impl RecordingRuleTask {
                         debug!(
                             "Flow id = {:?}, can't get window size: precise_lower_bound={expire_time_window_bound:?}, using the same query", self.flow_id
                         );
-                        // since no time window lower/upper bound is found, just return the original query
-                        return Ok(Some((self.query.clone(), schema_len)));
+
+                        let plan =
+                            sql_to_df_plan(query_ctx.clone(), engine.clone(), &self.query, false)
+                                .await?;
+
+                        let mut add_auto_column =
+                            AddAutoColumnRewriter::new(sink_table_meta.clone());
+                        let plan = plan
+                            .clone()
+                            .rewrite(&mut add_auto_column)
+                            .with_context(|_| DatafusionSnafu {
+                                context: format!("Failed to rewrite plan {plan:?}"),
+                            })?
+                            .data;
+                        let new_query = df_plan_to_sql(&plan)?;
+                        let schema_len = plan.schema().fields().len();
+
+                        // since no time window lower/upper bound is found, just return the original query(with auto columns)
+                        return Ok(Some((new_query, schema_len)));
                     }
                 }
             };
@@ -721,12 +712,14 @@ impl RecordingRuleTask {
             };
 
             let mut add_filter = AddFilterRewriter::new(expr);
+            let mut add_auto_column = AddAutoColumnRewriter::new(sink_table_meta.clone());
             // make a not optimized plan for clearer unparse
             let plan =
                 sql_to_df_plan(query_ctx.clone(), engine.clone(), &self.query, false).await?;
             let plan = plan
                 .clone()
                 .rewrite(&mut add_filter)
+                .and_then(|p| p.data.rewrite(&mut add_auto_column))
                 .with_context(|_| DatafusionSnafu {
                     context: format!("Failed to rewrite plan {plan:?}"),
                 })?
@@ -870,7 +863,7 @@ impl DirtyTimeWindows {
         for (lower_bound, upper_bound) in std::mem::take(&mut self.windows) {
             // filter out expired time window
             if let Some(expire_lower_bound) = expire_lower_bound {
-                if lower_bound <= expire_lower_bound {
+                if lower_bound < expire_lower_bound {
                     continue;
                 }
             }

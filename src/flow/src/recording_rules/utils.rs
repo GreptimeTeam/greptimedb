@@ -14,15 +14,24 @@
 
 //! some utils for helping with recording rule
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
+use common_telemetry::debug;
 use datafusion_common::tree_node::{TreeNodeRecursion, TreeNodeVisitor};
 use datafusion_expr::{Distinct, LogicalPlan};
 
 /// Helper to find the innermost group by expr in schema, return None if no group by expr
 #[derive(Debug, Clone, Default)]
 pub struct FindGroupByFinalName {
-    pub group_expr_names: Option<BTreeSet<String>>,
+    group_exprs: Option<HashSet<datafusion_expr::Expr>>,
+}
+
+impl FindGroupByFinalName {
+    pub fn get_group_expr_names(&self) -> Option<HashSet<String>> {
+        self.group_exprs
+            .as_ref()
+            .map(|exprs| exprs.iter().map(|expr| expr.qualified_name().1).collect())
+    }
 }
 
 impl TreeNodeVisitor<'_> for FindGroupByFinalName {
@@ -30,35 +39,18 @@ impl TreeNodeVisitor<'_> for FindGroupByFinalName {
 
     fn f_down(&mut self, node: &Self::Node) -> datafusion_common::Result<TreeNodeRecursion> {
         if let LogicalPlan::Aggregate(aggregate) = node {
-            self.group_expr_names = Some(
-                aggregate
-                    .group_expr
-                    .iter()
-                    .map(|e| e.name_for_alias())
-                    .collect::<Result<_, _>>()?,
-            );
+            self.group_exprs = Some(aggregate.group_expr.iter().cloned().collect());
+            debug!("Group by exprs: {:?}", self.group_exprs);
         } else if let LogicalPlan::Distinct(distinct) = node {
             match distinct {
                 Distinct::All(input) => {
-                    self.group_expr_names = Some(
-                        input
-                            .schema()
-                            .fields()
-                            .iter()
-                            .map(|f| f.name().clone())
-                            .collect(),
-                    )
+                    self.group_exprs = Some(input.expressions().iter().cloned().collect())
                 }
                 Distinct::On(distinct_on) => {
-                    self.group_expr_names = Some(
-                        distinct_on
-                            .on_expr
-                            .iter()
-                            .map(|e| e.name_for_alias())
-                            .collect::<Result<_, _>>()?,
-                    )
+                    self.group_exprs = Some(distinct_on.on_expr.iter().cloned().collect())
                 }
             }
+            debug!("Group by exprs: {:?}", self.group_exprs);
         }
 
         Ok(TreeNodeRecursion::Continue)
@@ -68,21 +60,24 @@ impl TreeNodeVisitor<'_> for FindGroupByFinalName {
     fn f_up(&mut self, node: &Self::Node) -> datafusion_common::Result<TreeNodeRecursion> {
         if let LogicalPlan::Projection(projection) = node {
             for expr in &projection.expr {
+                let Some(group_exprs) = &mut self.group_exprs else {
+                    return Ok(TreeNodeRecursion::Continue);
+                };
                 if let datafusion_expr::Expr::Alias(alias) = expr {
-                    // if a alias exist, replace it
-                    let old_name = alias.expr.name_for_alias()?;
-                    let new_name = alias.name.clone();
-                    let Some(group_expr_names) = &mut self.group_expr_names else {
-                        return Ok(TreeNodeRecursion::Continue);
-                    };
-
-                    if group_expr_names.contains(&old_name) {
-                        group_expr_names.remove(&old_name);
-                        group_expr_names.insert(new_name);
+                    // if a alias exist, replace with the new alias
+                    let mut new_group_exprs = group_exprs.clone();
+                    for group_expr in group_exprs.iter() {
+                        if group_expr.name_for_alias()? == alias.expr.name_for_alias()? {
+                            new_group_exprs.remove(group_expr);
+                            new_group_exprs.insert(expr.clone());
+                            break;
+                        }
                     }
+                    *group_exprs = new_group_exprs;
                 }
             }
         }
+        debug!("Aliased group by exprs: {:?}", self.group_exprs);
         Ok(TreeNodeRecursion::Continue)
     }
 }

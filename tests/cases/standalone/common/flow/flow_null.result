@@ -93,6 +93,8 @@ CREATE TABLE ngx_access_log (
     client STRING,
     country STRING,
     access_time TIMESTAMP TIME INDEX
+)WITH(
+    append_mode = 'true'
 );
 
 Affected Rows: 0
@@ -111,6 +113,25 @@ GROUP BY
     time_window;
 
 Affected Rows: 0
+
+SHOW CREATE TABLE ngx_country;
+
++-------------+------------------------------------------------+
+| Table       | Create Table                                   |
++-------------+------------------------------------------------+
+| ngx_country | CREATE TABLE IF NOT EXISTS "ngx_country" (     |
+|             |   "client" STRING NULL,                        |
+|             |   "country" STRING NULL,                       |
+|             |   "country_count" BIGINT NULL,                 |
+|             |   "time_window" TIMESTAMP(3) NOT NULL,         |
+|             |   "update_at" TIMESTAMP(3) NULL DEFAULT now(), |
+|             |   TIME INDEX ("time_window"),                  |
+|             |   PRIMARY KEY ("client", "country")            |
+|             | )                                              |
+|             |                                                |
+|             | ENGINE=mito                                    |
+|             |                                                |
++-------------+------------------------------------------------+
 
 INSERT INTO
     ngx_access_log
