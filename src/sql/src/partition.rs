@@ -16,6 +16,8 @@ use sqlparser::ast::{BinaryOperator, Expr, Ident, Value};
 
 use crate::statements::create::Partitions;
 
+const DEFAULT_PARTITION_NUM_FOR_TRACES: u32 = 16;
+
 macro_rules! between_string {
     ($col: expr, $left_incl: expr, $right_excl: expr) => {
         Expr::BinaryOp {
@@ -38,117 +40,105 @@ macro_rules! between_string {
     };
 }
 
-macro_rules! or {
-    ($left: expr, $right: expr) => {
-        Expr::BinaryOp {
-            op: BinaryOperator::Or,
-            left: Box::new($left),
-            right: Box::new($right),
-        }
-    };
+pub fn partition_rule_for_hexstring(ident: &str) -> Partitions {
+    Partitions {
+        column_list: vec![Ident::new(ident)],
+        exprs: partition_rules_for_uuid(DEFAULT_PARTITION_NUM_FOR_TRACES, ident),
+    }
 }
 
-pub fn partition_rule_for_hexstring(ident: &str) -> Partitions {
-    let ident = Ident::new(ident);
-    let ident_expr = Expr::Identifier(ident.clone());
+// partition_rules_for_uuid can creates partition rules up to 256 partitions.
+fn partition_rules_for_uuid(partition_num: u32, ident: &str) -> Vec<Expr> {
+    let ident_expr = Expr::Identifier(Ident::new(ident).clone());
 
-    // rules are like:
-    //
-    // "trace_id < '1'",
-    // "trace_id >= '1' AND trace_id < '2'",
-    // "trace_id >= '2' AND trace_id < '3'",
-    // "trace_id >= '3' AND trace_id < '4'",
-    // "trace_id >= '4' AND trace_id < '5'",
-    // "trace_id >= '5' AND trace_id < '6'",
-    // "trace_id >= '6' AND trace_id < '7'",
-    // "trace_id >= '7' AND trace_id < '8'",
-    // "trace_id >= '8' AND trace_id < '9'",
-    // "trace_id >= '9' AND trace_id < 'A'",
-    // "trace_id >= 'A' AND trace_id < 'B' OR trace_id >= 'a' AND trace_id < 'b'",
-    // "trace_id >= 'B' AND trace_id < 'C' OR trace_id >= 'b' AND trace_id < 'c'",
-    // "trace_id >= 'C' AND trace_id < 'D' OR trace_id >= 'c' AND trace_id < 'd'",
-    // "trace_id >= 'D' AND trace_id < 'E' OR trace_id >= 'd' AND trace_id < 'e'",
-    // "trace_id >= 'E' AND trace_id < 'F' OR trace_id >= 'e' AND trace_id < 'f'",
-    // "trace_id >= 'F' AND trace_id < 'a' OR trace_id >= 'f'",
-    let rules = vec![
-        Expr::BinaryOp {
-            left: Box::new(ident_expr.clone()),
-            op: BinaryOperator::Lt,
-            right: Box::new(Expr::Value(Value::SingleQuotedString("1".to_string()))),
-        },
-        // [left, right)
-        between_string!(ident_expr, "1", "2"),
-        between_string!(ident_expr, "2", "3"),
-        between_string!(ident_expr, "3", "4"),
-        between_string!(ident_expr, "4", "5"),
-        between_string!(ident_expr, "5", "6"),
-        between_string!(ident_expr, "6", "7"),
-        between_string!(ident_expr, "7", "8"),
-        between_string!(ident_expr, "8", "9"),
-        between_string!(ident_expr, "9", "A"),
-        or!(
-            between_string!(ident_expr, "A", "B"),
-            between_string!(ident_expr, "a", "b")
-        ),
-        or!(
-            between_string!(ident_expr, "B", "C"),
-            between_string!(ident_expr, "b", "c")
-        ),
-        or!(
-            between_string!(ident_expr, "C", "D"),
-            between_string!(ident_expr, "c", "d")
-        ),
-        or!(
-            between_string!(ident_expr, "D", "E"),
-            between_string!(ident_expr, "d", "e")
-        ),
-        or!(
-            between_string!(ident_expr, "E", "F"),
-            between_string!(ident_expr, "e", "f")
-        ),
-        or!(
-            between_string!(ident_expr, "F", "a"),
-            Expr::BinaryOp {
+    let total_partitions = 256;
+    let partition_size = total_partitions / partition_num;
+    let remainder = total_partitions % partition_num;
+
+    let mut rules = Vec::new();
+    let mut current_boundary = 0;
+    for i in 0..partition_num {
+        let mut size = partition_size;
+        if i < remainder {
+            size += 1;
+        }
+        let start = current_boundary;
+        let end = current_boundary + size;
+
+        if i == 0 {
+            // Create the leftmost rule, for example: trace_id < '10'.
+            rules.push(Expr::BinaryOp {
+                left: Box::new(ident_expr.clone()),
+                op: BinaryOperator::Lt,
+                right: Box::new(Expr::Value(Value::SingleQuotedString(format!(
+                    "{:02x}",
+                    end
+                )))),
+            });
+        } else if i == partition_num - 1 {
+            // Create the rightmost rule, for example: trace_id >= 'f0'.
+            rules.push(Expr::BinaryOp {
                 left: Box::new(ident_expr.clone()),
                 op: BinaryOperator::GtEq,
-                right: Box::new(Expr::Value(Value::SingleQuotedString("f".to_string()))),
-            }
-        ),
-    ];
+                right: Box::new(Expr::Value(Value::SingleQuotedString(format!(
+                    "{:02x}",
+                    start
+                )))),
+            });
+        } else {
+            // Create the middle rules, for example: trace_id >= '10' AND trace_id < '20'.
+            rules.push(between_string!(
+                ident_expr,
+                format!("{:02x}", start),
+                format!("{:02x}", end)
+            ));
+        }
 
-    Partitions {
-        column_list: vec![ident],
-        exprs: rules,
+        current_boundary = end;
     }
+
+    rules
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use sqlparser::ast::Expr;
     use sqlparser::dialect::GenericDialect;
     use sqlparser::parser::Parser;
+    use uuid::Uuid;
 
     use super::*;
 
     #[test]
+    fn test_partition_rules_for_uuid() {
+        assert!(check_distribution(16, 10000));
+        assert!(check_distribution(32, 10000));
+        assert!(check_distribution(64, 10000));
+        assert!(check_distribution(128, 10000));
+        assert!(check_distribution(256, 10000));
+    }
+
+    #[test]
     fn test_rules() {
         let expr = vec![
-            "trace_id < '1'",
-            "trace_id >= '1' AND trace_id < '2'",
-            "trace_id >= '2' AND trace_id < '3'",
-            "trace_id >= '3' AND trace_id < '4'",
-            "trace_id >= '4' AND trace_id < '5'",
-            "trace_id >= '5' AND trace_id < '6'",
-            "trace_id >= '6' AND trace_id < '7'",
-            "trace_id >= '7' AND trace_id < '8'",
-            "trace_id >= '8' AND trace_id < '9'",
-            "trace_id >= '9' AND trace_id < 'A'",
-            "trace_id >= 'A' AND trace_id < 'B' OR trace_id >= 'a' AND trace_id < 'b'",
-            "trace_id >= 'B' AND trace_id < 'C' OR trace_id >= 'b' AND trace_id < 'c'",
-            "trace_id >= 'C' AND trace_id < 'D' OR trace_id >= 'c' AND trace_id < 'd'",
-            "trace_id >= 'D' AND trace_id < 'E' OR trace_id >= 'd' AND trace_id < 'e'",
-            "trace_id >= 'E' AND trace_id < 'F' OR trace_id >= 'e' AND trace_id < 'f'",
-            "trace_id >= 'F' AND trace_id < 'a' OR trace_id >= 'f'",
+            "trace_id < '10'",
+            "trace_id >= '10' AND trace_id < '20'",
+            "trace_id >= '20' AND trace_id < '30'",
+            "trace_id >= '30' AND trace_id < '40'",
+            "trace_id >= '40' AND trace_id < '50'",
+            "trace_id >= '50' AND trace_id < '60'",
+            "trace_id >= '60' AND trace_id < '70'",
+            "trace_id >= '70' AND trace_id < '80'",
+            "trace_id >= '80' AND trace_id < '90'",
+            "trace_id >= '90' AND trace_id < 'a0'",
+            "trace_id >= 'a0' AND trace_id < 'b0'",
+            "trace_id >= 'b0' AND trace_id < 'c0'",
+            "trace_id >= 'c0' AND trace_id < 'd0'",
+            "trace_id >= 'd0' AND trace_id < 'e0'",
+            "trace_id >= 'e0' AND trace_id < 'f0'",
+            "trace_id >= 'f0'",
         ];
 
         let dialect = GenericDialect {};
@@ -161,5 +151,89 @@ mod tests {
             .collect::<Vec<Expr>>();
 
         assert_eq!(results, partition_rule_for_hexstring("trace_id").exprs);
+    }
+
+    fn check_distribution(test_partition: u32, test_uuid_num: usize) -> bool {
+        // Generate test_uuid_num random uuids.
+        let uuids = (0..test_uuid_num)
+            .map(|_| Uuid::new_v4().to_string().replace("-", ""))
+            .collect::<Vec<String>>();
+
+        // Generate the partition rules.
+        let rules = partition_rules_for_uuid(test_partition, "test_trace_id");
+
+        // Collect the number of partitions for each uuid.
+        let mut stats = HashMap::new();
+        for uuid in uuids {
+            let partition = allocate_partition_for_uuid(uuid.clone(), &rules);
+            // Count the number of uuids in each partition.
+            *stats.entry(partition).or_insert(0) += 1;
+        }
+
+        // Check if the partition distribution is uniform.
+        let expected_ratio = 100.0 / test_partition as f64;
+
+        // delta is the allowed deviation from the expected ratio.
+        let delta = 0.9;
+
+        // For each partition, its ratio should be as close as possible to the expected ratio.
+        for (_, count) in stats {
+            let ratio = (count as f64 / test_uuid_num as f64) * 100.0;
+            if (ratio - expected_ratio).abs() >= delta {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    fn allocate_partition_for_uuid(uuid: String, rules: &[Expr]) -> usize {
+        for (i, rule) in rules.iter().enumerate() {
+            if let Expr::BinaryOp { left, op: _, right } = rule {
+                if i == 0 {
+                    // Hit the leftmost rule.
+                    if let Expr::Value(Value::SingleQuotedString(leftmost)) = *right.clone() {
+                        if uuid < leftmost {
+                            return i;
+                        }
+                    }
+                } else if i == rules.len() - 1 {
+                    // Hit the rightmost rule.
+                    if let Expr::Value(Value::SingleQuotedString(rightmost)) = *right.clone() {
+                        if uuid >= rightmost {
+                            return i;
+                        }
+                    }
+                } else {
+                    // Hit the middle rules.
+                    if let Expr::BinaryOp {
+                        left: _,
+                        op: _,
+                        right: inner_right,
+                    } = *left.clone()
+                    {
+                        if let Expr::Value(Value::SingleQuotedString(lower)) = *inner_right.clone()
+                        {
+                            if let Expr::BinaryOp {
+                                left: _,
+                                op: _,
+                                right: inner_right,
+                            } = *right.clone()
+                            {
+                                if let Expr::Value(Value::SingleQuotedString(upper)) =
+                                    *inner_right.clone()
+                                {
+                                    if uuid >= lower && uuid < upper {
+                                        return i;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        panic!("No partition found for uuid: {}", uuid);
     }
 }
