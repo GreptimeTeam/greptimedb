@@ -15,16 +15,16 @@
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::add_column_location::LocationType;
 use api::v1::alter_table_expr::Kind;
-use api::v1::column_def::{as_fulltext_option, as_skipping_index_type};
+use api::v1::column_def::{
+    analyzer_as_fulltext_option, as_skipping_index_type, backend_as_fulltext_option,
+};
 use api::v1::{
     column_def, AddColumnLocation as Location, AlterTableExpr, Analyzer, CreateTableExpr,
-    DropColumns, ModifyColumnTypes, RenameTable, SemanticType,
-    SkippingIndexType as PbSkippingIndexType,
+    DropColumns, FulltextBackend as PbFulltextBackend, ModifyColumnTypes, RenameTable,
+    SemanticType, SkippingIndexType as PbSkippingIndexType,
 };
 use common_query::AddColumnLocation;
-use datatypes::schema::{
-    ColumnSchema, FulltextBackend, FulltextOptions, RawSchema, SkippingIndexOptions,
-};
+use datatypes::schema::{ColumnSchema, FulltextOptions, RawSchema, SkippingIndexOptions};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 use table::metadata::TableId;
@@ -128,13 +128,15 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterTableExpr) -> Result<
                         column_name: f.column_name.clone(),
                         options: FulltextOptions {
                             enable: f.enable,
-                            analyzer: as_fulltext_option(
+                            analyzer: analyzer_as_fulltext_option(
                                 Analyzer::try_from(f.analyzer)
                                     .context(InvalidSetFulltextOptionRequestSnafu)?,
                             ),
                             case_sensitive: f.case_sensitive,
-                            // TODO(zhongzc): support backend
-                            backend: FulltextBackend::Tantivy,
+                            backend: backend_as_fulltext_option(
+                                PbFulltextBackend::try_from(f.backend)
+                                    .context(InvalidSetFulltextOptionRequestSnafu)?,
+                            ),
                         },
                     },
                 },

@@ -21,16 +21,19 @@ use api::v1::column_def::options_from_column_schema;
 use api::v1::{
     set_index, unset_index, AddColumn, AddColumns, AlterDatabaseExpr, AlterTableExpr, Analyzer,
     ColumnDataType, ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
-    DropColumn, DropColumns, ExpireAfter, ModifyColumnType, ModifyColumnTypes, RenameTable,
-    SemanticType, SetDatabaseOptions, SetFulltext, SetIndex, SetInverted, SetSkipping,
-    SetTableOptions, SkippingIndexType as PbSkippingIndexType, TableName, UnsetDatabaseOptions,
-    UnsetFulltext, UnsetIndex, UnsetInverted, UnsetSkipping, UnsetTableOptions,
+    DropColumn, DropColumns, ExpireAfter, FulltextBackend as PbFulltextBackend, ModifyColumnType,
+    ModifyColumnTypes, RenameTable, SemanticType, SetDatabaseOptions, SetFulltext, SetIndex,
+    SetInverted, SetSkipping, SetTableOptions, SkippingIndexType as PbSkippingIndexType, TableName,
+    UnsetDatabaseOptions, UnsetFulltext, UnsetIndex, UnsetInverted, UnsetSkipping,
+    UnsetTableOptions,
 };
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
 use common_time::Timezone;
 use datafusion::sql::planner::object_name_to_table_reference;
-use datatypes::schema::{ColumnSchema, FulltextAnalyzer, Schema, SkippingIndexType, COMMENT_KEY};
+use datatypes::schema::{
+    ColumnSchema, FulltextAnalyzer, FulltextBackend, Schema, SkippingIndexType, COMMENT_KEY,
+};
 use file_engine::FileOptions;
 use query::sql::{
     check_file_to_table_schema_compatibility, file_column_schemas_to_table,
@@ -581,6 +584,10 @@ pub(crate) fn to_alter_table_expr(
                         FulltextAnalyzer::Chinese => Analyzer::Chinese.into(),
                     },
                     case_sensitive: options.case_sensitive,
+                    backend: match options.backend {
+                        FulltextBackend::Tantivy => PbFulltextBackend::Tantivy.into(),
+                        FulltextBackend::Bloom => PbFulltextBackend::Bloom.into(),
+                    },
                 })),
             },
             sql::statements::alter::SetIndexOperation::Inverted { column_name } => SetIndex {

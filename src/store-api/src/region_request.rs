@@ -17,20 +17,22 @@ use std::fmt::{self, Display};
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::add_column_location::LocationType;
-use api::v1::column_def::{as_fulltext_option, as_skipping_index_type};
+use api::v1::column_def::{
+    analyzer_as_fulltext_option, as_skipping_index_type, backend_as_fulltext_option,
+};
 use api::v1::region::{
     alter_request, compact_request, region_request, AlterRequest, AlterRequests, CloseRequest,
     CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest, DropRequests,
     FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
 };
 use api::v1::{
-    self, set_index, Analyzer, Option as PbOption, Rows, SemanticType,
-    SkippingIndexType as PbSkippingIndexType, WriteHint,
+    self, set_index, Analyzer, FulltextBackend as PbFulltextBackend, Option as PbOption, Rows,
+    SemanticType, SkippingIndexType as PbSkippingIndexType, WriteHint,
 };
 pub use common_base::AffectedRows;
 use common_time::TimeToLive;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{FulltextBackend, FulltextOptions, SkippingIndexOptions};
+use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use strum::{AsRefStr, IntoStaticStr};
@@ -729,12 +731,13 @@ impl TryFrom<alter_request::Kind> for AlterKind {
                         column_name: x.column_name.clone(),
                         options: FulltextOptions {
                             enable: x.enable,
-                            analyzer: as_fulltext_option(
+                            analyzer: analyzer_as_fulltext_option(
                                 Analyzer::try_from(x.analyzer).context(DecodeProtoSnafu)?,
                             ),
                             case_sensitive: x.case_sensitive,
-                            // TODO(zhongzc): support backend:
-                            backend: FulltextBackend::Tantivy,
+                            backend: backend_as_fulltext_option(
+                                PbFulltextBackend::try_from(x.backend).context(DecodeProtoSnafu)?,
+                            ),
                         },
                     },
                 },
@@ -1151,7 +1154,7 @@ mod tests {
     use api::v1::region::RegionColumnDef;
     use api::v1::{ColumnDataType, ColumnDef};
     use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::{ColumnSchema, FulltextAnalyzer};
+    use datatypes::schema::{ColumnSchema, FulltextAnalyzer, FulltextBackend};
 
     use super::*;
     use crate::metadata::RegionMetadataBuilder;

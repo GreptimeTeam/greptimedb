@@ -181,7 +181,7 @@ impl Display for AlterTableOperation {
                     column_name,
                     options,
                 } => {
-                    write!(f, "MODIFY COLUMN {column_name} SET FULLTEXT INDEX WITH(analyzer={0}, case_sensitive={1})", options.analyzer, options.case_sensitive)
+                    write!(f, "MODIFY COLUMN {column_name} SET FULLTEXT INDEX WITH(analyzer={0}, case_sensitive={1}, backend={2})", options.analyzer, options.case_sensitive, options.backend)
                 }
                 SetIndexOperation::Inverted { column_name } => {
                     write!(f, "MODIFY COLUMN {column_name} SET INVERTED INDEX")

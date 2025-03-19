@@ -15,10 +15,13 @@
 use std::collections::HashMap;
 
 use datatypes::schema::{
-    ColumnDefaultConstraint, ColumnSchema, FulltextAnalyzer, FulltextOptions, SkippingIndexOptions,
-    SkippingIndexType, COMMENT_KEY, FULLTEXT_KEY, INVERTED_INDEX_KEY, SKIPPING_INDEX_KEY,
+    ColumnDefaultConstraint, ColumnSchema, FulltextAnalyzer, FulltextBackend, FulltextOptions,
+    SkippingIndexOptions, SkippingIndexType, COMMENT_KEY, FULLTEXT_KEY, INVERTED_INDEX_KEY,
+    SKIPPING_INDEX_KEY,
 };
-use greptime_proto::v1::{Analyzer, SkippingIndexType as PbSkippingIndexType};
+use greptime_proto::v1::{
+    Analyzer, FulltextBackend as PbFulltextBackend, SkippingIndexType as PbSkippingIndexType,
+};
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
@@ -142,10 +145,17 @@ pub fn options_from_inverted() -> ColumnOptions {
 }
 
 /// Tries to construct a `FulltextAnalyzer` from the given analyzer.
-pub fn as_fulltext_option(analyzer: Analyzer) -> FulltextAnalyzer {
+pub fn analyzer_as_fulltext_option(analyzer: Analyzer) -> FulltextAnalyzer {
     match analyzer {
         Analyzer::English => FulltextAnalyzer::English,
         Analyzer::Chinese => FulltextAnalyzer::Chinese,
+    }
+}
+
+pub fn backend_as_fulltext_option(backend: PbFulltextBackend) -> FulltextBackend {
+    match backend {
+        PbFulltextBackend::Tantivy => FulltextBackend::Tantivy,
+        PbFulltextBackend::Bloom => FulltextBackend::Bloom,
     }
 }
 

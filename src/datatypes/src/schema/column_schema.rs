@@ -202,10 +202,6 @@ impl ColumnSchema {
         self.skipping_index_options().unwrap_or_default().is_some()
     }
 
-    pub fn has_inverted_index_key(&self) -> bool {
-        self.metadata.contains_key(INVERTED_INDEX_KEY)
-    }
-
     /// Set default constraint.
     ///
     /// If a default constraint exists for the column, this method will
