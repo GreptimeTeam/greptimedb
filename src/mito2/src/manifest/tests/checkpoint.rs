@@ -44,6 +44,18 @@ async fn build_manager(
     (env, manager)
 }
 
+async fn build_manager_with_initial_metadata(
+    env: &TestEnv,
+    checkpoint_distance: u64,
+    compress_type: CompressionType,
+) -> RegionManifestManager {
+    let metadata = Arc::new(basic_region_metadata());
+    env.create_manifest_manager(compress_type, checkpoint_distance, Some(metadata.clone()))
+        .await
+        .unwrap()
+        .unwrap()
+}
+
 async fn reopen_manager(
     env: &TestEnv,
     checkpoint_distance: u64,
@@ -265,4 +277,145 @@ async fn generate_checkpoint_with_compression_types(
         .await
         .unwrap()
         .unwrap()
+        .0
+}
+
+fn generate_action_lists(num: usize) -> (Vec<FileId>, Vec<RegionMetaActionList>) {
+    let mut files = vec![];
+    let mut actions = vec![];
+    for _ in 0..num {
+        let file_id = FileId::random();
+        files.push(file_id);
+        let file_meta = FileMeta {
+            region_id: RegionId::new(123, 456),
+            file_id,
+            time_range: (0.into(), 10000000.into()),
+            level: 0,
+            file_size: 1024000,
+            available_indexes: Default::default(),
+            index_file_size: 0,
+            num_rows: 0,
+            num_row_groups: 0,
+            sequence: None,
+        };
+        let action = RegionMetaActionList::new(vec![RegionMetaAction::Edit(RegionEdit {
+            files_to_add: vec![file_meta],
+            files_to_remove: vec![],
+            compaction_time_window: None,
+            flushed_entry_id: None,
+            flushed_sequence: None,
+        })]);
+        actions.push(action);
+    }
+    (files, actions)
+}
+
+#[tokio::test]
+async fn manifest_install_manifest_changes() {
+    common_telemetry::init_default_ut_logging();
+    let (env, mut manager) = build_manager(0, CompressionType::Uncompressed).await;
+    let (files, actions) = generate_action_lists(10);
+    for action in actions {
+        manager.update(action).await.unwrap();
+    }
+
+    // Nothing to install
+    let target_version = manager.manifest().manifest_version;
+    let installed_version = manager
+        .install_manifest_changes(target_version)
+        .await
+        .unwrap();
+    assert_eq!(target_version, installed_version);
+
+    let mut another_manager =
+        build_manager_with_initial_metadata(&env, 0, CompressionType::Uncompressed).await;
+
+    // install manifest changes
+    let target_version = manager.manifest().manifest_version;
+    let installed_version = another_manager
+        .install_manifest_changes(target_version - 1)
+        .await
+        .unwrap();
+    assert_eq!(target_version - 1, installed_version);
+    for file_id in files[0..9].iter() {
+        assert!(another_manager.manifest().files.contains_key(file_id));
+    }
+
+    let installed_version = another_manager
+        .install_manifest_changes(target_version)
+        .await
+        .unwrap();
+    assert_eq!(target_version, installed_version);
+    for file_id in files.iter() {
+        assert!(another_manager.manifest().files.contains_key(file_id));
+    }
+}
+
+#[tokio::test]
+async fn manifest_install_manifest_changes_with_checkpoint() {
+    common_telemetry::init_default_ut_logging();
+    let (env, mut manager) = build_manager(3, CompressionType::Uncompressed).await;
+    let (files, actions) = generate_action_lists(10);
+    for action in actions {
+        manager.update(action).await.unwrap();
+
+        while manager.checkpointer().is_doing_checkpoint() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    // has checkpoint
+    assert!(manager
+        .store()
+        .load_last_checkpoint()
+        .await
+        .unwrap()
+        .is_some());
+
+    // check files
+    let mut expected = vec![
+        "/",
+        "00000000000000000006.checkpoint",
+        "00000000000000000007.json",
+        "00000000000000000008.json",
+        "00000000000000000009.checkpoint",
+        "00000000000000000009.json",
+        "00000000000000000010.json",
+        "_last_checkpoint",
+    ];
+    expected.sort_unstable();
+    let mut paths = manager
+        .store()
+        .get_paths(|e| Some(e.name().to_string()))
+        .await
+        .unwrap();
+
+    paths.sort_unstable();
+    assert_eq!(expected, paths);
+
+    let mut another_manager =
+        build_manager_with_initial_metadata(&env, 0, CompressionType::Uncompressed).await;
+
+    // Install 9 manifests
+    let target_version = manager.manifest().manifest_version;
+    let installed_version = another_manager
+        .install_manifest_changes(target_version - 1)
+        .await
+        .unwrap();
+    assert_eq!(target_version - 1, installed_version);
+    for file_id in files[0..9].iter() {
+        assert!(another_manager.manifest().files.contains_key(file_id));
+    }
+
+    // Install all manifests
+    let target_version = manager.manifest().manifest_version;
+    let installed_version = another_manager
+        .install_manifest_changes(target_version)
+        .await
+        .unwrap();
+    assert_eq!(target_version, installed_version);
+    for file_id in files.iter() {
+        assert!(another_manager.manifest().files.contains_key(file_id));
+    }
+    assert_eq!(4217, another_manager.store().total_manifest_size());
 }

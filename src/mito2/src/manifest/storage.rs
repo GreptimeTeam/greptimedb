@@ -236,7 +236,31 @@ impl ManifestObjectStore {
         Ok(entries)
     }
 
-    /// Fetch all manifests in concurrent.
+    /// Fetches manifests in range [start_version, end_version).
+    ///
+    /// This functions is guaranteed to return manifests from the `start_version` strictly.
+    pub async fn fetch_manifests_strict_from(
+        &self,
+        start_version: ManifestVersion,
+        end_version: ManifestVersion,
+    ) -> Result<Vec<(ManifestVersion, Vec<u8>)>> {
+        let mut manifests = self.fetch_manifests(start_version, end_version).await?;
+        let start_index = manifests.iter().position(|(v, _)| *v == start_version + 1);
+        debug!(
+            "fetches manifess in range [{},{}), start_index: {:?}",
+            start_version, end_version, start_index
+        );
+        if let Some(start_index) = start_index {
+            Ok(manifests.split_off(start_index))
+        } else {
+            Ok(vec![])
+        }
+    }
+
+    /// Fetch all manifests in concurrent, and return the manifests in range [start_version, end_version)
+    ///
+    /// **Notes**: This function is no guarantee to return manifests from the `start_version` strictly.
+    /// Uses [fetch_manifests_strict_from](ManifestObjectStore::fetch_manifests_strict_from) to get manifests from the `start_version`.
     pub async fn fetch_manifests(
         &self,
         start_version: ManifestVersion,
@@ -576,6 +600,12 @@ impl ManifestObjectStore {
         self.manifest_size_map.read().unwrap().values().sum()
     }
 
+    /// Resets the size of all files.
+    pub(crate) fn reset_manifest_size(&mut self) {
+        self.manifest_size_map.write().unwrap().clear();
+        self.total_manifest_size.store(0, Ordering::Relaxed);
+    }
+
     /// Set the size of the delta file by delta version.
     pub(crate) fn set_delta_file_size(&mut self, version: ManifestVersion, size: u64) {
         let mut m = self.manifest_size_map.write().unwrap();
@@ -585,7 +615,7 @@ impl ManifestObjectStore {
     }
 
     /// Set the size of the checkpoint file by checkpoint version.
-    fn set_checkpoint_file_size(&self, version: ManifestVersion, size: u64) {
+    pub(crate) fn set_checkpoint_file_size(&self, version: ManifestVersion, size: u64) {
         let mut m = self.manifest_size_map.write().unwrap();
         m.insert(FileKey::Checkpoint(version), size);
 
@@ -595,6 +625,7 @@ impl ManifestObjectStore {
     fn unset_file_size(&self, key: &FileKey) {
         let mut m = self.manifest_size_map.write().unwrap();
         if let Some(val) = m.remove(key) {
+            debug!("Unset file size: {:?}, size: {}", key, val);
             self.dec_total_manifest_size(val);
         }
     }

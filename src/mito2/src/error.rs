@@ -781,6 +781,18 @@ pub enum Error {
     #[snafu(display("checksum mismatch (actual: {}, expected: {})", actual, expected))]
     ChecksumMismatch { actual: u32, expected: u32 },
 
+    #[snafu(display(
+        "No checkpoint found, region_id: {}, last_version: {}",
+        region_id,
+        last_version
+    ))]
+    NoCheckpoint {
+        region_id: RegionId,
+        last_version: ManifestVersion,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Region {} is stopped", region_id))]
     RegionStopped {
         region_id: RegionId,
@@ -1019,7 +1031,8 @@ impl ErrorExt for Error {
             | OperateAbortedIndex { .. }
             | UnexpectedReplay { .. }
             | IndexEncodeNull { .. }
-            | UnexpectedImpureDefault { .. } => StatusCode::Unexpected,
+            | UnexpectedImpureDefault { .. }
+            | NoCheckpoint { .. } => StatusCode::Unexpected,
             RegionNotFound { .. } => StatusCode::RegionNotFound,
             ObjectStoreNotFound { .. }
             | InvalidScanIndex { .. }
