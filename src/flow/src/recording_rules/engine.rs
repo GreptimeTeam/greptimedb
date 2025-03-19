@@ -429,8 +429,6 @@ impl RecordingRuleTask {
             })?
             .into_inner();
 
-        let table_schema = &table.table_info.meta.schema.column_schemas;
-
         let new_query = self
             .gen_query_with_time_window(engine.clone(), &table.table_info.meta)
             .await?;

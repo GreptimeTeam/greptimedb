@@ -14,7 +14,7 @@
 
 //! some utils for helping with recording rule
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::HashSet;
 
 use common_telemetry::debug;
 use datafusion_common::tree_node::{TreeNodeRecursion, TreeNodeVisitor};
