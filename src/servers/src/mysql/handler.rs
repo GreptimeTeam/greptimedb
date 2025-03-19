@@ -183,7 +183,7 @@ impl MysqlInstanceShim {
         let describe_result = self
             .do_describe(statement.clone(), query_ctx.clone())
             .await?;
-        let (plan, schema) = if let Some(DescribeResult {
+        let (mut plan, schema) = if let Some(DescribeResult {
             logical_plan,
             schema,
         }) = describe_result
@@ -193,8 +193,8 @@ impl MysqlInstanceShim {
             (None, None)
         };
 
-        let params = if let Some(plan) = &plan {
-            let plan = fix_placeholder_types(plan.clone())?;
+        let params = if let Some(plan) = &mut plan {
+            fix_placeholder_types(plan)?;
             prepared_params(
                 &plan
                     .get_parameter_types()
@@ -259,8 +259,8 @@ impl MysqlInstanceShim {
         };
 
         let outputs = match sql_plan.plan {
-            Some(plan) => {
-                let plan = fix_placeholder_types(plan.clone())?;
+            Some(mut plan) => {
+                fix_placeholder_types(&mut plan)?;
                 let param_types = plan
                     .get_parameter_types()
                     .context(DataFrameSnafu)?
@@ -297,7 +297,10 @@ impl MysqlInstanceShim {
                     }
                     Params::CliParams(params) => params.iter().map(|x| x.to_string()).collect(),
                 };
-                debug!("do_execute Replacing with Params: {:?}", param_strs);
+                debug!(
+                    "do_execute Replacing with Params: {:?}, Original Query: {}",
+                    param_strs, sql_plan.query
+                );
                 let query = replace_params(param_strs, sql_plan.query);
                 debug!("Mysql execute replaced query: {}", query);
                 self.do_query(&query, query_ctx.clone()).await
@@ -645,12 +648,13 @@ fn replace_params_with_values(
     debug_assert_eq!(param_types.len(), params.len());
 
     debug!(
-        "replace_params_with_values(param_types: {:#?}, params: {:#?})",
+        "replace_params_with_values(param_types: {:#?}, params: {:#?}, plan: {:#?})",
         param_types,
         params
             .iter()
             .map(|x| format!("({:?}, {:?})", x.value, x.coltype))
-            .join(", ")
+            .join(", "),
+        plan
     );
 
     let mut values = Vec::with_capacity(params.len());
@@ -676,9 +680,10 @@ fn replace_params_with_exprs(
     debug_assert_eq!(param_types.len(), params.len());
 
     debug!(
-        "replace_params_with_exprs(param_types: {:#?}, params: {:#?})",
+        "replace_params_with_exprs(param_types: {:#?}, params: {:#?}, plan: {:#?})",
         param_types,
-        params.iter().map(|x| format!("({:?})", x)).join(", ")
+        params.iter().map(|x| format!("({:?})", x)).join(", "),
+        plan
     );
 
     let mut values = Vec::with_capacity(params.len());

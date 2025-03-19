@@ -80,7 +80,9 @@ pub fn transform_placeholders(stmt: Statement) -> Statement {
 }
 
 /// Give placeholder in skip and limit `int64` data type if it is not specified
-pub fn fix_placeholder_types(plan: LogicalPlan) -> Result<LogicalPlan> {
+///
+/// because it seems datafusion will not give data type to placeholder if it's in limit/skip position, still unknown if this is a feature or a bug. And if a placeholder expr have no data type, datafusion will fail to extract it using `LogicalPlan::get_parameter_types`
+pub fn fix_placeholder_types(plan: &mut LogicalPlan) -> Result<()> {
     let give_placeholder_types = |mut e| {
         if let datafusion_expr::Expr::Placeholder(ph) = &mut e {
             if ph.data_type.is_none() {
@@ -93,25 +95,29 @@ pub fn fix_placeholder_types(plan: LogicalPlan) -> Result<LogicalPlan> {
             Ok(Transformed::no(e))
         }
     };
-    let plan = plan
+    *plan = std::mem::take(plan)
         .transform(|p| {
             let LogicalPlan::Limit(mut limit) = p else {
                 return Ok(Transformed::no(p));
             };
 
             if let Some(fetch) = &mut limit.fetch {
-                *fetch = Box::new(fetch.clone().transform(give_placeholder_types)?.data);
+                *fetch = Box::new(
+                    std::mem::take(fetch)
+                        .transform(give_placeholder_types)?
+                        .data,
+                );
             }
 
             if let Some(skip) = &mut limit.skip {
-                *skip = Box::new(skip.clone().transform(give_placeholder_types)?.data);
+                *skip = Box::new(std::mem::take(skip).transform(give_placeholder_types)?.data);
             }
 
             Ok(Transformed::yes(LogicalPlan::Limit(limit)))
         })
         .context(DataFusionSnafu)?
         .data;
-    Ok(plan)
+    Ok(())
 }
 
 fn visit_placeholders<V>(v: &mut V)

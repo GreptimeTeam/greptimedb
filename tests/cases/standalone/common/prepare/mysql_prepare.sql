@@ -48,3 +48,29 @@ EXECUTE stmt USING 1, 2;
 -- SQLNESS PROTOCOL MYSQL
 DEALLOCATE stmt;
 
+-- test with data
+CREATE TABLE IF NOT EXISTS "cake" (
+    `domain` STRING,
+    is_expire BOOLEAN NULL,
+    ts TIMESTAMP(3),
+    TIME INDEX ("ts"),
+    PRIMARY KEY ("domain")
+) ENGINE=mito
+WITH(
+    append_mode = 'true',
+    ttl='7days'
+);
+
+INSERT INTO cake(domain, is_expire, ts) VALUES('happy', false, '2025-03-18 12:55:51.758000');
+
+-- SQLNESS PROTOCOL MYSQL
+PREPARE stmt FROM 'SELECT `cake`.`domain`, `cake`.`is_expire`, `cake`.`ts` FROM `cake` WHERE `cake`.`domain` = ? LIMIT ? OFFSET ?';
+
+-- SQLNESS PROTOCOL MYSQL
+EXECUTE stmt USING 'happy', 42, 0;
+
+-- SQLNESS PROTOCOL MYSQL
+DEALLOCATE stmt;
+
+-- SQLNESS PROTOCOL MYSQL
+DROP TABLE cake;
