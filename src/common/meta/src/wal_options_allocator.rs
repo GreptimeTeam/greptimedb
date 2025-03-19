@@ -248,9 +248,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_allocator_with_skip_wal() {
-        let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
-        let wal_config = MetasrvWalConfig::RaftEngine;
-        let allocator = WalOptionsAllocator::new(wal_config, kv_backend);
+        let allocator = WalOptionsAllocator::RaftEngine;
         allocator.start().await.unwrap();
 
         let num_regions = 32;
