@@ -6,7 +6,7 @@
   </picture>
 </p>
 
-<h2 align="center">Unified & Cost-Effective Time Series Database for Metrics, Logs, and Events</h2>
+<h2 align="center">Unified & Cost-Effective Observerability Database for Metrics, Logs, and Events</h2>
 
 <div align="center">
 <h3 align="center">
@@ -62,15 +62,19 @@
 
 ## Introduction
 
-**GreptimeDB** is an open-source unified & cost-effective time-series database for **Metrics**, **Logs**, and **Events** (also **Traces** in plan). You can gain real-time insights from Edge to Cloud at Any Scale.
+**GreptimeDB** is an open-source unified & cost-effective observerability database for **Metrics**, **Logs**, and **Events** (also **Traces** in plan). You can gain real-time insights from Edge to Cloud at Any Scale.
+
+## News
+
+**[GreptimeDB archives 1 billion cold run #1 in JSONBench!](https://greptime.com/blogs/2025-03-18-jsonbench-greptimedb-performance)**
 
 ## Why GreptimeDB
 
-Our core developers have been building time-series data platforms for years. Based on our best practices, GreptimeDB was born to give you:
+Our core developers have been building observerability data platforms for years. Based on our best practices, GreptimeDB was born to give you:
 
 * **Unified Processing of Metrics, Logs, and Events**
 
-  GreptimeDB unifies time series data processing by treating all data - whether metrics, logs, or events - as timestamped events with context. Users can analyze this data using either [SQL](https://docs.greptime.com/user-guide/query-data/sql) or [PromQL](https://docs.greptime.com/user-guide/query-data/promql) and leverage stream processing ([Flow](https://docs.greptime.com/user-guide/flow-computation/overview)) to enable continuous aggregation. [Read more](https://docs.greptime.com/user-guide/concepts/data-model).
+  GreptimeDB unifies observerability data processing by treating all data - whether metrics, logs, or events - as timestamped events with context. Users can analyze this data using either [SQL](https://docs.greptime.com/user-guide/query-data/sql) or [PromQL](https://docs.greptime.com/user-guide/query-data/promql) and leverage stream processing ([Flow](https://docs.greptime.com/user-guide/flow-computation/overview)) to enable continuous aggregation. [Read more](https://docs.greptime.com/user-guide/concepts/data-model).
 
 * **Cloud-native Distributed Database**
 
