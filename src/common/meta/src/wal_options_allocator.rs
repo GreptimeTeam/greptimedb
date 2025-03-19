@@ -53,19 +53,6 @@ impl WalOptionsAllocator {
         }
     }
 
-    /// Allocates a wal options for a region.
-    pub fn alloc(&self) -> Result<WalOptions> {
-        match self {
-            Self::RaftEngine => Ok(WalOptions::RaftEngine),
-            Self::Kafka(topic_manager) => {
-                let topic = topic_manager.select()?;
-                Ok(WalOptions::Kafka(KafkaWalOptions {
-                    topic: topic.clone(),
-                }))
-            }
-        }
-    }
-
     /// Allocates a batch of wal options where each wal options goes to a region.
     pub fn alloc_batch(&self, num_regions: usize) -> Result<Vec<WalOptions>> {
         match self {
