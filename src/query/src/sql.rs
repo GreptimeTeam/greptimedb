@@ -432,7 +432,7 @@ pub async fn show_index(
     let mut index_types = StringVectorBuilder::with_capacity(capacity);
     let mut comments = StringVectorBuilder::with_capacity(capacity);
     let mut index_comments = StringVectorBuilder::with_capacity(capacity);
-    let mut visibles = StringVectorBuilder::with_capacity(capacity);
+    let mut visible = StringVectorBuilder::with_capacity(capacity);
     let mut expressions = StringVectorBuilder::with_capacity(capacity);
 
     let mut append_index_column =
@@ -450,7 +450,7 @@ pub async fn show_index(
             index_types.push(Some(index_type));
             comments.push(Some(""));
             index_comments.push(Some(""));
-            visibles.push(Some(YES_STR));
+            visible.push(Some(YES_STR));
             expressions.push(None);
         };
 
@@ -528,7 +528,7 @@ pub async fn show_index(
         index_types.to_vector(),
         comments.to_vector(),
         index_comments.to_vector(),
-        visibles.to_vector(),
+        visible.to_vector(),
         expressions.to_vector(),
     ];
 
