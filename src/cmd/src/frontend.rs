@@ -73,13 +73,19 @@ impl App for FrontendApp {
         let plugins = self.frontend.instance.plugins().clone();
         plugins::start_frontend_plugins(plugins)
             .await
-            .context(error::FrontendSnafu)?;
+            .context(error::StartFrontendSnafu)?;
 
-        self.frontend.start().await.context(error::FrontendSnafu)
+        self.frontend
+            .start()
+            .await
+            .context(error::StartFrontendSnafu)
     }
 
     async fn stop(&self) -> Result<()> {
-        self.frontend.stop().await.context(error::FrontendSnafu)
+        self.frontend
+            .stop()
+            .await
+            .context(error::StartFrontendSnafu)
     }
 }
 
@@ -267,7 +273,7 @@ impl StartCommand {
         let mut plugins = Plugins::new();
         plugins::setup_frontend_plugins(&mut plugins, &plugin_opts, &opts)
             .await
-            .context(error::FrontendSnafu)?;
+            .context(error::StartFrontendSnafu)?;
 
         set_default_timezone(opts.default_timezone.as_deref()).context(error::InitTimezoneSnafu)?;
 
@@ -357,13 +363,13 @@ impl StartCommand {
         .with_local_cache_invalidator(layered_cache_registry)
         .try_build()
         .await
-        .context(error::FrontendSnafu)?;
+        .context(error::StartFrontendSnafu)?;
         let instance = Arc::new(instance);
 
         let servers = Services::new(opts.clone(), instance.clone(), plugins.clone())
             .build()
             .await
-            .context(error::FrontendSnafu)?;
+            .context(error::StartFrontendSnafu)?;
 
         let export_metrics_task = ExportMetricsTask::try_new(&opts.export_metrics, Some(&plugins))
             .context(error::ServersSnafu)?;

@@ -275,19 +275,25 @@ impl App for StandaloneApp {
 
         plugins::start_frontend_plugins(self.frontend.instance.plugins().clone())
             .await
-            .context(error::FrontendSnafu)?;
+            .context(error::StartFrontendSnafu)?;
 
         self.flow_worker_manager
             .clone()
             .run_background(Some(self.flow_shutdown.subscribe()));
 
-        self.frontend.start().await.context(error::FrontendSnafu)?;
+        self.frontend
+            .start()
+            .await
+            .context(error::StartFrontendSnafu)?;
 
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
-        self.frontend.stop().await.context(error::FrontendSnafu)?;
+        self.frontend
+            .stop()
+            .await
+            .context(error::StartFrontendSnafu)?;
 
         self.procedure_manager
             .stop()
@@ -460,7 +466,7 @@ impl StartCommand {
 
         plugins::setup_frontend_plugins(&mut plugins, &plugin_opts, &fe_opts)
             .await
-            .context(error::FrontendSnafu)?;
+            .context(error::StartFrontendSnafu)?;
 
         plugins::setup_datanode_plugins(&mut plugins, &plugin_opts, &dn_opts)
             .await
