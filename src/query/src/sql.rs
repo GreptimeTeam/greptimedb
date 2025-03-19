@@ -18,8 +18,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use catalog::information_schema::{
-    columns, flows, key_column_usage, schemata, tables, CHARACTER_SETS, COLLATIONS, COLUMNS, FLOWS,
-    KEY_COLUMN_USAGE, SCHEMATA, TABLES, VIEWS,
+    columns, flows, schemata, tables, CHARACTER_SETS, COLLATIONS, COLUMNS, FLOWS, SCHEMATA, TABLES,
+    VIEWS,
 };
 use catalog::CatalogManagerRef;
 use common_catalog::consts::{
@@ -39,13 +39,13 @@ use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::RecordBatches;
 use common_time::timezone::get_timezone;
 use common_time::Timestamp;
-use datafusion::common::ScalarValue;
-use datafusion::prelude::{concat_ws, SessionContext};
-use datafusion_expr::expr::WildcardOptions;
-use datafusion_expr::{case, col, lit, Expr, SortExpr};
+use datafusion::prelude::SessionContext;
+use datafusion_expr::{col, lit, Expr, SortExpr};
 use datatypes::prelude::*;
-use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, RawSchema, Schema};
-use datatypes::vectors::StringVector;
+use datatypes::schema::{
+    ColumnDefaultConstraint, ColumnSchema, FulltextBackend, RawSchema, Schema,
+};
+use datatypes::vectors::{StringVector, StringVectorBuilder, UInt32VectorBuilder, VectorRef};
 use itertools::Itertools;
 use object_store::ObjectStore;
 use once_cell::sync::Lazy;
@@ -94,21 +94,6 @@ const COLUMN_SEMANTIC_TYPE_COLUMN: &str = "Semantic Type";
 const YES_STR: &str = "YES";
 const NO_STR: &str = "NO";
 const PRI_KEY: &str = "PRI";
-const TIME_INDEX: &str = "TIME INDEX";
-
-/// SHOW index columns
-const INDEX_TABLE_COLUMN: &str = "Table";
-const INDEX_NONT_UNIQUE_COLUMN: &str = "Non_unique";
-const INDEX_CARDINALITY_COLUMN: &str = "Cardinality";
-const INDEX_SUB_PART_COLUMN: &str = "Sub_part";
-const INDEX_PACKED_COLUMN: &str = "Packed";
-const INDEX_INDEX_TYPE_COLUMN: &str = "Index_type";
-const INDEX_COMMENT_COLUMN: &str = "Index_comment";
-const INDEX_VISIBLE_COLUMN: &str = "Visible";
-const INDEX_EXPRESSION_COLUMN: &str = "Expression";
-const INDEX_KEY_NAME_COLUMN: &str = "Key_name";
-const INDEX_SEQ_IN_INDEX_COLUMN: &str = "Seq_in_index";
-const INDEX_COLUMN_NAME_COLUMN: &str = "Column_name";
 
 static DESCRIBE_TABLE_OUTPUT_SCHEMA: Lazy<Arc<Schema>> = Lazy::new(|| {
     Arc::new(Schema::new(vec![
@@ -173,9 +158,25 @@ static SHOW_CREATE_VIEW_OUTPUT_SCHEMA: Lazy<Arc<Schema>> = Lazy::new(|| {
     ]))
 });
 
-fn null() -> Expr {
-    lit(ScalarValue::Null)
-}
+static SHOW_INDEX_OUTPUT_SCHEMA: Lazy<Arc<Schema>> = Lazy::new(|| {
+    Arc::new(Schema::new(vec![
+        ColumnSchema::new("Table", ConcreteDataType::string_datatype(), false),
+        ColumnSchema::new("Non_unique", ConcreteDataType::uint32_datatype(), false),
+        ColumnSchema::new("Key_name", ConcreteDataType::string_datatype(), false),
+        ColumnSchema::new("Seq_in_index", ConcreteDataType::uint32_datatype(), false),
+        ColumnSchema::new("Column_name", ConcreteDataType::string_datatype(), false),
+        ColumnSchema::new("Collation", ConcreteDataType::string_datatype(), true),
+        ColumnSchema::new("Cardinality", ConcreteDataType::uint32_datatype(), true),
+        ColumnSchema::new("Sub_part", ConcreteDataType::uint32_datatype(), true),
+        ColumnSchema::new("Packed", ConcreteDataType::string_datatype(), true),
+        ColumnSchema::new("Null", ConcreteDataType::string_datatype(), false),
+        ColumnSchema::new("Index_type", ConcreteDataType::string_datatype(), false),
+        ColumnSchema::new("Comment", ConcreteDataType::string_datatype(), false),
+        ColumnSchema::new("Index_comment", ConcreteDataType::string_datatype(), true),
+        ColumnSchema::new("Visible", ConcreteDataType::string_datatype(), true),
+        ColumnSchema::new("Expression", ConcreteDataType::string_datatype(), true),
+    ]))
+});
 
 pub async fn show_databases(
     stmt: ShowDatabases,
@@ -390,10 +391,9 @@ pub async fn show_columns(
     .await
 }
 
-/// Execute `SHOW INDEX` statement.
+/// Execute `SHOW INDEX` statement. Refer to https://dev.mysql.com/doc/refman/8.0/en/show-index.html
 pub async fn show_index(
     stmt: ShowIndex,
-    query_engine: &QueryEngineRef,
     catalog_manager: &CatalogManagerRef,
     query_ctx: QueryContextRef,
 ) -> Result<Output> {
@@ -403,102 +403,145 @@ pub async fn show_index(
         query_ctx.current_schema()
     };
 
-    let primary_key_expr = case(col("constraint_name").like(lit("%PRIMARY%")))
-        .when(lit(true), lit("greptime-primary-key-v1"))
-        .otherwise(null())
-        .context(error::PlanSqlSnafu)?;
-    let inverted_index_expr = case(col("constraint_name").like(lit("%INVERTED INDEX%")))
-        .when(lit(true), lit("greptime-inverted-index-v1"))
-        .otherwise(null())
-        .context(error::PlanSqlSnafu)?;
-    let fulltext_index_expr = case(col("constraint_name").like(lit("%FULLTEXT INDEX%")))
-        .when(lit(true), lit("greptime-fulltext-index-v1"))
-        .otherwise(null())
-        .context(error::PlanSqlSnafu)?;
-    let skipping_index_expr = case(col("constraint_name").like(lit("%SKIPPING INDEX%")))
-        .when(lit(true), lit("greptime-bloom-filter-v1"))
-        .otherwise(null())
-        .context(error::PlanSqlSnafu)?;
-
-    let select = vec![
-        // 1 as `Non_unique`: contain duplicates
-        lit(1).alias(INDEX_NONT_UNIQUE_COLUMN),
-        // How the column is sorted in the index: A (ascending).
-        lit("A").alias(COLUMN_COLLATION_COLUMN),
-        null().alias(INDEX_CARDINALITY_COLUMN),
-        null().alias(INDEX_SUB_PART_COLUMN),
-        null().alias(INDEX_PACKED_COLUMN),
-        // case `constraint_name`
-        //    when 'TIME INDEX' then 'NO'
-        //    else 'YES'
-        // end as `Null`
-        case(col(key_column_usage::CONSTRAINT_NAME))
-            .when(lit(TIME_INDEX), lit(NO_STR))
-            .otherwise(lit(YES_STR))
-            .context(error::PlanSqlSnafu)?
-            .alias(COLUMN_NULLABLE_COLUMN),
-        concat_ws(
-            lit(", "),
-            vec![
-                primary_key_expr,
-                inverted_index_expr,
-                fulltext_index_expr,
-                skipping_index_expr,
-            ],
+    let table = catalog_manager
+        .table(
+            query_ctx.current_catalog(),
+            &schema_name,
+            &stmt.table,
+            Some(&query_ctx),
         )
-        .alias(INDEX_INDEX_TYPE_COLUMN),
-        lit("").alias(COLUMN_COMMENT_COLUMN),
-        lit("").alias(INDEX_COMMENT_COLUMN),
-        lit(YES_STR).alias(INDEX_VISIBLE_COLUMN),
-        null().alias(INDEX_EXPRESSION_COLUMN),
-        Expr::Wildcard {
-            qualifier: None,
-            options: WildcardOptions::default(),
-        },
+        .await
+        .context(error::CatalogSnafu)?
+        .with_context(|| error::TableNotFoundSnafu {
+            table: format_full_table_name(query_ctx.current_catalog(), &schema_name, &stmt.table),
+        })?;
+
+    let table_info = table.table_info();
+    let table_meta = &table_info.meta;
+    let table_name = &table_info.name;
+
+    let capacity = table_meta.schema.num_columns();
+    let mut tables = StringVectorBuilder::with_capacity(capacity);
+    let mut non_uniques = UInt32VectorBuilder::with_capacity(capacity);
+    let mut key_names = StringVectorBuilder::with_capacity(capacity);
+    let mut seq_in_indices = UInt32VectorBuilder::with_capacity(capacity);
+    let mut column_names = StringVectorBuilder::with_capacity(capacity);
+    let mut collations = StringVectorBuilder::with_capacity(capacity);
+    let mut cardinalities = UInt32VectorBuilder::with_capacity(capacity);
+    let mut sub_parts = UInt32VectorBuilder::with_capacity(capacity);
+    let mut packeds = StringVectorBuilder::with_capacity(capacity);
+    let mut nullables = StringVectorBuilder::with_capacity(capacity);
+    let mut index_types = StringVectorBuilder::with_capacity(capacity);
+    let mut comments = StringVectorBuilder::with_capacity(capacity);
+    let mut index_comments = StringVectorBuilder::with_capacity(capacity);
+    let mut visibles = StringVectorBuilder::with_capacity(capacity);
+    let mut expressions = StringVectorBuilder::with_capacity(capacity);
+
+    let mut append_index_column =
+        |key_name: &str, column_name: &str, nullable: bool, index_type: &str, sorted: bool| {
+            tables.push(Some(table_name));
+            non_uniques.push(Some(1));
+            key_names.push(Some(key_name));
+            seq_in_indices.push(Some(1));
+            column_names.push(Some(column_name));
+            collations.push(if sorted { Some("A") } else { None });
+            cardinalities.push(None);
+            sub_parts.push(None);
+            packeds.push(None);
+            nullables.push(Some(if nullable { YES_STR } else { "" }));
+            index_types.push(Some(index_type));
+            comments.push(Some(""));
+            index_comments.push(Some(""));
+            visibles.push(Some(YES_STR));
+            expressions.push(None);
+        };
+
+    let schema = &table_meta.schema;
+
+    if let Some(time_column) = schema.timestamp_column() {
+        append_index_column(
+            "TIME INDEX",
+            &time_column.name,
+            time_column.is_nullable(),
+            "",
+            true,
+        );
+    }
+
+    let column_schemas = schema.column_schemas();
+    let primary_key_columns = table_meta
+        .primary_key_indices
+        .iter()
+        .map(|i| &column_schemas[*i]);
+    for column_schema in primary_key_columns {
+        append_index_column(
+            "PRIMARY",
+            &column_schema.name,
+            column_schema.is_nullable(),
+            "greptime-primary-key-v1",
+            true,
+        );
+    }
+
+    for column in column_schemas {
+        if column.is_inverted_indexed() {
+            append_index_column(
+                "INVERTED INDEX",
+                &column.name,
+                column.is_nullable(),
+                "greptime-inverted-index-v1",
+                true,
+            );
+        }
+
+        if let Some(options) = column.fulltext_options().ok().flatten()
+            && options.enable
+        {
+            let index_type = match options.backend {
+                FulltextBackend::Tantivy => "greptime-fulltext-index-v1",
+                FulltextBackend::Bloom => "greptime-fulltext-index-bloom",
+            };
+
+            append_index_column(
+                "FULLTEXT INDEX",
+                &column.name,
+                column.is_nullable(),
+                index_type,
+                false,
+            );
+        }
+        if column.is_skipping_indexed() {
+            append_index_column(
+                "SKIPPING INDEX",
+                &column.name,
+                column.is_nullable(),
+                "greptime-bloom-filter-v1",
+                false,
+            );
+        }
+    }
+
+    let columns = vec![
+        tables.to_vector(),
+        non_uniques.to_vector(),
+        key_names.to_vector(),
+        seq_in_indices.to_vector(),
+        column_names.to_vector(),
+        collations.to_vector(),
+        cardinalities.to_vector(),
+        sub_parts.to_vector(),
+        packeds.to_vector(),
+        nullables.to_vector(),
+        index_types.to_vector(),
+        comments.to_vector(),
+        index_comments.to_vector(),
+        visibles.to_vector(),
+        expressions.to_vector(),
     ];
 
-    let projects = vec![
-        (key_column_usage::TABLE_NAME, INDEX_TABLE_COLUMN),
-        (INDEX_NONT_UNIQUE_COLUMN, INDEX_NONT_UNIQUE_COLUMN),
-        (key_column_usage::CONSTRAINT_NAME, INDEX_KEY_NAME_COLUMN),
-        (
-            key_column_usage::ORDINAL_POSITION,
-            INDEX_SEQ_IN_INDEX_COLUMN,
-        ),
-        (key_column_usage::COLUMN_NAME, INDEX_COLUMN_NAME_COLUMN),
-        (COLUMN_COLLATION_COLUMN, COLUMN_COLLATION_COLUMN),
-        (INDEX_CARDINALITY_COLUMN, INDEX_CARDINALITY_COLUMN),
-        (INDEX_SUB_PART_COLUMN, INDEX_SUB_PART_COLUMN),
-        (INDEX_PACKED_COLUMN, INDEX_PACKED_COLUMN),
-        (COLUMN_NULLABLE_COLUMN, COLUMN_NULLABLE_COLUMN),
-        (INDEX_INDEX_TYPE_COLUMN, INDEX_INDEX_TYPE_COLUMN),
-        (COLUMN_COMMENT_COLUMN, COLUMN_COMMENT_COLUMN),
-        (INDEX_COMMENT_COLUMN, INDEX_COMMENT_COLUMN),
-        (INDEX_VISIBLE_COLUMN, INDEX_VISIBLE_COLUMN),
-        (INDEX_EXPRESSION_COLUMN, INDEX_EXPRESSION_COLUMN),
-    ];
-
-    let filters = vec![
-        col(key_column_usage::TABLE_NAME).eq(lit(&stmt.table)),
-        col(key_column_usage::TABLE_SCHEMA).eq(lit(schema_name.clone())),
-        col(key_column_usage::REAL_TABLE_CATALOG).eq(lit(query_ctx.current_catalog())),
-    ];
-    let like_field = None;
-    let sort = vec![col(columns::COLUMN_NAME).sort(true, true)];
-
-    query_from_information_schema_table(
-        query_engine,
-        catalog_manager,
-        query_ctx,
-        KEY_COLUMN_USAGE,
-        select,
-        projects,
-        filters,
-        like_field,
-        sort,
-        stmt.kind,
-    )
-    .await
+    let records = RecordBatches::try_from_columns(SHOW_INDEX_OUTPUT_SCHEMA.clone(), columns)
+        .context(error::CreateRecordBatchSnafu)?;
+    Ok(Output::new_with_record_batches(records))
 }
 
 /// Execute [`ShowTables`] statement and return the [`Output`] if success.

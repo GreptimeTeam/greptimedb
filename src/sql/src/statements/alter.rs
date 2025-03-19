@@ -425,7 +425,7 @@ ALTER TABLE monitor RENAME monitor_new"#,
             }
         }
 
-        let sql = "ALTER TABLE monitor MODIFY COLUMN a SET FULLTEXT INDEX WITH(analyzer='English',case_sensitive='false')";
+        let sql = "ALTER TABLE monitor MODIFY COLUMN a SET FULLTEXT INDEX WITH(analyzer='English')";
         let stmts =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
@@ -437,7 +437,7 @@ ALTER TABLE monitor RENAME monitor_new"#,
                 let new_sql = format!("\n{}", set);
                 assert_eq!(
                     r#"
-ALTER TABLE monitor MODIFY COLUMN a SET FULLTEXT INDEX WITH(analyzer=English, case_sensitive=false)"#,
+ALTER TABLE monitor MODIFY COLUMN a SET FULLTEXT INDEX WITH(analyzer=English, case_sensitive=false, backend=tantivy)"#,
                     &new_sql
                 );
             }

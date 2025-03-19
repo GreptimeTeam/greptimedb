@@ -89,7 +89,7 @@ impl StatementExecutor {
         stmt: ShowIndex,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
-        query::sql::show_index(stmt, &self.query_engine, &self.catalog_manager, query_ctx)
+        query::sql::show_index(stmt, &self.catalog_manager, query_ctx)
             .await
             .context(ExecuteStatementSnafu)
     }

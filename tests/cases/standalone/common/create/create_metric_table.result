@@ -289,14 +289,16 @@ SHOW CREATE TABLE phy;
 
 SHOW INDEX FROM phy;
 
-+-------+------------+-------------------------+--------------+-------------+-----------+-------------+----------+--------+------+---------------------------------------------------+---------+---------------+---------+------------+
-| Table | Non_unique | Key_name                | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type                                        | Comment | Index_comment | Visible | Expression |
-+-------+------------+-------------------------+--------------+-------------+-----------+-------------+----------+--------+------+---------------------------------------------------+---------+---------------+---------+------------+
-| phy   | 1          | PRIMARY, SKIPPING INDEX | 3            | __table_id  | A         |             |          |        | YES  | greptime-primary-key-v1, greptime-bloom-filter-v1 |         |               | YES     |            |
-| phy   | 1          | PRIMARY                 | 4            | __tsid      | A         |             |          |        | YES  | greptime-primary-key-v1                           |         |               | YES     |            |
-| phy   | 1          | PRIMARY, SKIPPING INDEX | 5            | host        | A         |             |          |        | YES  | greptime-primary-key-v1, greptime-bloom-filter-v1 |         |               | YES     |            |
-| phy   | 1          | TIME INDEX              | 1            | ts          | A         |             |          |        | NO   |                                                   |         |               | YES     |            |
-+-------+------------+-------------------------+--------------+-------------+-----------+-------------+----------+--------+------+---------------------------------------------------+---------+---------------+---------+------------+
++-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
+| Table | Non_unique | Key_name       | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type               | Comment | Index_comment | Visible | Expression |
++-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
+| phy   | 1          | TIME INDEX     | 1            | ts          | A         |             |          |        |      |                          |         |               | YES     |            |
+| phy   | 1          | PRIMARY        | 1            | __table_id  | A         |             |          |        |      | greptime-primary-key-v1  |         |               | YES     |            |
+| phy   | 1          | PRIMARY        | 1            | __tsid      | A         |             |          |        |      | greptime-primary-key-v1  |         |               | YES     |            |
+| phy   | 1          | PRIMARY        | 1            | host        | A         |             |          |        | YES  | greptime-primary-key-v1  |         |               | YES     |            |
+| phy   | 1          | SKIPPING INDEX | 1            | __table_id  |           |             |          |        |      | greptime-bloom-filter-v1 |         |               | YES     |            |
+| phy   | 1          | SKIPPING INDEX | 1            | host        |           |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
++-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
 
 DROP TABLE t1;
 
