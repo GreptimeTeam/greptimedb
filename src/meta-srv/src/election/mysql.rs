@@ -39,6 +39,16 @@ use crate::metasrv::{ElectionRef, LeaderValue, MetasrvNodeInfo};
 // Separator between value and expire time.
 const LEASE_SEP: &str = r#"||__metadata_lease_sep||"#;
 
+/// Lease information.
+#[derive(Default, Clone)]
+struct Lease {
+    leader_value: String,
+    expire_time: Timestamp,
+    current: Timestamp,
+    // origin is the origin value of the lease, used for CAS.
+    origin: String,
+}
+
 struct ElectionSqlFactory<'a> {
     table_name: &'a str,
 }
@@ -364,7 +374,6 @@ impl Election for MySqlElection {
             .is_ok()
     }
 
-    /// TODO(CookiePie): Split the candidate registration and keep alive logic into separate methods, so that upper layers can call them separately.
     async fn register_candidate(&self, node_info: &MetasrvNodeInfo) -> Result<()> {
         let key = self.candidate_key();
         let node_info =
@@ -402,26 +411,24 @@ impl Election for MySqlElection {
             let _ = keep_alive_interval.tick().await;
             let client = self.client.lock().await;
             let mut executor = Executor::Default(client);
-            let (_, prev_expire_time, current_time, origin) = self
-                .get_value_with_lease(&key, true, &mut executor)
+            let lease = self
+                .get_value_with_lease(&key, &mut executor)
                 .await?
                 .unwrap_or_default();
 
             ensure!(
-                prev_expire_time > current_time,
+                lease.expire_time > lease.current,
                 UnexpectedSnafu {
                     violated: format!(
                         "Candidate lease expired at {:?} (current time: {:?}), key: {:?}",
-                        prev_expire_time,
-                        current_time,
+                        lease.expire_time,
+                        lease.current,
                         String::from_utf8_lossy(&key.into_bytes())
                     ),
                 }
             );
 
-            // Safety: origin is Some since we are using `get_value_with_lease` with `true`.
-            let origin = origin.unwrap();
-            self.update_value_with_lease(&key, &origin, &node_info, &mut executor)
+            self.update_value_with_lease(&key, &lease.origin, &node_info, &mut executor)
                 .await?;
             std::mem::drop(executor);
         }
@@ -464,12 +471,9 @@ impl Election for MySqlElection {
 
             let client = self.client.lock().await;
             let mut executor = Executor::Default(client);
-            if let Some((leader, expire_time, current, _)) = self
-                .get_value_with_lease(&key, false, &mut executor)
-                .await?
-            {
-                ensure!(expire_time > current, NoLeaderSnafu);
-                Ok(leader.as_bytes().into())
+            if let Some(lease) = self.get_value_with_lease(&key, &mut executor).await? {
+                ensure!(lease.expire_time > lease.current, NoLeaderSnafu);
+                Ok(lease.leader_value.as_bytes().into())
             } else {
                 NoLeaderSnafu.fail()
             }
@@ -490,9 +494,8 @@ impl MySqlElection {
     async fn get_value_with_lease(
         &self,
         key: &str,
-        with_origin: bool,
         executor: &mut Executor<'_>,
-    ) -> Result<Option<(String, Timestamp, Timestamp, Option<String>)>> {
+    ) -> Result<Option<Lease>> {
         let key = key.as_bytes();
         let query = sqlx::query(&self.sql_set.get_value_with_lease).bind(key);
         let res = executor.query(query).await?;
@@ -513,16 +516,12 @@ impl MySqlElection {
         let value_and_expire_time = String::from_utf8_lossy(res[0].try_get(0).unwrap_or_default());
         let (value, expire_time) = parse_value_and_expire_time(&value_and_expire_time)?;
 
-        if with_origin {
-            Ok(Some((
-                value,
-                expire_time,
-                current_time,
-                Some(value_and_expire_time.to_string()),
-            )))
-        } else {
-            Ok(Some((value, expire_time, current_time, None)))
-        }
+        Ok(Some(Lease {
+            leader_value: value,
+            expire_time,
+            current: current_time,
+            origin: value_and_expire_time.to_string(),
+        }))
     }
 
     /// Returns all values and expire time with the given key prefix. Also returns the current time.
@@ -612,172 +611,79 @@ impl MySqlElection {
     }
 
     /// Attempts to acquire leadership by executing a campaign. This function continuously checks
-    /// if the current instance can become the leader by acquiring an advisory lock in the PostgreSQL database.
-    ///
-    /// The function operates in a loop, where it:
-    ///
-    /// 1. Waits for a predefined interval before attempting to acquire the lock again.
-    /// 2. Executes the `SELECT FOR UPDATE` SQL query to try to acquire the lock.
-    /// 3. Checks the result of the query:
-    ///    - If the lock is successfully acquired (result is true), it calls the `leader_action` method.
-    ///      Different from PgElection, it does not mean you are the leader. So it performs a check before
-    ///      renewing the lease.
-    ///    - If the lock is not acquired (result is false), it calls the `follower_action` method
-    ///      to perform a check.
+    /// if the current lease is still valid.
     async fn do_campaign(&self, interval: &mut Interval) -> Result<()> {
         // Need to restrict the scope of the client to avoid ambiguous overloads.
         use sqlx::Acquire;
 
         loop {
-            let mut client = self.client.lock().await;
-            let txn = client.begin().await.context(MySqlExecutionSnafu)?;
-            let mut executor = Executor::Txn(txn);
-            let query = sqlx::query(&self.sql_set.campaign);
-            match executor.query(query).await {
-                // Caution: leader action does not mean you are the leader.
-                // It just means you get the lock, and now you can perform a check.
-                Ok(_) => self.leader_action(executor).await?,
-                // If the lock is not acquired, another instance is in the check.
-                Err(_) => {
-                    executor.commit().await?;
-                    let executor = Executor::Default(client);
-                    self.follower_action(executor).await?;
+            let client = self.client.lock().await;
+            let executor = Executor::Default(client);
+            let mut lease = Lease::default();
+            match (
+                self.lease_check(executor, &mut lease).await,
+                self.is_leader(),
+            ) {
+                // If the leader lease is valid and I'm the leader, renew the lease.
+                (Ok(_), true) => {
+                    let mut client = self.client.lock().await;
+                    let txn = client.begin().await.context(MySqlExecutionSnafu)?;
+                    let mut executor = Executor::Txn(txn);
+                    let query = sqlx::query(&self.sql_set.campaign);
+                    executor.query(query).await?;
+                    self.renew_lease(executor, lease).await?;
                 }
+                // If the leader lease expires and I'm the leader, notify the leader watcher and step down.
+                // Another instance should be elected as the leader in this case.
+                (Err(_), true) => {
+                    warn!("Leader lease expired, re-initiate the campaign");
+                    self.step_down_without_lock().await?;
+                }
+                // If the leader lease expires and I'm not the leader, elect myself.
+                (Err(_), false) => {
+                    warn!("Leader lease expired, re-initiate the campaign");
+                    let mut client = self.client.lock().await;
+                    let txn = client.begin().await.context(MySqlExecutionSnafu)?;
+                    let mut executor = Executor::Txn(txn);
+                    let query = sqlx::query(&self.sql_set.campaign);
+                    executor.query(query).await?;
+                    self.elected(&mut executor).await?;
+                    executor.commit().await?;
+                }
+                // If the leader lease is valid and I'm not the leader, do nothing.
+                (Ok(_), false) => {}
             }
             interval.tick().await;
         }
     }
 
-    /// Handles the actions with the acquired lock in the election process.
-    /// Note: Leader action does not mean you are the leader. It just means you get the lock, and now you can perform a unique check.
-    ///
-    /// This function performs the following checks and actions:
-    ///
-    /// - **Case 1**: If the instance is still the leader and the lease is valid, it renews the lease
-    ///   by updating the value associated with the election key.
-    /// - **Case 2**: If the instance is still the leader but the lease has expired, it logs a warning
-    ///   and steps down, initiating a new campaign for leadership.
-    /// - **Case 3**: If the instance is not the leader and the lease has expired, it is elected as the leader.
-    /// - **Case 4**: If the instance is the leader and the lease is valid but the leader has changed,
-    ///   it logs a warning and steps down.
-    /// - **Case 5**: If the instance is not the leader and the lease is valid, it does nothing.
-    /// - **Case 6**: If the instance is the leader and no lease information is found, it logs a warning and steps down.
-    /// - **Case 7**: If the instance is not the leader and no lease information is found, it is elected as the leader.
-    async fn leader_action(&self, mut executor: Executor<'_>) -> Result<()> {
+    /// Renew the lease
+    async fn renew_lease(&self, mut executor: Executor<'_>, lease: Lease) -> Result<()> {
         let key = self.election_key();
-        match self.get_value_with_lease(&key, true, &mut executor).await? {
-            Some((prev_leader, expire_time, current, prev)) => {
-                match (prev_leader == self.leader_value, expire_time > current) {
-                    // Case 1: Believe itself as the leader and the lease is still valid.
-                    (true, true) => {
-                        // Safety: prev is Some since we are using `get_value_with_lease` with `true`.
-                        let prev = prev.unwrap();
-                        self.update_value_with_lease(
-                            &key,
-                            &prev,
-                            &self.leader_value,
-                            &mut executor,
-                        )
-                        .await?;
-                        executor.commit().await?;
-                    }
-                    (_, false) => {
-                        if self.is_leader() {
-                            // Case 2: Believe itself as the leader but the lease has expired.
-                            warn!(
-                                "Leader lease expired at {:?} (current time: {:?}), stepping down",
-                                expire_time, current
-                            );
-                            self.step_down(executor).await?;
-                        } else {
-                            // Case 3: Do not believe itself as the leader and the lease has expired.
-                            self.elected(&mut executor).await?;
-                            executor.commit().await?;
-                        }
-                    }
-                    (false, true) => {
-                        if self.is_leader() {
-                            // Case 4: Believe itself as the leader but the leader has changed.
-                            warn!(
-                                "Leader changed from {:?} to {:?}, stepping down",
-                                prev_leader, self.leader_value
-                            );
-                            // Do not delete the key, since another leader is elected.
-                            self.step_down_without_lock().await?;
-                        }
-                        // Case 5: Do not believe itself as the leader and the lease is still valid.
-                        executor.commit().await?;
-                    }
-                }
-            }
-            None => {
-                if self.is_leader() {
-                    // Case 6: Believe itself as the leader but no lease information found.
-                    warn!("No lease information found, stepping down, key: {:?}", key);
-                    self.step_down(executor).await?;
-                } else {
-                    // Case 7: Do not believe itself as the leader and no lease information found.
-                    self.elected(&mut executor).await?;
-                    executor.commit().await?;
-                }
-            }
-        }
+        self.update_value_with_lease(&key, &lease.origin, &self.leader_value, &mut executor)
+            .await?;
+        executor.commit().await?;
         Ok(())
     }
 
-    /// Handles the actions of a follower in the election process.
+    /// Performs a lease check during the election process.
     ///
     /// This function performs the following checks and actions:
     ///
-    /// - **Case 1**: If the current instance believes it is the leader from the previous term,
-    ///   it steps down without deleting the key.
-    /// - **Case 2**: If the current instance is not the leader but the lease has expired, it raises an error
+    /// - **Case 1**: If the current instance is not the leader but the lease has expired, it raises an error
     ///   to re-initiate the campaign. If the leader failed to renew the lease, its session will expire and the lock
     ///   will be released.
-    /// - **Case 3**: If all checks pass, the function returns without performing any actions.
-    async fn follower_action(&self, mut executor: Executor<'_>) -> Result<()> {
+    /// - **Case 2**: If all checks pass, the function returns without performing any actions.
+    async fn lease_check(&self, mut executor: Executor<'_>, lease: &mut Lease) -> Result<()> {
         let key = self.election_key();
-        // Case 1
-        if self.is_leader() {
-            self.step_down_without_lock().await?;
-        }
-        let (_, expire_time, current, _) = self
-            .get_value_with_lease(&key, false, &mut executor)
+        let check_lease = self
+            .get_value_with_lease(&key, &mut executor)
             .await?
             .context(NoLeaderSnafu)?;
-        // Case 2
-        ensure!(expire_time > current, NoLeaderSnafu);
-        // Case 3
-        Ok(())
-    }
-
-    /// Step down the leader. The leader should delete the key and notify the leader watcher.
-    ///
-    /// __DO NOT__ check if the deletion is successful, since the key may be deleted by others elected.
-    ///
-    /// ## Caution:
-    /// Should only step down while holding the lock.
-    async fn step_down(&self, mut executor: Executor<'_>) -> Result<()> {
-        let key = self.election_key();
-        let leader_key = MySqlLeaderKey {
-            name: self.leader_value.clone().into_bytes(),
-            key: key.clone().into_bytes(),
-            ..Default::default()
-        };
-        if self
-            .is_leader
-            .compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
-        {
-            self.delete_value(&key, &mut executor).await?;
-            executor.commit().await?;
-            if let Err(e) = self
-                .leader_watcher
-                .send(LeaderChangeMessage::StepDown(Arc::new(leader_key)))
-            {
-                error!(e; "Failed to send leader change message");
-            }
-        }
+        *lease = check_lease;
+        // Case 1: Lease expired
+        ensure!(lease.expire_time > lease.current, NoLeaderSnafu);
+        // Case 2: Everything is fine
         Ok(())
     }
 
