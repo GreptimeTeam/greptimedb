@@ -143,6 +143,10 @@ impl<'a> ElectionSqlFactory<'a> {
         )
     }
 
+    fn check_version(&self) -> &str {
+        "SELECT @@version;"
+    }
+
     fn campaign_sql(&self) -> String {
         format!("SELECT * FROM `{}` FOR UPDATE;", self.table_name)
     }
@@ -350,6 +354,8 @@ impl MySqlElection {
             .context(MySqlExecutionSnafu {
                 sql: &sql_factory.insert_once(),
             })?;
+        // Check MySQL version
+        Self::check_version(&mut client, sql_factory.check_version()).await?;
         let tx = listen_leader_change(leader_value.clone());
         Ok(Arc::new(Self {
             leader_value,
@@ -767,6 +773,26 @@ impl MySqlElection {
                 .send(LeaderChangeMessage::Elected(Arc::new(leader_key)))
             {
                 error!(e; "Failed to send leader change message");
+            }
+        }
+        Ok(())
+    }
+
+    /// Check if the MySQL version is supported.
+    async fn check_version(client: &mut MySqlConnection, sql: &str) -> Result<()> {
+        let query = sqlx::query(sql);
+        match query.fetch_one(client).await {
+            Ok(row) => {
+                let version: String = row.try_get(0).unwrap();
+                if !version.starts_with("8.0") || !version.starts_with("5.7") {
+                    warn!(
+                        "Unsupported MySQL version: {}, expected: [5.7, 8.0]",
+                        version
+                    );
+                }
+            }
+            Err(e) => {
+                warn!(e; "Failed to check MySQL version through sql: {}", sql);
             }
         }
         Ok(())
