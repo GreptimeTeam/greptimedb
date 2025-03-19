@@ -17,6 +17,7 @@ use std::any::Any;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use datatypes::timestamp::TimestampNanosecond;
 use snafu::{Location, Snafu};
 
 #[derive(Snafu)]
@@ -51,7 +52,7 @@ pub enum Error {
     #[snafu(display("Processor {processor}: expect string value, but got {v:?}"))]
     ProcessorExpectString {
         processor: String,
-        v: crate::etl::Value,
+        v: crate::Value,
         #[snafu(implicit)]
         location: Location,
     },
@@ -607,13 +608,197 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Pipeline table not found"))]
+    PipelineTableNotFound {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to insert pipeline to pipelines table"))]
+    InsertPipeline {
+        #[snafu(source)]
+        source: operator::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Pipeline not found, name: {}, version: {}", name, version.map(|ts| ts.0.to_iso8601_string()).unwrap_or("latest".to_string())))]
+    PipelineNotFound {
+        name: String,
+        version: Option<TimestampNanosecond>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to collect record batch"))]
+    CollectRecords {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        source: common_recordbatch::error::Error,
+    },
+
+    #[snafu(display("Failed to cast type, msg: {}", msg))]
+    CastType {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to build DataFusion logical plan"))]
+    BuildDfLogicalPlan {
+        #[snafu(source)]
+        error: datafusion_common::DataFusionError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to execute internal statement"))]
+    ExecuteInternalStatement {
+        #[snafu(source)]
+        source: query::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to create dataframe"))]
+    DataFrame {
+        #[snafu(source)]
+        source: query::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("General catalog error"))]
+    Catalog {
+        #[snafu(source)]
+        source: catalog::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to create table"))]
+    CreateTable {
+        #[snafu(source)]
+        source: operator::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid pipeline version format: {}", version))]
+    InvalidPipelineVersion {
+        version: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
-        StatusCode::InvalidArguments
+        use Error::*;
+        match self {
+            CastType { .. } => StatusCode::Unexpected,
+            PipelineTableNotFound { .. } => StatusCode::TableNotFound,
+            InsertPipeline { source, .. } => source.status_code(),
+            CollectRecords { source, .. } => source.status_code(),
+            PipelineNotFound { .. } | InvalidPipelineVersion { .. } => StatusCode::InvalidArguments,
+            BuildDfLogicalPlan { .. } => StatusCode::Internal,
+            ExecuteInternalStatement { source, .. } => source.status_code(),
+            DataFrame { source, .. } => source.status_code(),
+            Catalog { source, .. } => source.status_code(),
+            CreateTable { source, .. } => source.status_code(),
+
+            EmptyInputField { .. }
+            | MissingInputField { .. }
+            | ProcessorMustBeMap { .. }
+            | ProcessorMissingField { .. }
+            | ProcessorExpectString { .. }
+            | ProcessorUnsupportedValue { .. }
+            | ProcessorKeyMustBeString { .. }
+            | ProcessorFailedToParseString { .. }
+            | ProcessorMustHaveStringKey { .. }
+            | UnsupportedProcessor { .. }
+            | FieldMustBeType { .. }
+            | FailedParseFieldFromString { .. }
+            | FailedToParseIntKey { .. }
+            | FailedToParseInt { .. }
+            | FailedToParseFloatKey { .. }
+            | IntermediateKeyIndex { .. }
+            | CmcdMissingValue { .. }
+            | CmcdMissingKey { .. }
+            | KeyMustBeString { .. }
+            | CsvRead { .. }
+            | CsvNoRecord { .. }
+            | CsvSeparatorName { .. }
+            | CsvQuoteName { .. }
+            | DateParseTimezone { .. }
+            | DateParse { .. }
+            | DateFailedToGetLocalTimezone { .. }
+            | DateFailedToGetTimestamp { .. }
+            | DateInvalidFormat { .. }
+            | DissectInvalidPattern { .. }
+            | DissectEmptyPattern { .. }
+            | DissectSplitExceedsInput { .. }
+            | DissectSplitNotMatchInput { .. }
+            | DissectConsecutiveNames { .. }
+            | DissectNoMatchingPattern { .. }
+            | DissectModifierAlreadySet { .. }
+            | DissectAppendOrderAlreadySet { .. }
+            | DissectOrderOnlyAppend { .. }
+            | DissectOrderOnlyAppendModifier { .. }
+            | DissectEndModifierAlreadySet { .. }
+            | EpochInvalidResolution { .. }
+            | GsubPatternRequired { .. }
+            | GsubReplacementRequired { .. }
+            | Regex { .. }
+            | JoinSeparatorRequired { .. }
+            | LetterInvalidMethod { .. }
+            | RegexNamedGroupNotFound { .. }
+            | RegexNoValidField { .. }
+            | RegexNoValidPattern { .. }
+            | UrlEncodingInvalidMethod { .. }
+            | DigestPatternInvalid { .. }
+            | UrlEncodingDecode { .. }
+            | TransformOnFailureInvalidValue { .. }
+            | TransformElementMustBeMap { .. }
+            | TransformTypeMustBeSet { .. }
+            | TransformEmpty { .. }
+            | TransformColumnNameMustBeUnique { .. }
+            | TransformMultipleTimestampIndex { .. }
+            | TransformTimestampIndexCount { .. }
+            | CoerceUnsupportedNullType { .. }
+            | CoerceUnsupportedNullTypeTo { .. }
+            | CoerceUnsupportedEpochType { .. }
+            | CoerceStringToType { .. }
+            | CoerceJsonTypeTo { .. }
+            | CoerceTypeToJson { .. }
+            | CoerceIncompatibleTypes { .. }
+            | ValueInvalidResolution { .. }
+            | ValueParseType { .. }
+            | ValueParseInt { .. }
+            | ValueParseFloat { .. }
+            | ValueParseBoolean { .. }
+            | ValueDefaultValueUnsupported { .. }
+            | ValueUnsupportedNumberType { .. }
+            | ValueUnsupportedYamlType { .. }
+            | ValueYamlKeyMustBeString { .. }
+            | YamlLoad { .. }
+            | YamlParse { .. }
+            | PrepareValueMustBeObject { .. }
+            | ColumnOptions { .. }
+            | UnsupportedIndexType { .. }
+            | UnsupportedNumberType { .. }
+            | IdentifyPipelineColumnTypeMismatch { .. }
+            | JsonPathParse { .. }
+            | JsonPathParseResultIndex { .. }
+            | FieldRequiredForDispatcher
+            | TableSuffixRequiredForDispatcherRule
+            | ValueRequiredForDispatcherRule
+            | ReachedMaxNestedLevels { .. } => StatusCode::InvalidArguments,
+        }
     }
 
     fn as_any(&self) -> &dyn Any {

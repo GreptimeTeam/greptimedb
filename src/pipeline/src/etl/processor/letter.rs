@@ -14,7 +14,7 @@
 
 use snafu::OptionExt;
 
-use crate::etl::error::{
+use crate::error::{
     Error, KeyMustBeStringSnafu, LetterInvalidMethodSnafu, ProcessorExpectStringSnafu,
     ProcessorMissingFieldSnafu, Result,
 };

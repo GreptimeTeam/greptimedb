@@ -41,9 +41,9 @@ use table::metadata::TableInfo;
 use table::TableRef;
 
 use crate::error::{
-    BuildDfLogicalPlanSnafu, CastTypeSnafu, CollectRecordsSnafu, CompilePipelineSnafu,
-    DataFrameSnafu, ExecuteInternalStatementSnafu, InsertPipelineSnafu,
-    InvalidPipelineVersionSnafu, PipelineNotFoundSnafu, Result,
+    BuildDfLogicalPlanSnafu, CastTypeSnafu, CollectRecordsSnafu, DataFrameSnafu,
+    ExecuteInternalStatementSnafu, InsertPipelineSnafu, InvalidPipelineVersionSnafu,
+    PipelineNotFoundSnafu, Result,
 };
 use crate::etl::transform::GreptimeTransformer;
 use crate::etl::{parse, Content, Pipeline};
@@ -204,7 +204,7 @@ impl PipelineTable {
     /// Compile a pipeline from a string.
     pub fn compile_pipeline(pipeline: &str) -> Result<Pipeline<GreptimeTransformer>> {
         let yaml_content = Content::Yaml(pipeline);
-        parse::<GreptimeTransformer>(&yaml_content).context(CompilePipelineSnafu)
+        parse::<GreptimeTransformer>(&yaml_content)
     }
 
     /// Insert a pipeline into the pipeline table.
