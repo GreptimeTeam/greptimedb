@@ -26,6 +26,7 @@ pub mod dist_plan;
 pub mod dummy_catalog;
 pub mod error;
 pub mod executor;
+pub mod expand;
 pub mod log_query;
 pub mod metrics;
 mod optimizer;
