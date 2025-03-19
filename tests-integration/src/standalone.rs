@@ -41,11 +41,13 @@ use common_procedure::ProcedureManagerRef;
 use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use datanode::datanode::DatanodeBuilder;
 use flow::FlownodeBuilder;
+use frontend::frontend::Frontend;
 use frontend::instance::builder::FrontendBuilder;
-use frontend::instance::{FrontendInstance, Instance, StandaloneDatanodeManager};
+use frontend::instance::{Instance, StandaloneDatanodeManager};
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
 use query::stats::StatementStatistics;
 use servers::grpc::GrpcOptions;
+use servers::server::ServerHandlers;
 use servers::Mode;
 use snafu::ResultExt;
 
@@ -234,6 +236,7 @@ impl GreptimeDbStandaloneBuilder {
         .try_build()
         .await
         .unwrap();
+        let instance = Arc::new(instance);
 
         let flow_worker_manager = flownode.flow_worker_manager();
         let invoker = flow::FrontendInvoker::build_from(
@@ -255,10 +258,18 @@ impl GreptimeDbStandaloneBuilder {
 
         test_util::prepare_another_catalog_and_schema(&instance).await;
 
-        instance.start().await.unwrap();
+        let frontend = Frontend {
+            opts: opts.frontend_options(),
+            instance,
+            servers: ServerHandlers::new(),
+            heartbeat_task: None,
+            export_metrics_task: None,
+        };
+
+        frontend.start().await.unwrap();
 
         GreptimeDbStandalone {
-            instance: Arc::new(instance),
+            instance: frontend.instance.clone(),
             opts,
             guard,
             kv_backend,
