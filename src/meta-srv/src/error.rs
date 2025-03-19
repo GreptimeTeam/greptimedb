@@ -740,12 +740,13 @@ pub enum Error {
     },
 
     #[cfg(feature = "mysql_kvbackend")]
-    #[snafu(display("Failed to execute via mysql"))]
+    #[snafu(display("Failed to execute via mysql, sql: {}", sql))]
     MySqlExecution {
         #[snafu(source)]
         error: sqlx::Error,
         #[snafu(implicit)]
         location: Location,
+        sql: String,
     },
 
     #[cfg(feature = "mysql_kvbackend")]

@@ -138,19 +138,19 @@ impl<'a> ElectionSqlFactory<'a> {
 
     fn insert_once(&self) -> String {
         format!(
-            "INSERT IGNORE INTO {} (k, v) VALUES ('__place_holder_for_lock', '');",
+            "INSERT IGNORE INTO `{}` (k, v) VALUES ('__place_holder_for_lock', '');",
             self.table_name
         )
     }
 
     fn campaign_sql(&self) -> String {
-        format!("SELECT * FROM {} FOR UPDATE;", self.table_name)
+        format!("SELECT * FROM `{}` FOR UPDATE;", self.table_name)
     }
 
     fn put_value_with_lease_sql(&self) -> String {
         format!(
             r#"
-            INSERT INTO {} (k, v) VALUES (
+            INSERT INTO `{}` (k, v) VALUES (
                 ?,
                 CONCAT(
                     ?,
@@ -166,7 +166,7 @@ impl<'a> ElectionSqlFactory<'a> {
 
     fn update_value_with_lease_sql(&self) -> String {
         format!(
-            r#"UPDATE {}
+            r#"UPDATE `{}`
                SET v = CONCAT(?, '{}', DATE_FORMAT(DATE_ADD(NOW(4), INTERVAL ? SECOND), '%Y-%m-%d %T.%f'))
                WHERE k = ? AND v = ?"#,
             self.table_name, LEASE_SEP
@@ -175,14 +175,14 @@ impl<'a> ElectionSqlFactory<'a> {
 
     fn get_value_with_lease_sql(&self) -> String {
         format!(
-            r#"SELECT v, DATE_FORMAT(NOW(4), '%Y-%m-%d %T.%f') FROM {} WHERE k = ?"#,
+            r#"SELECT v, DATE_FORMAT(NOW(4), '%Y-%m-%d %T.%f') FROM `{}` WHERE k = ?"#,
             self.table_name
         )
     }
 
     fn get_value_with_lease_by_prefix_sql(&self) -> String {
         format!(
-            r#"SELECT v, DATE_FORMAT(NOW(4), '%Y-%m-%d %T.%f') FROM {} WHERE k LIKE ?"#,
+            r#"SELECT v, DATE_FORMAT(NOW(4), '%Y-%m-%d %T.%f') FROM `{}` WHERE k LIKE ?"#,
             self.table_name
         )
     }
@@ -194,15 +194,16 @@ impl<'a> ElectionSqlFactory<'a> {
 
 /// Parse the value and expire time from the given string. The value should be in the format "value || LEASE_SEP || expire_time".
 fn parse_value_and_expire_time(value: &str) -> Result<(String, Timestamp)> {
-    let (value, expire_time) = value
-        .split(LEASE_SEP)
-        .collect_tuple()
-        .context(UnexpectedSnafu {
-            violated: format!(
-                "Invalid value {}, expect node info || {} || expire time",
-                value, LEASE_SEP
-            ),
-        })?;
+    let (value, expire_time) =
+        value
+            .split(LEASE_SEP)
+            .collect_tuple()
+            .with_context(|| UnexpectedSnafu {
+                violated: format!(
+                    "Invalid value {}, expect node info || {} || expire time",
+                    value, LEASE_SEP
+                ),
+            })?;
     // Given expire_time is in the format 'YYYY-MM-DD HH24:MI:SS.MS'
     let expire_time = match Timestamp::from_str(expire_time, None) {
         Ok(ts) => ts,
@@ -396,28 +397,30 @@ impl Election for MySqlElection {
                 input: format!("{node_info:?}"),
             })?;
 
-        let client = self.client.lock().await;
-        let mut executor = Executor::Default(client);
-        let res = self
-            .put_value_with_lease(
-                &key,
-                &node_info,
-                self.candidate_lease_ttl_secs,
-                &mut executor,
-            )
-            .await?;
-        // May registered before, just update the lease.
-        if !res {
-            self.delete_value(&key, &mut executor).await?;
-            self.put_value_with_lease(
-                &key,
-                &node_info,
-                self.candidate_lease_ttl_secs,
-                &mut executor,
-            )
-            .await?;
+        {
+            let client = self.client.lock().await;
+            let mut executor = Executor::Default(client);
+            let res = self
+                .put_value_with_lease(
+                    &key,
+                    &node_info,
+                    self.candidate_lease_ttl_secs,
+                    &mut executor,
+                )
+                .await?;
+            // May registered before, just update the lease.
+            if !res {
+                warn!("Candidate already registered, update the lease");
+                self.delete_value(&key, &mut executor).await?;
+                self.put_value_with_lease(
+                    &key,
+                    &node_info,
+                    self.candidate_lease_ttl_secs,
+                    &mut executor,
+                )
+                .await?;
+            }
         }
-        std::mem::drop(executor);
 
         // Check if the current lease has expired and renew the lease.
         let mut keep_alive_interval =
