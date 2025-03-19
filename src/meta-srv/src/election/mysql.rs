@@ -40,6 +40,7 @@ use crate::metasrv::{ElectionRef, LeaderValue, MetasrvNodeInfo};
 const LEASE_SEP: &str = r#"||__metadata_lease_sep||"#;
 
 /// Lease information.
+/// TODO(CookiePie): PgElection can also use this struct. Refactor it to a common module.
 #[derive(Default, Clone)]
 struct Lease {
     leader_value: String,
@@ -245,39 +246,43 @@ enum Executor<'a> {
 }
 
 impl Executor<'_> {
-    async fn query(&mut self, query: Query<'_, MySql, MySqlArguments>) -> Result<Vec<MySqlRow>> {
+    async fn query(
+        &mut self,
+        query: Query<'_, MySql, MySqlArguments>,
+        sql: &str,
+    ) -> Result<Vec<MySqlRow>> {
         match self {
             Executor::Default(client) => {
                 let res = query
                     .fetch_all(&mut **client)
                     .await
-                    .context(MySqlExecutionSnafu)?;
+                    .context(MySqlExecutionSnafu { sql })?;
                 Ok(res)
             }
             Executor::Txn(txn) => {
                 let res = query
                     .fetch_all(&mut **txn)
                     .await
-                    .context(MySqlExecutionSnafu)?;
+                    .context(MySqlExecutionSnafu { sql })?;
                 Ok(res)
             }
         }
     }
 
-    async fn execute(&mut self, query: Query<'_, MySql, MySqlArguments>) -> Result<u64> {
+    async fn execute(&mut self, query: Query<'_, MySql, MySqlArguments>, sql: &str) -> Result<u64> {
         match self {
             Executor::Default(client) => {
                 let res = query
                     .execute(&mut **client)
                     .await
-                    .context(MySqlExecutionSnafu)?;
+                    .context(MySqlExecutionSnafu { sql })?;
                 Ok(res.rows_affected())
             }
             Executor::Txn(txn) => {
                 let res = query
                     .execute(&mut **txn)
                     .await
-                    .context(MySqlExecutionSnafu)?;
+                    .context(MySqlExecutionSnafu { sql })?;
                 Ok(res.rows_affected())
             }
         }
@@ -286,7 +291,9 @@ impl Executor<'_> {
     async fn commit(self) -> Result<()> {
         match self {
             Executor::Txn(txn) => {
-                txn.commit().await.context(MySqlExecutionSnafu)?;
+                txn.commit()
+                    .await
+                    .context(MySqlExecutionSnafu { sql: "COMMIT" })?;
                 Ok(())
             }
             _ => Ok(()),
@@ -318,22 +325,30 @@ impl MySqlElection {
         sqlx::query(&sql_factory.create_table_sql())
             .execute(&mut client)
             .await
-            .context(MySqlExecutionSnafu)?;
+            .context(MySqlExecutionSnafu {
+                sql: &sql_factory.create_table_sql(),
+            })?;
         // Set idle session timeout to IDLE_SESSION_TIMEOUT to avoid dead lock.
         sqlx::query(&sql_factory.set_idle_session_timeout_sql())
             .execute(&mut client)
             .await
-            .context(MySqlExecutionSnafu)?;
+            .context(MySqlExecutionSnafu {
+                sql: &sql_factory.set_idle_session_timeout_sql(),
+            })?;
         // Set lock wait timeout to LOCK_WAIT_TIMEOUT to avoid waiting too long.
         sqlx::query(sql_factory.set_lock_wait_timeout_sql())
             .execute(&mut client)
             .await
-            .context(MySqlExecutionSnafu)?;
+            .context(MySqlExecutionSnafu {
+                sql: sql_factory.set_lock_wait_timeout_sql(),
+            })?;
         // Insert at least one row for `SELECT * FOR UPDATE` to work.
         sqlx::query(&sql_factory.insert_once())
             .execute(&mut client)
             .await
-            .context(MySqlExecutionSnafu)?;
+            .context(MySqlExecutionSnafu {
+                sql: &sql_factory.insert_once(),
+            })?;
         let tx = listen_leader_change(leader_value.clone());
         Ok(Arc::new(Self {
             leader_value,
@@ -498,7 +513,9 @@ impl MySqlElection {
     ) -> Result<Option<Lease>> {
         let key = key.as_bytes();
         let query = sqlx::query(&self.sql_set.get_value_with_lease).bind(key);
-        let res = executor.query(query).await?;
+        let res = executor
+            .query(query, &self.sql_set.get_value_with_lease)
+            .await?;
 
         if res.is_empty() {
             return Ok(None);
@@ -532,7 +549,9 @@ impl MySqlElection {
     ) -> Result<(Vec<(String, Timestamp)>, Timestamp)> {
         let key_prefix = format!("{}%", key_prefix).as_bytes().to_vec();
         let query = sqlx::query(&self.sql_set.get_value_with_lease_by_prefix).bind(key_prefix);
-        let res = executor.query(query).await?;
+        let res = executor
+            .query(query, &self.sql_set.get_value_with_lease_by_prefix)
+            .await?;
 
         let mut values_with_leases = vec![];
         let mut current = Timestamp::default();
@@ -570,7 +589,9 @@ impl MySqlElection {
             .bind(self.candidate_lease_ttl_secs as f64)
             .bind(key)
             .bind(prev);
-        let res = executor.execute(query).await?;
+        let res = executor
+            .execute(query, &self.sql_set.update_value_with_lease)
+            .await?;
 
         ensure!(
             res == 1,
@@ -596,7 +617,9 @@ impl MySqlElection {
             .bind(key)
             .bind(value)
             .bind(lease_ttl_secs);
-        let res = executor.query(query).await?;
+        let res = executor
+            .query(query, &self.sql_set.put_value_with_lease)
+            .await?;
         Ok(res.is_empty())
     }
 
@@ -605,7 +628,7 @@ impl MySqlElection {
     async fn delete_value(&self, key: &str, executor: &mut Executor<'_>) -> Result<bool> {
         let key = key.as_bytes();
         let query = sqlx::query(&self.sql_set.delete_value).bind(key);
-        let res = executor.execute(query).await?;
+        let res = executor.execute(query, &self.sql_set.delete_value).await?;
 
         Ok(res == 1)
     }
@@ -627,10 +650,13 @@ impl MySqlElection {
                 // If the leader lease is valid and I'm the leader, renew the lease.
                 (Ok(_), true) => {
                     let mut client = self.client.lock().await;
-                    let txn = client.begin().await.context(MySqlExecutionSnafu)?;
+                    let txn = client
+                        .begin()
+                        .await
+                        .context(MySqlExecutionSnafu { sql: "BEGIN" })?;
                     let mut executor = Executor::Txn(txn);
                     let query = sqlx::query(&self.sql_set.campaign);
-                    executor.query(query).await?;
+                    executor.query(query, &self.sql_set.campaign).await?;
                     self.renew_lease(executor, lease).await?;
                 }
                 // If the leader lease expires and I'm the leader, notify the leader watcher and step down.
@@ -643,10 +669,13 @@ impl MySqlElection {
                 (Err(_), false) => {
                     warn!("Leader lease expired, re-initiate the campaign");
                     let mut client = self.client.lock().await;
-                    let txn = client.begin().await.context(MySqlExecutionSnafu)?;
+                    let txn = client
+                        .begin()
+                        .await
+                        .context(MySqlExecutionSnafu { sql: "BEGIN" })?;
                     let mut executor = Executor::Txn(txn);
                     let query = sqlx::query(&self.sql_set.campaign);
-                    executor.query(query).await?;
+                    executor.query(query, &self.sql_set.campaign).await?;
                     self.elected(&mut executor).await?;
                     executor.commit().await?;
                 }

@@ -576,10 +576,10 @@ jobs:
           - name: "Remote WAL"
             opts: "-w kafka -k 127.0.0.1:9092"
             kafka: true
-          - name: "Pg Kvbackend"
+          - name: "PostgreSQL KvBackend"
             opts: "--setup-pg"
             kafka: false
-          - name: "Mysql Kvbackend"
+          - name: "MySQL Kvbackend"
             opts: "--setup-mysql"
             kafka: false
     timeout-minutes: 60
