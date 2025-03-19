@@ -352,6 +352,63 @@ pub fn setup_pg(pg_port: u16, pg_version: Option<&str>) {
     }
 }
 
+/// Set up a MySql server in docker.
+pub fn setup_mysql(mysql_port: u16, mysql_version: Option<&str>) {
+    if std::process::Command::new("docker")
+        .args(["-v"])
+        .status()
+        .is_err()
+    {
+        panic!("Docker is not installed");
+    }
+
+    let mysql_image = if let Some(mysql_version) = mysql_version {
+        format!("bitnami/mysql:{mysql_version}")
+    } else {
+        "bitnami/mysql:5.7".to_string()
+    };
+    let mysql_password = "admin";
+    let mysql_user = "greptimedb";
+
+    let mut arg_list = vec![];
+    arg_list.extend(["run", "-d"]);
+
+    let mysql_password_env = format!("MYSQL_PASSWORD={mysql_password}");
+    let mysql_user_env = format!("MYSQL_USER={mysql_user}");
+    let mysql_root_password_env = format!("MYSQL_ROOT_PASSWORD={mysql_password}");
+    let mysql_port_forward = format!("{mysql_port}:3306");
+    arg_list.extend([
+        "-e",
+        &mysql_password_env,
+        "-e",
+        &mysql_user_env,
+        "-e",
+        &mysql_root_password_env,
+        "-e",
+        "MYSQL_DATABASE=mysql",
+    ]);
+    arg_list.extend(["-p", &mysql_port_forward]);
+
+    arg_list.extend(["--name", "greptimedb_mysql", &mysql_image]);
+
+    let mut cmd = std::process::Command::new("docker");
+
+    cmd.args(arg_list);
+
+    println!("Starting MySQL with command: {:?}", cmd);
+
+    let status = cmd.status();
+    if status.is_err() {
+        panic!("Failed to start MySQL: {:?}", status);
+    } else if let Ok(status) = status {
+        if status.success() {
+            println!("Started MySQL with port {}", mysql_port);
+        } else {
+            panic!("Failed to start MySQL: {:?}", status);
+        }
+    }
+}
+
 /// Get the dir of test cases. This function only works when the runner is run
 /// under the project's dir because it depends on some envs set by cargo.
 pub fn get_case_dir(case_dir: Option<PathBuf>) -> String {
