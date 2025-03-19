@@ -16,7 +16,6 @@ use std::collections::{HashMap, HashSet};
 
 use common_telemetry::warn;
 use datafusion_common::ScalarValue;
-use datafusion_expr::expr::InList;
 use datafusion_expr::{BinaryExpr, Expr, Operator};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::value::Value;
@@ -35,21 +34,6 @@ use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplier;
 use crate::sst::index::codec::IndexValueCodec;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 
-/// Enumerates types of predicates for value filtering.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Predicate {
-    /// Predicate for matching values in a list.
-    InList(InListPredicate),
-}
-
-/// `InListPredicate` contains a list of acceptable values. A value needs to match at least
-/// one of the elements (logical OR semantic) for the predicate to be satisfied.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InListPredicate {
-    /// List of acceptable values.
-    pub list: HashSet<Bytes>,
-}
-
 pub struct BloomFilterIndexApplierBuilder<'a> {
     region_dir: String,
     object_store: ObjectStore,
@@ -58,7 +42,7 @@ pub struct BloomFilterIndexApplierBuilder<'a> {
     file_cache: Option<FileCacheRef>,
     puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
     bloom_filter_index_cache: Option<BloomFilterIndexCacheRef>,
-    output: HashMap<ColumnId, Vec<Predicate>>,
+    output: HashMap<ColumnId, HashSet<Bytes>>,
 }
 
 impl<'a> BloomFilterIndexApplierBuilder<'a> {
@@ -137,7 +121,6 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
                 Operator::Eq => self.collect_eq(left, right),
                 _ => Ok(()),
             },
-            Expr::InList(in_list) => self.collect_in_list(in_list),
             _ => Ok(()),
         };
 
@@ -178,68 +161,9 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
             return Ok(());
         };
         let value = encode_lit(lit, data_type)?;
-
-        // Create bloom filter predicate
-        let mut set = HashSet::new();
-        set.insert(value);
-        let predicate = Predicate::InList(InListPredicate { list: set });
-
-        // Add to output predicates
-        self.output.entry(column_id).or_default().push(predicate);
+        self.output.entry(column_id).or_default().insert(value);
 
         Ok(())
-    }
-
-    /// Collects an in list expression in the form of `column IN (lit, lit, ...)`.
-    fn collect_in_list(&mut self, in_list: &InList) -> Result<()> {
-        // Only collect InList predicates if they reference a column
-        let Expr::Column(column) = &in_list.expr.as_ref() else {
-            return Ok(());
-        };
-        if in_list.list.is_empty() || in_list.negated {
-            return Ok(());
-        }
-
-        let Some((column_id, data_type)) = self.column_id_and_type(&column.name)? else {
-            return Ok(());
-        };
-
-        // Convert all non-null literals to predicates
-        let predicates = in_list
-            .list
-            .iter()
-            .filter_map(Self::nonnull_lit)
-            .map(|lit| encode_lit(lit, data_type.clone()));
-
-        // Collect successful conversions
-        let mut valid_predicates = HashSet::new();
-        for predicate in predicates {
-            match predicate {
-                Ok(p) => {
-                    valid_predicates.insert(p);
-                }
-                Err(e) => warn!(e; "Failed to convert value in InList"),
-            }
-        }
-
-        if !valid_predicates.is_empty() {
-            self.output
-                .entry(column_id)
-                .or_default()
-                .push(Predicate::InList(InListPredicate {
-                    list: valid_predicates,
-                }));
-        }
-
-        Ok(())
-    }
-
-    /// Helper function to get non-null literal value
-    fn nonnull_lit(expr: &Expr) -> Option<&ScalarValue> {
-        match expr {
-            Expr::Literal(lit) if !lit.is_null() => Some(lit),
-            _ => None,
-        }
     }
 }
 
@@ -336,54 +260,19 @@ mod tests {
         let filters = result.unwrap().filters;
         assert_eq!(filters.len(), 1);
 
-        let column_predicates = filters.get(&1).unwrap();
-        assert_eq!(column_predicates.len(), 1);
+        let column_probes = filters.get(&1).unwrap();
+        assert_eq!(column_probes.len(), 1);
 
         let expected = encode_lit(
             &ScalarValue::Utf8(Some("value1".to_string())),
             ConcreteDataType::string_datatype(),
         )
         .unwrap();
-        match &column_predicates[0] {
-            Predicate::InList(p) => {
-                assert_eq!(p.list.iter().next().unwrap(), &expected);
-            }
-        }
+        assert!(column_probes.contains(expected.as_slice()))
     }
 
     fn int64_lit(i: i64) -> Expr {
         Expr::Literal(ScalarValue::Int64(Some(i)))
-    }
-
-    #[test]
-    fn test_build_with_in_list() {
-        let (_d, factory) = PuffinManagerFactory::new_for_test_block("test_build_with_in_list_");
-        let metadata = test_region_metadata();
-        let builder = BloomFilterIndexApplierBuilder::new(
-            "test".to_string(),
-            test_object_store(),
-            &metadata,
-            factory,
-        );
-
-        let exprs = vec![Expr::InList(InList {
-            expr: Box::new(column("column2")),
-            list: vec![int64_lit(1), int64_lit(2), int64_lit(3)],
-            negated: false,
-        })];
-
-        let result = builder.build(&exprs).unwrap();
-        assert!(result.is_some());
-
-        let filters = result.unwrap().filters;
-        let column_predicates = filters.get(&2).unwrap();
-        assert_eq!(column_predicates.len(), 1);
-
-        match &column_predicates[0] {
-            Predicate::InList(p) => {
-                assert_eq!(p.list.len(), 3);
-            }
-        }
     }
 
     #[test]
@@ -431,34 +320,14 @@ mod tests {
             factory,
         );
 
-        let exprs = vec![
-            Expr::BinaryExpr(BinaryExpr {
-                left: Box::new(column("column1")),
-                op: Operator::Eq,
-                right: Box::new(Expr::Literal(ScalarValue::Utf8(None))),
-            }),
-            Expr::InList(InList {
-                expr: Box::new(column("column2")),
-                list: vec![
-                    int64_lit(1),
-                    Expr::Literal(ScalarValue::Int64(None)),
-                    int64_lit(3),
-                ],
-                negated: false,
-            }),
-        ];
+        let exprs = vec![Expr::BinaryExpr(BinaryExpr {
+            left: Box::new(column("column1")),
+            op: Operator::Eq,
+            right: Box::new(Expr::Literal(ScalarValue::Utf8(None))),
+        })];
 
         let result = builder.build(&exprs).unwrap();
-        assert!(result.is_some());
-
-        let filters = result.unwrap().filters;
-        assert!(!filters.contains_key(&1)); // Null equality should be ignored
-        let column2_predicates = filters.get(&2).unwrap();
-        match &column2_predicates[0] {
-            Predicate::InList(p) => {
-                assert_eq!(p.list.len(), 2); // Only non-null values should be included
-            }
-        }
+        assert!(result.is_none());
     }
 
     #[test]
@@ -485,12 +354,6 @@ mod tests {
                 op: Operator::Eq,
                 right: Box::new(string_lit("value")),
             }),
-            // Negated IN list
-            Expr::InList(InList {
-                expr: Box::new(column("column2")),
-                list: vec![int64_lit(1), int64_lit(2)],
-                negated: true,
-            }),
         ];
 
         let result = builder.build(&exprs).unwrap();
@@ -514,10 +377,10 @@ mod tests {
                 op: Operator::Eq,
                 right: Box::new(string_lit("value1")),
             }),
-            Expr::InList(InList {
-                expr: Box::new(column("column1")),
-                list: vec![string_lit("value2"), string_lit("value3")],
-                negated: false,
+            Expr::BinaryExpr(BinaryExpr {
+                left: Box::new(column("column1")),
+                op: Operator::Eq,
+                right: Box::new(string_lit("value2")),
             }),
         ];
 
@@ -525,7 +388,7 @@ mod tests {
         assert!(result.is_some());
 
         let filters = result.unwrap().filters;
-        let column_predicates = filters.get(&1).unwrap();
-        assert_eq!(column_predicates.len(), 2);
+        let column_probes = filters.get(&1).unwrap();
+        assert_eq!(column_probes.len(), 2);
     }
 }

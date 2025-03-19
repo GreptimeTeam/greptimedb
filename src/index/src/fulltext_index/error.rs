@@ -104,6 +104,29 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to serialize to json"))]
+    SerializeToJson {
+        #[snafu(source)]
+        error: serde_json::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to deserialize from json"))]
+    DeserializeFromJson {
+        #[snafu(source)]
+        error: serde_json::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Property not found: {property_name}"))]
+    PropertyNotFound {
+        property_name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -122,6 +145,10 @@ impl ErrorExt for Error {
             PuffinAddBlob { source, .. } => source.status_code(),
 
             External { source, .. } => source.status_code(),
+
+            SerializeToJson { .. } | DeserializeFromJson { .. } | PropertyNotFound { .. } => {
+                StatusCode::Internal
+            }
         }
     }
 

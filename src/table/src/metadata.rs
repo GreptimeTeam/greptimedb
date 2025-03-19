@@ -1808,6 +1808,7 @@ mod tests {
                     enable: true,
                     analyzer: datatypes::schema::FulltextAnalyzer::Chinese,
                     case_sensitive: true,
+                    backend: datatypes::schema::FulltextBackend::Tantivy,
                 },
             },
         };

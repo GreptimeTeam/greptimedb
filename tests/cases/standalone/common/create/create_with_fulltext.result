@@ -7,18 +7,18 @@ Affected Rows: 0
 
 SHOW CREATE TABLE log;
 
-+-------+------------------------------------------------------------------------------------------+
-| Table | Create Table                                                                             |
-+-------+------------------------------------------------------------------------------------------+
-| log   | CREATE TABLE IF NOT EXISTS "log" (                                                       |
-|       |   "ts" TIMESTAMP(3) NOT NULL,                                                            |
-|       |   "msg" STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', case_sensitive = 'false'), |
-|       |   TIME INDEX ("ts")                                                                      |
-|       | )                                                                                        |
-|       |                                                                                          |
-|       | ENGINE=mito                                                                              |
-|       |                                                                                          |
-+-------+------------------------------------------------------------------------------------------+
++-------+---------------------------------------------------------------------------------------------------------------+
+| Table | Create Table                                                                                                  |
++-------+---------------------------------------------------------------------------------------------------------------+
+| log   | CREATE TABLE IF NOT EXISTS "log" (                                                                            |
+|       |   "ts" TIMESTAMP(3) NOT NULL,                                                                                 |
+|       |   "msg" STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', backend = 'tantivy', case_sensitive = 'false'), |
+|       |   TIME INDEX ("ts")                                                                                           |
+|       | )                                                                                                             |
+|       |                                                                                                               |
+|       | ENGINE=mito                                                                                                   |
+|       |                                                                                                               |
++-------+---------------------------------------------------------------------------------------------------------------+
 
 DROP TABLE log;
 
@@ -33,18 +33,18 @@ Affected Rows: 0
 
 SHOW CREATE TABLE log_with_opts;
 
-+---------------+-----------------------------------------------------------------------------------------+
-| Table         | Create Table                                                                            |
-+---------------+-----------------------------------------------------------------------------------------+
-| log_with_opts | CREATE TABLE IF NOT EXISTS "log_with_opts" (                                            |
-|               |   "ts" TIMESTAMP(3) NOT NULL,                                                           |
-|               |   "msg" STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', case_sensitive = 'true'), |
-|               |   TIME INDEX ("ts")                                                                     |
-|               | )                                                                                       |
-|               |                                                                                         |
-|               | ENGINE=mito                                                                             |
-|               |                                                                                         |
-+---------------+-----------------------------------------------------------------------------------------+
++---------------+--------------------------------------------------------------------------------------------------------------+
+| Table         | Create Table                                                                                                 |
++---------------+--------------------------------------------------------------------------------------------------------------+
+| log_with_opts | CREATE TABLE IF NOT EXISTS "log_with_opts" (                                                                 |
+|               |   "ts" TIMESTAMP(3) NOT NULL,                                                                                |
+|               |   "msg" STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', backend = 'tantivy', case_sensitive = 'true'), |
+|               |   TIME INDEX ("ts")                                                                                          |
+|               | )                                                                                                            |
+|               |                                                                                                              |
+|               | ENGINE=mito                                                                                                  |
+|               |                                                                                                              |
++---------------+--------------------------------------------------------------------------------------------------------------+
 
 DROP TABLE log_with_opts;
 
@@ -60,19 +60,19 @@ Affected Rows: 0
 
 SHOW CREATE TABLE log_multi_fulltext_cols;
 
-+-------------------------+-------------------------------------------------------------------------------------------+
-| Table                   | Create Table                                                                              |
-+-------------------------+-------------------------------------------------------------------------------------------+
-| log_multi_fulltext_cols | CREATE TABLE IF NOT EXISTS "log_multi_fulltext_cols" (                                    |
-|                         |   "ts" TIMESTAMP(3) NOT NULL,                                                             |
-|                         |   "msg" STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', case_sensitive = 'false'),  |
-|                         |   "msg2" STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', case_sensitive = 'false'), |
-|                         |   TIME INDEX ("ts")                                                                       |
-|                         | )                                                                                         |
-|                         |                                                                                           |
-|                         | ENGINE=mito                                                                               |
-|                         |                                                                                           |
-+-------------------------+-------------------------------------------------------------------------------------------+
++-------------------------+----------------------------------------------------------------------------------------------------------------+
+| Table                   | Create Table                                                                                                   |
++-------------------------+----------------------------------------------------------------------------------------------------------------+
+| log_multi_fulltext_cols | CREATE TABLE IF NOT EXISTS "log_multi_fulltext_cols" (                                                         |
+|                         |   "ts" TIMESTAMP(3) NOT NULL,                                                                                  |
+|                         |   "msg" STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', backend = 'tantivy', case_sensitive = 'false'),  |
+|                         |   "msg2" STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', backend = 'tantivy', case_sensitive = 'false'), |
+|                         |   TIME INDEX ("ts")                                                                                            |
+|                         | )                                                                                                              |
+|                         |                                                                                                                |
+|                         | ENGINE=mito                                                                                                    |
+|                         |                                                                                                                |
++-------------------------+----------------------------------------------------------------------------------------------------------------+
 
 DROP TABLE log_multi_fulltext_cols;
 

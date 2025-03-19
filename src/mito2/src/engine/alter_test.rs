@@ -22,7 +22,7 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, FulltextAnalyzer, FulltextOptions};
+use datatypes::schema::{ColumnSchema, FulltextAnalyzer, FulltextBackend, FulltextOptions};
 use store_api::metadata::ColumnMetadata;
 use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{
@@ -90,6 +90,7 @@ fn alter_column_fulltext_options() -> RegionAlterRequest {
                     enable: true,
                     analyzer: FulltextAnalyzer::English,
                     case_sensitive: false,
+                    backend: FulltextBackend::Tantivy,
                 },
             },
         },
@@ -557,6 +558,7 @@ async fn test_alter_column_fulltext_options() {
         enable: true,
         analyzer: FulltextAnalyzer::English,
         case_sensitive: false,
+        backend: FulltextBackend::Tantivy,
     };
     let check_fulltext_options = |engine: &MitoEngine, expected: &FulltextOptions| {
         let current_fulltext_options = engine

@@ -79,20 +79,20 @@ SELECT * FROM test WHERE MATCHES(message, 'hello') ORDER BY message;
 -- SQLNESS ARG restart=true
 SHOW CREATE TABLE test;
 
-+-------+---------------------------------------------------------------------------------------------+
-| Table | Create Table                                                                                |
-+-------+---------------------------------------------------------------------------------------------+
-| test  | CREATE TABLE IF NOT EXISTS "test" (                                                         |
-|       |   "message" STRING NULL FULLTEXT INDEX WITH(analyzer = 'Chinese', case_sensitive = 'true'), |
-|       |   "time" TIMESTAMP(3) NOT NULL,                                                             |
-|       |   TIME INDEX ("time")                                                                       |
-|       | )                                                                                           |
-|       |                                                                                             |
-|       | ENGINE=mito                                                                                 |
-|       | WITH(                                                                                       |
-|       |   append_mode = 'true'                                                                      |
-|       | )                                                                                           |
-+-------+---------------------------------------------------------------------------------------------+
++-------+------------------------------------------------------------------------------------------------------------------+
+| Table | Create Table                                                                                                     |
++-------+------------------------------------------------------------------------------------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" (                                                                              |
+|       |   "message" STRING NULL FULLTEXT INDEX WITH(analyzer = 'Chinese', backend = 'tantivy', case_sensitive = 'true'), |
+|       |   "time" TIMESTAMP(3) NOT NULL,                                                                                  |
+|       |   TIME INDEX ("time")                                                                                            |
+|       | )                                                                                                                |
+|       |                                                                                                                  |
+|       | ENGINE=mito                                                                                                      |
+|       | WITH(                                                                                                            |
+|       |   append_mode = 'true'                                                                                           |
+|       | )                                                                                                                |
++-------+------------------------------------------------------------------------------------------------------------------+
 
 SHOW INDEX FROM test;
 
@@ -138,20 +138,20 @@ Affected Rows: 0
 
 SHOW CREATE TABLE test;
 
-+-------+---------------------------------------------------------------------------------------------+
-| Table | Create Table                                                                                |
-+-------+---------------------------------------------------------------------------------------------+
-| test  | CREATE TABLE IF NOT EXISTS "test" (                                                         |
-|       |   "message" STRING NULL FULLTEXT INDEX WITH(analyzer = 'Chinese', case_sensitive = 'true'), |
-|       |   "time" TIMESTAMP(3) NOT NULL,                                                             |
-|       |   TIME INDEX ("time")                                                                       |
-|       | )                                                                                           |
-|       |                                                                                             |
-|       | ENGINE=mito                                                                                 |
-|       | WITH(                                                                                       |
-|       |   append_mode = 'true'                                                                      |
-|       | )                                                                                           |
-+-------+---------------------------------------------------------------------------------------------+
++-------+------------------------------------------------------------------------------------------------------------------+
+| Table | Create Table                                                                                                     |
++-------+------------------------------------------------------------------------------------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" (                                                                              |
+|       |   "message" STRING NULL FULLTEXT INDEX WITH(analyzer = 'Chinese', backend = 'tantivy', case_sensitive = 'true'), |
+|       |   "time" TIMESTAMP(3) NOT NULL,                                                                                  |
+|       |   TIME INDEX ("time")                                                                                            |
+|       | )                                                                                                                |
+|       |                                                                                                                  |
+|       | ENGINE=mito                                                                                                      |
+|       | WITH(                                                                                                            |
+|       |   append_mode = 'true'                                                                                           |
+|       | )                                                                                                                |
++-------+------------------------------------------------------------------------------------------------------------------+
 
 SHOW INDEX FROM test;
 
