@@ -87,6 +87,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             match wal_writer.write_to_wal().await.map_err(Arc::new) {
                 Ok(response) => {
                     for (region_id, region_ctx) in region_ctxs.iter_mut() {
+                        if let WalOptions::Noop = &region_ctx.version().options.wal_options {
+                            continue;
+                        }
+
                         // Safety: the log store implementation ensures that either the `write_to_wal` fails and no
                         // response is returned or the last entry ids for each region do exist.
                         let last_entry_id = response.last_entry_ids.get(region_id).unwrap();

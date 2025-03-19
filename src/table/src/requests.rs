@@ -67,6 +67,7 @@ pub fn validate_table_option(key: &str) -> bool {
         TTL_KEY,
         STORAGE_KEY,
         COMMENT_KEY,
+        SKIP_WAL_KEY,
         // file engine keys:
         FILE_TABLE_LOCATION_KEY,
         FILE_TABLE_FORMAT_KEY,
