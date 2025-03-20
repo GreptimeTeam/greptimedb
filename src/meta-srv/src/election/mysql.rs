@@ -871,7 +871,7 @@ mod tests {
         let mut a = client.lock().await;
         let txn = a.begin().await.unwrap();
         let mut executor = Executor::Txn(txn);
-        let raw_query = format!("SELECT * FROM {} FOR UPDATE NOWAIT;", table_name);
+        let raw_query = format!("SELECT * FROM {} FOR UPDATE;", table_name);
         let query = sqlx::query(&raw_query);
         let _ = executor.query(query, &raw_query).await.unwrap();
         std::mem::drop(executor);
