@@ -1734,10 +1734,7 @@ pub async fn test_identify_pipeline_with_custom_ts(store_type: StorageType) {
     .await;
 
     // drop table
-    let res = client
-        .get(format!("/v1/sql?sql=drop table logs").as_str())
-        .send()
-        .await;
+    let res = client.get("/v1/sql?sql=drop table logs").send().await;
     assert_eq!(res.status(), StatusCode::OK);
 
     let body = r#"{"__time__":"2019-01-16 02:42:01+08:00","__source__":"10.170.***.***"}"#;
