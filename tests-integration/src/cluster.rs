@@ -48,6 +48,7 @@ use datanode::datanode::{Datanode, DatanodeBuilder, ProcedureConfig};
 use frontend::frontend::{Frontend, FrontendOptions};
 use frontend::heartbeat::HeartbeatTask;
 use frontend::instance::builder::FrontendBuilder;
+use frontend::instance::Instance as FeInstance;
 use hyper_util::rt::TokioIo;
 use meta_client::client::MetaClientBuilder;
 use meta_srv::cluster::MetaPeerClientRef;
@@ -79,6 +80,12 @@ pub struct GreptimeDbCluster {
     pub kv_backend: KvBackendRef,
     pub metasrv: Arc<Metasrv>,
     pub frontend: Arc<Frontend>,
+}
+
+impl GreptimeDbCluster {
+    pub fn fe_instance(&self) -> &Arc<FeInstance> {
+        &self.frontend.instance
+    }
 }
 
 pub struct GreptimeDbClusterBuilder {
@@ -404,7 +411,7 @@ impl GreptimeDbClusterBuilder {
         );
 
         let instance = FrontendBuilder::new(
-            options.clone(),
+            options,
             cached_meta_backend.clone(),
             cache_registry.clone(),
             catalog_manager,
@@ -419,7 +426,6 @@ impl GreptimeDbClusterBuilder {
         let instance = Arc::new(instance);
 
         Frontend {
-            opts: options,
             instance,
             servers: ServerHandlers::new(),
             heartbeat_task: Some(heartbeat_task),

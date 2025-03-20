@@ -155,7 +155,7 @@ impl Instance {
     }
 
     pub fn plugins(&self) -> &Plugins {
-        &&self.plugins
+        &self.plugins
     }
 
     pub fn statement_executor(&self) -> &StatementExecutorRef {

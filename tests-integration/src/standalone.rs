@@ -259,8 +259,7 @@ impl GreptimeDbStandaloneBuilder {
         test_util::prepare_another_catalog_and_schema(&instance).await;
 
         let frontend = Frontend {
-            opts: opts.frontend_options(),
-            instance,
+            instance: instance.clone(),
             servers: ServerHandlers::new(),
             heartbeat_task: None,
             export_metrics_task: None,
@@ -269,7 +268,7 @@ impl GreptimeDbStandaloneBuilder {
         frontend.start().await.unwrap();
 
         GreptimeDbStandalone {
-            instance: frontend.instance.clone(),
+            instance,
             opts,
             guard,
             kv_backend,

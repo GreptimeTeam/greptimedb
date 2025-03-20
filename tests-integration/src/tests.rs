@@ -30,7 +30,7 @@ pub struct MockDistributedInstance(GreptimeDbCluster);
 
 impl MockDistributedInstance {
     pub fn frontend(&self) -> Arc<Instance> {
-        self.0.frontend.instance.clone()
+        self.0.fe_instance().clone()
     }
 
     pub fn datanodes(&self) -> &HashMap<u64, Datanode> {

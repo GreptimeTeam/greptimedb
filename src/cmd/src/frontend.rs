@@ -83,9 +83,9 @@ impl App for FrontendApp {
 
     async fn stop(&self) -> Result<()> {
         self.frontend
-            .stop()
+            .shutdown()
             .await
-            .context(error::StartFrontendSnafu)
+            .context(error::ShutdownFrontendSnafu)
     }
 }
 
@@ -366,16 +366,15 @@ impl StartCommand {
         .context(error::StartFrontendSnafu)?;
         let instance = Arc::new(instance);
 
-        let servers = Services::new(opts.clone(), instance.clone(), plugins.clone())
+        let export_metrics_task = ExportMetricsTask::try_new(&opts.export_metrics, Some(&plugins))
+            .context(error::ServersSnafu)?;
+
+        let servers = Services::new(opts, instance.clone(), plugins)
             .build()
             .await
             .context(error::StartFrontendSnafu)?;
 
-        let export_metrics_task = ExportMetricsTask::try_new(&opts.export_metrics, Some(&plugins))
-            .context(error::ServersSnafu)?;
-
         let frontend = Frontend {
-            opts,
             instance,
             servers,
             heartbeat_task,

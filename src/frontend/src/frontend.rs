@@ -94,7 +94,6 @@ impl Configurable for FrontendOptions {
 }
 
 pub struct Frontend {
-    pub opts: FrontendOptions,
     pub instance: Arc<Instance>,
     pub servers: ServerHandlers,
     pub heartbeat_task: Option<HeartbeatTask>,
@@ -124,7 +123,7 @@ impl Frontend {
             .context(error::StartServerSnafu)
     }
 
-    pub async fn stop(&self) -> Result<()> {
+    pub async fn shutdown(&self) -> Result<()> {
         self.servers
             .shutdown_all()
             .await

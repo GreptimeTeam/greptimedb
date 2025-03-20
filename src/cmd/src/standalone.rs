@@ -291,7 +291,7 @@ impl App for StandaloneApp {
 
     async fn stop(&self) -> Result<()> {
         self.frontend
-            .stop()
+            .shutdown()
             .await
             .context(error::StartFrontendSnafu)?;
 
@@ -621,16 +621,15 @@ impl StartCommand {
 
         let (tx, _rx) = broadcast::channel(1);
 
-        let servers = Services::new(opts.clone(), fe_instance.clone(), plugins.clone())
+        let export_metrics_task = ExportMetricsTask::try_new(&opts.export_metrics, Some(&plugins))
+            .context(error::ServersSnafu)?;
+
+        let servers = Services::new(opts, fe_instance.clone(), plugins)
             .build()
             .await
             .context(error::StartFrontendSnafu)?;
 
-        let export_metrics_task = ExportMetricsTask::try_new(&opts.export_metrics, Some(&plugins))
-            .context(error::ServersSnafu)?;
-
         let frontend = Frontend {
-            opts: fe_opts,
             instance: fe_instance,
             servers,
             heartbeat_task: None,
