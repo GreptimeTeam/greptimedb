@@ -14,13 +14,12 @@
 
 use snafu::OptionExt as _;
 
-use crate::etl::error::{Error, Result};
+use crate::error::{Error, KeyMustBeStringSnafu, ProcessorMissingFieldSnafu, Result};
 use crate::etl::field::Fields;
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, FIELDS_NAME, FIELD_NAME,
     IGNORE_MISSING_NAME, SIMPLE_EXTRACT_KEY_NAME,
 };
-use crate::etl_error::{KeyMustBeStringSnafu, ProcessorMissingFieldSnafu};
 use crate::{PipelineMap, Processor, Value};
 
 pub(crate) const PROCESSOR_SIMPLE_EXTRACT: &str = "simple_extract";

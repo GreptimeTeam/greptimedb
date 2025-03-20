@@ -24,8 +24,9 @@ use std::borrow::Cow;
 use regex::Regex;
 use snafu::OptionExt;
 
-use crate::etl::error::{
-    Error, KeyMustBeStringSnafu, ProcessorExpectStringSnafu, ProcessorMissingFieldSnafu, Result,
+use crate::error::{
+    DigestPatternInvalidSnafu, Error, KeyMustBeStringSnafu, ProcessorExpectStringSnafu,
+    ProcessorMissingFieldSnafu, Result,
 };
 use crate::etl::field::Fields;
 use crate::etl::processor::{
@@ -33,7 +34,6 @@ use crate::etl::processor::{
 };
 use crate::etl::value::Value;
 use crate::etl::PipelineMap;
-use crate::etl_error::DigestPatternInvalidSnafu;
 
 pub(crate) const PROCESSOR_DIGEST: &str = "digest";
 

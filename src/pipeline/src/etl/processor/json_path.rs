@@ -19,12 +19,11 @@ use super::{
     yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, PipelineMap, Processor, FIELDS_NAME,
     FIELD_NAME, IGNORE_MISSING_NAME, JSON_PATH_NAME, JSON_PATH_RESULT_INDEX_NAME,
 };
-use crate::etl::error::{Error, Result};
-use crate::etl::field::Fields;
-use crate::etl_error::{
-    JsonPathParseResultIndexSnafu, JsonPathParseSnafu, KeyMustBeStringSnafu,
-    ProcessorMissingFieldSnafu,
+use crate::error::{
+    Error, JsonPathParseResultIndexSnafu, JsonPathParseSnafu, KeyMustBeStringSnafu,
+    ProcessorMissingFieldSnafu, Result,
 };
+use crate::etl::field::Fields;
 use crate::Value;
 
 pub(crate) const PROCESSOR_JSON_PATH: &str = "json_path";

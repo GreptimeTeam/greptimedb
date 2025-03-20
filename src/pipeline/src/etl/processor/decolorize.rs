@@ -22,7 +22,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use snafu::OptionExt;
 
-use crate::etl::error::{
+use crate::error::{
     Error, KeyMustBeStringSnafu, ProcessorExpectStringSnafu, ProcessorMissingFieldSnafu, Result,
 };
 use crate::etl::field::Fields;

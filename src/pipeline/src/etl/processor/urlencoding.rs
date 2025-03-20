@@ -15,7 +15,7 @@
 use snafu::{OptionExt, ResultExt};
 use urlencoding::{decode, encode};
 
-use crate::etl::error::{
+use crate::error::{
     Error, KeyMustBeStringSnafu, ProcessorExpectStringSnafu, ProcessorMissingFieldSnafu, Result,
     UrlEncodingDecodeSnafu, UrlEncodingInvalidMethodSnafu,
 };

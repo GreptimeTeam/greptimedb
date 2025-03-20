@@ -70,7 +70,7 @@ impl HeartbeatHandler for RemapFlowPeerHandler {
 
 async fn rewrite_node_address(ctx: &mut Context, peer: &Peer) {
     let key = NodeAddressKey::with_flownode(peer.id).to_bytes();
-    if let Ok(value) = NodeAddressValue::new(peer.clone().into()).try_as_raw_value() {
+    if let Ok(value) = NodeAddressValue::new(peer.clone()).try_as_raw_value() {
         let put = PutRequest {
             key,
             value,

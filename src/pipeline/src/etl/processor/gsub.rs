@@ -15,7 +15,7 @@
 use regex::Regex;
 use snafu::{OptionExt, ResultExt};
 
-use crate::etl::error::{
+use crate::error::{
     Error, GsubPatternRequiredSnafu, GsubReplacementRequiredSnafu, KeyMustBeStringSnafu,
     ProcessorExpectStringSnafu, ProcessorMissingFieldSnafu, RegexSnafu, Result,
 };

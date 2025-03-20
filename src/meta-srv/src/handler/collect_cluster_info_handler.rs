@@ -153,7 +153,7 @@ fn extract_base_info(request: &HeartbeatRequest) -> Option<(NodeInfoKey, Peer, P
         return None;
     };
 
-    Some((key, Peer::from(peer.clone()), info.clone()))
+    Some((key, peer.clone(), info.clone()))
 }
 
 async fn put_into_memory_store(ctx: &mut Context, key: NodeInfoKey, value: NodeInfo) -> Result<()> {

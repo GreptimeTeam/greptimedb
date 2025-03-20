@@ -20,7 +20,7 @@ use greptime_proto::v1::value::ValueData;
 use greptime_proto::v1::{ColumnDataType, ColumnSchema, SemanticType};
 use snafu::ResultExt;
 
-use crate::etl::error::{
+use crate::error::{
     CoerceIncompatibleTypesSnafu, CoerceJsonTypeToSnafu, CoerceStringToTypeSnafu,
     CoerceTypeToJsonSnafu, CoerceUnsupportedEpochTypeSnafu, CoerceUnsupportedNullTypeSnafu,
     CoerceUnsupportedNullTypeToSnafu, ColumnOptionsSnafu, Error, Result,

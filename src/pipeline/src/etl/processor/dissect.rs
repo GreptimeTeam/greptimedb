@@ -18,7 +18,7 @@ use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use itertools::Itertools;
 use snafu::OptionExt;
 
-use crate::etl::error::{
+use crate::error::{
     DissectAppendOrderAlreadySetSnafu, DissectConsecutiveNamesSnafu, DissectEmptyPatternSnafu,
     DissectEndModifierAlreadySetSnafu, DissectInvalidPatternSnafu, DissectModifierAlreadySetSnafu,
     DissectNoMatchingPatternSnafu, DissectOrderOnlyAppendModifierSnafu,

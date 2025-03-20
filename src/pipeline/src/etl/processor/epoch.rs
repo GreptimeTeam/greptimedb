@@ -14,7 +14,7 @@
 
 use snafu::{OptionExt, ResultExt};
 
-use crate::etl::error::{
+use crate::error::{
     EpochInvalidResolutionSnafu, Error, FailedToParseIntSnafu, KeyMustBeStringSnafu,
     ProcessorMissingFieldSnafu, ProcessorUnsupportedValueSnafu, Result,
 };

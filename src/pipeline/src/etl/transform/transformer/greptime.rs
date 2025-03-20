@@ -27,7 +27,7 @@ use greptime_proto::v1::{ColumnSchema, Row, Rows, Value as GreptimeValue};
 use itertools::Itertools;
 use serde_json::Number;
 
-use crate::etl::error::{
+use crate::error::{
     IdentifyPipelineColumnTypeMismatchSnafu, ReachedMaxNestedLevelsSnafu, Result,
     TransformColumnNameMustBeUniqueSnafu, TransformEmptySnafu,
     TransformMultipleTimestampIndexSnafu, TransformTimestampIndexCountSnafu,

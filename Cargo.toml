@@ -191,6 +191,8 @@ snafu = "0.8"
 sqlx = { version = "0.8", features = [
     "runtime-tokio-rustls",
     "mysql",
+    "postgres",
+    "chrono",
 ] }
 sysinfo = "0.30"
 # on branch v0.52.x

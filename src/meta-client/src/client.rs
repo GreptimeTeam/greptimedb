@@ -284,7 +284,7 @@ impl ClusterInfo for MetaClient {
             followers
                 .into_iter()
                 .map(|node| NodeInfo {
-                    peer: node.peer.map(|p| p.into()).unwrap_or_default(),
+                    peer: node.peer.unwrap_or_default(),
                     last_activity_ts,
                     status: NodeStatus::Metasrv(MetasrvStatus { is_leader: false }),
                     version: node.version,
@@ -292,7 +292,7 @@ impl ClusterInfo for MetaClient {
                     start_time_ms: node.start_time_ms,
                 })
                 .chain(leader.into_iter().map(|node| NodeInfo {
-                    peer: node.peer.map(|p| p.into()).unwrap_or_default(),
+                    peer: node.peer.unwrap_or_default(),
                     last_activity_ts,
                     status: NodeStatus::Metasrv(MetasrvStatus { is_leader: true }),
                     version: node.version,

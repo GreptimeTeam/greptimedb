@@ -13,16 +13,11 @@
 // limitations under the License.
 
 #![allow(dead_code)]
-
-pub mod error;
 pub mod field;
 pub mod processor;
 pub mod transform;
 pub mod value;
 
-use error::{
-    IntermediateKeyIndexSnafu, PrepareValueMustBeObjectSnafu, YamlLoadSnafu, YamlParseSnafu,
-};
 use processor::{Processor, Processors};
 use snafu::{ensure, OptionExt, ResultExt};
 use transform::{Transformer, Transforms};
@@ -30,7 +25,9 @@ use value::Value;
 use yaml_rust::YamlLoader;
 
 use crate::dispatcher::{Dispatcher, Rule};
-use crate::etl::error::Result;
+use crate::error::{
+    IntermediateKeyIndexSnafu, PrepareValueMustBeObjectSnafu, Result, YamlLoadSnafu, YamlParseSnafu,
+};
 
 const DESCRIPTION: &str = "description";
 const PROCESSORS: &str = "processors";
