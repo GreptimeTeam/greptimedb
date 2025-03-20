@@ -232,31 +232,33 @@ Affected Rows: 0
 -- test nullable pk with no default value
 CREATE TABLE nullable_pk (
     pid INT NULL,
-    name STRING,
+    client STRING,
     ts TIMESTAMP TIME INDEX,
-    PRIMARY KEY (id)
+    PRIMARY KEY (pid)
+) WITH (
+    append_mode = 'true'
 );
 
-Error: 2000(InvalidSyntax), Invalid SQL syntax: sql parser error: Cannot use keyword 'name' as column name. Hint: add quotes to the name.
+Affected Rows: 0
 
 CREATE TABLE out_nullable_pk (
     pid INT NULL,
-    name STRING,
+    client STRING,
     ts TIMESTAMP TIME INDEX,
-    PRIMARY KEY (id)
+    PRIMARY KEY (pid, client)
 );
 
-Error: 2000(InvalidSyntax), Invalid SQL syntax: sql parser error: Cannot use keyword 'name' as column name. Hint: add quotes to the name.
+Affected Rows: 0
 
 CREATE FLOW calc_nullable_pk SINK TO out_nullable_pk AS
 SELECT
     pid,
-    name,
+    client,
     ts
 FROM
     nullable_pk;
 
-Error: 4001(TableNotFound), Table not found: 'greptime.public.nullable_pk'
+Affected Rows: 0
 
 INSERT INTO
     nullable_pk
@@ -265,26 +267,68 @@ VALUES
     (2, "name2", "2024-10-18 19:00:00"),
     (3, "name3", "2024-10-18 19:00:00");
 
-Error: 4001(TableNotFound), Table not found: greptime.public.nullable_pk
+Affected Rows: 3
 
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_nullable_pk');
 
-Error: 8001(FlowNotFound), Flow not found: 'greptime.calc_nullable_pk'
++--------------------------------------+
+| ADMIN FLUSH_FLOW('calc_nullable_pk') |
++--------------------------------------+
+|  FLOW_FLUSHED  |
++--------------------------------------+
 
 SELECT * FROM out_nullable_pk;
 
-Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.public.out_nullable_pk
++-----+--------+---------------------+
+| pid | client | ts                  |
++-----+--------+---------------------+
+| 1   | name1  | 2024-10-18T19:00:00 |
+| 2   | name2  | 2024-10-18T19:00:00 |
+| 3   | name3  | 2024-10-18T19:00:00 |
++-----+--------+---------------------+
+
+-- pk is nullable
+INSERT INTO
+    nullable_pk (client, ts)
+VALUES
+    ("name1", "2024-10-18 19:00:00"),
+    ("name2", "2024-10-18 19:00:00"),
+    ("name3", "2024-10-18 19:00:00");
+
+Affected Rows: 3
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('calc_nullable_pk');
+
++--------------------------------------+
+| ADMIN FLUSH_FLOW('calc_nullable_pk') |
++--------------------------------------+
+|  FLOW_FLUSHED  |
++--------------------------------------+
+
+SELECT * FROM out_nullable_pk;
+
++-----+--------+---------------------+
+| pid | client | ts                  |
++-----+--------+---------------------+
+|     | name1  | 2024-10-18T19:00:00 |
+|     | name2  | 2024-10-18T19:00:00 |
+|     | name3  | 2024-10-18T19:00:00 |
+| 1   | name1  | 2024-10-18T19:00:00 |
+| 2   | name2  | 2024-10-18T19:00:00 |
+| 3   | name3  | 2024-10-18T19:00:00 |
++-----+--------+---------------------+
 
 DROP FLOW calc_nullable_pk;
 
-Error: 8001(FlowNotFound), Flow not found: greptime.calc_nullable_pk
+Affected Rows: 0
 
 DROP TABLE nullable_pk;
 
-Error: 4001(TableNotFound), Table not found: greptime.public.nullable_pk
+Affected Rows: 0
 
 DROP TABLE out_nullable_pk;
 
-Error: 4001(TableNotFound), Table not found: greptime.public.out_nullable_pk
+Affected Rows: 0
 
