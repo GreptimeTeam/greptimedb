@@ -63,12 +63,7 @@ use servers::interceptor::{
     PromQueryInterceptor, PromQueryInterceptorRef, SqlQueryInterceptor, SqlQueryInterceptorRef,
 };
 use servers::prometheus_handler::PrometheusHandler;
-use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
-use servers::query_handler::{
-    InfluxdbLineProtocolHandler, JaegerQueryHandler, LogQueryHandler, OpenTelemetryProtocolHandler,
-    OpentsdbProtocolHandler, PipelineHandler, PromStoreProtocolHandler,
-};
 use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
 use snafu::prelude::*;
@@ -86,25 +81,9 @@ use crate::error::{
 };
 use crate::limiter::LimiterRef;
 
-pub trait FrontendInstance:
-    GrpcQueryHandler<Error = Error>
-    + SqlQueryHandler<Error = Error>
-    + OpentsdbProtocolHandler
-    + InfluxdbLineProtocolHandler
-    + PromStoreProtocolHandler
-    + OpenTelemetryProtocolHandler
-    + PrometheusHandler
-    + PipelineHandler
-    + LogQueryHandler
-    + JaegerQueryHandler
-    + Send
-    + Sync
-    + 'static
-{
-}
-
-pub type FrontendInstanceRef = Arc<dyn FrontendInstance>;
-
+/// The frontend instance contains necessary components, and implements many
+/// traits, like [`servers::query_handler::grpc::GrpcQueryHandler`],
+/// [`servers::query_handler::sql::SqlQueryHandler`], etc.
 #[derive(Clone)]
 pub struct Instance {
     catalog_manager: CatalogManagerRef,
@@ -170,8 +149,6 @@ impl Instance {
         &self.inserter
     }
 }
-
-impl FrontendInstance for Instance {}
 
 fn parse_stmt(sql: &str, dialect: &(dyn Dialect + Send + Sync)) -> Result<Vec<Statement>> {
     ParserContext::create_with_dialect(sql, dialect, ParseOptions::default()).context(ParseSqlSnafu)
