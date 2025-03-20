@@ -159,7 +159,23 @@ async fn do_handle_bulk_api(
     };
     let log_num = requests.len();
 
-    let pipeline = PipelineDefinition::from_name(&pipeline_name, None);
+    let pipeline = match PipelineDefinition::from_name(&pipeline_name, None, None) {
+        Ok(pipeline) => pipeline,
+        Err(e) => {
+            // should be unreachable
+            error!(e; "Failed to ingest logs");
+            return (
+                status_code_to_http_status(&e.status_code()),
+                elasticsearch_headers(),
+                axum::Json(write_bulk_response(
+                    start.elapsed().as_millis() as i64,
+                    0,
+                    e.status_code() as u32,
+                    e.to_string().as_str(),
+                )),
+            );
+        }
+    };
     if let Err(e) = ingest_logs_inner(
         log_state.log_handler,
         pipeline,

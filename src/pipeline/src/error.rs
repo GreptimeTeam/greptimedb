@@ -692,6 +692,14 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Invalid custom time index config: {}, reason: {}", config, reason))]
+    InvalidCustomTimeIndex {
+        config: String,
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -704,7 +712,9 @@ impl ErrorExt for Error {
             PipelineTableNotFound { .. } => StatusCode::TableNotFound,
             InsertPipeline { source, .. } => source.status_code(),
             CollectRecords { source, .. } => source.status_code(),
-            PipelineNotFound { .. } | InvalidPipelineVersion { .. } => StatusCode::InvalidArguments,
+            PipelineNotFound { .. }
+            | InvalidPipelineVersion { .. }
+            | InvalidCustomTimeIndex { .. } => StatusCode::InvalidArguments,
             BuildDfLogicalPlan { .. } => StatusCode::Internal,
             ExecuteInternalStatement { source, .. } => source.status_code(),
             DataFrame { source, .. } => source.status_code(),

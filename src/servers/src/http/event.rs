@@ -86,6 +86,15 @@ pub struct LogIngesterQueryParams {
     /// The JSON field name of the log message. If not provided, it will take the whole log as the message.
     /// The field must be at the top level of the JSON structure.
     pub msg_field: Option<String>,
+    /// Specify a custom time index from the input data rather than server's arrival time.
+    /// Valid formats:
+    /// - <field_name>;epoch;<resolution>
+    /// - <field_name>;datestr;<format>
+    ///
+    /// If an error occurs while parsing the config, the error will be returned in the response.
+    /// If an error occurs while ingesting the data, the `ignore_errors` will be used to determine if the error should be ignored.
+    /// If so, use the current server's timestamp as the event time.
+    pub custom_time_index: Option<String>,
 }
 
 /// LogIngestRequest is the internal request for log ingestion. The raw log input can be transformed into multiple LogIngestRequests.
@@ -531,13 +540,18 @@ pub async fn log_ingester(
         reason: "table is required",
     })?;
 
+    let ignore_errors = query_params.ignore_errors.unwrap_or(false);
+
     let pipeline_name = query_params.pipeline_name.context(InvalidParameterSnafu {
         reason: "pipeline_name is required",
     })?;
     let version = to_pipeline_version(query_params.version.as_deref()).context(PipelineSnafu)?;
-    let pipeline = PipelineDefinition::from_name(&pipeline_name, version);
-
-    let ignore_errors = query_params.ignore_errors.unwrap_or(false);
+    let pipeline = PipelineDefinition::from_name(
+        &pipeline_name,
+        version,
+        query_params.custom_time_index.map(|s| (s, ignore_errors)),
+    )
+    .context(PipelineSnafu)?;
 
     let value = extract_pipeline_value_by_content_type(content_type, payload, ignore_errors)?;
 
