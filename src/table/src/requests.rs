@@ -452,7 +452,7 @@ mod tests {
         };
 
         assert_eq!(
-            "write_buffer_size=128.0MiB ttl=16m 40s skip_wal=false",
+            "write_buffer_size=128.0MiB ttl=16m 40s",
             options.to_string()
         );
 
@@ -464,7 +464,18 @@ mod tests {
         };
 
         assert_eq!(
-            "write_buffer_size=128.0MiB ttl=16m 40s skip_wal=false a=A",
+            "write_buffer_size=128.0MiB ttl=16m 40s a=A",
+            options.to_string()
+        );
+
+        let options = TableOptions {
+            write_buffer_size: Some(ReadableSize::mb(128)),
+            ttl: Some(Duration::from_secs(1000).into()),
+            extra_options: HashMap::new(),
+            skip_wal: true,
+        };
+        assert_eq!(
+            "write_buffer_size=128.0MiB ttl=16m 40s skip_wal=true",
             options.to_string()
         );
     }
