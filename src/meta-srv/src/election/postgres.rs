@@ -126,9 +126,9 @@ impl<'a> ElectionSqlFactory<'a> {
     fn put_value_with_lease_sql(&self) -> String {
         format!(
             r#"WITH prev AS (
-                SELECT k, v FROM {} WHERE k = $1
+                SELECT k, v FROM "{}" WHERE k = $1
             ), insert AS (
-                INSERT INTO {}
+                INSERT INTO "{}"
                 VALUES($1, convert_to($2 || '{}' || TO_CHAR(CURRENT_TIMESTAMP + INTERVAL '1 second' * $3, 'YYYY-MM-DD HH24:MI:SS.MS'), 'UTF8'))
                 ON CONFLICT (k) DO NOTHING
             )
@@ -140,7 +140,7 @@ impl<'a> ElectionSqlFactory<'a> {
 
     fn update_value_with_lease_sql(&self) -> String {
         format!(
-            r#"UPDATE {} 
+            r#"UPDATE "{}"
                SET v = convert_to($3 || '{}' || TO_CHAR(CURRENT_TIMESTAMP + INTERVAL '1 second' * $4, 'YYYY-MM-DD HH24:MI:SS.MS'), 'UTF8')
                WHERE k = $1 AND v = $2"#,
             self.table_name, LEASE_SEP
@@ -149,21 +149,21 @@ impl<'a> ElectionSqlFactory<'a> {
 
     fn get_value_with_lease_sql(&self) -> String {
         format!(
-            r#"SELECT v, TO_CHAR(CURRENT_TIMESTAMP, 'YYYY-MM-DD HH24:MI:SS.MS') FROM {} WHERE k = $1"#,
+            r#"SELECT v, TO_CHAR(CURRENT_TIMESTAMP, 'YYYY-MM-DD HH24:MI:SS.MS') FROM "{}" WHERE k = $1"#,
             self.table_name
         )
     }
 
     fn get_value_with_lease_by_prefix_sql(&self) -> String {
         format!(
-            r#"SELECT v, TO_CHAR(CURRENT_TIMESTAMP, 'YYYY-MM-DD HH24:MI:SS.MS') FROM {} WHERE k LIKE $1"#,
+            r#"SELECT v, TO_CHAR(CURRENT_TIMESTAMP, 'YYYY-MM-DD HH24:MI:SS.MS') FROM "{}" WHERE k LIKE $1"#,
             self.table_name
         )
     }
 
     fn delete_value_sql(&self) -> String {
         format!(
-            "DELETE FROM {} WHERE k = $1 RETURNING k,v;",
+            "DELETE FROM \"{}\" WHERE k = $1 RETURNING k,v;",
             self.table_name
         )
     }
@@ -285,7 +285,6 @@ impl Election for PgElection {
             .is_ok()
     }
 
-    /// TODO(CookiePie): Split the candidate registration and keep alive logic into separate methods, so that upper layers can call them separately.
     async fn register_candidate(&self, node_info: &MetasrvNodeInfo) -> Result<()> {
         let key = self.candidate_key();
         let node_info =
@@ -745,7 +744,7 @@ mod tests {
         });
         if let Some(table_name) = table_name {
             let create_table_sql = format!(
-                "CREATE TABLE IF NOT EXISTS {}(k bytea PRIMARY KEY, v bytea);",
+                "CREATE TABLE IF NOT EXISTS \"{}\"(k bytea PRIMARY KEY, v bytea);",
                 table_name
             );
             client.execute(&create_table_sql, &[]).await.unwrap();
@@ -754,7 +753,7 @@ mod tests {
     }
 
     async fn drop_table(client: &Client, table_name: &str) {
-        let sql = format!("DROP TABLE IF EXISTS {};", table_name);
+        let sql = format!("DROP TABLE IF EXISTS \"{}\";", table_name);
         client.execute(&sql, &[]).await.unwrap();
     }
 
