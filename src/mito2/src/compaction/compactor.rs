@@ -24,6 +24,7 @@ use itertools::Itertools;
 use object_store::manager::ObjectStoreManagerRef;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
+use store_api::manifest::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 
@@ -253,7 +254,7 @@ pub trait Compactor: Send + Sync + 'static {
         &self,
         compaction_region: &CompactionRegion,
         merge_output: MergeOutput,
-    ) -> Result<RegionEdit>;
+    ) -> Result<(ManifestVersion, RegionEdit)>;
 
     /// Execute compaction for a region.
     async fn compact(
@@ -400,7 +401,7 @@ impl Compactor for DefaultCompactor {
         &self,
         compaction_region: &CompactionRegion,
         merge_output: MergeOutput,
-    ) -> Result<RegionEdit> {
+    ) -> Result<(ManifestVersion, RegionEdit)> {
         // Write region edit to manifest.
         let edit = RegionEdit {
             files_to_add: merge_output.files_to_add,
@@ -414,12 +415,12 @@ impl Compactor for DefaultCompactor {
 
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
         // TODO: We might leak files if we fail to update manifest. We can add a cleanup task to remove them later.
-        compaction_region
+        let version = compaction_region
             .manifest_ctx
             .update_manifest(RegionLeaderState::Writable, action_list)
             .await?;
 
-        Ok(edit)
+        Ok((version, edit))
     }
 
     // The default implementation of compact combines the merge_ssts and update_manifest functions.

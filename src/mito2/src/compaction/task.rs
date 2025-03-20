@@ -18,6 +18,7 @@ use std::time::Instant;
 
 use common_telemetry::{error, info};
 use snafu::ResultExt;
+use store_api::manifest::ManifestVersion;
 use tokio::sync::mpsc;
 
 use crate::compaction::compactor::{CompactionRegion, Compactor};
@@ -77,7 +78,7 @@ impl CompactionTaskImpl {
             .for_each(|o| o.inputs.iter().for_each(|f| f.set_compacting(compacting)));
     }
 
-    async fn handle_compaction(&mut self) -> error::Result<RegionEdit> {
+    async fn handle_compaction(&mut self) -> error::Result<(ManifestVersion, RegionEdit)> {
         self.mark_files_compacting(true);
 
         let merge_timer = COMPACTION_STAGE_ELAPSED
@@ -146,12 +147,15 @@ impl CompactionTaskImpl {
 impl CompactionTask for CompactionTaskImpl {
     async fn run(&mut self) {
         let notify = match self.handle_compaction().await {
-            Ok(edit) => BackgroundNotify::CompactionFinished(CompactionFinished {
-                region_id: self.compaction_region.region_id,
-                senders: std::mem::take(&mut self.waiters),
-                start_time: self.start_time,
-                edit,
-            }),
+            Ok((manifest_version, edit)) => {
+                BackgroundNotify::CompactionFinished(CompactionFinished {
+                    region_id: self.compaction_region.region_id,
+                    senders: std::mem::take(&mut self.waiters),
+                    start_time: self.start_time,
+                    edit,
+                    manifest_version,
+                })
+            }
             Err(e) => {
                 error!(e; "Failed to compact region, region id: {}", self.compaction_region.region_id);
                 let err = Arc::new(e);

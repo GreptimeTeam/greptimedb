@@ -24,6 +24,7 @@ use store_api::storage::RegionId;
 use crate::config::MitoConfig;
 use crate::error::{RegionNotFoundSnafu, Result};
 use crate::flush::{FlushReason, RegionFlushTask};
+use crate::manifest::notifier::ManifestChangeEvent;
 use crate::region::MitoRegionRef;
 use crate::request::{FlushFailed, FlushFinished, OnFailure, OptionOutputTx};
 use crate::worker::RegionWorkerLoop;
@@ -203,6 +204,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
         };
 
+        let manifest_version = request.manifest_version;
+
         region.version_control.apply_edit(
             request.edit.clone(),
             &request.memtables_to_remove,
@@ -228,6 +231,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         // Notifies waiters and observes the flush timer.
         request.on_success();
+
+        // Notifies the manifest change to the downstream.
+        self.notify_manifest_change(&region, manifest_version, ManifestChangeEvent::Flush)
+            .await;
 
         // Handle pending requests for the region.
         if let Some((mut ddl_requests, mut write_requests)) =
