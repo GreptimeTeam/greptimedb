@@ -24,8 +24,8 @@ pub use etl::transform::transformer::identity_pipeline;
 pub use etl::transform::{GreptimeTransformer, Transformer};
 pub use etl::value::{Array, Map, Value};
 pub use etl::{
-    json_array_to_intermediate_state, json_to_intermediate_state, parse, Content, DispatchedTo,
-    Pipeline, PipelineExecOutput, PipelineMap,
+    json_array_to_map, json_to_map, parse, Content, DispatchedTo, Pipeline, PipelineExecOutput,
+    PipelineMap,
 };
 pub use manager::{
     pipeline_operator, table, util, PipelineDefinition, PipelineInfo, PipelineRef,

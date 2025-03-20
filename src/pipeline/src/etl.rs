@@ -147,7 +147,7 @@ impl<O> PipelineExecOutput<O> {
     }
 }
 
-pub fn json_to_intermediate_state(val: serde_json::Value) -> Result<PipelineMap> {
+pub fn json_to_map(val: serde_json::Value) -> Result<PipelineMap> {
     match val {
         serde_json::Value::Object(map) => {
             let mut intermediate_state = PipelineMap::new();
@@ -160,8 +160,8 @@ pub fn json_to_intermediate_state(val: serde_json::Value) -> Result<PipelineMap>
     }
 }
 
-pub fn json_array_to_intermediate_state(val: Vec<serde_json::Value>) -> Result<Vec<PipelineMap>> {
-    val.into_iter().map(json_to_intermediate_state).collect()
+pub fn json_array_to_map(val: Vec<serde_json::Value>) -> Result<Vec<PipelineMap>> {
+    val.into_iter().map(json_to_map).collect()
 }
 
 impl<T> Pipeline<T>
@@ -238,7 +238,7 @@ transform:
       type: uint32
     "#;
         let pipeline: Pipeline<GreptimeTransformer> = parse(&Content::Yaml(pipeline_yaml)).unwrap();
-        let mut payload = json_to_intermediate_state(input_value).unwrap();
+        let mut payload = json_to_map(input_value).unwrap();
         let result = pipeline
             .exec_mut(&mut payload)
             .unwrap()
@@ -366,7 +366,7 @@ transform:
     "#;
 
         let pipeline: Pipeline<GreptimeTransformer> = parse(&Content::Yaml(pipeline_yaml)).unwrap();
-        let mut payload = json_to_intermediate_state(input_value).unwrap();
+        let mut payload = json_to_map(input_value).unwrap();
         let result = pipeline
             .exec_mut(&mut payload)
             .unwrap()
@@ -408,7 +408,7 @@ transform:
 
         let pipeline: Pipeline<GreptimeTransformer> = parse(&Content::Yaml(pipeline_yaml)).unwrap();
         let schema = pipeline.schemas().clone();
-        let mut result = json_to_intermediate_state(input_value).unwrap();
+        let mut result = json_to_map(input_value).unwrap();
 
         let row = pipeline
             .exec_mut(&mut result)

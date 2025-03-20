@@ -49,10 +49,10 @@ pub async fn get_pipeline(
 }
 
 pub(crate) async fn run_pipeline(
-    state: &PipelineHandlerRef,
+    handler: &PipelineHandlerRef,
     pipeline_definition: PipelineDefinition,
     pipeline_parameters: &GreptimePipelineParams,
-    array: Vec<PipelineMap>,
+    data_array: Vec<PipelineMap>,
     table_name: String,
     query_ctx: &QueryContextRef,
     is_top_level: bool,
@@ -63,11 +63,11 @@ pub(crate) async fn run_pipeline(
         pipeline_definition,
         PipelineDefinition::GreptimeIdentityPipeline
     ) {
-        let table = state
+        let table = handler
             .get_table(&table_name, query_ctx)
             .await
             .context(CatalogSnafu)?;
-        pipeline::identity_pipeline(array, table, pipeline_parameters)
+        pipeline::identity_pipeline(data_array, table, pipeline_parameters)
             .map(|rows| {
                 vec![RowInsertRequest {
                     rows: Some(rows),
@@ -76,14 +76,14 @@ pub(crate) async fn run_pipeline(
             })
             .context(PipelineSnafu)
     } else {
-        let pipeline = get_pipeline(pipeline_definition, state, query_ctx).await?;
+        let pipeline = get_pipeline(pipeline_definition, handler, query_ctx).await?;
 
         let transform_timer = std::time::Instant::now();
 
-        let mut transformed = Vec::with_capacity(array.len());
+        let mut transformed = Vec::with_capacity(data_array.len());
         let mut dispatched: BTreeMap<DispatchedTo, Vec<PipelineMap>> = BTreeMap::new();
 
-        for mut values in array {
+        for mut values in data_array {
             let r = pipeline
                 .exec_mut(&mut values)
                 .inspect_err(|_| {
@@ -134,7 +134,7 @@ pub(crate) async fn run_pipeline(
 
             // run pipeline recursively.
             let requests = Box::pin(run_pipeline(
-                state,
+                handler,
                 PipelineDefinition::from_name(next_pipeline_name, None),
                 pipeline_parameters,
                 coll,
