@@ -47,7 +47,7 @@ pub trait MockInstance: Sync + Send {
 
 impl MockInstance for GreptimeDbStandalone {
     fn frontend(&self) -> Arc<Instance> {
-        self.instance.clone()
+        self.fe_instance().clone()
     }
 
     fn is_distributed_mode(&self) -> bool {

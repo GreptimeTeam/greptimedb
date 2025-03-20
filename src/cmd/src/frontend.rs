@@ -49,7 +49,7 @@ use crate::{log_versions, App};
 
 type FrontendOptions = GreptimeOptions<frontend::frontend::FrontendOptions>;
 
-pub struct FrontendApp {
+pub struct Instance {
     frontend: Frontend,
     // Keep the logging guard to prevent the worker from being dropped.
     _guard: Vec<WorkerGuard>,
@@ -57,14 +57,14 @@ pub struct FrontendApp {
 
 pub const APP_NAME: &str = "greptime-frontend";
 
-impl FrontendApp {
+impl Instance {
     pub fn new(frontend: Frontend, _guard: Vec<WorkerGuard>) -> Self {
         Self { frontend, _guard }
     }
 }
 
 #[async_trait]
-impl App for FrontendApp {
+impl App for Instance {
     fn name(&self) -> &str {
         APP_NAME
     }
@@ -96,7 +96,7 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(&self, opts: FrontendOptions) -> Result<FrontendApp> {
+    pub async fn build(&self, opts: FrontendOptions) -> Result<Instance> {
         self.subcmd.build(opts).await
     }
 
@@ -111,7 +111,7 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(&self, opts: FrontendOptions) -> Result<FrontendApp> {
+    async fn build(&self, opts: FrontendOptions) -> Result<Instance> {
         match self {
             SubCommand::Start(cmd) => cmd.build(opts).await,
         }
@@ -253,7 +253,7 @@ impl StartCommand {
         Ok(())
     }
 
-    async fn build(&self, opts: FrontendOptions) -> Result<FrontendApp> {
+    async fn build(&self, opts: FrontendOptions) -> Result<Instance> {
         common_runtime::init_global_runtimes(&opts.runtime);
 
         let guard = common_telemetry::init_global_logging(
@@ -381,7 +381,7 @@ impl StartCommand {
             export_metrics_task,
         };
 
-        Ok(FrontendApp::new(frontend, guard))
+        Ok(Instance::new(frontend, guard))
     }
 }
 

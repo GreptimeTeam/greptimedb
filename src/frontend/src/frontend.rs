@@ -93,6 +93,8 @@ impl Configurable for FrontendOptions {
     }
 }
 
+/// The [`Frontend`] struct is the main entry point for the frontend service
+/// which contains server handlers, frontend instance and some background tasks.
 pub struct Frontend {
     pub instance: Arc<Instance>,
     pub servers: ServerHandlers,

@@ -54,12 +54,18 @@ use snafu::ResultExt;
 use crate::test_util::{self, create_tmp_dir_and_datanode_opts, StorageType, TestGuard};
 
 pub struct GreptimeDbStandalone {
-    pub instance: Arc<Instance>,
+    pub frontend: Arc<Frontend>,
     pub opts: StandaloneOptions,
     pub guard: TestGuard,
     // Used in rebuild.
     pub kv_backend: KvBackendRef,
     pub procedure_manager: ProcedureManagerRef,
+}
+
+impl GreptimeDbStandalone {
+    pub fn fe_instance(&self) -> &Arc<Instance> {
+        &self.frontend.instance
+    }
 }
 
 pub struct GreptimeDbStandaloneBuilder {
@@ -259,16 +265,17 @@ impl GreptimeDbStandaloneBuilder {
         test_util::prepare_another_catalog_and_schema(&instance).await;
 
         let frontend = Frontend {
-            instance: instance.clone(),
+            instance,
             servers: ServerHandlers::new(),
             heartbeat_task: None,
             export_metrics_task: None,
         };
+        let frontend = Arc::new(frontend);
 
         frontend.start().await.unwrap();
 
         GreptimeDbStandalone {
-            instance,
+            frontend,
             opts,
             guard,
             kv_backend,

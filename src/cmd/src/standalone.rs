@@ -88,7 +88,7 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(&self, opts: GreptimeOptions<StandaloneOptions>) -> Result<StandaloneApp> {
+    pub async fn build(&self, opts: GreptimeOptions<StandaloneOptions>) -> Result<Instance> {
         self.subcmd.build(opts).await
     }
 
@@ -106,7 +106,7 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(&self, opts: GreptimeOptions<StandaloneOptions>) -> Result<StandaloneApp> {
+    async fn build(&self, opts: GreptimeOptions<StandaloneOptions>) -> Result<Instance> {
         match self {
             SubCommand::Start(cmd) => cmd.build(opts).await,
         }
@@ -242,7 +242,7 @@ impl StandaloneOptions {
     }
 }
 
-pub struct StandaloneApp {
+pub struct Instance {
     datanode: Datanode,
     frontend: Frontend,
     // TODO(discord9): wrapped it in flownode instance instead
@@ -255,7 +255,7 @@ pub struct StandaloneApp {
 }
 
 #[async_trait]
-impl App for StandaloneApp {
+impl App for Instance {
     fn name(&self) -> &str {
         APP_NAME
     }
@@ -443,7 +443,7 @@ impl StartCommand {
     #[allow(unused_variables)]
     #[allow(clippy::diverging_sub_expression)]
     /// Build GreptimeDB instance with the loaded options.
-    pub async fn build(&self, opts: GreptimeOptions<StandaloneOptions>) -> Result<StandaloneApp> {
+    pub async fn build(&self, opts: GreptimeOptions<StandaloneOptions>) -> Result<Instance> {
         common_runtime::init_global_runtimes(&opts.runtime);
 
         let guard = common_telemetry::init_global_logging(
@@ -636,7 +636,7 @@ impl StartCommand {
             export_metrics_task,
         };
 
-        Ok(StandaloneApp {
+        Ok(Instance {
             datanode,
             frontend,
             flow_worker_manager,
