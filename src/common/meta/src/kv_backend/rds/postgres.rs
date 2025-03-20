@@ -227,9 +227,9 @@ impl PgSqlTemplateSet {
         format!(
             r#"
     WITH prev AS (
-        SELECT k,v FROM \"{table_name}\" WHERE k IN ({in_clause})
+        SELECT k,v FROM "{table_name}" WHERE k IN ({in_clause})
     ), update AS (
-    INSERT INTO \"{table_name}\" (k, v) VALUES
+    INSERT INTO "{table_name}" (k, v) VALUES
         {values_clause}
     ON CONFLICT (
         k
