@@ -340,177 +340,124 @@ fn values_to_row(schema_info: &mut SchemaInfo, values: PipelineMap) -> Result<Ro
         }
 
         let index = schema_info.index.get(&column_name).copied();
-
-        match value {
-            Value::Null => {}
-
-            Value::Int8(_) | Value::Int16(_) | Value::Int32(_) | Value::Int64(_) => {
-                // safe unwrap after type matched
-                let v = value.as_i64().unwrap();
-                resolve_schema(
-                    index,
-                    ValueData::I64Value(v),
-                    ColumnSchema {
-                        column_name,
-                        datatype: ColumnDataType::Int64 as i32,
-                        semantic_type: SemanticType::Field as i32,
-                        datatype_extension: None,
-                        options: None,
-                    },
-                    &mut row,
-                    schema_info,
-                )?;
-            }
-
-            Value::Uint8(_) | Value::Uint16(_) | Value::Uint32(_) | Value::Uint64(_) => {
-                // safe unwrap after type matched
-                let v = value.as_u64().unwrap();
-                resolve_schema(
-                    index,
-                    ValueData::U64Value(v),
-                    ColumnSchema {
-                        column_name,
-                        datatype: ColumnDataType::Uint64 as i32,
-                        semantic_type: SemanticType::Field as i32,
-                        datatype_extension: None,
-                        options: None,
-                    },
-                    &mut row,
-                    schema_info,
-                )?;
-            }
-
-            Value::Float32(_) | Value::Float64(_) => {
-                // safe unwrap after type matched
-                let v = value.as_f64().unwrap();
-                resolve_schema(
-                    index,
-                    ValueData::F64Value(v),
-                    ColumnSchema {
-                        column_name,
-                        datatype: ColumnDataType::Float64 as i32,
-                        semantic_type: SemanticType::Field as i32,
-                        datatype_extension: None,
-                        options: None,
-                    },
-                    &mut row,
-                    schema_info,
-                )?;
-            }
-
-            Value::Boolean(v) => {
-                resolve_schema(
-                    index,
-                    ValueData::BoolValue(v),
-                    ColumnSchema {
-                        column_name,
-                        datatype: ColumnDataType::Boolean as i32,
-                        semantic_type: SemanticType::Field as i32,
-                        datatype_extension: None,
-                        options: None,
-                    },
-                    &mut row,
-                    schema_info,
-                )?;
-            }
-            Value::String(v) => {
-                resolve_schema(
-                    index,
-                    ValueData::StringValue(v),
-                    ColumnSchema {
-                        column_name,
-                        datatype: ColumnDataType::String as i32,
-                        semantic_type: SemanticType::Field as i32,
-                        datatype_extension: None,
-                        options: None,
-                    },
-                    &mut row,
-                    schema_info,
-                )?;
-            }
-
-            Value::Timestamp(Timestamp::Nanosecond(ns)) => {
-                resolve_schema(
-                    index,
-                    ValueData::TimestampNanosecondValue(ns),
-                    ColumnSchema {
-                        column_name,
-                        datatype: ColumnDataType::TimestampNanosecond as i32,
-                        semantic_type: SemanticType::Field as i32,
-                        datatype_extension: None,
-                        options: None,
-                    },
-                    &mut row,
-                    schema_info,
-                )?;
-            }
-            Value::Timestamp(Timestamp::Microsecond(us)) => {
-                resolve_schema(
-                    index,
-                    ValueData::TimestampMicrosecondValue(us),
-                    ColumnSchema {
-                        column_name,
-                        datatype: ColumnDataType::TimestampMicrosecond as i32,
-                        semantic_type: SemanticType::Field as i32,
-                        datatype_extension: None,
-                        options: None,
-                    },
-                    &mut row,
-                    schema_info,
-                )?;
-            }
-            Value::Timestamp(Timestamp::Millisecond(ms)) => {
-                resolve_schema(
-                    index,
-                    ValueData::TimestampMillisecondValue(ms),
-                    ColumnSchema {
-                        column_name,
-                        datatype: ColumnDataType::TimestampMillisecond as i32,
-                        semantic_type: SemanticType::Field as i32,
-                        datatype_extension: None,
-                        options: None,
-                    },
-                    &mut row,
-                    schema_info,
-                )?;
-            }
-            Value::Timestamp(Timestamp::Second(s)) => {
-                resolve_schema(
-                    index,
-                    ValueData::TimestampSecondValue(s),
-                    ColumnSchema {
-                        column_name,
-                        datatype: ColumnDataType::TimestampSecond as i32,
-                        semantic_type: SemanticType::Field as i32,
-                        datatype_extension: None,
-                        options: None,
-                    },
-                    &mut row,
-                    schema_info,
-                )?;
-            }
-
-            Value::Array(_) | Value::Map(_) => {
-                let data: jsonb::Value = value.into();
-                resolve_schema(
-                    index,
-                    ValueData::BinaryValue(data.to_vec()),
-                    ColumnSchema {
-                        column_name,
-                        datatype: ColumnDataType::Binary as i32,
-                        semantic_type: SemanticType::Field as i32,
-                        datatype_extension: Some(ColumnDataTypeExtension {
-                            type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
-                        }),
-                        options: None,
-                    },
-                    &mut row,
-                    schema_info,
-                )?;
-            }
-        }
+        resolve_value(index, value, column_name, &mut row, schema_info)?;
     }
     Ok(Row { values: row })
+}
+
+fn resolve_value(
+    index: Option<usize>,
+    value: Value,
+    column_name: String,
+    row: &mut Vec<GreptimeValue>,
+    schema_info: &mut SchemaInfo,
+) -> Result<()> {
+    let mut resolve_simple_type =
+        |value_data: ValueData, column_name: String, data_type: ColumnDataType| {
+            resolve_schema(
+                index,
+                value_data,
+                ColumnSchema {
+                    column_name,
+                    datatype: data_type as i32,
+                    semantic_type: SemanticType::Field as i32,
+                    datatype_extension: None,
+                    options: None,
+                },
+                row,
+                schema_info,
+            )
+        };
+
+    match value {
+        Value::Null => {}
+
+        Value::Int8(_) | Value::Int16(_) | Value::Int32(_) | Value::Int64(_) => {
+            // safe unwrap after type matched
+            let v = value.as_i64().unwrap();
+            resolve_simple_type(ValueData::I64Value(v), column_name, ColumnDataType::Int64)?;
+        }
+
+        Value::Uint8(_) | Value::Uint16(_) | Value::Uint32(_) | Value::Uint64(_) => {
+            // safe unwrap after type matched
+            let v = value.as_u64().unwrap();
+            resolve_simple_type(ValueData::U64Value(v), column_name, ColumnDataType::Uint64)?;
+        }
+
+        Value::Float32(_) | Value::Float64(_) => {
+            // safe unwrap after type matched
+            let v = value.as_f64().unwrap();
+            resolve_simple_type(ValueData::F64Value(v), column_name, ColumnDataType::Float64)?;
+        }
+
+        Value::Boolean(v) => {
+            resolve_simple_type(
+                ValueData::BoolValue(v),
+                column_name,
+                ColumnDataType::Boolean,
+            )?;
+        }
+
+        Value::String(v) => {
+            resolve_simple_type(
+                ValueData::StringValue(v),
+                column_name,
+                ColumnDataType::String,
+            )?;
+        }
+
+        Value::Timestamp(Timestamp::Nanosecond(ns)) => {
+            resolve_simple_type(
+                ValueData::TimestampNanosecondValue(ns),
+                column_name,
+                ColumnDataType::TimestampNanosecond,
+            )?;
+        }
+
+        Value::Timestamp(Timestamp::Microsecond(us)) => {
+            resolve_simple_type(
+                ValueData::TimestampMicrosecondValue(us),
+                column_name,
+                ColumnDataType::TimestampMicrosecond,
+            )?;
+        }
+
+        Value::Timestamp(Timestamp::Millisecond(ms)) => {
+            resolve_simple_type(
+                ValueData::TimestampMillisecondValue(ms),
+                column_name,
+                ColumnDataType::TimestampMillisecond,
+            )?;
+        }
+
+        Value::Timestamp(Timestamp::Second(s)) => {
+            resolve_simple_type(
+                ValueData::TimestampSecondValue(s),
+                column_name,
+                ColumnDataType::TimestampSecond,
+            )?;
+        }
+
+        Value::Array(_) | Value::Map(_) => {
+            let data: jsonb::Value = value.into();
+            resolve_schema(
+                index,
+                ValueData::BinaryValue(data.to_vec()),
+                ColumnSchema {
+                    column_name,
+                    datatype: ColumnDataType::Binary as i32,
+                    semantic_type: SemanticType::Field as i32,
+                    datatype_extension: Some(ColumnDataTypeExtension {
+                        type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
+                    }),
+                    options: None,
+                },
+                row,
+                schema_info,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn identity_pipeline_inner(array: Vec<PipelineMap>) -> Result<(SchemaInfo, Vec<Row>)> {
