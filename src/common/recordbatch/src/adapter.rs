@@ -206,13 +206,16 @@ impl Stream for DfRecordBatchStreamAdapter {
 }
 
 /// DataFusion [SendableRecordBatchStream](DfSendableRecordBatchStream) -> Greptime [RecordBatchStream].
-/// The reverse one is [DfRecordBatchStreamAdapter]
+/// The reverse one is [DfRecordBatchStreamAdapter].
+/// It can collect metrics from DataFusion execution plan.
 pub struct RecordBatchStreamAdapter {
     schema: SchemaRef,
     stream: DfSendableRecordBatchStream,
     metrics: Option<BaselineMetrics>,
     /// Aggregated plan-level metrics. Resolved after an [ExecutionPlan] is finished.
     metrics_2: Metrics,
+    /// Display plan and metrics in verbose mode.
+    explain_verbose: bool,
 }
 
 /// Json encoded metrics. Contains metric from a whole plan tree.
@@ -231,6 +234,7 @@ impl RecordBatchStreamAdapter {
             stream,
             metrics: None,
             metrics_2: Metrics::Unavailable,
+            explain_verbose: false,
         })
     }
 
@@ -246,11 +250,17 @@ impl RecordBatchStreamAdapter {
             stream,
             metrics: Some(metrics),
             metrics_2: Metrics::Unresolved(df_plan),
+            explain_verbose: false,
         })
     }
 
     pub fn set_metrics2(&mut self, plan: Arc<dyn ExecutionPlan>) {
         self.metrics_2 = Metrics::Unresolved(plan)
+    }
+
+    /// Set the verbose mode for displaying plan and metrics.
+    pub fn set_explain_verbose(&mut self, verbose: bool) {
+        self.explain_verbose = verbose;
     }
 }
 
@@ -296,7 +306,7 @@ impl Stream for RecordBatchStreamAdapter {
             }
             Poll::Ready(None) => {
                 if let Metrics::Unresolved(df_plan) = &self.metrics_2 {
-                    let mut metric_collector = MetricCollector::default();
+                    let mut metric_collector = MetricCollector::new(self.explain_verbose);
                     accept(df_plan.as_ref(), &mut metric_collector).unwrap();
                     self.metrics_2 = Metrics::Resolved(metric_collector.record_batch_metrics);
                 }
@@ -312,10 +322,20 @@ impl Stream for RecordBatchStreamAdapter {
 }
 
 /// An [ExecutionPlanVisitor] to collect metrics from a [ExecutionPlan].
-#[derive(Default)]
 pub struct MetricCollector {
     current_level: usize,
     pub record_batch_metrics: RecordBatchMetrics,
+    verbose: bool,
+}
+
+impl MetricCollector {
+    pub fn new(verbose: bool) -> Self {
+        Self {
+            current_level: 0,
+            record_batch_metrics: RecordBatchMetrics::default(),
+            verbose,
+        }
+    }
 }
 
 impl ExecutionPlanVisitor for MetricCollector {

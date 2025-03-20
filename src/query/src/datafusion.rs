@@ -367,8 +367,15 @@ impl DatafusionQueryEngine {
             } else {
                 AnalyzeFormat::TEXT
             };
+            // Sets the verbose flag of the query context.
+            // The MergeScanExec plan uses the verbose flag to determine whether to print the plan in verbose mode.
+            ctx.query_ctx().set_explain_verbose(analyze_plan.verbose());
 
-            Arc::new(DistAnalyzeExec::new(analyze_plan.input().clone(), format))
+            Arc::new(DistAnalyzeExec::new(
+                analyze_plan.input().clone(),
+                analyze_plan.verbose(),
+                format,
+            ))
             // let mut new_plan = analyze_plan.input().clone();
             // for optimizer in state.physical_optimizers() {
             //     new_plan = optimizer
@@ -511,6 +518,7 @@ impl QueryExecutor for DatafusionQueryEngine {
                     .map_err(BoxedError::new)
                     .context(QueryExecutionSnafu)?;
                 stream.set_metrics2(plan.clone());
+                stream.set_explain_verbose(ctx.query_ctx().explain_verbose());
                 let stream = OnDone::new(Box::pin(stream), move || {
                     exec_timer.observe_duration();
                 });
@@ -537,6 +545,7 @@ impl QueryExecutor for DatafusionQueryEngine {
                     .map_err(BoxedError::new)
                     .context(QueryExecutionSnafu)?;
                 stream.set_metrics2(plan.clone());
+                stream.set_explain_verbose(ctx.query_ctx().explain_verbose());
                 let stream = OnDone::new(Box::pin(stream), move || {
                     exec_timer.observe_duration();
                 });
