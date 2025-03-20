@@ -71,6 +71,7 @@ pub const GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME: &str = "greptime_trace_v1";
 
 /// Enum for holding information of a pipeline, which is either pipeline itself,
 /// or information that be used to retrieve a pipeline from `PipelineHandler`
+#[derive(Debug, Clone)]
 pub enum PipelineDefinition {
     Resolved(Arc<Pipeline<GreptimeTransformer>>),
     ByNameAndValue((String, PipelineVersion)),

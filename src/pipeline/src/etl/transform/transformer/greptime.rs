@@ -513,11 +513,7 @@ fn values_to_row(schema_info: &mut SchemaInfo, values: PipelineMap) -> Result<Ro
     Ok(Row { values: row })
 }
 
-fn identity_pipeline_inner<'a>(
-    array: Vec<PipelineMap>,
-    tag_column_names: Option<impl Iterator<Item = &'a String>>,
-    _params: &GreptimePipelineParams,
-) -> Result<Rows> {
+fn identity_pipeline_inner(array: Vec<PipelineMap>) -> Result<(SchemaInfo, Vec<Row>)> {
     let mut rows = Vec::with_capacity(array.len());
     let mut schema_info = SchemaInfo::default();
 
@@ -547,18 +543,7 @@ fn identity_pipeline_inner<'a>(
     }
     schema_info.schema.push(greptime_timestamp_schema);
 
-    // set the semantic type of the row key column to Tag
-    if let Some(tag_column_names) = tag_column_names {
-        tag_column_names.for_each(|tag_column_name| {
-            if let Some(index) = schema_info.index.get(tag_column_name) {
-                schema_info.schema[*index].semantic_type = SemanticType::Tag as i32;
-            }
-        });
-    }
-    Ok(Rows {
-        schema: schema_info.schema,
-        rows,
-    })
+    Ok((schema_info, rows))
 }
 
 /// Identity pipeline for Greptime
@@ -583,14 +568,20 @@ pub fn identity_pipeline(
         array
     };
 
-    match table {
-        Some(table) => {
+    identity_pipeline_inner(input).map(|(mut schema, rows)| {
+        if let Some(table) = table {
             let table_info = table.table_info();
-            let tag_column_names = table_info.meta.row_key_column_names();
-            identity_pipeline_inner(input, Some(tag_column_names), params)
+            for tag_name in table_info.meta.row_key_column_names() {
+                if let Some(index) = schema.index.get(tag_name) {
+                    schema.schema[*index].semantic_type = SemanticType::Tag as i32;
+                }
+            }
         }
-        None => identity_pipeline_inner(input, None::<std::iter::Empty<&String>>, params),
-    }
+        Rows {
+            schema: schema.schema,
+            rows,
+        }
+    })
 }
 
 /// Consumes the JSON object and consumes it into a single-level object.
@@ -648,7 +639,7 @@ mod tests {
     use api::v1::SemanticType;
 
     use super::*;
-    use crate::etl::{json_array_to_intermediate_state, json_to_intermediate_state};
+    use crate::etl::{json_array_to_map, json_to_map};
     use crate::identity_pipeline;
 
     #[test]
@@ -674,7 +665,7 @@ mod tests {
                     "gaga": "gaga"
                 }),
             ];
-            let array = json_array_to_intermediate_state(array).unwrap();
+            let array = json_array_to_map(array).unwrap();
             let rows = identity_pipeline(array, None, &GreptimePipelineParams::default());
             assert!(rows.is_err());
             assert_eq!(
@@ -704,7 +695,7 @@ mod tests {
                 }),
             ];
             let rows = identity_pipeline(
-                json_array_to_intermediate_state(array).unwrap(),
+                json_array_to_map(array).unwrap(),
                 None,
                 &GreptimePipelineParams::default(),
             );
@@ -736,7 +727,7 @@ mod tests {
                 }),
             ];
             let rows = identity_pipeline(
-                json_array_to_intermediate_state(array).unwrap(),
+                json_array_to_map(array).unwrap(),
                 None,
                 &GreptimePipelineParams::default(),
             );
@@ -769,11 +760,21 @@ mod tests {
                 }),
             ];
             let tag_column_names = ["name".to_string(), "address".to_string()];
-            let rows = identity_pipeline_inner(
-                json_array_to_intermediate_state(array).unwrap(),
-                Some(tag_column_names.iter()),
-                &GreptimePipelineParams::default(),
+
+            let rows = identity_pipeline_inner(json_array_to_map(array).unwrap()).map(
+                |(mut schema, rows)| {
+                    for name in tag_column_names {
+                        if let Some(index) = schema.index.get(&name) {
+                            schema.schema[*index].semantic_type = SemanticType::Tag as i32;
+                        }
+                    }
+                    Rows {
+                        schema: schema.schema,
+                        rows,
+                    }
+                },
             );
+
             assert!(rows.is_ok());
             let rows = rows.unwrap();
             assert_eq!(rows.schema.len(), 8);
@@ -869,8 +870,8 @@ mod tests {
         ];
 
         for (input, max_depth, expected) in test_cases {
-            let input = json_to_intermediate_state(input).unwrap();
-            let expected = expected.map(|e| json_to_intermediate_state(e).unwrap());
+            let input = json_to_map(input).unwrap();
+            let expected = expected.map(|e| json_to_map(e).unwrap());
 
             let flattened_object = flatten_object(input, max_depth).ok();
             assert_eq!(flattened_object, expected);

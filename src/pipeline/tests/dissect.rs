@@ -16,7 +16,7 @@ mod common;
 
 use greptime_proto::v1::value::ValueData::StringValue;
 use greptime_proto::v1::{ColumnDataType, SemanticType};
-use pipeline::json_to_intermediate_state;
+use pipeline::json_to_map;
 
 fn make_string_column_schema(name: String) -> greptime_proto::v1::ColumnSchema {
     common::make_column_schema(name, ColumnDataType::String, SemanticType::Field)
@@ -274,7 +274,7 @@ transform:
     let yaml_content = pipeline::Content::Yaml(pipeline_yaml);
     let pipeline: pipeline::Pipeline<pipeline::GreptimeTransformer> =
         pipeline::parse(&yaml_content).expect("failed to parse pipeline");
-    let mut result = json_to_intermediate_state(input_value).unwrap();
+    let mut result = json_to_map(input_value).unwrap();
 
     let row = pipeline.exec_mut(&mut result);
 
