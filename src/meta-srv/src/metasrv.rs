@@ -70,7 +70,7 @@ use crate::state::{become_follower, become_leader, StateRef};
 
 pub const TABLE_ID_SEQ: &str = "table_id";
 pub const FLOW_ID_SEQ: &str = "flow_id";
-pub const METASRV_HOME: &str = "/tmp/metasrv";
+pub const METASRV_HOME: &str = "./greptimedb_data/metasrv";
 
 #[cfg(feature = "pg_kvbackend")]
 pub const DEFAULT_META_TABLE_NAME: &str = "greptime_metakv";

@@ -121,7 +121,7 @@ impl AccessLayer {
     /// Writes a SST with specific `file_id` and `metadata` to the layer.
     ///
     /// Returns the info of the SST. If no data written, returns None.
-    pub(crate) async fn write_sst(
+    pub async fn write_sst(
         &self,
         request: SstWriteRequest,
         write_opts: &WriteOptions,
@@ -191,26 +191,26 @@ impl AccessLayer {
 
 /// `OperationType` represents the origin of the `SstWriteRequest`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum OperationType {
+pub enum OperationType {
     Flush,
     Compact,
 }
 
 /// Contents to build a SST.
-pub(crate) struct SstWriteRequest {
-    pub(crate) op_type: OperationType,
-    pub(crate) metadata: RegionMetadataRef,
-    pub(crate) source: Source,
-    pub(crate) cache_manager: CacheManagerRef,
+pub struct SstWriteRequest {
+    pub op_type: OperationType,
+    pub metadata: RegionMetadataRef,
+    pub source: Source,
+    pub cache_manager: CacheManagerRef,
     #[allow(dead_code)]
-    pub(crate) storage: Option<String>,
-    pub(crate) max_sequence: Option<SequenceNumber>,
+    pub storage: Option<String>,
+    pub max_sequence: Option<SequenceNumber>,
 
     /// Configs for index
-    pub(crate) index_options: IndexOptions,
-    pub(crate) inverted_index_config: InvertedIndexConfig,
-    pub(crate) fulltext_index_config: FulltextIndexConfig,
-    pub(crate) bloom_filter_index_config: BloomFilterConfig,
+    pub index_options: IndexOptions,
+    pub inverted_index_config: InvertedIndexConfig,
+    pub fulltext_index_config: FulltextIndexConfig,
+    pub bloom_filter_index_config: BloomFilterConfig,
 }
 
 pub(crate) async fn new_fs_cache_store(root: &str) -> Result<ObjectStore> {

@@ -40,7 +40,7 @@ const TSID_HASH_SEED: u32 = 846793005;
 ///
 /// - For [`PrimaryKeyEncoding::Dense`] encoding,
 ///   it adds two columns(`__table_id`, `__tsid`) to the row.
-pub struct RowModifier {
+pub(crate) struct RowModifier {
     codec: SparsePrimaryKeyCodec,
 }
 
@@ -52,7 +52,7 @@ impl RowModifier {
     }
 
     /// Modify rows with the given primary key encoding.
-    pub fn modify_rows(
+    pub(crate) fn modify_rows(
         &self,
         iter: RowsIter,
         table_id: TableId,
@@ -145,21 +145,47 @@ impl RowModifier {
 
     /// Fills internal columns of a row with table name and a hash of tag values.
     fn fill_internal_columns(&self, table_id: TableId, iter: &RowIter<'_>) -> (Value, Value) {
-        let mut hasher = mur3::Hasher128::with_seed(TSID_HASH_SEED);
+        let mut hasher = TsidGenerator::default();
         for (name, value) in iter.primary_keys_with_name() {
             // The type is checked before. So only null is ignored.
             if let Some(ValueData::StringValue(string)) = &value.value_data {
-                name.hash(&mut hasher);
-                string.hash(&mut hasher);
+                hasher.write_label(name, string);
             }
         }
-        // TSID is 64 bits, simply truncate the 128 bits hash
-        let (hash, _) = hasher.finish128();
+        let hash = hasher.finish();
 
         (
             ValueData::U32Value(table_id).into(),
             ValueData::U64Value(hash).into(),
         )
+    }
+}
+
+/// Tsid generator.
+pub struct TsidGenerator {
+    hasher: mur3::Hasher128,
+}
+
+impl Default for TsidGenerator {
+    fn default() -> Self {
+        Self {
+            hasher: mur3::Hasher128::with_seed(TSID_HASH_SEED),
+        }
+    }
+}
+
+impl TsidGenerator {
+    /// Writes a label pair to the generator.
+    pub fn write_label(&mut self, name: &str, value: &str) {
+        name.hash(&mut self.hasher);
+        value.hash(&mut self.hasher);
+    }
+
+    /// Generates a new TSID.
+    pub fn finish(&mut self) -> u64 {
+        // TSID is 64 bits, simply truncate the 128 bits hash
+        let (hash, _) = self.hasher.finish128();
+        hash
     }
 }
 

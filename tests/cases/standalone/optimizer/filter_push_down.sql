@@ -57,3 +57,11 @@ SELECT * FROM (SELECT i1.i AS a, i2.i AS b, row_number() OVER (ORDER BY i1.i, i2
 SELECT * FROM (SELECT 0=1 AS cond FROM integers i1, integers i2 GROUP BY 1) a1 WHERE cond ORDER BY 1;
 
 DROP TABLE integers;
+
+CREATE TABLE characters(c STRING, t TIMESTAMP TIME INDEX);
+
+INSERT INTO characters VALUES ('a', 1), ('b', 2), ('c', 3), (NULL, 4), ('a', 5), ('b', 6), ('c', 7), (NULL, 8);
+
+SELECT * FROM characters WHERE c IN ('a', 'c') ORDER BY t;
+
+DROP TABLE characters;

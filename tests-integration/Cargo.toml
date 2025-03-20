@@ -92,6 +92,7 @@ itertools.workspace = true
 opentelemetry-proto.workspace = true
 partition.workspace = true
 paste.workspace = true
+pipeline.workspace = true
 prost.workspace = true
 rand.workspace = true
 session = { workspace = true, features = ["testing"] }

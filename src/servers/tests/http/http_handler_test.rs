@@ -386,12 +386,12 @@ async fn test_config() {
 
             [http]
             addr = "127.0.0.1:4000"
-            timeout = "30s"
+            timeout = "0s"
             body_limit = "2GB"
 
             [logging]
             level = "debug"
-            dir = "/tmp/greptimedb/test/logs"
+            dir = "./greptimedb_data/test/logs"
         "#;
     let rs = http_handler::config(State(GreptimeOptionsConfigState {
         greptime_config_options: toml_str.to_string(),
