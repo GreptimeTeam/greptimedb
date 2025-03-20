@@ -94,6 +94,7 @@ macro_rules! http_tests {
                 test_plain_text_ingestion,
                 test_identify_pipeline,
                 test_identify_pipeline_with_flatten,
+                test_identify_pipeline_with_custom_ts,
                 test_pipeline_dispatcher,
 
                 test_otlp_metrics,
@@ -1422,8 +1423,8 @@ pub async fn test_identify_pipeline(store_type: StorageType) {
 
     assert_eq!(res.status(), StatusCode::OK);
 
-    let line1_expected = r#"["10.170.***.***",1453809242,"","10.200.**.***","200","26/Jan/2016:19:54:02 +0800","POST/PutData?Category=YunOsAccountOpLog&AccessKeyId=<yourAccessKeyId>&Date=Fri%2C%2028%20Jun%202013%2006%3A53%3A30%20GMT&Topic=raw&Signature=<yourSignature>HTTP/1.1","aliyun-sdk-java","guaguagua","hasagei",null]"#;
-    let line2_expected = r#"["10.170.***.***",1453809242,"","10.200.**.***","200","26/Jan/2016:19:54:02 +0800","POST/PutData?Category=YunOsAccountOpLog&AccessKeyId=<yourAccessKeyId>&Date=Fri%2C%2028%20Jun%202013%2006%3A53%3A30%20GMT&Topic=raw&Signature=<yourSignature>HTTP/1.1","aliyun-sdk-java",null,null,null]"#;
+    let line1_expected = r#"[null,"10.170.***.***",1453809242,"","10.200.**.***","200","26/Jan/2016:19:54:02 +0800","POST/PutData?Category=YunOsAccountOpLog&AccessKeyId=<yourAccessKeyId>&Date=Fri%2C%2028%20Jun%202013%2006%3A53%3A30%20GMT&Topic=raw&Signature=<yourSignature>HTTP/1.1","aliyun-sdk-java",null,null]"#;
+    let line2_expected = r#"[null,"10.170.***.***",1453809242,"","10.200.**.***","200","26/Jan/2016:19:54:02 +0800","POST/PutData?Category=YunOsAccountOpLog&AccessKeyId=<yourAccessKeyId>&Date=Fri%2C%2028%20Jun%202013%2006%3A53%3A30%20GMT&Topic=raw&Signature=<yourSignature>HTTP/1.1","aliyun-sdk-java","guaguagua","hasagei"]"#;
     let res = client.get("/v1/sql?sql=select * from logs").send().await;
     assert_eq!(res.status(), StatusCode::OK);
     let resp: serde_json::Value = res.json().await;
@@ -1431,10 +1432,11 @@ pub async fn test_identify_pipeline(store_type: StorageType) {
     assert_eq!(result.len(), 2);
     let mut line1 = result[0].as_array().unwrap().clone();
     let mut line2 = result[1].as_array().unwrap().clone();
-    assert!(line1.last().unwrap().is_i64());
-    assert!(line2.last().unwrap().is_i64());
-    *line1.last_mut().unwrap() = serde_json::Value::Null;
-    *line2.last_mut().unwrap() = serde_json::Value::Null;
+    assert!(line1.first().unwrap().is_i64());
+    assert!(line2.first().unwrap().is_i64());
+    // set time index to null for assertion
+    *line1.first_mut().unwrap() = serde_json::Value::Null;
+    *line2.first_mut().unwrap() = serde_json::Value::Null;
 
     assert_eq!(
         line1,
@@ -1445,7 +1447,7 @@ pub async fn test_identify_pipeline(store_type: StorageType) {
         serde_json::from_str::<Vec<Value>>(line2_expected).unwrap()
     );
 
-    let expected = r#"[["__source__","String","","YES","","FIELD"],["__time__","Int64","","YES","","FIELD"],["__topic__","String","","YES","","FIELD"],["ip","String","","YES","","FIELD"],["status","String","","YES","","FIELD"],["time","String","","YES","","FIELD"],["url","String","","YES","","FIELD"],["user-agent","String","","YES","","FIELD"],["dongdongdong","String","","YES","","FIELD"],["hasagei","String","","YES","","FIELD"],["greptime_timestamp","TimestampNanosecond","PRI","NO","","TIMESTAMP"]]"#;
+    let expected = r#"[["greptime_timestamp","TimestampNanosecond","PRI","NO","","TIMESTAMP"],["__source__","String","","YES","","FIELD"],["__time__","Int64","","YES","","FIELD"],["__topic__","String","","YES","","FIELD"],["ip","String","","YES","","FIELD"],["status","String","","YES","","FIELD"],["time","String","","YES","","FIELD"],["url","String","","YES","","FIELD"],["user-agent","String","","YES","","FIELD"],["dongdongdong","String","","YES","","FIELD"],["hasagei","String","","YES","","FIELD"]]"#;
     validate_data("identity_schema", &client, "desc logs", expected).await;
 
     guard.remove_all().await;
@@ -1670,7 +1672,7 @@ pub async fn test_identify_pipeline_with_flatten(store_type: StorageType) {
 
     assert_eq!(StatusCode::OK, res.status());
 
-    let expected = r#"[["__source__","String","","YES","","FIELD"],["__time__","Int64","","YES","","FIELD"],["__topic__","String","","YES","","FIELD"],["custom_map.value_a","Json","","YES","","FIELD"],["custom_map.value_b","String","","YES","","FIELD"],["ip","String","","YES","","FIELD"],["status","String","","YES","","FIELD"],["time","String","","YES","","FIELD"],["url","String","","YES","","FIELD"],["user-agent","String","","YES","","FIELD"],["greptime_timestamp","TimestampNanosecond","PRI","NO","","TIMESTAMP"]]"#;
+    let expected = r#"[["greptime_timestamp","TimestampNanosecond","PRI","NO","","TIMESTAMP"],["__source__","String","","YES","","FIELD"],["__time__","Int64","","YES","","FIELD"],["__topic__","String","","YES","","FIELD"],["custom_map.value_a","Json","","YES","","FIELD"],["custom_map.value_b","String","","YES","","FIELD"],["ip","String","","YES","","FIELD"],["status","String","","YES","","FIELD"],["time","String","","YES","","FIELD"],["url","String","","YES","","FIELD"],["user-agent","String","","YES","","FIELD"]]"#;
     validate_data(
         "test_identify_pipeline_with_flatten_desc_logs",
         &client,
@@ -1684,6 +1686,88 @@ pub async fn test_identify_pipeline_with_flatten(store_type: StorageType) {
         "test_identify_pipeline_with_flatten_select_json",
         &client,
         "select `custom_map.value_a` from logs",
+        expected,
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
+pub async fn test_identify_pipeline_with_custom_ts(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_identify_pipeline_with_custom_ts")
+            .await;
+
+    let client = TestClient::new(app).await;
+    let body = r#"{"__time__":1453809242,"__source__":"10.170.***.***"}"#;
+
+    let res = send_req(
+        &client,
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/json"),
+        )],
+        "/v1/ingest?table=logs&pipeline_name=greptime_identity&custom_time_index=__time__;epoch;s",
+        body.as_bytes().to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    let expected = r#"[["__time__","TimestampSecond","PRI","NO","","TIMESTAMP"],["__source__","String","","YES","","FIELD"]]"#;
+    validate_data(
+        "test_identify_pipeline_with_custom_ts_desc_logs",
+        &client,
+        "desc logs",
+        expected,
+    )
+    .await;
+
+    let expected = r#"[[1453809242,"10.170.***.***"]]"#;
+    validate_data(
+        "test_identify_pipeline_with_custom_ts_data",
+        &client,
+        "select * from logs",
+        expected,
+    )
+    .await;
+
+    // drop table
+    let res = client
+        .get(format!("/v1/sql?sql=drop table logs").as_str())
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body = r#"{"__time__":"2019-01-16 02:42:01+08:00","__source__":"10.170.***.***"}"#;
+    let res = send_req(
+        &client,
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/json"),
+        )],
+        "/v1/ingest?table=logs&pipeline_name=greptime_identity&custom_time_index=__time__;datestr;%Y-%m-%d %H:%M:%S%z",
+        body.as_bytes().to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    let expected = r#"[["__time__","TimestampNanosecond","PRI","NO","","TIMESTAMP"],["__source__","String","","YES","","FIELD"]]"#;
+    validate_data(
+        "test_identify_pipeline_with_custom_ts_desc_logs",
+        &client,
+        "desc logs",
+        expected,
+    )
+    .await;
+
+    let expected = r#"[[1547577721000000000,"10.170.***.***"]]"#;
+    validate_data(
+        "test_identify_pipeline_with_custom_ts_data",
+        &client,
+        "select * from logs",
         expected,
     )
     .await;

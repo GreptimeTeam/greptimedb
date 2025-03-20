@@ -28,7 +28,7 @@ pub use etl::{
     PipelineMap,
 };
 pub use manager::{
-    pipeline_operator, table, util, PipelineDefinition, PipelineInfo, PipelineRef,
-    PipelineTableRef, PipelineVersion, PipelineWay, SelectInfo,
+    pipeline_operator, table, util, IdentityTimeIndex, PipelineDefinition, PipelineInfo,
+    PipelineRef, PipelineTableRef, PipelineVersion, PipelineWay, SelectInfo,
     GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME, GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME,
 };

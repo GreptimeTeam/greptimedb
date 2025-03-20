@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_time::timestamp::TimeUnit;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Timestamp {
     Nanosecond(i64),
@@ -84,11 +86,20 @@ impl Timestamp {
             Timestamp::Second(v) => *v,
         }
     }
+
+    pub(crate) fn to_unit(&self, unit: &TimeUnit) -> i64 {
+        match unit {
+            TimeUnit::Second => self.timestamp(),
+            TimeUnit::Millisecond => self.timestamp_millis(),
+            TimeUnit::Microsecond => self.timestamp_micros(),
+            TimeUnit::Nanosecond => self.timestamp_nanos(),
+        }
+    }
 }
 
 impl Default for Timestamp {
     fn default() -> Self {
-        Timestamp::Nanosecond(chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0))
+        Timestamp::Nanosecond(chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default())
     }
 }
 
