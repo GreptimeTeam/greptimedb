@@ -12,11 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use snafu::ensure;
 use sqlparser::ast::{BinaryOperator, Expr, Ident, Value};
 
+use crate::error::{InvalidPartitionNumberSnafu, Result};
 use crate::statements::create::Partitions;
 
+/// The default number of partitions for OpenTelemetry traces.
 const DEFAULT_PARTITION_NUM_FOR_TRACES: u32 = 16;
+
+/// The maximum number of partitions for OpenTelemetry traces.
+const MAX_PARTITION_NUM_FOR_TRACES: u32 = 65536;
 
 macro_rules! between_string {
     ($col: expr, $left_incl: expr, $right_excl: expr) => {
@@ -40,18 +46,32 @@ macro_rules! between_string {
     };
 }
 
-pub fn partition_rule_for_hexstring(ident: &str) -> Partitions {
-    Partitions {
+pub fn partition_rule_for_hexstring(ident: &str) -> Result<Partitions> {
+    Ok(Partitions {
         column_list: vec![Ident::new(ident)],
-        exprs: partition_rules_for_uuid(DEFAULT_PARTITION_NUM_FOR_TRACES, ident),
-    }
+        exprs: partition_rules_for_uuid(DEFAULT_PARTITION_NUM_FOR_TRACES, ident)?,
+    })
 }
 
-// partition_rules_for_uuid can creates partition rules up to 256 partitions.
-fn partition_rules_for_uuid(partition_num: u32, ident: &str) -> Vec<Expr> {
+// partition_rules_for_uuid can creates partition rules up to 65536 partitions.
+fn partition_rules_for_uuid(partition_num: u32, ident: &str) -> Result<Vec<Expr>> {
+    ensure!(
+        partition_num.is_power_of_two() && (2..=65536).contains(&partition_num),
+        InvalidPartitionNumberSnafu { partition_num }
+    );
+
     let ident_expr = Expr::Identifier(Ident::new(ident).clone());
 
-    let total_partitions = 256;
+    let (total_partitions, hex_length) = {
+        match partition_num {
+            2..=16 => (16, 1),
+            17..=256 => (256, 2),
+            257..=4096 => (4096, 3),
+            4097..=MAX_PARTITION_NUM_FOR_TRACES => (MAX_PARTITION_NUM_FOR_TRACES, 4),
+            _ => unreachable!(),
+        }
+    };
+
     let partition_size = total_partitions / partition_num;
     let remainder = total_partitions % partition_num;
 
@@ -66,38 +86,38 @@ fn partition_rules_for_uuid(partition_num: u32, ident: &str) -> Vec<Expr> {
         let end = current_boundary + size;
 
         if i == 0 {
-            // Create the leftmost rule, for example: trace_id < '10'.
+            // Create the leftmost rule, for example: trace_id < '1'.
             rules.push(Expr::BinaryOp {
                 left: Box::new(ident_expr.clone()),
                 op: BinaryOperator::Lt,
                 right: Box::new(Expr::Value(Value::SingleQuotedString(format!(
-                    "{:02x}",
+                    "{:0hex_length$x}",
                     end
                 )))),
             });
         } else if i == partition_num - 1 {
-            // Create the rightmost rule, for example: trace_id >= 'f0'.
+            // Create the rightmost rule, for example: trace_id >= 'f'.
             rules.push(Expr::BinaryOp {
                 left: Box::new(ident_expr.clone()),
                 op: BinaryOperator::GtEq,
                 right: Box::new(Expr::Value(Value::SingleQuotedString(format!(
-                    "{:02x}",
+                    "{:0hex_length$x}",
                     start
                 )))),
             });
         } else {
-            // Create the middle rules, for example: trace_id >= '10' AND trace_id < '20'.
+            // Create the middle rules, for example: trace_id >= '1' AND trace_id < '2'.
             rules.push(between_string!(
                 ident_expr,
-                format!("{:02x}", start),
-                format!("{:02x}", end)
+                format!("{:0hex_length$x}", start),
+                format!("{:0hex_length$x}", end)
             ));
         }
 
         current_boundary = end;
     }
 
-    rules
+    Ok(rules)
 }
 
 #[cfg(test)]
@@ -113,32 +133,37 @@ mod tests {
 
     #[test]
     fn test_partition_rules_for_uuid() {
-        assert!(check_distribution(16, 10000));
-        assert!(check_distribution(32, 10000));
-        assert!(check_distribution(64, 10000));
-        assert!(check_distribution(128, 10000));
-        assert!(check_distribution(256, 10000));
+        // NOTE: We only test a subset of partitions to keep the test execution time reasonable.
+        // As the number of partitions increases, we need to increase the number of test samples to ensure uniform distribution.
+        assert!(check_distribution(2, 10_000)); // 2^1
+        assert!(check_distribution(4, 10_000)); // 2^2
+        assert!(check_distribution(8, 10_000)); // 2^3
+        assert!(check_distribution(16, 10_000)); // 2^4
+        assert!(check_distribution(32, 10_000)); // 2^5
+        assert!(check_distribution(64, 100_000)); // 2^6
+        assert!(check_distribution(128, 100_000)); // 2^7
+        assert!(check_distribution(256, 100_000)); // 2^8
     }
 
     #[test]
     fn test_rules() {
         let expr = vec![
-            "trace_id < '10'",
-            "trace_id >= '10' AND trace_id < '20'",
-            "trace_id >= '20' AND trace_id < '30'",
-            "trace_id >= '30' AND trace_id < '40'",
-            "trace_id >= '40' AND trace_id < '50'",
-            "trace_id >= '50' AND trace_id < '60'",
-            "trace_id >= '60' AND trace_id < '70'",
-            "trace_id >= '70' AND trace_id < '80'",
-            "trace_id >= '80' AND trace_id < '90'",
-            "trace_id >= '90' AND trace_id < 'a0'",
-            "trace_id >= 'a0' AND trace_id < 'b0'",
-            "trace_id >= 'b0' AND trace_id < 'c0'",
-            "trace_id >= 'c0' AND trace_id < 'd0'",
-            "trace_id >= 'd0' AND trace_id < 'e0'",
-            "trace_id >= 'e0' AND trace_id < 'f0'",
-            "trace_id >= 'f0'",
+            "trace_id < '1'",
+            "trace_id >= '1' AND trace_id < '2'",
+            "trace_id >= '2' AND trace_id < '3'",
+            "trace_id >= '3' AND trace_id < '4'",
+            "trace_id >= '4' AND trace_id < '5'",
+            "trace_id >= '5' AND trace_id < '6'",
+            "trace_id >= '6' AND trace_id < '7'",
+            "trace_id >= '7' AND trace_id < '8'",
+            "trace_id >= '8' AND trace_id < '9'",
+            "trace_id >= '9' AND trace_id < 'a'",
+            "trace_id >= 'a' AND trace_id < 'b'",
+            "trace_id >= 'b' AND trace_id < 'c'",
+            "trace_id >= 'c' AND trace_id < 'd'",
+            "trace_id >= 'd' AND trace_id < 'e'",
+            "trace_id >= 'e' AND trace_id < 'f'",
+            "trace_id >= 'f'",
         ];
 
         let dialect = GenericDialect {};
@@ -150,17 +175,20 @@ mod tests {
             })
             .collect::<Vec<Expr>>();
 
-        assert_eq!(results, partition_rule_for_hexstring("trace_id").exprs);
+        assert_eq!(
+            results,
+            partition_rule_for_hexstring("trace_id").unwrap().exprs
+        );
     }
 
     fn check_distribution(test_partition: u32, test_uuid_num: usize) -> bool {
         // Generate test_uuid_num random uuids.
         let uuids = (0..test_uuid_num)
-            .map(|_| Uuid::new_v4().to_string().replace("-", ""))
+            .map(|_| Uuid::new_v4().to_string().replace("-", "").to_lowercase())
             .collect::<Vec<String>>();
 
         // Generate the partition rules.
-        let rules = partition_rules_for_uuid(test_partition, "test_trace_id");
+        let rules = partition_rules_for_uuid(test_partition, "test_trace_id").unwrap();
 
         // Collect the number of partitions for each uuid.
         let mut stats = HashMap::new();
@@ -173,13 +201,13 @@ mod tests {
         // Check if the partition distribution is uniform.
         let expected_ratio = 100.0 / test_partition as f64;
 
-        // delta is the allowed deviation from the expected ratio.
-        let delta = 0.9;
+        // tolerance is the allowed deviation from the expected ratio.
+        let tolerance = 100.0 / test_partition as f64 * 0.30;
 
         // For each partition, its ratio should be as close as possible to the expected ratio.
         for (_, count) in stats {
             let ratio = (count as f64 / test_uuid_num as f64) * 100.0;
-            if (ratio - expected_ratio).abs() >= delta {
+            if (ratio - expected_ratio).abs() >= tolerance {
                 return false;
             }
         }
@@ -234,6 +262,6 @@ mod tests {
             }
         }
 
-        panic!("No partition found for uuid: {}", uuid);
+        panic!("No partition found for uuid: {}, rules: {:?}", uuid, rules);
     }
 }
