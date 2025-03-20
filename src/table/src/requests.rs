@@ -164,7 +164,9 @@ impl fmt::Display for TableOptions {
             key_vals.push(format!("{}={}", TTL_KEY, ttl));
         }
 
-        key_vals.push(format!("{}={}", SKIP_WAL_KEY, self.skip_wal));
+        if self.skip_wal {
+            key_vals.push(format!("{}={}", SKIP_WAL_KEY, self.skip_wal));
+        }
 
         for (k, v) in &self.extra_options {
             key_vals.push(format!("{}={}", k, v));
