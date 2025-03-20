@@ -278,12 +278,14 @@ impl RegionManifestManager {
     /// Installs the manifest changes from the current version to the target version.
     ///
     /// Returns installed version.
-    pub async fn install_manifest_changes(
+    /// **Note**: This function is not guaranteed to install the target version strictly.
+    /// The installed version may be greater than the target version.
+    pub async fn install_manifest_to(
         &mut self,
         target_version: ManifestVersion,
     ) -> Result<ManifestVersion> {
         let _t = MANIFEST_OP_ELAPSED
-            .with_label_values(&["install_manifest_changes"])
+            .with_label_values(&["install_manifest_to"])
             .start_timer();
 
         // Case 1: If the target version is less than the current version, return the current version.

@@ -311,7 +311,7 @@ fn generate_action_lists(num: usize) -> (Vec<FileId>, Vec<RegionMetaActionList>)
 }
 
 #[tokio::test]
-async fn manifest_install_manifest_changes() {
+async fn manifest_install_manifest_to() {
     common_telemetry::init_default_ut_logging();
     let (env, mut manager) = build_manager(0, CompressionType::Uncompressed).await;
     let (files, actions) = generate_action_lists(10);
@@ -321,10 +321,7 @@ async fn manifest_install_manifest_changes() {
 
     // Nothing to install
     let target_version = manager.manifest().manifest_version;
-    let installed_version = manager
-        .install_manifest_changes(target_version)
-        .await
-        .unwrap();
+    let installed_version = manager.install_manifest_to(target_version).await.unwrap();
     assert_eq!(target_version, installed_version);
 
     let mut another_manager =
@@ -333,7 +330,7 @@ async fn manifest_install_manifest_changes() {
     // install manifest changes
     let target_version = manager.manifest().manifest_version;
     let installed_version = another_manager
-        .install_manifest_changes(target_version - 1)
+        .install_manifest_to(target_version - 1)
         .await
         .unwrap();
     assert_eq!(target_version - 1, installed_version);
@@ -342,7 +339,7 @@ async fn manifest_install_manifest_changes() {
     }
 
     let installed_version = another_manager
-        .install_manifest_changes(target_version)
+        .install_manifest_to(target_version)
         .await
         .unwrap();
     assert_eq!(target_version, installed_version);
@@ -352,7 +349,7 @@ async fn manifest_install_manifest_changes() {
 }
 
 #[tokio::test]
-async fn manifest_install_manifest_changes_with_checkpoint() {
+async fn manifest_install_manifest_to_with_checkpoint() {
     common_telemetry::init_default_ut_logging();
     let (env, mut manager) = build_manager(3, CompressionType::Uncompressed).await;
     let (files, actions) = generate_action_lists(10);
@@ -399,7 +396,7 @@ async fn manifest_install_manifest_changes_with_checkpoint() {
     // Install 9 manifests
     let target_version = manager.manifest().manifest_version;
     let installed_version = another_manager
-        .install_manifest_changes(target_version - 1)
+        .install_manifest_to(target_version - 1)
         .await
         .unwrap();
     assert_eq!(target_version - 1, installed_version);
@@ -410,7 +407,7 @@ async fn manifest_install_manifest_changes_with_checkpoint() {
     // Install all manifests
     let target_version = manager.manifest().manifest_version;
     let installed_version = another_manager
-        .install_manifest_changes(target_version)
+        .install_manifest_to(target_version)
         .await
         .unwrap();
     assert_eq!(target_version, installed_version);
