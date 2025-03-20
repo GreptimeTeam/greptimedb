@@ -345,6 +345,16 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display(
+        "Invalid partition number: {}, should be in range [2, 65536]",
+        partition_num
+    ))]
+    InvalidPartitionNumber {
+        partition_num: u32,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -380,6 +390,7 @@ impl ErrorExt for Error {
             | Simplification { .. }
             | InvalidInterval { .. }
             | InvalidUnaryOp { .. }
+            | InvalidPartitionNumber { .. }
             | UnsupportedUnaryOp { .. } => StatusCode::InvalidArguments,
 
             SerializeColumnDefaultConstraint { source, .. } => source.status_code(),
