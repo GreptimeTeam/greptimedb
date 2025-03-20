@@ -1,14 +1,16 @@
--- test ttl = instant
+-- test ttl = 5s and expire after is shorter than ttl
 CREATE TABLE distinct_basic (
     number INT,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(number),
     TIME INDEX(ts)
-)WITH ('ttl' = 'instant');
+)WITH ('ttl' = '5s');
 
 Affected Rows: 0
 
-CREATE FLOW test_distinct_basic SINK TO out_distinct_basic AS
+CREATE FLOW test_distinct_basic SINK TO out_distinct_basic
+EXPIRE AFTER INTERVAL '3s'
+AS
 SELECT
     DISTINCT number as dis
 FROM
@@ -24,7 +26,7 @@ VALUES
     (20, "2021-07-01 00:00:00.200"),
     (22, "2021-07-01 00:00:00.600");
 
-Affected Rows: 0
+Affected Rows: 3
 
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_distinct_basic');
@@ -49,26 +51,55 @@ SHOW CREATE TABLE distinct_basic;
 |                |                                                           |
 |                | ENGINE=mito                                               |
 |                | WITH(                                                     |
-|                |   ttl = 'instant'                                         |
+|                |   ttl = '5s'                                              |
 |                | )                                                         |
 +----------------+-----------------------------------------------------------+
 
 SHOW CREATE TABLE out_distinct_basic;
 
-+--------------------+---------------------------------------------------+
-| Table              | Create Table                                      |
-+--------------------+---------------------------------------------------+
-| out_distinct_basic | CREATE TABLE IF NOT EXISTS "out_distinct_basic" ( |
-|                    |   "dis" INT NULL,                                 |
-|                    |   "update_at" TIMESTAMP(3) NULL,                  |
-|                    |   "__ts_placeholder" TIMESTAMP(3) NOT NULL,       |
-|                    |   TIME INDEX ("__ts_placeholder"),                |
-|                    |   PRIMARY KEY ("dis")                             |
-|                    | )                                                 |
-|                    |                                                   |
-|                    | ENGINE=mito                                       |
-|                    |                                                   |
-+--------------------+---------------------------------------------------+
++--------------------+--------------------------------------------------------------------------------+
+| Table              | Create Table                                                                   |
++--------------------+--------------------------------------------------------------------------------+
+| out_distinct_basic | CREATE TABLE IF NOT EXISTS "out_distinct_basic" (                              |
+|                    |   "dis" INT NULL,                                                              |
+|                    |   "update_at" TIMESTAMP(3) NULL DEFAULT now(),                                 |
+|                    |   "__ts_placeholder" TIMESTAMP(3) NOT NULL DEFAULT '1970-01-01 00:00:00+0000', |
+|                    |   TIME INDEX ("__ts_placeholder"),                                             |
+|                    |   PRIMARY KEY ("dis")                                                          |
+|                    | )                                                                              |
+|                    |                                                                                |
+|                    | ENGINE=mito                                                                    |
+|                    |                                                                                |
++--------------------+--------------------------------------------------------------------------------+
+
+SELECT
+    dis
+FROM
+    out_distinct_basic;
+
++-----+
+| dis |
++-----+
+| 20  |
+| 22  |
++-----+
+
+ADMIN FLUSH_TABLE('distinct_basic');
+
++-------------------------------------+
+| ADMIN FLUSH_TABLE('distinct_basic') |
++-------------------------------------+
+| 0                                   |
++-------------------------------------+
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('test_distinct_basic');
+
++-----------------------------------------+
+| ADMIN FLUSH_FLOW('test_distinct_basic') |
++-----------------------------------------+
+|  FLOW_FLUSHED  |
++-----------------------------------------+
 
 SELECT
     dis

@@ -171,6 +171,31 @@ impl Database {
         from_grpc_response(response)
     }
 
+    pub async fn handle_with_hints(&self, request: Request, hints: &[(&str, &str)]) -> Result<u32> {
+        let mut client = make_database_client(&self.client)?.inner;
+        let request = self.to_rpc_request(request);
+        let mut request = tonic::Request::new(request);
+        let metadata = request.metadata_mut();
+        for (key, value) in hints {
+            let key = AsciiMetadataKey::from_bytes(format!("x-greptime-hint-{}", key).as_bytes())
+                .map_err(|_| {
+                InvalidAsciiSnafu {
+                    value: key.to_string(),
+                }
+                .build()
+            })?;
+            let value = value.parse().map_err(|_| {
+                InvalidAsciiSnafu {
+                    value: value.to_string(),
+                }
+                .build()
+            })?;
+            metadata.insert(key, value);
+        }
+        let response = client.handle(request).await?.into_inner();
+        from_grpc_response(response)
+    }
+
     #[inline]
     fn to_rpc_request(&self, request: Request) -> GreptimeRequest {
         GreptimeRequest {

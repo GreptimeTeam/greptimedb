@@ -59,6 +59,8 @@ CREATE TABLE ngx_access_log (
     client STRING,
     country STRING,
     access_time TIMESTAMP TIME INDEX
+)WITH(
+    append_mode = 'true'
 );
 
 CREATE FLOW calc_ngx_country SINK TO ngx_country AS
@@ -73,6 +75,8 @@ GROUP BY
     client,
     country,
     time_window;
+
+SHOW CREATE TABLE ngx_country;
 
 INSERT INTO
     ngx_access_log

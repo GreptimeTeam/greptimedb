@@ -15,8 +15,10 @@
 //! How to query table information from database
 
 use common_error::ext::BoxedError;
+use common_meta::key::flow::FlowMetadataManagerRef;
 use common_meta::key::table_info::{TableInfoManager, TableInfoValue};
 use common_meta::key::table_name::{TableNameKey, TableNameManager};
+use common_meta::key::TableMetadataManagerRef;
 use datatypes::schema::ColumnDefaultConstraint;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
@@ -75,6 +77,8 @@ pub struct ManagedTableSource {
     /// for query `TableId -> TableName` mapping
     table_info_manager: TableInfoManager,
     table_name_manager: TableNameManager,
+    pub table_meta: TableMetadataManagerRef,
+    pub flow_meta: FlowMetadataManagerRef,
 }
 
 #[async_trait::async_trait]
@@ -103,10 +107,12 @@ impl FlowTableSource for ManagedTableSource {
 }
 
 impl ManagedTableSource {
-    pub fn new(table_info_manager: TableInfoManager, table_name_manager: TableNameManager) -> Self {
+    pub fn new(table_meta: TableMetadataManagerRef, flow_meta: FlowMetadataManagerRef) -> Self {
         ManagedTableSource {
-            table_info_manager,
-            table_name_manager,
+            table_info_manager: table_meta.table_info_manager().clone(),
+            table_name_manager: table_meta.table_name_manager().clone(),
+            table_meta,
+            flow_meta,
         }
     }
 
