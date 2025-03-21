@@ -10923,6 +10923,7 @@ dependencies = [
  "sqlparser_derive 0.1.1",
  "store-api",
  "table",
+ "uuid",
 ]
 
 [[package]]
