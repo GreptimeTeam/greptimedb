@@ -491,6 +491,9 @@ impl RegionManifestManager {
     }
 
     /// Fetches the last [RegionCheckpoint] from storage.
+    ///
+    /// If the checkpoint is not found, returns `None`.
+    /// Otherwise, returns the checkpoint and the size of the checkpoint.
     pub(crate) async fn last_checkpoint(
         store: &mut ManifestObjectStore,
     ) -> Result<Option<(RegionCheckpoint, u64)>> {
