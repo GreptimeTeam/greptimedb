@@ -157,21 +157,25 @@ impl<'a> PgSqlTemplateFactory<'a> {
         PgSqlTemplateSet {
             table_name: table_name.to_string(),
             create_table_statement: format!(
-                "CREATE TABLE IF NOT EXISTS {table_name}(k bytea PRIMARY KEY, v bytea)",
+                "CREATE TABLE IF NOT EXISTS \"{table_name}\"(k bytea PRIMARY KEY, v bytea)",
             ),
             range_template: RangeTemplate {
-                point: format!("SELECT k, v FROM {table_name} WHERE k = $1"),
-                range: format!("SELECT k, v FROM {table_name} WHERE k >= $1 AND k < $2 ORDER BY k"),
-                full: format!("SELECT k, v FROM {table_name} $1 ORDER BY k"),
-                left_bounded: format!("SELECT k, v FROM {table_name} WHERE k >= $1 ORDER BY k"),
-                prefix: format!("SELECT k, v FROM {table_name} WHERE k LIKE $1 ORDER BY k"),
+                point: format!("SELECT k, v FROM \"{table_name}\" WHERE k = $1"),
+                range: format!(
+                    "SELECT k, v FROM \"{table_name}\" WHERE k >= $1 AND k < $2 ORDER BY k"
+                ),
+                full: format!("SELECT k, v FROM \"{table_name}\" $1 ORDER BY k"),
+                left_bounded: format!("SELECT k, v FROM \"{table_name}\" WHERE k >= $1 ORDER BY k"),
+                prefix: format!("SELECT k, v FROM \"{table_name}\" WHERE k LIKE $1 ORDER BY k"),
             },
             delete_template: RangeTemplate {
-                point: format!("DELETE FROM {table_name} WHERE k = $1 RETURNING k,v;"),
-                range: format!("DELETE FROM {table_name} WHERE k >= $1 AND k < $2 RETURNING k,v;"),
-                full: format!("DELETE FROM {table_name} RETURNING k,v"),
-                left_bounded: format!("DELETE FROM {table_name} WHERE k >= $1 RETURNING k,v;"),
-                prefix: format!("DELETE FROM {table_name} WHERE k LIKE $1 RETURNING k,v;"),
+                point: format!("DELETE FROM \"{table_name}\" WHERE k = $1 RETURNING k,v;"),
+                range: format!(
+                    "DELETE FROM \"{table_name}\" WHERE k >= $1 AND k < $2 RETURNING k,v;"
+                ),
+                full: format!("DELETE FROM \"{table_name}\" RETURNING k,v"),
+                left_bounded: format!("DELETE FROM \"{table_name}\" WHERE k >= $1 RETURNING k,v;"),
+                prefix: format!("DELETE FROM \"{table_name}\" WHERE k LIKE $1 RETURNING k,v;"),
             },
         }
     }
@@ -191,7 +195,10 @@ impl PgSqlTemplateSet {
     fn generate_batch_get_query(&self, key_len: usize) -> String {
         let table_name = &self.table_name;
         let in_clause = pg_generate_in_placeholders(1, key_len).join(", ");
-        format!("SELECT k, v FROM {table_name} WHERE k in ({});", in_clause)
+        format!(
+            "SELECT k, v FROM \"{table_name}\" WHERE k in ({});",
+            in_clause
+        )
     }
 
     /// Generates the sql for batch delete.
@@ -199,7 +206,7 @@ impl PgSqlTemplateSet {
         let table_name = &self.table_name;
         let in_clause = pg_generate_in_placeholders(1, key_len).join(", ");
         format!(
-            "DELETE FROM {table_name} WHERE k in ({}) RETURNING k,v;",
+            "DELETE FROM \"{table_name}\" WHERE k in ({}) RETURNING k,v;",
             in_clause
         )
     }
@@ -220,9 +227,9 @@ impl PgSqlTemplateSet {
         format!(
             r#"
     WITH prev AS (
-        SELECT k,v FROM {table_name} WHERE k IN ({in_clause})
+        SELECT k,v FROM "{table_name}" WHERE k IN ({in_clause})
     ), update AS (
-    INSERT INTO {table_name} (k, v) VALUES
+    INSERT INTO "{table_name}" (k, v) VALUES
         {values_clause}
     ON CONFLICT (
         k

@@ -22,7 +22,7 @@ use lazy_static::lazy_static;
 use regex::Regex;
 use snafu::{OptionExt, ResultExt};
 
-use crate::etl::error::{
+use crate::error::{
     Error, KeyMustBeStringSnafu, ProcessorExpectStringSnafu, ProcessorMissingFieldSnafu,
     RegexNamedGroupNotFoundSnafu, RegexNoValidFieldSnafu, RegexNoValidPatternSnafu, RegexSnafu,
     Result,

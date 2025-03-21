@@ -155,21 +155,21 @@ impl<'a> MySqlTemplateFactory<'a> {
             table_name: table_name.to_string(),
             create_table_statement: format!(
                 // Cannot be more than 3072 bytes in PRIMARY KEY
-                "CREATE TABLE IF NOT EXISTS {table_name}(k VARBINARY(3072) PRIMARY KEY, v BLOB);",
+                "CREATE TABLE IF NOT EXISTS `{table_name}`(k VARBINARY(3072) PRIMARY KEY, v BLOB);",
             ),
             range_template: RangeTemplate {
-                point: format!("SELECT k, v FROM {table_name} WHERE k = ?"),
-                range: format!("SELECT k, v FROM {table_name} WHERE k >= ? AND k < ? ORDER BY k"),
-                full: format!("SELECT k, v FROM {table_name} ? ORDER BY k"),
-                left_bounded: format!("SELECT k, v FROM {table_name} WHERE k >= ? ORDER BY k"),
-                prefix: format!("SELECT k, v FROM {table_name} WHERE k LIKE ? ORDER BY k"),
+                point: format!("SELECT k, v FROM `{table_name}` WHERE k = ?"),
+                range: format!("SELECT k, v FROM `{table_name}` WHERE k >= ? AND k < ? ORDER BY k"),
+                full: format!("SELECT k, v FROM `{table_name}` ? ORDER BY k"),
+                left_bounded: format!("SELECT k, v FROM `{table_name}` WHERE k >= ? ORDER BY k"),
+                prefix: format!("SELECT k, v FROM `{table_name}` WHERE k LIKE ? ORDER BY k"),
             },
             delete_template: RangeTemplate {
-                point: format!("DELETE FROM {table_name} WHERE k = ?;"),
-                range: format!("DELETE FROM {table_name} WHERE k >= ? AND k < ?;"),
-                full: format!("DELETE FROM {table_name}"),
-                left_bounded: format!("DELETE FROM {table_name} WHERE k >= ?;"),
-                prefix: format!("DELETE FROM {table_name} WHERE k LIKE ?;"),
+                point: format!("DELETE FROM `{table_name}` WHERE k = ?;"),
+                range: format!("DELETE FROM `{table_name}` WHERE k >= ? AND k < ?;"),
+                full: format!("DELETE FROM `{table_name}`"),
+                left_bounded: format!("DELETE FROM `{table_name}` WHERE k >= ?;"),
+                prefix: format!("DELETE FROM `{table_name}` WHERE k LIKE ?;"),
             },
         }
     }
@@ -189,14 +189,17 @@ impl MySqlTemplateSet {
     fn generate_batch_get_query(&self, key_len: usize) -> String {
         let table_name = &self.table_name;
         let in_clause = mysql_generate_in_placeholders(1, key_len).join(", ");
-        format!("SELECT k, v FROM {table_name} WHERE k in ({});", in_clause)
+        format!(
+            "SELECT k, v FROM `{table_name}` WHERE k in ({});",
+            in_clause
+        )
     }
 
     /// Generates the sql for batch delete.
     fn generate_batch_delete_query(&self, key_len: usize) -> String {
         let table_name = &self.table_name;
         let in_clause = mysql_generate_in_placeholders(1, key_len).join(", ");
-        format!("DELETE FROM {table_name} WHERE k in ({});", in_clause)
+        format!("DELETE FROM `{table_name}` WHERE k in ({});", in_clause)
     }
 
     /// Generates the sql for batch upsert.
@@ -212,9 +215,9 @@ impl MySqlTemplateSet {
         let values_clause = values_placeholders.join(", ");
 
         (
-            format!(r#"SELECT k, v FROM {table_name} WHERE k IN ({in_clause})"#,),
+            format!(r#"SELECT k, v FROM `{table_name}` WHERE k IN ({in_clause})"#,),
             format!(
-                r#"INSERT INTO {table_name} (k, v) VALUES {values_clause} ON DUPLICATE KEY UPDATE v = VALUES(v);"#,
+                r#"INSERT INTO `{table_name}` (k, v) VALUES {values_clause} ON DUPLICATE KEY UPDATE v = VALUES(v);"#,
             ),
         )
     }

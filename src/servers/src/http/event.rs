@@ -32,7 +32,6 @@ use common_telemetry::{error, warn};
 use datatypes::value::column_data_to_json;
 use headers::ContentType;
 use lazy_static::lazy_static;
-use pipeline::error::PipelineTransformSnafu;
 use pipeline::util::to_pipeline_version;
 use pipeline::{GreptimePipelineParams, GreptimeTransformer, PipelineDefinition, PipelineVersion};
 use serde::{Deserialize, Serialize};
@@ -284,9 +283,7 @@ async fn dryrun_pipeline_inner(
         &pipeline_handler,
         PipelineDefinition::Resolved(pipeline),
         &params,
-        pipeline::json_array_to_intermediate_state(value)
-            .context(PipelineTransformSnafu)
-            .context(PipelineSnafu)?,
+        pipeline::json_array_to_intermediate_state(value).context(PipelineSnafu)?,
         "dry_run".to_owned(),
         query_ctx,
         true,
@@ -636,9 +633,7 @@ pub(crate) async fn ingest_logs_inner(
             &state,
             PipelineDefinition::from_name(&pipeline_name, version),
             &pipeline_params,
-            pipeline::json_array_to_intermediate_state(request.values)
-                .context(PipelineTransformSnafu)
-                .context(PipelineSnafu)?,
+            pipeline::json_array_to_intermediate_state(request.values).context(PipelineSnafu)?,
             request.table,
             &query_ctx,
             true,

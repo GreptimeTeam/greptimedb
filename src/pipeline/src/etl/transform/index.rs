@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::etl::error::{Error, Result, UnsupportedIndexTypeSnafu};
+use crate::error::{Error, Result, UnsupportedIndexTypeSnafu};
 
 const INDEX_TIMESTAMP: &str = "timestamp";
 const INDEX_TIMEINDEX: &str = "time";
