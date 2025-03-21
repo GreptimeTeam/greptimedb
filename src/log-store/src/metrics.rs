@@ -19,6 +19,10 @@ use prometheus::*;
 pub const LOGSTORE_LABEL: &str = "logstore";
 /// Operation type label.
 pub const OPTYPE_LABEL: &str = "optype";
+/// Kafka topic label.
+pub const TOPIC_LABEL: &str = "topic";
+/// Kafka partition label.
+pub const PARTITION_LABEL: &str = "partition";
 
 lazy_static! {
     /// Counters of bytes of each operation on a logstore.
@@ -62,4 +66,17 @@ lazy_static! {
     /// Timer of the append_batch operation on the raft-engine logstore.
     /// This timer only measures the duration of the read operation, not measures the total duration of replay.
     pub static ref METRIC_RAFT_ENGINE_READ_ELAPSED: Histogram = METRIC_LOGSTORE_OP_ELAPSED.with_label_values(&["raft-engine", "read"]);
+
+    pub static ref METRIC_KAFKA_CLIENT_BYTES_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "greptime_logstore_kafka_client_bytes_total",
+        "kafka logstore's bytes traffic total",
+        &[LOGSTORE_LABEL, PARTITION_LABEL],
+    )
+    .unwrap();
+    pub static ref METRIC_KAFKA_CLIENT_TRAFIC_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "greptime_logstore_kafka_client_trafic_total",
+        "kafka logstore's request count traffic total",
+        &[LOGSTORE_LABEL, PARTITION_LABEL],
+    )
+    .unwrap();
 }

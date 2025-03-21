@@ -24,6 +24,7 @@ use tokio::sync::mpsc::{self, Receiver, Sender};
 use crate::error::{self, Result};
 use crate::kafka::index::IndexCollector;
 use crate::kafka::worker::{BackgroundProducerWorker, ProduceResultHandle, WorkerRequest};
+use crate::metrics::{METRIC_KAFKA_CLIENT_BYTES_TOTAL, METRIC_KAFKA_CLIENT_TRAFIC_TOTAL};
 
 pub type OrderedBatchProducerRef = Arc<OrderedBatchProducer>;
 
@@ -106,6 +107,15 @@ impl ProducerClient for PartitionClient {
         records: Vec<Record>,
         compression: Compression,
     ) -> rskafka::client::error::Result<Vec<i64>> {
+        let total_size = records.iter().map(|r| r.approximate_size()).sum::<usize>();
+        let partition = self.partition().to_string();
+        METRIC_KAFKA_CLIENT_BYTES_TOTAL
+            .with_label_values(&[&self.topic(), &partition])
+            .inc_by(total_size as u64);
+        METRIC_KAFKA_CLIENT_TRAFIC_TOTAL
+            .with_label_values(&[&self.topic(), &partition])
+            .inc_by(total_size as u64);
+
         self.produce(records, compression).await
     }
 
