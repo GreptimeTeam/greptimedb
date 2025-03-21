@@ -198,7 +198,6 @@ fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Opti
             // Reset time index column.
             time_index = HashSet::from([region_scan_exec.time_index()]);
             tag_columns = Some(region_scan_exec.tag_columns());
-
             // set distinguish_partition_ranges to true, this is an incorrect workaround
             if !is_batch_coalesced {
                 region_scan_exec.with_distinguish_partition_range(true);
