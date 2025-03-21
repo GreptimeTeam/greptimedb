@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use greptime_proto::v1::{ColumnDataType, ColumnSchema, Rows, SemanticType};
-use pipeline::{json_to_intermediate_state, parse, Content, GreptimeTransformer, Pipeline};
+use pipeline::{json_to_map, parse, Content, GreptimeTransformer, Pipeline};
 
 /// test util function to parse and execute pipeline
 pub fn parse_and_exec(input_str: &str, pipeline_yaml: &str) -> Rows {
@@ -30,7 +30,7 @@ pub fn parse_and_exec(input_str: &str, pipeline_yaml: &str) -> Rows {
     match input_value {
         serde_json::Value::Array(array) => {
             for value in array {
-                let mut intermediate_status = json_to_intermediate_state(value).unwrap();
+                let mut intermediate_status = json_to_map(value).unwrap();
                 let row = pipeline
                     .exec_mut(&mut intermediate_status)
                     .expect("failed to exec pipeline")
@@ -40,7 +40,7 @@ pub fn parse_and_exec(input_str: &str, pipeline_yaml: &str) -> Rows {
             }
         }
         serde_json::Value::Object(_) => {
-            let mut intermediate_status = json_to_intermediate_state(input_value).unwrap();
+            let mut intermediate_status = json_to_map(input_value).unwrap();
             let row = pipeline
                 .exec_mut(&mut intermediate_status)
                 .expect("failed to exec pipeline")
