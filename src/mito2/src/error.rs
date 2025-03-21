@@ -781,6 +781,50 @@ pub enum Error {
     #[snafu(display("checksum mismatch (actual: {}, expected: {})", actual, expected))]
     ChecksumMismatch { actual: u32, expected: u32 },
 
+    #[snafu(display(
+        "No checkpoint found, region: {}, last_version: {}",
+        region_id,
+        last_version
+    ))]
+    NoCheckpoint {
+        region_id: RegionId,
+        last_version: ManifestVersion,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "No manifests found in range: [{}..{}), region: {}, last_version: {}",
+        start_version,
+        end_version,
+        region_id,
+        last_version
+    ))]
+    NoManifests {
+        region_id: RegionId,
+        start_version: ManifestVersion,
+        end_version: ManifestVersion,
+        last_version: ManifestVersion,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Failed to install manifest to {}, region: {}, available manifest version: {}, last version: {}",
+        target_version,
+        available_version,
+        region_id,
+        last_version
+    ))]
+    InstallManifestTo {
+        region_id: RegionId,
+        target_version: ManifestVersion,
+        available_version: ManifestVersion,
+        #[snafu(implicit)]
+        location: Location,
+        last_version: ManifestVersion,
+    },
+
     #[snafu(display("Region {} is stopped", region_id))]
     RegionStopped {
         region_id: RegionId,
@@ -1019,7 +1063,10 @@ impl ErrorExt for Error {
             | OperateAbortedIndex { .. }
             | UnexpectedReplay { .. }
             | IndexEncodeNull { .. }
-            | UnexpectedImpureDefault { .. } => StatusCode::Unexpected,
+            | UnexpectedImpureDefault { .. }
+            | NoCheckpoint { .. }
+            | NoManifests { .. }
+            | InstallManifestTo { .. } => StatusCode::Unexpected,
             RegionNotFound { .. } => StatusCode::RegionNotFound,
             ObjectStoreNotFound { .. }
             | InvalidScanIndex { .. }
