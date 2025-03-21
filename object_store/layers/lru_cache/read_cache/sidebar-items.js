@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["READ_CACHE_DIR","RECOVER_CACHE_LIST_CONCURRENT"],"enum":["ReadResult"],"fn":["can_cache","read_cache_key","read_cache_key_prefix","read_cache_root","to_output_reader"],"struct":["CacheAwareDeleter","ReadCache"]};

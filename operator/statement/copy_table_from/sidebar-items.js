@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_BATCH_SIZE","DEFAULT_READ_BUFFER"],"enum":["FileMetadata"],"fn":["batch_insert","ensure_schema_compatible","gen_insert_output","generated_schema_projection_and_compatible_file_schema"]};

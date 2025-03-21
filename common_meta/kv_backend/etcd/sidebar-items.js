@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["BatchDelete","BatchGet","BatchPut","Delete","EtcdStore","Get","Put"]};
