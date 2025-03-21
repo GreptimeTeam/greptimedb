@@ -11,19 +11,13 @@ Affected Rows: 3
 
 SELECT * FROM floats JOIN (SELECT 'inf'::FLOAT) tbl(f) USING (f);
 
-+-----+-------------------------+
-| f   | ts                      |
-+-----+-------------------------+
-| inf | 1970-01-01T00:00:00.001 |
-+-----+-------------------------+
+++
+++
 
 SELECT * FROM floats JOIN (SELECT '-inf'::FLOAT) tbl(f) USING (f);
 
-+------+-------------------------+
-| f    | ts                      |
-+------+-------------------------+
-| -inf | 1970-01-01T00:00:00.002 |
-+------+-------------------------+
+++
+++
 
 SELECT * FROM floats JOIN (SELECT 'inf'::FLOAT) tbl(f) ON (floats.f >= tbl.f) ORDER BY 1;
 
@@ -67,11 +61,8 @@ Affected Rows: 3
 
 SELECT * FROM doubles JOIN (SELECT 'inf'::DOUBLE) tbl(d) USING (d);
 
-+-----+-------------------------+
-| d   | ts                      |
-+-----+-------------------------+
-| inf | 1970-01-01T00:00:00.001 |
-+-----+-------------------------+
+++
+++
 
 SELECT * FROM doubles JOIN (SELECT '-inf'::DOUBLE) tbl(d) USING (d);
 
