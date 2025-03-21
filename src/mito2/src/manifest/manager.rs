@@ -277,7 +277,7 @@ impl RegionManifestManager {
         self.stopped = true;
     }
 
-    /// Installs the manifest changes from the current version to the target version.
+    /// Installs the manifest changes from the current version to the target version (inclusive).
     ///
     /// Returns installed version.
     /// **Note**: This function is not guaranteed to install the target version strictly.
