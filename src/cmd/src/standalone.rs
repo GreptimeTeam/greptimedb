@@ -293,7 +293,7 @@ impl App for Instance {
         self.frontend
             .shutdown()
             .await
-            .context(error::StartFrontendSnafu)?;
+            .context(error::ShutdownFrontendSnafu)?;
 
         self.procedure_manager
             .stop()
