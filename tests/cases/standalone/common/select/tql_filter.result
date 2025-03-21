@@ -72,11 +72,7 @@ tql analyze (1, 3, '1s') t1{ a =~ "a.*" };
 |_|_|_SortExec: expr=[a@0 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_SortPreservingMergeExec: [a@0 DESC NULLS LAST, b@1 DESC NULLS LAST] REDACTED
-|_|_|_SortExec: expr=[a@0 DESC NULLS LAST, b@1 DESC NULLS LAST], preserve_partitioning=[true] REDACTED
-|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_FilterExec: a@0 ~ a.* REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
+| 1_| 0_|_SortExec: expr=[a@0 DESC NULLS LAST, b@1 DESC NULLS LAST], preserve_partitioning=[false] REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges) REDACTED
 |_|_|_|
 |_|_| Total rows: 3_|
