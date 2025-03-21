@@ -133,3 +133,59 @@ DROP FLOW calc_ngx_country;
 DROP TABLE ngx_access_log;
 
 DROP TABLE ngx_country;
+
+-- test nullable pk with no default value
+CREATE TABLE nullable_pk (
+    pid INT NULL,
+    client STRING,
+    ts TIMESTAMP TIME INDEX,
+    PRIMARY KEY (pid)
+) WITH (
+    append_mode = 'true'
+);
+
+CREATE TABLE out_nullable_pk (
+    pid INT NULL,
+    client STRING,
+    ts TIMESTAMP TIME INDEX,
+    PRIMARY KEY (pid, client)
+);
+
+CREATE FLOW calc_nullable_pk SINK TO out_nullable_pk AS
+SELECT
+    pid,
+    client,
+    ts
+FROM
+    nullable_pk;
+
+INSERT INTO
+    nullable_pk
+VALUES
+    (1, "name1", "2024-10-18 19:00:00"),
+    (2, "name2", "2024-10-18 19:00:00"),
+    (3, "name3", "2024-10-18 19:00:00");
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('calc_nullable_pk');
+
+SELECT * FROM out_nullable_pk;
+
+-- pk is nullable
+INSERT INTO
+    nullable_pk (client, ts)
+VALUES
+    ("name1", "2024-10-18 19:00:00"),
+    ("name2", "2024-10-18 19:00:00"),
+    ("name3", "2024-10-18 19:00:00");
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('calc_nullable_pk');
+
+SELECT * FROM out_nullable_pk;
+
+DROP FLOW calc_nullable_pk;
+
+DROP TABLE nullable_pk;
+
+DROP TABLE out_nullable_pk;
