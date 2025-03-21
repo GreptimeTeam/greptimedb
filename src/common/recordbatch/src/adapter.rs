@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt::Display;
+use std::fmt::{self, Display};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
@@ -28,7 +28,7 @@ use datafusion::logical_expr::Expr;
 use datafusion::physical_expr::create_physical_expr;
 use datafusion::physical_plan::metrics::{BaselineMetrics, MetricValue};
 use datafusion::physical_plan::{
-    accept, displayable, ExecutionPlan, ExecutionPlanVisitor, PhysicalExpr,
+    accept, DisplayFormatType, ExecutionPlan, ExecutionPlanVisitor, PhysicalExpr,
     RecordBatchStream as DfRecordBatchStream,
 };
 use datafusion_common::arrow::error::ArrowError;
@@ -359,7 +359,7 @@ impl ExecutionPlanVisitor for MetricCollector {
             .sorted_for_display()
             .timestamps_removed();
         let mut plan_metric = PlanMetrics {
-            plan: displayable(plan).one_line().to_string(),
+            plan: one_line(plan, self.verbose).to_string(),
             level: self.current_level,
             metrics: Vec::with_capacity(metric.iter().size_hint().0),
         };
@@ -389,6 +389,29 @@ impl ExecutionPlanVisitor for MetricCollector {
         self.current_level -= 1;
         Ok(true)
     }
+}
+
+/// Returns a single-line summary of the root of the plan.
+/// If the `verbose` flag is set, it will display detailed information about the plan.
+fn one_line(plan: &dyn ExecutionPlan, verbose: bool) -> impl fmt::Display + '_ {
+    struct Wrapper<'a> {
+        plan: &'a dyn ExecutionPlan,
+        format_type: DisplayFormatType,
+    }
+
+    impl fmt::Display for Wrapper<'_> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            self.plan.fmt_as(self.format_type, f)?;
+            writeln!(f)
+        }
+    }
+
+    let format_type = if verbose {
+        DisplayFormatType::Verbose
+    } else {
+        DisplayFormatType::Default
+    };
+    Wrapper { plan, format_type }
 }
 
 /// [`RecordBatchMetrics`] carrys metrics value
