@@ -331,6 +331,7 @@ impl RegionOpener {
                 );
                 Ok(Provider::kafka_provider(options.topic.to_string()))
             }
+            WalOptions::Noop => Ok(Provider::noop_provider()),
         }
     }
 

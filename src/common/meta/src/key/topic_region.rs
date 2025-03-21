@@ -224,6 +224,7 @@ impl TopicRegionManager {
                         Some((region_id, kafka.topic.as_str()))
                     }
                     Some(WalOptions::RaftEngine) => None,
+                    Some(WalOptions::Noop) => None,
                     None => None,
                 },
             )

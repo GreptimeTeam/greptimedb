@@ -98,13 +98,14 @@ impl TableMetadataAllocator {
     fn create_wal_options(
         &self,
         table_route: &PhysicalTableRouteValue,
+        skip_wal: bool,
     ) -> Result<HashMap<RegionNumber, String>> {
         let region_numbers = table_route
             .region_routes
             .iter()
             .map(|route| route.region.id.region_number())
             .collect();
-        allocate_region_wal_options(region_numbers, &self.wal_options_allocator)
+        allocate_region_wal_options(region_numbers, &self.wal_options_allocator, skip_wal)
     }
 
     async fn create_table_route(
@@ -158,7 +159,9 @@ impl TableMetadataAllocator {
     pub async fn create(&self, task: &CreateTableTask) -> Result<TableMetadata> {
         let table_id = self.allocate_table_id(&task.create_table.table_id).await?;
         let table_route = self.create_table_route(table_id, task).await?;
-        let region_wal_options = self.create_wal_options(&table_route)?;
+
+        let region_wal_options =
+            self.create_wal_options(&table_route, task.table_info.meta.options.skip_wal)?;
 
         debug!(
             "Allocated region wal options {:?} for table {}",

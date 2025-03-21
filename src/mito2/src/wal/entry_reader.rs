@@ -50,6 +50,14 @@ pub(crate) trait WalEntryReader: Send + Sync {
     fn read(&mut self, ns: &'_ Provider, start_id: EntryId) -> Result<WalEntryStream<'static>>;
 }
 
+pub(crate) struct NoopEntryReader;
+
+impl WalEntryReader for NoopEntryReader {
+    fn read(&mut self, _ns: &'_ Provider, _start_id: EntryId) -> Result<WalEntryStream<'static>> {
+        Ok(futures::stream::empty().boxed())
+    }
+}
+
 /// A Reader reads the [RawEntry] from [RawEntryReader] and decodes [RawEntry] into [WalEntry].
 pub struct LogStoreEntryReader<R> {
     reader: R,
