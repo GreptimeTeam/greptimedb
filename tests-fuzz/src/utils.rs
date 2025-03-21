@@ -39,9 +39,11 @@ use crate::ir::Ident;
 /// Database connections
 pub struct Connections {
     pub mysql: Option<Pool<MySql>>,
+    pub http: Option<String>,
 }
 
 const GT_MYSQL_ADDR: &str = "GT_MYSQL_ADDR";
+const GT_HTTP_ADDR: &str = "GT_HTTP_ADDR";
 
 /// Connects to GreptimeDB via env variables.
 pub async fn init_greptime_connections_via_env() -> Connections {
@@ -53,11 +55,18 @@ pub async fn init_greptime_connections_via_env() -> Connections {
         None
     };
 
-    init_greptime_connections(mysql).await
+    let http = if let Ok(addr) = env::var(GT_HTTP_ADDR) {
+        Some(addr)
+    } else {
+        info!("GT_HTTP_ADDR is empty, ignores test");
+        None
+    };
+
+    init_greptime_connections(mysql, http).await
 }
 
 /// Connects to GreptimeDB.
-pub async fn init_greptime_connections(mysql: Option<String>) -> Connections {
+pub async fn init_greptime_connections(mysql: Option<String>, http: Option<String>) -> Connections {
     let mysql = if let Some(addr) = mysql {
         let opts = format!("mysql://{addr}/public")
             .parse::<MySqlConnectOptions>()
@@ -69,7 +78,7 @@ pub async fn init_greptime_connections(mysql: Option<String>) -> Connections {
         None
     };
 
-    Connections { mysql }
+    Connections { mysql, http }
 }
 
 const GT_FUZZ_BINARY_PATH: &str = "GT_FUZZ_BINARY_PATH";
