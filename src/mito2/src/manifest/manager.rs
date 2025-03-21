@@ -312,7 +312,7 @@ impl RegionManifestManager {
 
         if manifests.is_empty() {
             debug!(
-                "Manifests is not strict from {}, region: {}, tries to install the last checkpoint",
+                "Manifests are not strict from {}, region: {}, tries to install the last checkpoint",
                 self.last_version, self.manifest.metadata.region_id
             );
             // Case 2: If there are no manifests in range: [last_version, target_version+1),

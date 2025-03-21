@@ -247,7 +247,7 @@ impl ManifestObjectStore {
         let mut manifests = self.fetch_manifests(start_version, end_version).await?;
         let start_index = manifests.iter().position(|(v, _)| *v == start_version + 1);
         debug!(
-            "fetches manifess in range [{},{}), start_index: {:?}",
+            "fetches manifests in range [{},{}), start_index: {:?}",
             start_version, end_version, start_index
         );
         if let Some(start_index) = start_index {
