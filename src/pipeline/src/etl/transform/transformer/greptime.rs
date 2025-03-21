@@ -336,28 +336,29 @@ fn values_to_row(
 ) -> Result<Row> {
     let mut row: Vec<GreptimeValue> = Vec::with_capacity(schema_info.schema.len());
 
-    if let Some(custom_ts) = custom_ts {
-        let ts_field = values.get(custom_ts.get_column_name());
-        let ts = custom_ts.get_timestamp(ts_field)?;
-        row.push(GreptimeValue {
-            value_data: Some(ts),
-        });
-    } else {
-        row.push(GreptimeValue {
-            value_data: Some(ValueData::TimestampNanosecondValue(
-                chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default(),
-            )),
-        });
-    }
+    // set time index value
+    let value_data = match custom_ts {
+        Some(ts) => {
+            let ts_field = values.get(ts.get_column_name());
+            Some(ts.get_timestamp(ts_field)?)
+        }
+        None => Some(ValueData::TimestampNanosecondValue(
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default(),
+        )),
+    };
+
+    row.push(GreptimeValue { value_data });
 
     for _ in 1..schema_info.schema.len() {
         row.push(GreptimeValue { value_data: None });
     }
 
-    for (column_name, value) in values.into_iter() {
-        if (custom_ts.is_some() && *custom_ts.unwrap().get_column_name() == column_name)
-            || column_name == DEFAULT_GREPTIME_TIMESTAMP_COLUMN
-        {
+    for (column_name, value) in values {
+        // skip ts column
+        let ts_column = custom_ts
+            .as_ref()
+            .map_or(DEFAULT_GREPTIME_TIMESTAMP_COLUMN, |ts| ts.get_column_name());
+        if column_name == ts_column {
             continue;
         }
 
@@ -489,8 +490,8 @@ fn identity_pipeline_inner(
     let mut rows = Vec::with_capacity(array.len());
     let mut schema_info = SchemaInfo::default();
 
-    // set timeindex column first
-    let timestamp_column_name = ColumnSchema {
+    // set time index column schema first
+    schema_info.schema.push(ColumnSchema {
         column_name: custom_ts
             .as_ref()
             .map(|ts| ts.get_column_name().clone())
@@ -502,8 +503,7 @@ fn identity_pipeline_inner(
         semantic_type: SemanticType::Timestamp as i32,
         datatype_extension: None,
         options: None,
-    };
-    schema_info.schema.push(timestamp_column_name);
+    });
 
     for values in array {
         let row = values_to_row(&mut schema_info, values, custom_ts.as_ref())?;
