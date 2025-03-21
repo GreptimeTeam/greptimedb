@@ -310,15 +310,19 @@ impl RegionManifestManager {
             .fetch_manifests_strict_from(self.last_version, target_version + 1)
             .await?;
 
+        // Case 2: No manifests in range: [last_version, target_version+1)
+        //
+        // |---------Has been deleted------------|     [Checkpoint Version]...[Latest Version]
+        //                                                                     [Leader region]
+        // [Current Version]......[Target Version]
+        // [Follower region]
         if manifests.is_empty() {
             debug!(
                 "Manifests are not strict from {}, region: {}, tries to install the last checkpoint",
                 self.last_version, self.manifest.metadata.region_id
             );
-            // Case 2: If there are no manifests in range: [last_version, target_version+1),
-            // tries to install the last checkpoint.
             let last_version = self.install_last_checkpoint().await?;
-            // Case 2.1: If the installed version is greater than or equal to the target version, return the last version.
+            // Case 2.1: If the installed checkpoint version is greater than or equal to the target version, return the last version.
             if last_version >= target_version {
                 return Ok(last_version);
             }
