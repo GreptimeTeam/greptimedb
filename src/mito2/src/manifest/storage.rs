@@ -238,14 +238,14 @@ impl ManifestObjectStore {
 
     /// Fetches manifests in range [start_version, end_version).
     ///
-    /// This functions is guaranteed to return manifests from the `start_version` strictly.
+    /// This functions is guaranteed to return manifests from the `start_version` strictly (must contain `start_version`).
     pub async fn fetch_manifests_strict_from(
         &self,
         start_version: ManifestVersion,
         end_version: ManifestVersion,
     ) -> Result<Vec<(ManifestVersion, Vec<u8>)>> {
         let mut manifests = self.fetch_manifests(start_version, end_version).await?;
-        let start_index = manifests.iter().position(|(v, _)| *v == start_version + 1);
+        let start_index = manifests.iter().position(|(v, _)| *v == start_version);
         debug!(
             "fetches manifests in range [{},{}), start_index: {:?}",
             start_version, end_version, start_index

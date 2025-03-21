@@ -307,13 +307,14 @@ impl RegionManifestManager {
         // Fetches manifests from the last version strictly.
         let mut manifests = self
             .store
-            .fetch_manifests_strict_from(self.last_version, target_version + 1)
+            // Invariant: last_version < target_version.
+            .fetch_manifests_strict_from(self.last_version + 1, target_version + 1)
             .await?;
 
-        // Case 2: No manifests in range: [last_version, target_version+1)
+        // Case 2: No manifests in range: [current_version+1, target_version+1)
         //
         // |---------Has been deleted------------|     [Checkpoint Version]...[Latest Version]
-        //                                                                     [Leader region]
+        //                                                                    [Leader region]
         // [Current Version]......[Target Version]
         // [Follower region]
         if manifests.is_empty() {
@@ -330,7 +331,8 @@ impl RegionManifestManager {
             // Fetches manifests from the installed version strictly.
             manifests = self
                 .store
-                .fetch_manifests_strict_from(last_version, target_version + 1)
+                // Invariant: last_version < target_version.
+                .fetch_manifests_strict_from(last_version + 1, target_version + 1)
                 .await?;
         }
 
