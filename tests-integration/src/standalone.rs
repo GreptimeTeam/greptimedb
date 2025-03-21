@@ -41,23 +41,31 @@ use common_procedure::ProcedureManagerRef;
 use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use datanode::datanode::DatanodeBuilder;
 use flow::FlownodeBuilder;
+use frontend::frontend::Frontend;
 use frontend::instance::builder::FrontendBuilder;
-use frontend::instance::{FrontendInstance, Instance, StandaloneDatanodeManager};
+use frontend::instance::{Instance, StandaloneDatanodeManager};
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
 use query::stats::StatementStatistics;
 use servers::grpc::GrpcOptions;
+use servers::server::ServerHandlers;
 use servers::Mode;
 use snafu::ResultExt;
 
 use crate::test_util::{self, create_tmp_dir_and_datanode_opts, StorageType, TestGuard};
 
 pub struct GreptimeDbStandalone {
-    pub instance: Arc<Instance>,
+    pub frontend: Arc<Frontend>,
     pub opts: StandaloneOptions,
     pub guard: TestGuard,
     // Used in rebuild.
     pub kv_backend: KvBackendRef,
     pub procedure_manager: ProcedureManagerRef,
+}
+
+impl GreptimeDbStandalone {
+    pub fn fe_instance(&self) -> &Arc<Instance> {
+        &self.frontend.instance
+    }
 }
 
 pub struct GreptimeDbStandaloneBuilder {
@@ -234,6 +242,7 @@ impl GreptimeDbStandaloneBuilder {
         .try_build()
         .await
         .unwrap();
+        let instance = Arc::new(instance);
 
         let flow_worker_manager = flownode.flow_worker_manager();
         let invoker = flow::FrontendInvoker::build_from(
@@ -255,10 +264,18 @@ impl GreptimeDbStandaloneBuilder {
 
         test_util::prepare_another_catalog_and_schema(&instance).await;
 
-        instance.start().await.unwrap();
+        let frontend = Frontend {
+            instance,
+            servers: ServerHandlers::new(),
+            heartbeat_task: None,
+            export_metrics_task: None,
+        };
+        let frontend = Arc::new(frontend);
+
+        frontend.start().await.unwrap();
 
         GreptimeDbStandalone {
-            instance: Arc::new(instance),
+            frontend,
             opts,
             guard,
             kv_backend,

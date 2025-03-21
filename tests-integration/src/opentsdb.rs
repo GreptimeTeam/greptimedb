@@ -33,7 +33,7 @@ mod tests {
         let standalone = GreptimeDbStandaloneBuilder::new("test_standalone_exec")
             .build()
             .await;
-        let instance = &standalone.instance;
+        let instance = standalone.fe_instance();
 
         test_exec(instance).await;
     }
