@@ -16,6 +16,7 @@
 
 use std::any::Any;
 
+use arrow_schema::ArrowError;
 use common_error::ext::BoxedError;
 use common_error::{define_into_tonic_status, from_err_code_msg_to_header};
 use common_macro::stack_trace_debug;
@@ -156,6 +157,15 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Arrow error: {raw:?} in context: {context}"))]
+    Arrow {
+        #[snafu(source)]
+        raw: ArrowError,
+        context: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Datafusion error: {raw:?} in context: {context}"))]
     Datafusion {
         #[snafu(source)]
@@ -230,6 +240,7 @@ impl ErrorExt for Error {
         match self {
             Self::Eval { .. }
             | Self::JoinTask { .. }
+            | Self::Arrow { .. }
             | Self::Datafusion { .. }
             | Self::InsertIntoFlow { .. } => StatusCode::Internal,
             Self::FlowAlreadyExist { .. } => StatusCode::TableAlreadyExists,

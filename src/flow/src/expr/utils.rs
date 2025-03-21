@@ -238,6 +238,7 @@ mod test {
 
         for (sql, current, expected) in &testcases {
             let plan = sql_to_substrait(engine.clone(), sql).await;
+
             let mut ctx = create_test_ctx();
             let flow_plan = TypedPlan::from_substrait_plan(&mut ctx, &plan)
                 .await
