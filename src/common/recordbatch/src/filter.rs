@@ -212,7 +212,9 @@ impl SimpleFilterEvaluator {
     ) -> std::result::Result<BooleanArray, ArrowError> {
         let flag = if ignore_case { Some("i") } else { None };
         let array = input.get().0;
-        let string_array = as_string_array(array).unwrap(); // todo: error handling
+        let string_array = as_string_array(array).map_err(|_| {
+            ArrowError::CastError(format!("Cannot cast {:?} to StringArray", array))
+        })?;
         let literal_array = self.literal.clone().into_inner();
         let regex_array = as_string_array(&literal_array).map_err(|_| {
             ArrowError::CastError(format!("Cannot cast {:?} to StringArray", literal_array))
