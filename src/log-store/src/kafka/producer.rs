@@ -110,10 +110,10 @@ impl ProducerClient for PartitionClient {
         let total_size = records.iter().map(|r| r.approximate_size()).sum::<usize>();
         let partition = self.partition().to_string();
         METRIC_KAFKA_CLIENT_BYTES_TOTAL
-            .with_label_values(&[&self.topic(), &partition])
+            .with_label_values(&[self.topic(), &partition])
             .inc_by(total_size as u64);
         METRIC_KAFKA_CLIENT_TRAFIC_TOTAL
-            .with_label_values(&[&self.topic(), &partition])
+            .with_label_values(&[self.topic(), &partition])
             .inc_by(total_size as u64);
 
         self.produce(records, compression).await
