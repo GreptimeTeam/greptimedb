@@ -17,6 +17,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use arrow::array::new_null_array;
+use common_error::ext::BoxedError;
 use common_telemetry::trace;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::DataType;
@@ -29,9 +30,14 @@ use snafu::{ensure, OptionExt, ResultExt};
 use crate::compute::render::{Context, SubgraphArg};
 use crate::compute::types::{Arranged, Collection, CollectionBundle, ErrCollector, Toff};
 use crate::error::{Error, NotImplementedSnafu, PlanSnafu};
-use crate::expr::error::{ArrowSnafu, DataAlreadyExpiredSnafu, DataTypeSnafu, InternalSnafu};
-use crate::expr::{Accum, Accumulator, Batch, EvalError, ScalarExpr, VectorDiff};
-use crate::plan::{AccumulablePlan, AggrWithIndex, KeyValPlan, ReducePlan, TypedPlan};
+use crate::expr::error::{
+    ArrowSnafu, DataAlreadyExpiredSnafu, DataTypeSnafu, ExternalSnafu, InternalSnafu,
+};
+use crate::expr::{Batch, EvalError, ScalarExpr};
+use crate::plan::{
+    AccumulablePlan, AccumulablePlanV2, AggrWithIndex, AggrWithIndexV2, KeyValPlan, ReducePlan,
+    TypedPlan,
+};
 use crate::repr::{self, DiffRow, KeyValDiffRow, RelationType, Row};
 use crate::utils::{ArrangeHandler, ArrangeReader, ArrangeWriter, KeyExpiryManager};
 
@@ -48,13 +54,7 @@ impl Context<'_, '_> {
         reduce_plan: &ReducePlan,
         output_type: &RelationType,
     ) -> Result<CollectionBundle<Batch>, Error> {
-        let accum_plan = if let ReducePlan::Accumulable(accum_plan) = reduce_plan {
-            if !accum_plan.distinct_aggrs.is_empty() {
-                NotImplementedSnafu {
-                    reason: "Distinct aggregation is not supported in batch mode",
-                }
-                .fail()?
-            }
+        let accum_plan = if let ReducePlan::AccumulableV2(accum_plan) = reduce_plan {
             accum_plan.clone()
         } else {
             NotImplementedSnafu {
@@ -252,6 +252,7 @@ impl Context<'_, '_> {
     ) -> Option<Vec<ArrangeHandler>> {
         match reduce_plan {
             ReducePlan::Distinct => None,
+            ReducePlan::AccumulableV2(_) => None,
             ReducePlan::Accumulable(AccumulablePlan { distinct_aggrs, .. }) => {
                 (!distinct_aggrs.is_empty()).then(|| {
                     std::iter::repeat_with(|| {
@@ -357,7 +358,7 @@ fn reduce_batch_subgraph(
     arrange: &ArrangeHandler,
     src_data: impl IntoIterator<Item = Batch>,
     key_val_plan: &KeyValPlan,
-    accum_plan: &AccumulablePlan,
+    accum_plan: &AccumulablePlanV2,
     output_type: &RelationType,
     SubgraphArg {
         now,
@@ -529,39 +530,48 @@ fn reduce_batch_subgraph(
         err_collector.run(|| -> Result<(), _> {
             let (accums, _, _) = arrange.get(now, &key).unwrap_or_default();
             let accum_list =
-                from_accum_values_to_live_accums(accums.unpack(), accum_plan.simple_aggrs.len())?;
+                from_accum_values_to_live_accums(accums.unpack(), accum_plan.full_aggrs.len())?;
 
             let mut accum_output = AccumOutput::new();
-            for AggrWithIndex {
+            for AggrWithIndexV2 {
                 expr,
-                input_idx,
+                input_idxs,
                 output_idx,
-            } in accum_plan.simple_aggrs.iter()
+                state_types,
+            } in accum_plan.full_aggrs.iter()
             {
                 let cur_accum_value = accum_list.get(*output_idx).cloned().unwrap_or_default();
-                let mut cur_accum = if cur_accum_value.is_empty() {
-                    Accum::new_accum(&expr.func.clone())?
-                } else {
-                    Accum::try_into_accum(&expr.func, cur_accum_value)?
-                };
+                let mut cur_accum = expr
+                    .create_accumulator()
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)?;
+                if !cur_accum_value.is_empty() {
+                    cur_accum.merge_states(&[cur_accum_value], state_types)?;
+                }
 
                 for val_batch in val_batches.iter() {
                     // if batch is empty, input null instead
-                    let cur_input = val_batch
-                        .batch()
-                        .get(*input_idx)
-                        .cloned()
-                        .unwrap_or_else(|| Arc::new(NullVector::new(val_batch.row_count())));
+                    let batch = val_batch.batch();
+
+                    let cur_input = input_idxs
+                        .iter()
+                        .map(|idx| {
+                            batch
+                                .get(*idx)
+                                .cloned()
+                                .unwrap_or_else(|| Arc::new(NullVector::new(val_batch.row_count())))
+                        })
+                        .collect_vec();
                     let len = cur_input.len();
-                    cur_accum.update_batch(&expr.func, VectorDiff::from(cur_input))?;
+                    cur_accum.update_batch(&cur_input)?;
 
                     trace!("Reduce accum after take {} rows: {:?}", len, cur_accum);
                 }
-                let final_output = cur_accum.eval(&expr.func)?;
+                let final_output = cur_accum.evaluate()?;
                 trace!("Reduce accum final output: {:?}", final_output);
                 accum_output.insert_output(*output_idx, final_output);
 
-                let cur_accum_value = cur_accum.into_state();
+                let cur_accum_value = cur_accum.state()?.into_iter().map(|(v, _)| v).collect();
                 accum_output.insert_accum(*output_idx, cur_accum_value);
             }
 
@@ -679,6 +689,7 @@ fn reduce_subgraph(
                 send,
             },
         ),
+        ReducePlan::AccumulableV2(_) => unimplemented!(),
     };
 }
 
@@ -1211,12 +1222,14 @@ mod test {
     use std::time::Duration;
 
     use common_time::Timestamp;
+    use datafusion::functions_aggregate::sum::sum_udaf;
     use datatypes::data_type::{ConcreteDataType, ConcreteDataType as CDT};
     use hydroflow::scheduled::graph::Hydroflow;
 
     use super::*;
     use crate::compute::render::test::{get_output_handle, harness_test_ctx, run_and_check};
     use crate::compute::state::DataflowState;
+    use crate::expr::relation::{AggregateExprV2, OrderingReq};
     use crate::expr::{
         self, AggregateExpr, AggregateFunc, BinaryFunc, GlobalId, MapFilterProject, UnaryFunc,
     };
@@ -1581,26 +1594,31 @@ mod test {
             val_plan: MapFilterProject::new(1).project([0]).unwrap().into_safe(),
         };
 
-        let simple_aggrs = vec![AggrWithIndex::new(
-            AggregateExpr {
-                func: AggregateFunc::SumInt64,
-                expr: ScalarExpr::Column(0),
-                distinct: false,
-            },
-            0,
-            0,
-        )];
-        let accum_plan = AccumulablePlan {
-            full_aggrs: vec![AggregateExpr {
-                func: AggregateFunc::SumInt64,
-                expr: ScalarExpr::Column(0),
-                distinct: false,
-            }],
-            simple_aggrs,
-            distinct_aggrs: vec![],
+        let aggr_expr = AggregateExprV2 {
+            func: sum_udaf().as_ref().clone(),
+            args: vec![
+                ScalarExpr::Column(0).with_type(ColumnType::new(CDT::int64_datatype(), false))
+            ],
+            return_type: CDT::int64_datatype(),
+            name: "sum".to_string(),
+            schema: RelationType::new(vec![ColumnType::new(
+                ConcreteDataType::int32_datatype(),
+                false,
+            )])
+            .into_named(vec![Some("number".to_string())]),
+            ordering_req: OrderingReq::empty(),
+            ignore_nulls: false,
+            is_distinct: false,
+            is_reversed: false,
+            input_types: vec![CDT::int64_datatype()],
+            is_nullable: true,
         };
 
-        let reduce_plan = ReducePlan::Accumulable(accum_plan);
+        let accum_plan = AccumulablePlanV2 {
+            full_aggrs: vec![AggrWithIndexV2::new(aggr_expr, vec![0], 0).unwrap()],
+        };
+
+        let reduce_plan = ReducePlan::AccumulableV2(accum_plan);
         let bundle = ctx
             .render_reduce_batch(
                 Box::new(input_plan.with_types(typ.into_unnamed())),
