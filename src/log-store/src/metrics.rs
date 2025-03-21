@@ -73,8 +73,8 @@ lazy_static! {
         &[LOGSTORE_LABEL, PARTITION_LABEL],
     )
     .unwrap();
-    pub static ref METRIC_KAFKA_CLIENT_TRAFIC_TOTAL: IntCounterVec = register_int_counter_vec!(
-        "greptime_logstore_kafka_client_trafic_total",
+    pub static ref METRIC_KAFKA_CLIENT_TRAFFIC_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "greptime_logstore_kafka_client_traffic_total",
         "kafka logstore's request count traffic total",
         &[LOGSTORE_LABEL, PARTITION_LABEL],
     )
