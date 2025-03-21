@@ -23,7 +23,9 @@ use snafu::{ensure, OptionExt, ResultExt};
 use store_api::manifest::{ManifestVersion, MAX_VERSION, MIN_VERSION};
 use store_api::metadata::RegionMetadataRef;
 
-use crate::error::{self, NoCheckpointSnafu, RegionStoppedSnafu, Result};
+use crate::error::{
+    self, InstallManifestToSnafu, NoCheckpointSnafu, NoManifestsSnafu, RegionStoppedSnafu, Result,
+};
 use crate::manifest::action::{
     RegionChange, RegionCheckpoint, RegionManifest, RegionManifestBuilder, RegionMetaAction,
     RegionMetaActionList,
@@ -336,6 +338,17 @@ impl RegionManifestManager {
                 .await?;
         }
 
+        if manifests.is_empty() {
+            return NoManifestsSnafu {
+                region_id: self.manifest.metadata.region_id,
+                start_version: self.last_version + 1,
+                end_version: target_version + 1,
+                last_version: self.last_version,
+            }
+            .fail();
+        }
+
+        debug_assert_eq!(manifests.first().unwrap().0, self.last_version + 1);
         let mut manifest_builder =
             RegionManifestBuilder::with_checkpoint(Some(self.manifest.as_ref().clone()));
 
@@ -365,6 +378,16 @@ impl RegionManifestManager {
         }
 
         let new_manifest = manifest_builder.try_build()?;
+        ensure!(
+            new_manifest.manifest_version >= target_version,
+            InstallManifestToSnafu {
+                region_id: self.manifest.metadata.region_id,
+                target_version,
+                available_version: new_manifest.manifest_version,
+                last_version: self.last_version,
+            }
+        );
+
         let version = self.last_version;
         self.manifest = Arc::new(new_manifest);
         self.last_version = self.manifest.manifest_version;
