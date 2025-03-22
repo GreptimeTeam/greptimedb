@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use arrow::array::Array;
 use arrow::datatypes::Int32Type;
-use arrow_array::{ArrayRef, DictionaryArray};
+use arrow_array::{ArrayRef, DictionaryArray, Int32Array};
 use serde_json::Value as JsonValue;
 use snafu::ResultExt;
 
@@ -225,116 +225,116 @@ impl<'a> Iterator for DictionaryIter<'a> {
 
 impl VectorOp for DictionaryVector {
     fn replicate(&self, offsets: &[usize]) -> VectorRef {
-        todo!()
+        let keys = self.array.keys();
+        let mut replicated_keys = Vec::with_capacity(offsets.len());
+
+        for &offset in offsets {
+            if offset < self.len() {
+                if keys.is_valid(offset) {
+                    replicated_keys.push(Some(keys.value(offset)));
+                } else {
+                    replicated_keys.push(None);
+                }
+            } else {
+                replicated_keys.push(None);
+            }
+        }
+
+        let new_keys = Int32Array::from(replicated_keys);
+        let new_array = DictionaryArray::try_new(new_keys, self.values().clone())
+            .expect("Failed to create replicated dictionary array");
+
+        Arc::new(Self {
+            array: new_array,
+            item_type: self.item_type.clone(),
+            item_vector: self.item_vector.clone(),
+        })
     }
 
     fn find_unique(&self, selected: &mut common_base::BitVec, prev_vector: Option<&dyn Vector>) {
-        todo!()
+        if let Some(prev) = prev_vector {
+            if let Some(prev_dict) = prev.as_any().downcast_ref::<DictionaryVector>() {
+                // If previous vector is also a dictionary, we can compare dictionary keys
+                for i in 0..self.len() {
+                    if i < prev_dict.len()
+                        && !self.is_null(i)
+                        && !prev_dict.is_null(i)
+                        && self.array.keys().value(i) == prev_dict.array.keys().value(i)
+                    {
+                        continue;
+                    }
+                    selected.set(i, true);
+                }
+            } else {
+                // If previous vector is of different type, mark all as unique
+                for i in 0..self.len() {
+                    selected.set(i, true);
+                }
+            }
+        } else {
+            // No previous vector, mark all as unique
+            for i in 0..self.len() {
+                selected.set(i, true);
+            }
+        }
     }
 
     fn filter(&self, filter: &vectors::BooleanVector) -> Result<VectorRef> {
-        todo!()
+        let key_array: ArrayRef = Arc::new(self.array.keys().clone());
+        let key_vector = Helper::try_into_vector(&key_array).unwrap_or_else(|_| {
+            panic!(
+                "arrow array with datatype {:?} cannot be converted to our vector",
+                key_array.data_type()
+            )
+        });
+        let filtered_key_vector = key_vector.filter(filter)?;
+        let filtered_key_array = filtered_key_vector.to_arrow_array();
+        let filtered_key_array = filtered_key_array
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+
+        let new_array = DictionaryArray::try_new(filtered_key_array.clone(), self.values().clone())
+            .expect("Failed to create filtered dictionary array");
+
+        Ok(Arc::new(Self {
+            array: new_array,
+            item_type: self.item_type.clone(),
+            item_vector: self.item_vector.clone(),
+        }))
     }
 
     fn cast(&self, to_type: &ConcreteDataType) -> Result<VectorRef> {
-        todo!()
+        let new_items = self.item_vector.cast(to_type)?;
+        let new_array =
+            DictionaryArray::try_new(self.array.keys().clone(), new_items.to_arrow_array())
+                .expect("Failed to create casted dictionary array");
+        Ok(Arc::new(Self {
+            array: new_array,
+            item_type: to_type.clone(),
+            item_vector: self.item_vector.clone(),
+        }))
     }
 
     fn take(&self, indices: &vectors::UInt32Vector) -> Result<VectorRef> {
-        todo!()
+        let key_array: ArrayRef = Arc::new(self.array.keys().clone());
+        let key_vector = Helper::try_into_vector(&key_array).unwrap_or_else(|_| {
+            panic!(
+                "arrow array with datatype {:?} cannot be converted to our vector",
+                key_array.data_type()
+            )
+        });
+        let new_key_vector = key_vector.take(indices)?;
+        let new_key_array = new_key_vector.to_arrow_array();
+        let new_key_array = new_key_array.as_any().downcast_ref::<Int32Array>().unwrap();
+
+        let new_array = DictionaryArray::try_new(new_key_array.clone(), self.values().clone())
+            .expect("Failed to create filtered dictionary array");
+
+        Ok(Arc::new(Self {
+            array: new_array,
+            item_type: self.item_type.clone(),
+            item_vector: self.item_vector.clone(),
+        }))
     }
 }
-
-// #[cfg(test)]
-// mod tests {
-//     use arrow_array::{Int32Array, StringArray};
-
-//     use super::*;
-//     use crate::vectors::StringVector;
-
-//     fn create_test_dictionary_array() -> DictionaryArray<Int32Type> {
-//         let values = StringArray::from(vec!["a", "b", "c"]);
-//         let keys = Int32Array::from(vec![0, 0, 1, 2, 0]);
-
-//         DictionaryArray::try_new(keys, Arc::new(values)).unwrap()
-//     }
-
-//     #[test]
-//     fn test_dictionary_vector() {
-//         let array = create_test_dictionary_array();
-//         let vector = DictionaryVector::from(array);
-
-//         assert_eq!(
-//             ConcreteDataType::Dictionary(DictionaryType::new(ConcreteDataType::string_datatype())),
-//             vector.data_type()
-//         );
-//         assert_eq!("DictionaryVector", vector.vector_type_name());
-//         assert_eq!(5, vector.len());
-
-//         // Test value access
-//         let value0 = vector.get(0);
-//         if let Value::Dictionary(dict_value) = value0 {
-//             assert_eq!(0, dict_value.key());
-//             assert_eq!("a", dict_value.value().as_string().unwrap());
-//         } else {
-//             panic!("Expected dictionary value");
-//         }
-
-//         // Test reference access
-//         let value_ref = vector.get_ref(2);
-//         assert!(matches!(
-//             value_ref,
-//             ValueRef::Dictionary(DictionaryValueRef::Indexed { .. })
-//         ));
-
-//         // Test slice
-//         let slice = vector.slice(1, 3);
-//         assert_eq!(3, slice.len());
-//     }
-
-//     #[test]
-//     fn test_dictionary_vector_builder() {
-//         let mut builder =
-//             DictionaryVectorBuilder::with_type_capacity(ConcreteDataType::string_datatype(), 5);
-
-//         // Push some values
-//         builder
-//             .try_push_value_ref(ValueRef::String("a".into()))
-//             .unwrap();
-//         builder.push_null();
-//         builder
-//             .try_push_value_ref(ValueRef::String("b".into()))
-//             .unwrap();
-//         builder
-//             .try_push_value_ref(ValueRef::String("a".into()))
-//             .unwrap();
-
-//         let vector = builder.finish();
-
-//         assert_eq!(4, vector.len());
-//         assert_eq!(1, vector.null_count());
-
-//         // The dictionary should have "a" and "b" as values
-//         let values = vector.values();
-//         let values_vector = Helper::try_into_vector(values.as_ref()).unwrap();
-//         assert_eq!(2, values_vector.len());
-
-//         // First and last elements should point to the same value "a"
-//         let key0 = vector.keys().value(0);
-//         let key3 = vector.keys().value(3);
-//         assert_eq!(key0, key3);
-//     }
-
-//     #[test]
-//     fn test_serialize_to_json() {
-//         let array = create_test_dictionary_array();
-//         let vector = DictionaryVector::from(array);
-
-//         let json = vector.serialize_to_json().unwrap();
-//         assert_eq!(5, json.len());
-//         assert_eq!(json[0], json[1]);
-//         assert_eq!(json[0], json[4]);
-//         assert_ne!(json[0], json[2]);
-//         assert_ne!(json[0], json[3]);
-//     }
-// }
