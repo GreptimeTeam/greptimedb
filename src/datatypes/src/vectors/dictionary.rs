@@ -259,7 +259,7 @@ impl VectorOp for DictionaryVector {
                     if i < prev_dict.len()
                         && !self.is_null(i)
                         && !prev_dict.is_null(i)
-                        && self.array.keys().value(i) == prev_dict.array.keys().value(i)
+                        && self.get_ref(i) == prev_dict.get_ref(i)
                     {
                         continue;
                     }
@@ -336,5 +336,179 @@ impl VectorOp for DictionaryVector {
             item_type: self.item_type.clone(),
             item_vector: self.item_vector.clone(),
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use arrow_array::StringArray;
+    use common_base::BitVec;
+
+    use super::*;
+
+    // Helper function to create a test dictionary vector with string values
+    fn create_test_dictionary() -> DictionaryVector {
+        // Dictionary values: ["a", "b", "c", "d"]
+        // Keys: [0, 1, 2, null, 1, 3]
+        // Resulting in: ["a", "b", "c", null, "b", "d"]
+        let values = StringArray::from(vec!["a", "b", "c", "d"]);
+        let keys = Int32Array::from(vec![Some(0), Some(1), Some(2), None, Some(1), Some(3)]);
+        let dict_array = DictionaryArray::new(keys, Arc::new(values));
+        DictionaryVector::from(dict_array)
+    }
+
+    #[test]
+    fn test_dictionary_vector_basics() {
+        let dict_vec = create_test_dictionary();
+
+        // Test length and null count
+        assert_eq!(dict_vec.len(), 6);
+        assert_eq!(dict_vec.null_count(), 1);
+
+        // Test data type
+        let data_type = dict_vec.data_type();
+        if let ConcreteDataType::Dictionary(dict_type) = data_type {
+            assert_eq!(*dict_type.value_type(), ConcreteDataType::string_datatype());
+        } else {
+            panic!("Expected Dictionary data type");
+        }
+
+        // Test is_null
+        assert!(!dict_vec.is_null(0));
+        assert!(dict_vec.is_null(3));
+
+        // Test get values
+        assert_eq!(dict_vec.get(0), Value::String("a".to_string().into()));
+        assert_eq!(dict_vec.get(1), Value::String("b".to_string().into()));
+        assert_eq!(dict_vec.get(3), Value::Null);
+        assert_eq!(dict_vec.get(4), Value::String("b".to_string().into()));
+    }
+
+    #[test]
+    fn test_slice() {
+        let dict_vec = create_test_dictionary();
+        let sliced = dict_vec.slice(1, 3);
+
+        assert_eq!(sliced.len(), 3);
+        assert_eq!(sliced.get(0), Value::String("b".to_string().into()));
+        assert_eq!(sliced.get(1), Value::String("c".to_string().into()));
+        assert_eq!(sliced.get(2), Value::Null);
+    }
+
+    #[test]
+    fn test_replicate() {
+        let dict_vec = create_test_dictionary();
+
+        // Replicate with offsets [0, 2, 5] - should get values at these indices
+        let offsets = vec![0, 2, 5];
+        let replicated = dict_vec.replicate(&offsets);
+
+        assert_eq!(replicated.len(), 3);
+        assert_eq!(replicated.get(0), Value::String("a".to_string().into()));
+        assert_eq!(replicated.get(1), Value::String("c".to_string().into()));
+        assert_eq!(replicated.get(2), Value::String("d".to_string().into()));
+    }
+
+    #[test]
+    fn test_find_unique() {
+        let dict_vec = create_test_dictionary();
+        let mut selected = BitVec::repeat(false, dict_vec.len());
+
+        // Test with no previous vector - all should be marked unique
+        dict_vec.find_unique(&mut selected, None);
+        for i in 0..dict_vec.len() {
+            assert!(selected.get(i).unwrap());
+        }
+
+        // Test with previous vector (same type and content)
+        let prev_dict = create_test_dictionary();
+        selected = BitVec::repeat(false, dict_vec.len());
+        dict_vec.find_unique(&mut selected, Some(&prev_dict));
+
+        // None should be unique as they're identical
+        for i in 0..dict_vec.len() {
+            if !dict_vec.is_null(i) {
+                assert!(!selected.get(i).unwrap(), "{i}");
+            }
+        }
+
+        // Create a different dictionary with some changes
+        let values = StringArray::from(vec!["a", "b", "c", "d"]);
+        let keys = Int32Array::from(vec![Some(1), Some(1), Some(2), None, Some(0), Some(3)]);
+        let diff_dict_array = DictionaryArray::new(keys, Arc::new(values));
+        let diff_dict = DictionaryVector::from(diff_dict_array);
+
+        selected = BitVec::repeat(false, dict_vec.len());
+        dict_vec.find_unique(&mut selected, Some(&diff_dict));
+
+        // First and fourth elements should be unique (indices 0 and 4)
+        assert!(selected.get(0).unwrap());
+        assert!(!selected.get(1).unwrap());
+        assert!(!selected.get(2).unwrap());
+        assert!(selected.get(3).unwrap()); // NULL
+        assert!(selected.get(4).unwrap());
+        assert!(!selected.get(5).unwrap());
+    }
+
+    #[test]
+    fn test_filter() {
+        let dict_vec = create_test_dictionary();
+
+        // Keep only indices 0, 2, 4
+        let filter_values = vec![true, false, true, false, true, false];
+        let filter = vectors::BooleanVector::from(filter_values);
+
+        let filtered = dict_vec.filter(&filter).unwrap();
+        assert_eq!(filtered.len(), 3);
+
+        // Check the values
+        assert_eq!(filtered.get(0), Value::String("a".to_string().into()));
+        assert_eq!(filtered.get(1), Value::String("c".to_string().into()));
+        assert_eq!(filtered.get(2), Value::String("b".to_string().into()));
+    }
+
+    #[test]
+    fn test_cast() {
+        let dict_vec = create_test_dictionary();
+
+        // Cast to the same type should return an equivalent vector
+        let casted = dict_vec.cast(&ConcreteDataType::string_datatype()).unwrap();
+
+        // The returned vector should have string values
+        assert_eq!(
+            casted.data_type(),
+            ConcreteDataType::Dictionary(DictionaryType::new(
+                ConcreteDataType::int32_datatype(),
+                ConcreteDataType::string_datatype(),
+            ))
+        );
+        assert_eq!(casted.len(), dict_vec.len());
+
+        // Values should match the original dictionary lookups
+        assert_eq!(casted.get(0), Value::String("a".to_string().into()));
+        assert_eq!(casted.get(1), Value::String("b".to_string().into()));
+        assert_eq!(casted.get(2), Value::String("c".to_string().into()));
+        assert_eq!(casted.get(3), Value::Null);
+        assert_eq!(casted.get(4), Value::String("b".to_string().into()));
+        assert_eq!(casted.get(5), Value::String("d".to_string().into()));
+    }
+
+    #[test]
+    fn test_take() {
+        let dict_vec = create_test_dictionary();
+
+        // Take indices 2, 0, 4
+        let indices_vec = vec![Some(2u32), Some(0), Some(4)];
+        let indices = vectors::UInt32Vector::from(indices_vec);
+
+        let taken = dict_vec.take(&indices).unwrap();
+        assert_eq!(taken.len(), 3);
+
+        // Check the values
+        assert_eq!(taken.get(0), Value::String("c".to_string().into()));
+        assert_eq!(taken.get(1), Value::String("a".to_string().into()));
+        assert_eq!(taken.get(2), Value::String("b".to_string().into()));
     }
 }
