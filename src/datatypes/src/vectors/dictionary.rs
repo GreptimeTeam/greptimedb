@@ -41,18 +41,14 @@ pub struct DictionaryVector {
 
 impl DictionaryVector {
     /// Create a new instance of `DictionaryVector` from a dictionary array and item type
-    pub fn new(array: DictionaryArray<Int32Type>, item_type: ConcreteDataType) -> Self {
-        let item_vector = Helper::try_into_vector(array.values()).unwrap_or_else(|_| {
-            panic!(
-                "arrow array with datatype {:?} cannot be converted to our vector",
-                array.values().data_type()
-            )
-        });
-        Self {
+    pub fn new(array: DictionaryArray<Int32Type>, item_type: ConcreteDataType) -> Result<Self> {
+        let item_vector = Helper::try_into_vector(array.values())?;
+
+        Ok(Self {
             array,
             item_type,
             item_vector,
-        }
+        })
     }
 
     /// Returns the underlying Arrow dictionary array
@@ -167,20 +163,18 @@ impl Serializable for DictionaryVector {
     }
 }
 
-impl From<DictionaryArray<Int32Type>> for DictionaryVector {
-    fn from(array: DictionaryArray<Int32Type>) -> Self {
+impl TryFrom<DictionaryArray<Int32Type>> for DictionaryVector {
+    type Error = crate::error::Error;
+
+    fn try_from(array: DictionaryArray<Int32Type>) -> Result<Self> {
         let item_type = ConcreteDataType::from_arrow_type(array.values().data_type());
-        let item_vector = Helper::try_into_vector(array.values()).unwrap_or_else(|_| {
-            panic!(
-                "arrow array with datatype {:?} cannot be converted to our vector",
-                array.values().data_type()
-            )
-        });
-        Self {
+        let item_vector = Helper::try_into_vector(array.values())?;
+
+        Ok(Self {
             array,
             item_type,
             item_vector,
-        }
+        })
     }
 }
 
@@ -281,12 +275,7 @@ impl VectorOp for DictionaryVector {
 
     fn filter(&self, filter: &vectors::BooleanVector) -> Result<VectorRef> {
         let key_array: ArrayRef = Arc::new(self.array.keys().clone());
-        let key_vector = Helper::try_into_vector(&key_array).unwrap_or_else(|_| {
-            panic!(
-                "arrow array with datatype {:?} cannot be converted to our vector",
-                key_array.data_type()
-            )
-        });
+        let key_vector = Helper::try_into_vector(&key_array)?;
         let filtered_key_vector = key_vector.filter(filter)?;
         let filtered_key_array = filtered_key_vector.to_arrow_array();
         let filtered_key_array = filtered_key_array
@@ -318,12 +307,7 @@ impl VectorOp for DictionaryVector {
 
     fn take(&self, indices: &vectors::UInt32Vector) -> Result<VectorRef> {
         let key_array: ArrayRef = Arc::new(self.array.keys().clone());
-        let key_vector = Helper::try_into_vector(&key_array).unwrap_or_else(|_| {
-            panic!(
-                "arrow array with datatype {:?} cannot be converted to our vector",
-                key_array.data_type()
-            )
-        });
+        let key_vector = Helper::try_into_vector(&key_array)?;
         let new_key_vector = key_vector.take(indices)?;
         let new_key_array = new_key_vector.to_arrow_array();
         let new_key_array = new_key_array.as_any().downcast_ref::<Int32Array>().unwrap();
@@ -356,7 +340,7 @@ mod tests {
         let values = StringArray::from(vec!["a", "b", "c", "d"]);
         let keys = Int32Array::from(vec![Some(0), Some(1), Some(2), None, Some(1), Some(3)]);
         let dict_array = DictionaryArray::new(keys, Arc::new(values));
-        DictionaryVector::from(dict_array)
+        DictionaryVector::try_from(dict_array).unwrap()
     }
 
     #[test]
@@ -438,7 +422,7 @@ mod tests {
         let values = StringArray::from(vec!["a", "b", "c", "d"]);
         let keys = Int32Array::from(vec![Some(1), Some(1), Some(2), None, Some(0), Some(3)]);
         let diff_dict_array = DictionaryArray::new(keys, Arc::new(values));
-        let diff_dict = DictionaryVector::from(diff_dict_array);
+        let diff_dict = DictionaryVector::try_from(diff_dict_array).unwrap();
 
         selected = BitVec::repeat(false, dict_vec.len());
         dict_vec.find_unique(&mut selected, Some(&diff_dict));
