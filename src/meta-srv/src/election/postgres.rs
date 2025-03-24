@@ -16,7 +16,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use common_meta::distributed_time_constants::{META_KEEP_ALIVE_INTERVAL_SECS, META_LEASE_SECS};
 use common_telemetry::{error, warn};
 use common_time::Timestamp;
 use itertools::Itertools;
@@ -41,6 +40,7 @@ const LEASE_SEP: &str = r#"||__metadata_lease_sep||"#;
 struct ElectionSqlFactory<'a> {
     lock_id: u64,
     table_name: &'a str,
+    meta_lease_ttl_secs: u64,
 }
 
 struct ElectionSqlSet {
@@ -90,10 +90,11 @@ struct ElectionSqlSet {
 }
 
 impl<'a> ElectionSqlFactory<'a> {
-    fn new(lock_id: u64, table_name: &'a str) -> Self {
+    fn new(lock_id: u64, table_name: &'a str, meta_lease_ttl_secs: u64) -> Self {
         Self {
             lock_id,
             table_name,
+            meta_lease_ttl_secs,
         }
     }
 
@@ -112,7 +113,10 @@ impl<'a> ElectionSqlFactory<'a> {
     // Currently the session timeout is longer than the leader lease time.
     // So the leader will renew the lease twice before the session timeout if everything goes well.
     fn set_idle_session_timeout_sql(&self) -> String {
-        format!("SET idle_session_timeout = '{}s';", META_LEASE_SECS + 1)
+        format!(
+            "SET idle_session_timeout = '{}s';",
+            self.meta_lease_ttl_secs + 1
+        )
     }
 
     fn campaign_sql(&self) -> String {
@@ -226,6 +230,7 @@ pub struct PgElection {
     leader_watcher: broadcast::Sender<LeaderChangeMessage>,
     store_key_prefix: String,
     candidate_lease_ttl_secs: u64,
+    meta_lease_ttl_secs: u64,
     sql_set: ElectionSqlSet,
 }
 
@@ -235,10 +240,11 @@ impl PgElection {
         client: Client,
         store_key_prefix: String,
         candidate_lease_ttl_secs: u64,
+        meta_lease_ttl_secs: u64,
         table_name: &str,
         lock_id: u64,
     ) -> Result<ElectionRef> {
-        let sql_factory = ElectionSqlFactory::new(lock_id, table_name);
+        let sql_factory = ElectionSqlFactory::new(lock_id, table_name, meta_lease_ttl_secs);
         // Set idle session timeout to IDLE_SESSION_TIMEOUT to avoid dead advisory lock.
         client
             .execute(&sql_factory.set_idle_session_timeout_sql(), &[])
@@ -254,6 +260,7 @@ impl PgElection {
             leader_watcher: tx,
             store_key_prefix,
             candidate_lease_ttl_secs,
+            meta_lease_ttl_secs,
             sql_set: sql_factory.build(),
         }))
     }
@@ -326,7 +333,7 @@ impl Election for PgElection {
 
             // Safety: origin is Some since we are using `get_value_with_lease` with `true`.
             let origin = origin.unwrap();
-            self.update_value_with_lease(&key, &origin, &node_info)
+            self.update_value_with_lease(&key, &origin, &node_info, self.candidate_lease_ttl_secs)
                 .await?;
         }
     }
@@ -361,7 +368,7 @@ impl Election for PgElection {
     ///      to perform actions as a follower.
     async fn campaign(&self) -> Result<()> {
         let mut keep_alive_interval =
-            tokio::time::interval(Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS));
+            tokio::time::interval(Duration::from_secs(self.meta_lease_ttl_secs / 2));
         keep_alive_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         loop {
@@ -489,19 +496,20 @@ impl PgElection {
         Ok((values_with_leases, current))
     }
 
-    async fn update_value_with_lease(&self, key: &str, prev: &str, updated: &str) -> Result<()> {
+    async fn update_value_with_lease(
+        &self,
+        key: &str,
+        prev: &str,
+        updated: &str,
+        lease_ttl: u64,
+    ) -> Result<()> {
         let key = key.as_bytes();
         let prev = prev.as_bytes();
         let res = self
             .client
             .execute(
                 &self.sql_set.update_value_with_lease,
-                &[
-                    &key,
-                    &prev,
-                    &updated,
-                    &(self.candidate_lease_ttl_secs as f64),
-                ],
+                &[&key, &prev, &updated, &(lease_ttl as f64)],
             )
             .await
             .context(PostgresExecutionSnafu)?;
@@ -578,8 +586,13 @@ impl PgElection {
                         (true, true) => {
                             // Safety: prev is Some since we are using `get_value_with_lease` with `true`.
                             let prev = prev.unwrap();
-                            self.update_value_with_lease(&key, &prev, &self.leader_value)
-                                .await?;
+                            self.update_value_with_lease(
+                                &key,
+                                &prev,
+                                &self.leader_value,
+                                self.meta_lease_ttl_secs,
+                            )
+                            .await?;
                         }
                         // Case 1.2
                         (true, false) => {
@@ -698,7 +711,7 @@ impl PgElection {
             ..Default::default()
         };
         self.delete_value(&key).await?;
-        self.put_value_with_lease(&key, &self.leader_value, META_LEASE_SECS)
+        self.put_value_with_lease(&key, &self.leader_value, self.meta_lease_ttl_secs)
             .await?;
 
         if self
@@ -775,7 +788,8 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix: uuid,
             candidate_lease_ttl_secs: 10,
-            sql_set: ElectionSqlFactory::new(28319, table_name).build(),
+            meta_lease_ttl_secs: 2,
+            sql_set: ElectionSqlFactory::new(28319, table_name, 2).build(),
         };
 
         let res = pg_election
@@ -793,7 +807,7 @@ mod tests {
 
         let prev = prev.unwrap();
         pg_election
-            .update_value_with_lease(&key, &prev, &value)
+            .update_value_with_lease(&key, &prev, &value, pg_election.meta_lease_ttl_secs)
             .await
             .unwrap();
 
@@ -852,7 +866,8 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix,
             candidate_lease_ttl_secs,
-            sql_set: ElectionSqlFactory::new(28319, &table_name).build(),
+            meta_lease_ttl_secs: 2,
+            sql_set: ElectionSqlFactory::new(28319, &table_name, 2).build(),
         };
 
         let node_info = MetasrvNodeInfo {
@@ -896,7 +911,8 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix: uuid.clone(),
             candidate_lease_ttl_secs,
-            sql_set: ElectionSqlFactory::new(28319, table_name).build(),
+            meta_lease_ttl_secs: 2,
+            sql_set: ElectionSqlFactory::new(28319, table_name, 2).build(),
         };
 
         let candidates = pg_election.all_candidates().await.unwrap();
@@ -938,7 +954,8 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix: uuid,
             candidate_lease_ttl_secs,
-            sql_set: ElectionSqlFactory::new(28320, table_name).build(),
+            meta_lease_ttl_secs: 2,
+            sql_set: ElectionSqlFactory::new(28320, table_name, 2).build(),
         };
 
         leader_pg_election.elected().await.unwrap();
@@ -1050,7 +1067,8 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix: uuid,
             candidate_lease_ttl_secs,
-            sql_set: ElectionSqlFactory::new(28321, table_name).build(),
+            meta_lease_ttl_secs: 2,
+            sql_set: ElectionSqlFactory::new(28321, table_name, 2).build(),
         };
 
         // Step 1: No leader exists, campaign and elected.
@@ -1103,7 +1121,7 @@ mod tests {
         assert!(leader_pg_election.is_leader());
 
         // Step 3: Something wrong, the leader lease expired.
-        tokio::time::sleep(Duration::from_secs(META_LEASE_SECS)).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
 
         let res = leader_pg_election
             .client
@@ -1284,7 +1302,8 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix: uuid.clone(),
             candidate_lease_ttl_secs,
-            sql_set: ElectionSqlFactory::new(28322, table_name).build(),
+            meta_lease_ttl_secs: 2,
+            sql_set: ElectionSqlFactory::new(28322, table_name, 2).build(),
         };
 
         let leader_client = create_postgres_client(Some(table_name)).await.unwrap();
@@ -1297,7 +1316,8 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix: uuid,
             candidate_lease_ttl_secs,
-            sql_set: ElectionSqlFactory::new(28322, table_name).build(),
+            meta_lease_ttl_secs: 2,
+            sql_set: ElectionSqlFactory::new(28322, table_name, 2).build(),
         };
 
         leader_pg_election
@@ -1311,7 +1331,7 @@ mod tests {
         follower_pg_election.follower_action().await.unwrap();
 
         // Step 2: As a follower, the leader exists but the lease expired.
-        tokio::time::sleep(Duration::from_secs(META_LEASE_SECS)).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
         assert!(follower_pg_election.follower_action().await.is_err());
 
         // Step 3: As a follower, the leader does not exist.
