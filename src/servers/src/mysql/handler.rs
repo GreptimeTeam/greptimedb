@@ -195,6 +195,7 @@ impl MysqlInstanceShim {
 
         let params = if let Some(plan) = &mut plan {
             fix_placeholder_types(plan)?;
+            debug!("Plan after fix placeholder types: {:#?}", plan);
             prepared_params(
                 &plan
                     .get_parameter_types()
