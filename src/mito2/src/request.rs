@@ -688,6 +688,21 @@ impl WorkerRequest {
             receiver,
         )
     }
+
+    pub(crate) fn new_sync_region_request(
+        region_id: RegionId,
+        manifest_version: ManifestVersion,
+    ) -> (WorkerRequest, Receiver<Result<ManifestVersion>>) {
+        let (sender, receiver) = oneshot::channel();
+        (
+            WorkerRequest::SyncRegion(RegionSyncRequest {
+                region_id,
+                manifest_version,
+                sender,
+            }),
+            receiver,
+        )
+    }
 }
 
 /// DDL request to a region.
@@ -878,12 +893,6 @@ pub(crate) struct RegionSyncRequest {
     pub(crate) region_id: RegionId,
     pub(crate) manifest_version: ManifestVersion,
     pub(crate) sender: Sender<Result<ManifestVersion>>,
-}
-
-#[derive(Debug)]
-pub(crate) struct RegionSyncResult {
-    pub(crate) region_id: RegionId,
-    pub(crate) result: Result<ManifestVersion>,
 }
 
 #[cfg(test)]

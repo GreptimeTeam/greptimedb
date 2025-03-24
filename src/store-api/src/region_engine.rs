@@ -33,6 +33,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
 use crate::logstore::entry;
+use crate::manifest::ManifestVersion;
 use crate::metadata::RegionMetadataRef;
 use crate::region_request::{
     BatchRegionDdlRequest, RegionOpenRequest, RegionRequest, RegionSequencesRequest,
@@ -502,6 +503,13 @@ pub trait RegionEngine: Send + Sync {
     /// the region as readonly doesn't guarantee that write operations in progress will not
     /// take effect.
     fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<(), BoxedError>;
+
+    /// Syncs the region manifest to the given manifest version.
+    async fn sync_region(
+        &self,
+        region_id: RegionId,
+        manifest_version: ManifestVersion,
+    ) -> Result<(), BoxedError>;
 
     /// Sets region role state gracefully.
     ///
