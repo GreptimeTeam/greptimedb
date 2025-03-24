@@ -41,7 +41,7 @@ mod tests {
         )
         .build()
         .await;
-        let instance = &standalone.instance;
+        let instance = standalone.fe_instance();
 
         test_prom_store_remote_rw(instance, None).await;
     }
@@ -64,7 +64,7 @@ mod tests {
         )
         .build()
         .await;
-        let instance = &standalone.instance;
+        let instance = standalone.fe_instance();
 
         test_prom_store_remote_rw(instance, Some("my_custom_physical_table".to_string())).await;
     }
