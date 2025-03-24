@@ -20,6 +20,7 @@ use api::v1::meta::procedure_service_server::ProcedureServiceServer;
 use api::v1::meta::store_server::StoreServer;
 use common_base::Plugins;
 use common_config::Configurable;
+use common_meta::distributed_time_constants::META_LEASE_SECS;
 use common_meta::kv_backend::chroot::ChrootKvBackend;
 use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::memory::MemoryKvBackend;
@@ -249,6 +250,7 @@ pub async fn metasrv_builder(
                 election_client,
                 opts.store_key_prefix.clone(),
                 CANDIDATE_LEASE_SECS,
+                META_LEASE_SECS,
                 &opts.meta_table_name,
                 opts.meta_election_lock_id,
             )
@@ -270,6 +272,7 @@ pub async fn metasrv_builder(
                 election_client,
                 opts.store_key_prefix.clone(),
                 CANDIDATE_LEASE_SECS,
+                META_LEASE_SECS,
                 &election_table_name,
             )
             .await?;

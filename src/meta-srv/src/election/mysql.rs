@@ -16,7 +16,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use common_meta::distributed_time_constants::{META_KEEP_ALIVE_INTERVAL_SECS, META_LEASE_SECS};
 use common_telemetry::{error, warn};
 use common_time::Timestamp;
 use itertools::Itertools;
@@ -41,7 +40,7 @@ const LEASE_SEP: &str = r#"||__metadata_lease_sep||"#;
 
 /// Lease information.
 /// TODO(CookiePie): PgElection can also use this struct. Refactor it to a common module.
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 struct Lease {
     leader_value: String,
     expire_time: Timestamp,
@@ -52,6 +51,7 @@ struct Lease {
 
 struct ElectionSqlFactory<'a> {
     table_name: &'a str,
+    meta_lease_secs: u64,
 }
 
 struct ElectionSqlSet {
@@ -99,8 +99,11 @@ struct ElectionSqlSet {
 }
 
 impl<'a> ElectionSqlFactory<'a> {
-    fn new(table_name: &'a str) -> Self {
-        Self { table_name }
+    fn new(table_name: &'a str, meta_lease_secs: u64) -> Self {
+        Self {
+            table_name,
+            meta_lease_secs,
+        }
     }
 
     fn build(self) -> ElectionSqlSet {
@@ -117,7 +120,7 @@ impl<'a> ElectionSqlFactory<'a> {
     // Currently the session timeout is longer than the leader lease time.
     // So the leader will renew the lease twice before the session timeout if everything goes well.
     fn set_idle_session_timeout_sql(&self) -> String {
-        format!("SET SESSION wait_timeout = {};", META_LEASE_SECS + 1)
+        format!("SET SESSION wait_timeout = {};", self.meta_lease_secs + 1)
     }
 
     fn set_lock_wait_timeout_sql(&self) -> &str {
@@ -315,6 +318,7 @@ pub struct MySqlElection {
     leader_watcher: broadcast::Sender<LeaderChangeMessage>,
     store_key_prefix: String,
     candidate_lease_ttl_secs: u64,
+    meta_lease_ttl_secs: u64,
     sql_set: ElectionSqlSet,
 }
 
@@ -324,9 +328,10 @@ impl MySqlElection {
         mut client: sqlx::MySqlConnection,
         store_key_prefix: String,
         candidate_lease_ttl_secs: u64,
+        meta_lease_ttl_secs: u64,
         table_name: &str,
     ) -> Result<ElectionRef> {
-        let sql_factory = ElectionSqlFactory::new(table_name);
+        let sql_factory = ElectionSqlFactory::new(table_name, meta_lease_ttl_secs);
         sqlx::query(&sql_factory.create_table_sql())
             .execute(&mut client)
             .await
@@ -365,6 +370,7 @@ impl MySqlElection {
             leader_watcher: tx,
             store_key_prefix,
             candidate_lease_ttl_secs,
+            meta_lease_ttl_secs,
             sql_set: sql_factory.build(),
         }))
     }
@@ -452,8 +458,14 @@ impl Election for MySqlElection {
                 }
             );
 
-            self.update_value_with_lease(&key, &lease.origin, &node_info, &mut executor)
-                .await?;
+            self.update_value_with_lease(
+                &key,
+                &lease.origin,
+                &node_info,
+                self.candidate_lease_ttl_secs,
+                &mut executor,
+            )
+            .await?;
             std::mem::drop(executor);
         }
     }
@@ -480,7 +492,7 @@ impl Election for MySqlElection {
 
     async fn campaign(&self) -> Result<()> {
         let mut keep_alive_interval =
-            tokio::time::interval(Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS));
+            tokio::time::interval(Duration::from_secs(self.meta_lease_ttl_secs / 2));
         keep_alive_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
             let _ = self.do_campaign().await;
@@ -588,6 +600,7 @@ impl MySqlElection {
         key: &str,
         prev: &str,
         updated: &str,
+        lease_ttl: u64,
         executor: &mut Executor<'_>,
     ) -> Result<()> {
         let key = key.as_bytes();
@@ -596,7 +609,7 @@ impl MySqlElection {
 
         let query = sqlx::query(&self.sql_set.update_value_with_lease)
             .bind(updated)
-            .bind(self.candidate_lease_ttl_secs as f64)
+            .bind(lease_ttl as f64)
             .bind(key)
             .bind(prev);
         let res = executor
@@ -713,8 +726,14 @@ impl MySqlElection {
     /// Renew the lease
     async fn renew_lease(&self, mut executor: Executor<'_>, lease: Lease) -> Result<()> {
         let key = self.election_key();
-        self.update_value_with_lease(&key, &lease.origin, &self.leader_value, &mut executor)
-            .await?;
+        self.update_value_with_lease(
+            &key,
+            &lease.origin,
+            &self.leader_value,
+            self.meta_lease_ttl_secs,
+            &mut executor,
+        )
+        .await?;
         executor.commit().await?;
         Ok(())
     }
@@ -773,7 +792,7 @@ impl MySqlElection {
             ..Default::default()
         };
         self.delete_value(&key, executor).await?;
-        self.put_value_with_lease(&key, &self.leader_value, META_LEASE_SECS, executor)
+        self.put_value_with_lease(&key, &self.leader_value, self.meta_lease_ttl_secs, executor)
             .await?;
 
         if self
@@ -886,7 +905,8 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix: uuid,
             candidate_lease_ttl_secs: 10,
-            sql_set: ElectionSqlFactory::new(table_name).build(),
+            meta_lease_ttl_secs: 1,
+            sql_set: ElectionSqlFactory::new(table_name, 1).build(),
         };
         let client = mysql_election.client.lock().await;
         let mut executor = Executor::Default(client);
@@ -904,7 +924,7 @@ mod tests {
         assert_eq!(lease.leader_value, value);
 
         mysql_election
-            .update_value_with_lease(&key, &lease.origin, &value, &mut executor)
+            .update_value_with_lease(&key, &lease.origin, &value, 10, &mut executor)
             .await
             .unwrap();
 
@@ -974,7 +994,8 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix,
             candidate_lease_ttl_secs,
-            sql_set: ElectionSqlFactory::new(&table_name).build(),
+            meta_lease_ttl_secs: 1,
+            sql_set: ElectionSqlFactory::new(&table_name, 1).build(),
         };
 
         let node_info = MetasrvNodeInfo {
@@ -989,7 +1010,7 @@ mod tests {
     #[tokio::test]
     async fn test_candidate_registration() {
         let leader_value_prefix = "test_leader".to_string();
-        let candidate_lease_ttl_secs = 5;
+        let candidate_lease_ttl_secs = 2;
         let uuid = uuid::Uuid::new_v4().to_string();
         let table_name = "test_candidate_registration_greptime_metakv";
         let mut handles = vec![];
@@ -1006,7 +1027,7 @@ mod tests {
             handles.push(handle);
         }
         // Wait for candidates to registrate themselves and renew their leases at least once.
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        tokio::time::sleep(Duration::from_secs(candidate_lease_ttl_secs + 1)).await;
 
         let (tx, _) = broadcast::channel(100);
         let leader_value = "test_leader".to_string();
@@ -1018,7 +1039,8 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix: uuid.clone(),
             candidate_lease_ttl_secs,
-            sql_set: ElectionSqlFactory::new(table_name).build(),
+            meta_lease_ttl_secs: 1,
+            sql_set: ElectionSqlFactory::new(table_name, 1).build(),
         };
 
         let candidates = mysql_election.all_candidates().await.unwrap();
@@ -1029,7 +1051,7 @@ mod tests {
         }
 
         // Wait for the candidate leases to expire.
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        tokio::time::sleep(Duration::from_secs(candidate_lease_ttl_secs + 1)).await;
         let candidates = mysql_election.all_candidates().await.unwrap();
         assert!(candidates.is_empty());
 
@@ -1073,7 +1095,7 @@ mod tests {
     #[tokio::test]
     async fn test_elected_and_step_down() {
         let leader_value = "test_leader".to_string();
-        let candidate_lease_ttl_secs = 5;
+        let candidate_lease_ttl_secs = 1;
         let uuid = uuid::Uuid::new_v4().to_string();
         let table_name = "test_elected_and_step_down_greptime_metakv";
         let client = create_mysql_client(Some(table_name)).await.unwrap();
@@ -1087,7 +1109,8 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix: uuid,
             candidate_lease_ttl_secs,
-            sql_set: ElectionSqlFactory::new(table_name).build(),
+            meta_lease_ttl_secs: 1,
+            sql_set: ElectionSqlFactory::new(table_name, 1).build(),
         };
 
         elected(&leader_mysql_election, table_name).await;
@@ -1158,6 +1181,7 @@ mod tests {
         let uuid = uuid::Uuid::new_v4().to_string();
         let table_name = "test_leader_action_greptime_metakv";
         let candidate_lease_ttl_secs = 5;
+        let meta_lease_ttl_secs = 1;
         let client = create_mysql_client(Some(table_name)).await.unwrap();
 
         let (tx, mut rx) = broadcast::channel(100);
@@ -1169,7 +1193,8 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix: uuid,
             candidate_lease_ttl_secs,
-            sql_set: ElectionSqlFactory::new(table_name).build(),
+            meta_lease_ttl_secs,
+            sql_set: ElectionSqlFactory::new(table_name, 1).build(),
         };
 
         // Step 1: No leader exists, campaign and elected.
@@ -1202,7 +1227,7 @@ mod tests {
         assert!(leader_mysql_election.is_leader());
 
         // Step 3: Something wrong, the leader lease expired.
-        tokio::time::sleep(Duration::from_secs(META_LEASE_SECS + 1)).await;
+        tokio::time::sleep(Duration::from_secs(meta_lease_ttl_secs + 1)).await;
         leader_mysql_election.do_campaign().await.unwrap();
         let lease = get_lease(&leader_mysql_election).await.unwrap();
         assert_eq!(lease.leader_value, leader_value);
@@ -1335,6 +1360,7 @@ mod tests {
     async fn test_follower_action() {
         common_telemetry::init_default_ut_logging();
         let candidate_lease_ttl_secs = 5;
+        let meta_lease_ttl_secs = 1;
         let uuid = uuid::Uuid::new_v4().to_string();
         let table_name = "test_follower_action_greptime_metakv";
 
@@ -1348,7 +1374,8 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix: uuid.clone(),
             candidate_lease_ttl_secs,
-            sql_set: ElectionSqlFactory::new(table_name).build(),
+            meta_lease_ttl_secs,
+            sql_set: ElectionSqlFactory::new(table_name, 1).build(),
         };
 
         let leader_client = create_mysql_client(Some(table_name)).await.unwrap();
@@ -1361,7 +1388,8 @@ mod tests {
             leader_watcher: tx,
             store_key_prefix: uuid,
             candidate_lease_ttl_secs,
-            sql_set: ElectionSqlFactory::new(table_name).build(),
+            meta_lease_ttl_secs,
+            sql_set: ElectionSqlFactory::new(table_name, 1).build(),
         };
 
         leader_mysql_election.do_campaign().await.unwrap();
@@ -1370,7 +1398,7 @@ mod tests {
         follower_mysql_election.do_campaign().await.unwrap();
 
         // Step 2: As a follower, the leader exists but the lease expired. Re-elect itself.
-        tokio::time::sleep(Duration::from_secs(META_LEASE_SECS + 1)).await;
+        tokio::time::sleep(Duration::from_secs(meta_lease_ttl_secs + 1)).await;
         follower_mysql_election.do_campaign().await.unwrap();
         assert!(follower_mysql_election.is_leader());
 
