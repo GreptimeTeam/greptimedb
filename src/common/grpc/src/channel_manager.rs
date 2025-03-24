@@ -265,6 +265,12 @@ pub struct ChannelConfig {
 
 impl Default for ChannelConfig {
     fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ChannelConfig {
+    pub const fn new() -> Self {
         Self {
             timeout: Some(Duration::from_secs(DEFAULT_GRPC_REQUEST_TIMEOUT_SECS)),
             connect_timeout: Some(Duration::from_secs(DEFAULT_GRPC_CONNECT_TIMEOUT_SECS)),
@@ -283,15 +289,9 @@ impl Default for ChannelConfig {
             max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
         }
     }
-}
-
-impl ChannelConfig {
-    pub fn new() -> Self {
-        Default::default()
-    }
 
     /// A timeout to each request.
-    pub fn timeout(mut self, timeout: Duration) -> Self {
+    pub const fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
         self
     }
@@ -299,26 +299,26 @@ impl ChannelConfig {
     /// A timeout to connecting to the uri.
     ///
     /// Defaults to no timeout.
-    pub fn connect_timeout(mut self, timeout: Duration) -> Self {
+    pub const fn connect_timeout(mut self, timeout: Duration) -> Self {
         self.connect_timeout = Some(timeout);
         self
     }
 
     /// A concurrency limit to each request.
-    pub fn concurrency_limit(mut self, limit: usize) -> Self {
+    pub const fn concurrency_limit(mut self, limit: usize) -> Self {
         self.concurrency_limit = Some(limit);
         self
     }
 
     /// A rate limit to each request.
-    pub fn rate_limit(mut self, limit: u64, duration: Duration) -> Self {
+    pub const fn rate_limit(mut self, limit: u64, duration: Duration) -> Self {
         self.rate_limit = Some((limit, duration));
         self
     }
 
     /// Sets the SETTINGS_INITIAL_WINDOW_SIZE option for HTTP2 stream-level flow control.
     /// Default is 65,535
-    pub fn initial_stream_window_size(mut self, size: u32) -> Self {
+    pub const fn initial_stream_window_size(mut self, size: u32) -> Self {
         self.initial_stream_window_size = Some(size);
         self
     }
@@ -326,31 +326,31 @@ impl ChannelConfig {
     /// Sets the max connection-level flow control for HTTP2
     ///
     /// Default is 65,535
-    pub fn initial_connection_window_size(mut self, size: u32) -> Self {
+    pub const fn initial_connection_window_size(mut self, size: u32) -> Self {
         self.initial_connection_window_size = Some(size);
         self
     }
 
     /// Set http2 KEEP_ALIVE_INTERVAL. Uses hyper’s default otherwise.
-    pub fn http2_keep_alive_interval(mut self, duration: Duration) -> Self {
+    pub const fn http2_keep_alive_interval(mut self, duration: Duration) -> Self {
         self.http2_keep_alive_interval = Some(duration);
         self
     }
 
     /// Set http2 KEEP_ALIVE_TIMEOUT. Uses hyper’s default otherwise.
-    pub fn http2_keep_alive_timeout(mut self, duration: Duration) -> Self {
+    pub const fn http2_keep_alive_timeout(mut self, duration: Duration) -> Self {
         self.http2_keep_alive_timeout = Some(duration);
         self
     }
 
     /// Set http2 KEEP_ALIVE_WHILE_IDLE. Uses hyper’s default otherwise.
-    pub fn http2_keep_alive_while_idle(mut self, enabled: bool) -> Self {
+    pub const fn http2_keep_alive_while_idle(mut self, enabled: bool) -> Self {
         self.http2_keep_alive_while_idle = Some(enabled);
         self
     }
 
     /// Sets whether to use an adaptive flow control. Uses hyper’s default otherwise.
-    pub fn http2_adaptive_window(mut self, enabled: bool) -> Self {
+    pub const fn http2_adaptive_window(mut self, enabled: bool) -> Self {
         self.http2_adaptive_window = Some(enabled);
         self
     }
@@ -361,7 +361,7 @@ impl ChannelConfig {
     /// will be the time to remain idle before sending TCP keepalive probes.
     ///
     /// Default is no keepalive (None)
-    pub fn tcp_keepalive(mut self, duration: Duration) -> Self {
+    pub const fn tcp_keepalive(mut self, duration: Duration) -> Self {
         self.tcp_keepalive = Some(duration);
         self
     }
@@ -369,7 +369,7 @@ impl ChannelConfig {
     /// Set the value of TCP_NODELAY option for accepted connections.
     ///
     /// Enabled by default.
-    pub fn tcp_nodelay(mut self, enabled: bool) -> Self {
+    pub const fn tcp_nodelay(mut self, enabled: bool) -> Self {
         self.tcp_nodelay = enabled;
         self
     }

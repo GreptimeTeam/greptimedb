@@ -26,12 +26,13 @@ use meta_client::client::MetaClient;
 use snafu::ResultExt;
 
 use crate::error::{ExternalSnafu, UnexpectedSnafu};
-use crate::recording_rules::engine::DEFAULT_RULE_ENGINE_QUERY_TIMEOUT;
+use crate::recording_rules::DEFAULT_RULE_ENGINE_QUERY_TIMEOUT;
 use crate::Error;
 
+const CHNL_CFG: ChannelConfig = ChannelConfig::new().timeout(DEFAULT_RULE_ENGINE_QUERY_TIMEOUT);
+
 fn default_channel_mgr() -> ChannelManager {
-    let cfg = ChannelConfig::new().timeout(DEFAULT_RULE_ENGINE_QUERY_TIMEOUT);
-    ChannelManager::with_config(cfg)
+    ChannelManager::with_config(CHNL_CFG)
 }
 
 fn client_from_urls(addrs: Vec<String>) -> Client {
@@ -121,14 +122,12 @@ impl FrontendClient {
         }
 
         let frontends = self.scan_for_frontend().await?;
-        let mut last_activity_ts = i64::MIN;
         let mut peer = None;
-        for (_key, val) in frontends.iter() {
-            if val.last_activity_ts > last_activity_ts {
-                last_activity_ts = val.last_activity_ts;
-                peer = Some(val.peer.clone());
-            }
+
+        if let Some((_, val)) = frontends.iter().max_by_key(|(_, val)| val.last_activity_ts) {
+            peer = Some(val.peer.clone());
         }
+
         let Some(peer) = peer else {
             UnexpectedSnafu {
                 reason: format!("No frontend available: {:?}", frontends),
