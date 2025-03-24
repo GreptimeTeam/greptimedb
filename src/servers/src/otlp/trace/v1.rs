@@ -12,8 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
+
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, RowInsertRequests, Value};
+use common_catalog::consts::TRACE_SERVICES_TABLE_NAME;
 use common_grpc::precision::Precision;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::tonic::common::v1::any_value::Value as OtlpValue;
@@ -56,15 +59,21 @@ pub fn v1_to_grpc_insert_requests(
     let spans = parse(request);
     let mut multi_table_writer = MultiTableData::default();
 
-    let one_table_writer = multi_table_writer.get_or_default_table_data(
-        table_name,
-        APPROXIMATE_COLUMN_COUNT,
-        spans.len(),
-    );
+    let mut trace_writer = TableData::new(APPROXIMATE_COLUMN_COUNT, spans.len());
+    let mut trace_services_writer = TableData::new(APPROXIMATE_COLUMN_COUNT, 1);
 
+    let mut services = HashSet::new();
     for span in spans {
-        write_span_to_row(one_table_writer, span)?;
+        if let Some(service_name) = span.service_name.clone() {
+            services.insert(service_name);
+        }
+        write_span_to_row(&mut trace_writer, span)?;
     }
+
+    write_trace_services_to_row(&mut trace_services_writer, services)?;
+
+    multi_table_writer.add_table_data(table_name, trace_writer);
+    multi_table_writer.add_table_data(TRACE_SERVICES_TABLE_NAME, trace_services_writer);
 
     Ok(multi_table_writer.into_row_insert_requests())
 }
@@ -146,6 +155,28 @@ pub fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> 
     row_writer::write_json(writer, "span_links", span.span_links.into(), &mut row)?;
 
     writer.add_row(row);
+
+    Ok(())
+}
+
+fn write_trace_services_to_row(writer: &mut TableData, services: HashSet<String>) -> Result<()> {
+    for service_name in services {
+        let mut row = writer.alloc_one_row();
+        // write zero timestamp
+        row_writer::write_ts_to_nanos(
+            writer,
+            TIMESTAMP_COLUMN,
+            Some(0),
+            Precision::Nanosecond,
+            &mut row,
+        )?;
+        row_writer::write_fields(
+            writer,
+            std::iter::once(make_string_column_data(SERVICE_NAME_COLUMN, service_name)),
+            &mut row,
+        )?;
+        writer.add_row(row);
+    }
 
     Ok(())
 }

@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
+use common_catalog::consts::TRACE_TABLE_NAME;
 use common_function::function::{Function, FunctionRef};
 use common_function::scalars::json::json_get::{
     JsonGetBool, JsonGetFloat, JsonGetInt, JsonGetString,
@@ -38,7 +39,7 @@ use servers::error::{
 use servers::http::jaeger::{QueryTraceParams, JAEGER_QUERY_TABLE_NAME_KEY};
 use servers::otlp::trace::{
     DURATION_NANO_COLUMN, SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN, SPAN_KIND_COLUMN,
-    SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, TIMESTAMP_COLUMN, TRACE_ID_COLUMN, TRACE_TABLE_NAME,
+    SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, TIMESTAMP_COLUMN, TRACE_ID_COLUMN,
 };
 use servers::query_handler::JaegerQueryHandler;
 use session::context::QueryContextRef;
@@ -60,7 +61,7 @@ impl JaegerQueryHandler for Instance {
             self.query_engine(),
             vec![col(SERVICE_NAME_COLUMN)],
             vec![],
-            Some(DEFAULT_LIMIT),
+            None,
             None,
             true,
         )
