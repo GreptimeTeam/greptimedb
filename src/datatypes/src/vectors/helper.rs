@@ -353,7 +353,7 @@ impl Helper {
                     .as_ref()
                     .as_any()
                     .downcast_ref::<DictionaryArray<Int32Type>>()
-                    .unwrap(); // Safety: the type is guared by match arm condition
+                    .unwrap(); // Safety: the type is guarded by match arm condition
                 Arc::new(DictionaryVector::new(
                     array.clone(),
                     ConcreteDataType::try_from(value.as_ref())?,
