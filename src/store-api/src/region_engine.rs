@@ -83,6 +83,7 @@ impl SetRegionRoleStateResponse {
 pub struct GrantedRegion {
     pub region_id: RegionId,
     pub region_role: RegionRole,
+    pub manifest_version: u64,
 }
 
 impl GrantedRegion {
@@ -90,6 +91,8 @@ impl GrantedRegion {
         Self {
             region_id,
             region_role,
+            // TODO(weny): use real manifest version
+            manifest_version: 0,
         }
     }
 }
@@ -99,6 +102,7 @@ impl From<GrantedRegion> for PbGrantedRegion {
         PbGrantedRegion {
             region_id: value.region_id.as_u64(),
             role: PbRegionRole::from(value.region_role).into(),
+            manifest_version: value.manifest_version,
         }
     }
 }
@@ -108,6 +112,7 @@ impl From<PbGrantedRegion> for GrantedRegion {
         GrantedRegion {
             region_id: RegionId::from_u64(value.region_id),
             region_role: value.role().into(),
+            manifest_version: value.manifest_version,
         }
     }
 }
