@@ -955,7 +955,7 @@ impl StreamContext {
             file: &'a FileHandle,
         }
 
-        impl<'a> fmt::Debug for FileWrapper<'a> {
+        impl fmt::Debug for FileWrapper<'_> {
             fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
                 write!(
                     f,
@@ -976,7 +976,7 @@ impl StreamContext {
             input: &'a ScanInput,
         }
 
-        impl<'a> fmt::Debug for InputWrapper<'a> {
+        impl fmt::Debug for InputWrapper<'_> {
             fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
                 let output_schema = self.input.mapper.output_schema();
                 if !output_schema.is_empty() {
