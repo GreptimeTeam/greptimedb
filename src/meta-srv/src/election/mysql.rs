@@ -1032,7 +1032,7 @@ mod tests {
             handles.push(handle);
         }
         // Wait for candidates to registrate themselves and renew their leases at least once.
-        tokio::time::sleep(Duration::from_secs(candidate_lease_ttl_secs + 1)).await;
+        tokio::time::sleep(Duration::from_secs(candidate_lease_ttl_secs / 2 + 1)).await;
 
         let (tx, _) = broadcast::channel(100);
         let leader_value = "test_leader".to_string();
