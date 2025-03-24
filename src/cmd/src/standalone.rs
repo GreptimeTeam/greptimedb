@@ -41,6 +41,7 @@ use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::NodeManagerRef;
 use common_meta::peer::Peer;
 use common_meta::region_keeper::MemoryRegionKeeper;
+use common_meta::region_registry::LeaderRegionRegistry;
 use common_meta::sequence::SequenceBuilder;
 use common_meta::wal_options_allocator::{build_wal_options_allocator, WalOptionsAllocatorRef};
 use common_procedure::{ProcedureInfo, ProcedureManagerRef};
@@ -662,6 +663,7 @@ impl StartCommand {
                     node_manager,
                     cache_invalidator,
                     memory_region_keeper: Arc::new(MemoryRegionKeeper::default()),
+                    leader_region_registry: Arc::new(LeaderRegionRegistry::default()),
                     table_metadata_manager,
                     table_metadata_allocator,
                     flow_metadata_manager,
@@ -779,6 +781,7 @@ impl InformationExtension for StandaloneInformationExtension {
                     manifest_size: region_stat.manifest_size,
                     sst_size: region_stat.sst_size,
                     index_size: region_stat.index_size,
+                    manifest_version: region_stat.manifest_version,
                 }
             })
             .collect::<Vec<_>>();

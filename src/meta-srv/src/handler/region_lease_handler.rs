@@ -56,7 +56,7 @@ impl HeartbeatHandler for RegionLeaseHandler {
     async fn handle(
         &self,
         req: &HeartbeatRequest,
-        _ctx: &mut Context,
+        ctx: &mut Context,
         acc: &mut HeartbeatAccumulator,
     ) -> Result<HandleControl> {
         let Some(stat) = acc.stat.as_ref() else {
@@ -73,15 +73,16 @@ impl HeartbeatHandler for RegionLeaseHandler {
             .region_lease_keeper
             .renew_region_leases(datanode_id, &regions)
             .await?;
+        let renewed_regions = renewed.keys().cloned();
+        let leader_regions = ctx.leader_region_registry.batch_get(renewed_regions);
 
         let renewed = renewed
             .into_iter()
             .map(|(region_id, region_role)| {
-                GrantedRegion {
-                    region_id,
-                    region_role,
-                }
-                .into()
+                let manifest_version = leader_regions
+                    .get(&region_id)
+                    .map_or(0, |leader_region| leader_region.manifest_version);
+                GrantedRegion::new(region_id, region_role, manifest_version).into()
             })
             .collect::<Vec<_>>();
 
@@ -139,6 +140,7 @@ mod test {
             manifest_size: 0,
             sst_size: 0,
             index_size: 0,
+            manifest_version: 0,
         }
     }
 
@@ -202,7 +204,10 @@ mod test {
 
         handler.handle(&req, ctx, acc).await.unwrap();
 
-        assert_region_lease(acc, vec![GrantedRegion::new(region_id, RegionRole::Leader)]);
+        assert_region_lease(
+            acc,
+            vec![GrantedRegion::new(region_id, RegionRole::Leader, 0)],
+        );
         assert_eq!(acc.inactive_region_ids, HashSet::from([another_region_id]));
         assert_eq!(
             acc.region_lease.as_ref().unwrap().closeable_region_ids,
@@ -229,7 +234,7 @@ mod test {
 
         assert_region_lease(
             acc,
-            vec![GrantedRegion::new(region_id, RegionRole::Follower)],
+            vec![GrantedRegion::new(region_id, RegionRole::Follower, 0)],
         );
         assert_eq!(acc.inactive_region_ids, HashSet::from([another_region_id]));
         assert_eq!(
@@ -264,8 +269,8 @@ mod test {
         assert_region_lease(
             acc,
             vec![
-                GrantedRegion::new(region_id, RegionRole::Follower),
-                GrantedRegion::new(opening_region_id, RegionRole::Follower),
+                GrantedRegion::new(region_id, RegionRole::Follower, 0),
+                GrantedRegion::new(opening_region_id, RegionRole::Follower, 0),
             ],
         );
         assert_eq!(acc.inactive_region_ids, HashSet::from([another_region_id]));
@@ -347,8 +352,8 @@ mod test {
         assert_region_lease(
             acc,
             vec![
-                GrantedRegion::new(region_id, RegionRole::DowngradingLeader),
-                GrantedRegion::new(another_region_id, RegionRole::Leader),
+                GrantedRegion::new(region_id, RegionRole::DowngradingLeader, 0),
+                GrantedRegion::new(another_region_id, RegionRole::Leader, 0),
             ],
         );
         assert_eq!(acc.inactive_region_ids, HashSet::from([no_exist_region_id]));

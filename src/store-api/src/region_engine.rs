@@ -83,13 +83,15 @@ impl SetRegionRoleStateResponse {
 pub struct GrantedRegion {
     pub region_id: RegionId,
     pub region_role: RegionRole,
+    pub manifest_version: u64,
 }
 
 impl GrantedRegion {
-    pub fn new(region_id: RegionId, region_role: RegionRole) -> Self {
+    pub fn new(region_id: RegionId, region_role: RegionRole, manifest_version: u64) -> Self {
         Self {
             region_id,
             region_role,
+            manifest_version,
         }
     }
 }
@@ -99,6 +101,7 @@ impl From<GrantedRegion> for PbGrantedRegion {
         PbGrantedRegion {
             region_id: value.region_id.as_u64(),
             role: PbRegionRole::from(value.region_role).into(),
+            manifest_version: value.manifest_version,
         }
     }
 }
@@ -108,6 +111,7 @@ impl From<PbGrantedRegion> for GrantedRegion {
         GrantedRegion {
             region_id: RegionId::from_u64(value.region_id),
             region_role: value.role().into(),
+            manifest_version: value.manifest_version,
         }
     }
 }
@@ -372,6 +376,9 @@ pub struct RegionStatistic {
     /// The size of SST index files in bytes.
     #[serde(default)]
     pub index_size: u64,
+    /// The version of manifest.
+    #[serde(default)]
+    pub manifest_version: u64,
 }
 
 impl RegionStatistic {
