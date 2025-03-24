@@ -917,7 +917,7 @@ impl StreamContext {
     }
 
     /// Format the context for explain.
-    pub(crate) fn format_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    pub(crate) fn format_for_explain(&self, verbose: bool, f: &mut fmt::Formatter) -> fmt::Result {
         let (mut num_mem_ranges, mut num_file_ranges) = (0, 0);
         for range_meta in &self.ranges {
             for idx in &range_meta.row_group_indices {
@@ -939,7 +939,76 @@ impl StreamContext {
         if let Some(selector) = &self.input.series_row_selector {
             write!(f, ", selector={}", selector)?;
         }
+        if let Some(distribution) = &self.input.distribution {
+            write!(f, ", distribution={}", distribution)?;
+        }
+
+        if verbose {
+            self.format_verbose_content(f)?;
+        }
+
         Ok(())
+    }
+
+    fn format_verbose_content(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        struct FileWrapper<'a> {
+            file: &'a FileHandle,
+        }
+
+        impl<'a> fmt::Debug for FileWrapper<'a> {
+            fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                write!(
+                    f,
+                    "[file={}, time_range=({}::{}, {}::{}), rows={}, size={}, index_size={}]",
+                    self.file.file_id(),
+                    self.file.time_range().0.value(),
+                    self.file.time_range().0.unit(),
+                    self.file.time_range().1.value(),
+                    self.file.time_range().1.unit(),
+                    self.file.num_rows(),
+                    self.file.size(),
+                    self.file.index_size()
+                )
+            }
+        }
+
+        struct InputWrapper<'a> {
+            input: &'a ScanInput,
+        }
+
+        impl<'a> fmt::Debug for InputWrapper<'a> {
+            fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                let output_schema = self.input.mapper.output_schema();
+                if !output_schema.is_empty() {
+                    write!(f, ", projection=")?;
+                    f.debug_list()
+                        .entries(output_schema.column_schemas().iter().map(|col| &col.name))
+                        .finish()?;
+                }
+                if let Some(predicate) = &self.input.predicate.predicate() {
+                    if !predicate.exprs().is_empty() {
+                        write!(f, ", filters=[")?;
+                        for (i, expr) in predicate.exprs().iter().enumerate() {
+                            if i == predicate.exprs().len() - 1 {
+                                write!(f, "{}]", expr)?;
+                            } else {
+                                write!(f, "{}, ", expr)?;
+                            }
+                        }
+                    }
+                }
+                if !self.input.files.is_empty() {
+                    write!(f, ", files=")?;
+                    f.debug_list()
+                        .entries(self.input.files.iter().map(|file| FileWrapper { file }))
+                        .finish()?;
+                }
+
+                Ok(())
+            }
+        }
+
+        write!(f, "{:?}", InputWrapper { input: &self.input })
     }
 }
 
