@@ -29,10 +29,9 @@ use crate::error::{ExternalSnafu, UnexpectedSnafu};
 use crate::recording_rules::DEFAULT_RULE_ENGINE_QUERY_TIMEOUT;
 use crate::Error;
 
-const CHNL_CFG: ChannelConfig = ChannelConfig::new().timeout(DEFAULT_RULE_ENGINE_QUERY_TIMEOUT);
-
 fn default_channel_mgr() -> ChannelManager {
-    ChannelManager::with_config(CHNL_CFG)
+    let cfg = ChannelConfig::new().timeout(DEFAULT_RULE_ENGINE_QUERY_TIMEOUT);
+    ChannelManager::with_config(cfg)
 }
 
 fn client_from_urls(addrs: Vec<String>) -> Client {
