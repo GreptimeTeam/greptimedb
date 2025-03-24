@@ -277,14 +277,14 @@ impl App for Instance {
             .await
             .context(error::StartFrontendSnafu)?;
 
-        self.flow_worker_manager
-            .clone()
-            .run_background(Some(self.flow_shutdown.subscribe()));
-
         self.frontend
             .start()
             .await
             .context(error::StartFrontendSnafu)?;
+
+        self.flow_worker_manager
+            .clone()
+            .run_background(Some(self.flow_shutdown.subscribe()));
 
         Ok(())
     }
