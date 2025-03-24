@@ -290,7 +290,7 @@ async fn dryrun_pipeline_inner(
 
     let results = run_pipeline(
         &pipeline_handler,
-        PipelineDefinition::Resolved(pipeline),
+        &PipelineDefinition::Resolved(pipeline),
         &params,
         pipeline::json_array_to_map(value).context(PipelineSnafu)?,
         "dry_run".to_owned(),
@@ -644,7 +644,7 @@ pub(crate) async fn ingest_logs_inner(
     for request in log_ingest_requests {
         let requests = run_pipeline(
             &state,
-            pipeline.clone(),
+            &pipeline,
             &pipeline_params,
             pipeline::json_array_to_map(request.values).context(PipelineSnafu)?,
             request.table,

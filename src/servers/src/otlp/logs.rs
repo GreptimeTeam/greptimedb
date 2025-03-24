@@ -76,7 +76,7 @@ pub async fn to_grpc_insert_requests(
 
             let inserts = run_pipeline(
                 &pipeline_handler,
-                pipeline_def,
+                &pipeline_def,
                 &pipeline_params,
                 array,
                 table_name,

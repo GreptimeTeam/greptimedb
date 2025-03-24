@@ -485,7 +485,7 @@ fn resolve_value(
 
 fn identity_pipeline_inner(
     array: Vec<PipelineMap>,
-    custom_ts: Option<IdentityTimeIndex>,
+    custom_ts: Option<&IdentityTimeIndex>,
 ) -> Result<(SchemaInfo, Vec<Row>)> {
     let mut rows = Vec::with_capacity(array.len());
     let mut schema_info = SchemaInfo::default();
@@ -493,11 +493,9 @@ fn identity_pipeline_inner(
     // set time index column schema first
     schema_info.schema.push(ColumnSchema {
         column_name: custom_ts
-            .as_ref()
             .map(|ts| ts.get_column_name().clone())
             .unwrap_or_else(|| DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string()),
         datatype: custom_ts
-            .as_ref()
             .map(|c| c.get_datatype())
             .unwrap_or(ColumnDataType::TimestampNanosecond) as i32,
         semantic_type: SemanticType::Timestamp as i32,
@@ -506,7 +504,7 @@ fn identity_pipeline_inner(
     });
 
     for values in array {
-        let row = values_to_row(&mut schema_info, values, custom_ts.as_ref())?;
+        let row = values_to_row(&mut schema_info, values, custom_ts)?;
         rows.push(row);
     }
 
@@ -533,7 +531,7 @@ pub fn identity_pipeline(
     array: Vec<PipelineMap>,
     table: Option<Arc<table::Table>>,
     params: &GreptimePipelineParams,
-    custom_ts: Option<IdentityTimeIndex>,
+    custom_ts: Option<&IdentityTimeIndex>,
 ) -> Result<Rows> {
     let input = if params.flatten_json_object() {
         array

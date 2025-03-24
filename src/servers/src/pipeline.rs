@@ -31,15 +31,15 @@ use crate::query_handler::PipelineHandlerRef;
 
 /// Never call this on `GreptimeIdentityPipeline` because it's a real pipeline
 pub async fn get_pipeline(
-    pipeline_def: PipelineDefinition,
+    pipeline_def: &PipelineDefinition,
     handler: &PipelineHandlerRef,
     query_ctx: &QueryContextRef,
 ) -> Result<Arc<Pipeline<GreptimeTransformer>>> {
     match pipeline_def {
-        PipelineDefinition::Resolved(pipeline) => Ok(pipeline),
+        PipelineDefinition::Resolved(pipeline) => Ok(pipeline.clone()),
         PipelineDefinition::ByNameAndValue((name, version)) => {
             handler
-                .get_pipeline(&name, version, query_ctx.clone())
+                .get_pipeline(name, *version, query_ctx.clone())
                 .await
         }
         _ => {
@@ -50,7 +50,7 @@ pub async fn get_pipeline(
 
 pub(crate) async fn run_pipeline(
     handler: &PipelineHandlerRef,
-    pipeline_definition: PipelineDefinition,
+    pipeline_definition: &PipelineDefinition,
     pipeline_parameters: &GreptimePipelineParams,
     data_array: Vec<PipelineMap>,
     table_name: String,
@@ -61,7 +61,7 @@ pub(crate) async fn run_pipeline(
         PipelineDefinition::GreptimeIdentityPipeline(custom_ts) => {
             run_identity_pipeline(
                 handler,
-                custom_ts,
+                custom_ts.as_ref(),
                 pipeline_parameters,
                 data_array,
                 table_name,
@@ -86,7 +86,7 @@ pub(crate) async fn run_pipeline(
 
 async fn run_identity_pipeline(
     handler: &PipelineHandlerRef,
-    custom_ts: Option<IdentityTimeIndex>,
+    custom_ts: Option<&IdentityTimeIndex>,
     pipeline_parameters: &GreptimePipelineParams,
     data_array: Vec<PipelineMap>,
     table_name: String,
@@ -108,7 +108,7 @@ async fn run_identity_pipeline(
 
 async fn run_custom_pipeline(
     handler: &PipelineHandlerRef,
-    pipeline_definition: PipelineDefinition,
+    pipeline_definition: &PipelineDefinition,
     pipeline_parameters: &GreptimePipelineParams,
     data_array: Vec<PipelineMap>,
     table_name: String,
@@ -173,9 +173,11 @@ async fn run_custom_pipeline(
             .unwrap_or(GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME);
 
         // run pipeline recursively.
+        let next_pipeline_def =
+            PipelineDefinition::from_name(next_pipeline_name, None, None).context(PipelineSnafu)?;
         let requests = Box::pin(run_pipeline(
             handler,
-            PipelineDefinition::from_name(next_pipeline_name, None, None).context(PipelineSnafu)?,
+            &next_pipeline_def,
             pipeline_parameters,
             coll,
             table_name,
