@@ -17,6 +17,7 @@
 //! It updates the manifest and applies the changes to the region in background.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 
 use common_telemetry::{info, warn};
 use store_api::logstore::LogStore;
@@ -29,6 +30,7 @@ use crate::manifest::action::{
     RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionTruncate,
 };
 use crate::metrics::WRITE_CACHE_INFLIGHT_DOWNLOAD;
+use crate::region::version::VersionBuilder;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{
     BackgroundNotify, OptionOutputTx, RegionChangeResult, RegionEditRequest, RegionEditResult,
@@ -134,30 +136,44 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
         };
 
-        let is_mutable_empty = region.version().memtables.mutable.is_empty();
-        let manifest_version = if !is_mutable_empty {
-            match self.reopen_region(&region, is_mutable_empty).await {
-                Ok(reopened) => reopened.manifest_ctx.manifest_version().await,
-                Err(e) => {
-                    let _ = sender.send(Err(e));
-                    return;
-                }
-            }
-        } else {
-            match region
-                .manifest_ctx
-                .install_manifest_to(request.manifest_version)
-                .await
-            {
-                Ok(manifest_version) => manifest_version,
-                Err(e) => {
-                    let _ = sender.send(Err(e));
-                    return;
-                }
+        let manifest = match region
+            .manifest_ctx
+            .install_manifest_to(request.manifest_version)
+            .await
+        {
+            Ok(manifest) => manifest,
+            Err(e) => {
+                let _ = sender.send(Err(e));
+                return;
             }
         };
+        let version = region.version();
+        if !version.memtables.mutable.is_empty() {
+            warn!(
+                "Region {} mutable memtables is not empty, which should not happen, manifest version: {}",
+                region.region_id, manifest.manifest_version
+            );
+        }
+        let region_options = version.options.clone();
+        let new_mutable = Arc::new(
+            region
+                .version()
+                .memtables
+                .mutable
+                .new_with_part_duration(version.compaction_time_window),
+        );
+        let metadata = manifest.metadata.clone();
+        let version = VersionBuilder::new(metadata, new_mutable)
+            .add_files(region.file_purger.clone(), manifest.files.values().cloned())
+            .flushed_entry_id(manifest.flushed_entry_id)
+            .flushed_sequence(manifest.flushed_sequence)
+            .truncated_entry_id(manifest.truncated_entry_id)
+            .compaction_time_window(manifest.compaction_time_window)
+            .options(region_options)
+            .build();
+        region.version_control.overwrite_current(Arc::new(version));
 
-        let _ = sender.send(Ok(manifest_version));
+        let _ = sender.send(Ok(manifest.manifest_version));
     }
 }
 

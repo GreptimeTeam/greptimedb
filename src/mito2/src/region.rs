@@ -38,7 +38,7 @@ use crate::error::{
     FlushableRegionStateSnafu, RegionFollowerStateSnafu, RegionLeaderStateSnafu,
     RegionNotFoundSnafu, RegionTruncatedSnafu, Result, UpdateManifestSnafu,
 };
-use crate::manifest::action::{RegionMetaAction, RegionMetaActionList};
+use crate::manifest::action::{RegionManifest, RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::RegionManifestManager;
 use crate::memtable::MemtableBuilderRef;
 use crate::region::version::{VersionControlRef, VersionRef};
@@ -360,18 +360,17 @@ impl ManifestContext {
 
     /// Installs the manifest changes from the current version to the target version (inclusive).
     ///
-    /// Returns installed version.
+    /// Returns installed [RegionManifest].
     /// **Note**: This function is not guaranteed to install the target version strictly.
     /// The installed version may be greater than the target version.
     pub(crate) async fn install_manifest_to(
         &self,
         version: ManifestVersion,
-    ) -> Result<ManifestVersion> {
-        self.manifest_manager
-            .write()
-            .await
-            .install_manifest_to(version)
-            .await
+    ) -> Result<Arc<RegionManifest>> {
+        let mut manager = self.manifest_manager.write().await;
+        manager.install_manifest_to(version).await?;
+
+        Ok(manager.manifest())
     }
 
     /// Updates the manifest if current state is `expect_state`.

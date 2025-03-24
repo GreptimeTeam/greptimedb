@@ -820,8 +820,8 @@ pub enum Error {
     #[snafu(display(
         "Failed to install manifest to {}, region: {}, available manifest version: {}, last version: {}",
         target_version,
-        available_version,
         region_id,
+        available_version,
         last_version
     ))]
     InstallManifestTo {

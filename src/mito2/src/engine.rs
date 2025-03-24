@@ -55,6 +55,8 @@ mod row_selector_test;
 #[cfg(test)]
 mod set_role_state_test;
 #[cfg(test)]
+mod sync_test;
+#[cfg(test)]
 mod truncate_test;
 
 use std::any::Any;
