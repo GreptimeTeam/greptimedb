@@ -79,15 +79,24 @@ pub fn transform_placeholders(stmt: Statement) -> Statement {
     }
 }
 
-/// Give placeholder in skip and limit `int64` data type if it is not specified
+/// Give placeholder that cast to certain type `data_type` the same data type as is cast to
 ///
-/// because it seems datafusion will not give data type to placeholder if it's in limit/skip position, still unknown if this is a feature or a bug. And if a placeholder expr have no data type, datafusion will fail to extract it using `LogicalPlan::get_parameter_types`
+/// because it seems datafusion will not give data type to placeholder if it need to be cast to certain type, still unknown if this is a feature or a bug. And if a placeholder expr have no data type, datafusion will fail to extract it using `LogicalPlan::get_parameter_types`
 pub fn fix_placeholder_types(plan: &mut LogicalPlan) -> Result<()> {
-    let give_placeholder_types = |mut e| {
-        if let datafusion_expr::Expr::Placeholder(ph) = &mut e {
-            if ph.data_type.is_none() {
-                ph.data_type = Some(arrow_schema::DataType::Int64);
-                Ok(Transformed::yes(e))
+    let give_placeholder_types = |mut e: datafusion_expr::Expr| {
+        if let datafusion_expr::Expr::Cast(cast) = &mut e {
+            if let datafusion_expr::Expr::Placeholder(ph) = &mut *cast.expr {
+                if ph.data_type.is_none() {
+                    ph.data_type = Some(cast.data_type.clone());
+                    common_telemetry::debug!(
+                        "give placeholder type {:?} to {:?}",
+                        cast.data_type,
+                        ph
+                    );
+                    Ok(Transformed::yes(e))
+                } else {
+                    Ok(Transformed::no(e))
+                }
             } else {
                 Ok(Transformed::no(e))
             }
@@ -95,26 +104,10 @@ pub fn fix_placeholder_types(plan: &mut LogicalPlan) -> Result<()> {
             Ok(Transformed::no(e))
         }
     };
+    let give_placeholder_types_recursively =
+        |e: datafusion_expr::Expr| e.transform(give_placeholder_types);
     *plan = std::mem::take(plan)
-        .transform(|p| {
-            let LogicalPlan::Limit(mut limit) = p else {
-                return Ok(Transformed::no(p));
-            };
-
-            if let Some(fetch) = &mut limit.fetch {
-                *fetch = Box::new(
-                    std::mem::take(fetch)
-                        .transform(give_placeholder_types)?
-                        .data,
-                );
-            }
-
-            if let Some(skip) = &mut limit.skip {
-                *skip = Box::new(std::mem::take(skip).transform(give_placeholder_types)?.data);
-            }
-
-            Ok(Transformed::yes(LogicalPlan::Limit(limit)))
-        })
+        .transform(|p| p.map_expressions(give_placeholder_types_recursively))
         .context(DataFusionSnafu)?
         .data;
     Ok(())

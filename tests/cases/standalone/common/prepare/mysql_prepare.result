@@ -13,16 +13,16 @@ affected_rows: 0
 -- SQLNESS PROTOCOL MYSQL
 EXECUTE stmt USING 1;
 
-+----------+
-| Int64(1) |
-+----------+
-| 1        |
-+----------+
++----+
+| $1 |
++----+
+| 1  |
++----+
 
 -- SQLNESS PROTOCOL MYSQL
 EXECUTE stmt USING 'a';
 
-Failed to parse query result, err: MySqlError { ERROR 1815 (HY000): (EngineExecuteQuery): Cast error: Cannot cast string 'a' to value of Int32 type }
+Failed to execute query, err: MySqlError { ERROR 1210 (HY000): (InvalidArguments): Invalid request parameter: Column  expect type: Int32(Int32Type), actual: String(StringType) }
 
 -- SQLNESS PROTOCOL MYSQL
 DEALLOCATE stmt;
@@ -59,11 +59,11 @@ affected_rows: 0
 -- SQLNESS PROTOCOL MYSQL
 EXECUTE stmt USING 1, 'hello';
 
-+----------+---------------+
-| Int64(1) | Utf8("hello") |
-+----------+---------------+
-| 1        | hello         |
-+----------+---------------+
++----+-------+
+| $1 | $2    |
++----+-------+
+| 1  | hello |
++----+-------+
 
 -- SQLNESS PROTOCOL MYSQL
 DEALLOCATE stmt;
