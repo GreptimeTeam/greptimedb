@@ -889,14 +889,14 @@ mod tests {
         let table_name = "test_mysql_crud_greptime_metakv";
         let client = create_mysql_client(Some(table_name)).await.unwrap();
 
-        let mut a = client.lock().await;
-        let txn = a.begin().await.unwrap();
-        let mut executor = Executor::Txn(txn);
-        let raw_query = format!("SELECT * FROM {} FOR UPDATE;", table_name);
-        let query = sqlx::query(&raw_query);
-        let _ = executor.query(query, &raw_query).await.unwrap();
-        std::mem::drop(executor);
-        std::mem::drop(a);
+        {
+            let mut a = client.lock().await;
+            let txn = a.begin().await.unwrap();
+            let mut executor = Executor::Txn(txn);
+            let raw_query = format!("SELECT * FROM {} FOR UPDATE;", table_name);
+            let query = sqlx::query(&raw_query);
+            let _ = executor.query(query, &raw_query).await.unwrap();
+        }
 
         let (tx, _) = broadcast::channel(100);
         let mysql_election = MySqlElection {
