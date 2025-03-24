@@ -147,7 +147,7 @@ impl FlowStateManager {
 }
 
 /// Flow's state report, send regularly through heartbeat message
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct FlowStat {
     /// For each key, the bytes of the state in memory
     pub state_size: BTreeMap<u32, usize>,

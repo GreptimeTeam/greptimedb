@@ -20,18 +20,23 @@ use api::v1::flow::{
 };
 use api::v1::region::InsertRequests;
 use common_error::ext::BoxedError;
-use common_meta::error::{ExternalSnafu, Result, UnexpectedSnafu};
 use common_meta::node_manager::Flownode;
-use common_telemetry::{debug, trace};
+use common_telemetry::{debug, info, trace};
 use datatypes::value::Value;
+use futures::TryStreamExt;
 use itertools::Itertools;
+use session::context::QueryContextBuilder;
 use snafu::{IntoError, OptionExt, ResultExt};
 use store_api::storage::RegionId;
 
 use crate::adapter::{CreateFlowArgs, FlowWorkerManager};
-use crate::error::{CreateFlowSnafu, InsertIntoFlowSnafu, InternalSnafu};
+use crate::error::{
+    CreateFlowSnafu, ExternalSnafu, FlowNotFoundSnafu, InsertIntoFlowSnafu, InternalSnafu,
+    ListFlowsSnafu, UnexpectedSnafu,
+};
 use crate::metrics::METRIC_FLOW_TASK_COUNT;
 use crate::repr::{self, DiffRow};
+use crate::Error;
 
 /// return a function to convert `crate::error::Error` to `common_meta::error::Error`
 fn to_meta_err(
@@ -47,7 +52,31 @@ fn to_meta_err(
 
 #[async_trait::async_trait]
 impl Flownode for FlowWorkerManager {
-    async fn handle(&self, request: FlowRequest) -> Result<FlowResponse> {
+    async fn handle(
+        &self,
+        request: FlowRequest,
+    ) -> Result<FlowResponse, common_meta::error::Error> {
+        self.handle_inner(request)
+            .await
+            .map_err(to_meta_err(snafu::location!()))
+    }
+
+    #[allow(unreachable_code, unused)]
+    async fn handle_inserts(
+        &self,
+        request: InsertRequests,
+    ) -> Result<FlowResponse, common_meta::error::Error> {
+        self.handle_inserts_inner(request)
+            .await
+            .map_err(to_meta_err(snafu::location!()))
+    }
+}
+
+impl FlowWorkerManager {
+    async fn handle_inner(
+        &self,
+        request: FlowRequest,
+    ) -> Result<FlowResponse, crate::error::Error> {
         let query_ctx = request
             .header
             .and_then(|h| h.query_context)
@@ -87,8 +116,7 @@ impl Flownode for FlowWorkerManager {
                     .create_flow(args)
                     .await
                     .map_err(BoxedError::new)
-                    .with_context(|_| CreateFlowSnafu { sql: sql.clone() })
-                    .map_err(to_meta_err(snafu::location!()))?;
+                    .with_context(|_| CreateFlowSnafu { sql: sql.clone() })?;
                 METRIC_FLOW_TASK_COUNT.inc();
                 Ok(FlowResponse {
                     affected_flows: ret
@@ -101,9 +129,7 @@ impl Flownode for FlowWorkerManager {
             Some(flow_request::Body::Drop(DropRequest {
                 flow_id: Some(flow_id),
             })) => {
-                self.remove_flow(flow_id.id as u64)
-                    .await
-                    .map_err(to_meta_err(snafu::location!()))?;
+                self.remove_flow(flow_id.id as u64).await?;
                 METRIC_FLOW_TASK_COUNT.dec();
                 Ok(Default::default())
             }
@@ -115,26 +141,17 @@ impl Flownode for FlowWorkerManager {
                 // lock to make sure writes before flush are written to flow
                 // and immediately drop to prevent following writes to be blocked
                 drop(self.flush_lock.write().await);
-                let flushed_input_rows = self
-                    .node_context
-                    .read()
-                    .await
-                    .flush_all_sender()
-                    .await
-                    .map_err(to_meta_err(snafu::location!()))?;
-                let rows_send = self
-                    .run_available(true)
-                    .await
-                    .map_err(to_meta_err(snafu::location!()))?;
-                let row = self
-                    .send_writeback_requests()
-                    .await
-                    .map_err(to_meta_err(snafu::location!()))?;
+                let flushed_input_rows = self.node_context.read().await.flush_all_sender().await?;
+                let rows_send = self.run_available(true).await?;
+                let row = self.send_writeback_requests().await?;
 
                 debug!(
-                    "Done to flush flow_id={:?} with {} input rows flushed, {} rows sended and {} output rows flushed",
-                    flow_id, flushed_input_rows, rows_send, row
-                );
+                "Done to flush flow_id={:?} with {} input rows flushed, {} rows sended and {} output rows flushed",
+                flow_id, flushed_input_rows, rows_send, row
+            );
+                if self.rule_engine.flow_exist(flow_id.id as u64).await {
+                    self.rule_engine.flush_flow(flow_id.id as u64).await?;
+                }
                 Ok(FlowResponse {
                     affected_flows: vec![flow_id],
                     affected_rows: row as u64,
@@ -142,17 +159,23 @@ impl Flownode for FlowWorkerManager {
                 })
             }
             None => UnexpectedSnafu {
-                err_msg: "Missing request body",
+                reason: "Missing request body",
             }
             .fail(),
             _ => UnexpectedSnafu {
-                err_msg: "Invalid request body.",
+                reason: "Invalid request body.",
             }
             .fail(),
         }
     }
 
-    async fn handle_inserts(&self, request: InsertRequests) -> Result<FlowResponse> {
+    #[allow(unreachable_code, unused)]
+    async fn handle_inserts_inner(
+        &self,
+        request: InsertRequests,
+    ) -> Result<FlowResponse, crate::error::Error> {
+        // TODO(discord9): make mirror request go to both engine
+        return self.rule_engine.handle_inserts(request).await;
         // using try_read to ensure two things:
         // 1. flush wouldn't happen until inserts before it is inserted
         // 2. inserts happening concurrently with flush wouldn't be block by flush
@@ -173,11 +196,7 @@ impl Flownode for FlowWorkerManager {
                 let ctx = self.node_context.read().await;
 
                 // TODO(discord9): also check schema version so that altered table can be reported
-                let table_schema = ctx
-                    .table_source
-                    .table_from_id(&table_id)
-                    .await
-                    .map_err(to_meta_err(snafu::location!()))?;
+                let table_schema = ctx.table_source.table_from_id(&table_id).await?;
                 let default_vals = table_schema
                     .default_values
                     .iter()
@@ -205,15 +224,15 @@ impl Flownode for FlowWorkerManager {
                     .collect_vec();
                 let table_col_names = table_schema.relation_desc.names;
                 let table_col_names = table_col_names
-                    .iter().enumerate()
-                    .map(|(idx,name)| match name {
-                        Some(name) => Ok(name.clone()),
-                        None => InternalSnafu {
-                            reason: format!("Expect column {idx} of table id={table_id} to have name in table schema, found None"),
-                        }
-                        .fail().map_err(BoxedError::new).context(ExternalSnafu),
-                    })
-                    .collect::<Result<Vec<_>>>()?;
+                        .iter().enumerate()
+                        .map(|(idx,name)| match name {
+                            Some(name) => Ok(name.clone()),
+                            None => InternalSnafu {
+                                reason: format!("Expect column {idx} of table id={table_id} to have name in table schema, found None"),
+                            }
+                            .fail().map_err(BoxedError::new).context(ExternalSnafu),
+                        })
+                        .collect::<Result<Vec<_>,_>>()?;
                 let name_to_col = HashMap::<_, _>::from_iter(
                     insert_schema
                         .iter()
@@ -231,7 +250,7 @@ impl Flownode for FlowWorkerManager {
                             .map(FetchFromRow::Idx)
                             .or_else(|| col_default_val.clone().map(FetchFromRow::Default))
                             .with_context(|| UnexpectedSnafu {
-                                err_msg: format!(
+                                reason: format!(
                                     "Column not found: {}, default_value: {:?}",
                                     col_name, col_default_val
                                 ),
@@ -273,11 +292,113 @@ impl Flownode for FlowWorkerManager {
                 }
                 .into_error(err);
                 common_telemetry::error!(err; "Failed to handle write request");
-                let err = to_meta_err(snafu::location!())(err);
                 return Err(err);
             }
         }
         Ok(Default::default())
+    }
+
+    /// recover all flow tasks in this flownode in distributed mode(nodeid is Some(<num>))
+    ///
+    /// or recover all existing flow tasks if in standalone mode(nodeid is None)
+    ///
+    /// TODO(discord9): persistent flow tasks with internal state
+    pub async fn recover_flows(&self) -> Result<usize, Error> {
+        let nodeid = self.node_id;
+        let to_be_recovered: Vec<_> = if let Some(nodeid) = nodeid {
+            let to_be_recover = self
+                .table_info_source
+                .flow_meta
+                .flownode_flow_manager()
+                .flows(nodeid.into())
+                .try_collect::<Vec<_>>()
+                .await
+                .context(ListFlowsSnafu {
+                    id: Some(nodeid.into()),
+                })?;
+            to_be_recover.into_iter().map(|(id, _)| id).collect()
+        } else {
+            let all_catalogs = self
+                .table_info_source
+                .table_meta
+                .catalog_manager()
+                .catalog_names()
+                .try_collect::<Vec<_>>()
+                .await
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?;
+            let mut all_flow_ids = vec![];
+            for catalog in all_catalogs {
+                let flows = self
+                    .table_info_source
+                    .flow_meta
+                    .flow_name_manager()
+                    .flow_names(&catalog)
+                    .await
+                    .try_collect::<Vec<_>>()
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)?;
+
+                all_flow_ids.extend(flows.into_iter().map(|(_, id)| id.flow_id()));
+            }
+            all_flow_ids
+        };
+        let mut cnt = 0;
+
+        // TODO(discord9): recover in parallel
+        for flow_id in to_be_recovered {
+            let info = self
+                .table_info_source
+                .flow_meta
+                .flow_info_manager()
+                .get(flow_id)
+                .await
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?
+                .context(FlowNotFoundSnafu { id: flow_id })?;
+
+            let sink_table_name = [
+                info.sink_table_name().catalog_name.clone(),
+                info.sink_table_name().schema_name.clone(),
+                info.sink_table_name().table_name.clone(),
+            ];
+            let args = CreateFlowArgs {
+                flow_id: flow_id as _,
+                sink_table_name,
+                source_table_ids: info.source_table_ids().to_vec(),
+                // because recover should only happen on restart the `create_if_not_exists` and `or_replace` can be arbitrary value(since flow doesn't exist)
+                // but for the sake of consistency and to make sure recover of flow actually happen, we set both to true
+                // (which is also fine since checks for not allow both to be true is on metasrv and we already pass that)
+                create_if_not_exists: true,
+                or_replace: true,
+                expire_after: info.expire_after(),
+                comment: Some(info.comment().clone()),
+                sql: info.raw_sql().clone(),
+                flow_options: info.options().clone(),
+                query_ctx: Some(
+                    QueryContextBuilder::default()
+                        .current_catalog(info.catalog_name().clone())
+                        .build(),
+                ),
+            };
+            if let Err(err) = self
+                .create_flow(args)
+                .await
+                .map_err(BoxedError::new)
+                .with_context(|_| CreateFlowSnafu {
+                    sql: info.raw_sql().clone(),
+                })
+            {
+                common_telemetry::error!(err; "Failed to create flow (flow_id = {flow_id}) on reboot")
+            } else {
+                cnt += 1;
+            }
+        }
+
+        info!("Recover {} flows", cnt);
+
+        Ok(cnt)
     }
 }
 
