@@ -51,7 +51,7 @@ struct Lease {
 
 struct ElectionSqlFactory<'a> {
     table_name: &'a str,
-    meta_lease_secs: u64,
+    meta_lease_ttl_secs: u64,
 }
 
 struct ElectionSqlSet {
@@ -99,10 +99,10 @@ struct ElectionSqlSet {
 }
 
 impl<'a> ElectionSqlFactory<'a> {
-    fn new(table_name: &'a str, meta_lease_secs: u64) -> Self {
+    fn new(table_name: &'a str, meta_lease_ttl_secs: u64) -> Self {
         Self {
             table_name,
-            meta_lease_secs,
+            meta_lease_ttl_secs,
         }
     }
 
@@ -120,7 +120,10 @@ impl<'a> ElectionSqlFactory<'a> {
     // Currently the session timeout is longer than the leader lease time.
     // So the leader will renew the lease twice before the session timeout if everything goes well.
     fn set_idle_session_timeout_sql(&self) -> String {
-        format!("SET SESSION wait_timeout = {};", self.meta_lease_secs + 1)
+        format!(
+            "SET SESSION wait_timeout = {};",
+            self.meta_lease_ttl_secs + 1
+        )
     }
 
     fn set_lock_wait_timeout_sql(&self) -> &str {
@@ -820,7 +823,7 @@ impl MySqlElection {
         match query.fetch_one(client).await {
             Ok(row) => {
                 let version: String = row.try_get(0).unwrap();
-                if !version.starts_with("8.0") || !version.starts_with("5.7") {
+                if !version.starts_with("8.0") && !version.starts_with("5.7") {
                     warn!(
                         "Unsupported MySQL version: {}, expected: [5.7, 8.0]",
                         version
