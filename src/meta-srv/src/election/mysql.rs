@@ -150,6 +150,8 @@ impl<'a> ElectionSqlFactory<'a> {
         "SELECT @@version;"
     }
 
+    /// Use `SELECT FOR UPDATE` to lock for compatibility with other MySQL-compatible databases
+    /// instead of directly using `GET_LOCK`.
     fn campaign_sql(&self) -> String {
         format!("SELECT * FROM `{}` FOR UPDATE;", self.table_name)
     }
