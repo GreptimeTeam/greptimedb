@@ -222,16 +222,25 @@ impl VectorOp for DictionaryVector {
         let keys = self.array.keys();
         let mut replicated_keys = Vec::with_capacity(offsets.len());
 
-        for &offset in offsets {
-            if offset < self.len() {
-                if keys.is_valid(offset) {
-                    replicated_keys.push(Some(keys.value(offset)));
+        let mut previous_offset = 0;
+        for (i, &offset) in offsets.iter().enumerate() {
+            let key = if i < self.len() {
+                if keys.is_valid(i) {
+                    Some(keys.value(i))
                 } else {
-                    replicated_keys.push(None);
+                    None
                 }
             } else {
-                replicated_keys.push(None);
+                None
+            };
+
+            // repeat this key (offset - previous_offset) times
+            let repeat_count = offset - previous_offset;
+            if repeat_count > 0 {
+                replicated_keys.resize(replicated_keys.len() + repeat_count, key);
             }
+
+            previous_offset = offset;
         }
 
         let new_keys = Int32Array::from(replicated_keys);
@@ -245,32 +254,8 @@ impl VectorOp for DictionaryVector {
         })
     }
 
-    fn find_unique(&self, selected: &mut common_base::BitVec, prev_vector: Option<&dyn Vector>) {
-        if let Some(prev) = prev_vector {
-            if let Some(prev_dict) = prev.as_any().downcast_ref::<DictionaryVector>() {
-                // If previous vector is also a dictionary, we can compare dictionary keys
-                for i in 0..self.len() {
-                    if i < prev_dict.len()
-                        && !self.is_null(i)
-                        && !prev_dict.is_null(i)
-                        && self.get_ref(i) == prev_dict.get_ref(i)
-                    {
-                        continue;
-                    }
-                    selected.set(i, true);
-                }
-            } else {
-                // If previous vector is of different type, mark all as unique
-                for i in 0..self.len() {
-                    selected.set(i, true);
-                }
-            }
-        } else {
-            // No previous vector, mark all as unique
-            for i in 0..self.len() {
-                selected.set(i, true);
-            }
-        }
+    fn find_unique(&self, _selected: &mut common_base::BitVec, _prev_vector: Option<&dyn Vector>) {
+        // Method is deprecated.
     }
 
     fn filter(&self, filter: &vectors::BooleanVector) -> Result<VectorRef> {

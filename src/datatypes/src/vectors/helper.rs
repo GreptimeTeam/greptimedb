@@ -20,7 +20,8 @@ use std::sync::Arc;
 use arrow::array::{Array, ArrayRef, StringArray};
 use arrow::compute;
 use arrow::compute::kernels::comparison;
-use arrow::datatypes::{DataType as ArrowDataType, TimeUnit};
+use arrow::datatypes::{DataType as ArrowDataType, Int32Type, TimeUnit};
+use arrow_array::DictionaryArray;
 use arrow_schema::IntervalUnit;
 use datafusion_common::ScalarValue;
 use snafu::{OptionExt, ResultExt};
@@ -31,7 +32,7 @@ use crate::prelude::DataType;
 use crate::scalars::{Scalar, ScalarVectorBuilder};
 use crate::value::{ListValue, ListValueRef, Value};
 use crate::vectors::{
-    BinaryVector, BooleanVector, ConstantVector, DateVector, Decimal128Vector,
+    BinaryVector, BooleanVector, ConstantVector, DateVector, Decimal128Vector, DictionaryVector,
     DurationMicrosecondVector, DurationMillisecondVector, DurationNanosecondVector,
     DurationSecondVector, Float32Vector, Float64Vector, Int16Vector, Int32Vector, Int64Vector,
     Int8Vector, IntervalDayTimeVector, IntervalMonthDayNanoVector, IntervalYearMonthVector,
@@ -346,6 +347,17 @@ impl Helper {
             },
             ArrowDataType::Decimal128(_, _) => {
                 Arc::new(Decimal128Vector::try_from_arrow_array(array)?)
+            }
+            ArrowDataType::Dictionary(key, value) if matches!(&**key, ArrowDataType::Int32) => {
+                let array = array
+                    .as_ref()
+                    .as_any()
+                    .downcast_ref::<DictionaryArray<Int32Type>>()
+                    .unwrap(); // Safety: the type is guared by match arm condition
+                Arc::new(DictionaryVector::new(
+                    array.clone(),
+                    ConcreteDataType::try_from(value.as_ref())?,
+                )?)
             }
             ArrowDataType::Float16
             | ArrowDataType::LargeList(_)
