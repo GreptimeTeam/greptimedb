@@ -14,8 +14,6 @@
 
 //! Handling catchup request.
 
-use std::sync::Arc;
-
 use common_telemetry::tracing::warn;
 use common_telemetry::{debug, info};
 use snafu::ensure;
@@ -26,7 +24,7 @@ use store_api::storage::RegionId;
 use tokio::time::Instant;
 
 use crate::error::{self, Result};
-use crate::region::opener::{replay_memtable, RegionOpener};
+use crate::region::opener::replay_memtable;
 use crate::worker::RegionWorkerLoop;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -49,30 +47,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         // Utilizes the short circuit evaluation.
         let region = if !is_mutable_empty || region.manifest_ctx.has_update().await? {
-            let manifest_version = region.manifest_ctx.manifest_version().await;
-            let flushed_entry_id = region.version_control.current().last_entry_id;
-            info!("Reopening the region: {region_id}, empty mutable: {is_mutable_empty}, manifest version: {manifest_version}, flushed entry id: {flushed_entry_id}");
-            let reopened_region = Arc::new(
-                RegionOpener::new(
-                    region_id,
-                    region.region_dir(),
-                    self.memtable_builder_provider.clone(),
-                    self.object_store_manager.clone(),
-                    self.purge_scheduler.clone(),
-                    self.puffin_manager_factory.clone(),
-                    self.intermediate_manager.clone(),
-                    self.time_provider.clone(),
-                )
-                .cache(Some(self.cache_manager.clone()))
-                .options(region.version().options.clone())?
-                .skip_wal_replay(true)
-                .open(&self.config, &self.wal)
-                .await?,
-            );
-            debug_assert!(!reopened_region.is_writable());
-            self.regions.insert_region(reopened_region.clone());
-
-            reopened_region
+            self.reopen_region(&region, is_mutable_empty).await?
         } else {
             region
         };

@@ -32,7 +32,7 @@ use crate::metrics::WRITE_CACHE_INFLIGHT_DOWNLOAD;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{
     BackgroundNotify, OptionOutputTx, RegionChangeResult, RegionEditRequest, RegionEditResult,
-    TruncateResult, WorkerRequest,
+    RegionSyncRequest, TruncateResult, WorkerRequest,
 };
 use crate::sst::location;
 use crate::worker::{RegionWorkerLoop, WorkerListener};
@@ -117,6 +117,47 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Handles the stalled requests.
         self.handle_region_stalled_requests(&change_result.region_id)
             .await;
+    }
+
+    /// Handles region sync request.
+    ///
+    /// Updates the manifest to at least the given version.
+    /// **Note**: The installed version may be greater than the given version.
+    pub(crate) async fn handle_region_sync(&mut self, request: RegionSyncRequest) {
+        let region_id = request.region_id;
+        let sender = request.sender;
+        let region = match self.regions.follower_region(region_id) {
+            Ok(region) => region,
+            Err(e) => {
+                let _ = sender.send(Err(e));
+                return;
+            }
+        };
+
+        let is_mutable_empty = region.version().memtables.mutable.is_empty();
+        let manifest_version = if !is_mutable_empty {
+            match self.reopen_region(&region, is_mutable_empty).await {
+                Ok(reopened) => reopened.manifest_ctx.manifest_version().await,
+                Err(e) => {
+                    let _ = sender.send(Err(e));
+                    return;
+                }
+            }
+        } else {
+            match region
+                .manifest_ctx
+                .install_manifest_to(request.manifest_version)
+                .await
+            {
+                Ok(manifest_version) => manifest_version,
+                Err(e) => {
+                    let _ = sender.send(Err(e));
+                    return;
+                }
+            }
+        };
+
+        let _ = sender.send(Ok(manifest_version));
     }
 }
 

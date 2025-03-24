@@ -519,6 +519,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Region {} is in {:?} state, expect: follower", region_id, state))]
+    RegionFollowerState {
+        region_id: RegionId,
+        state: RegionRoleState,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
         "Region {} is in {:?} state, expect: Leader or Leader(Downgrading)",
         region_id,
@@ -1125,7 +1133,9 @@ impl ErrorExt for Error {
             CompactRegion { source, .. } => source.status_code(),
             CompatReader { .. } => StatusCode::Unexpected,
             InvalidRegionRequest { source, .. } => source.status_code(),
-            RegionLeaderState { .. } | UpdateManifest { .. } => StatusCode::RegionNotReady,
+            RegionLeaderState { .. } | RegionFollowerState { .. } | UpdateManifest { .. } => {
+                StatusCode::RegionNotReady
+            }
             &FlushableRegionState { .. } => StatusCode::RegionNotReady,
             JsonOptions { .. } => StatusCode::InvalidArguments,
             EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,

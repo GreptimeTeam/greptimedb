@@ -35,8 +35,8 @@ use store_api::storage::RegionId;
 
 use crate::access_layer::AccessLayerRef;
 use crate::error::{
-    FlushableRegionStateSnafu, RegionLeaderStateSnafu, RegionNotFoundSnafu, RegionTruncatedSnafu,
-    Result, UpdateManifestSnafu,
+    FlushableRegionStateSnafu, RegionFollowerStateSnafu, RegionLeaderStateSnafu,
+    RegionNotFoundSnafu, RegionTruncatedSnafu, Result, UpdateManifestSnafu,
 };
 use crate::manifest::action::{RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::RegionManifestManager;
@@ -358,6 +358,22 @@ impl ManifestContext {
         self.manifest_manager.read().await.has_update().await
     }
 
+    /// Installs the manifest changes from the current version to the target version (inclusive).
+    ///
+    /// Returns installed version.
+    /// **Note**: This function is not guaranteed to install the target version strictly.
+    /// The installed version may be greater than the target version.
+    pub(crate) async fn install_manifest_to(
+        &self,
+        version: ManifestVersion,
+    ) -> Result<ManifestVersion> {
+        self.manifest_manager
+            .write()
+            .await
+            .install_manifest_to(version)
+            .await
+    }
+
     /// Updates the manifest if current state is `expect_state`.
     pub(crate) async fn update_manifest(
         &self,
@@ -595,6 +611,24 @@ impl RegionMap {
                 expect: RegionLeaderState::Writable,
             }
         );
+        Ok(region)
+    }
+
+    /// Gets readonly region by region id.
+    ///
+    /// Returns error if the region does not exist or is writable.
+    pub(crate) fn follower_region(&self, region_id: RegionId) -> Result<MitoRegionRef> {
+        let region = self
+            .get_region(region_id)
+            .context(RegionNotFoundSnafu { region_id })?;
+        ensure!(
+            region.is_follower(),
+            RegionFollowerStateSnafu {
+                region_id,
+                state: region.state(),
+            }
+        );
+
         Ok(region)
     }
 

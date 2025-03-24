@@ -31,6 +31,7 @@ use prost::Message;
 use smallvec::SmallVec;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::codec::{infer_primary_key_encoding_from_hint, PrimaryKeyEncoding};
+use store_api::manifest::ManifestVersion;
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{SetRegionRoleStateResponse, SettableRegionRoleState};
 use store_api::region_request::{
@@ -565,6 +566,9 @@ pub(crate) enum WorkerRequest {
 
     /// Use [RegionEdit] to edit a region directly.
     EditRegion(RegionEditRequest),
+
+    /// Keep the manifest of a region up to date.
+    SyncRegion(RegionSyncRequest),
 }
 
 impl WorkerRequest {
@@ -867,6 +871,19 @@ pub(crate) struct RegionEditResult {
     pub(crate) edit: RegionEdit,
     /// Result from the manifest manager.
     pub(crate) result: Result<()>,
+}
+
+#[derive(Debug)]
+pub(crate) struct RegionSyncRequest {
+    pub(crate) region_id: RegionId,
+    pub(crate) manifest_version: ManifestVersion,
+    pub(crate) sender: Sender<Result<ManifestVersion>>,
+}
+
+#[derive(Debug)]
+pub(crate) struct RegionSyncResult {
+    pub(crate) region_id: RegionId,
+    pub(crate) result: Result<ManifestVersion>,
 }
 
 #[cfg(test)]
