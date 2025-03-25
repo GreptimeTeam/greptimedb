@@ -28,7 +28,8 @@ use api::v1::{
 use catalog::CatalogManagerRef;
 use client::{OutputData, OutputMeta};
 use common_catalog::consts::{
-    default_engine, PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN, TRACE_ID_COLUMN, TRACE_TABLE_NAME,
+    default_engine, PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN, TRACE_ID_COLUMN,
+    TRACE_SERVICES_TABLE_NAME,
 };
 use common_grpc_expr::util::ColumnExpr;
 use common_meta::cache::TableFlownodeSetCacheRef;
@@ -574,7 +575,16 @@ impl Inserter {
                 // note that auto create table shouldn't be ttl instant table
                 // for it's a very unexpected behavior and should be set by user explicitly
                 for mut create_table in create_tables {
-                    if create_table.table_name == TRACE_TABLE_NAME {
+                    if create_table.table_name == TRACE_SERVICES_TABLE_NAME {
+                        let table = self
+                            .create_physical_table(create_table, None, ctx, statement_executor)
+                            .await?;
+                        let table_info = table.table_info();
+                        if table_info.is_ttl_instant_table() {
+                            instant_table_ids.insert(table_info.table_id());
+                        }
+                        table_infos.insert(table_info.table_id(), table.table_info());
+                    } else {
                         // prebuilt partition rules for uuid data: see the function
                         // for more information
                         let partitions = partition_rule_for_hexstring(TRACE_ID_COLUMN);
@@ -614,15 +624,6 @@ impl Inserter {
                                 ctx,
                                 statement_executor,
                             )
-                            .await?;
-                        let table_info = table.table_info();
-                        if table_info.is_ttl_instant_table() {
-                            instant_table_ids.insert(table_info.table_id());
-                        }
-                        table_infos.insert(table_info.table_id(), table.table_info());
-                    } else {
-                        let table = self
-                            .create_physical_table(create_table, None, ctx, statement_executor)
                             .await?;
                         let table_info = table.table_info();
                         if table_info.is_ttl_instant_table() {
