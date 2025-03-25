@@ -49,7 +49,7 @@ use table::table::adapter::DfTableProviderAdapter;
 
 use super::Instance;
 
-const DEFAULT_LIMIT: usize = 100;
+const DEFAULT_LIMIT: usize = 2000;
 
 #[async_trait]
 impl JaegerQueryHandler for Instance {
