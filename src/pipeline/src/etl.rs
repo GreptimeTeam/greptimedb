@@ -29,6 +29,7 @@ use crate::dispatcher::{Dispatcher, Rule};
 use crate::error::{
     IntermediateKeyIndexSnafu, PrepareValueMustBeObjectSnafu, Result, YamlLoadSnafu, YamlParseSnafu,
 };
+use crate::tablename::TableNameTemplate;
 use crate::GreptimeTransformer;
 
 const DESCRIPTION: &str = "description";
@@ -36,6 +37,7 @@ const PROCESSORS: &str = "processors";
 const TRANSFORM: &str = "transform";
 const TRANSFORMS: &str = "transforms";
 const DISPATCHER: &str = "dispatcher";
+const TABLENAME: &str = "tablename";
 
 pub type PipelineMap = std::collections::BTreeMap<String, Value>;
 
@@ -76,11 +78,18 @@ pub fn parse(input: &Content) -> Result<Pipeline> {
                 None
             };
 
+            let tablename = if !doc[TABLENAME].is_badvalue() {
+                Some(TableNameTemplate::try_from(&doc[TABLENAME])?)
+            } else {
+                None
+            };
+
             Ok(Pipeline {
                 description,
                 processors,
                 transformer,
                 dispatcher,
+                tablename,
             })
         }
         Content::Json(_) => unimplemented!(),
@@ -93,6 +102,7 @@ pub struct Pipeline {
     processors: processor::Processors,
     dispatcher: Option<Dispatcher>,
     transformer: GreptimeTransformer,
+    tablename: Option<TableNameTemplate>,
 }
 
 /// Where the pipeline executed is dispatched to, with context information

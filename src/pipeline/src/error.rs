@@ -639,6 +639,16 @@ pub enum Error {
         source: common_recordbatch::error::Error,
     },
 
+    #[snafu(display("A valid table name template is required for tablename section"))]
+    RequiredTableNameTemplate,
+
+    #[snafu(display("Invalid table name template, input: {}", input))]
+    InvalidTableNameTemplate {
+        input: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to cast type, msg: {}", msg))]
     CastType {
         msg: String,
@@ -807,7 +817,9 @@ impl ErrorExt for Error {
             | FieldRequiredForDispatcher
             | TableSuffixRequiredForDispatcherRule
             | ValueRequiredForDispatcherRule
-            | ReachedMaxNestedLevels { .. } => StatusCode::InvalidArguments,
+            | ReachedMaxNestedLevels { .. }
+            | RequiredTableNameTemplate
+            | InvalidTableNameTemplate { .. } => StatusCode::InvalidArguments,
         }
     }
 

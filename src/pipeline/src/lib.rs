@@ -17,6 +17,7 @@ pub mod error;
 mod etl;
 mod manager;
 mod metrics;
+mod tablename;
 
 pub use etl::processor::Processor;
 pub use etl::transform::transformer::greptime::{GreptimePipelineParams, SchemaInfo};
