@@ -57,8 +57,9 @@ pub struct NaiveEntry {
 }
 
 impl NaiveEntry {
+    /// Estimates the persisted size of the entry.
     fn estimated_size(&self) -> usize {
-        size_of::<Self>() + self.data.capacity() * size_of::<u8>()
+        size_of::<Self>() + self.data.len() * size_of::<u8>()
     }
 }
 
@@ -84,14 +85,15 @@ impl MultiplePartEntry {
             && self.headers.contains(&MultiplePartHeader::Last)
     }
 
+    /// Estimates the persisted size of the entry.
     fn estimated_size(&self) -> usize {
         size_of::<Self>()
             + self
                 .parts
                 .iter()
-                .map(|data| data.capacity() * size_of::<u8>())
+                .map(|data| data.len() * size_of::<u8>())
                 .sum::<usize>()
-            + self.headers.capacity() * size_of::<MultiplePartHeader>()
+            + self.headers.len() * size_of::<MultiplePartHeader>()
     }
 }
 
