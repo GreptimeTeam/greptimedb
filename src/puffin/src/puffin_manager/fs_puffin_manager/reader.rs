@@ -102,8 +102,7 @@ where
     }
 
     async fn blob(&self, key: &str) -> Result<BlobWithMetadata<Self::Blob>> {
-        let mut reader: <F as PuffinFileAccessor>::Reader =
-            self.puffin_file_accessor.reader(&self.handle).await?;
+        let mut reader = self.puffin_file_accessor.reader(&self.handle).await?;
         if let Some(file_size_hint) = self.file_size_hint {
             reader.with_file_size_hint(file_size_hint);
         }
