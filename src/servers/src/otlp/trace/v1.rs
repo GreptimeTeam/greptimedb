@@ -64,8 +64,11 @@ pub fn v1_to_grpc_insert_requests(
 
     let mut services = HashSet::new();
     for span in spans {
-        if let Some(service_name) = span.service_name.clone() {
-            services.insert(service_name);
+        if let Some(service_name) = &span.service_name {
+            // Only insert the service name if it's not already in the set.
+            if !services.contains(service_name) {
+                services.insert(service_name.clone());
+            }
         }
         write_span_to_row(&mut trace_writer, span)?;
     }
@@ -162,7 +165,7 @@ pub fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> 
 fn write_trace_services_to_row(writer: &mut TableData, services: HashSet<String>) -> Result<()> {
     for service_name in services {
         let mut row = writer.alloc_one_row();
-        // write zero timestamp
+        // Write the timestamp as 0.
         row_writer::write_ts_to_nanos(
             writer,
             TIMESTAMP_COLUMN,
@@ -170,6 +173,8 @@ fn write_trace_services_to_row(writer: &mut TableData, services: HashSet<String>
             Precision::Nanosecond,
             &mut row,
         )?;
+
+        // Write the `service_name` column.
         row_writer::write_fields(
             writer,
             std::iter::once(make_string_column_data(SERVICE_NAME_COLUMN, service_name)),
