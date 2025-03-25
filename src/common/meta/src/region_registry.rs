@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -64,12 +65,22 @@ impl LeaderRegionRegistry {
     pub fn batch_put(&self, key_values: Vec<(RegionId, LeaderRegion)>) {
         let mut inner = self.inner.write().unwrap();
         for (region_id, leader_region) in key_values {
-            if let Some(previous) = inner.insert(region_id, leader_region) {
-                if previous.manifest_version > leader_region.manifest_version {
-                    warn!(
-                        "The manifest version of region {} is decreased from {} to {}",
-                        region_id, previous.manifest_version, leader_region.manifest_version
-                    );
+            match inner.entry(region_id) {
+                Entry::Vacant(entry) => {
+                    entry.insert(leader_region);
+                }
+                Entry::Occupied(mut entry) => {
+                    let manifest_version = entry.get().manifest_version;
+                    if manifest_version > leader_region.manifest_version {
+                        warn!(
+                            "Received a leader region with a smaller manifest version than the existing one, ignore it. region: {}, existing_manifest_version: {}, new_manifest_version: {}",
+                            region_id,
+                            manifest_version,
+                            leader_region.manifest_version
+                        );
+                    } else {
+                        entry.insert(leader_region);
+                    }
                 }
             }
         }
