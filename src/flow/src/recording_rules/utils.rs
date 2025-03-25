@@ -27,11 +27,11 @@ use datafusion_common::tree_node::{
 };
 use datafusion_common::DataFusionError;
 use datafusion_expr::{Distinct, LogicalPlan};
+use datatypes::schema::RawSchema;
 use query::parser::QueryLanguageParser;
 use query::QueryEngineRef;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
-use table::metadata::RawTableMeta;
 
 use crate::adapter::AUTO_CREATED_PLACEHOLDER_TS_COL;
 use crate::df_optimizer::apply_df_optimizer;
@@ -163,14 +163,14 @@ impl TreeNodeVisitor<'_> for FindGroupByFinalName {
 /// Add to the final select columns like `update_at` and `__ts_placeholder` with values like `now()` and `0`
 #[derive(Debug)]
 pub struct AddAutoColumnRewriter {
-    pub sink_table_meta: RawTableMeta,
+    pub schema: RawSchema,
     pub is_rewritten: bool,
 }
 
 impl AddAutoColumnRewriter {
-    pub fn new(sink_table_meta: RawTableMeta) -> Self {
+    pub fn new(schema: RawSchema) -> Self {
         Self {
-            sink_table_meta,
+            schema,
             is_rewritten: false,
         }
     }
@@ -193,17 +193,17 @@ impl TreeNodeRewriter for AddAutoColumnRewriter {
 
         // add columns if have different column count
         let query_col_cnt = exprs.len();
-        let table_col_cnt = self.sink_table_meta.schema.column_schemas.len();
+        let table_col_cnt = self.schema.column_schemas.len();
         info!("query_col_cnt={query_col_cnt}, table_col_cnt={table_col_cnt}");
         if query_col_cnt == table_col_cnt {
             self.is_rewritten = true;
             return Ok(Transformed::no(node));
         } else if query_col_cnt + 1 == table_col_cnt {
-            let last_col_schema = self.sink_table_meta.schema.column_schemas.last().unwrap();
+            let last_col_schema = self.schema.column_schemas.last().unwrap();
 
             // if time index column is auto created add it
             if last_col_schema.name == AUTO_CREATED_PLACEHOLDER_TS_COL
-                && self.sink_table_meta.schema.timestamp_index == Some(table_col_cnt - 1)
+                && self.schema.timestamp_index == Some(table_col_cnt - 1)
             {
                 exprs.push(datafusion::logical_expr::lit(0));
             } else if last_col_schema.data_type.is_timestamp() {
@@ -217,20 +217,20 @@ impl TreeNodeRewriter for AddAutoColumnRewriter {
                 )));
             }
         } else if query_col_cnt + 2 == table_col_cnt {
-            let mut col_iter = self.sink_table_meta.schema.column_schemas.iter().rev();
+            let mut col_iter = self.schema.column_schemas.iter().rev();
             let last_col_schema = col_iter.next().unwrap();
             let second_last_col_schema = col_iter.next().unwrap();
             if second_last_col_schema.data_type.is_timestamp() {
                 exprs.push(datafusion::prelude::now());
             } else {
                 return Err(DataFusionError::Plan(format!(
-                    "Expect timestamp column, found {:?}",
-                    second_last_col_schema.data_type
+                    "Expect timestamp column, found {:?} at column {:?}",
+                    second_last_col_schema.data_type, second_last_col_schema.name
                 )));
             }
 
             if last_col_schema.name == AUTO_CREATED_PLACEHOLDER_TS_COL
-                && self.sink_table_meta.schema.timestamp_index == Some(table_col_cnt - 1)
+                && self.schema.timestamp_index == Some(table_col_cnt - 1)
             {
                 exprs.push(datafusion::logical_expr::lit(0));
             } else {
@@ -242,7 +242,7 @@ impl TreeNodeRewriter for AddAutoColumnRewriter {
         } else {
             return Err(DataFusionError::Plan(format!(
                     "Expect table have 0,1 or 2 columns more than query columns, found {} query columns {:?}, {} table columns {:?}",
-                    query_col_cnt, node.expressions(), table_col_cnt, self.sink_table_meta.schema.column_schemas
+                    query_col_cnt, node.expressions(), table_col_cnt, self.schema.column_schemas
                 )));
         }
 
@@ -297,6 +297,8 @@ impl TreeNodeRewriter for AddFilterRewriter {
 #[cfg(test)]
 mod test {
     use datafusion_common::tree_node::TreeNode as _;
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
     use pretty_assertions::assert_eq;
     use session::context::QueryContext;
 
@@ -324,7 +326,8 @@ mod test {
     async fn test_add_filter() {
         let testcases = vec![
             (
-                "SELECT number FROM numbers_with_ts GROUP BY number","SELECT numbers_with_ts.number FROM numbers_with_ts WHERE (number > 4) GROUP BY numbers_with_ts.number"
+                "SELECT number FROM numbers_with_ts GROUP BY number",
+                "SELECT numbers_with_ts.number FROM numbers_with_ts WHERE (number > 4) GROUP BY numbers_with_ts.number"
             ),
 
             (
@@ -373,15 +376,194 @@ mod test {
     }
 
     #[tokio::test]
+    async fn test_add_auto_column_rewriter() {
+        let testcases = vec![
+            // add update_at
+            (
+                "SELECT number FROM numbers_with_ts",
+                Ok("SELECT numbers_with_ts.number, now() FROM numbers_with_ts"),
+                vec![
+                    ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
+                    ColumnSchema::new(
+                        "ts",
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    )
+                    .with_time_index(true),
+                ],
+            ),
+            // add ts placeholder
+            (
+                "SELECT number FROM numbers_with_ts",
+                Ok("SELECT numbers_with_ts.number, 0 FROM numbers_with_ts"),
+                vec![
+                    ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
+                    ColumnSchema::new(
+                        AUTO_CREATED_PLACEHOLDER_TS_COL,
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    )
+                    .with_time_index(true),
+                ],
+            ),
+            // no modify
+            (
+                "SELECT number, ts FROM numbers_with_ts",
+                Ok("SELECT numbers_with_ts.number, numbers_with_ts.ts FROM numbers_with_ts"),
+                vec![
+                    ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
+                    ColumnSchema::new(
+                        "ts",
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    )
+                    .with_time_index(true),
+                ],
+            ),
+            // add update_at and ts placeholder
+            (
+                "SELECT number FROM numbers_with_ts",
+                Ok("SELECT numbers_with_ts.number, now(), 0 FROM numbers_with_ts"),
+                vec![
+                    ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
+                    ColumnSchema::new(
+                        "update_at",
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    ),
+                    ColumnSchema::new(
+                        AUTO_CREATED_PLACEHOLDER_TS_COL,
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    )
+                    .with_time_index(true),
+                ],
+            ),
+            // add ts placeholder
+            (
+                "SELECT number, ts FROM numbers_with_ts",
+                Ok("SELECT numbers_with_ts.number, numbers_with_ts.ts, 0 FROM numbers_with_ts"),
+                vec![
+                    ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
+                    ColumnSchema::new(
+                        "update_at",
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    ),
+                    ColumnSchema::new(
+                        AUTO_CREATED_PLACEHOLDER_TS_COL,
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    )
+                    .with_time_index(true),
+                ],
+            ),
+            // add update_at after time index column
+            (
+                "SELECT number, ts FROM numbers_with_ts",
+                Ok("SELECT numbers_with_ts.number, numbers_with_ts.ts, now() FROM numbers_with_ts"),
+                vec![
+                    ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
+                    ColumnSchema::new(
+                        "ts",
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    )
+                    .with_time_index(true),
+                    ColumnSchema::new(
+                        // name is irrelevant for update_at column
+                        "update_atat",
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    ),
+                ],
+            ),
+            // error datatype mismatch
+            (
+                "SELECT number, ts FROM numbers_with_ts",
+                Err("Expect timestamp"),
+                vec![
+                    ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
+                    ColumnSchema::new(
+                        "ts",
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    )
+                    .with_time_index(true),
+                    ColumnSchema::new(
+                        // name is irrelevant for update_at column
+                        "atat",
+                        ConcreteDataType::int8_datatype(),
+                        false,
+                    ),
+                ],
+            ),
+        ];
+
+        let query_engine = create_test_query_engine();
+        let ctx = QueryContext::arc();
+        for (before, after, column_schemas) in testcases {
+            let raw_schema = RawSchema::new(column_schemas);
+            let mut add_auto_column_rewriter = AddAutoColumnRewriter::new(raw_schema);
+
+            let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), before, false)
+                .await
+                .unwrap();
+            let new_sql = (|| {
+                let plan = plan
+                    .rewrite(&mut add_auto_column_rewriter)
+                    .map_err(|e| e.to_string())?
+                    .data;
+                df_plan_to_sql(&plan).map_err(|e| e.to_string())
+            })();
+            match (after, new_sql.clone()) {
+                (Ok(after), Ok(new_sql)) => assert_eq!(after, new_sql),
+                (Err(expected), Err(real_err_msg)) => assert!(
+                    real_err_msg.contains(expected),
+                    "expected: {expected}, real: {real_err_msg}"
+                ),
+                _ => panic!("expected: {:?}, real: {:?}", after, new_sql),
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn test_find_group_by_exprs() {
         let testcases = vec![
-            ("SELECT arrow_cast(date_bin(INTERVAL '1 MINS', numbers_with_ts.ts), 'Timestamp(Second, None)') AS ts FROM numbers_with_ts GROUP BY ts;", vec!["ts"])
+            (
+                "SELECT arrow_cast(date_bin(INTERVAL '1 MINS', numbers_with_ts.ts), 'Timestamp(Second, None)') AS ts FROM numbers_with_ts GROUP BY ts;", 
+                vec!["ts"]
+            ),
+            (
+                "SELECT number FROM numbers_with_ts GROUP BY number",
+                vec!["number"]
+            ),
+            (
+                "SELECT date_bin('5 minutes', ts) as time_window FROM numbers_with_ts GROUP BY time_window",
+                vec!["time_window"]
+            ),
+             // subquery
+            (
+                "SELECT number, time_window FROM (SELECT number, date_bin('5 minutes', ts) as time_window FROM numbers_with_ts GROUP BY time_window, number);", 
+                vec!["time_window", "number"]
+            ),
+            // complex subquery without alias
+            (
+                "SELECT sum(number), number, date_bin('5 minutes', ts) as time_window, bucket_name FROM (SELECT number, ts, case when number < 5 THEN 'bucket_0_5' when number >= 5 THEN 'bucket_5_inf' END as bucket_name FROM numbers_with_ts) GROUP BY number, time_window, bucket_name;",
+                vec!["number", "time_window", "bucket_name"]
+            ),
+            // complex subquery alias
+            (
+                "SELECT sum(number), number, date_bin('5 minutes', ts) as time_window, bucket_name FROM (SELECT number, ts, case when number < 5 THEN 'bucket_0_5' when number >= 5 THEN 'bucket_5_inf' END as bucket_name FROM numbers_with_ts) as cte GROUP BY number, time_window, bucket_name;",
+                vec!["number", "time_window", "bucket_name"]
+            )
         ];
 
         let query_engine = create_test_query_engine();
         let ctx = QueryContext::arc();
         for (sql, expected) in testcases {
-            let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), sql, true)
+            // need to be unoptimize for better readiability
+            let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), sql, false)
                 .await
                 .unwrap();
             let mut group_by_exprs = FindGroupByFinalName::default();
