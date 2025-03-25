@@ -24,6 +24,7 @@ mod util;
 use std::sync::Arc;
 
 use api::v1::meta::{ProcedureDetailResponse, Role};
+pub use ask_leader::AskLeader;
 use cluster::Client as ClusterClient;
 pub use cluster::ClusterKvBackend;
 use common_error::ext::BoxedError;
