@@ -116,14 +116,8 @@ impl QueryContextBuilder {
     }
 
     pub fn explain_options(mut self, explain_options: Option<ExplainOptions>) -> Self {
-        if self.mutable_query_context_data.is_none() {
-            self.mutable_query_context_data =
-                Some(Arc::new(RwLock::new(QueryContextMutableFields::default())));
-        }
-
         self.mutable_query_context_data
-            .as_mut()
-            .unwrap()
+            .get_or_insert_default()
             .write()
             .unwrap()
             .explain_options = explain_options;
