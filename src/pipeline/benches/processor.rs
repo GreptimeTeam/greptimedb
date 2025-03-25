@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use pipeline::{json_to_intermediate_state, parse, Content, GreptimeTransformer, Pipeline, Result};
+use pipeline::error::Result;
+use pipeline::{json_to_map, parse, Content, GreptimeTransformer, Pipeline};
 use serde_json::{Deserializer, Value};
 
 fn processor_mut(
@@ -23,7 +24,7 @@ fn processor_mut(
     let mut result = Vec::with_capacity(input_values.len());
 
     for v in input_values {
-        let mut payload = json_to_intermediate_state(v).unwrap();
+        let mut payload = json_to_map(v).unwrap();
         let r = pipeline
             .exec_mut(&mut payload)?
             .into_transformed()

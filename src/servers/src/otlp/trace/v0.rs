@@ -87,18 +87,14 @@ pub fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> 
         row_writer::write_tag(writer, SERVICE_NAME_COLUMN, service_name, &mut row)?;
     }
 
-    // tags
-    let iter = vec![
-        (TRACE_ID_COLUMN, span.trace_id),
-        (SPAN_ID_COLUMN, span.span_id),
-        (PARENT_SPAN_ID_COLUMN, span.parent_span_id),
-    ]
-    .into_iter()
-    .map(|(col, val)| (col.to_string(), val));
-    row_writer::write_tags(writer, iter, &mut row)?;
-
     // write fields
     let fields = vec![
+        make_string_column_data(TRACE_ID_COLUMN, span.trace_id),
+        make_string_column_data(SPAN_ID_COLUMN, span.span_id),
+        make_string_column_data(
+            PARENT_SPAN_ID_COLUMN,
+            span.parent_span_id.unwrap_or_default(),
+        ),
         make_string_column_data(SPAN_KIND_COLUMN, span.span_kind),
         make_string_column_data(SPAN_NAME_COLUMN, span.span_name),
         make_string_column_data("span_status_code", span.span_status_code),

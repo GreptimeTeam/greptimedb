@@ -258,13 +258,16 @@ impl RegionScanner for UnorderedScan {
 }
 
 impl DisplayAs for UnorderedScan {
-    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
             "UnorderedScan: region={}, ",
             self.stream_ctx.input.mapper.metadata().region_id
         )?;
-        self.stream_ctx.format_for_explain(f)
+        match t {
+            DisplayFormatType::Default => self.stream_ctx.format_for_explain(false, f),
+            DisplayFormatType::Verbose => self.stream_ctx.format_for_explain(true, f),
+        }
     }
 }
 

@@ -4782,7 +4782,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Current counts for stalled write requests by instance\n\nWrite stalls when memtable is full and pending for flush\n\n",
+      "description": "Ingestion size by row counts.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -4844,7 +4844,7 @@
         "x": 12,
         "y": 138
       },
-      "id": 221,
+      "id": 277,
       "options": {
         "legend": {
           "calcs": [],
@@ -4864,14 +4864,14 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum by(pod) (greptime_mito_write_stall_total{pod=~\"$datanode\"})",
+          "expr": "rate(greptime_mito_write_rows_total{pod=~\"$datanode\"}[$__rate_interval])",
           "instant": false,
           "legendFormat": "{{pod}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Write Stall per Instance",
+      "title": "Write Rows per Instance",
       "type": "timeseries"
     },
     {
@@ -4976,7 +4976,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Cache size by instance.\n",
+      "description": "Current counts for stalled write requests by instance\n\nWrite stalls when memtable is full and pending for flush\n\n",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -5028,7 +5028,7 @@
               }
             ]
           },
-          "unit": "decbytes"
+          "unit": "none"
         },
         "overrides": []
       },
@@ -5038,7 +5038,7 @@
         "x": 12,
         "y": 146
       },
-      "id": 229,
+      "id": 221,
       "options": {
         "legend": {
           "calcs": [],
@@ -5058,14 +5058,14 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "greptime_mito_cache_bytes{pod=~\"$datanode\"}",
+          "expr": "sum by(pod) (greptime_mito_write_stall_total{pod=~\"$datanode\"})",
           "instant": false,
-          "legendFormat": "{{pod}}-{{type}}",
+          "legendFormat": "{{pod}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Cached Bytes per Instance",
+      "title": "Write Stall per Instance",
       "type": "timeseries"
     },
     {
@@ -5172,7 +5172,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "P99 latency of each type of reads by instance",
+      "description": "Cache size by instance.\n",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -5224,7 +5224,7 @@
               }
             ]
           },
-          "unit": "s"
+          "unit": "decbytes"
         },
         "overrides": []
       },
@@ -5234,17 +5234,13 @@
         "x": 12,
         "y": 154
       },
-      "id": 228,
+      "id": 229,
       "options": {
         "legend": {
-          "calcs": [
-            "lastNotNull"
-          ],
+          "calcs": [],
           "displayMode": "table",
           "placement": "bottom",
-          "showLegend": true,
-          "sortBy": "Last *",
-          "sortDesc": true
+          "showLegend": true
         },
         "tooltip": {
           "mode": "single",
@@ -5258,14 +5254,14 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by(pod, le, stage) (rate(greptime_mito_read_stage_elapsed_bucket{pod=~\"$datanode\"}[$__rate_interval])))",
+          "expr": "greptime_mito_cache_bytes{pod=~\"$datanode\"}",
           "instant": false,
-          "legendFormat": "{{pod}}-{{stage}}-p99",
+          "legendFormat": "{{pod}}-{{type}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Read Stage P99 per Instance",
+      "title": "Cached Bytes per Instance",
       "type": "timeseries"
     },
     {
@@ -5317,7 +5313,8 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green"
+                "color": "green",
+                "value": null
               },
               {
                 "color": "red",
@@ -5370,7 +5367,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Latency of compaction task, at p99",
+      "description": "P99 latency of each type of reads by instance",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -5414,7 +5411,8 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green"
+                "color": "green",
+                "value": null
               },
               {
                 "color": "red",
@@ -5432,7 +5430,7 @@
         "x": 12,
         "y": 162
       },
-      "id": 230,
+      "id": 228,
       "options": {
         "legend": {
           "calcs": [
@@ -5440,7 +5438,9 @@
           ],
           "displayMode": "table",
           "placement": "bottom",
-          "showLegend": true
+          "showLegend": true,
+          "sortBy": "Last *",
+          "sortDesc": true
         },
         "tooltip": {
           "mode": "single",
@@ -5454,14 +5454,14 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by(pod, le) (rate(greptime_mito_compaction_total_elapsed_bucket{pod=~\"$datanode\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(pod, le, stage) (rate(greptime_mito_read_stage_elapsed_bucket{pod=~\"$datanode\"}[$__rate_interval])))",
           "instant": false,
-          "legendFormat": "[{{pod}}]-compaction-p99",
+          "legendFormat": "{{pod}}-{{stage}}-p99",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Compaction P99 per Instance",
+      "title": "Read Stage P99 per Instance",
       "type": "timeseries"
     },
     {
@@ -5570,7 +5570,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Compaction latency by stage",
+      "description": "Latency of compaction task, at p99",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -5632,7 +5632,7 @@
         "x": 12,
         "y": 170
       },
-      "id": 232,
+      "id": 230,
       "options": {
         "legend": {
           "calcs": [
@@ -5654,9 +5654,9 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by(pod, le, stage) (rate(greptime_mito_compaction_stage_elapsed_bucket{pod=~\"$datanode\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(pod, le) (rate(greptime_mito_compaction_total_elapsed_bucket{pod=~\"$datanode\"}[$__rate_interval])))",
           "instant": false,
-          "legendFormat": "{{pod}}-{{stage}}-p99",
+          "legendFormat": "[{{pod}}]-compaction-p99",
           "range": true,
           "refId": "A"
         }
@@ -5794,7 +5794,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Write-ahead log operations latency at p99",
+      "description": "Compaction latency by stage",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -5856,13 +5856,13 @@
         "x": 12,
         "y": 178
       },
-      "id": 269,
+      "id": 232,
       "options": {
         "legend": {
           "calcs": [
             "lastNotNull"
           ],
-          "displayMode": "list",
+          "displayMode": "table",
           "placement": "bottom",
           "showLegend": true
         },
@@ -5878,14 +5878,14 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by(le,logstore,optype,pod) (rate(greptime_logstore_op_elapsed_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by(pod, le, stage) (rate(greptime_mito_compaction_stage_elapsed_bucket{pod=~\"$datanode\"}[$__rate_interval])))",
           "instant": false,
-          "legendFormat": "{{pod}}-{{logstore}}-{{optype}}-p99",
+          "legendFormat": "{{pod}}-{{stage}}-p99",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Log Store op duration seconds",
+      "title": "Compaction P99 per Instance",
       "type": "timeseries"
     },
     {
@@ -5993,7 +5993,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Ongoing compaction task count",
+      "description": "Write-ahead log operations latency at p99",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -6045,7 +6045,7 @@
               }
             ]
           },
-          "unit": "none"
+          "unit": "s"
         },
         "overrides": []
       },
@@ -6055,13 +6055,13 @@
         "x": 12,
         "y": 186
       },
-      "id": 271,
+      "id": 269,
       "options": {
         "legend": {
           "calcs": [
             "lastNotNull"
           ],
-          "displayMode": "table",
+          "displayMode": "list",
           "placement": "bottom",
           "showLegend": true
         },
@@ -6078,14 +6078,14 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "greptime_mito_inflight_compaction_count",
+          "expr": "histogram_quantile(0.99, sum by(le,logstore,optype,pod) (rate(greptime_logstore_op_elapsed_bucket[$__rate_interval])))",
           "instant": false,
-          "legendFormat": "{{pod}}",
+          "legendFormat": "{{pod}}-{{logstore}}-{{optype}}-p99",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Inflight Compaction",
+      "title": "Log Store op duration seconds",
       "type": "timeseries"
     },
     {
@@ -6186,6 +6186,105 @@
         }
       ],
       "title": "Inflight Flush",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Ongoing compaction task count",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "points",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 194
+      },
+      "id": 271,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.1.3",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "greptime_mito_inflight_compaction_count",
+          "instant": false,
+          "legendFormat": "{{pod}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Inflight Compaction",
       "type": "timeseries"
     },
     {

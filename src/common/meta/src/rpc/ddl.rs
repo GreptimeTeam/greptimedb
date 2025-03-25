@@ -1240,6 +1240,7 @@ impl From<QueryContext> for PbQueryContext {
             extensions,
             channel: channel as u32,
             snapshot_seqs: None,
+            explain: None,
         }
     }
 }

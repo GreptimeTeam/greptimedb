@@ -17,8 +17,7 @@ use std::str::FromStr;
 
 use snafu::OptionExt;
 
-use super::error::{EmptyInputFieldSnafu, MissingInputFieldSnafu};
-use crate::etl::error::{Error, Result};
+use crate::error::{EmptyInputFieldSnafu, Error, MissingInputFieldSnafu, Result};
 
 /// Raw processor-defined inputs and outputs
 #[derive(Debug, Default, Clone)]

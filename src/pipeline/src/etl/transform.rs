@@ -17,7 +17,15 @@ pub mod transformer;
 
 use snafu::OptionExt;
 
-use crate::etl::error::{Error, Result};
+use super::field::Fields;
+use super::processor::{yaml_new_field, yaml_new_fields, yaml_string};
+use super::value::Timestamp;
+use super::PipelineMap;
+use crate::error::{
+    Error, KeyMustBeStringSnafu, Result, TransformElementMustBeMapSnafu,
+    TransformOnFailureInvalidValueSnafu, TransformTypeMustBeSetSnafu,
+};
+use crate::etl::processor::yaml_bool;
 use crate::etl::transform::index::Index;
 use crate::etl::value::Value;
 
@@ -25,19 +33,11 @@ const TRANSFORM_FIELD: &str = "field";
 const TRANSFORM_FIELDS: &str = "fields";
 const TRANSFORM_TYPE: &str = "type";
 const TRANSFORM_INDEX: &str = "index";
+const TRANSFORM_TAG: &str = "tag";
 const TRANSFORM_DEFAULT: &str = "default";
 const TRANSFORM_ON_FAILURE: &str = "on_failure";
 
 pub use transformer::greptime::GreptimeTransformer;
-
-use super::error::{
-    KeyMustBeStringSnafu, TransformElementMustBeMapSnafu, TransformOnFailureInvalidValueSnafu,
-    TransformTypeMustBeSetSnafu,
-};
-use super::field::Fields;
-use super::processor::{yaml_new_field, yaml_new_fields, yaml_string};
-use super::value::Timestamp;
-use super::PipelineMap;
 
 pub trait Transformer: std::fmt::Debug + Sized + Send + Sync + 'static {
     type Output;
@@ -144,6 +144,8 @@ pub struct Transform {
 
     pub index: Option<Index>,
 
+    pub tag: bool,
+
     pub on_failure: Option<OnFailure>,
 }
 
@@ -154,6 +156,7 @@ impl Default for Transform {
             type_: Value::Null,
             default: None,
             index: None,
+            tag: false,
             on_failure: None,
         }
     }
@@ -185,6 +188,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for Transform {
         let mut type_ = Value::Null;
         let mut default = None;
         let mut index = None;
+        let mut tag = false;
         let mut on_failure = None;
 
         for (k, v) in hash {
@@ -208,6 +212,10 @@ impl TryFrom<&yaml_rust::yaml::Hash> for Transform {
                 TRANSFORM_INDEX => {
                     let index_str = yaml_string(v, TRANSFORM_INDEX)?;
                     index = Some(index_str.try_into()?);
+                }
+
+                TRANSFORM_TAG => {
+                    tag = yaml_bool(v, TRANSFORM_TAG)?;
                 }
 
                 TRANSFORM_DEFAULT => {
@@ -247,6 +255,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for Transform {
             default: final_default,
             index,
             on_failure,
+            tag,
         };
 
         Ok(builder)

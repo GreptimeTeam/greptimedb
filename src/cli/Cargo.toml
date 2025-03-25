@@ -6,6 +6,7 @@ license.workspace = true
 
 [features]
 pg_kvbackend = ["common-meta/pg_kvbackend"]
+mysql_kvbackend = ["common-meta/mysql_kvbackend"]
 
 [lints]
 workspace = true
@@ -43,6 +44,10 @@ futures.workspace = true
 humantime.workspace = true
 meta-client.workspace = true
 nu-ansi-term = "0.46"
+opendal = { version = "0.51.1", features = [
+    "services-fs",
+    "services-s3",
+] }
 query.workspace = true
 rand.workspace = true
 reqwest.workspace = true

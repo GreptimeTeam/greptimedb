@@ -61,6 +61,7 @@ impl Default for WriteOptions {
 }
 
 /// Parquet SST info returned by the writer.
+#[derive(Debug)]
 pub struct SstInfo {
     /// SST file id.
     pub file_id: FileId,

@@ -238,6 +238,13 @@ jobs:
           version: ${{ needs.allocate-runners.outputs.version }}
           push-latest-tag: false # Don't push the latest tag to registry.
           dev-mode: true # Only build the standard images.
+          
+      - name: Echo Docker image tag to step summary
+        run: |
+          echo "## Docker Image Tag" >> $GITHUB_STEP_SUMMARY
+          echo "Image Tag: \`${{ needs.allocate-runners.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Full Image Name: \`docker.io/${{ vars.IMAGE_NAMESPACE }}/${{ vars.DEV_BUILD_IMAGE_NAME }}:${{ needs.allocate-runners.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Pull Command: \`docker pull docker.io/${{ vars.IMAGE_NAMESPACE }}/${{ vars.DEV_BUILD_IMAGE_NAME }}:${{ needs.allocate-runners.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
 
       - name: Set build result
         id: set-build-result

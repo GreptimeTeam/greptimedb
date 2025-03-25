@@ -42,6 +42,14 @@ use crate::worker::WorkerId;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("External error, context: {}", context))]
+    External {
+        source: BoxedError,
+        context: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to encode sparse primary key, reason: {}", reason))]
     EncodeSparsePrimaryKey {
         reason: String,
@@ -773,6 +781,50 @@ pub enum Error {
     #[snafu(display("checksum mismatch (actual: {}, expected: {})", actual, expected))]
     ChecksumMismatch { actual: u32, expected: u32 },
 
+    #[snafu(display(
+        "No checkpoint found, region: {}, last_version: {}",
+        region_id,
+        last_version
+    ))]
+    NoCheckpoint {
+        region_id: RegionId,
+        last_version: ManifestVersion,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "No manifests found in range: [{}..{}), region: {}, last_version: {}",
+        start_version,
+        end_version,
+        region_id,
+        last_version
+    ))]
+    NoManifests {
+        region_id: RegionId,
+        start_version: ManifestVersion,
+        end_version: ManifestVersion,
+        last_version: ManifestVersion,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Failed to install manifest to {}, region: {}, available manifest version: {}, last version: {}",
+        target_version,
+        available_version,
+        region_id,
+        last_version
+    ))]
+    InstallManifestTo {
+        region_id: RegionId,
+        target_version: ManifestVersion,
+        available_version: ManifestVersion,
+        #[snafu(implicit)]
+        location: Location,
+        last_version: ManifestVersion,
+    },
+
     #[snafu(display("Region {} is stopped", region_id))]
     RegionStopped {
         region_id: RegionId,
@@ -968,6 +1020,9 @@ pub enum Error {
 
     #[snafu(display("Manual compaction is override by following operations."))]
     ManualCompactionOverride {},
+
+    #[snafu(display("Incompatible WAL provider change. This is typically caused by changing WAL provider in database config file without completely cleaning existing files. Global provider: {}, region provider: {}", global, region))]
+    IncompatibleWalProviderChange { global: String, region: String },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -1008,7 +1063,10 @@ impl ErrorExt for Error {
             | OperateAbortedIndex { .. }
             | UnexpectedReplay { .. }
             | IndexEncodeNull { .. }
-            | UnexpectedImpureDefault { .. } => StatusCode::Unexpected,
+            | UnexpectedImpureDefault { .. }
+            | NoCheckpoint { .. }
+            | NoManifests { .. }
+            | InstallManifestTo { .. } => StatusCode::Unexpected,
             RegionNotFound { .. } => StatusCode::RegionNotFound,
             ObjectStoreNotFound { .. }
             | InvalidScanIndex { .. }
@@ -1087,6 +1145,8 @@ impl ErrorExt for Error {
             InvalidConfig { .. } => StatusCode::InvalidArguments,
             StaleLogEntry { .. } => StatusCode::Unexpected,
 
+            External { source, .. } => source.status_code(),
+
             FilterRecordBatch { source, .. } => source.status_code(),
 
             Download { .. } | Upload { .. } => StatusCode::StorageUnavailable,
@@ -1114,6 +1174,8 @@ impl ErrorExt for Error {
             }
 
             ManualCompactionOverride {} => StatusCode::Cancelled,
+
+            IncompatibleWalProviderChange { .. } => StatusCode::InvalidArguments,
         }
     }
 

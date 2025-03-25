@@ -36,26 +36,24 @@ use snafu::ResultExt;
 
 use crate::error::{self, Result, StartServerSnafu, TomlFormatSnafu};
 use crate::frontend::FrontendOptions;
-use crate::instance::FrontendInstance;
+use crate::instance::Instance;
 
-pub struct Services<T, U>
+pub struct Services<T>
 where
     T: Into<FrontendOptions> + Configurable + Clone,
-    U: FrontendInstance,
 {
     opts: T,
-    instance: Arc<U>,
+    instance: Arc<Instance>,
     grpc_server_builder: Option<GrpcServerBuilder>,
     http_server_builder: Option<HttpServerBuilder>,
     plugins: Plugins,
 }
 
-impl<T, U> Services<T, U>
+impl<T> Services<T>
 where
     T: Into<FrontendOptions> + Configurable + Clone,
-    U: FrontendInstance,
 {
-    pub fn new(opts: T, instance: Arc<U>, plugins: Plugins) -> Self {
+    pub fn new(opts: T, instance: Arc<Instance>, plugins: Plugins) -> Self {
         Self {
             opts,
             instance,

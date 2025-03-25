@@ -8,7 +8,7 @@ inputs:
     default: 2
     description: "Number of Datanode replicas"
   meta-replicas:
-    default: 1
+    default: 2
     description: "Number of Metasrv replicas"
   image-registry: 
     default: "docker.io"

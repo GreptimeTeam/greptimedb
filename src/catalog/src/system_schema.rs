@@ -77,7 +77,7 @@ trait SystemSchemaProviderInner {
     fn system_table(&self, name: &str) -> Option<SystemTableRef>;
 
     fn table_info(catalog_name: String, table: &SystemTableRef) -> TableInfoRef {
-        let table_meta = TableMetaBuilder::default()
+        let table_meta = TableMetaBuilder::empty()
             .schema(table.schema())
             .primary_key_indices(vec![])
             .next_column_id(0)

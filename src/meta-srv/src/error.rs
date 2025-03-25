@@ -343,6 +343,16 @@ pub enum Error {
         location: Location,
     },
 
+    #[cfg(feature = "mysql_kvbackend")]
+    #[snafu(display("Failed to parse mysql url: {}", mysql_url))]
+    ParseMySqlUrl {
+        #[snafu(source)]
+        error: sqlx::error::Error,
+        mysql_url: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to find table route for {table_id}"))]
     TableRouteNotFound {
         table_id: TableId,
@@ -729,6 +739,34 @@ pub enum Error {
         location: Location,
     },
 
+    #[cfg(feature = "mysql_kvbackend")]
+    #[snafu(display("Failed to execute via mysql, sql: {}", sql))]
+    MySqlExecution {
+        #[snafu(source)]
+        error: sqlx::Error,
+        #[snafu(implicit)]
+        location: Location,
+        sql: String,
+    },
+
+    #[cfg(feature = "mysql_kvbackend")]
+    #[snafu(display("Failed to create mysql pool"))]
+    CreateMySqlPool {
+        #[snafu(source)]
+        error: sqlx::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "mysql_kvbackend")]
+    #[snafu(display("Failed to connect to mysql"))]
+    ConnectMySql {
+        #[snafu(source)]
+        error: sqlx::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Handler not found: {}", name))]
     HandlerNotFound {
         name: String,
@@ -748,6 +786,41 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Logical table cannot add follower: {table_id}"))]
+    LogicalTableCannotAddFollower {
+        table_id: TableId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "A region follower cannot be placed on the same node as the leader: {region_id}, {peer_id}"
+    ))]
+    RegionFollowerLeaderConflict {
+        region_id: RegionId,
+        peer_id: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Multiple region followers cannot be placed on the same node: {region_id}, {peer_id}"
+    ))]
+    MultipleRegionFollowersOnSameNode {
+        region_id: RegionId,
+        peer_id: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Region follower not exists: {region_id}, {peer_id}"))]
+    RegionFollowerNotExists {
+        region_id: RegionId,
+        peer_id: u64,
+        #[snafu(implicit)]
+        location: Location,
     },
 }
 
@@ -818,6 +891,10 @@ impl ErrorExt for Error {
             | Error::ProcedureNotFound { .. }
             | Error::TooManyPartitions { .. }
             | Error::TomlFormat { .. }
+            | Error::LogicalTableCannotAddFollower { .. }
+            | Error::RegionFollowerLeaderConflict { .. }
+            | Error::MultipleRegionFollowersOnSameNode { .. }
+            | Error::RegionFollowerNotExists { .. }
             | Error::HandlerNotFound { .. } => StatusCode::InvalidArguments,
             Error::LeaseKeyFromUtf8 { .. }
             | Error::LeaseValueFromUtf8 { .. }
@@ -872,6 +949,11 @@ impl ErrorExt for Error {
             | Error::GetPostgresConnection { .. }
             | Error::PostgresExecution { .. }
             | Error::ConnectPostgres { .. } => StatusCode::Internal,
+            #[cfg(feature = "mysql_kvbackend")]
+            Error::MySqlExecution { .. }
+            | Error::CreateMySqlPool { .. }
+            | Error::ConnectMySql { .. }
+            | Error::ParseMySqlUrl { .. } => StatusCode::Internal,
         }
     }
 

@@ -2992,7 +2992,7 @@ mod test {
                 ));
             }
             let schema = Arc::new(Schema::new(columns));
-            let table_meta = TableMetaBuilder::default()
+            let table_meta = TableMetaBuilder::empty()
                 .schema(schema)
                 .primary_key_indices((0..num_tag).collect())
                 .value_indices((num_tag + 1..num_tag + 1 + num_field).collect())
@@ -3055,7 +3055,7 @@ mod test {
                 true,
             ));
             let schema = Arc::new(Schema::new(columns));
-            let table_meta = TableMetaBuilder::default()
+            let table_meta = TableMetaBuilder::empty()
                 .schema(schema)
                 .primary_key_indices((0..num_tag).collect())
                 .next_column_id(1024)
@@ -4031,7 +4031,7 @@ mod test {
             ),
         ];
         let schema = Arc::new(Schema::new(columns));
-        let table_meta = TableMetaBuilder::default()
+        let table_meta = TableMetaBuilder::empty()
             .schema(schema)
             .primary_key_indices(vec![0])
             .value_indices(vec![2])

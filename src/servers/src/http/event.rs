@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::io::BufRead;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 
 use api::v1::RowInsertRequests;
 use async_trait::async_trait;
+use axum::body::Bytes;
 use axum::extract::{FromRequest, Multipart, Path, Query, Request, State};
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, StatusCode};
@@ -30,9 +32,8 @@ use common_telemetry::{error, warn};
 use datatypes::value::column_data_to_json;
 use headers::ContentType;
 use lazy_static::lazy_static;
-use pipeline::error::PipelineTransformSnafu;
 use pipeline::util::to_pipeline_version;
-use pipeline::{GreptimePipelineParams, GreptimeTransformer, PipelineDefinition, PipelineVersion};
+use pipeline::{GreptimePipelineParams, GreptimeTransformer, PipelineDefinition};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Deserializer, Map, Value};
 use session::context::{Channel, QueryContext, QueryContextRef};
@@ -43,7 +44,7 @@ use crate::error::{
     Result, UnsupportedContentTypeSnafu,
 };
 use crate::http::header::constants::GREPTIME_PIPELINE_PARAMS_HEADER;
-use crate::http::header::CONTENT_TYPE_PROTOBUF_STR;
+use crate::http::header::{CONTENT_TYPE_NDJSON_STR, CONTENT_TYPE_PROTOBUF_STR};
 use crate::http::result::greptime_manage_resp::GreptimedbManageResponse;
 use crate::http::result::greptime_result_v1::GreptimedbV1Response;
 use crate::http::HttpResponse;
@@ -63,6 +64,8 @@ lazy_static! {
     pub static ref TEXT_UTF8_CONTENT_TYPE: ContentType = ContentType::text_utf8();
     pub static ref PB_CONTENT_TYPE: ContentType =
         ContentType::from_str(CONTENT_TYPE_PROTOBUF_STR).unwrap();
+    pub static ref NDJSON_CONTENT_TYPE: ContentType =
+        ContentType::from_str(CONTENT_TYPE_NDJSON_STR).unwrap();
 }
 
 /// LogIngesterQueryParams is used for query params of log ingester API.
@@ -83,6 +86,15 @@ pub struct LogIngesterQueryParams {
     /// The JSON field name of the log message. If not provided, it will take the whole log as the message.
     /// The field must be at the top level of the JSON structure.
     pub msg_field: Option<String>,
+    /// Specify a custom time index from the input data rather than server's arrival time.
+    /// Valid formats:
+    /// - <field_name>;epoch;<resolution>
+    /// - <field_name>;datestr;<format>
+    ///
+    /// If an error occurs while parsing the config, the error will be returned in the response.
+    /// If an error occurs while ingesting the data, the `ignore_errors` will be used to determine if the error should be ignored.
+    /// If so, use the current server's timestamp as the event time.
+    pub custom_time_index: Option<String>,
 }
 
 /// LogIngestRequest is the internal request for log ingestion. The raw log input can be transformed into multiple LogIngestRequests.
@@ -278,11 +290,9 @@ async fn dryrun_pipeline_inner(
 
     let results = run_pipeline(
         &pipeline_handler,
-        PipelineDefinition::Resolved(pipeline),
+        &PipelineDefinition::Resolved(pipeline),
         &params,
-        pipeline::json_array_to_intermediate_state(value)
-            .context(PipelineTransformSnafu)
-            .context(PipelineSnafu)?,
+        pipeline::json_array_to_map(value).context(PipelineSnafu)?,
         "dry_run".to_owned(),
         query_ctx,
         true,
@@ -387,8 +397,8 @@ pub struct PipelineDryrunParams {
 /// Check if the payload is valid json
 /// Check if the payload contains pipeline or pipeline_name and data
 /// Return Some if valid, None if invalid
-fn check_pipeline_dryrun_params_valid(payload: &str) -> Option<PipelineDryrunParams> {
-    match serde_json::from_str::<PipelineDryrunParams>(payload) {
+fn check_pipeline_dryrun_params_valid(payload: &Bytes) -> Option<PipelineDryrunParams> {
+    match serde_json::from_slice::<PipelineDryrunParams>(payload) {
         // payload with pipeline or pipeline_name and data is array
         Ok(params) if params.pipeline.is_some() || params.pipeline_name.is_some() => Some(params),
         // because of the pipeline_name or pipeline is required
@@ -430,7 +440,7 @@ pub async fn pipeline_dryrun(
     Query(query_params): Query<LogIngesterQueryParams>,
     Extension(mut query_ctx): Extension<QueryContext>,
     TypedHeader(content_type): TypedHeader<ContentType>,
-    payload: String,
+    payload: Bytes,
 ) -> Result<Response> {
     let handler = log_state.log_handler;
 
@@ -512,7 +522,7 @@ pub async fn log_ingester(
     Extension(mut query_ctx): Extension<QueryContext>,
     TypedHeader(content_type): TypedHeader<ContentType>,
     headers: HeaderMap,
-    payload: String,
+    payload: Bytes,
 ) -> Result<HttpResponse> {
     // validate source and payload
     let source = query_params.source.as_deref();
@@ -526,16 +536,22 @@ pub async fn log_ingester(
 
     let handler = log_state.log_handler;
 
-    let pipeline_name = query_params.pipeline_name.context(InvalidParameterSnafu {
-        reason: "pipeline_name is required",
-    })?;
     let table_name = query_params.table.context(InvalidParameterSnafu {
         reason: "table is required",
     })?;
 
-    let version = to_pipeline_version(query_params.version.as_deref()).context(PipelineSnafu)?;
-
     let ignore_errors = query_params.ignore_errors.unwrap_or(false);
+
+    let pipeline_name = query_params.pipeline_name.context(InvalidParameterSnafu {
+        reason: "pipeline_name is required",
+    })?;
+    let version = to_pipeline_version(query_params.version.as_deref()).context(PipelineSnafu)?;
+    let pipeline = PipelineDefinition::from_name(
+        &pipeline_name,
+        version,
+        query_params.custom_time_index.map(|s| (s, ignore_errors)),
+    )
+    .context(PipelineSnafu)?;
 
     let value = extract_pipeline_value_by_content_type(content_type, payload, ignore_errors)?;
 
@@ -549,8 +565,7 @@ pub async fn log_ingester(
 
     ingest_logs_inner(
         handler,
-        pipeline_name,
-        version,
+        pipeline,
         vec![LogIngestRequest {
             table: table_name,
             values: value,
@@ -563,17 +578,45 @@ pub async fn log_ingester(
 
 fn extract_pipeline_value_by_content_type(
     content_type: ContentType,
-    payload: String,
+    payload: Bytes,
     ignore_errors: bool,
 ) -> Result<Vec<Value>> {
     Ok(match content_type {
         ct if ct == *JSON_CONTENT_TYPE => transform_ndjson_array_factory(
-            Deserializer::from_str(&payload).into_iter(),
+            Deserializer::from_slice(&payload).into_iter(),
             ignore_errors,
         )?,
+        ct if ct == *NDJSON_CONTENT_TYPE => {
+            let mut result = Vec::with_capacity(1000);
+            for (index, line) in payload.lines().enumerate() {
+                let line = match line {
+                    Ok(line) if !line.is_empty() => line,
+                    Ok(_) => continue, // Skip empty lines
+                    Err(_) if ignore_errors => continue,
+                    Err(e) => {
+                        warn!(e; "invalid string at index: {}", index);
+                        return InvalidParameterSnafu {
+                            reason: format!("invalid line at index: {}", index),
+                        }
+                        .fail();
+                    }
+                };
+
+                if let Ok(v) = serde_json::from_str(&line) {
+                    result.push(v);
+                } else if !ignore_errors {
+                    warn!("invalid JSON at index: {}, content: {:?}", index, line);
+                    return InvalidParameterSnafu {
+                        reason: format!("invalid JSON at index: {}", index),
+                    }
+                    .fail();
+                }
+            }
+            result
+        }
         ct if ct == *TEXT_CONTENT_TYPE || ct == *TEXT_UTF8_CONTENT_TYPE => payload
             .lines()
-            .filter(|line| !line.is_empty())
+            .filter_map(|line| line.ok().filter(|line| !line.is_empty()))
             .map(|line| json!({"message": line}))
             .collect(),
         _ => UnsupportedContentTypeSnafu { content_type }.fail()?,
@@ -582,8 +625,7 @@ fn extract_pipeline_value_by_content_type(
 
 pub(crate) async fn ingest_logs_inner(
     state: PipelineHandlerRef,
-    pipeline_name: String,
-    version: PipelineVersion,
+    pipeline: PipelineDefinition,
     log_ingest_requests: Vec<LogIngestRequest>,
     query_ctx: QueryContextRef,
     headers: HeaderMap,
@@ -602,11 +644,9 @@ pub(crate) async fn ingest_logs_inner(
     for request in log_ingest_requests {
         let requests = run_pipeline(
             &state,
-            PipelineDefinition::from_name(&pipeline_name, version),
+            &pipeline,
             &pipeline_params,
-            pipeline::json_array_to_intermediate_state(request.values)
-                .context(PipelineTransformSnafu)
-                .context(PipelineSnafu)?,
+            pipeline::json_array_to_map(request.values).context(PipelineSnafu)?,
             request.table,
             &query_ctx,
             true,
@@ -652,7 +692,8 @@ pub(crate) async fn ingest_logs_inner(
 pub trait LogValidator: Send + Sync {
     /// validate payload by source before processing
     /// Return a `Some` result to indicate validation failure.
-    async fn validate(&self, source: Option<&str>, payload: &str) -> Option<Result<HttpResponse>>;
+    async fn validate(&self, source: Option<&str>, payload: &Bytes)
+        -> Option<Result<HttpResponse>>;
 }
 
 pub type LogValidatorRef = Arc<dyn LogValidator + 'static>;
@@ -698,5 +739,29 @@ mod tests {
         )
         .to_string();
         assert_eq!(a, "[{\"a\":1},{\"b\":2}]");
+    }
+
+    #[test]
+    fn test_extract_by_content() {
+        let payload = r#"
+        {"a": 1}
+        {"b": 2"}
+        {"c": 1}
+"#
+        .as_bytes();
+        let payload = Bytes::from_static(payload);
+
+        let fail_rest =
+            extract_pipeline_value_by_content_type(ContentType::json(), payload.clone(), true);
+        assert!(fail_rest.is_ok());
+        assert_eq!(fail_rest.unwrap(), vec![json!({"a": 1})]);
+
+        let fail_only_wrong =
+            extract_pipeline_value_by_content_type(NDJSON_CONTENT_TYPE.clone(), payload, true);
+        assert!(fail_only_wrong.is_ok());
+        assert_eq!(
+            fail_only_wrong.unwrap(),
+            vec![json!({"a": 1}), json!({"c": 1})]
+        );
     }
 }

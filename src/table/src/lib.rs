@@ -24,6 +24,7 @@ pub mod stats;
 pub mod table;
 pub mod table_name;
 pub mod table_reference;
+#[cfg(any(test, feature = "testing"))]
 pub mod test_util;
 
 pub use crate::error::{Error, Result};
