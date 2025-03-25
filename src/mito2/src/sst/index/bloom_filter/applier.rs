@@ -14,7 +14,7 @@
 
 mod builder;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -22,6 +22,7 @@ use common_base::range_read::RangeReader;
 use common_telemetry::warn;
 use index::bloom_filter::applier::BloomFilterApplier;
 use index::bloom_filter::reader::{BloomFilterReader, BloomFilterReaderImpl};
+use index::Bytes;
 use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use puffin::puffin_manager::{BlobGuard, PuffinManager, PuffinReader};
@@ -40,7 +41,6 @@ use crate::error::{
 use crate::metrics::INDEX_APPLY_ELAPSED;
 use crate::sst::file::FileId;
 pub use crate::sst::index::bloom_filter::applier::builder::BloomFilterIndexApplierBuilder;
-use crate::sst::index::bloom_filter::applier::builder::Predicate;
 use crate::sst::index::bloom_filter::INDEX_BLOB_TYPE;
 use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory};
 use crate::sst::index::TYPE_BLOOM_FILTER_INDEX;
@@ -70,18 +70,21 @@ pub struct BloomFilterIndexApplier {
     /// Cache for bloom filter index.
     bloom_filter_index_cache: Option<BloomFilterIndexCacheRef>,
 
-    /// Bloom filter predicates.
-    filters: HashMap<ColumnId, Vec<Predicate>>,
+    /// Bloom filter probes.
+    /// For each column, the value will be retained only if it contains __all__ probes.
+    probes: HashMap<ColumnId, HashSet<Bytes>>,
 }
 
 impl BloomFilterIndexApplier {
     /// Creates a new `BloomFilterIndexApplier`.
+    ///
+    /// For each column, the value will be retained only if it contains __all__ probes.
     pub fn new(
         region_dir: String,
         region_id: RegionId,
         object_store: ObjectStore,
         puffin_manager_factory: PuffinManagerFactory,
-        filters: HashMap<ColumnId, Vec<Predicate>>,
+        probes: HashMap<ColumnId, HashSet<Bytes>>,
     ) -> Self {
         Self {
             region_dir,
@@ -91,7 +94,7 @@ impl BloomFilterIndexApplier {
             puffin_manager_factory,
             puffin_metadata_cache: None,
             bloom_filter_index_cache: None,
-            filters,
+            probes,
         }
     }
 
@@ -148,7 +151,7 @@ impl BloomFilterIndexApplier {
             .map(|(i, range)| (*i, vec![range.clone()]))
             .collect::<Vec<_>>();
 
-        for (column_id, predicates) in &self.filters {
+        for (column_id, probes) in &self.probes {
             let blob = match self
                 .blob_reader(file_id, *column_id, file_size_hint)
                 .await?
@@ -167,12 +170,12 @@ impl BloomFilterIndexApplier {
                     BloomFilterReaderImpl::new(blob),
                     bloom_filter_cache.clone(),
                 );
-                self.apply_filters(reader, predicates, &input, &mut output)
+                self.apply_probes(reader, probes, &mut output)
                     .await
                     .context(ApplyBloomFilterIndexSnafu)?;
             } else {
                 let reader = BloomFilterReaderImpl::new(blob);
-                self.apply_filters(reader, predicates, &input, &mut output)
+                self.apply_probes(reader, probes, &mut output)
                     .await
                     .context(ApplyBloomFilterIndexSnafu)?;
             }
@@ -298,72 +301,25 @@ impl BloomFilterIndexApplier {
             .context(PuffinBuildReaderSnafu)
     }
 
-    async fn apply_filters<R: BloomFilterReader + Send + 'static>(
+    async fn apply_probes<R: BloomFilterReader + Send + 'static>(
         &self,
         reader: R,
-        predicates: &[Predicate],
-        input: &[(usize, Range<usize>)],
+        probes: &HashSet<Bytes>,
         output: &mut [(usize, Vec<Range<usize>>)],
     ) -> std::result::Result<(), index::bloom_filter::error::Error> {
         let mut applier = BloomFilterApplier::new(Box::new(reader)).await?;
 
-        for ((_, r), (_, output)) in input.iter().zip(output.iter_mut()) {
+        for (_, output) in output.iter_mut() {
             // All rows are filtered out, skip the search
             if output.is_empty() {
                 continue;
             }
 
-            for predicate in predicates {
-                match predicate {
-                    Predicate::InList(in_list) => {
-                        let res = applier.search(&in_list.list, r.clone()).await?;
-                        if res.is_empty() {
-                            output.clear();
-                            break;
-                        }
-
-                        *output = intersect_ranges(output, &res);
-                        if output.is_empty() {
-                            break;
-                        }
-                    }
-                }
-            }
+            *output = applier.search(probes, output).await?;
         }
 
         Ok(())
     }
-}
-
-/// Intersects two lists of ranges and returns the intersection.
-///
-/// The input lists are assumed to be sorted and non-overlapping.
-fn intersect_ranges(lhs: &[Range<usize>], rhs: &[Range<usize>]) -> Vec<Range<usize>> {
-    let mut i = 0;
-    let mut j = 0;
-
-    let mut output = Vec::new();
-    while i < lhs.len() && j < rhs.len() {
-        let r1 = &lhs[i];
-        let r2 = &rhs[j];
-
-        // Find intersection if exists
-        let start = r1.start.max(r2.start);
-        let end = r1.end.min(r2.end);
-
-        if start < end {
-            output.push(start..end);
-        }
-
-        // Move forward the range that ends first
-        if r1.end < r2.end {
-            i += 1;
-        } else {
-            j += 1;
-        }
-    }
-
-    output
 }
 
 fn is_blob_not_found(err: &Error) -> bool {
@@ -512,66 +468,5 @@ mod tests {
         )
         .await;
         assert_eq!(res, vec![(0, vec![0..4])]);
-
-        // rows        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19
-        // row group: | o  row group |  o row group | x  row group     |  o row group     |
-        // field_u64: | o pred   | x pred    |  o pred     |  x pred       | x pred       |
-        let res = tester(
-            &[col("field_u64").in_list(vec![lit(1u64), lit(11u64)], false)],
-            vec![(5, true), (5, true), (5, false), (5, true)],
-        )
-        .await;
-        assert_eq!(res, vec![(0, vec![0..4]), (1, vec![3..5])]);
-    }
-
-    #[test]
-    #[allow(clippy::single_range_in_vec_init)]
-    fn test_intersect_ranges() {
-        // empty inputs
-        assert_eq!(intersect_ranges(&[], &[]), Vec::<Range<usize>>::new());
-        assert_eq!(intersect_ranges(&[1..5], &[]), Vec::<Range<usize>>::new());
-        assert_eq!(intersect_ranges(&[], &[1..5]), Vec::<Range<usize>>::new());
-
-        // no overlap
-        assert_eq!(
-            intersect_ranges(&[1..3, 5..7], &[3..5, 7..9]),
-            Vec::<Range<usize>>::new()
-        );
-
-        // single overlap
-        assert_eq!(intersect_ranges(&[1..5], &[3..7]), vec![3..5]);
-
-        // multiple overlaps
-        assert_eq!(
-            intersect_ranges(&[1..5, 7..10, 12..15], &[2..6, 8..13]),
-            vec![2..5, 8..10, 12..13]
-        );
-
-        // exact overlap
-        assert_eq!(
-            intersect_ranges(&[1..3, 5..7], &[1..3, 5..7]),
-            vec![1..3, 5..7]
-        );
-
-        // contained ranges
-        assert_eq!(
-            intersect_ranges(&[1..10], &[2..4, 5..7, 8..9]),
-            vec![2..4, 5..7, 8..9]
-        );
-
-        // partial overlaps
-        assert_eq!(
-            intersect_ranges(&[1..4, 6..9], &[2..7, 8..10]),
-            vec![2..4, 6..7, 8..9]
-        );
-
-        // single point overlap
-        assert_eq!(
-            intersect_ranges(&[1..3], &[3..5]),
-            Vec::<Range<usize>>::new()
-        );
-
-        // large ranges
-        assert_eq!(intersect_ranges(&[0..100], &[50..150]), vec![50..100]);
     }
 }
