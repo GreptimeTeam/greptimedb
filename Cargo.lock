@@ -6647,6 +6647,7 @@ version = "0.14.0"
 dependencies = [
  "api",
  "async-trait",
+ "common-base",
  "common-error",
  "common-grpc",
  "common-macro",

@@ -295,10 +295,13 @@ impl StartCommand {
             msg: "'meta_client_options'",
         })?;
 
-        let meta_client =
-            meta_client::create_meta_client(MetaClientType::Datanode { member_id }, meta_config)
-                .await
-                .context(MetaClientInitSnafu)?;
+        let meta_client = meta_client::create_meta_client(
+            MetaClientType::Datanode { member_id },
+            meta_config,
+            None,
+        )
+        .await
+        .context(MetaClientInitSnafu)?;
 
         let meta_backend = Arc::new(MetaKvBackend {
             client: meta_client.clone(),
