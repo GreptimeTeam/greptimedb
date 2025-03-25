@@ -120,13 +120,13 @@ impl DispatchedTo {
 
 /// The result of pipeline execution
 #[derive(Debug)]
-pub enum PipelineExecOutput<O> {
-    Transformed(O),
+pub enum PipelineExecOutput {
+    Transformed(Row),
     DispatchedTo(DispatchedTo),
 }
 
-impl<O> PipelineExecOutput<O> {
-    pub fn into_transformed(self) -> Option<O> {
+impl PipelineExecOutput {
+    pub fn into_transformed(self) -> Option<Row> {
         if let Self::Transformed(o) = self {
             Some(o)
         } else {
@@ -161,7 +161,7 @@ pub fn json_array_to_map(val: Vec<serde_json::Value>) -> Result<Vec<PipelineMap>
 }
 
 impl Pipeline {
-    pub fn exec_mut(&self, val: &mut PipelineMap) -> Result<PipelineExecOutput<Row>> {
+    pub fn exec_mut(&self, val: &mut PipelineMap) -> Result<PipelineExecOutput> {
         for processor in self.processors.iter() {
             processor.exec_mut(val)?;
         }
