@@ -313,7 +313,6 @@ mod tests {
     use std::sync::Arc;
 
     use arrow_array::StringArray;
-    use common_base::BitVec;
 
     use super::*;
 
