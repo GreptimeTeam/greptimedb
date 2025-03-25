@@ -114,9 +114,9 @@ impl TreeNodeVisitor<'_> for FindGroupByFinalName {
                         let len = table_scan.projected_schema.fields().len();
                         let columns = (0..len)
                             .map(|f| {
-                                let (qualifer, field) =
+                                let (qualifier, field) =
                                     table_scan.projected_schema.qualified_field(f);
-                                datafusion_common::Column::new(qualifer.cloned(), field.name())
+                                datafusion_common::Column::new(qualifier.cloned(), field.name())
                             })
                             .map(datafusion_expr::Expr::Column);
                         self.group_exprs = Some(columns.collect());
@@ -348,6 +348,28 @@ mod test {
             let plan = plan.rewrite(&mut add_filter).unwrap().data;
             let new_sql = df_plan_to_sql(&plan).unwrap();
             assert_eq!(after, new_sql);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_find_group_by_exprs() {
+        let testcases = vec![
+            ("SELECT arrow_cast(date_bin(INTERVAL '1 MINS', numbers_with_ts.ts), 'Timestamp(Second, None)') AS ts FROM numbers_with_ts GROUP BY ts;", vec!["ts"])
+        ];
+
+        let query_engine = create_test_query_engine();
+        let ctx = QueryContext::arc();
+        for (sql, expected) in testcases {
+            let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), sql, true)
+                .await
+                .unwrap();
+            let mut group_by_exprs = FindGroupByFinalName::default();
+            plan.visit(&mut group_by_exprs).unwrap();
+            let expected: HashSet<String> = expected.into_iter().map(|s| s.to_string()).collect();
+            assert_eq!(
+                expected,
+                group_by_exprs.get_group_expr_names().unwrap_or_default()
+            );
         }
     }
 }
