@@ -58,7 +58,6 @@ pub fn v1_to_grpc_insert_requests(
 ) -> Result<(RowInsertRequests, usize)> {
     let spans = parse(request);
     let mut multi_table_writer = MultiTableData::default();
-
     let mut trace_writer = TableData::new(APPROXIMATE_COLUMN_COUNT, spans.len());
     let mut trace_services_writer = TableData::new(APPROXIMATE_COLUMN_COUNT, 1);
 
@@ -72,7 +71,6 @@ pub fn v1_to_grpc_insert_requests(
         }
         write_span_to_row(&mut trace_writer, span)?;
     }
-
     write_trace_services_to_row(&mut trace_services_writer, services)?;
 
     multi_table_writer.add_table_data(table_name, trace_writer);
