@@ -21,6 +21,7 @@ mod cluster;
 mod store;
 mod util;
 
+use std::fmt::Debug;
 use std::sync::Arc;
 
 use api::v1::meta::{ProcedureDetailResponse, Role};
@@ -34,13 +35,16 @@ use common_meta::cluster::{
 };
 use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue, RegionStat};
 use common_meta::ddl::{ExecutorContext, ProcedureExecutor};
-use common_meta::error::{self as meta_error, ExternalSnafu, Result as MetaResult};
+use common_meta::error::{
+    self as meta_error, ExternalSnafu, Result as MetaResult, UnsupportedSnafu,
+};
 use common_meta::key::flow::flow_state::{FlowStat, FlowStateManager};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::range_stream::PaginationStream;
 use common_meta::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::procedure::{
-    MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
+    AddRegionFollowerRequest, MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
+    RemoveRegionFollowerRequest,
 };
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
@@ -75,6 +79,7 @@ pub struct MetaClientBuilder {
     enable_store: bool,
     enable_procedure: bool,
     enable_access_cluster_info: bool,
+    region_follower: Option<RegionFollowerClientRef>,
     channel_manager: Option<ChannelManager>,
     ddl_channel_manager: Option<ChannelManager>,
     heartbeat_channel_manager: Option<ChannelManager>,
@@ -163,6 +168,13 @@ impl MetaClientBuilder {
         }
     }
 
+    pub fn with_region_follower(self, region_follower: RegionFollowerClientRef) -> Self {
+        Self {
+            region_follower: Some(region_follower),
+            ..self
+        }
+    }
+
     pub fn build(self) -> MetaClient {
         let mut client = if let Some(mgr) = self.channel_manager {
             MetaClient::with_channel_manager(self.id, mgr)
@@ -205,6 +217,10 @@ impl MetaClientBuilder {
             ))
         }
 
+        if let Some(region_follower) = self.region_follower {
+            client.region_follower = Some(region_follower);
+        }
+
         client
     }
 }
@@ -217,6 +233,19 @@ pub struct MetaClient {
     store: Option<StoreClient>,
     procedure: Option<ProcedureClient>,
     cluster: Option<ClusterClient>,
+    region_follower: Option<RegionFollowerClientRef>,
+}
+
+pub type RegionFollowerClientRef = Arc<dyn RegionFollowerClient>;
+
+/// A trait for clients that can manage region followers.
+#[async_trait::async_trait]
+pub trait RegionFollowerClient: Sync + Send + Debug {
+    async fn add_region_follower(&self, request: AddRegionFollowerRequest) -> Result<()>;
+
+    async fn remove_region_follower(&self, request: RemoveRegionFollowerRequest) -> Result<()>;
+
+    async fn start(&self, urls: &[&str]) -> Result<()>;
 }
 
 #[async_trait::async_trait]
@@ -241,6 +270,44 @@ impl ProcedureExecutor for MetaClient {
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)
+    }
+
+    async fn add_region_follower(
+        &self,
+        _ctx: &ExecutorContext,
+        request: AddRegionFollowerRequest,
+    ) -> MetaResult<()> {
+        if let Some(region_follower) = &self.region_follower {
+            region_follower
+                .add_region_follower(request)
+                .await
+                .map_err(BoxedError::new)
+                .context(meta_error::ExternalSnafu)
+        } else {
+            UnsupportedSnafu {
+                operation: "add_region_follower",
+            }
+            .fail()
+        }
+    }
+
+    async fn remove_region_follower(
+        &self,
+        _ctx: &ExecutorContext,
+        request: RemoveRegionFollowerRequest,
+    ) -> MetaResult<()> {
+        if let Some(region_follower) = &self.region_follower {
+            region_follower
+                .remove_region_follower(request)
+                .await
+                .map_err(BoxedError::new)
+                .context(meta_error::ExternalSnafu)
+        } else {
+            UnsupportedSnafu {
+                operation: "remove_region_follower",
+            }
+            .fail()
+        }
     }
 
     async fn query_procedure_state(
@@ -376,6 +443,11 @@ impl MetaClient {
     {
         info!("MetaClient channel config: {:?}", self.channel_config());
 
+        if let Some(client) = &mut self.region_follower {
+            let urls = urls.as_ref().iter().map(|u| u.as_ref()).collect::<Vec<_>>();
+            client.start(&urls).await?;
+            info!("Region follower client started");
+        }
         if let Some(client) = &mut self.heartbeat {
             client.start(urls.clone()).await?;
             info!("Heartbeat client started");

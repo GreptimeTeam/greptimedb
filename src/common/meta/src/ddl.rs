@@ -22,14 +22,17 @@ use store_api::storage::{RegionId, RegionNumber, TableId};
 use crate::cache_invalidator::CacheInvalidatorRef;
 use crate::ddl::flow_meta::FlowMetadataAllocatorRef;
 use crate::ddl::table_meta::TableMetadataAllocatorRef;
-use crate::error::Result;
+use crate::error::{Result, UnsupportedSnafu};
 use crate::key::flow::FlowMetadataManagerRef;
 use crate::key::table_route::PhysicalTableRouteValue;
 use crate::key::TableMetadataManagerRef;
 use crate::node_manager::NodeManagerRef;
 use crate::region_keeper::MemoryRegionKeeperRef;
 use crate::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
-use crate::rpc::procedure::{MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse};
+use crate::rpc::procedure::{
+    AddRegionFollowerRequest, MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
+    RemoveRegionFollowerRequest,
+};
 use crate::DatanodeId;
 
 pub mod alter_database;
@@ -69,6 +72,30 @@ pub trait ProcedureExecutor: Send + Sync {
         ctx: &ExecutorContext,
         request: SubmitDdlTaskRequest,
     ) -> Result<SubmitDdlTaskResponse>;
+
+    /// Add a region follower
+    async fn add_region_follower(
+        &self,
+        _ctx: &ExecutorContext,
+        _request: AddRegionFollowerRequest,
+    ) -> Result<()> {
+        UnsupportedSnafu {
+            operation: "add_region_follower",
+        }
+        .fail()
+    }
+
+    /// Remove a region follower
+    async fn remove_region_follower(
+        &self,
+        _ctx: &ExecutorContext,
+        _request: RemoveRegionFollowerRequest,
+    ) -> Result<()> {
+        UnsupportedSnafu {
+            operation: "remove_region_follower",
+        }
+        .fail()
+    }
 
     /// Submit a region migration task
     async fn migrate_region(
