@@ -36,7 +36,7 @@ use crate::partial_reader::PartialReader;
 use crate::puffin_manager::file_accessor::PuffinFileAccessor;
 use crate::puffin_manager::fs_puffin_manager::dir_meta::DirMetadata;
 use crate::puffin_manager::stager::{BoxWriter, DirWriterProviderRef, Stager};
-use crate::puffin_manager::{BlobGuard, PuffinReader};
+use crate::puffin_manager::{BlobGuard, BlobWithMetadata, PuffinReader};
 
 /// `FsPuffinReader` is a `PuffinReader` that provides fs readers for puffin files.
 pub struct FsPuffinReader<S, F>
@@ -101,8 +101,9 @@ where
         self.get_puffin_file_metadata(&mut file).await
     }
 
-    async fn blob(&self, key: &str) -> Result<Self::Blob> {
-        let mut reader = self.puffin_file_accessor.reader(&self.handle).await?;
+    async fn blob(&self, key: &str) -> Result<BlobWithMetadata<Self::Blob>> {
+        let mut reader: <F as PuffinFileAccessor>::Reader =
+            self.puffin_file_accessor.reader(&self.handle).await?;
         if let Some(file_size_hint) = self.file_size_hint {
             reader.with_file_size_hint(file_size_hint);
         }
@@ -121,10 +122,11 @@ where
             Either::L(RandomReadBlob {
                 handle: self.handle.clone(),
                 accessor: self.puffin_file_accessor.clone(),
-                blob_metadata,
+                blob_metadata: blob_metadata.clone(),
             })
         } else {
             // If the blob is compressed, we need to decompress it into staging space before reading.
+            let blob_metadata = blob_metadata.clone();
             let staged_blob = self
                 .stager
                 .get_blob(
@@ -139,7 +141,7 @@ where
             Either::R(staged_blob)
         };
 
-        Ok(blob)
+        Ok(BlobWithMetadata::new(blob, blob_metadata))
     }
 
     async fn dir(&self, key: &str) -> Result<Self::Dir> {

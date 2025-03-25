@@ -304,7 +304,12 @@ impl BloomFilterIndexer {
         let blob_name = format!("{}-{}", INDEX_BLOB_TYPE, col_id);
         let (index_finish, puffin_add_blob) = futures::join!(
             creator.finish(tx.compat_write()),
-            puffin_writer.put_blob(&blob_name, rx.compat(), PutOptions::default())
+            puffin_writer.put_blob(
+                &blob_name,
+                rx.compat(),
+                PutOptions::default(),
+                Default::default(),
+            )
         );
 
         match (
@@ -351,7 +356,7 @@ pub(crate) mod tests {
     use index::bloom_filter::reader::{BloomFilterReader, BloomFilterReaderImpl};
     use object_store::services::Memory;
     use object_store::ObjectStore;
-    use puffin::puffin_manager::{BlobGuard, PuffinManager, PuffinReader};
+    use puffin::puffin_manager::{PuffinManager, PuffinReader};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
 

@@ -23,9 +23,7 @@ use crate::blob_metadata::CompressionCodec;
 use crate::puffin_manager::file_accessor::MockFileAccessor;
 use crate::puffin_manager::fs_puffin_manager::FsPuffinManager;
 use crate::puffin_manager::stager::BoundedStager;
-use crate::puffin_manager::{
-    BlobGuard, DirGuard, PuffinManager, PuffinReader, PuffinWriter, PutOptions,
-};
+use crate::puffin_manager::{DirGuard, PuffinManager, PuffinReader, PuffinWriter, PutOptions};
 
 async fn new_bounded_stager(prefix: &str, capacity: u64) -> (TempDir, Arc<BoundedStager<String>>) {
     let staging_dir = create_temp_dir(prefix);
@@ -283,6 +281,7 @@ async fn put_blob(
             PutOptions {
                 compression: compression_codec,
             },
+            HashMap::from_iter([("test_key".to_string(), "test_value".to_string())]),
         )
         .await
         .unwrap();
@@ -297,6 +296,13 @@ async fn check_blob(
     compressed: bool,
 ) {
     let blob = puffin_reader.blob(key).await.unwrap();
+
+    let blob_metadata = blob.metadata();
+    assert_eq!(
+        blob_metadata.properties,
+        HashMap::from_iter([("test_key".to_string(), "test_value".to_string())])
+    );
+
     let reader = blob.reader().await.unwrap();
     let meta = reader.metadata().await.unwrap();
     let bs = reader.read(0..meta.content_length).await.unwrap();
