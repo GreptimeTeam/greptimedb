@@ -24,7 +24,10 @@ use tokio::sync::mpsc::{self, Receiver, Sender};
 use crate::error::{self, Result};
 use crate::kafka::index::IndexCollector;
 use crate::kafka::worker::{BackgroundProducerWorker, ProduceResultHandle, WorkerRequest};
-use crate::metrics::{METRIC_KAFKA_CLIENT_BYTES_TOTAL, METRIC_KAFKA_CLIENT_TRAFFIC_TOTAL};
+use crate::metrics::{
+    METRIC_KAFKA_CLIENT_BYTES_TOTAL, METRIC_KAFKA_CLIENT_PRODUCE_ELAPSED,
+    METRIC_KAFKA_CLIENT_TRAFFIC_TOTAL,
+};
 
 pub type OrderedBatchProducerRef = Arc<OrderedBatchProducer>;
 
@@ -115,6 +118,9 @@ impl ProducerClient for PartitionClient {
         METRIC_KAFKA_CLIENT_TRAFFIC_TOTAL
             .with_label_values(&[self.topic(), &partition])
             .inc();
+        let _timer = METRIC_KAFKA_CLIENT_PRODUCE_ELAPSED
+            .with_label_values(&[self.topic(), &partition])
+            .start_timer();
 
         self.produce(records, compression).await
     }

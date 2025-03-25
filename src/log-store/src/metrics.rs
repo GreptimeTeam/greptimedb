@@ -79,4 +79,10 @@ lazy_static! {
         &[LOGSTORE_LABEL, PARTITION_LABEL],
     )
     .unwrap();
+    pub static ref METRIC_KAFKA_CLIENT_PRODUCE_ELAPSED: HistogramVec = register_histogram_vec!(
+        "greptime_logstore_kafka_client_produce_elapsed",
+        "kafka logstore produce operation elapsed",
+        &[LOGSTORE_LABEL, PARTITION_LABEL],
+    )
+    .unwrap();
 }
