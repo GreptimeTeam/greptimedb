@@ -14,6 +14,7 @@
 
 //! Utilities for scanners.
 
+use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -36,7 +37,7 @@ use crate::sst::file::FileTimeRange;
 use crate::sst::parquet::reader::{ReaderFilterMetrics, ReaderMetrics};
 
 /// Verbose scan metrics for a partition.
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct ScanMetricsSet {
     /// Duration to prepare the scan task.
     prepare_scan_cost: Duration,
@@ -93,6 +94,66 @@ struct ScanMetricsSet {
     first_poll: Duration,
 }
 
+impl fmt::Debug for ScanMetricsSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let ScanMetricsSet {
+            prepare_scan_cost,
+            build_reader_cost,
+            scan_cost,
+            convert_cost,
+            yield_cost,
+            total_cost,
+            num_rows,
+            num_batches,
+            num_mem_ranges,
+            num_file_ranges,
+            build_parts_cost,
+            rg_total,
+            rg_fulltext_filtered,
+            rg_inverted_filtered,
+            rg_minmax_filtered,
+            rg_bloom_filtered,
+            rows_before_filter,
+            rows_fulltext_filtered,
+            rows_inverted_filtered,
+            rows_bloom_filtered,
+            rows_precise_filtered,
+            num_sst_record_batches,
+            num_sst_batches,
+            num_sst_rows,
+            first_poll,
+        } = self;
+
+        write!(
+            f,
+            "{{prepare_scan_cost={prepare_scan_cost:?}, \
+            build_reader_cost={build_reader_cost:?}, \
+            scan_cost={scan_cost:?}, \
+            convert_cost={convert_cost:?}, \
+            yield_cost={yield_cost:?}, \
+            total_cost={total_cost:?}, \
+            num_rows={num_rows}, \
+            num_batches={num_batches}, \
+            num_mem_ranges={num_mem_ranges}, \
+            num_file_ranges={num_file_ranges}, \
+            build_parts_cost={build_parts_cost:?}, \
+            rg_total={rg_total}, \
+            rg_fulltext_filtered={rg_fulltext_filtered}, \
+            rg_inverted_filtered={rg_inverted_filtered}, \
+            rg_minmax_filtered={rg_minmax_filtered}, \
+            rg_bloom_filtered={rg_bloom_filtered}, \
+            rows_before_filter={rows_before_filter}, \
+            rows_fulltext_filtered={rows_fulltext_filtered}, \
+            rows_inverted_filtered={rows_inverted_filtered}, \
+            rows_bloom_filtered={rows_bloom_filtered}, \
+            rows_precise_filtered={rows_precise_filtered}, \
+            num_sst_record_batches={num_sst_record_batches}, \
+            num_sst_batches={num_sst_batches}, \
+            num_sst_rows={num_sst_rows}, \
+            first_poll={first_poll:?}}}"
+        )
+    }
+}
 impl ScanMetricsSet {
     /// Attaches the `prepare_scan_cost` to the metrics set.
     fn with_prepare_scan_cost(mut self, cost: Duration) -> Self {
@@ -129,24 +190,24 @@ impl ScanMetricsSet {
     fn merge_reader_metrics(&mut self, other: &ReaderMetrics) {
         let ReaderMetrics {
             build_cost,
-            filter_metrics,
+            filter_metrics:
+                ReaderFilterMetrics {
+                    rg_total,
+                    rg_fulltext_filtered,
+                    rg_inverted_filtered,
+                    rg_minmax_filtered,
+                    rg_bloom_filtered,
+                    rows_total,
+                    rows_fulltext_filtered,
+                    rows_inverted_filtered,
+                    rows_bloom_filtered,
+                    rows_precise_filtered,
+                },
             num_record_batches,
             num_batches,
             num_rows,
             scan_cost: _,
         } = other;
-        let ReaderFilterMetrics {
-            rg_total,
-            rg_fulltext_filtered,
-            rg_inverted_filtered,
-            rg_minmax_filtered,
-            rg_bloom_filtered,
-            rows_total,
-            rows_fulltext_filtered,
-            rows_inverted_filtered,
-            rows_bloom_filtered,
-            rows_precise_filtered,
-        } = filter_metrics;
 
         self.build_parts_cost += *build_cost;
 
@@ -287,6 +348,15 @@ impl PartitionMetricsList {
         }
         list[partition] = Some(metrics);
     }
+
+    /// Format verbose metrics for each partition for explain.
+    pub(crate) fn format_verbose_metrics(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let list = self.0.lock().unwrap();
+        write!(f, ", metrics_per_partition: ")?;
+        f.debug_list()
+            .entries(list.iter().filter_map(|p| p.as_ref()))
+            .finish()
+    }
 }
 
 /// Metrics while reading a partition.
@@ -368,6 +438,13 @@ impl PartitionMetrics {
     /// Finishes the query.
     pub(crate) fn on_finish(&self) {
         self.0.on_finish();
+    }
+}
+
+impl fmt::Debug for PartitionMetrics {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let metrics = self.0.metrics.lock().unwrap();
+        write!(f, "[partition={}, {:?}]", self.0.partition, metrics)
     }
 }
 

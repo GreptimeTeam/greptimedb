@@ -272,7 +272,10 @@ impl DisplayAs for UnorderedScan {
         )?;
         match t {
             DisplayFormatType::Default => self.stream_ctx.format_for_explain(false, f),
-            DisplayFormatType::Verbose => self.stream_ctx.format_for_explain(true, f),
+            DisplayFormatType::Verbose => {
+                self.stream_ctx.format_for_explain(true, f)?;
+                self.metrics_list.format_verbose_metrics(f)
+            }
         }
     }
 }
