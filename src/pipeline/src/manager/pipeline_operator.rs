@@ -35,7 +35,7 @@ use crate::metrics::{
     METRIC_PIPELINE_RETRIEVE_HISTOGRAM,
 };
 use crate::table::{PipelineTable, PIPELINE_TABLE_NAME};
-use crate::{GreptimeTransformer, Pipeline};
+use crate::Pipeline;
 
 /// PipelineOperator is responsible for managing pipelines.
 /// It provides the ability to:
@@ -181,7 +181,7 @@ impl PipelineOperator {
         query_ctx: QueryContextRef,
         name: &str,
         version: PipelineVersion,
-    ) -> Result<Arc<Pipeline<GreptimeTransformer>>> {
+    ) -> Result<Arc<Pipeline>> {
         let schema = query_ctx.current_schema();
         self.create_pipeline_table_if_not_exists(query_ctx.clone())
             .await?;
@@ -245,7 +245,7 @@ impl PipelineOperator {
     }
 
     /// Compile a pipeline.
-    pub fn build_pipeline(pipeline: &str) -> Result<Pipeline<GreptimeTransformer>> {
+    pub fn build_pipeline(pipeline: &str) -> Result<Pipeline> {
         PipelineTable::compile_pipeline(pipeline)
     }
 }

@@ -33,7 +33,7 @@ use datatypes::value::column_data_to_json;
 use headers::ContentType;
 use lazy_static::lazy_static;
 use pipeline::util::to_pipeline_version;
-use pipeline::{GreptimePipelineParams, GreptimeTransformer, PipelineDefinition};
+use pipeline::{GreptimePipelineParams, PipelineDefinition};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Deserializer, Map, Value};
 use session::context::{Channel, QueryContext, QueryContextRef};
@@ -282,7 +282,7 @@ fn transform_ndjson_array_factory(
 /// Dryrun pipeline with given data
 async fn dryrun_pipeline_inner(
     value: Vec<Value>,
-    pipeline: Arc<pipeline::Pipeline<GreptimeTransformer>>,
+    pipeline: Arc<pipeline::Pipeline>,
     pipeline_handler: PipelineHandlerRef,
     query_ctx: &QueryContextRef,
 ) -> Result<Response> {

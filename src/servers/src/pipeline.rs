@@ -17,8 +17,8 @@ use std::sync::Arc;
 
 use api::v1::{RowInsertRequest, Rows};
 use pipeline::{
-    DispatchedTo, GreptimePipelineParams, GreptimeTransformer, IdentityTimeIndex, Pipeline,
-    PipelineDefinition, PipelineExecOutput, PipelineMap, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
+    DispatchedTo, GreptimePipelineParams, IdentityTimeIndex, Pipeline, PipelineDefinition,
+    PipelineExecOutput, PipelineMap, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
 };
 use session::context::QueryContextRef;
 use snafu::ResultExt;
@@ -34,7 +34,7 @@ pub async fn get_pipeline(
     pipeline_def: &PipelineDefinition,
     handler: &PipelineHandlerRef,
     query_ctx: &QueryContextRef,
-) -> Result<Arc<Pipeline<GreptimeTransformer>>> {
+) -> Result<Arc<Pipeline>> {
     match pipeline_def {
         PipelineDefinition::Resolved(pipeline) => Ok(pipeline.clone()),
         PipelineDefinition::ByNameAndValue((name, version)) => {

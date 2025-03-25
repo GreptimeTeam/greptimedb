@@ -18,9 +18,10 @@ pub mod processor;
 pub mod transform;
 pub mod value;
 
+use api::v1::Row;
 use processor::{Processor, Processors};
 use snafu::{ensure, OptionExt, ResultExt};
-use transform::{Transformer, Transforms};
+use transform::Transforms;
 use value::Value;
 use yaml_rust::YamlLoader;
 
@@ -28,6 +29,7 @@ use crate::dispatcher::{Dispatcher, Rule};
 use crate::error::{
     IntermediateKeyIndexSnafu, PrepareValueMustBeObjectSnafu, Result, YamlLoadSnafu, YamlParseSnafu,
 };
+use crate::GreptimeTransformer;
 
 const DESCRIPTION: &str = "description";
 const PROCESSORS: &str = "processors";
@@ -42,10 +44,7 @@ pub enum Content<'a> {
     Yaml(&'a str),
 }
 
-pub fn parse<T>(input: &Content) -> Result<Pipeline<T>>
-where
-    T: Transformer,
-{
+pub fn parse(input: &Content) -> Result<Pipeline> {
     match input {
         Content::Yaml(str) => {
             let docs = YamlLoader::load_from_str(str).context(YamlLoadSnafu)?;
@@ -69,7 +68,7 @@ where
                 Transforms::default()
             };
 
-            let transformer = T::new(transformers)?;
+            let transformer = GreptimeTransformer::new(transformers)?;
 
             let dispatcher = if !doc[DISPATCHER].is_badvalue() {
                 Some(Dispatcher::try_from(&doc[DISPATCHER])?)
@@ -89,14 +88,11 @@ where
 }
 
 #[derive(Debug)]
-pub struct Pipeline<T>
-where
-    T: Transformer,
-{
+pub struct Pipeline {
     description: Option<String>,
     processors: processor::Processors,
     dispatcher: Option<Dispatcher>,
-    transformer: T,
+    transformer: GreptimeTransformer,
 }
 
 /// Where the pipeline executed is dispatched to, with context information
@@ -164,11 +160,8 @@ pub fn json_array_to_map(val: Vec<serde_json::Value>) -> Result<Vec<PipelineMap>
     val.into_iter().map(json_to_map).collect()
 }
 
-impl<T> Pipeline<T>
-where
-    T: Transformer,
-{
-    pub fn exec_mut(&self, val: &mut PipelineMap) -> Result<PipelineExecOutput<T::VecOutput>> {
+impl Pipeline {
+    pub fn exec_mut(&self, val: &mut PipelineMap) -> Result<PipelineExecOutput<Row>> {
         for processor in self.processors.iter() {
             processor.exec_mut(val)?;
         }
@@ -191,7 +184,7 @@ where
         &self.processors
     }
 
-    pub fn transformer(&self) -> &T {
+    pub fn transformer(&self) -> &GreptimeTransformer {
         &self.transformer
     }
 
@@ -214,7 +207,6 @@ mod tests {
     use greptime_proto::v1::{self, ColumnDataType, SemanticType};
 
     use super::*;
-    use crate::etl::transform::GreptimeTransformer;
 
     #[test]
     fn test_pipeline_prepare() {
@@ -237,7 +229,7 @@ transform:
     - field: field2
       type: uint32
     "#;
-        let pipeline: Pipeline<GreptimeTransformer> = parse(&Content::Yaml(pipeline_yaml)).unwrap();
+        let pipeline: Pipeline = parse(&Content::Yaml(pipeline_yaml)).unwrap();
         let mut payload = json_to_map(input_value).unwrap();
         let result = pipeline
             .exec_mut(&mut payload)
@@ -287,7 +279,7 @@ transform:
     - field: ts
       type: timestamp, ns
       index: time"#;
-        let pipeline: Pipeline<GreptimeTransformer> = parse(&Content::Yaml(pipeline_str)).unwrap();
+        let pipeline: Pipeline = parse(&Content::Yaml(pipeline_str)).unwrap();
         let mut payload = PipelineMap::new();
         payload.insert("message".to_string(), Value::String(message));
         let result = pipeline
@@ -365,7 +357,7 @@ transform:
         type: uint32
     "#;
 
-        let pipeline: Pipeline<GreptimeTransformer> = parse(&Content::Yaml(pipeline_yaml)).unwrap();
+        let pipeline: Pipeline = parse(&Content::Yaml(pipeline_yaml)).unwrap();
         let mut payload = json_to_map(input_value).unwrap();
         let result = pipeline
             .exec_mut(&mut payload)
@@ -406,7 +398,7 @@ transform:
       index: time
     "#;
 
-        let pipeline: Pipeline<GreptimeTransformer> = parse(&Content::Yaml(pipeline_yaml)).unwrap();
+        let pipeline: Pipeline = parse(&Content::Yaml(pipeline_yaml)).unwrap();
         let schema = pipeline.schemas().clone();
         let mut result = json_to_map(input_value).unwrap();
 
@@ -460,7 +452,7 @@ transform:
     type: string
 
 "#;
-        let pipeline: Pipeline<GreptimeTransformer> = parse(&Content::Yaml(pipeline_yaml)).unwrap();
+        let pipeline: Pipeline = parse(&Content::Yaml(pipeline_yaml)).unwrap();
         let dispatcher = pipeline.dispatcher.expect("expect dispatcher");
         assert_eq!(dispatcher.field, "typename");
 
@@ -545,11 +537,11 @@ transform:
 
 "#;
 
-        let r: Result<Pipeline<GreptimeTransformer>> = parse(&Content::Yaml(bad_yaml1));
+        let r: Result<Pipeline> = parse(&Content::Yaml(bad_yaml1));
         assert!(r.is_err());
-        let r: Result<Pipeline<GreptimeTransformer>> = parse(&Content::Yaml(bad_yaml2));
+        let r: Result<Pipeline> = parse(&Content::Yaml(bad_yaml2));
         assert!(r.is_err());
-        let r: Result<Pipeline<GreptimeTransformer>> = parse(&Content::Yaml(bad_yaml3));
+        let r: Result<Pipeline> = parse(&Content::Yaml(bad_yaml3));
         assert!(r.is_err());
     }
 }

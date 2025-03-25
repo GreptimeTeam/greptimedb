@@ -26,7 +26,7 @@ use util::to_pipeline_version;
 use crate::error::{CastTypeSnafu, InvalidCustomTimeIndexSnafu, Result};
 use crate::etl::value::time::{MS_RESOLUTION, NS_RESOLUTION, S_RESOLUTION, US_RESOLUTION};
 use crate::table::PipelineTable;
-use crate::{GreptimeTransformer, Pipeline, Value};
+use crate::{Pipeline, Value};
 
 pub mod pipeline_operator;
 pub mod table;
@@ -43,7 +43,7 @@ pub type PipelineVersion = Option<TimestampNanosecond>;
 pub type PipelineInfo = (Timestamp, PipelineRef);
 
 pub type PipelineTableRef = Arc<PipelineTable>;
-pub type PipelineRef = Arc<Pipeline<GreptimeTransformer>>;
+pub type PipelineRef = Arc<Pipeline>;
 
 /// SelectInfo is used to store the selected keys from OpenTelemetry record attrs
 /// The key is used to uplift value from the attributes and serve as column name in the table
@@ -78,7 +78,7 @@ pub const GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME: &str = "greptime_trace_v1";
 /// or information that be used to retrieve a pipeline from `PipelineHandler`
 #[derive(Debug, Clone)]
 pub enum PipelineDefinition {
-    Resolved(Arc<Pipeline<GreptimeTransformer>>),
+    Resolved(Arc<Pipeline>),
     ByNameAndValue((String, PipelineVersion)),
     GreptimeIdentityPipeline(Option<IdentityTimeIndex>),
 }
