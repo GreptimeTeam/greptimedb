@@ -33,7 +33,7 @@ use crate::read::range::{RangeBuilderList, RowGroupIndex};
 use crate::read::scan_region::StreamContext;
 use crate::read::{Batch, ScannerMetrics, Source};
 use crate::sst::file::FileTimeRange;
-use crate::sst::parquet::reader::ReaderMetrics;
+use crate::sst::parquet::reader::{ReaderFilterMetrics, ReaderMetrics};
 
 /// Verbose scan metrics for a partition.
 #[derive(Debug, Default)]
@@ -94,38 +94,77 @@ struct ScanMetricsSet {
 }
 
 impl ScanMetricsSet {
+    /// Attaches the `prepare_scan_cost` to the metrics set.
+    fn with_prepare_scan_cost(mut self, cost: Duration) -> Self {
+        self.prepare_scan_cost += cost;
+        self
+    }
+
     /// Merges the local scanner metrics.
     fn merge_scanner_metrics(&mut self, other: &ScannerMetrics) {
-        self.prepare_scan_cost += other.prepare_scan_cost;
-        self.build_reader_cost += other.build_reader_cost;
-        self.scan_cost += other.scan_cost;
-        self.convert_cost += other.convert_cost;
-        self.yield_cost += other.yield_cost;
-        self.num_rows += other.num_rows;
-        self.num_batches += other.num_batches;
-        self.num_mem_ranges += other.num_mem_ranges;
-        self.num_file_ranges += other.num_file_ranges;
+        let ScannerMetrics {
+            prepare_scan_cost,
+            build_reader_cost,
+            scan_cost,
+            convert_cost,
+            yield_cost,
+            num_batches,
+            num_rows,
+            num_mem_ranges,
+            num_file_ranges,
+        } = other;
+
+        self.prepare_scan_cost += *prepare_scan_cost;
+        self.build_reader_cost += *build_reader_cost;
+        self.scan_cost += *scan_cost;
+        self.convert_cost += *convert_cost;
+        self.yield_cost += *yield_cost;
+        self.num_rows += *num_rows;
+        self.num_batches += *num_batches;
+        self.num_mem_ranges += *num_mem_ranges;
+        self.num_file_ranges += *num_file_ranges;
     }
 
     /// Merges the local reader metrics.
     fn merge_reader_metrics(&mut self, other: &ReaderMetrics) {
-        self.build_parts_cost += other.build_cost;
+        let ReaderMetrics {
+            build_cost,
+            filter_metrics,
+            num_record_batches,
+            num_batches,
+            num_rows,
+            scan_cost: _,
+        } = other;
+        let ReaderFilterMetrics {
+            rg_total,
+            rg_fulltext_filtered,
+            rg_inverted_filtered,
+            rg_minmax_filtered,
+            rg_bloom_filtered,
+            rows_total,
+            rows_fulltext_filtered,
+            rows_inverted_filtered,
+            rows_bloom_filtered,
+            rows_precise_filtered,
+        } = filter_metrics;
 
-        self.rg_total += other.filter_metrics.rg_total;
-        self.rg_fulltext_filtered += other.filter_metrics.rg_fulltext_filtered;
-        self.rg_inverted_filtered += other.filter_metrics.rg_inverted_filtered;
-        self.rg_minmax_filtered += other.filter_metrics.rg_minmax_filtered;
-        self.rg_bloom_filtered += other.filter_metrics.rg_bloom_filtered;
+        self.build_parts_cost += *build_cost;
 
-        self.rows_before_filter += other.filter_metrics.rows_total;
-        self.rows_fulltext_filtered += other.filter_metrics.rows_fulltext_filtered;
-        self.rows_inverted_filtered += other.filter_metrics.rows_inverted_filtered;
-        self.rows_bloom_filtered += other.filter_metrics.rows_bloom_filtered;
-        self.rows_precise_filtered += other.filter_metrics.rows_precise_filtered;
+        self.rg_total += *rg_total;
+        self.rg_fulltext_filtered += *rg_fulltext_filtered;
+        self.rg_inverted_filtered += *rg_inverted_filtered;
+        self.rg_minmax_filtered += *rg_minmax_filtered;
+        self.rg_bloom_filtered += *rg_bloom_filtered;
 
-        self.num_sst_record_batches += other.num_record_batches;
-        self.num_sst_batches += other.num_batches;
-        self.num_sst_rows += other.num_rows;
+        self.rows_before_filter += *rows_total;
+        self.rows_fulltext_filtered += *rows_fulltext_filtered;
+        self.rows_inverted_filtered += *rows_inverted_filtered;
+        self.rows_bloom_filtered += *rows_bloom_filtered;
+        self.rows_precise_filtered += *rows_precise_filtered;
+
+        self.num_sst_record_batches += *num_record_batches;
+        self.num_sst_batches += *num_batches;
+        self.num_sst_rows += *num_rows;
     }
 
     /// Observes metrics.
@@ -250,8 +289,7 @@ impl PartitionMetrics {
         let partition_str = partition.to_string();
         let in_progress_scan = IN_PROGRESS_SCAN.with_label_values(&[scanner_type, &partition_str]);
         in_progress_scan.inc();
-        let mut metrics = ScanMetricsSet::default();
-        metrics.prepare_scan_cost = query_start.elapsed();
+        let metrics = ScanMetricsSet::default().with_prepare_scan_cost(query_start.elapsed());
         let inner = PartitionMetricsInner {
             region_id,
             partition,
