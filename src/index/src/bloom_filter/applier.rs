@@ -58,8 +58,12 @@ impl BloomFilterApplier {
 
             if end_seg == self.meta.segment_loc_indices.len() + 1 {
                 // Handle legacy bug with missing last segment
-                // In a previous version, if the last segment was all null,
-                // this segment would not be written into the index.
+                //
+                // In a previous version, there was a bug where if the last segment was all null,
+                // this segment would not be written into the index. This caused the slice
+                // `self.meta.segment_loc_indices[start_seg..end_seg]` to go out of bounds due to
+                // the missing segment. Since the `search` function does not search for nulls,
+                // we can simply ignore the last segment in this buggy scenario.
                 end_seg -= 1;
             }
             segments.extend(start_seg..end_seg);
