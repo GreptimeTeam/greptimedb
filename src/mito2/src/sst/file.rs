@@ -248,6 +248,10 @@ impl FileHandle {
         self.inner.meta.file_size
     }
 
+    pub fn index_size(&self) -> u64 {
+        self.inner.meta.index_file_size
+    }
+
     pub fn num_rows(&self) -> usize {
         self.inner.meta.num_rows as usize
     }
