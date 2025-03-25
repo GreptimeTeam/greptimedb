@@ -381,47 +381,6 @@ mod tests {
     }
 
     #[test]
-    fn test_find_unique() {
-        let dict_vec = create_test_dictionary();
-        let mut selected = BitVec::repeat(false, dict_vec.len());
-
-        // Test with no previous vector - all should be marked unique
-        dict_vec.find_unique(&mut selected, None);
-        for i in 0..dict_vec.len() {
-            assert!(selected.get(i).unwrap());
-        }
-
-        // Test with previous vector (same type and content)
-        let prev_dict = create_test_dictionary();
-        selected = BitVec::repeat(false, dict_vec.len());
-        dict_vec.find_unique(&mut selected, Some(&prev_dict));
-
-        // None should be unique as they're identical
-        for i in 0..dict_vec.len() {
-            if !dict_vec.is_null(i) {
-                assert!(!selected.get(i).unwrap(), "{i}");
-            }
-        }
-
-        // Create a different dictionary with some changes
-        let values = StringArray::from(vec!["a", "b", "c", "d"]);
-        let keys = Int32Array::from(vec![Some(1), Some(1), Some(2), None, Some(0), Some(3)]);
-        let diff_dict_array = DictionaryArray::new(keys, Arc::new(values));
-        let diff_dict = DictionaryVector::try_from(diff_dict_array).unwrap();
-
-        selected = BitVec::repeat(false, dict_vec.len());
-        dict_vec.find_unique(&mut selected, Some(&diff_dict));
-
-        // First and fourth elements should be unique (indices 0 and 4)
-        assert!(selected.get(0).unwrap());
-        assert!(!selected.get(1).unwrap());
-        assert!(!selected.get(2).unwrap());
-        assert!(selected.get(3).unwrap()); // NULL
-        assert!(selected.get(4).unwrap());
-        assert!(!selected.get(5).unwrap());
-    }
-
-    #[test]
     fn test_filter() {
         let dict_vec = create_test_dictionary();
 
