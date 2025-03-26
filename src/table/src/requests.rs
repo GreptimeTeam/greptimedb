@@ -21,7 +21,6 @@ use std::str::FromStr;
 use common_base::readable_size::ReadableSize;
 use common_datasource::object_store::s3::is_supported_in_s3;
 use common_query::AddColumnLocation;
-use common_telemetry::warn;
 use common_time::range::TimestampRange;
 use common_time::TimeToLive;
 use datatypes::data_type::ConcreteDataType;
@@ -135,13 +134,13 @@ impl TableOptions {
         }
 
         if let Some(skip_wal) = kvs.get(SKIP_WAL_KEY) {
-            options.skip_wal = skip_wal.parse().unwrap_or_else(|_| {
-                warn!(
-                    "Invalid value for skip_wal: {}, using default value: false",
-                    skip_wal
-                );
-                false
-            });
+            options.skip_wal = skip_wal.parse().map_err(|_| {
+                ParseTableOptionSnafu {
+                    key: SKIP_WAL_KEY,
+                    value: skip_wal,
+                }
+                .build()
+            })?;
         }
 
         options.extra_options = HashMap::from_iter(

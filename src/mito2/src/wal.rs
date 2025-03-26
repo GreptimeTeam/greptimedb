@@ -24,6 +24,7 @@ use std::sync::Arc;
 
 use api::v1::WalEntry;
 use common_error::ext::BoxedError;
+use common_telemetry::debug;
 use entry_reader::NoopEntryReader;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
@@ -89,6 +90,7 @@ impl<S: LogStore> Wal<S> {
         let store = self.store.clone();
         move |region_id, last_entry_id, provider| -> BoxFuture<'_, Result<()>> {
             if let Provider::Noop = provider {
+                debug!("Skip obsolete for region: {}", region_id);
                 return Box::pin(async move { Ok(()) });
             }
             Box::pin(async move {
