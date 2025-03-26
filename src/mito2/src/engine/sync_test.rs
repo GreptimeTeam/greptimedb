@@ -133,6 +133,7 @@ async fn test_sync_after_flush_region() {
     let expected = "++\n++";
     scan_check(&follower_engine, region_id, expected, 0, 0).await;
 
+    // Returns error since the max manifest is 1
     let err = follower_engine.sync_region(region_id, 2).await.unwrap_err();
     let err = err.as_any().downcast_ref::<Error>().unwrap();
     assert_matches!(err, Error::InstallManifestTo { .. });
