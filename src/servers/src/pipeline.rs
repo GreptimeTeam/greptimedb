@@ -54,7 +54,7 @@ pub(crate) async fn run_pipeline(
     pipeline_definition: &PipelineDefinition,
     pipeline_parameters: &GreptimePipelineParams,
     data_array: Vec<PipelineMap>,
-    table_name: String,
+    default_table: String,
     query_ctx: &QueryContextRef,
     is_top_level: bool,
 ) -> Result<Vec<RowInsertRequest>> {
@@ -65,7 +65,7 @@ pub(crate) async fn run_pipeline(
                 custom_ts.as_ref(),
                 pipeline_parameters,
                 data_array,
-                table_name,
+                default_table,
                 query_ctx,
             )
             .await
@@ -76,7 +76,7 @@ pub(crate) async fn run_pipeline(
                 pipeline_definition,
                 pipeline_parameters,
                 data_array,
-                table_name,
+                default_table,
                 query_ctx,
                 is_top_level,
             )
@@ -112,7 +112,7 @@ async fn run_custom_pipeline(
     pipeline_definition: &PipelineDefinition,
     pipeline_parameters: &GreptimePipelineParams,
     data_array: Vec<PipelineMap>,
-    default_table_name: String,
+    default_table: String,
     query_ctx: &QueryContextRef,
     is_top_level: bool,
 ) -> Result<Vec<RowInsertRequest>> {
@@ -137,7 +137,7 @@ async fn run_custom_pipeline(
 
         match r {
             PipelineExecOutput::Transformed((row, table_name)) => {
-                let table_name = table_name.unwrap_or(default_table_name.clone());
+                let table_name = table_name.unwrap_or(default_table.clone());
                 req_map
                     .entry(table_name)
                     .or_insert_with(|| Vec::with_capacity(arr_len))
@@ -172,7 +172,7 @@ async fn run_custom_pipeline(
     for (dispatched_to, coll) in dispatched {
         // we generate the new table name according to `table_part` and
         // current custom table name.
-        let table_name = dispatched_to.dispatched_to_table_name(&default_table_name);
+        let table_name = dispatched_to.dispatched_to_table_name(&default_table);
         let next_pipeline_name = dispatched_to
             .pipeline
             .as_deref()

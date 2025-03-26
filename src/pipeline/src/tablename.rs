@@ -23,9 +23,21 @@ use crate::PipelineMap;
 const REPLACE_KEY: &str = "{}";
 
 lazy_static::lazy_static! {
-    static ref RE: Regex = Regex::new(r"\$\{([^}]+)\}").unwrap();
+    static ref NAME_TPL: Regex = Regex::new(r"\$\{([^}]+)\}").unwrap();
 }
 
+/// TableNameTemplate is used to generate target table name from pipeline context.
+/// The config should be placed at the end of the pipeline.
+/// Use `${variable}` to refer to the variable in the pipeline context, the viarable can be from input data or be a processed result.
+/// Note the variable should be an integer number or a string.
+/// In case of any error occurs during runtime, the input default table name will be used.
+///
+/// ```yaml
+/// tablename: a_${xxx}_${b}
+/// ```
+///
+/// For example, if the template is `a_${xxx}_${b}`, and the pipeline context is
+/// `{"xxx": "123", "b": "456"}`, the generated table name will be `a_123_456`.
 #[derive(Debug, PartialEq)]
 pub(crate) struct TableNameTemplate {
     pub template: String,
@@ -70,7 +82,7 @@ impl TryFrom<&Yaml> for TableNameTemplate {
             .to_string();
 
         let mut keys = Vec::new();
-        for cap in RE.captures_iter(&name_template) {
+        for cap in NAME_TPL.captures_iter(&name_template) {
             ensure!(
                 cap.len() >= 2,
                 InvalidTableNameTemplateSnafu {
@@ -81,7 +93,9 @@ impl TryFrom<&Yaml> for TableNameTemplate {
             keys.push(key);
         }
 
-        let template = RE.replace_all(&name_template, REPLACE_KEY).to_string();
+        let template = NAME_TPL
+            .replace_all(&name_template, REPLACE_KEY)
+            .to_string();
 
         Ok(TableNameTemplate { template, keys })
     }
