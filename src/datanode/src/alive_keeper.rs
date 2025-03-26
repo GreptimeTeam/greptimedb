@@ -380,7 +380,7 @@ impl CountdownTask {
                             }
                         },
                         Some(CountdownCommand::Reset((role, deadline))) => {
-                            if let Err(err) = self.region_server.set_region_role(self.region_id, role){
+                            if let Err(err) = self.region_server.set_region_role(self.region_id, role) {
                                 error!(err; "Failed to set region role to {role} for region {region_id}");
                             }
                             trace!(
@@ -404,7 +404,7 @@ impl CountdownTask {
                 }
                 () = &mut countdown => {
                     warn!("The region {region_id} lease is expired, convert region to follower.");
-                    if let Err(err) = self.region_server.set_region_role(self.region_id, RegionRole::Follower){
+                    if let Err(err) = self.region_server.set_region_role(self.region_id, RegionRole::Follower) {
                         error!(err; "Failed to set region role to follower for region {region_id}");
                     }
                     // resets the countdown.
