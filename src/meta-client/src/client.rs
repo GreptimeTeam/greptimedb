@@ -335,6 +335,15 @@ impl ClusterInfo for MetaClient {
 
         Ok(region_stats)
     }
+
+    async fn list_flow_stats(&self) -> Result<Option<FlowStat>> {
+        let cluster_backend = ClusterKvBackend::new(Arc::new(self.cluster_client()?));
+        let cluster_backend = Arc::new(cluster_backend) as KvBackendRef;
+        let flow_state_manager = FlowStateManager::new(cluster_backend);
+        let res = flow_state_manager.get().await.context(GetFlowStatSnafu)?;
+
+        Ok(res.map(|r| r.into()))
+    }
 }
 
 fn decode_stats(kv: KeyValue) -> MetaResult<DatanodeStatValue> {
@@ -344,15 +353,6 @@ fn decode_stats(kv: KeyValue) -> MetaResult<DatanodeStatValue> {
 }
 
 impl MetaClient {
-    pub async fn list_flow_stats(&self) -> Result<Option<FlowStat>> {
-        let cluster_backend = ClusterKvBackend::new(Arc::new(self.cluster_client()?));
-        let cluster_backend = Arc::new(cluster_backend) as KvBackendRef;
-        let flow_state_manager = FlowStateManager::new(cluster_backend);
-        let res = flow_state_manager.get().await.context(GetFlowStatSnafu)?;
-
-        Ok(res.map(|r| r.into()))
-    }
-
     pub fn new(id: Id) -> Self {
         Self {
             id,
