@@ -300,7 +300,7 @@ impl<R: Rng> Generator<AlterTableExpr, R> for AlterExprUnsetTableOptionsGenerato
 mod tests {
     use std::sync::Arc;
 
-    use rand_chacha::rand_core::SeedableRng;
+    use rand::SeedableRng;
 
     use super::*;
     use crate::context::TableContext;
