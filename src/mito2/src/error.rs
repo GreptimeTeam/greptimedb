@@ -33,7 +33,7 @@ use store_api::storage::RegionId;
 use tokio::time::error::Elapsed;
 
 use crate::cache::file_cache::FileType;
-use crate::region::{RegionLeaderState, RegionRoleState};
+use crate::region::RegionRoleState;
 use crate::schedule::remote_job_scheduler::JobId;
 use crate::sst::file::FileId;
 use crate::worker::WorkerId;
@@ -1125,10 +1125,8 @@ impl ErrorExt for Error {
             CompactRegion { source, .. } => source.status_code(),
             CompatReader { .. } => StatusCode::Unexpected,
             InvalidRegionRequest { source, .. } => source.status_code(),
-            RegionLeaderState { .. } | RegionFollowerState { .. } | UpdateManifest { .. } => {
-                StatusCode::RegionNotReady
-            }
-            &FlushableRegionState { .. } => StatusCode::RegionNotReady,
+            RegionState { .. } | UpdateManifest { .. } => StatusCode::RegionNotReady,
+            FlushableRegionState { .. } => StatusCode::RegionNotReady,
             JsonOptions { .. } => StatusCode::InvalidArguments,
             EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,
             ArrowReader { .. } => StatusCode::StorageUnavailable,

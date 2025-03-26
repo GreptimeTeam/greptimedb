@@ -52,7 +52,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             || !is_immutable_empty
             || region.manifest_ctx.has_update().await?
         {
-            self.reopen_region(&region, is_mutable_empty).await?
+            self.reopen_region(&region, is_mutable_empty, is_immutable_empty)
+                .await?
         } else {
             region
         };

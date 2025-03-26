@@ -35,8 +35,8 @@ use store_api::storage::RegionId;
 
 use crate::access_layer::AccessLayerRef;
 use crate::error::{
-    FlushableRegionStateSnafu, RegionFollowerStateSnafu, RegionLeaderStateSnafu,
-    RegionNotFoundSnafu, RegionStateSnafu, RegionTruncatedSnafu, Result, UpdateManifestSnafu,
+    FlushableRegionStateSnafu, RegionNotFoundSnafu, RegionStateSnafu, RegionTruncatedSnafu, Result,
+    UpdateManifestSnafu,
 };
 use crate::manifest::action::{RegionManifest, RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::RegionManifestManager;
@@ -317,7 +317,7 @@ impl MitoRegion {
             .state
             .compare_exchange(RegionRoleState::Leader(expect), state)
             .map_err(|actual| {
-                RegionLStateSnafu {
+                RegionStateSnafu {
                     region_id: self.region_id,
                     state: actual,
                     expect: RegionRoleState::Leader(expect),

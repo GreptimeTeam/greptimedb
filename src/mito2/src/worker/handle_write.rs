@@ -24,7 +24,7 @@ use store_api::codec::PrimaryKeyEncoding;
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
-use crate::error::{InvalidRequestSnafu, RegionLeaderStateSnafu, RegionStateSnafu, RejectWriteSnafu, Result};
+use crate::error::{InvalidRequestSnafu, RegionStateSnafu, RejectWriteSnafu, Result};
 use crate::metrics::{WRITE_REJECT_TOTAL, WRITE_ROWS_TOTAL, WRITE_STAGE_ELAPSED};
 use crate::region::{RegionLeaderState, RegionRoleState};
 use crate::region_write_ctx::RegionWriteCtx;
