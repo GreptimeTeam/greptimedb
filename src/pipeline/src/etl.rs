@@ -172,20 +172,20 @@ pub fn json_array_to_map(val: Vec<serde_json::Value>) -> Result<Vec<PipelineMap>
 
 impl Pipeline {
     pub fn exec_mut(&self, val: &mut PipelineMap) -> Result<PipelineExecOutput> {
+        // process
         for processor in self.processors.iter() {
             processor.exec_mut(val)?;
         }
 
-        let matched_rule = self
-            .dispatcher
-            .as_ref()
-            .and_then(|dispatcher| dispatcher.exec(val));
+        // dispatch, fast return if matched
+        if let Some(rule) = self.dispatcher.as_ref().and_then(|d| d.exec(val)) {
+            return Ok(PipelineExecOutput::DispatchedTo(rule.into()));
+        }
 
-        let row = match matched_rule {
-            None => self.transformer.transform_mut(val)?,
-            Some(rule) => return Ok(PipelineExecOutput::DispatchedTo(rule.into())),
-        };
+        // transform
+        let row = self.transformer.transform_mut(val)?;
 
+        // generate table name
         let table_name = self.tablename.as_ref().and_then(|t| t.apply(val));
 
         Ok(PipelineExecOutput::Transformed((row, table_name)))

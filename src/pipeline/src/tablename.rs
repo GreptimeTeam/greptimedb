@@ -18,7 +18,7 @@ use snafu::{ensure, OptionExt};
 use yaml_rust::Yaml;
 
 use crate::error::{Error, InvalidTableNameTemplateSnafu, RequiredTableNameTemplateSnafu, Result};
-use crate::PipelineMap;
+use crate::{PipelineMap, Value};
 
 const REPLACE_KEY: &str = "{}";
 
@@ -52,15 +52,15 @@ impl TableNameTemplate {
             .filter_map(|key| {
                 let v = val.get(key)?;
                 match v {
-                    crate::Value::Int8(v) => Some(v.to_string()),
-                    crate::Value::Int16(v) => Some(v.to_string()),
-                    crate::Value::Int32(v) => Some(v.to_string()),
-                    crate::Value::Int64(v) => Some(v.to_string()),
-                    crate::Value::Uint8(v) => Some(v.to_string()),
-                    crate::Value::Uint16(v) => Some(v.to_string()),
-                    crate::Value::Uint32(v) => Some(v.to_string()),
-                    crate::Value::Uint64(v) => Some(v.to_string()),
-                    crate::Value::String(v) => Some(v.clone()),
+                    Value::Int8(v) => Some(v.to_string()),
+                    Value::Int16(v) => Some(v.to_string()),
+                    Value::Int32(v) => Some(v.to_string()),
+                    Value::Int64(v) => Some(v.to_string()),
+                    Value::Uint8(v) => Some(v.to_string()),
+                    Value::Uint16(v) => Some(v.to_string()),
+                    Value::Uint32(v) => Some(v.to_string()),
+                    Value::Uint64(v) => Some(v.to_string()),
+                    Value::String(v) => Some(v.clone()),
                     _ => None,
                 }
             })
