@@ -483,7 +483,7 @@ mod test {
             // error datatype mismatch
             (
                 "SELECT number, ts FROM numbers_with_ts",
-                Err("Expect timestamp"),
+                Err("Expect the last column in table to be timestamp column, found column atat with type Int8"),
                 vec![
                     ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
                     ColumnSchema::new(
@@ -498,6 +498,26 @@ mod test {
                         ConcreteDataType::int8_datatype(),
                         false,
                     ),
+                ],
+            ),
+            // error datatype mismatch on second last column
+            (
+                "SELECT number FROM numbers_with_ts",
+                Err("Expect the second last column in the table to be timestamp column, found column ts with type Int8"),
+                vec![
+                    ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
+                    ColumnSchema::new(
+                        "ts",
+                        ConcreteDataType::int8_datatype(),
+                        false,
+                    ),
+                    ColumnSchema::new(
+                        // name is irrelevant for update_at column
+                        "atat",
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    )
+                    .with_time_index(true),
                 ],
             ),
         ];
