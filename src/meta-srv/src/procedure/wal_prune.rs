@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
+use common_error::ext::BoxedError;
 use common_meta::distributed_time_constants::MAILBOX_RTT_SECS;
 use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
 use common_meta::key::TableMetadataManagerRef;
@@ -147,7 +148,11 @@ impl WalPruneProcedure {
             .topic_region_manager()
             .get_regions_by_topics(&self.data.topics)
             .await
-            .context(TableMetadataManagerSnafu)?;
+            .context(TableMetadataManagerSnafu)
+            .map_err(BoxedError::new)
+            .with_context(|_| error::RetryLaterWithSourceSnafu {
+                reason: "Failed to get topic-region map",
+            })?;
         let regions = topic_region_map
             .values()
             .flatten()
@@ -309,14 +314,8 @@ impl Procedure for WalPruneProcedure {
         Self::TYPE_NAME
     }
 
-    async fn rollback(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<()> {
-        self.rollback_inner()
-            .await
-            .map_err(ProcedureError::external)
-    }
-
     fn rollback_supported(&self) -> bool {
-        true
+        false
     }
 
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
