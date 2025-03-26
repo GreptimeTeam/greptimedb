@@ -665,17 +665,15 @@ impl Series {
 
     /// Freezes active part to frozen part and compact frozen part to reduce memory fragmentation.
     /// Returns the frozen and compacted values.
-    fn compact(&mut self, region_metadata: &RegionMetadataRef) -> Result<Values> {
+    fn compact(&mut self, region_metadata: &RegionMetadataRef) -> Result<&Values> {
         self.freeze(region_metadata);
 
-        let mut frozen = self.frozen.clone();
+        let frozen = &self.frozen;
 
         // Each series must contain at least one row
         debug_assert!(!frozen.is_empty());
 
-        let values = if frozen.len() == 1 {
-            frozen.pop().unwrap()
-        } else {
+        if frozen.len() > 1 {
             // TODO(hl): We should keep track of min/max timestamps for each values and avoid
             // cloning and sorting when values do not overlap with each other.
 
@@ -699,10 +697,9 @@ impl Series {
 
             debug_assert_eq!(concatenated.len(), column_size);
             let values = Values::from_columns(&concatenated)?;
-            self.frozen = vec![values.clone()];
-            values
+            self.frozen = vec![values];
         };
-        Ok(values)
+        Ok(&self.frozen[0])
     }
 }
 
@@ -1007,7 +1004,7 @@ mod tests {
         vec![ValueRef::Int64(v0), ValueRef::Float64(OrderedFloat(v1))].into_iter()
     }
 
-    fn check_values(values: Values, expect: &[(i64, u64, u8, i64, f64)]) {
+    fn check_values(values: &Values, expect: &[(i64, u64, u8, i64, f64)]) {
         let ts = values
             .timestamp
             .as_any()

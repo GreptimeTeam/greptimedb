@@ -383,8 +383,13 @@ impl Batch {
         ];
         let rows = converter.convert_columns(&columns).unwrap();
         let mut to_sort: Vec<_> = rows.iter().enumerate().collect();
-        to_sort.sort_unstable_by(|left, right| left.1.cmp(&right.1));
 
+        let was_sorted = to_sort.is_sorted_by_key(|x| x.1);
+        if !was_sorted {
+            to_sort.sort_unstable_by_key(|x| x.1);
+        }
+
+        let num_rows = to_sort.len();
         if dedup {
             // Dedup by timestamps.
             to_sort.dedup_by(|left, right| {
@@ -395,7 +400,11 @@ impl Batch {
                 left_key[..TIMESTAMP_KEY_LEN] == right_key[..TIMESTAMP_KEY_LEN]
             });
         }
+        let no_dedup = to_sort.len() == num_rows;
 
+        if was_sorted && no_dedup {
+            return Ok(());
+        }
         let indices = UInt32Vector::from_iter_values(to_sort.iter().map(|v| v.0 as u32));
         self.take_in_place(&indices)
     }
