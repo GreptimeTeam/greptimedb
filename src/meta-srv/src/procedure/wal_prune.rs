@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use common_error::ext::BoxedError;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::lock_key::RemoteWalLock;
 use common_procedure::error::ToJsonSnafu;
@@ -29,7 +30,7 @@ use snafu::ResultExt;
 use store_api::logstore::EntryId;
 use store_api::storage::RegionId;
 
-use crate::error::{BuildPartitionClientSnafu, DeleteRecordSnafu, TableMetadataManagerSnafu};
+use crate::error::{self, BuildPartitionClientSnafu, DeleteRecordSnafu, TableMetadataManagerSnafu};
 use crate::Result;
 
 type KafkaClientRef = Arc<Client>;
@@ -94,7 +95,11 @@ impl WalPruneProcedure {
             .topic_region_manager()
             .get_regions_by_topics(&self.data.topics)
             .await
-            .context(TableMetadataManagerSnafu)?;
+            .context(TableMetadataManagerSnafu)
+            .map_err(BoxedError::new)
+            .with_context(|_| error::RetryLaterWithSourceSnafu {
+                reason: "Failed to get topic-region map",
+            })?;
         let regions = topic_region_map
             .values()
             .flatten()
