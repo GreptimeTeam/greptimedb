@@ -24,6 +24,7 @@ pub(crate) mod range;
 pub(crate) mod scan_region;
 pub(crate) mod scan_util;
 pub(crate) mod seq_scan;
+pub(crate) mod series_scan;
 pub(crate) mod unordered_scan;
 
 use std::collections::{HashMap, HashSet};
