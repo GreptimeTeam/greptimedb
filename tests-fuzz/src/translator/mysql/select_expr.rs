@@ -69,7 +69,8 @@ mod tests {
 
         let select_expr = select_expr_generator.generate(&mut rng).unwrap();
         let output = SelectExprTranslator.translate(&select_expr).unwrap();
-        let expected = r#"SELECT ts, memory_util, cpu_util, disk_util FROM test ORDER BY disk_util, ts DESC;"#;
+        let expected =
+            r#"SELECT ts, memory_util, cpu_util, disk_util FROM test ORDER BY disk_util, ts DESC;"#;
         assert_eq!(output, expected);
     }
 }
