@@ -148,9 +148,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
         };
         let version = region.version();
-        if !version.memtables.mutable.is_empty() {
+        if !version.memtables.mutable.is_empty() || !version.memtables.immutables().is_empty() {
             warn!(
-                "Region {} mutable memtables is not empty, which should not happen, manifest version: {}",
+                "Region {} memtables is not empty, which should not happen, manifest version: {}",
                 region.region_id, manifest.manifest_version
             );
         }

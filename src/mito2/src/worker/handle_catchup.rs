@@ -43,10 +43,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
         // Note: Currently, We protect the split brain by ensuring the mutable table is empty.
         // It's expensive to execute catch-up requests without `set_writable=true` multiple times.
-        let is_mutable_empty = region.version().memtables.mutable.is_empty();
+        let version = region.version();
+        let is_mutable_empty = version.memtables.mutable.is_empty();
+        let is_immutable_empty = version.memtables.immutables().is_empty();
 
         // Utilizes the short circuit evaluation.
-        let region = if !is_mutable_empty || region.manifest_ctx.has_update().await? {
+        let region = if !is_mutable_empty
+            || !is_immutable_empty
+            || region.manifest_ctx.has_update().await?
+        {
             self.reopen_region(&region, is_mutable_empty).await?
         } else {
             region

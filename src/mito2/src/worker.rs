@@ -946,11 +946,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         &mut self,
         region: &Arc<MitoRegion>,
         is_mutable_empty: bool,
+        is_immutable_empty: bool,
     ) -> Result<Arc<MitoRegion>> {
         let region_id = region.region_id;
         let manifest_version = region.manifest_ctx.manifest_version().await;
         let flushed_entry_id = region.version_control.current().last_entry_id;
-        info!("Reopening the region: {region_id}, empty mutable: {is_mutable_empty}, manifest version: {manifest_version}, flushed entry id: {flushed_entry_id}");
+        info!("Reopening the region: {region_id}, empty mutable: {is_mutable_empty}, empty immutable: {is_immutable_empty}, manifest version: {manifest_version}, flushed entry id: {flushed_entry_id}");
         let reopened_region = Arc::new(
             RegionOpener::new(
                 region_id,
