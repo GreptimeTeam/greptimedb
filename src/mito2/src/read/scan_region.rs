@@ -47,6 +47,7 @@ use crate::read::compat::{self, CompatBatch};
 use crate::read::projection::ProjectionMapper;
 use crate::read::range::{FileRangeBuilder, MemRangeBuilder, RangeMeta, RowGroupIndex};
 use crate::read::seq_scan::SeqScan;
+use crate::read::series_scan::SeriesScan;
 use crate::read::unordered_scan::UnorderedScan;
 use crate::read::{Batch, Source};
 use crate::region::options::MergeMode;
@@ -67,6 +68,8 @@ pub(crate) enum Scanner {
     Seq(SeqScan),
     /// Unordered scan.
     Unordered(UnorderedScan),
+    /// Per-series scan.
+    Series(SeriesScan),
 }
 
 impl Scanner {
@@ -76,6 +79,7 @@ impl Scanner {
         match self {
             Scanner::Seq(seq_scan) => seq_scan.build_stream(),
             Scanner::Unordered(unordered_scan) => unordered_scan.build_stream().await,
+            Scanner::Series(series_scan) => series_scan.build_stream().await,
         }
     }
 }
@@ -87,6 +91,7 @@ impl Scanner {
         match self {
             Scanner::Seq(seq_scan) => seq_scan.input().num_files(),
             Scanner::Unordered(unordered_scan) => unordered_scan.input().num_files(),
+            Scanner::Series(series_scan) => series_scan.input().num_files(),
         }
     }
 
@@ -95,6 +100,7 @@ impl Scanner {
         match self {
             Scanner::Seq(seq_scan) => seq_scan.input().num_memtables(),
             Scanner::Unordered(unordered_scan) => unordered_scan.input().num_memtables(),
+            Scanner::Series(series_scan) => series_scan.input().num_memtables(),
         }
     }
 
@@ -103,6 +109,7 @@ impl Scanner {
         match self {
             Scanner::Seq(seq_scan) => seq_scan.input().file_ids(),
             Scanner::Unordered(unordered_scan) => unordered_scan.input().file_ids(),
+            Scanner::Series(series_scan) => series_scan.input().file_ids(),
         }
     }
 
@@ -114,6 +121,7 @@ impl Scanner {
         match self {
             Scanner::Seq(seq_scan) => seq_scan.prepare(request).unwrap(),
             Scanner::Unordered(unordered_scan) => unordered_scan.prepare(request).unwrap(),
+            Scanner::Series(series_scan) => series_scan.prepare(request).unwrap(),
         }
     }
 }

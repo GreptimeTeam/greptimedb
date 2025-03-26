@@ -17,15 +17,17 @@
 use std::fmt;
 use std::sync::Arc;
 
+use async_stream::stream;
 use common_error::ext::BoxedError;
-use common_recordbatch::SendableRecordBatchStream;
+use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::schema::SchemaRef;
+use futures::StreamExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{PrepareRequest, RegionScanner, ScannerProperties};
 
 use crate::error::PartitionOutOfRangeSnafu;
-use crate::read::scan_region::StreamContext;
+use crate::read::scan_region::{ScanInput, StreamContext};
 
 /// Scans a region and returns sorted rows of a series in the same partition.
 ///
@@ -40,6 +42,11 @@ pub struct SeriesScan {
 }
 
 impl SeriesScan {
+    /// Creates a new [SeriesScan].
+    pub(crate) fn new(input: ScanInput) -> Self {
+        todo!()
+    }
+
     fn scan_partition_impl(
         &self,
         partition: usize,
@@ -55,6 +62,27 @@ impl SeriesScan {
         }
 
         todo!()
+    }
+
+    // TODO(yingwen): Reuse codes.
+    /// Scans the region and returns a stream.
+    pub(crate) async fn build_stream(&self) -> Result<SendableRecordBatchStream, BoxedError> {
+        let part_num = self.properties.num_partitions();
+        let streams = (0..part_num)
+            .map(|i| self.scan_partition(i))
+            .collect::<Result<Vec<_>, BoxedError>>()?;
+        let stream = stream! {
+            for mut stream in streams {
+                while let Some(rb) = stream.next().await {
+                    yield rb;
+                }
+            }
+        };
+        let stream = Box::pin(RecordBatchStreamWrapper::new(
+            self.schema(),
+            Box::pin(stream),
+        ));
+        Ok(stream)
     }
 }
 
@@ -109,5 +137,13 @@ impl fmt::Debug for SeriesScan {
         f.debug_struct("SeriesScan")
             .field("num_ranges", &self.stream_ctx.ranges.len())
             .finish()
+    }
+}
+
+#[cfg(test)]
+impl SeriesScan {
+    /// Returns the input.
+    pub(crate) fn input(&self) -> &ScanInput {
+        &self.stream_ctx.input
     }
 }
