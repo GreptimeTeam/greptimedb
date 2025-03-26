@@ -63,12 +63,12 @@ pub async fn sql_to_df_plan(
 }
 
 pub fn df_plan_to_sql(plan: &LogicalPlan) -> Result<String, Error> {
-    /// A dialect that forces all identifiers to be quoted
+    /// A dialect that forces identifiers to be quoted when have uppercase
     struct ForceQuoteIdentifiers;
     impl datafusion::sql::unparser::dialect::Dialect for ForceQuoteIdentifiers {
         fn identifier_quote_style(&self, identifier: &str) -> Option<char> {
             if identifier.to_lowercase() != identifier {
-                Some('"')
+                Some('`')
             } else {
                 None
             }
@@ -160,7 +160,7 @@ impl TreeNodeVisitor<'_> for FindGroupByFinalName {
     }
 }
 
-/// Add to the final select columns like `update_at` and `__ts_placeholder` with values like `now()` and `0`
+/// Add to the final select columns like `update_at`(which doesn't necessary need to have exact name just need to be a extra timestamp column) and `__ts_placeholder`(this column need to have exact this name and be a timestamp) with values like `now()` and `0`
 #[derive(Debug)]
 pub struct AddAutoColumnRewriter {
     pub schema: RawSchema,
@@ -212,7 +212,8 @@ impl TreeNodeRewriter for AddAutoColumnRewriter {
             } else {
                 // helpful error message
                 return Err(DataFusionError::Plan(format!(
-                    "Expect timestamp column, found {:?}",
+                    "Expect the last column in table to be timestamp column, found column {} with type {:?}",
+                    last_col_schema.name,
                     last_col_schema.data_type
                 )));
             }
@@ -224,8 +225,9 @@ impl TreeNodeRewriter for AddAutoColumnRewriter {
                 exprs.push(datafusion::prelude::now());
             } else {
                 return Err(DataFusionError::Plan(format!(
-                    "Expect timestamp column, found {:?} at column {:?}",
-                    second_last_col_schema.data_type, second_last_col_schema.name
+                    "Expect the second last column in the table to be timestamp column, found column {} with type {:?}",
+                    second_last_col_schema.name,
+                    second_last_col_schema.data_type
                 )));
             }
 
@@ -317,7 +319,7 @@ mod test {
         let new_sql = df_plan_to_sql(&new).unwrap();
 
         assert_eq!(
-            r#"SELECT "UPPERCASE_NUMBERS_WITH_TS"."NUMBER" FROM "UPPERCASE_NUMBERS_WITH_TS""#,
+            r#"SELECT `UPPERCASE_NUMBERS_WITH_TS`.`NUMBER` FROM `UPPERCASE_NUMBERS_WITH_TS`"#,
             new_sql
         );
     }
