@@ -26,7 +26,10 @@ pub trait WeightedChoose<Item>: Send + Sync {
 
     /// The method will choose multiple items.
     ///
-    /// Returns less than `amount` items if the weight_array is not enough.
+    /// ## Note
+    ///
+    /// - Returns less than `amount` items if the weight_array is not enough.
+    /// - The returned items cannot be duplicated.
     fn choose_multiple(&mut self, amount: usize) -> Result<Vec<Item>>;
 
     /// Returns the length of the weight_array.
@@ -92,6 +95,8 @@ where
     }
 
     fn choose_multiple(&mut self, amount: usize) -> Result<Vec<Item>> {
+        let amount = amount.min(self.items.iter().filter(|item| item.weight > 0).count());
+
         Ok(self
             .items
             .choose_multiple_weighted(&mut rng(), amount, |item| item.weight as f64)
@@ -127,7 +132,7 @@ mod tests {
 
         for _ in 0..100 {
             let ret = choose.choose_multiple(3).unwrap();
-            assert_eq!(vec![1, 2], ret);
+            assert_eq!(vec![1], ret);
         }
     }
 }
