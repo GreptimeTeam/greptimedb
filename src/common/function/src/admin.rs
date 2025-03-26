@@ -12,15 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod add_region_follower;
 mod flush_compact_region;
 mod flush_compact_table;
 mod migrate_region;
+mod remove_region_follower;
 
 use std::sync::Arc;
 
+use add_region_follower::AddRegionFollowerFunction;
 use flush_compact_region::{CompactRegionFunction, FlushRegionFunction};
 use flush_compact_table::{CompactTableFunction, FlushTableFunction};
 use migrate_region::MigrateRegionFunction;
+use remove_region_follower::RemoveRegionFollowerFunction;
 
 use crate::flush_flow::FlushFlowFunction;
 use crate::function_registry::FunctionRegistry;
@@ -32,6 +36,8 @@ impl AdminFunction {
     /// Register all table functions to [`FunctionRegistry`].
     pub fn register(registry: &FunctionRegistry) {
         registry.register_async(Arc::new(MigrateRegionFunction));
+        registry.register_async(Arc::new(AddRegionFollowerFunction));
+        registry.register_async(Arc::new(RemoveRegionFollowerFunction));
         registry.register_async(Arc::new(FlushRegionFunction));
         registry.register_async(Arc::new(CompactRegionFunction));
         registry.register_async(Arc::new(FlushTableFunction));
