@@ -36,7 +36,7 @@ use store_api::storage::RegionId;
 use crate::access_layer::AccessLayerRef;
 use crate::error::{
     FlushableRegionStateSnafu, RegionFollowerStateSnafu, RegionLeaderStateSnafu,
-    RegionNotFoundSnafu, RegionTruncatedSnafu, Result, UpdateManifestSnafu,
+    RegionNotFoundSnafu, RegionStateSnafu, RegionTruncatedSnafu, Result, UpdateManifestSnafu,
 };
 use crate::manifest::action::{RegionManifest, RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::RegionManifestManager;
@@ -317,10 +317,10 @@ impl MitoRegion {
             .state
             .compare_exchange(RegionRoleState::Leader(expect), state)
             .map_err(|actual| {
-                RegionLeaderStateSnafu {
+                RegionLStateSnafu {
                     region_id: self.region_id,
                     state: actual,
-                    expect,
+                    expect: RegionRoleState::Leader(expect),
                 }
                 .build()
             })?;
@@ -409,10 +409,10 @@ impl ManifestContext {
         } else {
             ensure!(
                 current_state == RegionRoleState::Leader(expect_state),
-                RegionLeaderStateSnafu {
+                RegionStateSnafu {
                     region_id: manifest.metadata.region_id,
                     state: current_state,
-                    expect: expect_state,
+                    expect: RegionRoleState::Leader(expect_state),
                 }
             );
         }
@@ -604,10 +604,10 @@ impl RegionMap {
             .context(RegionNotFoundSnafu { region_id })?;
         ensure!(
             region.is_writable(),
-            RegionLeaderStateSnafu {
+            RegionStateSnafu {
                 region_id,
                 state: region.state(),
-                expect: RegionLeaderState::Writable,
+                expect: RegionRoleState::Leader(RegionLeaderState::Writable),
             }
         );
         Ok(region)
@@ -622,9 +622,10 @@ impl RegionMap {
             .context(RegionNotFoundSnafu { region_id })?;
         ensure!(
             region.is_follower(),
-            RegionFollowerStateSnafu {
+            RegionStateSnafu {
                 region_id,
                 state: region.state(),
+                expect: RegionRoleState::Follower,
             }
         );
 

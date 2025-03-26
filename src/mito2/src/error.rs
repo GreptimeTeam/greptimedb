@@ -511,18 +511,10 @@ pub enum Error {
     },
 
     #[snafu(display("Region {} is in {:?} state, expect: {:?}", region_id, state, expect))]
-    RegionLeaderState {
+    RegionState {
         region_id: RegionId,
         state: RegionRoleState,
-        expect: RegionLeaderState,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Region {} is in {:?} state, expect: follower", region_id, state))]
-    RegionFollowerState {
-        region_id: RegionId,
-        state: RegionRoleState,
+        expect: RegionRoleState,
         #[snafu(implicit)]
         location: Location,
     },
