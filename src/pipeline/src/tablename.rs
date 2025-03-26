@@ -115,10 +115,10 @@ mod tests {
         let config = YamlLoader::load_from_str(yaml);
         assert!(config.is_ok());
         let config = config.unwrap()[0]["tablename"].clone();
-        let name_tamplate = TableNameTemplate::try_from(&config);
-        assert!(name_tamplate.is_ok());
-        let name_tamplate = name_tamplate.unwrap();
-        assert_eq!(name_tamplate.template, "a_{}_{}");
-        assert_eq!(name_tamplate.keys, vec!["xxx", "b"]);
+        let name_template = TableNameTemplate::try_from(&config);
+        assert!(name_template.is_ok());
+        let name_template = name_template.unwrap();
+        assert_eq!(name_template.template, "a_{}_{}");
+        assert_eq!(name_template.keys, vec!["xxx", "b"]);
     }
 }
