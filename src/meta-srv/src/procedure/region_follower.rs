@@ -23,12 +23,12 @@ mod test_util;
 
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
-use common_meta::distributed_time_constants;
 use common_meta::key::datanode_table::{DatanodeTableKey, DatanodeTableValue, RegionInfo};
 use common_meta::key::table_route::{PhysicalTableRouteValue, TableRouteValue};
 use common_meta::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
 use common_meta::lock_key::{CatalogLock, RegionLock, SchemaLock, TableLock};
 use common_meta::peer::Peer;
+use common_meta::{distributed_time_constants, DatanodeId};
 use common_procedure::StringKey;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -129,9 +129,9 @@ impl AlterRegionFollowerData {
     pub(crate) async fn load_datanode_table_value(
         &self,
         ctx: &Context,
+        datanode_id: DatanodeId,
     ) -> Result<Option<DatanodeTableValue>> {
         let table_id = self.region_id.table_id();
-        let datanode_id = self.peer_id;
         let datanode_table_key = DatanodeTableKey {
             datanode_id,
             table_id,

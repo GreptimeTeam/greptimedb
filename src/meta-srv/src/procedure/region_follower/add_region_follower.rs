@@ -67,12 +67,26 @@ impl AddRegionFollowerProcedure {
         // loads the datanode peer and check peer is alive
         self.data.peer = self.data.load_datanode_peer(&self.context).await?;
 
-        // loads the datanode table value
-        self.data.datanode_table_value = self.data.load_datanode_table_value(&self.context).await?;
-
         // loads the table route of the region
         self.data.table_route = self.data.load_table_route(&self.context).await?;
+        let region_leader_datanode_id = {
+            let table_route = self.data.physical_table_route().unwrap();
+            table_route
+                .region_routes
+                .iter()
+                .find(|region_route| region_route.region.id == self.data.region_id)
+                .map(|region_route| region_route.leader_peer.as_ref().unwrap().id)
+                .unwrap_or_default()
+        };
+
+        // loads the datanode table value
+        self.data.datanode_table_value = self
+            .data
+            .load_datanode_table_value(&self.context, region_leader_datanode_id)
+            .await?;
+
         let table_route = self.data.physical_table_route().unwrap();
+
         let datanode_peer = self.data.datanode_peer().unwrap();
 
         // check if the destination peer is already a leader/follower of the region
@@ -111,6 +125,7 @@ impl AddRegionFollowerProcedure {
             "Add region({}) follower procedure is preparing, peer: {datanode_peer:?}",
             self.data.region_id
         );
+        self.data.state = AlterRegionFollowerState::SubmitRequest;
 
         Ok(Status::executing(true))
     }
@@ -126,6 +141,7 @@ impl AddRegionFollowerProcedure {
         create_follower
             .send_open_region_instruction(&self.context, instruction)
             .await?;
+        self.data.state = AlterRegionFollowerState::UpdateMetadata;
 
         Ok(Status::executing(true))
     }
@@ -161,6 +177,7 @@ impl AddRegionFollowerProcedure {
             )
             .await
             .context(error::TableMetadataManagerSnafu)?;
+        self.data.state = AlterRegionFollowerState::InvalidateTableCache;
 
         Ok(Status::executing(true))
     }
@@ -174,7 +191,7 @@ impl AddRegionFollowerProcedure {
             .cache_invalidator
             .invalidate(&ctx, &[CacheIdent::TableId(table_id)])
             .await;
-        Ok(Status::executing(true))
+        Ok(Status::done())
     }
 }
 
