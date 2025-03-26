@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use api::v1::{RowInsertRequest, Rows};
+use hashbrown::HashMap;
 use pipeline::{
     DispatchedTo, GreptimePipelineParams, IdentityTimeIndex, Pipeline, PipelineDefinition,
     PipelineExecOutput, PipelineMap, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
@@ -111,7 +112,7 @@ async fn run_custom_pipeline(
     pipeline_definition: &PipelineDefinition,
     pipeline_parameters: &GreptimePipelineParams,
     data_array: Vec<PipelineMap>,
-    table_name: String,
+    default_table_name: String,
     query_ctx: &QueryContextRef,
     is_top_level: bool,
 ) -> Result<Vec<RowInsertRequest>> {
@@ -120,7 +121,8 @@ async fn run_custom_pipeline(
 
     let transform_timer = std::time::Instant::now();
 
-    let mut transformed = Vec::with_capacity(data_array.len());
+    let arr_len = data_array.len();
+    let mut req_map = HashMap::new();
     let mut dispatched: BTreeMap<DispatchedTo, Vec<PipelineMap>> = BTreeMap::new();
 
     for mut values in data_array {
@@ -134,8 +136,12 @@ async fn run_custom_pipeline(
             .context(PipelineSnafu)?;
 
         match r {
-            PipelineExecOutput::Transformed(row) => {
-                transformed.push(row);
+            PipelineExecOutput::Transformed((row, table_name)) => {
+                let table_name = table_name.unwrap_or(default_table_name.clone());
+                req_map
+                    .entry(table_name)
+                    .or_insert_with(|| Vec::with_capacity(arr_len))
+                    .push(row);
             }
             PipelineExecOutput::DispatchedTo(dispatched_to) => {
                 if let Some(coll) = dispatched.get_mut(&dispatched_to) {
@@ -151,14 +157,14 @@ async fn run_custom_pipeline(
     // if current pipeline generates some transformed results, build it as
     // `RowInsertRequest` and append to results. If the pipeline doesn't
     // have dispatch, this will be only output of the pipeline.
-    if !transformed.is_empty() {
+    for (table_name, rows) in req_map {
         results.push(RowInsertRequest {
             rows: Some(Rows {
-                rows: transformed,
+                rows,
                 schema: pipeline.schemas().clone(),
             }),
-            table_name: table_name.clone(),
-        })
+            table_name,
+        });
     }
 
     // if current pipeline contains dispatcher and has several rules, we may
@@ -166,7 +172,7 @@ async fn run_custom_pipeline(
     for (dispatched_to, coll) in dispatched {
         // we generate the new table name according to `table_part` and
         // current custom table name.
-        let table_name = dispatched_to.dispatched_to_table_name(&table_name);
+        let table_name = dispatched_to.dispatched_to_table_name(&default_table_name);
         let next_pipeline_name = dispatched_to
             .pipeline
             .as_deref()

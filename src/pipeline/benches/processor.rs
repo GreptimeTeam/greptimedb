@@ -29,7 +29,7 @@ fn processor_mut(
             .exec_mut(&mut payload)?
             .into_transformed()
             .expect("expect transformed result ");
-        result.push(r);
+        result.push(r.0);
     }
 
     Ok(result)

@@ -131,12 +131,12 @@ impl DispatchedTo {
 /// The result of pipeline execution
 #[derive(Debug)]
 pub enum PipelineExecOutput {
-    Transformed(Row),
+    Transformed((Row, Option<String>)),
     DispatchedTo(DispatchedTo),
 }
 
 impl PipelineExecOutput {
-    pub fn into_transformed(self) -> Option<Row> {
+    pub fn into_transformed(self) -> Option<(Row, Option<String>)> {
         if let Self::Transformed(o) = self {
             Some(o)
         } else {
@@ -181,13 +181,14 @@ impl Pipeline {
             .as_ref()
             .and_then(|dispatcher| dispatcher.exec(val));
 
-        match matched_rule {
-            None => self
-                .transformer
-                .transform_mut(val)
-                .map(PipelineExecOutput::Transformed),
-            Some(rule) => Ok(PipelineExecOutput::DispatchedTo(rule.into())),
-        }
+        let row = match matched_rule {
+            None => self.transformer.transform_mut(val)?,
+            Some(rule) => return Ok(PipelineExecOutput::DispatchedTo(rule.into())),
+        };
+
+        let table_name = self.tablename.as_ref().and_then(|t| t.apply(val));
+
+        Ok(PipelineExecOutput::Transformed((row, table_name)))
     }
 
     pub fn processors(&self) -> &processor::Processors {
@@ -247,9 +248,9 @@ transform:
             .into_transformed()
             .unwrap();
 
-        assert_eq!(result.values[0].value_data, Some(ValueData::U32Value(1)));
-        assert_eq!(result.values[1].value_data, Some(ValueData::U32Value(2)));
-        match &result.values[2].value_data {
+        assert_eq!(result.0.values[0].value_data, Some(ValueData::U32Value(1)));
+        assert_eq!(result.0.values[1].value_data, Some(ValueData::U32Value(2)));
+        match &result.0.values[2].value_data {
             Some(ValueData::TimestampNanosecondValue(v)) => {
                 assert_ne!(*v, 0);
             }
@@ -299,7 +300,7 @@ transform:
             .unwrap();
         let sechema = pipeline.schemas();
 
-        assert_eq!(sechema.len(), result.values.len());
+        assert_eq!(sechema.len(), result.0.values.len());
         let test = vec![
             (
                 ColumnDataType::String as i32,
@@ -338,7 +339,7 @@ transform:
         ];
         for i in 0..sechema.len() {
             let schema = &sechema[i];
-            let value = &result.values[i];
+            let value = &result.0.values[i];
             assert_eq!(schema.datatype, test[i].0);
             assert_eq!(value.value_data, test[i].1);
         }
@@ -374,9 +375,9 @@ transform:
             .unwrap()
             .into_transformed()
             .unwrap();
-        assert_eq!(result.values[0].value_data, Some(ValueData::U32Value(1)));
-        assert_eq!(result.values[1].value_data, Some(ValueData::U32Value(2)));
-        match &result.values[2].value_data {
+        assert_eq!(result.0.values[0].value_data, Some(ValueData::U32Value(1)));
+        assert_eq!(result.0.values[1].value_data, Some(ValueData::U32Value(2)));
+        match &result.0.values[2].value_data {
             Some(ValueData::TimestampNanosecondValue(v)) => {
                 assert_ne!(*v, 0);
             }
@@ -419,7 +420,7 @@ transform:
             .unwrap();
         let output = Rows {
             schema,
-            rows: vec![row],
+            rows: vec![row.0],
         };
         let schemas = output.schema;
 
