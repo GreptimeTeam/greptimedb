@@ -325,7 +325,7 @@ mod tests {
             .generate(&mut rng)
             .unwrap();
         let serialized = serde_json::to_string(&expr).unwrap();
-        let expected = r#"{"table_name":{"value":"animI","quote_style":null},"alter_kinds":{"AddColumn":{"column":{"name":{"value":"velit","quote_style":null},"column_type":{"Int32":{}},"options":[{"DefaultValue":{"Int32":1606462472}}]},"location":null}}}"#;
+        let expected = r#"{"table_name":{"value":"quasi","quote_style":null},"alter_kinds":{"AddColumn":{"column":{"name":{"value":"consequatur","quote_style":null},"column_type":{"Float64":{}},"options":[{"DefaultValue":{"Float64":0.48809950435391647}}]},"location":null}}}"#;
         assert_eq!(expected, serialized);
 
         let expr = AlterExprRenameGeneratorBuilder::default()
@@ -335,7 +335,7 @@ mod tests {
             .generate(&mut rng)
             .unwrap();
         let serialized = serde_json::to_string(&expr).unwrap();
-        let expected = r#"{"table_name":{"value":"animI","quote_style":null},"alter_kinds":{"RenameTable":{"new_table_name":{"value":"nihil","quote_style":null}}}}"#;
+        let expected = r#"{"table_name":{"value":"quasi","quote_style":null},"alter_kinds":{"RenameTable":{"new_table_name":{"value":"voluptates","quote_style":null}}}}"#;
         assert_eq!(expected, serialized);
 
         let expr = AlterExprDropColumnGeneratorBuilder::default()
@@ -345,7 +345,7 @@ mod tests {
             .generate(&mut rng)
             .unwrap();
         let serialized = serde_json::to_string(&expr).unwrap();
-        let expected = r#"{"table_name":{"value":"animI","quote_style":null},"alter_kinds":{"DropColumn":{"name":{"value":"cUmquE","quote_style":null}}}}"#;
+        let expected = r#"{"table_name":{"value":"quasi","quote_style":null},"alter_kinds":{"DropColumn":{"name":{"value":"ImPEDiT","quote_style":null}}}}"#;
         assert_eq!(expected, serialized);
 
         let expr = AlterExprModifyDataTypeGeneratorBuilder::default()
@@ -355,7 +355,7 @@ mod tests {
             .generate(&mut rng)
             .unwrap();
         let serialized = serde_json::to_string(&expr).unwrap();
-        let expected = r#"{"table_name":{"value":"animI","quote_style":null},"alter_kinds":{"ModifyDataType":{"column":{"name":{"value":"toTAm","quote_style":null},"column_type":{"Int64":{}},"options":[]}}}}"#;
+        let expected = r#"{"table_name":{"value":"quasi","quote_style":null},"alter_kinds":{"ModifyDataType":{"column":{"name":{"value":"ADIpisci","quote_style":null},"column_type":{"Int64":{}},"options":[]}}}}"#;
         assert_eq!(expected, serialized);
 
         let expr = AlterExprSetTableOptionsGeneratorBuilder::default()
@@ -365,7 +365,7 @@ mod tests {
             .generate(&mut rng)
             .unwrap();
         let serialized = serde_json::to_string(&expr).unwrap();
-        let expected = r#"{"table_name":{"value":"animI","quote_style":null},"alter_kinds":{"SetTableOptions":{"options":[{"TwcsMaxActiveWindowRuns":14908016120444947142},{"TwcsMaxActiveWindowFiles":5840340123887173415},{"TwcsMaxOutputFileSize":17740311466571102265}]}}}"#;
+        let expected = r#"{"table_name":{"value":"quasi","quote_style":null},"alter_kinds":{"SetTableOptions":{"options":[{"TwcsMaxOutputFileSize":16770910638250818741}]}}}"#;
         assert_eq!(expected, serialized);
 
         let expr = AlterExprUnsetTableOptionsGeneratorBuilder::default()
@@ -375,7 +375,7 @@ mod tests {
             .generate(&mut rng)
             .unwrap();
         let serialized = serde_json::to_string(&expr).unwrap();
-        let expected = r#"{"table_name":{"value":"animI","quote_style":null},"alter_kinds":{"UnsetTableOptions":{"keys":["compaction.twcs.max_active_window_runs"]}}}"#;
+        let expected = r#"{"table_name":{"value":"quasi","quote_style":null},"alter_kinds":{"UnsetTableOptions":{"keys":["compaction.twcs.max_active_window_runs","compaction.twcs.max_output_file_size","compaction.twcs.time_window","compaction.twcs.max_inactive_window_files","compaction.twcs.max_active_window_files"]}}}"#;
         assert_eq!(expected, serialized);
     }
 }
