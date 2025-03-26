@@ -45,7 +45,6 @@ use crate::error::{
     ExecuteInternalStatementSnafu, InsertPipelineSnafu, InvalidPipelineVersionSnafu,
     PipelineNotFoundSnafu, Result,
 };
-use crate::etl::transform::GreptimeTransformer;
 use crate::etl::{parse, Content, Pipeline};
 use crate::manager::{PipelineInfo, PipelineVersion};
 use crate::util::{generate_pipeline_cache_key, prepare_dataframe_conditions};
@@ -69,7 +68,7 @@ pub struct PipelineTable {
     statement_executor: StatementExecutorRef,
     table: TableRef,
     query_engine: QueryEngineRef,
-    pipelines: Cache<String, Arc<Pipeline<GreptimeTransformer>>>,
+    pipelines: Cache<String, Arc<Pipeline>>,
 }
 
 impl PipelineTable {
@@ -202,9 +201,9 @@ impl PipelineTable {
     }
 
     /// Compile a pipeline from a string.
-    pub fn compile_pipeline(pipeline: &str) -> Result<Pipeline<GreptimeTransformer>> {
+    pub fn compile_pipeline(pipeline: &str) -> Result<Pipeline> {
         let yaml_content = Content::Yaml(pipeline);
-        parse::<GreptimeTransformer>(&yaml_content)
+        parse(&yaml_content)
     }
 
     /// Insert a pipeline into the pipeline table.
@@ -266,7 +265,7 @@ impl PipelineTable {
         schema: &str,
         name: &str,
         version: PipelineVersion,
-    ) -> Result<Arc<Pipeline<GreptimeTransformer>>> {
+    ) -> Result<Arc<Pipeline>> {
         if let Some(pipeline) = self
             .pipelines
             .get(&generate_pipeline_cache_key(schema, name, version))

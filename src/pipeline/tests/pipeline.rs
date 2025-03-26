@@ -20,7 +20,7 @@ use greptime_proto::v1::value::ValueData::{
     U32Value, U64Value, U8Value,
 };
 use greptime_proto::v1::Value as GreptimeValue;
-use pipeline::{json_to_map, parse, Content, GreptimeTransformer, Pipeline};
+use pipeline::{json_to_map, parse, Content, Pipeline};
 
 #[test]
 fn test_complex_data() {
@@ -418,8 +418,7 @@ transform:
     .collect::<Vec<GreptimeValue>>();
 
     let yaml_content = Content::Yaml(pipeline_yaml);
-    let pipeline: Pipeline<GreptimeTransformer> =
-        parse(&yaml_content).expect("failed to parse pipeline");
+    let pipeline: Pipeline = parse(&yaml_content).expect("failed to parse pipeline");
     let mut stats = json_to_map(input_value).unwrap();
 
     let row = pipeline
@@ -487,7 +486,7 @@ transform:
 "#;
 
     let yaml_content = Content::Yaml(pipeline_yaml);
-    let pipeline: Pipeline<GreptimeTransformer> = parse(&yaml_content).unwrap();
+    let pipeline: Pipeline = parse(&yaml_content).unwrap();
 
     let mut status = json_to_map(input_value).unwrap();
     let row = pipeline
@@ -595,7 +594,7 @@ transform:
 "#;
 
     let yaml_content = Content::Yaml(pipeline_yaml);
-    let pipeline: Pipeline<GreptimeTransformer> = parse(&yaml_content).unwrap();
+    let pipeline: Pipeline = parse(&yaml_content).unwrap();
 
     let mut status = json_to_map(input_value).unwrap();
     let row = pipeline
@@ -660,7 +659,7 @@ transform:
 "#;
 
     let yaml_content = Content::Yaml(pipeline_yaml);
-    let pipeline: Pipeline<GreptimeTransformer> = parse(&yaml_content).unwrap();
+    let pipeline: Pipeline = parse(&yaml_content).unwrap();
 
     let mut status = json_to_map(input_value).unwrap();
     let row = pipeline
@@ -699,7 +698,7 @@ transform:
     type: string
 "#;
     let yaml_content = Content::Yaml(pipeline_yaml);
-    let pipeline: Pipeline<GreptimeTransformer> = parse(&yaml_content).unwrap();
+    let pipeline: Pipeline = parse(&yaml_content).unwrap();
 
     let mut status = json_to_map(input_value).unwrap();
 
@@ -758,7 +757,7 @@ transform:
 "#;
 
     let yaml_content = Content::Yaml(pipeline_yaml);
-    let pipeline: Pipeline<GreptimeTransformer> = parse(&yaml_content).unwrap();
+    let pipeline: Pipeline = parse(&yaml_content).unwrap();
 
     let mut status = json_to_map(input_value).unwrap();
     let row = pipeline
@@ -798,7 +797,7 @@ transform:
 "#;
 
     let yaml_content = Content::Yaml(pipeline_yaml);
-    let pipeline: Pipeline<GreptimeTransformer> = parse(&yaml_content).unwrap();
+    let pipeline: Pipeline = parse(&yaml_content).unwrap();
 
     let mut status = json_to_map(input_value).unwrap();
     let row = pipeline
@@ -860,7 +859,7 @@ transform:
 "#;
 
     let yaml_content = Content::Yaml(pipeline_yaml);
-    let pipeline: Pipeline<GreptimeTransformer> = parse(&yaml_content).unwrap();
+    let pipeline: Pipeline = parse(&yaml_content).unwrap();
 
     let mut status = json_to_map(input_value1).unwrap();
     let dispatched_to = pipeline
