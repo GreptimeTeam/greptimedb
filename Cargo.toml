@@ -99,7 +99,7 @@ async-trait = "0.1"
 # Remember to update axum-extra, axum-macros when updating axum
 axum = "0.8"
 axum-extra = "0.10"
-axum-macros = "0.4"
+axum-macros = "0.5"
 backon = "1"
 base64 = "0.22"
 bigdecimal = "0.4.2"
@@ -121,8 +121,8 @@ datafusion-physical-expr = { git = "https://github.com/apache/datafusion.git", r
 datafusion-physical-plan = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
 datafusion-sql = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
 datafusion-substrait = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
-deadpool = "0.10"
-deadpool-postgres = "0.12"
+deadpool = "0.12"
+deadpool-postgres = "0.14"
 derive_builder = "0.20"
 dotenv = "0.15"
 etcd-client = "0.14"
@@ -145,7 +145,7 @@ meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev =
 mockall = "0.13"
 moka = "0.12"
 nalgebra = "0.33"
-notify = "6.1"
+notify = "8.0"
 num_cpus = "1.16"
 once_cell = "1.18"
 opentelemetry-proto = { version = "0.27", features = [
@@ -176,7 +176,7 @@ reqwest = { version = "0.12", default-features = false, features = [
 rskafka = { git = "https://github.com/influxdata/rskafka.git", rev = "75535b5ad9bae4a5dbb582c82e44dfd81ec10105", features = [
     "transport-tls",
 ] }
-rstest = "0.21"
+rstest = "0.25"
 rstest_reuse = "0.7"
 rust_decimal = "1.33"
 rustc-hash = "2.0"
@@ -184,7 +184,7 @@ rustls = { version = "0.23.20", default-features = false } # override by patch, 
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
 serde_with = "3"
-shadow-rs = "0.38"
+shadow-rs = "1.1"
 similar-asserts = "1.6.0"
 smallvec = { version = "1", features = ["serde"] }
 snafu = "0.8"
