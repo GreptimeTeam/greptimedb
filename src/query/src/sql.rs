@@ -18,8 +18,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use catalog::information_schema::{
-    columns, flows, key_column_usage, schemata, tables, CHARACTER_SETS, COLLATIONS, COLUMNS, FLOWS,
-    KEY_COLUMN_USAGE, SCHEMATA, TABLES, VIEWS,
+    columns, flows, key_column_usage, region_peers, schemata, tables, CHARACTER_SETS, COLLATIONS,
+    COLUMNS, FLOWS, KEY_COLUMN_USAGE, REGION_PEERS, SCHEMATA, TABLES, VIEWS,
 };
 use catalog::CatalogManagerRef;
 use common_catalog::consts::{
@@ -57,8 +57,8 @@ use sql::ast::Ident;
 use sql::parser::ParserContext;
 use sql::statements::create::{CreateDatabase, CreateFlow, CreateView, Partitions};
 use sql::statements::show::{
-    ShowColumns, ShowDatabases, ShowFlows, ShowIndex, ShowKind, ShowTableStatus, ShowTables,
-    ShowVariables, ShowViews,
+    ShowColumns, ShowDatabases, ShowFlows, ShowIndex, ShowKind, ShowRegion, ShowTableStatus,
+    ShowTables, ShowVariables, ShowViews,
 };
 use sql::statements::statement::Statement;
 use sql::statements::OptionMap;
@@ -492,6 +492,51 @@ pub async fn show_index(
         query_ctx,
         KEY_COLUMN_USAGE,
         select,
+        projects,
+        filters,
+        like_field,
+        sort,
+        stmt.kind,
+    )
+    .await
+}
+
+pub async fn show_region(
+    stmt: ShowRegion,
+    query_engine: &QueryEngineRef,
+    catalog_manager: &CatalogManagerRef,
+    query_ctx: QueryContextRef,
+) -> Result<Output> {
+    let schema_name = if let Some(database) = stmt.database {
+        database
+    } else {
+        query_ctx.current_schema()
+    };
+
+    let filters = vec![
+        col(region_peers::TABLE_NAME).eq(lit(&stmt.table)),
+        col(region_peers::TABLE_SCHEMA).eq(lit(schema_name.clone())),
+        col(region_peers::TABLE_CATALOG).eq(lit(query_ctx.current_catalog())),
+    ];
+    let projects = vec![
+        (region_peers::TABLE_NAME, "Table"),
+        (region_peers::REGION_ID, "Region"),
+        (region_peers::PEER_ID, "Peer"),
+        (region_peers::IS_LEADER, "Leader"),
+    ];
+
+    let like_field = None;
+    let sort = vec![
+        col(columns::REGION_ID).sort(true, true),
+        col(columns::PEER_ID).sort(true, true),
+    ];
+
+    query_from_information_schema_table(
+        query_engine,
+        catalog_manager,
+        query_ctx,
+        REGION_PEERS,
+        vec![],
         projects,
         filters,
         like_field,

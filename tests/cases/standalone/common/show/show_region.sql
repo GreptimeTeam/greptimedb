@@ -1,0 +1,33 @@
+CREATE TABLE my_table (
+  a INT PRIMARY KEY,
+  b STRING,
+  ts TIMESTAMP TIME INDEX,
+)
+PARTITION ON COLUMNS (a) (
+  a < 1000,
+  a >= 1000 AND a < 2000,
+  a >= 2000
+);
+
+CREATE TABLE another_table (
+  a INT PRIMARY KEY,
+  b STRING,
+  ts TIMESTAMP TIME INDEX,
+);
+
+-- SQLNESS REPLACE (\d{13}) REGION_ID
+-- SQLNESS REPLACE (\d{1}) PEER_ID
+SHOW REGION FROM my_table;
+
+-- SQLNESS REPLACE (\d{13}) REGION_ID
+-- SQLNESS REPLACE (\d{1}) PEER_ID
+SHOW REGION FROM another_table in public;
+
+-- SQLNESS REPLACE (\d{13}) REGION_ID
+-- SQLNESS REPLACE (\d{1}) PEER_ID
+SHOW REGION FROM another_table WHERE Leader = 'No';
+
+
+DROP TABLE my_table;
+
+DROP TABLE another_table;

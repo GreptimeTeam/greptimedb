@@ -36,8 +36,8 @@ use crate::statements::query::Query;
 use crate::statements::set_variables::SetVariables;
 use crate::statements::show::{
     ShowColumns, ShowCreateDatabase, ShowCreateFlow, ShowCreateTable, ShowCreateView,
-    ShowDatabases, ShowFlows, ShowIndex, ShowKind, ShowSearchPath, ShowStatus, ShowTableStatus,
-    ShowTables, ShowVariables, ShowViews,
+    ShowDatabases, ShowFlows, ShowIndex, ShowKind, ShowRegion, ShowSearchPath, ShowStatus,
+    ShowTableStatus, ShowTables, ShowVariables, ShowViews,
 };
 use crate::statements::tql::Tql;
 use crate::statements::truncate::TruncateTable;
@@ -90,6 +90,8 @@ pub enum Statement {
     ShowCollation(ShowKind),
     // SHOW INDEX
     ShowIndex(ShowIndex),
+    // SHOW REGION
+    ShowRegion(ShowRegion),
     // SHOW CREATE DATABASE
     ShowCreateDatabase(ShowCreateDatabase),
     // SHOW CREATE TABLE
@@ -154,6 +156,7 @@ impl Display for Statement {
             Statement::ShowTableStatus(s) => s.fmt(f),
             Statement::ShowColumns(s) => s.fmt(f),
             Statement::ShowIndex(s) => s.fmt(f),
+            Statement::ShowRegion(s) => s.fmt(f),
             Statement::ShowCreateTable(s) => s.fmt(f),
             Statement::ShowCreateFlow(s) => s.fmt(f),
             Statement::ShowFlows(s) => s.fmt(f),
