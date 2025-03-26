@@ -19,6 +19,7 @@ use std::str::FromStr;
 use api::prom_store::remote::WriteRequest;
 use auth::user_provider_from_option;
 use axum::http::{HeaderName, HeaderValue, StatusCode};
+use chrono::Utc;
 use common_error::status_code::StatusCode as ErrorCode;
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -3076,7 +3077,7 @@ pub async fn test_jaeger_query_api(store_type: StorageType) {
 
     // Test `/api/operations` API.
     let res = client
-        .get("/v1/jaeger/api/operations?service=test-jaeger-query-api")
+        .get("/v1/jaeger/api/operations?service=test-jaeger-query-api&start=1738726754492421&end=1738726754642422")
         .send()
         .await;
     assert_eq!(StatusCode::OK, res.status());
@@ -3104,7 +3105,7 @@ pub async fn test_jaeger_query_api(store_type: StorageType) {
 
     // Test `/api/services/{service_name}/operations` API.
     let res = client
-        .get("/v1/jaeger/api/services/test-jaeger-query-api/operations")
+        .get("/v1/jaeger/api/services/test-jaeger-query-api/operations?start=1738726754492421&end=1738726754642422")
         .send()
         .await;
     assert_eq!(StatusCode::OK, res.status());
@@ -3440,6 +3441,34 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
                                 }
                             }
                         ]
+                    },
+                    {
+                        "scope": {
+                        "name": "test-jaeger-get-operations",
+                        "version": "1.0.0"
+                        },
+                        "spans": [
+                            {
+                                "traceId": "5611dce1bc9ebed65352d99a027b08ff",
+                                "spanId": "ffa03416a7b9ea48",
+                                "name": "access-pg",
+                                "kind": 2,
+                                "startTimeUnixNano": "1738726754492422000",
+                                "endTimeUnixNano": "1738726754592422000",
+                                "attributes": [
+                                    {
+                                        "key": "operation.type",
+                                        "value": {
+                                        "stringValue": "access-pg"
+                                        }
+                                    }
+                                ],
+                                "status": {
+                                    "message": "success",
+                                    "code": 0
+                                }
+                            }
+                        ]
                     }
                 ],
                 "schemaUrl": "https://opentelemetry.io/schemas/1.4.0"
@@ -3448,8 +3477,22 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     }
     "#;
 
-    let req: ExportTraceServiceRequest = serde_json::from_str(content).unwrap();
+    let mut req: ExportTraceServiceRequest = serde_json::from_str(content).unwrap();
+    // Modify timestamp fields
+    let now = Utc::now().timestamp_nanos_opt().unwrap() as u64;
+    for span in req.resource_spans.iter_mut() {
+        for scope_span in span.scope_spans.iter_mut() {
+            // Only modify the timestamp fields for the span with the name "test-jaeger-get-operations" to current time.
+            if scope_span.scope.as_ref().unwrap().name == "test-jaeger-get-operations" {
+                for span in scope_span.spans.iter_mut() {
+                    span.start_time_unix_nano = now - 5_000_000_000; // 5 seconds ago
+                    span.end_time_unix_nano = now;
+                }
+            }
+        }
+    }
     let body = req.encode_to_vec();
+
     // write traces data.
     let res = send_req(
         &client,
@@ -3500,6 +3543,7 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     let res = client
         .get("/v1/jaeger/api/operations?service=test-jaeger-query-api")
         .header("x-greptime-trace-table-name", "mytable")
+        .header("x-greptime-jaeger-time-range-for-operations", "3 days")
         .send()
         .await;
     assert_eq!(StatusCode::OK, res.status());
@@ -3507,15 +3551,11 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     {
         "data": [
             {
-                "name": "access-mysql",
-                "spanKind": "server"
-            },
-            {
-                "name": "access-redis",
+                "name": "access-pg",
                 "spanKind": "server"
             }
         ],
-        "total": 2,
+        "total": 1,
         "limit": 0,
         "offset": 0,
         "errors": []
@@ -3527,7 +3567,7 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
 
     // Test `/api/services/{service_name}/operations` API.
     let res = client
-        .get("/v1/jaeger/api/services/test-jaeger-query-api/operations")
+        .get("/v1/jaeger/api/services/test-jaeger-query-api/operations?start=1738726754492421&end=1738726754642422")
         .header("x-greptime-trace-table-name", "mytable")
         .send()
         .await;

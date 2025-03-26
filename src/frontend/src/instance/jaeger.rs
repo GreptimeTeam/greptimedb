@@ -60,9 +60,10 @@ impl JaegerQueryHandler for Instance {
             self.query_engine(),
             vec![col(SERVICE_NAME_COLUMN)],
             vec![],
+            vec![],
             Some(DEFAULT_LIMIT),
             None,
-            true,
+            vec![col(SERVICE_NAME_COLUMN)],
         )
         .await?)
     }
@@ -72,6 +73,8 @@ impl JaegerQueryHandler for Instance {
         ctx: QueryContextRef,
         service_name: &str,
         span_kind: Option<&str>,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
     ) -> ServerResult<Output> {
         let mut filters = vec![col(SERVICE_NAME_COLUMN).eq(lit(service_name))];
 
@@ -83,18 +86,27 @@ impl JaegerQueryHandler for Instance {
             ))));
         }
 
+        if let Some(start_time) = start_time {
+            // Microseconds to nanoseconds.
+            filters.push(col(TIMESTAMP_COLUMN).gt_eq(lit_timestamp_nano(start_time * 1_000)));
+        }
+
+        if let Some(end_time) = end_time {
+            // Microseconds to nanoseconds.
+            filters.push(col(TIMESTAMP_COLUMN).lt_eq(lit_timestamp_nano(end_time * 1_000)));
+        }
+
         // It's equivalent to
         //
         // ```
-        // SELECT
-        //   span_name,
-        //   span_kind
+        // SELECT DISTINCT span_name, span_kind
         // FROM
         //   {db}.{trace_table}
         // WHERE
-        //   service_name = '{service_name}'
-        // ORDER BY
-        //   timestamp
+        //   service_name = '{service_name}' AND
+        //   timestamp >= {start_time} AND
+        //   timestamp <= {end_time} AND
+        //   span_kind = '{span_kind}'
         // ```.
         Ok(query_trace_table(
             ctx,
@@ -104,11 +116,13 @@ impl JaegerQueryHandler for Instance {
                 col(SPAN_NAME_COLUMN),
                 col(SPAN_KIND_COLUMN),
                 col(SERVICE_NAME_COLUMN),
+                col(TIMESTAMP_COLUMN),
             ],
             filters,
+            vec![col(SPAN_NAME_COLUMN)],
             Some(DEFAULT_LIMIT),
             None,
-            false,
+            vec![col(SPAN_NAME_COLUMN), col(SPAN_KIND_COLUMN)],
         )
         .await?)
     }
@@ -136,9 +150,10 @@ impl JaegerQueryHandler for Instance {
             self.query_engine(),
             selects,
             filters,
+            vec![col(TIMESTAMP_COLUMN)],
             Some(DEFAULT_LIMIT),
             None,
-            false,
+            vec![],
         )
         .await?)
     }
@@ -178,9 +193,10 @@ impl JaegerQueryHandler for Instance {
             self.query_engine(),
             selects,
             filters,
+            vec![col(TIMESTAMP_COLUMN)],
             Some(DEFAULT_LIMIT),
             query_params.tags,
-            false,
+            vec![],
         )
         .await?)
     }
@@ -193,9 +209,10 @@ async fn query_trace_table(
     query_engine: &QueryEngineRef,
     selects: Vec<Expr>,
     filters: Vec<Expr>,
+    sorts: Vec<Expr>,
     limit: Option<usize>,
     tags: Option<HashMap<String, JsonValue>>,
-    distinct: bool,
+    distincts: Vec<Expr>,
 ) -> ServerResult<Output> {
     let table_name = ctx
         .extension(JAEGER_QUERY_TABLE_NAME_KEY)
@@ -244,13 +261,19 @@ async fn query_trace_table(
         })?;
 
     // Apply the distinct if needed.
-    let dataframe = if distinct {
-        dataframe.distinct().context(DataFusionSnafu)?
-    } else {
-        // for non distinct query, sort by timestamp to make results stable
+    let dataframe = if !distincts.is_empty() {
         dataframe
-            .sort_by(vec![col(TIMESTAMP_COLUMN)])
+            .distinct_on(distincts.clone(), distincts, None)
             .context(DataFusionSnafu)?
+    } else {
+        dataframe
+    };
+
+    // Apply the sorts if needed.
+    let dataframe = if !sorts.is_empty() {
+        dataframe.sort_by(sorts).context(DataFusionSnafu)?
+    } else {
+        dataframe
     };
 
     // Apply the limit if needed.
