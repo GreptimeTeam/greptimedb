@@ -280,7 +280,12 @@ impl InvertedIndexer {
             // TODO(zhongzc): config bitmap type
             self.index_creator
                 .finish(&mut index_writer, index::bitmap::BitmapType::Roaring),
-            puffin_writer.put_blob(INDEX_BLOB_TYPE, rx.compat(), PutOptions::default())
+            puffin_writer.put_blob(
+                INDEX_BLOB_TYPE,
+                rx.compat(),
+                PutOptions::default(),
+                Default::default(),
+            )
         );
 
         match (
