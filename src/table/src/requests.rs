@@ -46,6 +46,24 @@ pub const FILE_TABLE_FORMAT_KEY: &str = "format";
 pub const TABLE_DATA_MODEL: &str = "table_data_model";
 pub const TABLE_DATA_MODEL_TRACE_V1: &str = "greptime_trace_v1";
 
+pub const VALID_TABLE_OPTION_KEYS: [&str; 11] = [
+    // common keys:
+    WRITE_BUFFER_SIZE_KEY,
+    TTL_KEY,
+    STORAGE_KEY,
+    COMMENT_KEY,
+    SKIP_WAL_KEY,
+    // file engine keys:
+    FILE_TABLE_LOCATION_KEY,
+    FILE_TABLE_FORMAT_KEY,
+    FILE_TABLE_PATTERN_KEY,
+    // metric engine keys:
+    PHYSICAL_TABLE_METADATA_KEY,
+    LOGICAL_TABLE_METADATA_KEY,
+    // table model info
+    TABLE_DATA_MODEL,
+];
+
 /// Returns true if the `key` is a valid key for any engine or storage.
 pub fn validate_table_option(key: &str) -> bool {
     if is_supported_in_s3(key) {
@@ -60,24 +78,7 @@ pub fn validate_table_option(key: &str) -> bool {
         return true;
     }
 
-    [
-        // common keys:
-        WRITE_BUFFER_SIZE_KEY,
-        TTL_KEY,
-        STORAGE_KEY,
-        COMMENT_KEY,
-        SKIP_WAL_KEY,
-        // file engine keys:
-        FILE_TABLE_LOCATION_KEY,
-        FILE_TABLE_FORMAT_KEY,
-        FILE_TABLE_PATTERN_KEY,
-        // metric engine keys:
-        PHYSICAL_TABLE_METADATA_KEY,
-        LOGICAL_TABLE_METADATA_KEY,
-        // table model info
-        TABLE_DATA_MODEL,
-    ]
-    .contains(&key)
+    VALID_TABLE_OPTION_KEYS.contains(&key)
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
