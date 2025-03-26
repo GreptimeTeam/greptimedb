@@ -33,6 +33,7 @@ pub enum WalOptions {
     RaftEngine,
     #[serde(with = "kafka_prefix")]
     Kafka(KafkaWalOptions),
+    Noop,
 }
 
 with_prefix!(kafka_prefix "wal.kafka.");
@@ -58,6 +59,15 @@ mod tests {
         });
         let encoded = serde_json::to_string(&wal_options).unwrap();
         let expected = r#"{"wal.provider":"kafka","wal.kafka.topic":"test_topic"}"#;
+        assert_eq!(&encoded, expected);
+
+        let decoded: WalOptions = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, wal_options);
+
+        // Test serde noop wal options.
+        let wal_options = WalOptions::Noop;
+        let encoded = serde_json::to_string(&wal_options).unwrap();
+        let expected = r#"{"wal.provider":"noop"}"#;
         assert_eq!(&encoded, expected);
 
         let decoded: WalOptions = serde_json::from_str(&encoded).unwrap();

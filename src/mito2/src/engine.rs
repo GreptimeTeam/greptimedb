@@ -272,7 +272,7 @@ fn prepare_batch_open_requests(
                     .or_default()
                     .push((region_id, request));
             }
-            WalOptions::RaftEngine => {
+            WalOptions::RaftEngine | WalOptions::Noop => {
                 remaining_regions.push((region_id, request));
             }
         }
