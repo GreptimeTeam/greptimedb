@@ -52,13 +52,14 @@ impl LeaderRegionRegistry {
         region_ids: I,
     ) -> HashMap<RegionId, LeaderRegion> {
         let inner = self.inner.read().unwrap();
-        let mut result = HashMap::new();
-        for region_id in region_ids {
-            if let Some(leader_region) = inner.get(&region_id) {
-                result.insert(region_id, *leader_region);
-            }
-        }
-        result
+        region_ids
+            .into_iter()
+            .flat_map(|region_id| {
+                inner
+                    .get(&region_id)
+                    .map(|leader_region| (region_id, *leader_region))
+            })
+            .collect::<HashMap<_, _>>()
     }
 
     /// Puts the leader regions into the registry.
