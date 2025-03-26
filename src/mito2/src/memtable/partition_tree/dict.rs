@@ -389,10 +389,10 @@ mod tests {
 
     fn prepare_input_keys(num_keys: usize) -> Vec<Vec<u8>> {
         let prefix = ["a", "b", "c", "d", "e", "f"];
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let mut keys = Vec::with_capacity(num_keys);
         for i in 0..num_keys {
-            let prefix_idx = rng.gen_range(0..prefix.len());
+            let prefix_idx = rng.random_range(0..prefix.len());
             // We don't need to decode the primary key in index's test so we format the string
             // into the key.
             let key = format!("{}{}", prefix[prefix_idx], i);

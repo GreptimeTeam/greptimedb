@@ -80,15 +80,15 @@ impl Arbitrary<'_> for FuzzInput {
         let seed = u.int_in_range(u64::MIN..=u64::MAX)?;
         let mut rng = ChaChaRng::seed_from_u64(seed);
         let max_rows = get_gt_fuzz_input_max_rows();
-        let rows = rng.gen_range(2..max_rows);
+        let rows = rng.random_range(2..max_rows);
         let max_tables = get_gt_fuzz_input_max_tables();
-        let tables = rng.gen_range(1..max_tables);
+        let tables = rng.random_range(1..max_tables);
         Ok(FuzzInput { rows, seed, tables })
     }
 }
 
 fn generate_create_physical_table_expr<R: Rng + 'static>(rng: &mut R) -> Result<CreateTableExpr> {
-    let physical_table_if_not_exists = rng.gen_bool(0.5);
+    let physical_table_if_not_exists = rng.random_bool(0.5);
     let create_physical_table_expr = CreatePhysicalTableExprGeneratorBuilder::default()
         .name_generator(Box::new(MappedGenerator::new(
             WordGenerator,
@@ -121,8 +121,8 @@ fn generate_create_logical_table_expr<R: Rng + 'static>(
     physical_table_ctx: TableContextRef,
     rng: &mut R,
 ) -> Result<CreateTableExpr> {
-    let labels = rng.gen_range(1..=5);
-    let logical_table_if_not_exists = rng.gen_bool(0.5);
+    let labels = rng.random_range(1..=5);
+    let logical_table_if_not_exists = rng.random_bool(0.5);
 
     let create_logical_table_expr = CreateLogicalTableExprGeneratorBuilder::default()
         .name_generator(Box::new(MappedGenerator::new(
@@ -208,10 +208,10 @@ async fn execute_failover(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
 
         let insert_expr =
             insert_values(input.rows, &ctx, &mut rng, logical_table_ctx.clone()).await?;
-        if rng.gen_bool(0.1) {
+        if rng.random_bool(0.1) {
             flush_memtable(&ctx.greptime, &physical_table_ctx.name).await?;
         }
-        if rng.gen_bool(0.1) {
+        if rng.random_bool(0.1) {
             compact_table(&ctx.greptime, &physical_table_ctx.name).await?;
         }
 

@@ -40,7 +40,7 @@ fn add_column_options_generator<R: Rng>(
     // 0 -> NULL
     // 1 -> DEFAULT VALUE
     // 2 -> PRIMARY KEY + DEFAULT VALUE
-    let idx = rng.gen_range(0..3);
+    let idx = rng.random_range(0..3);
     match idx {
         0 => vec![ColumnOption::Null],
         1 => {
@@ -79,15 +79,15 @@ impl<R: Rng + 'static> Generator<AlterTableExpr, R> for AlterExprAddColumnGenera
     type Error = Error;
 
     fn generate(&self, rng: &mut R) -> Result<AlterTableExpr> {
-        let with_location = self.location && rng.gen::<bool>();
+        let with_location = self.location && rng.random::<bool>();
         let location = if with_location {
-            let use_first = rng.gen::<bool>();
+            let use_first = rng.random::<bool>();
             let location = if use_first {
                 AddColumnLocation::First
             } else {
                 AddColumnLocation::After {
                     column_name: self.table_ctx.columns
-                        [rng.gen_range(0..self.table_ctx.columns.len())]
+                        [rng.random_range(0..self.table_ctx.columns.len())]
                     .name
                     .to_string(),
                 }
@@ -129,7 +129,7 @@ impl<R: Rng> Generator<AlterTableExpr, R> for AlterExprDropColumnGenerator<R> {
     fn generate(&self, rng: &mut R) -> Result<AlterTableExpr> {
         let droppable = droppable_columns(&self.table_ctx.columns);
         ensure!(!droppable.is_empty(), error::DroppableColumnsSnafu);
-        let name = droppable[rng.gen_range(0..droppable.len())].name.clone();
+        let name = droppable[rng.random_range(0..droppable.len())].name.clone();
         Ok(AlterTableExpr {
             table_name: self.table_ctx.name.clone(),
             alter_kinds: AlterTableOperation::DropColumn { name },
@@ -174,7 +174,7 @@ impl<R: Rng> Generator<AlterTableExpr, R> for AlterExprModifyDataTypeGenerator<R
 
     fn generate(&self, rng: &mut R) -> Result<AlterTableExpr> {
         let modifiable = modifiable_columns(&self.table_ctx.columns);
-        let changed = modifiable[rng.gen_range(0..modifiable.len())].clone();
+        let changed = modifiable[rng.random_range(0..modifiable.len())].clone();
         let mut to_type = self.column_type_generator.gen(rng);
         while !changed.column_type.can_arrow_type_cast_to(&to_type) {
             to_type = self.column_type_generator.gen(rng);
@@ -209,8 +209,8 @@ impl<R: Rng> Generator<AlterTableExpr, R> for AlterExprSetTableOptionsGenerator<
         let all_options = AlterTableOption::iter().collect::<Vec<_>>();
         // Generate random distinct options
         let mut option_templates_idx = vec![];
-        for _ in 1..rng.gen_range(2..=all_options.len()) {
-            let option = rng.gen_range(0..all_options.len());
+        for _ in 1..rng.random_range(2..=all_options.len()) {
+            let option = rng.random_range(0..all_options.len());
             if !option_templates_idx.contains(&option) {
                 option_templates_idx.push(option);
             }
@@ -219,10 +219,10 @@ impl<R: Rng> Generator<AlterTableExpr, R> for AlterExprSetTableOptionsGenerator<
             .iter()
             .map(|idx| match all_options[*idx] {
                 AlterTableOption::Ttl(_) => {
-                    let ttl_type = rng.gen_range(0..3);
+                    let ttl_type = rng.random_range(0..3);
                     match ttl_type {
                         0 => {
-                            let duration: u32 = rng.gen();
+                            let duration: u32 = rng.random();
                             AlterTableOption::Ttl(Ttl::Duration((duration as i64).into()))
                         }
                         1 => AlterTableOption::Ttl(Ttl::Instant),
@@ -231,27 +231,27 @@ impl<R: Rng> Generator<AlterTableExpr, R> for AlterExprSetTableOptionsGenerator<
                     }
                 }
                 AlterTableOption::TwcsTimeWindow(_) => {
-                    let time_window: u32 = rng.gen();
+                    let time_window: u32 = rng.random();
                     AlterTableOption::TwcsTimeWindow((time_window as i64).into())
                 }
                 AlterTableOption::TwcsMaxOutputFileSize(_) => {
-                    let max_output_file_size: u64 = rng.gen();
+                    let max_output_file_size: u64 = rng.random();
                     AlterTableOption::TwcsMaxOutputFileSize(ReadableSize(max_output_file_size))
                 }
                 AlterTableOption::TwcsMaxInactiveWindowRuns(_) => {
-                    let max_inactive_window_runs: u64 = rng.gen();
+                    let max_inactive_window_runs: u64 = rng.random();
                     AlterTableOption::TwcsMaxInactiveWindowRuns(max_inactive_window_runs)
                 }
                 AlterTableOption::TwcsMaxActiveWindowFiles(_) => {
-                    let max_active_window_files: u64 = rng.gen();
+                    let max_active_window_files: u64 = rng.random();
                     AlterTableOption::TwcsMaxActiveWindowFiles(max_active_window_files)
                 }
                 AlterTableOption::TwcsMaxActiveWindowRuns(_) => {
-                    let max_active_window_runs: u64 = rng.gen();
+                    let max_active_window_runs: u64 = rng.random();
                     AlterTableOption::TwcsMaxActiveWindowRuns(max_active_window_runs)
                 }
                 AlterTableOption::TwcsMaxInactiveWindowFiles(_) => {
-                    let max_inactive_window_files: u64 = rng.gen();
+                    let max_inactive_window_files: u64 = rng.random();
                     AlterTableOption::TwcsMaxInactiveWindowFiles(max_inactive_window_files)
                 }
             })
@@ -279,8 +279,8 @@ impl<R: Rng> Generator<AlterTableExpr, R> for AlterExprUnsetTableOptionsGenerato
         let all_options = AlterTableOption::iter().collect::<Vec<_>>();
         // Generate random distinct options
         let mut option_templates_idx = vec![];
-        for _ in 1..rng.gen_range(2..=all_options.len()) {
-            let option = rng.gen_range(0..all_options.len());
+        for _ in 1..rng.random_range(2..=all_options.len()) {
+            let option = rng.random_range(0..all_options.len());
             if !option_templates_idx.contains(&option) {
                 option_templates_idx.push(option);
             }
@@ -300,7 +300,7 @@ impl<R: Rng> Generator<AlterTableExpr, R> for AlterExprUnsetTableOptionsGenerato
 mod tests {
     use std::sync::Arc;
 
-    use rand::SeedableRng;
+    use rand_chacha::rand_core::SeedableRng;
 
     use super::*;
     use crate::context::TableContext;

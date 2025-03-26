@@ -82,7 +82,7 @@ mod tests {
     #[test]
     fn test_insert_into_translator() {
         let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0);
-        let omit_column_list = rng.gen_bool(0.2);
+        let omit_column_list = rng.random_bool(0.2);
 
         let test_ctx = test_utils::new_test_ctx();
         let insert_expr_generator = InsertExprGeneratorBuilder::default()

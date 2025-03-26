@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use enum_dispatch::enum_dispatch;
-use rand::seq::SliceRandom;
+use rand::seq::IndexedRandom;
 
 #[enum_dispatch]
 pub trait LoadBalance {
@@ -37,7 +37,7 @@ pub struct Random;
 
 impl LoadBalance for Random {
     fn get_peer<'a>(&self, peers: &'a [String]) -> Option<&'a String> {
-        peers.choose(&mut rand::thread_rng())
+        peers.choose(&mut rand::rng())
     }
 }
 

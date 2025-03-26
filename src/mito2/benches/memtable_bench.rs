@@ -28,7 +28,7 @@ use mito2::region::options::MergeMode;
 use mito2::row_converter::DensePrimaryKeyCodec;
 use mito2::test_util::memtable_util::{self, region_metadata_to_row_schema};
 use rand::rngs::ThreadRng;
-use rand::seq::SliceRandom;
+use rand::seq::IndexedRandom;
 use rand::Rng;
 use store_api::metadata::{
     ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
@@ -161,8 +161,8 @@ struct Host {
 
 impl Host {
     fn random_with_id(id: usize) -> Host {
-        let mut rng = rand::thread_rng();
-        let region = format!("ap-southeast-{}", rng.gen_range(0..10));
+        let mut rng = rand::rng();
+        let region = format!("ap-southeast-{}", rng.random_range(0..10));
         let datacenter = format!(
             "{}{}",
             region,
@@ -172,12 +172,12 @@ impl Host {
             hostname: format!("host_{id}"),
             region,
             datacenter,
-            rack: rng.gen_range(0..100).to_string(),
+            rack: rng.random_range(0..100).to_string(),
             os: "Ubuntu16.04LTS".to_string(),
             arch: "x86".to_string(),
             team: "CHI".to_string(),
-            service: rng.gen_range(0..100).to_string(),
-            service_version: rng.gen_range(0..10).to_string(),
+            service: rng.random_range(0..100).to_string(),
+            service_version: rng.random_range(0..10).to_string(),
             service_environment: "test".to_string(),
         }
     }
@@ -254,7 +254,7 @@ impl CpuDataGenerator {
             .hosts
             .iter()
             .map(|host| {
-                let mut rng = rand::thread_rng();
+                let mut rng = rand::rng();
                 let mut values = Vec::with_capacity(21);
                 values.push(api::v1::Value {
                     value_data: Some(ValueData::TimestampMillisecondValue(current_sec * 1000)),
@@ -288,12 +288,12 @@ impl CpuDataGenerator {
     }
 
     fn random_hostname(&self) -> String {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         self.hosts.choose(&mut rng).unwrap().hostname.clone()
     }
 
     fn random_f64(rng: &mut ThreadRng) -> f64 {
-        let base: u32 = rng.gen_range(30..95);
+        let base: u32 = rng.random_range(30..95);
         base as f64
     }
 

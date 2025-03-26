@@ -16,7 +16,7 @@ use std::marker::PhantomData;
 
 use datatypes::value::Value;
 use derive_builder::Builder;
-use rand::seq::SliceRandom;
+use rand::seq::{IndexedRandom, SliceRandom};
 use rand::Rng;
 
 use super::TsValueGenerator;
@@ -60,7 +60,7 @@ impl<R: Rng + 'static> Generator<InsertIntoExpr, R> for InsertExprGenerator<R> {
                 let can_omit = column.is_nullable() || column.has_default_value();
 
                 // 50% chance to omit a column if it's not required
-                if !can_omit || rng.gen_bool(0.5) {
+                if !can_omit || rng.random_bool(0.5) {
                     values_columns.push(column.clone());
                 }
             }
@@ -76,12 +76,12 @@ impl<R: Rng + 'static> Generator<InsertIntoExpr, R> for InsertExprGenerator<R> {
         for _ in 0..self.rows {
             let mut row = Vec::with_capacity(values_columns.len());
             for column in &values_columns {
-                if column.is_nullable() && rng.gen_bool(0.2) {
+                if column.is_nullable() && rng.random_bool(0.2) {
                     row.push(RowValue::Value(Value::Null));
                     continue;
                 }
 
-                if column.has_default_value() && rng.gen_bool(0.2) {
+                if column.has_default_value() && rng.random_bool(0.2) {
                     row.push(RowValue::Default);
                     continue;
                 }

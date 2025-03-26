@@ -67,7 +67,7 @@ impl BloomFilterApplier {
         for ((_, mut group), bloom) in locs
             .iter()
             .zip(start_seg..end_seg)
-            .group_by(|(x, _)| **x)
+            .chunk_by(|(x, _)| **x)
             .into_iter()
             .zip(bfs.iter())
         {

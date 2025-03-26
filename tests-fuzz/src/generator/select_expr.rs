@@ -15,7 +15,7 @@
 use std::marker::PhantomData;
 
 use derive_builder::Builder;
-use rand::seq::SliceRandom;
+use rand::seq::{IndexedRandom, SliceRandom};
 use rand::Rng;
 
 use crate::context::TableContextRef;
@@ -37,7 +37,7 @@ impl<R: Rng + 'static> Generator<SelectExpr, R> for SelectExprGenerator<R> {
     type Error = Error;
 
     fn generate(&self, rng: &mut R) -> Result<SelectExpr> {
-        let selection = rng.gen_range(1..self.table_ctx.columns.len());
+        let selection = rng.random_range(1..self.table_ctx.columns.len());
         let mut selected_columns = self
             .table_ctx
             .columns
@@ -46,16 +46,16 @@ impl<R: Rng + 'static> Generator<SelectExpr, R> for SelectExprGenerator<R> {
             .collect::<Vec<_>>();
         selected_columns.shuffle(rng);
 
-        let order_by_selection = rng.gen_range(1..selection);
+        let order_by_selection = rng.random_range(1..selection);
 
         let order_by = selected_columns
             .choose_multiple(rng, order_by_selection)
             .map(|c| c.name.to_string())
             .collect::<Vec<_>>();
 
-        let limit = rng.gen_range(1..self.max_limit);
+        let limit = rng.random_range(1..self.max_limit);
 
-        let direction = if rng.gen_bool(1.0 / 2.0) {
+        let direction = if rng.random_bool(1.0 / 2.0) {
             Direction::Asc
         } else {
             Direction::Desc

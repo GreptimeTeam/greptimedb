@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use rand::seq::SliceRandom;
-use rand::thread_rng;
+use rand::rng;
+use rand::seq::IndexedRandom;
 use snafu::ResultExt;
 
 use crate::error;
@@ -84,7 +84,7 @@ where
         // unwrap safety: whether weighted_index is none has been checked before.
         let item = self
             .items
-            .choose_weighted(&mut thread_rng(), |item| item.weight as f64)
+            .choose_weighted(&mut rng(), |item| item.weight as f64)
             .context(error::ChooseItemsSnafu)?
             .item
             .clone();
@@ -94,7 +94,7 @@ where
     fn choose_multiple(&mut self, amount: usize) -> Result<Vec<Item>> {
         Ok(self
             .items
-            .choose_multiple_weighted(&mut thread_rng(), amount, |item| item.weight as f64)
+            .choose_multiple_weighted(&mut rng(), amount, |item| item.weight as f64)
             .context(error::ChooseItemsSnafu)?
             .cloned()
             .map(|item| item.item)

@@ -59,16 +59,16 @@ impl Arbitrary<'_> for FuzzInput {
         let seed = u.int_in_range(u64::MIN..=u64::MAX)?;
         let mut rng = ChaChaRng::seed_from_u64(seed);
         let max_columns = get_gt_fuzz_input_max_columns();
-        let columns = rng.gen_range(2..max_columns);
+        let columns = rng.random_range(2..max_columns);
         Ok(FuzzInput { columns, seed })
     }
 }
 
 fn generate_expr(input: FuzzInput) -> Result<CreateTableExpr> {
     let mut rng = ChaChaRng::seed_from_u64(input.seed);
-    let if_not_exists = rng.gen_bool(0.5);
+    let if_not_exists = rng.random_bool(0.5);
     let mut with_clause = HashMap::new();
-    if rng.gen_bool(0.5) {
+    if rng.random_bool(0.5) {
         with_clause.insert("append_mode".to_string(), "true".to_string());
     }
 

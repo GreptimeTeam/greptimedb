@@ -399,7 +399,7 @@ mod tests {
 
     #[test]
     fn test_create_table_expr_generator() {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         let expr = CreateTableExprGeneratorBuilder::default()
             .columns(10)
@@ -446,7 +446,7 @@ mod tests {
 
     #[test]
     fn test_create_logical_table_expr_generator() {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         let physical_table_expr = CreatePhysicalTableExprGeneratorBuilder::default()
             .if_not_exists(false)
@@ -535,7 +535,7 @@ mod tests {
 
     #[test]
     fn test_create_database_expr_generator() {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         let expr = CreateDatabaseExprGeneratorBuilder::default()
             .if_not_exists(true)

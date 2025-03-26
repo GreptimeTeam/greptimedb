@@ -22,6 +22,6 @@ static PORTS: OnceCell<AtomicUsize> = OnceCell::new();
 /// Return a unique port(in runtime) for test
 pub fn get_port() -> usize {
     PORTS
-        .get_or_init(|| AtomicUsize::new(rand::thread_rng().gen_range(13000..13800)))
+        .get_or_init(|| AtomicUsize::new(rand::rng().random_range(13000..13800)))
         .fetch_add(1, Ordering::Relaxed)
 }
