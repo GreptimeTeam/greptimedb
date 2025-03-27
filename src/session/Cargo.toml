@@ -24,3 +24,4 @@ derive_builder.workspace = true
 derive_more = { version = "1", default-features = false, features = ["debug"] }
 snafu.workspace = true
 sql.workspace = true
+strum.workspace = true

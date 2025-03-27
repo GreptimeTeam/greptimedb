@@ -10633,6 +10633,7 @@ dependencies = [
  "derive_more",
  "snafu 0.8.5",
  "sql",
+ "strum 0.27.1",
 ]
 
 [[package]]

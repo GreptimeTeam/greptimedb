@@ -724,6 +724,7 @@ pub fn show_variable(stmt: ShowVariables, query_ctx: QueryContextRef) -> Result<
     let value = match variable.as_str() {
         "SYSTEM_TIME_ZONE" | "SYSTEM_TIMEZONE" => get_timezone(None).to_string(),
         "TIME_ZONE" | "TIMEZONE" => query_ctx.timezone().to_string(),
+        "READ_PREFERENCE" | "READ_PREF" => query_ctx.read_preference().to_string(),
         "DATESTYLE" => {
             let (style, order) = *query_ctx.configuration_parameter().pg_datetime_style();
             format!("{}, {}", style, order)
