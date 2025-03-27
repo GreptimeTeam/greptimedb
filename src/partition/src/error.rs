@@ -93,20 +93,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to find region, reason: {}", reason))]
-    FindRegion {
-        reason: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Failed to find regions by filters: {:?}", filters))]
-    FindRegions {
-        filters: Vec<Expr>,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Invalid InsertRequest, reason: {}", reason))]
     InvalidInsertRequest {
         reason: String,
@@ -201,9 +187,7 @@ impl ErrorExt for Error {
             | Error::InvalidExpr { .. }
             | Error::UndefinedColumn { .. } => StatusCode::InvalidArguments,
 
-            Error::FindRegion { .. }
-            | Error::FindRegions { .. }
-            | Error::RegionKeysSize { .. }
+            Error::RegionKeysSize { .. }
             | Error::InvalidInsertRequest { .. }
             | Error::InvalidDeleteRequest { .. } => StatusCode::InvalidArguments,
 
