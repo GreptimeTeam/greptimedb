@@ -2345,6 +2345,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-session"
+version = "0.14.0"
+dependencies = [
+ "strum 0.27.1",
+]
+
+[[package]]
 name = "common-telemetry"
 version = "0.14.0"
 dependencies = [
@@ -8083,6 +8090,7 @@ dependencies = [
  "itertools 0.14.0",
  "serde",
  "serde_json",
+ "session",
  "snafu 0.8.5",
  "sql",
  "sqlparser 0.52.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=71dd86058d2af97b9925093d40c4e03360403170)",
@@ -9094,6 +9102,7 @@ dependencies = [
  "num-traits",
  "object-store",
  "once_cell",
+ "partition",
  "paste",
  "pretty_assertions",
  "prometheus",
@@ -10627,13 +10636,13 @@ dependencies = [
  "common-error",
  "common-macro",
  "common-recordbatch",
+ "common-session",
  "common-telemetry",
  "common-time",
  "derive_builder 0.20.1",
  "derive_more",
  "snafu 0.8.5",
  "sql",
- "strum 0.27.1",
 ]
 
 [[package]]

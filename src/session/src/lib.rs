@@ -25,11 +25,11 @@ use auth::UserInfoRef;
 use common_catalog::build_db_string;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_recordbatch::cursor::RecordBatchStreamCursor;
+pub use common_session::ReadPreference;
 use common_time::timezone::get_timezone;
 use common_time::Timezone;
 use context::{ConfigurationVariables, QueryContextBuilder};
 use derive_more::Debug;
-use strum::{AsRefStr, Display, EnumString};
 
 use crate::context::{Channel, ConnInfo, QueryContextRef};
 
@@ -43,27 +43,6 @@ pub struct Session {
 }
 
 pub type SessionRef = Arc<Session>;
-
-/// Defines the read preference for frontend route operations,
-/// determining whether to read from the region leader or follower.
-#[derive(Debug, Clone, Copy, Default, EnumString, Display, AsRefStr)]
-pub enum ReadPreference {
-    #[default]
-    // Reads all operations from the region leader. This is the default mode.
-    #[strum(serialize = "leader", to_string = "LEADER")]
-    Leader,
-    // Reads all operations from the region follower.
-    #[strum(serialize = "follower", to_string = "FOLLOWER")]
-    Follower,
-    // Prefers to read operations from the region follower.
-    // If there is only a single region leader and no follower, reads from the leader.
-    #[strum(
-        serialize = "follower_preferred",
-        serialize = "follower_pref",
-        to_string = "FOLLOWER_PREFERRED"
-    )]
-    FollowerPreferred,
-}
 
 /// A container for mutable items in query context
 #[derive(Debug)]
