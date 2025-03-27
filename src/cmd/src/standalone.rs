@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::{fs, path};
 
@@ -252,6 +253,13 @@ pub struct Instance {
     wal_options_allocator: WalOptionsAllocatorRef,
     // Keep the logging guard to prevent the worker from being dropped.
     _guard: Vec<WorkerGuard>,
+}
+
+impl Instance {
+    /// Find the socket addr of a server by its `name`.
+    pub async fn server_addr(&self, name: &str) -> Option<SocketAddr> {
+        self.frontend.server_handlers().addr(name).await
+    }
 }
 
 #[async_trait]
