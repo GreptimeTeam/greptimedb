@@ -77,7 +77,7 @@ pub struct BloomFilterIndexApplier {
 impl BloomFilterIndexApplier {
     /// Creates a new `BloomFilterIndexApplier`.
     ///
-    /// For each column, the value will be retained only if it contains __all__ probes.
+    /// For each column, the value will be retained only if it contains __all__ predicates.
     pub fn new(
         region_dir: String,
         region_id: RegionId,
