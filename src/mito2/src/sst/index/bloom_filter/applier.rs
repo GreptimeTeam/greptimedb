@@ -14,15 +14,14 @@
 
 mod builder;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
 
 use common_base::range_read::RangeReader;
 use common_telemetry::warn;
-use index::bloom_filter::applier::BloomFilterApplier;
+use index::bloom_filter::applier::{BloomFilterApplier, InListPredicate};
 use index::bloom_filter::reader::{BloomFilterReader, BloomFilterReaderImpl};
-use index::Bytes;
 use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use puffin::puffin_manager::{PuffinManager, PuffinReader};
@@ -70,9 +69,9 @@ pub struct BloomFilterIndexApplier {
     /// Cache for bloom filter index.
     bloom_filter_index_cache: Option<BloomFilterIndexCacheRef>,
 
-    /// Bloom filter probes.
-    /// For each column, the value will be retained only if it contains __all__ probes.
-    probes: HashMap<ColumnId, HashSet<Bytes>>,
+    /// Bloom filter predicates.
+    /// For each column, the value will be retained only if it contains __all__ predicates.
+    predicates: HashMap<ColumnId, Vec<InListPredicate>>,
 }
 
 impl BloomFilterIndexApplier {
@@ -84,7 +83,7 @@ impl BloomFilterIndexApplier {
         region_id: RegionId,
         object_store: ObjectStore,
         puffin_manager_factory: PuffinManagerFactory,
-        probes: HashMap<ColumnId, HashSet<Bytes>>,
+        predicates: HashMap<ColumnId, Vec<InListPredicate>>,
     ) -> Self {
         Self {
             region_dir,
@@ -94,7 +93,7 @@ impl BloomFilterIndexApplier {
             puffin_manager_factory,
             puffin_metadata_cache: None,
             bloom_filter_index_cache: None,
-            probes,
+            predicates,
         }
     }
 
@@ -151,7 +150,7 @@ impl BloomFilterIndexApplier {
             .map(|(i, range)| (*i, vec![range.clone()]))
             .collect::<Vec<_>>();
 
-        for (column_id, probes) in &self.probes {
+        for (column_id, predicates) in &self.predicates {
             let blob = match self
                 .blob_reader(file_id, *column_id, file_size_hint)
                 .await?
@@ -170,12 +169,12 @@ impl BloomFilterIndexApplier {
                     BloomFilterReaderImpl::new(blob),
                     bloom_filter_cache.clone(),
                 );
-                self.apply_probes(reader, probes, &mut output)
+                self.apply_predicates(reader, predicates, &mut output)
                     .await
                     .context(ApplyBloomFilterIndexSnafu)?;
             } else {
                 let reader = BloomFilterReaderImpl::new(blob);
-                self.apply_probes(reader, probes, &mut output)
+                self.apply_predicates(reader, predicates, &mut output)
                     .await
                     .context(ApplyBloomFilterIndexSnafu)?;
             }
@@ -301,10 +300,10 @@ impl BloomFilterIndexApplier {
             .context(PuffinBuildReaderSnafu)
     }
 
-    async fn apply_probes<R: BloomFilterReader + Send + 'static>(
+    async fn apply_predicates<R: BloomFilterReader + Send + 'static>(
         &self,
         reader: R,
-        probes: &HashSet<Bytes>,
+        predicates: &[InListPredicate],
         output: &mut [(usize, Vec<Range<usize>>)],
     ) -> std::result::Result<(), index::bloom_filter::error::Error> {
         let mut applier = BloomFilterApplier::new(Box::new(reader)).await?;
@@ -315,7 +314,7 @@ impl BloomFilterIndexApplier {
                 continue;
             }
 
-            *output = applier.search(probes, output).await?;
+            *output = applier.search(predicates, output).await?;
         }
 
         Ok(())
@@ -468,5 +467,15 @@ mod tests {
         )
         .await;
         assert_eq!(res, vec![(0, vec![0..4])]);
+
+        // rows        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19
+        // row group: | o  row group |  o row group | x  row group     |  o row group     |
+        // field_u64: | o pred   | x pred    |  o pred     |  x pred       | x pred       |
+        let res = tester(
+            &[col("field_u64").in_list(vec![lit(1u64), lit(11u64)], false)],
+            vec![(5, true), (5, true), (5, false), (5, true)],
+        )
+        .await;
+        assert_eq!(res, vec![(0, vec![0..4]), (1, vec![3..5])]);
     }
 }

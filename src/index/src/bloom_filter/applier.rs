@@ -23,6 +23,14 @@ use crate::bloom_filter::error::Result;
 use crate::bloom_filter::reader::BloomFilterReader;
 use crate::Bytes;
 
+/// `InListPredicate` contains a list of acceptable values. A value needs to match at least
+/// one of the elements (logical OR semantic) for the predicate to be satisfied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InListPredicate {
+    /// List of acceptable values.
+    pub list: HashSet<Bytes>,
+}
+
 pub struct BloomFilterApplier {
     reader: Box<dyn BloomFilterReader + Send>,
     meta: BloomFilterMeta,
@@ -35,15 +43,22 @@ impl BloomFilterApplier {
         Ok(Self { reader, meta })
     }
 
-    /// Searches ranges of rows that match all the probes in the given search ranges.
+    /// Searches ranges of rows that match all the given predicates in the search ranges.
+    /// Each predicate represents an OR condition of probes, and all predicates must match (AND semantics).
+    /// The logic is: (probe1 OR probe2 OR ...) AND (probe3 OR probe4 OR ...)
     pub async fn search(
         &mut self,
-        probes: &HashSet<Bytes>,
+        predicates: &[InListPredicate],
         search_ranges: &[Range<usize>],
     ) -> Result<Vec<Range<usize>>> {
+        if predicates.is_empty() {
+            // If no predicates, return empty result
+            return Ok(Vec::new());
+        }
+
         let segments = self.row_ranges_to_segments(search_ranges);
         let (seg_locations, bloom_filters) = self.load_bloom_filters(&segments).await?;
-        let matching_row_ranges = self.find_matching_rows(seg_locations, bloom_filters, probes);
+        let matching_row_ranges = self.find_matching_rows(seg_locations, bloom_filters, predicates);
         Ok(intersect_ranges(search_ranges, &matching_row_ranges))
     }
 
@@ -81,13 +96,11 @@ impl BloomFilterApplier {
         &mut self,
         segments: &[usize],
     ) -> Result<(Vec<(u64, usize)>, Vec<BloomFilter>)> {
-        // Map segments to their location indices
         let segment_locations = segments
             .iter()
             .map(|&seg| (self.meta.segment_loc_indices[seg], seg))
             .collect::<Vec<_>>();
 
-        // Get unique bloom filter locations
         let bloom_filter_locs = segment_locations
             .iter()
             .map(|(loc, _)| *loc)
@@ -95,32 +108,38 @@ impl BloomFilterApplier {
             .map(|i| self.meta.bloom_filter_locs[i as usize])
             .collect::<Vec<_>>();
 
-        // Load the actual bloom filters
         let bloom_filters = self.reader.bloom_filter_vec(&bloom_filter_locs).await?;
 
         Ok((segment_locations, bloom_filters))
     }
 
-    /// Finds segments that match all probes and converts them to row ranges
+    /// Finds segments that match all predicates and converts them to row ranges
     fn find_matching_rows(
         &self,
         segment_locations: Vec<(u64, usize)>,
         bloom_filters: Vec<BloomFilter>,
-        probes: &HashSet<Bytes>,
+        predicates: &[InListPredicate],
     ) -> Vec<Range<usize>> {
         let rows_per_segment = self.meta.rows_per_segment as usize;
         let mut matching_row_ranges = Vec::with_capacity(bloom_filters.len());
 
-        // Group segments by their location index (since they have the same bloom filter) and check if they match all probes
+        // Group segments by their location index (since they have the same bloom filter) and check if they match all predicates
         for ((_loc_index, group), bloom_filter) in segment_locations
             .into_iter()
             .chunk_by(|(loc, _)| *loc)
             .into_iter()
             .zip(bloom_filters.iter())
         {
-            // Check if this bloom filter contains all probes
-            let matches_all_probes = probes.iter().all(|probe| bloom_filter.contains(probe));
-            if !matches_all_probes {
+            // Check if this bloom filter matches each predicate (AND semantics)
+            let matches_all_predicates = predicates.iter().all(|predicate| {
+                // For each predicate, at least one probe must match (OR semantics)
+                predicate
+                    .list
+                    .iter()
+                    .any(|probe| bloom_filter.contains(probe))
+            });
+
+            if !matches_all_predicates {
                 continue;
             }
 
@@ -131,9 +150,6 @@ impl BloomFilterApplier {
                 matching_row_ranges.push(start_row..end_row);
             }
         }
-
-        // Sort ranges by start position for consistent output
-        matching_row_ranges.sort_unstable_by_key(|r| r.start);
 
         self.merge_adjacent_ranges(matching_row_ranges)
     }
@@ -246,37 +262,6 @@ mod tests {
             vec![b"dup".to_vec()],
         ];
 
-        let cases = vec![
-            (vec![b"row00".to_vec()], 0..28, vec![0..4]), // search one row in full range
-            (vec![b"row05".to_vec()], 4..8, vec![4..8]),  // search one row in partial range
-            (vec![b"row03".to_vec()], 4..8, vec![]), // search for a row that doesn't exist in the partial range
-            (
-                vec![b"overl".to_vec(), b"row06".to_vec()],
-                0..28,
-                vec![4..8],
-            ), // search multiple rows in multiple ranges
-            (
-                vec![b"seg01".to_vec(), b"overp".to_vec()],
-                0..28,
-                vec![4..8],
-            ), // search multiple rows in multiple ranges
-            (vec![b"row99".to_vec()], 0..28, vec![]), // search for a row that doesn't exist in the full range
-            (vec![b"row00".to_vec()], 12..12, vec![]), // search in an empty range
-            (
-                vec![b"row04".to_vec(), b"row05".to_vec()],
-                0..12,
-                vec![4..8],
-            ), // search multiple rows in same segment
-            (vec![b"seg01".to_vec()], 0..28, vec![4..8]), // search rows in a segment
-            (vec![b"seg01".to_vec()], 6..28, vec![6..8]), // search rows in a segment in partial range
-            (vec![b"overl".to_vec()], 0..28, vec![0..8]), // search rows in multiple segments
-            (vec![b"overl".to_vec()], 2..28, vec![2..8]), // search range starts from the middle of a segment
-            (vec![b"overp".to_vec()], 0..10, vec![4..10]), // search range ends at the middle of a segment
-            (vec![b"dup".to_vec()], 0..12, vec![]), // search for a duplicate row not in the range
-            (vec![b"dup".to_vec()], 0..16, vec![12..16]), // search for a duplicate row in the range
-            (vec![b"dup".to_vec()], 0..28, vec![12..28]), // search for a duplicate row in the full range
-        ];
-
         for row in rows {
             creator.push_row_elems(row).await.unwrap();
         }
@@ -284,15 +269,164 @@ mod tests {
         creator.finish(&mut writer).await.unwrap();
 
         let bytes = writer.into_inner();
-
         let reader = BloomFilterReaderImpl::new(bytes);
-
         let mut applier = BloomFilterApplier::new(Box::new(reader)).await.unwrap();
 
-        for (probes, search_range, expected) in cases {
-            let probes: HashSet<Bytes> = probes.into_iter().collect();
-            let ranges = applier.search(&probes, &[search_range]).await.unwrap();
-            assert_eq!(ranges, expected);
+        // Test cases for predicates
+        let cases = vec![
+            // Single value predicates
+            (
+                vec![InListPredicate {
+                    list: HashSet::from_iter([b"row00".to_vec()]),
+                }],
+                0..28,
+                vec![0..4],
+            ),
+            (
+                vec![InListPredicate {
+                    list: HashSet::from_iter([b"row05".to_vec()]),
+                }],
+                4..8,
+                vec![4..8],
+            ),
+            (
+                vec![InListPredicate {
+                    list: HashSet::from_iter([b"row03".to_vec()]),
+                }],
+                4..8,
+                vec![],
+            ),
+            // Multiple values in a single predicate (OR logic)
+            (
+                vec![InListPredicate {
+                    list: HashSet::from_iter([b"overl".to_vec(), b"row06".to_vec()]),
+                }],
+                0..28,
+                vec![0..8],
+            ),
+            (
+                vec![InListPredicate {
+                    list: HashSet::from_iter([b"seg01".to_vec(), b"overp".to_vec()]),
+                }],
+                0..28,
+                vec![4..12],
+            ),
+            // Non-existent values
+            (
+                vec![InListPredicate {
+                    list: HashSet::from_iter([b"row99".to_vec()]),
+                }],
+                0..28,
+                vec![],
+            ),
+            // Empty range
+            (
+                vec![InListPredicate {
+                    list: HashSet::from_iter([b"row00".to_vec()]),
+                }],
+                12..12,
+                vec![],
+            ),
+            // Multiple values in a single predicate within specific ranges
+            (
+                vec![InListPredicate {
+                    list: HashSet::from_iter([b"row04".to_vec(), b"row05".to_vec()]),
+                }],
+                0..12,
+                vec![4..8],
+            ),
+            (
+                vec![InListPredicate {
+                    list: HashSet::from_iter([b"seg01".to_vec()]),
+                }],
+                0..28,
+                vec![4..8],
+            ),
+            (
+                vec![InListPredicate {
+                    list: HashSet::from_iter([b"seg01".to_vec()]),
+                }],
+                6..28,
+                vec![6..8],
+            ),
+            // Values spanning multiple segments
+            (
+                vec![InListPredicate {
+                    list: HashSet::from_iter([b"overl".to_vec()]),
+                }],
+                0..28,
+                vec![0..8],
+            ),
+            (
+                vec![InListPredicate {
+                    list: HashSet::from_iter([b"overl".to_vec()]),
+                }],
+                2..28,
+                vec![2..8],
+            ),
+            (
+                vec![InListPredicate {
+                    list: HashSet::from_iter([b"overp".to_vec()]),
+                }],
+                0..10,
+                vec![4..10],
+            ),
+            // Duplicate values
+            (
+                vec![InListPredicate {
+                    list: HashSet::from_iter([b"dup".to_vec()]),
+                }],
+                0..12,
+                vec![],
+            ),
+            (
+                vec![InListPredicate {
+                    list: HashSet::from_iter([b"dup".to_vec()]),
+                }],
+                0..16,
+                vec![12..16],
+            ),
+            (
+                vec![InListPredicate {
+                    list: HashSet::from_iter([b"dup".to_vec()]),
+                }],
+                0..28,
+                vec![12..28],
+            ),
+            // Multiple predicates (AND logic)
+            (
+                vec![
+                    InListPredicate {
+                        list: HashSet::from_iter([b"row00".to_vec(), b"row01".to_vec()]),
+                    },
+                    InListPredicate {
+                        list: HashSet::from_iter([b"seg00".to_vec()]),
+                    },
+                ],
+                0..28,
+                vec![0..4],
+            ),
+            (
+                vec![
+                    InListPredicate {
+                        list: HashSet::from_iter([b"overl".to_vec()]),
+                    },
+                    InListPredicate {
+                        list: HashSet::from_iter([b"seg01".to_vec()]),
+                    },
+                ],
+                0..28,
+                vec![4..8],
+            ),
+        ];
+
+        for (predicates, search_range, expected) in cases {
+            let result = applier.search(&predicates, &[search_range]).await.unwrap();
+            assert_eq!(
+                result, expected,
+                "Expected {:?}, got {:?}",
+                expected, result
+            );
         }
     }
 
