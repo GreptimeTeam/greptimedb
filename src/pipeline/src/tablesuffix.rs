@@ -28,18 +28,18 @@ lazy_static::lazy_static! {
     static ref NAME_TPL: Regex = Regex::new(r"\$\{([^}]+)\}").unwrap();
 }
 
-/// TableNameTemplate is used to generate target table name from pipeline context.
+/// TableSuffixTemplate is used to generate suffix for the table name, so that the input data can be written to multiple tables.
 /// The config should be placed at the end of the pipeline.
 /// Use `${variable}` to refer to the variable in the pipeline context, the viarable can be from input data or be a processed result.
 /// Note the variable should be an integer number or a string.
-/// In case of any error occurs during runtime, the input default table name will be used.
+/// In case of any error occurs during runtime, no suffix will be added to the table name.
 ///
 /// ```yaml
-/// tablename: a_${xxx}_${b}
+/// tablesuffix: _${xxx}_${b}
 /// ```
 ///
-/// For example, if the template is `a_${xxx}_${b}`, and the pipeline context is
-/// `{"xxx": "123", "b": "456"}`, the generated table name will be `a_123_456`.
+/// For example, if the template is `_${xxx}_${b}`, and the pipeline context is
+/// `{"xxx": "123", "b": "456"}`, the generated table name will be `_123_456`.
 #[derive(Debug, PartialEq)]
 pub(crate) struct TableSuffixTemplate {
     pub template: String,
@@ -110,17 +110,17 @@ mod tests {
     use crate::tablesuffix::TableSuffixTemplate;
 
     #[test]
-    fn test_table_name_parsing() {
+    fn test_table_suffix_parsing() {
         let yaml = r#"
-        tablename: a_${xxx}_${b}
+        tablesuffix: _${xxx}_${b}
         "#;
         let config = YamlLoader::load_from_str(yaml);
         assert!(config.is_ok());
-        let config = config.unwrap()[0]["tablename"].clone();
+        let config = config.unwrap()[0]["tablesuffix"].clone();
         let name_template = TableSuffixTemplate::try_from(&config);
         assert!(name_template.is_ok());
         let name_template = name_template.unwrap();
-        assert_eq!(name_template.template, "a_{}_{}");
+        assert_eq!(name_template.template, "_{}_{}");
         assert_eq!(name_template.keys, vec!["xxx", "b"]);
     }
 }
