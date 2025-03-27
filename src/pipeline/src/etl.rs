@@ -29,7 +29,7 @@ use crate::dispatcher::{Dispatcher, Rule};
 use crate::error::{
     IntermediateKeyIndexSnafu, PrepareValueMustBeObjectSnafu, Result, YamlLoadSnafu, YamlParseSnafu,
 };
-use crate::tablename::TableNameTemplate;
+use crate::tablesuffix::TableSuffixTemplate;
 use crate::GreptimeTransformer;
 
 const DESCRIPTION: &str = "description";
@@ -37,7 +37,7 @@ const PROCESSORS: &str = "processors";
 const TRANSFORM: &str = "transform";
 const TRANSFORMS: &str = "transforms";
 const DISPATCHER: &str = "dispatcher";
-const TABLENAME: &str = "tablename";
+const TABLESUFFIX: &str = "tablesuffix";
 
 pub type PipelineMap = std::collections::BTreeMap<String, Value>;
 
@@ -78,8 +78,8 @@ pub fn parse(input: &Content) -> Result<Pipeline> {
                 None
             };
 
-            let tablename = if !doc[TABLENAME].is_badvalue() {
-                Some(TableNameTemplate::try_from(&doc[TABLENAME])?)
+            let tablesuffix = if !doc[TABLESUFFIX].is_badvalue() {
+                Some(TableSuffixTemplate::try_from(&doc[TABLESUFFIX])?)
             } else {
                 None
             };
@@ -89,7 +89,7 @@ pub fn parse(input: &Content) -> Result<Pipeline> {
                 processors,
                 transformer,
                 dispatcher,
-                tablename,
+                tablesuffix,
             })
         }
         Content::Json(_) => unimplemented!(),
@@ -102,7 +102,7 @@ pub struct Pipeline {
     processors: processor::Processors,
     dispatcher: Option<Dispatcher>,
     transformer: GreptimeTransformer,
-    tablename: Option<TableNameTemplate>,
+    tablesuffix: Option<TableSuffixTemplate>,
 }
 
 /// Where the pipeline executed is dispatched to, with context information
@@ -186,9 +186,9 @@ impl Pipeline {
         let row = self.transformer.transform_mut(val)?;
 
         // generate table name
-        let table_name = self.tablename.as_ref().and_then(|t| t.apply(val));
+        let table_suffix = self.tablesuffix.as_ref().and_then(|t| t.apply(val));
 
-        Ok(PipelineExecOutput::Transformed((row, table_name)))
+        Ok(PipelineExecOutput::Transformed((row, table_suffix)))
     }
 
     pub fn processors(&self) -> &processor::Processors {

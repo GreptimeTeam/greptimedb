@@ -102,7 +102,7 @@ pub struct LogIngesterQueryParams {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct LogIngestRequest {
     /// The table where the log data will be written to.
-    pub default_table: String,
+    pub table: String,
     /// The log data to be ingested.
     pub values: Vec<Value>,
 }
@@ -567,7 +567,7 @@ pub async fn log_ingester(
         handler,
         pipeline,
         vec![LogIngestRequest {
-            default_table: table_name,
+            table: table_name,
             values: value,
         }],
         query_ctx,
@@ -647,7 +647,7 @@ pub(crate) async fn ingest_logs_inner(
             &pipeline,
             &pipeline_params,
             pipeline::json_array_to_map(request.values).context(PipelineSnafu)?,
-            request.default_table,
+            request.table,
             &query_ctx,
             true,
         )

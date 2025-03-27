@@ -96,7 +96,7 @@ macro_rules! http_tests {
                 test_identify_pipeline_with_flatten,
                 test_identify_pipeline_with_custom_ts,
                 test_pipeline_dispatcher,
-                test_pipeline_name_template,
+                test_pipeline_suffix_template,
 
                 test_otlp_metrics,
                 test_otlp_traces_v0,
@@ -1645,10 +1645,10 @@ transform:
     guard.remove_all().await;
 }
 
-pub async fn test_pipeline_name_template(storage_type: StorageType) {
+pub async fn test_pipeline_suffix_template(storage_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) =
-        setup_test_http_app_with_frontend(storage_type, "test_pipeline_name_template").await;
+        setup_test_http_app_with_frontend(storage_type, "test_pipeline_suffix_template").await;
 
     // handshake
     let client = TestClient::new(app).await;
@@ -1674,7 +1674,7 @@ transform:
   - field: time
     type: time
     index: timestamp
-tablename: table_${type}
+tablesuffix: _${type}
 "#;
 
     // 1. create pipeline
@@ -1741,16 +1741,16 @@ tablename: table_${type}
 
     // 3. check table list
     validate_data(
-        "test_pipeline_name_template_table_list",
+        "test_pipeline_suffix_template_table_list",
         &client,
         "show tables",
-        "[[\"d_table\"],[\"demo\"],[\"numbers\"],[\"table_db\"],[\"table_http\"]]",
+        "[[\"d_table\"],[\"d_table_db\"],[\"d_table_http\"],[\"demo\"],[\"numbers\"]]",
     )
     .await;
 
     // 4. check each table's data
     validate_data(
-        "test_pipeline_name_template_default",
+        "test_pipeline_suffix_template_default",
         &client,
         "select * from d_table",
         "[[2436,2528,null,\"ClusterAdapter:enter sendTextDataToCluster\\\\n\",\"INTERACT.MANAGER\",1716668197217000000]]",
@@ -1760,7 +1760,7 @@ tablename: table_${type}
     validate_data(
         "test_pipeline_name_template_db",
         &client,
-        "select * from table_db",
+        "select * from d_table_db",
         "[[2436,2528,\"db\",\"ClusterAdapter:enter sendTextDataToCluster\\\\n\",\"INTERACT.MANAGER\",1716668197217000000]]",
     )
     .await;
@@ -1768,7 +1768,7 @@ tablename: table_${type}
     validate_data(
         "test_pipeline_name_template_http",
         &client,
-        "select * from table_http",
+        "select * from d_table_http",
         "[[2436,2528,\"http\",\"ClusterAdapter:enter sendTextDataToCluster\\\\n\",\"INTERACT.MANAGER\",1716668197217000000],[2436,2528,\"http\",\"ClusterAdapter:enter sendTextDataToCluster\\\\n\",\"INTERACT.MANAGER\",1716668197217000000],[2436,2528,\"http\",\"ClusterAdapter:enter sendTextDataToCluster\\\\n\",\"INTERACT.MANAGER\",1716668197217000000]]",
     )
     .await;

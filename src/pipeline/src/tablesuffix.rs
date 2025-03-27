@@ -17,7 +17,9 @@ use regex::Regex;
 use snafu::{ensure, OptionExt};
 use yaml_rust::Yaml;
 
-use crate::error::{Error, InvalidTableNameTemplateSnafu, RequiredTableNameTemplateSnafu, Result};
+use crate::error::{
+    Error, InvalidTableSuffixTemplateSnafu, RequiredTableSuffixTemplateSnafu, Result,
+};
 use crate::{PipelineMap, Value};
 
 const REPLACE_KEY: &str = "{}";
@@ -39,12 +41,12 @@ lazy_static::lazy_static! {
 /// For example, if the template is `a_${xxx}_${b}`, and the pipeline context is
 /// `{"xxx": "123", "b": "456"}`, the generated table name will be `a_123_456`.
 #[derive(Debug, PartialEq)]
-pub(crate) struct TableNameTemplate {
+pub(crate) struct TableSuffixTemplate {
     pub template: String,
     pub keys: Vec<String>,
 }
 
-impl TableNameTemplate {
+impl TableSuffixTemplate {
     pub fn apply(&self, val: &PipelineMap) -> Option<String> {
         let values = self
             .keys
@@ -72,20 +74,20 @@ impl TableNameTemplate {
     }
 }
 
-impl TryFrom<&Yaml> for TableNameTemplate {
+impl TryFrom<&Yaml> for TableSuffixTemplate {
     type Error = Error;
 
     fn try_from(value: &Yaml) -> Result<Self> {
         let name_template = value
             .as_str()
-            .context(RequiredTableNameTemplateSnafu)?
+            .context(RequiredTableSuffixTemplateSnafu)?
             .to_string();
 
         let mut keys = Vec::new();
         for cap in NAME_TPL.captures_iter(&name_template) {
             ensure!(
                 cap.len() >= 2,
-                InvalidTableNameTemplateSnafu {
+                InvalidTableSuffixTemplateSnafu {
                     input: name_template.clone(),
                 }
             );
@@ -97,7 +99,7 @@ impl TryFrom<&Yaml> for TableNameTemplate {
             .replace_all(&name_template, REPLACE_KEY)
             .to_string();
 
-        Ok(TableNameTemplate { template, keys })
+        Ok(TableSuffixTemplate { template, keys })
     }
 }
 
@@ -105,7 +107,7 @@ impl TryFrom<&Yaml> for TableNameTemplate {
 mod tests {
     use yaml_rust::YamlLoader;
 
-    use crate::tablename::TableNameTemplate;
+    use crate::tablesuffix::TableSuffixTemplate;
 
     #[test]
     fn test_table_name_parsing() {
@@ -115,7 +117,7 @@ mod tests {
         let config = YamlLoader::load_from_str(yaml);
         assert!(config.is_ok());
         let config = config.unwrap()[0]["tablename"].clone();
-        let name_template = TableNameTemplate::try_from(&config);
+        let name_template = TableSuffixTemplate::try_from(&config);
         assert!(name_template.is_ok());
         let name_template = name_template.unwrap();
         assert_eq!(name_template.template, "a_{}_{}");

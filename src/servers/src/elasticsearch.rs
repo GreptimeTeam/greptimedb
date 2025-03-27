@@ -331,7 +331,7 @@ fn parse_bulk_request(
             );
 
             requests.push(LogIngestRequest {
-                default_table: index.unwrap_or_else(|| index_from_url.as_ref().unwrap().clone()),
+                table: index.unwrap_or_else(|| index_from_url.as_ref().unwrap().clone()),
                 values: vec![log_value],
             });
         }
@@ -402,13 +402,13 @@ mod tests {
                 None,
                 Ok(vec![
                     LogIngestRequest {
-                        default_table: "test".to_string(),
+                        table: "test".to_string(),
                         values: vec![
                             json!({"foo1": "foo1_value", "bar1": "bar1_value"}),
                         ],
                     },
                     LogIngestRequest {
-                        default_table: "test".to_string(),
+                        table: "test".to_string(),
                         values: vec![json!({"foo2": "foo2_value", "bar2": "bar2_value"})],
                     },
                 ]),
@@ -425,11 +425,11 @@ mod tests {
                 None,
                 Ok(vec![
                     LogIngestRequest {
-                        default_table: "test".to_string(),
+                        table: "test".to_string(),
                         values: vec![json!({"foo1": "foo1_value", "bar1": "bar1_value"})],
                     },
                     LogIngestRequest {
-                        default_table: "logs".to_string(),
+                        table: "logs".to_string(),
                         values: vec![json!({"foo2": "foo2_value", "bar2": "bar2_value"})],
                     },
                 ]),
@@ -446,11 +446,11 @@ mod tests {
                 None,
                 Ok(vec![
                     LogIngestRequest {
-                        default_table: "test".to_string(),
+                        table: "test".to_string(),
                         values: vec![json!({"foo1": "foo1_value", "bar1": "bar1_value"})],
                     },
                     LogIngestRequest {
-                        default_table: "logs".to_string(),
+                        table: "logs".to_string(),
                         values: vec![json!({"foo2": "foo2_value", "bar2": "bar2_value"})],
                     },
                 ]),
@@ -466,7 +466,7 @@ mod tests {
                 None,
                 Ok(vec![
                     LogIngestRequest {
-                        default_table: "test".to_string(),
+                        table: "test".to_string(),
                         values: vec![json!({"foo1": "foo1_value", "bar1": "bar1_value"})],
                     },
                 ]),
@@ -483,11 +483,11 @@ mod tests {
                 Some("data".to_string()),
                 Ok(vec![
                     LogIngestRequest {
-                        default_table: "test".to_string(),
+                        table: "test".to_string(),
                         values: vec![json!({"foo1": "foo1_value", "bar1": "bar1_value"})],
                     },
                     LogIngestRequest {
-                        default_table: "test".to_string(),
+                        table: "test".to_string(),
                         values: vec![json!({"foo2": "foo2_value", "bar2": "bar2_value"})],
                     },
                 ]),
@@ -504,13 +504,13 @@ mod tests {
                 Some("message".to_string()),
                 Ok(vec![
                     LogIngestRequest {
-                        default_table: "logs-generic-default".to_string(),
+                        table: "logs-generic-default".to_string(),
                         values: vec![
                             json!("172.16.0.1 - - [25/May/2024:20:19:37 +0000] \"GET /contact HTTP/1.1\" 404 162 \"-\" \"Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1\""),
                         ],
                     },
                     LogIngestRequest {
-                        default_table: "logs-generic-default".to_string(),
+                        table: "logs-generic-default".to_string(),
                         values: vec![
                             json!("10.0.0.1 - - [25/May/2024:20:18:37 +0000] \"GET /images/logo.png HTTP/1.1\" 304 0 \"-\" \"Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:89.0) Gecko/20100101 Firefox/89.0\""),
                         ],

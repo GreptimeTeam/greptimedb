@@ -639,11 +639,11 @@ pub enum Error {
         source: common_recordbatch::error::Error,
     },
 
-    #[snafu(display("A valid table name template is required for tablename section"))]
-    RequiredTableNameTemplate,
+    #[snafu(display("A valid table suffix template is required for tablesuffix section"))]
+    RequiredTableSuffixTemplate,
 
-    #[snafu(display("Invalid table name template, input: {}", input))]
-    InvalidTableNameTemplate {
+    #[snafu(display("Invalid table suffix template, input: {}", input))]
+    InvalidTableSuffixTemplate {
         input: String,
         #[snafu(implicit)]
         location: Location,
@@ -818,8 +818,8 @@ impl ErrorExt for Error {
             | TableSuffixRequiredForDispatcherRule
             | ValueRequiredForDispatcherRule
             | ReachedMaxNestedLevels { .. }
-            | RequiredTableNameTemplate
-            | InvalidTableNameTemplate { .. } => StatusCode::InvalidArguments,
+            | RequiredTableSuffixTemplate
+            | InvalidTableSuffixTemplate { .. } => StatusCode::InvalidArguments,
         }
     }
 

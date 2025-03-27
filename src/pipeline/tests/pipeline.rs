@@ -897,7 +897,7 @@ transform:
 }
 
 #[test]
-fn test_name_template() {
+fn test_table_suffix_template() {
     let input_value = r#"
 {
     "line": "2024-05-25 20:16:37.217 [http] hello world"
@@ -924,7 +924,7 @@ transform:
   - field: ts
     type: time
     index: timestamp
-tablename: table_${logger}
+tablesuffix: _${logger}
 "#;
 
     let yaml_content = Content::Yaml(pipeline_yaml);
@@ -944,5 +944,5 @@ tablename: table_${logger}
         },
     ];
     assert_eq!(expected_values, values);
-    assert_eq!(table_name, Some("table_http".to_string()));
+    assert_eq!(table_name, Some("_http".to_string()));
 }
