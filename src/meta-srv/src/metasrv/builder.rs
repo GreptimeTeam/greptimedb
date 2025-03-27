@@ -55,8 +55,6 @@ use crate::lease::MetaPeerLookupService;
 use crate::metasrv::{
     ElectionRef, Metasrv, MetasrvInfo, MetasrvOptions, SelectorContext, SelectorRef, TABLE_ID_SEQ,
 };
-use crate::procedure::region_follower::manager::RegionFollowerManager;
-use crate::procedure::region_follower::Context as ArfContext;
 use crate::procedure::region_migration::manager::RegionMigrationManager;
 use crate::procedure::region_migration::DefaultContextFactory;
 use crate::region::supervisor::{
@@ -344,19 +342,6 @@ impl MetasrvBuilder {
             )
             .context(error::InitDdlManagerSnafu)?,
         );
-
-        // alter region follower manager
-        let region_follower_manager = Arc::new(RegionFollowerManager::new(
-            procedure_manager.clone(),
-            ArfContext {
-                table_metadata_manager: table_metadata_manager.clone(),
-                mailbox: mailbox.clone(),
-                server_addr: options.server_addr.clone(),
-                cache_invalidator: cache_invalidator.clone(),
-                meta_peer_client: meta_peer_client.clone(),
-            },
-        ));
-        region_follower_manager.try_start()?;
 
         let handler_group_builder = match handler_group_builder {
             Some(handler_group_builder) => handler_group_builder,
