@@ -407,11 +407,8 @@ impl RecordingRuleTask {
             .expect("Time went backwards");
         let low_bound = self
             .expire_after
-            .map(|e| since_the_epoch.as_secs() - e as u64);
-
-        let Some(low_bound) = low_bound else {
-            return Ok(Some(self.query.clone()));
-        };
+            .map(|e| since_the_epoch.as_secs() - e as u64)
+            .unwrap_or(u64::MIN);
 
         let low_bound = Timestamp::new_second(low_bound as i64);
 
@@ -607,7 +604,7 @@ impl DirtyTimeWindows {
             };
             expr_lst.push(expr);
         }
-        let expr = expr_lst.into_iter().reduce(|a, b| a.and(b));
+        let expr = expr_lst.into_iter().reduce(|a, b| a.or(b));
         Ok(expr)
     }
 
