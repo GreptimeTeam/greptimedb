@@ -501,6 +501,7 @@ pub async fn show_index(
     .await
 }
 
+/// Execute `SHOW REGION` statement.
 pub async fn show_region(
     stmt: ShowRegion,
     query_engine: &QueryEngineRef,

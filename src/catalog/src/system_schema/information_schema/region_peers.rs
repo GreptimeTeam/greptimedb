@@ -193,7 +193,7 @@ impl InformationSchemaRegionPeersBuilder {
         let predicates = Predicates::from_scan_request(&request);
 
         for schema_name in catalog_manager.schema_names(&catalog_name, None).await? {
-            let table_id_stream = catalog_manager
+            let table_stream = catalog_manager
                 .tables(&catalog_name, &schema_name, None)
                 .try_filter_map(|t| async move {
                     let table_info = t.table_info();
@@ -209,11 +209,11 @@ impl InformationSchemaRegionPeersBuilder {
 
             const BATCH_SIZE: usize = 128;
 
-            // Split table ids into chunks
-            let mut table_id_chunks = pin!(table_id_stream.ready_chunks(BATCH_SIZE));
+            // Split tables into chunks
+            let mut table_chunks = pin!(table_stream.ready_chunks(BATCH_SIZE));
 
-            while let Some(table_ids) = table_id_chunks.next().await {
-                let tables = table_ids.into_iter().collect::<Result<HashMap<_, _>>>()?;
+            while let Some(tables) = table_chunks.next().await {
+                let tables = tables.into_iter().collect::<Result<HashMap<_, _>>>()?;
                 let table_ids = tables.keys().cloned().collect::<Vec<_>>();
 
                 let table_routes = if let Some(partition_manager) = &partition_manager {
