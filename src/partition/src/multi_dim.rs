@@ -148,13 +148,6 @@ impl PartitionRule for MultiDimPartitionRule {
     fn find_region(&self, values: &[Value]) -> Result<RegionNumber> {
         self.find_region(values)
     }
-
-    fn find_regions_by_exprs(
-        &self,
-        _exprs: &[crate::partition::PartitionExpr],
-    ) -> Result<Vec<RegionNumber>> {
-        Ok(self.regions.clone())
-    }
 }
 
 /// Helper for [RuleChecker]

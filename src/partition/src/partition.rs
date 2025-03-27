@@ -37,11 +37,6 @@ pub trait PartitionRule: Sync + Send {
     ///
     /// Note that the `values` should have the same length as the `partition_columns`.
     fn find_region(&self, values: &[Value]) -> Result<RegionNumber>;
-
-    /// Finds the target regions by the partition expressions.
-    ///
-    /// Note that the `exprs` should have the same length as the `partition_columns`.
-    fn find_regions_by_exprs(&self, exprs: &[PartitionExpr]) -> Result<Vec<RegionNumber>>;
 }
 
 /// The right bound(exclusive) of partition range.
