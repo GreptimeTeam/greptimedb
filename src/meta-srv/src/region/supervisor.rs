@@ -543,11 +543,11 @@ pub(crate) mod tests {
         assert!(rx.await.unwrap().is_empty());
 
         fn generate_heartbeats(datanode_id: u64, region_ids: Vec<u32>) -> Vec<DatanodeHeartbeat> {
-            let mut rng = rand::thread_rng();
+            let mut rng = rand::rng();
             let start = current_time_millis();
             (0..2000)
                 .map(|i| DatanodeHeartbeat {
-                    timestamp: start + i * 1000 + rng.gen_range(0..100),
+                    timestamp: start + i * 1000 + rng.random_range(0..100),
                     datanode_id,
                     regions: region_ids
                         .iter()

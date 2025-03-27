@@ -25,7 +25,7 @@ use index::bloom_filter::reader::{BloomFilterReader, BloomFilterReaderImpl};
 use index::Bytes;
 use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
-use puffin::puffin_manager::{BlobGuard, PuffinManager, PuffinReader};
+use puffin::puffin_manager::{PuffinManager, PuffinReader};
 use snafu::ResultExt;
 use store_api::storage::{ColumnId, RegionId};
 

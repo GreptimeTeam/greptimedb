@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use async_compression::futures::bufread::ZstdEncoder;
@@ -65,7 +65,13 @@ where
     S: Stager,
     W: AsyncWrite + Unpin + Send,
 {
-    async fn put_blob<R>(&mut self, key: &str, raw_data: R, options: PutOptions) -> Result<u64>
+    async fn put_blob<R>(
+        &mut self,
+        key: &str,
+        raw_data: R,
+        options: PutOptions,
+        properties: HashMap<String, String>,
+    ) -> Result<u64>
     where
         R: AsyncRead + Send,
     {
@@ -75,7 +81,7 @@ where
         );
 
         let written_bytes = self
-            .handle_compress(key.to_string(), raw_data, options.compression)
+            .handle_compress(key.to_string(), raw_data, options.compression, properties)
             .await?;
 
         self.blob_keys.insert(key.to_string());
@@ -111,7 +117,12 @@ where
 
             let file_key = Uuid::new_v4().to_string();
             written_bytes += self
-                .handle_compress(file_key.clone(), reader, options.compression)
+                .handle_compress(
+                    file_key.clone(),
+                    reader,
+                    options.compression,
+                    Default::default(),
+                )
                 .await?;
 
             let path = entry.path();
@@ -174,6 +185,7 @@ where
         key: String,
         raw_data: impl AsyncRead + Send,
         compression: Option<CompressionCodec>,
+        properties: HashMap<String, String>,
     ) -> Result<u64> {
         match compression {
             Some(CompressionCodec::Lz4) => UnsupportedCompressionSnafu { codec: "lz4" }.fail(),
@@ -182,7 +194,7 @@ where
                     blob_type: key,
                     compressed_data: ZstdEncoder::new(BufReader::new(raw_data)),
                     compression_codec: compression,
-                    properties: Default::default(),
+                    properties,
                 };
                 self.puffin_file_writer.add_blob(blob).await
             }
@@ -191,7 +203,7 @@ where
                     blob_type: key,
                     compressed_data: raw_data,
                     compression_codec: compression,
-                    properties: Default::default(),
+                    properties,
                 };
                 self.puffin_file_writer.add_blob(blob).await
             }

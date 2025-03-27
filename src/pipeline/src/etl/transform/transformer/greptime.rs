@@ -35,7 +35,7 @@ use crate::error::{
 };
 use crate::etl::field::{Field, Fields};
 use crate::etl::transform::index::Index;
-use crate::etl::transform::{Transform, Transformer, Transforms};
+use crate::etl::transform::{Transform, Transforms};
 use crate::etl::value::{Timestamp, Value};
 use crate::etl::PipelineMap;
 use crate::IdentityTimeIndex;
@@ -103,7 +103,7 @@ impl GreptimeTransformer {
     }
 
     /// Generate the schema for the GreptimeTransformer
-    fn schemas(transforms: &Transforms) -> Result<Vec<ColumnSchema>> {
+    fn init_schemas(transforms: &Transforms) -> Result<Vec<ColumnSchema>> {
         let mut schema = vec![];
         for transform in transforms.iter() {
             schema.extend(coerce_columns(transform)?);
@@ -112,11 +112,8 @@ impl GreptimeTransformer {
     }
 }
 
-impl Transformer for GreptimeTransformer {
-    type Output = Rows;
-    type VecOutput = Row;
-
-    fn new(mut transforms: Transforms) -> Result<Self> {
+impl GreptimeTransformer {
+    pub fn new(mut transforms: Transforms) -> Result<Self> {
         if transforms.is_empty() {
             return TransformEmptySnafu.fail();
         }
@@ -165,11 +162,11 @@ impl Transformer for GreptimeTransformer {
             0 => {
                 GreptimeTransformer::add_greptime_timestamp_column(&mut transforms);
 
-                let schema = GreptimeTransformer::schemas(&transforms)?;
+                let schema = GreptimeTransformer::init_schemas(&transforms)?;
                 Ok(GreptimeTransformer { transforms, schema })
             }
             1 => {
-                let schema = GreptimeTransformer::schemas(&transforms)?;
+                let schema = GreptimeTransformer::init_schemas(&transforms)?;
                 Ok(GreptimeTransformer { transforms, schema })
             }
             _ => {
@@ -180,7 +177,7 @@ impl Transformer for GreptimeTransformer {
         }
     }
 
-    fn transform_mut(&self, val: &mut PipelineMap) -> Result<Self::VecOutput> {
+    pub fn transform_mut(&self, val: &mut PipelineMap) -> Result<Row> {
         let mut values = vec![GreptimeValue { value_data: None }; self.schema.len()];
         let mut output_index = 0;
         for transform in self.transforms.iter() {
@@ -215,15 +212,15 @@ impl Transformer for GreptimeTransformer {
         Ok(Row { values })
     }
 
-    fn transforms(&self) -> &Transforms {
+    pub fn transforms(&self) -> &Transforms {
         &self.transforms
     }
 
-    fn schemas(&self) -> &Vec<greptime_proto::v1::ColumnSchema> {
+    pub fn schemas(&self) -> &Vec<greptime_proto::v1::ColumnSchema> {
         &self.schema
     }
 
-    fn transforms_mut(&mut self) -> &mut Transforms {
+    pub fn transforms_mut(&mut self) -> &mut Transforms {
         &mut self.transforms
     }
 }

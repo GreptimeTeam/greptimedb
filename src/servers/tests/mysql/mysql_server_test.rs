@@ -26,7 +26,6 @@ use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::value::Value;
 use mysql_async::prelude::*;
 use mysql_async::{Conn, Row, SslOpts};
-use rand::rngs::StdRng;
 use rand::Rng;
 use servers::error::Result;
 use servers::install_ring_crypto_provider;
@@ -426,13 +425,11 @@ async fn test_query_concurrently() -> Result<()> {
     let mut join_handles = vec![];
     for _ in 0..threads {
         join_handles.push(tokio::spawn(async move {
-            let mut rand: StdRng = rand::SeedableRng::from_entropy();
-
             let mut connection = create_connection_default_db_name(server_port, false)
                 .await
                 .unwrap();
             for _ in 0..expect_executed_queries_per_worker {
-                let expected: u32 = rand.gen_range(0..100);
+                let expected: u32 = rand::rng().random_range(0..100);
                 let result: u32 = connection
                     .query_first(format!(
                         "SELECT uint32s FROM numbers WHERE uint32s = {expected}"

@@ -38,7 +38,7 @@ use common_telemetry::{error, info, warn};
 use futures::future::try_join_all;
 use object_store::manager::ObjectStoreManagerRef;
 use prometheus::IntGauge;
-use rand::{thread_rng, Rng};
+use rand::{rng, Rng};
 use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::region_engine::{SetRegionRoleStateResponse, SettableRegionRoleState};
@@ -390,7 +390,7 @@ async fn write_cache_from_config(
 
 /// Computes a initial check delay for a worker.
 pub(crate) fn worker_init_check_delay() -> Duration {
-    let init_check_delay = thread_rng().gen_range(0..MAX_INITIAL_CHECK_DELAY_SECS);
+    let init_check_delay = rng().random_range(0..MAX_INITIAL_CHECK_DELAY_SECS);
     Duration::from_secs(init_check_delay)
 }
 

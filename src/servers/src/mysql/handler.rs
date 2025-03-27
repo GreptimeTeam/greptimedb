@@ -92,7 +92,7 @@ impl MysqlInstanceShim {
     ) -> MysqlInstanceShim {
         // init a random salt
         let mut bs = vec![0u8; 20];
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         rng.fill_bytes(bs.as_mut());
 
         let mut scramble: [u8; 20] = [0; 20];

@@ -114,7 +114,7 @@ impl BloomFilterApplier {
         // Group segments by their location index (since they have the same bloom filter) and check if they match all probes
         for ((_loc_index, group), bloom_filter) in segment_locations
             .into_iter()
-            .group_by(|(loc, _)| *loc)
+            .chunk_by(|(loc, _)| *loc)
             .into_iter()
             .zip(bloom_filters.iter())
         {

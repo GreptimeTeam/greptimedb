@@ -164,6 +164,8 @@ impl FulltextIndexCreator for TantivyFulltextIndexCreator {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use common_test_util::temp_dir::create_temp_dir;
     use futures::AsyncRead;
     use tantivy::collector::DocSetCollector;
@@ -182,6 +184,7 @@ mod tests {
             _key: &str,
             _raw_data: R,
             _options: PutOptions,
+            _properties: HashMap<String, String>,
         ) -> puffin::error::Result<u64>
         where
             R: AsyncRead + Send,
