@@ -19,7 +19,7 @@ use common_procedure::{
     Result as ProcedureResult, Status,
 };
 use common_telemetry::info;
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::RegionId;
 
 use super::remove::RemoveFollower;
@@ -73,13 +73,21 @@ impl RemoveRegionFollowerProcedure {
         // loads the table route of the region
         self.data.table_route = self.data.load_table_route(&self.context).await?;
         let region_leader_datanode_id = {
+            // Safety: load table route is done before.
             let table_route = self.data.physical_table_route().unwrap();
             table_route
                 .region_routes
                 .iter()
                 .find(|region_route| region_route.region.id == self.data.region_id)
-                .map(|region_route| region_route.leader_peer.as_ref().unwrap().id)
-                .unwrap_or_default()
+                .context(error::RegionRouteNotFoundSnafu {
+                    region_id: self.data.region_id,
+                })?
+                .leader_peer
+                .as_ref()
+                .context(error::UnexpectedSnafu {
+                    violated: format!("No leader found for region: {}", self.data.region_id),
+                })?
+                .id
         };
 
         // loads the datanode table value
