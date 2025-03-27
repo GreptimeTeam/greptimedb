@@ -92,6 +92,8 @@ pub struct RegionStat {
     pub sst_size: u64,
     /// The size of the SST index files in bytes.
     pub index_size: u64,
+    /// The version of manifest.
+    pub manifest_version: u64,
 }
 
 impl Stat {
@@ -185,6 +187,7 @@ impl From<&api::v1::meta::RegionStat> for RegionStat {
             manifest_size: region_stat.manifest_size,
             sst_size: region_stat.sst_size,
             index_size: region_stat.index_size,
+            manifest_version: region_stat.manifest_version,
         }
     }
 }

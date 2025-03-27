@@ -223,6 +223,7 @@ mod tests {
     use common_meta::datanode::DatanodeStatKey;
     use common_meta::key::TableMetadataManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_meta::region_registry::LeaderRegionRegistry;
     use common_meta::sequence::SequenceBuilder;
 
     use super::*;
@@ -257,6 +258,7 @@ mod tests {
             is_infancy: false,
             table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend.clone())),
             cache_invalidator: Arc::new(DummyCacheInvalidator),
+            leader_region_registry: Arc::new(LeaderRegionRegistry::new()),
         };
 
         let handler = CollectStatsHandler::default();

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use common_datasource::compression::CompressionType;
@@ -23,6 +23,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 use store_api::manifest::{ManifestVersion, MAX_VERSION, MIN_VERSION};
 use store_api::metadata::RegionMetadataRef;
 
+use super::storage::is_checkpoint_file;
 use crate::error::{
     self, InstallManifestToSnafu, NoCheckpointSnafu, NoManifestsSnafu, RegionStoppedSnafu, Result,
 };
@@ -115,7 +116,7 @@ pub struct RegionManifestOptions {
 #[derive(Debug)]
 pub struct RegionManifestManager {
     store: ManifestObjectStore,
-    last_version: ManifestVersion,
+    last_version: Arc<AtomicU64>,
     checkpointer: Checkpointer,
     manifest: Arc<RegionManifest>,
     stopped: bool,
@@ -127,6 +128,7 @@ impl RegionManifestManager {
         metadata: RegionMetadataRef,
         options: RegionManifestOptions,
         total_manifest_size: Arc<AtomicU64>,
+        manifest_version: Arc<AtomicU64>,
     ) -> Result<Self> {
         // construct storage
         let mut store = ManifestObjectStore::new(
@@ -164,9 +166,10 @@ impl RegionManifestManager {
         store.save(version, &action_list.encode()?).await?;
 
         let checkpointer = Checkpointer::new(region_id, options, store.clone(), MIN_VERSION);
+        manifest_version.store(version, Ordering::Relaxed);
         Ok(Self {
             store,
-            last_version: version,
+            last_version: manifest_version,
             checkpointer,
             manifest: Arc::new(manifest),
             stopped: false,
@@ -179,6 +182,7 @@ impl RegionManifestManager {
     pub async fn open(
         options: RegionManifestOptions,
         total_manifest_size: Arc<AtomicU64>,
+        manifest_version: Arc<AtomicU64>,
     ) -> Result<Option<Self>> {
         let _t = MANIFEST_OP_ELAPSED
             .with_label_values(&["open"])
@@ -263,9 +267,10 @@ impl RegionManifestManager {
             store.clone(),
             last_checkpoint_version,
         );
+        manifest_version.store(version, Ordering::Relaxed);
         Ok(Some(Self {
             store,
-            last_version: version,
+            last_version: manifest_version,
             checkpointer,
             manifest: Arc::new(manifest),
             stopped: false,
@@ -290,13 +295,14 @@ impl RegionManifestManager {
             .with_label_values(&["install_manifest_to"])
             .start_timer();
 
+        let last_version = self.last_version();
         // Case 1: If the target version is less than the current version, return the current version.
-        if self.last_version >= target_version {
+        if last_version >= target_version {
             debug!(
                 "Target version {} is less than or equal to the current version {}, region: {}, skip install",
-                target_version, self.last_version, self.manifest.metadata.region_id
+                target_version, last_version, self.manifest.metadata.region_id
             );
-            return Ok(self.last_version);
+            return Ok(last_version);
         }
 
         ensure!(
@@ -310,7 +316,7 @@ impl RegionManifestManager {
         let mut manifests = self
             .store
             // Invariant: last_version < target_version.
-            .fetch_manifests_strict_from(self.last_version + 1, target_version + 1)
+            .fetch_manifests_strict_from(last_version + 1, target_version + 1)
             .await?;
 
         // Case 2: No manifests in range: [current_version+1, target_version+1)
@@ -322,7 +328,7 @@ impl RegionManifestManager {
         if manifests.is_empty() {
             debug!(
                 "Manifests are not strict from {}, region: {}, tries to install the last checkpoint",
-                self.last_version, self.manifest.metadata.region_id
+                last_version, self.manifest.metadata.region_id
             );
             let last_version = self.install_last_checkpoint().await?;
             // Case 2.1: If the installed checkpoint version is greater than or equal to the target version, return the last version.
@@ -341,14 +347,14 @@ impl RegionManifestManager {
         if manifests.is_empty() {
             return NoManifestsSnafu {
                 region_id: self.manifest.metadata.region_id,
-                start_version: self.last_version + 1,
+                start_version: last_version + 1,
                 end_version: target_version + 1,
-                last_version: self.last_version,
+                last_version,
             }
             .fail();
         }
 
-        debug_assert_eq!(manifests.first().unwrap().0, self.last_version + 1);
+        debug_assert_eq!(manifests.first().unwrap().0, last_version + 1);
         let mut manifest_builder =
             RegionManifestBuilder::with_checkpoint(Some(self.manifest.as_ref().clone()));
 
@@ -384,28 +390,29 @@ impl RegionManifestManager {
                 region_id: self.manifest.metadata.region_id,
                 target_version,
                 available_version: new_manifest.manifest_version,
-                last_version: self.last_version,
+                last_version,
             }
         );
 
-        let version = self.last_version;
+        let version = self.last_version();
         self.manifest = Arc::new(new_manifest);
-        self.last_version = self.manifest.manifest_version;
+        let last_version = self.set_version(self.manifest.manifest_version);
         info!(
             "Install manifest changes from {} to {}, region: {}",
-            version, self.last_version, self.manifest.metadata.region_id
+            version, last_version, self.manifest.metadata.region_id
         );
 
-        Ok(self.last_version)
+        Ok(last_version)
     }
 
     /// Installs the last checkpoint.
     pub(crate) async fn install_last_checkpoint(&mut self) -> Result<ManifestVersion> {
+        let last_version = self.last_version();
         let Some((checkpoint, checkpoint_size)) = Self::last_checkpoint(&mut self.store).await?
         else {
             return NoCheckpointSnafu {
                 region_id: self.manifest.metadata.region_id,
-                last_version: self.last_version,
+                last_version,
             }
             .fail();
         };
@@ -414,14 +421,14 @@ impl RegionManifestManager {
             .set_checkpoint_file_size(checkpoint.last_version, checkpoint_size);
         let builder = RegionManifestBuilder::with_checkpoint(checkpoint.checkpoint);
         let manifest = builder.try_build()?;
-        self.last_version = manifest.manifest_version;
+        let last_version = self.set_version(manifest.manifest_version);
         self.manifest = Arc::new(manifest);
         info!(
             "Installed region manifest from checkpoint: {}, region: {}",
             checkpoint.last_version, self.manifest.metadata.region_id
         );
 
-        Ok(self.last_version)
+        Ok(last_version)
     }
 
     /// Updates the manifest. Returns the current manifest version number.
@@ -486,7 +493,7 @@ impl RegionManifestManager {
     /// It doesn't lock the manifest directory in the object store so the result
     /// may be inaccurate if there are concurrent writes.
     pub async fn has_update(&self) -> Result<bool> {
-        let last_version = self.last_version;
+        let last_version = self.last_version();
 
         let streamer =
             self.store
@@ -499,7 +506,7 @@ impl RegionManifestManager {
         let need_update = streamer
             .try_any(|entry| async move {
                 let file_name = entry.name();
-                if is_delta_file(file_name) {
+                if is_delta_file(file_name) || is_checkpoint_file(file_name) {
                     let version = file_version(file_name);
                     if version > last_version {
                         return true;
@@ -515,8 +522,18 @@ impl RegionManifestManager {
 
     /// Increases last version and returns the increased version.
     fn increase_version(&mut self) -> ManifestVersion {
-        self.last_version += 1;
-        self.last_version
+        let previous = self.last_version.fetch_add(1, Ordering::Relaxed);
+        previous + 1
+    }
+
+    /// Sets the last version.
+    fn set_version(&mut self, version: ManifestVersion) -> ManifestVersion {
+        self.last_version.store(version, Ordering::Relaxed);
+        version
+    }
+
+    fn last_version(&self) -> ManifestVersion {
+        self.last_version.load(Ordering::Relaxed)
     }
 
     /// Fetches the last [RegionCheckpoint] from storage.
@@ -547,8 +564,8 @@ impl RegionManifestManager {
     fn validate_manifest(&self, expect: &RegionMetadataRef, last_version: ManifestVersion) {
         let manifest = self.manifest();
         assert_eq!(manifest.metadata, *expect);
-        assert_eq!(self.manifest.manifest_version, self.last_version);
-        assert_eq!(last_version, self.last_version);
+        assert_eq!(self.manifest.manifest_version, self.last_version());
+        assert_eq!(last_version, self.last_version());
     }
 
     pub fn store(&self) -> ManifestObjectStore {

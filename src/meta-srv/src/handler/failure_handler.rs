@@ -98,6 +98,7 @@ mod tests {
                 manifest_size: 0,
                 sst_size: 0,
                 index_size: 0,
+                manifest_version: 0,
             }
         }
         acc.stat = Some(Stat {

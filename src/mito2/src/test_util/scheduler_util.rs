@@ -121,6 +121,7 @@ impl SchedulerEnv {
                     checkpoint_distance: 10,
                 },
                 Default::default(),
+                Default::default(),
             )
             .await
             .unwrap(),

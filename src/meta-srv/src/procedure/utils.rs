@@ -123,6 +123,7 @@ pub mod test_data {
     use common_meta::node_manager::NodeManagerRef;
     use common_meta::peer::Peer;
     use common_meta::region_keeper::MemoryRegionKeeper;
+    use common_meta::region_registry::LeaderRegionRegistry;
     use common_meta::rpc::router::RegionRoute;
     use common_meta::sequence::SequenceBuilder;
     use common_meta::wal_options_allocator::WalOptionsAllocator;
@@ -227,6 +228,7 @@ pub mod test_data {
             flow_metadata_manager,
             flow_metadata_allocator,
             memory_region_keeper: Arc::new(MemoryRegionKeeper::new()),
+            leader_region_registry: Arc::new(LeaderRegionRegistry::default()),
             region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
         }
     }

@@ -34,6 +34,7 @@ use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::region_keeper::MemoryRegionKeeper;
+use common_meta::region_registry::LeaderRegionRegistry;
 use common_meta::sequence::SequenceBuilder;
 use common_meta::wal_options_allocator::build_wal_options_allocator;
 use common_procedure::options::ProcedureConfig;
@@ -217,6 +218,7 @@ impl GreptimeDbStandaloneBuilder {
                     node_manager: node_manager.clone(),
                     cache_invalidator: cache_registry.clone(),
                     memory_region_keeper: Arc::new(MemoryRegionKeeper::default()),
+                    leader_region_registry: Arc::new(LeaderRegionRegistry::default()),
                     table_metadata_manager,
                     table_metadata_allocator,
                     flow_metadata_manager,

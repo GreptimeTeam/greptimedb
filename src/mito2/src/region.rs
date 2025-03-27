@@ -289,6 +289,7 @@ impl MitoRegion {
         let wal_usage = self.estimated_wal_usage(memtable_usage);
         let manifest_usage = self.stats.total_manifest_size();
         let num_rows = version.ssts.num_rows() + version.memtables.num_rows();
+        let manifest_version = self.stats.manifest_version();
 
         RegionStatistic {
             num_rows,
@@ -297,6 +298,7 @@ impl MitoRegion {
             manifest_size: manifest_usage,
             sst_size: sst_usage,
             index_size: index_usage,
+            manifest_version,
         }
     }
 
@@ -747,11 +749,16 @@ pub(crate) type OpeningRegionsRef = Arc<OpeningRegions>;
 #[derive(Default, Debug, Clone)]
 pub(crate) struct ManifestStats {
     total_manifest_size: Arc<AtomicU64>,
+    manifest_version: Arc<AtomicU64>,
 }
 
 impl ManifestStats {
     fn total_manifest_size(&self) -> u64 {
         self.total_manifest_size.load(Ordering::Relaxed)
+    }
+
+    fn manifest_version(&self) -> u64 {
+        self.manifest_version.load(Ordering::Relaxed)
     }
 }
 
