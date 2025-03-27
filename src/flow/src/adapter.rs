@@ -63,7 +63,7 @@ pub(crate) mod refill;
 mod stat;
 #[cfg(test)]
 mod tests;
-mod util;
+pub(crate) mod util;
 mod worker;
 
 pub(crate) mod node_context;
