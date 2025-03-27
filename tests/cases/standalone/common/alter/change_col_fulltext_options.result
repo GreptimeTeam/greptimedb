@@ -99,8 +99,8 @@ SHOW INDEX FROM test;
 +-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+----------------------------+---------+---------------+---------+------------+
 | Table | Non_unique | Key_name       | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type                 | Comment | Index_comment | Visible | Expression |
 +-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+----------------------------+---------+---------------+---------+------------+
-| test  | 1          | FULLTEXT INDEX | 1            | message     | A         |             |          |        | YES  | greptime-fulltext-index-v1 |         |               | YES     |            |
-| test  | 1          | TIME INDEX     | 1            | time        | A         |             |          |        | NO   |                            |         |               | YES     |            |
+| test  | 1          | TIME INDEX     | 1            | time        | A         |             |          |        |      |                            |         |               | YES     |            |
+| test  | 1          | FULLTEXT INDEX | 1            | message     |           |             |          |        | YES  | greptime-fulltext-index-v1 |         |               | YES     |            |
 +-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+----------------------------+---------+---------------+---------+------------+
 
 ALTER TABLE test MODIFY COLUMN message UNSET FULLTEXT INDEX;
@@ -129,7 +129,7 @@ SHOW INDEX FROM test;
 +-------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
 | Table | Non_unique | Key_name   | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type | Comment | Index_comment | Visible | Expression |
 +-------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
-| test  | 1          | TIME INDEX | 1            | time        | A         |             |          |        | NO   |            |         |               | YES     |            |
+| test  | 1          | TIME INDEX | 1            | time        | A         |             |          |        |      |            |         |               | YES     |            |
 +-------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
 
 ALTER TABLE test MODIFY COLUMN message SET FULLTEXT INDEX WITH(analyzer = 'Chinese', case_sensitive = 'true');
@@ -158,8 +158,8 @@ SHOW INDEX FROM test;
 +-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+----------------------------+---------+---------------+---------+------------+
 | Table | Non_unique | Key_name       | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type                 | Comment | Index_comment | Visible | Expression |
 +-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+----------------------------+---------+---------------+---------+------------+
-| test  | 1          | FULLTEXT INDEX | 1            | message     | A         |             |          |        | YES  | greptime-fulltext-index-v1 |         |               | YES     |            |
-| test  | 1          | TIME INDEX     | 1            | time        | A         |             |          |        | NO   |                            |         |               | YES     |            |
+| test  | 1          | TIME INDEX     | 1            | time        | A         |             |          |        |      |                            |         |               | YES     |            |
+| test  | 1          | FULLTEXT INDEX | 1            | message     |           |             |          |        | YES  | greptime-fulltext-index-v1 |         |               | YES     |            |
 +-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+----------------------------+---------+---------------+---------+------------+
 
 ALTER TABLE test MODIFY COLUMN message SET FULLTEXT INDEX WITH(analyzer = 'Chinese', case_sensitive = 'false');
@@ -192,7 +192,7 @@ SHOW INDEX FROM test;
 +-------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
 | Table | Non_unique | Key_name   | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type | Comment | Index_comment | Visible | Expression |
 +-------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
-| test  | 1          | TIME INDEX | 1            | time        | A         |             |          |        | NO   |            |         |               | YES     |            |
+| test  | 1          | TIME INDEX | 1            | time        | A         |             |          |        |      |            |         |               | YES     |            |
 +-------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
 
 ALTER TABLE test MODIFY COLUMN message SET FULLTEXT INDEX WITH(analyzer = 'Chinglish', case_sensitive = 'false');
