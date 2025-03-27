@@ -372,11 +372,12 @@ mod tests {
         // Replicate with offsets [0, 2, 5] - should get values at these indices
         let offsets = vec![0, 2, 5];
         let replicated = dict_vec.replicate(&offsets);
-
-        assert_eq!(replicated.len(), 3);
-        assert_eq!(replicated.get(0), Value::String("a".to_string().into()));
-        assert_eq!(replicated.get(1), Value::String("c".to_string().into()));
-        assert_eq!(replicated.get(2), Value::String("d".to_string().into()));
+        assert_eq!(replicated.len(), 5);
+        assert_eq!(replicated.get(0), Value::String("b".to_string().into()));
+        assert_eq!(replicated.get(1), Value::String("b".to_string().into()));
+        assert_eq!(replicated.get(2), Value::String("c".to_string().into()));
+        assert_eq!(replicated.get(3), Value::String("c".to_string().into()));
+        assert_eq!(replicated.get(4), Value::String("c".to_string().into()));
     }
 
     #[test]
