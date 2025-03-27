@@ -25,7 +25,7 @@ use sql::ast::Ident;
 use sql::statements::create::Partitions;
 use sql::statements::show::{
     ShowColumns, ShowCreateFlow, ShowCreateView, ShowDatabases, ShowFlows, ShowIndex, ShowKind,
-    ShowTableStatus, ShowTables, ShowVariables, ShowViews,
+    ShowRegion, ShowTableStatus, ShowTables, ShowVariables, ShowViews,
 };
 use sql::statements::OptionMap;
 use table::metadata::TableType;
@@ -90,6 +90,16 @@ impl StatementExecutor {
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
         query::sql::show_index(stmt, &self.query_engine, &self.catalog_manager, query_ctx)
+            .await
+            .context(ExecuteStatementSnafu)
+    }
+
+    pub(super) async fn show_region(
+        &self,
+        stmt: ShowRegion,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        query::sql::show_region(stmt, &self.query_engine, &self.catalog_manager, query_ctx)
             .await
             .context(ExecuteStatementSnafu)
     }
