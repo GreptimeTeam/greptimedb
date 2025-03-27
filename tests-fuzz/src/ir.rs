@@ -34,7 +34,7 @@ use datatypes::value::Value;
 use derive_builder::Builder;
 pub use insert_expr::InsertIntoExpr;
 use lazy_static::lazy_static;
-use rand::seq::SliceRandom;
+use rand::seq::{IndexedRandom, SliceRandom};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
@@ -146,15 +146,15 @@ pub fn generate_random_value<R: Rng>(
     random_str: Option<&dyn Random<Ident, R>>,
 ) -> Value {
     match datatype {
-        &ConcreteDataType::Boolean(_) => Value::from(rng.gen::<bool>()),
-        ConcreteDataType::Int16(_) => Value::from(rng.gen::<i16>()),
-        ConcreteDataType::Int32(_) => Value::from(rng.gen::<i32>()),
-        ConcreteDataType::Int64(_) => Value::from(rng.gen::<i64>()),
-        ConcreteDataType::Float32(_) => Value::from(rng.gen::<f32>()),
-        ConcreteDataType::Float64(_) => Value::from(rng.gen::<f64>()),
+        &ConcreteDataType::Boolean(_) => Value::from(rng.random::<bool>()),
+        ConcreteDataType::Int16(_) => Value::from(rng.random::<i16>()),
+        ConcreteDataType::Int32(_) => Value::from(rng.random::<i32>()),
+        ConcreteDataType::Int64(_) => Value::from(rng.random::<i64>()),
+        ConcreteDataType::Float32(_) => Value::from(rng.random::<f32>()),
+        ConcreteDataType::Float64(_) => Value::from(rng.random::<f64>()),
         ConcreteDataType::String(_) => match random_str {
             Some(random) => Value::from(random.gen(rng).value),
-            None => Value::from(rng.gen::<char>().to_string()),
+            None => Value::from(rng.random::<char>().to_string()),
         },
         ConcreteDataType::Date(_) => generate_random_date(rng),
 
@@ -188,25 +188,25 @@ pub fn generate_random_timestamp<R: Rng>(rng: &mut R, ts_type: TimestampType) ->
         TimestampType::Second(_) => {
             let min = i64::from(Timestamp::MIN_SECOND);
             let max = i64::from(Timestamp::MAX_SECOND);
-            let value = rng.gen_range(min..=max);
+            let value = rng.random_range(min..=max);
             Timestamp::new_second(value)
         }
         TimestampType::Millisecond(_) => {
             let min = i64::from(Timestamp::MIN_MILLISECOND);
             let max = i64::from(Timestamp::MAX_MILLISECOND);
-            let value = rng.gen_range(min..=max);
+            let value = rng.random_range(min..=max);
             Timestamp::new_millisecond(value)
         }
         TimestampType::Microsecond(_) => {
             let min = i64::from(Timestamp::MIN_MICROSECOND);
             let max = i64::from(Timestamp::MAX_MICROSECOND);
-            let value = rng.gen_range(min..=max);
+            let value = rng.random_range(min..=max);
             Timestamp::new_microsecond(value)
         }
         TimestampType::Nanosecond(_) => {
             let min = i64::from(Timestamp::MIN_NANOSECOND);
             let max = i64::from(Timestamp::MAX_NANOSECOND);
-            let value = rng.gen_range(min..=max);
+            let value = rng.random_range(min..=max);
             Timestamp::new_nanosecond(value)
         }
     };
@@ -219,25 +219,25 @@ pub fn generate_random_timestamp_for_mysql<R: Rng>(rng: &mut R, ts_type: Timesta
         TimestampType::Second(_) => {
             let min = 1;
             let max = 2_147_483_647;
-            let value = rng.gen_range(min..=max);
+            let value = rng.random_range(min..=max);
             Timestamp::new_second(value)
         }
         TimestampType::Millisecond(_) => {
             let min = 1000;
             let max = 2_147_483_647_499;
-            let value = rng.gen_range(min..=max);
+            let value = rng.random_range(min..=max);
             Timestamp::new_millisecond(value)
         }
         TimestampType::Microsecond(_) => {
             let min = 1_000_000;
             let max = 2_147_483_647_499_999;
-            let value = rng.gen_range(min..=max);
+            let value = rng.random_range(min..=max);
             Timestamp::new_microsecond(value)
         }
         TimestampType::Nanosecond(_) => {
             let min = 1_000_000_000;
             let max = 2_147_483_647_499_999_000;
-            let value = rng.gen_range(min..=max);
+            let value = rng.random_range(min..=max);
             Timestamp::new_nanosecond(value)
         }
     };
@@ -247,7 +247,7 @@ pub fn generate_random_timestamp_for_mysql<R: Rng>(rng: &mut R, ts_type: Timesta
 fn generate_random_date<R: Rng>(rng: &mut R) -> Value {
     let min = i64::from(Timestamp::MIN_MILLISECOND);
     let max = i64::from(Timestamp::MAX_MILLISECOND);
-    let value = rng.gen_range(min..=max);
+    let value = rng.random_range(min..=max);
     let date = Timestamp::new_millisecond(value).to_chrono_date().unwrap();
     Value::from(Date::from(date))
 }
@@ -411,7 +411,7 @@ pub fn column_options_generator<R: Rng>(
     // 2 -> DEFAULT VALUE
     // 3 -> PRIMARY KEY
     // 4 -> EMPTY
-    let option_idx = rng.gen_range(0..5);
+    let option_idx = rng.random_range(0..5);
     match option_idx {
         0 => vec![ColumnOption::Null],
         1 => vec![ColumnOption::NotNull],
@@ -434,7 +434,7 @@ pub fn partible_column_options_generator<R: Rng + 'static>(
     // 1 -> NOT NULL
     // 2 -> DEFAULT VALUE
     // 3 -> PRIMARY KEY
-    let option_idx = rng.gen_range(0..4);
+    let option_idx = rng.random_range(0..4);
     match option_idx {
         0 => vec![ColumnOption::PrimaryKey, ColumnOption::Null],
         1 => vec![ColumnOption::PrimaryKey, ColumnOption::NotNull],

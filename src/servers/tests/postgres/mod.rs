@@ -22,7 +22,6 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_runtime::runtime::BuilderBuild;
 use common_runtime::Builder as RuntimeBuilder;
 use pgwire::api::Type;
-use rand::rngs::StdRng;
 use rand::Rng;
 use rustls::client::danger::{ServerCertVerified, ServerCertVerifier};
 use rustls::{Error, SignatureScheme};
@@ -202,12 +201,10 @@ async fn test_query_pg_concurrently() -> Result<()> {
     let mut join_handles = vec![];
     for _i in 0..threads {
         join_handles.push(tokio::spawn(async move {
-            let mut rand: StdRng = rand::SeedableRng::from_entropy();
-
             let mut client = create_plain_connection(server_port, false).await.unwrap();
 
             for _k in 0..expect_executed_queries_per_worker {
-                let expected: u32 = rand.gen_range(0..100);
+                let expected: u32 = rand::rng().random_range(0..100);
                 let result: u32 = unwrap_results(
                     client
                         .simple_query(&format!(

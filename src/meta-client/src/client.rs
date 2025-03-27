@@ -1058,11 +1058,11 @@ mod tests {
         let tx = new_client("test_cluster_client").await;
         let in_memory = tx.in_memory().unwrap();
         let cluster_client = tx.client.cluster_client().unwrap();
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         // Generates rough 10MB data, which is larger than the default grpc message size limit.
         for i in 0..10 {
-            let data: Vec<u8> = (0..1024 * 1024).map(|_| rng.gen()).collect();
+            let data: Vec<u8> = (0..1024 * 1024).map(|_| rng.random()).collect();
             in_memory
                 .put(
                     PutRequest::new()

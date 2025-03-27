@@ -399,7 +399,7 @@ mod tests {
 
     #[test]
     fn test_create_table_expr_generator() {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         let expr = CreateTableExprGeneratorBuilder::default()
             .columns(10)
@@ -440,13 +440,13 @@ mod tests {
             .unwrap();
 
         let serialized = serde_json::to_string(&expr).unwrap();
-        let expected = r#"{"table_name":{"value":"animI","quote_style":null},"columns":[{"name":{"value":"IMpEdIT","quote_style":null},"column_type":{"Float64":{}},"options":["PrimaryKey","NotNull"]},{"name":{"value":"natuS","quote_style":null},"column_type":{"Timestamp":{"Millisecond":null}},"options":["TimeIndex"]},{"name":{"value":"ADIPisCI","quote_style":null},"column_type":{"Float64":{}},"options":["Null"]},{"name":{"value":"EXpEdita","quote_style":null},"column_type":{"Int16":{}},"options":[{"DefaultValue":{"Int16":4864}}]},{"name":{"value":"cUlpA","quote_style":null},"column_type":{"Int64":{}},"options":["PrimaryKey"]},{"name":{"value":"MOLeStIAs","quote_style":null},"column_type":{"Float64":{}},"options":["NotNull"]},{"name":{"value":"cUmquE","quote_style":null},"column_type":{"Boolean":null},"options":["Null"]},{"name":{"value":"toTAm","quote_style":null},"column_type":{"Float32":{}},"options":[{"DefaultValue":{"Float32":0.21569687}}]},{"name":{"value":"deBitIs","quote_style":null},"column_type":{"Float64":{}},"options":["NotNull"]},{"name":{"value":"QUi","quote_style":null},"column_type":{"Float32":{}},"options":["Null"]}],"if_not_exists":true,"partition":{"partition_columns":["IMpEdIT"],"partition_bounds":[{"Expr":{"lhs":{"Column":"IMpEdIT"},"op":"Lt","rhs":{"Value":{"Float64":5.992310449541053e307}}}},{"Expr":{"lhs":{"Expr":{"lhs":{"Column":"IMpEdIT"},"op":"GtEq","rhs":{"Value":{"Float64":5.992310449541053e307}}}},"op":"And","rhs":{"Expr":{"lhs":{"Column":"IMpEdIT"},"op":"Lt","rhs":{"Value":{"Float64":1.1984620899082105e308}}}}}},{"Expr":{"lhs":{"Column":"IMpEdIT"},"op":"GtEq","rhs":{"Value":{"Float64":1.1984620899082105e308}}}}]},"engine":"mito2","options":{},"primary_keys":[0,4]}"#;
+        let expected = r#"{"table_name":{"value":"quasi","quote_style":null},"columns":[{"name":{"value":"mOLEsTIAs","quote_style":null},"column_type":{"Float64":{}},"options":["PrimaryKey","Null"]},{"name":{"value":"CUMQUe","quote_style":null},"column_type":{"Timestamp":{"Second":null}},"options":["TimeIndex"]},{"name":{"value":"NaTus","quote_style":null},"column_type":{"Int64":{}},"options":[]},{"name":{"value":"EXPeDITA","quote_style":null},"column_type":{"Float64":{}},"options":[]},{"name":{"value":"ImPEDiT","quote_style":null},"column_type":{"Float32":{}},"options":[{"DefaultValue":{"Float32":0.56425774}}]},{"name":{"value":"ADIpisci","quote_style":null},"column_type":{"Float32":{}},"options":["PrimaryKey"]},{"name":{"value":"deBITIs","quote_style":null},"column_type":{"Float32":{}},"options":[{"DefaultValue":{"Float32":0.31315368}}]},{"name":{"value":"toTaM","quote_style":null},"column_type":{"Int32":{}},"options":["NotNull"]},{"name":{"value":"QuI","quote_style":null},"column_type":{"Float32":{}},"options":[{"DefaultValue":{"Float32":0.39941502}}]},{"name":{"value":"INVeNtOre","quote_style":null},"column_type":{"Boolean":null},"options":["PrimaryKey"]}],"if_not_exists":true,"partition":{"partition_columns":["mOLEsTIAs"],"partition_bounds":[{"Expr":{"lhs":{"Column":"mOLEsTIAs"},"op":"Lt","rhs":{"Value":{"Float64":5.992310449541053e307}}}},{"Expr":{"lhs":{"Expr":{"lhs":{"Column":"mOLEsTIAs"},"op":"GtEq","rhs":{"Value":{"Float64":5.992310449541053e307}}}},"op":"And","rhs":{"Expr":{"lhs":{"Column":"mOLEsTIAs"},"op":"Lt","rhs":{"Value":{"Float64":1.1984620899082105e308}}}}}},{"Expr":{"lhs":{"Column":"mOLEsTIAs"},"op":"GtEq","rhs":{"Value":{"Float64":1.1984620899082105e308}}}}]},"engine":"mito2","options":{},"primary_keys":[0,5,9]}"#;
         assert_eq!(expected, serialized);
     }
 
     #[test]
     fn test_create_logical_table_expr_generator() {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         let physical_table_expr = CreatePhysicalTableExprGeneratorBuilder::default()
             .if_not_exists(false)
@@ -529,13 +529,13 @@ mod tests {
             .unwrap();
 
         let logical_table_serialized = serde_json::to_string(&logical_table_expr).unwrap();
-        let logical_table_expected = r#"{"table_name":{"value":"impedit","quote_style":null},"columns":[{"name":{"value":"ts","quote_style":null},"column_type":{"Timestamp":{"Millisecond":null}},"options":["TimeIndex"]},{"name":{"value":"val","quote_style":null},"column_type":{"Float64":{}},"options":[]},{"name":{"value":"qui","quote_style":null},"column_type":{"String":null},"options":["PrimaryKey"]},{"name":{"value":"totam","quote_style":null},"column_type":{"String":null},"options":["PrimaryKey"]},{"name":{"value":"molestias","quote_style":null},"column_type":{"String":null},"options":["PrimaryKey"]},{"name":{"value":"natus","quote_style":null},"column_type":{"String":null},"options":["PrimaryKey"]},{"name":{"value":"cumque","quote_style":null},"column_type":{"String":null},"options":["PrimaryKey"]}],"if_not_exists":false,"partition":null,"engine":"metric","options":{"on_physical_table":{"String":"expedita"}},"primary_keys":[2,5,3,6,4]}"#;
+        let logical_table_expected = r#"{"table_name":{"value":"impedit","quote_style":null},"columns":[{"name":{"value":"ts","quote_style":null},"column_type":{"Timestamp":{"Millisecond":null}},"options":["TimeIndex"]},{"name":{"value":"val","quote_style":null},"column_type":{"Float64":{}},"options":[]},{"name":{"value":"totam","quote_style":null},"column_type":{"String":null},"options":["PrimaryKey"]},{"name":{"value":"cumque","quote_style":null},"column_type":{"String":null},"options":["PrimaryKey"]},{"name":{"value":"natus","quote_style":null},"column_type":{"String":null},"options":["PrimaryKey"]},{"name":{"value":"molestias","quote_style":null},"column_type":{"String":null},"options":["PrimaryKey"]},{"name":{"value":"qui","quote_style":null},"column_type":{"String":null},"options":["PrimaryKey"]}],"if_not_exists":false,"partition":null,"engine":"metric","options":{"on_physical_table":{"String":"expedita"}},"primary_keys":[4,2,3,6,5]}"#;
         assert_eq!(logical_table_expected, logical_table_serialized);
     }
 
     #[test]
     fn test_create_database_expr_generator() {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         let expr = CreateDatabaseExprGeneratorBuilder::default()
             .if_not_exists(true)
@@ -558,7 +558,7 @@ mod tests {
 
         let serialized = serde_json::to_string(&expr).unwrap();
         let expected =
-            r#"{"database_name":{"value":"eXPedITa","quote_style":null},"if_not_exists":true}"#;
+            r#"{"database_name":{"value":"EXPediTA","quote_style":null},"if_not_exists":true}"#;
         assert_eq!(expected, serialized);
     }
 }

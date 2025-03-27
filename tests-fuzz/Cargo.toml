@@ -44,7 +44,7 @@ nix = { version = "0.28", features = ["process", "signal"], optional = true }
 partition = { workspace = true }
 paste.workspace = true
 rand = { workspace = true }
-rand_chacha = "0.3.1"
+rand_chacha = "0.9"
 reqwest = { workspace = true }
 schemars = "0.8"
 serde = { workspace = true }

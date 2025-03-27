@@ -36,7 +36,7 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
-        error: rand::distributions::WeightedError,
+        error: rand::distr::weighted::Error,
     },
 
     #[snafu(display("Exceeded deadline, operation: {}", operation))]

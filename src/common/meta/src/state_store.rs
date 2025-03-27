@@ -290,13 +290,13 @@ mod tests {
         num_per_range: u32,
         max_bytes: u32,
     ) {
-        let num_cases = rand::thread_rng().gen_range(1..=8);
+        let num_cases = rand::rng().random_range(1..=8);
         common_telemetry::info!("num_cases: {}", num_cases);
         let mut cases = Vec::with_capacity(num_cases);
         for i in 0..num_cases {
-            let size = rand::thread_rng().gen_range(size_limit..=max_bytes);
+            let size = rand::rng().random_range(size_limit..=max_bytes);
             let mut large_value = vec![0u8; size as usize];
-            rand::thread_rng().fill_bytes(&mut large_value);
+            rand::rng().fill_bytes(&mut large_value);
 
             // Starts from `a`.
             let prefix = format!("{}/", std::char::from_u32(97 + i as u32).unwrap());
@@ -354,8 +354,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_meta_state_store_split_value() {
-        let size_limit = rand::thread_rng().gen_range(128..=512);
-        let page_size = rand::thread_rng().gen_range(1..10);
+        let size_limit = rand::rng().random_range(128..=512);
+        let page_size = rand::rng().random_range(1..10);
         let kv_backend = Arc::new(MemoryKvBackend::new());
         test_meta_state_store_split_value_with_size_limit(kv_backend, size_limit, page_size, 8192)
             .await;
@@ -388,7 +388,7 @@ mod tests {
         // However, some KvBackends, the `ChrootKvBackend`, will add the prefix to `key`;
         // we don't know the exact size of the key.
         let size_limit = 1536 * 1024 - key_size;
-        let page_size = rand::thread_rng().gen_range(1..10);
+        let page_size = rand::rng().random_range(1..10);
         test_meta_state_store_split_value_with_size_limit(
             kv_backend,
             size_limit,

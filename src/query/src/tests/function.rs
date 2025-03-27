@@ -28,7 +28,7 @@ use crate::QueryEngineRef;
 pub fn create_query_engine_for_vector10x3() -> QueryEngineRef {
     let mut column_schemas = vec![];
     let mut columns = vec![];
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     let column_name = "vector";
     let column_schema = ColumnSchema::new(column_name, ConcreteDataType::binary_datatype(), true);
@@ -37,9 +37,9 @@ pub fn create_query_engine_for_vector10x3() -> QueryEngineRef {
     let vectors = (0..10)
         .map(|_| {
             let veclit = [
-                rng.gen_range(-100f32..100.0),
-                rng.gen_range(-100f32..100.0),
-                rng.gen_range(-100f32..100.0),
+                rng.random_range(-100f32..100.0),
+                rng.random_range(-100f32..100.0),
+                rng.random_range(-100f32..100.0),
             ];
             veclit_to_binlit(&veclit)
         })

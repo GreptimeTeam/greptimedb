@@ -715,10 +715,10 @@ mod tests {
             TimeUnit::Microsecond,
             TimeUnit::Nanosecond,
         ];
-        let mut rng = rand::thread_rng();
-        let unit_idx: usize = rng.gen_range(0..4);
+        let mut rng = rand::rng();
+        let unit_idx: usize = rng.random_range(0..4);
         let unit = units[unit_idx];
-        let value: i64 = rng.gen();
+        let value: i64 = rng.random();
         Timestamp::new(value, unit)
     }
 
@@ -745,8 +745,8 @@ mod tests {
 
     /// Generate timestamp less than or equal to `threshold`
     fn gen_ts_le(threshold: &Timestamp) -> Timestamp {
-        let mut rng = rand::thread_rng();
-        let timestamp = rng.gen_range(i64::MIN..=threshold.value);
+        let mut rng = rand::rng();
+        let timestamp = rng.random_range(i64::MIN..=threshold.value);
         Timestamp::new(timestamp, threshold.unit)
     }
 
