@@ -61,6 +61,14 @@ impl Instance {
     pub fn new(frontend: Frontend, _guard: Vec<WorkerGuard>) -> Self {
         Self { frontend, _guard }
     }
+
+    pub fn inner(&self) -> &Frontend {
+        &self.frontend
+    }
+
+    pub fn mut_inner(&mut self) -> &mut Frontend {
+        &mut self.frontend
+    }
 }
 
 #[async_trait]
