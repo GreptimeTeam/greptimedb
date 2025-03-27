@@ -173,6 +173,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to convert to vector"))]
+    ConvertToVector {
+        source: datatypes::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -180,26 +187,23 @@ impl ErrorExt for Error {
         match self {
             Error::GetCache { .. } | Error::FindLeader { .. } => StatusCode::StorageUnavailable,
             Error::FindRegionRoutes { .. } => StatusCode::RegionNotReady,
-
             Error::ConjunctExprWithNonExpr { .. }
             | Error::UnclosedValue { .. }
             | Error::InvalidExpr { .. }
             | Error::UndefinedColumn { .. } => StatusCode::InvalidArguments,
-
             Error::RegionKeysSize { .. }
             | Error::InvalidInsertRequest { .. }
             | Error::InvalidDeleteRequest { .. } => StatusCode::InvalidArguments,
-
             Error::ConvertScalarValue { .. }
             | Error::SerializeJson { .. }
             | Error::DeserializeJson { .. } => StatusCode::Internal,
-
             Error::Unexpected { .. } => StatusCode::Unexpected,
             Error::InvalidTableRouteData { .. } => StatusCode::TableUnavailable,
             Error::FindTableRoutes { .. } => StatusCode::TableUnavailable,
             Error::TableRouteNotFound { .. } => StatusCode::TableNotFound,
             Error::TableRouteManager { source, .. } => source.status_code(),
             Error::UnexpectedLogicalRouteTable { source, .. } => source.status_code(),
+            Error::ConvertToVector { source, .. } => source.status_code(),
         }
     }
 
