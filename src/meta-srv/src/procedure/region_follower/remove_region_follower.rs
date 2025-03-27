@@ -84,7 +84,7 @@ impl RemoveRegionFollowerProcedure {
                 })?
                 .leader_peer
                 .as_ref()
-                .context(error::UnexpectedSnafu {
+                .with_context(|| error::UnexpectedSnafu {
                     violated: format!("No leader found for region: {}", self.data.region_id),
                 })?
                 .id
