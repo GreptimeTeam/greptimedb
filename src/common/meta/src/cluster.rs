@@ -27,6 +27,7 @@ use crate::error::{
     DecodeJsonSnafu, EncodeJsonSnafu, Error, FromUtf8Snafu, InvalidNodeInfoKeySnafu,
     InvalidRoleSnafu, ParseNumSnafu, Result,
 };
+use crate::key::flow::flow_state::FlowStat;
 use crate::peer::Peer;
 
 const CLUSTER_NODE_INFO_PREFIX: &str = "__meta_cluster_node_info";
@@ -51,6 +52,9 @@ pub trait ClusterInfo {
 
     /// List all region stats in the cluster.
     async fn list_region_stats(&self) -> std::result::Result<Vec<RegionStat>, Self::Error>;
+
+    /// List all flow stats in the cluster.
+    async fn list_flow_stats(&self) -> std::result::Result<Option<FlowStat>, Self::Error>;
 
     // TODO(jeremy): Other info, like region status, etc.
 }
