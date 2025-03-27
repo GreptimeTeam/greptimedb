@@ -87,11 +87,11 @@ pub struct GrantedRegion {
 }
 
 impl GrantedRegion {
-    pub fn new(region_id: RegionId, region_role: RegionRole, manifest_version: u64) -> Self {
+    pub fn new(region_id: RegionId, region_role: RegionRole) -> Self {
         Self {
             region_id,
             region_role,
-            manifest_version,
+            manifest_version: 0,
         }
     }
 }

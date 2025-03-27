@@ -50,7 +50,7 @@ use crate::flow_meta_alloc::FlowPeerAllocator;
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::failure_handler::RegionFailureHandler;
 use crate::handler::flow_state_handler::FlowStateHandler;
-use crate::handler::region_lease_handler::RegionLeaseHandler;
+use crate::handler::region_lease_handler::{CustomizedRegionLeaseRenewerRef, RegionLeaseHandler};
 use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatMailbox, Pushers};
 use crate::lease::MetaPeerLookupService;
 use crate::metasrv::{
@@ -361,6 +361,10 @@ impl MetasrvBuilder {
         ));
         region_follower_manager.try_start()?;
 
+        let customized_region_lease_renewer = plugins
+            .as_ref()
+            .and_then(|plugins| plugins.get::<CustomizedRegionLeaseRenewerRef>());
+
         let handler_group_builder = match handler_group_builder {
             Some(handler_group_builder) => handler_group_builder,
             None => {
@@ -368,6 +372,7 @@ impl MetasrvBuilder {
                     distributed_time_constants::REGION_LEASE_SECS,
                     table_metadata_manager.clone(),
                     memory_region_keeper.clone(),
+                    customized_region_lease_renewer,
                 );
 
                 HeartbeatHandlerGroupBuilder::new(pushers)
