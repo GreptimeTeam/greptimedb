@@ -51,6 +51,8 @@ use crate::error::{ArrowSnafu, DatafusionSnafu, DatatypesSnafu, ExternalSnafu, U
 use crate::expr::error::DataTypeSnafu;
 use crate::Error;
 
+/// Time window expr like `date_bin(INTERVAL '1' MINUTE, ts)`, this type help with
+/// evaluating the expr using given timestamp
 #[derive(Debug, Clone)]
 pub struct TimeWindowExpr {
     phy_expr: PhysicalExprRef,
@@ -90,6 +92,8 @@ impl TimeWindowExpr {
     }
 
     /// Find timestamps from rows using time window expr
+    ///
+    /// use column of name `self.column_name` from input rows list as input to time window expr
     pub async fn handle_rows(
         &self,
         rows_list: Vec<api::v1::Rows>,
@@ -98,6 +102,7 @@ impl TimeWindowExpr {
 
         for rows in rows_list {
             // pick the time index column and use it to eval on `self.expr`
+            // TODO(discord9): handle case where time index column is not present(i.e. DEFAULT constant value)
             let ts_col_index = rows
                 .schema
                 .iter()
