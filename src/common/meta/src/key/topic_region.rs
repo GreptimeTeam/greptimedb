@@ -32,6 +32,7 @@ use std::fmt::{self, Display};
 use common_wal::options::WalOptions;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
+use store_api::logstore::EntryId;
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
@@ -229,6 +230,29 @@ impl TopicRegionManager {
                 },
             )
             .collect::<Vec<_>>()
+    }
+
+    /// Retrieves a list of [RegionId]s through the provided topic name.
+    /// TODO(CookiePieWw): can be batched to reduce the number of requests.
+    pub async fn get_regions_by_topics<'a>(
+        &self,
+        topic: &'a Vec<String>,
+    ) -> Result<HashMap<&'a String, Vec<RegionId>>> {
+        let mut result = HashMap::new();
+        for t in topic {
+            let regions = self.regions(t).await?;
+            result.insert(t, regions);
+        }
+        Ok(result)
+    }
+
+    /// Retrieves a mapping of [`RegionId`]s to their corresponding last entry IDs.
+    /// Should be maintained through heartbeats. Not implemented yet.
+    pub async fn get_region_last_entry_ids(
+        &self,
+        _regions: Vec<RegionId>,
+    ) -> HashMap<RegionId, EntryId> {
+        todo!()
     }
 }
 
