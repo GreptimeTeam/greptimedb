@@ -176,6 +176,13 @@ impl MergeScanExec {
         // Reconsider if it's possible to remove it.
         let arrow_schema = Arc::new(arrow_schema.clone());
 
+        // States the output ordering of the plan.
+        //
+        // When the input plan is a sort, we can use the sort ordering as the output ordering
+        // if the target partition is greater than the number of regions, which means we won't
+        // break the ordering on merging (of MergeScan).
+        //
+        // Otherwise, we need to use the default ordering.
         let eq_properties = if let LogicalPlan::Sort(sort) = &plan
             && target_partition >= regions.len()
         {
