@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use common_telemetry::{error, info};
 use common_wal::config::kafka::MetasrvKafkaConfig;
 use rskafka::client::error::Error as RsKafkaError;
@@ -32,9 +34,11 @@ use crate::error::{
 // The `DEFAULT_PARTITION` refers to the index of the partition.
 const DEFAULT_PARTITION: i32 = 0;
 
+type KafkaClientRef = Arc<Client>;
+
 /// Creates topics in kafka.
 pub struct KafkaTopicCreator {
-    client: Client,
+    client: KafkaClientRef,
     /// The number of partitions per topic.
     num_partitions: i32,
     /// The replication factor of each topic.
@@ -44,6 +48,10 @@ pub struct KafkaTopicCreator {
 }
 
 impl KafkaTopicCreator {
+    pub fn client(&self) -> &KafkaClientRef {
+        &self.client
+    }
+
     async fn create_topic(&self, topic: &String, client: &Client) -> Result<()> {
         let controller = client
             .controller_client()
@@ -151,7 +159,7 @@ pub async fn build_kafka_topic_creator(config: &MetasrvKafkaConfig) -> Result<Ka
         })?;
 
     Ok(KafkaTopicCreator {
-        client,
+        client: Arc::new(client),
         num_partitions: config.kafka_topic.num_partitions,
         replication_factor: config.kafka_topic.replication_factor,
         create_topic_timeout: config.kafka_topic.create_topic_timeout.as_millis() as i32,

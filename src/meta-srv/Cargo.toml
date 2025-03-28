@@ -6,6 +6,7 @@ license.workspace = true
 
 [features]
 mock = []
+testing = ["common-wal/testing"]
 pg_kvbackend = ["dep:tokio-postgres", "common-meta/pg_kvbackend", "dep:deadpool-postgres", "dep:deadpool"]
 mysql_kvbackend = ["dep:sqlx", "common-meta/mysql_kvbackend"]
 

@@ -28,7 +28,7 @@ use common_procedure::{
     Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
     Result as ProcedureResult, Status,
 };
-use common_telemetry::{info, warn};
+use common_telemetry::{debug, warn};
 use log_store::kafka::DEFAULT_PARTITION;
 use rskafka::client::partition::UnknownTopicHandling;
 use rskafka::client::Client;
@@ -118,7 +118,12 @@ impl WalPruneProcedure {
             .table_route_manager()
             .get_physical_table_route(table_id)
             .await
-            .unwrap();
+            .context(error::TableMetadataManagerSnafu)
+            .map_err(BoxedError::new)
+            .with_context(|_| error::RetryLaterWithSourceSnafu {
+                reason: format!("Failed to get TableRoute: {table_id}"),
+            })?;
+
         for region_route in table_route.region_routes {
             if region_route.region.id == region_id {
                 if let Some(peer) = region_route.leader_peer {
@@ -251,7 +256,7 @@ impl WalPruneProcedure {
                         };
 
                         if result {
-                            info!("Flush region {} successfully", region_id);
+                            debug!("Flush region {} successfully", region_id);
                         } else {
                             warn!("Failed to flush region {}, error: {:?}", region_id, error);
                         }
@@ -342,5 +347,152 @@ impl Procedure for WalPruneProcedure {
     fn lock_key(&self) -> LockKey {
         let lock_key = vec![RemoteWalLock::Read.into()];
         LockKey::new(lock_key)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use common_meta::key::table_route::TableRouteValue;
+    use common_meta::key::test_utils::new_test_table_info;
+    use common_meta::rpc::router::{Region, RegionRoute};
+    use common_meta::wal_options_allocator::build_kafka_topic_creator;
+    use common_wal::config::kafka::common::{KafkaConnectionConfig, KafkaTopicConfig};
+    use common_wal::config::kafka::MetasrvKafkaConfig;
+    use common_wal::test_util::run_test_with_kafka_wal;
+
+    use super::*;
+    use crate::procedure::region_migration::test_util::TestingEnv;
+
+    async fn mock_prepared_data(
+        broker_endpoints: Vec<String>,
+        region_ids: &[RegionId],
+    ) -> (TestingEnv, WalPruneProcedure) {
+        let from_peer = Peer::empty(1);
+        let data = WalPruneData {
+            topics: vec!["topic1".to_string(), "topic2".to_string()],
+            threshold: Some(1),
+            last_entry_ids_to_prune: Some(vec![Some(1), Some(2)]),
+            regions_to_flush: Some(vec![RegionId::new(1, 1), RegionId::new(1, 2)]),
+            state: WalPruneState::SendFlushRequest,
+        };
+
+        let mut env = TestingEnv::new();
+
+        let table_info = new_test_table_info(1, vec![1, 2]).into();
+        let region_routes = region_ids
+            .iter()
+            .map(|region_id| RegionRoute {
+                region: Region::new_test(*region_id),
+                leader_peer: Some(from_peer.clone()),
+                follower_peers: vec![],
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+
+        env.table_metadata_manager()
+            .create_table_metadata(
+                table_info,
+                TableRouteValue::physical(region_routes),
+                HashMap::default(),
+            )
+            .await
+            .unwrap();
+
+        let topics = (0..1)
+            .map(|i| format!("test_alloc_topics_{}_{}", i, uuid::Uuid::new_v4()))
+            .collect::<Vec<_>>();
+
+        // Creates a topic manager.
+        let kafka_topic = KafkaTopicConfig {
+            replication_factor: broker_endpoints.len() as i16,
+            ..Default::default()
+        };
+        let config = MetasrvKafkaConfig {
+            connection: KafkaConnectionConfig {
+                broker_endpoints,
+                ..Default::default()
+            },
+            kafka_topic,
+            ..Default::default()
+        };
+        let topic_creator = build_kafka_topic_creator(&config).await.unwrap();
+        let table_metadata_manager = env.table_metadata_manager().clone();
+        let mailbox_ctx = env.mailbox_context();
+
+        let context = Context {
+            client: topic_creator.client().clone(),
+            table_metadata_manager,
+            server_addr: "mock_server_addr".to_string(),
+            mailbox: mailbox_ctx.mailbox().clone(),
+        };
+        let mut procedure = WalPruneProcedure::new(topics, Some(1), context);
+        procedure.data = data;
+        (env, procedure)
+    }
+
+    fn mock_flush_reply(
+        region_id: RegionId,
+        result: bool,
+        error: Option<String>,
+    ) -> MailboxMessage {
+        let instruction = InstructionReply::FlushRegion(SimpleReply { result, error });
+        MailboxMessage::json_message(
+            &format!("Flushed region: {}", region_id),
+            &format!(
+                "Datanode-{}@{}",
+                region_id.table_id(),
+                region_id.region_number()
+            ),
+            &format!("Metasrv@{}", "mock_server_addr"),
+            common_time::util::current_time_millis(),
+            &instruction,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_procedure_execution() {
+        run_test_with_kafka_wal(|broker_endpoints| {
+            Box::pin(async {
+                common_telemetry::init_default_ut_logging();
+                // Since we haven't implement the logic in kvbackend yet, we only test `on_sending_flush_request` and `on_prune` here.
+                // Manually set the states.
+                // TODO(CookiePie): Add more tests after implementing the heartbeat part.
+                let region_ids = vec![RegionId::new(1, 1), RegionId::new(1, 2)];
+                let (mut env, mut procedure) =
+                    mock_prepared_data(broker_endpoints, &region_ids).await;
+
+                let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+
+                env.mailbox_context()
+                    .insert_heartbeat_response_receiver(Channel::Datanode(1), tx)
+                    .await;
+
+                common_runtime::spawn_global(async move {
+                    procedure.on_sending_flush_request().await.unwrap();
+                });
+
+                for region_id in &region_ids {
+                    let resp = rx.recv().await.unwrap().unwrap();
+                    let msg = resp.mailbox_message.unwrap();
+                    let instruction = HeartbeatMailbox::json_instruction(&msg).unwrap();
+                    assert_eq!(
+                        instruction,
+                        Instruction::FlushRegion(RegionIdent {
+                            datanode_id: 1,
+                            table_id: region_id.table_id(),
+                            region_number: region_id.region_number(),
+                            engine: "".to_string()
+                        })
+                    );
+                    let reply = mock_flush_reply(*region_id, true, None);
+                    let mailbox = env.mailbox_context().mailbox();
+                    mailbox.on_recv(msg.id, Ok(reply)).await.unwrap();
+                }
+            })
+        })
+        .await;
     }
 }
