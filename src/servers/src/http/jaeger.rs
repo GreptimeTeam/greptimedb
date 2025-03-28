@@ -505,7 +505,13 @@ pub async fn handle_get_operations(
             .start_timer();
 
         match handler
-            .get_operations(query_ctx, service_name, query_params.span_kind.as_deref())
+            .get_operations(
+                query_ctx,
+                service_name,
+                query_params.span_kind.as_deref(),
+                query_params.start,
+                query_params.end,
+            )
             .await
         {
             Ok(output) => match covert_to_records(output).await {
@@ -577,7 +583,16 @@ pub async fn handle_get_operations_by_service(
         .with_label_values(&[&db, "/api/services"])
         .start_timer();
 
-    match handler.get_operations(query_ctx, &service_name, None).await {
+    match handler
+        .get_operations(
+            query_ctx,
+            &service_name,
+            None,
+            query_params.start,
+            query_params.end,
+        )
+        .await
+    {
         Ok(output) => match covert_to_records(output).await {
             Ok(Some(records)) => match operations_from_records(records, false) {
                 Ok(operations) => {
@@ -969,11 +984,7 @@ fn operations_from_records(
     records: HttpRecordsOutput,
     contain_span_kind: bool,
 ) -> Result<Vec<Operation>> {
-    let expected_schema = vec![
-        (SPAN_NAME_COLUMN, "String"),
-        (SPAN_KIND_COLUMN, "String"),
-        (SERVICE_NAME_COLUMN, "String"),
-    ];
+    let expected_schema = vec![(SPAN_NAME_COLUMN, "String"), (SPAN_KIND_COLUMN, "String")];
     check_schema(&records, &expected_schema)?;
 
     let mut operations = Vec::with_capacity(records.total_rows);
