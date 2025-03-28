@@ -11882,6 +11882,8 @@ dependencies = [
  "nix 0.28.0",
  "partition",
  "paste",
+ "prometheus",
+ "prost 0.13.3",
  "rand 0.9.0",
  "rand_chacha 0.9.0",
  "reqwest",

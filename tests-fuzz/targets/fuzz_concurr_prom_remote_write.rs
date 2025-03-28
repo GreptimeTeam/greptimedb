@@ -68,10 +68,10 @@ impl Arbitrary<'_> for FuzzInput {
         let seed = u.int_in_range(u64::MIN..=u64::MAX)?;
         let mut rng = ChaChaRng::seed_from_u64(seed);
         Ok(FuzzInput {
-            concurr_writes: rng.gen_range(2..256),
+            concurr_writes: rng.random_range(2..256),
             // one table is not enough for this concurrent test
             tables: 2,
-            labels: rng.gen_range(0..4),
+            labels: rng.random_range(0..4),
             seed,
             always_choose_old_table: true,
         })
@@ -100,12 +100,12 @@ fn generate_prom_metrics_write_reqs<R: Rng + 'static>(
         // more tables means more chance to select an existing table
         let table_name = {
             let prob = 1.0 - (-(len as f64)).exp();
-            let choose_old = rng.gen_bool(prob) || input.always_choose_old_table;
+            let choose_old = rng.random_bool(prob) || input.always_choose_old_table;
             let use_old = choose_old && table_used_col_names.len() >= input.tables;
 
             if use_old {
                 // randomly select a table name from the table_used_col_names
-                let idx = rng.gen_range(0..table_used_col_names.len());
+                let idx = rng.random_range(0..table_used_col_names.len());
                 let table_name = table_used_col_names.keys().nth(idx).unwrap().clone();
 
                 uppercase_and_keyword_backtick_map(rng, Ident::new(table_name))
@@ -164,7 +164,7 @@ fn generate_prom_metrics_write_reqs<R: Rng + 'static>(
         timeseries.push(TimeSeries {
             labels: random_labels,
             samples: vec![Sample {
-                value: rng.gen_range(0.0..100.0),
+                value: rng.random_range(0.0..100.0),
                 timestamp: *timestamp,
             }],
             exemplars: vec![],
