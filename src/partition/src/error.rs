@@ -180,6 +180,26 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Column not found: {}", column))]
+    ColumnNotFound {
+        column: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid partition rule: {}", reason))]
+    InvalidPartitionRule {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Failed to parse sql value"))]
+    ParseSqlValue {
+        source: sql::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -204,6 +224,9 @@ impl ErrorExt for Error {
             Error::TableRouteManager { source, .. } => source.status_code(),
             Error::UnexpectedLogicalRouteTable { source, .. } => source.status_code(),
             Error::ConvertToVector { source, .. } => source.status_code(),
+            Error::ColumnNotFound { .. } => StatusCode::InvalidArguments,
+            Error::InvalidPartitionRule { .. } => StatusCode::InvalidArguments,
+            Error::ParseSqlValue { source, .. } => source.status_code(),
         }
     }
 

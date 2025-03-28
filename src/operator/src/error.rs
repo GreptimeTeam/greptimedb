@@ -420,13 +420,6 @@ pub enum Error {
         source: datatypes::error::Error,
     },
 
-    #[snafu(display("Failed to deserialize partition in meta to partition def"))]
-    DeserializePartition {
-        #[snafu(implicit)]
-        location: Location,
-        source: partition::error::Error,
-    },
-
     #[snafu(display("Failed to describe schema for given statement"))]
     DescribeStatement {
         #[snafu(implicit)]
@@ -643,7 +636,7 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-
+    
     #[snafu(display("Failed to parse sql value"))]
     ParseSqlValue {
         source: sql::error::Error,
@@ -725,12 +718,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid partition rule: {}", reason))]
-    InvalidPartitionRule {
-        reason: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
+    
 
     #[snafu(display("Invalid configuration value."))]
     InvalidConfigValue {
@@ -923,7 +911,6 @@ impl ErrorExt for Error {
             Error::AlterExprToRequest { source, .. } => source.status_code(),
 
             Error::External { source, .. } => source.status_code(),
-            Error::DeserializePartition { source, .. }
             | Error::FindTablePartitionRule { source, .. }
             | Error::SplitInsert { source, .. }
             | Error::SplitDelete { source, .. }
@@ -947,7 +934,6 @@ impl ErrorExt for Error {
             Error::ColumnDefaultValue { source, .. } => source.status_code(),
 
             Error::EmptyDdlExpr { .. }
-            | Error::InvalidPartitionRule { .. }
             | Error::ParseSqlValue { .. }
             | Error::InvalidTimestampRange { .. } => StatusCode::InvalidArguments,
 

@@ -45,6 +45,7 @@ use lazy_static::lazy_static;
 use partition::expr::{Operand, PartitionExpr, RestrictedOp};
 use partition::multi_dim::MultiDimPartitionRule;
 use partition::partition::{PartitionBound, PartitionDef};
+use partition::utils::parse_partitions;
 use query::parser::QueryStatement;
 use query::plan::extract_and_rewrite_full_table_names;
 use query::query_engine::DefaultSerializer;
@@ -71,8 +72,8 @@ use table::TableRef;
 use super::StatementExecutor;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogSnafu, ColumnDataTypeSnafu, ColumnNotFoundSnafu,
-    ConvertSchemaSnafu, CreateLogicalTablesSnafu, CreateTableInfoSnafu, DeserializePartitionSnafu,
-    EmptyDdlExprSnafu, ExtractTableNamesSnafu, FlowNotFoundSnafu, InvalidPartitionRuleSnafu,
+    ConvertSchemaSnafu, CreateLogicalTablesSnafu, CreateTableInfoSnafu, 
+    EmptyDdlExprSnafu, ExtractTableNamesSnafu, FlowNotFoundSnafu, 
     InvalidPartitionSnafu, InvalidSqlSnafu, InvalidTableNameSnafu, InvalidViewNameSnafu,
     InvalidViewStmtSnafu, ParseSqlValueSnafu, Result, SchemaInUseSnafu, SchemaNotFoundSnafu,
     SchemaReadOnlySnafu, SubstraitCodecSnafu, TableAlreadyExistsSnafu, TableMetadataManagerSnafu,
@@ -248,7 +249,8 @@ impl StatementExecutor {
             &create_table.table_name,
         );
 
-        let (partitions, partition_cols) = parse_partitions(create_table, partitions, &query_ctx)?;
+        let (partitions, partition_cols) = parse_partitions(create_table, partitions, &query_ctx)
+        .context(error::InvalidPartitionSnafu)?;
         let mut table_info = create_table_info(create_table, partition_cols)?;
 
         let resp = self
@@ -1318,40 +1320,6 @@ impl StatementExecutor {
     }
 }
 
-/// Parse partition statement [Partitions] into [MetaPartition] and partition columns.
-fn parse_partitions(
-    create_table: &CreateTableExpr,
-    partitions: Option<Partitions>,
-    query_ctx: &QueryContextRef,
-) -> Result<(Vec<MetaPartition>, Vec<String>)> {
-    // If partitions are not defined by user, use the timestamp column (which has to be existed) as
-    // the partition column, and create only one partition.
-    let partition_columns = find_partition_columns(&partitions)?;
-    let partition_entries =
-        find_partition_entries(create_table, &partitions, &partition_columns, query_ctx)?;
-
-    // Validates partition
-    let mut exprs = vec![];
-    for partition in &partition_entries {
-        for bound in partition {
-            if let PartitionBound::Expr(expr) = bound {
-                exprs.push(expr.clone());
-            }
-        }
-    }
-    MultiDimPartitionRule::try_new(partition_columns.clone(), vec![], exprs)
-        .context(InvalidPartitionSnafu)?;
-
-    Ok((
-        partition_entries
-            .into_iter()
-            .map(|x| MetaPartition::try_from(PartitionDef::new(partition_columns.clone(), x)))
-            .collect::<std::result::Result<_, _>>()
-            .context(DeserializePartitionSnafu)?,
-        partition_columns,
-    ))
-}
-
 fn create_table_info(
     create_table: &CreateTableExpr,
     partition_columns: Vec<String>,
@@ -1438,154 +1406,7 @@ fn create_table_info(
     Ok(table_info)
 }
 
-fn find_partition_columns(partitions: &Option<Partitions>) -> Result<Vec<String>> {
-    let columns = if let Some(partitions) = partitions {
-        partitions
-            .column_list
-            .iter()
-            .map(|x| x.value.clone())
-            .collect::<Vec<_>>()
-    } else {
-        vec![]
-    };
-    Ok(columns)
-}
 
-/// Parse [Partitions] into a group of partition entries.
-///
-/// Returns a list of [PartitionBound], each of which defines a partition.
-fn find_partition_entries(
-    create_table: &CreateTableExpr,
-    partitions: &Option<Partitions>,
-    partition_columns: &[String],
-    query_ctx: &QueryContextRef,
-) -> Result<Vec<Vec<PartitionBound>>> {
-    let entries = if let Some(partitions) = partitions {
-        // extract concrete data type of partition columns
-        let column_defs = partition_columns
-            .iter()
-            .map(|pc| {
-                create_table
-                    .column_defs
-                    .iter()
-                    .find(|c| &c.name == pc)
-                    // unwrap is safe here because we have checked that partition columns are defined
-                    .unwrap()
-            })
-            .collect::<Vec<_>>();
-        let mut column_name_and_type = HashMap::with_capacity(column_defs.len());
-        for column in column_defs {
-            let column_name = &column.name;
-            let data_type = ConcreteDataType::from(
-                ColumnDataTypeWrapper::try_new(column.data_type, column.datatype_extension)
-                    .context(ColumnDataTypeSnafu)?,
-            );
-            column_name_and_type.insert(column_name, data_type);
-        }
-
-        // Transform parser expr to partition expr
-        let mut partition_exprs = Vec::with_capacity(partitions.exprs.len());
-        for partition in &partitions.exprs {
-            let partition_expr =
-                convert_one_expr(partition, &column_name_and_type, &query_ctx.timezone())?;
-            partition_exprs.push(vec![PartitionBound::Expr(partition_expr)]);
-        }
-
-        // fallback for no expr
-        if partition_exprs.is_empty() {
-            partition_exprs.push(vec![PartitionBound::MaxValue]);
-        }
-
-        partition_exprs
-    } else {
-        vec![vec![PartitionBound::MaxValue]]
-    };
-    Ok(entries)
-}
-
-fn convert_one_expr(
-    expr: &Expr,
-    column_name_and_type: &HashMap<&String, ConcreteDataType>,
-    timezone: &Timezone,
-) -> Result<PartitionExpr> {
-    let Expr::BinaryOp { left, op, right } = expr else {
-        return InvalidPartitionRuleSnafu {
-            reason: "partition rule must be a binary expression",
-        }
-        .fail();
-    };
-
-    let op =
-        RestrictedOp::try_from_parser(&op.clone()).with_context(|| InvalidPartitionRuleSnafu {
-            reason: format!("unsupported operator in partition expr {op}"),
-        })?;
-
-    // convert leaf node.
-    let (lhs, op, rhs) = match (left.as_ref(), right.as_ref()) {
-        // col, val
-        (Expr::Identifier(ident), Expr::Value(value)) => {
-            let (column_name, data_type) = convert_identifier(ident, column_name_and_type)?;
-            let value = convert_value(value, data_type, timezone, None)?;
-            (Operand::Column(column_name), op, Operand::Value(value))
-        }
-        (Expr::Identifier(ident), Expr::UnaryOp { op: unary_op, expr })
-            if let Expr::Value(v) = &**expr =>
-        {
-            let (column_name, data_type) = convert_identifier(ident, column_name_and_type)?;
-            let value = convert_value(v, data_type, timezone, Some(*unary_op))?;
-            (Operand::Column(column_name), op, Operand::Value(value))
-        }
-        // val, col
-        (Expr::Value(value), Expr::Identifier(ident)) => {
-            let (column_name, data_type) = convert_identifier(ident, column_name_and_type)?;
-            let value = convert_value(value, data_type, timezone, None)?;
-            (Operand::Value(value), op, Operand::Column(column_name))
-        }
-        (Expr::UnaryOp { op: unary_op, expr }, Expr::Identifier(ident))
-            if let Expr::Value(v) = &**expr =>
-        {
-            let (column_name, data_type) = convert_identifier(ident, column_name_and_type)?;
-            let value = convert_value(v, data_type, timezone, Some(*unary_op))?;
-            (Operand::Value(value), op, Operand::Column(column_name))
-        }
-        (Expr::BinaryOp { .. }, Expr::BinaryOp { .. }) => {
-            // sub-expr must against another sub-expr
-            let lhs = convert_one_expr(left, column_name_and_type, timezone)?;
-            let rhs = convert_one_expr(right, column_name_and_type, timezone)?;
-            (Operand::Expr(lhs), op, Operand::Expr(rhs))
-        }
-        _ => {
-            return InvalidPartitionRuleSnafu {
-                reason: format!("invalid partition expr {expr}"),
-            }
-            .fail();
-        }
-    };
-
-    Ok(PartitionExpr::new(lhs, op, rhs))
-}
-
-fn convert_identifier(
-    ident: &Ident,
-    column_name_and_type: &HashMap<&String, ConcreteDataType>,
-) -> Result<(String, ConcreteDataType)> {
-    let column_name = ident.value.clone();
-    let data_type = column_name_and_type
-        .get(&column_name)
-        .cloned()
-        .with_context(|| ColumnNotFoundSnafu { msg: &column_name })?;
-    Ok((column_name, data_type))
-}
-
-fn convert_value(
-    value: &ParserValue,
-    data_type: ConcreteDataType,
-    timezone: &Timezone,
-    unary_op: Option<UnaryOperator>,
-) -> Result<Value> {
-    sql_value_to_value("<NONAME>", &data_type, value, Some(timezone), unary_op)
-        .context(ParseSqlValueSnafu)
-}
 
 #[cfg(test)]
 mod test {
