@@ -19,6 +19,10 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use api::helper::pb_value_to_value_ref;
+use arrow::array::{
+    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+    TimestampSecondArray,
+};
 use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
 use common_recordbatch::DfRecordBatch;
@@ -34,7 +38,6 @@ use datafusion_common::{DFSchema, TableReference};
 use datafusion_expr::{ColumnarValue, LogicalPlan};
 use datafusion_physical_expr::PhysicalExprRef;
 use datatypes::prelude::{ConcreteDataType, DataType};
-use datatypes::scalars::ScalarVector;
 use datatypes::schema::TIME_INDEX_KEY;
 use datatypes::value::Value;
 use datatypes::vectors::{
@@ -46,7 +49,9 @@ use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::adapter::util::from_proto_to_data_type;
-use crate::error::{ArrowSnafu, DatafusionSnafu, DatatypesSnafu, ExternalSnafu, UnexpectedSnafu};
+use crate::error::{
+    ArrowSnafu, DatafusionSnafu, DatatypesSnafu, ExternalSnafu, PlanSnafu, UnexpectedSnafu,
+};
 use crate::expr::error::DataTypeSnafu;
 use crate::Error;
 
@@ -113,15 +118,9 @@ impl TimeWindowExpr {
             let col_schema = &rows.schema[ts_col_index];
             let cdt = from_proto_to_data_type(col_schema)?;
 
-            let column_values = rows
-                .rows
-                .iter()
-                .map(|row| &row.values[ts_col_index])
-                .collect_vec();
-
-            let mut vector = cdt.create_mutable_vector(column_values.len());
-            for value in column_values {
-                let value = pb_value_to_value_ref(value, &None);
+            let mut vector = cdt.create_mutable_vector(rows.rows.len());
+            for row in rows.rows {
+                let value = pb_value_to_value_ref(&row.values[ts_col_index], &None);
                 vector.try_push_value_ref(value).context(DataTypeSnafu {
                     msg: "Failed to convert rows to columns",
                 })?;
@@ -193,40 +192,50 @@ fn columnar_to_ts_vector(columnar: &ColumnarValue) -> Result<Vec<Option<Timestam
             };
 
             match time_unit {
-                TimeUnit::Second => TimestampSecondVector::try_from_arrow_array(array.clone())
-                    .with_context(|_| DatatypesSnafu {
-                        extra: format!("Failed to create vector from arrow array {array:?}"),
+                TimeUnit::Second => array
+                    .as_ref()
+                    .as_any()
+                    .downcast_ref::<TimestampSecondArray>()
+                    .with_context(|| PlanSnafu {
+                        reason: format!("Failed to create vector from arrow array {array:?}"),
                     })?
-                    .iter_data()
-                    .map(|d| d.map(|d| d.0))
+                    .values()
+                    .iter()
+                    .map(|d| Some(Timestamp::new(*d, time_unit)))
                     .collect_vec(),
-                TimeUnit::Millisecond => {
-                    TimestampMillisecondVector::try_from_arrow_array(array.clone())
-                        .with_context(|_| DatatypesSnafu {
-                            extra: format!("Failed to create vector from arrow array {array:?}"),
-                        })?
-                        .iter_data()
-                        .map(|d| d.map(|d| d.0))
-                        .collect_vec()
-                }
-                TimeUnit::Microsecond => {
-                    TimestampMicrosecondVector::try_from_arrow_array(array.clone())
-                        .with_context(|_| DatatypesSnafu {
-                            extra: format!("Failed to create vector from arrow array {array:?}"),
-                        })?
-                        .iter_data()
-                        .map(|d| d.map(|d| d.0))
-                        .collect_vec()
-                }
-                TimeUnit::Nanosecond => {
-                    TimestampNanosecondVector::try_from_arrow_array(array.clone())
-                        .with_context(|_| DatatypesSnafu {
-                            extra: format!("Failed to create vector from arrow array {array:?}"),
-                        })?
-                        .iter_data()
-                        .map(|d| d.map(|d| d.0))
-                        .collect_vec()
-                }
+                TimeUnit::Millisecond => array
+                    .as_ref()
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondArray>()
+                    .with_context(|| PlanSnafu {
+                        reason: format!("Failed to create vector from arrow array {array:?}"),
+                    })?
+                    .values()
+                    .iter()
+                    .map(|d| Some(Timestamp::new(*d, time_unit)))
+                    .collect_vec(),
+                TimeUnit::Microsecond => array
+                    .as_ref()
+                    .as_any()
+                    .downcast_ref::<TimestampMicrosecondArray>()
+                    .with_context(|| PlanSnafu {
+                        reason: format!("Failed to create vector from arrow array {array:?}"),
+                    })?
+                    .values()
+                    .iter()
+                    .map(|d| Some(Timestamp::new(*d, time_unit)))
+                    .collect_vec(),
+                TimeUnit::Nanosecond => array
+                    .as_ref()
+                    .as_any()
+                    .downcast_ref::<TimestampNanosecondArray>()
+                    .with_context(|| PlanSnafu {
+                        reason: format!("Failed to create vector from arrow array {array:?}"),
+                    })?
+                    .values()
+                    .iter()
+                    .map(|d| Some(Timestamp::new(*d, time_unit)))
+                    .collect_vec(),
             }
         }
         datafusion_expr::ColumnarValue::Scalar(scalar) => {
@@ -297,7 +306,7 @@ async fn find_time_window_expr(
 
     let schema = &table_ref.table_info().meta.schema;
 
-    let ts_index = schema.timestamp_column().context(UnexpectedSnafu {
+    let ts_index = schema.timestamp_column().with_context(|| UnexpectedSnafu {
         reason: format!("Can't find timestamp column in table {table_name:?}"),
     })?;
 
@@ -353,7 +362,9 @@ async fn find_time_window_expr(
             };
             let field = aggregate.input.schema().field(index);
 
-            let is_time_index = field.metadata().get(TIME_INDEX_KEY) == Some(&"true".to_string());
+            // TODO(discord9): need to ensure the field has the meta key for the time index
+            let is_time_index =
+                field.metadata().get(TIME_INDEX_KEY).map(|s| s.as_str()) == Some("true");
 
             if is_time_index {
                 let rewrite_column = group_expr.clone();
@@ -484,13 +495,12 @@ fn probe_expr_time_window_upper_bound(
         let next_time_window = eval_phy_time_window_expr(&phy_expr, df_schema, next_time_probe)?;
 
         match next_time_window.cmp(&cur_time_window) {
-            Ordering::Less => {UnexpectedSnafu {
-                reason: format!(
-                    "Unsupported time window expression, expect monotonic increasing for time window expression {expr:?}"
-                ),
-            }
-            .fail()?
-            }
+            Ordering::Less => UnexpectedSnafu {
+                    reason: format!(
+                        "Unsupported time window expression, expect monotonic increasing for time window expression {expr:?}"
+                    ),
+                }
+                .fail()?,
             Ordering::Equal => {
                 lower_bound = Some(next_time_probe);
             }
@@ -526,7 +536,7 @@ fn binary_search_expr(
     phy_expr: &PhysicalExprRef,
     df_schema: &DFSchema,
 ) -> Result<Timestamp, Error> {
-    ensure!(lower_bound.map(|v|v.unit())==upper_bound.map(|v|v.unit()), UnexpectedSnafu{
+    ensure!(lower_bound.map(|v|v.unit()) == upper_bound.map(|v| v.unit()), UnexpectedSnafu {
         reason: format!(" unit mismatch for time window expression {phy_expr:?}, found {lower_bound:?} and {upper_bound:?}"),
     });
 
