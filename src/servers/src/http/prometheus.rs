@@ -32,6 +32,7 @@ use datatypes::scalars::ScalarVector;
 use datatypes::vectors::Float64Vector;
 use futures::future::join_all;
 use futures::StreamExt;
+use itertools::Itertools;
 use promql_parser::label::{MatchOp, Matcher, Matchers, METRIC_NAME};
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
@@ -1003,18 +1004,19 @@ pub async fn label_values_query(
 
     for query in queries {
         let promql_expr = try_call_return_response!(promql_parser::parser::parse(&query));
-        let PromqlExpr::VectorSelector(VectorSelector { name, matchers, .. }) = promql_expr else {
+        let PromqlExpr::VectorSelector(mut vector_selector) = promql_expr else {
             return PrometheusJsonResponse::error(
                 StatusCode::InvalidArguments,
                 "expected vector selector",
             );
         };
-        let Some(name) = name else {
+        let Some(name) = take_metric_name(&mut vector_selector) else {
             return PrometheusJsonResponse::error(
                 StatusCode::InvalidArguments,
                 "expected metric name",
             );
         };
+        let VectorSelector { matchers, .. } = vector_selector;
         // Only use and filter matchers.
         let matchers = matchers.matchers;
         let result = handler
@@ -1046,6 +1048,25 @@ pub async fn label_values_query(
     let mut label_values: Vec<_> = label_values.into_iter().collect();
     label_values.sort_unstable();
     PrometheusJsonResponse::success(PrometheusResponse::LabelValues(label_values))
+}
+
+/// Take metric name from the [VectorSelector].
+/// It takes the name in the selector or removes the name matcher.
+fn take_metric_name(selector: &mut VectorSelector) -> Option<String> {
+    if let Some(name) = selector.name.take() {
+        return Some(name);
+    }
+
+    let (pos, matcher) = selector
+        .matchers
+        .matchers
+        .iter()
+        .find_position(|matcher| matcher.name == "__name__" && matcher.op == MatchOp::Equal)?;
+    let name = matcher.value.clone();
+    // We need to remove the name matcher to avoid using it as a filter in query.
+    selector.matchers.matchers.remove(pos);
+
+    Some(name)
 }
 
 async fn retrieve_field_names(
