@@ -18,6 +18,8 @@ use std::time::Duration;
 use chrono::NaiveDate;
 use common_query::prelude::ScalarValue;
 use common_time::Timestamp;
+use datafusion_common::tree_node::{Transformed, TreeNode};
+use datafusion_expr::LogicalPlan;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::types::TimestampType;
 use datatypes::value::{self, Value};
@@ -28,7 +30,7 @@ use sql::ast::{visit_expressions_mut, Expr, Value as ValueExpr, VisitMut};
 use sql::statements::sql_value_to_value;
 use sql::statements::statement::Statement;
 
-use crate::error::{self, Result};
+use crate::error::{self, DataFusionSnafu, Result};
 
 /// Returns the placeholder string "$i".
 pub fn format_placeholder(i: usize) -> String {
@@ -75,6 +77,40 @@ pub fn transform_placeholders(stmt: Statement) -> Statement {
         }
         stmt => stmt,
     }
+}
+
+/// Give placeholder that cast to certain type `data_type` the same data type as is cast to
+///
+/// because it seems datafusion will not give data type to placeholder if it need to be cast to certain type, still unknown if this is a feature or a bug. And if a placeholder expr have no data type, datafusion will fail to extract it using `LogicalPlan::get_parameter_types`
+pub fn fix_placeholder_types(plan: &mut LogicalPlan) -> Result<()> {
+    let give_placeholder_types = |mut e: datafusion_expr::Expr| {
+        if let datafusion_expr::Expr::Cast(cast) = &mut e {
+            if let datafusion_expr::Expr::Placeholder(ph) = &mut *cast.expr {
+                if ph.data_type.is_none() {
+                    ph.data_type = Some(cast.data_type.clone());
+                    common_telemetry::debug!(
+                        "give placeholder type {:?} to {:?}",
+                        cast.data_type,
+                        ph
+                    );
+                    Ok(Transformed::yes(e))
+                } else {
+                    Ok(Transformed::no(e))
+                }
+            } else {
+                Ok(Transformed::no(e))
+            }
+        } else {
+            Ok(Transformed::no(e))
+        }
+    };
+    let give_placeholder_types_recursively =
+        |e: datafusion_expr::Expr| e.transform(give_placeholder_types);
+    *plan = std::mem::take(plan)
+        .transform(|p| p.map_expressions(give_placeholder_types_recursively))
+        .context(DataFusionSnafu)?
+        .data;
+    Ok(())
 }
 
 fn visit_placeholders<V>(v: &mut V)

@@ -28,13 +28,12 @@ use regex::Regex;
 use snafu::{OptionExt, ResultExt};
 pub use time::Timestamp;
 
-use super::error::{
-    ValueDefaultValueUnsupportedSnafu, ValueInvalidResolutionSnafu, ValueParseBooleanSnafu,
-    ValueParseFloatSnafu, ValueParseIntSnafu, ValueParseTypeSnafu, ValueUnsupportedNumberTypeSnafu,
-    ValueUnsupportedYamlTypeSnafu, ValueYamlKeyMustBeStringSnafu,
-};
 use super::PipelineMap;
-use crate::etl::error::{Error, Result};
+use crate::error::{
+    Error, Result, ValueDefaultValueUnsupportedSnafu, ValueInvalidResolutionSnafu,
+    ValueParseBooleanSnafu, ValueParseFloatSnafu, ValueParseIntSnafu, ValueParseTypeSnafu,
+    ValueUnsupportedNumberTypeSnafu, ValueUnsupportedYamlTypeSnafu, ValueYamlKeyMustBeStringSnafu,
+};
 
 /// Value can be used as type
 /// acts as value: the enclosed value is the actual value

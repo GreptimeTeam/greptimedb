@@ -177,7 +177,7 @@ fn create_table_info(table_id: TableId, table_name: TableName) -> RawTableInfo {
 
 fn create_region_routes(regions: Vec<RegionNumber>) -> Vec<RegionRoute> {
     let mut region_routes = Vec::with_capacity(100);
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     for region_id in regions.into_iter().map(u64::from) {
         region_routes.push(RegionRoute {
@@ -188,7 +188,7 @@ fn create_region_routes(regions: Vec<RegionNumber>) -> Vec<RegionRoute> {
                 attrs: BTreeMap::new(),
             },
             leader_peer: Some(Peer {
-                id: rng.gen_range(0..10),
+                id: rng.random_range(0..10),
                 addr: String::new(),
             }),
             follower_peers: vec![],

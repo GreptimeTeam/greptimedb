@@ -13,15 +13,14 @@
 // limitations under the License.
 
 use greptime_proto::v1::{ColumnDataType, ColumnSchema, Rows, SemanticType};
-use pipeline::{json_to_intermediate_state, parse, Content, GreptimeTransformer, Pipeline};
+use pipeline::{json_to_map, parse, Content, Pipeline};
 
 /// test util function to parse and execute pipeline
 pub fn parse_and_exec(input_str: &str, pipeline_yaml: &str) -> Rows {
     let input_value = serde_json::from_str::<serde_json::Value>(input_str).unwrap();
 
     let yaml_content = Content::Yaml(pipeline_yaml);
-    let pipeline: Pipeline<GreptimeTransformer> =
-        parse(&yaml_content).expect("failed to parse pipeline");
+    let pipeline: Pipeline = parse(&yaml_content).expect("failed to parse pipeline");
 
     let schema = pipeline.schemas().clone();
 
@@ -30,23 +29,23 @@ pub fn parse_and_exec(input_str: &str, pipeline_yaml: &str) -> Rows {
     match input_value {
         serde_json::Value::Array(array) => {
             for value in array {
-                let mut intermediate_status = json_to_intermediate_state(value).unwrap();
+                let mut intermediate_status = json_to_map(value).unwrap();
                 let row = pipeline
                     .exec_mut(&mut intermediate_status)
                     .expect("failed to exec pipeline")
                     .into_transformed()
                     .expect("expect transformed result ");
-                rows.push(row);
+                rows.push(row.0);
             }
         }
         serde_json::Value::Object(_) => {
-            let mut intermediate_status = json_to_intermediate_state(input_value).unwrap();
+            let mut intermediate_status = json_to_map(input_value).unwrap();
             let row = pipeline
                 .exec_mut(&mut intermediate_status)
                 .expect("failed to exec pipeline")
                 .into_transformed()
                 .expect("expect transformed result ");
-            rows.push(row);
+            rows.push(row.0);
         }
         _ => {
             panic!("invalid input value");

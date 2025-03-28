@@ -32,9 +32,8 @@ use common_telemetry::{error, warn};
 use datatypes::value::column_data_to_json;
 use headers::ContentType;
 use lazy_static::lazy_static;
-use pipeline::error::PipelineTransformSnafu;
 use pipeline::util::to_pipeline_version;
-use pipeline::{GreptimePipelineParams, GreptimeTransformer, PipelineDefinition, PipelineVersion};
+use pipeline::{GreptimePipelineParams, PipelineDefinition};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Deserializer, Map, Value};
 use session::context::{Channel, QueryContext, QueryContextRef};
@@ -87,6 +86,15 @@ pub struct LogIngesterQueryParams {
     /// The JSON field name of the log message. If not provided, it will take the whole log as the message.
     /// The field must be at the top level of the JSON structure.
     pub msg_field: Option<String>,
+    /// Specify a custom time index from the input data rather than server's arrival time.
+    /// Valid formats:
+    /// - <field_name>;epoch;<resolution>
+    /// - <field_name>;datestr;<format>
+    ///
+    /// If an error occurs while parsing the config, the error will be returned in the response.
+    /// If an error occurs while ingesting the data, the `ignore_errors` will be used to determine if the error should be ignored.
+    /// If so, use the current server's timestamp as the event time.
+    pub custom_time_index: Option<String>,
 }
 
 /// LogIngestRequest is the internal request for log ingestion. The raw log input can be transformed into multiple LogIngestRequests.
@@ -274,7 +282,7 @@ fn transform_ndjson_array_factory(
 /// Dryrun pipeline with given data
 async fn dryrun_pipeline_inner(
     value: Vec<Value>,
-    pipeline: Arc<pipeline::Pipeline<GreptimeTransformer>>,
+    pipeline: Arc<pipeline::Pipeline>,
     pipeline_handler: PipelineHandlerRef,
     query_ctx: &QueryContextRef,
 ) -> Result<Response> {
@@ -282,11 +290,9 @@ async fn dryrun_pipeline_inner(
 
     let results = run_pipeline(
         &pipeline_handler,
-        PipelineDefinition::Resolved(pipeline),
+        &PipelineDefinition::Resolved(pipeline),
         &params,
-        pipeline::json_array_to_intermediate_state(value)
-            .context(PipelineTransformSnafu)
-            .context(PipelineSnafu)?,
+        pipeline::json_array_to_map(value).context(PipelineSnafu)?,
         "dry_run".to_owned(),
         query_ctx,
         true,
@@ -530,16 +536,22 @@ pub async fn log_ingester(
 
     let handler = log_state.log_handler;
 
-    let pipeline_name = query_params.pipeline_name.context(InvalidParameterSnafu {
-        reason: "pipeline_name is required",
-    })?;
     let table_name = query_params.table.context(InvalidParameterSnafu {
         reason: "table is required",
     })?;
 
-    let version = to_pipeline_version(query_params.version.as_deref()).context(PipelineSnafu)?;
-
     let ignore_errors = query_params.ignore_errors.unwrap_or(false);
+
+    let pipeline_name = query_params.pipeline_name.context(InvalidParameterSnafu {
+        reason: "pipeline_name is required",
+    })?;
+    let version = to_pipeline_version(query_params.version.as_deref()).context(PipelineSnafu)?;
+    let pipeline = PipelineDefinition::from_name(
+        &pipeline_name,
+        version,
+        query_params.custom_time_index.map(|s| (s, ignore_errors)),
+    )
+    .context(PipelineSnafu)?;
 
     let value = extract_pipeline_value_by_content_type(content_type, payload, ignore_errors)?;
 
@@ -553,8 +565,7 @@ pub async fn log_ingester(
 
     ingest_logs_inner(
         handler,
-        pipeline_name,
-        version,
+        pipeline,
         vec![LogIngestRequest {
             table: table_name,
             values: value,
@@ -614,8 +625,7 @@ fn extract_pipeline_value_by_content_type(
 
 pub(crate) async fn ingest_logs_inner(
     state: PipelineHandlerRef,
-    pipeline_name: String,
-    version: PipelineVersion,
+    pipeline: PipelineDefinition,
     log_ingest_requests: Vec<LogIngestRequest>,
     query_ctx: QueryContextRef,
     headers: HeaderMap,
@@ -634,11 +644,9 @@ pub(crate) async fn ingest_logs_inner(
     for request in log_ingest_requests {
         let requests = run_pipeline(
             &state,
-            PipelineDefinition::from_name(&pipeline_name, version),
+            &pipeline,
             &pipeline_params,
-            pipeline::json_array_to_intermediate_state(request.values)
-                .context(PipelineTransformSnafu)
-                .context(PipelineSnafu)?,
+            pipeline::json_array_to_map(request.values).context(PipelineSnafu)?,
             request.table,
             &query_ctx,
             true,

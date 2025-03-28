@@ -17,7 +17,13 @@ pub mod transformer;
 
 use snafu::OptionExt;
 
-use crate::etl::error::{Error, Result};
+use super::field::Fields;
+use super::processor::{yaml_new_field, yaml_new_fields, yaml_string};
+use super::value::Timestamp;
+use crate::error::{
+    Error, KeyMustBeStringSnafu, Result, TransformElementMustBeMapSnafu,
+    TransformOnFailureInvalidValueSnafu, TransformTypeMustBeSetSnafu,
+};
 use crate::etl::processor::yaml_bool;
 use crate::etl::transform::index::Index;
 use crate::etl::value::Value;
@@ -31,26 +37,6 @@ const TRANSFORM_DEFAULT: &str = "default";
 const TRANSFORM_ON_FAILURE: &str = "on_failure";
 
 pub use transformer::greptime::GreptimeTransformer;
-
-use super::error::{
-    KeyMustBeStringSnafu, TransformElementMustBeMapSnafu, TransformOnFailureInvalidValueSnafu,
-    TransformTypeMustBeSetSnafu,
-};
-use super::field::Fields;
-use super::processor::{yaml_new_field, yaml_new_fields, yaml_string};
-use super::value::Timestamp;
-use super::PipelineMap;
-
-pub trait Transformer: std::fmt::Debug + Sized + Send + Sync + 'static {
-    type Output;
-    type VecOutput;
-
-    fn new(transforms: Transforms) -> Result<Self>;
-    fn schemas(&self) -> &Vec<greptime_proto::v1::ColumnSchema>;
-    fn transforms(&self) -> &Transforms;
-    fn transforms_mut(&mut self) -> &mut Transforms;
-    fn transform_mut(&self, val: &mut PipelineMap) -> Result<Self::VecOutput>;
-}
 
 /// On Failure behavior when transform fails
 #[derive(Debug, Clone, Default, Copy)]

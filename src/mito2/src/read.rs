@@ -56,7 +56,6 @@ use crate::error::{
     ComputeArrowSnafu, ComputeVectorSnafu, ConvertVectorSnafu, InvalidBatchSnafu, Result,
 };
 use crate::memtable::BoxedBatchIterator;
-use crate::metrics::{READ_BATCHES_RETURN, READ_ROWS_RETURN, READ_STAGE_ELAPSED};
 use crate::read::prune::PruneReader;
 use crate::row_converter::{CompositeValues, PrimaryKeyCodec};
 
@@ -383,8 +382,13 @@ impl Batch {
         ];
         let rows = converter.convert_columns(&columns).unwrap();
         let mut to_sort: Vec<_> = rows.iter().enumerate().collect();
-        to_sort.sort_unstable_by(|left, right| left.1.cmp(&right.1));
 
+        let was_sorted = to_sort.is_sorted_by_key(|x| x.1);
+        if !was_sorted {
+            to_sort.sort_unstable_by_key(|x| x.1);
+        }
+
+        let num_rows = to_sort.len();
         if dedup {
             // Dedup by timestamps.
             to_sort.dedup_by(|left, right| {
@@ -395,7 +399,11 @@ impl Batch {
                 left_key[..TIMESTAMP_KEY_LEN] == right_key[..TIMESTAMP_KEY_LEN]
             });
         }
+        let no_dedup = to_sort.len() == num_rows;
 
+        if was_sorted && no_dedup {
+            return Ok(());
+        }
         let indices = UInt32Vector::from_iter_values(to_sort.iter().map(|v| v.0 as u32));
         self.take_in_place(&indices)
     }
@@ -991,13 +999,11 @@ impl<T: BatchReader + ?Sized> BatchReader for Box<T> {
     }
 }
 
-/// Metrics for scanners.
+/// Local metrics for scanners.
 #[derive(Debug, Default)]
 pub(crate) struct ScannerMetrics {
     /// Duration to prepare the scan task.
     prepare_scan_cost: Duration,
-    /// Duration to build file ranges.
-    build_parts_cost: Duration,
     /// Duration to build the (merge) reader.
     build_reader_cost: Duration,
     /// Duration to scan data.
@@ -1006,8 +1012,6 @@ pub(crate) struct ScannerMetrics {
     convert_cost: Duration,
     /// Duration while waiting for `yield`.
     yield_cost: Duration,
-    /// Duration of the scan.
-    total_cost: Duration,
     /// Number of batches returned.
     num_batches: usize,
     /// Number of rows returned.
@@ -1016,50 +1020,6 @@ pub(crate) struct ScannerMetrics {
     num_mem_ranges: usize,
     /// Number of file ranges scanned.
     num_file_ranges: usize,
-}
-
-impl ScannerMetrics {
-    /// Observes metrics.
-    fn observe_metrics(&self) {
-        READ_STAGE_ELAPSED
-            .with_label_values(&["prepare_scan"])
-            .observe(self.prepare_scan_cost.as_secs_f64());
-        READ_STAGE_ELAPSED
-            .with_label_values(&["build_parts"])
-            .observe(self.build_parts_cost.as_secs_f64());
-        READ_STAGE_ELAPSED
-            .with_label_values(&["build_reader"])
-            .observe(self.build_reader_cost.as_secs_f64());
-        READ_STAGE_ELAPSED
-            .with_label_values(&["convert_rb"])
-            .observe(self.convert_cost.as_secs_f64());
-        READ_STAGE_ELAPSED
-            .with_label_values(&["scan"])
-            .observe(self.scan_cost.as_secs_f64());
-        READ_STAGE_ELAPSED
-            .with_label_values(&["yield"])
-            .observe(self.yield_cost.as_secs_f64());
-        READ_STAGE_ELAPSED
-            .with_label_values(&["total"])
-            .observe(self.total_cost.as_secs_f64());
-        READ_ROWS_RETURN.observe(self.num_rows as f64);
-        READ_BATCHES_RETURN.observe(self.num_batches as f64);
-    }
-
-    /// Merges metrics from another [ScannerMetrics].
-    fn merge_from(&mut self, other: &ScannerMetrics) {
-        self.prepare_scan_cost += other.prepare_scan_cost;
-        self.build_parts_cost += other.build_parts_cost;
-        self.build_reader_cost += other.build_reader_cost;
-        self.scan_cost += other.scan_cost;
-        self.convert_cost += other.convert_cost;
-        self.yield_cost += other.yield_cost;
-        self.total_cost += other.total_cost;
-        self.num_batches += other.num_batches;
-        self.num_rows += other.num_rows;
-        self.num_mem_ranges += other.num_mem_ranges;
-        self.num_file_ranges += other.num_file_ranges;
-    }
 }
 
 #[cfg(test)]

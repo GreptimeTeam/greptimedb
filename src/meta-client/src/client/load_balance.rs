@@ -22,8 +22,8 @@ where
         return None;
     }
 
-    let mut rng = rand::thread_rng();
-    let i = rng.gen_range(0..len);
+    let mut rng = rand::rng();
+    let i = rng.random_range(0..len);
 
     func(i)
 }

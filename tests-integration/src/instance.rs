@@ -49,7 +49,7 @@ mod tests {
         let standalone = GreptimeDbStandaloneBuilder::new("test_standalone_exec_sql")
             .build()
             .await;
-        let instance = standalone.instance.as_ref();
+        let instance = standalone.fe_instance();
 
         let sql = r#"
             CREATE TABLE demo(
@@ -350,7 +350,7 @@ mod tests {
             .with_plugin(plugins)
             .build()
             .await;
-        let instance = standalone.instance;
+        let instance = standalone.fe_instance().clone();
 
         let sql = r#"CREATE TABLE demo(
                             host STRING,
@@ -412,7 +412,7 @@ mod tests {
             .with_plugin(plugins)
             .build()
             .await;
-        let instance = standalone.instance;
+        let instance = standalone.fe_instance().clone();
 
         let sql = r#"CREATE TABLE demo(
                             host STRING,

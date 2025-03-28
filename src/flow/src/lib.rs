@@ -33,6 +33,7 @@ mod expr;
 pub mod heartbeat;
 mod metrics;
 mod plan;
+mod recording_rules;
 mod repr;
 mod server;
 mod transform;

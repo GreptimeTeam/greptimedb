@@ -76,9 +76,9 @@ enum AlterTableKind {
 
 fn generate_create_table_expr<R: Rng + 'static>(rng: &mut R) -> Result<CreateTableExpr> {
     let max_columns = get_gt_fuzz_input_max_columns();
-    let columns = rng.gen_range(2..max_columns);
+    let columns = rng.random_range(2..max_columns);
     let mut with_clause = HashMap::new();
-    if rng.gen_bool(0.5) {
+    if rng.random_bool(0.5) {
         with_clause.insert("append_mode".to_string(), "true".to_string());
     }
     let create_table_generator = CreateTableExprGeneratorBuilder::default()
@@ -99,7 +99,7 @@ fn generate_alter_table_expr<R: Rng + 'static>(
     rng: &mut R,
 ) -> Result<AlterTableExpr> {
     let kinds = AlterTableKind::iter().collect::<Vec<_>>();
-    match kinds[rng.gen_range(0..kinds.len())] {
+    match kinds[rng.random_range(0..kinds.len())] {
         AlterTableKind::DropColumn if !droppable_columns(&table_ctx.columns).is_empty() => {
             AlterExprDropColumnGeneratorBuilder::default()
                 .table_ctx(table_ctx)
@@ -138,7 +138,7 @@ fn generate_alter_table_expr<R: Rng + 'static>(
             expr_generator.generate(rng)
         }
         _ => {
-            let location = rng.gen_bool(0.5);
+            let location = rng.random_bool(0.5);
             let expr_generator = AlterExprAddColumnGeneratorBuilder::default()
                 .table_ctx(table_ctx)
                 .location(location)
@@ -153,7 +153,7 @@ impl Arbitrary<'_> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
         let seed = u.int_in_range(u64::MIN..=u64::MAX)?;
         let mut rng = ChaChaRng::seed_from_u64(seed);
-        let actions = rng.gen_range(1..256);
+        let actions = rng.random_range(1..256);
 
         Ok(FuzzInput { seed, actions })
     }

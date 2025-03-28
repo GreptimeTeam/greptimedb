@@ -20,7 +20,7 @@ use api::v1::{ColumnDataType, ColumnDataTypeExtension, CreateTableExpr, Semantic
 use common_error::ext::BoxedError;
 use common_meta::key::table_info::TableInfoValue;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::ColumnSchema;
+use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
 use itertools::Itertools;
 use operator::expr_helper;
 use session::context::QueryContextBuilder;
@@ -174,7 +174,15 @@ pub fn table_info_value_to_relation_desc(
     let default_values = raw_schema
         .column_schemas
         .iter()
-        .map(|c| c.default_constraint().cloned())
+        .map(|c| {
+            c.default_constraint().cloned().or_else(|| {
+                if c.is_nullable() {
+                    Some(ColumnDefaultConstraint::null_value())
+                } else {
+                    None
+                }
+            })
+        })
         .collect_vec();
 
     Ok(TableDesc::new(relation_desc, default_values))

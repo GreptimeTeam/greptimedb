@@ -283,7 +283,7 @@ impl ExecutionPlan for RegionScanExec {
             .scanner
             .lock()
             .unwrap()
-            .scan_partition(partition)
+            .scan_partition(&self.metric, partition)
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
         let stream_metrics = StreamMetrics::new(&self.metric, partition);
         Ok(Box::pin(StreamWithMetricWrapper {

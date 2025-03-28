@@ -94,7 +94,9 @@ macro_rules! http_tests {
                 test_plain_text_ingestion,
                 test_identify_pipeline,
                 test_identify_pipeline_with_flatten,
+                test_identify_pipeline_with_custom_ts,
                 test_pipeline_dispatcher,
+                test_pipeline_suffix_template,
 
                 test_otlp_metrics,
                 test_otlp_traces_v0,
@@ -671,6 +673,19 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     // single match[]
     let res = client
         .get("/v1/prometheus/api/v1/label/host/values?match[]=demo&start=0&end=300")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = serde_json::from_str::<PrometheusJsonResponse>(&res.text().await).unwrap();
+    assert_eq!(body.status, "success");
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PrometheusResponse>(json!(["host1"])).unwrap()
+    );
+
+    // single match[] with __name__
+    let res = client
+        .get("/v1/prometheus/api/v1/label/host/values?match[]={__name__%3D%22demo%22}&start=0&end=300")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
@@ -1422,8 +1437,8 @@ pub async fn test_identify_pipeline(store_type: StorageType) {
 
     assert_eq!(res.status(), StatusCode::OK);
 
-    let line1_expected = r#"["10.170.***.***",1453809242,"","10.200.**.***","200","26/Jan/2016:19:54:02 +0800","POST/PutData?Category=YunOsAccountOpLog&AccessKeyId=<yourAccessKeyId>&Date=Fri%2C%2028%20Jun%202013%2006%3A53%3A30%20GMT&Topic=raw&Signature=<yourSignature>HTTP/1.1","aliyun-sdk-java","guaguagua","hasagei",null]"#;
-    let line2_expected = r#"["10.170.***.***",1453809242,"","10.200.**.***","200","26/Jan/2016:19:54:02 +0800","POST/PutData?Category=YunOsAccountOpLog&AccessKeyId=<yourAccessKeyId>&Date=Fri%2C%2028%20Jun%202013%2006%3A53%3A30%20GMT&Topic=raw&Signature=<yourSignature>HTTP/1.1","aliyun-sdk-java",null,null,null]"#;
+    let line1_expected = r#"[null,"10.170.***.***",1453809242,"","10.200.**.***","200","26/Jan/2016:19:54:02 +0800","POST/PutData?Category=YunOsAccountOpLog&AccessKeyId=<yourAccessKeyId>&Date=Fri%2C%2028%20Jun%202013%2006%3A53%3A30%20GMT&Topic=raw&Signature=<yourSignature>HTTP/1.1","aliyun-sdk-java",null,null]"#;
+    let line2_expected = r#"[null,"10.170.***.***",1453809242,"","10.200.**.***","200","26/Jan/2016:19:54:02 +0800","POST/PutData?Category=YunOsAccountOpLog&AccessKeyId=<yourAccessKeyId>&Date=Fri%2C%2028%20Jun%202013%2006%3A53%3A30%20GMT&Topic=raw&Signature=<yourSignature>HTTP/1.1","aliyun-sdk-java","guaguagua","hasagei"]"#;
     let res = client.get("/v1/sql?sql=select * from logs").send().await;
     assert_eq!(res.status(), StatusCode::OK);
     let resp: serde_json::Value = res.json().await;
@@ -1431,10 +1446,11 @@ pub async fn test_identify_pipeline(store_type: StorageType) {
     assert_eq!(result.len(), 2);
     let mut line1 = result[0].as_array().unwrap().clone();
     let mut line2 = result[1].as_array().unwrap().clone();
-    assert!(line1.last().unwrap().is_i64());
-    assert!(line2.last().unwrap().is_i64());
-    *line1.last_mut().unwrap() = serde_json::Value::Null;
-    *line2.last_mut().unwrap() = serde_json::Value::Null;
+    assert!(line1.first().unwrap().is_i64());
+    assert!(line2.first().unwrap().is_i64());
+    // set time index to null for assertion
+    *line1.first_mut().unwrap() = serde_json::Value::Null;
+    *line2.first_mut().unwrap() = serde_json::Value::Null;
 
     assert_eq!(
         line1,
@@ -1445,7 +1461,7 @@ pub async fn test_identify_pipeline(store_type: StorageType) {
         serde_json::from_str::<Vec<Value>>(line2_expected).unwrap()
     );
 
-    let expected = r#"[["__source__","String","","YES","","FIELD"],["__time__","Int64","","YES","","FIELD"],["__topic__","String","","YES","","FIELD"],["ip","String","","YES","","FIELD"],["status","String","","YES","","FIELD"],["time","String","","YES","","FIELD"],["url","String","","YES","","FIELD"],["user-agent","String","","YES","","FIELD"],["dongdongdong","String","","YES","","FIELD"],["hasagei","String","","YES","","FIELD"],["greptime_timestamp","TimestampNanosecond","PRI","NO","","TIMESTAMP"]]"#;
+    let expected = r#"[["greptime_timestamp","TimestampNanosecond","PRI","NO","","TIMESTAMP"],["__source__","String","","YES","","FIELD"],["__time__","Int64","","YES","","FIELD"],["__topic__","String","","YES","","FIELD"],["ip","String","","YES","","FIELD"],["status","String","","YES","","FIELD"],["time","String","","YES","","FIELD"],["url","String","","YES","","FIELD"],["user-agent","String","","YES","","FIELD"],["dongdongdong","String","","YES","","FIELD"],["hasagei","String","","YES","","FIELD"]]"#;
     validate_data("identity_schema", &client, "desc logs", expected).await;
 
     guard.remove_all().await;
@@ -1642,6 +1658,137 @@ transform:
     guard.remove_all().await;
 }
 
+pub async fn test_pipeline_suffix_template(storage_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(storage_type, "test_pipeline_suffix_template").await;
+
+    // handshake
+    let client = TestClient::new(app).await;
+
+    let root_pipeline = r#"
+processors:
+  - date:
+      field: time
+      formats:
+        - "%Y-%m-%d %H:%M:%S%.3f"
+      ignore_missing: true
+
+transform:
+  - fields:
+      - id1, id1_root
+      - id2, id2_root
+    type: int32
+  - fields:
+      - type
+      - log
+      - logger
+    type: string
+  - field: time
+    type: time
+    index: timestamp
+table_suffix: _${type}
+"#;
+
+    // 1. create pipeline
+    let res = client
+        .post("/v1/events/pipelines/root")
+        .header("Content-Type", "application/x-yaml")
+        .body(root_pipeline)
+        .send()
+        .await;
+
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 2. write data
+    let data_body = r#"
+[
+  {
+    "id1": "2436",
+    "id2": "2528",
+    "logger": "INTERACT.MANAGER",
+    "type": "http",
+    "time": "2024-05-25 20:16:37.217",
+    "log": "ClusterAdapter:enter sendTextDataToCluster\\n"
+  },
+  {
+    "id1": "2436",
+    "id2": "2528",
+    "logger": "INTERACT.MANAGER",
+    "type": "http",
+    "time": "2024-05-25 20:16:37.217",
+    "log": "ClusterAdapter:enter sendTextDataToCluster\\n"
+  },
+  {
+    "id1": "2436",
+    "id2": "2528",
+    "logger": "INTERACT.MANAGER",
+    "type": "db",
+    "time": "2024-05-25 20:16:37.217",
+    "log": "ClusterAdapter:enter sendTextDataToCluster\\n"
+  },
+  {
+    "id1": "2436",
+    "id2": "2528",
+    "logger": "INTERACT.MANAGER",
+    "type": "http",
+    "time": "2024-05-25 20:16:37.217",
+    "log": "ClusterAdapter:enter sendTextDataToCluster\\n"
+  },
+  {
+    "id1": "2436",
+    "id2": "2528",
+    "logger": "INTERACT.MANAGER",
+    "time": "2024-05-25 20:16:37.217",
+    "log": "ClusterAdapter:enter sendTextDataToCluster\\n"
+  }
+]
+"#;
+    let res = client
+        .post("/v1/events/logs?db=public&table=d_table&pipeline_name=root")
+        .header("Content-Type", "application/json")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 3. check table list
+    validate_data(
+        "test_pipeline_suffix_template_table_list",
+        &client,
+        "show tables",
+        "[[\"d_table\"],[\"d_table_db\"],[\"d_table_http\"],[\"demo\"],[\"numbers\"]]",
+    )
+    .await;
+
+    // 4. check each table's data
+    validate_data(
+        "test_pipeline_suffix_template_default",
+        &client,
+        "select * from d_table",
+        "[[2436,2528,null,\"ClusterAdapter:enter sendTextDataToCluster\\\\n\",\"INTERACT.MANAGER\",1716668197217000000]]",
+    )
+    .await;
+
+    validate_data(
+        "test_pipeline_name_template_db",
+        &client,
+        "select * from d_table_db",
+        "[[2436,2528,\"db\",\"ClusterAdapter:enter sendTextDataToCluster\\\\n\",\"INTERACT.MANAGER\",1716668197217000000]]",
+    )
+    .await;
+
+    validate_data(
+        "test_pipeline_name_template_http",
+        &client,
+        "select * from d_table_http",
+        "[[2436,2528,\"http\",\"ClusterAdapter:enter sendTextDataToCluster\\\\n\",\"INTERACT.MANAGER\",1716668197217000000],[2436,2528,\"http\",\"ClusterAdapter:enter sendTextDataToCluster\\\\n\",\"INTERACT.MANAGER\",1716668197217000000],[2436,2528,\"http\",\"ClusterAdapter:enter sendTextDataToCluster\\\\n\",\"INTERACT.MANAGER\",1716668197217000000]]",
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
 pub async fn test_identify_pipeline_with_flatten(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) =
@@ -1670,7 +1817,7 @@ pub async fn test_identify_pipeline_with_flatten(store_type: StorageType) {
 
     assert_eq!(StatusCode::OK, res.status());
 
-    let expected = r#"[["__source__","String","","YES","","FIELD"],["__time__","Int64","","YES","","FIELD"],["__topic__","String","","YES","","FIELD"],["custom_map.value_a","Json","","YES","","FIELD"],["custom_map.value_b","String","","YES","","FIELD"],["ip","String","","YES","","FIELD"],["status","String","","YES","","FIELD"],["time","String","","YES","","FIELD"],["url","String","","YES","","FIELD"],["user-agent","String","","YES","","FIELD"],["greptime_timestamp","TimestampNanosecond","PRI","NO","","TIMESTAMP"]]"#;
+    let expected = r#"[["greptime_timestamp","TimestampNanosecond","PRI","NO","","TIMESTAMP"],["__source__","String","","YES","","FIELD"],["__time__","Int64","","YES","","FIELD"],["__topic__","String","","YES","","FIELD"],["custom_map.value_a","Json","","YES","","FIELD"],["custom_map.value_b","String","","YES","","FIELD"],["ip","String","","YES","","FIELD"],["status","String","","YES","","FIELD"],["time","String","","YES","","FIELD"],["url","String","","YES","","FIELD"],["user-agent","String","","YES","","FIELD"]]"#;
     validate_data(
         "test_identify_pipeline_with_flatten_desc_logs",
         &client,
@@ -1684,6 +1831,92 @@ pub async fn test_identify_pipeline_with_flatten(store_type: StorageType) {
         "test_identify_pipeline_with_flatten_select_json",
         &client,
         "select `custom_map.value_a` from logs",
+        expected,
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
+pub async fn test_identify_pipeline_with_custom_ts(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_identify_pipeline_with_custom_ts")
+            .await;
+
+    let client = TestClient::new(app).await;
+    let body = r#"
+    [{"__time__":1453809242,"__source__":"10.170.***.***", "__name__":"hello"},
+    {"__time__":1453809252,"__source__":"10.170.***.***"}]
+    "#;
+
+    let res = send_req(
+        &client,
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/json"),
+        )],
+        "/v1/ingest?table=logs&pipeline_name=greptime_identity&custom_time_index=__time__;epoch;s",
+        body.as_bytes().to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    let expected = r#"[["__time__","TimestampSecond","PRI","NO","","TIMESTAMP"],["__name__","String","","YES","","FIELD"],["__source__","String","","YES","","FIELD"]]"#;
+    validate_data(
+        "test_identify_pipeline_with_custom_ts_desc_logs",
+        &client,
+        "desc logs",
+        expected,
+    )
+    .await;
+
+    let expected = r#"[[1453809242,"hello","10.170.***.***"],[1453809252,null,"10.170.***.***"]]"#;
+    validate_data(
+        "test_identify_pipeline_with_custom_ts_data",
+        &client,
+        "select * from logs",
+        expected,
+    )
+    .await;
+
+    // drop table
+    let res = client.get("/v1/sql?sql=drop table logs").send().await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body = r#"
+    [{"__time__":"2019-01-16 02:42:01+08:00","__source__":"10.170.***.***"},
+    {"__time__":"2019-01-16 02:42:04+08:00","__source__":"10.170.***.***", "__name__":"hello"}]
+    "#;
+
+    let res = send_req(
+        &client,
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/json"),
+        )],
+        "/v1/ingest?table=logs&pipeline_name=greptime_identity&custom_time_index=__time__;datestr;%Y-%m-%d %H:%M:%S%z",
+        body.as_bytes().to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    let expected = r#"[["__time__","TimestampNanosecond","PRI","NO","","TIMESTAMP"],["__source__","String","","YES","","FIELD"],["__name__","String","","YES","","FIELD"]]"#;
+    validate_data(
+        "test_identify_pipeline_with_custom_ts_desc_logs",
+        &client,
+        "desc logs",
+        expected,
+    )
+    .await;
+
+    let expected = r#"[[1547577721000000000,"10.170.***.***",null],[1547577724000000000,"10.170.***.***","hello"]]"#;
+    validate_data(
+        "test_identify_pipeline_with_custom_ts_data",
+        &client,
+        "select * from logs",
         expected,
     )
     .await;
@@ -2116,7 +2349,7 @@ pub async fn test_otlp_traces_v0(store_type: StorageType) {
     assert_eq!(StatusCode::OK, res.status());
 
     // select traces data
-    let expected = r#"[[1736480942444376000,1736480942444499000,123000,"telemetrygen","c05d7a4ec8e1f231f02ed6e8da8655b4","9630f2916e2f7909","d24f921c75f68e23","SPAN_KIND_SERVER","okey-dokey-0","STATUS_CODE_UNSET","","",{"net.peer.ip":"1.2.3.4","peer.service":"telemetrygen-client"},[],[],"telemetrygen","",{},{"service.name":"telemetrygen"}],[1736480942444376000,1736480942444499000,123000,"telemetrygen","c05d7a4ec8e1f231f02ed6e8da8655b4","d24f921c75f68e23","","SPAN_KIND_CLIENT","lets-go","STATUS_CODE_UNSET","","",{"net.peer.ip":"1.2.3.4","peer.service":"telemetrygen-server"},[],[],"telemetrygen","",{},{"service.name":"telemetrygen"}],[1736480942444589000,1736480942444712000,123000,"telemetrygen","cc9e0991a2e63d274984bd44ee669203","8f847259b0f6e1ab","eba7be77e3558179","SPAN_KIND_SERVER","okey-dokey-0","STATUS_CODE_UNSET","","",{"net.peer.ip":"1.2.3.4","peer.service":"telemetrygen-client"},[],[],"telemetrygen","",{},{"service.name":"telemetrygen"}],[1736480942444589000,1736480942444712000,123000,"telemetrygen","cc9e0991a2e63d274984bd44ee669203","eba7be77e3558179","","SPAN_KIND_CLIENT","lets-go","STATUS_CODE_UNSET","","",{"net.peer.ip":"1.2.3.4","peer.service":"telemetrygen-server"},[],[],"telemetrygen","",{},{"service.name":"telemetrygen"}]]"#;
+    let expected = r#"[[1736480942444376000,1736480942444499000,123000,"telemetrygen","c05d7a4ec8e1f231f02ed6e8da8655b4","d24f921c75f68e23","","SPAN_KIND_CLIENT","lets-go","STATUS_CODE_UNSET","","",{"net.peer.ip":"1.2.3.4","peer.service":"telemetrygen-server"},[],[],"telemetrygen","",{},{"service.name":"telemetrygen"}],[1736480942444376000,1736480942444499000,123000,"telemetrygen","c05d7a4ec8e1f231f02ed6e8da8655b4","9630f2916e2f7909","d24f921c75f68e23","SPAN_KIND_SERVER","okey-dokey-0","STATUS_CODE_UNSET","","",{"net.peer.ip":"1.2.3.4","peer.service":"telemetrygen-client"},[],[],"telemetrygen","",{},{"service.name":"telemetrygen"}],[1736480942444589000,1736480942444712000,123000,"telemetrygen","cc9e0991a2e63d274984bd44ee669203","eba7be77e3558179","","SPAN_KIND_CLIENT","lets-go","STATUS_CODE_UNSET","","",{"net.peer.ip":"1.2.3.4","peer.service":"telemetrygen-server"},[],[],"telemetrygen","",{},{"service.name":"telemetrygen"}],[1736480942444589000,1736480942444712000,123000,"telemetrygen","cc9e0991a2e63d274984bd44ee669203","8f847259b0f6e1ab","eba7be77e3558179","SPAN_KIND_SERVER","okey-dokey-0","STATUS_CODE_UNSET","","",{"net.peer.ip":"1.2.3.4","peer.service":"telemetrygen-client"},[],[],"telemetrygen","",{},{"service.name":"telemetrygen"}]]"#;
     validate_data(
         "otlp_traces",
         &client,
@@ -2198,10 +2431,10 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
     assert_eq!(StatusCode::OK, res.status());
 
     // select traces data
-    let expected = r#"[[1736480942444376000,1736480942444499000,123000,"c05d7a4ec8e1f231f02ed6e8da8655b4","9630f2916e2f7909","d24f921c75f68e23","SPAN_KIND_SERVER","okey-dokey-0","STATUS_CODE_UNSET","","","telemetrygen","","telemetrygen","1.2.3.4","telemetrygen-client",[],[]],[1736480942444376000,1736480942444499000,123000,"c05d7a4ec8e1f231f02ed6e8da8655b4","d24f921c75f68e23",null,"SPAN_KIND_CLIENT","lets-go","STATUS_CODE_UNSET","","","telemetrygen","","telemetrygen","1.2.3.4","telemetrygen-server",[],[]],[1736480942444589000,1736480942444712000,123000,"cc9e0991a2e63d274984bd44ee669203","8f847259b0f6e1ab","eba7be77e3558179","SPAN_KIND_SERVER","okey-dokey-0","STATUS_CODE_UNSET","","","telemetrygen","","telemetrygen","1.2.3.4","telemetrygen-client",[],[]],[1736480942444589000,1736480942444712000,123000,"cc9e0991a2e63d274984bd44ee669203","eba7be77e3558179",null,"SPAN_KIND_CLIENT","lets-go","STATUS_CODE_UNSET","","","telemetrygen","","telemetrygen","1.2.3.4","telemetrygen-server",[],[]]]"#;
+    let expected = r#"[[1736480942444376000,1736480942444499000,123000,null,"c05d7a4ec8e1f231f02ed6e8da8655b4","d24f921c75f68e23","SPAN_KIND_CLIENT","lets-go","STATUS_CODE_UNSET","","","telemetrygen","","telemetrygen","1.2.3.4","telemetrygen-server",[],[]],[1736480942444376000,1736480942444499000,123000,"d24f921c75f68e23","c05d7a4ec8e1f231f02ed6e8da8655b4","9630f2916e2f7909","SPAN_KIND_SERVER","okey-dokey-0","STATUS_CODE_UNSET","","","telemetrygen","","telemetrygen","1.2.3.4","telemetrygen-client",[],[]],[1736480942444589000,1736480942444712000,123000,null,"cc9e0991a2e63d274984bd44ee669203","eba7be77e3558179","SPAN_KIND_CLIENT","lets-go","STATUS_CODE_UNSET","","","telemetrygen","","telemetrygen","1.2.3.4","telemetrygen-server",[],[]],[1736480942444589000,1736480942444712000,123000,"eba7be77e3558179","cc9e0991a2e63d274984bd44ee669203","8f847259b0f6e1ab","SPAN_KIND_SERVER","okey-dokey-0","STATUS_CODE_UNSET","","","telemetrygen","","telemetrygen","1.2.3.4","telemetrygen-client",[],[]]]"#;
     validate_data("otlp_traces", &client, "select * from mytable;", expected).await;
 
-    let expected_ddl = r#"[["mytable","CREATE TABLE IF NOT EXISTS \"mytable\" (\n  \"timestamp\" TIMESTAMP(9) NOT NULL,\n  \"timestamp_end\" TIMESTAMP(9) NULL,\n  \"duration_nano\" BIGINT UNSIGNED NULL,\n  \"trace_id\" STRING NULL SKIPPING INDEX WITH(granularity = '10240', type = 'BLOOM'),\n  \"span_id\" STRING NULL,\n  \"parent_span_id\" STRING NULL SKIPPING INDEX WITH(granularity = '10240', type = 'BLOOM'),\n  \"span_kind\" STRING NULL,\n  \"span_name\" STRING NULL,\n  \"span_status_code\" STRING NULL,\n  \"span_status_message\" STRING NULL,\n  \"trace_state\" STRING NULL,\n  \"scope_name\" STRING NULL,\n  \"scope_version\" STRING NULL,\n  \"service_name\" STRING NULL SKIPPING INDEX WITH(granularity = '10240', type = 'BLOOM'),\n  \"span_attributes.net.peer.ip\" STRING NULL,\n  \"span_attributes.peer.service\" STRING NULL,\n  \"span_events\" JSON NULL,\n  \"span_links\" JSON NULL,\n  TIME INDEX (\"timestamp\"),\n  PRIMARY KEY (\"trace_id\", \"span_id\")\n)\nPARTITION ON COLUMNS (\"trace_id\") (\n  trace_id < '1',\n  trace_id >= '1' AND trace_id < '2',\n  trace_id >= '2' AND trace_id < '3',\n  trace_id >= '3' AND trace_id < '4',\n  trace_id >= '4' AND trace_id < '5',\n  trace_id >= '5' AND trace_id < '6',\n  trace_id >= '6' AND trace_id < '7',\n  trace_id >= '7' AND trace_id < '8',\n  trace_id >= '8' AND trace_id < '9',\n  trace_id >= '9' AND trace_id < 'A',\n  trace_id >= 'A' AND trace_id < 'B' OR trace_id >= 'a' AND trace_id < 'b',\n  trace_id >= 'B' AND trace_id < 'C' OR trace_id >= 'b' AND trace_id < 'c',\n  trace_id >= 'C' AND trace_id < 'D' OR trace_id >= 'c' AND trace_id < 'd',\n  trace_id >= 'D' AND trace_id < 'E' OR trace_id >= 'd' AND trace_id < 'e',\n  trace_id >= 'E' AND trace_id < 'F' OR trace_id >= 'e' AND trace_id < 'f',\n  trace_id >= 'F' AND trace_id < 'a' OR trace_id >= 'f'\n)\nENGINE=mito\nWITH(\n  append_mode = 'true',\n  table_data_model = 'greptime_trace_v1'\n)"]]"#;
+    let expected_ddl = r#"[["mytable","CREATE TABLE IF NOT EXISTS \"mytable\" (\n  \"timestamp\" TIMESTAMP(9) NOT NULL,\n  \"timestamp_end\" TIMESTAMP(9) NULL,\n  \"duration_nano\" BIGINT UNSIGNED NULL,\n  \"parent_span_id\" STRING NULL SKIPPING INDEX WITH(granularity = '10240', type = 'BLOOM'),\n  \"trace_id\" STRING NULL SKIPPING INDEX WITH(granularity = '10240', type = 'BLOOM'),\n  \"span_id\" STRING NULL,\n  \"span_kind\" STRING NULL,\n  \"span_name\" STRING NULL,\n  \"span_status_code\" STRING NULL,\n  \"span_status_message\" STRING NULL,\n  \"trace_state\" STRING NULL,\n  \"scope_name\" STRING NULL,\n  \"scope_version\" STRING NULL,\n  \"service_name\" STRING NULL SKIPPING INDEX WITH(granularity = '10240', type = 'BLOOM'),\n  \"span_attributes.net.peer.ip\" STRING NULL,\n  \"span_attributes.peer.service\" STRING NULL,\n  \"span_events\" JSON NULL,\n  \"span_links\" JSON NULL,\n  TIME INDEX (\"timestamp\"),\n  PRIMARY KEY (\"service_name\")\n)\nPARTITION ON COLUMNS (\"trace_id\") (\n  trace_id < '1',\n  trace_id >= '1' AND trace_id < '2',\n  trace_id >= '2' AND trace_id < '3',\n  trace_id >= '3' AND trace_id < '4',\n  trace_id >= '4' AND trace_id < '5',\n  trace_id >= '5' AND trace_id < '6',\n  trace_id >= '6' AND trace_id < '7',\n  trace_id >= '7' AND trace_id < '8',\n  trace_id >= '8' AND trace_id < '9',\n  trace_id >= '9' AND trace_id < 'A',\n  trace_id >= 'A' AND trace_id < 'B' OR trace_id >= 'a' AND trace_id < 'b',\n  trace_id >= 'B' AND trace_id < 'C' OR trace_id >= 'b' AND trace_id < 'c',\n  trace_id >= 'C' AND trace_id < 'D' OR trace_id >= 'c' AND trace_id < 'd',\n  trace_id >= 'D' AND trace_id < 'E' OR trace_id >= 'd' AND trace_id < 'e',\n  trace_id >= 'E' AND trace_id < 'F' OR trace_id >= 'e' AND trace_id < 'f',\n  trace_id >= 'F' AND trace_id < 'a' OR trace_id >= 'f'\n)\nENGINE=mito\nWITH(\n  append_mode = 'true',\n  table_data_model = 'greptime_trace_v1'\n)"]]"#;
     validate_data(
         "otlp_traces",
         &client,

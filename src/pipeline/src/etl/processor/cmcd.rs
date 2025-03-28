@@ -19,7 +19,7 @@
 use snafu::{OptionExt, ResultExt};
 use urlencoding::decode;
 
-use crate::etl::error::{
+use crate::error::{
     CmcdMissingKeySnafu, CmcdMissingValueSnafu, Error, FailedToParseFloatKeySnafu,
     FailedToParseIntKeySnafu, KeyMustBeStringSnafu, ProcessorExpectStringSnafu,
     ProcessorMissingFieldSnafu, Result,

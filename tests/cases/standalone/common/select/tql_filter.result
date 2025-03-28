@@ -21,7 +21,7 @@ tql analyze (1, 3, '1s') t1{ a = "a" };
 |_|_|_PromSeriesDivideExec: tags=["a"] REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges) REDACTED
+| 1_| 0_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges), distribution=PerSeries REDACTED
 |_|_|_|
 |_|_| Total rows: 3_|
 +-+-+-+
@@ -41,7 +41,7 @@ tql analyze (1, 3, '1s') t1{ a =~ ".*" };
 |_|_|_PromSeriesDivideExec: tags=["a"] REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges) REDACTED
+| 1_| 0_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges), distribution=PerSeries REDACTED
 |_|_|_|
 |_|_| Total rows: 6_|
 +-+-+-+
@@ -65,7 +65,7 @@ tql analyze (1, 3, '1s') t1{ a =~ "a.*" };
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: a@0 ~ a.* REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges) REDACTED
+|_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges), distribution=PerSeries REDACTED
 |_|_|_|
 |_|_| Total rows: 3_|
 +-+-+-+

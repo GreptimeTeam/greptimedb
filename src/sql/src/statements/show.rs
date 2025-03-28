@@ -97,6 +97,25 @@ impl Display for ShowIndex {
     }
 }
 
+/// The SQL `SHOW REGION` statement
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
+pub struct ShowRegion {
+    pub kind: ShowKind,
+    pub table: String,
+    pub database: Option<String>,
+}
+
+impl Display for ShowRegion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SHOW REGION IN {}", &self.table)?;
+        if let Some(database) = &self.database {
+            write!(f, " IN {database}")?;
+        }
+        format_kind!(self, f);
+        Ok(())
+    }
+}
+
 impl ShowDatabases {
     /// Creates a statement for `SHOW DATABASES`
     pub fn new(kind: ShowKind, full: bool) -> Self {

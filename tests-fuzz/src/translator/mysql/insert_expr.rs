@@ -82,7 +82,7 @@ mod tests {
     #[test]
     fn test_insert_into_translator() {
         let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0);
-        let omit_column_list = rng.gen_bool(0.2);
+        let omit_column_list = rng.random_bool(0.2);
 
         let test_ctx = test_utils::new_test_ctx();
         let insert_expr_generator = InsertExprGeneratorBuilder::default()
@@ -95,23 +95,23 @@ mod tests {
         let insert_expr = insert_expr_generator.generate(&mut rng).unwrap();
 
         let output = InsertIntoExprTranslator.translate(&insert_expr).unwrap();
-        let expected = r#"INSERT INTO test (ts, host, cpu_util) VALUES
-('+199601-11-07 21:32:56.695+0000', 'corrupti', 0.051130243193075464),
-('+40822-03-25 02:17:34.328+0000', NULL, 0.6552502332327004);"#;
+        let expected = r#"INSERT INTO test (cpu_util, ts, host) VALUES
+(0.494276426950336, '+210328-02-20 15:44:23.848+0000', 'aut'),
+(0.5240550121500691, '-78231-02-16 05:32:41.400+0000', 'in');"#;
         assert_eq!(output, expected);
 
         let insert_expr = insert_expr_generator.generate(&mut rng).unwrap();
         let output = InsertIntoExprTranslator.translate(&insert_expr).unwrap();
-        let expected = r#"INSERT INTO test (ts, memory_util) VALUES
-('+22606-05-02 04:44:02.976+0000', 0.7074194466620976),
-('+33689-06-12 08:42:11.037+0000', 0.40987428386535585);"#;
+        let expected = r#"INSERT INTO test (ts, host) VALUES
+('+137972-11-29 18:23:19.505+0000', 'repellendus'),
+('-237884-01-11 09:44:43.491+0000', 'a');"#;
         assert_eq!(output, expected);
 
         let insert_expr = insert_expr_generator.generate(&mut rng).unwrap();
         let output = InsertIntoExprTranslator.translate(&insert_expr).unwrap();
-        let expected = r#"INSERT INTO test (ts, disk_util, cpu_util, host) VALUES
-('+200107-10-22 01:36:36.924+0000', 0.9082597320638828, 0.020853190804573818, 'voluptates'),
-('+241156-12-16 20:52:15.185+0000', 0.6492772846116915, 0.18078027701087784, 'repellat');"#;
+        let expected = r#"INSERT INTO test (disk_util, ts) VALUES
+(0.399415030703252, '+154545-01-21 09:38:13.768+0000'),
+(NULL, '-227688-03-19 14:23:24.582+0000');"#;
         assert_eq!(output, expected);
     }
 }
