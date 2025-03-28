@@ -27,7 +27,7 @@ use snafu::{OptionExt, ResultExt};
 use store_api::storage::TimeSeriesRowSelector;
 
 use crate::error::{
-    DecodeStatsSnafu, FieldTypeMismatchSnafu, FilterRecordBatchSnafu, Result, StatsNotPresentSnafu,
+    DecodeStatsSnafu, FieldTypeMismatchSnafu, RecordBatchSnafu, Result, StatsNotPresentSnafu,
 };
 use crate::read::compat::CompatBatch;
 use crate::read::last_row::RowGroupLastRowCachedReader;
@@ -294,7 +294,7 @@ impl RangeBase {
                     };
                     if filter
                         .evaluate_scalar(&pk_value)
-                        .context(FilterRecordBatchSnafu)?
+                        .context(RecordBatchSnafu)?
                     {
                         continue;
                     } else {
@@ -311,11 +311,11 @@ impl RangeBase {
                     let field_col = &input.fields()[field_index].data;
                     filter
                         .evaluate_vector(field_col)
-                        .context(FilterRecordBatchSnafu)?
+                        .context(RecordBatchSnafu)?
                 }
                 SemanticType::Timestamp => filter
                     .evaluate_vector(input.timestamps())
-                    .context(FilterRecordBatchSnafu)?,
+                    .context(RecordBatchSnafu)?,
             };
 
             mask = mask.bitand(&result);
