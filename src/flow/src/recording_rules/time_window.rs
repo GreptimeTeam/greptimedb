@@ -42,7 +42,6 @@ use datatypes::vectors::{
     TimestampSecondVector, Vector,
 };
 use itertools::Itertools;
-use query::QueryEngineRef;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 
@@ -53,6 +52,13 @@ use crate::Error;
 
 /// Time window expr like `date_bin(INTERVAL '1' MINUTE, ts)`, this type help with
 /// evaluating the expr using given timestamp
+///
+/// The time window expr must satisfies following conditions:
+/// 1. The expr must be monotonic non-decreasing
+/// 2. The expr must only have one and only one input column with timestamp type, and the output column must be timestamp type
+/// 3. The expr must be deterministic
+///
+/// An example of time window expr is `date_bin(INTERVAL '1' MINUTE, ts)`
 #[derive(Debug, Clone)]
 pub struct TimeWindowExpr {
     phy_expr: PhysicalExprRef,
@@ -63,15 +69,7 @@ pub struct TimeWindowExpr {
 
 impl TimeWindowExpr {
     pub fn from_expr(expr: &Expr, column_name: &str, df_schema: &DFSchema) -> Result<Self, Error> {
-        let phy_planner = DefaultPhysicalPlanner::default();
-
-        let phy_expr: PhysicalExprRef = phy_planner
-            .create_physical_expr(expr, df_schema, &SessionContext::new().state())
-            .with_context(|_e| DatafusionSnafu {
-                context: format!(
-                    "Failed to create physical expression from {expr:?} using {df_schema:?}"
-                ),
-            })?;
+        let phy_expr: PhysicalExprRef = to_phy_expr(expr, df_schema)?;
         Ok(Self {
             phy_expr,
             column_name: column_name.to_string(),
@@ -85,9 +83,9 @@ impl TimeWindowExpr {
         current: Timestamp,
     ) -> Result<(Option<Timestamp>, Option<Timestamp>), Error> {
         let lower_bound =
-            find_expr_time_window_lower_bound(&self.logical_expr, &self.df_schema, current)?;
+            calc_expr_time_window_lower_bound(&self.logical_expr, &self.df_schema, current)?;
         let upper_bound =
-            find_expr_time_window_upper_bound(&self.logical_expr, &self.df_schema, current)?;
+            probe_expr_time_window_upper_bound(&self.logical_expr, &self.df_schema, current)?;
         Ok((lower_bound, upper_bound))
     }
 
@@ -245,6 +243,11 @@ fn columnar_to_ts_vector(columnar: &ColumnarValue) -> Result<Vec<Option<Timestam
 }
 
 /// Return (the column name of time index column, the time window expr, the expected time unit of time index column, the expr's schema for evaluating the time window)
+///
+/// The time window expr is expected to have one input column with Timestamp type, and also return Timestamp type, the time window expr is expected
+/// to be monotonic increasing and appears in the innermost GROUP BY clause
+///
+/// note this plan should only contain one TableScan
 async fn find_time_window_expr(
     plan: &LogicalPlan,
     catalog_man: CatalogManagerRef,
@@ -401,11 +404,12 @@ async fn find_time_window_expr(
 /// 3. show up in GROUP BY clause
 ///
 /// note this plan should only contain one TableScan
+#[cfg(test)]
 pub async fn find_plan_time_window_bound(
     plan: &LogicalPlan,
     current: Timestamp,
     query_ctx: QueryContextRef,
-    engine: QueryEngineRef,
+    engine: query::QueryEngineRef,
 ) -> Result<(String, Option<Timestamp>, Option<Timestamp>), Error> {
     // TODO(discord9): find the expr that do time window
     let catalog_man = engine.engine_state().catalog_manager();
@@ -422,9 +426,9 @@ pub async fn find_plan_time_window_bound(
     // if no time_window_expr is found, return None
     if let Some(time_window_expr) = time_window_expr {
         let lower_bound =
-            find_expr_time_window_lower_bound(&time_window_expr, &df_schema, new_current)?;
+            calc_expr_time_window_lower_bound(&time_window_expr, &df_schema, new_current)?;
         let upper_bound =
-            find_expr_time_window_upper_bound(&time_window_expr, &df_schema, new_current)?;
+            probe_expr_time_window_upper_bound(&time_window_expr, &df_schema, new_current)?;
         Ok((ts_col_name, lower_bound, upper_bound))
     } else {
         Ok((ts_col_name, None, None))
@@ -439,45 +443,30 @@ pub async fn find_plan_time_window_bound(
 /// of current time window given the current timestamp
 ///
 /// if return None, meaning this time window have no lower bound
-fn find_expr_time_window_lower_bound(
+fn calc_expr_time_window_lower_bound(
     expr: &Expr,
     df_schema: &DFSchema,
     current: Timestamp,
 ) -> Result<Option<Timestamp>, Error> {
-    let phy_planner = DefaultPhysicalPlanner::default();
+    let phy_expr: PhysicalExprRef = to_phy_expr(expr, df_schema)?;
 
-    let phy_expr: PhysicalExprRef = phy_planner
-        .create_physical_expr(expr, df_schema, &SessionContext::new().state())
-        .with_context(|_e| DatafusionSnafu {
-            context: format!(
-                "Failed to create physical expression from {expr:?} using {df_schema:?}"
-            ),
-        })?;
-
-    let cur_time_window = eval_ts_to_ts(&phy_expr, df_schema, current)?;
+    let cur_time_window = eval_phy_time_window_expr(&phy_expr, df_schema, current)?;
     let input_time_unit = cur_time_window.unit();
     Ok(cur_time_window.convert_to(input_time_unit))
 }
 
-/// Find the upper bound for time window expression
-fn find_expr_time_window_upper_bound(
+/// Probe for the upper bound for time window expression
+fn probe_expr_time_window_upper_bound(
     expr: &Expr,
     df_schema: &DFSchema,
     current: Timestamp,
 ) -> Result<Option<Timestamp>, Error> {
+    // TODO(discord9): special handling `date_bin` for faster path
     use std::cmp::Ordering;
 
-    let phy_planner = DefaultPhysicalPlanner::default();
+    let phy_expr: PhysicalExprRef = to_phy_expr(expr, df_schema)?;
 
-    let phy_expr: PhysicalExprRef = phy_planner
-        .create_physical_expr(expr, df_schema, &SessionContext::new().state())
-        .with_context(|_e| DatafusionSnafu {
-            context: format!(
-                "Failed to create physical expression from {expr:?} using {df_schema:?}"
-            ),
-        })?;
-
-    let cur_time_window = eval_ts_to_ts(&phy_expr, df_schema, current)?;
+    let cur_time_window = eval_phy_time_window_expr(&phy_expr, df_schema, current)?;
 
     // search to find the lower bound
     let mut offset: i64 = 1;
@@ -486,13 +475,13 @@ fn find_expr_time_window_upper_bound(
     // first expontial probe to found a range for binary search
     loop {
         let Some(next_val) = current.value().checked_add(offset) else {
-            // no upper bound if overflow
+            // no upper bound if overflow, which is ok
             return Ok(None);
         };
 
         let next_time_probe = common_time::Timestamp::new(next_val, current.unit());
 
-        let next_time_window = eval_ts_to_ts(&phy_expr, df_schema, next_time_probe)?;
+        let next_time_window = eval_phy_time_window_expr(&phy_expr, df_schema, next_time_probe)?;
 
         match next_time_window.cmp(&cur_time_window) {
             Ordering::Less => {UnexpectedSnafu {
@@ -520,8 +509,25 @@ fn find_expr_time_window_upper_bound(
 
     // binary search for the exact upper bound
 
+    binary_search_expr(
+        lower_bound,
+        upper_bound,
+        cur_time_window,
+        &phy_expr,
+        df_schema,
+    )
+    .map(Some)
+}
+
+fn binary_search_expr(
+    lower_bound: Option<Timestamp>,
+    upper_bound: Option<Timestamp>,
+    cur_time_window: Timestamp,
+    phy_expr: &PhysicalExprRef,
+    df_schema: &DFSchema,
+) -> Result<Timestamp, Error> {
     ensure!(lower_bound.map(|v|v.unit())==upper_bound.map(|v|v.unit()), UnexpectedSnafu{
-        reason: format!(" unit mismatch for time window expression {expr:?}, found {lower_bound:?} and {upper_bound:?}"),
+        reason: format!(" unit mismatch for time window expression {phy_expr:?}, found {lower_bound:?} and {upper_bound:?}"),
     });
 
     let output_unit = upper_bound
@@ -543,24 +549,24 @@ fn find_expr_time_window_upper_bound(
     while low < high {
         let mid = (low + high) / 2;
         let mid_probe = common_time::Timestamp::new(mid, output_unit);
-        let mid_time_window = eval_ts_to_ts(&phy_expr, df_schema, mid_probe)?;
+        let mid_time_window = eval_phy_time_window_expr(phy_expr, df_schema, mid_probe)?;
 
         match mid_time_window.cmp(&cur_time_window) {
-            Ordering::Less => UnexpectedSnafu {
-                reason: format!("Binary search failed for time window expression {expr:?}"),
+            std::cmp::Ordering::Less => UnexpectedSnafu {
+                reason: format!("Binary search failed for time window expression {phy_expr:?}"),
             }
             .fail()?,
-            Ordering::Equal => low = mid + 1,
-            Ordering::Greater => high = mid,
+            std::cmp::Ordering::Equal => low = mid + 1,
+            std::cmp::Ordering::Greater => high = mid,
         }
     }
 
     let final_upper_bound_for_time_window = common_time::Timestamp::new(high, output_unit);
-
-    Ok(Some(final_upper_bound_for_time_window))
+    Ok(final_upper_bound_for_time_window)
 }
 
-fn eval_ts_to_ts(
+/// Expect the `phy` expression only have one input column with Timestamp type, and also return Timestamp type
+fn eval_phy_time_window_expr(
     phy: &PhysicalExprRef,
     df_schema: &DFSchema,
     input_value: Timestamp,
@@ -615,6 +621,19 @@ fn eval_ts_to_ts(
         }
         .fail()?
     }
+}
+
+fn to_phy_expr(expr: &Expr, df_schema: &DFSchema) -> Result<PhysicalExprRef, Error> {
+    let phy_planner = DefaultPhysicalPlanner::default();
+
+    let phy_expr: PhysicalExprRef = phy_planner
+        .create_physical_expr(expr, df_schema, &SessionContext::new().state())
+        .with_context(|_e| DatafusionSnafu {
+            context: format!(
+                "Failed to create physical expression from {expr:?} using {df_schema:?}"
+            ),
+        })?;
+    Ok(phy_expr)
 }
 
 #[cfg(test)]
