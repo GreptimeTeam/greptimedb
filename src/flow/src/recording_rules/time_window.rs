@@ -73,8 +73,13 @@ pub struct TimeWindowExpr {
 }
 
 impl TimeWindowExpr {
-    pub fn from_expr(expr: &Expr, column_name: &str, df_schema: &DFSchema) -> Result<Self, Error> {
-        let phy_expr: PhysicalExprRef = to_phy_expr(expr, df_schema)?;
+    pub fn from_expr(
+        expr: &Expr,
+        column_name: &str,
+        df_schema: &DFSchema,
+        session: &SessionContext,
+    ) -> Result<Self, Error> {
+        let phy_expr: PhysicalExprRef = to_phy_expr(expr, df_schema, session)?;
         Ok(Self {
             phy_expr,
             column_name: column_name.to_string(),
@@ -88,9 +93,9 @@ impl TimeWindowExpr {
         current: Timestamp,
     ) -> Result<(Option<Timestamp>, Option<Timestamp>), Error> {
         let lower_bound =
-            calc_expr_time_window_lower_bound(&self.logical_expr, &self.df_schema, current)?;
+            calc_expr_time_window_lower_bound(&self.phy_expr, &self.df_schema, current)?;
         let upper_bound =
-            probe_expr_time_window_upper_bound(&self.logical_expr, &self.df_schema, current)?;
+            probe_expr_time_window_upper_bound(&self.phy_expr, &self.df_schema, current)?;
         Ok((lower_bound, upper_bound))
     }
 
@@ -436,10 +441,9 @@ pub async fn find_plan_time_window_bound(
 
     // if no time_window_expr is found, return None
     if let Some(time_window_expr) = time_window_expr {
-        let lower_bound =
-            calc_expr_time_window_lower_bound(&time_window_expr, &df_schema, new_current)?;
-        let upper_bound =
-            probe_expr_time_window_upper_bound(&time_window_expr, &df_schema, new_current)?;
+        let phy_expr = to_phy_expr(&time_window_expr, &df_schema, &SessionContext::new())?;
+        let lower_bound = calc_expr_time_window_lower_bound(&phy_expr, &df_schema, new_current)?;
+        let upper_bound = probe_expr_time_window_upper_bound(&phy_expr, &df_schema, new_current)?;
         Ok((ts_col_name, lower_bound, upper_bound))
     } else {
         Ok((ts_col_name, None, None))
@@ -455,29 +459,25 @@ pub async fn find_plan_time_window_bound(
 ///
 /// if return None, meaning this time window have no lower bound
 fn calc_expr_time_window_lower_bound(
-    expr: &Expr,
+    phy_expr: &PhysicalExprRef,
     df_schema: &DFSchema,
     current: Timestamp,
 ) -> Result<Option<Timestamp>, Error> {
-    let phy_expr: PhysicalExprRef = to_phy_expr(expr, df_schema)?;
-
-    let cur_time_window = eval_phy_time_window_expr(&phy_expr, df_schema, current)?;
+    let cur_time_window = eval_phy_time_window_expr(phy_expr, df_schema, current)?;
     let input_time_unit = cur_time_window.unit();
     Ok(cur_time_window.convert_to(input_time_unit))
 }
 
 /// Probe for the upper bound for time window expression
 fn probe_expr_time_window_upper_bound(
-    expr: &Expr,
+    phy_expr: &PhysicalExprRef,
     df_schema: &DFSchema,
     current: Timestamp,
 ) -> Result<Option<Timestamp>, Error> {
     // TODO(discord9): special handling `date_bin` for faster path
     use std::cmp::Ordering;
 
-    let phy_expr: PhysicalExprRef = to_phy_expr(expr, df_schema)?;
-
-    let cur_time_window = eval_phy_time_window_expr(&phy_expr, df_schema, current)?;
+    let cur_time_window = eval_phy_time_window_expr(phy_expr, df_schema, current)?;
 
     // search to find the lower bound
     let mut offset: i64 = 1;
@@ -492,12 +492,12 @@ fn probe_expr_time_window_upper_bound(
 
         let next_time_probe = common_time::Timestamp::new(next_val, current.unit());
 
-        let next_time_window = eval_phy_time_window_expr(&phy_expr, df_schema, next_time_probe)?;
+        let next_time_window = eval_phy_time_window_expr(phy_expr, df_schema, next_time_probe)?;
 
         match next_time_window.cmp(&cur_time_window) {
             Ordering::Less => UnexpectedSnafu {
                     reason: format!(
-                        "Unsupported time window expression, expect monotonic increasing for time window expression {expr:?}"
+                        "Unsupported time window expression, expect monotonic increasing for time window expression {phy_expr:?}"
                     ),
                 }
                 .fail()?,
@@ -523,7 +523,7 @@ fn probe_expr_time_window_upper_bound(
         lower_bound,
         upper_bound,
         cur_time_window,
-        &phy_expr,
+        phy_expr,
         df_schema,
     )
     .map(Some)
@@ -633,11 +633,15 @@ fn eval_phy_time_window_expr(
     }
 }
 
-fn to_phy_expr(expr: &Expr, df_schema: &DFSchema) -> Result<PhysicalExprRef, Error> {
+fn to_phy_expr(
+    expr: &Expr,
+    df_schema: &DFSchema,
+    session: &SessionContext,
+) -> Result<PhysicalExprRef, Error> {
     let phy_planner = DefaultPhysicalPlanner::default();
 
     let phy_expr: PhysicalExprRef = phy_planner
-        .create_physical_expr(expr, df_schema, &SessionContext::new().state())
+        .create_physical_expr(expr, df_schema, &session.state())
         .with_context(|_e| DatafusionSnafu {
             context: format!(
                 "Failed to create physical expression from {expr:?} using {df_schema:?}"
