@@ -254,10 +254,6 @@ impl VectorOp for DictionaryVector {
         })
     }
 
-    fn find_unique(&self, _selected: &mut common_base::BitVec, _prev_vector: Option<&dyn Vector>) {
-        // Method is deprecated.
-    }
-
     fn filter(&self, filter: &vectors::BooleanVector) -> Result<VectorRef> {
         let key_array: ArrayRef = Arc::new(self.array.keys().clone());
         let key_vector = Helper::try_into_vector(&key_array)?;
