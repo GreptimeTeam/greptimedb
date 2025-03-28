@@ -29,9 +29,7 @@ use store_api::mito_engine_options;
 use store_api::region_request::{AlterKind, RegionAlterRequest, SetRegionOption};
 use store_api::storage::RegionId;
 
-use crate::error::{
-    InvalidMetadataSnafu, InvalidRegionRequestSchemaVersionSnafu, InvalidRegionRequestSnafu, Result,
-};
+use crate::error::{InvalidMetadataSnafu, InvalidRegionRequestSnafu, Result};
 use crate::flush::FlushReason;
 use crate::manifest::action::RegionChange;
 use crate::region::options::CompactionOptions::Twcs;
@@ -83,22 +81,6 @@ impl<S> RegionWorkerLoop<S> {
             _ => {}
         }
 
-        if version.metadata.schema_version != request.schema_version {
-            // This is possible if we retry the request.
-            debug!(
-                "Ignores alter request, region id:{}, region schema version {} is not equal to request schema version {}",
-                region_id, version.metadata.schema_version, request.schema_version
-            );
-            // Returns an error.
-            sender.send(
-                InvalidRegionRequestSchemaVersionSnafu {
-                    expect: version.metadata.schema_version,
-                    actual: request.schema_version,
-                }
-                .fail(),
-            );
-            return;
-        }
         // Validate request.
         if let Err(e) = request.validate(&version.metadata) {
             // Invalid request.

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::assert_matches::assert_matches;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,7 +20,6 @@ use std::time::Duration;
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, Row, Rows, SemanticType};
 use common_error::ext::ErrorExt;
-use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, FulltextAnalyzer, FulltextOptions};
@@ -34,6 +34,7 @@ use store_api::storage::{RegionId, ScanRequest};
 use crate::config::MitoConfig;
 use crate::engine::listener::{AlterFlushListener, NotifyRegionChangeResultListener};
 use crate::engine::MitoEngine;
+use crate::error;
 use crate::test_util::{
     build_rows, build_rows_for_key, flush_region, put_rows, rows_schema, CreateRequestBuilder,
     TestEnv,
@@ -357,7 +358,8 @@ async fn test_alter_region_retry() {
         .handle_request(region_id, RegionRequest::Alter(request))
         .await
         .unwrap_err();
-    assert_eq!(err.status_code(), StatusCode::RequestOutdated);
+    let err = err.as_any().downcast_ref::<error::Error>().unwrap();
+    assert_matches!(err, &error::Error::InvalidRegionRequest { .. });
 
     let expected = "\
 +-------+-------+---------+---------------------+

@@ -443,17 +443,6 @@ pub struct RegionAlterRequest {
 impl RegionAlterRequest {
     /// Checks whether the request is valid, returns an error if it is invalid.
     pub fn validate(&self, metadata: &RegionMetadata) -> Result<()> {
-        ensure!(
-            metadata.schema_version == self.schema_version,
-            InvalidRegionRequestSnafu {
-                region_id: metadata.region_id,
-                err: format!(
-                    "region schema version {} is not equal to request schema version {}",
-                    metadata.schema_version, self.schema_version
-                ),
-            }
-        );
-
         self.kind.validate(metadata)?;
 
         Ok(())
@@ -1524,21 +1513,6 @@ mod tests {
         };
         kind.validate(&metadata).unwrap();
         assert!(kind.need_alter(&metadata));
-    }
-
-    #[test]
-    fn test_validate_schema_version() {
-        let mut metadata = new_metadata();
-        metadata.schema_version = 2;
-
-        RegionAlterRequest {
-            schema_version: 1,
-            kind: AlterKind::DropColumns {
-                names: vec!["field_0".to_string()],
-            },
-        }
-        .validate(&metadata)
-        .unwrap_err();
     }
 
     #[test]
