@@ -1033,6 +1033,7 @@ purge_interval = "1m"
 [procedure]
 max_retry_times = 3
 retry_delay = "500ms"
+max_running_procedures = 128
 
 [flow]
 

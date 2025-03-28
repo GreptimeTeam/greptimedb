@@ -118,6 +118,7 @@ impl Instance {
         let manager_config = ManagerConfig {
             max_retry_times: procedure_config.max_retry_times,
             retry_delay: procedure_config.retry_delay,
+            max_running_procedures: procedure_config.max_running_procedures,
             ..Default::default()
         };
         let procedure_manager = Arc::new(LocalManager::new(manager_config, state_store));
