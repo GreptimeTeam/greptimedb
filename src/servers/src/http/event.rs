@@ -33,7 +33,7 @@ use datatypes::value::column_data_to_json;
 use headers::ContentType;
 use lazy_static::lazy_static;
 use pipeline::util::to_pipeline_version;
-use pipeline::{GreptimePipelineParams, PipelineDefinition};
+use pipeline::{GreptimePipelineParams, PipelineDefinition, PipelineMap};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Deserializer, Map, Value};
 use session::context::{Channel, QueryContext, QueryContextRef};
@@ -99,12 +99,12 @@ pub struct LogIngesterQueryParams {
 
 /// LogIngestRequest is the internal request for log ingestion. The raw log input can be transformed into multiple LogIngestRequests.
 /// Multiple LogIngestRequests will be ingested into the same database with the same pipeline.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub(crate) struct LogIngestRequest {
     /// The table where the log data will be written to.
     pub table: String,
     /// The log data to be ingested.
-    pub values: Vec<Value>,
+    pub values: Vec<PipelineMap>,
 }
 
 pub struct PipelineContent(String);
@@ -281,7 +281,7 @@ fn transform_ndjson_array_factory(
 
 /// Dryrun pipeline with given data
 async fn dryrun_pipeline_inner(
-    value: Vec<Value>,
+    value: Vec<PipelineMap>,
     pipeline: Arc<pipeline::Pipeline>,
     pipeline_handler: PipelineHandlerRef,
     query_ctx: &QueryContextRef,
@@ -292,7 +292,7 @@ async fn dryrun_pipeline_inner(
         &pipeline_handler,
         &PipelineDefinition::Resolved(pipeline),
         &params,
-        pipeline::json_array_to_map(value).context(PipelineSnafu)?,
+        value,
         "dry_run".to_owned(),
         query_ctx,
         true,
@@ -449,7 +449,7 @@ pub async fn pipeline_dryrun(
 
     match check_pipeline_dryrun_params_valid(&payload) {
         Some(params) => {
-            let data = params.data;
+            let data = pipeline::json_array_to_map(params.data).context(PipelineSnafu)?;
 
             check_data_valid(data.len())?;
 
@@ -580,16 +580,20 @@ fn extract_pipeline_value_by_content_type(
     content_type: ContentType,
     payload: Bytes,
     ignore_errors: bool,
-) -> Result<Vec<Value>> {
+) -> Result<Vec<PipelineMap>> {
     Ok(match content_type {
-        ct if ct == *JSON_CONTENT_TYPE => transform_ndjson_array_factory(
-            Deserializer::from_slice(&payload).into_iter(),
-            ignore_errors,
-        )?,
+        ct if ct == *JSON_CONTENT_TYPE => {
+            // `simd_json` have not support stream and ndjson, see https://github.com/simd-lite/simd-json/issues/349
+            pipeline::json_array_to_map(transform_ndjson_array_factory(
+                Deserializer::from_slice(&payload).into_iter(),
+                ignore_errors,
+            )?)
+            .context(PipelineSnafu)?
+        }
         ct if ct == *NDJSON_CONTENT_TYPE => {
             let mut result = Vec::with_capacity(1000);
             for (index, line) in payload.lines().enumerate() {
-                let line = match line {
+                let mut line = match line {
                     Ok(line) if !line.is_empty() => line,
                     Ok(_) => continue, // Skip empty lines
                     Err(_) if ignore_errors => continue,
@@ -602,7 +606,8 @@ fn extract_pipeline_value_by_content_type(
                     }
                 };
 
-                if let Ok(v) = serde_json::from_str(&line) {
+                if let Ok(v) = unsafe { simd_json::to_owned_value(line.as_mut_vec()) } {
+                    let v = pipeline::simd_json_to_map(v).context(PipelineSnafu)?;
                     result.push(v);
                 } else if !ignore_errors {
                     warn!("invalid JSON at index: {}, content: {:?}", index, line);
@@ -617,8 +622,13 @@ fn extract_pipeline_value_by_content_type(
         ct if ct == *TEXT_CONTENT_TYPE || ct == *TEXT_UTF8_CONTENT_TYPE => payload
             .lines()
             .filter_map(|line| line.ok().filter(|line| !line.is_empty()))
-            .map(|line| json!({"message": line}))
-            .collect(),
+            .map(|line| {
+                let mut map = PipelineMap::new();
+                map.insert("message".to_string(), pipeline::Value::String(line));
+                map
+            })
+            .collect::<Vec<_>>(),
+
         _ => UnsupportedContentTypeSnafu { content_type }.fail()?,
     })
 }
@@ -646,7 +656,7 @@ pub(crate) async fn ingest_logs_inner(
             &state,
             &pipeline,
             &pipeline_params,
-            pipeline::json_array_to_map(request.values).context(PipelineSnafu)?,
+            request.values,
             request.table,
             &query_ctx,
             true,
@@ -754,14 +764,17 @@ mod tests {
         let fail_rest =
             extract_pipeline_value_by_content_type(ContentType::json(), payload.clone(), true);
         assert!(fail_rest.is_ok());
-        assert_eq!(fail_rest.unwrap(), vec![json!({"a": 1})]);
+        assert_eq!(
+            fail_rest.unwrap(),
+            pipeline::json_array_to_map(vec![json!({"a": 1})]).unwrap()
+        );
 
         let fail_only_wrong =
             extract_pipeline_value_by_content_type(NDJSON_CONTENT_TYPE.clone(), payload, true);
         assert!(fail_only_wrong.is_ok());
         assert_eq!(
             fail_only_wrong.unwrap(),
-            vec![json!({"a": 1}), json!({"c": 1})]
+            pipeline::json_array_to_map(vec![json!({"a": 1}), json!({"c": 1})]).unwrap()
         );
     }
 }

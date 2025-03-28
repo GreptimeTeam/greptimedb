@@ -160,6 +160,23 @@ pub fn json_array_to_map(val: Vec<serde_json::Value>) -> Result<Vec<PipelineMap>
     val.into_iter().map(json_to_map).collect()
 }
 
+pub fn simd_json_to_map(val: simd_json::OwnedValue) -> Result<PipelineMap> {
+    match val {
+        simd_json::OwnedValue::Object(map) => {
+            let mut intermediate_state = PipelineMap::new();
+            for (k, v) in map.into_iter() {
+                intermediate_state.insert(k, Value::try_from(v)?);
+            }
+            Ok(intermediate_state)
+        }
+        _ => PrepareValueMustBeObjectSnafu.fail(),
+    }
+}
+
+pub fn simd_json_array_to_map(val: Vec<simd_json::OwnedValue>) -> Result<Vec<PipelineMap>> {
+    val.into_iter().map(simd_json_to_map).collect()
+}
+
 impl Pipeline {
     pub fn exec_mut(&self, val: &mut PipelineMap) -> Result<PipelineExecOutput> {
         for processor in self.processors.iter() {
