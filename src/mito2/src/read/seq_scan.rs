@@ -149,7 +149,7 @@ impl SeqScan {
     /// Builds a reader to read sources. If `semaphore` is provided, reads sources in parallel
     /// if possible.
     #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
-    async fn build_reader_from_sources(
+    pub(crate) async fn build_reader_from_sources(
         stream_ctx: &StreamContext,
         mut sources: Vec<Source>,
         semaphore: Option<Arc<Semaphore>>,
@@ -498,7 +498,7 @@ impl fmt::Debug for SeqScan {
 }
 
 /// Builds sources for the partition range and push them to the `sources` vector.
-fn build_sources(
+pub(crate) fn build_sources(
     stream_ctx: &Arc<StreamContext>,
     part_range: &PartitionRange,
     compaction: bool,
