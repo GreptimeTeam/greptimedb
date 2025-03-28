@@ -534,7 +534,6 @@ mod tests {
 
         for (input, index, msg_field, expected) in test_cases {
             let requests = parse_bulk_request(input, &index, &msg_field);
-            println!("[DEBUG]requests: {:?}", requests);
             if expected.is_ok() {
                 assert_eq!(requests.unwrap(), expected.unwrap());
             } else {
