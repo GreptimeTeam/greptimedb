@@ -8055,6 +8055,7 @@ dependencies = [
  "common-query",
  "datafusion-common",
  "datafusion-expr",
+ "datafusion-physical-expr",
  "datatypes",
  "itertools 0.14.0",
  "serde",

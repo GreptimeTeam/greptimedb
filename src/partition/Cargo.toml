@@ -16,6 +16,7 @@ common-meta.workspace = true
 common-query.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
+datafusion-physical-expr.workspace = true
 datatypes.workspace = true
 itertools.workspace = true
 serde.workspace = true

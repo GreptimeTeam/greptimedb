@@ -16,8 +16,9 @@ use std::any::Any;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
+use datafusion_expr::ColumnarValue;
+use datafusion_physical_expr::PhysicalExpr;
 use datatypes::arrow::array::{BooleanArray, BooleanBufferBuilder, RecordBatch};
-use datatypes::arrow::buffer::BooleanBuffer;
 use datatypes::prelude::Value;
 use datatypes::vectors::{Helper, VectorRef};
 use serde::{Deserialize, Serialize};
@@ -168,7 +169,11 @@ impl MultiDimPartitionRule {
         let mut result = self
             .regions
             .iter()
-            .map(|region| (*region, BooleanBufferBuilder::new(num_rows)))
+            .map(|region| {
+                let mut builder = BooleanBufferBuilder::new(num_rows);
+                builder.append_n(num_rows, false);
+                (*region, builder)
+            })
             .collect::<HashMap<_, _>>();
 
         let cols = self.record_batch_to_cols(record_batch)?;
@@ -192,7 +197,25 @@ impl MultiDimPartitionRule {
         &self,
         record_batch: &RecordBatch,
     ) -> Result<HashMap<RegionNumber, BooleanArray>> {
-        todo!()
+        Ok(self
+            .exprs
+            .iter()
+            .zip(self.regions.iter())
+            .map(|(expr, region_num)| {
+                let df_expr = expr.try_as_physical_expr(&record_batch.schema()).unwrap();
+                let ColumnarValue::Array(column) = df_expr.evaluate(record_batch).unwrap() else {
+                    unreachable!("Expected an array")
+                };
+                (
+                    *region_num,
+                    column
+                        .as_any()
+                        .downcast_ref::<BooleanArray>()
+                        .unwrap()
+                        .clone(),
+                )
+            })
+            .collect())
     }
 }
 
@@ -343,6 +366,7 @@ impl<'a> RuleChecker<'a> {
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
+    use std::sync::Arc;
 
     use super::*;
     use crate::error::{self, Error};
@@ -691,5 +715,165 @@ mod tests {
 
         // check rule
         assert!(rule.is_err());
+    }
+
+    #[test]
+    fn test_split_record_batch_by_one_column() {
+        use datatypes::arrow::array::{Int64Array, StringArray};
+        use datatypes::arrow::datatypes::{DataType, Field, Schema};
+        use datatypes::arrow::record_batch::RecordBatch;
+
+        // Create a simple MultiDimPartitionRule
+        let rule = MultiDimPartitionRule::try_new(
+            vec!["host".to_string(), "value".to_string()],
+            vec![0, 1],
+            vec![
+                PartitionExpr::new(
+                    Operand::Column("host".to_string()),
+                    RestrictedOp::Lt,
+                    Operand::Value(Value::String("server1".into())),
+                ),
+                PartitionExpr::new(
+                    Operand::Column("host".to_string()),
+                    RestrictedOp::GtEq,
+                    Operand::Value(Value::String("server1".into())),
+                ),
+            ],
+        )
+        .unwrap();
+
+        // Create a record batch with test data
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("host", DataType::Utf8, false),
+            Field::new("value", DataType::Int64, false),
+        ]));
+
+        let host_array = StringArray::from(vec!["server1", "server2", "server3", "server1"]);
+        let value_array = Int64Array::from(vec![10, 20, 30, 40]);
+
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(host_array), Arc::new(value_array)])
+            .unwrap();
+
+        // Split the batch
+        let result = rule.split_record_batch(&batch).unwrap();
+        let expected = rule.split_record_batch_naive(&batch).unwrap();
+        assert_eq!(result.len(), expected.len());
+        for (region, value) in &result {
+            assert_eq!(
+                value,
+                expected.get(region).unwrap(),
+                "failed on region: {}",
+                region
+            );
+        }
+    }
+
+    #[test]
+    fn test_split_record_batch_empty() {
+        use datatypes::arrow::array::{Int64Array, StringArray};
+        use datatypes::arrow::datatypes::{DataType, Field, Schema};
+        use datatypes::arrow::record_batch::RecordBatch;
+
+        // Create a simple MultiDimPartitionRule
+        let rule = MultiDimPartitionRule::try_new(
+            vec!["host".to_string()],
+            vec![1],
+            vec![PartitionExpr::new(
+                Operand::Column("host".to_string()),
+                RestrictedOp::Eq,
+                Operand::Value(Value::String("server1".into())),
+            )],
+        )
+        .unwrap();
+
+        // Create an empty record batch
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("host", DataType::Utf8, false),
+            Field::new("value", DataType::Int64, false),
+        ]));
+
+        let host_array = StringArray::from(Vec::<&str>::new());
+        let value_array = Int64Array::from(Vec::<i64>::new());
+
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(host_array), Arc::new(value_array)])
+            .unwrap();
+
+        // Split the batch
+        let result = rule.split_record_batch(&batch).unwrap();
+
+        // Empty batch should result in empty map
+        assert_eq!(result.len(), 0);
+    }
+
+    #[test]
+    fn test_split_record_batch_complex_condition() {
+        use datatypes::arrow::array::{Int64Array, StringArray};
+        use datatypes::arrow::datatypes::{DataType, Field, Schema};
+        use datatypes::arrow::record_batch::RecordBatch;
+
+        // Create a rule with more complex conditions
+        let rule = MultiDimPartitionRule::try_new(
+            vec!["host".to_string(), "value".to_string()],
+            vec![1, 2],
+            vec![
+                // Region 1: host = 'server1' AND value > 20
+                PartitionExpr::new(
+                    Operand::Expr(PartitionExpr::new(
+                        Operand::Column("host".to_string()),
+                        RestrictedOp::Eq,
+                        Operand::Value(Value::String("server1".into())),
+                    )),
+                    RestrictedOp::And,
+                    Operand::Expr(PartitionExpr::new(
+                        Operand::Column("value".into()),
+                        RestrictedOp::Gt,
+                        Operand::Value(Value::Int64(20)),
+                    )),
+                ),
+                // Region 2: host = 'server2'
+                PartitionExpr::new(
+                    Operand::Column("host".to_string()),
+                    RestrictedOp::Eq,
+                    Operand::Value(Value::String("server2".into())),
+                ),
+            ],
+        )
+        .unwrap();
+
+        // Create a record batch with test data
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("host", DataType::Utf8, false),
+            Field::new("value", DataType::Int64, false),
+        ]));
+
+        let host_array = StringArray::from(vec!["server1", "server1", "server2", "server3"]);
+        let value_array = Int64Array::from(vec![10, 30, 20, 40]);
+
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(host_array), Arc::new(value_array)])
+            .unwrap();
+
+        // Split the batch
+        let result = rule.split_record_batch(&batch).unwrap();
+
+        // Check the results
+        assert_eq!(result.len(), 3); // 2 defined regions + 1 default region
+
+        // Check region 1 (server1 AND value > 20)
+        let region1_array = result.get(&1).unwrap();
+        assert_eq!(region1_array.len(), 1);
+        assert_eq!(
+            region1_array.iter().map(|b| b.unwrap()).collect::<Vec<_>>(),
+            vec![true]
+        );
+
+        // Check region 2 (server2)
+        assert!(result.contains_key(&2));
+        let region2_batch = result.get(&2).unwrap();
+        assert_eq!(region2_batch.len(), 1);
+
+        // Check default region (server1 with value <= 20 and server3)
+        assert!(result.contains_key(&0));
+        let default_batch = result.get(&0).unwrap();
+        assert_eq!(default_batch.len(), 2);
     }
 }
