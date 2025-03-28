@@ -147,7 +147,6 @@ type ProcedureMetaRef = Arc<ProcedureMeta>;
 /// Procedure loaded from store.
 struct LoadedProcedure {
     procedure: BoxedProcedure,
-    parent_id: Option<ProcedureId>,
     step: u32,
 }
 
@@ -157,8 +156,6 @@ pub(crate) struct ManagerContext {
     loaders: Mutex<HashMap<String, BoxedProcedureLoader>>,
     key_lock: KeyRwLock<String>,
     procedures: RwLock<HashMap<ProcedureId, ProcedureMetaRef>>,
-    /// Messages loaded from the procedure store.
-    messages: Mutex<HashMap<ProcedureId, ProcedureMessage>>,
     /// Ids and finished time of finished procedures.
     finished_procedures: Mutex<VecDeque<(ProcedureId, Instant)>>,
     /// Running flag.
@@ -179,7 +176,6 @@ impl ManagerContext {
             key_lock: KeyRwLock::new(),
             loaders: Mutex::new(HashMap::new()),
             procedures: RwLock::new(HashMap::new()),
-            messages: Mutex::new(HashMap::new()),
             finished_procedures: Mutex::new(VecDeque::new()),
             running: Arc::new(AtomicBool::new(false)),
         }
@@ -264,16 +260,6 @@ impl ManagerContext {
         }
     }
 
-    /// Load procedure with specific `procedure_id` from cached [ProcedureMessage]s.
-    fn load_one_procedure(&self, procedure_id: ProcedureId) -> Option<LoadedProcedure> {
-        let message = {
-            let messages = self.messages.lock().unwrap();
-            messages.get(&procedure_id).cloned()?
-        };
-
-        self.load_one_procedure_from_message(procedure_id, &message)
-    }
-
     /// Load procedure from specific [ProcedureMessage].
     fn load_one_procedure_from_message(
         &self,
@@ -301,7 +287,6 @@ impl ManagerContext {
 
         Some(LoadedProcedure {
             procedure,
-            parent_id: message.parent_id,
             step: message.step,
         })
     }
@@ -350,18 +335,8 @@ impl ManagerContext {
         }
     }
 
-    /// Remove cached [ProcedureMessage] by ids.
-    fn remove_messages(&self, procedure_ids: &[ProcedureId]) {
-        let mut messages = self.messages.lock().unwrap();
-        for procedure_id in procedure_ids {
-            let _ = messages.remove(procedure_id);
-        }
-    }
-
     /// Clean resources of finished procedures.
     fn on_procedures_finish(&self, procedure_ids: &[ProcedureId]) {
-        self.remove_messages(procedure_ids);
-
         // Since users need to query the procedure state, so we can't remove the
         // meta of the procedure directly.
         let now = Instant::now();
