@@ -29,6 +29,7 @@ use crate::dispatcher::{Dispatcher, Rule};
 use crate::error::{
     IntermediateKeyIndexSnafu, PrepareValueMustBeObjectSnafu, Result, YamlLoadSnafu, YamlParseSnafu,
 };
+use crate::tablesuffix::TableSuffixTemplate;
 use crate::GreptimeTransformer;
 
 const DESCRIPTION: &str = "description";
@@ -36,6 +37,7 @@ const PROCESSORS: &str = "processors";
 const TRANSFORM: &str = "transform";
 const TRANSFORMS: &str = "transforms";
 const DISPATCHER: &str = "dispatcher";
+const TABLESUFFIX: &str = "table_suffix";
 
 pub type PipelineMap = std::collections::BTreeMap<String, Value>;
 
@@ -76,11 +78,18 @@ pub fn parse(input: &Content) -> Result<Pipeline> {
                 None
             };
 
+            let tablesuffix = if !doc[TABLESUFFIX].is_badvalue() {
+                Some(TableSuffixTemplate::try_from(&doc[TABLESUFFIX])?)
+            } else {
+                None
+            };
+
             Ok(Pipeline {
                 description,
                 processors,
                 transformer,
                 dispatcher,
+                tablesuffix,
             })
         }
         Content::Json(_) => unimplemented!(),
@@ -93,6 +102,7 @@ pub struct Pipeline {
     processors: processor::Processors,
     dispatcher: Option<Dispatcher>,
     transformer: GreptimeTransformer,
+    tablesuffix: Option<TableSuffixTemplate>,
 }
 
 /// Where the pipeline executed is dispatched to, with context information
@@ -121,12 +131,12 @@ impl DispatchedTo {
 /// The result of pipeline execution
 #[derive(Debug)]
 pub enum PipelineExecOutput {
-    Transformed(Row),
+    Transformed((Row, Option<String>)),
     DispatchedTo(DispatchedTo),
 }
 
 impl PipelineExecOutput {
-    pub fn into_transformed(self) -> Option<Row> {
+    pub fn into_transformed(self) -> Option<(Row, Option<String>)> {
         if let Self::Transformed(o) = self {
             Some(o)
         } else {
@@ -162,22 +172,23 @@ pub fn json_array_to_map(val: Vec<serde_json::Value>) -> Result<Vec<PipelineMap>
 
 impl Pipeline {
     pub fn exec_mut(&self, val: &mut PipelineMap) -> Result<PipelineExecOutput> {
+        // process
         for processor in self.processors.iter() {
             processor.exec_mut(val)?;
         }
 
-        let matched_rule = self
-            .dispatcher
-            .as_ref()
-            .and_then(|dispatcher| dispatcher.exec(val));
-
-        match matched_rule {
-            None => self
-                .transformer
-                .transform_mut(val)
-                .map(PipelineExecOutput::Transformed),
-            Some(rule) => Ok(PipelineExecOutput::DispatchedTo(rule.into())),
+        // dispatch, fast return if matched
+        if let Some(rule) = self.dispatcher.as_ref().and_then(|d| d.exec(val)) {
+            return Ok(PipelineExecOutput::DispatchedTo(rule.into()));
         }
+
+        // transform
+        let row = self.transformer.transform_mut(val)?;
+
+        // generate table name
+        let table_suffix = self.tablesuffix.as_ref().and_then(|t| t.apply(val));
+
+        Ok(PipelineExecOutput::Transformed((row, table_suffix)))
     }
 
     pub fn processors(&self) -> &processor::Processors {
@@ -237,9 +248,9 @@ transform:
             .into_transformed()
             .unwrap();
 
-        assert_eq!(result.values[0].value_data, Some(ValueData::U32Value(1)));
-        assert_eq!(result.values[1].value_data, Some(ValueData::U32Value(2)));
-        match &result.values[2].value_data {
+        assert_eq!(result.0.values[0].value_data, Some(ValueData::U32Value(1)));
+        assert_eq!(result.0.values[1].value_data, Some(ValueData::U32Value(2)));
+        match &result.0.values[2].value_data {
             Some(ValueData::TimestampNanosecondValue(v)) => {
                 assert_ne!(*v, 0);
             }
@@ -289,7 +300,7 @@ transform:
             .unwrap();
         let sechema = pipeline.schemas();
 
-        assert_eq!(sechema.len(), result.values.len());
+        assert_eq!(sechema.len(), result.0.values.len());
         let test = vec![
             (
                 ColumnDataType::String as i32,
@@ -328,7 +339,7 @@ transform:
         ];
         for i in 0..sechema.len() {
             let schema = &sechema[i];
-            let value = &result.values[i];
+            let value = &result.0.values[i];
             assert_eq!(schema.datatype, test[i].0);
             assert_eq!(value.value_data, test[i].1);
         }
@@ -364,9 +375,9 @@ transform:
             .unwrap()
             .into_transformed()
             .unwrap();
-        assert_eq!(result.values[0].value_data, Some(ValueData::U32Value(1)));
-        assert_eq!(result.values[1].value_data, Some(ValueData::U32Value(2)));
-        match &result.values[2].value_data {
+        assert_eq!(result.0.values[0].value_data, Some(ValueData::U32Value(1)));
+        assert_eq!(result.0.values[1].value_data, Some(ValueData::U32Value(2)));
+        match &result.0.values[2].value_data {
             Some(ValueData::TimestampNanosecondValue(v)) => {
                 assert_ne!(*v, 0);
             }
@@ -409,7 +420,7 @@ transform:
             .unwrap();
         let output = Rows {
             schema,
-            rows: vec![row],
+            rows: vec![row.0],
         };
         let schemas = output.schema;
 

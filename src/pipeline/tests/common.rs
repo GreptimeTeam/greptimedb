@@ -35,7 +35,7 @@ pub fn parse_and_exec(input_str: &str, pipeline_yaml: &str) -> Rows {
                     .expect("failed to exec pipeline")
                     .into_transformed()
                     .expect("expect transformed result ");
-                rows.push(row);
+                rows.push(row.0);
             }
         }
         serde_json::Value::Object(_) => {
@@ -45,7 +45,7 @@ pub fn parse_and_exec(input_str: &str, pipeline_yaml: &str) -> Rows {
                 .expect("failed to exec pipeline")
                 .into_transformed()
                 .expect("expect transformed result ");
-            rows.push(row);
+            rows.push(row.0);
         }
         _ => {
             panic!("invalid input value");

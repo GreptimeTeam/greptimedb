@@ -639,6 +639,16 @@ pub enum Error {
         source: common_recordbatch::error::Error,
     },
 
+    #[snafu(display("A valid table suffix template is required for tablesuffix section"))]
+    RequiredTableSuffixTemplate,
+
+    #[snafu(display("Invalid table suffix template, input: {}", input))]
+    InvalidTableSuffixTemplate {
+        input: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to cast type, msg: {}", msg))]
     CastType {
         msg: String,
@@ -807,7 +817,9 @@ impl ErrorExt for Error {
             | FieldRequiredForDispatcher
             | TableSuffixRequiredForDispatcherRule
             | ValueRequiredForDispatcherRule
-            | ReachedMaxNestedLevels { .. } => StatusCode::InvalidArguments,
+            | ReachedMaxNestedLevels { .. }
+            | RequiredTableSuffixTemplate
+            | InvalidTableSuffixTemplate { .. } => StatusCode::InvalidArguments,
         }
     }
 
