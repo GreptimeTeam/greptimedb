@@ -37,7 +37,7 @@ const PROCESSORS: &str = "processors";
 const TRANSFORM: &str = "transform";
 const TRANSFORMS: &str = "transforms";
 const DISPATCHER: &str = "dispatcher";
-const TABLESUFFIX: &str = "tablesuffix";
+const TABLESUFFIX: &str = "table_suffix";
 
 pub type PipelineMap = std::collections::BTreeMap<String, Value>;
 

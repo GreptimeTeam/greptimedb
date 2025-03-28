@@ -1674,7 +1674,7 @@ transform:
   - field: time
     type: time
     index: timestamp
-tablesuffix: _${type}
+table_suffix: _${type}
 "#;
 
     // 1. create pipeline

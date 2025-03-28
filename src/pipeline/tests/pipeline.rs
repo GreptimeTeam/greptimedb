@@ -924,7 +924,7 @@ transform:
   - field: ts
     type: time
     index: timestamp
-tablesuffix: _${logger}
+table_suffix: _${logger}
 "#;
 
     let yaml_content = Content::Yaml(pipeline_yaml);

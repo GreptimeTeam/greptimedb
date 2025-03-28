@@ -35,7 +35,7 @@ lazy_static::lazy_static! {
 /// In case of any error occurs during runtime, no suffix will be added to the table name.
 ///
 /// ```yaml
-/// tablesuffix: _${xxx}_${b}
+/// table_suffix: _${xxx}_${b}
 /// ```
 ///
 /// For example, if the template is `_${xxx}_${b}`, and the pipeline context is
@@ -112,11 +112,11 @@ mod tests {
     #[test]
     fn test_table_suffix_parsing() {
         let yaml = r#"
-        tablesuffix: _${xxx}_${b}
+        table_suffix: _${xxx}_${b}
         "#;
         let config = YamlLoader::load_from_str(yaml);
         assert!(config.is_ok());
-        let config = config.unwrap()[0]["tablesuffix"].clone();
+        let config = config.unwrap()[0]["table_suffix"].clone();
         let name_template = TableSuffixTemplate::try_from(&config);
         assert!(name_template.is_ok());
         let name_template = name_template.unwrap();
