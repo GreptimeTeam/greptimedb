@@ -19,6 +19,7 @@ use axum::http::header;
 use axum::response::IntoResponse;
 use axum::Extension;
 use bytes::Bytes;
+use common_catalog::consts::TRACE_TABLE_NAME;
 use common_telemetry::tracing;
 use opentelemetry_proto::tonic::collector::logs::v1::{
     ExportLogsServiceRequest, ExportLogsServiceResponse,
@@ -38,7 +39,6 @@ use super::header::{write_cost_header_map, CONTENT_TYPE_PROTOBUF};
 use crate::error::{self, PipelineSnafu, Result};
 use crate::http::extractor::{LogTableName, PipelineInfo, SelectInfoWrapper, TraceTableName};
 use crate::metrics::METRIC_HTTP_OPENTELEMETRY_LOGS_ELAPSED;
-use crate::otlp::trace::TRACE_TABLE_NAME;
 use crate::query_handler::{OpenTelemetryProtocolHandlerRef, PipelineHandler};
 
 #[axum_macros::debug_handler]

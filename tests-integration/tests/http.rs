@@ -19,6 +19,7 @@ use std::str::FromStr;
 use api::prom_store::remote::WriteRequest;
 use auth::user_provider_from_option;
 use axum::http::{HeaderName, HeaderValue, StatusCode};
+use common_catalog::consts::TRACE_SERVICES_TABLE_NAME;
 use common_error::status_code::StatusCode as ErrorCode;
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -2348,6 +2349,15 @@ pub async fn test_otlp_traces_v0(store_type: StorageType) {
     .await;
     assert_eq!(StatusCode::OK, res.status());
 
+    let expected = r#"[["telemetrygen"]]"#;
+    validate_data(
+        "otlp_traces",
+        &client,
+        &format!("select service_name from {};", TRACE_SERVICES_TABLE_NAME),
+        expected,
+    )
+    .await;
+
     // select traces data
     let expected = r#"[[1736480942444376000,1736480942444499000,123000,"telemetrygen","c05d7a4ec8e1f231f02ed6e8da8655b4","d24f921c75f68e23","","SPAN_KIND_CLIENT","lets-go","STATUS_CODE_UNSET","","",{"net.peer.ip":"1.2.3.4","peer.service":"telemetrygen-server"},[],[],"telemetrygen","",{},{"service.name":"telemetrygen"}],[1736480942444376000,1736480942444499000,123000,"telemetrygen","c05d7a4ec8e1f231f02ed6e8da8655b4","9630f2916e2f7909","d24f921c75f68e23","SPAN_KIND_SERVER","okey-dokey-0","STATUS_CODE_UNSET","","",{"net.peer.ip":"1.2.3.4","peer.service":"telemetrygen-client"},[],[],"telemetrygen","",{},{"service.name":"telemetrygen"}],[1736480942444589000,1736480942444712000,123000,"telemetrygen","cc9e0991a2e63d274984bd44ee669203","eba7be77e3558179","","SPAN_KIND_CLIENT","lets-go","STATUS_CODE_UNSET","","",{"net.peer.ip":"1.2.3.4","peer.service":"telemetrygen-server"},[],[],"telemetrygen","",{},{"service.name":"telemetrygen"}],[1736480942444589000,1736480942444712000,123000,"telemetrygen","cc9e0991a2e63d274984bd44ee669203","8f847259b0f6e1ab","eba7be77e3558179","SPAN_KIND_SERVER","okey-dokey-0","STATUS_CODE_UNSET","","",{"net.peer.ip":"1.2.3.4","peer.service":"telemetrygen-client"},[],[],"telemetrygen","",{},{"service.name":"telemetrygen"}]]"#;
     validate_data(
@@ -2430,6 +2440,15 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
     .await;
     assert_eq!(StatusCode::OK, res.status());
 
+    let expected = r#"[["telemetrygen"]]"#;
+    validate_data(
+        "otlp_traces",
+        &client,
+        &format!("select service_name from {};", TRACE_SERVICES_TABLE_NAME),
+        expected,
+    )
+    .await;
+
     // select traces data
     let expected = r#"[[1736480942444376000,1736480942444499000,123000,null,"c05d7a4ec8e1f231f02ed6e8da8655b4","d24f921c75f68e23","SPAN_KIND_CLIENT","lets-go","STATUS_CODE_UNSET","","","telemetrygen","","telemetrygen","1.2.3.4","telemetrygen-server",[],[]],[1736480942444376000,1736480942444499000,123000,"d24f921c75f68e23","c05d7a4ec8e1f231f02ed6e8da8655b4","9630f2916e2f7909","SPAN_KIND_SERVER","okey-dokey-0","STATUS_CODE_UNSET","","","telemetrygen","","telemetrygen","1.2.3.4","telemetrygen-client",[],[]],[1736480942444589000,1736480942444712000,123000,null,"cc9e0991a2e63d274984bd44ee669203","eba7be77e3558179","SPAN_KIND_CLIENT","lets-go","STATUS_CODE_UNSET","","","telemetrygen","","telemetrygen","1.2.3.4","telemetrygen-server",[],[]],[1736480942444589000,1736480942444712000,123000,"eba7be77e3558179","cc9e0991a2e63d274984bd44ee669203","8f847259b0f6e1ab","SPAN_KIND_SERVER","okey-dokey-0","STATUS_CODE_UNSET","","","telemetrygen","","telemetrygen","1.2.3.4","telemetrygen-client",[],[]]]"#;
     validate_data("otlp_traces", &client, "select * from mytable;", expected).await;
@@ -2439,6 +2458,15 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
         "otlp_traces",
         &client,
         "show create table mytable;",
+        expected_ddl,
+    )
+    .await;
+
+    let expected_ddl = r#"[["greptime_trace_services","CREATE TABLE IF NOT EXISTS \"greptime_trace_services\" (\n  \"timestamp\" TIMESTAMP(9) NOT NULL,\n  \"service_name\" STRING NULL,\n  TIME INDEX (\"timestamp\")\n)\n\nENGINE=mito\nWITH(\n  append_mode = 'true'\n)"]]"#;
+    validate_data(
+        "otlp_traces",
+        &client,
+        &format!("show create table {};", TRACE_SERVICES_TABLE_NAME),
         expected_ddl,
     )
     .await;
@@ -3327,11 +3355,7 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     let client = TestClient::new(app).await;
 
     // Test empty response for `/api/services` API before writing any traces.
-    let res = client
-        .get("/v1/jaeger/api/services")
-        .header("x-greptime-trace-table-name", "mytable")
-        .send()
-        .await;
+    let res = client.get("/v1/jaeger/api/services").send().await;
     assert_eq!(StatusCode::OK, res.status());
     let expected = r#"
     {
@@ -3475,11 +3499,7 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     assert_eq!(StatusCode::OK, res.status());
 
     // Test `/api/services` API.
-    let res = client
-        .get("/v1/jaeger/api/services")
-        .header("x-greptime-trace-table-name", "mytable")
-        .send()
-        .await;
+    let res = client.get("/v1/jaeger/api/services").send().await;
     assert_eq!(StatusCode::OK, res.status());
     let expected = r#"
     {
