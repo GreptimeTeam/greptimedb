@@ -236,6 +236,29 @@ pub(super) fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>
             ],
             vec![],
         ),
+        STATISTICS => (
+            vec![
+                string_column("TABLE_CATALOG"),
+                string_column("TABLE_SCHEMA"),
+                string_column("TABLE_NAME"),
+                string_column("NON_UNIQUE"),
+                string_column("INDEX_SCHEMA"),
+                string_column("INDEX_NAME"),
+                bigint_column("SEQ_IN_INDEX"),
+                string_column("COLUMN_NAME"),
+                string_column("COLLATION"),
+                bigint_column("CARDINALITY"),
+                bigint_column("SUB_PART"),
+                string_column("PACKED"),
+                string_column("NULLABLE"),
+                string_column("INDEX_TYPE"),
+                string_column("COMMENT"),
+                string_column("INDEX_COMMENT"),
+                string_column("IS_VISIBLE"),
+                string_column("Expression"),
+            ],
+            vec![],
+        ),
 
         // MySQL(https://dev.mysql.com/doc/refman/8.2/en/information-schema-parameters-table.html)
         // has the spec that is different from

@@ -29,6 +29,7 @@ pub const FILES: &str = "files";
 pub const SCHEMATA: &str = "schemata";
 pub const KEY_COLUMN_USAGE: &str = "key_column_usage";
 pub const OPTIMIZER_TRACE: &str = "optimizer_trace";
+pub const STATISTICS: &str = "statistics";
 pub const PARAMETERS: &str = "parameters";
 pub const PROFILING: &str = "profiling";
 pub const REFERENTIAL_CONSTRAINTS: &str = "referential_constraints";
