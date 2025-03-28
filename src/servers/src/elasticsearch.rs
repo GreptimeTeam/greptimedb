@@ -507,13 +507,13 @@ mod tests {
                     LogIngestRequest {
                         table: "logs-generic-default".to_string(),
                         values: vec![
-                            pipeline::json_to_map(json!("172.16.0.1 - - [25/May/2024:20:19:37 +0000] \"GET /contact HTTP/1.1\" 404 162 \"-\" \"Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1\"")).unwrap(),
+                            pipeline::json_to_map(json!({"message": "172.16.0.1 - - [25/May/2024:20:19:37 +0000] \"GET /contact HTTP/1.1\" 404 162 \"-\" \"Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1\""})).unwrap(),
                         ],
                     },
                     LogIngestRequest {
                         table: "logs-generic-default".to_string(),
                         values: vec![
-                            pipeline::json_to_map(json!("10.0.0.1 - - [25/May/2024:20:18:37 +0000] \"GET /images/logo.png HTTP/1.1\" 304 0 \"-\" \"Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:89.0) Gecko/20100101 Firefox/89.0\"")).unwrap(),
+                            pipeline::json_to_map(json!({"message": "10.0.0.1 - - [25/May/2024:20:18:37 +0000] \"GET /images/logo.png HTTP/1.1\" 304 0 \"-\" \"Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:89.0) Gecko/20100101 Firefox/89.0\""})).unwrap(),
                         ],
                     },
                 ]),
@@ -534,6 +534,7 @@ mod tests {
 
         for (input, index, msg_field, expected) in test_cases {
             let requests = parse_bulk_request(input, &index, &msg_field);
+            println!("[DEBUG]requests: {:?}", requests);
             if expected.is_ok() {
                 assert_eq!(requests.unwrap(), expected.unwrap());
             } else {

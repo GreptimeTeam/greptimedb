@@ -772,9 +772,11 @@ mod tests {
         let fail_only_wrong =
             extract_pipeline_value_by_content_type(NDJSON_CONTENT_TYPE.clone(), payload, true);
         assert!(fail_only_wrong.is_ok());
-        assert_eq!(
-            fail_only_wrong.unwrap(),
-            pipeline::json_array_to_map(vec![json!({"a": 1}), json!({"c": 1})]).unwrap()
-        );
+
+        let mut map1 = PipelineMap::new();
+        map1.insert("a".to_string(), pipeline::Value::Uint64(1));
+        let mut map2 = PipelineMap::new();
+        map2.insert("c".to_string(), pipeline::Value::Uint64(1));
+        assert_eq!(fail_only_wrong.unwrap(), vec![map1, map2]);
     }
 }
