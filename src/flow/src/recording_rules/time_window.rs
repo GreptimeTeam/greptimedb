@@ -262,7 +262,7 @@ fn columnar_to_ts_vector(columnar: &ColumnarValue) -> Result<Vec<Option<Timestam
 /// to be monotonic increasing and appears in the innermost GROUP BY clause
 ///
 /// note this plan should only contain one TableScan
-async fn find_time_window_expr(
+pub async fn find_time_window_expr(
     plan: &LogicalPlan,
     catalog_man: CatalogManagerRef,
     query_ctx: QueryContextRef,

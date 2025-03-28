@@ -16,6 +16,7 @@
 
 use std::time::Duration;
 
+mod engine;
 mod frontend_client;
 mod time_window;
 mod utils;
