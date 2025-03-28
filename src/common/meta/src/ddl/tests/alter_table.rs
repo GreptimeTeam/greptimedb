@@ -227,7 +227,8 @@ async fn test_on_submit_alter_request_with_outdated_request() {
     };
     let mut procedure = AlterTableProcedure::new(table_id, alter_table_task, ddl_context).unwrap();
     procedure.on_prepare().await.unwrap();
-    procedure.submit_alter_region_requests().await.unwrap();
+    let err = procedure.submit_alter_region_requests().await.unwrap_err();
+    assert_eq!(err.is_retry_later(), false);
 }
 
 #[tokio::test]
