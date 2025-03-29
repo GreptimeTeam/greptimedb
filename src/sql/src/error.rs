@@ -345,6 +345,35 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Illegal primary keys definition: {}", msg))]
+    IllegalPrimaryKeysDef {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Unrecognized table option"))]
+    UnrecognizedTableOption {
+        #[snafu(implicit)]
+        location: Location,
+        source: table::error::Error,
+    },
+
+    #[snafu(display("Column datatype error"))]
+    ColumnDataType {
+        #[snafu(implicit)]
+        location: Location,
+        source: api::error::Error,
+    },
+
+    #[snafu(display("Failed to convert column default constraint, column: {}", column_name))]
+    ConvertColumnDefaultConstraint {
+        column_name: String,
+        #[snafu(implicit)]
+        location: Location,
+        source: datatypes::error::Error,
+    },
 }
 
 impl ErrorExt for Error {
@@ -364,7 +393,6 @@ impl ErrorExt for Error {
             | ConcreteTypeNotSupported { .. }
             | UnexpectedToken { .. }
             | InvalidDefault { .. } => StatusCode::InvalidSyntax,
-
             InvalidColumnOption { .. }
             | InvalidTableOptionValue { .. }
             | InvalidDatabaseName { .. }
@@ -381,15 +409,17 @@ impl ErrorExt for Error {
             | InvalidInterval { .. }
             | InvalidUnaryOp { .. }
             | UnsupportedUnaryOp { .. } => StatusCode::InvalidArguments,
-
             SerializeColumnDefaultConstraint { source, .. } => source.status_code(),
             ConvertToGrpcDataType { source, .. } => source.status_code(),
             Datatype { source, .. } => source.status_code(),
             ConvertToDfStatement { .. } => StatusCode::Internal,
             ConvertSqlValue { .. } | ConvertValue { .. } => StatusCode::Unsupported,
-
             PermissionDenied { .. } => StatusCode::PermissionDenied,
             SetFulltextOption { .. } | SetSkippingIndexOption { .. } => StatusCode::Unexpected,
+            IllegalPrimaryKeysDef { .. } => StatusCode::InvalidArguments,
+            ColumnDataType { .. } => StatusCode::InvalidArguments,
+            ConvertColumnDefaultConstraint { .. } => StatusCode::InvalidArguments,
+            UnrecognizedTableOption { source, .. } => source.status_code(),
         }
     }
 

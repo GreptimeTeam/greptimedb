@@ -17,7 +17,6 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use datafusion_expr::ColumnarValue;
-use datafusion_physical_expr::PhysicalExpr;
 use datatypes::arrow::array::{BooleanArray, BooleanBufferBuilder, RecordBatch};
 use datatypes::prelude::Value;
 use datatypes::vectors::{Helper, VectorRef};
@@ -368,8 +367,15 @@ mod tests {
     use std::assert_matches::assert_matches;
     use std::sync::Arc;
 
+    use datatypes::arrow::array::{ArrayRef, Int32Array};
+    use session::context::QueryContext;
+    use sql::dialect::GreptimeDbDialect;
+    use sql::parser::{ParseOptions, ParserContext};
+    use sql::statements::statement::Statement;
+
     use super::*;
     use crate::error::{self, Error};
+    use crate::utils::parse_partition_columns_and_exprs;
 
     #[test]
     fn test_find_region() {
@@ -805,75 +811,94 @@ mod tests {
         assert_eq!(result.len(), 0);
     }
 
-    #[test]
-    fn test_split_record_batch_complex_condition() {
-        use datatypes::arrow::array::{Int64Array, StringArray};
-        use datatypes::arrow::datatypes::{DataType, Field, Schema};
-        use datatypes::arrow::record_batch::RecordBatch;
+    fn sql_to_partition_rule(
+        sql: &str,
+        regions: Vec<RegionNumber>,
+    ) -> Result<MultiDimPartitionRule> {
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
 
-        // Create a rule with more complex conditions
-        let rule = MultiDimPartitionRule::try_new(
-            vec!["host".to_string(), "value".to_string()],
-            vec![1, 2],
-            vec![
-                // Region 1: host = 'server1' AND value > 20
-                PartitionExpr::new(
-                    Operand::Expr(PartitionExpr::new(
-                        Operand::Column("host".to_string()),
-                        RestrictedOp::Eq,
-                        Operand::Value(Value::String("server1".into())),
-                    )),
-                    RestrictedOp::And,
-                    Operand::Expr(PartitionExpr::new(
-                        Operand::Column("value".into()),
-                        RestrictedOp::Gt,
-                        Operand::Value(Value::Int64(20)),
-                    )),
-                ),
-                // Region 2: host = 'server2'
-                PartitionExpr::new(
-                    Operand::Column("host".to_string()),
-                    RestrictedOp::Eq,
-                    Operand::Value(Value::String("server2".into())),
-                ),
-            ],
+        let Statement::CreateTable(create_table) = &stmts[0] else {
+            unreachable!("Expected a CreateTable statement");
+        };
+
+        let expr = sql::util::create_to_expr(
+            create_table,
+            "default",
+            "default",
+            common_time::timezone::get_timezone(None),
         )
         .unwrap();
 
+        let (partition_cols, _, exprs) = parse_partition_columns_and_exprs(
+            &expr,
+            create_table.partitions.clone(),
+            &QueryContext::arc(),
+        )
+        .unwrap();
+
+        // Create a rule with more complex conditions
+        MultiDimPartitionRule::try_new(partition_cols, regions, exprs)
+    }
+
+    #[test]
+    fn test_split_record_batch_by_sql() {
+        use datatypes::arrow::array::StringArray;
+        use datatypes::arrow::datatypes::{DataType, Field, Schema};
+        use datatypes::arrow::record_batch::RecordBatch;
+
+        let sql = r#"CREATE TABLE test (a INT, b STRING, c TIMESTAMP, TIME INDEX (c) )
+    PARTITION ON COLUMNS (a) (
+        a < 20,
+        a >= 20
+    )"#;
+        let rule = sql_to_partition_rule(sql, vec![0, 1, 2]).unwrap();
+
         // Create a record batch with test data
         let schema = Arc::new(Schema::new(vec![
-            Field::new("host", DataType::Utf8, false),
-            Field::new("value", DataType::Int64, false),
+            Field::new("a", DataType::Int32, false),
+            Field::new("b", DataType::Utf8, false),
         ]));
 
-        let host_array = StringArray::from(vec!["server1", "server1", "server2", "server3"]);
-        let value_array = Int64Array::from(vec![10, 30, 20, 40]);
+        let a_array = Arc::new(Int32Array::from(vec![10, 30, 20, 40])) as ArrayRef;
+        let b_array = Arc::new(StringArray::from(vec![
+            "server1", "server1", "server2", "server3",
+        ])) as ArrayRef;
 
-        let batch = RecordBatch::try_new(schema, vec![Arc::new(host_array), Arc::new(value_array)])
-            .unwrap();
+        let batch = RecordBatch::try_new(schema, vec![a_array, b_array]).unwrap();
 
         // Split the batch
         let result = rule.split_record_batch(&batch).unwrap();
 
         // Check the results
-        assert_eq!(result.len(), 3); // 2 defined regions + 1 default region
+        assert_eq!(result.len(), 2); // 2 defined regions
 
-        // Check region 1 (server1 AND value > 20)
-        let region1_array = result.get(&1).unwrap();
-        assert_eq!(region1_array.len(), 1);
+        // Check region 0 (a < 20)
+        let region0_selection = result.get(&0).unwrap();
+        assert_eq!(region0_selection.len(), 4);
         assert_eq!(
-            region1_array.iter().map(|b| b.unwrap()).collect::<Vec<_>>(),
-            vec![true]
+            region0_selection
+                .iter()
+                .map(|b| b.unwrap())
+                .collect::<Vec<_>>(),
+            vec![true, false, false, false]
         );
 
-        // Check region 2 (server2)
-        assert!(result.contains_key(&2));
-        let region2_batch = result.get(&2).unwrap();
-        assert_eq!(region2_batch.len(), 1);
-
-        // Check default region (server1 with value <= 20 and server3)
-        assert!(result.contains_key(&0));
-        let default_batch = result.get(&0).unwrap();
-        assert_eq!(default_batch.len(), 2);
+        // Check region 1 (a >= 20)
+        let region1_selection = result.get(&1).unwrap();
+        assert_eq!(region1_selection.len(), 4);
+        assert_eq!(
+            region1_selection
+                .iter()
+                .map(|b| b.unwrap())
+                .collect::<Vec<_>>(),
+            vec![false, true, true, true]
+        );
     }
+}
+
+#[cfg(test)]
+mod test_split_record_batch {
+    use super::*;
 }

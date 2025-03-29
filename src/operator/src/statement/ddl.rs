@@ -15,7 +15,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use api::helper::ColumnDataTypeWrapper;
 use api::v1::meta::CreateFlowTask as PbCreateFlowTask;
 use api::v1::{
     column_def, AlterDatabaseExpr, AlterTableExpr, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
@@ -34,17 +33,11 @@ use common_meta::rpc::ddl::{
     CreateFlowTask, DdlTask, DropFlowTask, DropViewTask, SubmitDdlTaskRequest,
     SubmitDdlTaskResponse,
 };
-use common_meta::rpc::router::{Partition, Partition as MetaPartition};
+use common_meta::rpc::router::Partition;
 use common_query::Output;
 use common_telemetry::{debug, info, tracing};
-use common_time::Timezone;
-use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{RawSchema, Schema};
-use datatypes::value::Value;
 use lazy_static::lazy_static;
-use partition::expr::{Operand, PartitionExpr, RestrictedOp};
-use partition::multi_dim::MultiDimPartitionRule;
-use partition::partition::{PartitionBound, PartitionDef};
 use partition::utils::parse_partitions;
 use query::parser::QueryStatement;
 use query::plan::extract_and_rewrite_full_table_names;
@@ -58,9 +51,7 @@ use sql::statements::alter::{AlterDatabase, AlterTable};
 use sql::statements::create::{
     CreateExternalTable, CreateFlow, CreateTable, CreateTableLike, CreateView, Partitions,
 };
-use sql::statements::sql_value_to_value;
 use sql::statements::statement::Statement;
-use sqlparser::ast::{Expr, Ident, UnaryOperator, Value as ParserValue};
 use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::dist_table::DistTable;
@@ -71,13 +62,12 @@ use table::TableRef;
 
 use super::StatementExecutor;
 use crate::error::{
-    self, AlterExprToRequestSnafu, CatalogSnafu, ColumnDataTypeSnafu, ColumnNotFoundSnafu,
-    ConvertSchemaSnafu, CreateLogicalTablesSnafu, CreateTableInfoSnafu, 
-    EmptyDdlExprSnafu, ExtractTableNamesSnafu, FlowNotFoundSnafu, 
-    InvalidPartitionSnafu, InvalidSqlSnafu, InvalidTableNameSnafu, InvalidViewNameSnafu,
-    InvalidViewStmtSnafu, ParseSqlValueSnafu, Result, SchemaInUseSnafu, SchemaNotFoundSnafu,
-    SchemaReadOnlySnafu, SubstraitCodecSnafu, TableAlreadyExistsSnafu, TableMetadataManagerSnafu,
-    TableNotFoundSnafu, UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
+    self, AlterExprToRequestSnafu, CatalogSnafu, ColumnNotFoundSnafu, ConvertSchemaSnafu,
+    CreateLogicalTablesSnafu, CreateTableInfoSnafu, EmptyDdlExprSnafu, ExtractTableNamesSnafu,
+    FlowNotFoundSnafu, InvalidSqlSnafu, InvalidTableNameSnafu, InvalidViewNameSnafu,
+    InvalidViewStmtSnafu, Result, SchemaInUseSnafu, SchemaNotFoundSnafu, SchemaReadOnlySnafu,
+    SubstraitCodecSnafu, TableAlreadyExistsSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
+    UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
 };
 use crate::expr_helper;
 use crate::statement::show::create_partitions_stmt;
@@ -250,7 +240,7 @@ impl StatementExecutor {
         );
 
         let (partitions, partition_cols) = parse_partitions(create_table, partitions, &query_ctx)
-        .context(error::InvalidPartitionSnafu)?;
+            .context(error::InvalidPartitionSnafu)?;
         let mut table_info = create_table_info(create_table, partition_cols)?;
 
         let resp = self
@@ -1405,8 +1395,6 @@ fn create_table_info(
     };
     Ok(table_info)
 }
-
-
 
 #[cfg(test)]
 mod test {

@@ -1,5 +1,5 @@
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::{column_def, CreateTableExpr};
+use api::v1::CreateTableExpr;
 use common_meta::rpc::router::Partition as MetaPartition;
 use common_time::Timezone;
 use datafusion_common::HashMap;
@@ -7,7 +7,6 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::value::Value;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
-use sql::error::ParseSqlValueSnafu;
 use sql::statements::create::Partitions;
 use sql::statements::sql_value_to_value;
 use sqlparser::ast::{Expr, Ident, UnaryOperator, Value as ParserValue};
@@ -82,7 +81,7 @@ fn find_partition_columns(partitions: &Option<Partitions>) -> Result<Vec<String>
     Ok(columns)
 }
 
-fn parse_partition_columns_and_exprs(
+pub fn parse_partition_columns_and_exprs(
     create_table: &CreateTableExpr,
     partitions: Option<Partitions>,
     query_ctx: &QueryContextRef,

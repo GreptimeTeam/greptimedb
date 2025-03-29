@@ -427,13 +427,6 @@ pub enum Error {
         source: query::error::Error,
     },
 
-    #[snafu(display("Illegal primary keys definition: {}", msg))]
-    IllegalPrimaryKeysDef {
-        msg: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Unrecognized table option"))]
     UnrecognizedTableOption {
         #[snafu(implicit)]
@@ -636,7 +629,7 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-    
+
     #[snafu(display("Failed to parse sql value"))]
     ParseSqlValue {
         source: sql::error::Error,
@@ -717,8 +710,6 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-
-    
 
     #[snafu(display("Invalid configuration value."))]
     InvalidConfigValue {
@@ -806,7 +797,6 @@ impl ErrorExt for Error {
             | Error::InvalidConfigValue { .. }
             | Error::InvalidInsertRequest { .. }
             | Error::InvalidDeleteRequest { .. }
-            | Error::IllegalPrimaryKeysDef { .. }
             | Error::SchemaNotFound { .. }
             | Error::SchemaExists { .. }
             | Error::SchemaInUse { .. }
@@ -911,7 +901,7 @@ impl ErrorExt for Error {
             Error::AlterExprToRequest { source, .. } => source.status_code(),
 
             Error::External { source, .. } => source.status_code(),
-            | Error::FindTablePartitionRule { source, .. }
+            Error::FindTablePartitionRule { source, .. }
             | Error::SplitInsert { source, .. }
             | Error::SplitDelete { source, .. }
             | Error::FindRegionLeader { source, .. } => source.status_code(),
