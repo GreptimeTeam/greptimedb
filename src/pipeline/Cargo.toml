@@ -53,6 +53,7 @@ query.workspace = true
 regex.workspace = true
 serde_json.workspace = true
 session.workspace = true
+simd-json.workspace = true
 snafu.workspace = true
 sql.workspace = true
 table.workspace = true
