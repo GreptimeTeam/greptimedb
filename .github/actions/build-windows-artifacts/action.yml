@@ -47,7 +47,6 @@ runs:
       shell: pwsh
       run: make test sqlness-test
       env:
-        RUSTUP_WINDOWS_PATH_ADD_BIN: 1 # Workaround for https://github.com/nextest-rs/nextest/issues/1493
         RUST_BACKTRACE: 1
         SQLNESS_OPTS: "--preserve-state"
 
