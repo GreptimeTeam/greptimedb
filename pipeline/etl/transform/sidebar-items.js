@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["TRANSFORM_DEFAULT","TRANSFORM_FIELD","TRANSFORM_FIELDS","TRANSFORM_INDEX","TRANSFORM_ON_FAILURE","TRANSFORM_TAG","TRANSFORM_TYPE"],"enum":["OnFailure"],"mod":["index","transformer"],"struct":["Transform","Transforms"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DISK_SIZE","ENGINE","INDEX_SIZE","INIT_CAPACITY","MANIFEST_SIZE","MEMTABLE_SIZE","REGION_ID","REGION_NUMBER","REGION_ROLE","REGION_ROWS","SST_SIZE","TABLE_ID"],"struct":["InformationSchemaRegionStatistics","InformationSchemaRegionStatisticsBuilder"]};

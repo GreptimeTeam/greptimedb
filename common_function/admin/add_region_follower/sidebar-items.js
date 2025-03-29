@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["add_region_follower","signature"],"struct":["AddRegionFollowerFunction"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Request","Response"],"fn":["create_inter_thread_call","create_worker","from_send_error"],"struct":["ActiveDataflowState","InterThreadCallClient","InterThreadCallServer","Worker","WorkerHandle"],"type":["ReqId","SharedBuf"]};

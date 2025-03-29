@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["__create","__read_all"]};
