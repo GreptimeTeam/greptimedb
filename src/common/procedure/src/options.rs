@@ -29,6 +29,8 @@ pub struct ProcedureConfig {
     pub retry_delay: Duration,
     /// `None` stands for no limit.
     pub max_metadata_value_size: Option<ReadableSize>,
+    /// Max running procedures.
+    pub max_running_procedures: usize,
 }
 
 impl Default for ProcedureConfig {
@@ -37,6 +39,7 @@ impl Default for ProcedureConfig {
             max_retry_times: 3,
             retry_delay: Duration::from_millis(500),
             max_metadata_value_size: None,
+            max_running_procedures: 128,
         }
     }
 }

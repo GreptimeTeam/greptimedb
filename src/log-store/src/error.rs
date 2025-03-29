@@ -15,6 +15,7 @@
 use std::any::Any;
 
 use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_runtime::error::Error as RuntimeError;
 use serde_json::error::Error as JsonError;
@@ -310,10 +311,72 @@ pub enum Error {
     },
 }
 
+pub type Result<T> = std::result::Result<T, Error>;
+
+fn rskafka_client_error_to_status_code(error: &rskafka::client::error::Error) -> StatusCode {
+    match error {
+        rskafka::client::error::Error::Connection(_)
+        | rskafka::client::error::Error::Request(_)
+        | rskafka::client::error::Error::InvalidResponse(_)
+        | rskafka::client::error::Error::ServerError { .. }
+        | rskafka::client::error::Error::RetryFailed(_) => StatusCode::Internal,
+        rskafka::client::error::Error::Timeout => StatusCode::StorageUnavailable,
+        _ => StatusCode::Internal,
+    }
+}
+
 impl ErrorExt for Error {
     fn as_any(&self) -> &dyn Any {
         self
     }
-}
 
-pub type Result<T> = std::result::Result<T, Error>;
+    fn status_code(&self) -> StatusCode {
+        use Error::*;
+
+        match self {
+            TlsConfig { .. }
+            | InvalidProvider { .. }
+            | IllegalNamespace { .. }
+            | MissingKey { .. }
+            | MissingValue { .. }
+            | OverrideCompactedEntry { .. } => StatusCode::InvalidArguments,
+            StartWalTask { .. }
+            | StopWalTask { .. }
+            | IllegalState { .. }
+            | ResolveKafkaEndpoint { .. }
+            | NoMaxValue { .. }
+            | Cast { .. }
+            | EncodeJson { .. }
+            | DecodeJson { .. }
+            | IllegalSequence { .. }
+            | DiscontinuousLogIndex { .. }
+            | OrderedBatchProducerStopped { .. }
+            | WaitProduceResultReceiver { .. }
+            | WaitDumpIndex { .. }
+            | MetaLengthExceededLimit { .. } => StatusCode::Internal,
+
+            // Object store related errors
+            CreateWriter { .. } | WriteIndex { .. } | ReadIndex { .. } | Io { .. } => {
+                StatusCode::StorageUnavailable
+            }
+            // Raft engine
+            FetchEntry { .. } | RaftEngine { .. } | AddEntryLogBatch { .. } => {
+                StatusCode::StorageUnavailable
+            }
+            // Kafka producer related errors
+            ProduceRecord { error, .. } => match error {
+                rskafka::client::producer::Error::Client(error) => {
+                    rskafka_client_error_to_status_code(error)
+                }
+                rskafka::client::producer::Error::Aggregator(_)
+                | rskafka::client::producer::Error::FlushError(_)
+                | rskafka::client::producer::Error::TooLarge => StatusCode::Internal,
+            },
+            BuildClient { error, .. }
+            | BuildPartitionClient { error, .. }
+            | BatchProduce { error, .. }
+            | GetOffset { error, .. }
+            | ConsumeRecord { error, .. } => rskafka_client_error_to_status_code(error),
+        }
+    }
+}

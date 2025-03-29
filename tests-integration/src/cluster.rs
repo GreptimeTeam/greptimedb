@@ -191,6 +191,7 @@ impl GreptimeDbClusterBuilder {
                 max_retry_times: 5,
                 retry_delay: Duration::from_secs(1),
                 max_metadata_value_size: None,
+                max_running_procedures: 128,
             },
             wal: self.metasrv_wal_config.clone(),
             server_addr: "127.0.0.1:3002".to_string(),

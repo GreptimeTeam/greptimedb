@@ -15,7 +15,8 @@
 mod runner;
 mod rwlock;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -33,6 +34,7 @@ use self::rwlock::KeyRwLock;
 use crate::error::{
     self, DuplicateProcedureSnafu, Error, LoaderConflictSnafu, ManagerNotStartSnafu, Result,
     StartRemoveOutdatedMetaTaskSnafu, StopRemoveOutdatedMetaTaskSnafu,
+    TooManyRunningProceduresSnafu,
 };
 use crate::local::runner::Runner;
 use crate::procedure::{BoxedProcedureLoader, InitProcedureState, ProcedureInfo};
@@ -147,7 +149,6 @@ type ProcedureMetaRef = Arc<ProcedureMeta>;
 /// Procedure loaded from store.
 struct LoadedProcedure {
     procedure: BoxedProcedure,
-    parent_id: Option<ProcedureId>,
     step: u32,
 }
 
@@ -157,8 +158,7 @@ pub(crate) struct ManagerContext {
     loaders: Mutex<HashMap<String, BoxedProcedureLoader>>,
     key_lock: KeyRwLock<String>,
     procedures: RwLock<HashMap<ProcedureId, ProcedureMetaRef>>,
-    /// Messages loaded from the procedure store.
-    messages: Mutex<HashMap<ProcedureId, ProcedureMessage>>,
+    running_procedures: Mutex<HashSet<ProcedureId>>,
     /// Ids and finished time of finished procedures.
     finished_procedures: Mutex<VecDeque<(ProcedureId, Instant)>>,
     /// Running flag.
@@ -179,7 +179,7 @@ impl ManagerContext {
             key_lock: KeyRwLock::new(),
             loaders: Mutex::new(HashMap::new()),
             procedures: RwLock::new(HashMap::new()),
-            messages: Mutex::new(HashMap::new()),
+            running_procedures: Mutex::new(HashSet::new()),
             finished_procedures: Mutex::new(VecDeque::new()),
             running: Arc::new(AtomicBool::new(false)),
         }
@@ -210,18 +210,27 @@ impl ManagerContext {
         procedures.contains_key(&procedure_id)
     }
 
+    /// Returns the number of running procedures.
+    fn num_running_procedures(&self) -> usize {
+        self.running_procedures.lock().unwrap().len()
+    }
+
     /// Try to insert the `procedure` to the context if there is no procedure
     /// with same [ProcedureId].
     ///
     /// Returns `false` if there is already a procedure using the same [ProcedureId].
     fn try_insert_procedure(&self, meta: ProcedureMetaRef) -> bool {
+        let procedure_id = meta.id;
         let mut procedures = self.procedures.write().unwrap();
-        if procedures.contains_key(&meta.id) {
-            return false;
+        match procedures.entry(procedure_id) {
+            Entry::Occupied(_) => return false,
+            Entry::Vacant(vacant_entry) => {
+                vacant_entry.insert(meta);
+            }
         }
 
-        let old = procedures.insert(meta.id, meta);
-        debug_assert!(old.is_none());
+        let mut running_procedures = self.running_procedures.lock().unwrap();
+        running_procedures.insert(procedure_id);
 
         true
     }
@@ -264,16 +273,6 @@ impl ManagerContext {
         }
     }
 
-    /// Load procedure with specific `procedure_id` from cached [ProcedureMessage]s.
-    fn load_one_procedure(&self, procedure_id: ProcedureId) -> Option<LoadedProcedure> {
-        let message = {
-            let messages = self.messages.lock().unwrap();
-            messages.get(&procedure_id).cloned()?
-        };
-
-        self.load_one_procedure_from_message(procedure_id, &message)
-    }
-
     /// Load procedure from specific [ProcedureMessage].
     fn load_one_procedure_from_message(
         &self,
@@ -301,7 +300,6 @@ impl ManagerContext {
 
         Some(LoadedProcedure {
             procedure,
-            parent_id: message.parent_id,
             step: message.step,
         })
     }
@@ -350,23 +348,19 @@ impl ManagerContext {
         }
     }
 
-    /// Remove cached [ProcedureMessage] by ids.
-    fn remove_messages(&self, procedure_ids: &[ProcedureId]) {
-        let mut messages = self.messages.lock().unwrap();
-        for procedure_id in procedure_ids {
-            let _ = messages.remove(procedure_id);
-        }
-    }
-
     /// Clean resources of finished procedures.
     fn on_procedures_finish(&self, procedure_ids: &[ProcedureId]) {
-        self.remove_messages(procedure_ids);
-
         // Since users need to query the procedure state, so we can't remove the
         // meta of the procedure directly.
         let now = Instant::now();
         let mut finished_procedures = self.finished_procedures.lock().unwrap();
         finished_procedures.extend(procedure_ids.iter().map(|id| (*id, now)));
+
+        // Remove the procedures from the running set.
+        let mut running_procedures = self.running_procedures.lock().unwrap();
+        for procedure_id in procedure_ids {
+            running_procedures.remove(procedure_id);
+        }
     }
 
     /// Remove metadata of outdated procedures.
@@ -410,6 +404,7 @@ pub struct ManagerConfig {
     pub retry_delay: Duration,
     pub remove_outdated_meta_task_interval: Duration,
     pub remove_outdated_meta_ttl: Duration,
+    pub max_running_procedures: usize,
 }
 
 impl Default for ManagerConfig {
@@ -420,6 +415,7 @@ impl Default for ManagerConfig {
             retry_delay: Duration::from_millis(500),
             remove_outdated_meta_task_interval: Duration::from_secs(60 * 10),
             remove_outdated_meta_ttl: META_TTL,
+            max_running_procedures: 128,
         }
     }
 }
@@ -491,6 +487,13 @@ impl LocalManager {
         };
 
         let watcher = meta.state_receiver.clone();
+
+        ensure!(
+            self.manager_ctx.num_running_procedures() < self.config.max_running_procedures,
+            TooManyRunningProceduresSnafu {
+                max_running_procedures: self.config.max_running_procedures,
+            }
+        );
 
         // Inserts meta into the manager before actually spawnd the runner.
         ensure!(
@@ -1119,6 +1122,7 @@ mod tests {
             retry_delay: Duration::from_millis(500),
             remove_outdated_meta_task_interval: Duration::from_millis(1),
             remove_outdated_meta_ttl: Duration::from_millis(1),
+            max_running_procedures: 128,
         };
         let state_store = Arc::new(ObjectStateStore::new(object_store.clone()));
         let manager = LocalManager::new(config, state_store);
@@ -1189,6 +1193,69 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn test_too_many_running_procedures() {
+        let dir = create_temp_dir("too_many_running_procedures");
+        let config = ManagerConfig {
+            parent_path: "data/".to_string(),
+            max_retry_times: 3,
+            retry_delay: Duration::from_millis(500),
+            max_running_procedures: 1,
+            ..Default::default()
+        };
+        let state_store = Arc::new(ObjectStateStore::new(test_util::new_object_store(&dir)));
+        let manager = LocalManager::new(config, state_store);
+        manager.manager_ctx.set_running();
+
+        manager
+            .manager_ctx
+            .running_procedures
+            .lock()
+            .unwrap()
+            .insert(ProcedureId::random());
+        manager.start().await.unwrap();
+
+        // Submit a new procedure should fail.
+        let mut procedure = ProcedureToLoad::new("submit");
+        procedure.lock_key = LockKey::single_exclusive("test.submit");
+        let procedure_id = ProcedureId::random();
+        let err = manager
+            .submit(ProcedureWithId {
+                id: procedure_id,
+                procedure: Box::new(procedure),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::TooManyRunningProcedures { .. }));
+
+        manager
+            .manager_ctx
+            .running_procedures
+            .lock()
+            .unwrap()
+            .clear();
+
+        // Submit a new procedure should succeed.
+        let mut procedure = ProcedureToLoad::new("submit");
+        procedure.lock_key = LockKey::single_exclusive("test.submit");
+        assert!(manager
+            .submit(ProcedureWithId {
+                id: procedure_id,
+                procedure: Box::new(procedure),
+            })
+            .await
+            .is_ok());
+        assert!(manager
+            .procedure_state(procedure_id)
+            .await
+            .unwrap()
+            .is_some());
+        // Wait for the procedure done.
+        let mut watcher = manager.procedure_watcher(procedure_id).unwrap();
+        watcher.changed().await.unwrap();
+        assert!(watcher.borrow().is_done());
     }
 
     #[derive(Debug)]

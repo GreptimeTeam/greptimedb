@@ -58,6 +58,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Too many running procedures, max: {}", max_running_procedures))]
+    TooManyRunningProcedures {
+        max_running_procedures: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to put state, key: '{key}'"))]
     PutState {
         key: String,
@@ -192,7 +199,8 @@ impl ErrorExt for Error {
             | Error::FromJson { .. }
             | Error::WaitWatcher { .. }
             | Error::RetryLater { .. }
-            | Error::RollbackProcedureRecovered { .. } => StatusCode::Internal,
+            | Error::RollbackProcedureRecovered { .. }
+            | Error::TooManyRunningProcedures { .. } => StatusCode::Internal,
 
             Error::RetryTimesExceeded { .. }
             | Error::RollbackTimesExceeded { .. }

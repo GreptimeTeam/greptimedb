@@ -348,24 +348,14 @@ impl Runner {
         &self,
         procedure_id: ProcedureId,
         procedure_state: ProcedureState,
-        mut procedure: BoxedProcedure,
+        procedure: BoxedProcedure,
     ) {
         if self.manager_ctx.contains_procedure(procedure_id) {
             // If the parent has already submitted this procedure, don't submit it again.
             return;
         }
 
-        let mut step = 0;
-        if let Some(loaded_procedure) = self.manager_ctx.load_one_procedure(procedure_id) {
-            // Try to load procedure state from the message to avoid re-run the subprocedure
-            // from initial state.
-            assert_eq!(self.meta.id, loaded_procedure.parent_id.unwrap());
-
-            // Use the dumped procedure from the procedure store.
-            procedure = loaded_procedure.procedure;
-            // Update step number.
-            step = loaded_procedure.step;
-        }
+        let step = 0;
 
         let meta = Arc::new(ProcedureMeta::new(
             procedure_id,
