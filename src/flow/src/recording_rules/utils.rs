@@ -264,7 +264,7 @@ pub struct AddFilterRewriter {
 }
 
 impl AddFilterRewriter {
-    fn new(filter: Expr) -> Self {
+    pub fn new(filter: Expr) -> Self {
         Self {
             extra_filter: filter,
             is_rewritten: false,

@@ -16,6 +16,7 @@
 
 use std::any::Any;
 
+use arrow_schema::ArrowError;
 use common_error::ext::BoxedError;
 use common_error::{define_into_tonic_status, from_err_code_msg_to_header};
 use common_macro::stack_trace_debug;
@@ -156,6 +157,15 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Arrow error: {raw:?} in context: {context}"))]
+    Arrow {
+        #[snafu(source)]
+        raw: ArrowError,
+        context: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Datafusion error: {raw:?} in context: {context}"))]
     Datafusion {
         #[snafu(source)]
@@ -238,7 +248,9 @@ impl ErrorExt for Error {
             | Self::FlowNotFound { .. }
             | Self::ListFlows { .. } => StatusCode::TableNotFound,
             Self::Plan { .. } | Self::Datatypes { .. } => StatusCode::PlanQuery,
-            Self::InvalidQuery { .. } | Self::CreateFlow { .. } => StatusCode::EngineExecuteQuery,
+            Self::InvalidQuery { .. } | Self::CreateFlow { .. } | Self::Arrow { .. } => {
+                StatusCode::EngineExecuteQuery
+            }
             Self::Unexpected { .. } => StatusCode::Unexpected,
             Self::NotImplemented { .. } | Self::UnsupportedTemporalFilter { .. } => {
                 StatusCode::Unsupported
