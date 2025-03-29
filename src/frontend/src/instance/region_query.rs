@@ -22,9 +22,10 @@ use common_recordbatch::SendableRecordBatchStream;
 use partition::manager::PartitionRuleManagerRef;
 use query::error::{RegionQuerySnafu, Result as QueryResult};
 use query::region_query::RegionQueryHandler;
+use session::ReadPreference;
 use snafu::ResultExt;
 
-use crate::error::{FindTableRouteSnafu, RequestQuerySnafu, Result};
+use crate::error::{FindRegionPeerSnafu, RequestQuerySnafu, Result};
 
 pub(crate) struct FrontendRegionQueryHandler {
     partition_manager: PartitionRuleManagerRef,
@@ -45,8 +46,12 @@ impl FrontendRegionQueryHandler {
 
 #[async_trait]
 impl RegionQueryHandler for FrontendRegionQueryHandler {
-    async fn do_get(&self, request: QueryRequest) -> QueryResult<SendableRecordBatchStream> {
-        self.do_get_inner(request)
+    async fn do_get(
+        &self,
+        read_preference: ReadPreference,
+        request: QueryRequest,
+    ) -> QueryResult<SendableRecordBatchStream> {
+        self.do_get_inner(read_preference, request)
             .await
             .map_err(BoxedError::new)
             .context(RegionQuerySnafu)
@@ -54,15 +59,20 @@ impl RegionQueryHandler for FrontendRegionQueryHandler {
 }
 
 impl FrontendRegionQueryHandler {
-    async fn do_get_inner(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
+    async fn do_get_inner(
+        &self,
+        read_preference: ReadPreference,
+        request: QueryRequest,
+    ) -> Result<SendableRecordBatchStream> {
         let region_id = request.region_id;
 
         let peer = &self
             .partition_manager
             .find_region_leader(region_id)
             .await
-            .context(FindTableRouteSnafu {
-                table_id: region_id.table_id(),
+            .context(FindRegionPeerSnafu {
+                region_id,
+                read_preference,
             })?;
 
         let client = self.node_manager.datanode(peer).await;

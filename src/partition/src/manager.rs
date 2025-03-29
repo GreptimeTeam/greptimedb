@@ -171,6 +171,7 @@ impl PartitionRuleManager {
         Ok(Arc::new(rule) as _)
     }
 
+    /// Find the leader of the region.
     pub async fn find_region_leader(&self, region_id: RegionId) -> Result<Peer> {
         let region_routes = &self
             .find_physical_table_route(region_id.table_id())

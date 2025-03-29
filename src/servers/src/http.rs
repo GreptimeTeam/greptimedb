@@ -103,6 +103,7 @@ mod timeout;
 pub(crate) use timeout::DynamicTimeoutLayer;
 
 mod hints;
+mod read_preference;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_helpers;
 
@@ -804,7 +805,10 @@ impl HttpServer {
                         AuthState::new(self.user_provider.clone()),
                         authorize::check_http_auth,
                     ))
-                    .layer(middleware::from_fn(hints::extract_hints)),
+                    .layer(middleware::from_fn(hints::extract_hints))
+                    .layer(middleware::from_fn(
+                        read_preference::extract_read_preference,
+                    )),
             )
             // Handlers for debug, we don't expect a timeout.
             .nest(
