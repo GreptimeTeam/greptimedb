@@ -1047,11 +1047,10 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            OpenDal { .. }
-            | ReadParquet { .. }
-            | WriteWal { .. }
-            | ReadWal { .. }
-            | DeleteWal { .. } => StatusCode::StorageUnavailable,
+            OpenDal { .. } | ReadParquet { .. } => StatusCode::StorageUnavailable,
+            WriteWal { source, .. } | ReadWal { source, .. } | DeleteWal { source, .. } => {
+                source.status_code()
+            }
             CompressObject { .. }
             | DecompressObject { .. }
             | SerdeJson { .. }
