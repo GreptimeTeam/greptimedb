@@ -22,8 +22,6 @@ use std::vec;
 use api::v1::alter_table_expr::Kind;
 use api::v1::RenameTable;
 use async_trait::async_trait;
-use common_error::ext::ErrorExt;
-use common_error::status_code::StatusCode;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{
     Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure, Status, StringKey,
@@ -140,16 +138,10 @@ impl AlterTableProcedure {
                 let requester = requester.clone();
 
                 alter_region_tasks.push(async move {
-                    if let Err(err) = requester.handle(request).await {
-                        if err.status_code() != StatusCode::RequestOutdated {
-                            // Treat request outdated as success.
-                            // The engine will throw this code when the schema version not match.
-                            // As this procedure has locked the table, the only reason for this error
-                            // is procedure is succeeded before and is retrying.
-                            return Err(add_peer_context_if_needed(datanode)(err));
-                        }
-                    }
-                    Ok(())
+                    requester
+                        .handle(request)
+                        .await
+                        .map_err(add_peer_context_if_needed(datanode))
                 });
             }
         }

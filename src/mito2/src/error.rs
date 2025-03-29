@@ -490,14 +490,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Schema version doesn't match. Expect {} but gives {}", expect, actual))]
-    InvalidRegionRequestSchemaVersion {
-        expect: u64,
-        actual: u64,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display(
         "Region {} is in {:?} state, which does not permit manifest updates.",
         region_id,
@@ -1080,8 +1072,6 @@ impl ErrorExt for Error {
             | InvalidWalReadRequest { .. }
             | PartitionOutOfRange { .. }
             | ParseJobId { .. } => StatusCode::InvalidArguments,
-
-            InvalidRegionRequestSchemaVersion { .. } => StatusCode::RequestOutdated,
 
             RegionMetadataNotFound { .. }
             | Join { .. }
