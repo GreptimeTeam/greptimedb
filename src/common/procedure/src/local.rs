@@ -15,6 +15,7 @@
 mod runner;
 mod rwlock;
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -221,12 +222,12 @@ impl ManagerContext {
     fn try_insert_procedure(&self, meta: ProcedureMetaRef) -> bool {
         let procedure_id = meta.id;
         let mut procedures = self.procedures.write().unwrap();
-        if procedures.contains_key(&procedure_id) {
-            return false;
+        match procedures.entry(procedure_id) {
+            Entry::Occupied(_) => return false,
+            Entry::Vacant(vacant_entry) => {
+                vacant_entry.insert(meta);
+            }
         }
-
-        let old = procedures.insert(procedure_id, meta);
-        debug_assert!(old.is_none());
 
         let mut running_procedures = self.running_procedures.lock().unwrap();
         running_procedures.insert(procedure_id);
