@@ -24,6 +24,7 @@ use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::{error, info};
 use object_store::ObjectStore;
 use snafu::{ensure, OptionExt};
+use store_api::manifest::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
     RegionEngine, RegionRole, RegionScannerRef, RegionStatistic, SetRegionRoleStateResponse,
@@ -136,6 +137,15 @@ impl RegionEngine for FileRegionEngine {
         } else {
             Ok(SetRegionRoleStateResponse::NotFound)
         }
+    }
+
+    async fn sync_region(
+        &self,
+        _region_id: RegionId,
+        _manifest_version: ManifestVersion,
+    ) -> Result<(), BoxedError> {
+        // File engine doesn't need to sync region manifest.
+        Ok(())
     }
 
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {

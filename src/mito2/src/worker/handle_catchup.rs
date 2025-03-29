@@ -27,6 +27,7 @@ use tokio::time::Instant;
 
 use crate::error::{self, Result};
 use crate::region::opener::{replay_memtable, RegionOpener};
+use crate::region::MitoRegion;
 use crate::worker::RegionWorkerLoop;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -45,34 +46,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
         // Note: Currently, We protect the split brain by ensuring the mutable table is empty.
         // It's expensive to execute catch-up requests without `set_writable=true` multiple times.
-        let is_mutable_empty = region.version().memtables.mutable.is_empty();
+        let version = region.version();
+        let is_empty_memtable = version.memtables.is_empty();
 
         // Utilizes the short circuit evaluation.
-        let region = if !is_mutable_empty || region.manifest_ctx.has_update().await? {
-            let manifest_version = region.manifest_ctx.manifest_version().await;
-            let flushed_entry_id = region.version_control.current().last_entry_id;
-            info!("Reopening the region: {region_id}, empty mutable: {is_mutable_empty}, manifest version: {manifest_version}, flushed entry id: {flushed_entry_id}");
-            let reopened_region = Arc::new(
-                RegionOpener::new(
-                    region_id,
-                    region.region_dir(),
-                    self.memtable_builder_provider.clone(),
-                    self.object_store_manager.clone(),
-                    self.purge_scheduler.clone(),
-                    self.puffin_manager_factory.clone(),
-                    self.intermediate_manager.clone(),
-                    self.time_provider.clone(),
-                )
-                .cache(Some(self.cache_manager.clone()))
-                .options(region.version().options.clone())?
-                .skip_wal_replay(true)
-                .open(&self.config, &self.wal)
-                .await?,
-            );
-            debug_assert!(!reopened_region.is_writable());
-            self.regions.insert_region(reopened_region.clone());
-
-            reopened_region
+        let region = if !is_empty_memtable || region.manifest_ctx.has_update().await? {
+            self.reopen_region(&region).await?
         } else {
             region
         };
@@ -123,5 +102,37 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
 
         Ok(0)
+    }
+
+    /// Reopens a region.
+    pub(crate) async fn reopen_region(
+        &mut self,
+        region: &Arc<MitoRegion>,
+    ) -> Result<Arc<MitoRegion>> {
+        let region_id = region.region_id;
+        let manifest_version = region.manifest_ctx.manifest_version().await;
+        let flushed_entry_id = region.version_control.current().last_entry_id;
+        info!("Reopening the region: {region_id}, manifest version: {manifest_version}, flushed entry id: {flushed_entry_id}");
+        let reopened_region = Arc::new(
+            RegionOpener::new(
+                region_id,
+                region.region_dir(),
+                self.memtable_builder_provider.clone(),
+                self.object_store_manager.clone(),
+                self.purge_scheduler.clone(),
+                self.puffin_manager_factory.clone(),
+                self.intermediate_manager.clone(),
+                self.time_provider.clone(),
+            )
+            .cache(Some(self.cache_manager.clone()))
+            .options(region.version().options.clone())?
+            .skip_wal_replay(true)
+            .open(&self.config, &self.wal)
+            .await?,
+        );
+        debug_assert!(!reopened_region.is_writable());
+        self.regions.insert_region(reopened_region.clone());
+
+        Ok(reopened_region)
     }
 }

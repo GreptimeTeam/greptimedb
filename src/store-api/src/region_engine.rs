@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
 use crate::logstore::entry;
+use crate::manifest::ManifestVersion;
 use crate::metadata::RegionMetadataRef;
 use crate::region_request::{
     BatchRegionDdlRequest, RegionOpenRequest, RegionRequest, RegionSequencesRequest,
@@ -84,6 +85,7 @@ impl SetRegionRoleStateResponse {
 pub struct GrantedRegion {
     pub region_id: RegionId,
     pub region_role: RegionRole,
+    pub manifest_version: u64,
 }
 
 impl GrantedRegion {
@@ -91,6 +93,8 @@ impl GrantedRegion {
         Self {
             region_id,
             region_role,
+            // TODO(weny): use real manifest version
+            manifest_version: 0,
         }
     }
 }
@@ -100,6 +104,7 @@ impl From<GrantedRegion> for PbGrantedRegion {
         PbGrantedRegion {
             region_id: value.region_id.as_u64(),
             role: PbRegionRole::from(value.region_role).into(),
+            manifest_version: value.manifest_version,
         }
     }
 }
@@ -109,6 +114,7 @@ impl From<PbGrantedRegion> for GrantedRegion {
         GrantedRegion {
             region_id: RegionId::from_u64(value.region_id),
             region_role: value.role().into(),
+            manifest_version: value.manifest_version,
         }
     }
 }
@@ -502,6 +508,13 @@ pub trait RegionEngine: Send + Sync {
     /// the region as readonly doesn't guarantee that write operations in progress will not
     /// take effect.
     fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<(), BoxedError>;
+
+    /// Syncs the region manifest to the given manifest version.
+    async fn sync_region(
+        &self,
+        region_id: RegionId,
+        manifest_version: ManifestVersion,
+    ) -> Result<(), BoxedError>;
 
     /// Sets region role state gracefully.
     ///

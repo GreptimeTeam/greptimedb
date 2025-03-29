@@ -25,7 +25,7 @@ use store_api::codec::PrimaryKeyEncoding;
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
-use crate::error::{InvalidRequestSnafu, RegionLeaderStateSnafu, RejectWriteSnafu, Result};
+use crate::error::{InvalidRequestSnafu, RegionStateSnafu, RejectWriteSnafu, Result};
 use crate::metrics::{WRITE_REJECT_TOTAL, WRITE_ROWS_TOTAL, WRITE_STAGE_ELAPSED};
 use crate::region::{RegionLeaderState, RegionRoleState};
 use crate::region_write_ctx::RegionWriteCtx;
@@ -240,10 +240,10 @@ impl<S> RegionWorkerLoop<S> {
                     state => {
                         // The region is not writable.
                         sender_req.sender.send(
-                            RegionLeaderStateSnafu {
+                            RegionStateSnafu {
                                 region_id,
                                 state,
-                                expect: RegionLeaderState::Writable,
+                                expect: RegionRoleState::Leader(RegionLeaderState::Writable),
                             }
                             .fail(),
                         );

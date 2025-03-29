@@ -246,6 +246,10 @@ impl RegionEngine for MockRegionEngine {
         Some(RegionRole::Leader)
     }
 
+    async fn sync_region(&self, _region_id: RegionId, _version: u64) -> Result<(), BoxedError> {
+        unimplemented!()
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

@@ -35,10 +35,10 @@ use store_api::storage::RegionId;
 
 use crate::access_layer::AccessLayerRef;
 use crate::error::{
-    FlushableRegionStateSnafu, RegionLeaderStateSnafu, RegionNotFoundSnafu, RegionTruncatedSnafu,
-    Result, UpdateManifestSnafu,
+    FlushableRegionStateSnafu, RegionNotFoundSnafu, RegionStateSnafu, RegionTruncatedSnafu, Result,
+    UpdateManifestSnafu,
 };
-use crate::manifest::action::{RegionMetaAction, RegionMetaActionList};
+use crate::manifest::action::{RegionManifest, RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::RegionManifestManager;
 use crate::memtable::MemtableBuilderRef;
 use crate::region::version::{VersionControlRef, VersionRef};
@@ -317,10 +317,10 @@ impl MitoRegion {
             .state
             .compare_exchange(RegionRoleState::Leader(expect), state)
             .map_err(|actual| {
-                RegionLeaderStateSnafu {
+                RegionStateSnafu {
                     region_id: self.region_id,
                     state: actual,
-                    expect,
+                    expect: RegionRoleState::Leader(expect),
                 }
                 .build()
             })?;
@@ -356,6 +356,21 @@ impl ManifestContext {
 
     pub(crate) async fn has_update(&self) -> Result<bool> {
         self.manifest_manager.read().await.has_update().await
+    }
+
+    /// Installs the manifest changes from the current version to the target version (inclusive).
+    ///
+    /// Returns installed [RegionManifest].
+    /// **Note**: This function is not guaranteed to install the target version strictly.
+    /// The installed version may be greater than the target version.
+    pub(crate) async fn install_manifest_to(
+        &self,
+        version: ManifestVersion,
+    ) -> Result<Arc<RegionManifest>> {
+        let mut manager = self.manifest_manager.write().await;
+        manager.install_manifest_to(version).await?;
+
+        Ok(manager.manifest())
     }
 
     /// Updates the manifest if current state is `expect_state`.
@@ -394,10 +409,10 @@ impl ManifestContext {
         } else {
             ensure!(
                 current_state == RegionRoleState::Leader(expect_state),
-                RegionLeaderStateSnafu {
+                RegionStateSnafu {
                     region_id: manifest.metadata.region_id,
                     state: current_state,
-                    expect: expect_state,
+                    expect: RegionRoleState::Leader(expect_state),
                 }
             );
         }
@@ -589,12 +604,31 @@ impl RegionMap {
             .context(RegionNotFoundSnafu { region_id })?;
         ensure!(
             region.is_writable(),
-            RegionLeaderStateSnafu {
+            RegionStateSnafu {
                 region_id,
                 state: region.state(),
-                expect: RegionLeaderState::Writable,
+                expect: RegionRoleState::Leader(RegionLeaderState::Writable),
             }
         );
+        Ok(region)
+    }
+
+    /// Gets readonly region by region id.
+    ///
+    /// Returns error if the region does not exist or is writable.
+    pub(crate) fn follower_region(&self, region_id: RegionId) -> Result<MitoRegionRef> {
+        let region = self
+            .get_region(region_id)
+            .context(RegionNotFoundSnafu { region_id })?;
+        ensure!(
+            region.is_follower(),
+            RegionStateSnafu {
+                region_id,
+                state: region.state(),
+                expect: RegionRoleState::Follower,
+            }
+        );
+
         Ok(region)
     }
 

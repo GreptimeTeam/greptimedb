@@ -80,6 +80,8 @@ impl HeartbeatHandler for RegionLeaseHandler {
                 GrantedRegion {
                     region_id,
                     region_role,
+                    // TODO(weny): use real manifest version
+                    manifest_version: 0,
                 }
                 .into()
             })
