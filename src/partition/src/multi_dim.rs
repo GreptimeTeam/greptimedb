@@ -287,6 +287,13 @@ impl PartitionRule for MultiDimPartitionRule {
     fn find_region(&self, values: &[Value]) -> Result<RegionNumber> {
         self.find_region(values)
     }
+
+    fn split_record_batch(
+        &self,
+        record_batch: &RecordBatch,
+    ) -> Result<HashMap<RegionNumber, BooleanArray>> {
+        self.split_record_batch(record_batch)
+    }
 }
 
 /// Helper for [RuleChecker]

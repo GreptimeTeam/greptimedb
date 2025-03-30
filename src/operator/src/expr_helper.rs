@@ -763,8 +763,7 @@ fn sanitize_flow_name(mut flow_name: ObjectName) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use api::v1::{ColumnDataType, SetDatabaseOptions, UnsetDatabaseOptions};
-    use common_time::Timezone;
+    use api::v1::{SetDatabaseOptions, UnsetDatabaseOptions};
     use datatypes::value::Value;
     use session::context::{QueryContext, QueryContextBuilder};
     use sql::dialect::GreptimeDbDialect;
