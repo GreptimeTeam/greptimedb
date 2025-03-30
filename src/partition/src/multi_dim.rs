@@ -23,11 +23,7 @@ use datatypes::arrow::buffer::BooleanBuffer;
 use datatypes::prelude::Value;
 use datatypes::vectors::{Helper, VectorRef};
 use serde::{Deserialize, Serialize};
-use session::context::QueryContext;
 use snafu::{ensure, OptionExt, ResultExt};
-use sql::dialect::GreptimeDbDialect;
-use sql::parser::{ParseOptions, ParserContext};
-use sql::statements::statement::Statement;
 use store_api::storage::RegionNumber;
 
 use crate::error::{
@@ -35,7 +31,6 @@ use crate::error::{
     UndefinedColumnSnafu,
 };
 use crate::expr::{Operand, PartitionExpr, RestrictedOp};
-use crate::utils::parse_partition_columns_and_exprs;
 use crate::PartitionRule;
 
 /// The default region number when no partition exprs are matched.
@@ -192,7 +187,7 @@ impl MultiDimPartitionRule {
             let current_region = self.find_region(&current_row)?;
             let region_mask = result
                 .get_mut(&current_region)
-                .expect(&format!("Region {} must be initialized", current_region));
+                .unwrap_or_else(|| panic!("Region {} must be initialized", current_region));
             region_mask.set_bit(row_idx, true);
         }
 
@@ -229,7 +224,7 @@ impl MultiDimPartitionRule {
 
         let mut selected = BooleanArray::new(BooleanBuffer::new_unset(num_rows), None);
         for region_selection in result.values() {
-            selected = arrow::compute::kernels::boolean::or(&selected, &region_selection).unwrap();
+            selected = arrow::compute::kernels::boolean::or(&selected, region_selection).unwrap();
         }
 
         // bitwise not to find unselected rows
@@ -392,53 +387,12 @@ impl<'a> RuleChecker<'a> {
     }
 }
 
-pub fn sql_to_partition_rule(
-    sql: &str,
-    regions: Vec<RegionNumber>,
-) -> Result<MultiDimPartitionRule> {
-    let stmts =
-        ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
-            .unwrap();
-
-    let Statement::CreateTable(create_table) = &stmts[0] else {
-        unreachable!("Expected a CreateTable statement");
-    };
-
-    let expr = sql::util::create_to_expr(
-        create_table,
-        "default",
-        "default",
-        common_time::timezone::get_timezone(None),
-    )
-    .unwrap();
-
-    let (partition_cols, _, exprs) = parse_partition_columns_and_exprs(
-        &expr,
-        create_table.partitions.clone(),
-        &QueryContext::arc(),
-    )
-    .unwrap();
-
-    // Create a rule with more complex conditions
-    MultiDimPartitionRule::try_new(partition_cols, regions, exprs)
-}
-
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
-    use std::sync::Arc;
-
-    use datatypes::arrow::array::{ArrayRef, Int32Array};
-    use datatypes::arrow::datatypes::{DataType, Field, Schema};
-    use datatypes::arrow_array::StringArray;
-    use session::context::QueryContext;
-    use sql::dialect::GreptimeDbDialect;
-    use sql::parser::{ParseOptions, ParserContext};
-    use sql::statements::statement::Statement;
 
     use super::*;
     use crate::error::{self, Error};
-    use crate::utils::parse_partition_columns_and_exprs;
 
     #[test]
     fn test_find_region() {
@@ -789,6 +743,8 @@ mod tests {
 
 #[cfg(test)]
 mod test_split_record_batch {
+    use std::sync::Arc;
+
     use super::*;
 
     #[test]
@@ -877,60 +833,5 @@ mod test_split_record_batch {
 
         // Empty batch should result in empty map
         assert_eq!(result.len(), 0);
-    }
-
-    #[test]
-    fn test_split_record_batch_by_sql() {
-        use datatypes::arrow::array::StringArray;
-        use datatypes::arrow::datatypes::{DataType, Field, Schema};
-        use datatypes::arrow::record_batch::RecordBatch;
-
-        let sql = r#"CREATE TABLE test (a INT, b STRING, c TIMESTAMP, TIME INDEX (c) )
-    PARTITION ON COLUMNS (a) (
-        a < 20,
-        a >= 20
-    )"#;
-        let rule = sql_to_partition_rule(sql, vec![0, 1, 2]).unwrap();
-
-        // Create a record batch with test data
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("a", DataType::Int32, false),
-            Field::new("b", DataType::Utf8, false),
-        ]));
-
-        let a_array = Arc::new(Int32Array::from(vec![10, 30, 20, 40])) as ArrayRef;
-        let b_array = Arc::new(StringArray::from(vec![
-            "server1", "server1", "server2", "server3",
-        ])) as ArrayRef;
-
-        let batch = RecordBatch::try_new(schema, vec![a_array, b_array]).unwrap();
-
-        // Split the batch
-        let result = rule.split_record_batch(&batch).unwrap();
-
-        // Check the results
-        assert_eq!(result.len(), 2); // 2 defined regions
-
-        // Check region 0 (a < 20)
-        let region0_selection = result.get(&0).unwrap();
-        assert_eq!(region0_selection.len(), 4);
-        assert_eq!(
-            region0_selection
-                .iter()
-                .map(|b| b.unwrap())
-                .collect::<Vec<_>>(),
-            vec![true, false, false, false]
-        );
-
-        // Check region 1 (a >= 20)
-        let region1_selection = result.get(&1).unwrap();
-        assert_eq!(region1_selection.len(), 4);
-        assert_eq!(
-            region1_selection
-                .iter()
-                .map(|b| b.unwrap())
-                .collect::<Vec<_>>(),
-            vec![false, true, true, true]
-        );
     }
 }

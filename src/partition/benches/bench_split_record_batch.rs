@@ -4,15 +4,10 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use datatypes::arrow::array::{ArrayRef, Int32Array, StringArray, TimestampMillisecondArray};
 use datatypes::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use datatypes::arrow::record_batch::RecordBatch;
-use partition::multi_dim::{sql_to_partition_rule, MultiDimPartitionRule};
+use datatypes::value::Value;
+use partition::expr::{col, Operand};
+use partition::multi_dim::MultiDimPartitionRule;
 use rand::Rng;
-
-const CREATE_SQL: &str = r#"CREATE TABLE test(
-	a0 INT,
-	a1 STRING,
-	a2 INT,
-	ts timestamp time index
-)"#;
 
 fn table_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
@@ -28,41 +23,79 @@ fn table_schema() -> Arc<Schema> {
 }
 
 fn create_test_rule(num_columns: usize) -> MultiDimPartitionRule {
-    let (sql, regions) = match num_columns {
+    let (columns, exprs) = match num_columns {
         1 => {
-            let sql = format!("{CREATE_SQL} PARTITION ON COLUMNS (a0) (a0 < 50, a0 >= 50)");
-            (sql, vec![0, 1])
+            let exprs = vec![
+                col("a0").lt(Value::Int32(50)),
+                col("a0").gt_eq(Value::Int32(50)),
+            ];
+            (vec!["a0".to_string()], exprs)
         }
         2 => {
-            let sql = format!(
-                r#"{CREATE_SQL} PARTITION ON COLUMNS (a0, a1) (
-    a0 < 50 AND a1 < 'server50', 
-    a0 < 50 AND a1 >= 'server50', 
-    a0 >= 50 AND a1 < 'server50', 
-    a0 >= 50 AND a1 >= 'server50')"#
-            );
-            (sql, vec![0, 1, 2, 3])
+            let exprs = vec![
+                col("a0")
+                    .lt(Value::Int32(50))
+                    .and(col("a1").lt(Value::String("server50".into()))),
+                col("a0")
+                    .lt(Value::Int32(50))
+                    .and(col("a1").gt_eq(Value::String("server50".into()))),
+                col("a0")
+                    .gt_eq(Value::Int32(50))
+                    .and(col("a1").lt(Value::String("server50".into()))),
+                col("a0")
+                    .gt_eq(Value::Int32(50))
+                    .and(col("a1").gt_eq(Value::String("server50".into()))),
+            ];
+            (vec!["a0".to_string(), "a1".to_string()], exprs)
         }
         3 => {
-            let sql = format!(
-                r#"{CREATE_SQL} PARTITION ON COLUMNS (a0, a1, a2) (
-    a0 < 50 AND a1 < 'server50' AND a2 < 50, 
-    a0 < 50 AND a1 < 'server50' AND a2 >= 50, 
-    a0 < 50 AND a1 >= 'server50' AND a2 < 50,
-    a0 < 50 AND a1 >= 'server50' AND a2 >= 50,
-    a0 >= 50 AND a1 < 'server50' AND a2 < 50,
-    a0 >= 50 AND a1 < 'server50' AND a2 >= 50,
-    a0 >= 50 AND a1 >= 'server50' AND a2 < 50,
-    a0 >= 50 AND a1 >= 'server50' AND a2 >= 50)"#
-            );
-            (sql, vec![0, 1, 2, 3, 4, 5, 6, 7])
+            let expr = vec![
+                col("a0")
+                    .lt(Value::Int32(50))
+                    .and(col("a1").lt(Value::String("server50".into())))
+                    .and(col("a2").lt(Value::Int32(50))),
+                col("a0")
+                    .lt(Operand::Value(Value::Int32(50)))
+                    .and(col("a1").lt(Value::String("server50".into())))
+                    .and(col("a2").gt_eq(Value::Int32(50))),
+                col("a0")
+                    .lt(Value::Int32(50))
+                    .and(col("a1").gt_eq(Value::String("server50".into())))
+                    .and(col("a2").lt(Value::Int32(50))),
+                col("a0")
+                    .lt(Value::Int32(50))
+                    .and(col("a1").gt_eq(Value::String("server50".into())))
+                    .and(col("a2").gt_eq(Value::Int32(50))),
+                col("a0")
+                    .gt_eq(Value::Int32(50))
+                    .and(col("a1").lt(Value::String("server50".into())))
+                    .and(col("a2").lt(Value::Int32(50))),
+                col("a0")
+                    .gt_eq(Operand::Value(Value::Int32(50)))
+                    .and(col("a1").lt(Value::String("server50".into())))
+                    .and(col("a2").gt_eq(Value::Int32(50))),
+                col("a0")
+                    .gt_eq(Value::Int32(50))
+                    .and(col("a1").gt_eq(Value::String("server50".into())))
+                    .and(col("a2").lt(Value::Int32(50))),
+                col("a0")
+                    .gt_eq(Value::Int32(50))
+                    .and(col("a1").gt_eq(Value::String("server50".into())))
+                    .and(col("a2").gt_eq(Value::Int32(50))),
+            ];
+
+            (
+                vec!["a0".to_string(), "a1".to_string(), "a2".to_string()],
+                expr,
+            )
         }
         _ => {
             panic!("invalid number of columns, only 1-4 are supported");
         }
     };
 
-    sql_to_partition_rule(&sql, regions).expect(&format!("invalid partition rule: {}", sql))
+    let regions = (0..exprs.len()).map(|v| v as u32).collect();
+    MultiDimPartitionRule::try_new(columns, regions, exprs).unwrap()
 }
 
 fn create_test_batch(size: usize) -> RecordBatch {

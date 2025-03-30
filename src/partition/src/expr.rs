@@ -47,6 +47,16 @@ pub enum Operand {
     Expr(PartitionExpr),
 }
 
+pub fn col(column_name: impl Into<String>) -> Operand {
+    Operand::Column(column_name.into())
+}
+
+impl From<Value> for Operand {
+    fn from(value: Value) -> Self {
+        Operand::Value(value)
+    }
+}
+
 impl Operand {
     pub fn try_as_logical_expr(&self) -> error::Result<Expr> {
         match self {
@@ -86,6 +96,14 @@ impl Operand {
             }
             Self::Expr(e) => e.try_as_logical_expr(),
         }
+    }
+
+    pub fn lt(self, rhs: impl Into<Self>) -> PartitionExpr {
+        PartitionExpr::new(self, RestrictedOp::Lt, rhs.into())
+    }
+
+    pub fn gt_eq(self, rhs: impl Into<Self>) -> PartitionExpr {
+        PartitionExpr::new(self, RestrictedOp::GtEq, rhs.into())
     }
 }
 
@@ -219,6 +237,10 @@ impl PartitionExpr {
         let expr = self.try_as_logical_expr()?;
         Ok(create_physical_expr(&expr, &df_schema, execution_props).unwrap())
     }
+
+    pub fn and(self, rhs: PartitionExpr) -> PartitionExpr {
+        PartitionExpr::new(Operand::Expr(self), RestrictedOp::And, Operand::Expr(rhs))
+    }
 }
 
 impl Display for PartitionExpr {
@@ -229,10 +251,6 @@ impl Display for PartitionExpr {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use datatypes::arrow::datatypes::{DataType, Field, Schema};
-
     use super::*;
 
     #[test]
@@ -302,17 +320,5 @@ mod tests {
             let expr = PartitionExpr::new(case.0, case.1.clone(), case.2);
             assert_eq!(case.3, expr.to_string());
         }
-    }
-
-    #[test]
-    fn test_to_physical_expr() {
-        let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, false)]));
-        let expr = PartitionExpr::new(
-            Operand::Column("a".to_string()),
-            RestrictedOp::Eq,
-            Operand::Value(Value::Int32(10)),
-        );
-        let physical_expr = expr.try_as_physical_expr(&schema).unwrap();
-        println!("{:?}", physical_expr);
     }
 }
