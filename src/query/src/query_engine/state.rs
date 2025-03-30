@@ -47,6 +47,7 @@ use table::TableRef;
 use crate::dist_plan::{DistExtensionPlanner, DistPlannerAnalyzer, MergeSortExtensionPlanner};
 use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
 use crate::optimizer::parallelize_scan::ParallelizeScan;
+use crate::optimizer::pass_distribution::PassDistribution;
 use crate::optimizer::remove_duplicate::RemoveDuplicate;
 use crate::optimizer::scan_hint::ScanHintRule;
 use crate::optimizer::string_normalization::StringNormalizationRule;
@@ -128,6 +129,10 @@ impl QueryEngineState {
         physical_optimizer
             .rules
             .insert(0, Arc::new(ParallelizeScan));
+        // Pass distribution requirement to MergeScanExec to avoid unnecessary shuffling
+        physical_optimizer
+            .rules
+            .insert(1, Arc::new(PassDistribution));
         // Add rule for windowed sort
         physical_optimizer
             .rules

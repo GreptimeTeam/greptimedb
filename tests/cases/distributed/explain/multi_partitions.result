@@ -28,7 +28,6 @@ explain SELECT * FROM demo WHERE ts > cast(1000000000 as timestamp) ORDER BY hos
 | logical_plan_| MergeSort: demo.host ASC NULLS LAST_|
 |_|_MergeScan [is_placeholder=false]_|
 | physical_plan | SortPreservingMergeExec: [host@0 ASC NULLS LAST]_|
-|_|_SortExec: expr=[host@0 ASC NULLS LAST], preserve_partitioning=[true]_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+

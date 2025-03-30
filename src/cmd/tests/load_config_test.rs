@@ -168,8 +168,8 @@ fn test_load_metasrv_example_config() {
                 tracing_sample_ratio: Some(Default::default()),
                 slow_query: SlowQueryOptions {
                     enable: false,
-                    threshold: Some(Duration::from_secs(10)),
-                    sample_ratio: Some(1.0),
+                    threshold: None,
+                    sample_ratio: None,
                 },
                 ..Default::default()
             },
