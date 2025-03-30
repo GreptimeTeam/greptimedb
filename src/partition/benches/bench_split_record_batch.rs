@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::vec;
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use datatypes::arrow::array::{ArrayRef, Int32Array, StringArray, TimestampMillisecondArray};
@@ -7,7 +8,9 @@ use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::value::Value;
 use partition::expr::{col, Operand};
 use partition::multi_dim::MultiDimPartitionRule;
+use partition::PartitionRule;
 use rand::Rng;
+use store_api::storage::RegionNumber;
 
 fn table_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
@@ -90,7 +93,7 @@ fn create_test_rule(num_columns: usize) -> MultiDimPartitionRule {
             )
         }
         _ => {
-            panic!("invalid number of columns, only 1-4 are supported");
+            panic!("invalid number of columns, only 1-3 are supported");
         }
     };
 
@@ -154,5 +157,56 @@ fn bench_split_record_batch_naive_vs_optimized(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_split_record_batch_naive_vs_optimized);
+fn record_batch_to_rows(
+    rule: &MultiDimPartitionRule,
+    record_batch: &RecordBatch,
+) -> Vec<Vec<Value>> {
+    let num_rows = record_batch.num_rows();
+    let vectors = rule.record_batch_to_cols(record_batch).unwrap();
+    let mut res = Vec::with_capacity(num_rows);
+    let mut current_row = vec![Value::Null; vectors.len()];
+
+    for row in 0..num_rows {
+        rule.row_at(&vectors, row, &mut current_row).unwrap();
+        res.push(current_row.clone());
+    }
+    res
+}
+
+fn find_all_regions(rule: &MultiDimPartitionRule, rows: &[Vec<Value>]) -> Vec<RegionNumber> {
+    rows.iter()
+        .map(|row| rule.find_region(row).unwrap())
+        .collect()
+}
+
+fn bench_split_record_batch_vs_row(c: &mut Criterion) {
+    let mut group = c.benchmark_group("bench_split_record_batch_vs_row");
+
+    for num_columns in [1, 2, 3].iter() {
+        for num_rows in [100, 1000, 10000, 100000].iter() {
+            let rule = create_test_rule(*num_columns);
+            let batch = create_test_batch(*num_rows);
+            let rows = record_batch_to_rows(&rule, &batch);
+
+            group.bench_function(format!("split_by_row_{}_{}", num_columns, num_rows), |b| {
+                b.iter(|| {
+                    black_box(find_all_regions(&rule, &rows));
+                });
+            });
+            group.bench_function(format!("split_by_col_{}_{}", num_columns, num_rows), |b| {
+                b.iter(|| {
+                    black_box(rule.split_record_batch(black_box(&batch))).unwrap();
+                });
+            });
+        }
+    }
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_split_record_batch_naive_vs_optimized,
+    bench_split_record_batch_vs_row
+);
 criterion_main!(benches);

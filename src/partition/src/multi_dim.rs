@@ -143,14 +143,14 @@ impl MultiDimPartitionRule {
         Ok(result)
     }
 
-    fn row_at(&self, cols: &[VectorRef], index: usize, row: &mut [Value]) -> Result<()> {
+    pub fn row_at(&self, cols: &[VectorRef], index: usize, row: &mut [Value]) -> Result<()> {
         for (col_idx, col) in cols.iter().enumerate() {
             row[col_idx] = col.get(index);
         }
         Ok(())
     }
 
-    fn record_batch_to_cols(&self, record_batch: &RecordBatch) -> Result<Vec<VectorRef>> {
+    pub fn record_batch_to_cols(&self, record_batch: &RecordBatch) -> Result<Vec<VectorRef>> {
         self.partition_columns
             .iter()
             .map(|col_name| {
@@ -207,38 +207,41 @@ impl MultiDimPartitionRule {
             .iter()
             .zip(self.regions.iter())
             .map(|(expr, region_num)| {
-                let df_expr = expr.try_as_physical_expr(&record_batch.schema()).unwrap();
-                let ColumnarValue::Array(column) = df_expr.evaluate(record_batch).unwrap() else {
+                let df_expr = expr.try_as_physical_expr(&record_batch.schema())?;
+                let ColumnarValue::Array(column) = df_expr
+                    .evaluate(record_batch)
+                    .context(error::EvaluateRecordBatchSnafu)?
+                else {
                     unreachable!("Expected an array")
                 };
-                (
+                Ok((
                     *region_num,
                     column
                         .as_any()
                         .downcast_ref::<BooleanArray>()
-                        .unwrap()
+                        .with_context(|| error::UnexpectedColumnTypeSnafu {
+                            data_type: column.data_type().clone(),
+                        })?
                         .clone(),
-                )
+                ))
             })
-            .collect();
+            .collect::<error::Result<_>>()?;
 
         let mut selected = BooleanArray::new(BooleanBuffer::new_unset(num_rows), None);
         for region_selection in result.values() {
-            selected = arrow::compute::kernels::boolean::or(&selected, region_selection).unwrap();
+            selected = arrow::compute::kernels::boolean::or(&selected, region_selection)
+                .context(error::ComputeArrowKernelSnafu)?;
         }
 
-        // bitwise not to find unselected rows
-        let unselected = arrow::compute::kernels::boolean::not(&selected).unwrap();
-
-        result
+        // find unselected rows and assign to default region
+        let unselected = arrow::compute::kernels::boolean::not(&selected)
+            .context(error::ComputeArrowKernelSnafu)?;
+        let default_region_selection = result
             .entry(DEFAULT_REGION)
-            .and_modify(|default_region_selected| {
-                *default_region_selected =
-                    arrow::compute::kernels::boolean::or(default_region_selected, &unselected)
-                        .unwrap();
-            })
             .or_insert_with(|| unselected.clone());
-
+        *default_region_selection =
+            arrow::compute::kernels::boolean::or(default_region_selection, &unselected)
+                .context(error::ComputeArrowKernelSnafu)?;
         Ok(result)
     }
 }
