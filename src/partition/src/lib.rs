@@ -13,7 +13,6 @@
 // limitations under the License.
 
 #![feature(assert_matches)]
-#![feature(if_let_guard)]
 
 //! Structs and traits for partitioning rule.   
 
@@ -23,6 +22,5 @@ pub mod manager;
 pub mod multi_dim;
 pub mod partition;
 pub mod splitter;
-pub mod utils;
 
 pub use crate::partition::{PartitionRule, PartitionRuleRef};

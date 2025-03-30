@@ -420,11 +420,25 @@ pub enum Error {
         source: datatypes::error::Error,
     },
 
+    #[snafu(display("Failed to deserialize partition in meta to partition def"))]
+    DeserializePartition {
+        #[snafu(implicit)]
+        location: Location,
+        source: partition::error::Error,
+    },
+
     #[snafu(display("Failed to describe schema for given statement"))]
     DescribeStatement {
         #[snafu(implicit)]
         location: Location,
         source: query::error::Error,
+    },
+
+    #[snafu(display("Illegal primary keys definition: {}", msg))]
+    IllegalPrimaryKeysDef {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display("Unrecognized table option"))]
@@ -711,6 +725,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid partition rule: {}", reason))]
+    InvalidPartitionRule {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid configuration value."))]
     InvalidConfigValue {
         source: session::session_config::Error,
@@ -797,6 +818,7 @@ impl ErrorExt for Error {
             | Error::InvalidConfigValue { .. }
             | Error::InvalidInsertRequest { .. }
             | Error::InvalidDeleteRequest { .. }
+            | Error::IllegalPrimaryKeysDef { .. }
             | Error::SchemaNotFound { .. }
             | Error::SchemaExists { .. }
             | Error::SchemaInUse { .. }
@@ -901,7 +923,8 @@ impl ErrorExt for Error {
             Error::AlterExprToRequest { source, .. } => source.status_code(),
 
             Error::External { source, .. } => source.status_code(),
-            Error::FindTablePartitionRule { source, .. }
+            Error::DeserializePartition { source, .. }
+            | Error::FindTablePartitionRule { source, .. }
             | Error::SplitInsert { source, .. }
             | Error::SplitDelete { source, .. }
             | Error::FindRegionLeader { source, .. } => source.status_code(),
@@ -924,6 +947,7 @@ impl ErrorExt for Error {
             Error::ColumnDefaultValue { source, .. } => source.status_code(),
 
             Error::EmptyDdlExpr { .. }
+            | Error::InvalidPartitionRule { .. }
             | Error::ParseSqlValue { .. }
             | Error::InvalidTimestampRange { .. } => StatusCode::InvalidArguments,
 
