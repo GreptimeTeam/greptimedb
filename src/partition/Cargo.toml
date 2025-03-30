@@ -28,3 +28,11 @@ sql.workspace = true
 sqlparser.workspace = true
 store-api.workspace = true
 table.workspace = true
+
+[dev-dependencies]
+criterion = "0.5"
+rand = "0.8"
+
+[[bench]]
+name = "bench_split_record_batch"
+harness = false

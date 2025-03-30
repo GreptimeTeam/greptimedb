@@ -17,11 +17,17 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use datafusion_expr::ColumnarValue;
+use datatypes::arrow;
 use datatypes::arrow::array::{BooleanArray, BooleanBufferBuilder, RecordBatch};
+use datatypes::arrow::buffer::BooleanBuffer;
 use datatypes::prelude::Value;
 use datatypes::vectors::{Helper, VectorRef};
 use serde::{Deserialize, Serialize};
+use session::context::QueryContext;
 use snafu::{ensure, OptionExt, ResultExt};
+use sql::dialect::GreptimeDbDialect;
+use sql::parser::{ParseOptions, ParserContext};
+use sql::statements::statement::Statement;
 use store_api::storage::RegionNumber;
 
 use crate::error::{
@@ -29,7 +35,11 @@ use crate::error::{
     UndefinedColumnSnafu,
 };
 use crate::expr::{Operand, PartitionExpr, RestrictedOp};
+use crate::utils::parse_partition_columns_and_exprs;
 use crate::PartitionRule;
+
+/// The default region number when no partition exprs are matched.
+const DEFAULT_REGION: RegionNumber = 0;
 
 /// Multi-Dimiension partition rule. RFC [here](https://github.com/GreptimeTeam/greptimedb/blob/main/docs/rfcs/2024-02-21-multi-dimension-partition-rule/rfc.md)
 ///
@@ -90,7 +100,7 @@ impl MultiDimPartitionRule {
         }
 
         // return the default region number
-        Ok(0)
+        Ok(DEFAULT_REGION)
     }
 
     fn evaluate_expr(&self, expr: &PartitionExpr, values: &[Value]) -> Result<bool> {
@@ -159,7 +169,7 @@ impl MultiDimPartitionRule {
             .collect::<Result<Vec<_>>>()
     }
 
-    fn split_record_batch_naive(
+    pub fn split_record_batch_naive(
         &self,
         record_batch: &RecordBatch,
     ) -> Result<HashMap<RegionNumber, BooleanArray>> {
@@ -192,11 +202,12 @@ impl MultiDimPartitionRule {
             .collect())
     }
 
-    fn split_record_batch(
+    pub fn split_record_batch(
         &self,
         record_batch: &RecordBatch,
     ) -> Result<HashMap<RegionNumber, BooleanArray>> {
-        Ok(self
+        let num_rows = record_batch.num_rows();
+        let mut result: HashMap<u32, BooleanArray> = self
             .exprs
             .iter()
             .zip(self.regions.iter())
@@ -214,7 +225,26 @@ impl MultiDimPartitionRule {
                         .clone(),
                 )
             })
-            .collect())
+            .collect();
+
+        let mut selected = BooleanArray::new(BooleanBuffer::new_unset(num_rows), None);
+        for region_selection in result.values() {
+            selected = arrow::compute::kernels::boolean::or(&selected, &region_selection).unwrap();
+        }
+
+        // bitwise not to find unselected rows
+        let unselected = arrow::compute::kernels::boolean::not(&selected).unwrap();
+
+        result
+            .entry(DEFAULT_REGION)
+            .and_modify(|default_region_selected| {
+                *default_region_selected =
+                    arrow::compute::kernels::boolean::or(default_region_selected, &unselected)
+                        .unwrap();
+            })
+            .or_insert_with(|| unselected.clone());
+
+        Ok(result)
     }
 }
 
@@ -362,12 +392,45 @@ impl<'a> RuleChecker<'a> {
     }
 }
 
+pub fn sql_to_partition_rule(
+    sql: &str,
+    regions: Vec<RegionNumber>,
+) -> Result<MultiDimPartitionRule> {
+    let stmts =
+        ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+            .unwrap();
+
+    let Statement::CreateTable(create_table) = &stmts[0] else {
+        unreachable!("Expected a CreateTable statement");
+    };
+
+    let expr = sql::util::create_to_expr(
+        create_table,
+        "default",
+        "default",
+        common_time::timezone::get_timezone(None),
+    )
+    .unwrap();
+
+    let (partition_cols, _, exprs) = parse_partition_columns_and_exprs(
+        &expr,
+        create_table.partitions.clone(),
+        &QueryContext::arc(),
+    )
+    .unwrap();
+
+    // Create a rule with more complex conditions
+    MultiDimPartitionRule::try_new(partition_cols, regions, exprs)
+}
+
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
     use std::sync::Arc;
 
     use datatypes::arrow::array::{ArrayRef, Int32Array};
+    use datatypes::arrow::datatypes::{DataType, Field, Schema};
+    use datatypes::arrow_array::StringArray;
     use session::context::QueryContext;
     use sql::dialect::GreptimeDbDialect;
     use sql::parser::{ParseOptions, ParserContext};
@@ -722,6 +785,11 @@ mod tests {
         // check rule
         assert!(rule.is_err());
     }
+}
+
+#[cfg(test)]
+mod test_split_record_batch {
+    use super::*;
 
     #[test]
     fn test_split_record_batch_by_one_column() {
@@ -811,37 +879,6 @@ mod tests {
         assert_eq!(result.len(), 0);
     }
 
-    fn sql_to_partition_rule(
-        sql: &str,
-        regions: Vec<RegionNumber>,
-    ) -> Result<MultiDimPartitionRule> {
-        let stmts =
-            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
-                .unwrap();
-
-        let Statement::CreateTable(create_table) = &stmts[0] else {
-            unreachable!("Expected a CreateTable statement");
-        };
-
-        let expr = sql::util::create_to_expr(
-            create_table,
-            "default",
-            "default",
-            common_time::timezone::get_timezone(None),
-        )
-        .unwrap();
-
-        let (partition_cols, _, exprs) = parse_partition_columns_and_exprs(
-            &expr,
-            create_table.partitions.clone(),
-            &QueryContext::arc(),
-        )
-        .unwrap();
-
-        // Create a rule with more complex conditions
-        MultiDimPartitionRule::try_new(partition_cols, regions, exprs)
-    }
-
     #[test]
     fn test_split_record_batch_by_sql() {
         use datatypes::arrow::array::StringArray;
@@ -896,9 +933,4 @@ mod tests {
             vec![false, true, true, true]
         );
     }
-}
-
-#[cfg(test)]
-mod test_split_record_batch {
-    use super::*;
 }
