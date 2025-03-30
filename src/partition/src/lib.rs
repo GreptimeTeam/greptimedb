@@ -13,7 +13,7 @@
 // limitations under the License.
 
 #![feature(assert_matches)]
-
+#![feature(let_chains)]
 //! Structs and traits for partitioning rule.   
 
 pub mod error;

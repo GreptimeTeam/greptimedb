@@ -106,6 +106,10 @@ impl Operand {
     pub fn gt_eq(self, rhs: impl Into<Self>) -> PartitionExpr {
         PartitionExpr::new(self, RestrictedOp::GtEq, rhs.into())
     }
+
+    pub fn eq(self, rhs: impl Into<Self>) -> PartitionExpr {
+        PartitionExpr::new(self, RestrictedOp::Eq, rhs.into())
+    }
 }
 
 impl Display for Operand {
