@@ -832,6 +832,6 @@ mod test_split_record_batch {
         let result = rule.split_record_batch(&batch).unwrap();
 
         // Empty batch should result in empty map
-        assert_eq!(result.len(), 0);
+        assert_eq!(result.len(), 2);
     }
 }

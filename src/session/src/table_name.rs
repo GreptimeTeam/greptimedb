@@ -14,7 +14,7 @@
 
 use snafu::ensure;
 use sql::ast::ObjectName;
-use sql::error::{PermissionDeniedSnafu, Result};
+use sql::error::{InvalidSqlSnafu, PermissionDeniedSnafu, Result};
 use sql::parser::ParserContext;
 
 use crate::QueryContextRef;
@@ -39,14 +39,31 @@ pub fn table_name_to_full_name(
     Ok((catalog, schema, table))
 }
 
-// Re-export table_idents_to_full_name from sql::util
+/// Converts maybe fully-qualified table name (`<catalog>.<schema>.<table>`) to tuple.
 pub fn table_idents_to_full_name(
     obj_name: &ObjectName,
     query_ctx: &QueryContextRef,
 ) -> Result<(String, String, String)> {
-    sql::util::table_idents_to_full_name(
-        obj_name,
-        query_ctx.current_catalog(),
-        query_ctx.current_schema(),
-    )
+    match &obj_name.0[..] {
+        [table] => Ok((
+            query_ctx.current_catalog().to_string(),
+            query_ctx.current_schema().to_string(),
+            table.value.clone(),
+        )),
+        [schema, table] => Ok((
+            query_ctx.current_catalog().to_string(),
+            schema.value.clone(),
+            table.value.clone(),
+        )),
+        [catalog, schema, table] => Ok((
+            catalog.value.clone(),
+            schema.value.clone(),
+            table.value.clone(),
+        )),
+        _ => InvalidSqlSnafu {
+            msg: format!(
+                "expect table name to be <catalog>.<schema>.<table>, <schema>.<table> or <table>, actual: {obj_name}",
+            ),
+        }.fail(),
+    }
 }

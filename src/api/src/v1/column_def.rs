@@ -26,11 +26,11 @@ use crate::helper::ColumnDataTypeWrapper;
 use crate::v1::{ColumnDef, ColumnOptions, SemanticType};
 
 /// Key used to store fulltext options in gRPC column options.
-pub const FULLTEXT_GRPC_KEY: &str = "fulltext";
+const FULLTEXT_GRPC_KEY: &str = "fulltext";
 /// Key used to store inverted index options in gRPC column options.
-pub const INVERTED_INDEX_GRPC_KEY: &str = "inverted_index";
+const INVERTED_INDEX_GRPC_KEY: &str = "inverted_index";
 /// Key used to store skip index options in gRPC column options.
-pub const SKIPPING_INDEX_GRPC_KEY: &str = "skipping_index";
+const SKIPPING_INDEX_GRPC_KEY: &str = "skipping_index";
 
 /// Tries to construct a `ColumnSchema` from the given  `ColumnDef`.
 pub fn try_as_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
