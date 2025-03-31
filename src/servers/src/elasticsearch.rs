@@ -372,8 +372,8 @@ fn get_log_value_from_msg_field(mut v: Value, msg_field: &str) -> Value {
         match message {
             Value::String(s) => match serde_json::from_str::<Value>(&s) {
                 Ok(s) => s,
-                // If the message is not a valid JSON, just use the original message as the log value.
-                Err(_) => Value::String(s),
+                // If the message is not a valid JSON, return a map with the original message key and value.
+                Err(_) => json!({msg_field: s}),
             },
             // If the message is not a string, just use the original message as the log value.
             _ => message,
