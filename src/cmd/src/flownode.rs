@@ -34,8 +34,7 @@ use common_telemetry::logging::TracingOptions;
 use common_version::{short_version, version};
 use flow::{FlownodeBuilder, FlownodeInstance, FrontendInvoker};
 use meta_client::{MetaClientOptions, MetaClientType};
-use servers::Mode;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{
@@ -203,7 +202,6 @@ impl StartCommand {
                 .get_or_insert_with(MetaClientOptions::default)
                 .metasrv_addrs
                 .clone_from(metasrv_addrs);
-            opts.mode = Mode::Distributed;
         }
 
         if let Some(http_addr) = &self.http_addr {
@@ -214,12 +212,12 @@ impl StartCommand {
             opts.http.timeout = Duration::from_secs(http_timeout);
         }
 
-        if let (Mode::Distributed, None) = (&opts.mode, &opts.node_id) {
-            return MissingConfigSnafu {
-                msg: "Missing node id option",
+        ensure!(
+            opts.node_id.is_some(),
+            MissingConfigSnafu {
+                msg: "Missing node id option"
             }
-            .fail();
-        }
+        );
 
         Ok(())
     }

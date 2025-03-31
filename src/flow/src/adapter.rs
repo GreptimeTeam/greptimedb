@@ -37,7 +37,6 @@ use serde::{Deserialize, Serialize};
 use servers::grpc::GrpcOptions;
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
-use servers::Mode;
 use session::context::QueryContext;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{ConcreteDataType, RegionId};
@@ -102,7 +101,6 @@ impl Default for FlowConfig {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FlownodeOptions {
-    pub mode: Mode,
     pub node_id: Option<u64>,
     pub flow: FlowConfig,
     pub grpc: GrpcOptions,
@@ -116,7 +114,6 @@ pub struct FlownodeOptions {
 impl Default for FlownodeOptions {
     fn default() -> Self {
         Self {
-            mode: servers::Mode::Standalone,
             node_id: None,
             flow: FlowConfig::default(),
             grpc: GrpcOptions::default().with_bind_addr("127.0.0.1:3004"),
