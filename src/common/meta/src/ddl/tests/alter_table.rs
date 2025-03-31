@@ -37,6 +37,7 @@ use crate::ddl::test_util::datanode_handler::{
     AllFailureDatanodeHandler, DatanodeWatcher, PartialSuccessDatanodeHandler,
     RequestOutdatedErrorDatanodeHandler,
 };
+use crate::error::Error;
 use crate::key::consistency_guard::{ConsistencyGuardKey, ConsistencyGuardResourceType};
 use crate::key::datanode_table::DatanodeTableKey;
 use crate::key::table_name::TableNameKey;
@@ -563,4 +564,57 @@ async fn on_submit_alter_request_with_all_failure(retryable: bool) {
         // all failure, the consistency guard should be removed
         assert!(value.is_none());
     }
+}
+
+#[tokio::test]
+async fn test_on_submit_alter_request_with_conflict() {
+    common_telemetry::init_default_ut_logging();
+    let node_manager = Arc::new(MockDatanodeManager::new(AllFailureDatanodeHandler {
+        retryable: false,
+    }));
+    let ddl_context = new_ddl_context(node_manager);
+    let table_id = 1024;
+    let table_name = "foo";
+    let task = test_create_table_task(table_name, table_id);
+    // Puts a value to table name key.
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info.clone(),
+            prepare_table_route(table_id),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let alter_table_task = AlterTableTask {
+        alter_table: AlterTableExpr {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: table_name.to_string(),
+            kind: Some(Kind::DropColumns(DropColumns {
+                drop_columns: vec![DropColumn {
+                    name: "cpu".to_string(),
+                }],
+            })),
+        },
+    };
+    let key = ConsistencyGuardKey::new(ConsistencyGuardResourceType::Table, table_id as u64);
+    let another_procedure_id = ProcedureId::random();
+    ddl_context
+        .table_metadata_manager
+        .consistency_guard_manager()
+        .acquire(&key, another_procedure_id)
+        .await
+        .unwrap();
+
+    let procedure_id = ProcedureId::random();
+    let mut procedure =
+        AlterTableProcedure::new(table_id, alter_table_task, ddl_context.clone()).unwrap();
+    procedure.on_prepare().await.unwrap();
+    let err = procedure
+        .submit_alter_region_requests(procedure_id)
+        .await
+        .unwrap_err();
+    assert_matches!(err, Error::ConsistencyGuardConflict { .. });
 }
