@@ -323,6 +323,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Within filter interval error: {}", message))]
+    WithinFilterInternal {
+        message: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -370,7 +377,9 @@ impl ErrorExt for Error {
 
             RegionQuery { source, .. } => source.status_code(),
             TableMutation { source, .. } => source.status_code(),
-            MissingTableMutationHandler { .. } => StatusCode::Unexpected,
+            WithinFilterInternal { .. } | MissingTableMutationHandler { .. } => {
+                StatusCode::Unexpected
+            }
             GetRegionMetadata { .. } => StatusCode::RegionNotReady,
             TableReadOnly { .. } => StatusCode::Unsupported,
             GetFulltextOptions { source, .. } | GetSkippingIndexOptions { source, .. } => {
