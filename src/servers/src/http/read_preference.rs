@@ -33,6 +33,7 @@ pub async fn extract_read_preference(mut request: Request<Body>, next: Next) -> 
         .unwrap_or_default();
 
     if let Some(query_ctx) = request.extensions_mut().get_mut::<QueryContext>() {
+        common_telemetry::debug!("Setting read preference to {}", read_preference);
         query_ctx.set_read_preference(read_preference);
     }
     next.run(request).await

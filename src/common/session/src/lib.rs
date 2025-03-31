@@ -16,10 +16,30 @@ use strum::{AsRefStr, Display, EnumString};
 
 /// Defines the read preference for frontend route operations,
 /// determining whether to read from the region leader or follower.
-#[derive(Debug, Clone, Copy, Default, EnumString, Display, AsRefStr)]
+#[derive(Debug, Clone, Copy, Default, EnumString, Display, AsRefStr, PartialEq, Eq)]
 pub enum ReadPreference {
     #[default]
     // Reads all operations from the region leader. This is the default mode.
     #[strum(serialize = "leader", to_string = "LEADER")]
     Leader,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use crate::ReadPreference;
+
+    #[test]
+    fn test_read_preference() {
+        assert_eq!(ReadPreference::Leader.to_string(), "LEADER");
+
+        let read_preference = ReadPreference::from_str("LEADER").unwrap();
+        assert_eq!(read_preference, ReadPreference::Leader);
+
+        let read_preference = ReadPreference::from_str("leader").unwrap();
+        assert_eq!(read_preference, ReadPreference::Leader);
+
+        ReadPreference::from_str("follower").unwrap_err();
+    }
 }
