@@ -824,6 +824,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 WorkerRequest::Stop => {
                     debug_assert!(!self.running.load(Ordering::Relaxed));
                 }
+
+                WorkerRequest::SyncRegion(req) => {
+                    self.handle_region_sync(req).await;
+                }
             }
         }
 
