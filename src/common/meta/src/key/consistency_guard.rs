@@ -192,10 +192,14 @@ impl ConsistencyGuardManager {
         Ok(value.map(|v| ConsistencyGuardValue::try_from_raw_value(&v.value).unwrap()))
     }
 
-    /// Locks the consistency guard key.
+    /// Acquires the consistency guard.
     ///
-    /// If the consistency guard key is already locked by other procedure, it will return an error.
-    pub async fn lock(&self, key: &ConsistencyGuardKey, procedure_id: ProcedureId) -> Result<()> {
+    /// If the consistency guard is already acquired by other procedure, it will return an error.
+    pub async fn acquire(
+        &self,
+        key: &ConsistencyGuardKey,
+        procedure_id: ProcedureId,
+    ) -> Result<()> {
         let (txn, on_failure) = self.build_create_txn(
             key,
             &ConsistencyGuardValue {
@@ -217,7 +221,7 @@ impl ConsistencyGuardManager {
                 remote_value.procedure_id == procedure_id.to_string(),
                 error::ConsistencyGuardConflictSnafu {
                     msg: format!(
-                        "The consistency guard value is already locked by other procedure {}",
+                        "The consistency guard value is already acquired by other procedure {}",
                         remote_value.procedure_id
                     ),
                 }
@@ -227,9 +231,7 @@ impl ConsistencyGuardManager {
         Ok(())
     }
 
-    /// Releases the consistency guard key.
-    ///
-    /// If the consistency guard key is not locked by the procedure, it will return an error.
+    /// Releases the consistency guard.
     pub async fn release(
         &self,
         key: &ConsistencyGuardKey,
@@ -285,13 +287,13 @@ mod tests {
         let procedure_id = ProcedureId::random();
 
         consistency_guard_manager
-            .lock(&key, procedure_id)
+            .acquire(&key, procedure_id)
             .await
             .unwrap();
 
         // Lock again, should be ok.
         consistency_guard_manager
-            .lock(&key, procedure_id)
+            .acquire(&key, procedure_id)
             .await
             .unwrap();
 
@@ -322,12 +324,12 @@ mod tests {
         let procedure_id2 = ProcedureId::random();
 
         consistency_guard_manager
-            .lock(&key, procedure_id)
+            .acquire(&key, procedure_id)
             .await
             .unwrap();
 
         let err = consistency_guard_manager
-            .lock(&key, procedure_id2)
+            .acquire(&key, procedure_id2)
             .await
             .unwrap_err();
         assert_matches!(err, Error::ConsistencyGuardConflict { .. });

@@ -105,7 +105,7 @@ impl AlterTableProcedure {
         Ok(Status::executing(true))
     }
 
-    async fn lock_consistency_guard(
+    async fn acquire_consistency_guard(
         &self,
         table_id: TableId,
         procedure_id: ProcedureId,
@@ -114,7 +114,7 @@ impl AlterTableProcedure {
             .context
             .table_metadata_manager
             .consistency_guard_manager()
-            .lock(
+            .acquire(
                 &ConsistencyGuardKey::new(ConsistencyGuardResourceType::Table, table_id as u64),
                 procedure_id,
             )
@@ -179,8 +179,9 @@ impl AlterTableProcedure {
         );
 
         ensure!(!leaders.is_empty(), NoLeaderSnafu { table_id });
-        // Locks the consistency guard before submitting alter region requests.
-        self.lock_consistency_guard(table_id, procedure_id).await?;
+        // Acquires the consistency guard before submitting alter region requests.
+        self.acquire_consistency_guard(table_id, procedure_id)
+            .await?;
         for datanode in leaders {
             let requester = self.context.node_manager.datanode(&datanode).await;
             let regions = find_leader_regions(&physical_table_route.region_routes, &datanode);
