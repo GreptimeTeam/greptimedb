@@ -520,6 +520,7 @@ mod tests {
             #[cfg(feature = "tokio-console")]
             tokio_console_addr: None,
         });
+        // Missing node_id.
         assert_matches!(result, Err(crate::error::Error::MissingConfig { .. }));
 
         cmd.node_id = Some(42);
