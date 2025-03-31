@@ -242,22 +242,6 @@ max_batch_bytes = "1MB"
 ## **It's only used when the provider is `kafka`**.
 consumer_wait_timeout = "100ms"
 
-## The initial backoff delay.
-## **It's only used when the provider is `kafka`**.
-backoff_init = "500ms"
-
-## The maximum backoff delay.
-## **It's only used when the provider is `kafka`**.
-backoff_max = "10s"
-
-## The exponential backoff rate, i.e. next backoff = base * current backoff.
-## **It's only used when the provider is `kafka`**.
-backoff_base = 2
-
-## The deadline of retries.
-## **It's only used when the provider is `kafka`**.
-backoff_deadline = "5mins"
-
 ## Ignore missing entries during read WAL.
 ## **It's only used when the provider is `kafka`**.
 ##

@@ -13,13 +13,13 @@
 // limitations under the License.
 
 use common_telemetry::{error, info};
+use common_wal::config::kafka::datanode::DEFAULT_BACKOFF_CONFIG;
 use common_wal::config::kafka::MetasrvKafkaConfig;
 use rskafka::client::error::Error as RsKafkaError;
 use rskafka::client::error::ProtocolError::TopicAlreadyExists;
 use rskafka::client::partition::{Compression, UnknownTopicHandling};
 use rskafka::client::{Client, ClientBuilder};
 use rskafka::record::Record;
-use rskafka::BackoffConfig;
 use snafu::ResultExt;
 
 use crate::error::{
@@ -127,16 +127,10 @@ impl KafkaTopicCreator {
 
 pub async fn build_kafka_topic_creator(config: &MetasrvKafkaConfig) -> Result<KafkaTopicCreator> {
     // Builds an kafka controller client for creating topics.
-    let backoff_config = BackoffConfig {
-        init_backoff: config.backoff.init,
-        max_backoff: config.backoff.max,
-        base: config.backoff.base as f64,
-        deadline: config.backoff.deadline,
-    };
     let broker_endpoints = common_wal::resolve_to_ipv4(&config.connection.broker_endpoints)
         .await
         .context(ResolveKafkaEndpointSnafu)?;
-    let mut builder = ClientBuilder::new(broker_endpoints).backoff_config(backoff_config);
+    let mut builder = ClientBuilder::new(broker_endpoints).backoff_config(DEFAULT_BACKOFF_CONFIG);
     if let Some(sasl) = &config.connection.sasl {
         builder = builder.sasl_config(sasl.config.clone().into_sasl_config());
     };
