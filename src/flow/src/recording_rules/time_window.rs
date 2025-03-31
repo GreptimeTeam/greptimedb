@@ -30,9 +30,9 @@ use common_telemetry::warn;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datafusion::error::Result as DfResult;
+use datafusion::execution::SessionState;
 use datafusion::logical_expr::Expr;
 use datafusion::physical_planner::{DefaultPhysicalPlanner, PhysicalPlanner};
-use datafusion::prelude::SessionContext;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeRewriter};
 use datafusion_common::{DFSchema, TableReference};
 use datafusion_expr::{ColumnarValue, LogicalPlan};
@@ -77,7 +77,7 @@ impl TimeWindowExpr {
         expr: &Expr,
         column_name: &str,
         df_schema: &DFSchema,
-        session: &SessionContext,
+        session: &SessionState,
     ) -> Result<Self, Error> {
         let phy_expr: PhysicalExprRef = to_phy_expr(expr, df_schema, session)?;
         Ok(Self {
@@ -441,7 +441,11 @@ pub async fn find_plan_time_window_bound(
 
     // if no time_window_expr is found, return None
     if let Some(time_window_expr) = time_window_expr {
-        let phy_expr = to_phy_expr(&time_window_expr, &df_schema, &SessionContext::new())?;
+        let phy_expr = to_phy_expr(
+            &time_window_expr,
+            &df_schema,
+            &engine.engine_state().session_state(),
+        )?;
         let lower_bound = calc_expr_time_window_lower_bound(&phy_expr, &df_schema, new_current)?;
         let upper_bound = probe_expr_time_window_upper_bound(&phy_expr, &df_schema, new_current)?;
         Ok((ts_col_name, lower_bound, upper_bound))
@@ -636,12 +640,12 @@ fn eval_phy_time_window_expr(
 fn to_phy_expr(
     expr: &Expr,
     df_schema: &DFSchema,
-    session: &SessionContext,
+    session: &SessionState,
 ) -> Result<PhysicalExprRef, Error> {
     let phy_planner = DefaultPhysicalPlanner::default();
 
     let phy_expr: PhysicalExprRef = phy_planner
-        .create_physical_expr(expr, df_schema, &session.state())
+        .create_physical_expr(expr, df_schema, session)
         .with_context(|_e| DatafusionSnafu {
             context: format!(
                 "Failed to create physical expression from {expr:?} using {df_schema:?}"
