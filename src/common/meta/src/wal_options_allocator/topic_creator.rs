@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use common_telemetry::{error, info};
-use common_wal::config::kafka::datanode::DEFAULT_BACKOFF_CONFIG;
+use common_wal::config::kafka::common::DEFAULT_BACKOFF_CONFIG;
 use common_wal::config::kafka::MetasrvKafkaConfig;
 use rskafka::client::error::Error as RsKafkaError;
 use rskafka::client::error::ProtocolError::TopicAlreadyExists;

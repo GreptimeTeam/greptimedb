@@ -17,9 +17,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rskafka::client::{Credentials, SaslConfig};
+use rskafka::BackoffConfig;
 use rustls::{ClientConfig, RootCertStore};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
+
+pub const DEFAULT_BACKOFF_CONFIG: BackoffConfig = BackoffConfig {
+    init_backoff: Duration::from_millis(100),
+    max_backoff: Duration::from_secs(10),
+    base: 2.0,
+    deadline: Some(Duration::from_secs(40)),
+};
 
 use crate::error::{self, Result};
 use crate::{TopicSelectorType, BROKER_ENDPOINT, TOPIC_NAME_PREFIX};

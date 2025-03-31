@@ -15,18 +15,10 @@
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
-use rskafka::BackoffConfig;
 use serde::{Deserialize, Serialize};
 
 use super::common::KafkaConnectionConfig;
 use crate::config::kafka::common::KafkaTopicConfig;
-
-pub const DEFAULT_BACKOFF_CONFIG: BackoffConfig = BackoffConfig {
-    init_backoff: Duration::from_millis(100),
-    max_backoff: Duration::from_micros(500),
-    base: 2.0,
-    deadline: Some(Duration::from_secs(30)),
-};
 
 /// Kafka wal configurations for datanode.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
