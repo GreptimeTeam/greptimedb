@@ -302,6 +302,10 @@ purge_interval = "1m"
 max_retry_times = 3
 ## Initial retry delay of procedures, increases exponentially
 retry_delay = "500ms"
+## Max running procedures.
+## The maximum number of procedures that can be running at the same time.
+## If the number of running procedures exceeds this limit, the procedure will be rejected.
+max_running_procedures = 128
 
 ## flow engine options.
 [flow]
