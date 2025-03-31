@@ -33,7 +33,7 @@ use store_api::storage::RegionId;
 use tokio::time::error::Elapsed;
 
 use crate::cache::file_cache::FileType;
-use crate::region::{RegionLeaderState, RegionRoleState};
+use crate::region::RegionRoleState;
 use crate::schedule::remote_job_scheduler::JobId;
 use crate::sst::file::FileId;
 use crate::worker::WorkerId;
@@ -503,10 +503,10 @@ pub enum Error {
     },
 
     #[snafu(display("Region {} is in {:?} state, expect: {:?}", region_id, state, expect))]
-    RegionLeaderState {
+    RegionState {
         region_id: RegionId,
         state: RegionRoleState,
-        expect: RegionLeaderState,
+        expect: RegionRoleState,
         #[snafu(implicit)]
         location: Location,
     },
@@ -804,8 +804,8 @@ pub enum Error {
     #[snafu(display(
         "Failed to install manifest to {}, region: {}, available manifest version: {}, last version: {}",
         target_version,
-        available_version,
         region_id,
+        available_version,
         last_version
     ))]
     InstallManifestTo {
@@ -1039,11 +1039,10 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            OpenDal { .. }
-            | ReadParquet { .. }
-            | WriteWal { .. }
-            | ReadWal { .. }
-            | DeleteWal { .. } => StatusCode::StorageUnavailable,
+            OpenDal { .. } | ReadParquet { .. } => StatusCode::StorageUnavailable,
+            WriteWal { source, .. } | ReadWal { source, .. } | DeleteWal { source, .. } => {
+                source.status_code()
+            }
             CompressObject { .. }
             | DecompressObject { .. }
             | SerdeJson { .. }
@@ -1115,8 +1114,8 @@ impl ErrorExt for Error {
             CompactRegion { source, .. } => source.status_code(),
             CompatReader { .. } => StatusCode::Unexpected,
             InvalidRegionRequest { source, .. } => source.status_code(),
-            RegionLeaderState { .. } | UpdateManifest { .. } => StatusCode::RegionNotReady,
-            &FlushableRegionState { .. } => StatusCode::RegionNotReady,
+            RegionState { .. } | UpdateManifest { .. } => StatusCode::RegionNotReady,
+            FlushableRegionState { .. } => StatusCode::RegionNotReady,
             JsonOptions { .. } => StatusCode::InvalidArguments,
             EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,
             ArrowReader { .. } => StatusCode::StorageUnavailable,

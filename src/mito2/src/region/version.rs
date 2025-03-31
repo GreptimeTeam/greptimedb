@@ -216,6 +216,12 @@ impl VersionControl {
         version_data.version.ssts.mark_all_deleted();
         version_data.version = new_version;
     }
+
+    /// Overwrites the current version with a new version.
+    pub(crate) fn overwrite_current(&self, version: VersionRef) {
+        let mut version_data = self.data.write().unwrap();
+        version_data.version = version;
+    }
 }
 
 pub(crate) type VersionControlRef = Arc<VersionControl>;

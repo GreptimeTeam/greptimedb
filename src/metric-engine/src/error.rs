@@ -259,6 +259,12 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Unsupported sync region request"))]
+    UnsupportedSyncRegion {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -280,9 +286,9 @@ impl ErrorExt for Error {
             | UnexpectedRequest { .. }
             | UnsupportedAlterKind { .. } => StatusCode::InvalidArguments,
 
-            ForbiddenPhysicalAlter { .. } | UnsupportedRegionRequest { .. } => {
-                StatusCode::Unsupported
-            }
+            ForbiddenPhysicalAlter { .. }
+            | UnsupportedRegionRequest { .. }
+            | UnsupportedSyncRegion { .. } => StatusCode::Unsupported,
 
             DeserializeColumnMetadata { .. }
             | SerializeColumnMetadata { .. }

@@ -430,6 +430,7 @@ fn build_procedure_manager(
     let manager_config = ManagerConfig {
         max_retry_times: options.procedure.max_retry_times,
         retry_delay: options.procedure.retry_delay,
+        max_running_procedures: options.procedure.max_running_procedures,
         ..Default::default()
     };
     let state_store = KvStateStore::new(kv_backend.clone()).with_max_value_size(
