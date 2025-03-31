@@ -35,7 +35,9 @@ use crate::error::{self, Result};
 use crate::instruction::CacheIdent;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
-use crate::rpc::router::{find_leader_regions, find_leaders, RegionRoute};
+use crate::rpc::router::{
+    find_leader_regions, find_leaders, operating_leader_regions, RegionRoute,
+};
 
 /// [Control] indicated to the caller whether to go to the next step.
 #[derive(Debug)]
@@ -249,6 +251,11 @@ impl DropTableExecutor {
             .await
             .into_iter()
             .collect::<Result<Vec<_>>>()?;
+
+        // Deletes the leader region from registry.
+        let region_ids = operating_leader_regions(region_routes);
+        ctx.leader_region_registry
+            .batch_delete(region_ids.into_iter().map(|(region_id, _)| region_id));
 
         Ok(())
     }

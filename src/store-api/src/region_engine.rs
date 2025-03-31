@@ -93,7 +93,6 @@ impl GrantedRegion {
         Self {
             region_id,
             region_role,
-            // TODO(weny): use real manifest version
             manifest_version: 0,
         }
     }
@@ -383,6 +382,9 @@ pub struct RegionStatistic {
     /// The size of SST index files in bytes.
     #[serde(default)]
     pub index_size: u64,
+    /// The version of manifest.
+    #[serde(default)]
+    pub manifest_version: u64,
 }
 
 impl RegionStatistic {

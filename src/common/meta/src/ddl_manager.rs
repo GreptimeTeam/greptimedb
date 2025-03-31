@@ -850,6 +850,7 @@ mod tests {
     use crate::node_manager::{DatanodeRef, FlownodeRef, NodeManager};
     use crate::peer::Peer;
     use crate::region_keeper::MemoryRegionKeeper;
+    use crate::region_registry::LeaderRegionRegistry;
     use crate::sequence::SequenceBuilder;
     use crate::state_store::KvStateStore;
     use crate::wal_options_allocator::WalOptionsAllocator;
@@ -893,6 +894,7 @@ mod tests {
                 flow_metadata_manager,
                 flow_metadata_allocator,
                 memory_region_keeper: Arc::new(MemoryRegionKeeper::default()),
+                leader_region_registry: Arc::new(LeaderRegionRegistry::default()),
                 region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
             },
             procedure_manager.clone(),

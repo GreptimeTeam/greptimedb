@@ -12,13 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::meta::{HeartbeatRequest, RegionLease, Role};
 use async_trait::async_trait;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::region_keeper::MemoryRegionKeeperRef;
-use store_api::region_engine::GrantedRegion;
+use store_api::region_engine::{GrantedRegion, RegionRole};
+use store_api::storage::RegionId;
 
 use crate::error::Result;
 use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
@@ -29,6 +31,17 @@ use crate::region::RegionLeaseKeeper;
 pub struct RegionLeaseHandler {
     region_lease_seconds: u64,
     region_lease_keeper: RegionLeaseKeeperRef,
+    customized_region_lease_renewer: Option<CustomizedRegionLeaseRenewerRef>,
+}
+
+pub type CustomizedRegionLeaseRenewerRef = Arc<dyn CustomizedRegionLeaseRenewer>;
+
+pub trait CustomizedRegionLeaseRenewer: Send + Sync {
+    fn renew(
+        &self,
+        ctx: &mut Context,
+        regions: HashMap<RegionId, RegionRole>,
+    ) -> Vec<GrantedRegion>;
 }
 
 impl RegionLeaseHandler {
@@ -36,6 +49,7 @@ impl RegionLeaseHandler {
         region_lease_seconds: u64,
         table_metadata_manager: TableMetadataManagerRef,
         memory_region_keeper: MemoryRegionKeeperRef,
+        customized_region_lease_renewer: Option<CustomizedRegionLeaseRenewerRef>,
     ) -> Self {
         let region_lease_keeper =
             RegionLeaseKeeper::new(table_metadata_manager, memory_region_keeper.clone());
@@ -43,6 +57,7 @@ impl RegionLeaseHandler {
         Self {
             region_lease_seconds,
             region_lease_keeper: Arc::new(region_lease_keeper),
+            customized_region_lease_renewer,
         }
     }
 }
@@ -56,7 +71,7 @@ impl HeartbeatHandler for RegionLeaseHandler {
     async fn handle(
         &self,
         req: &HeartbeatRequest,
-        _ctx: &mut Context,
+        ctx: &mut Context,
         acc: &mut HeartbeatAccumulator,
     ) -> Result<HandleControl> {
         let Some(stat) = acc.stat.as_ref() else {
@@ -74,18 +89,18 @@ impl HeartbeatHandler for RegionLeaseHandler {
             .renew_region_leases(datanode_id, &regions)
             .await?;
 
-        let renewed = renewed
-            .into_iter()
-            .map(|(region_id, region_role)| {
-                GrantedRegion {
-                    region_id,
-                    region_role,
-                    // TODO(weny): use real manifest version
-                    manifest_version: 0,
-                }
-                .into()
-            })
-            .collect::<Vec<_>>();
+        let renewed = if let Some(renewer) = &self.customized_region_lease_renewer {
+            renewer
+                .renew(ctx, renewed)
+                .into_iter()
+                .map(|region| region.into())
+                .collect()
+        } else {
+            renewed
+                .into_iter()
+                .map(|(region_id, region_role)| GrantedRegion::new(region_id, region_role).into())
+                .collect::<Vec<_>>()
+        };
 
         acc.region_lease = Some(RegionLease {
             regions: renewed,
@@ -141,6 +156,7 @@ mod test {
             manifest_size: 0,
             sst_size: 0,
             index_size: 0,
+            manifest_version: 0,
         }
     }
 
@@ -200,6 +216,7 @@ mod test {
             distributed_time_constants::REGION_LEASE_SECS,
             table_metadata_manager.clone(),
             opening_region_keeper.clone(),
+            None,
         );
 
         handler.handle(&req, ctx, acc).await.unwrap();
@@ -342,6 +359,7 @@ mod test {
             distributed_time_constants::REGION_LEASE_SECS,
             table_metadata_manager.clone(),
             Default::default(),
+            None,
         );
 
         handler.handle(&req, ctx, acc).await.unwrap();

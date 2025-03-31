@@ -96,7 +96,7 @@ pub trait HeartbeatHandler: Send + Sync {
 /// HandleControl
 ///
 /// Controls process of handling heartbeat request.
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 pub enum HandleControl {
     Continue,
     Done,

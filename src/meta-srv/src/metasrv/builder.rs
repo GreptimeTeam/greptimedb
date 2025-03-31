@@ -34,6 +34,7 @@ use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_meta::node_manager::NodeManagerRef;
 use common_meta::region_keeper::MemoryRegionKeeper;
+use common_meta::region_registry::LeaderRegionRegistry;
 use common_meta::sequence::SequenceBuilder;
 use common_meta::state_store::KvStateStore;
 use common_meta::wal_options_allocator::build_wal_options_allocator;
@@ -49,7 +50,7 @@ use crate::flow_meta_alloc::FlowPeerAllocator;
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::failure_handler::RegionFailureHandler;
 use crate::handler::flow_state_handler::FlowStateHandler;
-use crate::handler::region_lease_handler::RegionLeaseHandler;
+use crate::handler::region_lease_handler::{CustomizedRegionLeaseRenewerRef, RegionLeaseHandler};
 use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatMailbox, Pushers};
 use crate::lease::MetaPeerLookupService;
 use crate::metasrv::{
@@ -325,12 +326,14 @@ impl MetasrvBuilder {
             None
         };
 
+        let leader_region_registry = Arc::new(LeaderRegionRegistry::default());
         let ddl_manager = Arc::new(
             DdlManager::try_new(
                 DdlContext {
                     node_manager,
                     cache_invalidator: cache_invalidator.clone(),
                     memory_region_keeper: memory_region_keeper.clone(),
+                    leader_region_registry: leader_region_registry.clone(),
                     table_metadata_manager: table_metadata_manager.clone(),
                     table_metadata_allocator: table_metadata_allocator.clone(),
                     flow_metadata_manager: flow_metadata_manager.clone(),
@@ -343,6 +346,10 @@ impl MetasrvBuilder {
             .context(error::InitDdlManagerSnafu)?,
         );
 
+        let customized_region_lease_renewer = plugins
+            .as_ref()
+            .and_then(|plugins| plugins.get::<CustomizedRegionLeaseRenewerRef>());
+
         let handler_group_builder = match handler_group_builder {
             Some(handler_group_builder) => handler_group_builder,
             None => {
@@ -350,6 +357,7 @@ impl MetasrvBuilder {
                     distributed_time_constants::REGION_LEASE_SECS,
                     table_metadata_manager.clone(),
                     memory_region_keeper.clone(),
+                    customized_region_lease_renewer,
                 );
 
                 HeartbeatHandlerGroupBuilder::new(pushers)
@@ -397,6 +405,7 @@ impl MetasrvBuilder {
             region_migration_manager,
             region_supervisor_ticker,
             cache_invalidator,
+            leader_region_registry,
         })
     }
 }
