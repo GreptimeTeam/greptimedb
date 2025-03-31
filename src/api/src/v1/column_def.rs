@@ -15,10 +15,13 @@
 use std::collections::HashMap;
 
 use datatypes::schema::{
-    ColumnDefaultConstraint, ColumnSchema, FulltextAnalyzer, FulltextOptions, SkippingIndexOptions,
-    SkippingIndexType, COMMENT_KEY, FULLTEXT_KEY, INVERTED_INDEX_KEY, SKIPPING_INDEX_KEY,
+    ColumnDefaultConstraint, ColumnSchema, FulltextAnalyzer, FulltextBackend, FulltextOptions,
+    SkippingIndexOptions, SkippingIndexType, COMMENT_KEY, FULLTEXT_KEY, INVERTED_INDEX_KEY,
+    SKIPPING_INDEX_KEY,
 };
-use greptime_proto::v1::{Analyzer, SkippingIndexType as PbSkippingIndexType};
+use greptime_proto::v1::{
+    Analyzer, FulltextBackend as PbFulltextBackend, SkippingIndexType as PbSkippingIndexType,
+};
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
@@ -142,10 +145,18 @@ pub fn options_from_inverted() -> ColumnOptions {
 }
 
 /// Tries to construct a `FulltextAnalyzer` from the given analyzer.
-pub fn as_fulltext_option(analyzer: Analyzer) -> FulltextAnalyzer {
+pub fn as_fulltext_option_analyzer(analyzer: Analyzer) -> FulltextAnalyzer {
     match analyzer {
         Analyzer::English => FulltextAnalyzer::English,
         Analyzer::Chinese => FulltextAnalyzer::Chinese,
+    }
+}
+
+/// Tries to construct a `FulltextBackend` from the given backend.
+pub fn as_fulltext_option_backend(backend: PbFulltextBackend) -> FulltextBackend {
+    match backend {
+        PbFulltextBackend::Bloom => FulltextBackend::Bloom,
+        PbFulltextBackend::Tantivy => FulltextBackend::Tantivy,
     }
 }
 
@@ -160,7 +171,7 @@ pub fn as_skipping_index_type(skipping_index_type: PbSkippingIndexType) -> Skipp
 mod tests {
 
     use datatypes::data_type::ConcreteDataType;
-    use datatypes::schema::FulltextAnalyzer;
+    use datatypes::schema::{FulltextAnalyzer, FulltextBackend};
 
     use super::*;
     use crate::v1::ColumnDataType;
@@ -219,13 +230,14 @@ mod tests {
                 enable: true,
                 analyzer: FulltextAnalyzer::English,
                 case_sensitive: false,
+                backend: FulltextBackend::Bloom,
             })
             .unwrap();
         schema.set_inverted_index(true);
         let options = options_from_column_schema(&schema).unwrap();
         assert_eq!(
             options.options.get(FULLTEXT_GRPC_KEY).unwrap(),
-            "{\"enable\":true,\"analyzer\":\"English\",\"case-sensitive\":false}"
+            "{\"enable\":true,\"analyzer\":\"English\",\"case-sensitive\":false,\"backend\":\"bloom\"}"
         );
         assert_eq!(
             options.options.get(INVERTED_INDEX_GRPC_KEY).unwrap(),
@@ -239,11 +251,12 @@ mod tests {
             enable: true,
             analyzer: FulltextAnalyzer::English,
             case_sensitive: false,
+            backend: FulltextBackend::Bloom,
         };
         let options = options_from_fulltext(&fulltext).unwrap().unwrap();
         assert_eq!(
             options.options.get(FULLTEXT_GRPC_KEY).unwrap(),
-            "{\"enable\":true,\"analyzer\":\"English\",\"case-sensitive\":false}"
+            "{\"enable\":true,\"analyzer\":\"English\",\"case-sensitive\":false,\"backend\":\"bloom\"}"
         );
     }
 

@@ -514,6 +514,9 @@ pub struct FulltextOptions {
     /// Whether the fulltext index is case-sensitive.
     #[serde(default)]
     pub case_sensitive: bool,
+    /// The fulltext backend to use.
+    #[serde(default)]
+    pub backend: FulltextBackend,
 }
 
 impl fmt::Display for FulltextOptions {
@@ -522,8 +525,27 @@ impl fmt::Display for FulltextOptions {
         if self.enable {
             write!(f, ", analyzer={}", self.analyzer)?;
             write!(f, ", case_sensitive={}", self.case_sensitive)?;
+            write!(f, ", backend={}", self.backend)?;
         }
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Visit, VisitMut)]
+#[serde(rename_all = "kebab-case")]
+pub enum FulltextBackend {
+    #[default]
+    Bloom,
+
+    Tantivy,
+}
+
+impl fmt::Display for FulltextBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FulltextBackend::Tantivy => write!(f, "tantivy"),
+            FulltextBackend::Bloom => write!(f, "bloom"),
+        }
     }
 }
 

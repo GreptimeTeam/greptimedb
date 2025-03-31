@@ -444,7 +444,7 @@ mod tests {
     use std::assert_matches::assert_matches;
 
     use common_error::ext::ErrorExt;
-    use datatypes::schema::{FulltextAnalyzer, FulltextOptions};
+    use datatypes::schema::{FulltextAnalyzer, FulltextBackend, FulltextOptions};
     use sqlparser::ast::{ColumnDef, ColumnOption, ColumnOptionDef, DataType};
 
     use super::*;
@@ -984,7 +984,8 @@ mod tests {
                             FulltextOptions {
                                 enable: true,
                                 analyzer: FulltextAnalyzer::English,
-                                case_sensitive: false
+                                case_sensitive: false,
+                                backend: FulltextBackend::Bloom,
                             },
                             *options
                         );
