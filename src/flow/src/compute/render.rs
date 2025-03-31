@@ -179,7 +179,7 @@ impl Context<'_, '_> {
     ) -> CollectionBundle<Batch> {
         let (send_port, recv_port) = self.df.make_edge::<_, Toff<Batch>>("constant_batch");
         let mut per_time: BTreeMap<repr::Timestamp, Vec<DiffRow>> = Default::default();
-        for (key, group) in &rows.into_iter().group_by(|(_row, ts, _diff)| *ts) {
+        for (key, group) in &rows.into_iter().chunk_by(|(_row, ts, _diff)| *ts) {
             per_time.entry(key).or_default().extend(group);
         }
 
@@ -233,7 +233,7 @@ impl Context<'_, '_> {
     pub fn render_constant(&mut self, rows: Vec<DiffRow>) -> CollectionBundle {
         let (send_port, recv_port) = self.df.make_edge::<_, Toff>("constant");
         let mut per_time: BTreeMap<repr::Timestamp, Vec<DiffRow>> = Default::default();
-        for (key, group) in &rows.into_iter().group_by(|(_row, ts, _diff)| *ts) {
+        for (key, group) in &rows.into_iter().chunk_by(|(_row, ts, _diff)| *ts) {
             per_time.entry(key).or_default().extend(group);
         }
 

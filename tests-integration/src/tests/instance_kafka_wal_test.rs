@@ -193,8 +193,8 @@ async fn create_tables(test_name: &str, instance: &Arc<Instance>, num_tables: us
 async fn insert_data(tables: &[Table], instance: &Arc<Instance>, num_writers: usize) {
     // Each writer randomly chooses a table and inserts a sequence of rows into the table.
     futures::future::join_all((0..num_writers).map(|_| async {
-        let mut rng = rand::thread_rng();
-        let table = &tables[rng.gen_range(0..tables.len())];
+        let mut rng = rand::rng();
+        let table = &tables[rng.random_range(0..tables.len())];
         for _ in 0..10 {
             let ts = table.logical_timer.fetch_add(1000, Ordering::Relaxed);
             let row = make_row(ts, &mut rng);
@@ -302,8 +302,8 @@ async fn execute_sql_with(
 }
 
 fn make_row(ts: u64, rng: &mut ThreadRng) -> String {
-    let host = format!("host{}", rng.gen_range(0..5));
-    let cpu: f64 = rng.gen_range(0.0..99.9);
-    let memory: f64 = rng.gen_range(0.0..999.9);
+    let host = format!("host{}", rng.random_range(0..5));
+    let cpu: f64 = rng.random_range(0.0..99.9);
+    let memory: f64 = rng.random_range(0.0..999.9);
     format!("('{host}', {cpu}, {memory}, {ts})")
 }

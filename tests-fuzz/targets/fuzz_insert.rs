@@ -69,9 +69,9 @@ impl Arbitrary<'_> for FuzzInput {
         let seed = u.int_in_range(u64::MIN..=u64::MAX)?;
         let mut rng = ChaChaRng::seed_from_u64(seed);
         let max_columns = get_gt_fuzz_input_max_columns();
-        let columns = rng.gen_range(2..max_columns);
+        let columns = rng.random_range(2..max_columns);
         let max_row = get_gt_fuzz_input_max_rows();
-        let rows = rng.gen_range(1..max_row);
+        let rows = rng.random_range(1..max_row);
         Ok(FuzzInput {
             columns,
             rows,
@@ -85,7 +85,7 @@ fn generate_create_expr<R: Rng + 'static>(
     rng: &mut R,
 ) -> Result<CreateTableExpr> {
     let mut with_clause = HashMap::new();
-    if rng.gen_bool(0.5) {
+    if rng.random_bool(0.5) {
         with_clause.insert("append_mode".to_string(), "true".to_string());
     }
 
@@ -108,7 +108,7 @@ fn generate_insert_expr<R: Rng + 'static>(
     rng: &mut R,
     table_ctx: TableContextRef,
 ) -> Result<InsertIntoExpr> {
-    let omit_column_list = rng.gen_bool(0.2);
+    let omit_column_list = rng.random_bool(0.2);
 
     let insert_generator = InsertExprGeneratorBuilder::default()
         .table_ctx(table_ctx)
@@ -155,7 +155,7 @@ async fn execute_insert(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
         }
     );
 
-    if rng.gen_bool(0.5) {
+    if rng.random_bool(0.5) {
         flush_memtable(&ctx.greptime, &create_expr.table_name).await?;
     }
 

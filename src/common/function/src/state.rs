@@ -35,7 +35,10 @@ impl FunctionState {
         use api::v1::meta::ProcedureStatus;
         use async_trait::async_trait;
         use common_base::AffectedRows;
-        use common_meta::rpc::procedure::{MigrateRegionRequest, ProcedureStateResponse};
+        use common_meta::rpc::procedure::{
+            AddRegionFollowerRequest, MigrateRegionRequest, ProcedureStateResponse,
+            RemoveRegionFollowerRequest,
+        };
         use common_query::error::Result;
         use common_query::Output;
         use session::context::QueryContextRef;
@@ -65,6 +68,17 @@ impl FunctionState {
                     error: "OK".to_string(),
                     ..Default::default()
                 })
+            }
+
+            async fn add_region_follower(&self, _request: AddRegionFollowerRequest) -> Result<()> {
+                Ok(())
+            }
+
+            async fn remove_region_follower(
+                &self,
+                _request: RemoveRegionFollowerRequest,
+            ) -> Result<()> {
+                Ok(())
             }
         }
 

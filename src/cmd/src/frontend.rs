@@ -61,6 +61,14 @@ impl Instance {
     pub fn new(frontend: Frontend, _guard: Vec<WorkerGuard>) -> Self {
         Self { frontend, _guard }
     }
+
+    pub fn inner(&self) -> &Frontend {
+        &self.frontend
+    }
+
+    pub fn mut_inner(&mut self) -> &mut Frontend {
+        &mut self.frontend
+    }
 }
 
 #[async_trait]
@@ -288,10 +296,13 @@ impl StartCommand {
         let cache_ttl = meta_client_options.metadata_cache_ttl;
         let cache_tti = meta_client_options.metadata_cache_tti;
 
-        let meta_client =
-            meta_client::create_meta_client(MetaClientType::Frontend, meta_client_options)
-                .await
-                .context(error::MetaClientInitSnafu)?;
+        let meta_client = meta_client::create_meta_client(
+            MetaClientType::Frontend,
+            meta_client_options,
+            Some(&plugins),
+        )
+        .await
+        .context(error::MetaClientInitSnafu)?;
 
         // TODO(discord9): add helper function to ease the creation of cache registry&such
         let cached_meta_backend =

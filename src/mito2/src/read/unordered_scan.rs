@@ -22,6 +22,7 @@ use async_stream::{stream, try_stream};
 use common_error::ext::BoxedError;
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
+use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::schema::SchemaRef;
 use futures::{Stream, StreamExt};
@@ -32,7 +33,9 @@ use store_api::region_engine::{PrepareRequest, RegionScanner, ScannerProperties}
 use crate::error::{PartitionOutOfRangeSnafu, Result};
 use crate::read::range::RangeBuilderList;
 use crate::read::scan_region::{ScanInput, StreamContext};
-use crate::read::scan_util::{scan_file_ranges, scan_mem_ranges, PartitionMetrics};
+use crate::read::scan_util::{
+    scan_file_ranges, scan_mem_ranges, PartitionMetrics, PartitionMetricsList,
+};
 use crate::read::{Batch, ScannerMetrics};
 
 /// Scans a region without providing any output ordering guarantee.
@@ -43,6 +46,8 @@ pub struct UnorderedScan {
     properties: ScannerProperties,
     /// Context of streams.
     stream_ctx: Arc<StreamContext>,
+    /// Metrics for each partition.
+    metrics_list: PartitionMetricsList,
 }
 
 impl UnorderedScan {
@@ -57,14 +62,16 @@ impl UnorderedScan {
         Self {
             properties,
             stream_ctx,
+            metrics_list: PartitionMetricsList::default(),
         }
     }
 
     /// Scans the region and returns a stream.
     pub(crate) async fn build_stream(&self) -> Result<SendableRecordBatchStream, BoxedError> {
+        let metrics_set = ExecutionPlanMetricsSet::new();
         let part_num = self.properties.num_partitions();
         let streams = (0..part_num)
-            .map(|i| self.scan_partition(i))
+            .map(|i| self.scan_partition(&metrics_set, i))
             .collect::<Result<Vec<_>, BoxedError>>()?;
         let stream = stream! {
             for mut stream in streams {
@@ -119,6 +126,7 @@ impl UnorderedScan {
 
     fn scan_partition_impl(
         &self,
+        metrics_set: &ExecutionPlanMetricsSet,
         partition: usize,
     ) -> Result<SendableRecordBatchStream, BoxedError> {
         if partition >= self.properties.partitions.len() {
@@ -136,11 +144,9 @@ impl UnorderedScan {
             partition,
             "UnorderedScan",
             self.stream_ctx.query_start,
-            ScannerMetrics {
-                prepare_scan_cost: self.stream_ctx.query_start.elapsed(),
-                ..Default::default()
-            },
+            metrics_set,
         );
+        self.metrics_list.set(partition, part_metrics.clone());
         let stream_ctx = self.stream_ctx.clone();
         let part_ranges = self.properties.partitions[partition].clone();
         let distinguish_range = self.properties.distinguish_partition_range;
@@ -239,8 +245,12 @@ impl RegionScanner for UnorderedScan {
         Ok(())
     }
 
-    fn scan_partition(&self, partition: usize) -> Result<SendableRecordBatchStream, BoxedError> {
-        self.scan_partition_impl(partition)
+    fn scan_partition(
+        &self,
+        metrics_set: &ExecutionPlanMetricsSet,
+        partition: usize,
+    ) -> Result<SendableRecordBatchStream, BoxedError> {
+        self.scan_partition_impl(metrics_set, partition)
     }
 
     fn has_predicate(&self) -> bool {
@@ -262,7 +272,10 @@ impl DisplayAs for UnorderedScan {
         )?;
         match t {
             DisplayFormatType::Default => self.stream_ctx.format_for_explain(false, f),
-            DisplayFormatType::Verbose => self.stream_ctx.format_for_explain(true, f),
+            DisplayFormatType::Verbose => {
+                self.stream_ctx.format_for_explain(true, f)?;
+                self.metrics_list.format_verbose_metrics(f)
+            }
         }
     }
 }

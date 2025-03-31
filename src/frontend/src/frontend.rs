@@ -131,6 +131,10 @@ impl Frontend {
             .await
             .context(error::ShutdownServerSnafu)
     }
+
+    pub fn server_handlers(&self) -> &ServerHandlers {
+        &self.servers
+    }
 }
 
 #[cfg(test)]

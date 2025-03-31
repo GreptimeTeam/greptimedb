@@ -26,6 +26,7 @@ use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
 use common_recordbatch::SendableRecordBatchStream;
 use common_time::Timestamp;
+use datafusion_physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion_physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::schema::SchemaRef;
 use futures::future::join_all;
@@ -33,6 +34,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
 use crate::logstore::entry;
+use crate::manifest::ManifestVersion;
 use crate::metadata::RegionMetadataRef;
 use crate::region_request::{
     BatchRegionDdlRequest, RegionOpenRequest, RegionRequest, RegionSequencesRequest,
@@ -346,7 +348,11 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
     ///
     /// # Panics
     /// Panics if the `partition` is out of bound.
-    fn scan_partition(&self, partition: usize) -> Result<SendableRecordBatchStream, BoxedError>;
+    fn scan_partition(
+        &self,
+        metrics_set: &ExecutionPlanMetricsSet,
+        partition: usize,
+    ) -> Result<SendableRecordBatchStream, BoxedError>;
 
     /// Check if there is any predicate that may be executed in this scanner.
     fn has_predicate(&self) -> bool;
@@ -505,6 +511,13 @@ pub trait RegionEngine: Send + Sync {
     /// take effect.
     fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<(), BoxedError>;
 
+    /// Syncs the region manifest to the given manifest version.
+    async fn sync_region(
+        &self,
+        region_id: RegionId,
+        manifest_version: ManifestVersion,
+    ) -> Result<(), BoxedError>;
+
     /// Sets region role state gracefully.
     ///
     /// After the call returns, the engine ensures no more write operations will succeed in the region.
@@ -569,7 +582,11 @@ impl RegionScanner for SinglePartitionScanner {
         Ok(())
     }
 
-    fn scan_partition(&self, _partition: usize) -> Result<SendableRecordBatchStream, BoxedError> {
+    fn scan_partition(
+        &self,
+        _metrics_set: &ExecutionPlanMetricsSet,
+        _partition: usize,
+    ) -> Result<SendableRecordBatchStream, BoxedError> {
         let mut stream = self.stream.lock().unwrap();
         stream.take().ok_or_else(|| {
             BoxedError::new(PlainError::new(

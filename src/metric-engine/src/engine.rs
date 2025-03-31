@@ -36,6 +36,7 @@ use common_error::status_code::StatusCode;
 use mito2::engine::MitoEngine;
 pub(crate) use options::IndexOptions;
 use snafu::ResultExt;
+use store_api::manifest::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
 use store_api::region_engine::{
@@ -48,7 +49,7 @@ use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 use self::state::MetricEngineState;
 use crate::config::EngineConfig;
 use crate::data_region::DataRegion;
-use crate::error::{self, Result, UnsupportedRegionRequestSnafu};
+use crate::error::{self, Result, UnsupportedRegionRequestSnafu, UnsupportedSyncRegionSnafu};
 use crate::metadata_region::MetadataRegion;
 use crate::row_modifier::RowModifier;
 use crate::utils;
@@ -283,6 +284,15 @@ impl RegionEngine for MetricEngine {
             }
         }
         Ok(())
+    }
+
+    async fn sync_region(
+        &self,
+        _region_id: RegionId,
+        _manifest_version: ManifestVersion,
+    ) -> Result<(), BoxedError> {
+        // TODO(weny): implement it later.
+        Err(BoxedError::new(UnsupportedSyncRegionSnafu {}.build()))
     }
 
     async fn set_region_role_state_gracefully(

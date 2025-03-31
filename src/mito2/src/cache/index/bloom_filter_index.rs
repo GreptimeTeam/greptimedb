@@ -146,14 +146,14 @@ mod test {
 
     #[test]
     fn fuzz_index_calculation() {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let mut data = vec![0u8; 1024 * 1024];
         rng.fill_bytes(&mut data);
 
         for _ in 0..FUZZ_REPEAT_TIMES {
-            let offset = rng.gen_range(0..data.len() as u64);
-            let size = rng.gen_range(0..data.len() as u32 - offset as u32);
-            let page_size: usize = rng.gen_range(1..1024);
+            let offset = rng.random_range(0..data.len() as u64);
+            let size = rng.random_range(0..data.len() as u32 - offset as u32);
+            let page_size: usize = rng.random_range(1..1024);
 
             let indexes =
                 PageKey::generate_page_keys(offset, size, page_size as u64).collect::<Vec<_>>();

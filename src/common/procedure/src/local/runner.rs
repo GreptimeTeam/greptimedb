@@ -207,7 +207,7 @@ impl Runner {
                     if let Some(d) = retry.next() {
                         let millis = d.as_millis() as u64;
                         // Add random noise to the retry delay to avoid retry storms.
-                        let noise = rand::thread_rng().gen_range(0..(millis / 4) + 1);
+                        let noise = rand::rng().random_range(0..(millis / 4) + 1);
                         let d = d.add(Duration::from_millis(noise));
 
                         self.wait_on_err(d, retry_times).await;

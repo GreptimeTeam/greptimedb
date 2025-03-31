@@ -75,7 +75,7 @@ impl AskLeader {
             let leadership_group = self.leadership_group.read().unwrap();
             leadership_group.peers.clone()
         };
-        peers.shuffle(&mut rand::thread_rng());
+        peers.shuffle(&mut rand::rng());
 
         let req = AskLeaderRequest {
             header: Some(RequestHeader::new(

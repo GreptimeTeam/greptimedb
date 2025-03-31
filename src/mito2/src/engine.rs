@@ -55,6 +55,8 @@ mod row_selector_test;
 #[cfg(test)]
 mod set_role_state_test;
 #[cfg(test)]
+mod sync_test;
+#[cfg(test)]
 mod truncate_test;
 
 use std::any::Any;
@@ -76,6 +78,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::logstore::provider::Provider;
 use store_api::logstore::LogStore;
+use store_api::manifest::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
     BatchResponses, RegionEngine, RegionRole, RegionScannerRef, RegionStatistic,
@@ -272,7 +275,7 @@ fn prepare_batch_open_requests(
                     .or_default()
                     .push((region_id, request));
             }
-            WalOptions::RaftEngine => {
+            WalOptions::RaftEngine | WalOptions::Noop => {
                 remaining_regions.push((region_id, request));
             }
         }
@@ -488,6 +491,18 @@ impl EngineInner {
         receiver.await.context(RecvSnafu)
     }
 
+    async fn sync_region(
+        &self,
+        region_id: RegionId,
+        manifest_version: ManifestVersion,
+    ) -> Result<ManifestVersion> {
+        let (request, receiver) =
+            WorkerRequest::new_sync_region_request(region_id, manifest_version);
+        self.workers.submit_to_worker(region_id, request).await?;
+
+        receiver.await.context(RecvSnafu)?
+    }
+
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {
         self.workers.get_region(region_id).map(|region| {
             if region.is_follower() {
@@ -607,6 +622,18 @@ impl RegionEngine for MitoEngine {
             .set_region_role_state_gracefully(region_id, region_role_state)
             .await
             .map_err(BoxedError::new)
+    }
+
+    async fn sync_region(
+        &self,
+        region_id: RegionId,
+        manifest_version: ManifestVersion,
+    ) -> Result<(), BoxedError> {
+        self.inner
+            .sync_region(region_id, manifest_version)
+            .await
+            .map_err(BoxedError::new)
+            .map(|_| ())
     }
 
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {

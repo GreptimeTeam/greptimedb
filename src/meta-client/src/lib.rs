@@ -15,8 +15,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use client::RegionFollowerClientRef;
+use common_base::Plugins;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
-use common_telemetry::info;
+use common_telemetry::{debug, info};
 use serde::{Deserialize, Serialize};
 
 use crate::client::MetaClientBuilder;
@@ -73,6 +75,7 @@ pub type MetaClientRef = Arc<client::MetaClient>;
 pub async fn create_meta_client(
     client_type: MetaClientType,
     meta_client_options: &MetaClientOptions,
+    plugins: Option<&Plugins>,
 ) -> error::Result<MetaClientRef> {
     info!(
         "Creating {:?} instance with Metasrv addrs {:?}",
@@ -98,6 +101,13 @@ pub async fn create_meta_client(
     if let MetaClientType::Frontend = client_type {
         let ddl_config = base_config.clone().timeout(meta_client_options.ddl_timeout);
         builder = builder.ddl_channel_manager(ChannelManager::with_config(ddl_config));
+        if let Some(plugins) = plugins {
+            let region_follower = plugins.get::<RegionFollowerClientRef>();
+            if let Some(region_follower) = region_follower {
+                debug!("Region follower client found in plugins");
+                builder = builder.with_region_follower(region_follower);
+            }
+        }
     }
 
     builder = builder

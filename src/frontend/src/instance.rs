@@ -524,6 +524,9 @@ pub fn check_permission(
         Statement::ShowIndex(stmt) => {
             validate_db_permission!(stmt, query_ctx);
         }
+        Statement::ShowRegion(stmt) => {
+            validate_db_permission!(stmt, query_ctx);
+        }
         Statement::ShowViews(stmt) => {
             validate_db_permission!(stmt, query_ctx);
         }

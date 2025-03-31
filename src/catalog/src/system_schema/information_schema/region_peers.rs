@@ -21,6 +21,7 @@ use common_error::ext::BoxedError;
 use common_meta::rpc::router::RegionRoute;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
+use datafusion::common::HashMap;
 use datafusion::execution::TaskContext;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::PartitionStream as DfPartitionStream;
@@ -43,16 +44,22 @@ use crate::kvbackend::KvBackendCatalogManager;
 use crate::system_schema::information_schema::{InformationTable, Predicates};
 use crate::CatalogManager;
 
-const REGION_ID: &str = "region_id";
-const PEER_ID: &str = "peer_id";
+pub const TABLE_CATALOG: &str = "table_catalog";
+pub const TABLE_SCHEMA: &str = "table_schema";
+pub const TABLE_NAME: &str = "table_name";
+pub const REGION_ID: &str = "region_id";
+pub const PEER_ID: &str = "peer_id";
 const PEER_ADDR: &str = "peer_addr";
-const IS_LEADER: &str = "is_leader";
+pub const IS_LEADER: &str = "is_leader";
 const STATUS: &str = "status";
 const DOWN_SECONDS: &str = "down_seconds";
 const INIT_CAPACITY: usize = 42;
 
 /// The `REGION_PEERS` table provides information about the region distribution and routes. Including fields:
 ///
+/// - `table_catalog`: the table catalog name
+/// - `table_schema`: the table schema name
+/// - `table_name`: the table name
 /// - `region_id`: the region id
 /// - `peer_id`: the region storage datanode peer id
 /// - `peer_addr`: the region storage datanode gRPC peer address
@@ -77,6 +84,9 @@ impl InformationSchemaRegionPeers {
 
     pub(crate) fn schema() -> SchemaRef {
         Arc::new(Schema::new(vec![
+            ColumnSchema::new(TABLE_CATALOG, ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(TABLE_SCHEMA, ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(TABLE_NAME, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(REGION_ID, ConcreteDataType::uint64_datatype(), false),
             ColumnSchema::new(PEER_ID, ConcreteDataType::uint64_datatype(), true),
             ColumnSchema::new(PEER_ADDR, ConcreteDataType::string_datatype(), true),
@@ -134,6 +144,9 @@ struct InformationSchemaRegionPeersBuilder {
     catalog_name: String,
     catalog_manager: Weak<dyn CatalogManager>,
 
+    table_catalogs: StringVectorBuilder,
+    table_schemas: StringVectorBuilder,
+    table_names: StringVectorBuilder,
     region_ids: UInt64VectorBuilder,
     peer_ids: UInt64VectorBuilder,
     peer_addrs: StringVectorBuilder,
@@ -152,6 +165,9 @@ impl InformationSchemaRegionPeersBuilder {
             schema,
             catalog_name,
             catalog_manager,
+            table_catalogs: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            table_schemas: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            table_names: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             region_ids: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
             peer_ids: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
             peer_addrs: StringVectorBuilder::with_capacity(INIT_CAPACITY),
@@ -177,24 +193,28 @@ impl InformationSchemaRegionPeersBuilder {
         let predicates = Predicates::from_scan_request(&request);
 
         for schema_name in catalog_manager.schema_names(&catalog_name, None).await? {
-            let table_id_stream = catalog_manager
+            let table_stream = catalog_manager
                 .tables(&catalog_name, &schema_name, None)
                 .try_filter_map(|t| async move {
                     let table_info = t.table_info();
                     if table_info.table_type == TableType::Temporary {
                         Ok(None)
                     } else {
-                        Ok(Some(table_info.ident.table_id))
+                        Ok(Some((
+                            table_info.ident.table_id,
+                            table_info.name.to_string(),
+                        )))
                     }
                 });
 
             const BATCH_SIZE: usize = 128;
 
-            // Split table ids into chunks
-            let mut table_id_chunks = pin!(table_id_stream.ready_chunks(BATCH_SIZE));
+            // Split tables into chunks
+            let mut table_chunks = pin!(table_stream.ready_chunks(BATCH_SIZE));
 
-            while let Some(table_ids) = table_id_chunks.next().await {
-                let table_ids = table_ids.into_iter().collect::<Result<Vec<_>>>()?;
+            while let Some(tables) = table_chunks.next().await {
+                let tables = tables.into_iter().collect::<Result<HashMap<_, _>>>()?;
+                let table_ids = tables.keys().cloned().collect::<Vec<_>>();
 
                 let table_routes = if let Some(partition_manager) = &partition_manager {
                     partition_manager
@@ -206,7 +226,16 @@ impl InformationSchemaRegionPeersBuilder {
                 };
 
                 for (table_id, routes) in table_routes {
-                    self.add_region_peers(&predicates, table_id, &routes);
+                    // Safety: table_id is guaranteed to be in the map
+                    let table_name = tables.get(&table_id).unwrap();
+                    self.add_region_peers(
+                        &catalog_name,
+                        &schema_name,
+                        table_name,
+                        &predicates,
+                        table_id,
+                        &routes,
+                    );
                 }
             }
         }
@@ -216,6 +245,9 @@ impl InformationSchemaRegionPeersBuilder {
 
     fn add_region_peers(
         &mut self,
+        table_catalog: &str,
+        table_schema: &str,
+        table_name: &str,
         predicates: &Predicates,
         table_id: TableId,
         routes: &[RegionRoute],
@@ -231,13 +263,20 @@ impl InformationSchemaRegionPeersBuilder {
                 Some("ALIVE".to_string())
             };
 
-            let row = [(REGION_ID, &Value::from(region_id))];
+            let row = [
+                (TABLE_CATALOG, &Value::from(table_catalog)),
+                (TABLE_SCHEMA, &Value::from(table_schema)),
+                (TABLE_NAME, &Value::from(table_name)),
+                (REGION_ID, &Value::from(region_id)),
+            ];
 
             if !predicates.eval(&row) {
                 return;
             }
 
-            // TODO(dennis): adds followers.
+            self.table_catalogs.push(Some(table_catalog));
+            self.table_schemas.push(Some(table_schema));
+            self.table_names.push(Some(table_name));
             self.region_ids.push(Some(region_id));
             self.peer_ids.push(peer_id);
             self.peer_addrs.push(peer_addr.as_deref());
@@ -245,11 +284,26 @@ impl InformationSchemaRegionPeersBuilder {
             self.statuses.push(state.as_deref());
             self.down_seconds
                 .push(route.leader_down_millis().map(|m| m / 1000));
+
+            for follower in &route.follower_peers {
+                self.table_catalogs.push(Some(table_catalog));
+                self.table_schemas.push(Some(table_schema));
+                self.table_names.push(Some(table_name));
+                self.region_ids.push(Some(region_id));
+                self.peer_ids.push(Some(follower.id));
+                self.peer_addrs.push(Some(follower.addr.as_str()));
+                self.is_leaders.push(Some("No"));
+                self.statuses.push(None);
+                self.down_seconds.push(None);
+            }
         }
     }
 
     fn finish(&mut self) -> Result<RecordBatch> {
         let columns: Vec<VectorRef> = vec![
+            Arc::new(self.table_catalogs.finish()),
+            Arc::new(self.table_schemas.finish()),
+            Arc::new(self.table_names.finish()),
             Arc::new(self.region_ids.finish()),
             Arc::new(self.peer_ids.finish()),
             Arc::new(self.peer_addrs.finish()),

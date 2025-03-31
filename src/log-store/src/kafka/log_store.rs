@@ -535,7 +535,7 @@ mod tests {
             .flatten()
             .cloned()
             .collect::<Vec<_>>();
-        all_entries.shuffle(&mut rand::thread_rng());
+        all_entries.shuffle(&mut rand::rng());
 
         let response = logstore.append_batch(all_entries.clone()).await.unwrap();
         // 5 region
@@ -575,7 +575,7 @@ mod tests {
             warn!("The endpoints is empty, skipping the test 'test_append_batch_basic_large'");
             return;
         };
-        let data_size_kb = rand::thread_rng().gen_range(9..31usize);
+        let data_size_kb = rand::rng().random_range(9..31usize);
         info!("Entry size: {}Ki", data_size_kb);
         let broker_endpoints = broker_endpoints
             .split(',')
@@ -608,7 +608,7 @@ mod tests {
             .cloned()
             .collect::<Vec<_>>();
         assert_matches!(all_entries[0], Entry::MultiplePart(_));
-        all_entries.shuffle(&mut rand::thread_rng());
+        all_entries.shuffle(&mut rand::rng());
 
         let response = logstore.append_batch(all_entries.clone()).await.unwrap();
         // 5 region

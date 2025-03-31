@@ -13,14 +13,14 @@
 // limitations under the License.
 
 use api::v1::value::ValueData;
-use api::v1::Rows;
+use api::v1::{Rows, Value};
 use common_telemetry::tracing::info;
 use greptime_proto::v1::value::ValueData::{
     BinaryValue, BoolValue, F64Value, StringValue, TimestampNanosecondValue, TimestampSecondValue,
     U32Value, U64Value, U8Value,
 };
 use greptime_proto::v1::Value as GreptimeValue;
-use pipeline::{json_to_map, parse, Content, GreptimeTransformer, Pipeline};
+use pipeline::{json_to_map, parse, Content, Pipeline};
 
 #[test]
 fn test_complex_data() {
@@ -418,8 +418,7 @@ transform:
     .collect::<Vec<GreptimeValue>>();
 
     let yaml_content = Content::Yaml(pipeline_yaml);
-    let pipeline: Pipeline<GreptimeTransformer> =
-        parse(&yaml_content).expect("failed to parse pipeline");
+    let pipeline: Pipeline = parse(&yaml_content).expect("failed to parse pipeline");
     let mut stats = json_to_map(input_value).unwrap();
 
     let row = pipeline
@@ -430,7 +429,7 @@ transform:
 
     let output = Rows {
         schema: pipeline.schemas().clone(),
-        rows: vec![row],
+        rows: vec![row.0],
     };
 
     assert_eq!(output.rows.len(), 1);
@@ -487,7 +486,7 @@ transform:
 "#;
 
     let yaml_content = Content::Yaml(pipeline_yaml);
-    let pipeline: Pipeline<GreptimeTransformer> = parse(&yaml_content).unwrap();
+    let pipeline: Pipeline = parse(&yaml_content).unwrap();
 
     let mut status = json_to_map(input_value).unwrap();
     let row = pipeline
@@ -496,6 +495,7 @@ transform:
         .into_transformed()
         .expect("expect transformed result ");
     let r = row
+        .0
         .values
         .into_iter()
         .map(|v| v.value_data.unwrap())
@@ -595,7 +595,7 @@ transform:
 "#;
 
     let yaml_content = Content::Yaml(pipeline_yaml);
-    let pipeline: Pipeline<GreptimeTransformer> = parse(&yaml_content).unwrap();
+    let pipeline: Pipeline = parse(&yaml_content).unwrap();
 
     let mut status = json_to_map(input_value).unwrap();
     let row = pipeline
@@ -605,6 +605,7 @@ transform:
         .expect("expect transformed result ");
 
     let r = row
+        .0
         .values
         .into_iter()
         .map(|v| v.value_data.unwrap())
@@ -660,7 +661,7 @@ transform:
 "#;
 
     let yaml_content = Content::Yaml(pipeline_yaml);
-    let pipeline: Pipeline<GreptimeTransformer> = parse(&yaml_content).unwrap();
+    let pipeline: Pipeline = parse(&yaml_content).unwrap();
 
     let mut status = json_to_map(input_value).unwrap();
     let row = pipeline
@@ -669,6 +670,7 @@ transform:
         .into_transformed()
         .expect("expect transformed result ");
     let r = row
+        .0
         .values
         .into_iter()
         .map(|v| v.value_data.unwrap())
@@ -699,7 +701,7 @@ transform:
     type: string
 "#;
     let yaml_content = Content::Yaml(pipeline_yaml);
-    let pipeline: Pipeline<GreptimeTransformer> = parse(&yaml_content).unwrap();
+    let pipeline: Pipeline = parse(&yaml_content).unwrap();
 
     let mut status = json_to_map(input_value).unwrap();
 
@@ -710,6 +712,7 @@ transform:
         .expect("expect transformed result ");
 
     let r = row
+        .0
         .values
         .into_iter()
         .map(|v| v.value_data.unwrap())
@@ -758,7 +761,7 @@ transform:
 "#;
 
     let yaml_content = Content::Yaml(pipeline_yaml);
-    let pipeline: Pipeline<GreptimeTransformer> = parse(&yaml_content).unwrap();
+    let pipeline: Pipeline = parse(&yaml_content).unwrap();
 
     let mut status = json_to_map(input_value).unwrap();
     let row = pipeline
@@ -768,6 +771,7 @@ transform:
         .expect("expect transformed result ");
 
     let mut r = row
+        .0
         .values
         .into_iter()
         .map(|v| v.value_data.unwrap())
@@ -798,7 +802,7 @@ transform:
 "#;
 
     let yaml_content = Content::Yaml(pipeline_yaml);
-    let pipeline: Pipeline<GreptimeTransformer> = parse(&yaml_content).unwrap();
+    let pipeline: Pipeline = parse(&yaml_content).unwrap();
 
     let mut status = json_to_map(input_value).unwrap();
     let row = pipeline
@@ -807,7 +811,7 @@ transform:
         .into_transformed()
         .expect("expect transformed result ");
 
-    row.values.into_iter().for_each(|v| {
+    row.0.values.into_iter().for_each(|v| {
         if let ValueData::TimestampNanosecondValue(v) = v.value_data.unwrap() {
             let now = chrono::Utc::now().timestamp_nanos_opt().unwrap();
             assert!(now - v < 1_000_000);
@@ -860,7 +864,7 @@ transform:
 "#;
 
     let yaml_content = Content::Yaml(pipeline_yaml);
-    let pipeline: Pipeline<GreptimeTransformer> = parse(&yaml_content).unwrap();
+    let pipeline: Pipeline = parse(&yaml_content).unwrap();
 
     let mut status = json_to_map(input_value1).unwrap();
     let dispatched_to = pipeline
@@ -878,6 +882,7 @@ transform:
         .into_transformed()
         .expect("expect transformed result ");
     let r = row
+        .0
         .values
         .into_iter()
         .map(|v| v.value_data.unwrap())
@@ -889,4 +894,55 @@ transform:
     ];
 
     assert_eq!(expected, r);
+}
+
+#[test]
+fn test_table_suffix_template() {
+    let input_value = r#"
+{
+    "line": "2024-05-25 20:16:37.217 [http] hello world"
+}
+"#;
+    let input_value = serde_json::from_str::<serde_json::Value>(input_value).unwrap();
+
+    let pipeline_yaml = r#"
+processors:
+  - dissect:
+      fields:
+        - line
+      patterns:
+        - "%{+ts} %{+ts} [%{logger}] %{content}"
+  - date:
+      fields:
+        - ts
+      formats:
+        - "%Y-%m-%d %H:%M:%S%.3f"
+transform:
+  - fields:
+      - content
+    type: string
+  - field: ts
+    type: time
+    index: timestamp
+table_suffix: _${logger}
+"#;
+
+    let yaml_content = Content::Yaml(pipeline_yaml);
+    let pipeline: Pipeline = parse(&yaml_content).unwrap();
+
+    let mut status = json_to_map(input_value).unwrap();
+    let exec_re = pipeline.exec_mut(&mut status).unwrap();
+
+    let (row, table_name) = exec_re.into_transformed().unwrap();
+    let values = row.values;
+    let expected_values = vec![
+        Value {
+            value_data: Some(ValueData::StringValue("hello world".into())),
+        },
+        Value {
+            value_data: Some(ValueData::TimestampNanosecondValue(1716668197217000000)),
+        },
+    ];
+    assert_eq!(expected_values, values);
+    assert_eq!(table_name, Some("_http".to_string()));
 }

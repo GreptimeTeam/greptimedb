@@ -18,7 +18,6 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datafusion_common::ScalarValue;
-use datafusion_expr::expr::Expr;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
 use table::metadata::TableId;
@@ -89,20 +88,6 @@ pub enum Error {
     RegionKeysSize {
         expect: usize,
         actual: usize,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Failed to find region, reason: {}", reason))]
-    FindRegion {
-        reason: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Failed to find regions by filters: {:?}", filters))]
-    FindRegions {
-        filters: Vec<Expr>,
         #[snafu(implicit)]
         location: Location,
     },
@@ -201,9 +186,7 @@ impl ErrorExt for Error {
             | Error::InvalidExpr { .. }
             | Error::UndefinedColumn { .. } => StatusCode::InvalidArguments,
 
-            Error::FindRegion { .. }
-            | Error::FindRegions { .. }
-            | Error::RegionKeysSize { .. }
+            Error::RegionKeysSize { .. }
             | Error::InvalidInsertRequest { .. }
             | Error::InvalidDeleteRequest { .. } => StatusCode::InvalidArguments,
 

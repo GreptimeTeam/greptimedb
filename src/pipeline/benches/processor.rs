@@ -14,11 +14,11 @@
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use pipeline::error::Result;
-use pipeline::{json_to_map, parse, Content, GreptimeTransformer, Pipeline};
+use pipeline::{json_to_map, parse, Content, Pipeline};
 use serde_json::{Deserializer, Value};
 
 fn processor_mut(
-    pipeline: &Pipeline<GreptimeTransformer>,
+    pipeline: &Pipeline,
     input_values: Vec<Value>,
 ) -> Result<Vec<greptime_proto::v1::Row>> {
     let mut result = Vec::with_capacity(input_values.len());
@@ -29,13 +29,13 @@ fn processor_mut(
             .exec_mut(&mut payload)?
             .into_transformed()
             .expect("expect transformed result ");
-        result.push(r);
+        result.push(r.0);
     }
 
     Ok(result)
 }
 
-fn prepare_pipeline() -> Pipeline<GreptimeTransformer> {
+fn prepare_pipeline() -> Pipeline {
     let pipeline_yaml = r#"
 ---
 description: Pipeline for Akamai DataStream2 Log

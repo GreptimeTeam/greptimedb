@@ -249,10 +249,13 @@ impl StartCommand {
             msg: "'meta_client_options'",
         })?;
 
-        let meta_client =
-            meta_client::create_meta_client(MetaClientType::Flownode { member_id }, meta_config)
-                .await
-                .context(MetaClientInitSnafu)?;
+        let meta_client = meta_client::create_meta_client(
+            MetaClientType::Flownode { member_id },
+            meta_config,
+            None,
+        )
+        .await
+        .context(MetaClientInitSnafu)?;
 
         let cache_max_capacity = meta_config.metadata_cache_max_capacity;
         let cache_ttl = meta_config.metadata_cache_ttl;
