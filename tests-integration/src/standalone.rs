@@ -143,12 +143,13 @@ impl GreptimeDbStandaloneBuilder {
                 .build(),
         );
 
-        let datanode = DatanodeBuilder::new(opts.datanode_options(), plugins.clone())
-            .with_kv_backend(kv_backend.clone())
-            .with_cache_registry(layered_cache_registry)
-            .build()
-            .await
-            .unwrap();
+        let datanode =
+            DatanodeBuilder::new(opts.datanode_options(), plugins.clone(), Mode::Standalone)
+                .with_kv_backend(kv_backend.clone())
+                .with_cache_registry(layered_cache_registry)
+                .build()
+                .await
+                .unwrap();
 
         let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
         table_metadata_manager.init().await.unwrap();
@@ -288,7 +289,6 @@ impl GreptimeDbStandaloneBuilder {
         let store_types = self.store_providers.clone().unwrap_or_default();
 
         let (opts, guard) = create_tmp_dir_and_datanode_opts(
-            Mode::Standalone,
             default_store_type,
             store_types,
             &self.instance_name,

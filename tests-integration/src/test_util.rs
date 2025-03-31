@@ -52,7 +52,6 @@ use servers::query_handler::grpc::ServerGrpcQueryHandlerAdapter;
 use servers::query_handler::sql::{ServerSqlQueryHandlerAdapter, SqlQueryHandler};
 use servers::server::Server;
 use servers::tls::ReloadableTlsServerConfig;
-use servers::Mode;
 use session::context::QueryContext;
 
 use crate::standalone::{GreptimeDbStandalone, GreptimeDbStandaloneBuilder};
@@ -301,7 +300,6 @@ impl TestGuard {
 }
 
 pub fn create_tmp_dir_and_datanode_opts(
-    mode: Mode,
     default_store_type: StorageType,
     store_provider_types: Vec<StorageType>,
     name: &str,
@@ -323,7 +321,7 @@ pub fn create_tmp_dir_and_datanode_opts(
         store_providers.push(store);
         storage_guards.push(StorageGuard(data_tmp_dir))
     }
-    let opts = create_datanode_opts(mode, default_store, store_providers, home_dir, wal_config);
+    let opts = create_datanode_opts(default_store, store_providers, home_dir, wal_config);
 
     (
         opts,
@@ -335,7 +333,6 @@ pub fn create_tmp_dir_and_datanode_opts(
 }
 
 pub(crate) fn create_datanode_opts(
-    mode: Mode,
     default_store: ObjectStoreConfig,
     providers: Vec<ObjectStoreConfig>,
     home_dir: String,
@@ -352,7 +349,6 @@ pub(crate) fn create_datanode_opts(
         grpc: GrpcOptions::default()
             .with_bind_addr(PEER_PLACEHOLDER_ADDR)
             .with_server_addr(PEER_PLACEHOLDER_ADDR),
-        mode,
         wal: wal_config,
         ..Default::default()
     }

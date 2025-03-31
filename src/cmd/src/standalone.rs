@@ -237,7 +237,6 @@ impl StandaloneOptions {
             grpc: cloned_opts.grpc,
             init_regions_in_background: cloned_opts.init_regions_in_background,
             init_regions_parallelism: cloned_opts.init_regions_parallelism,
-            mode: Mode::Standalone,
             ..Default::default()
         }
     }
@@ -508,7 +507,7 @@ impl StartCommand {
             .build(),
         );
 
-        let datanode = DatanodeBuilder::new(dn_opts, plugins.clone())
+        let datanode = DatanodeBuilder::new(dn_opts, plugins.clone(), Mode::Standalone)
             .with_kv_backend(kv_backend.clone())
             .with_cache_registry(layered_cache_registry.clone())
             .build()
