@@ -755,6 +755,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Consistency guard conflict: {}", msg))]
+    ConsistencyGuardConflict {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -775,7 +782,7 @@ impl ErrorExt for Error {
 
             NoLeader { .. } => StatusCode::TableUnavailable,
 
-            ValueNotExist { .. } => StatusCode::Unexpected,
+            ValueNotExist { .. } | ConsistencyGuardConflict { .. } => StatusCode::Unexpected,
 
             Unsupported { .. } => StatusCode::Unsupported,
 
@@ -910,6 +917,11 @@ impl Error {
         Error::RetryLater {
             source: BoxedError::new(err),
         }
+    }
+
+    /// Determine whether it is a consistency guard conflict.
+    pub fn is_consistency_guard_conflict(&self) -> bool {
+        matches!(self, Error::ConsistencyGuardConflict { .. })
     }
 
     /// Determine whether it is a retry later type through [StatusCode]

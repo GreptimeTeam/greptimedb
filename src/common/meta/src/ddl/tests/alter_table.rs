@@ -25,6 +25,7 @@ use api::v1::{
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_procedure::ProcedureId;
 use store_api::storage::RegionId;
 use table::requests::TTL_KEY;
 use tokio::sync::mpsc::{self};
@@ -141,9 +142,13 @@ async fn test_on_submit_alter_request() {
             })),
         },
     };
+    let procedure_id = ProcedureId::random();
     let mut procedure = AlterTableProcedure::new(table_id, alter_table_task, ddl_context).unwrap();
     procedure.on_prepare().await.unwrap();
-    procedure.submit_alter_region_requests().await.unwrap();
+    procedure
+        .submit_alter_region_requests(procedure_id)
+        .await
+        .unwrap();
 
     let check = |peer: Peer,
                  request: RegionRequest,
@@ -225,9 +230,13 @@ async fn test_on_submit_alter_request_with_outdated_request() {
             })),
         },
     };
+    let procedure_id = ProcedureId::random();
     let mut procedure = AlterTableProcedure::new(table_id, alter_table_task, ddl_context).unwrap();
     procedure.on_prepare().await.unwrap();
-    let err = procedure.submit_alter_region_requests().await.unwrap_err();
+    let err = procedure
+        .submit_alter_region_requests(procedure_id)
+        .await
+        .unwrap_err();
     assert!(!err.is_retry_later());
 }
 
@@ -327,9 +336,13 @@ async fn test_on_update_metadata_add_columns() {
             })),
         },
     };
+    let procedure_id = ProcedureId::random();
     let mut procedure = AlterTableProcedure::new(table_id, task, ddl_context.clone()).unwrap();
     procedure.on_prepare().await.unwrap();
-    procedure.submit_alter_region_requests().await.unwrap();
+    procedure
+        .submit_alter_region_requests(procedure_id)
+        .await
+        .unwrap();
     procedure.on_update_metadata().await.unwrap();
 
     let table_info = ddl_context
@@ -388,9 +401,13 @@ async fn test_on_update_table_options() {
             })),
         },
     };
+    let procedure_id = ProcedureId::random();
     let mut procedure = AlterTableProcedure::new(table_id, task, ddl_context.clone()).unwrap();
     procedure.on_prepare().await.unwrap();
-    procedure.submit_alter_region_requests().await.unwrap();
+    procedure
+        .submit_alter_region_requests(procedure_id)
+        .await
+        .unwrap();
     procedure.on_update_metadata().await.unwrap();
 
     let table_info = ddl_context

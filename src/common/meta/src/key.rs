@@ -132,7 +132,7 @@ use common_catalog::consts::{
 };
 use common_telemetry::warn;
 use common_wal::options::WalOptions;
-use consistency_guard::ConsistencyGuardValue;
+use consistency_guard::{ConsistencyGuardManager, ConsistencyGuardValue};
 use datanode_table::{DatanodeTableKey, DatanodeTableManager, DatanodeTableValue};
 use flow::flow_route::FlowRouteValue;
 use flow::table_flow::TableFlowValue;
@@ -326,6 +326,7 @@ pub struct TableMetadataManager {
     table_route_manager: TableRouteManager,
     tombstone_manager: TombstoneManager,
     topic_region_manager: TopicRegionManager,
+    consistency_guard_manager: ConsistencyGuardManager,
     kv_backend: KvBackendRef,
 }
 
@@ -477,6 +478,7 @@ impl TableMetadataManager {
             table_route_manager: TableRouteManager::new(kv_backend.clone()),
             tombstone_manager: TombstoneManager::new(kv_backend.clone()),
             topic_region_manager: TopicRegionManager::new(kv_backend.clone()),
+            consistency_guard_manager: ConsistencyGuardManager::new(kv_backend.clone()),
             kv_backend,
         }
     }
@@ -527,6 +529,10 @@ impl TableMetadataManager {
 
     pub fn table_route_manager(&self) -> &TableRouteManager {
         &self.table_route_manager
+    }
+
+    pub fn consistency_guard_manager(&self) -> &ConsistencyGuardManager {
+        &self.consistency_guard_manager
     }
 
     #[cfg(feature = "testing")]

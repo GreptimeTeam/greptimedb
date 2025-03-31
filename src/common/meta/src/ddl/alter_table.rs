@@ -22,9 +22,11 @@ use std::vec;
 use api::v1::alter_table_expr::Kind;
 use api::v1::RenameTable;
 use async_trait::async_trait;
+use common_error::ext::BoxedError;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure, Status, StringKey,
+    Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure, ProcedureId, Status,
+    StringKey,
 };
 use common_telemetry::{debug, error, info};
 use futures::future;
@@ -38,8 +40,9 @@ use table::table_reference::TableReference;
 use crate::cache_invalidator::Context;
 use crate::ddl::utils::{add_peer_context_if_needed, handle_multiple_results, MultipleResults};
 use crate::ddl::DdlContext;
-use crate::error::{Error, NoLeaderSnafu, Result};
+use crate::error::{Error, NoLeaderSnafu, Result, RetryLaterSnafu};
 use crate::instruction::CacheIdent;
+use crate::key::consistency_guard::{ConsistencyGuardKey, ConsistencyGuardResourceType};
 use crate::key::table_info::TableInfoValue;
 use crate::key::{DeserializedValueWithBytes, RegionDistribution};
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
@@ -102,7 +105,57 @@ impl AlterTableProcedure {
         Ok(Status::executing(true))
     }
 
-    pub async fn submit_alter_region_requests(&mut self) -> Result<Status> {
+    async fn lock_consistency_guard(
+        &self,
+        table_id: TableId,
+        procedure_id: ProcedureId,
+    ) -> Result<()> {
+        if let Err(e) = self
+            .context
+            .table_metadata_manager
+            .consistency_guard_manager()
+            .lock(
+                &ConsistencyGuardKey::new(ConsistencyGuardResourceType::Table, table_id as u64),
+                procedure_id,
+            )
+            .await
+        {
+            if !e.is_consistency_guard_conflict() {
+                return Err(BoxedError::new(e)).context(RetryLaterSnafu);
+            }
+            return Err(e);
+        }
+
+        Ok(())
+    }
+
+    async fn release_consistency_guard(
+        &self,
+        table_id: TableId,
+        procedure_id: ProcedureId,
+    ) -> Result<()> {
+        if let Err(e) = self
+            .context
+            .table_metadata_manager
+            .consistency_guard_manager()
+            .release(
+                &ConsistencyGuardKey::new(ConsistencyGuardResourceType::Table, table_id as u64),
+                procedure_id,
+            )
+            .await
+        {
+            if !e.is_consistency_guard_conflict() {
+                return Err(BoxedError::new(e)).context(RetryLaterSnafu);
+            }
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    pub async fn submit_alter_region_requests(
+        &mut self,
+        procedure_id: ProcedureId,
+    ) -> Result<Status> {
         let table_id = self.data.table_id();
         let (_, physical_table_route) = self
             .context
@@ -126,7 +179,8 @@ impl AlterTableProcedure {
         );
 
         ensure!(!leaders.is_empty(), NoLeaderSnafu { table_id });
-
+        // Locks the consistency guard before submitting alter region requests.
+        self.lock_consistency_guard(table_id, procedure_id).await?;
         for datanode in leaders {
             let requester = self.context.node_manager.datanode(&datanode).await;
             let regions = find_leader_regions(&physical_table_route.region_routes, &datanode);
@@ -168,12 +222,16 @@ impl AlterTableProcedure {
             }
             MultipleResults::Ok => {
                 // continue
+                self.release_consistency_guard(table_id, procedure_id)
+                    .await?;
             }
             MultipleResults::AllNonRetryable(error) => {
                 // It assumes the metadata on datanode is not changed.
                 // Case: The alter region request is sent but not applied. (e.g., InvalidArgument)
 
-                // Release resource lock.
+                // Release resource lock before returning the error.
+                self.release_consistency_guard(table_id, procedure_id)
+                    .await?;
                 return Err(error);
             }
         }
@@ -269,7 +327,7 @@ impl Procedure for AlterTableProcedure {
         Self::TYPE_NAME
     }
 
-    async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
+    async fn execute(&mut self, ctx: &ProcedureContext) -> ProcedureResult<Status> {
         let error_handler = |e: Error| {
             if e.is_retry_later() {
                 ProcedureError::retry_later(e)
@@ -288,7 +346,9 @@ impl Procedure for AlterTableProcedure {
 
         match state {
             AlterTableState::Prepare => self.on_prepare().await,
-            AlterTableState::SubmitAlterRegionRequests => self.submit_alter_region_requests().await,
+            AlterTableState::SubmitAlterRegionRequests => {
+                self.submit_alter_region_requests(ctx.procedure_id).await
+            }
             AlterTableState::UpdateMetadata => self.on_update_metadata().await,
             AlterTableState::InvalidateTableCache => self.on_broadcast().await,
         }

@@ -64,6 +64,15 @@ pub struct ConsistencyGuardKey {
     resource_id: u64,
 }
 
+impl ConsistencyGuardKey {
+    pub fn new(resource_type: ConsistencyGuardResourceType, resource_id: u64) -> Self {
+        Self {
+            resource_type,
+            resource_id,
+        }
+    }
+}
+
 impl Display for ConsistencyGuardKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -192,15 +201,15 @@ impl ConsistencyGuardManager {
         if !resp.succeeded {
             let mut set = TxnOpGetResponseSet::from(&mut resp.responses);
             let remote_value = on_failure(&mut set)?
-                .context(error::UnexpectedSnafu {
-                    err_msg: "Reads the empty consistency guard value in comparing operation of the lock consistency guard",
+                .context(error::ConsistencyGuardConflictSnafu {
+                    msg: "Reads the empty consistency guard value in comparing operation of the lock consistency guard",
                 })?
                 .into_inner();
 
             ensure!(
                 remote_value.procedure_id == procedure_id.to_string(),
-                error::UnexpectedSnafu {
-                    err_msg: format!(
+                error::ConsistencyGuardConflictSnafu {
+                    msg: format!(
                         "The consistency guard value is already locked by other procedure {}",
                         remote_value.procedure_id
                     ),
@@ -234,8 +243,8 @@ impl ConsistencyGuardManager {
 
             ensure!(
                 remote_value.is_none(),
-                error::UnexpectedSnafu {
-                    err_msg: format!(
+                error::ConsistencyGuardConflictSnafu {
+                    msg: format!(
                         "The consistency guard value is not locked by the procedure {}",
                         remote_value.unwrap().into_inner().procedure_id
                     ),
@@ -249,9 +258,11 @@ impl ConsistencyGuardManager {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches::assert_matches;
     use std::sync::Arc;
 
     use super::*;
+    use crate::error::Error;
     use crate::kv_backend::memory::MemoryKvBackend;
 
     #[tokio::test]
@@ -308,15 +319,17 @@ mod tests {
             .await
             .unwrap();
 
-        consistency_guard_manager
+        let err = consistency_guard_manager
             .lock(&key, procedure_id2)
             .await
             .unwrap_err();
+        assert_matches!(err, Error::ConsistencyGuardConflict { .. });
 
-        consistency_guard_manager
+        let err = consistency_guard_manager
             .release(&key, procedure_id2)
             .await
             .unwrap_err();
+        assert_matches!(err, Error::ConsistencyGuardConflict { .. });
     }
 
     #[test]
