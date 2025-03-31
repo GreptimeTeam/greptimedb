@@ -201,7 +201,6 @@ fn metadata_after_alteration(
         .context(InvalidRegionRequestSnafu)?
         .bump_version();
     let new_meta = builder.build().context(InvalidMetadataSnafu)?;
-    assert_eq!(request.schema_version + 1, new_meta.schema_version);
 
     Ok(Arc::new(new_meta))
 }

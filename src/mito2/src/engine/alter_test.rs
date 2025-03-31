@@ -52,7 +52,6 @@ async fn scan_check_after_alter(engine: &MitoEngine, region_id: RegionId, expect
 
 fn add_tag1() -> RegionAlterRequest {
     RegionAlterRequest {
-        schema_version: 0,
         kind: AlterKind::AddColumns {
             columns: vec![AddColumn {
                 column_metadata: ColumnMetadata {
@@ -72,7 +71,6 @@ fn add_tag1() -> RegionAlterRequest {
 
 fn alter_column_inverted_index() -> RegionAlterRequest {
     RegionAlterRequest {
-        schema_version: 0,
         kind: AlterKind::SetIndex {
             options: ApiSetIndexOptions::Inverted {
                 column_name: "tag_0".to_string(),
@@ -83,7 +81,6 @@ fn alter_column_inverted_index() -> RegionAlterRequest {
 
 fn alter_column_fulltext_options() -> RegionAlterRequest {
     RegionAlterRequest {
-        schema_version: 0,
         kind: AlterKind::SetIndex {
             options: ApiSetIndexOptions::Fulltext {
                 column_name: "tag_0".to_string(),
@@ -733,7 +730,6 @@ async fn test_alter_region_ttl_options() {
         .unwrap();
     let engine_cloned = engine.clone();
     let alter_ttl_request = RegionAlterRequest {
-        schema_version: 0,
         kind: AlterKind::SetRegionOptions {
             options: vec![SetRegionOption::Ttl(Some(Duration::from_secs(500).into()))],
         },
