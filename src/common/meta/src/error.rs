@@ -748,6 +748,13 @@ pub enum Error {
         #[snafu(source)]
         error: serde_json::Error,
     },
+
+    #[snafu(display("No leader found for table_id: {}", table_id))]
+    NoLeader {
+        table_id: TableId,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -765,6 +772,8 @@ impl ErrorExt for Error {
             | GetCache { .. }
             | SerializeToJson { .. }
             | DeserializeFromJson { .. } => StatusCode::Internal,
+
+            NoLeader { .. } => StatusCode::TableUnavailable,
 
             ValueNotExist { .. } => StatusCode::Unexpected,
 

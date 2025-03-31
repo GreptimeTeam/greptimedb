@@ -17,28 +17,32 @@ mod metadata;
 mod region_request;
 mod update_metadata;
 
-use std::vec;
+use std::{result, vec};
 
+use api::region::RegionResponse;
 use api::v1::alter_table_expr::Kind;
 use api::v1::RenameTable;
 use async_trait::async_trait;
-use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
+use common_error::ext::BoxedError;
+use common_procedure::error::{
+    FromJsonSnafu, Result as ProcedureResult, RetryLaterSnafu, ToJsonSnafu,
+};
 use common_procedure::{
     Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure, Status, StringKey,
 };
 use common_telemetry::{debug, error, info};
 use futures::future;
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
+use snafu::{ensure, ResultExt};
 use store_api::storage::RegionId;
 use strum::AsRefStr;
 use table::metadata::{RawTableInfo, TableId, TableInfo};
 use table::table_reference::TableReference;
 
 use crate::cache_invalidator::Context;
-use crate::ddl::utils::add_peer_context_if_needed;
+use crate::ddl::utils::{add_peer_context_if_needed, handle_multiple_results, MultipleResults};
 use crate::ddl::DdlContext;
-use crate::error::{Error, Result};
+use crate::error::{Error, NoLeaderSnafu, Result};
 use crate::instruction::CacheIdent;
 use crate::key::table_info::TableInfoValue;
 use crate::key::{DeserializedValueWithBytes, RegionDistribution};
@@ -125,6 +129,8 @@ impl AlterTableProcedure {
             alter_kind,
         );
 
+        ensure!(!leaders.is_empty(), NoLeaderSnafu { table_id });
+
         for datanode in leaders {
             let requester = self.context.node_manager.datanode(&datanode).await;
             let regions = find_leader_regions(&physical_table_route.region_routes, &datanode);
@@ -146,10 +152,35 @@ impl AlterTableProcedure {
             }
         }
 
-        future::join_all(alter_region_tasks)
+        let results = future::join_all(alter_region_tasks)
             .await
             .into_iter()
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Vec<_>>();
+
+        match handle_multiple_results(results) {
+            MultipleResults::PartialRetryable(error) => {
+                // Just returns the error, and wait for the next try.
+                return Err(error);
+            }
+            MultipleResults::PartialNonRetryable(error) => {
+                // No retry will be done.
+                return Err(error);
+            }
+            MultipleResults::AllRetryable(error) => {
+                // Just returns the error, and wait for the next try.
+                return Err(error);
+            }
+            MultipleResults::Ok => {
+                // continue
+            }
+            MultipleResults::AllNonRetryable(error) => {
+                // It assumes the metadata on datanode is not changed.
+                // Case: The alter region request is sent but not applied. (e.g., InvalidArgument)
+
+                // Release resource lock.
+                return Err(error);
+            }
+        }
 
         self.data.state = AlterTableState::UpdateMetadata;
 

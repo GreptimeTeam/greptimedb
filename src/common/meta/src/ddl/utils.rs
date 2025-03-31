@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::fmt::Debug;
 
 use common_catalog::consts::METRIC_ENGINE;
 use common_error::ext::BoxedError;
@@ -180,6 +181,53 @@ pub fn extract_region_wal_options(
         region_wal_options.extend(parsed_options);
     }
     Ok(region_wal_options)
+}
+
+pub enum MultipleResults {
+    Ok,
+    PartialRetryable(Error),
+    PartialNonRetryable(Error),
+    AllRetryable(Error),
+    AllNonRetryable(Error),
+}
+
+/// Handles the results of alter region requests.
+///
+/// For partial success, we need to check if the errors are retryable.
+/// If all the errors are retryable, we return a retryable error.
+/// Otherwise, we return the first error.
+pub fn handle_multiple_results<T: Debug>(results: Vec<Result<T>>) -> MultipleResults {
+    let mut retryable_results = Vec::new();
+    let mut non_retryable_results = Vec::new();
+    let mut ok_results = Vec::new();
+
+    for result in results {
+        match result {
+            Ok(_) => ok_results.push(result),
+            Err(err) => {
+                if err.is_retry_later() {
+                    retryable_results.push(err);
+                } else {
+                    non_retryable_results.push(err);
+                }
+            }
+        }
+    }
+
+    match (
+        retryable_results.len(),
+        non_retryable_results.len(),
+        ok_results.len(),
+    ) {
+        (0, 0, _) => MultipleResults::Ok,
+        (0, _, 0) => MultipleResults::AllRetryable(retryable_results.into_iter().next().unwrap()),
+        (_, 0, 0) => {
+            MultipleResults::AllNonRetryable(non_retryable_results.into_iter().next().unwrap())
+        }
+        (_, _, _) => {
+            MultipleResults::PartialRetryable(retryable_results.into_iter().next().unwrap())
+        }
+    }
 }
 
 #[cfg(test)]
