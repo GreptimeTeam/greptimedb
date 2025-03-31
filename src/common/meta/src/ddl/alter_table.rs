@@ -17,16 +17,12 @@ mod metadata;
 mod region_request;
 mod update_metadata;
 
-use std::{result, vec};
+use std::vec;
 
-use api::region::RegionResponse;
 use api::v1::alter_table_expr::Kind;
 use api::v1::RenameTable;
 use async_trait::async_trait;
-use common_error::ext::BoxedError;
-use common_procedure::error::{
-    FromJsonSnafu, Result as ProcedureResult, RetryLaterSnafu, ToJsonSnafu,
-};
+use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{
     Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure, Status, StringKey,
 };
