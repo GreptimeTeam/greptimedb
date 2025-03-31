@@ -185,6 +185,13 @@ impl ConsistencyGuardManager {
         ))
     }
 
+    #[cfg(test)]
+    pub async fn get(&self, key: &ConsistencyGuardKey) -> Result<Option<ConsistencyGuardValue>> {
+        let key = key.to_bytes();
+        let value = self.kv_backend.get(&key).await?;
+        Ok(value.map(|v| ConsistencyGuardValue::try_from_raw_value(&v.value).unwrap()))
+    }
+
     /// Locks the consistency guard key.
     ///
     /// If the consistency guard key is already locked by other procedure, it will return an error.

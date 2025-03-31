@@ -197,6 +197,7 @@ pub enum MultipleResults {
 /// If all the errors are retryable, we return a retryable error.
 /// Otherwise, we return the first error.
 pub fn handle_multiple_results<T: Debug>(results: Vec<Result<T>>) -> MultipleResults {
+    let num_results = results.len();
     let mut retryable_results = Vec::new();
     let mut non_retryable_results = Vec::new();
     let mut ok_results = Vec::new();
@@ -214,20 +215,28 @@ pub fn handle_multiple_results<T: Debug>(results: Vec<Result<T>>) -> MultipleRes
         }
     }
 
-    match (
+    common_telemetry::debug!(
+        "retryable_results: {}, non_retryable_results: {}, ok_results: {}",
         retryable_results.len(),
         non_retryable_results.len(),
-        ok_results.len(),
-    ) {
-        (0, 0, _) => MultipleResults::Ok,
-        (0, _, 0) => MultipleResults::AllRetryable(retryable_results.into_iter().next().unwrap()),
-        (_, 0, 0) => {
-            MultipleResults::AllNonRetryable(non_retryable_results.into_iter().next().unwrap())
-        }
-        (_, _, _) => {
-            MultipleResults::PartialRetryable(retryable_results.into_iter().next().unwrap())
-        }
+        ok_results.len()
+    );
+
+    if retryable_results.len() == num_results {
+        return MultipleResults::AllRetryable(retryable_results.into_iter().next().unwrap());
+    } else if non_retryable_results.len() == num_results {
+        return MultipleResults::AllNonRetryable(non_retryable_results.into_iter().next().unwrap());
+    } else if ok_results.len() == num_results {
+        return MultipleResults::Ok;
+    } else if !retryable_results.is_empty()
+        && !ok_results.is_empty()
+        && non_retryable_results.is_empty()
+    {
+        return MultipleResults::PartialRetryable(retryable_results.into_iter().next().unwrap());
     }
+
+    // non_retryable_results.len() > 0
+    MultipleResults::PartialNonRetryable(non_retryable_results.into_iter().next().unwrap())
 }
 
 #[cfg(test)]

@@ -171,3 +171,74 @@ impl MockDatanodeHandler for NaiveDatanodeHandler {
         unreachable!()
     }
 }
+
+#[derive(Clone)]
+pub struct PartialSuccessDatanodeHandler {
+    pub retryable: bool,
+}
+
+#[async_trait::async_trait]
+impl MockDatanodeHandler for PartialSuccessDatanodeHandler {
+    async fn handle(&self, peer: &Peer, _request: RegionRequest) -> Result<RegionResponse> {
+        let success = peer.id % 2 == 0;
+        if success {
+            Ok(RegionResponse::new(0))
+        } else if self.retryable {
+            Err(Error::RetryLater {
+                source: BoxedError::new(
+                    error::UnexpectedSnafu {
+                        err_msg: "retry later",
+                    }
+                    .build(),
+                ),
+            })
+        } else {
+            error::UnexpectedSnafu {
+                err_msg: "mock error",
+            }
+            .fail()
+        }
+    }
+
+    async fn handle_query(
+        &self,
+        _peer: &Peer,
+        _request: QueryRequest,
+    ) -> Result<SendableRecordBatchStream> {
+        unreachable!()
+    }
+}
+
+#[derive(Clone)]
+pub struct AllFailureDatanodeHandler {
+    pub retryable: bool,
+}
+
+#[async_trait::async_trait]
+impl MockDatanodeHandler for AllFailureDatanodeHandler {
+    async fn handle(&self, _peer: &Peer, _request: RegionRequest) -> Result<RegionResponse> {
+        if self.retryable {
+            Err(Error::RetryLater {
+                source: BoxedError::new(
+                    error::UnexpectedSnafu {
+                        err_msg: "retry later",
+                    }
+                    .build(),
+                ),
+            })
+        } else {
+            error::UnexpectedSnafu {
+                err_msg: "mock error",
+            }
+            .fail()
+        }
+    }
+
+    async fn handle_query(
+        &self,
+        _peer: &Peer,
+        _request: QueryRequest,
+    ) -> Result<SendableRecordBatchStream> {
+        unreachable!()
+    }
+}
