@@ -46,6 +46,7 @@ pub const SKIPPING_INDEX_KEY: &str = "greptime:skipping_index";
 pub const COLUMN_FULLTEXT_CHANGE_OPT_KEY_ENABLE: &str = "enable";
 pub const COLUMN_FULLTEXT_OPT_KEY_ANALYZER: &str = "analyzer";
 pub const COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE: &str = "case_sensitive";
+pub const COLUMN_FULLTEXT_OPT_KEY_BACKEND: &str = "backend";
 
 /// Keys used in SKIPPING index options
 pub const COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY: &str = "granularity";
@@ -535,9 +536,8 @@ impl fmt::Display for FulltextOptions {
 #[serde(rename_all = "kebab-case")]
 pub enum FulltextBackend {
     #[default]
-    Bloom,
-
     Tantivy,
+    Bloom, // TODO(zhongzc): when bloom is ready, use it as default
 }
 
 impl fmt::Display for FulltextBackend {
@@ -591,6 +591,19 @@ impl TryFrom<HashMap<String, String>> for FulltextOptions {
                 _ => {
                     return InvalidFulltextOptionSnafu {
                         msg: format!("{case_sensitive}, expected: 'true' | 'false'"),
+                    }
+                    .fail();
+                }
+            }
+        }
+
+        if let Some(backend) = options.get(COLUMN_FULLTEXT_OPT_KEY_BACKEND) {
+            match backend.to_ascii_lowercase().as_str() {
+                "bloom" => fulltext_options.backend = FulltextBackend::Bloom,
+                "tantivy" => fulltext_options.backend = FulltextBackend::Tantivy,
+                _ => {
+                    return InvalidFulltextOptionSnafu {
+                        msg: format!("{backend}, expected: 'bloom' | 'tantivy'"),
                     }
                     .fail();
                 }
