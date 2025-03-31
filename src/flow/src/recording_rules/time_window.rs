@@ -67,7 +67,7 @@ use crate::Error;
 #[derive(Debug, Clone)]
 pub struct TimeWindowExpr {
     phy_expr: PhysicalExprRef,
-    column_name: String,
+    pub column_name: String,
     logical_expr: Expr,
     df_schema: DFSchema,
 }

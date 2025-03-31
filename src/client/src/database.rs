@@ -164,7 +164,7 @@ impl Database {
         from_grpc_response(response)
     }
 
-    async fn handle(&self, request: Request) -> Result<u32> {
+    pub async fn handle(&self, request: Request) -> Result<u32> {
         let mut client = make_database_client(&self.client)?.inner;
         let request = self.to_rpc_request(request);
         let response = client.handle(request).await?.into_inner();
