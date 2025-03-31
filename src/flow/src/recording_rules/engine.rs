@@ -37,7 +37,6 @@ use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use table::metadata::{RawTableMeta, TableId};
-use table::requests::AUTO_CREATE_TABLE_KEY;
 use tokio::sync::oneshot::error::TryRecvError;
 use tokio::sync::{oneshot, RwLock};
 use tokio::time::Instant;
