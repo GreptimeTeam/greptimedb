@@ -1,6 +1,3 @@
-## The running mode of the datanode. It can be `standalone` or `distributed`.
-mode = "standalone"
-
 ## The datanode identifier and should be unique in the cluster.
 ## @toml2docs:none-default
 node_id = 42
