@@ -18,7 +18,6 @@
 #![feature(let_chains)]
 #![feature(if_let_guard)]
 #![feature(trait_upcasting)]
-#![feature(slice_as_array)]
 
 use datafusion_expr::LogicalPlan;
 use datatypes::schema::Schema;

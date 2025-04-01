@@ -606,7 +606,7 @@ fn extract_pipeline_value_by_content_type(
                     }
                 };
 
-                if let Ok(v) = unsafe { simd_json::to_owned_value(line.as_mut_vec()) } {
+                if let Ok(v) = simd_json::to_owned_value(unsafe { line.as_bytes_mut() }) {
                     let v = pipeline::simd_json_to_map(v).context(PipelineSnafu)?;
                     result.push(v);
                 } else if !ignore_errors {
