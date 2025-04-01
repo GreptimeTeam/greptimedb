@@ -54,10 +54,11 @@ pub struct Context {
 /// The data of WAL pruning.
 #[derive(Serialize, Deserialize)]
 pub struct WalPruneData {
-    /// The topic names to prune.
-    pub topics: Vec<String>,
-    /// The last entry id for each region.
-    pub last_entry_ids: Option<Vec<Option<EntryId>>>,
+    /// The topic name to prune.
+    pub topic: String,
+    /// The minimum flush entry id for topic, which is used to prune the WAL.
+    /// If the topic has no region, the value is set to `None`.
+    pub min_flush_entry_id: EntryId,
     /// The state.
     pub state: WalPruneState,
 }
@@ -71,11 +72,11 @@ pub struct WalPruneProcedure {
 impl WalPruneProcedure {
     const TYPE_NAME: &'static str = "metasrv-procedure::WalPrune";
 
-    pub fn new(topics: Vec<String>, context: Context) -> Self {
+    pub fn new(topic: String, context: Context) -> Self {
         Self {
             data: WalPruneData {
-                topics,
-                last_entry_ids: None,
+                topic,
+                min_flush_entry_id: 0,
                 state: WalPruneState::Prepare,
             },
             context,
@@ -89,53 +90,37 @@ impl WalPruneProcedure {
 
     /// Calculate the last entry id to prune for each topic.
     pub async fn on_prepare(&mut self) -> Result<Status> {
-        let topic_region_map = self
+        let region_ids = self
             .context
             .table_metadata_manager
             .topic_region_manager()
-            .get_regions_by_topics(&self.data.topics)
+            .regions(&self.data.topic)
             .await
             .context(TableMetadataManagerSnafu)
             .map_err(BoxedError::new)
             .with_context(|_| error::RetryLaterWithSourceSnafu {
                 reason: "Failed to get topic-region map",
             })?;
-        let regions = topic_region_map
-            .values()
-            .flatten()
-            .copied()
-            .collect::<Vec<RegionId>>();
-        let last_entry_ids_map = self
+        // TODO(CookiePie): Should store in memory instead of getting from table metadata manager.
+        let flush_entry_ids_map = self
             .context
             .table_metadata_manager
             .topic_region_manager()
-            .get_region_last_entry_ids(regions)
+            .get_region_last_entry_ids(&region_ids)
             .await;
-        // Map last entry id to each topic
-        let mut last_entry_ids = Vec::with_capacity(self.data.topics.len());
-        for topic in &self.data.topics {
-            // Safety: the topic must exist in the map.
-            let region_ids = topic_region_map.get(topic).unwrap();
-            // `None` means no region for the topic.
-            if region_ids.is_empty() {
-                last_entry_ids.push(None);
-                continue;
-            }
-            let mut max_last_entry_id = 0;
-            for region_id in region_ids {
-                let last_entry_id = last_entry_ids_map.get(region_id).copied();
-                if let Some(last_entry_id) = last_entry_id {
-                    // We should use the biggest last entry id.
-                    max_last_entry_id = max_last_entry_id.max(last_entry_id);
-                }
-            }
-            if max_last_entry_id == 0 {
-                last_entry_ids.push(None);
-            } else {
-                last_entry_ids.push(Some(max_last_entry_id));
-            }
+
+        // Check if the `flush_entry_ids_map` contains all region ids.
+        let heartbeat_collected_region_ids = flush_entry_ids_map.keys().collect::<Vec<_>>();
+        if !check_heartbeat_collected_region_ids(
+            &region_ids.iter().collect::<Vec<_>>(),
+            &heartbeat_collected_region_ids,
+        ) || region_ids.is_empty()
+        {
+            return Ok(Status::done());
         }
-        self.data.last_entry_ids = Some(last_entry_ids);
+
+        // Safety: `flush_entry_ids_map` are not empty.
+        self.data.min_flush_entry_id = *(flush_entry_ids_map.values().min().unwrap());
         self.data.state = WalPruneState::Prune;
         Ok(Status::executing(true))
     }
@@ -143,33 +128,28 @@ impl WalPruneProcedure {
     /// Prune the WAL.
     pub async fn on_prune(&mut self) -> Result<Status> {
         // Safety: last_entry_ids are loaded in on_prepare.
-        for (topic, last_entry_id) in self
-            .data
-            .topics
-            .iter()
-            .zip(self.data.last_entry_ids.as_ref().unwrap())
-        {
-            if let Some(last_entry_id) = last_entry_id {
-                let partition_client = self
-                    .context
-                    .client
-                    .partition_client(topic, DEFAULT_PARTITION, UnknownTopicHandling::Retry)
-                    .await
-                    .context(BuildPartitionClientSnafu {
-                        topic,
-                        partition: DEFAULT_PARTITION,
-                    })?;
+        let partition_client = self
+            .context
+            .client
+            .partition_client(
+                self.data.topic.clone(),
+                DEFAULT_PARTITION,
+                UnknownTopicHandling::Retry,
+            )
+            .await
+            .context(BuildPartitionClientSnafu {
+                topic: self.data.topic.clone(),
+                partition: DEFAULT_PARTITION,
+            })?;
 
-                partition_client
-                    .delete_records((*last_entry_id) as i64, TIMEOUT)
-                    .await
-                    .context(DeleteRecordSnafu {
-                        topic,
-                        partition: DEFAULT_PARTITION,
-                        offset: *last_entry_id,
-                    })?;
-            }
-        }
+        partition_client
+            .delete_records(self.data.min_flush_entry_id as i64, TIMEOUT)
+            .await
+            .context(DeleteRecordSnafu {
+                topic: self.data.topic.clone(),
+                partition: DEFAULT_PARTITION,
+                offset: self.data.min_flush_entry_id,
+            })?;
         Ok(Status::done())
     }
 }
@@ -208,4 +188,21 @@ impl Procedure for WalPruneProcedure {
         let lock_key = vec![RemoteWalLock::Read.into()];
         LockKey::new(lock_key)
     }
+}
+
+/// Check if the heartbeat collected region ids are the same as the region ids in the kvbackend.
+/// If not, we should not prune the WAL.
+fn check_heartbeat_collected_region_ids(
+    region_ids: &[&RegionId],
+    heartbeat_collected_region_ids: &[&RegionId],
+) -> bool {
+    if region_ids.len() != heartbeat_collected_region_ids.len() {
+        return false;
+    }
+    let cmp = |a: &&RegionId, b: &&RegionId| a.as_u64().cmp(&b.as_u64());
+    let mut heartbeat_collected_region_ids = heartbeat_collected_region_ids.to_vec();
+    heartbeat_collected_region_ids.sort_by(cmp);
+    let mut region_ids = region_ids.to_vec();
+    region_ids.sort_by(cmp);
+    region_ids == heartbeat_collected_region_ids
 }

@@ -250,7 +250,7 @@ impl TopicRegionManager {
     /// Should be maintained through heartbeats. Not implemented yet.
     pub async fn get_region_last_entry_ids(
         &self,
-        _regions: Vec<RegionId>,
+        _regions: &[RegionId],
     ) -> HashMap<RegionId, EntryId> {
         todo!()
     }
