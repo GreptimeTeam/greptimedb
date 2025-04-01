@@ -27,7 +27,6 @@ const TABLE_NAME_LOCK_PREFIX: &str = "__table_name_lock";
 const FLOW_NAME_LOCK_PREFIX: &str = "__flow_name_lock";
 const REGION_LOCK_PREFIX: &str = "__region_lock";
 const FLOW_LOCK_PREFIX: &str = "__flow_lock";
-const REMOTE_WAL_LOCK_PREFIX: &str = "__remote_wal_lock";
 
 /// [CatalogLock] acquires the lock on the tenant level.
 pub enum CatalogLock<'a> {
@@ -228,29 +227,6 @@ impl From<FlowLock> for StringKey {
         match value {
             FlowLock::Write(_) => StringKey::Exclusive(value.to_string()),
             FlowLock::Read(_) => StringKey::Share(value.to_string()),
-        }
-    }
-}
-
-/// [RemoteWalLock] acquires the lock on the remote wal level.
-///
-/// Note: Locks all the remote wal operations.
-pub enum RemoteWalLock {
-    Read,
-    Write,
-}
-
-impl Display for RemoteWalLock {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", REMOTE_WAL_LOCK_PREFIX)
-    }
-}
-
-impl From<RemoteWalLock> for StringKey {
-    fn from(value: RemoteWalLock) -> Self {
-        match value {
-            RemoteWalLock::Write => StringKey::Exclusive(value.to_string()),
-            RemoteWalLock::Read => StringKey::Share(value.to_string()),
         }
     }
 }

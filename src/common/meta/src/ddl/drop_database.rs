@@ -34,7 +34,7 @@ use self::start::DropDatabaseStart;
 use crate::ddl::DdlContext;
 use crate::error::Result;
 use crate::key::table_name::TableNameValue;
-use crate::lock_key::{CatalogLock, RemoteWalLock, SchemaLock};
+use crate::lock_key::{CatalogLock, SchemaLock};
 
 pub struct DropDatabaseProcedure {
     /// The context of procedure runtime.
@@ -166,7 +166,6 @@ impl Procedure for DropDatabaseProcedure {
         let lock_key = vec![
             CatalogLock::Read(&self.context.catalog).into(),
             SchemaLock::write(&self.context.catalog, &self.context.schema).into(),
-            RemoteWalLock::Write.into(),
         ];
 
         LockKey::new(lock_key)

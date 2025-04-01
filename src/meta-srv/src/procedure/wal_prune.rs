@@ -16,7 +16,6 @@ use std::sync::Arc;
 
 use common_error::ext::BoxedError;
 use common_meta::key::TableMetadataManagerRef;
-use common_meta::lock_key::RemoteWalLock;
 use common_procedure::error::ToJsonSnafu;
 use common_procedure::{
     Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
@@ -184,25 +183,21 @@ impl Procedure for WalPruneProcedure {
         serde_json::to_string(&self.data).context(ToJsonSnafu)
     }
 
+    /// WAL prune procedure will read the topic-region map from the table metadata manager,
+    /// which are modified by `DROP [TABLE|DATABASE]` and `CREATE [TABLE]` operations.
+    /// But the modifications are atomic, so it does not conflict with the procedure.
+    /// It only abort the procedure sometimes since the `check_heartbeat_collected_region_ids` fails.
     fn lock_key(&self) -> LockKey {
-        let lock_key = vec![RemoteWalLock::Read.into()];
-        LockKey::new(lock_key)
+        LockKey::new(vec![])
     }
 }
 
-/// Check if the heartbeat collected region ids are the same as the region ids in the kvbackend.
-/// If not, we should not prune the WAL.
+/// Check if the heartbeat collected region ids contains all region ids in the topic-region map.
 fn check_heartbeat_collected_region_ids(
     region_ids: &[&RegionId],
     heartbeat_collected_region_ids: &[&RegionId],
 ) -> bool {
-    if region_ids.len() != heartbeat_collected_region_ids.len() {
-        return false;
-    }
-    let cmp = |a: &&RegionId, b: &&RegionId| a.as_u64().cmp(&b.as_u64());
-    let mut heartbeat_collected_region_ids = heartbeat_collected_region_ids.to_vec();
-    heartbeat_collected_region_ids.sort_by(cmp);
-    let mut region_ids = region_ids.to_vec();
-    region_ids.sort_by(cmp);
-    region_ids == heartbeat_collected_region_ids
+    region_ids
+        .iter()
+        .all(|region_id| heartbeat_collected_region_ids.contains(region_id))
 }
