@@ -19,12 +19,12 @@ mod jaeger;
 mod log_handler;
 mod logs;
 mod opentsdb;
+mod otel_arrow;
 mod otlp;
 pub mod prom_store;
 mod promql;
 mod region_query;
 pub mod standalone;
-mod otel_arrow;
 
 use std::sync::Arc;
 use std::time::SystemTime;

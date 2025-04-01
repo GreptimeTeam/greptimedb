@@ -18,9 +18,9 @@ mod cancellation;
 mod database;
 pub mod flight;
 pub mod greptime_handler;
+pub mod otel_arrow;
 pub mod prom_query_gateway;
 pub mod region_server;
-pub mod otel_arrow;
 
 use std::net::SocketAddr;
 

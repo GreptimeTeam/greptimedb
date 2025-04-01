@@ -37,6 +37,7 @@ mod metrics;
 pub mod metrics_handler;
 pub mod mysql;
 pub mod opentsdb;
+pub mod otel_arrow;
 pub mod otlp;
 mod pipeline;
 pub mod postgres;
@@ -50,7 +51,6 @@ pub mod repeated_field;
 mod row_writer;
 pub mod server;
 pub mod tls;
-pub mod otel_arrow;
 
 pub use common_config::Mode;
 

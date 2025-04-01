@@ -1,6 +1,3 @@
-pub struct OtelArrowServer {
-}
+pub struct OtelArrowServer {}
 
-impl OtelArrowServer {
-    
-}
+impl OtelArrowServer {}
