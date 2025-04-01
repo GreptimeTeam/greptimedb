@@ -951,7 +951,6 @@ providers = []"#,
 
     let expected_toml_str = format!(
         r#"
-mode = "standalone"
 enable_telemetry = true
 init_regions_in_background = false
 init_regions_parallelism = 16
