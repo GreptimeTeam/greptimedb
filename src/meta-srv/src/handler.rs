@@ -62,6 +62,7 @@ use crate::service::mailbox::{
 
 pub mod check_leader_handler;
 pub mod collect_cluster_info_handler;
+pub mod collect_leader_region_handler;
 pub mod collect_stats_handler;
 pub mod extract_stat_handler;
 pub mod failure_handler;

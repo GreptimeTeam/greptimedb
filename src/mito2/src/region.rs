@@ -30,7 +30,9 @@ use store_api::codec::PrimaryKeyEncoding;
 use store_api::logstore::provider::Provider;
 use store_api::manifest::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::{RegionRole, RegionStatistic, SettableRegionRoleState};
+use store_api::region_engine::{
+    RegionDetail, RegionRole, RegionStatistic, SettableRegionRoleState,
+};
 use store_api::storage::RegionId;
 
 use crate::access_layer::AccessLayerRef;
@@ -290,6 +292,7 @@ impl MitoRegion {
         let manifest_usage = self.stats.total_manifest_size();
         let num_rows = version.ssts.num_rows() + version.memtables.num_rows();
         let manifest_version = self.stats.manifest_version();
+        let flushed_entry_id = version.flushed_entry_id;
 
         RegionStatistic {
             num_rows,
@@ -298,7 +301,10 @@ impl MitoRegion {
             manifest_size: manifest_usage,
             sst_size: sst_usage,
             index_size: index_usage,
-            manifest_version,
+            detail: RegionDetail::Mito {
+                manifest_version,
+                flushed_entry_id,
+            },
         }
     }
 
