@@ -4289,6 +4289,7 @@ dependencies = [
  "num_cpus",
  "opentelemetry-proto 0.27.0",
  "operator",
+ "otel-arrow-rust",
  "partition",
  "pipeline",
  "prometheus",
@@ -7509,6 +7510,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "num_enum"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e613fc340b2220f734a8595782c551f1250e969d87d3be1ae0579e8d4065179"
+dependencies = [
+ "num_enum_derive",
+]
+
+[[package]]
+name = "num_enum_derive"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af1844ef2428cc3e1cb900be36181049ef3d3193c63e43026cfe202983b27a56"
+dependencies = [
+ "proc-macro-crate 1.3.1",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.96",
+]
+
+[[package]]
 name = "num_threads"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7941,6 +7963,23 @@ name = "os_str_bytes"
 version = "6.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2355d85b9a3786f481747ced0e0ff2ba35213a1f9bd406ed906554d7af805a1"
+
+[[package]]
+name = "otel-arrow-rust"
+version = "0.1.0"
+source = "git+https://github.com/v0y4g3r/otel-arrow.git?rev=e3d9ed216c0a198a14987d1aa6e13c98264574c3#e3d9ed216c0a198a14987d1aa6e13c98264574c3"
+dependencies = [
+ "arrow",
+ "lazy_static",
+ "num_enum",
+ "opentelemetry-proto 0.27.0",
+ "paste",
+ "prost 0.13.3",
+ "serde",
+ "snafu 0.8.5",
+ "tonic 0.12.3",
+ "tonic-build 0.12.3",
+]
 
 [[package]]
 name = "overload"
@@ -10546,6 +10585,7 @@ dependencies = [
  "openmetrics-parser",
  "opensrv-mysql",
  "opentelemetry-proto 0.27.0",
+ "otel-arrow-rust",
  "parking_lot 0.12.3",
  "permutation",
  "pgwire",

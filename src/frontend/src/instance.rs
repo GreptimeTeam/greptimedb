@@ -24,6 +24,7 @@ pub mod prom_store;
 mod promql;
 mod region_query;
 pub mod standalone;
+mod otel_arrow;
 
 use std::sync::Arc;
 use std::time::SystemTime;

@@ -50,6 +50,7 @@ pub mod repeated_field;
 mod row_writer;
 pub mod server;
 pub mod tls;
+pub mod otel_arrow;
 
 pub use common_config::Mode;
 

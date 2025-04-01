@@ -258,6 +258,7 @@ common-version = { path = "src/common/version" }
 common-wal = { path = "src/common/wal" }
 datanode = { path = "src/datanode" }
 datatypes = { path = "src/datatypes" }
+otel-arrow-rust = { git = "https://github.com/v0y4g3r/otel-arrow.git", rev = "e3d9ed216c0a198a14987d1aa6e13c98264574c3" , features = ["server"]}
 file-engine = { path = "src/file-engine" }
 flow = { path = "src/flow" }
 frontend = { path = "src/frontend", default-features = false }
