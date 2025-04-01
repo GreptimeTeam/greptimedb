@@ -379,7 +379,7 @@ impl TryFrom<simd_json::value::OwnedValue> for Value {
                 simd_json::value::StaticNode::U64(v) => Ok(Value::Uint64(v)),
                 simd_json::value::StaticNode::F64(v) => Ok(Value::Float64(v)),
             },
-            simd_json::OwnedValue::String(s) => Ok(Value::String(s.to_string())),
+            simd_json::OwnedValue::String(s) => Ok(Value::String(s)),
             simd_json::OwnedValue::Array(values) => {
                 let mut re = Vec::with_capacity(values.len());
                 for v in values.into_iter() {
