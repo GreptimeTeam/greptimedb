@@ -606,6 +606,8 @@ fn extract_pipeline_value_by_content_type(
                     }
                 };
 
+                // simd_json, according to description, only de-escapes string at character level,
+                // like any other json parser. So it should be safe here.
                 if let Ok(v) = simd_json::to_owned_value(unsafe { line.as_bytes_mut() }) {
                     let v = pipeline::simd_json_to_map(v).context(PipelineSnafu)?;
                     result.push(v);
