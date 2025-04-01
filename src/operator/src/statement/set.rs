@@ -61,7 +61,7 @@ pub fn set_read_preference(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()>
         }
         expr => NotSupportedSnafu {
             feat: format!(
-                "Unsupported timezone expr {} in set variable statement",
+                "Unsupported read preference expr {} in set variable statement",
                 expr
             ),
         }
