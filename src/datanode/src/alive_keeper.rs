@@ -472,7 +472,6 @@ mod test {
                 &[GrantedRegion {
                     region_id: region_id.as_u64(),
                     role: api::v1::meta::RegionRole::Leader.into(),
-                    // TODO(weny): use real manifest version
                     manifest_version: 0,
                 }],
                 Instant::now() + Duration::from_millis(200),
