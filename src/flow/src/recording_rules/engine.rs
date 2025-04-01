@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use api::v1::flow::FlowResponse;
+use arrow_schema::Fields;
 use common_error::ext::BoxedError;
 use common_meta::ddl::create_flow::FlowType;
 use common_meta::key::flow::FlowMetadataManagerRef;
@@ -127,8 +128,12 @@ impl RecordingRuleEngine {
     }
 }
 
-async fn get_table_name(zelf: &TableInfoManager, table_id: &TableId) -> Result<TableName, Error> {
-    zelf.get(*table_id)
+async fn get_table_name(
+    table_info: &TableInfoManager,
+    table_id: &TableId,
+) -> Result<TableName, Error> {
+    table_info
+        .get(*table_id)
         .await
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?
@@ -546,17 +551,11 @@ impl RecordingRuleTask {
         }
     }
 
-    /// Generate the create table SQL
-    ///
-    /// the auto created table will automatically added a `update_at` Milliseconds DEFAULT now() column in the end
-    /// (for compatibility with flow streaming mode)
-    ///
-    /// and it will use first timestamp column as time index, all other columns will be added as normal columns and nullable
-    async fn gen_create_table_sql(&self, engine: QueryEngineRef) -> Result<String, Error> {
-        let query_ctx = self.state.read().await.query_ctx.clone();
-        let plan = sql_to_df_plan(query_ctx.clone(), engine.clone(), &self.query, true).await?;
-        let schema = plan.schema().fields();
-
+    async fn build_primary_key_constraint(
+        &self,
+        plan: &LogicalPlan,
+        schema: &Fields,
+    ) -> Result<(Option<String>, Vec<String>), Error> {
         let mut pk_names = FindGroupByFinalName::default();
 
         plan.visit(&mut pk_names)
@@ -568,9 +567,8 @@ impl RecordingRuleTask {
         let all_pk_cols: Vec<_> = schema
             .iter()
             .filter(|f| pk_final_names.contains(f.name()))
-            .map(|f| f.name())
+            .map(|f| f.name().clone())
             .collect();
-
         // auto create table use first timestamp column as time index
         let first_time_stamp = schema
             .iter()
@@ -581,6 +579,23 @@ impl RecordingRuleTask {
             .into_iter()
             .filter(|col| first_time_stamp != Some(col.to_string()))
             .collect();
+
+        Ok((first_time_stamp, all_pk_cols))
+    }
+
+    /// Generate the create table SQL
+    ///
+    /// the auto created table will automatically added a `update_at` Milliseconds DEFAULT now() column in the end
+    /// (for compatibility with flow streaming mode)
+    ///
+    /// and it will use first timestamp column as time index, all other columns will be added as normal columns and nullable
+    async fn gen_create_table_sql(&self, engine: QueryEngineRef) -> Result<String, Error> {
+        let query_ctx = self.state.read().await.query_ctx.clone();
+        let plan = sql_to_df_plan(query_ctx.clone(), engine.clone(), &self.query, true).await?;
+        let schema = plan.schema().fields();
+
+        let (first_time_stamp, all_pk_cols) =
+            self.build_primary_key_constraint(&plan, schema).await?;
 
         let mut schema_in_sql: Vec<String> = Vec::new();
         for field in schema {
@@ -674,17 +689,14 @@ impl RecordingRuleTask {
                             "Flow id = {:?}, can't get window size: precise_lower_bound={expire_time_window_bound:?}, using the same query", self.flow_id
                         );
 
-                        let plan =
-                            sql_to_df_plan(query_ctx.clone(), engine.clone(), &self.query, false)
-                                .await?;
-
                         let mut add_auto_column =
                             AddAutoColumnRewriter::new(sink_table_meta.schema.clone());
-                        let plan = plan
+                        let plan = self
+                            .plan
                             .clone()
                             .rewrite(&mut add_auto_column)
                             .with_context(|_| DatafusionSnafu {
-                                context: format!("Failed to rewrite plan {plan:?}"),
+                                context: format!("Failed to rewrite plan {:?}", self.plan),
                             })?
                             .data;
                         let new_query = df_plan_to_sql(&plan)?;
@@ -779,11 +791,15 @@ impl RecordingRuleState {
 
 #[derive(Debug, Clone, Default)]
 pub struct DirtyTimeWindows {
+    /// windows's `start -> end` and non-overlapping
+    /// `end` is exclusive(and optional)
     windows: BTreeMap<Timestamp, Option<Timestamp>>,
 }
 
 impl DirtyTimeWindows {
     /// Time window merge distance
+    ///
+    /// TODO(discord9): make those configurable
     const MERGE_DIST: i32 = 3;
 
     /// Maximum number of filters allowed in a single query
@@ -881,6 +897,7 @@ impl DirtyTimeWindows {
     ) -> Result<(), Error> {
         let mut new_windows = BTreeMap::new();
 
+        // previous time window
         let mut prev_tw = None;
         for (lower_bound, upper_bound) in std::mem::take(&mut self.windows) {
             // filter out expired time window
