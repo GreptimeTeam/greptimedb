@@ -119,7 +119,7 @@ mod test {
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
 
-    use common_meta::datanode::{RegionDetail, RegionStat, Stat};
+    use common_meta::datanode::{RegionManifestInfo, RegionStat, Stat};
     use common_meta::distributed_time_constants;
     use common_meta::key::table_route::TableRouteValue;
     use common_meta::key::test_utils::new_test_table_info;
@@ -156,7 +156,7 @@ mod test {
             manifest_size: 0,
             sst_size: 0,
             index_size: 0,
-            detail: RegionDetail::Mito {
+            region_manifest: RegionManifestInfo::Mito {
                 manifest_version: 0,
                 flushed_entry_id: 0,
             },

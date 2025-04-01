@@ -40,7 +40,7 @@ use store_api::manifest::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
 use store_api::region_engine::{
-    RegionDetail, RegionEngine, RegionRole, RegionScannerRef, RegionStatistic,
+    RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef, RegionStatistic,
     SetRegionRoleStateResponse, SettableRegionRoleState,
 };
 use store_api::region_request::{BatchRegionDdlRequest, RegionRequest};
@@ -273,11 +273,11 @@ impl RegionEngine for MetricEngine {
                     manifest_size: metadata_stat.manifest_size + data_stat.manifest_size,
                     sst_size: metadata_stat.sst_size + data_stat.sst_size,
                     index_size: metadata_stat.index_size + data_stat.index_size,
-                    detail: RegionDetail::Metric {
-                        data_flushed_entry_id: data_stat.detail.flushed_entry_id(),
-                        data_manifest_version: data_stat.detail.manifest_version(),
-                        metadata_flushed_entry_id: metadata_stat.detail.flushed_entry_id(),
-                        metadata_manifest_version: metadata_stat.detail.manifest_version(),
+                    manifest: RegionManifestInfo::Metric {
+                        data_flushed_entry_id: data_stat.manifest.flushed_entry_id(),
+                        data_manifest_version: data_stat.manifest.manifest_version(),
+                        metadata_flushed_entry_id: metadata_stat.manifest.flushed_entry_id(),
+                        metadata_manifest_version: metadata_stat.manifest.manifest_version(),
                     },
                 }),
                 _ => None,

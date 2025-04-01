@@ -789,7 +789,7 @@ impl InformationExtension for StandaloneInformationExtension {
                     manifest_size: region_stat.manifest_size,
                     sst_size: region_stat.sst_size,
                     index_size: region_stat.index_size,
-                    detail: region_stat.detail.into(),
+                    region_manifest: region_stat.manifest.into(),
                 }
             })
             .collect::<Vec<_>>();

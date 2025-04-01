@@ -95,7 +95,7 @@ mod tests {
     use std::collections::HashMap;
 
     use common_meta::datanode::{
-        DatanodeStatKey, DatanodeStatValue, RegionDetail, RegionStat, Stat,
+        DatanodeStatKey, DatanodeStatValue, RegionManifestInfo, RegionStat, Stat,
     };
     use common_meta::peer::Peer;
     use store_api::region_engine::RegionRole;
@@ -191,7 +191,7 @@ mod tests {
                 manifest_size: 0,
                 sst_size: 0,
                 index_size: 0,
-                detail: RegionDetail::Mito {
+                region_manifest: RegionManifestInfo::Mito {
                     manifest_version: 0,
                     flushed_entry_id: 0,
                 },
@@ -216,7 +216,7 @@ mod tests {
                 manifest_size: 0,
                 sst_size: 0,
                 index_size: 0,
-                detail: RegionDetail::Mito {
+                region_manifest: RegionManifestInfo::Mito {
                     manifest_version: 0,
                     flushed_entry_id: 0,
                 },
@@ -241,7 +241,7 @@ mod tests {
                 manifest_size: 0,
                 sst_size: 0,
                 index_size: 0,
-                detail: RegionDetail::Mito {
+                region_manifest: RegionManifestInfo::Mito {
                     manifest_version: 0,
                     flushed_entry_id: 0,
                 },

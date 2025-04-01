@@ -92,12 +92,12 @@ pub struct RegionStat {
     pub sst_size: u64,
     /// The size of the SST index files in bytes.
     pub index_size: u64,
-    /// The details of the region.
-    pub detail: RegionDetail,
+    /// The manifest infoof the region.
+    pub region_manifest: RegionManifestInfo,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub enum RegionDetail {
+pub enum RegionManifestInfo {
     Mito {
         manifest_version: u64,
         flushed_entry_id: u64,
@@ -181,22 +181,22 @@ impl TryFrom<&HeartbeatRequest> for Stat {
     }
 }
 
-impl From<store_api::region_engine::RegionDetail> for RegionDetail {
-    fn from(value: store_api::region_engine::RegionDetail) -> Self {
+impl From<store_api::region_engine::RegionManifestInfo> for RegionManifestInfo {
+    fn from(value: store_api::region_engine::RegionManifestInfo) -> Self {
         match value {
-            store_api::region_engine::RegionDetail::Mito {
+            store_api::region_engine::RegionManifestInfo::Mito {
                 manifest_version,
                 flushed_entry_id,
-            } => RegionDetail::Mito {
+            } => RegionManifestInfo::Mito {
                 manifest_version,
                 flushed_entry_id,
             },
-            store_api::region_engine::RegionDetail::Metric {
+            store_api::region_engine::RegionManifestInfo::Metric {
                 data_manifest_version,
                 data_flushed_entry_id,
                 metadata_manifest_version,
                 metadata_flushed_entry_id,
-            } => RegionDetail::Metric {
+            } => RegionManifestInfo::Metric {
                 data_manifest_version,
                 data_flushed_entry_id,
                 metadata_manifest_version,
@@ -226,7 +226,7 @@ impl From<&api::v1::meta::RegionStat> for RegionStat {
             manifest_size: region_stat.manifest_size,
             sst_size: region_stat.sst_size,
             index_size: region_stat.index_size,
-            detail: region_stat.detail.into(),
+            region_manifest: region_stat.manifest.into(),
         }
     }
 }

@@ -45,10 +45,10 @@ impl HeartbeatHandler for CollectLeaderRegionHandler {
                 continue;
             }
 
-            let detail = stat.detail.into();
+            let manifest = stat.region_manifest.into();
             let value = LeaderRegion {
                 datanode_id: current_stat.id,
-                detail,
+                manifest,
             };
             key_values.push((stat.id, value));
         }
@@ -64,10 +64,10 @@ mod tests {
     use std::sync::Arc;
 
     use common_meta::cache_invalidator::DummyCacheInvalidator;
-    use common_meta::datanode::{RegionDetail, RegionStat, Stat};
+    use common_meta::datanode::{RegionManifestInfo, RegionStat, Stat};
     use common_meta::key::TableMetadataManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
-    use common_meta::region_registry::{LeaderRegionDetail, LeaderRegionRegistry};
+    use common_meta::region_registry::{LeaderRegionManifestInfo, LeaderRegionRegistry};
     use common_meta::sequence::SequenceBuilder;
     use store_api::region_engine::RegionRole;
     use store_api::storage::RegionId;
@@ -110,7 +110,7 @@ mod tests {
     fn new_region_stat(id: RegionId, manifest_version: u64, role: RegionRole) -> RegionStat {
         RegionStat {
             id,
-            detail: RegionDetail::Mito {
+            region_manifest: RegionManifestInfo::Mito {
                 manifest_version,
                 flushed_entry_id: 0,
             },
@@ -160,7 +160,7 @@ mod tests {
             regions.get(&RegionId::new(1, 1)),
             Some(&LeaderRegion {
                 datanode_id: 1,
-                detail: LeaderRegionDetail::Mito {
+                manifest: LeaderRegionManifestInfo::Mito {
                     manifest_version: 1,
                     flushed_entry_id: 0,
                 },
@@ -191,7 +191,7 @@ mod tests {
             regions.get(&RegionId::new(1, 1)),
             Some(&LeaderRegion {
                 datanode_id: 1,
-                detail: LeaderRegionDetail::Mito {
+                manifest: LeaderRegionManifestInfo::Mito {
                     manifest_version: 2,
                     flushed_entry_id: 0,
                 },
@@ -223,7 +223,7 @@ mod tests {
             // The manifest version is not updated
             Some(&LeaderRegion {
                 datanode_id: 1,
-                detail: LeaderRegionDetail::Mito {
+                manifest: LeaderRegionManifestInfo::Mito {
                     manifest_version: 2,
                     flushed_entry_id: 0,
                 },

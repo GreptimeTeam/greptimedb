@@ -384,11 +384,11 @@ pub struct RegionStatistic {
     pub index_size: u64,
     /// The details of the region.
     #[serde(default)]
-    pub detail: RegionDetail,
+    pub manifest: RegionManifestInfo,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum RegionDetail {
+pub enum RegionManifestInfo {
     Mito {
         manifest_version: u64,
         flushed_entry_id: u64,
@@ -401,14 +401,14 @@ pub enum RegionDetail {
     },
 }
 
-impl RegionDetail {
+impl RegionManifestInfo {
     /// Returns the flushed entry id of the data region.
     pub fn flushed_entry_id(&self) -> u64 {
         match self {
-            RegionDetail::Mito {
+            RegionManifestInfo::Mito {
                 flushed_entry_id, ..
             } => *flushed_entry_id,
-            RegionDetail::Metric {
+            RegionManifestInfo::Metric {
                 metadata_flushed_entry_id,
                 ..
             } => *metadata_flushed_entry_id,
@@ -418,10 +418,10 @@ impl RegionDetail {
     /// Returns the manifest version of the data region.
     pub fn manifest_version(&self) -> u64 {
         match self {
-            RegionDetail::Mito {
+            RegionManifestInfo::Mito {
                 manifest_version, ..
             } => *manifest_version,
-            RegionDetail::Metric {
+            RegionManifestInfo::Metric {
                 metadata_manifest_version,
                 ..
             } => *metadata_manifest_version,
@@ -429,7 +429,7 @@ impl RegionDetail {
     }
 }
 
-impl Default for RegionDetail {
+impl Default for RegionManifestInfo {
     fn default() -> Self {
         Self::Mito {
             manifest_version: 0,

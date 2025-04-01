@@ -31,7 +31,7 @@ use store_api::logstore::provider::Provider;
 use store_api::manifest::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
-    RegionDetail, RegionRole, RegionStatistic, SettableRegionRoleState,
+    RegionManifestInfo, RegionRole, RegionStatistic, SettableRegionRoleState,
 };
 use store_api::storage::RegionId;
 
@@ -301,7 +301,7 @@ impl MitoRegion {
             manifest_size: manifest_usage,
             sst_size: sst_usage,
             index_size: index_usage,
-            detail: RegionDetail::Mito {
+            manifest: RegionManifestInfo::Mito {
                 manifest_version,
                 flushed_entry_id,
             },

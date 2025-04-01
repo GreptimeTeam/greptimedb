@@ -64,7 +64,7 @@ impl HeartbeatHandler for RegionFailureHandler {
 mod tests {
     use api::v1::meta::HeartbeatRequest;
     use common_catalog::consts::default_engine;
-    use common_meta::datanode::{RegionDetail, RegionStat, Stat};
+    use common_meta::datanode::{RegionManifestInfo, RegionStat, Stat};
     use store_api::region_engine::RegionRole;
     use store_api::storage::RegionId;
     use tokio::sync::oneshot;
@@ -98,7 +98,7 @@ mod tests {
                 manifest_size: 0,
                 sst_size: 0,
                 index_size: 0,
-                detail: RegionDetail::Mito {
+                region_manifest: RegionManifestInfo::Mito {
                     manifest_version: 0,
                     flushed_entry_id: 0,
                 },
