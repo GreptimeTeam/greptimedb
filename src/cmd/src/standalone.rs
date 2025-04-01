@@ -126,7 +126,6 @@ impl SubCommand {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct StandaloneOptions {
-    pub mode: Mode,
     pub enable_telemetry: bool,
     pub default_timezone: Option<String>,
     pub http: HttpOptions,
@@ -156,7 +155,6 @@ pub struct StandaloneOptions {
 impl Default for StandaloneOptions {
     fn default() -> Self {
         Self {
-            mode: Mode::Standalone,
             enable_telemetry: true,
             default_timezone: None,
             http: HttpOptions::default(),
@@ -380,9 +378,6 @@ impl StartCommand {
         global_options: &GlobalOptions,
         opts: &mut StandaloneOptions,
     ) -> Result<()> {
-        // Should always be standalone mode.
-        opts.mode = Mode::Standalone;
-
         if let Some(dir) = &global_options.log_dir {
             opts.logging.dir.clone_from(dir);
         }
@@ -1062,7 +1057,6 @@ mod tests {
         let options =
             StandaloneOptions::load_layered_options(None, "GREPTIMEDB_STANDALONE").unwrap();
         let default_options = StandaloneOptions::default();
-        assert_eq!(options.mode, default_options.mode);
         assert_eq!(options.enable_telemetry, default_options.enable_telemetry);
         assert_eq!(options.http, default_options.http);
         assert_eq!(options.grpc, default_options.grpc);
