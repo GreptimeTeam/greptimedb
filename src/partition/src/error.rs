@@ -178,8 +178,8 @@ pub enum Error {
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::GetCache { .. } | Error::FindLeader { .. } => StatusCode::StorageUnavailable,
-            Error::FindRegionRoutes { .. } => StatusCode::RegionNotReady,
+            Error::GetCache { .. } => StatusCode::StorageUnavailable,
+            Error::FindLeader { .. } => StatusCode::TableUnavailable,
 
             Error::ConjunctExprWithNonExpr { .. }
             | Error::UnclosedValue { .. }
@@ -194,9 +194,10 @@ impl ErrorExt for Error {
             | Error::SerializeJson { .. }
             | Error::DeserializeJson { .. } => StatusCode::Internal,
 
-            Error::Unexpected { .. } => StatusCode::Unexpected,
-            Error::InvalidTableRouteData { .. } => StatusCode::TableUnavailable,
-            Error::FindTableRoutes { .. } => StatusCode::TableUnavailable,
+            Error::Unexpected { .. }
+            | Error::InvalidTableRouteData { .. }
+            | Error::FindTableRoutes { .. }
+            | Error::FindRegionRoutes { .. } => StatusCode::Unexpected,
             Error::TableRouteNotFound { .. } => StatusCode::TableNotFound,
             Error::TableRouteManager { source, .. } => source.status_code(),
             Error::UnexpectedLogicalRouteTable { source, .. } => source.status_code(),
