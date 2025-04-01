@@ -18,6 +18,7 @@ use std::fmt::Debug;
 use common_catalog::consts::METRIC_ENGINE;
 use common_error::ext::BoxedError;
 use common_procedure::error::Error as ProcedureError;
+use common_telemetry::{error, warn};
 use common_wal::options::WalOptions;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metric_engine_consts::LOGICAL_TABLE_METADATA_KEY;
@@ -225,6 +226,10 @@ pub fn handle_multiple_results<T: Debug>(results: Vec<Result<T>>) -> MultipleRes
     if retryable_results.len() == num_results {
         return MultipleResults::AllRetryable(retryable_results.into_iter().next().unwrap());
     } else if non_retryable_results.len() == num_results {
+        warn!("all non retryable results: {}", non_retryable_results.len());
+        for err in &non_retryable_results {
+            error!(err; "non retryable error");
+        }
         return MultipleResults::AllNonRetryable(non_retryable_results.into_iter().next().unwrap());
     } else if ok_results.len() == num_results {
         return MultipleResults::Ok;
@@ -235,6 +240,15 @@ pub fn handle_multiple_results<T: Debug>(results: Vec<Result<T>>) -> MultipleRes
         return MultipleResults::PartialRetryable(retryable_results.into_iter().next().unwrap());
     }
 
+    warn!(
+        "partial non retryable results: {}, retryable results: {}, ok results: {}",
+        non_retryable_results.len(),
+        retryable_results.len(),
+        ok_results.len()
+    );
+    for err in &non_retryable_results {
+        error!(err; "non retryable error");
+    }
     // non_retryable_results.len() > 0
     MultipleResults::PartialNonRetryable(non_retryable_results.into_iter().next().unwrap())
 }
