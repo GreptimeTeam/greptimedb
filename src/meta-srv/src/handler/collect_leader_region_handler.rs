@@ -224,7 +224,7 @@ mod tests {
             Some(&LeaderRegion {
                 datanode_id: 1,
                 detail: LeaderRegionDetail::Mito {
-                    manifest_version: 1,
+                    manifest_version: 2,
                     flushed_entry_id: 0,
                 },
             })
