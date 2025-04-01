@@ -107,6 +107,7 @@ impl RecordingRuleEngine {
             }
         }
 
+        // TODO(discord9): not use one lock for all tasks
         for (_flow_id, task) in self.tasks.read().await.iter() {
             let src_table_names = &task.source_table_names;
 
@@ -613,7 +614,13 @@ impl RecordingRuleTask {
                             .write()
                             .await
                             .dirty_time_windows
-                            .gen_filter_exprs(&col_name, Some(l), window_size, self)?
+                            .gen_filter_exprs(
+                                &col_name,
+                                Some(l),
+                                window_size,
+                                self.flow_id,
+                                Some(self),
+                            )?
                     }
                     _ => {
                         debug!(
@@ -731,7 +738,12 @@ fn build_primary_key_constraint(
             context: format!("Can't find aggr expr in plan {plan:?}"),
         })?;
 
+    // if no group by clause, return empty
     let pk_final_names = pk_names.get_group_expr_names().unwrap_or_default();
+    if pk_final_names.is_empty() {
+        return Ok((None, Vec::new()));
+    }
+
     let all_pk_cols: Vec<_> = schema
         .iter()
         .filter(|f| pk_final_names.contains(f.name()))
@@ -832,7 +844,8 @@ impl DirtyTimeWindows {
         col_name: &str,
         expire_lower_bound: Option<Timestamp>,
         window_size: chrono::Duration,
-        task_ctx: &RecordingRuleTask,
+        flow_id: FlowId,
+        task_ctx: Option<&RecordingRuleTask>,
     ) -> Result<Option<datafusion_expr::Expr>, Error> {
         debug!(
             "expire_lower_bound: {:?}, window_size: {:?}",
@@ -844,7 +857,9 @@ impl DirtyTimeWindows {
         if self.windows.len() > Self::MAX_FILTER_NUM {
             let first_time_window = self.windows.first_key_value();
             let last_time_window = self.windows.last_key_value();
-            warn!(
+
+            if let Some(task_ctx) = task_ctx {
+                warn!(
                 "Flow id = {:?}, too many time windows: {}, only the first {} are taken for this query, the group by expression might be wrong. Time window expr={:?}, expire_after={:?}, first_time_window={:?}, last_time_window={:?}, the original query: {:?}",
                 task_ctx.flow_id,
                 self.windows.len(),
@@ -855,6 +870,15 @@ impl DirtyTimeWindows {
                 last_time_window,
                 task_ctx.query
             );
+            } else {
+                warn!("Flow id = {:?}, too many time windows: {}, only the first {} are taken for this query, the group by expression might be wrong. first_time_window={:?}, last_time_window={:?}",
+                flow_id,
+                self.windows.len(),
+                Self::MAX_FILTER_NUM,
+                first_time_window,
+                last_time_window
+                )
+            }
         }
 
         // get the first `MAX_FILTER_NUM` time windows
@@ -894,7 +918,7 @@ impl DirtyTimeWindows {
             };
             expr_lst.push(expr);
         }
-        let expr = expr_lst.into_iter().reduce(|a, b| a.and(b));
+        let expr = expr_lst.into_iter().reduce(|a, b| a.or(b));
         Ok(expr)
     }
 
@@ -988,99 +1012,99 @@ mod test {
 
     #[test]
     fn test_merge_dirty_time_windows() {
-        let mut dirty = DirtyTimeWindows::default();
-        dirty.add_lower_bounds(
-            vec![
-                Timestamp::new_second(0),
-                Timestamp::new_second((1 + DirtyTimeWindows::MERGE_DIST as i64) * 5 * 60),
-            ]
-            .into_iter(),
-        );
-        dirty
-            .merge_dirty_time_windows(chrono::Duration::seconds(5 * 60), None)
-            .unwrap();
-        // just enough to merge
-        assert_eq!(
-            dirty.windows,
-            BTreeMap::from([(
-                Timestamp::new_second(0),
-                Some(Timestamp::new_second(
-                    (2 + DirtyTimeWindows::MERGE_DIST as i64) * 5 * 60
-                ))
-            )])
-        );
-
-        // separate time window
-        let mut dirty = DirtyTimeWindows::default();
-        dirty.add_lower_bounds(
-            vec![
-                Timestamp::new_second(0),
-                Timestamp::new_second((2 + DirtyTimeWindows::MERGE_DIST as i64) * 5 * 60),
-            ]
-            .into_iter(),
-        );
-        dirty
-            .merge_dirty_time_windows(chrono::Duration::seconds(5 * 60), None)
-            .unwrap();
-        // just enough to merge
-        assert_eq!(
-            BTreeMap::from([
-                (
+        let testcases = vec![
+            // just enough to merge
+            (
+                vec![
                     Timestamp::new_second(0),
-                    Some(Timestamp::new_second(5 * 60))
-                ),
-                (
-                    Timestamp::new_second((2 + DirtyTimeWindows::MERGE_DIST as i64) * 5 * 60),
+                    Timestamp::new_second((1 + DirtyTimeWindows::MERGE_DIST as i64) * 5 * 60),
+                ],
+                (chrono::Duration::seconds(5 * 60), None),
+                BTreeMap::from([(
+                    Timestamp::new_second(0),
                     Some(Timestamp::new_second(
-                        (3 + DirtyTimeWindows::MERGE_DIST as i64) * 5 * 60
-                    ))
+                        (2 + DirtyTimeWindows::MERGE_DIST as i64) * 5 * 60,
+                    )),
+                )]),
+                Some(
+                    "((ts >= CAST('1970-01-01 00:00:00' AS TIMESTAMP)) AND (ts < CAST('1970-01-01 00:25:00' AS TIMESTAMP)))",
                 )
-            ]),
-            dirty.windows
-        );
+            ),
+            // separate time window
+            (
+                vec![
+                    Timestamp::new_second(0),
+                    Timestamp::new_second((2 + DirtyTimeWindows::MERGE_DIST as i64) * 5 * 60),
+                ],
+                (chrono::Duration::seconds(5 * 60), None),
+                BTreeMap::from([
+                    (
+                        Timestamp::new_second(0),
+                        Some(Timestamp::new_second(5 * 60)),
+                    ),
+                    (
+                        Timestamp::new_second((2 + DirtyTimeWindows::MERGE_DIST as i64) * 5 * 60),
+                        Some(Timestamp::new_second(
+                            (3 + DirtyTimeWindows::MERGE_DIST as i64) * 5 * 60,
+                        )),
+                    ),
+                ]),
+                Some(
+                    "(((ts >= CAST('1970-01-01 00:00:00' AS TIMESTAMP)) AND (ts < CAST('1970-01-01 00:05:00' AS TIMESTAMP))) OR ((ts >= CAST('1970-01-01 00:25:00' AS TIMESTAMP)) AND (ts < CAST('1970-01-01 00:30:00' AS TIMESTAMP))))",
+                )
+            ),
+            // overlapping
+            (
+                vec![
+                    Timestamp::new_second(0),
+                    Timestamp::new_second((DirtyTimeWindows::MERGE_DIST as i64) * 5 * 60),
+                ],
+                (chrono::Duration::seconds(5 * 60), None),
+                BTreeMap::from([(
+                    Timestamp::new_second(0),
+                    Some(Timestamp::new_second(
+                        (1 + DirtyTimeWindows::MERGE_DIST as i64) * 5 * 60,
+                    )),
+                )]),
+                Some(
+                    "((ts >= CAST('1970-01-01 00:00:00' AS TIMESTAMP)) AND (ts < CAST('1970-01-01 00:20:00' AS TIMESTAMP)))",
+                )
+            ),
+            // expired
+            (
+                vec![
+                    Timestamp::new_second(0),
+                    Timestamp::new_second((DirtyTimeWindows::MERGE_DIST as i64) * 5 * 60),
+                ],
+                (
+                    chrono::Duration::seconds(5 * 60),
+                    Some(Timestamp::new_second(
+                        (DirtyTimeWindows::MERGE_DIST as i64) * 6 * 60,
+                    )),
+                ),
+                BTreeMap::from([]),
+                None
+            ),
+        ];
+        for (lower_bounds, (window_size, expire_lower_bound), expected, expected_filter_expr) in
+            testcases
+        {
+            let mut dirty = DirtyTimeWindows::default();
+            dirty.add_lower_bounds(lower_bounds.into_iter());
+            dirty
+                .merge_dirty_time_windows(window_size, expire_lower_bound)
+                .unwrap();
+            assert_eq!(dirty.windows, expected);
+            let filter_expr = dirty
+                .gen_filter_exprs("ts", expire_lower_bound, window_size, 0, None)
+                .unwrap();
 
-        // overlapping
-        let mut dirty = DirtyTimeWindows::default();
-        dirty.add_lower_bounds(
-            vec![
-                Timestamp::new_second(0),
-                Timestamp::new_second((DirtyTimeWindows::MERGE_DIST as i64) * 5 * 60),
-            ]
-            .into_iter(),
-        );
-        dirty
-            .merge_dirty_time_windows(chrono::Duration::seconds(5 * 60), None)
-            .unwrap();
-        // just enough to merge
-        assert_eq!(
-            BTreeMap::from([(
-                Timestamp::new_second(0),
-                Some(Timestamp::new_second(
-                    (1 + DirtyTimeWindows::MERGE_DIST as i64) * 5 * 60
-                ))
-            ),]),
-            dirty.windows
-        );
-
-        // expired
-        let mut dirty = DirtyTimeWindows::default();
-        dirty.add_lower_bounds(
-            vec![
-                Timestamp::new_second(0),
-                Timestamp::new_second((DirtyTimeWindows::MERGE_DIST as i64) * 5 * 60),
-            ]
-            .into_iter(),
-        );
-        dirty
-            .merge_dirty_time_windows(
-                chrono::Duration::seconds(5 * 60),
-                Some(Timestamp::new_second(
-                    (DirtyTimeWindows::MERGE_DIST as i64) * 6 * 60,
-                )),
-            )
-            .unwrap();
-        // just enough to merge
-        assert_eq!(BTreeMap::from([]), dirty.windows);
+            let unparser = datafusion::sql::unparser::Unparser::default();
+            let to_sql = filter_expr
+                .as_ref()
+                .map(|e| unparser.expr_to_sql(e).unwrap().to_string());
+            assert_eq!(expected_filter_expr, to_sql.as_deref());
+        }
     }
 
     #[tokio::test]
