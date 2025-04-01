@@ -265,7 +265,7 @@ impl RecordingRuleEngine {
             }
         });
 
-        // TODO(discord9): deal with replace logic
+        // only replace here not earlier because we want the old one intact if something went wrong before this line
         let replaced_old_task_opt = self.tasks.write().await.insert(flow_id, task);
         drop(replaced_old_task_opt);
 
@@ -551,7 +551,7 @@ impl RecordingRuleTask {
         }
     }
 
-    async fn build_primary_key_constraint(
+    fn build_primary_key_constraint(
         &self,
         plan: &LogicalPlan,
         schema: &Fields,
@@ -592,44 +592,7 @@ impl RecordingRuleTask {
     async fn gen_create_table_sql(&self, engine: QueryEngineRef) -> Result<String, Error> {
         let query_ctx = self.state.read().await.query_ctx.clone();
         let plan = sql_to_df_plan(query_ctx.clone(), engine.clone(), &self.query, true).await?;
-        let schema = plan.schema().fields();
-
-        let (first_time_stamp, all_pk_cols) =
-            self.build_primary_key_constraint(&plan, schema).await?;
-
-        let mut schema_in_sql: Vec<String> = Vec::new();
-        for field in schema {
-            let ty = ConcreteDataType::from_arrow_type(field.data_type());
-            if first_time_stamp == Some(field.name().clone()) {
-                schema_in_sql.push(format!("\"{}\" {} TIME INDEX,", field.name(), ty));
-            } else {
-                schema_in_sql.push(format!("\"{}\" {} NULL,", field.name(), ty));
-            }
-        }
-        if first_time_stamp.is_none() {
-            schema_in_sql.push("\"update_at\" TimestampMillisecond default now(),".to_string());
-            schema_in_sql.push(format!(
-                "\"{}\" TimestampMillisecond TIME INDEX default 0,",
-                AUTO_CREATED_PLACEHOLDER_TS_COL
-            ));
-        } else {
-            schema_in_sql.push("\"update_at\" TimestampMillisecond default now(),".to_string());
-        }
-
-        let pk_part_in_sql = if all_pk_cols.is_empty() {
-            "".to_string()
-        } else {
-            format!("PRIMARY KEY ({})", all_pk_cols.iter().join(","))
-        };
-        let col_defs = schema_in_sql.join(" ") + &pk_part_in_sql;
-
-        let create_table_sql = format!(
-            "CREATE TABLE IF NOT EXISTS {} ({})",
-            self.sink_table_name.join("."),
-            col_defs
-        );
-
-        Ok(create_table_sql)
+        create_table_with(&plan, &self.sink_table_name.join("."))
     }
 
     /// will merge and use the first ten time window in query
@@ -743,6 +706,84 @@ impl RecordingRuleTask {
 
         Ok(Some((new_sql, schema_len)))
     }
+}
+
+// auto created table have a auto added column `update_at`, and optional have a `AUTO_CREATED_PLACEHOLDER_TS_COL` column for time index placeholder if no timestamp column is specified
+fn create_table_with(plan: &LogicalPlan, sink_table_name: &str) -> Result<String, Error> {
+    let schema = plan.schema().fields();
+    let (first_time_stamp, all_pk_cols) = build_primary_key_constraint(plan, schema)?;
+
+    let mut schema_in_sql: Vec<String> = Vec::new();
+    for field in schema {
+        let ty = ConcreteDataType::from_arrow_type(field.data_type());
+        if first_time_stamp == Some(field.name().clone()) {
+            schema_in_sql.push(format!("\"{}\" {} TIME INDEX", field.name(), ty));
+        } else {
+            schema_in_sql.push(format!("\"{}\" {} NULL", field.name(), ty));
+        }
+    }
+    if first_time_stamp.is_none() {
+        schema_in_sql.push("\"update_at\" TimestampMillisecond default now()".to_string());
+        schema_in_sql.push(format!(
+            "\"{}\" TimestampMillisecond TIME INDEX default 0",
+            AUTO_CREATED_PLACEHOLDER_TS_COL
+        ));
+    } else {
+        schema_in_sql.push("\"update_at\" TimestampMillisecond default now()".to_string());
+    }
+
+    if !all_pk_cols.is_empty() {
+        schema_in_sql.push(format!("PRIMARY KEY ({})", all_pk_cols.iter().join(",")))
+    };
+
+    let col_defs = schema_in_sql.join(", ");
+
+    let create_table_sql = format!(
+        "CREATE TABLE IF NOT EXISTS {} ({})",
+        sink_table_name, col_defs
+    );
+
+    Ok(create_table_sql)
+}
+
+/// Return first timestamp column which is in group by clause and other columns which are also in group by clause
+///
+/// # Returns
+///
+/// * `Option<String>` - first timestamp column which is in group by clause
+/// * `Vec<String>` - other columns which are also in group by clause
+fn build_primary_key_constraint(
+    plan: &LogicalPlan,
+    schema: &Fields,
+) -> Result<(Option<String>, Vec<String>), Error> {
+    let mut pk_names = FindGroupByFinalName::default();
+
+    plan.visit(&mut pk_names)
+        .with_context(|_| DatafusionSnafu {
+            context: format!("Can't find aggr expr in plan {plan:?}"),
+        })?;
+
+    let pk_final_names = pk_names.get_group_expr_names().unwrap_or_default();
+    let all_pk_cols: Vec<_> = schema
+        .iter()
+        .filter(|f| pk_final_names.contains(f.name()))
+        .map(|f| f.name().clone())
+        .collect();
+    // auto create table use first timestamp column in group by clause as time index
+    let first_time_stamp = schema
+        .iter()
+        .find(|f| {
+            all_pk_cols.contains(&f.name().clone())
+                && ConcreteDataType::from_arrow_type(f.data_type()).is_timestamp()
+        })
+        .map(|f| f.name().clone());
+
+    let all_pk_cols: Vec<_> = all_pk_cols
+        .into_iter()
+        .filter(|col| first_time_stamp != Some(col.to_string()))
+        .collect();
+
+    Ok((first_time_stamp, all_pk_cols))
 }
 
 #[derive(Debug)]
@@ -972,8 +1013,10 @@ enum ExecState {
 #[cfg(test)]
 mod test {
     use pretty_assertions::assert_eq;
+    use session::context::QueryContext;
 
     use super::*;
+    use crate::test_utils::create_test_query_engine;
 
     #[test]
     fn test_merge_dirty_time_windows() {
@@ -1070,5 +1113,45 @@ mod test {
             .unwrap();
         // just enough to merge
         assert_eq!(BTreeMap::from([]), dirty.windows);
+    }
+
+    #[tokio::test]
+    async fn test_gen_create_table_sql() {
+        let query_engine = create_test_query_engine();
+        let ctx = QueryContext::arc();
+        struct TestCase {
+            sql: String,
+            sink_table_name: String,
+            create: String,
+        }
+        let testcases = vec![
+            TestCase {
+            sql: "SELECT number, ts FROM numbers_with_ts".to_string(),
+            sink_table_name: "new_table".to_string(),
+            create: r#"CREATE TABLE IF NOT EXISTS new_table ("number" UInt32 NULL, "ts" TimestampMillisecond NULL, "update_at" TimestampMillisecond default now(), "__ts_placeholder" TimestampMillisecond TIME INDEX default 0)"#.to_string(),
+        },
+        TestCase {
+            sql: "SELECT number, max(ts) FROM numbers_with_ts GROUP BY number".to_string(),
+            sink_table_name: "new_table".to_string(),
+            create: r#"CREATE TABLE IF NOT EXISTS new_table ("number" UInt32 NULL, "max(numbers_with_ts.ts)" TimestampMillisecond NULL, "update_at" TimestampMillisecond default now(), "__ts_placeholder" TimestampMillisecond TIME INDEX default 0, PRIMARY KEY (number))"#.to_string(),
+        },
+        TestCase {
+            sql: "SELECT max(number), ts FROM numbers_with_ts GROUP BY ts".to_string(),
+            sink_table_name: "new_table".to_string(),
+            create: r#"CREATE TABLE IF NOT EXISTS new_table ("max(numbers_with_ts.number)" UInt32 NULL, "ts" TimestampMillisecond TIME INDEX, "update_at" TimestampMillisecond default now())"#.to_string(),
+        },
+        TestCase {
+            sql: "SELECT number, ts FROM numbers_with_ts GROUP BY ts, number".to_string(),
+            sink_table_name: "new_table".to_string(),
+            create: r#"CREATE TABLE IF NOT EXISTS new_table ("number" UInt32 NULL, "ts" TimestampMillisecond TIME INDEX, "update_at" TimestampMillisecond default now(), PRIMARY KEY (number))"#.to_string(),
+        }];
+
+        for tc in testcases {
+            let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), &tc.sql, true)
+                .await
+                .unwrap();
+            let real = create_table_with(&plan, &tc.sink_table_name).unwrap();
+            assert_eq!(tc.create, real);
+        }
     }
 }
