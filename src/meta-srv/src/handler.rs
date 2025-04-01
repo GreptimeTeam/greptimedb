@@ -331,7 +331,7 @@ pub struct HeartbeatMailbox {
 }
 
 impl HeartbeatMailbox {
-    pub(crate) fn json_reply(msg: &MailboxMessage) -> Result<InstructionReply> {
+    pub fn json_reply(msg: &MailboxMessage) -> Result<InstructionReply> {
         let Payload::Json(payload) =
             msg.payload
                 .as_ref()
