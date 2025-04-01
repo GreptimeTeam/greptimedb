@@ -379,7 +379,7 @@ impl StatementExecutor {
     fn set_variables(&self, set_var: SetVariables, query_ctx: QueryContextRef) -> Result<Output> {
         let var_name = set_var.variable.to_string().to_uppercase();
         match var_name.as_str() {
-            "READ_PREFERENCE" | "READ_PREF" => set_read_preference(set_var.value, query_ctx)?,
+            "READ_PREFERENCE" => set_read_preference(set_var.value, query_ctx)?,
 
             "TIMEZONE" | "TIME_ZONE" => set_timezone(set_var.value, query_ctx)?,
 
