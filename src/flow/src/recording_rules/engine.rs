@@ -551,38 +551,6 @@ impl RecordingRuleTask {
         }
     }
 
-    fn build_primary_key_constraint(
-        &self,
-        plan: &LogicalPlan,
-        schema: &Fields,
-    ) -> Result<(Option<String>, Vec<String>), Error> {
-        let mut pk_names = FindGroupByFinalName::default();
-
-        plan.visit(&mut pk_names)
-            .with_context(|_| DatafusionSnafu {
-                context: format!("Can't find aggr expr in plan {plan:?}"),
-            })?;
-
-        let pk_final_names = pk_names.get_group_expr_names().unwrap_or_default();
-        let all_pk_cols: Vec<_> = schema
-            .iter()
-            .filter(|f| pk_final_names.contains(f.name()))
-            .map(|f| f.name().clone())
-            .collect();
-        // auto create table use first timestamp column as time index
-        let first_time_stamp = schema
-            .iter()
-            .find(|f| ConcreteDataType::from_arrow_type(f.data_type()).is_timestamp())
-            .map(|f| f.name().clone());
-
-        let all_pk_cols: Vec<_> = all_pk_cols
-            .into_iter()
-            .filter(|col| first_time_stamp != Some(col.to_string()))
-            .collect();
-
-        Ok((first_time_stamp, all_pk_cols))
-    }
-
     /// Generate the create table SQL
     ///
     /// the auto created table will automatically added a `update_at` Milliseconds DEFAULT now() column in the end
