@@ -32,7 +32,7 @@ use derive_builder::Builder;
 use sql::dialect::{Dialect, GenericDialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
 
 use crate::session_config::{PGByteaOutputValue, PGDateOrder, PGDateTimeStyle};
-use crate::MutableInner;
+use crate::{MutableInner, ReadPreference};
 
 pub type QueryContextRef = Arc<QueryContext>;
 pub type ConnInfoRef = Arc<ConnInfo>;
@@ -264,6 +264,14 @@ impl QueryContext {
 
     pub fn set_timezone(&self, timezone: Timezone) {
         self.mutable_session_data.write().unwrap().timezone = timezone;
+    }
+
+    pub fn read_preference(&self) -> ReadPreference {
+        self.mutable_session_data.read().unwrap().read_preference
+    }
+
+    pub fn set_read_preference(&self, read_preference: ReadPreference) {
+        self.mutable_session_data.write().unwrap().read_preference = read_preference;
     }
 
     pub fn current_user(&self) -> UserInfoRef {

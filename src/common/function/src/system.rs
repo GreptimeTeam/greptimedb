@@ -22,7 +22,9 @@ mod version;
 use std::sync::Arc;
 
 use build::BuildFunction;
-use database::{CurrentSchemaFunction, DatabaseFunction, SessionUserFunction};
+use database::{
+    CurrentSchemaFunction, DatabaseFunction, ReadPreferenceFunction, SessionUserFunction,
+};
 use pg_catalog::PGCatalogFunction;
 use procedure_state::ProcedureStateFunction;
 use timezone::TimezoneFunction;
@@ -39,6 +41,7 @@ impl SystemFunction {
         registry.register(Arc::new(CurrentSchemaFunction));
         registry.register(Arc::new(DatabaseFunction));
         registry.register(Arc::new(SessionUserFunction));
+        registry.register(Arc::new(ReadPreferenceFunction));
         registry.register(Arc::new(TimezoneFunction));
         registry.register_async(Arc::new(ProcedureStateFunction));
         PGCatalogFunction::register(registry);
