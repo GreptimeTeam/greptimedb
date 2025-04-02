@@ -12,19 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Storage related APIs
+//! Handles bulk insert requests.
 
-#![feature(let_chains)]
-#![feature(iterator_try_collect)]
+use store_api::logstore::LogStore;
+use store_api::region_request::RegionBulkInsertsRequest;
 
-pub mod codec;
-pub mod data_source;
-pub mod logstore;
-pub mod manifest;
-pub mod metadata;
-pub mod metric_engine_consts;
-pub mod mito_engine_options;
-pub mod path_utils;
-pub mod region_engine;
-pub mod region_request;
-pub mod storage;
+use crate::worker::RegionWorkerLoop;
+
+impl<S: LogStore> RegionWorkerLoop<S> {
+    pub(crate) async fn handle_bulk_inserts(&mut self, request: RegionBulkInsertsRequest) {
+        todo!()
+    }
+}

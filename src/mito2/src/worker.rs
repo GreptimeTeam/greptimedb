@@ -15,6 +15,7 @@
 //! Structs and utilities for writing regions.
 
 mod handle_alter;
+mod handle_bulk_insert;
 mod handle_catchup;
 mod handle_close;
 mod handle_compaction;
@@ -25,6 +26,7 @@ mod handle_manifest;
 mod handle_open;
 mod handle_truncate;
 mod handle_write;
+
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -820,15 +822,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 WorkerRequest::EditRegion(request) => {
                     self.handle_region_edit(request).await;
                 }
-                // We receive a stop signal, but we still want to process remaining
-                // requests. The worker thread will then check the running flag and
-                // then exit.
                 WorkerRequest::Stop => {
                     debug_assert!(!self.running.load(Ordering::Relaxed));
                 }
-
                 WorkerRequest::SyncRegion(req) => {
                     self.handle_region_sync(req).await;
+                }
+                WorkerRequest::BulkInserts(region_bulk_inserts_request) => {
+                    self.handle_bulk_inserts(region_bulk_inserts_request).await;
                 }
             }
         }

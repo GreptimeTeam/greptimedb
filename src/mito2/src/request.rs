@@ -35,9 +35,9 @@ use store_api::manifest::ManifestVersion;
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{SetRegionRoleStateResponse, SettableRegionRoleState};
 use store_api::region_request::{
-    AffectedRows, RegionAlterRequest, RegionCatchupRequest, RegionCloseRequest,
-    RegionCompactRequest, RegionCreateRequest, RegionFlushRequest, RegionOpenRequest,
-    RegionRequest, RegionTruncateRequest,
+    AffectedRows, RegionAlterRequest, RegionBulkInsertsRequest, RegionCatchupRequest,
+    RegionCloseRequest, RegionCompactRequest, RegionCreateRequest, RegionFlushRequest,
+    RegionOpenRequest, RegionRequest, RegionTruncateRequest,
 };
 use store_api::storage::{RegionId, SequenceNumber};
 use tokio::sync::oneshot::{self, Receiver, Sender};
@@ -569,6 +569,9 @@ pub(crate) enum WorkerRequest {
 
     /// Keep the manifest of a region up to date.
     SyncRegion(RegionSyncRequest),
+
+    /// Bulk inserts request.
+    BulkInserts(RegionBulkInsertsRequest),
 }
 
 impl WorkerRequest {
@@ -668,6 +671,9 @@ impl WorkerRequest {
                 sender: sender.into(),
                 request: DdlRequest::Catchup(v),
             }),
+            RegionRequest::BulkInserts(region_bulk_inserts_request) => {
+                WorkerRequest::BulkInserts(region_bulk_inserts_request)
+            }
         };
 
         Ok((worker_request, receiver))
