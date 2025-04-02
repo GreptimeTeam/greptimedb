@@ -230,20 +230,6 @@ impl TopicRegionManager {
             )
             .collect::<Vec<_>>()
     }
-
-    /// Retrieves a list of [RegionId]s through the provided topic name.
-    /// TODO(CookiePieWw): can be batched to reduce the number of requests.
-    pub async fn get_regions_by_topics<'a>(
-        &self,
-        topic: &'a Vec<String>,
-    ) -> Result<HashMap<&'a String, Vec<RegionId>>> {
-        let mut result = HashMap::new();
-        for t in topic {
-            let regions = self.regions(t).await?;
-            result.insert(t, regions);
-        }
-        Ok(result)
-    }
 }
 
 #[cfg(test)]
