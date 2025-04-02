@@ -23,11 +23,9 @@ use crate::blob_metadata::CompressionCodec;
 use crate::puffin_manager::file_accessor::MockFileAccessor;
 use crate::puffin_manager::fs_puffin_manager::FsPuffinManager;
 use crate::puffin_manager::stager::BoundedStager;
-use crate::puffin_manager::{
-    BlobGuard, DirGuard, PuffinManager, PuffinReader, PuffinWriter, PutOptions,
-};
+use crate::puffin_manager::{DirGuard, PuffinManager, PuffinReader, PuffinWriter, PutOptions};
 
-async fn new_bounded_stager(prefix: &str, capacity: u64) -> (TempDir, Arc<BoundedStager>) {
+async fn new_bounded_stager(prefix: &str, capacity: u64) -> (TempDir, Arc<BoundedStager<String>>) {
     let staging_dir = create_temp_dir(prefix);
     let path = staging_dir.path().to_path_buf();
     (
@@ -52,8 +50,8 @@ async fn test_put_get_file() {
 
             let puffin_manager = FsPuffinManager::new(stager.clone(), file_accessor.clone());
 
-            let puffin_file_name = "puffin_file";
-            let mut writer = puffin_manager.writer(puffin_file_name).await.unwrap();
+            let puffin_file_name = "puffin_file".to_string();
+            let mut writer = puffin_manager.writer(&puffin_file_name).await.unwrap();
 
             let key = "blob_a";
             let raw_data = "Hello, world!".as_bytes();
@@ -61,9 +59,9 @@ async fn test_put_get_file() {
 
             writer.finish().await.unwrap();
 
-            let reader = puffin_manager.reader(puffin_file_name).await.unwrap();
+            let reader = puffin_manager.reader(&puffin_file_name).await.unwrap();
             check_blob(
-                puffin_file_name,
+                &puffin_file_name,
                 key,
                 raw_data,
                 &stager,
@@ -76,9 +74,9 @@ async fn test_put_get_file() {
             let (_staging_dir, stager) = new_bounded_stager("test_put_get_file_", capacity).await;
             let puffin_manager = FsPuffinManager::new(stager.clone(), file_accessor);
 
-            let reader = puffin_manager.reader(puffin_file_name).await.unwrap();
+            let reader = puffin_manager.reader(&puffin_file_name).await.unwrap();
             check_blob(
-                puffin_file_name,
+                &puffin_file_name,
                 key,
                 raw_data,
                 &stager,
@@ -102,8 +100,8 @@ async fn test_put_get_files() {
 
             let puffin_manager = FsPuffinManager::new(stager.clone(), file_accessor.clone());
 
-            let puffin_file_name = "puffin_file";
-            let mut writer = puffin_manager.writer(puffin_file_name).await.unwrap();
+            let puffin_file_name = "puffin_file".to_string();
+            let mut writer = puffin_manager.writer(&puffin_file_name).await.unwrap();
 
             let blobs = [
                 ("blob_a", "Hello, world!".as_bytes()),
@@ -119,10 +117,10 @@ async fn test_put_get_files() {
 
             writer.finish().await.unwrap();
 
-            let reader = puffin_manager.reader(puffin_file_name).await.unwrap();
+            let reader = puffin_manager.reader(&puffin_file_name).await.unwrap();
             for (key, raw_data) in &blobs {
                 check_blob(
-                    puffin_file_name,
+                    &puffin_file_name,
                     key,
                     raw_data,
                     &stager,
@@ -135,10 +133,10 @@ async fn test_put_get_files() {
             // renew cache manager
             let (_staging_dir, stager) = new_bounded_stager("test_put_get_files_", capacity).await;
             let puffin_manager = FsPuffinManager::new(stager.clone(), file_accessor);
-            let reader = puffin_manager.reader(puffin_file_name).await.unwrap();
+            let reader = puffin_manager.reader(&puffin_file_name).await.unwrap();
             for (key, raw_data) in &blobs {
                 check_blob(
-                    puffin_file_name,
+                    &puffin_file_name,
                     key,
                     raw_data,
                     &stager,
@@ -164,8 +162,8 @@ async fn test_put_get_dir() {
 
             let puffin_manager = FsPuffinManager::new(stager.clone(), file_accessor.clone());
 
-            let puffin_file_name = "puffin_file";
-            let mut writer = puffin_manager.writer(puffin_file_name).await.unwrap();
+            let puffin_file_name = "puffin_file".to_string();
+            let mut writer = puffin_manager.writer(&puffin_file_name).await.unwrap();
 
             let key = "dir_a";
 
@@ -181,15 +179,15 @@ async fn test_put_get_dir() {
 
             writer.finish().await.unwrap();
 
-            let reader = puffin_manager.reader(puffin_file_name).await.unwrap();
-            check_dir(puffin_file_name, key, &files_in_dir, &stager, &reader).await;
+            let reader = puffin_manager.reader(&puffin_file_name).await.unwrap();
+            check_dir(&puffin_file_name, key, &files_in_dir, &stager, &reader).await;
 
             // renew cache manager
             let (_staging_dir, stager) = new_bounded_stager("test_put_get_dir_", capacity).await;
             let puffin_manager = FsPuffinManager::new(stager.clone(), file_accessor);
 
-            let reader = puffin_manager.reader(puffin_file_name).await.unwrap();
-            check_dir(puffin_file_name, key, &files_in_dir, &stager, &reader).await;
+            let reader = puffin_manager.reader(&puffin_file_name).await.unwrap();
+            check_dir(&puffin_file_name, key, &files_in_dir, &stager, &reader).await;
         }
     }
 }
@@ -207,8 +205,8 @@ async fn test_put_get_mix_file_dir() {
 
             let puffin_manager = FsPuffinManager::new(stager.clone(), file_accessor.clone());
 
-            let puffin_file_name = "puffin_file";
-            let mut writer = puffin_manager.writer(puffin_file_name).await.unwrap();
+            let puffin_file_name = "puffin_file".to_string();
+            let mut writer = puffin_manager.writer(&puffin_file_name).await.unwrap();
 
             let blobs = [
                 ("blob_a", "Hello, world!".as_bytes()),
@@ -234,10 +232,10 @@ async fn test_put_get_mix_file_dir() {
 
             writer.finish().await.unwrap();
 
-            let reader = puffin_manager.reader(puffin_file_name).await.unwrap();
+            let reader = puffin_manager.reader(&puffin_file_name).await.unwrap();
             for (key, raw_data) in &blobs {
                 check_blob(
-                    puffin_file_name,
+                    &puffin_file_name,
                     key,
                     raw_data,
                     &stager,
@@ -246,17 +244,17 @@ async fn test_put_get_mix_file_dir() {
                 )
                 .await;
             }
-            check_dir(puffin_file_name, dir_key, &files_in_dir, &stager, &reader).await;
+            check_dir(&puffin_file_name, dir_key, &files_in_dir, &stager, &reader).await;
 
             // renew cache manager
             let (_staging_dir, stager) =
                 new_bounded_stager("test_put_get_mix_file_dir_", capacity).await;
             let puffin_manager = FsPuffinManager::new(stager.clone(), file_accessor);
 
-            let reader = puffin_manager.reader(puffin_file_name).await.unwrap();
+            let reader = puffin_manager.reader(&puffin_file_name).await.unwrap();
             for (key, raw_data) in &blobs {
                 check_blob(
-                    puffin_file_name,
+                    &puffin_file_name,
                     key,
                     raw_data,
                     &stager,
@@ -265,7 +263,7 @@ async fn test_put_get_mix_file_dir() {
                 )
                 .await;
             }
-            check_dir(puffin_file_name, dir_key, &files_in_dir, &stager, &reader).await;
+            check_dir(&puffin_file_name, dir_key, &files_in_dir, &stager, &reader).await;
         }
     }
 }
@@ -283,6 +281,7 @@ async fn put_blob(
             PutOptions {
                 compression: compression_codec,
             },
+            HashMap::from_iter([("test_key".to_string(), "test_value".to_string())]),
         )
         .await
         .unwrap();
@@ -292,11 +291,18 @@ async fn check_blob(
     puffin_file_name: &str,
     key: &str,
     raw_data: &[u8],
-    stager: &BoundedStager,
+    stager: &BoundedStager<String>,
     puffin_reader: &impl PuffinReader,
     compressed: bool,
 ) {
     let blob = puffin_reader.blob(key).await.unwrap();
+
+    let blob_metadata = blob.metadata();
+    assert_eq!(
+        blob_metadata.properties,
+        HashMap::from_iter([("test_key".to_string(), "test_value".to_string())])
+    );
+
     let reader = blob.reader().await.unwrap();
     let meta = reader.metadata().await.unwrap();
     let bs = reader.read(0..meta.content_length).await.unwrap();
@@ -346,7 +352,7 @@ async fn check_dir(
     puffin_file_name: &str,
     key: &str,
     files_in_dir: &[(&str, &[u8])],
-    stager: &BoundedStager,
+    stager: &BoundedStager<String>,
     puffin_reader: &impl PuffinReader,
 ) {
     let res_dir = puffin_reader.dir(key).await.unwrap();

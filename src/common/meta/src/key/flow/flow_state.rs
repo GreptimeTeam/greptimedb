@@ -97,11 +97,19 @@ impl<'a> MetadataKey<'a, FlowStateKey> for FlowStateKey {
 pub struct FlowStateValue {
     /// For each key, the bytes of the state in memory
     pub state_size: BTreeMap<FlowId, usize>,
+    /// For each key, the last execution time of flow in unix timestamp milliseconds.
+    pub last_exec_time_map: BTreeMap<FlowId, i64>,
 }
 
 impl FlowStateValue {
-    pub fn new(state_size: BTreeMap<FlowId, usize>) -> Self {
-        Self { state_size }
+    pub fn new(
+        state_size: BTreeMap<FlowId, usize>,
+        last_exec_time_map: BTreeMap<FlowId, i64>,
+    ) -> Self {
+        Self {
+            state_size,
+            last_exec_time_map,
+        }
     }
 }
 
@@ -143,12 +151,15 @@ impl FlowStateManager {
 pub struct FlowStat {
     /// For each key, the bytes of the state in memory
     pub state_size: BTreeMap<u32, usize>,
+    /// For each key, the last execution time of flow in unix timestamp milliseconds.
+    pub last_exec_time_map: BTreeMap<FlowId, i64>,
 }
 
 impl From<FlowStateValue> for FlowStat {
     fn from(value: FlowStateValue) -> Self {
         Self {
             state_size: value.state_size,
+            last_exec_time_map: value.last_exec_time_map,
         }
     }
 }
@@ -157,6 +168,7 @@ impl From<FlowStat> for FlowStateValue {
     fn from(value: FlowStat) -> Self {
         Self {
             state_size: value.state_size,
+            last_exec_time_map: value.last_exec_time_map,
         }
     }
 }

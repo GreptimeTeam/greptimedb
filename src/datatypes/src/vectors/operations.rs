@@ -14,13 +14,10 @@
 
 mod cast;
 mod filter;
-mod find_unique;
 mod replicate;
 mod take;
 
 use std::sync::Arc;
-
-use common_base::BitVec;
 
 use crate::error::{self, Result};
 use crate::types::LogicalPrimitiveType;
@@ -39,23 +36,6 @@ pub trait VectorOp {
     /// # Panics
     /// Panics if `offsets.len() != self.len()`.
     fn replicate(&self, offsets: &[usize]) -> VectorRef;
-
-    /// Mark `i-th` bit of `selected` to `true` if the `i-th` element of `self` is unique, which
-    /// means there is no elements behind it have same value as it.
-    ///
-    /// The caller should ensure
-    /// 1. the length of `selected` bitmap is equal to `vector.len()`.
-    /// 2. `vector` and `prev_vector` are sorted.
-    ///
-    /// If there are multiple duplicate elements, this function retains the **first** element.
-    /// The first element is considered as unique if the first element of `self` is different
-    /// from its previous element, that is the last element of `prev_vector`.
-    ///
-    /// # Panics
-    /// Panics if
-    /// - `selected.len() < self.len()`.
-    /// - `prev_vector` and `self` have different data types.
-    fn find_unique(&self, selected: &mut BitVec, prev_vector: Option<&dyn Vector>);
 
     /// Filters the vector, returns elements matching the `filter` (i.e. where the values are true).
     ///
@@ -79,11 +59,6 @@ macro_rules! impl_scalar_vector_op {
         impl VectorOp for $VectorType {
             fn replicate(&self, offsets: &[usize]) -> VectorRef {
                 replicate::replicate_scalar(self, offsets)
-            }
-
-            fn find_unique(&self, selected: &mut BitVec, prev_vector: Option<&dyn Vector>) {
-                let prev_vector = prev_vector.map(|pv| pv.as_any().downcast_ref::<$VectorType>().unwrap());
-                find_unique::find_unique_scalar(self, selected, prev_vector);
             }
 
             fn filter(&self, filter: &BooleanVector) -> Result<VectorRef> {
@@ -121,11 +96,6 @@ impl VectorOp for Decimal128Vector {
         std::sync::Arc::new(replicate::replicate_decimal128(self, offsets))
     }
 
-    fn find_unique(&self, selected: &mut BitVec, prev_vector: Option<&dyn Vector>) {
-        let prev_vector = prev_vector.and_then(|pv| pv.as_any().downcast_ref::<Decimal128Vector>());
-        find_unique::find_unique_scalar(self, selected, prev_vector);
-    }
-
     fn filter(&self, filter: &BooleanVector) -> Result<VectorRef> {
         filter::filter_non_constant!(self, Decimal128Vector, filter)
     }
@@ -144,12 +114,6 @@ impl<T: LogicalPrimitiveType> VectorOp for PrimitiveVector<T> {
         std::sync::Arc::new(replicate::replicate_primitive(self, offsets))
     }
 
-    fn find_unique(&self, selected: &mut BitVec, prev_vector: Option<&dyn Vector>) {
-        let prev_vector =
-            prev_vector.and_then(|pv| pv.as_any().downcast_ref::<PrimitiveVector<T>>());
-        find_unique::find_unique_scalar(self, selected, prev_vector);
-    }
-
     fn filter(&self, filter: &BooleanVector) -> Result<VectorRef> {
         filter::filter_non_constant!(self, PrimitiveVector<T>, filter)
     }
@@ -166,11 +130,6 @@ impl<T: LogicalPrimitiveType> VectorOp for PrimitiveVector<T> {
 impl VectorOp for NullVector {
     fn replicate(&self, offsets: &[usize]) -> VectorRef {
         replicate::replicate_null(self, offsets)
-    }
-
-    fn find_unique(&self, selected: &mut BitVec, prev_vector: Option<&dyn Vector>) {
-        let prev_vector = prev_vector.and_then(|pv| pv.as_any().downcast_ref::<NullVector>());
-        find_unique::find_unique_null(self, selected, prev_vector);
     }
 
     fn filter(&self, filter: &BooleanVector) -> Result<VectorRef> {
@@ -193,11 +152,6 @@ impl VectorOp for NullVector {
 impl VectorOp for ConstantVector {
     fn replicate(&self, offsets: &[usize]) -> VectorRef {
         self.replicate_vector(offsets)
-    }
-
-    fn find_unique(&self, selected: &mut BitVec, prev_vector: Option<&dyn Vector>) {
-        let prev_vector = prev_vector.and_then(|pv| pv.as_any().downcast_ref::<ConstantVector>());
-        find_unique::find_unique_constant(self, selected, prev_vector);
     }
 
     fn filter(&self, filter: &BooleanVector) -> Result<VectorRef> {

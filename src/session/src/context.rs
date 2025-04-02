@@ -19,6 +19,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use api::v1::region::RegionRequestHeader;
+use api::v1::ExplainOptions;
 use arc_swap::ArcSwap;
 use auth::UserInfoRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -31,7 +32,7 @@ use derive_builder::Builder;
 use sql::dialect::{Dialect, GenericDialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
 
 use crate::session_config::{PGByteaOutputValue, PGDateOrder, PGDateTimeStyle};
-use crate::MutableInner;
+use crate::{MutableInner, ReadPreference};
 
 pub type QueryContextRef = Arc<QueryContext>;
 pub type ConnInfoRef = Arc<ConnInfo>;
@@ -67,6 +68,10 @@ pub struct QueryContext {
 #[derive(Debug, Builder, Clone, Default)]
 pub struct QueryContextMutableFields {
     warning: Option<String>,
+    // TODO: remove this when format is supported in datafusion
+    explain_format: Option<String>,
+    /// Explain options to control the verbose analyze output.
+    explain_options: Option<ExplainOptions>,
 }
 
 impl Display for QueryContext {
@@ -109,6 +114,15 @@ impl QueryContextBuilder {
             .timezone = timezone;
         self
     }
+
+    pub fn explain_options(mut self, explain_options: Option<ExplainOptions>) -> Self {
+        self.mutable_query_context_data
+            .get_or_insert_default()
+            .write()
+            .unwrap()
+            .explain_options = explain_options;
+        self
+    }
 }
 
 impl From<&RegionRequestHeader> for QueryContext {
@@ -123,7 +137,8 @@ impl From<&RegionRequestHeader> for QueryContext {
                 .channel(ctx.channel.into())
                 .snapshot_seqs(Arc::new(RwLock::new(
                     ctx.snapshot_seqs.clone().unwrap_or_default().snapshot_seqs,
-                )));
+                )))
+                .explain_options(ctx.explain);
         }
         builder.build()
     }
@@ -140,6 +155,7 @@ impl From<api::v1::QueryContext> for QueryContext {
             .snapshot_seqs(Arc::new(RwLock::new(
                 ctx.snapshot_seqs.clone().unwrap_or_default().snapshot_seqs,
             )))
+            .explain_options(ctx.explain)
             .build()
     }
 }
@@ -152,9 +168,11 @@ impl From<QueryContext> for api::v1::QueryContext {
             extensions,
             channel,
             snapshot_seqs,
+            mutable_query_context_data,
             ..
         }: QueryContext,
     ) -> Self {
+        let explain = mutable_query_context_data.read().unwrap().explain_options;
         let mutable_inner = mutable_inner.read().unwrap();
         api::v1::QueryContext {
             current_catalog,
@@ -165,6 +183,7 @@ impl From<QueryContext> for api::v1::QueryContext {
             snapshot_seqs: Some(api::v1::SnapshotSequences {
                 snapshot_seqs: snapshot_seqs.read().unwrap().clone(),
             }),
+            explain,
         }
     }
 }
@@ -247,6 +266,14 @@ impl QueryContext {
         self.mutable_session_data.write().unwrap().timezone = timezone;
     }
 
+    pub fn read_preference(&self) -> ReadPreference {
+        self.mutable_session_data.read().unwrap().read_preference
+    }
+
+    pub fn set_read_preference(&self, read_preference: ReadPreference) {
+        self.mutable_session_data.write().unwrap().read_preference = read_preference;
+    }
+
     pub fn current_user(&self) -> UserInfoRef {
         self.mutable_session_data.read().unwrap().user_info.clone()
     }
@@ -300,6 +327,39 @@ impl QueryContext {
 
     pub fn set_warning(&self, msg: String) {
         self.mutable_query_context_data.write().unwrap().warning = Some(msg);
+    }
+
+    pub fn explain_format(&self) -> Option<String> {
+        self.mutable_query_context_data
+            .read()
+            .unwrap()
+            .explain_format
+            .clone()
+    }
+
+    pub fn set_explain_format(&self, format: String) {
+        self.mutable_query_context_data
+            .write()
+            .unwrap()
+            .explain_format = Some(format);
+    }
+
+    pub fn explain_verbose(&self) -> bool {
+        self.mutable_query_context_data
+            .read()
+            .unwrap()
+            .explain_options
+            .map(|opts| opts.verbose)
+            .unwrap_or(false)
+    }
+
+    pub fn set_explain_verbose(&self, verbose: bool) {
+        self.mutable_query_context_data
+            .write()
+            .unwrap()
+            .explain_options
+            .get_or_insert_default()
+            .verbose = verbose;
     }
 
     pub fn query_timeout(&self) -> Option<Duration> {

@@ -27,7 +27,7 @@ use datatypes::vectors::PrimitiveVector;
 use datatypes::with_match_primitive_type_id;
 use snafu::{ensure, OptionExt};
 
-use crate::function::Function;
+use crate::function::{Function, FunctionContext};
 
 #[derive(Clone, Debug, Default)]
 pub struct ClampFunction;
@@ -49,11 +49,7 @@ impl Function for ClampFunction {
         Signature::uniform(3, ConcreteDataType::numerics(), Volatility::Immutable)
     }
 
-    fn eval(
-        &self,
-        _func_ctx: crate::function::FunctionContext,
-        columns: &[VectorRef],
-    ) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure!(
             columns.len() == 3,
             InvalidFuncArgsSnafu {
@@ -209,7 +205,7 @@ mod test {
                 Arc::new(Int64Vector::from_vec(vec![max])) as _,
             ];
             let result = func
-                .eval(FunctionContext::default(), args.as_slice())
+                .eval(&FunctionContext::default(), args.as_slice())
                 .unwrap();
             let expected: VectorRef = Arc::new(Int64Vector::from(expected));
             assert_eq!(expected, result);
@@ -253,7 +249,7 @@ mod test {
                 Arc::new(UInt64Vector::from_vec(vec![max])) as _,
             ];
             let result = func
-                .eval(FunctionContext::default(), args.as_slice())
+                .eval(&FunctionContext::default(), args.as_slice())
                 .unwrap();
             let expected: VectorRef = Arc::new(UInt64Vector::from(expected));
             assert_eq!(expected, result);
@@ -297,7 +293,7 @@ mod test {
                 Arc::new(Float64Vector::from_vec(vec![max])) as _,
             ];
             let result = func
-                .eval(FunctionContext::default(), args.as_slice())
+                .eval(&FunctionContext::default(), args.as_slice())
                 .unwrap();
             let expected: VectorRef = Arc::new(Float64Vector::from(expected));
             assert_eq!(expected, result);
@@ -317,7 +313,7 @@ mod test {
             Arc::new(Int64Vector::from_vec(vec![max])) as _,
         ];
         let result = func
-            .eval(FunctionContext::default(), args.as_slice())
+            .eval(&FunctionContext::default(), args.as_slice())
             .unwrap();
         let expected: VectorRef = Arc::new(Int64Vector::from(vec![Some(4)]));
         assert_eq!(expected, result);
@@ -335,7 +331,7 @@ mod test {
             Arc::new(Float64Vector::from_vec(vec![min])) as _,
             Arc::new(Float64Vector::from_vec(vec![max])) as _,
         ];
-        let result = func.eval(FunctionContext::default(), args.as_slice());
+        let result = func.eval(&FunctionContext::default(), args.as_slice());
         assert!(result.is_err());
     }
 
@@ -351,7 +347,7 @@ mod test {
             Arc::new(Int64Vector::from_vec(vec![min])) as _,
             Arc::new(UInt64Vector::from_vec(vec![max])) as _,
         ];
-        let result = func.eval(FunctionContext::default(), args.as_slice());
+        let result = func.eval(&FunctionContext::default(), args.as_slice());
         assert!(result.is_err());
     }
 
@@ -367,7 +363,7 @@ mod test {
             Arc::new(Float64Vector::from_vec(vec![min, min])) as _,
             Arc::new(Float64Vector::from_vec(vec![max])) as _,
         ];
-        let result = func.eval(FunctionContext::default(), args.as_slice());
+        let result = func.eval(&FunctionContext::default(), args.as_slice());
         assert!(result.is_err());
     }
 
@@ -381,7 +377,7 @@ mod test {
             Arc::new(Float64Vector::from(input)) as _,
             Arc::new(Float64Vector::from_vec(vec![min])) as _,
         ];
-        let result = func.eval(FunctionContext::default(), args.as_slice());
+        let result = func.eval(&FunctionContext::default(), args.as_slice());
         assert!(result.is_err());
     }
 
@@ -395,7 +391,7 @@ mod test {
             Arc::new(StringVector::from_vec(vec!["bar"])) as _,
             Arc::new(StringVector::from_vec(vec!["baz"])) as _,
         ];
-        let result = func.eval(FunctionContext::default(), args.as_slice());
+        let result = func.eval(&FunctionContext::default(), args.as_slice());
         assert!(result.is_err());
     }
 }

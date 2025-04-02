@@ -30,7 +30,7 @@ use datanode::datanode::{Datanode, DatanodeBuilder};
 use datanode::service::DatanodeServiceBuilder;
 use meta_client::{MetaClientOptions, MetaClientType};
 use servers::Mode;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{
@@ -223,15 +223,14 @@ impl StartCommand {
                 .get_or_insert_with(MetaClientOptions::default)
                 .metasrv_addrs
                 .clone_from(metasrv_addrs);
-            opts.mode = Mode::Distributed;
         }
 
-        if let (Mode::Distributed, None) = (&opts.mode, &opts.node_id) {
-            return MissingConfigSnafu {
-                msg: "Missing node id option",
+        ensure!(
+            opts.node_id.is_some(),
+            MissingConfigSnafu {
+                msg: "Missing node id option"
             }
-            .fail();
-        }
+        );
 
         if let Some(data_home) = &self.data_home {
             opts.storage.data_home.clone_from(data_home);
@@ -287,7 +286,6 @@ impl StartCommand {
             .await
             .context(StartDatanodeSnafu)?;
 
-        let cluster_id = 0; // TODO(hl): read from config
         let member_id = opts
             .node_id
             .context(MissingConfigSnafu { msg: "'node_id'" })?;
@@ -297,9 +295,9 @@ impl StartCommand {
         })?;
 
         let meta_client = meta_client::create_meta_client(
-            cluster_id,
             MetaClientType::Datanode { member_id },
             meta_config,
+            None,
         )
         .await
         .context(MetaClientInitSnafu)?;
@@ -315,7 +313,7 @@ impl StartCommand {
                 .build(),
         );
 
-        let mut datanode = DatanodeBuilder::new(opts.clone(), plugins)
+        let mut datanode = DatanodeBuilder::new(opts.clone(), plugins, Mode::Distributed)
             .with_meta_client(meta_client)
             .with_kv_backend(meta_backend)
             .with_cache_registry(layered_cache_registry)
@@ -337,6 +335,7 @@ impl StartCommand {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches::assert_matches;
     use std::io::Write;
     use std::time::Duration;
 
@@ -344,7 +343,6 @@ mod tests {
     use common_test_util::temp_dir::create_named_temp_file;
     use datanode::config::{FileConfig, GcsConfig, ObjectStoreConfig, S3Config};
     use servers::heartbeat_options::HeartbeatOptions;
-    use servers::Mode;
 
     use super::*;
     use crate::options::GlobalOptions;
@@ -410,7 +408,7 @@ mod tests {
             sync_write = false
 
             [storage]
-            data_home = "/tmp/greptimedb/"
+            data_home = "./greptimedb_data/"
             type = "File"
 
             [[storage.providers]]
@@ -424,7 +422,7 @@ mod tests {
 
             [logging]
             level = "debug"
-            dir = "/tmp/greptimedb/test/logs"
+            dir = "./greptimedb_data/test/logs"
         "#;
         write!(file, "{}", toml_str).unwrap();
 
@@ -471,7 +469,7 @@ mod tests {
         assert_eq!(10000, ddl_timeout.as_millis());
         assert_eq!(3000, timeout.as_millis());
         assert!(tcp_nodelay);
-        assert_eq!("/tmp/greptimedb/", options.storage.data_home);
+        assert_eq!("./greptimedb_data/", options.storage.data_home);
         assert!(matches!(
             &options.storage.store,
             ObjectStoreConfig::File(FileConfig { .. })
@@ -487,27 +485,14 @@ mod tests {
         ));
 
         assert_eq!("debug", options.logging.level.unwrap());
-        assert_eq!("/tmp/greptimedb/test/logs".to_string(), options.logging.dir);
+        assert_eq!(
+            "./greptimedb_data/test/logs".to_string(),
+            options.logging.dir
+        );
     }
 
     #[test]
     fn test_try_from_cmd() {
-        let opt = StartCommand::default()
-            .load_options(&GlobalOptions::default())
-            .unwrap()
-            .component;
-        assert_eq!(Mode::Standalone, opt.mode);
-
-        let opt = (StartCommand {
-            node_id: Some(42),
-            metasrv_addrs: Some(vec!["127.0.0.1:3002".to_string()]),
-            ..Default::default()
-        })
-        .load_options(&GlobalOptions::default())
-        .unwrap()
-        .component;
-        assert_eq!(Mode::Distributed, opt.mode);
-
         assert!((StartCommand {
             metasrv_addrs: Some(vec!["127.0.0.1:3002".to_string()]),
             ..Default::default()
@@ -526,11 +511,23 @@ mod tests {
 
     #[test]
     fn test_load_log_options_from_cli() {
-        let cmd = StartCommand::default();
+        let mut cmd = StartCommand::default();
+
+        let result = cmd.load_options(&GlobalOptions {
+            log_dir: Some("./greptimedb_data/test/logs".to_string()),
+            log_level: Some("debug".to_string()),
+
+            #[cfg(feature = "tokio-console")]
+            tokio_console_addr: None,
+        });
+        // Missing node_id.
+        assert_matches!(result, Err(crate::error::Error::MissingConfig { .. }));
+
+        cmd.node_id = Some(42);
 
         let options = cmd
             .load_options(&GlobalOptions {
-                log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
+                log_dir: Some("./greptimedb_data/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
 
                 #[cfg(feature = "tokio-console")]
@@ -540,7 +537,7 @@ mod tests {
             .component;
 
         let logging_opt = options.logging;
-        assert_eq!("/tmp/greptimedb/test/logs", logging_opt.dir);
+        assert_eq!("./greptimedb_data/test/logs", logging_opt.dir);
         assert_eq!("debug", logging_opt.level.as_ref().unwrap());
     }
 
@@ -569,11 +566,11 @@ mod tests {
 
             [storage]
             type = "File"
-            data_home = "/tmp/greptimedb/"
+            data_home = "./greptimedb_data/"
 
             [logging]
             level = "debug"
-            dir = "/tmp/greptimedb/test/logs"
+            dir = "./greptimedb_data/test/logs"
         "#;
         write!(file, "{}", toml_str).unwrap();
 

@@ -45,7 +45,7 @@ impl Function for ParseVectorFunction {
         )
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure!(
             columns.len() == 1,
             InvalidFuncArgsSnafu {
@@ -101,7 +101,7 @@ mod tests {
             None,
         ]));
 
-        let result = func.eval(FunctionContext::default(), &[input]).unwrap();
+        let result = func.eval(&FunctionContext::default(), &[input]).unwrap();
 
         let result = result.as_ref();
         assert_eq!(result.len(), 3);
@@ -136,7 +136,7 @@ mod tests {
             Some("[7.0,8.0,9.0".to_string()),
         ]));
 
-        let result = func.eval(FunctionContext::default(), &[input]);
+        let result = func.eval(&FunctionContext::default(), &[input]);
         assert!(result.is_err());
 
         let input = Arc::new(StringVector::from(vec![
@@ -145,7 +145,7 @@ mod tests {
             Some("7.0,8.0,9.0]".to_string()),
         ]));
 
-        let result = func.eval(FunctionContext::default(), &[input]);
+        let result = func.eval(&FunctionContext::default(), &[input]);
         assert!(result.is_err());
 
         let input = Arc::new(StringVector::from(vec![
@@ -154,7 +154,7 @@ mod tests {
             Some("[7.0,hello,9.0]".to_string()),
         ]));
 
-        let result = func.eval(FunctionContext::default(), &[input]);
+        let result = func.eval(&FunctionContext::default(), &[input]);
         assert!(result.is_err());
     }
 }

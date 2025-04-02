@@ -26,16 +26,18 @@ use common_config::Configurable;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::ProcedureExecutorRef;
+use common_meta::distributed_time_constants;
 use common_meta::key::maintenance::MaintenanceModeManagerRef;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackend, ResettableKvBackendRef};
 use common_meta::leadership_notifier::{
     LeadershipChangeNotifier, LeadershipChangeNotifierCustomizerRef,
 };
+use common_meta::node_expiry_listener::NodeExpiryListener;
 use common_meta::peer::Peer;
 use common_meta::region_keeper::MemoryRegionKeeperRef;
+use common_meta::region_registry::LeaderRegionRegistryRef;
 use common_meta::wal_options_allocator::WalOptionsAllocatorRef;
-use common_meta::{distributed_time_constants, ClusterId};
 use common_options::datanode::DatanodeClientOptions;
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
@@ -69,11 +71,11 @@ use crate::state::{become_follower, become_leader, StateRef};
 
 pub const TABLE_ID_SEQ: &str = "table_id";
 pub const FLOW_ID_SEQ: &str = "flow_id";
-pub const METASRV_HOME: &str = "/tmp/metasrv";
+pub const METASRV_HOME: &str = "./greptimedb_data/metasrv";
 
-#[cfg(feature = "pg_kvbackend")]
+#[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
 pub const DEFAULT_META_TABLE_NAME: &str = "greptime_metakv";
-#[cfg(feature = "pg_kvbackend")]
+#[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
 pub const DEFAULT_META_ELECTION_LOCK_ID: u64 = 1;
 
 // The datastores that implements metadata kvbackend.
@@ -88,6 +90,9 @@ pub enum BackendImpl {
     #[cfg(feature = "pg_kvbackend")]
     // Postgres as metadata storage.
     PostgresStore,
+    #[cfg(feature = "mysql_kvbackend")]
+    // MySql as metadata storage.
+    MysqlStore,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -145,12 +150,14 @@ pub struct MetasrvOptions {
     pub tracing: TracingOptions,
     /// The datastore for kv metadata.
     pub backend: BackendImpl,
-    #[cfg(feature = "pg_kvbackend")]
+    #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
     /// Table name of rds kv backend.
     pub meta_table_name: String,
     #[cfg(feature = "pg_kvbackend")]
     /// Lock id for meta kv election. Only effect when using pg_kvbackend.
     pub meta_election_lock_id: u64,
+    #[serde(with = "humantime_serde")]
+    pub node_max_idle_time: Duration,
 }
 
 const DEFAULT_METASRV_ADDR_PORT: &str = "3002";
@@ -176,6 +183,7 @@ impl Default for MetasrvOptions {
                 // The etcd the maximum size of any request is 1.5 MiB
                 // 1500KiB = 1536KiB (1.5MiB) - 36KiB (reserved size of key)
                 max_metadata_value_size: Some(ReadableSize::kb(1500)),
+                max_running_procedures: 128,
             },
             failure_detector: PhiAccrualFailureDetectorOptions::default(),
             datanode: DatanodeClientOptions::default(),
@@ -188,10 +196,11 @@ impl Default for MetasrvOptions {
             flush_stats_factor: 3,
             tracing: TracingOptions::default(),
             backend: BackendImpl::EtcdStore,
-            #[cfg(feature = "pg_kvbackend")]
+            #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
             meta_table_name: DEFAULT_META_TABLE_NAME.to_string(),
             #[cfg(feature = "pg_kvbackend")]
             meta_election_lock_id: DEFAULT_META_ELECTION_LOCK_ID,
+            node_max_idle_time: Duration::from_secs(24 * 60 * 60),
         }
     }
 }
@@ -250,11 +259,13 @@ pub struct Context {
     pub is_infancy: bool,
     pub table_metadata_manager: TableMetadataManagerRef,
     pub cache_invalidator: CacheInvalidatorRef,
+    pub leader_region_registry: LeaderRegionRegistryRef,
 }
 
 impl Context {
     pub fn reset_in_memory(&self) {
         self.in_memory.reset();
+        self.leader_region_registry.reset();
     }
 }
 
@@ -395,6 +406,7 @@ pub struct Metasrv {
     region_migration_manager: RegionMigrationManagerRef,
     region_supervisor_ticker: Option<RegionSupervisorTickerRef>,
     cache_invalidator: CacheInvalidatorRef,
+    leader_region_registry: LeaderRegionRegistryRef,
 
     plugins: Plugins,
 }
@@ -442,6 +454,10 @@ impl Metasrv {
             leadership_change_notifier.add_listener(self.wal_options_allocator.clone());
             leadership_change_notifier
                 .add_listener(Arc::new(ProcedureManagerListenerAdapter(procedure_manager)));
+            leadership_change_notifier.add_listener(Arc::new(NodeExpiryListener::new(
+                self.options.node_max_idle_time,
+                self.in_memory.clone(),
+            )));
             if let Some(region_supervisor_ticker) = &self.region_supervisor_ticker {
                 leadership_change_notifier.add_listener(region_supervisor_ticker.clone() as _);
             }
@@ -564,13 +580,8 @@ impl Metasrv {
     }
 
     /// Lookup a peer by peer_id, return it only when it's alive.
-    pub(crate) async fn lookup_peer(
-        &self,
-        cluster_id: ClusterId,
-        peer_id: u64,
-    ) -> Result<Option<Peer>> {
+    pub(crate) async fn lookup_peer(&self, peer_id: u64) -> Result<Option<Peer>> {
         lookup_datanode_peer(
-            cluster_id,
             peer_id,
             &self.meta_peer_client,
             distributed_time_constants::DATANODE_LEASE_SECS,
@@ -661,6 +672,7 @@ impl Metasrv {
         let election = self.election.clone();
         let table_metadata_manager = self.table_metadata_manager.clone();
         let cache_invalidator = self.cache_invalidator.clone();
+        let leader_region_registry = self.leader_region_registry.clone();
 
         Context {
             server_addr,
@@ -673,6 +685,7 @@ impl Metasrv {
             is_infancy: false,
             table_metadata_manager,
             cache_invalidator,
+            leader_region_registry,
         }
     }
 }

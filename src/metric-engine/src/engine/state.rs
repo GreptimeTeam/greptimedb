@@ -83,18 +83,6 @@ pub(crate) struct MetricEngineState {
 }
 
 impl MetricEngineState {
-    pub fn logical_region_exists_filter(
-        &self,
-        physical_region_id: RegionId,
-    ) -> impl for<'a> Fn(&'a RegionId) -> bool + use<'_> {
-        let state = self
-            .physical_region_states()
-            .get(&physical_region_id)
-            .unwrap();
-
-        move |logical_region_id| state.logical_regions().contains(logical_region_id)
-    }
-
     pub fn add_physical_region(
         &mut self,
         physical_region_id: RegionId,

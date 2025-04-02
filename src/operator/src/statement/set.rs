@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::str::FromStr;
 use std::time::Duration;
 
 use common_time::Timezone;
@@ -20,6 +21,7 @@ use regex::Regex;
 use session::context::Channel::Postgres;
 use session::context::QueryContextRef;
 use session::session_config::{PGByteaOutputValue, PGDateOrder, PGDateTimeStyle};
+use session::ReadPreference;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::{Expr, Ident, Value};
 use sql::statements::set_variables::SetVariables;
@@ -33,6 +35,38 @@ lazy_static! {
     // The string must end immediately after the unit, meaning there can be no extra
     // characters or spaces after the valid time specification.
     static ref PG_TIME_INPUT_REGEX: Regex = Regex::new(r"^(\d+)(ms|s|min|h|d)$").unwrap();
+}
+
+pub fn set_read_preference(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
+    let read_preference_expr = exprs.first().context(NotSupportedSnafu {
+        feat: "No read preference find in set variable statement",
+    })?;
+
+    match read_preference_expr {
+        Expr::Value(Value::SingleQuotedString(expr))
+        | Expr::Value(Value::DoubleQuotedString(expr)) => {
+            match ReadPreference::from_str(expr.as_str().to_lowercase().as_str()) {
+                Ok(read_preference) => ctx.set_read_preference(read_preference),
+                Err(_) => {
+                    return NotSupportedSnafu {
+                        feat: format!(
+                            "Invalid read preference expr {} in set variable statement",
+                            expr,
+                        ),
+                    }
+                    .fail()
+                }
+            }
+            Ok(())
+        }
+        expr => NotSupportedSnafu {
+            feat: format!(
+                "Unsupported read preference expr {} in set variable statement",
+                expr
+            ),
+        }
+        .fail(),
+    }
 }
 
 pub fn set_timezone(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {

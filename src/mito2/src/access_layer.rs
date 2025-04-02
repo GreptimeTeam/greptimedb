@@ -121,7 +121,7 @@ impl AccessLayer {
     /// Writes a SST with specific `file_id` and `metadata` to the layer.
     ///
     /// Returns the info of the SST. If no data written, returns None.
-    pub(crate) async fn write_sst(
+    pub async fn write_sst(
         &self,
         request: SstWriteRequest,
         write_opts: &WriteOptions,
@@ -146,11 +146,14 @@ impl AccessLayer {
         } else {
             // Write cache is disabled.
             let store = self.object_store.clone();
+            let path_provider = RegionFilePathFactory::new(self.region_dir.clone());
             let indexer_builder = IndexerBuilderImpl {
                 op_type: request.op_type,
                 metadata: request.metadata.clone(),
                 row_group_size: write_opts.row_group_size,
-                puffin_manager: self.puffin_manager_factory.build(store),
+                puffin_manager: self
+                    .puffin_manager_factory
+                    .build(store, path_provider.clone()),
                 intermediate_manager: self.intermediate_manager.clone(),
                 index_options: request.index_options,
                 inverted_index_config: request.inverted_index_config,
@@ -161,9 +164,7 @@ impl AccessLayer {
                 self.object_store.clone(),
                 request.metadata,
                 indexer_builder,
-                RegionFilePathFactory {
-                    region_dir: self.region_dir.clone(),
-                },
+                path_provider,
             )
             .await;
             writer
@@ -190,26 +191,26 @@ impl AccessLayer {
 
 /// `OperationType` represents the origin of the `SstWriteRequest`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum OperationType {
+pub enum OperationType {
     Flush,
     Compact,
 }
 
 /// Contents to build a SST.
-pub(crate) struct SstWriteRequest {
-    pub(crate) op_type: OperationType,
-    pub(crate) metadata: RegionMetadataRef,
-    pub(crate) source: Source,
-    pub(crate) cache_manager: CacheManagerRef,
+pub struct SstWriteRequest {
+    pub op_type: OperationType,
+    pub metadata: RegionMetadataRef,
+    pub source: Source,
+    pub cache_manager: CacheManagerRef,
     #[allow(dead_code)]
-    pub(crate) storage: Option<String>,
-    pub(crate) max_sequence: Option<SequenceNumber>,
+    pub storage: Option<String>,
+    pub max_sequence: Option<SequenceNumber>,
 
     /// Configs for index
-    pub(crate) index_options: IndexOptions,
-    pub(crate) inverted_index_config: InvertedIndexConfig,
-    pub(crate) fulltext_index_config: FulltextIndexConfig,
-    pub(crate) bloom_filter_index_config: BloomFilterConfig,
+    pub index_options: IndexOptions,
+    pub inverted_index_config: InvertedIndexConfig,
+    pub fulltext_index_config: FulltextIndexConfig,
+    pub bloom_filter_index_config: BloomFilterConfig,
 }
 
 pub(crate) async fn new_fs_cache_store(root: &str) -> Result<ObjectStore> {
@@ -248,8 +249,18 @@ pub trait FilePathProvider: Send + Sync {
 /// Path provider that builds paths in local write cache.
 #[derive(Clone)]
 pub(crate) struct WriteCachePathProvider {
-    pub(crate) region_id: RegionId,
-    pub(crate) file_cache: FileCacheRef,
+    region_id: RegionId,
+    file_cache: FileCacheRef,
+}
+
+impl WriteCachePathProvider {
+    /// Creates a new `WriteCachePathProvider` instance.
+    pub fn new(region_id: RegionId, file_cache: FileCacheRef) -> Self {
+        Self {
+            region_id,
+            file_cache,
+        }
+    }
 }
 
 impl FilePathProvider for WriteCachePathProvider {
@@ -267,7 +278,14 @@ impl FilePathProvider for WriteCachePathProvider {
 /// Path provider that builds paths in region storage path.
 #[derive(Clone, Debug)]
 pub(crate) struct RegionFilePathFactory {
-    pub(crate) region_dir: String,
+    region_dir: String,
+}
+
+impl RegionFilePathFactory {
+    /// Creates a new `RegionFilePathFactory` instance.
+    pub fn new(region_dir: String) -> Self {
+        Self { region_dir }
+    }
 }
 
 impl FilePathProvider for RegionFilePathFactory {

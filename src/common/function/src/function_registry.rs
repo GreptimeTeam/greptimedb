@@ -18,18 +18,21 @@ use std::sync::{Arc, RwLock};
 
 use once_cell::sync::Lazy;
 
+use crate::admin::AdminFunction;
 use crate::function::{AsyncFunctionRef, FunctionRef};
 use crate::scalars::aggregate::{AggregateFunctionMetaRef, AggregateFunctions};
 use crate::scalars::date::DateFunction;
 use crate::scalars::expression::ExpressionFunction;
+use crate::scalars::hll_count::HllCalcFunction;
+use crate::scalars::ip::IpFunctions;
 use crate::scalars::json::JsonFunction;
 use crate::scalars::matches::MatchesFunction;
 use crate::scalars::matches_term::MatchesTermFunction;
 use crate::scalars::math::MathFunction;
 use crate::scalars::timestamp::TimestampFunction;
+use crate::scalars::uddsketch_calc::UddSketchCalcFunction;
 use crate::scalars::vector::VectorFunction;
 use crate::system::SystemFunction;
-use crate::table::TableFunction;
 
 #[derive(Default)]
 pub struct FunctionRegistry {
@@ -106,6 +109,8 @@ pub static FUNCTION_REGISTRY: Lazy<Arc<FunctionRegistry>> = Lazy::new(|| {
     TimestampFunction::register(&function_registry);
     DateFunction::register(&function_registry);
     ExpressionFunction::register(&function_registry);
+    UddSketchCalcFunction::register(&function_registry);
+    HllCalcFunction::register(&function_registry);
 
     // Aggregate functions
     AggregateFunctions::register(&function_registry);
@@ -116,7 +121,7 @@ pub static FUNCTION_REGISTRY: Lazy<Arc<FunctionRegistry>> = Lazy::new(|| {
 
     // System and administration functions
     SystemFunction::register(&function_registry);
-    TableFunction::register(&function_registry);
+    AdminFunction::register(&function_registry);
 
     // Json related functions
     JsonFunction::register(&function_registry);
@@ -127,6 +132,9 @@ pub static FUNCTION_REGISTRY: Lazy<Arc<FunctionRegistry>> = Lazy::new(|| {
     // Geo functions
     #[cfg(feature = "geo")]
     crate::scalars::geo::GeoFunctions::register(&function_registry);
+
+    // Ip functions
+    IpFunctions::register(&function_registry);
 
     Arc::new(function_registry)
 });

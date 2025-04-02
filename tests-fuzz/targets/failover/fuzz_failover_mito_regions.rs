@@ -24,7 +24,7 @@ use common_telemetry::info;
 use common_time::util::current_time_millis;
 use futures::future::try_join_all;
 use libfuzzer_sys::fuzz_target;
-use rand::seq::SliceRandom;
+use rand::seq::IndexedRandom;
 use rand::{Rng, SeedableRng};
 use rand_chacha::{ChaCha20Rng, ChaChaRng};
 use snafu::{ensure, ResultExt};
@@ -87,13 +87,13 @@ impl Arbitrary<'_> for FuzzInput {
         let seed = u.int_in_range(u64::MIN..=u64::MAX)?;
         let mut rng = ChaChaRng::seed_from_u64(seed);
         let max_columns = get_gt_fuzz_input_max_columns();
-        let columns = rng.gen_range(2..max_columns);
+        let columns = rng.random_range(2..max_columns);
         let max_rows = get_gt_fuzz_input_max_rows();
-        let rows = rng.gen_range(2..max_rows);
+        let rows = rng.random_range(2..max_rows);
         let max_tables = get_gt_fuzz_input_max_tables();
-        let tables = rng.gen_range(2..max_tables);
+        let tables = rng.random_range(2..max_tables);
         let max_inserts = get_gt_fuzz_input_max_insert_actions();
-        let inserts = rng.gen_range(2..max_inserts);
+        let inserts = rng.random_range(2..max_inserts);
         Ok(FuzzInput {
             columns,
             rows,
@@ -116,7 +116,7 @@ fn generate_create_exprs<R: Rng + 'static>(
 
     let base_table_name = name_generator.gen(rng);
     let min_column = columns / 2;
-    let columns = rng.gen_range(min_column..columns);
+    let columns = rng.random_range(min_column..columns);
     let mut exprs = Vec::with_capacity(tables);
     for i in 0..tables {
         let table_name = Ident {
@@ -174,11 +174,11 @@ fn generate_insert_exprs<R: Rng + 'static>(
 ) -> Result<Vec<Vec<InsertIntoExpr>>> {
     let mut exprs = Vec::with_capacity(tables.len());
     for table_ctx in tables {
-        let omit_column_list = rng.gen_bool(0.2);
+        let omit_column_list = rng.random_bool(0.2);
         let min_rows = rows / 2;
-        let rows = rng.gen_range(min_rows..rows);
+        let rows = rng.random_range(min_rows..rows);
         let min_inserts = inserts / 2;
-        let inserts = rng.gen_range(min_inserts..inserts);
+        let inserts = rng.random_range(min_inserts..inserts);
 
         let insert_generator = InsertExprGeneratorBuilder::default()
             .table_ctx(table_ctx.clone())
@@ -207,9 +207,9 @@ async fn execute_insert_exprs<R: Rng + 'static>(
     let semaphore = Arc::new(Semaphore::new(parallelism));
 
     let tasks = inserts.into_iter().map(|inserts| {
-        let flush_probability = rng.gen_range(0.0..1.0);
-        let compact_probability = rng.gen_range(0.0..1.0);
-        let seed: u64 = rng.gen();
+        let flush_probability = rng.random_range(0.0..1.0);
+        let compact_probability = rng.random_range(0.0..1.0);
+        let seed: u64 = rng.random();
 
         let semaphore = semaphore.clone();
         let greptime = ctx.greptime.clone();
@@ -235,10 +235,10 @@ async fn execute_insert_exprs<R: Rng + 'static>(
                         )
                     }
                 );
-                if rng.gen_bool(flush_probability) {
+                if rng.random_bool(flush_probability) {
                     flush_memtable(&greptime, &insert_expr.table_name).await?;
                 }
-                if rng.gen_bool(compact_probability) {
+                if rng.random_bool(compact_probability) {
                     compact_table(&greptime, &insert_expr.table_name).await?;
                 }
                 total_affected += result.rows_affected();

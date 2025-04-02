@@ -26,11 +26,10 @@ use crate::flow_name::FlowName;
 use crate::key::schema_name::SchemaName;
 use crate::key::FlowId;
 use crate::peer::Peer;
-use crate::{ClusterId, DatanodeId, FlownodeId};
+use crate::{DatanodeId, FlownodeId};
 
 #[derive(Eq, Hash, PartialEq, Clone, Debug, Serialize, Deserialize)]
 pub struct RegionIdent {
-    pub cluster_id: ClusterId,
     pub datanode_id: DatanodeId,
     pub table_id: TableId,
     pub region_number: RegionNumber,
@@ -47,8 +46,8 @@ impl Display for RegionIdent {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "RegionIdent(datanode_id='{}.{}', table_id={}, region_number={}, engine = {})",
-            self.cluster_id, self.datanode_id, self.table_id, self.region_number, self.engine
+            "RegionIdent(datanode_id='{}', table_id={}, region_number={}, engine = {})",
+            self.datanode_id, self.table_id, self.region_number, self.engine
         )
     }
 }
@@ -262,7 +261,6 @@ mod tests {
     fn test_serialize_instruction() {
         let open_region = Instruction::OpenRegion(OpenRegion::new(
             RegionIdent {
-                cluster_id: 1,
                 datanode_id: 2,
                 table_id: 1024,
                 region_number: 1,
@@ -277,12 +275,11 @@ mod tests {
         let serialized = serde_json::to_string(&open_region).unwrap();
 
         assert_eq!(
-            r#"{"OpenRegion":{"region_ident":{"cluster_id":1,"datanode_id":2,"table_id":1024,"region_number":1,"engine":"mito2"},"region_storage_path":"test/foo","region_options":{},"region_wal_options":{},"skip_wal_replay":false}}"#,
+            r#"{"OpenRegion":{"region_ident":{"datanode_id":2,"table_id":1024,"region_number":1,"engine":"mito2"},"region_storage_path":"test/foo","region_options":{},"region_wal_options":{},"skip_wal_replay":false}}"#,
             serialized
         );
 
         let close_region = Instruction::CloseRegion(RegionIdent {
-            cluster_id: 1,
             datanode_id: 2,
             table_id: 1024,
             region_number: 1,
@@ -292,7 +289,7 @@ mod tests {
         let serialized = serde_json::to_string(&close_region).unwrap();
 
         assert_eq!(
-            r#"{"CloseRegion":{"cluster_id":1,"datanode_id":2,"table_id":1024,"region_number":1,"engine":"mito2"}}"#,
+            r#"{"CloseRegion":{"datanode_id":2,"table_id":1024,"region_number":1,"engine":"mito2"}}"#,
             serialized
         );
     }
@@ -307,7 +304,6 @@ mod tests {
     #[test]
     fn test_compatible_serialize_open_region() {
         let region_ident = RegionIdent {
-            cluster_id: 1,
             datanode_id: 2,
             table_id: 1024,
             region_number: 1,

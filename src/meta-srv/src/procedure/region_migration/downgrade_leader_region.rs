@@ -150,7 +150,7 @@ impl DowngradeLeaderRegion {
         let leader = &ctx.persistent_ctx.from_peer;
         let msg = MailboxMessage::json_message(
             &format!("Downgrade leader region: {}", region_id),
-            &format!("Meta@{}", ctx.server_addr()),
+            &format!("Metasrv@{}", ctx.server_addr()),
             &format!("Datanode-{}@{}", leader.id, leader.addr),
             common_time::util::current_time_millis(),
             &downgrade_instruction,
@@ -160,12 +160,18 @@ impl DowngradeLeaderRegion {
         })?;
 
         let ch = Channel::Datanode(leader.id);
+        let now = Instant::now();
         let receiver = ctx.mailbox.send(&ch, msg, operation_timeout).await?;
 
         match receiver.await? {
             Ok(msg) => {
                 let reply = HeartbeatMailbox::json_reply(&msg)?;
-                info!("Downgrade region reply: {:?}", reply);
+                info!(
+                    "Received downgrade region reply: {:?}, region: {}, elapsed: {:?}",
+                    reply,
+                    region_id,
+                    now.elapsed()
+                );
                 let InstructionReply::DowngradeRegion(DowngradeRegionReply {
                     last_entry_id,
                     exists,
@@ -182,8 +188,8 @@ impl DowngradeLeaderRegion {
                 if error.is_some() {
                     return error::RetryLaterSnafu {
                         reason: format!(
-                            "Failed to downgrade the region {} on Datanode {:?}, error: {:?}",
-                            region_id, leader, error
+                            "Failed to downgrade the region {} on Datanode {:?}, error: {:?}, elapsed: {:?}",
+                            region_id, leader, error, now.elapsed()
                         ),
                     }
                     .fail();
@@ -191,13 +197,15 @@ impl DowngradeLeaderRegion {
 
                 if !exists {
                     warn!(
-                        "Trying to downgrade the region {} on Datanode {}, but region doesn't exist!",
-                        region_id, leader
+                        "Trying to downgrade the region {} on Datanode {}, but region doesn't exist!, elapsed: {:?}",
+                        region_id, leader, now.elapsed()
                     );
                 } else {
                     info!(
-                        "Region {} leader is downgraded, last_entry_id: {:?}",
-                        region_id, last_entry_id
+                        "Region {} leader is downgraded, last_entry_id: {:?}, elapsed: {:?}",
+                        region_id,
+                        last_entry_id,
+                        now.elapsed()
                     );
                 }
 
@@ -209,8 +217,9 @@ impl DowngradeLeaderRegion {
             }
             Err(error::Error::MailboxTimeout { .. }) => {
                 let reason = format!(
-                    "Mailbox received timeout for downgrade leader region {region_id} on datanode {:?}", 
+                    "Mailbox received timeout for downgrade leader region {region_id} on datanode {:?}, elapsed: {:?}", 
                     leader,
+                    now.elapsed()
                 );
                 error::RetryLaterSnafu { reason }.fail()
             }
@@ -273,10 +282,11 @@ mod tests {
 
     use super::*;
     use crate::error::Error;
-    use crate::procedure::region_migration::test_util::{
-        new_close_region_reply, new_downgrade_region_reply, send_mock_reply, TestingEnv,
-    };
+    use crate::procedure::region_migration::test_util::TestingEnv;
     use crate::procedure::region_migration::{ContextFactory, PersistentContext};
+    use crate::procedure::test_util::{
+        new_close_region_reply, new_downgrade_region_reply, send_mock_reply,
+    };
 
     fn new_persistent_context() -> PersistentContext {
         PersistentContext {
@@ -285,7 +295,6 @@ mod tests {
             from_peer: Peer::empty(1),
             to_peer: Peer::empty(2),
             region_id: RegionId::new(1024, 1),
-            cluster_id: 0,
             timeout: Duration::from_millis(1000),
         }
     }

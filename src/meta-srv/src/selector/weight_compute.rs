@@ -94,7 +94,9 @@ impl WeightCompute for RegionNumsBasedWeightCompute {
 mod tests {
     use std::collections::HashMap;
 
-    use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue, RegionStat, Stat};
+    use common_meta::datanode::{
+        DatanodeStatKey, DatanodeStatValue, RegionManifestInfo, RegionStat, Stat,
+    };
     use common_meta::peer::Peer;
     use store_api::region_engine::RegionRole;
     use store_api::storage::RegionId;
@@ -104,26 +106,17 @@ mod tests {
     #[test]
     fn test_weight_compute() {
         let mut stat_kvs: HashMap<DatanodeStatKey, DatanodeStatValue> = HashMap::default();
-        let stat_key = DatanodeStatKey {
-            cluster_id: 1,
-            node_id: 1,
-        };
+        let stat_key = DatanodeStatKey { node_id: 1 };
         let stat_val = DatanodeStatValue {
             stats: vec![mock_stat_1()],
         };
         stat_kvs.insert(stat_key, stat_val);
-        let stat_key = DatanodeStatKey {
-            cluster_id: 1,
-            node_id: 2,
-        };
+        let stat_key = DatanodeStatKey { node_id: 2 };
         let stat_val = DatanodeStatValue {
             stats: vec![mock_stat_2()],
         };
         stat_kvs.insert(stat_key, stat_val);
-        let stat_key = DatanodeStatKey {
-            cluster_id: 1,
-            node_id: 3,
-        };
+        let stat_key = DatanodeStatKey { node_id: 3 };
         let stat_val = DatanodeStatValue {
             stats: vec![mock_stat_3()],
         };
@@ -198,6 +191,10 @@ mod tests {
                 manifest_size: 0,
                 sst_size: 0,
                 index_size: 0,
+                region_manifest: RegionManifestInfo::Mito {
+                    manifest_version: 0,
+                    flushed_entry_id: 0,
+                },
             }],
             ..Default::default()
         }
@@ -219,6 +216,10 @@ mod tests {
                 manifest_size: 0,
                 sst_size: 0,
                 index_size: 0,
+                region_manifest: RegionManifestInfo::Mito {
+                    manifest_version: 0,
+                    flushed_entry_id: 0,
+                },
             }],
             ..Default::default()
         }
@@ -240,6 +241,10 @@ mod tests {
                 manifest_size: 0,
                 sst_size: 0,
                 index_size: 0,
+                region_manifest: RegionManifestInfo::Mito {
+                    manifest_version: 0,
+                    flushed_entry_id: 0,
+                },
             }],
             ..Default::default()
         }

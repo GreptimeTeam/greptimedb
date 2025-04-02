@@ -22,7 +22,7 @@ use rand::prelude::SliceRandom;
 use crate::cluster::MetaPeerClientBuilder;
 use crate::error::Result;
 use crate::metasrv::SelectorContext;
-use crate::selector::{Namespace, Selector, SelectorOptions};
+use crate::selector::{Selector, SelectorOptions};
 
 /// Returns [SelectorContext] for test purpose.
 pub fn new_test_selector_context() -> SelectorContext {
@@ -60,13 +60,8 @@ impl Selector for RandomNodeSelector {
     type Context = SelectorContext;
     type Output = Vec<Peer>;
 
-    async fn select(
-        &self,
-        _ns: Namespace,
-        _ctx: &Self::Context,
-        _opts: SelectorOptions,
-    ) -> Result<Self::Output> {
-        let mut rng = rand::thread_rng();
+    async fn select(&self, _ctx: &Self::Context, _opts: SelectorOptions) -> Result<Self::Output> {
+        let mut rng = rand::rng();
         let mut nodes = self.nodes.clone();
         nodes.shuffle(&mut rng);
         Ok(nodes)

@@ -19,7 +19,9 @@ use common_error::define_into_tonic_status;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use session::ReadPreference;
 use snafu::{Location, Snafu};
+use store_api::storage::RegionId;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -140,9 +142,14 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to find table route for table id {}", table_id))]
-    FindTableRoute {
-        table_id: u32,
+    #[snafu(display(
+        "Failed to find region peer for region id {}, read preference: {}",
+        region_id,
+        read_preference
+    ))]
+    FindRegionPeer {
+        region_id: RegionId,
+        read_preference: ReadPreference,
         #[snafu(implicit)]
         location: Location,
         source: partition::error::Error,
@@ -236,6 +243,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         source: servers::error::Error,
+    },
+
+    #[snafu(display("Failed to create logical plan for prometheus label values query"))]
+    PrometheusLabelValuesQueryPlan {
+        #[snafu(implicit)]
+        location: Location,
+        source: query::promql::error::Error,
     },
 
     #[snafu(display("Failed to describe schema for given statement"))]
@@ -366,6 +380,8 @@ impl ErrorExt for Error {
             | Error::PrometheusMetricNamesQueryPlan { source, .. }
             | Error::ExecutePromql { source, .. } => source.status_code(),
 
+            Error::PrometheusLabelValuesQueryPlan { source, .. } => source.status_code(),
+
             Error::CollectRecordbatch { .. } => StatusCode::EngineExecuteQuery,
 
             Error::SqlExecIntercepted { source, .. } => source.status_code(),
@@ -401,7 +417,7 @@ impl ErrorExt for Error {
             Error::External { source, .. } | Error::InitPlugin { source, .. } => {
                 source.status_code()
             }
-            Error::FindTableRoute { source, .. } => source.status_code(),
+            Error::FindRegionPeer { source, .. } => source.status_code(),
 
             Error::TableOperation { source, .. } => source.status_code(),
 

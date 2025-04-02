@@ -29,6 +29,7 @@ members = [
     "src/common/query",
     "src/common/recordbatch",
     "src/common/runtime",
+    "src/common/session",
     "src/common/substrait",
     "src/common/telemetry",
     "src/common/test-util",
@@ -67,7 +68,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.12.0"
+version = "0.14.0"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -88,7 +89,7 @@ rust.unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
 #
 # See for more detaiils: https://github.com/rust-lang/cargo/issues/11329
 ahash = { version = "0.8", features = ["compile-time-rng"] }
-aquamarine = "0.3"
+aquamarine = "0.6"
 arrow = { version = "53.0.0", features = ["prettyprint"] }
 arrow-array = { version = "53.0.0", default-features = false, features = ["chrono-tz"] }
 arrow-flight = "53.0"
@@ -99,9 +100,9 @@ async-trait = "0.1"
 # Remember to update axum-extra, axum-macros when updating axum
 axum = "0.8"
 axum-extra = "0.10"
-axum-macros = "0.4"
+axum-macros = "0.5"
 backon = "1"
-base64 = "0.21"
+base64 = "0.22"
 bigdecimal = "0.4.2"
 bitflags = "2.4.1"
 bytemuck = "1.12"
@@ -111,7 +112,7 @@ chrono-tz = "0.10.1"
 clap = { version = "4.4", features = ["derive"] }
 config = "0.13.0"
 crossbeam-utils = "0.8"
-dashmap = "5.4"
+dashmap = "6.1"
 datafusion = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
 datafusion-common = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
 datafusion-expr = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
@@ -121,31 +122,31 @@ datafusion-physical-expr = { git = "https://github.com/apache/datafusion.git", r
 datafusion-physical-plan = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
 datafusion-sql = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
 datafusion-substrait = { git = "https://github.com/apache/datafusion.git", rev = "2464703c84c400a09cc59277018813f0e797bb4e" }
-deadpool = "0.10"
-deadpool-postgres = "0.12"
-derive_builder = "0.12"
+deadpool = "0.12"
+deadpool-postgres = "0.14"
+derive_builder = "0.20"
 dotenv = "0.15"
 etcd-client = "0.14"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "a25adc8a01340231121646d8f0a29d0e92f45461" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "103948cbce833e1a17ee7083f5ba79564d08d6ec" }
 hex = "0.4"
 http = "1"
 humantime = "2.1"
 humantime-serde = "1.1"
 hyper = "1.1"
 hyper-util = "0.1"
-itertools = "0.10"
+itertools = "0.14"
 jsonb = { git = "https://github.com/databendlabs/jsonb.git", rev = "8c8d2fc294a39f3ff08909d60f718639cfba3875", default-features = false }
 lazy_static = "1.4"
 local-ip-address = "0.6"
 loki-proto = { git = "https://github.com/GreptimeTeam/loki-proto.git", rev = "1434ecf23a2654025d86188fb5205e7a74b225d3" }
 meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "5618e779cf2bb4755b499c630fba4c35e91898cb" }
-mockall = "0.11.4"
+mockall = "0.13"
 moka = "0.12"
 nalgebra = "0.33"
-notify = "6.1"
+notify = "8.0"
 num_cpus = "1.16"
 once_cell = "1.18"
 opentelemetry-proto = { version = "0.27", features = [
@@ -160,13 +161,11 @@ parquet = { version = "53.0.0", default-features = false, features = ["arrow", "
 paste = "1.0"
 pin-project = "1.0"
 prometheus = { version = "0.13.3", features = ["process"] }
-promql-parser = { git = "https://github.com/GreptimeTeam/promql-parser.git", features = [
-    "ser",
-], rev = "27abb8e16003a50c720f00d6c85f41f5fa2a2a8e" }
+promql-parser = { version = "0.5", features = ["ser"] }
 prost = "0.13"
 raft-engine = { version = "0.4.1", default-features = false }
-rand = "0.8"
-ratelimit = "0.9"
+rand = "0.9"
+ratelimit = "0.10"
 regex = "1.8"
 regex-automata = "0.4"
 reqwest = { version = "0.12", default-features = false, features = [
@@ -178,7 +177,7 @@ reqwest = { version = "0.12", default-features = false, features = [
 rskafka = { git = "https://github.com/influxdata/rskafka.git", rev = "75535b5ad9bae4a5dbb582c82e44dfd81ec10105", features = [
     "transport-tls",
 ] }
-rstest = "0.21"
+rstest = "0.25"
 rstest_reuse = "0.7"
 rust_decimal = "1.33"
 rustc-hash = "2.0"
@@ -186,17 +185,24 @@ rustls = { version = "0.23.20", default-features = false } # override by patch, 
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
 serde_with = "3"
-shadow-rs = "0.38"
+shadow-rs = "1.1"
+simd-json = "0.15"
 similar-asserts = "1.6.0"
 smallvec = { version = "1", features = ["serde"] }
 snafu = "0.8"
-sysinfo = "0.30"
+sqlx = { version = "0.8", features = [
+    "runtime-tokio-rustls",
+    "mysql",
+    "postgres",
+    "chrono",
+] }
+sysinfo = "0.33"
 # on branch v0.52.x
 sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "71dd86058d2af97b9925093d40c4e03360403170", features = [
     "visitor",
     "serde",
 ] } # on branch v0.44.x
-strum = { version = "0.25", features = ["derive"] }
+strum = { version = "0.27", features = ["derive"] }
 tempfile = "3"
 tokio = { version = "1.40", features = ["full"] }
 tokio-postgres = "0.7"
@@ -243,6 +249,7 @@ common-procedure-test = { path = "src/common/procedure-test" }
 common-query = { path = "src/common/query" }
 common-recordbatch = { path = "src/common/recordbatch" }
 common-runtime = { path = "src/common/runtime" }
+common-session = { path = "src/common/session" }
 common-telemetry = { path = "src/common/telemetry" }
 common-test-util = { path = "src/common/test-util" }
 common-time = { path = "src/common/time" }

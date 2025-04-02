@@ -39,7 +39,6 @@ use common_meta::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
 use common_meta::lock_key::{CatalogLock, RegionLock, SchemaLock, TableLock};
 use common_meta::peer::Peer;
 use common_meta::region_keeper::{MemoryRegionKeeperRef, OperatingRegionGuard};
-use common_meta::ClusterId;
 use common_procedure::error::{
     Error as ProcedureError, FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu,
 };
@@ -70,8 +69,6 @@ pub struct PersistentContext {
     catalog: String,
     /// The table schema.
     schema: String,
-    /// The Id of the cluster.
-    cluster_id: ClusterId,
     /// The [Peer] of migration source.
     from_peer: Peer,
     /// The [Peer] of migration destination.
@@ -273,12 +270,11 @@ impl Context {
     /// The original failure detector was removed once the procedure was triggered.
     /// Now, we need to register the failure detector for the failed region again.
     pub async fn register_failure_detectors(&self) {
-        let cluster_id = self.persistent_ctx.cluster_id;
         let datanode_id = self.persistent_ctx.from_peer.id;
         let region_id = self.persistent_ctx.region_id;
 
         self.region_failure_detector_controller
-            .register_failure_detectors(vec![(cluster_id, datanode_id, region_id)])
+            .register_failure_detectors(vec![(datanode_id, region_id)])
             .await;
     }
 
@@ -287,12 +283,11 @@ impl Context {
     /// The original failure detectors was removed once the procedure was triggered.
     /// However, the `from_peer` may still send the heartbeats contains the failed region.
     pub async fn deregister_failure_detectors(&self) {
-        let cluster_id = self.persistent_ctx.cluster_id;
         let datanode_id = self.persistent_ctx.from_peer.id;
         let region_id = self.persistent_ctx.region_id;
 
         self.region_failure_detector_controller
-            .deregister_failure_detectors(vec![(cluster_id, datanode_id, region_id)])
+            .deregister_failure_detectors(vec![(datanode_id, region_id)])
             .await;
     }
 
@@ -458,7 +453,6 @@ impl RegionMigrationProcedure {
         } = serde_json::from_str(json).context(FromJsonSnafu)?;
 
         let guard = tracker.insert_running_procedure(&RegionMigrationProcedureTask {
-            cluster_id: persistent_ctx.cluster_id,
             region_id: persistent_ctx.region_id,
             from_peer: persistent_ctx.from_peer.clone(),
             to_peer: persistent_ctx.to_peer.clone(),
@@ -580,12 +574,14 @@ mod tests {
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::rpc::router::{Region, RegionRoute};
 
-    use super::migration_end::RegionMigrationEnd;
     use super::update_metadata::UpdateMetadata;
     use super::*;
     use crate::handler::HeartbeatMailbox;
     use crate::procedure::region_migration::open_candidate_region::OpenCandidateRegion;
     use crate::procedure::region_migration::test_util::*;
+    use crate::procedure::test_util::{
+        new_downgrade_region_reply, new_open_region_reply, new_upgrade_region_reply,
+    };
     use crate::service::mailbox::Channel;
 
     fn new_persistent_context() -> PersistentContext {
@@ -620,7 +616,7 @@ mod tests {
         let procedure = RegionMigrationProcedure::new(persistent_context, context, None);
 
         let serialized = procedure.dump().unwrap();
-        let expected = r#"{"persistent_ctx":{"catalog":"greptime","schema":"public","cluster_id":0,"from_peer":{"id":1,"addr":""},"to_peer":{"id":2,"addr":""},"region_id":4398046511105,"timeout":"10s"},"state":{"region_migration_state":"RegionMigrationStart"}}"#;
+        let expected = r#"{"persistent_ctx":{"catalog":"greptime","schema":"public","from_peer":{"id":1,"addr":""},"to_peer":{"id":2,"addr":""},"region_id":4398046511105,"timeout":"10s"},"state":{"region_migration_state":"RegionMigrationStart"}}"#;
         assert_eq!(expected, serialized);
     }
 
@@ -628,7 +624,7 @@ mod tests {
     fn test_backward_compatibility() {
         let persistent_ctx = test_util::new_persistent_context(1, 2, RegionId::new(1024, 1));
         // NOTES: Changes it will break backward compatibility.
-        let serialized = r#"{"catalog":"greptime","schema":"public","cluster_id":0,"from_peer":{"id":1,"addr":""},"to_peer":{"id":2,"addr":""},"region_id":4398046511105}"#;
+        let serialized = r#"{"catalog":"greptime","schema":"public","from_peer":{"id":1,"addr":""},"to_peer":{"id":2,"addr":""},"region_id":4398046511105}"#;
         let deserialized: PersistentContext = serde_json::from_str(serialized).unwrap();
 
         assert_eq!(persistent_ctx, deserialized);
@@ -640,15 +636,8 @@ mod tests {
     #[async_trait::async_trait]
     #[typetag::serde]
     impl State for MockState {
-        async fn next(&mut self, ctx: &mut Context) -> Result<(Box<dyn State>, Status)> {
-            let pc = &mut ctx.persistent_ctx;
-
-            if pc.cluster_id == 2 {
-                Ok((Box::new(RegionMigrationEnd), Status::done()))
-            } else {
-                pc.cluster_id += 1;
-                Ok((Box::new(MockState), Status::executing(false)))
-            }
+        async fn next(&mut self, _ctx: &mut Context) -> Result<(Box<dyn State>, Status)> {
+            Ok((Box::new(MockState), Status::done()))
         }
 
         fn as_any(&self) -> &dyn Any {
@@ -692,7 +681,6 @@ mod tests {
         for _ in 1..3 {
             status = Some(procedure.execute(&ctx).await.unwrap());
         }
-        assert_eq!(procedure.context.persistent_ctx.cluster_id, 2);
         assert!(status.unwrap().is_done());
     }
 

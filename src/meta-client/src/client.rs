@@ -21,9 +21,11 @@ mod cluster;
 mod store;
 mod util;
 
+use std::fmt::Debug;
 use std::sync::Arc;
 
 use api::v1::meta::{ProcedureDetailResponse, Role};
+pub use ask_leader::AskLeader;
 use cluster::Client as ClusterClient;
 pub use cluster::ClusterKvBackend;
 use common_error::ext::BoxedError;
@@ -33,13 +35,16 @@ use common_meta::cluster::{
 };
 use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue, RegionStat};
 use common_meta::ddl::{ExecutorContext, ProcedureExecutor};
-use common_meta::error::{self as meta_error, ExternalSnafu, Result as MetaResult};
+use common_meta::error::{
+    self as meta_error, ExternalSnafu, Result as MetaResult, UnsupportedSnafu,
+};
 use common_meta::key::flow::flow_state::{FlowStat, FlowStateManager};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::range_stream::PaginationStream;
 use common_meta::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::procedure::{
-    MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
+    AddRegionFollowerRequest, MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
+    RemoveRegionFollowerRequest,
 };
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
@@ -47,7 +52,6 @@ use common_meta::rpc::store::{
     DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
 };
 use common_meta::rpc::KeyValue;
-use common_meta::ClusterId;
 use common_telemetry::info;
 use futures::TryStreamExt;
 use heartbeat::Client as HeartbeatClient;
@@ -61,7 +65,7 @@ use crate::error::{
     Result,
 };
 
-pub type Id = (u64, u64);
+pub type Id = u64;
 
 const DEFAULT_ASK_LEADER_MAX_RETRY: usize = 3;
 const DEFAULT_SUBMIT_DDL_MAX_RETRY: usize = 3;
@@ -75,24 +79,25 @@ pub struct MetaClientBuilder {
     enable_store: bool,
     enable_procedure: bool,
     enable_access_cluster_info: bool,
+    region_follower: Option<RegionFollowerClientRef>,
     channel_manager: Option<ChannelManager>,
     ddl_channel_manager: Option<ChannelManager>,
     heartbeat_channel_manager: Option<ChannelManager>,
 }
 
 impl MetaClientBuilder {
-    pub fn new(cluster_id: ClusterId, member_id: u64, role: Role) -> Self {
+    pub fn new(member_id: u64, role: Role) -> Self {
         Self {
-            id: (cluster_id, member_id),
+            id: member_id,
             role,
             ..Default::default()
         }
     }
 
     /// Returns the role of Frontend's default options.
-    pub fn frontend_default_options(cluster_id: ClusterId) -> Self {
+    pub fn frontend_default_options() -> Self {
         // Frontend does not need a member id.
-        Self::new(cluster_id, 0, Role::Frontend)
+        Self::new(0, Role::Frontend)
             .enable_store()
             .enable_heartbeat()
             .enable_procedure()
@@ -100,15 +105,15 @@ impl MetaClientBuilder {
     }
 
     /// Returns the role of Datanode's default options.
-    pub fn datanode_default_options(cluster_id: ClusterId, member_id: u64) -> Self {
-        Self::new(cluster_id, member_id, Role::Datanode)
+    pub fn datanode_default_options(member_id: u64) -> Self {
+        Self::new(member_id, Role::Datanode)
             .enable_store()
             .enable_heartbeat()
     }
 
     /// Returns the role of Flownode's default options.
-    pub fn flownode_default_options(cluster_id: ClusterId, member_id: u64) -> Self {
-        Self::new(cluster_id, member_id, Role::Flownode)
+    pub fn flownode_default_options(member_id: u64) -> Self {
+        Self::new(member_id, Role::Flownode)
             .enable_store()
             .enable_heartbeat()
             .enable_procedure()
@@ -163,6 +168,13 @@ impl MetaClientBuilder {
         }
     }
 
+    pub fn with_region_follower(self, region_follower: RegionFollowerClientRef) -> Self {
+        Self {
+            region_follower: Some(region_follower),
+            ..self
+        }
+    }
+
     pub fn build(self) -> MetaClient {
         let mut client = if let Some(mgr) = self.channel_manager {
             MetaClient::with_channel_manager(self.id, mgr)
@@ -205,6 +217,10 @@ impl MetaClientBuilder {
             ))
         }
 
+        if let Some(region_follower) = self.region_follower {
+            client.region_follower = Some(region_follower);
+        }
+
         client
     }
 }
@@ -217,6 +233,19 @@ pub struct MetaClient {
     store: Option<StoreClient>,
     procedure: Option<ProcedureClient>,
     cluster: Option<ClusterClient>,
+    region_follower: Option<RegionFollowerClientRef>,
+}
+
+pub type RegionFollowerClientRef = Arc<dyn RegionFollowerClient>;
+
+/// A trait for clients that can manage region followers.
+#[async_trait::async_trait]
+pub trait RegionFollowerClient: Sync + Send + Debug {
+    async fn add_region_follower(&self, request: AddRegionFollowerRequest) -> Result<()>;
+
+    async fn remove_region_follower(&self, request: RemoveRegionFollowerRequest) -> Result<()>;
+
+    async fn start(&self, urls: &[&str]) -> Result<()>;
 }
 
 #[async_trait::async_trait]
@@ -241,6 +270,44 @@ impl ProcedureExecutor for MetaClient {
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)
+    }
+
+    async fn add_region_follower(
+        &self,
+        _ctx: &ExecutorContext,
+        request: AddRegionFollowerRequest,
+    ) -> MetaResult<()> {
+        if let Some(region_follower) = &self.region_follower {
+            region_follower
+                .add_region_follower(request)
+                .await
+                .map_err(BoxedError::new)
+                .context(meta_error::ExternalSnafu)
+        } else {
+            UnsupportedSnafu {
+                operation: "add_region_follower",
+            }
+            .fail()
+        }
+    }
+
+    async fn remove_region_follower(
+        &self,
+        _ctx: &ExecutorContext,
+        request: RemoveRegionFollowerRequest,
+    ) -> MetaResult<()> {
+        if let Some(region_follower) = &self.region_follower {
+            region_follower
+                .remove_region_follower(request)
+                .await
+                .map_err(BoxedError::new)
+                .context(meta_error::ExternalSnafu)
+        } else {
+            UnsupportedSnafu {
+                operation: "remove_region_follower",
+            }
+            .fail()
+        }
     }
 
     async fn query_procedure_state(
@@ -273,15 +340,9 @@ impl ClusterInfo for MetaClient {
         let cluster_client = self.cluster_client()?;
 
         let (get_metasrv_nodes, nodes_key_prefix) = match role {
-            None => (
-                true,
-                Some(NodeInfoKey::key_prefix_with_cluster_id(self.id.0)),
-            ),
+            None => (true, Some(NodeInfoKey::key_prefix())),
             Some(ClusterRole::Metasrv) => (true, None),
-            Some(role) => (
-                false,
-                Some(NodeInfoKey::key_prefix_with_role(self.id.0, role)),
-            ),
+            Some(role) => (false, Some(NodeInfoKey::key_prefix_with_role(role))),
         };
 
         let mut nodes = if get_metasrv_nodes {
@@ -291,7 +352,7 @@ impl ClusterInfo for MetaClient {
             followers
                 .into_iter()
                 .map(|node| NodeInfo {
-                    peer: node.peer.map(|p| p.into()).unwrap_or_default(),
+                    peer: node.peer.unwrap_or_default(),
                     last_activity_ts,
                     status: NodeStatus::Metasrv(MetasrvStatus { is_leader: false }),
                     version: node.version,
@@ -299,7 +360,7 @@ impl ClusterInfo for MetaClient {
                     start_time_ms: node.start_time_ms,
                 })
                 .chain(leader.into_iter().map(|node| NodeInfo {
-                    peer: node.peer.map(|p| p.into()).unwrap_or_default(),
+                    peer: node.peer.unwrap_or_default(),
                     last_activity_ts,
                     status: NodeStatus::Metasrv(MetasrvStatus { is_leader: true }),
                     version: node.version,
@@ -324,7 +385,7 @@ impl ClusterInfo for MetaClient {
 
     async fn list_region_stats(&self) -> Result<Vec<RegionStat>> {
         let cluster_kv_backend = Arc::new(self.cluster_client()?);
-        let range_prefix = DatanodeStatKey::key_prefix_with_cluster_id(self.id.0);
+        let range_prefix = DatanodeStatKey::prefix_key();
         let req = RangeRequest::new().with_prefix(range_prefix);
         let stream =
             PaginationStream::new(cluster_kv_backend, req, 256, decode_stats).into_stream();
@@ -342,6 +403,15 @@ impl ClusterInfo for MetaClient {
 
         Ok(region_stats)
     }
+
+    async fn list_flow_stats(&self) -> Result<Option<FlowStat>> {
+        let cluster_backend = ClusterKvBackend::new(Arc::new(self.cluster_client()?));
+        let cluster_backend = Arc::new(cluster_backend) as KvBackendRef;
+        let flow_state_manager = FlowStateManager::new(cluster_backend);
+        let res = flow_state_manager.get().await.context(GetFlowStatSnafu)?;
+
+        Ok(res.map(|r| r.into()))
+    }
 }
 
 fn decode_stats(kv: KeyValue) -> MetaResult<DatanodeStatValue> {
@@ -351,15 +421,6 @@ fn decode_stats(kv: KeyValue) -> MetaResult<DatanodeStatValue> {
 }
 
 impl MetaClient {
-    pub async fn list_flow_stats(&self) -> Result<Option<FlowStat>> {
-        let cluster_backend = ClusterKvBackend::new(Arc::new(self.cluster_client()?));
-        let cluster_backend = Arc::new(cluster_backend) as KvBackendRef;
-        let flow_state_manager = FlowStateManager::new(cluster_backend);
-        let res = flow_state_manager.get().await.context(GetFlowStatSnafu)?;
-
-        Ok(res.map(|r| r.into()))
-    }
-
     pub fn new(id: Id) -> Self {
         Self {
             id,
@@ -382,6 +443,11 @@ impl MetaClient {
     {
         info!("MetaClient channel config: {:?}", self.channel_config());
 
+        if let Some(client) = &mut self.region_follower {
+            let urls = urls.as_ref().iter().map(|u| u.as_ref()).collect::<Vec<_>>();
+            client.start(&urls).await?;
+            info!("Region follower client started");
+        }
         if let Some(client) = &mut self.heartbeat {
             client.start(urls.clone()).await?;
             info!("Heartbeat client started");
@@ -555,6 +621,8 @@ impl MetaClient {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use api::v1::meta::{HeartbeatRequest, Peer};
     use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
     use rand::Rng;
@@ -624,31 +692,31 @@ mod tests {
     async fn test_meta_client_builder() {
         let urls = &["127.0.0.1:3001", "127.0.0.1:3002"];
 
-        let mut meta_client = MetaClientBuilder::new(0, 0, Role::Datanode)
+        let mut meta_client = MetaClientBuilder::new(0, Role::Datanode)
             .enable_heartbeat()
             .build();
         let _ = meta_client.heartbeat_client().unwrap();
         assert!(meta_client.store_client().is_err());
         meta_client.start(urls).await.unwrap();
 
-        let mut meta_client = MetaClientBuilder::new(0, 0, Role::Datanode).build();
+        let mut meta_client = MetaClientBuilder::new(0, Role::Datanode).build();
         assert!(meta_client.heartbeat_client().is_err());
         assert!(meta_client.store_client().is_err());
         meta_client.start(urls).await.unwrap();
 
-        let mut meta_client = MetaClientBuilder::new(0, 0, Role::Datanode)
+        let mut meta_client = MetaClientBuilder::new(0, Role::Datanode)
             .enable_store()
             .build();
         assert!(meta_client.heartbeat_client().is_err());
         let _ = meta_client.store_client().unwrap();
         meta_client.start(urls).await.unwrap();
 
-        let mut meta_client = MetaClientBuilder::new(1, 2, Role::Datanode)
+        let mut meta_client = MetaClientBuilder::new(2, Role::Datanode)
             .enable_heartbeat()
             .enable_store()
             .build();
-        assert_eq!(1, meta_client.id().0);
-        assert_eq!(2, meta_client.id().1);
+        assert_eq!(2, meta_client.id());
+        assert_eq!(2, meta_client.id());
         let _ = meta_client.heartbeat_client().unwrap();
         let _ = meta_client.store_client().unwrap();
         meta_client.start(urls).await.unwrap();
@@ -657,7 +725,7 @@ mod tests {
     #[tokio::test]
     async fn test_not_start_heartbeat_client() {
         let urls = &["127.0.0.1:3001", "127.0.0.1:3002"];
-        let mut meta_client = MetaClientBuilder::new(0, 0, Role::Datanode)
+        let mut meta_client = MetaClientBuilder::new(0, Role::Datanode)
             .enable_store()
             .build();
         meta_client.start(urls).await.unwrap();
@@ -668,7 +736,7 @@ mod tests {
     #[tokio::test]
     async fn test_not_start_store_client() {
         let urls = &["127.0.0.1:3001", "127.0.0.1:3002"];
-        let mut meta_client = MetaClientBuilder::new(0, 0, Role::Datanode)
+        let mut meta_client = MetaClientBuilder::new(0, Role::Datanode)
             .enable_heartbeat()
             .build();
 
@@ -688,6 +756,9 @@ mod tests {
         let tc = new_client("test_heartbeat").await;
         let (sender, mut receiver) = tc.client.heartbeat().await.unwrap();
         // send heartbeats
+
+        let request_sent = Arc::new(AtomicUsize::new(0));
+        let request_sent_clone = request_sent.clone();
         let _handle = tokio::spawn(async move {
             for _ in 0..5 {
                 let req = HeartbeatRequest {
@@ -698,14 +769,24 @@ mod tests {
                     ..Default::default()
                 };
                 sender.send(req).await.unwrap();
+                request_sent_clone.fetch_add(1, Ordering::Relaxed);
             }
         });
 
-        let _handle = tokio::spawn(async move {
-            while let Some(res) = receiver.message().await.unwrap() {
-                assert_eq!(1000, res.header.unwrap().cluster_id);
+        let heartbeat_count = Arc::new(AtomicUsize::new(0));
+        let heartbeat_count_clone = heartbeat_count.clone();
+        let handle = tokio::spawn(async move {
+            while let Some(_resp) = receiver.message().await.unwrap() {
+                heartbeat_count_clone.fetch_add(1, Ordering::Relaxed);
             }
         });
+
+        handle.await.unwrap();
+        //+1 for the initial response
+        assert_eq!(
+            request_sent.load(Ordering::Relaxed) + 1,
+            heartbeat_count.load(Ordering::Relaxed)
+        );
     }
 
     #[tokio::test]
@@ -977,11 +1058,11 @@ mod tests {
         let tx = new_client("test_cluster_client").await;
         let in_memory = tx.in_memory().unwrap();
         let cluster_client = tx.client.cluster_client().unwrap();
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         // Generates rough 10MB data, which is larger than the default grpc message size limit.
         for i in 0..10 {
-            let data: Vec<u8> = (0..1024 * 1024).map(|_| rng.gen()).collect();
+            let data: Vec<u8> = (0..1024 * 1024).map(|_| rng.random()).collect();
             in_memory
                 .put(
                     PutRequest::new()

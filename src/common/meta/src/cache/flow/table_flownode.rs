@@ -16,7 +16,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
-use futures::TryStreamExt;
 use moka::future::Cache;
 use moka::ops::compute::Op;
 use table::metadata::TableId;
@@ -54,9 +53,13 @@ fn init_factory(table_flow_manager: TableFlowManagerRef) -> Initializer<TableId,
         Box::pin(async move {
             table_flow_manager
                 .flows(table_id)
-                .map_ok(|(key, value)| (key.flownode_id(), value.peer))
-                .try_collect::<HashMap<_, _>>()
                 .await
+                .map(|flows| {
+                    flows
+                        .into_iter()
+                        .map(|(key, value)| (key.flownode_id(), value.peer))
+                        .collect::<HashMap<_, _>>()
+                })
                 // We must cache the `HashSet` even if it's empty,
                 // to avoid future requests to the remote storage next time;
                 // If the value is added to the remote storage,
@@ -189,6 +192,8 @@ mod tests {
                     expire_after: Some(300),
                     comment: "comment".to_string(),
                     options: Default::default(),
+                    created_time: chrono::Utc::now(),
+                    updated_time: chrono::Utc::now(),
                 },
                 (1..=3)
                     .map(|i| {

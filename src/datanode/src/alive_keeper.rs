@@ -380,7 +380,9 @@ impl CountdownTask {
                             }
                         },
                         Some(CountdownCommand::Reset((role, deadline))) => {
-                            let _ = self.region_server.set_region_role(self.region_id, role);
+                            if let Err(err) = self.region_server.set_region_role(self.region_id, role) {
+                                error!(err; "Failed to set region role to {role} for region {region_id}");
+                            }
                             trace!(
                                 "Reset deadline of region {region_id} to approximately {} seconds later.",
                                 (deadline - Instant::now()).as_secs_f32(),
@@ -402,7 +404,9 @@ impl CountdownTask {
                 }
                 () = &mut countdown => {
                     warn!("The region {region_id} lease is expired, convert region to follower.");
-                    let _ = self.region_server.set_region_role(self.region_id, RegionRole::Follower);
+                    if let Err(err) = self.region_server.set_region_role(self.region_id, RegionRole::Follower) {
+                        error!(err; "Failed to set region role to follower for region {region_id}");
+                    }
                     // resets the countdown.
                     let far_future = Instant::now() + Duration::from_secs(86400 * 365 * 30);
                     countdown.as_mut().reset(far_future);
@@ -468,6 +472,7 @@ mod test {
                 &[GrantedRegion {
                     region_id: region_id.as_u64(),
                     role: api::v1::meta::RegionRole::Leader.into(),
+                    manifest_version: 0,
                 }],
                 Instant::now() + Duration::from_millis(200),
             )

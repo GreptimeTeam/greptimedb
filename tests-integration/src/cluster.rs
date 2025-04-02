@@ -45,10 +45,10 @@ use common_test_util::temp_dir::create_temp_dir;
 use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use datanode::config::{DatanodeOptions, ObjectStoreConfig};
 use datanode::datanode::{Datanode, DatanodeBuilder, ProcedureConfig};
-use frontend::frontend::FrontendOptions;
+use frontend::frontend::{Frontend, FrontendOptions};
 use frontend::heartbeat::HeartbeatTask;
 use frontend::instance::builder::FrontendBuilder;
-use frontend::instance::{FrontendInstance, Instance as FeInstance};
+use frontend::instance::Instance as FeInstance;
 use hyper_util::rt::TokioIo;
 use meta_client::client::MetaClientBuilder;
 use meta_srv::cluster::MetaPeerClientRef;
@@ -58,6 +58,7 @@ use query::stats::StatementStatistics;
 use servers::grpc::flight::FlightCraftWrapper;
 use servers::grpc::region_server::RegionServerRequestHandler;
 use servers::heartbeat_options::HeartbeatOptions;
+use servers::server::ServerHandlers;
 use servers::Mode;
 use tempfile::TempDir;
 use tonic::codec::CompressionEncoding;
@@ -78,7 +79,13 @@ pub struct GreptimeDbCluster {
     pub datanode_instances: HashMap<DatanodeId, Datanode>,
     pub kv_backend: KvBackendRef,
     pub metasrv: Arc<Metasrv>,
-    pub frontend: Arc<FeInstance>,
+    pub frontend: Arc<Frontend>,
+}
+
+impl GreptimeDbCluster {
+    pub fn fe_instance(&self) -> &Arc<FeInstance> {
+        &self.frontend.instance
+    }
 }
 
 pub struct GreptimeDbClusterBuilder {
@@ -184,6 +191,7 @@ impl GreptimeDbClusterBuilder {
                 max_retry_times: 5,
                 retry_delay: Duration::from_secs(1),
                 max_metadata_value_size: None,
+                max_running_procedures: 128,
             },
             wal: self.metasrv_wal_config.clone(),
             server_addr: "127.0.0.1:3002".to_string(),
@@ -210,7 +218,7 @@ impl GreptimeDbClusterBuilder {
 
         let frontend = self.build_frontend(metasrv.clone(), datanode_clients).await;
 
-        test_util::prepare_another_catalog_and_schema(frontend.as_ref()).await;
+        test_util::prepare_another_catalog_and_schema(&frontend.instance).await;
 
         frontend.start().await.unwrap();
 
@@ -243,7 +251,6 @@ impl GreptimeDbClusterBuilder {
 
         for i in 0..datanodes {
             let datanode_id = i as u64 + 1;
-            let mode = Mode::Distributed;
             let mut opts = if let Some(store_config) = &self.store_config {
                 let home_dir = if let Some(home_dir) = &self.shared_home_dir {
                     home_dir.path().to_str().unwrap().to_string()
@@ -256,7 +263,6 @@ impl GreptimeDbClusterBuilder {
                 };
 
                 create_datanode_opts(
-                    mode,
                     store_config.clone(),
                     vec![],
                     home_dir,
@@ -264,7 +270,6 @@ impl GreptimeDbClusterBuilder {
                 )
             } else {
                 let (opts, guard) = create_tmp_dir_and_datanode_opts(
-                    mode,
                     StorageType::File,
                     self.store_providers.clone().unwrap_or_default(),
                     &format!("{}-dn-{}", self.cluster_name, datanode_id),
@@ -308,11 +313,10 @@ impl GreptimeDbClusterBuilder {
         expected_datanodes: usize,
     ) {
         for _ in 0..10 {
-            let alive_datanodes =
-                meta_srv::lease::alive_datanodes(1000, meta_peer_client, u64::MAX)
-                    .await
-                    .unwrap()
-                    .len();
+            let alive_datanodes = meta_srv::lease::alive_datanodes(meta_peer_client, u64::MAX)
+                .await
+                .unwrap()
+                .len();
             if alive_datanodes == expected_datanodes {
                 return;
             }
@@ -322,10 +326,9 @@ impl GreptimeDbClusterBuilder {
     }
 
     async fn create_datanode(&self, opts: DatanodeOptions, metasrv: MockInfo) -> Datanode {
-        let mut meta_client =
-            MetaClientBuilder::datanode_default_options(1000, opts.node_id.unwrap())
-                .channel_manager(metasrv.channel_manager)
-                .build();
+        let mut meta_client = MetaClientBuilder::datanode_default_options(opts.node_id.unwrap())
+            .channel_manager(metasrv.channel_manager)
+            .build();
         meta_client.start(&[&metasrv.server_addr]).await.unwrap();
         let meta_client = Arc::new(meta_client);
 
@@ -339,7 +342,7 @@ impl GreptimeDbClusterBuilder {
                 .build(),
         );
 
-        let mut datanode = DatanodeBuilder::new(opts, Plugins::default())
+        let mut datanode = DatanodeBuilder::new(opts, Plugins::default(), Mode::Distributed)
             .with_kv_backend(meta_backend)
             .with_cache_registry(layered_cache_registry)
             .with_meta_client(meta_client)
@@ -356,8 +359,8 @@ impl GreptimeDbClusterBuilder {
         &self,
         metasrv: MockInfo,
         datanode_clients: Arc<NodeClients>,
-    ) -> Arc<FeInstance> {
-        let mut meta_client = MetaClientBuilder::frontend_default_options(1000)
+    ) -> Arc<Frontend> {
+        let mut meta_client = MetaClientBuilder::frontend_default_options()
             .channel_manager(metasrv.channel_manager)
             .enable_access_cluster_info()
             .build();
@@ -415,12 +418,18 @@ impl GreptimeDbClusterBuilder {
             StatementStatistics::default(),
         )
         .with_local_cache_invalidator(cache_registry)
-        .with_heartbeat_task(heartbeat_task)
         .try_build()
         .await
         .unwrap();
+        let instance = Arc::new(instance);
 
-        Arc::new(instance)
+        Frontend {
+            instance,
+            servers: ServerHandlers::new(),
+            heartbeat_task: Some(heartbeat_task),
+            export_metrics_task: None,
+        }
+        .into()
     }
 }
 

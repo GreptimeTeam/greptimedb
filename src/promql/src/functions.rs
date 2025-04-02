@@ -20,7 +20,9 @@ mod holt_winters;
 mod idelta;
 mod predict_linear;
 mod quantile;
+mod quantile_aggr;
 mod resets;
+mod round;
 #[cfg(test)]
 mod test_util;
 
@@ -38,7 +40,9 @@ pub use holt_winters::HoltWinters;
 pub use idelta::IDelta;
 pub use predict_linear::PredictLinear;
 pub use quantile::QuantileOverTime;
+pub use quantile_aggr::quantile_udaf;
 pub use resets::Resets;
+pub use round::Round;
 
 pub(crate) fn extract_array(columnar_value: &ColumnarValue) -> Result<ArrayRef, DataFusionError> {
     if let ColumnarValue::Array(array) = columnar_value {

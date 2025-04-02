@@ -58,6 +58,15 @@ FROM
     );
 
 SELECT
+    unnest(h3_grid_path_cells(cell1, cell2)) AS path_cells,
+FROM
+    (
+      SELECT
+          h3_string_to_cell('86283082fffffff') AS cell1,
+          h3_string_to_cell('86283470fffffff') AS cell2
+    );
+
+SELECT
     h3_cells_contains('86283470fffffff,862834777ffffff, 862834757ffffff, 86283471fffffff, 862834707ffffff', '8b283470d112fff') AS R00,
     h3_cells_contains('86283470fffffff,862834777ffffff, 862834757ffffff, 86283471fffffff, 862834707ffffff', 604189641792290815) AS R01,
     h3_cells_contains('86283470fffffff,862834777ffffff, 862834757ffffff, 86283471fffffff, 862834707ffffff', 626707639343067135) AS R02;
@@ -110,9 +119,9 @@ SELECT cell,
        s2_cell_parent(cell, 3)
 FROM cell_cte;
 
-SELECT json_encode_path(37.76938, -122.3889, 1728083375::TimestampSecond);
+SELECT UNNEST(geo_path(37.76938, -122.3889, 1728083375::TimestampSecond));
 
-SELECT json_encode_path(lat, lon, ts)
+SELECT UNNEST(geo_path(lat, lon, ts))
 FROM(
         SELECT 37.76938 AS lat, -122.3889 AS lon, 1728083375::TimestampSecond AS ts
         UNION ALL

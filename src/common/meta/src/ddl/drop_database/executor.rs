@@ -98,11 +98,10 @@ impl State for DropDatabaseExecutor {
     async fn next(
         &mut self,
         ddl_ctx: &DdlContext,
-        ctx: &mut DropDatabaseContext,
+        _ctx: &mut DropDatabaseContext,
     ) -> Result<(Box<dyn State>, Status)> {
         self.register_dropping_regions(ddl_ctx)?;
-        let executor =
-            DropTableExecutor::new(ctx.cluster_id, self.table_name.clone(), self.table_id, true);
+        let executor = DropTableExecutor::new(self.table_name.clone(), self.table_id, true);
         // Deletes metadata for table permanently.
         let table_route_value = TableRouteValue::new(
             self.table_id,
@@ -128,7 +127,7 @@ impl State for DropDatabaseExecutor {
             .await?;
         executor.invalidate_table_cache(ddl_ctx).await?;
         executor
-            .on_drop_regions(ddl_ctx, &self.physical_region_routes)
+            .on_drop_regions(ddl_ctx, &self.physical_region_routes, true)
             .await?;
         info!("Table: {}({}) is dropped", self.table_name, self.table_id);
 
@@ -187,7 +186,7 @@ mod tests {
     async fn test_next_with_physical_table() {
         let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
         let ddl_context = new_ddl_context(node_manager);
-        let physical_table_id = create_physical_table(&ddl_context, 0, "phy").await;
+        let physical_table_id = create_physical_table(&ddl_context, "phy").await;
         let (_, table_route) = ddl_context
             .table_metadata_manager
             .table_route_manager()
@@ -203,7 +202,6 @@ mod tests {
                 DropTableTarget::Physical,
             );
             let mut ctx = DropDatabaseContext {
-                cluster_id: 0,
                 catalog: DEFAULT_CATALOG_NAME.to_string(),
                 schema: DEFAULT_SCHEMA_NAME.to_string(),
                 drop_if_exists: false,
@@ -216,7 +214,6 @@ mod tests {
         }
         // Execute again
         let mut ctx = DropDatabaseContext {
-            cluster_id: 0,
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             drop_if_exists: false,
@@ -239,8 +236,8 @@ mod tests {
     async fn test_next_logical_table() {
         let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
         let ddl_context = new_ddl_context(node_manager);
-        let physical_table_id = create_physical_table(&ddl_context, 0, "phy").await;
-        create_logical_table(ddl_context.clone(), 0, physical_table_id, "metric").await;
+        let physical_table_id = create_physical_table(&ddl_context, "phy").await;
+        create_logical_table(ddl_context.clone(), physical_table_id, "metric").await;
         let logical_table_id = physical_table_id + 1;
         let (_, table_route) = ddl_context
             .table_metadata_manager
@@ -257,7 +254,6 @@ mod tests {
                 DropTableTarget::Logical,
             );
             let mut ctx = DropDatabaseContext {
-                cluster_id: 0,
                 catalog: DEFAULT_CATALOG_NAME.to_string(),
                 schema: DEFAULT_SCHEMA_NAME.to_string(),
                 drop_if_exists: false,
@@ -270,7 +266,6 @@ mod tests {
         }
         // Execute again
         let mut ctx = DropDatabaseContext {
-            cluster_id: 0,
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             drop_if_exists: false,
@@ -345,7 +340,7 @@ mod tests {
     async fn test_next_retryable_err() {
         let node_manager = Arc::new(MockDatanodeManager::new(RetryErrorDatanodeHandler));
         let ddl_context = new_ddl_context(node_manager);
-        let physical_table_id = create_physical_table(&ddl_context, 0, "phy").await;
+        let physical_table_id = create_physical_table(&ddl_context, "phy").await;
         let (_, table_route) = ddl_context
             .table_metadata_manager
             .table_route_manager()
@@ -360,7 +355,6 @@ mod tests {
             DropTableTarget::Physical,
         );
         let mut ctx = DropDatabaseContext {
-            cluster_id: 0,
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             drop_if_exists: false,
@@ -374,7 +368,7 @@ mod tests {
     async fn test_on_recovery() {
         let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
         let ddl_context = new_ddl_context(node_manager);
-        let physical_table_id = create_physical_table(&ddl_context, 0, "phy").await;
+        let physical_table_id = create_physical_table(&ddl_context, "phy").await;
         let (_, table_route) = ddl_context
             .table_metadata_manager
             .table_route_manager()
@@ -390,7 +384,6 @@ mod tests {
                 DropTableTarget::Physical,
             );
             let mut ctx = DropDatabaseContext {
-                cluster_id: 0,
                 catalog: DEFAULT_CATALOG_NAME.to_string(),
                 schema: DEFAULT_SCHEMA_NAME.to_string(),
                 drop_if_exists: false,

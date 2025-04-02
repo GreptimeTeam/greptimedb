@@ -20,12 +20,13 @@ mod log_handler;
 mod logs;
 mod opentsdb;
 mod otlp;
-mod prom_store;
+pub mod prom_store;
 mod promql;
 mod region_query;
 pub mod standalone;
 
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
@@ -46,7 +47,7 @@ use datafusion_expr::LogicalPlan;
 use log_store::raft_engine::RaftEngineBackend;
 use operator::delete::DeleterRef;
 use operator::insert::InserterRef;
-use operator::statement::StatementExecutor;
+use operator::statement::{StatementExecutor, StatementExecutorRef};
 use pipeline::pipeline_operator::PipelineOperator;
 use prometheus::HistogramTimer;
 use promql_parser::label::Matcher;
@@ -58,18 +59,11 @@ use query::stats::StatementStatistics;
 use query::QueryEngineRef;
 use servers::error as server_error;
 use servers::error::{AuthSnafu, ExecuteQuerySnafu, ParsePromQLSnafu};
-use servers::export_metrics::ExportMetricsTask;
 use servers::interceptor::{
     PromQueryInterceptor, PromQueryInterceptorRef, SqlQueryInterceptor, SqlQueryInterceptorRef,
 };
 use servers::prometheus_handler::PrometheusHandler;
-use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
-use servers::query_handler::{
-    InfluxdbLineProtocolHandler, JaegerQueryHandler, LogQueryHandler, OpenTelemetryProtocolHandler,
-    OpentsdbProtocolHandler, PipelineHandler, PromStoreProtocolHandler,
-};
-use servers::server::ServerHandlers;
 use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
 use snafu::prelude::*;
@@ -80,50 +74,25 @@ use sql::statements::statement::Statement;
 use sqlparser::ast::ObjectName;
 pub use standalone::StandaloneDatanodeManager;
 
-use self::prom_store::ExportMetricHandler;
 use crate::error::{
     self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu, InvalidSqlSnafu,
     ParseSqlSnafu, PermissionSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu,
-    StartServerSnafu, TableOperationSnafu,
+    TableOperationSnafu,
 };
-use crate::frontend::FrontendOptions;
-use crate::heartbeat::HeartbeatTask;
 use crate::limiter::LimiterRef;
 
-#[async_trait]
-pub trait FrontendInstance:
-    GrpcQueryHandler<Error = Error>
-    + SqlQueryHandler<Error = Error>
-    + OpentsdbProtocolHandler
-    + InfluxdbLineProtocolHandler
-    + PromStoreProtocolHandler
-    + OpenTelemetryProtocolHandler
-    + PrometheusHandler
-    + PipelineHandler
-    + LogQueryHandler
-    + JaegerQueryHandler
-    + Send
-    + Sync
-    + 'static
-{
-    async fn start(&self) -> Result<()>;
-}
-
-pub type FrontendInstanceRef = Arc<dyn FrontendInstance>;
-
+/// The frontend instance contains necessary components, and implements many
+/// traits, like [`servers::query_handler::grpc::GrpcQueryHandler`],
+/// [`servers::query_handler::sql::SqlQueryHandler`], etc.
 #[derive(Clone)]
 pub struct Instance {
-    options: FrontendOptions,
     catalog_manager: CatalogManagerRef,
     pipeline_operator: Arc<PipelineOperator>,
     statement_executor: Arc<StatementExecutor>,
     query_engine: QueryEngineRef,
     plugins: Plugins,
-    servers: ServerHandlers,
-    heartbeat_task: Option<HeartbeatTask>,
     inserter: InserterRef,
     deleter: DeleterRef,
-    export_metrics_task: Option<ExportMetricsTask>,
     table_metadata_manager: TableMetadataManagerRef,
     stats: StatementStatistics,
     limiter: Option<LimiterRef>,
@@ -149,20 +118,12 @@ impl Instance {
         let manager_config = ManagerConfig {
             max_retry_times: procedure_config.max_retry_times,
             retry_delay: procedure_config.retry_delay,
+            max_running_procedures: procedure_config.max_running_procedures,
             ..Default::default()
         };
         let procedure_manager = Arc::new(LocalManager::new(manager_config, state_store));
 
         Ok((kv_backend, procedure_manager))
-    }
-
-    pub fn build_servers(&mut self, servers: ServerHandlers) -> Result<()> {
-        self.export_metrics_task =
-            ExportMetricsTask::try_new(&self.options.export_metrics, Some(&self.plugins))
-                .context(StartServerSnafu)?;
-
-        self.servers = servers;
-        Ok(())
     }
 
     pub fn catalog_manager(&self) -> &CatalogManagerRef {
@@ -173,50 +134,20 @@ impl Instance {
         &self.query_engine
     }
 
-    pub fn plugins(&self) -> Plugins {
-        self.plugins.clone()
+    pub fn plugins(&self) -> &Plugins {
+        &self.plugins
     }
 
-    pub async fn shutdown(&self) -> Result<()> {
-        self.servers
-            .shutdown_all()
-            .await
-            .context(error::ShutdownServerSnafu)
-    }
-
-    pub fn server_handlers(&self) -> &ServerHandlers {
-        &self.servers
-    }
-
-    pub fn statement_executor(&self) -> Arc<StatementExecutor> {
-        self.statement_executor.clone()
+    pub fn statement_executor(&self) -> &StatementExecutorRef {
+        &self.statement_executor
     }
 
     pub fn table_metadata_manager(&self) -> &TableMetadataManagerRef {
         &self.table_metadata_manager
     }
-}
 
-#[async_trait]
-impl FrontendInstance for Instance {
-    async fn start(&self) -> Result<()> {
-        if let Some(heartbeat_task) = &self.heartbeat_task {
-            heartbeat_task.start().await?;
-        }
-
-        if let Some(t) = self.export_metrics_task.as_ref() {
-            if t.send_by_handler {
-                let handler = ExportMetricHandler::new_handler(
-                    self.inserter.clone(),
-                    self.statement_executor.clone(),
-                );
-                t.start(Some(handler)).context(StartServerSnafu)?
-            } else {
-                t.start(None).context(StartServerSnafu)?;
-            }
-        }
-
-        self.servers.start_all().await.context(StartServerSnafu)
+    pub fn inserter(&self) -> &InserterRef {
+        &self.inserter
     }
 }
 
@@ -237,6 +168,13 @@ impl Instance {
 
         let output = match stmt {
             Statement::Query(_) | Statement::Explain(_) | Statement::Delete(_) => {
+                // TODO: remove this when format is supported in datafusion
+                if let Statement::Explain(explain) = &stmt {
+                    if let Some(format) = explain.format() {
+                        query_ctx.set_explain_format(format.to_string());
+                    }
+                }
+
                 let stmt = QueryStatement::Sql(stmt);
                 let plan = self
                     .statement_executor
@@ -464,6 +402,21 @@ impl PrometheusHandler for Instance {
             .context(ExecuteQuerySnafu)
     }
 
+    async fn query_label_values(
+        &self,
+        metric: String,
+        label_name: String,
+        matchers: Vec<Matcher>,
+        start: SystemTime,
+        end: SystemTime,
+        ctx: &QueryContextRef,
+    ) -> server_error::Result<Vec<String>> {
+        self.handle_query_label_values(metric, label_name, matchers, start, end, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(ExecuteQuerySnafu)
+    }
+
     fn catalog_manager(&self) -> CatalogManagerRef {
         self.catalog_manager.clone()
     }
@@ -570,6 +523,9 @@ pub fn check_permission(
             validate_db_permission!(stmt, query_ctx);
         }
         Statement::ShowIndex(stmt) => {
+            validate_db_permission!(stmt, query_ctx);
+        }
+        Statement::ShowRegion(stmt) => {
             validate_db_permission!(stmt, query_ctx);
         }
         Statement::ShowViews(stmt) => {

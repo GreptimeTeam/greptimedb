@@ -24,6 +24,7 @@ pub mod join;
 pub mod json_path;
 pub mod letter;
 pub mod regex;
+pub mod simple_extract;
 pub mod timestamp;
 pub mod urlencoding;
 
@@ -44,14 +45,13 @@ use snafu::{OptionExt, ResultExt};
 use timestamp::TimestampProcessor;
 use urlencoding::UrlEncodingProcessor;
 
-use super::error::{
-    FailedParseFieldFromStringSnafu, FieldMustBeTypeSnafu, ProcessorKeyMustBeStringSnafu,
-    ProcessorMustBeMapSnafu, ProcessorMustHaveStringKeySnafu,
-};
 use super::field::{Field, Fields};
 use super::PipelineMap;
-use crate::etl::error::{Error, Result};
-use crate::etl_error::UnsupportedProcessorSnafu;
+use crate::error::{
+    Error, FailedParseFieldFromStringSnafu, FieldMustBeTypeSnafu, ProcessorKeyMustBeStringSnafu,
+    ProcessorMustBeMapSnafu, ProcessorMustHaveStringKeySnafu, Result, UnsupportedProcessorSnafu,
+};
+use crate::etl::processor::simple_extract::SimpleExtractProcessor;
 
 const FIELD_NAME: &str = "field";
 const FIELDS_NAME: &str = "fields";
@@ -63,6 +63,7 @@ const SEPARATOR_NAME: &str = "separator";
 const TARGET_FIELDS_NAME: &str = "target_fields";
 const JSON_PATH_NAME: &str = "json_path";
 const JSON_PATH_RESULT_INDEX_NAME: &str = "result_index";
+const SIMPLE_EXTRACT_KEY_NAME: &str = "key";
 
 /// Processor trait defines the interface for all processors.
 ///
@@ -97,6 +98,7 @@ pub enum ProcessorKind {
     Epoch(EpochProcessor),
     Date(DateProcessor),
     JsonPath(JsonPathProcessor),
+    SimpleJsonPath(SimpleExtractProcessor),
     Decolorize(DecolorizeProcessor),
     Digest(DigestProcessor),
 }
@@ -174,6 +176,9 @@ fn parse_processor(doc: &yaml_rust::Yaml) -> Result<ProcessorKind> {
             ProcessorKind::Decolorize(DecolorizeProcessor::try_from(value)?)
         }
         digest::PROCESSOR_DIGEST => ProcessorKind::Digest(DigestProcessor::try_from(value)?),
+        simple_extract::PROCESSOR_SIMPLE_EXTRACT => {
+            ProcessorKind::SimpleJsonPath(SimpleExtractProcessor::try_from(value)?)
+        }
         _ => return UnsupportedProcessorSnafu { processor: str_key }.fail(),
     };
 

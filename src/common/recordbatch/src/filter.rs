@@ -22,10 +22,13 @@ use datafusion::physical_plan::PhysicalExpr;
 use datafusion_common::arrow::array::{ArrayRef, Datum, Scalar};
 use datafusion_common::arrow::buffer::BooleanBuffer;
 use datafusion_common::arrow::compute::kernels::cmp;
-use datafusion_common::cast::{as_boolean_array, as_null_array};
+use datafusion_common::cast::{as_boolean_array, as_null_array, as_string_array};
 use datafusion_common::{internal_err, DataFusionError, ScalarValue};
 use datatypes::arrow::array::{Array, BooleanArray, RecordBatch};
 use datatypes::arrow::compute::filter_record_batch;
+use datatypes::arrow::error::ArrowError;
+use datatypes::compute::kernels::regexp;
+use datatypes::compute::or_kleene;
 use datatypes::vectors::VectorRef;
 use snafu::ResultExt;
 
@@ -35,7 +38,8 @@ use crate::error::{ArrowComputeSnafu, Result, ToArrowScalarSnafu, UnsupportedOpe
 /// - `col` `op` `literal`
 /// - `literal` `op` `col`
 ///
-/// And the `op` is one of `=`, `!=`, `>`, `>=`, `<`, `<=`.
+/// And the `op` is one of `=`, `!=`, `>`, `>=`, `<`, `<=`,
+/// or regex operators: `~`, `~*`, `!~`, `!~*`.
 ///
 /// This struct contains normalized predicate expr. In the form of
 /// `col` `op` `literal` where the `col` is provided from input.
@@ -47,6 +51,8 @@ pub struct SimpleFilterEvaluator {
     literal: Scalar<ArrayRef>,
     /// The operator.
     op: Operator,
+    /// Only used when the operator is `Or`-chain.
+    literal_list: Vec<Scalar<ArrayRef>>,
 }
 
 impl SimpleFilterEvaluator {
@@ -69,6 +75,7 @@ impl SimpleFilterEvaluator {
             column_name,
             literal: val.to_scalar().ok()?,
             op,
+            literal_list: vec![],
         })
     }
 
@@ -82,7 +89,40 @@ impl SimpleFilterEvaluator {
                     | Operator::Lt
                     | Operator::LtEq
                     | Operator::Gt
-                    | Operator::GtEq => {}
+                    | Operator::GtEq
+                    | Operator::RegexMatch
+                    | Operator::RegexIMatch
+                    | Operator::RegexNotMatch
+                    | Operator::RegexNotIMatch => {}
+                    Operator::Or => {
+                        let lhs = Self::try_new(&binary.left)?;
+                        let rhs = Self::try_new(&binary.right)?;
+                        if lhs.column_name != rhs.column_name
+                            || !matches!(lhs.op, Operator::Eq | Operator::Or)
+                            || !matches!(rhs.op, Operator::Eq | Operator::Or)
+                        {
+                            return None;
+                        }
+                        let mut list = vec![];
+                        let placeholder_literal = lhs.literal.clone();
+                        // above check guarantees the op is either `Eq` or `Or`
+                        if matches!(lhs.op, Operator::Or) {
+                            list.extend(lhs.literal_list);
+                        } else {
+                            list.push(lhs.literal);
+                        }
+                        if matches!(rhs.op, Operator::Or) {
+                            list.extend(rhs.literal_list);
+                        } else {
+                            list.push(rhs.literal);
+                        }
+                        return Some(Self {
+                            column_name: lhs.column_name,
+                            literal: placeholder_literal,
+                            op: Operator::Or,
+                            literal_list: list,
+                        });
+                    }
                     _ => return None,
                 }
 
@@ -103,6 +143,7 @@ impl SimpleFilterEvaluator {
                     column_name: lhs.name.clone(),
                     literal,
                     op,
+                    literal_list: vec![],
                 })
             }
             _ => None,
@@ -118,19 +159,19 @@ impl SimpleFilterEvaluator {
         let input = input
             .to_scalar()
             .with_context(|_| ToArrowScalarSnafu { v: input.clone() })?;
-        let result = self.evaluate_datum(&input)?;
+        let result = self.evaluate_datum(&input, 1)?;
         Ok(result.value(0))
     }
 
     pub fn evaluate_array(&self, input: &ArrayRef) -> Result<BooleanBuffer> {
-        self.evaluate_datum(input)
+        self.evaluate_datum(input, input.len())
     }
 
     pub fn evaluate_vector(&self, input: &VectorRef) -> Result<BooleanBuffer> {
-        self.evaluate_datum(&input.to_arrow_array())
+        self.evaluate_datum(&input.to_arrow_array(), input.len())
     }
 
-    fn evaluate_datum(&self, input: &impl Datum) -> Result<BooleanBuffer> {
+    fn evaluate_datum(&self, input: &impl Datum, input_len: usize) -> Result<BooleanBuffer> {
         let result = match self.op {
             Operator::Eq => cmp::eq(input, &self.literal),
             Operator::NotEq => cmp::neq(input, &self.literal),
@@ -138,6 +179,19 @@ impl SimpleFilterEvaluator {
             Operator::LtEq => cmp::lt_eq(input, &self.literal),
             Operator::Gt => cmp::gt(input, &self.literal),
             Operator::GtEq => cmp::gt_eq(input, &self.literal),
+            Operator::RegexMatch => self.regex_match(input, false, false),
+            Operator::RegexIMatch => self.regex_match(input, true, false),
+            Operator::RegexNotMatch => self.regex_match(input, false, true),
+            Operator::RegexNotIMatch => self.regex_match(input, true, true),
+            Operator::Or => {
+                // OR operator stands for OR-chained EQs (or INLIST in other words)
+                let mut result: BooleanArray = vec![false; input_len].into();
+                for literal in &self.literal_list {
+                    let rhs = cmp::eq(input, literal).context(ArrowComputeSnafu)?;
+                    result = or_kleene(&result, &rhs).context(ArrowComputeSnafu)?;
+                }
+                Ok(result)
+            }
             _ => {
                 return UnsupportedOperationSnafu {
                     reason: format!("{:?}", self.op),
@@ -148,6 +202,28 @@ impl SimpleFilterEvaluator {
         result
             .context(ArrowComputeSnafu)
             .map(|array| array.values().clone())
+    }
+
+    fn regex_match(
+        &self,
+        input: &impl Datum,
+        ignore_case: bool,
+        negative: bool,
+    ) -> std::result::Result<BooleanArray, ArrowError> {
+        let flag = if ignore_case { Some("i") } else { None };
+        let array = input.get().0;
+        let string_array = as_string_array(array).map_err(|_| {
+            ArrowError::CastError(format!("Cannot cast {:?} to StringArray", array))
+        })?;
+        let literal_array = self.literal.clone().into_inner();
+        let regex_array = as_string_array(&literal_array).map_err(|_| {
+            ArrowError::CastError(format!("Cannot cast {:?} to StringArray", literal_array))
+        })?;
+        let mut result = regexp::regexp_is_match_scalar(string_array, regex_array.value(0), flag)?;
+        if negative {
+            result = datatypes::compute::not(&result)?;
+        }
+        Ok(result)
     }
 }
 
@@ -348,5 +424,50 @@ mod test {
             .unwrap();
         let expected = datatypes::arrow::array::Int32Array::from(vec![5, 6]);
         assert_eq!(first_column_values, &expected);
+    }
+
+    #[test]
+    fn test_complex_filter_expression() {
+        // Create an expression tree for: col = 'B' OR col = 'C' OR col = 'D'
+        let col_eq_b = col("col").eq(lit("B"));
+        let col_eq_c = col("col").eq(lit("C"));
+        let col_eq_d = col("col").eq(lit("D"));
+
+        // Build the OR chain
+        let col_or_expr = col_eq_b.or(col_eq_c).or(col_eq_d);
+
+        // Check that SimpleFilterEvaluator can handle OR chain
+        let or_evaluator = SimpleFilterEvaluator::try_new(&col_or_expr).unwrap();
+        assert_eq!(or_evaluator.column_name, "col");
+        assert_eq!(or_evaluator.op, Operator::Or);
+        assert_eq!(or_evaluator.literal_list.len(), 3);
+        assert_eq!(format!("{:?}", or_evaluator.literal_list), "[Scalar(StringArray\n[\n  \"B\",\n]), Scalar(StringArray\n[\n  \"C\",\n]), Scalar(StringArray\n[\n  \"D\",\n])]");
+
+        // Create a schema and batch for testing
+        let schema = Schema::new(vec![Field::new("col", DataType::Utf8, false)]);
+        let df_schema = DFSchema::try_from(schema.clone()).unwrap();
+        let props = ExecutionProps::new();
+        let physical_expr = create_physical_expr(&col_or_expr, &df_schema, &props).unwrap();
+
+        // Create test data
+        let col_data = Arc::new(datatypes::arrow::array::StringArray::from(vec![
+            "B", "C", "E", "B", "C", "D", "F",
+        ]));
+        let batch = RecordBatch::try_new(Arc::new(schema), vec![col_data]).unwrap();
+        let expected = datatypes::arrow::array::StringArray::from(vec!["B", "C", "B", "C", "D"]);
+
+        // Filter the batch
+        let filtered_batch = batch_filter(&batch, &physical_expr).unwrap();
+
+        // Expected: rows with col in ("B", "C", "D")
+        // That would be rows 0, 1, 3, 4, 5
+        assert_eq!(filtered_batch.num_rows(), 5);
+
+        let col_filtered = filtered_batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<datatypes::arrow::array::StringArray>()
+            .unwrap();
+        assert_eq!(col_filtered, &expected);
     }
 }

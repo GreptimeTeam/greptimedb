@@ -387,7 +387,11 @@ impl ParquetReaderBuilder {
             return false;
         }
 
-        let apply_res = match index_applier.apply(self.file_handle.file_id()).await {
+        let file_size_hint = self.file_handle.meta_ref().index_file_size();
+        let apply_res = match index_applier
+            .apply(self.file_handle.file_id(), Some(file_size_hint))
+            .await
+        {
             Ok(res) => res,
             Err(err) => {
                 if cfg!(any(test, feature = "test")) {
@@ -467,9 +471,9 @@ impl ParquetReaderBuilder {
         if !self.file_handle.meta_ref().inverted_index_available() {
             return false;
         }
-        let file_size_hint = self.file_handle.meta_ref().inverted_index_size();
+        let file_size_hint = self.file_handle.meta_ref().index_file_size();
         let apply_output = match index_applier
-            .apply(self.file_handle.file_id(), file_size_hint)
+            .apply(self.file_handle.file_id(), Some(file_size_hint))
             .await
         {
             Ok(output) => output,
@@ -505,7 +509,7 @@ impl ParquetReaderBuilder {
 
                 (row_group_id, rg_begin_row_id..rg_end_row_id)
             })
-            .group_by(|(row_group_id, _)| *row_group_id);
+            .chunk_by(|(row_group_id, _)| *row_group_id);
 
         let ranges_in_row_groups = grouped_in_row_groups
             .into_iter()
@@ -578,11 +582,11 @@ impl ParquetReaderBuilder {
             return false;
         }
 
-        let file_size_hint = self.file_handle.meta_ref().bloom_filter_index_size();
+        let file_size_hint = self.file_handle.meta_ref().index_file_size();
         let apply_output = match index_applier
             .apply(
                 self.file_handle.file_id(),
-                file_size_hint,
+                Some(file_size_hint),
                 parquet_meta
                     .row_groups()
                     .iter()

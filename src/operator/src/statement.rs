@@ -56,7 +56,7 @@ use query::parser::QueryStatement;
 use query::QueryEngineRef;
 use session::context::{Channel, QueryContextRef};
 use session::table_name::table_idents_to_full_name;
-use set::set_query_timeout;
+use set::{set_query_timeout, set_read_preference};
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::copy::{
     CopyDatabase, CopyDatabaseArgument, CopyQueryToArgument, CopyTable, CopyTableArgument,
@@ -353,6 +353,7 @@ impl StatementExecutor {
                 self.show_columns(show_columns, query_ctx).await
             }
             Statement::ShowIndex(show_index) => self.show_index(show_index, query_ctx).await,
+            Statement::ShowRegion(show_region) => self.show_region(show_region, query_ctx).await,
             Statement::ShowStatus(_) => self.show_status(query_ctx).await,
             Statement::ShowSearchPath(_) => self.show_search_path(query_ctx).await,
             Statement::Use(db) => self.use_database(db, query_ctx).await,
@@ -378,6 +379,8 @@ impl StatementExecutor {
     fn set_variables(&self, set_var: SetVariables, query_ctx: QueryContextRef) -> Result<Output> {
         let var_name = set_var.variable.to_string().to_uppercase();
         match var_name.as_str() {
+            "READ_PREFERENCE" => set_read_preference(set_var.value, query_ctx)?,
+
             "TIMEZONE" | "TIME_ZONE" => set_timezone(set_var.value, query_ctx)?,
 
             "BYTEA_OUTPUT" => set_bytea_output(set_var.value, query_ctx)?,

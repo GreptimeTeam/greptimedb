@@ -31,12 +31,13 @@ use prost::Message;
 use smallvec::SmallVec;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::codec::{infer_primary_key_encoding_from_hint, PrimaryKeyEncoding};
+use store_api::manifest::ManifestVersion;
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{SetRegionRoleStateResponse, SettableRegionRoleState};
 use store_api::region_request::{
     AffectedRows, RegionAlterRequest, RegionCatchupRequest, RegionCloseRequest,
-    RegionCompactRequest, RegionCreateRequest, RegionDropRequest, RegionFlushRequest,
-    RegionOpenRequest, RegionRequest, RegionTruncateRequest,
+    RegionCompactRequest, RegionCreateRequest, RegionFlushRequest, RegionOpenRequest,
+    RegionRequest, RegionTruncateRequest,
 };
 use store_api::storage::{RegionId, SequenceNumber};
 use tokio::sync::oneshot::{self, Receiver, Sender};
@@ -565,6 +566,9 @@ pub(crate) enum WorkerRequest {
 
     /// Use [RegionEdit] to edit a region directly.
     EditRegion(RegionEditRequest),
+
+    /// Keep the manifest of a region up to date.
+    SyncRegion(RegionSyncRequest),
 }
 
 impl WorkerRequest {
@@ -624,10 +628,10 @@ impl WorkerRequest {
                 sender: sender.into(),
                 request: DdlRequest::Create(v),
             }),
-            RegionRequest::Drop(v) => WorkerRequest::Ddl(SenderDdlRequest {
+            RegionRequest::Drop(_) => WorkerRequest::Ddl(SenderDdlRequest {
                 region_id,
                 sender: sender.into(),
-                request: DdlRequest::Drop(v),
+                request: DdlRequest::Drop,
             }),
             RegionRequest::Open(v) => WorkerRequest::Ddl(SenderDdlRequest {
                 region_id,
@@ -684,13 +688,28 @@ impl WorkerRequest {
             receiver,
         )
     }
+
+    pub(crate) fn new_sync_region_request(
+        region_id: RegionId,
+        manifest_version: ManifestVersion,
+    ) -> (WorkerRequest, Receiver<Result<ManifestVersion>>) {
+        let (sender, receiver) = oneshot::channel();
+        (
+            WorkerRequest::SyncRegion(RegionSyncRequest {
+                region_id,
+                manifest_version,
+                sender,
+            }),
+            receiver,
+        )
+    }
 }
 
 /// DDL request to a region.
 #[derive(Debug)]
 pub(crate) enum DdlRequest {
     Create(RegionCreateRequest),
-    Drop(RegionDropRequest),
+    Drop,
     Open((RegionOpenRequest, Option<WalEntryReceiver>)),
     Close(RegionCloseRequest),
     Alter(RegionAlterRequest),
@@ -867,6 +886,13 @@ pub(crate) struct RegionEditResult {
     pub(crate) edit: RegionEdit,
     /// Result from the manifest manager.
     pub(crate) result: Result<()>,
+}
+
+#[derive(Debug)]
+pub(crate) struct RegionSyncRequest {
+    pub(crate) region_id: RegionId,
+    pub(crate) manifest_version: ManifestVersion,
+    pub(crate) sender: Sender<Result<ManifestVersion>>,
 }
 
 #[cfg(test)]

@@ -61,6 +61,7 @@ impl Default for WriteOptions {
 }
 
 /// Parquet SST info returned by the writer.
+#[derive(Debug)]
 pub struct SstInfo {
     /// SST file id.
     pub file_id: FileId,
@@ -131,7 +132,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl IndexerBuilder for NoopIndexBuilder {
-        async fn build(&self, _file_id: FileId, _path: String) -> Indexer {
+        async fn build(&self, _file_id: FileId) -> Indexer {
             Indexer::default()
         }
     }

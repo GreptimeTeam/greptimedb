@@ -16,9 +16,9 @@ pub mod flow_info;
 pub(crate) mod flow_name;
 pub(crate) mod flow_route;
 pub mod flow_state;
+mod flownode_addr_helper;
 pub(crate) mod flownode_flow;
 pub(crate) mod table_flow;
-
 use std::ops::Deref;
 use std::sync::Arc;
 
@@ -461,6 +461,8 @@ mod tests {
             expire_after: Some(300),
             comment: "hi".to_string(),
             options: Default::default(),
+            created_time: chrono::Utc::now(),
+            updated_time: chrono::Utc::now(),
         }
     }
 
@@ -506,7 +508,6 @@ mod tests {
         let routes = flow_metadata_manager
             .flow_route_manager()
             .routes(flow_id)
-            .try_collect::<Vec<_>>()
             .await
             .unwrap();
         assert_eq!(
@@ -538,7 +539,6 @@ mod tests {
             let nodes = flow_metadata_manager
                 .table_flow_manager()
                 .flows(table_id)
-                .try_collect::<Vec<_>>()
                 .await
                 .unwrap();
             assert_eq!(
@@ -634,6 +634,8 @@ mod tests {
             expire_after: Some(300),
             comment: "hi".to_string(),
             options: Default::default(),
+            created_time: chrono::Utc::now(),
+            updated_time: chrono::Utc::now(),
         };
         let err = flow_metadata_manager
             .create_flow_metadata(flow_id, flow_value, flow_routes.clone())
@@ -727,7 +729,6 @@ mod tests {
         let routes = flow_metadata_manager
             .flow_route_manager()
             .routes(flow_id)
-            .try_collect::<Vec<_>>()
             .await
             .unwrap();
         assert_eq!(
@@ -759,7 +760,6 @@ mod tests {
             let nodes = flow_metadata_manager
                 .table_flow_manager()
                 .flows(table_id)
-                .try_collect::<Vec<_>>()
                 .await
                 .unwrap();
             assert_eq!(
@@ -873,6 +873,8 @@ mod tests {
             expire_after: Some(300),
             comment: "hi".to_string(),
             options: Default::default(),
+            created_time: chrono::Utc::now(),
+            updated_time: chrono::Utc::now(),
         };
         let err = flow_metadata_manager
             .update_flow_metadata(

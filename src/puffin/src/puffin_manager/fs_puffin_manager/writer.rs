@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use async_compression::futures::bufread::ZstdEncoder;
@@ -34,9 +34,9 @@ use crate::puffin_manager::stager::Stager;
 use crate::puffin_manager::{PuffinWriter, PutOptions};
 
 /// `FsPuffinWriter` is a `PuffinWriter` that writes blobs and directories to a puffin file.
-pub struct FsPuffinWriter<S, W> {
+pub struct FsPuffinWriter<S: Stager, W> {
     /// The name of the puffin file.
-    puffin_file_name: String,
+    handle: S::FileHandle,
 
     /// The stager.
     stager: S,
@@ -48,10 +48,10 @@ pub struct FsPuffinWriter<S, W> {
     blob_keys: HashSet<String>,
 }
 
-impl<S, W> FsPuffinWriter<S, W> {
-    pub(crate) fn new(puffin_file_name: String, stager: S, writer: W) -> Self {
+impl<S: Stager, W> FsPuffinWriter<S, W> {
+    pub(crate) fn new(handle: S::FileHandle, stager: S, writer: W) -> Self {
         Self {
-            puffin_file_name,
+            handle,
             stager,
             puffin_file_writer: PuffinFileWriter::new(writer),
             blob_keys: HashSet::new(),
@@ -65,7 +65,13 @@ where
     S: Stager,
     W: AsyncWrite + Unpin + Send,
 {
-    async fn put_blob<R>(&mut self, key: &str, raw_data: R, options: PutOptions) -> Result<u64>
+    async fn put_blob<R>(
+        &mut self,
+        key: &str,
+        raw_data: R,
+        options: PutOptions,
+        properties: HashMap<String, String>,
+    ) -> Result<u64>
     where
         R: AsyncRead + Send,
     {
@@ -75,7 +81,7 @@ where
         );
 
         let written_bytes = self
-            .handle_compress(key.to_string(), raw_data, options.compression)
+            .handle_compress(key.to_string(), raw_data, options.compression, properties)
             .await?;
 
         self.blob_keys.insert(key.to_string());
@@ -111,7 +117,12 @@ where
 
             let file_key = Uuid::new_v4().to_string();
             written_bytes += self
-                .handle_compress(file_key.clone(), reader, options.compression)
+                .handle_compress(
+                    file_key.clone(),
+                    reader,
+                    options.compression,
+                    Default::default(),
+                )
                 .await?;
 
             let path = entry.path();
@@ -147,7 +158,7 @@ where
 
         // Move the directory into the stager.
         self.stager
-            .put_dir(&self.puffin_file_name, key, dir_path, dir_size)
+            .put_dir(&self.handle, key, dir_path, dir_size)
             .await?;
         Ok(written_bytes)
     }
@@ -174,6 +185,7 @@ where
         key: String,
         raw_data: impl AsyncRead + Send,
         compression: Option<CompressionCodec>,
+        properties: HashMap<String, String>,
     ) -> Result<u64> {
         match compression {
             Some(CompressionCodec::Lz4) => UnsupportedCompressionSnafu { codec: "lz4" }.fail(),
@@ -182,7 +194,7 @@ where
                     blob_type: key,
                     compressed_data: ZstdEncoder::new(BufReader::new(raw_data)),
                     compression_codec: compression,
-                    properties: Default::default(),
+                    properties,
                 };
                 self.puffin_file_writer.add_blob(blob).await
             }
@@ -191,7 +203,7 @@ where
                     blob_type: key,
                     compressed_data: raw_data,
                     compression_codec: compression,
-                    properties: Default::default(),
+                    properties,
                 };
                 self.puffin_file_writer.add_blob(blob).await
             }

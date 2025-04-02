@@ -91,7 +91,8 @@ impl FulltextIndexCreator for BloomFilterFulltextIndexCreator {
 
         let (index_finish, puffin_add_blob) = futures::join!(
             creator.finish(tx.compat_write()),
-            puffin_writer.put_blob(blob_key, rx.compat(), put_options)
+            // TODO(zhongzc): add fulltext config properties
+            puffin_writer.put_blob(blob_key, rx.compat(), put_options, Default::default())
         );
 
         match (

@@ -16,11 +16,11 @@ on:
         description: The runner uses to build linux-amd64 artifacts
         default: ec2-c6i.4xlarge-amd64
         options:
-          - ubuntu-20.04
-          - ubuntu-20.04-8-cores
-          - ubuntu-20.04-16-cores
-          - ubuntu-20.04-32-cores
-          - ubuntu-20.04-64-cores
+          - ubuntu-22.04
+          - ubuntu-22.04-8-cores
+          - ubuntu-22.04-16-cores
+          - ubuntu-22.04-32-cores
+          - ubuntu-22.04-64-cores
           - ec2-c6i.xlarge-amd64 # 4C8G
           - ec2-c6i.2xlarge-amd64 # 8C16G
           - ec2-c6i.4xlarge-amd64 # 16C32G
@@ -83,7 +83,7 @@ jobs:
   allocate-runners:
     name: Allocate runners
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     outputs:
       linux-amd64-runner: ${{ steps.start-linux-amd64-runner.outputs.label }}
       linux-arm64-runner: ${{ steps.start-linux-arm64-runner.outputs.label }}
@@ -218,7 +218,7 @@ jobs:
       build-linux-amd64-artifacts,
       build-linux-arm64-artifacts,
     ]
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     outputs:
       build-result: ${{ steps.set-build-result.outputs.build-result }}
     steps:
@@ -238,6 +238,13 @@ jobs:
           version: ${{ needs.allocate-runners.outputs.version }}
           push-latest-tag: false # Don't push the latest tag to registry.
           dev-mode: true # Only build the standard images.
+          
+      - name: Echo Docker image tag to step summary
+        run: |
+          echo "## Docker Image Tag" >> $GITHUB_STEP_SUMMARY
+          echo "Image Tag: \`${{ needs.allocate-runners.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Full Image Name: \`docker.io/${{ vars.IMAGE_NAMESPACE }}/${{ vars.DEV_BUILD_IMAGE_NAME }}:${{ needs.allocate-runners.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Pull Command: \`docker pull docker.io/${{ vars.IMAGE_NAMESPACE }}/${{ vars.DEV_BUILD_IMAGE_NAME }}:${{ needs.allocate-runners.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
 
       - name: Set build result
         id: set-build-result
@@ -251,7 +258,7 @@ jobs:
       allocate-runners,
       release-images-to-dockerhub,
     ]
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
@@ -283,7 +290,7 @@ jobs:
     name: Stop linux-amd64 runner
     # Only run this job when the runner is allocated.
     if: ${{ always() }}
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     needs: [
       allocate-runners,
       build-linux-amd64-artifacts,
@@ -309,7 +316,7 @@ jobs:
     name: Stop linux-arm64 runner
     # Only run this job when the runner is allocated.
     if: ${{ always() }}
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     needs: [
       allocate-runners,
       build-linux-arm64-artifacts,
@@ -337,7 +344,7 @@ jobs:
     needs: [
       release-images-to-dockerhub
     ]
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     permissions:
       issues: write
 

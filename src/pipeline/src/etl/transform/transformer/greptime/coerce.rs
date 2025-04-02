@@ -13,14 +13,14 @@
 // limitations under the License.
 
 use api::v1::column_data_type_extension::TypeExt;
-use api::v1::column_def::options_from_fulltext;
+use api::v1::column_def::{options_from_fulltext, options_from_inverted, options_from_skipping};
 use api::v1::{ColumnDataTypeExtension, ColumnOptions, JsonTypeExtension};
-use datatypes::schema::FulltextOptions;
+use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
 use greptime_proto::v1::value::ValueData;
 use greptime_proto::v1::{ColumnDataType, ColumnSchema, SemanticType};
 use snafu::ResultExt;
 
-use crate::etl::error::{
+use crate::error::{
     CoerceIncompatibleTypesSnafu, CoerceJsonTypeToSnafu, CoerceStringToTypeSnafu,
     CoerceTypeToJsonSnafu, CoerceUnsupportedEpochTypeSnafu, CoerceUnsupportedNullTypeSnafu,
     CoerceUnsupportedNullTypeToSnafu, ColumnOptionsSnafu, Error, Result,
@@ -95,22 +95,31 @@ pub(crate) fn coerce_columns(transform: &Transform) -> Result<Vec<ColumnSchema>>
 }
 
 fn coerce_semantic_type(transform: &Transform) -> SemanticType {
+    if transform.tag {
+        return SemanticType::Tag;
+    }
+
     match transform.index {
         Some(Index::Tag) => SemanticType::Tag,
         Some(Index::Time) => SemanticType::Timestamp,
-        Some(Index::Fulltext) | None => SemanticType::Field,
+        Some(Index::Fulltext) | Some(Index::Skipping) | Some(Index::Inverted) | None => {
+            SemanticType::Field
+        }
     }
 }
 
 fn coerce_options(transform: &Transform) -> Result<Option<ColumnOptions>> {
-    if let Some(Index::Fulltext) = transform.index {
-        options_from_fulltext(&FulltextOptions {
+    match transform.index {
+        Some(Index::Fulltext) => options_from_fulltext(&FulltextOptions {
             enable: true,
             ..Default::default()
         })
-        .context(ColumnOptionsSnafu)
-    } else {
-        Ok(None)
+        .context(ColumnOptionsSnafu),
+        Some(Index::Skipping) => {
+            options_from_skipping(&SkippingIndexOptions::default()).context(ColumnOptionsSnafu)
+        }
+        Some(Index::Inverted) => Ok(Some(options_from_inverted())),
+        _ => Ok(None),
     }
 }
 
@@ -476,6 +485,7 @@ mod tests {
             default: None,
             index: None,
             on_failure: None,
+            tag: false,
         };
 
         // valid string
@@ -501,6 +511,7 @@ mod tests {
             default: None,
             index: None,
             on_failure: Some(OnFailure::Ignore),
+            tag: false,
         };
 
         let val = Value::String("hello".to_string());
@@ -516,6 +527,7 @@ mod tests {
             default: None,
             index: None,
             on_failure: Some(OnFailure::Default),
+            tag: false,
         };
 
         // with no explicit default value

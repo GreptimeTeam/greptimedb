@@ -29,8 +29,8 @@ mod binary;
 mod boolean;
 mod constant;
 mod date;
-mod datetime;
 mod decimal;
+mod dictionary;
 mod duration;
 mod eq;
 mod helper;
@@ -48,8 +48,8 @@ pub use binary::{BinaryVector, BinaryVectorBuilder};
 pub use boolean::{BooleanVector, BooleanVectorBuilder};
 pub use constant::ConstantVector;
 pub use date::{DateVector, DateVectorBuilder};
-pub use datetime::{DateTimeVector, DateTimeVectorBuilder};
 pub use decimal::{Decimal128Vector, Decimal128VectorBuilder};
+pub use dictionary::{DictionaryIter, DictionaryVector};
 pub use duration::{
     DurationMicrosecondVector, DurationMicrosecondVectorBuilder, DurationMillisecondVector,
     DurationMillisecondVectorBuilder, DurationNanosecondVector, DurationNanosecondVectorBuilder,
@@ -377,7 +377,7 @@ pub mod tests {
         // Test Primitive types
         mutable_primitive_data_type_eq_with_lower!(
             Boolean, Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64, Float32, Float64,
-            Date, DateTime, Binary, String
+            Date, Binary, String
         );
 
         // Test types about time

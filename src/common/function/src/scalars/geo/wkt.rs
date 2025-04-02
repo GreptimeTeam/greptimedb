@@ -63,7 +63,7 @@ impl Function for LatLngToPointWkt {
         Signature::one_of(signatures, Volatility::Stable)
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure_columns_n!(columns, 2);
 
         let lat_vec = &columns[0];

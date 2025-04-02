@@ -61,7 +61,7 @@ mod test {
         let standalone = GreptimeDbStandaloneBuilder::new("test_standalone_handle_ddl_request")
             .build()
             .await;
-        let instance = &standalone.instance;
+        let instance = standalone.fe_instance();
 
         test_handle_ddl_request(instance.as_ref()).await;
     }
@@ -83,7 +83,7 @@ mod test {
             GreptimeDbStandaloneBuilder::new("test_standalone_handle_multi_ddl_request")
                 .build()
                 .await;
-        let instance = &standalone.instance;
+        let instance = standalone.fe_instance();
 
         test_handle_multi_ddl_request(instance.as_ref()).await;
     }
@@ -478,7 +478,7 @@ CREATE TABLE {table_name} (
         let standalone = GreptimeDbStandaloneBuilder::new("test_standalone_insert_and_query")
             .build()
             .await;
-        let instance = &standalone.instance;
+        let instance = standalone.fe_instance();
 
         let table_name = "my_table";
         let sql = format!("CREATE TABLE {table_name} (a INT, b STRING, c JSON, ts TIMESTAMP, TIME INDEX (ts), PRIMARY KEY (a, b, c))");
@@ -1053,7 +1053,7 @@ CREATE TABLE {table_name} (
         let standalone = GreptimeDbStandaloneBuilder::new("test_standalone_promql_query")
             .build()
             .await;
-        let instance = &standalone.instance;
+        let instance = standalone.fe_instance();
 
         let table_name = "my_table";
         let sql = format!("CREATE TABLE {table_name} (h string, a double, ts TIMESTAMP, TIME INDEX (ts), PRIMARY KEY(h))");

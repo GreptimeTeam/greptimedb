@@ -14,7 +14,7 @@
 
 //! Mito region.
 
-pub(crate) mod opener;
+pub mod opener;
 pub mod options;
 pub(crate) mod version;
 
@@ -30,15 +30,17 @@ use store_api::codec::PrimaryKeyEncoding;
 use store_api::logstore::provider::Provider;
 use store_api::manifest::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::{RegionRole, RegionStatistic, SettableRegionRoleState};
+use store_api::region_engine::{
+    RegionManifestInfo, RegionRole, RegionStatistic, SettableRegionRoleState,
+};
 use store_api::storage::RegionId;
 
 use crate::access_layer::AccessLayerRef;
 use crate::error::{
-    FlushableRegionStateSnafu, RegionLeaderStateSnafu, RegionNotFoundSnafu, RegionTruncatedSnafu,
-    Result,
+    FlushableRegionStateSnafu, RegionNotFoundSnafu, RegionStateSnafu, RegionTruncatedSnafu, Result,
+    UpdateManifestSnafu,
 };
-use crate::manifest::action::{RegionMetaAction, RegionMetaActionList};
+use crate::manifest::action::{RegionManifest, RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::RegionManifestManager;
 use crate::memtable::MemtableBuilderRef;
 use crate::region::version::{VersionControlRef, VersionRef};
@@ -289,6 +291,8 @@ impl MitoRegion {
         let wal_usage = self.estimated_wal_usage(memtable_usage);
         let manifest_usage = self.stats.total_manifest_size();
         let num_rows = version.ssts.num_rows() + version.memtables.num_rows();
+        let manifest_version = self.stats.manifest_version();
+        let flushed_entry_id = version.flushed_entry_id;
 
         RegionStatistic {
             num_rows,
@@ -297,6 +301,10 @@ impl MitoRegion {
             manifest_size: manifest_usage,
             sst_size: sst_usage,
             index_size: index_usage,
+            manifest: RegionManifestInfo::Mito {
+                manifest_version,
+                flushed_entry_id,
+            },
         }
     }
 
@@ -317,10 +325,10 @@ impl MitoRegion {
             .state
             .compare_exchange(RegionRoleState::Leader(expect), state)
             .map_err(|actual| {
-                RegionLeaderStateSnafu {
+                RegionStateSnafu {
                     region_id: self.region_id,
                     state: actual,
-                    expect,
+                    expect: RegionRoleState::Leader(expect),
                 }
                 .build()
             })?;
@@ -358,6 +366,21 @@ impl ManifestContext {
         self.manifest_manager.read().await.has_update().await
     }
 
+    /// Installs the manifest changes from the current version to the target version (inclusive).
+    ///
+    /// Returns installed [RegionManifest].
+    /// **Note**: This function is not guaranteed to install the target version strictly.
+    /// The installed version may be greater than the target version.
+    pub(crate) async fn install_manifest_to(
+        &self,
+        version: ManifestVersion,
+    ) -> Result<Arc<RegionManifest>> {
+        let mut manager = self.manifest_manager.write().await;
+        manager.install_manifest_to(version).await?;
+
+        Ok(manager.manifest())
+    }
+
     /// Updates the manifest if current state is `expect_state`.
     pub(crate) async fn update_manifest(
         &self,
@@ -371,14 +394,36 @@ impl ManifestContext {
         // Checks state inside the lock. This is to ensure that we won't update the manifest
         // after `set_readonly_gracefully()` is called.
         let current_state = self.state.load();
-        ensure!(
-            current_state == RegionRoleState::Leader(expect_state),
-            RegionLeaderStateSnafu {
-                region_id: manifest.metadata.region_id,
-                state: current_state,
-                expect: expect_state,
+
+        // If expect_state is not downgrading, the current state must be either `expect_state` or downgrading.
+        //
+        // A downgrading leader rejects user writes but still allows
+        // flushing the memtable and updating the manifest.
+        if expect_state != RegionLeaderState::Downgrading {
+            if current_state == RegionRoleState::Leader(RegionLeaderState::Downgrading) {
+                info!(
+                    "Region {} is in downgrading leader state, updating manifest. state is {:?}",
+                    manifest.metadata.region_id, expect_state
+                );
             }
-        );
+            ensure!(
+                current_state == RegionRoleState::Leader(expect_state)
+                    || current_state == RegionRoleState::Leader(RegionLeaderState::Downgrading),
+                UpdateManifestSnafu {
+                    region_id: manifest.metadata.region_id,
+                    state: current_state,
+                }
+            );
+        } else {
+            ensure!(
+                current_state == RegionRoleState::Leader(expect_state),
+                RegionStateSnafu {
+                    region_id: manifest.metadata.region_id,
+                    state: current_state,
+                    expect: RegionRoleState::Leader(expect_state),
+                }
+            );
+        }
 
         for action in &action_list.actions {
             // Checks whether the edit is still applicable.
@@ -567,12 +612,31 @@ impl RegionMap {
             .context(RegionNotFoundSnafu { region_id })?;
         ensure!(
             region.is_writable(),
-            RegionLeaderStateSnafu {
+            RegionStateSnafu {
                 region_id,
                 state: region.state(),
-                expect: RegionLeaderState::Writable,
+                expect: RegionRoleState::Leader(RegionLeaderState::Writable),
             }
         );
+        Ok(region)
+    }
+
+    /// Gets readonly region by region id.
+    ///
+    /// Returns error if the region does not exist or is writable.
+    pub(crate) fn follower_region(&self, region_id: RegionId) -> Result<MitoRegionRef> {
+        let region = self
+            .get_region(region_id)
+            .context(RegionNotFoundSnafu { region_id })?;
+        ensure!(
+            region.is_follower(),
+            RegionStateSnafu {
+                region_id,
+                state: region.state(),
+                expect: RegionRoleState::Follower,
+            }
+        );
+
         Ok(region)
     }
 
@@ -725,11 +789,16 @@ pub(crate) type OpeningRegionsRef = Arc<OpeningRegions>;
 #[derive(Default, Debug, Clone)]
 pub(crate) struct ManifestStats {
     total_manifest_size: Arc<AtomicU64>,
+    manifest_version: Arc<AtomicU64>,
 }
 
 impl ManifestStats {
     fn total_manifest_size(&self) -> u64 {
         self.total_manifest_size.load(Ordering::Relaxed)
+    }
+
+    fn manifest_version(&self) -> u64 {
+        self.manifest_version.load(Ordering::Relaxed)
     }
 }
 

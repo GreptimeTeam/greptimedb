@@ -26,6 +26,7 @@ use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
 use common_recordbatch::SendableRecordBatchStream;
 use common_time::Timestamp;
+use datafusion_physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion_physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::schema::SchemaRef;
 use futures::future::join_all;
@@ -33,6 +34,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
 use crate::logstore::entry;
+use crate::manifest::ManifestVersion;
 use crate::metadata::RegionMetadataRef;
 use crate::region_request::{
     BatchRegionDdlRequest, RegionOpenRequest, RegionRequest, RegionSequencesRequest,
@@ -83,6 +85,7 @@ impl SetRegionRoleStateResponse {
 pub struct GrantedRegion {
     pub region_id: RegionId,
     pub region_role: RegionRole,
+    pub manifest_version: u64,
 }
 
 impl GrantedRegion {
@@ -90,6 +93,7 @@ impl GrantedRegion {
         Self {
             region_id,
             region_role,
+            manifest_version: 0,
         }
     }
 }
@@ -99,6 +103,7 @@ impl From<GrantedRegion> for PbGrantedRegion {
         PbGrantedRegion {
             region_id: value.region_id.as_u64(),
             role: PbRegionRole::from(value.region_role).into(),
+            manifest_version: value.manifest_version,
         }
     }
 }
@@ -108,6 +113,7 @@ impl From<PbGrantedRegion> for GrantedRegion {
         GrantedRegion {
             region_id: RegionId::from_u64(value.region_id),
             region_role: value.role().into(),
+            manifest_version: value.manifest_version,
         }
     }
 }
@@ -212,6 +218,9 @@ pub struct ScannerProperties {
 
     /// The target partitions of the scanner. 0 indicates using the number of partitions as target partitions.
     target_partitions: usize,
+
+    /// Whether the scanner is scanning a logical region.
+    logical_region: bool,
 }
 
 impl ScannerProperties {
@@ -235,6 +244,7 @@ impl ScannerProperties {
             total_rows,
             distinguish_partition_range: false,
             target_partitions: 0,
+            logical_region: false,
         }
     }
 
@@ -264,6 +274,11 @@ impl ScannerProperties {
         self.total_rows
     }
 
+    /// Returns whether the scanner is scanning a logical region.
+    pub fn is_logical_region(&self) -> bool {
+        self.logical_region
+    }
+
     /// Returns the target partitions of the scanner. If it is not set, returns the number of partitions.
     pub fn target_partitions(&self) -> usize {
         if self.target_partitions == 0 {
@@ -271,6 +286,11 @@ impl ScannerProperties {
         } else {
             self.target_partitions
         }
+    }
+
+    /// Sets whether the scanner is reading a logical region.
+    pub fn set_logical_region(&mut self, logical_region: bool) {
+        self.logical_region = logical_region;
     }
 }
 
@@ -328,10 +348,17 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
     ///
     /// # Panics
     /// Panics if the `partition` is out of bound.
-    fn scan_partition(&self, partition: usize) -> Result<SendableRecordBatchStream, BoxedError>;
+    fn scan_partition(
+        &self,
+        metrics_set: &ExecutionPlanMetricsSet,
+        partition: usize,
+    ) -> Result<SendableRecordBatchStream, BoxedError>;
 
     /// Check if there is any predicate that may be executed in this scanner.
     fn has_predicate(&self) -> bool;
+
+    /// Sets whether the scanner is reading a logical region.
+    fn set_logical_region(&mut self, logical_region: bool);
 }
 
 pub type RegionScannerRef = Box<dyn RegionScanner>;
@@ -355,6 +382,60 @@ pub struct RegionStatistic {
     /// The size of SST index files in bytes.
     #[serde(default)]
     pub index_size: u64,
+    /// The details of the region.
+    #[serde(default)]
+    pub manifest: RegionManifestInfo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RegionManifestInfo {
+    Mito {
+        manifest_version: u64,
+        flushed_entry_id: u64,
+    },
+    Metric {
+        data_manifest_version: u64,
+        data_flushed_entry_id: u64,
+        metadata_manifest_version: u64,
+        metadata_flushed_entry_id: u64,
+    },
+}
+
+impl RegionManifestInfo {
+    /// Returns the flushed entry id of the data region.
+    pub fn flushed_entry_id(&self) -> u64 {
+        match self {
+            RegionManifestInfo::Mito {
+                flushed_entry_id, ..
+            } => *flushed_entry_id,
+            RegionManifestInfo::Metric {
+                metadata_flushed_entry_id,
+                ..
+            } => *metadata_flushed_entry_id,
+        }
+    }
+
+    /// Returns the manifest version of the data region.
+    pub fn manifest_version(&self) -> u64 {
+        match self {
+            RegionManifestInfo::Mito {
+                manifest_version, ..
+            } => *manifest_version,
+            RegionManifestInfo::Metric {
+                metadata_manifest_version,
+                ..
+            } => *metadata_manifest_version,
+        }
+    }
+}
+
+impl Default for RegionManifestInfo {
+    fn default() -> Self {
+        Self::Mito {
+            manifest_version: 0,
+            flushed_entry_id: 0,
+        }
+    }
 }
 
 impl RegionStatistic {
@@ -481,6 +562,13 @@ pub trait RegionEngine: Send + Sync {
     /// take effect.
     fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<(), BoxedError>;
 
+    /// Syncs the region manifest to the given manifest version.
+    async fn sync_region(
+        &self,
+        region_id: RegionId,
+        manifest_version: ManifestVersion,
+    ) -> Result<(), BoxedError>;
+
     /// Sets region role state gracefully.
     ///
     /// After the call returns, the engine ensures no more write operations will succeed in the region.
@@ -545,7 +633,11 @@ impl RegionScanner for SinglePartitionScanner {
         Ok(())
     }
 
-    fn scan_partition(&self, _partition: usize) -> Result<SendableRecordBatchStream, BoxedError> {
+    fn scan_partition(
+        &self,
+        _metrics_set: &ExecutionPlanMetricsSet,
+        _partition: usize,
+    ) -> Result<SendableRecordBatchStream, BoxedError> {
         let mut stream = self.stream.lock().unwrap();
         stream.take().ok_or_else(|| {
             BoxedError::new(PlainError::new(
@@ -561,6 +653,10 @@ impl RegionScanner for SinglePartitionScanner {
 
     fn metadata(&self) -> RegionMetadataRef {
         self.metadata.clone()
+    }
+
+    fn set_logical_region(&mut self, logical_region: bool) {
+        self.properties.set_logical_region(logical_region);
     }
 }
 

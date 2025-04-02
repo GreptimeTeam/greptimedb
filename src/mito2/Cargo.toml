@@ -6,7 +6,7 @@ license.workspace = true
 
 [features]
 default = []
-test = ["common-test-util", "log-store", "rstest", "rstest_reuse", "rskafka"]
+test = ["common-test-util", "rstest", "rstest_reuse", "rskafka"]
 
 [lints]
 workspace = true
@@ -45,7 +45,7 @@ humantime-serde.workspace = true
 index.workspace = true
 itertools.workspace = true
 lazy_static = "1.4"
-log-store = { workspace = true, optional = true }
+log-store = { workspace = true }
 memcomparable = "0.2"
 moka = { workspace = true, features = ["sync", "future"] }
 object-store.workspace = true

@@ -1,5 +1,5 @@
 ## The working home directory.
-data_home = "/tmp/metasrv/"
+data_home = "./greptimedb_data/metasrv/"
 
 ## The bind address of metasrv.
 bind_addr = "127.0.0.1:3002"
@@ -50,6 +50,9 @@ use_memory_store = false
 ## - Using shared storage (e.g., s3).
 enable_region_failover = false
 
+## Max allowed idle time before removing node info from metasrv memory.
+node_max_idle_time = "24hours"
+
 ## Whether to enable greptimedb telemetry. Enabled by default.
 #+ enable_telemetry = true
 
@@ -75,6 +78,11 @@ retry_delay = "500ms"
 ## 1500KiB = 1536KiB (1.5MiB) - 36KiB (reserved size of key)
 ## Comments out the `max_metadata_value_size`, for don't split large value (no limit).
 max_metadata_value_size = "1500KiB"
+
+## Max running procedures.
+## The maximum number of procedures that can be running at the same time.
+## If the number of running procedures exceeds this limit, the procedure will be rejected.
+max_running_procedures = 128
 
 # Failure detectors options.
 [failure_detector]
@@ -174,7 +182,7 @@ backoff_deadline = "5mins"
 ## The logging options.
 [logging]
 ## The directory to store the log files. If set to empty, logs will not be written to files.
-dir = "/tmp/greptimedb/logs"
+dir = "./greptimedb_data/logs"
 
 ## The log level. Can be `info`/`debug`/`warn`/`error`.
 ## @toml2docs:none-default

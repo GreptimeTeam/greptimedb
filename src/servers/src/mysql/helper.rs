@@ -18,6 +18,8 @@ use std::time::Duration;
 use chrono::NaiveDate;
 use common_query::prelude::ScalarValue;
 use common_time::Timestamp;
+use datafusion_common::tree_node::{Transformed, TreeNode};
+use datafusion_expr::LogicalPlan;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::types::TimestampType;
 use datatypes::value::{self, Value};
@@ -28,7 +30,7 @@ use sql::ast::{visit_expressions_mut, Expr, Value as ValueExpr, VisitMut};
 use sql::statements::sql_value_to_value;
 use sql::statements::statement::Statement;
 
-use crate::error::{self, Result};
+use crate::error::{self, DataFusionSnafu, Result};
 
 /// Returns the placeholder string "$i".
 pub fn format_placeholder(i: usize) -> String {
@@ -77,6 +79,40 @@ pub fn transform_placeholders(stmt: Statement) -> Statement {
     }
 }
 
+/// Give placeholder that cast to certain type `data_type` the same data type as is cast to
+///
+/// because it seems datafusion will not give data type to placeholder if it need to be cast to certain type, still unknown if this is a feature or a bug. And if a placeholder expr have no data type, datafusion will fail to extract it using `LogicalPlan::get_parameter_types`
+pub fn fix_placeholder_types(plan: &mut LogicalPlan) -> Result<()> {
+    let give_placeholder_types = |mut e: datafusion_expr::Expr| {
+        if let datafusion_expr::Expr::Cast(cast) = &mut e {
+            if let datafusion_expr::Expr::Placeholder(ph) = &mut *cast.expr {
+                if ph.data_type.is_none() {
+                    ph.data_type = Some(cast.data_type.clone());
+                    common_telemetry::debug!(
+                        "give placeholder type {:?} to {:?}",
+                        cast.data_type,
+                        ph
+                    );
+                    Ok(Transformed::yes(e))
+                } else {
+                    Ok(Transformed::no(e))
+                }
+            } else {
+                Ok(Transformed::no(e))
+            }
+        } else {
+            Ok(Transformed::no(e))
+        }
+    };
+    let give_placeholder_types_recursively =
+        |e: datafusion_expr::Expr| e.transform(give_placeholder_types);
+    *plan = std::mem::take(plan)
+        .transform(|p| p.map_expressions(give_placeholder_types_recursively))
+        .context(DataFusionSnafu)?
+        .data;
+    Ok(())
+}
+
 fn visit_placeholders<V>(v: &mut V)
 where
     V: VisitMut,
@@ -106,6 +142,7 @@ pub fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> Result<ScalarV
             ConcreteDataType::UInt64(_) => Ok(ScalarValue::UInt64(Some(i as u64))),
             ConcreteDataType::Float32(_) => Ok(ScalarValue::Float32(Some(i as f32))),
             ConcreteDataType::Float64(_) => Ok(ScalarValue::Float64(Some(i as f64))),
+            ConcreteDataType::Boolean(_) => Ok(ScalarValue::Boolean(Some(i != 0))),
             ConcreteDataType::Timestamp(ts_type) => Value::Timestamp(ts_type.create_timestamp(i))
                 .try_to_scalar_value(t)
                 .context(error::ConvertScalarValueSnafu),
@@ -127,6 +164,7 @@ pub fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> Result<ScalarV
             ConcreteDataType::UInt64(_) => Ok(ScalarValue::UInt64(Some(u))),
             ConcreteDataType::Float32(_) => Ok(ScalarValue::Float32(Some(u as f32))),
             ConcreteDataType::Float64(_) => Ok(ScalarValue::Float64(Some(u as f64))),
+            ConcreteDataType::Boolean(_) => Ok(ScalarValue::Boolean(Some(u != 0))),
             ConcreteDataType::Timestamp(ts_type) => {
                 Value::Timestamp(ts_type.create_timestamp(u as i64))
                     .try_to_scalar_value(t)
@@ -186,7 +224,6 @@ pub fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> Result<ScalarV
                 .timestamp_millis();
 
             match t {
-                ConcreteDataType::DateTime(_) => Ok(ScalarValue::Date64(Some(timestamp_millis))),
                 ConcreteDataType::Timestamp(_) => Ok(ScalarValue::TimestampMillisecond(
                     Some(timestamp_millis),
                     None,
@@ -358,10 +395,13 @@ mod tests {
         let expr = Expr::Value(ValueExpr::SingleQuotedString(
             "2001-01-02 03:04:05".to_string(),
         ));
-        let t = ConcreteDataType::datetime_datatype();
+        let t = ConcreteDataType::timestamp_microsecond_datatype();
         let v = convert_expr_to_scalar_value(&expr, &t).unwrap();
         let scalar_v = ScalarValue::Utf8(Some("2001-01-02 03:04:05".to_string()))
-            .cast_to(&arrow_schema::DataType::Date64)
+            .cast_to(&arrow_schema::DataType::Timestamp(
+                arrow_schema::TimeUnit::Microsecond,
+                None,
+            ))
             .unwrap();
         assert_eq!(scalar_v, v);
 

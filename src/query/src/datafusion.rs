@@ -27,7 +27,6 @@ use common_catalog::consts::is_readonly_schema;
 use common_error::ext::BoxedError;
 use common_function::function::FunctionRef;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
-use common_query::prelude::ScalarUdf;
 use common_query::{Output, OutputData, OutputMeta};
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
@@ -42,6 +41,7 @@ use datatypes::schema::Schema;
 use futures_util::StreamExt;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
+use sqlparser::ast::AnalyzeFormat;
 use table::requests::{DeleteRequest, InsertRequest};
 use table::TableRef;
 
@@ -347,7 +347,7 @@ impl DatafusionQueryEngine {
     #[tracing::instrument(skip_all)]
     fn optimize_physical_plan(
         &self,
-        _ctx: &mut QueryEngineContext,
+        ctx: &mut QueryEngineContext,
         plan: Arc<dyn ExecutionPlan>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let _timer = metrics::OPTIMIZE_PHYSICAL_ELAPSED.start_timer();
@@ -360,7 +360,22 @@ impl DatafusionQueryEngine {
         // skip optimize AnalyzeExec plan
         let optimized_plan = if let Some(analyze_plan) = plan.as_any().downcast_ref::<AnalyzeExec>()
         {
-            Arc::new(DistAnalyzeExec::new(analyze_plan.input().clone()))
+            let format = if let Some(format) = ctx.query_ctx().explain_format()
+                && format.to_lowercase() == "json"
+            {
+                AnalyzeFormat::JSON
+            } else {
+                AnalyzeFormat::TEXT
+            };
+            // Sets the verbose flag of the query context.
+            // The MergeScanExec plan uses the verbose flag to determine whether to print the plan in verbose mode.
+            ctx.query_ctx().set_explain_verbose(analyze_plan.verbose());
+
+            Arc::new(DistAnalyzeExec::new(
+                analyze_plan.input().clone(),
+                analyze_plan.verbose(),
+                format,
+            ))
             // let mut new_plan = analyze_plan.input().clone();
             // for optimizer in state.physical_optimizers() {
             //     new_plan = optimizer
@@ -446,11 +461,6 @@ impl QueryEngine for DatafusionQueryEngine {
         self.state.register_aggregate_function(func);
     }
 
-    /// Register a [`ScalarUdf`].
-    fn register_udf(&self, udf: ScalarUdf) {
-        self.state.register_udf(udf);
-    }
-
     /// Register an UDF function.
     /// Will override if the function with same name is already registered.
     fn register_function(&self, func: FunctionRef) {
@@ -508,6 +518,7 @@ impl QueryExecutor for DatafusionQueryEngine {
                     .map_err(BoxedError::new)
                     .context(QueryExecutionSnafu)?;
                 stream.set_metrics2(plan.clone());
+                stream.set_explain_verbose(ctx.query_ctx().explain_verbose());
                 let stream = OnDone::new(Box::pin(stream), move || {
                     exec_timer.observe_duration();
                 });
@@ -534,6 +545,7 @@ impl QueryExecutor for DatafusionQueryEngine {
                     .map_err(BoxedError::new)
                     .context(QueryExecutionSnafu)?;
                 stream.set_metrics2(plan.clone());
+                stream.set_explain_verbose(ctx.query_ctx().explain_verbose());
                 let stream = OnDone::new(Box::pin(stream), move || {
                     exec_timer.observe_duration();
                 });

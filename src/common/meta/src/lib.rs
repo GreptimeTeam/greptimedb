@@ -34,10 +34,12 @@ pub mod kv_backend;
 pub mod leadership_notifier;
 pub mod lock_key;
 pub mod metrics;
+pub mod node_expiry_listener;
 pub mod node_manager;
 pub mod peer;
 pub mod range_stream;
 pub mod region_keeper;
+pub mod region_registry;
 pub mod rpc;
 pub mod sequence;
 pub mod state_store;
@@ -46,8 +48,6 @@ pub mod test_util;
 pub mod util;
 pub mod wal_options_allocator;
 
-// The id of the cluster.
-pub type ClusterId = u64;
 // The id of the datanode.
 pub type DatanodeId = u64;
 // The id of the flownode.

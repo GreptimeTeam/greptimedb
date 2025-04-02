@@ -23,7 +23,7 @@ concurrency:
 jobs:
   check-typos-and-docs:
     name: Check typos and docs
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
@@ -36,7 +36,7 @@ jobs:
           || (echo "'config/config.md' is not up-to-date, please run 'make config-docs'." && exit 1)
 
   license-header-check:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     name: Check License Header
     steps:
       - uses: actions/checkout@v4
@@ -49,7 +49,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ ubuntu-20.04 ]
+        os: [ ubuntu-latest ]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -72,7 +72,7 @@ jobs:
 
   toml:
     name: Toml Check
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -89,7 +89,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ ubuntu-20.04 ]
+        os: [ ubuntu-latest ]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -111,7 +111,7 @@ jobs:
       - name: Build greptime binaries
         shell: bash
         # `cargo gc` will invoke `cargo build` with specified args
-        run: cargo gc -- --bin greptime --bin sqlness-runner --features pg_kvbackend
+        run: cargo gc -- --bin greptime --bin sqlness-runner --features "pg_kvbackend,mysql_kvbackend"
       - name: Pack greptime binaries
         shell: bash
         run: |
@@ -248,7 +248,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ ubuntu-20.04 ]
+        os: [ ubuntu-latest ]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -270,7 +270,7 @@ jobs:
       - name: Build greptime bianry
         shell: bash
         # `cargo gc` will invoke `cargo build` with specified args
-        run: cargo gc --profile ci -- --bin greptime --features pg_kvbackend
+        run: cargo gc --profile ci -- --bin greptime --features "pg_kvbackend,mysql_kvbackend"
       - name: Pack greptime binary
         shell: bash
         run: |
@@ -568,7 +568,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ ubuntu-20.04 ]
+        os: [ ubuntu-latest ]
         mode:
           - name: "Basic"
             opts: ""
@@ -576,8 +576,11 @@ jobs:
           - name: "Remote WAL"
             opts: "-w kafka -k 127.0.0.1:9092"
             kafka: true
-          - name: "Pg Kvbackend"
+          - name: "PostgreSQL KvBackend"
             opts: "--setup-pg"
+            kafka: false
+          - name: "MySQL Kvbackend"
+            opts: "--setup-mysql"
             kafka: false
     timeout-minutes: 60
     steps:
@@ -607,7 +610,7 @@ jobs:
 
   fmt:
     name: Rustfmt
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -624,7 +627,7 @@ jobs:
 
   clippy:
     name: Clippy
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -687,7 +690,7 @@ jobs:
         working-directory: tests-integration/fixtures
         run: docker compose up -d --wait
       - name: Run nextest cases
-        run: cargo nextest run --workspace -F dashboard -F pg_kvbackend
+        run: cargo nextest run --workspace -F dashboard -F pg_kvbackend -F mysql_kvbackend
         env:
           CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
           RUST_BACKTRACE: 1
@@ -704,13 +707,14 @@ jobs:
           GT_MINIO_ENDPOINT_URL: http://127.0.0.1:9000
           GT_ETCD_ENDPOINTS: http://127.0.0.1:2379
           GT_POSTGRES_ENDPOINTS: postgres://greptimedb:admin@127.0.0.1:5432/postgres
+          GT_MYSQL_ENDPOINTS: mysql://greptimedb:admin@127.0.0.1:3306/mysql
           GT_KAFKA_ENDPOINTS: 127.0.0.1:9092
           GT_KAFKA_SASL_ENDPOINTS: 127.0.0.1:9093
           UNITTEST_LOG_DIR: "__unittest_logs"
 
   coverage:
     if: github.event_name == 'merge_group'
-    runs-on: ubuntu-20.04-8-cores
+    runs-on: ubuntu-22.04-8-cores
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -739,7 +743,7 @@ jobs:
         working-directory: tests-integration/fixtures
         run: docker compose up -d --wait
       - name: Run nextest cases
-        run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info -F dashboard -F pg_kvbackend
+        run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info -F dashboard -F pg_kvbackend -F mysql_kvbackend
         env:
           CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
           RUST_BACKTRACE: 1
@@ -755,6 +759,7 @@ jobs:
           GT_MINIO_ENDPOINT_URL: http://127.0.0.1:9000
           GT_ETCD_ENDPOINTS: http://127.0.0.1:2379
           GT_POSTGRES_ENDPOINTS: postgres://greptimedb:admin@127.0.0.1:5432/postgres
+          GT_MYSQL_ENDPOINTS: mysql://greptimedb:admin@127.0.0.1:3306/mysql
           GT_KAFKA_ENDPOINTS: 127.0.0.1:9092
           GT_KAFKA_SASL_ENDPOINTS: 127.0.0.1:9093
           UNITTEST_LOG_DIR: "__unittest_logs"
@@ -770,7 +775,7 @@ jobs:
   # compat:
   #   name: Compatibility Test
   #   needs: build
-  #   runs-on: ubuntu-20.04
+  #   runs-on: ubuntu-22.04
   #   timeout-minutes: 60
   #   steps:
   #     - uses: actions/checkout@v4

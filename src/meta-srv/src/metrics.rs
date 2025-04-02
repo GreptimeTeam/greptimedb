@@ -20,7 +20,7 @@ lazy_static! {
     pub static ref METRIC_META_KV_REQUEST_ELAPSED: HistogramVec = register_histogram_vec!(
         "greptime_meta_kv_request_elapsed",
         "meta kv request",
-        &["target", "op", "cluster_id"]
+        &["target", "op"]
     )
     .unwrap();
     /// The heartbeat connection gauge.
@@ -60,5 +60,10 @@ lazy_static! {
     /// The migration fail counter.
     pub static ref METRIC_META_REGION_MIGRATION_FAIL: IntCounter =
         register_int_counter!("greptime_meta_region_migration_fail", "meta region migration fail").unwrap();
-
+    /// The add region follower execute histogram.
+    pub static ref METRIC_META_ADD_REGION_FOLLOWER_EXECUTE: HistogramVec =
+        register_histogram_vec!("greptime_meta_add_region_follower_execute", "meta add region follower execute", &["state"]).unwrap();
+    /// The remove region follower execute histogram.
+    pub static ref METRIC_META_REMOVE_REGION_FOLLOWER_EXECUTE: HistogramVec =
+        register_histogram_vec!("greptime_meta_remove_region_follower_execute", "meta remove region follower execute", &["state"]).unwrap();
 }

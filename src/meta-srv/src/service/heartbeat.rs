@@ -68,13 +68,15 @@ impl heartbeat_server::Heartbeat for Metasrv {
                         };
 
                         if pusher_id.is_none() {
-                            pusher_id = register_pusher(&handler_group, header, tx.clone()).await;
+                            pusher_id =
+                                Some(register_pusher(&handler_group, header, tx.clone()).await);
                         }
                         if let Some(k) = &pusher_id {
                             METRIC_META_HEARTBEAT_RECV.with_label_values(&[&k.to_string()]);
                         } else {
                             METRIC_META_HEARTBEAT_RECV.with_label_values(&["none"]);
                         }
+
                         let res = handler_group
                             .handle(req, ctx.clone())
                             .await
@@ -132,9 +134,7 @@ impl heartbeat_server::Heartbeat for Metasrv {
     }
 }
 
-async fn handle_ask_leader(req: AskLeaderRequest, ctx: Context) -> Result<AskLeaderResponse> {
-    let cluster_id = req.header.as_ref().map_or(0, |h| h.cluster_id);
-
+async fn handle_ask_leader(_req: AskLeaderRequest, ctx: Context) -> Result<AskLeaderResponse> {
     let addr = match ctx.election {
         Some(election) => {
             if election.is_leader() {
@@ -151,7 +151,7 @@ async fn handle_ask_leader(req: AskLeaderRequest, ctx: Context) -> Result<AskLea
         addr,
     });
 
-    let header = Some(ResponseHeader::success(cluster_id));
+    let header = Some(ResponseHeader::success());
     Ok(AskLeaderResponse { header, leader })
 }
 
@@ -173,13 +173,13 @@ async fn register_pusher(
     handler_group: &HeartbeatHandlerGroup,
     header: &RequestHeader,
     sender: Sender<std::result::Result<HeartbeatResponse, tonic::Status>>,
-) -> Option<PusherId> {
+) -> PusherId {
     let role = header.role();
     let id = get_node_id(header);
     let pusher_id = PusherId::new(role, id);
-    let pusher = Pusher::new(sender, header);
+    let pusher = Pusher::new(sender);
     handler_group.register_pusher(pusher_id, pusher).await;
-    Some(pusher_id)
+    pusher_id
 }
 
 #[cfg(test)]
@@ -211,12 +211,11 @@ mod tests {
             .unwrap();
 
         let req = AskLeaderRequest {
-            header: Some(RequestHeader::new((1, 1), Role::Datanode, W3cTrace::new())),
+            header: Some(RequestHeader::new(1, Role::Datanode, W3cTrace::new())),
         };
 
         let res = metasrv.ask_leader(req.into_request()).await.unwrap();
         let res = res.into_inner();
-        assert_eq!(1, res.header.unwrap().cluster_id);
         assert_eq!(metasrv.options().bind_addr, res.leader.unwrap().addr);
     }
 

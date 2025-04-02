@@ -29,16 +29,17 @@ use common_time::util::{current_time_rfc3339, yesterday_rfc3339};
 use common_version::OwnedBuildInfo;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVector;
-use datatypes::vectors::{Float64Vector, StringVector};
+use datatypes::vectors::Float64Vector;
 use futures::future::join_all;
 use futures::StreamExt;
+use itertools::Itertools;
 use promql_parser::label::{MatchOp, Matcher, Matchers, METRIC_NAME};
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
     AggregateExpr, BinaryExpr, Call, Expr as PromqlExpr, MatrixSelector, ParenExpr, SubqueryExpr,
     UnaryExpr, VectorSelector,
 };
-use query::parser::{PromQuery, DEFAULT_LOOKBACK_STRING};
+use query::parser::{PromQuery, QueryLanguageParser, DEFAULT_LOOKBACK_STRING};
 use query::promql::planner::normalize_matcher;
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
@@ -51,8 +52,8 @@ use store_api::metric_engine_consts::{
 
 pub use super::result::prometheus_resp::PrometheusJsonResponse;
 use crate::error::{
-    CatalogSnafu, CollectRecordbatchSnafu, Error, InvalidQuerySnafu, Result, TableNotFoundSnafu,
-    UnexpectedResultSnafu,
+    CatalogSnafu, CollectRecordbatchSnafu, Error, InvalidQuerySnafu, ParseTimestampSnafu, Result,
+    TableNotFoundSnafu, UnexpectedResultSnafu,
 };
 use crate::http::header::collect_plan_metrics;
 use crate::prom_store::{FIELD_NAME_LABEL, METRIC_NAME_LABEL};
@@ -994,44 +995,78 @@ pub async fn label_values_query(
 
     let start = params.start.unwrap_or_else(yesterday_rfc3339);
     let end = params.end.unwrap_or_else(current_time_rfc3339);
-    let lookback = params
-        .lookback
-        .unwrap_or_else(|| DEFAULT_LOOKBACK_STRING.to_string());
-
     let mut label_values = HashSet::new();
 
-    let mut merge_map = HashMap::new();
+    let start = try_call_return_response!(QueryLanguageParser::parse_promql_timestamp(&start)
+        .context(ParseTimestampSnafu { timestamp: &start }));
+    let end = try_call_return_response!(QueryLanguageParser::parse_promql_timestamp(&end)
+        .context(ParseTimestampSnafu { timestamp: &end }));
+
     for query in queries {
-        let prom_query = PromQuery {
-            query,
-            start: start.clone(),
-            end: end.clone(),
-            step: DEFAULT_LOOKBACK_STRING.to_string(),
-            lookback: lookback.clone(),
+        let promql_expr = try_call_return_response!(promql_parser::parser::parse(&query));
+        let PromqlExpr::VectorSelector(mut vector_selector) = promql_expr else {
+            return PrometheusJsonResponse::error(
+                StatusCode::InvalidArguments,
+                "expected vector selector",
+            );
         };
-        let result = handler.do_query(&prom_query, query_ctx.clone()).await;
-        if let Err(err) =
-            retrieve_label_values(result, &label_name, &mut label_values, &mut merge_map).await
-        {
-            // Prometheus won't report error if querying nonexist label and metric
-            if err.status_code() != StatusCode::TableNotFound
-                && err.status_code() != StatusCode::TableColumnNotFound
-            {
-                return PrometheusJsonResponse::error(err.status_code(), err.output_msg());
+        let Some(name) = take_metric_name(&mut vector_selector) else {
+            return PrometheusJsonResponse::error(
+                StatusCode::InvalidArguments,
+                "expected metric name",
+            );
+        };
+        let VectorSelector { matchers, .. } = vector_selector;
+        // Only use and filter matchers.
+        let matchers = matchers.matchers;
+        let result = handler
+            .query_label_values(
+                name,
+                label_name.to_string(),
+                matchers,
+                start,
+                end,
+                &query_ctx,
+            )
+            .await;
+
+        match result {
+            Ok(result) => {
+                label_values.extend(result.into_iter());
+            }
+            Err(err) => {
+                // Prometheus won't report error if querying nonexist label and metric
+                if err.status_code() != StatusCode::TableNotFound
+                    && err.status_code() != StatusCode::TableColumnNotFound
+                {
+                    return PrometheusJsonResponse::error(err.status_code(), err.output_msg());
+                }
             }
         }
     }
 
-    let merge_map = merge_map
-        .into_iter()
-        .map(|(k, v)| (k, Value::from(v)))
-        .collect();
-
     let mut label_values: Vec<_> = label_values.into_iter().collect();
     label_values.sort_unstable();
-    let mut resp = PrometheusJsonResponse::success(PrometheusResponse::LabelValues(label_values));
-    resp.resp_metrics = merge_map;
-    resp
+    PrometheusJsonResponse::success(PrometheusResponse::LabelValues(label_values))
+}
+
+/// Take metric name from the [VectorSelector].
+/// It takes the name in the selector or removes the name matcher.
+fn take_metric_name(selector: &mut VectorSelector) -> Option<String> {
+    if let Some(name) = selector.name.take() {
+        return Some(name);
+    }
+
+    let (pos, matcher) = selector
+        .matchers
+        .matchers
+        .iter()
+        .find_position(|matcher| matcher.name == "__name__" && matcher.op == MatchOp::Equal)?;
+    let name = matcher.value.clone();
+    // We need to remove the name matcher to avoid using it as a filter in query.
+    selector.matchers.matchers.remove(pos);
+
+    Some(name)
 }
 
 async fn retrieve_field_names(
@@ -1074,71 +1109,6 @@ async fn retrieve_field_names(
         }
     }
     Ok(field_columns)
-}
-
-async fn retrieve_label_values(
-    result: Result<Output>,
-    label_name: &str,
-    labels_values: &mut HashSet<String>,
-    metrics: &mut HashMap<String, u64>,
-) -> Result<()> {
-    let result = result?;
-    match result.data {
-        OutputData::RecordBatches(batches) => {
-            retrieve_label_values_from_record_batch(batches, label_name, labels_values).await
-        }
-        OutputData::Stream(stream) => {
-            let batches = RecordBatches::try_collect(stream)
-                .await
-                .context(CollectRecordbatchSnafu)?;
-            retrieve_label_values_from_record_batch(batches, label_name, labels_values).await
-        }
-        OutputData::AffectedRows(_) => UnexpectedResultSnafu {
-            reason: "expected data result, but got affected rows".to_string(),
-        }
-        .fail(),
-    }?;
-
-    if let Some(ref plan) = result.meta.plan {
-        collect_plan_metrics(plan, &mut [metrics]);
-    }
-
-    Ok(())
-}
-
-async fn retrieve_label_values_from_record_batch(
-    batches: RecordBatches,
-    label_name: &str,
-    labels_values: &mut HashSet<String>,
-) -> Result<()> {
-    let Some(label_col_idx) = batches.schema().column_index_by_name(label_name) else {
-        return Ok(());
-    };
-
-    // check whether label_name belongs to tag column
-    match batches
-        .schema()
-        .column_schema_by_name(label_name)
-        .unwrap()
-        .data_type
-    {
-        ConcreteDataType::String(_) => {}
-        _ => return Ok(()),
-    }
-    for batch in batches.iter() {
-        let label_column = batch
-            .column(label_col_idx)
-            .as_any()
-            .downcast_ref::<StringVector>()
-            .unwrap();
-        for row_index in 0..batch.num_rows() {
-            if let Some(label_value) = label_column.get_data(row_index) {
-                let _ = labels_values.insert(label_value.to_string());
-            }
-        }
-    }
-
-    Ok(())
 }
 
 /// Try to parse and extract the name of referenced metric from the promql query.

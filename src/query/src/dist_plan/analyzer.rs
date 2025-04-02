@@ -19,6 +19,7 @@ use datafusion::datasource::DefaultTableSource;
 use datafusion::error::Result as DfResult;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
+use datafusion_common::Column;
 use datafusion_expr::expr::{Exists, InSubquery};
 use datafusion_expr::utils::expr_to_columns;
 use datafusion_expr::{col as col_fn, Expr, LogicalPlan, LogicalPlanBuilder, Subquery};
@@ -77,8 +78,13 @@ impl DistPlannerAnalyzer {
             .map(|e| e.transform(&Self::transform_subquery).map(|x| x.data))
             .collect::<DfResult<Vec<_>>>()?;
 
-        let inputs = plan.inputs().into_iter().cloned().collect::<Vec<_>>();
-        Ok(Transformed::yes(plan.with_new_exprs(exprs, inputs)?))
+        // Some plans that are special treated (should not call `with_new_exprs` on them)
+        if !matches!(plan, LogicalPlan::Unnest(_)) {
+            let inputs = plan.inputs().into_iter().cloned().collect::<Vec<_>>();
+            Ok(Transformed::yes(plan.with_new_exprs(exprs, inputs)?))
+        } else {
+            Ok(Transformed::no(plan))
+        }
     }
 
     fn transform_subquery(expr: Expr) -> DfResult<Transformed<Expr>> {
@@ -147,7 +153,7 @@ struct PlanRewriter {
     status: RewriterStatus,
     /// Partition columns of the table in current pass
     partition_cols: Option<Vec<String>>,
-    column_requirements: HashSet<String>,
+    column_requirements: HashSet<Column>,
 }
 
 impl PlanRewriter {
@@ -210,7 +216,7 @@ impl PlanRewriter {
         }
 
         for col in container {
-            self.column_requirements.insert(col.flat_name());
+            self.column_requirements.insert(col);
         }
     }
 
@@ -265,6 +271,8 @@ impl PlanRewriter {
     }
 
     fn expand(&mut self, mut on_node: LogicalPlan) -> DfResult<LogicalPlan> {
+        // store schema before expand
+        let schema = on_node.schema().clone();
         let mut rewriter = EnforceDistRequirementRewriter {
             column_requirements: std::mem::take(&mut self.column_requirements),
         };
@@ -280,6 +288,13 @@ impl PlanRewriter {
         }
         self.set_expanded();
 
+        // recover the schema
+        let node = LogicalPlanBuilder::from(node)
+            .project(schema.iter().map(|(qualifier, field)| {
+                Expr::Column(Column::new(qualifier.cloned(), field.name()))
+            }))?
+            .build()?;
+
         Ok(node)
     }
 }
@@ -291,7 +306,7 @@ impl PlanRewriter {
 /// - Enforce column requirements for `LogicalPlan::Projection` nodes. Makes sure the
 ///   required columns are available in the sub plan.
 struct EnforceDistRequirementRewriter {
-    column_requirements: HashSet<String>,
+    column_requirements: HashSet<Column>,
 }
 
 impl TreeNodeRewriter for EnforceDistRequirementRewriter {
@@ -305,7 +320,9 @@ impl TreeNodeRewriter for EnforceDistRequirementRewriter {
             }
 
             for expr in &projection.expr {
-                column_requirements.remove(&expr.name_for_alias()?);
+                let (qualifier, name) = expr.qualified_name();
+                let column = Column::new(qualifier, name);
+                column_requirements.remove(&column);
             }
             if column_requirements.is_empty() {
                 return Ok(Transformed::no(node));
@@ -313,7 +330,7 @@ impl TreeNodeRewriter for EnforceDistRequirementRewriter {
 
             let mut new_exprs = projection.expr.clone();
             for col in &column_requirements {
-                new_exprs.push(col_fn(col));
+                new_exprs.push(Expr::Column(col.clone()));
             }
             let new_node =
                 node.with_new_exprs(new_exprs, node.inputs().into_iter().cloned().collect())?;
@@ -442,7 +459,8 @@ mod test {
 
         let config = ConfigOptions::default();
         let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
-        let expected = "MergeScan [is_placeholder=false]";
+        let expected = "Projection: avg(t.number)\
+        \n  MergeScan [is_placeholder=false]";
         assert_eq!(expected, result.to_string());
     }
 
@@ -467,7 +485,8 @@ mod test {
         let expected = [
             "Sort: t.number ASC NULLS LAST",
             "  Distinct:",
-            "    MergeScan [is_placeholder=false]",
+            "    Projection: t.number",
+            "      MergeScan [is_placeholder=false]",
         ]
         .join("\n");
         assert_eq!(expected, result.to_string());
@@ -489,7 +508,8 @@ mod test {
 
         let config = ConfigOptions::default();
         let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
-        let expected = "MergeScan [is_placeholder=false]";
+        let expected = "Projection: t.number\
+        \n  MergeScan [is_placeholder=false]";
         assert_eq!(expected, result.to_string());
     }
 
@@ -526,11 +546,16 @@ mod test {
 
         let config = ConfigOptions::default();
         let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
-        let expected = "Limit: skip=0, fetch=1\
-            \n  LeftSemi Join:  Filter: t.number = right.number\
-            \n    MergeScan [is_placeholder=false]\
-            \n    SubqueryAlias: right\
-            \n      MergeScan [is_placeholder=false]";
+        let expected = [
+            "Limit: skip=0, fetch=1",
+            "  LeftSemi Join:  Filter: t.number = right.number",
+            "    Projection: t.number",
+            "      MergeScan [is_placeholder=false]",
+            "    SubqueryAlias: right",
+            "      Projection: t.number",
+            "        MergeScan [is_placeholder=false]",
+        ]
+        .join("\n");
         assert_eq!(expected, result.to_string());
     }
 }

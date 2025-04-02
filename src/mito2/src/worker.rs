@@ -38,7 +38,7 @@ use common_telemetry::{error, info, warn};
 use futures::future::try_join_all;
 use object_store::manager::ObjectStoreManagerRef;
 use prometheus::IntGauge;
-use rand::{thread_rng, Rng};
+use rand::{rng, Rng};
 use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::region_engine::{SetRegionRoleStateResponse, SettableRegionRoleState};
@@ -390,7 +390,7 @@ async fn write_cache_from_config(
 
 /// Computes a initial check delay for a worker.
 pub(crate) fn worker_init_check_delay() -> Duration {
-    let init_check_delay = thread_rng().gen_range(0..MAX_INITIAL_CHECK_DELAY_SECS);
+    let init_check_delay = rng().random_range(0..MAX_INITIAL_CHECK_DELAY_SECS);
     Duration::from_secs(init_check_delay)
 }
 
@@ -583,6 +583,8 @@ type RequestBuffer = Vec<WorkerRequest>;
 #[derive(Default)]
 pub(crate) struct StalledRequests {
     /// Stalled requests.
+    /// Remember to use `StalledRequests::stalled_count()` to get the total number of stalled requests
+    /// instead of `StalledRequests::requests.len()`.
     ///
     /// Key: RegionId
     /// Value: (estimated size, stalled requests)
@@ -616,6 +618,11 @@ impl StalledRequests {
         } else {
             vec![]
         }
+    }
+
+    /// Returns the total number of all stalled requests.
+    pub(crate) fn stalled_count(&self) -> usize {
+        self.requests.values().map(|reqs| reqs.1.len()).sum()
     }
 }
 
@@ -817,6 +824,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 WorkerRequest::Stop => {
                     debug_assert!(!self.running.load(Ordering::Relaxed));
                 }
+
+                WorkerRequest::SyncRegion(req) => {
+                    self.handle_region_sync(req).await;
+                }
             }
         }
 
@@ -836,7 +847,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         for ddl in ddl_requests.drain(..) {
             let res = match ddl.request {
                 DdlRequest::Create(req) => self.handle_create_request(ddl.region_id, req).await,
-                DdlRequest::Drop(_) => self.handle_drop_request(ddl.region_id).await,
+                DdlRequest::Drop => self.handle_drop_request(ddl.region_id).await,
                 DdlRequest::Open((req, wal_entry_receiver)) => {
                     self.handle_open_request(ddl.region_id, req, wal_entry_receiver, ddl.sender)
                         .await;

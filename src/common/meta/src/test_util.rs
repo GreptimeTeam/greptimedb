@@ -35,9 +35,10 @@ use crate::node_manager::{
 };
 use crate::peer::{Peer, PeerLookupService};
 use crate::region_keeper::MemoryRegionKeeper;
+use crate::region_registry::LeaderRegionRegistry;
 use crate::sequence::SequenceBuilder;
 use crate::wal_options_allocator::WalOptionsAllocator;
-use crate::{ClusterId, DatanodeId, FlownodeId};
+use crate::{DatanodeId, FlownodeId};
 
 #[async_trait::async_trait]
 pub trait MockDatanodeHandler: Sync + Send + Clone {
@@ -177,6 +178,7 @@ pub fn new_ddl_context_with_kv_backend(
         node_manager,
         cache_invalidator: Arc::new(DummyCacheInvalidator),
         memory_region_keeper: Arc::new(MemoryRegionKeeper::new()),
+        leader_region_registry: Arc::new(LeaderRegionRegistry::default()),
         table_metadata_allocator,
         table_metadata_manager,
         flow_metadata_allocator,
@@ -189,11 +191,11 @@ pub struct NoopPeerLookupService;
 
 #[async_trait::async_trait]
 impl PeerLookupService for NoopPeerLookupService {
-    async fn datanode(&self, _cluster_id: ClusterId, id: DatanodeId) -> Result<Option<Peer>> {
+    async fn datanode(&self, id: DatanodeId) -> Result<Option<Peer>> {
         Ok(Some(Peer::empty(id)))
     }
 
-    async fn flownode(&self, _cluster_id: ClusterId, id: FlownodeId) -> Result<Option<Peer>> {
+    async fn flownode(&self, id: FlownodeId) -> Result<Option<Peer>> {
         Ok(Some(Peer::empty(id)))
     }
 }

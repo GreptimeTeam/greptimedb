@@ -16,12 +16,14 @@ use std::fmt::Display;
 
 use common_time::timestamp::Timestamp;
 use itertools::Itertools;
-use opentelemetry_proto::tonic::common::v1::{InstrumentationScope, KeyValue};
+use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+use opentelemetry_proto::tonic::common::v1::{any_value, InstrumentationScope, KeyValue};
 use opentelemetry_proto::tonic::trace::v1::span::{Event, Link};
 use opentelemetry_proto::tonic::trace::v1::{Span, Status};
 use serde::Serialize;
 
 use super::attributes::Attributes;
+use crate::otlp::trace::KEY_SERVICE_NAME;
 use crate::otlp::utils::bytes_to_hex_string;
 
 #[derive(Debug, Clone)]
@@ -30,22 +32,22 @@ pub struct TraceSpan {
     pub service_name: Option<String>,
     pub trace_id: String,
     pub span_id: String,
-    pub parent_span_id: String,
+    pub parent_span_id: Option<String>,
 
     // the following are fields
-    pub resource_attributes: Attributes, // TODO(yuanbohan): Map in the future
+    pub resource_attributes: Attributes,
     pub scope_name: String,
     pub scope_version: String,
-    pub scope_attributes: Attributes, // TODO(yuanbohan): Map in the future
+    pub scope_attributes: Attributes,
     pub trace_state: String,
     pub span_name: String,
     pub span_kind: String,
     pub span_status_code: String,
     pub span_status_message: String,
-    pub span_attributes: Attributes, // TODO(yuanbohan): Map in the future
-    pub span_events: SpanEvents,     // TODO(yuanbohan): List in the future
-    pub span_links: SpanLinks,       // TODO(yuanbohan): List in the future
-    pub start_in_nanosecond: u64,    // this is also the Timestamp Index
+    pub span_attributes: Attributes,
+    pub span_events: SpanEvents,  // TODO(yuanbohan): List in the future
+    pub span_links: SpanLinks,    // TODO(yuanbohan): List in the future
+    pub start_in_nanosecond: u64, // this is also the Timestamp Index
     pub end_in_nanosecond: u64,
 }
 
@@ -201,7 +203,11 @@ pub fn parse_span(
         service_name,
         trace_id: bytes_to_hex_string(&span.trace_id),
         span_id: bytes_to_hex_string(&span.span_id),
-        parent_span_id: bytes_to_hex_string(&span.parent_span_id),
+        parent_span_id: if span.parent_span_id.is_empty() {
+            None
+        } else {
+            Some(bytes_to_hex_string(&span.parent_span_id))
+        },
 
         resource_attributes: Attributes::from(resource_attrs),
         trace_state: span.trace_state,
@@ -228,6 +234,51 @@ pub fn status_to_string(status: &Option<Status>) -> (String, String) {
         Some(status) => (status.code().as_str_name().into(), status.message.clone()),
         None => ("".into(), "".into()),
     }
+}
+
+/// Convert OpenTelemetry traces to SpanTraces
+///
+/// See
+/// <https://github.com/open-telemetry/opentelemetry-proto/blob/main/opentelemetry/proto/trace/v1/trace.proto>
+/// for data structure of OTLP traces.
+pub fn parse(request: ExportTraceServiceRequest) -> TraceSpans {
+    let span_size = request
+        .resource_spans
+        .iter()
+        .flat_map(|res| res.scope_spans.iter())
+        .flat_map(|scope| scope.spans.iter())
+        .count();
+    let mut spans = Vec::with_capacity(span_size);
+    for resource_spans in request.resource_spans {
+        let resource_attrs = resource_spans
+            .resource
+            .map(|r| r.attributes)
+            .unwrap_or_default();
+        let service_name = resource_attrs
+            .iter()
+            .find_or_first(|kv| kv.key == KEY_SERVICE_NAME)
+            .and_then(|kv| kv.value.clone())
+            .and_then(|v| match v.value {
+                Some(any_value::Value::StringValue(s)) => Some(s),
+                Some(any_value::Value::BytesValue(b)) => {
+                    Some(String::from_utf8_lossy(&b).to_string())
+                }
+                _ => None,
+            });
+
+        for scope_spans in resource_spans.scope_spans {
+            let scope = scope_spans.scope.unwrap_or_default();
+            for span in scope_spans.spans {
+                spans.push(parse_span(
+                    service_name.clone(),
+                    &resource_attrs,
+                    &scope,
+                    span,
+                ));
+            }
+        }
+    }
+    spans
 }
 
 #[cfg(test)]

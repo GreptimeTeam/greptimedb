@@ -156,9 +156,9 @@ impl Display for Column {
         if let Some(fulltext_options) = &self.extensions.fulltext_index_options {
             if !fulltext_options.is_empty() {
                 let options = fulltext_options.kv_pairs();
-                write!(f, " FULLTEXT WITH({})", format_list_comma!(options))?;
+                write!(f, " FULLTEXT INDEX WITH({})", format_list_comma!(options))?;
             } else {
-                write!(f, " FULLTEXT")?;
+                write!(f, " FULLTEXT INDEX")?;
             }
         }
 

@@ -26,18 +26,20 @@ use puffin::puffin_manager::stager::{BoundedStager, Stager};
 use puffin::puffin_manager::{BlobGuard, PuffinManager, PuffinReader};
 use snafu::ResultExt;
 
+use crate::access_layer::FilePathProvider;
 use crate::error::{PuffinInitStagerSnafu, PuffinPurgeStagerSnafu, Result};
 use crate::metrics::{
     StagerMetrics, INDEX_PUFFIN_FLUSH_OP_TOTAL, INDEX_PUFFIN_READ_BYTES_TOTAL,
     INDEX_PUFFIN_READ_OP_TOTAL, INDEX_PUFFIN_WRITE_BYTES_TOTAL, INDEX_PUFFIN_WRITE_OP_TOTAL,
 };
+use crate::sst::file::FileId;
 use crate::sst::index::store::{self, InstrumentedStore};
 
 type InstrumentedRangeReader = store::InstrumentedRangeReader<'static>;
 type InstrumentedAsyncWrite = store::InstrumentedAsyncWrite<'static, FuturesAsyncWriter>;
 
 pub(crate) type SstPuffinManager =
-    FsPuffinManager<Arc<BoundedStager>, ObjectStorePuffinFileAccessor>;
+    FsPuffinManager<Arc<BoundedStager<FileId>>, ObjectStorePuffinFileAccessor>;
 pub(crate) type SstPuffinReader = <SstPuffinManager as PuffinManager>::Reader;
 pub(crate) type SstPuffinWriter = <SstPuffinManager as PuffinManager>::Writer;
 pub(crate) type SstPuffinBlob = <SstPuffinReader as PuffinReader>::Blob;
@@ -50,7 +52,7 @@ const STAGING_DIR: &str = "staging";
 #[derive(Clone)]
 pub struct PuffinManagerFactory {
     /// The stager used by the puffin manager.
-    stager: Arc<BoundedStager>,
+    stager: Arc<BoundedStager<FileId>>,
 
     /// The size of the write buffer used to create object store.
     write_buffer_size: Option<usize>,
@@ -79,15 +81,20 @@ impl PuffinManagerFactory {
         })
     }
 
-    pub(crate) fn build(&self, store: ObjectStore) -> SstPuffinManager {
+    pub(crate) fn build(
+        &self,
+        store: ObjectStore,
+        path_provider: impl FilePathProvider + 'static,
+    ) -> SstPuffinManager {
         let store = InstrumentedStore::new(store).with_write_buffer_size(self.write_buffer_size);
-        let puffin_file_accessor = ObjectStorePuffinFileAccessor::new(store);
+        let puffin_file_accessor =
+            ObjectStorePuffinFileAccessor::new(store, Arc::new(path_provider));
         SstPuffinManager::new(self.stager.clone(), puffin_file_accessor)
     }
 
-    pub(crate) async fn purge_stager(&self, puffin_file_name: &str) -> Result<()> {
+    pub(crate) async fn purge_stager(&self, file_id: FileId) -> Result<()> {
         self.stager
-            .purge(puffin_file_name)
+            .purge(&file_id)
             .await
             .context(PuffinPurgeStagerSnafu)
     }
@@ -119,11 +126,15 @@ impl PuffinManagerFactory {
 #[derive(Clone)]
 pub(crate) struct ObjectStorePuffinFileAccessor {
     object_store: InstrumentedStore,
+    path_provider: Arc<dyn FilePathProvider>,
 }
 
 impl ObjectStorePuffinFileAccessor {
-    pub fn new(object_store: InstrumentedStore) -> Self {
-        Self { object_store }
+    pub fn new(object_store: InstrumentedStore, path_provider: Arc<dyn FilePathProvider>) -> Self {
+        Self {
+            object_store,
+            path_provider,
+        }
     }
 }
 
@@ -131,11 +142,13 @@ impl ObjectStorePuffinFileAccessor {
 impl PuffinFileAccessor for ObjectStorePuffinFileAccessor {
     type Reader = InstrumentedRangeReader;
     type Writer = InstrumentedAsyncWrite;
+    type FileHandle = FileId;
 
-    async fn reader(&self, puffin_file_name: &str) -> PuffinResult<Self::Reader> {
+    async fn reader(&self, handle: &FileId) -> PuffinResult<Self::Reader> {
+        let file_path = self.path_provider.build_index_file_path(*handle);
         self.object_store
             .range_reader(
-                puffin_file_name,
+                &file_path,
                 &INDEX_PUFFIN_READ_BYTES_TOTAL,
                 &INDEX_PUFFIN_READ_OP_TOTAL,
             )
@@ -144,10 +157,11 @@ impl PuffinFileAccessor for ObjectStorePuffinFileAccessor {
             .context(puffin_error::ExternalSnafu)
     }
 
-    async fn writer(&self, puffin_file_name: &str) -> PuffinResult<Self::Writer> {
+    async fn writer(&self, handle: &FileId) -> PuffinResult<Self::Writer> {
+        let file_path = self.path_provider.build_index_file_path(*handle);
         self.object_store
             .writer(
-                puffin_file_name,
+                &file_path,
                 &INDEX_PUFFIN_WRITE_BYTES_TOTAL,
                 &INDEX_PUFFIN_WRITE_OP_TOTAL,
                 &INDEX_PUFFIN_FLUSH_OP_TOTAL,
@@ -169,22 +183,39 @@ mod tests {
 
     use super::*;
 
+    struct TestFilePathProvider;
+
+    impl FilePathProvider for TestFilePathProvider {
+        fn build_index_file_path(&self, file_id: FileId) -> String {
+            file_id.to_string()
+        }
+
+        fn build_sst_file_path(&self, file_id: FileId) -> String {
+            file_id.to_string()
+        }
+    }
+
     #[tokio::test]
     async fn test_puffin_manager_factory() {
         let (_dir, factory) =
             PuffinManagerFactory::new_for_test_async("test_puffin_manager_factory_").await;
 
         let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
-        let manager = factory.build(object_store);
+        let manager = factory.build(object_store, TestFilePathProvider);
 
-        let file_name = "my-puffin-file";
+        let file_id = FileId::random();
         let blob_key = "blob-key";
         let dir_key = "dir-key";
         let raw_data = b"hello world!";
 
-        let mut writer = manager.writer(file_name).await.unwrap();
+        let mut writer = manager.writer(&file_id).await.unwrap();
         writer
-            .put_blob(blob_key, Cursor::new(raw_data), PutOptions::default())
+            .put_blob(
+                blob_key,
+                Cursor::new(raw_data),
+                PutOptions::default(),
+                Default::default(),
+            )
             .await
             .unwrap();
         let dir_data = create_temp_dir("test_puffin_manager_factory_dir_data_");
@@ -203,7 +234,7 @@ mod tests {
             .unwrap();
         writer.finish().await.unwrap();
 
-        let reader = manager.reader(file_name).await.unwrap();
+        let reader = manager.reader(&file_id).await.unwrap();
         let blob_guard = reader.blob(blob_key).await.unwrap();
         let blob_reader = blob_guard.reader().await.unwrap();
         let meta = blob_reader.metadata().await.unwrap();

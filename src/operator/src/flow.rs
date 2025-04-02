@@ -21,7 +21,7 @@ use common_meta::node_manager::NodeManagerRef;
 use common_query::error::Result;
 use common_telemetry::tracing_context::TracingContext;
 use futures::stream::FuturesUnordered;
-use futures::{StreamExt, TryStreamExt};
+use futures::StreamExt;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 
@@ -40,6 +40,10 @@ impl FlowServiceOperator {
             flow_metadata_manager,
             node_manager,
         }
+    }
+
+    pub fn flow_metadata_manager(&self) -> FlowMetadataManagerRef {
+        self.flow_metadata_manager.clone()
     }
 }
 
@@ -81,7 +85,6 @@ impl FlowServiceOperator {
             .flow_metadata_manager
             .flow_route_manager()
             .routes(id)
-            .try_collect::<Vec<_>>()
             .await
             .map_err(BoxedError::new)
             .context(common_query::error::ExecuteSnafu)?;
@@ -124,6 +127,7 @@ impl FlowServiceOperator {
                 final_result = Some(res);
             }
         }
+
         final_result.context(common_query::error::FlownodeNotFoundSnafu)
     }
 }

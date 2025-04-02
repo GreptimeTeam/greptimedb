@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use api::v1::alter_table_expr::Kind;
+use api::v1::column_def::options_from_skipping;
 use api::v1::region::{
     InsertRequest as RegionInsertRequest, InsertRequests as RegionInsertRequests,
     RegionRequestHeader,
@@ -26,7 +27,9 @@ use api::v1::{
 };
 use catalog::CatalogManagerRef;
 use client::{OutputData, OutputMeta};
-use common_catalog::consts::default_engine;
+use common_catalog::consts::{
+    default_engine, PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN, TRACE_ID_COLUMN,
+};
 use common_grpc_expr::util::ColumnExpr;
 use common_meta::cache::TableFlownodeSetCacheRef;
 use common_meta::node_manager::{AffectedRows, NodeManagerRef};
@@ -34,13 +37,16 @@ use common_meta::peer::Peer;
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use common_query::Output;
 use common_telemetry::tracing_context::TracingContext;
-use common_telemetry::{error, info};
+use common_telemetry::{error, info, warn};
+use datatypes::schema::SkippingIndexOptions;
 use futures_util::future;
 use meter_macros::write_meter;
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
 use snafu::prelude::*;
 use snafu::ResultExt;
+use sql::partition::partition_rule_for_hexstring;
+use sql::statements::create::Partitions;
 use sql::statements::insert::Insert;
 use store_api::metric_engine_consts::{
     LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
@@ -48,13 +54,16 @@ use store_api::metric_engine_consts::{
 use store_api::mito_engine_options::{APPEND_MODE_KEY, MERGE_MODE_KEY};
 use store_api::storage::{RegionId, TableId};
 use table::metadata::TableInfo;
-use table::requests::{InsertRequest as TableInsertRequest, AUTO_CREATE_TABLE_KEY, TTL_KEY};
+use table::requests::{
+    InsertRequest as TableInsertRequest, AUTO_CREATE_TABLE_KEY, TABLE_DATA_MODEL,
+    TABLE_DATA_MODEL_TRACE_V1, VALID_TABLE_OPTION_KEYS,
+};
 use table::table_reference::TableReference;
 use table::TableRef;
 
 use crate::error::{
-    CatalogSnafu, FindRegionLeaderSnafu, InvalidInsertRequestSnafu, JoinTaskSnafu,
-    RequestInsertsSnafu, Result, TableNotFoundSnafu,
+    CatalogSnafu, ColumnOptionsSnafu, FindRegionLeaderSnafu, InvalidInsertRequestSnafu,
+    JoinTaskSnafu, RequestInsertsSnafu, Result, TableNotFoundSnafu,
 };
 use crate::expr_helper;
 use crate::region_req_factory::RegionRequestFactory;
@@ -84,6 +93,8 @@ enum AutoCreateTableType {
     Log,
     /// A table that merges rows by `last_non_null` strategy.
     LastNonNull,
+    /// Create table that build index and default partition rules on trace_id
+    Trace,
 }
 
 impl AutoCreateTableType {
@@ -93,6 +104,7 @@ impl AutoCreateTableType {
             AutoCreateTableType::Physical => "physical",
             AutoCreateTableType::Log => "log",
             AutoCreateTableType::LastNonNull => "last_non_null",
+            AutoCreateTableType::Trace => "trace",
         }
     }
 }
@@ -167,6 +179,21 @@ impl Inserter {
             ctx,
             statement_executor,
             AutoCreateTableType::Log,
+        )
+        .await
+    }
+
+    pub async fn handle_trace_inserts(
+        &self,
+        requests: RowInsertRequests,
+        ctx: QueryContextRef,
+        statement_executor: &StatementExecutor,
+    ) -> Result<Output> {
+        self.handle_row_inserts_with_create_type(
+            requests,
+            ctx,
+            statement_executor,
+            AutoCreateTableType::Trace,
         )
         .await
     }
@@ -528,7 +555,63 @@ impl Inserter {
                 // for it's a very unexpected behavior and should be set by user explicitly
                 for create_table in create_tables {
                     let table = self
-                        .create_physical_table(create_table, ctx, statement_executor)
+                        .create_physical_table(create_table, None, ctx, statement_executor)
+                        .await?;
+                    let table_info = table.table_info();
+                    if table_info.is_ttl_instant_table() {
+                        instant_table_ids.insert(table_info.table_id());
+                    }
+                    table_infos.insert(table_info.table_id(), table.table_info());
+                }
+                for alter_expr in alter_tables.into_iter() {
+                    statement_executor
+                        .alter_table_inner(alter_expr, ctx.clone())
+                        .await?;
+                }
+            }
+
+            AutoCreateTableType::Trace => {
+                // note that auto create table shouldn't be ttl instant table
+                // for it's a very unexpected behavior and should be set by user explicitly
+                for mut create_table in create_tables {
+                    // prebuilt partition rules for uuid data: see the function
+                    // for more information
+                    let partitions = partition_rule_for_hexstring(TRACE_ID_COLUMN);
+                    // add skip index to
+                    // - trace_id: when searching by trace id
+                    // - parent_span_id: when searching root span
+                    // - span_name: when searching certain types of span
+                    let index_columns =
+                        [TRACE_ID_COLUMN, PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN];
+                    for index_column in index_columns {
+                        if let Some(col) = create_table
+                            .column_defs
+                            .iter_mut()
+                            .find(|c| c.name == index_column)
+                        {
+                            col.options = options_from_skipping(&SkippingIndexOptions::default())
+                                .context(ColumnOptionsSnafu)?;
+                        } else {
+                            warn!(
+                                "Column {} not found when creating index for trace table: {}.",
+                                index_column, create_table.table_name
+                            );
+                        }
+                    }
+
+                    // use table_options to mark table model version
+                    create_table.table_options.insert(
+                        TABLE_DATA_MODEL.to_string(),
+                        TABLE_DATA_MODEL_TRACE_V1.to_string(),
+                    );
+
+                    let table = self
+                        .create_physical_table(
+                            create_table,
+                            Some(partitions),
+                            ctx,
+                            statement_executor,
+                        )
                         .await?;
                     let table_info = table.table_info();
                     if table_info.is_ttl_instant_table() {
@@ -632,8 +715,10 @@ impl Inserter {
         ctx: &QueryContextRef,
     ) -> Result<CreateTableExpr> {
         let mut table_options = Vec::with_capacity(4);
-        if let Some(ttl) = ctx.extension(TTL_KEY) {
-            table_options.push((TTL_KEY, ttl));
+        for key in VALID_TABLE_OPTION_KEYS {
+            if let Some(value) = ctx.extension(key) {
+                table_options.push((key, value));
+            }
         }
 
         let mut engine_name = default_engine();
@@ -658,6 +743,9 @@ impl Inserter {
             AutoCreateTableType::LastNonNull => {
                 table_options.push((MERGE_MODE_KEY, "last_non_null"));
             }
+            AutoCreateTableType::Trace => {
+                table_options.push((APPEND_MODE_KEY, "true"));
+            }
         }
 
         let schema = ctx.current_schema();
@@ -666,6 +754,7 @@ impl Inserter {
         let request_schema = req.rows.as_ref().unwrap().schema.as_slice();
         let mut create_table_expr =
             build_create_table_expr(&table_ref, request_schema, engine_name)?;
+
         info!("Table `{table_ref}` does not exist, try creating table");
         for (k, v) in table_options {
             create_table_expr
@@ -707,6 +796,7 @@ impl Inserter {
     async fn create_physical_table(
         &self,
         mut create_table_expr: CreateTableExpr,
+        partitions: Option<Partitions>,
         ctx: &QueryContextRef,
         statement_executor: &StatementExecutor,
     ) -> Result<TableRef> {
@@ -720,7 +810,7 @@ impl Inserter {
             info!("Table `{table_ref}` does not exist, try creating table");
         }
         let res = statement_executor
-            .create_table_inner(&mut create_table_expr, None, ctx.clone())
+            .create_table_inner(&mut create_table_expr, partitions, ctx.clone())
             .await;
 
         let table_ref = TableReference::full(

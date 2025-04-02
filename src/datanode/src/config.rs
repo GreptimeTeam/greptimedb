@@ -31,12 +31,11 @@ use servers::export_metrics::ExportMetricsOption;
 use servers::grpc::GrpcOptions;
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
-use servers::Mode;
 
 pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize::gb(5);
 
 /// Default data home in file storage
-const DEFAULT_DATA_HOME: &str = "/tmp/greptimedb";
+const DEFAULT_DATA_HOME: &str = "./greptimedb_data";
 
 /// Object storage config
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -171,6 +170,10 @@ pub struct S3Config {
     pub secret_access_key: SecretString,
     pub endpoint: Option<String>,
     pub region: Option<String>,
+    /// Enable virtual host style so that opendal will send API requests in virtual host style instead of path style.
+    /// By default, opendal will send API to https://s3.us-east-1.amazonaws.com/bucket_name
+    /// Enabled, opendal will send API to https://bucket_name.s3.us-east-1.amazonaws.com
+    pub enable_virtual_host_style: bool,
     #[serde(flatten)]
     pub cache: ObjectStorageCacheConfig,
     pub http_client: HttpClientConfig,
@@ -185,6 +188,7 @@ impl PartialEq for S3Config {
             && self.secret_access_key.expose_secret() == other.secret_access_key.expose_secret()
             && self.endpoint == other.endpoint
             && self.region == other.region
+            && self.enable_virtual_host_style == other.enable_virtual_host_style
             && self.cache == other.cache
             && self.http_client == other.http_client
     }
@@ -289,6 +293,7 @@ impl Default for S3Config {
             root: String::default(),
             access_key_id: SecretString::from(String::default()),
             secret_access_key: SecretString::from(String::default()),
+            enable_virtual_host_style: false,
             endpoint: Option::default(),
             region: Option::default(),
             cache: ObjectStorageCacheConfig::default(),
@@ -353,7 +358,6 @@ impl Default for ObjectStoreConfig {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct DatanodeOptions {
-    pub mode: Mode,
     pub node_id: Option<u64>,
     pub require_lease_before_startup: bool,
     pub init_regions_in_background: bool,
@@ -389,7 +393,6 @@ impl Default for DatanodeOptions {
     #[allow(deprecated)]
     fn default() -> Self {
         Self {
-            mode: Mode::Standalone,
             node_id: None,
             require_lease_before_startup: false,
             init_regions_in_background: false,

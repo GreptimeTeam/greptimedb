@@ -26,7 +26,7 @@ retry_interval = "3s"
 ## The address to bind the HTTP server.
 addr = "127.0.0.1:4000"
 ## HTTP request timeout. Set to 0 to disable timeout.
-timeout = "30s"
+timeout = "0s"
 ## HTTP request body limit.
 ## The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.
 ## Set to 0 to disable limit.
@@ -189,7 +189,7 @@ tcp_nodelay = true
 ## The logging options.
 [logging]
 ## The directory to store the log files. If set to empty, logs will not be written to files.
-dir = "/tmp/greptimedb/logs"
+dir = "./greptimedb_data/logs"
 
 ## The log level. Can be `info`/`debug`/`warn`/`error`.
 ## @toml2docs:none-default

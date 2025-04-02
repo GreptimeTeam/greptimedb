@@ -91,6 +91,14 @@ SELECT * FROM test_pk ORDER BY t LIMIT 5;
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 EXPLAIN ANALYZE SELECT * FROM test_pk ORDER BY t LIMIT 5;
 
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (files.*) REDACTED
+EXPLAIN ANALYZE VERBOSE SELECT * FROM test_pk ORDER BY t LIMIT 5;
+
 SELECT * FROM test_pk ORDER BY t DESC LIMIT 5;
 
 -- SQLNESS REPLACE (-+) -
@@ -109,5 +117,13 @@ SELECT * FROM test_pk where pk > 7 ORDER BY t LIMIT 5;
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 EXPLAIN ANALYZE SELECT * FROM test_pk where pk > 7 ORDER BY t LIMIT 5;
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (files.*) REDACTED
+EXPLAIN ANALYZE VERBOSE SELECT * FROM test_pk where pk > 7 ORDER BY t LIMIT 5;
 
 DROP TABLE test_pk;

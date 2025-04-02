@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use common_error::ext::BoxedError;
+use common_function::function::FunctionContext;
 use datafusion_substrait::extensions::Extensions;
 use datatypes::data_type::ConcreteDataType as CDT;
 use query::QueryEngine;
@@ -146,7 +147,7 @@ impl common_function::function::Function for TumbleFunction {
 
     fn eval(
         &self,
-        _func_ctx: common_function::function::FunctionContext,
+        _func_ctx: &FunctionContext,
         _columns: &[datatypes::prelude::VectorRef],
     ) -> common_query::error::Result<datatypes::prelude::VectorRef> {
         UnexpectedSnafu {

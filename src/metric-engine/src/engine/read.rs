@@ -79,10 +79,14 @@ impl MetricEngineInner {
         let request = self
             .transform_request(physical_region_id, logical_region_id, request)
             .await?;
-        self.mito
+        let mut scanner = self
+            .mito
             .handle_query(data_region_id, request)
             .await
-            .context(MitoReadOperationSnafu)
+            .context(MitoReadOperationSnafu)?;
+        scanner.set_logical_region(true);
+
+        Ok(scanner)
     }
 
     pub async fn get_last_seq_num(&self, region_id: RegionId) -> Result<Option<SequenceNumber>> {

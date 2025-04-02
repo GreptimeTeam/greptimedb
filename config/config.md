@@ -12,7 +12,6 @@
 
 | Key | Type | Default | Descriptions |
 | --- | -----| ------- | ----------- |
-| `mode` | String | `standalone` | The running mode of the datanode. It can be `standalone` or `distributed`. |
 | `default_timezone` | String | Unset | The default timezone of the server. |
 | `init_regions_in_background` | Bool | `false` | Initialize all regions in the background during the startup.<br/>By default, it provides services after all regions have been initialized. |
 | `init_regions_parallelism` | Integer | `16` | Parallelism of initializing regions. |
@@ -24,7 +23,7 @@
 | `runtime.compact_rt_size` | Integer | `4` | The number of threads to execute the runtime for global write operations. |
 | `http` | -- | -- | The HTTP server options. |
 | `http.addr` | String | `127.0.0.1:4000` | The address to bind the HTTP server. |
-| `http.timeout` | String | `30s` | HTTP request timeout. Set to 0 to disable timeout. |
+| `http.timeout` | String | `0s` | HTTP request timeout. Set to 0 to disable timeout. |
 | `http.body_limit` | String | `64MB` | HTTP request body limit.<br/>The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.<br/>Set to 0 to disable limit. |
 | `http.enable_cors` | Bool | `true` | HTTP CORS support, it's turned on by default<br/>This allows browser to access http APIs without CORS restrictions |
 | `http.cors_allowed_origins` | Array | Unset | Customize allowed origins for HTTP CORS. |
@@ -98,10 +97,11 @@
 | `procedure` | -- | -- | Procedure storage options. |
 | `procedure.max_retry_times` | Integer | `3` | Procedure max retry time. |
 | `procedure.retry_delay` | String | `500ms` | Initial retry delay of procedures, increases exponentially |
+| `procedure.max_running_procedures` | Integer | `128` | Max running procedures.<br/>The maximum number of procedures that can be running at the same time.<br/>If the number of running procedures exceeds this limit, the procedure will be rejected. |
 | `flow` | -- | -- | flow engine options. |
 | `flow.num_workers` | Integer | `0` | The number of flow worker in flownode.<br/>Not setting(or set to 0) this value will use the number of CPU cores divided by 2. |
 | `storage` | -- | -- | The data storage options. |
-| `storage.data_home` | String | `/tmp/greptimedb/` | The working home directory. |
+| `storage.data_home` | String | `./greptimedb_data/` | The working home directory. |
 | `storage.type` | String | `File` | The storage type used to store the data.<br/>- `File`: the data is stored in the local file system.<br/>- `S3`: the data is stored in the S3 object storage.<br/>- `Gcs`: the data is stored in the Google Cloud Storage.<br/>- `Azblob`: the data is stored in the Azure Blob Storage.<br/>- `Oss`: the data is stored in the Aliyun OSS. |
 | `storage.cache_path` | String | Unset | Read cache configuration for object storage such as 'S3' etc, it's configured by default when using object storage. It is recommended to configure it when using object storage for better performance.<br/>A local file directory, defaults to `{data_home}`. An empty string means disabling. |
 | `storage.cache_capacity` | String | Unset | The local file cache capacity in bytes. If your disk space is sufficient, it is recommended to set it larger. |
@@ -181,7 +181,7 @@
 | `region_engine.metric` | -- | -- | Metric engine options. |
 | `region_engine.metric.experimental_sparse_primary_key_encoding` | Bool | `false` | Whether to enable the experimental sparse primary key encoding. |
 | `logging` | -- | -- | The logging options. |
-| `logging.dir` | String | `/tmp/greptimedb/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
+| `logging.dir` | String | `./greptimedb_data/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
 | `logging.level` | String | Unset | The log level. Can be `info`/`debug`/`warn`/`error`. |
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
 | `logging.otlp_endpoint` | String | `http://localhost:4317` | The OTLP tracing endpoint. |
@@ -222,7 +222,7 @@
 | `heartbeat.retry_interval` | String | `3s` | Interval for retrying to send heartbeat messages to the metasrv. |
 | `http` | -- | -- | The HTTP server options. |
 | `http.addr` | String | `127.0.0.1:4000` | The address to bind the HTTP server. |
-| `http.timeout` | String | `30s` | HTTP request timeout. Set to 0 to disable timeout. |
+| `http.timeout` | String | `0s` | HTTP request timeout. Set to 0 to disable timeout. |
 | `http.body_limit` | String | `64MB` | HTTP request body limit.<br/>The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.<br/>Set to 0 to disable limit. |
 | `http.enable_cors` | Bool | `true` | HTTP CORS support, it's turned on by default<br/>This allows browser to access http APIs without CORS restrictions |
 | `http.cors_allowed_origins` | Array | Unset | Customize allowed origins for HTTP CORS. |
@@ -279,7 +279,7 @@
 | `datanode.client.connect_timeout` | String | `10s` | -- |
 | `datanode.client.tcp_nodelay` | Bool | `true` | -- |
 | `logging` | -- | -- | The logging options. |
-| `logging.dir` | String | `/tmp/greptimedb/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
+| `logging.dir` | String | `./greptimedb_data/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
 | `logging.level` | String | Unset | The log level. Can be `info`/`debug`/`warn`/`error`. |
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
 | `logging.otlp_endpoint` | String | `http://localhost:4317` | The OTLP tracing endpoint. |
@@ -308,7 +308,7 @@
 
 | Key | Type | Default | Descriptions |
 | --- | -----| ------- | ----------- |
-| `data_home` | String | `/tmp/metasrv/` | The working home directory. |
+| `data_home` | String | `./greptimedb_data/metasrv/` | The working home directory. |
 | `bind_addr` | String | `127.0.0.1:3002` | The bind address of metasrv. |
 | `server_addr` | String | `127.0.0.1:3002` | The communication server address for the frontend and datanode to connect to metasrv.<br/>If left empty or unset, the server will automatically use the IP address of the first network interface<br/>on the host, with the same port number as the one specified in `bind_addr`. |
 | `store_addrs` | Array | -- | Store server address default to etcd store.<br/>For postgres store, the format is:<br/>"password=password dbname=postgres user=postgres host=localhost port=5432"<br/>For etcd store, the format is:<br/>"127.0.0.1:2379" |
@@ -319,6 +319,7 @@
 | `selector` | String | `round_robin` | Datanode selector type.<br/>- `round_robin` (default value)<br/>- `lease_based`<br/>- `load_based`<br/>For details, please see "https://docs.greptime.com/developer-guide/metasrv/selector". |
 | `use_memory_store` | Bool | `false` | Store data in memory. |
 | `enable_region_failover` | Bool | `false` | Whether to enable region failover.<br/>This feature is only available on GreptimeDB running on cluster mode and<br/>- Using Remote WAL<br/>- Using shared storage (e.g., s3). |
+| `node_max_idle_time` | String | `24hours` | Max allowed idle time before removing node info from metasrv memory. |
 | `enable_telemetry` | Bool | `true` | Whether to enable greptimedb telemetry. Enabled by default. |
 | `runtime` | -- | -- | The runtime options. |
 | `runtime.global_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
@@ -327,6 +328,7 @@
 | `procedure.max_retry_times` | Integer | `12` | Procedure max retry time. |
 | `procedure.retry_delay` | String | `500ms` | Initial retry delay of procedures, increases exponentially |
 | `procedure.max_metadata_value_size` | String | `1500KiB` | Auto split large value<br/>GreptimeDB procedure uses etcd as the default metadata storage backend.<br/>The etcd the maximum size of any request is 1.5 MiB<br/>1500KiB = 1536KiB (1.5MiB) - 36KiB (reserved size of key)<br/>Comments out the `max_metadata_value_size`, for don't split large value (no limit). |
+| `procedure.max_running_procedures` | Integer | `128` | Max running procedures.<br/>The maximum number of procedures that can be running at the same time.<br/>If the number of running procedures exceeds this limit, the procedure will be rejected. |
 | `failure_detector` | -- | -- | -- |
 | `failure_detector.threshold` | Float | `8.0` | The threshold value used by the failure detector to determine failure conditions. |
 | `failure_detector.min_std_deviation` | String | `100ms` | The minimum standard deviation of the heartbeat intervals, used to calculate acceptable variations. |
@@ -351,7 +353,7 @@
 | `wal.backoff_base` | Integer | `2` | Exponential backoff rate, i.e. next backoff = base * current backoff. |
 | `wal.backoff_deadline` | String | `5mins` | Stop reconnecting if the total wait time reaches the deadline. If this config is missing, the reconnecting won't terminate. |
 | `logging` | -- | -- | The logging options. |
-| `logging.dir` | String | `/tmp/greptimedb/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
+| `logging.dir` | String | `./greptimedb_data/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
 | `logging.level` | String | Unset | The log level. Can be `info`/`debug`/`warn`/`error`. |
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
 | `logging.otlp_endpoint` | String | `http://localhost:4317` | The OTLP tracing endpoint. |
@@ -380,7 +382,6 @@
 
 | Key | Type | Default | Descriptions |
 | --- | -----| ------- | ----------- |
-| `mode` | String | `standalone` | The running mode of the datanode. It can be `standalone` or `distributed`. |
 | `node_id` | Integer | Unset | The datanode identifier and should be unique in the cluster. |
 | `require_lease_before_startup` | Bool | `false` | Start services after regions have obtained leases.<br/>It will block the datanode start if it can't receive leases in the heartbeat from metasrv. |
 | `init_regions_in_background` | Bool | `false` | Initialize all regions in the background during the startup.<br/>By default, it provides services after all regions have been initialized. |
@@ -389,7 +390,7 @@
 | `enable_telemetry` | Bool | `true` | Enable telemetry to collect anonymous usage data. Enabled by default. |
 | `http` | -- | -- | The HTTP server options. |
 | `http.addr` | String | `127.0.0.1:4000` | The address to bind the HTTP server. |
-| `http.timeout` | String | `30s` | HTTP request timeout. Set to 0 to disable timeout. |
+| `http.timeout` | String | `0s` | HTTP request timeout. Set to 0 to disable timeout. |
 | `http.body_limit` | String | `64MB` | HTTP request body limit.<br/>The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.<br/>Set to 0 to disable limit. |
 | `grpc` | -- | -- | The gRPC server options. |
 | `grpc.bind_addr` | String | `127.0.0.1:3001` | The address to bind the gRPC server. |
@@ -441,7 +442,7 @@
 | `wal.dump_index_interval` | String | `60s` | The interval for dumping WAL indexes.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.overwrite_entry_start_id` | Bool | `false` | Ignore missing entries during read WAL.<br/>**It's only used when the provider is `kafka`**.<br/><br/>This option ensures that when Kafka messages are deleted, the system<br/>can still successfully replay memtable data without throwing an<br/>out-of-range error.<br/>However, enabling this option might lead to unexpected data loss,<br/>as the system will skip over missing entries instead of treating<br/>them as critical errors. |
 | `storage` | -- | -- | The data storage options. |
-| `storage.data_home` | String | `/tmp/greptimedb/` | The working home directory. |
+| `storage.data_home` | String | `./greptimedb_data/` | The working home directory. |
 | `storage.type` | String | `File` | The storage type used to store the data.<br/>- `File`: the data is stored in the local file system.<br/>- `S3`: the data is stored in the S3 object storage.<br/>- `Gcs`: the data is stored in the Google Cloud Storage.<br/>- `Azblob`: the data is stored in the Azure Blob Storage.<br/>- `Oss`: the data is stored in the Aliyun OSS. |
 | `storage.cache_path` | String | Unset | Read cache configuration for object storage such as 'S3' etc, it's configured by default when using object storage. It is recommended to configure it when using object storage for better performance.<br/>A local file directory, defaults to `{data_home}`. An empty string means disabling. |
 | `storage.cache_capacity` | String | Unset | The local file cache capacity in bytes. If your disk space is sufficient, it is recommended to set it larger. |
@@ -521,7 +522,7 @@
 | `region_engine.metric` | -- | -- | Metric engine options. |
 | `region_engine.metric.experimental_sparse_primary_key_encoding` | Bool | `false` | Whether to enable the experimental sparse primary key encoding. |
 | `logging` | -- | -- | The logging options. |
-| `logging.dir` | String | `/tmp/greptimedb/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
+| `logging.dir` | String | `./greptimedb_data/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
 | `logging.level` | String | Unset | The log level. Can be `info`/`debug`/`warn`/`error`. |
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
 | `logging.otlp_endpoint` | String | `http://localhost:4317` | The OTLP tracing endpoint. |
@@ -550,7 +551,6 @@
 
 | Key | Type | Default | Descriptions |
 | --- | -----| ------- | ----------- |
-| `mode` | String | `distributed` | The running mode of the flownode. It can be `standalone` or `distributed`. |
 | `node_id` | Integer | Unset | The flownode identifier and should be unique in the cluster. |
 | `flow` | -- | -- | flow engine options. |
 | `flow.num_workers` | Integer | `0` | The number of flow worker in flownode.<br/>Not setting(or set to 0) this value will use the number of CPU cores divided by 2. |
@@ -562,7 +562,7 @@
 | `grpc.max_send_message_size` | String | `512MB` | The maximum send message size for gRPC server. |
 | `http` | -- | -- | The HTTP server options. |
 | `http.addr` | String | `127.0.0.1:4000` | The address to bind the HTTP server. |
-| `http.timeout` | String | `30s` | HTTP request timeout. Set to 0 to disable timeout. |
+| `http.timeout` | String | `0s` | HTTP request timeout. Set to 0 to disable timeout. |
 | `http.body_limit` | String | `64MB` | HTTP request body limit.<br/>The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.<br/>Set to 0 to disable limit. |
 | `meta_client` | -- | -- | The metasrv client options. |
 | `meta_client.metasrv_addrs` | Array | -- | The addresses of the metasrv. |
@@ -578,7 +578,7 @@
 | `heartbeat.interval` | String | `3s` | Interval for sending heartbeat messages to the metasrv. |
 | `heartbeat.retry_interval` | String | `3s` | Interval for retrying to send heartbeat messages to the metasrv. |
 | `logging` | -- | -- | The logging options. |
-| `logging.dir` | String | `/tmp/greptimedb/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
+| `logging.dir` | String | `./greptimedb_data/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
 | `logging.level` | String | Unset | The log level. Can be `info`/`debug`/`warn`/`error`. |
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
 | `logging.otlp_endpoint` | String | `http://localhost:4317` | The OTLP tracing endpoint. |

@@ -13,6 +13,8 @@
 // limitations under the License.
 
 pub mod etcd;
+#[cfg(feature = "mysql_kvbackend")]
+pub mod mysql;
 #[cfg(feature = "pg_kvbackend")]
 pub mod postgres;
 

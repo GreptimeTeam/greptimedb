@@ -56,6 +56,8 @@ pub const TABLE_CATALOG: &str = "table_catalog";
 pub const TABLE_SCHEMA: &str = "table_schema";
 pub const TABLE_NAME: &str = "table_name";
 pub const COLUMN_NAME: &str = "column_name";
+pub const REGION_ID: &str = "region_id";
+pub const PEER_ID: &str = "peer_id";
 const ORDINAL_POSITION: &str = "ordinal_position";
 const CHARACTER_MAXIMUM_LENGTH: &str = "character_maximum_length";
 const CHARACTER_OCTET_LENGTH: &str = "character_octet_length";
@@ -365,10 +367,6 @@ impl InformationSchemaColumnsBuilder {
             self.numeric_scales.push(None);
 
             match &column_schema.data_type {
-                ConcreteDataType::DateTime(datetime_type) => {
-                    self.datetime_precisions
-                        .push(Some(datetime_type.precision() as i64));
-                }
                 ConcreteDataType::Timestamp(ts_type) => {
                     self.datetime_precisions
                         .push(Some(ts_type.precision() as i64));

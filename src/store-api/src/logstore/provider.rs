@@ -62,6 +62,7 @@ impl RaftEngineProvider {
 pub enum Provider {
     RaftEngine(RaftEngineProvider),
     Kafka(Arc<KafkaProvider>),
+    Noop,
 }
 
 impl Display for Provider {
@@ -71,6 +72,7 @@ impl Display for Provider {
                 write!(f, "region: {}", RegionId::from_u64(provider.id))
             }
             Provider::Kafka(provider) => write!(f, "topic: {}", provider.topic),
+            Provider::Noop => write!(f, "noop"),
         }
     }
 }
@@ -84,6 +86,10 @@ impl Provider {
         Provider::Kafka(Arc::new(KafkaProvider { topic }))
     }
 
+    pub fn noop_provider() -> Provider {
+        Provider::Noop
+    }
+
     /// Returns true if it's remote WAL.
     pub fn is_remote_wal(&self) -> bool {
         matches!(self, Provider::Kafka(_))
@@ -94,6 +100,7 @@ impl Provider {
         match self {
             Provider::RaftEngine(_) => RaftEngineProvider::type_name(),
             Provider::Kafka(_) => KafkaProvider::type_name(),
+            Provider::Noop => "Noop",
         }
     }
 

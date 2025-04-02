@@ -33,7 +33,7 @@ use store_api::storage::RegionId;
 use tokio::time::error::Elapsed;
 
 use crate::cache::file_cache::FileType;
-use crate::region::{RegionLeaderState, RegionRoleState};
+use crate::region::RegionRoleState;
 use crate::schedule::remote_job_scheduler::JobId;
 use crate::sst::file::FileId;
 use crate::worker::WorkerId;
@@ -42,6 +42,14 @@ use crate::worker::WorkerId;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("External error, context: {}", context))]
+    External {
+        source: BoxedError,
+        context: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to encode sparse primary key, reason: {}", reason))]
     EncodeSparsePrimaryKey {
         reason: String,
@@ -490,11 +498,23 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Region {} is in {:?} state, expect: {:?}", region_id, state, expect))]
-    RegionLeaderState {
+    #[snafu(display(
+        "Region {} is in {:?} state, which does not permit manifest updates.",
+        region_id,
+        state
+    ))]
+    UpdateManifest {
         region_id: RegionId,
         state: RegionRoleState,
-        expect: RegionLeaderState,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Region {} is in {:?} state, expect: {:?}", region_id, state, expect))]
+    RegionState {
+        region_id: RegionId,
+        state: RegionRoleState,
+        expect: RegionRoleState,
         #[snafu(implicit)]
         location: Location,
     },
@@ -761,6 +781,50 @@ pub enum Error {
     #[snafu(display("checksum mismatch (actual: {}, expected: {})", actual, expected))]
     ChecksumMismatch { actual: u32, expected: u32 },
 
+    #[snafu(display(
+        "No checkpoint found, region: {}, last_version: {}",
+        region_id,
+        last_version
+    ))]
+    NoCheckpoint {
+        region_id: RegionId,
+        last_version: ManifestVersion,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "No manifests found in range: [{}..{}), region: {}, last_version: {}",
+        start_version,
+        end_version,
+        region_id,
+        last_version
+    ))]
+    NoManifests {
+        region_id: RegionId,
+        start_version: ManifestVersion,
+        end_version: ManifestVersion,
+        last_version: ManifestVersion,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Failed to install manifest to {}, region: {}, available manifest version: {}, last version: {}",
+        target_version,
+        region_id,
+        available_version,
+        last_version
+    ))]
+    InstallManifestTo {
+        region_id: RegionId,
+        target_version: ManifestVersion,
+        available_version: ManifestVersion,
+        #[snafu(implicit)]
+        location: Location,
+        last_version: ManifestVersion,
+    },
+
     #[snafu(display("Region {} is stopped", region_id))]
     RegionStopped {
         region_id: RegionId,
@@ -956,6 +1020,9 @@ pub enum Error {
 
     #[snafu(display("Manual compaction is override by following operations."))]
     ManualCompactionOverride {},
+
+    #[snafu(display("Incompatible WAL provider change. This is typically caused by changing WAL provider in database config file without completely cleaning existing files. Global provider: {}, region provider: {}", global, region))]
+    IncompatibleWalProviderChange { global: String, region: String },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -980,11 +1047,10 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            OpenDal { .. }
-            | ReadParquet { .. }
-            | WriteWal { .. }
-            | ReadWal { .. }
-            | DeleteWal { .. } => StatusCode::StorageUnavailable,
+            OpenDal { .. } | ReadParquet { .. } => StatusCode::StorageUnavailable,
+            WriteWal { source, .. } | ReadWal { source, .. } | DeleteWal { source, .. } => {
+                source.status_code()
+            }
             CompressObject { .. }
             | DecompressObject { .. }
             | SerdeJson { .. }
@@ -996,7 +1062,10 @@ impl ErrorExt for Error {
             | OperateAbortedIndex { .. }
             | UnexpectedReplay { .. }
             | IndexEncodeNull { .. }
-            | UnexpectedImpureDefault { .. } => StatusCode::Unexpected,
+            | UnexpectedImpureDefault { .. }
+            | NoCheckpoint { .. }
+            | NoManifests { .. }
+            | InstallManifestTo { .. } => StatusCode::Unexpected,
             RegionNotFound { .. } => StatusCode::RegionNotFound,
             ObjectStoreNotFound { .. }
             | InvalidScanIndex { .. }
@@ -1055,8 +1124,8 @@ impl ErrorExt for Error {
             CompactRegion { source, .. } => source.status_code(),
             CompatReader { .. } => StatusCode::Unexpected,
             InvalidRegionRequest { source, .. } => source.status_code(),
-            RegionLeaderState { .. } => StatusCode::RegionNotReady,
-            &FlushableRegionState { .. } => StatusCode::RegionNotReady,
+            RegionState { .. } | UpdateManifest { .. } => StatusCode::RegionNotReady,
+            FlushableRegionState { .. } => StatusCode::RegionNotReady,
             JsonOptions { .. } => StatusCode::InvalidArguments,
             EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,
             ArrowReader { .. } => StatusCode::StorageUnavailable,
@@ -1074,6 +1143,8 @@ impl ErrorExt for Error {
             CleanDir { .. } => StatusCode::Unexpected,
             InvalidConfig { .. } => StatusCode::InvalidArguments,
             StaleLogEntry { .. } => StatusCode::Unexpected,
+
+            External { source, .. } => source.status_code(),
 
             FilterRecordBatch { source, .. } => source.status_code(),
 
@@ -1102,6 +1173,8 @@ impl ErrorExt for Error {
             }
 
             ManualCompactionOverride {} => StatusCode::Cancelled,
+
+            IncompatibleWalProviderChange { .. } => StatusCode::InvalidArguments,
         }
     }
 

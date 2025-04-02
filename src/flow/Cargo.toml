@@ -46,6 +46,7 @@ get-size2 = "0.1.2"
 greptime-proto.workspace = true
 # This fork of hydroflow is simply for keeping our dependency in our org, and pin the version
 # otherwise it is the same with upstream repo
+chrono.workspace = true
 http.workspace = true
 hydroflow = { git = "https://github.com/GreptimeTeam/hydroflow.git", branch = "main" }
 itertools.workspace = true

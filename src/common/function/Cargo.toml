@@ -12,9 +12,12 @@ default = ["geo"]
 geo = ["geohash", "h3o", "s2", "wkt", "geo-types", "dep:geo"]
 
 [dependencies]
+ahash = "0.8"
 api.workspace = true
 arc-swap = "1.0"
 async-trait.workspace = true
+bincode = "1.3"
+chrono.workspace = true
 common-base.workspace = true
 common-catalog.workspace = true
 common-error.workspace = true
@@ -26,12 +29,15 @@ common-telemetry.workspace = true
 common-time.workspace = true
 common-version.workspace = true
 datafusion.workspace = true
+datafusion-common.workspace = true
+datafusion-expr.workspace = true
 datatypes.workspace = true
 derive_more = { version = "1", default-features = false, features = ["display"] }
 geo = { version = "0.29", optional = true }
 geo-types = { version = "0.7", optional = true }
 geohash = { version = "0.13", optional = true }
 h3o = { version = "0.6", optional = true }
+hyperloglogplus = "0.4"
 jsonb.workspace = true
 memchr = "2.7"
 nalgebra.workspace = true
@@ -48,6 +54,7 @@ sql.workspace = true
 statrs = "0.16"
 store-api.workspace = true
 table.workspace = true
+uddsketch = { git = "https://github.com/GreptimeTeam/timescaledb-toolkit.git", rev = "84828fe8fb494a6a61412a3da96517fc80f7bb20" }
 wkt = { version = "0.11", optional = true }
 
 [dev-dependencies]

@@ -52,7 +52,6 @@ use servers::query_handler::grpc::ServerGrpcQueryHandlerAdapter;
 use servers::query_handler::sql::{ServerSqlQueryHandlerAdapter, SqlQueryHandler};
 use servers::server::Server;
 use servers::tls::ReloadableTlsServerConfig;
-use servers::Mode;
 use session::context::QueryContext;
 
 use crate::standalone::{GreptimeDbStandalone, GreptimeDbStandaloneBuilder};
@@ -301,7 +300,6 @@ impl TestGuard {
 }
 
 pub fn create_tmp_dir_and_datanode_opts(
-    mode: Mode,
     default_store_type: StorageType,
     store_provider_types: Vec<StorageType>,
     name: &str,
@@ -323,7 +321,7 @@ pub fn create_tmp_dir_and_datanode_opts(
         store_providers.push(store);
         storage_guards.push(StorageGuard(data_tmp_dir))
     }
-    let opts = create_datanode_opts(mode, default_store, store_providers, home_dir, wal_config);
+    let opts = create_datanode_opts(default_store, store_providers, home_dir, wal_config);
 
     (
         opts,
@@ -335,7 +333,6 @@ pub fn create_tmp_dir_and_datanode_opts(
 }
 
 pub(crate) fn create_datanode_opts(
-    mode: Mode,
     default_store: ObjectStoreConfig,
     providers: Vec<ObjectStoreConfig>,
     home_dir: String,
@@ -352,7 +349,6 @@ pub(crate) fn create_datanode_opts(
         grpc: GrpcOptions::default()
             .with_bind_addr(PEER_PLACEHOLDER_ADDR)
             .with_server_addr(PEER_PLACEHOLDER_ADDR),
-        mode,
         wal: wal_config,
         ..Default::default()
     }
@@ -392,8 +388,10 @@ pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router
         ..Default::default()
     };
     let http_server = HttpServerBuilder::new(http_opts)
-        .with_sql_handler(ServerSqlQueryHandlerAdapter::arc(instance.instance.clone()))
-        .with_logs_handler(instance.instance.clone())
+        .with_sql_handler(ServerSqlQueryHandlerAdapter::arc(
+            instance.fe_instance().clone(),
+        ))
+        .with_logs_handler(instance.fe_instance().clone())
         .with_metrics_handler(MetricsHandler)
         .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
         .build();
@@ -417,7 +415,7 @@ pub async fn setup_test_http_app_with_frontend_and_user_provider(
 ) -> (Router, TestGuard) {
     let instance = setup_standalone_instance(name, store_type).await;
 
-    create_test_table(instance.instance.as_ref(), "demo").await;
+    create_test_table(instance.fe_instance(), "demo").await;
 
     let http_opts = HttpOptions {
         addr: format!("127.0.0.1:{}", ports::get_port()),
@@ -427,11 +425,13 @@ pub async fn setup_test_http_app_with_frontend_and_user_provider(
     let mut http_server = HttpServerBuilder::new(http_opts);
 
     http_server = http_server
-        .with_sql_handler(ServerSqlQueryHandlerAdapter::arc(instance.instance.clone()))
-        .with_log_ingest_handler(instance.instance.clone(), None, None)
-        .with_logs_handler(instance.instance.clone())
-        .with_otlp_handler(instance.instance.clone())
-        .with_jaeger_handler(instance.instance.clone())
+        .with_sql_handler(ServerSqlQueryHandlerAdapter::arc(
+            instance.fe_instance().clone(),
+        ))
+        .with_log_ingest_handler(instance.fe_instance().clone(), None, None)
+        .with_logs_handler(instance.fe_instance().clone())
+        .with_otlp_handler(instance.fe_instance().clone())
+        .with_jaeger_handler(instance.fe_instance().clone())
         .with_greptime_config_options(instance.opts.to_toml().unwrap());
 
     if let Some(user_provider) = user_provider {
@@ -445,7 +445,10 @@ pub async fn setup_test_http_app_with_frontend_and_user_provider(
 }
 
 async fn run_sql(sql: &str, instance: &GreptimeDbStandalone) {
-    let result = instance.instance.do_query(sql, QueryContext::arc()).await;
+    let result = instance
+        .fe_instance()
+        .do_query(sql, QueryContext::arc())
+        .await;
     let _ = result.first().unwrap().as_ref().unwrap();
 }
 
@@ -465,6 +468,7 @@ pub async fn setup_test_prom_app_with_frontend(
     run_sql(sql, &instance).await;
     let sql = "CREATE TABLE demo_metrics (ts timestamp time index, val double, idc string primary key) engine=metric with ('on_physical_table' = 'phy')";
     run_sql(sql, &instance).await;
+
     // insert rows
     let sql = "INSERT INTO demo(host, val, ts) VALUES ('host1', 1.1, 0), ('host2', 2.1, 600000)";
     run_sql(sql, &instance).await;
@@ -472,15 +476,23 @@ pub async fn setup_test_prom_app_with_frontend(
         "INSERT INTO demo_metrics(idc, val, ts) VALUES ('idc1', 1.1, 0), ('idc2', 2.1, 600000)";
     run_sql(sql, &instance).await;
 
+    // build physical table
+    let sql = "CREATE TABLE phy2 (ts timestamp(9) time index, val double, host string primary key) engine=metric with ('physical_metric_table' = '')";
+    run_sql(sql, &instance).await;
+    let sql = "CREATE TABLE demo_metrics_with_nanos(ts timestamp(9) time index, val double, idc string primary key) engine=metric with ('on_physical_table' = 'phy2')";
+    run_sql(sql, &instance).await;
+    let sql = "INSERT INTO demo_metrics_with_nanos(idc, val, ts) VALUES ('idc1', 1.1, 0)";
+    run_sql(sql, &instance).await;
+
     let http_opts = HttpOptions {
         addr: format!("127.0.0.1:{}", ports::get_port()),
         ..Default::default()
     };
-    let frontend_ref = instance.instance.clone();
+    let frontend_ref = instance.fe_instance().clone();
     let is_strict_mode = true;
     let http_server = HttpServerBuilder::new(http_opts)
         .with_sql_handler(ServerSqlQueryHandlerAdapter::arc(frontend_ref.clone()))
-        .with_logs_handler(instance.instance.clone())
+        .with_logs_handler(instance.fe_instance().clone())
         .with_prom_handler(frontend_ref.clone(), true, is_strict_mode)
         .with_prometheus_handler(frontend_ref)
         .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
@@ -518,7 +530,7 @@ pub async fn setup_grpc_server_with(
         .build()
         .unwrap();
 
-    let fe_instance_ref = instance.instance.clone();
+    let fe_instance_ref = instance.fe_instance().clone();
 
     let greptime_request_handler = GreptimeRequestHandler::new(
         ServerGrpcQueryHandlerAdapter::arc(fe_instance_ref.clone()),
@@ -573,7 +585,7 @@ pub async fn setup_mysql_server_with_user_provider(
 
     let fe_mysql_addr = format!("127.0.0.1:{}", ports::get_port());
 
-    let fe_instance_ref = instance.instance.clone();
+    let fe_instance_ref = instance.fe_instance().clone();
     let opts = MysqlOptions {
         addr: fe_mysql_addr.clone(),
         ..Default::default()
@@ -629,7 +641,7 @@ pub async fn setup_pg_server_with_user_provider(
 
     let fe_pg_addr = format!("127.0.0.1:{}", ports::get_port());
 
-    let fe_instance_ref = instance.instance.clone();
+    let fe_instance_ref = instance.fe_instance().clone();
     let opts = PostgresOptions {
         addr: fe_pg_addr.clone(),
         ..Default::default()

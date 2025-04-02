@@ -12,68 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 
-use api::v1::meta::Peer as PbPeer;
-use serde::{Deserialize, Serialize};
+pub use api::v1::meta::Peer;
 
 use crate::error::Error;
-use crate::{ClusterId, DatanodeId, FlownodeId};
-
-#[derive(Debug, Default, Clone, Hash, Eq, PartialEq, Deserialize, Serialize)]
-pub struct Peer {
-    /// Node identifier. Unique in a cluster.
-    pub id: u64,
-    pub addr: String,
-}
-
-impl From<PbPeer> for Peer {
-    fn from(p: PbPeer) -> Self {
-        Self {
-            id: p.id,
-            addr: p.addr,
-        }
-    }
-}
-
-impl From<Peer> for PbPeer {
-    fn from(p: Peer) -> Self {
-        Self {
-            id: p.id,
-            addr: p.addr,
-        }
-    }
-}
-
-impl Peer {
-    pub fn new(id: u64, addr: impl Into<String>) -> Self {
-        Self {
-            id,
-            addr: addr.into(),
-        }
-    }
-
-    #[cfg(any(test, feature = "testing"))]
-    pub fn empty(id: u64) -> Self {
-        Self {
-            id,
-            addr: String::new(),
-        }
-    }
-}
-
-impl Display for Peer {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "peer-{}({})", self.id, self.addr)
-    }
-}
+use crate::{DatanodeId, FlownodeId};
 
 /// can query peer given a node id
 #[async_trait::async_trait]
 pub trait PeerLookupService {
-    async fn datanode(&self, cluster_id: ClusterId, id: DatanodeId) -> Result<Option<Peer>, Error>;
-    async fn flownode(&self, cluster_id: ClusterId, id: FlownodeId) -> Result<Option<Peer>, Error>;
+    async fn datanode(&self, id: DatanodeId) -> Result<Option<Peer>, Error>;
+    async fn flownode(&self, id: FlownodeId) -> Result<Option<Peer>, Error>;
 }
 
 pub type PeerLookupServiceRef = Arc<dyn PeerLookupService + Send + Sync>;

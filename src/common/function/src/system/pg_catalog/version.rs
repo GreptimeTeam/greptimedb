@@ -44,7 +44,7 @@ impl Function for PGVersionFunction {
         Signature::exact(vec![], Volatility::Immutable)
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
         let result = StringVector::from(vec![format!(
             "PostgreSQL 16.3 GreptimeDB {}",
             env!("CARGO_PKG_VERSION")

@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use common_catalog::format_full_flow_name;
-use futures::TryStreamExt;
 use snafu::{ensure, OptionExt};
 
 use crate::ddl::drop_flow::DropFlowProcedure;
@@ -39,9 +38,10 @@ impl DropFlowProcedure {
             .flow_metadata_manager
             .flow_route_manager()
             .routes(self.data.task.flow_id)
-            .map_ok(|(_, value)| value)
-            .try_collect::<Vec<_>>()
-            .await?;
+            .await?
+            .into_iter()
+            .map(|(_, value)| value)
+            .collect::<Vec<_>>();
         ensure!(
             !flow_route_values.is_empty(),
             error::FlowRouteNotFoundSnafu {

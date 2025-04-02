@@ -610,7 +610,7 @@ mod test {
             ));
         }
         let schema = Arc::new(Schema::new(columns));
-        let table_meta = TableMetaBuilder::default()
+        let table_meta = TableMetaBuilder::empty()
             .schema(schema)
             .primary_key_indices((0..5).collect())
             .value_indices((6..11).collect())

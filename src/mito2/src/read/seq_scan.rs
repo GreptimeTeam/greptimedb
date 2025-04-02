@@ -24,12 +24,13 @@ use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::util::ChainedRecordBatchStream;
 use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
 use common_telemetry::tracing;
+use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::schema::SchemaRef;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{PartitionRange, PrepareRequest, RegionScanner, ScannerProperties};
-use store_api::storage::TimeSeriesRowSelector;
+use store_api::storage::{TimeSeriesDistribution, TimeSeriesRowSelector};
 use tokio::sync::Semaphore;
 
 use crate::error::{PartitionOutOfRangeSnafu, Result};
@@ -38,7 +39,9 @@ use crate::read::last_row::LastRowReader;
 use crate::read::merge::MergeReaderBuilder;
 use crate::read::range::RangeBuilderList;
 use crate::read::scan_region::{ScanInput, StreamContext};
-use crate::read::scan_util::{scan_file_ranges, scan_mem_ranges, PartitionMetrics};
+use crate::read::scan_util::{
+    scan_file_ranges, scan_mem_ranges, PartitionMetrics, PartitionMetricsList,
+};
 use crate::read::{BatchReader, BoxedBatchReader, ScannerMetrics, Source};
 use crate::region::options::MergeMode;
 
@@ -53,6 +56,9 @@ pub struct SeqScan {
     stream_ctx: Arc<StreamContext>,
     /// The scanner is used for compaction.
     compaction: bool,
+    /// Metrics for each partition.
+    /// The scanner only sets in query and keeps it empty during compaction.
+    metrics_list: PartitionMetricsList,
 }
 
 impl SeqScan {
@@ -69,6 +75,7 @@ impl SeqScan {
             properties,
             stream_ctx,
             compaction,
+            metrics_list: PartitionMetricsList::default(),
         }
     }
 
@@ -77,8 +84,9 @@ impl SeqScan {
     /// The returned stream is not partitioned and will contains all the data. If want
     /// partitioned scan, use [`RegionScanner::scan_partition`].
     pub fn build_stream(&self) -> Result<SendableRecordBatchStream, BoxedError> {
+        let metrics_set = ExecutionPlanMetricsSet::new();
         let streams = (0..self.properties.partitions.len())
-            .map(|partition: usize| self.scan_partition(partition))
+            .map(|partition: usize| self.scan_partition(&metrics_set, partition))
             .collect::<Result<Vec<_>, _>>()?;
 
         let aggr_stream = ChainedRecordBatchStream::new(streams).map_err(BoxedError::new)?;
@@ -92,16 +100,8 @@ impl SeqScan {
     pub async fn build_reader_for_compaction(&self) -> Result<BoxedBatchReader> {
         assert!(self.compaction);
 
-        let part_metrics = PartitionMetrics::new(
-            self.stream_ctx.input.mapper.metadata().region_id,
-            0,
-            get_scanner_type(self.compaction),
-            self.stream_ctx.query_start,
-            ScannerMetrics {
-                prepare_scan_cost: self.stream_ctx.query_start.elapsed(),
-                ..Default::default()
-            },
-        );
+        let metrics_set = ExecutionPlanMetricsSet::new();
+        let part_metrics = self.new_partition_metrics(&metrics_set, 0);
         debug_assert_eq!(1, self.properties.partitions.len());
         let partition_ranges = &self.properties.partitions[0];
 
@@ -194,6 +194,7 @@ impl SeqScan {
     /// Otherwise the returned stream might not contains any data.
     fn scan_partition_impl(
         &self,
+        metrics_set: &ExecutionPlanMetricsSet,
         partition: usize,
     ) -> Result<SendableRecordBatchStream, BoxedError> {
         if partition >= self.properties.partitions.len() {
@@ -206,32 +207,16 @@ impl SeqScan {
             ));
         }
 
+        if self.stream_ctx.input.distribution == Some(TimeSeriesDistribution::PerSeries) {
+            return self.scan_partition_by_series(metrics_set, partition);
+        }
+
         let stream_ctx = self.stream_ctx.clone();
-        let semaphore = if self.properties.target_partitions() > self.properties.num_partitions() {
-            // We can use additional tasks to read the data if we have more target partitions than actual partitions.
-            // This semaphore is partition level.
-            // We don't use a global semaphore to avoid a partition waiting for others. The final concurrency
-            // of tasks usually won't exceed the target partitions a lot as compaction can reduce the number of
-            // files in a part range.
-            Some(Arc::new(Semaphore::new(
-                self.properties.target_partitions() - self.properties.num_partitions() + 1,
-            )))
-        } else {
-            None
-        };
+        let semaphore = self.new_semaphore();
         let partition_ranges = self.properties.partitions[partition].clone();
         let compaction = self.compaction;
         let distinguish_range = self.properties.distinguish_partition_range;
-        let part_metrics = PartitionMetrics::new(
-            self.stream_ctx.input.mapper.metadata().region_id,
-            partition,
-            get_scanner_type(self.compaction),
-            stream_ctx.query_start,
-            ScannerMetrics {
-                prepare_scan_cost: self.stream_ctx.query_start.elapsed(),
-                ..Default::default()
-            },
-        );
+        let part_metrics = self.new_partition_metrics(metrics_set, partition);
 
         let stream = try_stream! {
             part_metrics.on_first_poll();
@@ -321,6 +306,134 @@ impl SeqScan {
 
         Ok(stream)
     }
+
+    /// Scans all ranges in the given partition and merge by time series.
+    /// Otherwise the returned stream might not contains any data.
+    fn scan_partition_by_series(
+        &self,
+        metrics_set: &ExecutionPlanMetricsSet,
+        partition: usize,
+    ) -> Result<SendableRecordBatchStream, BoxedError> {
+        let stream_ctx = self.stream_ctx.clone();
+        let semaphore = self.new_semaphore();
+        let partition_ranges = self.properties.partitions[partition].clone();
+        let distinguish_range = self.properties.distinguish_partition_range;
+        let part_metrics = self.new_partition_metrics(metrics_set, partition);
+        debug_assert!(!self.compaction);
+
+        let stream = try_stream! {
+            part_metrics.on_first_poll();
+
+            let range_builder_list = Arc::new(RangeBuilderList::new(
+                stream_ctx.input.num_memtables(),
+                stream_ctx.input.num_files(),
+            ));
+            // Scans all parts.
+            let mut sources = Vec::with_capacity(partition_ranges.len());
+            for part_range in partition_ranges {
+                build_sources(
+                    &stream_ctx,
+                    &part_range,
+                    false,
+                    &part_metrics,
+                    range_builder_list.clone(),
+                    &mut sources,
+                );
+            }
+
+            // Builds a reader that merge sources from all parts.
+            let mut reader =
+                Self::build_reader_from_sources(&stream_ctx, sources, semaphore.clone())
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)?;
+            let cache = &stream_ctx.input.cache_strategy;
+            let mut metrics = ScannerMetrics::default();
+            let mut fetch_start = Instant::now();
+
+            while let Some(batch) = reader
+                .next_batch()
+                .await
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?
+            {
+                metrics.scan_cost += fetch_start.elapsed();
+                metrics.num_batches += 1;
+                metrics.num_rows += batch.num_rows();
+
+                debug_assert!(!batch.is_empty());
+                if batch.is_empty() {
+                    continue;
+                }
+
+                let convert_start = Instant::now();
+                let record_batch = stream_ctx.input.mapper.convert(&batch, cache)?;
+                metrics.convert_cost += convert_start.elapsed();
+                let yield_start = Instant::now();
+                yield record_batch;
+                metrics.yield_cost += yield_start.elapsed();
+
+                fetch_start = Instant::now();
+            }
+
+            // Yields an empty part to indicate this range is terminated.
+            // The query engine can use this to optimize some queries.
+            if distinguish_range {
+                let yield_start = Instant::now();
+                yield stream_ctx.input.mapper.empty_record_batch();
+                metrics.yield_cost += yield_start.elapsed();
+            }
+
+            metrics.scan_cost += fetch_start.elapsed();
+            part_metrics.merge_metrics(&metrics);
+
+            part_metrics.on_finish();
+        };
+
+        let stream = Box::pin(RecordBatchStreamWrapper::new(
+            self.stream_ctx.input.mapper.output_schema(),
+            Box::pin(stream),
+        ));
+
+        Ok(stream)
+    }
+
+    fn new_semaphore(&self) -> Option<Arc<Semaphore>> {
+        if self.properties.target_partitions() > self.properties.num_partitions() {
+            // We can use additional tasks to read the data if we have more target partitions than actual partitions.
+            // This semaphore is partition level.
+            // We don't use a global semaphore to avoid a partition waiting for others. The final concurrency
+            // of tasks usually won't exceed the target partitions a lot as compaction can reduce the number of
+            // files in a part range.
+            Some(Arc::new(Semaphore::new(
+                self.properties.target_partitions() - self.properties.num_partitions() + 1,
+            )))
+        } else {
+            None
+        }
+    }
+
+    /// Creates a new partition metrics instance.
+    /// Sets the partition metrics for the given partition if it is not for compaction.
+    fn new_partition_metrics(
+        &self,
+        metrics_set: &ExecutionPlanMetricsSet,
+        partition: usize,
+    ) -> PartitionMetrics {
+        let metrics = PartitionMetrics::new(
+            self.stream_ctx.input.mapper.metadata().region_id,
+            partition,
+            get_scanner_type(self.compaction),
+            self.stream_ctx.query_start,
+            metrics_set,
+        );
+
+        if !self.compaction {
+            self.metrics_list.set(partition, metrics.clone());
+        }
+
+        metrics
+    }
 }
 
 impl RegionScanner for SeqScan {
@@ -332,8 +445,16 @@ impl RegionScanner for SeqScan {
         self.stream_ctx.input.mapper.output_schema()
     }
 
-    fn scan_partition(&self, partition: usize) -> Result<SendableRecordBatchStream, BoxedError> {
-        self.scan_partition_impl(partition)
+    fn metadata(&self) -> RegionMetadataRef {
+        self.stream_ctx.input.mapper.metadata().clone()
+    }
+
+    fn scan_partition(
+        &self,
+        metrics_set: &ExecutionPlanMetricsSet,
+        partition: usize,
+    ) -> Result<SendableRecordBatchStream, BoxedError> {
+        self.scan_partition_impl(metrics_set, partition)
     }
 
     fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {
@@ -346,19 +467,25 @@ impl RegionScanner for SeqScan {
         predicate.map(|p| !p.exprs().is_empty()).unwrap_or(false)
     }
 
-    fn metadata(&self) -> RegionMetadataRef {
-        self.stream_ctx.input.mapper.metadata().clone()
+    fn set_logical_region(&mut self, logical_region: bool) {
+        self.properties.set_logical_region(logical_region);
     }
 }
 
 impl DisplayAs for SeqScan {
-    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
             "SeqScan: region={}, ",
             self.stream_ctx.input.mapper.metadata().region_id
         )?;
-        self.stream_ctx.format_for_explain(f)
+        match t {
+            DisplayFormatType::Default => self.stream_ctx.format_for_explain(false, f),
+            DisplayFormatType::Verbose => {
+                self.stream_ctx.format_for_explain(true, f)?;
+                self.metrics_list.format_verbose_metrics(f)
+            }
+        }
     }
 }
 
@@ -370,7 +497,7 @@ impl fmt::Debug for SeqScan {
     }
 }
 
-/// Builds sources for the partition range.
+/// Builds sources for the partition range and push them to the `sources` vector.
 fn build_sources(
     stream_ctx: &Arc<StreamContext>,
     part_range: &PartitionRange,
@@ -382,8 +509,8 @@ fn build_sources(
     // Gets range meta.
     let range_meta = &stream_ctx.ranges[part_range.identifier];
     #[cfg(debug_assertions)]
-    if compaction {
-        // Compaction expects input sources are not been split.
+    if compaction || stream_ctx.input.distribution == Some(TimeSeriesDistribution::PerSeries) {
+        // Compaction or per series distribution expects input sources are not been split.
         debug_assert_eq!(range_meta.indices.len(), range_meta.row_group_indices.len());
         for (i, row_group_idx) in range_meta.row_group_indices.iter().enumerate() {
             // It should scan all row groups.

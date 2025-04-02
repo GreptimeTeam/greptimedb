@@ -43,7 +43,6 @@ impl Function for DateFormatFunction {
         helper::one_of_sigs2(
             vec![
                 ConcreteDataType::date_datatype(),
-                ConcreteDataType::datetime_datatype(),
                 ConcreteDataType::timestamp_second_datatype(),
                 ConcreteDataType::timestamp_millisecond_datatype(),
                 ConcreteDataType::timestamp_microsecond_datatype(),
@@ -53,7 +52,7 @@ impl Function for DateFormatFunction {
         )
     }
 
-    fn eval(&self, func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure!(
             columns.len() == 2,
             InvalidFuncArgsSnafu {
@@ -105,22 +104,6 @@ impl Function for DateFormatFunction {
                     results.push(result.as_deref());
                 }
             }
-            ConcreteDataType::DateTime(_) => {
-                for i in 0..size {
-                    let datetime = left.get(i).as_datetime();
-                    let format = formats.get(i).as_string();
-
-                    let result = match (datetime, format) {
-                        (Some(datetime), Some(fmt)) => datetime
-                            .as_formatted_string(&fmt, Some(&func_ctx.query_ctx.timezone()))
-                            .map_err(BoxedError::new)
-                            .context(error::ExecuteSnafu)?,
-                        _ => None,
-                    };
-
-                    results.push(result.as_deref());
-                }
-            }
             _ => {
                 return UnsupportedInputDataTypeSnafu {
                     function: NAME,
@@ -147,7 +130,7 @@ mod tests {
     use common_query::prelude::{TypeSignature, Volatility};
     use datatypes::prelude::{ConcreteDataType, ScalarVector};
     use datatypes::value::Value;
-    use datatypes::vectors::{DateTimeVector, DateVector, StringVector, TimestampSecondVector};
+    use datatypes::vectors::{DateVector, StringVector, TimestampSecondVector};
 
     use super::{DateFormatFunction, *};
 
@@ -169,16 +152,11 @@ mod tests {
             ConcreteDataType::string_datatype(),
             f.return_type(&[ConcreteDataType::date_datatype()]).unwrap()
         );
-        assert_eq!(
-            ConcreteDataType::string_datatype(),
-            f.return_type(&[ConcreteDataType::datetime_datatype()])
-                .unwrap()
-        );
         assert!(matches!(f.signature(),
                          Signature {
                              type_signature: TypeSignature::OneOf(sigs),
                              volatility: Volatility::Immutable
-                         } if  sigs.len() == 6));
+                         } if  sigs.len() == 5));
     }
 
     #[test]
@@ -202,7 +180,7 @@ mod tests {
         let time_vector = TimestampSecondVector::from(times.clone());
         let interval_vector = StringVector::from_vec(formats);
         let args: Vec<VectorRef> = vec![Arc::new(time_vector), Arc::new(interval_vector)];
-        let vector = f.eval(FunctionContext::default(), &args).unwrap();
+        let vector = f.eval(&FunctionContext::default(), &args).unwrap();
 
         assert_eq!(4, vector.len());
         for (i, _t) in times.iter().enumerate() {
@@ -243,48 +221,7 @@ mod tests {
         let date_vector = DateVector::from(dates.clone());
         let interval_vector = StringVector::from_vec(formats);
         let args: Vec<VectorRef> = vec![Arc::new(date_vector), Arc::new(interval_vector)];
-        let vector = f.eval(FunctionContext::default(), &args).unwrap();
-
-        assert_eq!(4, vector.len());
-        for (i, _t) in dates.iter().enumerate() {
-            let v = vector.get(i);
-            let result = results.get(i).unwrap();
-
-            if result.is_none() {
-                assert_eq!(Value::Null, v);
-                continue;
-            }
-            match v {
-                Value::String(s) => {
-                    assert_eq!(s.as_utf8(), result.unwrap());
-                }
-                _ => unreachable!(),
-            }
-        }
-    }
-
-    #[test]
-    fn test_datetime_date_format() {
-        let f = DateFormatFunction;
-
-        let dates = vec![Some(123), None, Some(42), None];
-        let formats = vec![
-            "%Y-%m-%d %T.%3f",
-            "%Y-%m-%d %T.%3f",
-            "%Y-%m-%d %T.%3f",
-            "%Y-%m-%d %T.%3f",
-        ];
-        let results = [
-            Some("1970-01-01 00:00:00.123"),
-            None,
-            Some("1970-01-01 00:00:00.042"),
-            None,
-        ];
-
-        let date_vector = DateTimeVector::from(dates.clone());
-        let interval_vector = StringVector::from_vec(formats);
-        let args: Vec<VectorRef> = vec![Arc::new(date_vector), Arc::new(interval_vector)];
-        let vector = f.eval(FunctionContext::default(), &args).unwrap();
+        let vector = f.eval(&FunctionContext::default(), &args).unwrap();
 
         assert_eq!(4, vector.len());
         for (i, _t) in dates.iter().enumerate() {

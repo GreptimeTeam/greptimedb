@@ -151,18 +151,10 @@ pub enum Error {
     #[snafu(display("Failed to describe statement"))]
     DescribeStatement { source: BoxedError },
 
-    #[snafu(display("Pipeline management api error"))]
+    #[snafu(display("Pipeline error"))]
     Pipeline {
         #[snafu(source)]
         source: pipeline::error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Pipeline transform error"))]
-    PipelineTransform {
-        #[snafu(source)]
-        source: pipeline::etl_error::Error,
         #[snafu(implicit)]
         location: Location,
     },
@@ -410,6 +402,15 @@ pub enum Error {
         source: query::error::Error,
     },
 
+    #[snafu(display("Failed to parse timestamp: {}", timestamp))]
+    ParseTimestamp {
+        timestamp: String,
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: query::error::Error,
+    },
+
     #[snafu(display("{}", reason))]
     UnexpectedResult {
         reason: String,
@@ -652,7 +653,6 @@ impl ErrorExt for Error {
             | CheckDatabaseValidity { source, .. } => source.status_code(),
 
             Pipeline { source, .. } => source.status_code(),
-            PipelineTransform { source, .. } => source.status_code(),
 
             NotSupported { .. }
             | InvalidParameter { .. }
@@ -685,7 +685,8 @@ impl ErrorExt for Error {
             | PrepareStatementNotFound { .. }
             | FailedToParseQuery { .. }
             | InvalidElasticsearchInput { .. }
-            | InvalidJaegerQuery { .. } => StatusCode::InvalidArguments,
+            | InvalidJaegerQuery { .. }
+            | ParseTimestamp { .. } => StatusCode::InvalidArguments,
 
             Catalog { source, .. } => source.status_code(),
             RowWriter { source, .. } => source.status_code(),

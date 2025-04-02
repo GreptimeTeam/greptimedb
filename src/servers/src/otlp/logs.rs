@@ -32,7 +32,8 @@ use snafu::{ensure, ResultExt};
 use super::trace::attributes::OtlpAnyValue;
 use super::utils::{bytes_to_hex_string, key_value_to_jsonb};
 use crate::error::{
-    IncompatibleSchemaSnafu, PipelineTransformSnafu, Result, UnsupportedJsonDataTypeForTagSnafu,
+    IncompatibleSchemaSnafu, NotSupportedSnafu, PipelineSnafu, Result,
+    UnsupportedJsonDataTypeForTagSnafu,
 };
 use crate::pipeline::run_pipeline;
 use crate::query_handler::PipelineHandlerRef;
@@ -71,12 +72,11 @@ pub async fn to_grpc_insert_requests(
         }
         PipelineWay::Pipeline(pipeline_def) => {
             let data = parse_export_logs_service_request(request);
-            let array =
-                pipeline::json_array_to_intermediate_state(data).context(PipelineTransformSnafu)?;
+            let array = pipeline::json_array_to_map(data).context(PipelineSnafu)?;
 
             let inserts = run_pipeline(
                 &pipeline_handler,
-                pipeline_def,
+                &pipeline_def,
                 &pipeline_params,
                 array,
                 table_name,
@@ -98,6 +98,10 @@ pub async fn to_grpc_insert_requests(
             let insert_requests = RowInsertRequests { inserts };
             Ok((insert_requests, len))
         }
+        _ => NotSupportedSnafu {
+            feat: "Unsupported pipeline for logs",
+        }
+        .fail(),
     }
 }
 

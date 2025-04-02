@@ -33,6 +33,8 @@ use crate::row_converter::dense::SortField;
 use crate::row_converter::{CompositeValues, PrimaryKeyCodec, PrimaryKeyFilter};
 
 /// A codec for sparse key of metrics.
+/// It requires the input primary key columns are sorted by the column name in lexicographical order.
+/// It encodes the column id of the physical region.
 #[derive(Clone, Debug)]
 pub struct SparsePrimaryKeyCodec {
     inner: Arc<SparsePrimaryKeyCodecInner>,

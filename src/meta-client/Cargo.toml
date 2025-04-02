@@ -10,6 +10,7 @@ workspace = true
 [dependencies]
 api.workspace = true
 async-trait.workspace = true
+common-base.workspace = true
 common-error.workspace = true
 common-grpc.workspace = true
 common-macro.workspace = true

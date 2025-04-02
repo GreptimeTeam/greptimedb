@@ -36,11 +36,12 @@ use common_error::status_code::StatusCode;
 use mito2::engine::MitoEngine;
 pub(crate) use options::IndexOptions;
 use snafu::ResultExt;
+use store_api::manifest::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
 use store_api::region_engine::{
-    RegionEngine, RegionRole, RegionScannerRef, RegionStatistic, SetRegionRoleStateResponse,
-    SettableRegionRoleState,
+    RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef, RegionStatistic,
+    SetRegionRoleStateResponse, SettableRegionRoleState,
 };
 use store_api::region_request::{BatchRegionDdlRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
@@ -48,7 +49,7 @@ use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 use self::state::MetricEngineState;
 use crate::config::EngineConfig;
 use crate::data_region::DataRegion;
-use crate::error::{self, Result, UnsupportedRegionRequestSnafu};
+use crate::error::{self, Result, UnsupportedRegionRequestSnafu, UnsupportedSyncRegionSnafu};
 use crate::metadata_region::MetadataRegion;
 use crate::row_modifier::RowModifier;
 use crate::utils;
@@ -258,7 +259,29 @@ impl RegionEngine for MetricEngine {
     /// Note: Returns `None` if it's a logical region.
     fn region_statistic(&self, region_id: RegionId) -> Option<RegionStatistic> {
         if self.inner.is_physical_region(region_id) {
-            self.inner.mito.region_statistic(region_id)
+            let metadata_region_id = utils::to_metadata_region_id(region_id);
+            let data_region_id = utils::to_data_region_id(region_id);
+
+            let metadata_stat = self.inner.mito.region_statistic(metadata_region_id);
+            let data_stat = self.inner.mito.region_statistic(data_region_id);
+
+            match (metadata_stat, data_stat) {
+                (Some(metadata_stat), Some(data_stat)) => Some(RegionStatistic {
+                    num_rows: metadata_stat.num_rows + data_stat.num_rows,
+                    memtable_size: metadata_stat.memtable_size + data_stat.memtable_size,
+                    wal_size: metadata_stat.wal_size + data_stat.wal_size,
+                    manifest_size: metadata_stat.manifest_size + data_stat.manifest_size,
+                    sst_size: metadata_stat.sst_size + data_stat.sst_size,
+                    index_size: metadata_stat.index_size + data_stat.index_size,
+                    manifest: RegionManifestInfo::Metric {
+                        data_flushed_entry_id: data_stat.manifest.flushed_entry_id(),
+                        data_manifest_version: data_stat.manifest.manifest_version(),
+                        metadata_flushed_entry_id: metadata_stat.manifest.flushed_entry_id(),
+                        metadata_manifest_version: metadata_stat.manifest.manifest_version(),
+                    },
+                }),
+                _ => None,
+            }
         } else {
             None
         }
@@ -283,6 +306,15 @@ impl RegionEngine for MetricEngine {
             }
         }
         Ok(())
+    }
+
+    async fn sync_region(
+        &self,
+        _region_id: RegionId,
+        _manifest_version: ManifestVersion,
+    ) -> Result<(), BoxedError> {
+        // TODO(weny): implement it later.
+        Err(BoxedError::new(UnsupportedSyncRegionSnafu {}.build()))
     }
 
     async fn set_region_role_state_gracefully(
@@ -333,6 +365,10 @@ impl MetricEngine {
                 row_modifier: RowModifier::new(),
             }),
         }
+    }
+
+    pub fn mito(&self) -> MitoEngine {
+        self.inner.mito.clone()
     }
 
     pub async fn logical_regions(&self, physical_region_id: RegionId) -> Result<Vec<RegionId>> {

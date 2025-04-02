@@ -29,12 +29,6 @@ pub struct AuthMiddlewareLayer {
     user_provider: Option<UserProviderRef>,
 }
 
-impl AuthMiddlewareLayer {
-    pub fn with(user_provider: Option<UserProviderRef>) -> Self {
-        Self { user_provider }
-    }
-}
-
 impl<S> Layer<S> for AuthMiddlewareLayer {
     type Service = AuthMiddleware<S>;
 

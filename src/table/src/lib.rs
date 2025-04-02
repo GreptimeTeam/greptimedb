@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #![feature(assert_matches)]
+#![feature(try_blocks)]
 
 pub mod dist_table;
 pub mod error;
@@ -23,6 +24,7 @@ pub mod stats;
 pub mod table;
 pub mod table_name;
 pub mod table_reference;
+#[cfg(any(test, feature = "testing"))]
 pub mod test_util;
 
 pub use crate::error::{Error, Result};

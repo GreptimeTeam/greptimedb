@@ -60,12 +60,12 @@ async fn query_flow_state(
 #[derive(Clone)]
 pub struct HeartbeatTask {
     node_id: u64,
+    node_epoch: u64,
     peer_addr: String,
     meta_client: Arc<MetaClient>,
     report_interval: Duration,
     retry_interval: Duration,
     resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
-    start_time_ms: u64,
     running: Arc<AtomicBool>,
     query_stat_size: Option<SizeReportSender>,
 }
@@ -83,12 +83,12 @@ impl HeartbeatTask {
     ) -> Self {
         Self {
             node_id: opts.node_id.unwrap_or(0),
+            node_epoch: common_time::util::current_time_millis() as u64,
             peer_addr: addrs::resolve_addr(&opts.grpc.bind_addr, Some(&opts.grpc.server_addr)),
             meta_client,
             report_interval: heartbeat_opts.interval,
             retry_interval: heartbeat_opts.retry_interval,
             resp_handler_executor,
-            start_time_ms: common_time::util::current_time_millis() as u64,
             running: Arc::new(AtomicBool::new(false)),
             query_stat_size: None,
         }
@@ -103,6 +103,11 @@ impl HeartbeatTask {
             warn!("Heartbeat task started multiple times");
             return Ok(());
         }
+
+        self.create_streams().await
+    }
+
+    async fn create_streams(&self) -> Result<(), Error> {
         info!("Start to establish the heartbeat connection to metasrv.");
         let (req_sender, resp_stream) = self
             .meta_client
@@ -149,14 +154,18 @@ impl HeartbeatTask {
         };
         let flow_stat = latest_report
             .as_ref()
-            .map(|report| {
-                report
+            .map(|report| api::v1::meta::FlowStat {
+                flow_stat_size: report
                     .state_size
                     .iter()
                     .map(|(k, v)| (*k, *v as u64))
-                    .collect()
-            })
-            .map(|f| api::v1::meta::FlowStat { flow_stat_size: f });
+                    .collect(),
+                flow_last_exec_time_map: report
+                    .last_exec_time_map
+                    .iter()
+                    .map(|(k, v)| (*k, *v))
+                    .collect(),
+            });
 
         Some(HeartbeatRequest {
             mailbox_message,
@@ -181,7 +190,7 @@ impl HeartbeatTask {
         mut outgoing_rx: mpsc::Receiver<OutgoingMessage>,
     ) {
         let report_interval = self.report_interval;
-        let start_time_ms = self.start_time_ms;
+        let node_epoch = self.node_epoch;
         let self_peer = Some(Peer {
             id: self.node_id,
             addr: self.peer_addr.clone(),
@@ -198,7 +207,8 @@ impl HeartbeatTask {
 
             let heartbeat_request = HeartbeatRequest {
                 peer: self_peer,
-                info: Self::build_node_info(start_time_ms),
+                node_epoch,
+                info: Self::build_node_info(node_epoch),
                 ..Default::default()
             };
 
@@ -230,6 +240,8 @@ impl HeartbeatTask {
                 // set the timeout to half of the report interval so that it wouldn't delay heartbeat if something went horribly wrong
                 latest_report = query_flow_state(&query_stat_size, report_interval / 2).await;
             }
+
+            info!("flownode heartbeat task stopped.");
         });
     }
 
@@ -273,7 +285,7 @@ impl HeartbeatTask {
 
             info!("Try to re-establish the heartbeat connection to metasrv.");
 
-            if self.start().await.is_ok() {
+            if self.create_streams().await.is_ok() {
                 break;
             }
         }

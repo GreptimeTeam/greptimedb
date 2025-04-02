@@ -20,7 +20,7 @@ use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use client::Output;
 use common_error::ext::BoxedError;
 use pipeline::pipeline_operator::PipelineOperator;
-use pipeline::{GreptimeTransformer, Pipeline, PipelineInfo, PipelineVersion};
+use pipeline::{Pipeline, PipelineInfo, PipelineVersion};
 use servers::error::{
     AuthSnafu, Error as ServerError, ExecuteGrpcRequestSnafu, InFlightWriteBytesExceededSnafu,
     PipelineSnafu, Result as ServerResult,
@@ -56,7 +56,7 @@ impl PipelineHandler for Instance {
         name: &str,
         version: PipelineVersion,
         query_ctx: QueryContextRef,
-    ) -> ServerResult<Arc<Pipeline<GreptimeTransformer>>> {
+    ) -> ServerResult<Arc<Pipeline>> {
         self.pipeline_operator
             .get_pipeline(query_ctx, name, version)
             .await
@@ -100,7 +100,7 @@ impl PipelineHandler for Instance {
             .await
     }
 
-    fn build_pipeline(&self, pipeline: &str) -> ServerResult<Pipeline<GreptimeTransformer>> {
+    fn build_pipeline(&self, pipeline: &str) -> ServerResult<Pipeline> {
         PipelineOperator::build_pipeline(pipeline).context(PipelineSnafu)
     }
 }
@@ -123,6 +123,28 @@ impl Instance {
 
         self.inserter
             .handle_log_inserts(log, ctx, self.statement_executor.as_ref())
+            .await
+            .map_err(BoxedError::new)
+            .context(ExecuteGrpcRequestSnafu)
+    }
+
+    pub async fn handle_trace_inserts(
+        &self,
+        rows: RowInsertRequests,
+        ctx: QueryContextRef,
+    ) -> ServerResult<Output> {
+        let _guard = if let Some(limiter) = &self.limiter {
+            let result = limiter.limit_row_inserts(&rows);
+            if result.is_none() {
+                return InFlightWriteBytesExceededSnafu.fail();
+            }
+            result
+        } else {
+            None
+        };
+
+        self.inserter
+            .handle_trace_inserts(rows, ctx, self.statement_executor.as_ref())
             .await
             .map_err(BoxedError::new)
             .context(ExecuteGrpcRequestSnafu)

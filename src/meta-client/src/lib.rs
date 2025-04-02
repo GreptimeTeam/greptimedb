@@ -15,8 +15,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use client::RegionFollowerClientRef;
+use common_base::Plugins;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
-use common_telemetry::info;
+use common_telemetry::{debug, info};
 use serde::{Deserialize, Serialize};
 
 use crate::client::MetaClientBuilder;
@@ -71,23 +73,23 @@ pub enum MetaClientType {
 pub type MetaClientRef = Arc<client::MetaClient>;
 
 pub async fn create_meta_client(
-    cluster_id: u64,
     client_type: MetaClientType,
     meta_client_options: &MetaClientOptions,
+    plugins: Option<&Plugins>,
 ) -> error::Result<MetaClientRef> {
     info!(
-        "Creating {:?} instance from cluster {} with Metasrv addrs {:?}",
-        client_type, cluster_id, meta_client_options.metasrv_addrs
+        "Creating {:?} instance with Metasrv addrs {:?}",
+        client_type, meta_client_options.metasrv_addrs
     );
 
     let mut builder = match client_type {
         MetaClientType::Datanode { member_id } => {
-            MetaClientBuilder::datanode_default_options(cluster_id, member_id)
+            MetaClientBuilder::datanode_default_options(member_id)
         }
         MetaClientType::Flownode { member_id } => {
-            MetaClientBuilder::flownode_default_options(cluster_id, member_id)
+            MetaClientBuilder::flownode_default_options(member_id)
         }
-        MetaClientType::Frontend => MetaClientBuilder::frontend_default_options(cluster_id),
+        MetaClientType::Frontend => MetaClientBuilder::frontend_default_options(),
     };
 
     let base_config = ChannelConfig::new()
@@ -99,6 +101,13 @@ pub async fn create_meta_client(
     if let MetaClientType::Frontend = client_type {
         let ddl_config = base_config.clone().timeout(meta_client_options.ddl_timeout);
         builder = builder.ddl_channel_manager(ChannelManager::with_config(ddl_config));
+        if let Some(plugins) = plugins {
+            let region_follower = plugins.get::<RegionFollowerClientRef>();
+            if let Some(region_follower) = region_follower {
+                debug!("Region follower client found in plugins");
+                builder = builder.with_region_follower(region_follower);
+            }
+        }
     }
 
     builder = builder

@@ -32,28 +32,25 @@ use common_telemetry::info;
 use common_telemetry::logging::TracingOptions;
 use common_time::timezone::set_default_timezone;
 use common_version::{short_version, version};
+use frontend::frontend::Frontend;
 use frontend::heartbeat::HeartbeatTask;
 use frontend::instance::builder::FrontendBuilder;
-use frontend::instance::{FrontendInstance, Instance as FeInstance};
 use frontend::server::Services;
 use meta_client::{MetaClientOptions, MetaClientType};
 use query::stats::StatementStatistics;
+use servers::export_metrics::ExportMetricsTask;
 use servers::tls::{TlsMode, TlsOption};
 use snafu::{OptionExt, ResultExt};
 use tracing_appender::non_blocking::WorkerGuard;
 
-use crate::error::{
-    self, InitTimezoneSnafu, LoadLayeredConfigSnafu, MetaClientInitSnafu, MissingConfigSnafu,
-    Result, StartFrontendSnafu,
-};
+use crate::error::{self, Result};
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{log_versions, App};
 
 type FrontendOptions = GreptimeOptions<frontend::frontend::FrontendOptions>;
 
 pub struct Instance {
-    frontend: FeInstance,
-
+    frontend: Frontend,
     // Keep the logging guard to prevent the worker from being dropped.
     _guard: Vec<WorkerGuard>,
 }
@@ -61,19 +58,16 @@ pub struct Instance {
 pub const APP_NAME: &str = "greptime-frontend";
 
 impl Instance {
-    pub fn new(frontend: FeInstance, guard: Vec<WorkerGuard>) -> Self {
-        Self {
-            frontend,
-            _guard: guard,
-        }
+    pub fn new(frontend: Frontend, _guard: Vec<WorkerGuard>) -> Self {
+        Self { frontend, _guard }
     }
 
-    pub fn mut_inner(&mut self) -> &mut FeInstance {
-        &mut self.frontend
-    }
-
-    pub fn inner(&self) -> &FeInstance {
+    pub fn inner(&self) -> &Frontend {
         &self.frontend
+    }
+
+    pub fn mut_inner(&mut self) -> &mut Frontend {
+        &mut self.frontend
     }
 }
 
@@ -84,11 +78,15 @@ impl App for Instance {
     }
 
     async fn start(&mut self) -> Result<()> {
-        plugins::start_frontend_plugins(self.frontend.plugins().clone())
+        let plugins = self.frontend.instance.plugins().clone();
+        plugins::start_frontend_plugins(plugins)
             .await
-            .context(StartFrontendSnafu)?;
+            .context(error::StartFrontendSnafu)?;
 
-        self.frontend.start().await.context(StartFrontendSnafu)
+        self.frontend
+            .start()
+            .await
+            .context(error::StartFrontendSnafu)
     }
 
     async fn stop(&self) -> Result<()> {
@@ -178,7 +176,7 @@ impl StartCommand {
             self.config_file.as_deref(),
             self.env_prefix.as_ref(),
         )
-        .context(LoadLayeredConfigSnafu)?;
+        .context(error::LoadLayeredConfigSnafu)?;
 
         self.merge_with_cli_options(global_options, &mut opts)?;
 
@@ -283,26 +281,28 @@ impl StartCommand {
         let mut plugins = Plugins::new();
         plugins::setup_frontend_plugins(&mut plugins, &plugin_opts, &opts)
             .await
-            .context(StartFrontendSnafu)?;
+            .context(error::StartFrontendSnafu)?;
 
-        set_default_timezone(opts.default_timezone.as_deref()).context(InitTimezoneSnafu)?;
+        set_default_timezone(opts.default_timezone.as_deref()).context(error::InitTimezoneSnafu)?;
 
-        let meta_client_options = opts.meta_client.as_ref().context(MissingConfigSnafu {
-            msg: "'meta_client'",
-        })?;
+        let meta_client_options = opts
+            .meta_client
+            .as_ref()
+            .context(error::MissingConfigSnafu {
+                msg: "'meta_client'",
+            })?;
 
         let cache_max_capacity = meta_client_options.metadata_cache_max_capacity;
         let cache_ttl = meta_client_options.metadata_cache_ttl;
         let cache_tti = meta_client_options.metadata_cache_tti;
 
-        let cluster_id = 0; // (TODO: jeremy): It is currently a reserved field and has not been enabled.
         let meta_client = meta_client::create_meta_client(
-            cluster_id,
             MetaClientType::Frontend,
             meta_client_options,
+            Some(&plugins),
         )
         .await
-        .context(MetaClientInitSnafu)?;
+        .context(error::MetaClientInitSnafu)?;
 
         // TODO(discord9): add helper function to ease the creation of cache registry&such
         let cached_meta_backend =
@@ -349,6 +349,7 @@ impl StartCommand {
             opts.heartbeat.clone(),
             Arc::new(executor),
         );
+        let heartbeat_task = Some(heartbeat_task);
 
         // frontend to datanode need not timeout.
         // Some queries are expected to take long time.
@@ -360,7 +361,7 @@ impl StartCommand {
         };
         let client = NodeClients::new(channel_config);
 
-        let mut instance = FrontendBuilder::new(
+        let instance = FrontendBuilder::new(
             opts.clone(),
             cached_meta_backend.clone(),
             layered_cache_registry.clone(),
@@ -371,20 +372,27 @@ impl StartCommand {
         )
         .with_plugin(plugins.clone())
         .with_local_cache_invalidator(layered_cache_registry)
-        .with_heartbeat_task(heartbeat_task)
         .try_build()
         .await
-        .context(StartFrontendSnafu)?;
+        .context(error::StartFrontendSnafu)?;
+        let instance = Arc::new(instance);
 
-        let servers = Services::new(opts, Arc::new(instance.clone()), plugins)
+        let export_metrics_task = ExportMetricsTask::try_new(&opts.export_metrics, Some(&plugins))
+            .context(error::ServersSnafu)?;
+
+        let servers = Services::new(opts, instance.clone(), plugins)
             .build()
             .await
-            .context(StartFrontendSnafu)?;
-        instance
-            .build_servers(servers)
-            .context(StartFrontendSnafu)?;
+            .context(error::StartFrontendSnafu)?;
 
-        Ok(Instance::new(instance, guard))
+        let frontend = Frontend {
+            instance,
+            servers,
+            heartbeat_task,
+            export_metrics_task,
+        };
+
+        Ok(Instance::new(frontend, guard))
     }
 }
 
@@ -444,7 +452,7 @@ mod tests {
 
             [http]
             addr = "127.0.0.1:4000"
-            timeout = "30s"
+            timeout = "0s"
             body_limit = "2GB"
 
             [opentsdb]
@@ -452,7 +460,7 @@ mod tests {
 
             [logging]
             level = "debug"
-            dir = "/tmp/greptimedb/test/logs"
+            dir = "./greptimedb_data/test/logs"
         "#;
         write!(file, "{}", toml_str).unwrap();
 
@@ -465,12 +473,15 @@ mod tests {
         let fe_opts = command.load_options(&Default::default()).unwrap().component;
 
         assert_eq!("127.0.0.1:4000".to_string(), fe_opts.http.addr);
-        assert_eq!(Duration::from_secs(30), fe_opts.http.timeout);
+        assert_eq!(Duration::from_secs(0), fe_opts.http.timeout);
 
         assert_eq!(ReadableSize::gb(2), fe_opts.http.body_limit);
 
         assert_eq!("debug", fe_opts.logging.level.as_ref().unwrap());
-        assert_eq!("/tmp/greptimedb/test/logs".to_string(), fe_opts.logging.dir);
+        assert_eq!(
+            "./greptimedb_data/test/logs".to_string(),
+            fe_opts.logging.dir
+        );
         assert!(!fe_opts.opentsdb.enable);
     }
 
@@ -509,7 +520,7 @@ mod tests {
 
         let options = cmd
             .load_options(&GlobalOptions {
-                log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
+                log_dir: Some("./greptimedb_data/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
 
                 #[cfg(feature = "tokio-console")]
@@ -519,7 +530,7 @@ mod tests {
             .component;
 
         let logging_opt = options.logging;
-        assert_eq!("/tmp/greptimedb/test/logs", logging_opt.dir);
+        assert_eq!("./greptimedb_data/test/logs", logging_opt.dir);
         assert_eq!("debug", logging_opt.level.as_ref().unwrap());
     }
 

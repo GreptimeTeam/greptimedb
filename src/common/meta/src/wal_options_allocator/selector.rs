@@ -39,7 +39,7 @@ impl RoundRobinTopicSelector {
     // The cursor in the round-robin selector is not persisted which may break the round-robin strategy cross crashes.
     // Introducing a shuffling strategy may help mitigate this issue.
     pub fn with_shuffle() -> Self {
-        let offset = rand::thread_rng().gen_range(0..64);
+        let offset = rand::rng().random_range(0..64);
         Self {
             cursor: AtomicUsize::new(offset),
         }

@@ -20,7 +20,8 @@ use std::sync::Arc;
 use arrow::array::{Array, ArrayRef, StringArray};
 use arrow::compute;
 use arrow::compute::kernels::comparison;
-use arrow::datatypes::{DataType as ArrowDataType, TimeUnit};
+use arrow::datatypes::{DataType as ArrowDataType, Int32Type, TimeUnit};
+use arrow_array::DictionaryArray;
 use arrow_schema::IntervalUnit;
 use datafusion_common::ScalarValue;
 use snafu::{OptionExt, ResultExt};
@@ -31,7 +32,7 @@ use crate::prelude::DataType;
 use crate::scalars::{Scalar, ScalarVectorBuilder};
 use crate::value::{ListValue, ListValueRef, Value};
 use crate::vectors::{
-    BinaryVector, BooleanVector, ConstantVector, DateTimeVector, DateVector, Decimal128Vector,
+    BinaryVector, BooleanVector, ConstantVector, DateVector, Decimal128Vector, DictionaryVector,
     DurationMicrosecondVector, DurationMillisecondVector, DurationNanosecondVector,
     DurationSecondVector, Float32Vector, Float64Vector, Int16Vector, Int32Vector, Int64Vector,
     Int8Vector, IntervalDayTimeVector, IntervalMonthDayNanoVector, IntervalYearMonthVector,
@@ -179,9 +180,6 @@ impl Helper {
             ScalarValue::Date32(v) => {
                 ConstantVector::new(Arc::new(DateVector::from(vec![v])), length)
             }
-            ScalarValue::Date64(v) => {
-                ConstantVector::new(Arc::new(DateTimeVector::from(vec![v])), length)
-            }
             ScalarValue::TimestampSecond(v, _) => {
                 // Timezone is unimplemented now.
                 ConstantVector::new(Arc::new(TimestampSecondVector::from(vec![v])), length)
@@ -244,7 +242,8 @@ impl Helper {
             | ScalarValue::Float16(_)
             | ScalarValue::Utf8View(_)
             | ScalarValue::BinaryView(_)
-            | ScalarValue::Map(_) => {
+            | ScalarValue::Map(_)
+            | ScalarValue::Date64(_) => {
                 return error::ConversionSnafu {
                     from: format!("Unsupported scalar value: {value}"),
                 }
@@ -286,7 +285,6 @@ impl Helper {
                 Arc::new(StringVector::try_from_arrow_array(array)?)
             }
             ArrowDataType::Date32 => Arc::new(DateVector::try_from_arrow_array(array)?),
-            ArrowDataType::Date64 => Arc::new(DateTimeVector::try_from_arrow_array(array)?),
             ArrowDataType::List(_) => Arc::new(ListVector::try_from_arrow_array(array)?),
             ArrowDataType::Timestamp(unit, _) => match unit {
                 TimeUnit::Second => Arc::new(TimestampSecondVector::try_from_arrow_array(array)?),
@@ -350,6 +348,17 @@ impl Helper {
             ArrowDataType::Decimal128(_, _) => {
                 Arc::new(Decimal128Vector::try_from_arrow_array(array)?)
             }
+            ArrowDataType::Dictionary(key, value) if matches!(&**key, ArrowDataType::Int32) => {
+                let array = array
+                    .as_ref()
+                    .as_any()
+                    .downcast_ref::<DictionaryArray<Int32Type>>()
+                    .unwrap(); // Safety: the type is guarded by match arm condition
+                Arc::new(DictionaryVector::new(
+                    array.clone(),
+                    ConcreteDataType::try_from(value.as_ref())?,
+                )?)
+            }
             ArrowDataType::Float16
             | ArrowDataType::LargeList(_)
             | ArrowDataType::FixedSizeList(_, _)
@@ -362,7 +371,8 @@ impl Helper {
             | ArrowDataType::BinaryView
             | ArrowDataType::Utf8View
             | ArrowDataType::ListView(_)
-            | ArrowDataType::LargeListView(_) => {
+            | ArrowDataType::LargeListView(_)
+            | ArrowDataType::Date64 => {
                 return error::UnsupportedArrowTypeSnafu {
                     arrow_type: array.as_ref().data_type().clone(),
                 }
@@ -411,9 +421,9 @@ impl Helper {
 #[cfg(test)]
 mod tests {
     use arrow::array::{
-        ArrayRef, BooleanArray, Date32Array, Date64Array, Float32Array, Float64Array, Int16Array,
-        Int32Array, Int64Array, Int8Array, LargeBinaryArray, ListArray, NullArray,
-        Time32MillisecondArray, Time32SecondArray, Time64MicrosecondArray, Time64NanosecondArray,
+        ArrayRef, BooleanArray, Date32Array, Float32Array, Float64Array, Int16Array, Int32Array,
+        Int64Array, Int8Array, LargeBinaryArray, ListArray, NullArray, Time32MillisecondArray,
+        Time32SecondArray, Time64MicrosecondArray, Time64NanosecondArray,
         TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
         TimestampSecondArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
     };
@@ -424,7 +434,7 @@ mod tests {
     use common_decimal::Decimal128;
     use common_time::time::Time;
     use common_time::timestamp::TimeUnit;
-    use common_time::{Date, DateTime, Duration};
+    use common_time::{Date, Duration};
 
     use super::*;
     use crate::value::Value;
@@ -463,16 +473,6 @@ mod tests {
         assert_eq!(3, vector.len());
         for i in 0..vector.len() {
             assert_eq!(Value::Date(Date::new(42)), vector.get(i));
-        }
-    }
-
-    #[test]
-    fn test_try_from_scalar_datetime_value() {
-        let vector = Helper::try_from_scalar_value(ScalarValue::Date64(Some(42)), 3).unwrap();
-        assert_eq!(ConcreteDataType::datetime_datatype(), vector.data_type());
-        assert_eq!(3, vector.len());
-        for i in 0..vector.len() {
-            assert_eq!(Value::DateTime(DateTime::new(42)), vector.get(i));
         }
     }
 
@@ -606,7 +606,6 @@ mod tests {
         check_try_into_vector(Float64Array::from(vec![1.0, 2.0, 3.0]));
         check_try_into_vector(StringArray::from(vec!["hello", "world"]));
         check_try_into_vector(Date32Array::from(vec![1, 2, 3]));
-        check_try_into_vector(Date64Array::from(vec![1, 2, 3]));
         let data = vec![None, Some(vec![Some(6), Some(7)])];
         let list_array = ListArray::from_iter_primitive::<Int32Type, _, _>(data);
         check_try_into_vector(list_array);
@@ -734,7 +733,6 @@ mod tests {
         check_into_and_from(Float64Array::from(vec![1.0, 2.0, 3.0]));
         check_into_and_from(StringArray::from(vec!["hello", "world"]));
         check_into_and_from(Date32Array::from(vec![1, 2, 3]));
-        check_into_and_from(Date64Array::from(vec![1, 2, 3]));
 
         check_into_and_from(TimestampSecondArray::from(vec![1, 2, 3]));
         check_into_and_from(TimestampMillisecondArray::from(vec![1, 2, 3]));

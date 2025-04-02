@@ -127,8 +127,8 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
 mod test {
     use std::num::NonZeroUsize;
 
-    use common_base::BitVec;
     use futures::stream;
+    use index::bitmap::{Bitmap, BitmapType};
     use index::inverted_index::format::reader::{InvertedIndexBlobReader, InvertedIndexReader};
     use index::inverted_index::format::writer::{InvertedIndexBlobWriter, InvertedIndexWriter};
     use index::Bytes;
@@ -146,14 +146,14 @@ mod test {
     #[test]
     fn fuzz_index_calculation() {
         // randomly generate a large u8 array
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let mut data = vec![0u8; 1024 * 1024];
         rng.fill_bytes(&mut data);
 
         for _ in 0..FUZZ_REPEAT_TIMES {
-            let offset = rng.gen_range(0..data.len() as u64);
-            let size = rng.gen_range(0..data.len() as u32 - offset as u32);
-            let page_size: usize = rng.gen_range(1..1024);
+            let offset = rng.random_range(0..data.len() as u64);
+            let size = rng.random_range(0..data.len() as u32 - offset as u32);
+            let page_size: usize = rng.random_range(1..1024);
 
             let indexes =
                 PageKey::generate_page_keys(offset, size, page_size as u64).collect::<Vec<_>>();
@@ -191,24 +191,44 @@ mod test {
         writer
             .add_index(
                 "tag0".to_string(),
-                BitVec::from_slice(&[0b0000_0001, 0b0000_0000]),
+                Bitmap::from_lsb0_bytes(&[0b0000_0001, 0b0000_0000], BitmapType::Roaring),
                 Box::new(stream::iter(vec![
-                    Ok((Bytes::from("a"), BitVec::from_slice(&[0b0000_0001]))),
-                    Ok((Bytes::from("b"), BitVec::from_slice(&[0b0010_0000]))),
-                    Ok((Bytes::from("c"), BitVec::from_slice(&[0b0000_0001]))),
+                    Ok((
+                        Bytes::from("a"),
+                        Bitmap::from_lsb0_bytes(&[0b0000_0001], BitmapType::Roaring),
+                    )),
+                    Ok((
+                        Bytes::from("b"),
+                        Bitmap::from_lsb0_bytes(&[0b0010_0000], BitmapType::Roaring),
+                    )),
+                    Ok((
+                        Bytes::from("c"),
+                        Bitmap::from_lsb0_bytes(&[0b0000_0001], BitmapType::Roaring),
+                    )),
                 ])),
+                index::bitmap::BitmapType::Roaring,
             )
             .await
             .unwrap();
         writer
             .add_index(
                 "tag1".to_string(),
-                BitVec::from_slice(&[0b0000_0001, 0b0000_0000]),
+                Bitmap::from_lsb0_bytes(&[0b0000_0001, 0b0000_0000], BitmapType::Roaring),
                 Box::new(stream::iter(vec![
-                    Ok((Bytes::from("x"), BitVec::from_slice(&[0b0000_0001]))),
-                    Ok((Bytes::from("y"), BitVec::from_slice(&[0b0010_0000]))),
-                    Ok((Bytes::from("z"), BitVec::from_slice(&[0b0000_0001]))),
+                    Ok((
+                        Bytes::from("x"),
+                        Bitmap::from_lsb0_bytes(&[0b0000_0001], BitmapType::Roaring),
+                    )),
+                    Ok((
+                        Bytes::from("y"),
+                        Bitmap::from_lsb0_bytes(&[0b0010_0000], BitmapType::Roaring),
+                    )),
+                    Ok((
+                        Bytes::from("z"),
+                        Bitmap::from_lsb0_bytes(&[0b0000_0001], BitmapType::Roaring),
+                    )),
                 ])),
+                index::bitmap::BitmapType::Roaring,
             )
             .await
             .unwrap();
@@ -267,22 +287,31 @@ mod test {
         assert_eq!(fst0.len(), 3);
         let [offset, size] = unpack(fst0.get(b"a").unwrap());
         let bitmap = cached_reader
-            .bitmap(tag0.base_offset + offset as u64, size)
+            .bitmap(tag0.base_offset + offset as u64, size, BitmapType::Roaring)
             .await
             .unwrap();
-        assert_eq!(bitmap, BitVec::from_slice(&[0b0000_0001]));
+        assert_eq!(
+            bitmap,
+            Bitmap::from_lsb0_bytes(&[0b0000_0001], BitmapType::Roaring)
+        );
         let [offset, size] = unpack(fst0.get(b"b").unwrap());
         let bitmap = cached_reader
-            .bitmap(tag0.base_offset + offset as u64, size)
+            .bitmap(tag0.base_offset + offset as u64, size, BitmapType::Roaring)
             .await
             .unwrap();
-        assert_eq!(bitmap, BitVec::from_slice(&[0b0010_0000]));
+        assert_eq!(
+            bitmap,
+            Bitmap::from_lsb0_bytes(&[0b0010_0000], BitmapType::Roaring)
+        );
         let [offset, size] = unpack(fst0.get(b"c").unwrap());
         let bitmap = cached_reader
-            .bitmap(tag0.base_offset + offset as u64, size)
+            .bitmap(tag0.base_offset + offset as u64, size, BitmapType::Roaring)
             .await
             .unwrap();
-        assert_eq!(bitmap, BitVec::from_slice(&[0b0000_0001]));
+        assert_eq!(
+            bitmap,
+            Bitmap::from_lsb0_bytes(&[0b0000_0001], BitmapType::Roaring)
+        );
 
         // tag1
         let tag1 = metadata.metas.get("tag1").unwrap();
@@ -301,28 +330,37 @@ mod test {
         assert_eq!(fst1.len(), 3);
         let [offset, size] = unpack(fst1.get(b"x").unwrap());
         let bitmap = cached_reader
-            .bitmap(tag1.base_offset + offset as u64, size)
+            .bitmap(tag1.base_offset + offset as u64, size, BitmapType::Roaring)
             .await
             .unwrap();
-        assert_eq!(bitmap, BitVec::from_slice(&[0b0000_0001]));
+        assert_eq!(
+            bitmap,
+            Bitmap::from_lsb0_bytes(&[0b0000_0001], BitmapType::Roaring)
+        );
         let [offset, size] = unpack(fst1.get(b"y").unwrap());
         let bitmap = cached_reader
-            .bitmap(tag1.base_offset + offset as u64, size)
+            .bitmap(tag1.base_offset + offset as u64, size, BitmapType::Roaring)
             .await
             .unwrap();
-        assert_eq!(bitmap, BitVec::from_slice(&[0b0010_0000]));
+        assert_eq!(
+            bitmap,
+            Bitmap::from_lsb0_bytes(&[0b0010_0000], BitmapType::Roaring)
+        );
         let [offset, size] = unpack(fst1.get(b"z").unwrap());
         let bitmap = cached_reader
-            .bitmap(tag1.base_offset + offset as u64, size)
+            .bitmap(tag1.base_offset + offset as u64, size, BitmapType::Roaring)
             .await
             .unwrap();
-        assert_eq!(bitmap, BitVec::from_slice(&[0b0000_0001]));
+        assert_eq!(
+            bitmap,
+            Bitmap::from_lsb0_bytes(&[0b0000_0001], BitmapType::Roaring)
+        );
 
         // fuzz test
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         for _ in 0..FUZZ_REPEAT_TIMES {
-            let offset = rng.gen_range(0..file_size);
-            let size = rng.gen_range(0..file_size as u32 - offset as u32);
+            let offset = rng.random_range(0..file_size);
+            let size = rng.random_range(0..file_size as u32 - offset as u32);
             let expected = cached_reader.range_read(offset, size).await.unwrap();
             let inner = &cached_reader.inner;
             let read = cached_reader

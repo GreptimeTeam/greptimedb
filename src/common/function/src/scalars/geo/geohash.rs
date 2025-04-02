@@ -118,7 +118,7 @@ impl Function for GeohashFunction {
         Signature::one_of(signatures, Volatility::Stable)
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure!(
             columns.len() == 3,
             InvalidFuncArgsSnafu {
@@ -218,7 +218,7 @@ impl Function for GeohashNeighboursFunction {
         Signature::one_of(signatures, Volatility::Stable)
     }
 
-    fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         ensure!(
             columns.len() == 3,
             InvalidFuncArgsSnafu {

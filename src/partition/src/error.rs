@@ -18,7 +18,6 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datafusion_common::ScalarValue;
-use datafusion_expr::expr::Expr;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
 use table::metadata::TableId;
@@ -89,20 +88,6 @@ pub enum Error {
     RegionKeysSize {
         expect: usize,
         actual: usize,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Failed to find region, reason: {}", reason))]
-    FindRegion {
-        reason: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Failed to find regions by filters: {:?}", filters))]
-    FindRegions {
-        filters: Vec<Expr>,
         #[snafu(implicit)]
         location: Location,
     },
@@ -193,17 +178,15 @@ pub enum Error {
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::GetCache { .. } | Error::FindLeader { .. } => StatusCode::StorageUnavailable,
-            Error::FindRegionRoutes { .. } => StatusCode::RegionNotReady,
+            Error::GetCache { .. } => StatusCode::StorageUnavailable,
+            Error::FindLeader { .. } => StatusCode::TableUnavailable,
 
             Error::ConjunctExprWithNonExpr { .. }
             | Error::UnclosedValue { .. }
             | Error::InvalidExpr { .. }
             | Error::UndefinedColumn { .. } => StatusCode::InvalidArguments,
 
-            Error::FindRegion { .. }
-            | Error::FindRegions { .. }
-            | Error::RegionKeysSize { .. }
+            Error::RegionKeysSize { .. }
             | Error::InvalidInsertRequest { .. }
             | Error::InvalidDeleteRequest { .. } => StatusCode::InvalidArguments,
 
@@ -211,9 +194,10 @@ impl ErrorExt for Error {
             | Error::SerializeJson { .. }
             | Error::DeserializeJson { .. } => StatusCode::Internal,
 
-            Error::Unexpected { .. } => StatusCode::Unexpected,
-            Error::InvalidTableRouteData { .. } => StatusCode::TableUnavailable,
-            Error::FindTableRoutes { .. } => StatusCode::TableUnavailable,
+            Error::Unexpected { .. }
+            | Error::InvalidTableRouteData { .. }
+            | Error::FindTableRoutes { .. }
+            | Error::FindRegionRoutes { .. } => StatusCode::Unexpected,
             Error::TableRouteNotFound { .. } => StatusCode::TableNotFound,
             Error::TableRouteManager { source, .. } => source.status_code(),
             Error::UnexpectedLogicalRouteTable { source, .. } => source.status_code(),

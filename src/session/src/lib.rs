@@ -25,6 +25,7 @@ use auth::UserInfoRef;
 use common_catalog::build_db_string;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_recordbatch::cursor::RecordBatchStreamCursor;
+pub use common_session::ReadPreference;
 use common_time::timezone::get_timezone;
 use common_time::Timezone;
 use context::{ConfigurationVariables, QueryContextBuilder};
@@ -50,6 +51,7 @@ pub(crate) struct MutableInner {
     user_info: UserInfoRef,
     timezone: Timezone,
     query_timeout: Option<Duration>,
+    read_preference: ReadPreference,
     #[debug(skip)]
     pub(crate) cursors: HashMap<String, Arc<RecordBatchStreamCursor>>,
 }
@@ -61,6 +63,7 @@ impl Default for MutableInner {
             user_info: auth::userinfo_by_name(None),
             timezone: get_timezone(None).clone(),
             query_timeout: None,
+            read_preference: ReadPreference::Leader,
             cursors: HashMap::with_capacity(0),
         }
     }
@@ -101,9 +104,17 @@ impl Session {
         self.mutable_inner.read().unwrap().timezone.clone()
     }
 
+    pub fn read_preference(&self) -> ReadPreference {
+        self.mutable_inner.read().unwrap().read_preference
+    }
+
     pub fn set_timezone(&self, tz: Timezone) {
         let mut inner = self.mutable_inner.write().unwrap();
         inner.timezone = tz;
+    }
+
+    pub fn set_read_preference(&self, read_preference: ReadPreference) {
+        self.mutable_inner.write().unwrap().read_preference = read_preference;
     }
 
     pub fn user_info(&self) -> UserInfoRef {

@@ -130,3 +130,11 @@ pub const SEMANTIC_TYPE_TIME_INDEX: &str = "TIMESTAMP";
 pub fn is_readonly_schema(schema: &str) -> bool {
     matches!(schema, INFORMATION_SCHEMA_NAME)
 }
+
+// ---- special table and fields ----
+pub const TRACE_ID_COLUMN: &str = "trace_id";
+pub const SPAN_ID_COLUMN: &str = "span_id";
+pub const SPAN_NAME_COLUMN: &str = "span_name";
+pub const SERVICE_NAME_COLUMN: &str = "service_name";
+pub const PARENT_SPAN_ID_COLUMN: &str = "parent_span_id";
+// ---- End of special table and fields ----
