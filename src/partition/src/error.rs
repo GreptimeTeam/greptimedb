@@ -19,6 +19,7 @@ use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datafusion_common::ScalarValue;
 use datatypes::arrow;
+use datatypes::prelude::Value;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
 use table::metadata::TableId;
@@ -220,6 +221,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Partition expr value is not supported: {:?}", value))]
+    UnsupportedPartitionExprValue {
+        value: Value,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -249,6 +257,7 @@ impl ErrorExt for Error {
             Error::UnexpectedColumnType { .. } => StatusCode::Internal,
             Error::ToDFSchema { .. } => StatusCode::Internal,
             Error::CreatePhysicalExpr { .. } => StatusCode::Internal,
+            Error::UnsupportedPartitionExprValue { .. } => StatusCode::InvalidArguments,
         }
     }
 

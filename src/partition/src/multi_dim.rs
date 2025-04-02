@@ -262,6 +262,11 @@ impl MultiDimPartitionRule {
                 .context(error::ComputeArrowKernelSnafu)?;
         }
 
+        // fast path: all rows are selected
+        if selected.true_count() == num_rows {
+            return Ok(result);
+        }
+
         // find unselected rows and assign to default region
         let unselected = arrow::compute::kernels::boolean::not(&selected)
             .context(error::ComputeArrowKernelSnafu)?;

@@ -91,7 +91,12 @@ impl Operand {
                         let (v, p, s) = d.to_scalar_value();
                         ScalarValue::Decimal128(v, p, s)
                     }
-                    _ => unreachable!(),
+                    other => {
+                        return error::UnsupportedPartitionExprValueSnafu {
+                            value: other.clone(),
+                        }
+                        .fail()
+                    }
                 };
                 Ok(datafusion_expr::lit(scalar_value))
             }
