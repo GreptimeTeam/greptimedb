@@ -232,9 +232,7 @@ impl From<FlowLock> for StringKey {
     }
 }
 
-/// [RemoteWalLock] acquires the lock on the remote wal level.
-///
-/// Note: Locks all the remote wal operations.
+/// [RemoteWalLock] acquires the lock on the remote wal topic level.
 pub enum RemoteWalLock {
     Read(String),
     Write(String),
