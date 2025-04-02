@@ -444,7 +444,7 @@ mod tests {
     use std::assert_matches::assert_matches;
 
     use common_error::ext::ErrorExt;
-    use datatypes::schema::{FulltextAnalyzer, FulltextOptions};
+    use datatypes::schema::{FulltextAnalyzer, FulltextBackend, FulltextOptions};
     use sqlparser::ast::{ColumnDef, ColumnOption, ColumnOptionDef, DataType};
 
     use super::*;
@@ -958,7 +958,7 @@ mod tests {
 
     #[test]
     fn test_parse_alter_column_fulltext() {
-        let sql = "ALTER TABLE test_table MODIFY COLUMN a SET FULLTEXT INDEX WITH(analyzer='English',case_sensitive='false')";
+        let sql = "ALTER TABLE test_table MODIFY COLUMN a SET FULLTEXT INDEX WITH(analyzer='English',case_sensitive='false',backend='bloom')";
         let mut result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
@@ -984,7 +984,8 @@ mod tests {
                             FulltextOptions {
                                 enable: true,
                                 analyzer: FulltextAnalyzer::English,
-                                case_sensitive: false
+                                case_sensitive: false,
+                                backend: FulltextBackend::Bloom,
                             },
                             *options
                         );

@@ -1233,7 +1233,9 @@ mod tests {
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
     use datatypes::data_type::ConcreteDataType;
-    use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder};
+    use datatypes::schema::{
+        ColumnSchema, FulltextAnalyzer, FulltextBackend, Schema, SchemaBuilder,
+    };
 
     use super::*;
 
@@ -1806,8 +1808,9 @@ mod tests {
                 column_name: "my_tag_first".to_string(),
                 options: FulltextOptions {
                     enable: true,
-                    analyzer: datatypes::schema::FulltextAnalyzer::Chinese,
+                    analyzer: FulltextAnalyzer::Chinese,
                     case_sensitive: true,
+                    backend: FulltextBackend::Bloom,
                 },
             },
         };
