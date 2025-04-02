@@ -158,10 +158,12 @@ impl RangeManipulate {
 
     pub fn to_execution_plan(&self, exec_input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
         let output_schema: SchemaRef = SchemaRef::new(self.output_schema.as_ref().into());
+        let properties = exec_input.properties();
         let properties = PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),
-            exec_input.properties().partitioning.clone(),
-            exec_input.properties().execution_mode,
+            properties.partitioning.clone(),
+            properties.emission_type,
+            properties.boundedness,
         );
         Arc::new(RangeManipulateExec {
             start: self.start,
@@ -336,10 +338,12 @@ impl ExecutionPlan for RangeManipulateExec {
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         assert!(!children.is_empty());
         let exec_input = children[0].clone();
+        let properties = exec_input.properties();
         let properties = PlanProperties::new(
             EquivalenceProperties::new(self.output_schema.clone()),
-            exec_input.properties().partitioning.clone(),
-            exec_input.properties().execution_mode,
+            properties.partitioning.clone(),
+            properties.emission_type,
+            properties.boundedness,
         );
         Ok(Arc::new(Self {
             start: self.start,
@@ -602,8 +606,8 @@ mod test {
     };
     use datafusion::common::ToDFSchema;
     use datafusion::physical_expr::Partitioning;
+    use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
     use datafusion::physical_plan::memory::MemoryExec;
-    use datafusion::physical_plan::ExecutionMode;
     use datafusion::prelude::SessionContext;
     use datatypes::arrow::array::TimestampMillisecondArray;
 
@@ -662,7 +666,8 @@ mod test {
         let properties = PlanProperties::new(
             EquivalenceProperties::new(manipulate_output_schema.clone()),
             Partitioning::UnknownPartitioning(1),
-            ExecutionMode::Bounded,
+            EmissionType::Incremental,
+            Boundedness::Bounded,
         );
         let normalize_exec = Arc::new(RangeManipulateExec {
             start,

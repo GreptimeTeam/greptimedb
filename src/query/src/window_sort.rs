@@ -117,13 +117,15 @@ impl WindowedSortExec {
     ) -> Result<Self> {
         check_partition_range_monotonicity(&ranges, expression.options.descending)?;
 
+        let properties = input.properties();
         let properties = PlanProperties::new(
             input
                 .equivalence_properties()
                 .clone()
                 .with_reorder(LexOrdering::new(vec![expression.clone()])),
             input.output_partitioning().clone(),
-            input.execution_mode(),
+            properties.emission_type,
+            properties.boundedness,
         );
 
         let mut all_avail_working_range = Vec::with_capacity(ranges.len());

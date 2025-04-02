@@ -342,10 +342,7 @@ mod tests {
 
         // Predicate
         let predicate = Some(Predicate::new(vec![Expr::BinaryExpr(BinaryExpr {
-            left: Box::new(Expr::Column(Column {
-                relation: None,
-                name: "tag_0".to_string(),
-            })),
+            left: Box::new(Expr::Column(Column::from_name("tag_0"))),
             op: Operator::Eq,
             right: Box::new(Expr::Literal(ScalarValue::Utf8(Some("a".to_string())))),
         })]));
@@ -435,10 +432,7 @@ mod tests {
 
         // Predicate
         let predicate = Some(Predicate::new(vec![Expr::BinaryExpr(BinaryExpr {
-            left: Box::new(Expr::Column(Column {
-                relation: None,
-                name: "field_0".to_string(),
-            })),
+            left: Box::new(Expr::Column(Column::from_name("field_0"))),
             op: Operator::GtEq,
             right: Box::new(Expr::Literal(ScalarValue::UInt64(Some(150)))),
         })]));

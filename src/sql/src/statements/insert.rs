@@ -14,13 +14,13 @@
 
 use serde::Serialize;
 use sqlparser::ast::{
-    Insert as SpInsert, ObjectName, Query, SetExpr, Statement, UnaryOperator, Values,
+    Insert as SpInsert, ObjectName, Query, SetExpr, Statement, TableObject, UnaryOperator, Values,
 };
 use sqlparser::parser::ParserError;
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::{Expr, Value};
-use crate::error::Result;
+use crate::error::{Result, UnsupportedSnafu};
 use crate::statements::query::Query as GtQuery;
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
@@ -39,9 +39,17 @@ macro_rules! parse_fail {
 }
 
 impl Insert {
-    pub fn table_name(&self) -> &ObjectName {
+    pub fn table_name(&self) -> Result<&ObjectName> {
         match &self.inner {
-            Statement::Insert(insert) => &insert.table_name,
+            Statement::Insert(insert) => {
+                let TableObject::TableName(name) = &insert.table else {
+                    return UnsupportedSnafu {
+                        keyword: "TABLE FUNCTION".to_string(),
+                    }
+                    .fail();
+                };
+                Ok(name)
+            }
             _ => unreachable!(),
         }
     }

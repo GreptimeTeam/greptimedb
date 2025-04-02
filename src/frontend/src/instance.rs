@@ -500,7 +500,8 @@ pub fn check_permission(
         Statement::ShowCharset(_) | Statement::ShowCollation(_) => {}
 
         Statement::Insert(insert) => {
-            validate_param(insert.table_name(), query_ctx)?;
+            let name = insert.table_name().context(ParseSqlSnafu)?;
+            validate_param(name, query_ctx)?;
         }
         Statement::CreateTable(stmt) => {
             validate_param(&stmt.name, query_ctx)?;

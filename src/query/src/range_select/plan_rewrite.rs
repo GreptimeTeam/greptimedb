@@ -492,7 +492,7 @@ impl RangePlanRewriter {
     async fn get_index_by(&mut self, schema: &Arc<DFSchema>) -> Result<(Expr, Vec<Expr>)> {
         let mut time_index_expr = Expr::Wildcard {
             qualifier: None,
-            options: WildcardOptions::default(),
+            options: Box::new(WildcardOptions::default()),
         };
         let mut default_by = vec![];
         for i in 0..schema.fields().len() {

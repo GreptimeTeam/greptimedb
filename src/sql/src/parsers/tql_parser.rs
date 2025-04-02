@@ -217,7 +217,7 @@ impl ParserContext<'_> {
         while matches!(parser.peek_token().token, Token::Comma) {
             let _skip_token = parser.next_token();
         }
-        let index = parser.next_token().location.column as usize;
+        let index = parser.next_token().span.start.column as usize;
         if index == 0 {
             return Err(ParserError::ParserError("empty TQL query".to_string()));
         }
