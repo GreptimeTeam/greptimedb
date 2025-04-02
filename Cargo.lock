@@ -7967,9 +7967,9 @@ checksum = "e2355d85b9a3786f481747ced0e0ff2ba35213a1f9bd406ed906554d7af805a1"
 [[package]]
 name = "otel-arrow-rust"
 version = "0.1.0"
-source = "git+https://github.com/v0y4g3r/otel-arrow.git?rev=e3d9ed216c0a198a14987d1aa6e13c98264574c3#e3d9ed216c0a198a14987d1aa6e13c98264574c3"
 dependencies = [
  "arrow",
+ "arrow-ipc",
  "lazy_static",
  "num_enum",
  "opentelemetry-proto 0.27.0",

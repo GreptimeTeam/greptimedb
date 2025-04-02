@@ -16,22 +16,27 @@ use futures::SinkExt;
 use otel_arrow_rust::opentelemetry::{ArrowMetricsService, BatchArrowRecords, BatchStatus};
 use otel_arrow_rust::Consumer;
 use session::context::QueryContext;
+use tonic::metadata::{Entry, MetadataValue};
+use tonic::service::Interceptor;
 use tonic::{Request, Response, Status, Streaming};
 
-use crate::query_handler::OpenTelemetryProtocolHandler;
+use crate::query_handler::OpenTelemetryProtocolHandlerRef;
 
 pub struct OtelArrowServiceHandler<T>(pub T);
 
+impl<T> OtelArrowServiceHandler<T> {
+    pub fn new(handler: T) -> Self {
+        Self(handler)
+    }
+}
+
 #[async_trait::async_trait]
-impl<T> ArrowMetricsService for OtelArrowServiceHandler<T>
-where
-    T: OpenTelemetryProtocolHandler + Send + Sync + Clone + 'static,
-{
+impl ArrowMetricsService for OtelArrowServiceHandler<OpenTelemetryProtocolHandlerRef> {
     type ArrowMetricsStream = futures::channel::mpsc::Receiver<Result<BatchStatus, Status>>;
     async fn arrow_metrics(
         &self,
         request: Request<Streaming<BatchArrowRecords>>,
-    ) -> std::result::Result<Response<Self::ArrowMetricsStream>, Status> {
+    ) -> Result<Response<Self::ArrowMetricsStream>, Status> {
         let (mut sender, receiver) = futures::channel::mpsc::channel(100);
         let mut incoming_requests = request.into_inner();
         let handler = self.0.clone();
@@ -54,5 +59,21 @@ where
             }
         });
         Ok(Response::new(receiver))
+    }
+}
+
+/// This serves as a workaround for otel-arrow collector's custom header.
+#[derive(Clone)]
+pub struct HeaderInterceptor;
+
+impl Interceptor for HeaderInterceptor {
+    fn call(&mut self, mut request: Request<()>) -> Result<Request<()>, Status> {
+        if let Entry::Occupied(mut e) = request.metadata_mut().entry("grpc-encoding").unwrap() {
+            // This works as a workaround to handle customized compression type (zstdarrow*) in otel-arrow.
+            if e.get().as_bytes().starts_with(b"zstdarrow") {
+                e.insert(MetadataValue::from_static("zstd"));
+            }
+        }
+        Ok(request)
     }
 }
