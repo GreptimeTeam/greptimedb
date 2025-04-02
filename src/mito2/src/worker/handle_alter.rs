@@ -18,8 +18,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use common_base::readable_size::ReadableSize;
+use common_telemetry::info;
 use common_telemetry::tracing::warn;
-use common_telemetry::{debug, info};
 use humantime_serde::re::humantime;
 use snafu::ResultExt;
 use store_api::metadata::{
