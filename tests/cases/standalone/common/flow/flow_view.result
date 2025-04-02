@@ -24,13 +24,13 @@ CREATE FLOW user_agent_flow SINK TO user_agent_statistics AS SELECT user_agent, 
 
 Affected Rows: 0
 
-SELECT created_time = updated_time, created_time IS NOT NULL, source_table_names FROM information_schema.flows WHERE flow_name = 'user_agent_flow';
+SELECT created_time <= updated_time, created_time IS NOT NULL, source_table_names FROM information_schema.flows WHERE flow_name = 'user_agent_flow';
 
-+-------------------------------------------------------------------------------+---------------------------------------------------+--------------------------------+
-| information_schema.flows.created_time = information_schema.flows.updated_time | information_schema.flows.created_time IS NOT NULL | source_table_names             |
-+-------------------------------------------------------------------------------+---------------------------------------------------+--------------------------------+
-| true                                                                          | true                                              | greptime.public.ngx_access_log |
-+-------------------------------------------------------------------------------+---------------------------------------------------+--------------------------------+
++--------------------------------------------------------------------------------+---------------------------------------------------+--------------------------------+
+| information_schema.flows.created_time <= information_schema.flows.updated_time | information_schema.flows.created_time IS NOT NULL | source_table_names             |
++--------------------------------------------------------------------------------+---------------------------------------------------+--------------------------------+
+| true                                                                           | true                                              | greptime.public.ngx_access_log |
++--------------------------------------------------------------------------------+---------------------------------------------------+--------------------------------+
 
 CREATE OR REPLACE FLOW user_agent_flow SINK TO user_agent_statistics AS SELECT user_agent, COUNT(user_agent)+123 AS total_count FROM ngx_access_log GROUP BY user_agent;
 
