@@ -19,7 +19,6 @@ use std::str::FromStr;
 use api::prom_store::remote::WriteRequest;
 use auth::user_provider_from_option;
 use axum::http::{HeaderName, HeaderValue, StatusCode};
-use common_catalog::consts::TRACE_SERVICES_TABLE_NAME;
 use common_error::status_code::StatusCode as ErrorCode;
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -33,7 +32,9 @@ use pipeline::GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME;
 use prost::Message;
 use serde_json::{json, Value};
 use servers::http::handler::HealthResponse;
-use servers::http::header::constants::GREPTIME_LOG_TABLE_NAME_HEADER_NAME;
+use servers::http::header::constants::{
+    GREPTIME_LOG_TABLE_NAME_HEADER_NAME, GREPTIME_TRACE_SERVICES_TABLE_NAME_HEADER_NAME,
+};
 use servers::http::header::{GREPTIME_DB_HEADER_NAME, GREPTIME_TIMEZONE_HEADER_NAME};
 use servers::http::prometheus::{PrometheusJsonResponse, PrometheusResponse};
 use servers::http::result::error_result::ErrorResponse;
@@ -2184,6 +2185,7 @@ pub async fn test_otlp_traces_v0(store_type: StorageType) {
 {"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"telemetrygen"}}],"droppedAttributesCount":0},"scopeSpans":[{"scope":{"name":"telemetrygen","version":"","attributes":[],"droppedAttributesCount":0},"spans":[{"traceId":"c05d7a4ec8e1f231f02ed6e8da8655b4","spanId":"9630f2916e2f7909","traceState":"","parentSpanId":"d24f921c75f68e23","flags":256,"name":"okey-dokey-0","kind":2,"startTimeUnixNano":"1736480942444376000","endTimeUnixNano":"1736480942444499000","attributes":[{"key":"net.peer.ip","value":{"stringValue":"1.2.3.4"}},{"key":"peer.service","value":{"stringValue":"telemetrygen-client"}}],"droppedAttributesCount":0,"events":[],"droppedEventsCount":0,"links":[],"droppedLinksCount":0,"status":{"message":"","code":0}},{"traceId":"c05d7a4ec8e1f231f02ed6e8da8655b4","spanId":"d24f921c75f68e23","traceState":"","parentSpanId":"","flags":256,"name":"lets-go","kind":3,"startTimeUnixNano":"1736480942444376000","endTimeUnixNano":"1736480942444499000","attributes":[{"key":"net.peer.ip","value":{"stringValue":"1.2.3.4"}},{"key":"peer.service","value":{"stringValue":"telemetrygen-server"}}],"droppedAttributesCount":0,"events":[],"droppedEventsCount":0,"links":[],"droppedLinksCount":0,"status":{"message":"","code":0}},{"traceId":"cc9e0991a2e63d274984bd44ee669203","spanId":"8f847259b0f6e1ab","traceState":"","parentSpanId":"eba7be77e3558179","flags":256,"name":"okey-dokey-0","kind":2,"startTimeUnixNano":"1736480942444589000","endTimeUnixNano":"1736480942444712000","attributes":[{"key":"net.peer.ip","value":{"stringValue":"1.2.3.4"}},{"key":"peer.service","value":{"stringValue":"telemetrygen-client"}}],"droppedAttributesCount":0,"events":[],"droppedEventsCount":0,"links":[],"droppedLinksCount":0,"status":{"message":"","code":0}},{"traceId":"cc9e0991a2e63d274984bd44ee669203","spanId":"eba7be77e3558179","traceState":"","parentSpanId":"","flags":256,"name":"lets-go","kind":3,"startTimeUnixNano":"1736480942444589000","endTimeUnixNano":"1736480942444712000","attributes":[{"key":"net.peer.ip","value":{"stringValue":"1.2.3.4"}},{"key":"peer.service","value":{"stringValue":"telemetrygen-server"}}],"droppedAttributesCount":0,"events":[],"droppedEventsCount":0,"links":[],"droppedLinksCount":0,"status":{"message":"","code":0}}],"schemaUrl":""}],"schemaUrl":"https://opentelemetry.io/schemas/1.4.0"}]}
 "#;
 
+    let test_trace_services_table_name = "test_trace_services_table";
     let req: ExportTraceServiceRequest = serde_json::from_str(content).unwrap();
     let body = req.encode_to_vec();
 
@@ -2193,10 +2195,16 @@ pub async fn test_otlp_traces_v0(store_type: StorageType) {
     // write traces data
     let res = send_req(
         &client,
-        vec![(
-            HeaderName::from_static("content-type"),
-            HeaderValue::from_static("application/x-protobuf"),
-        )],
+        vec![
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/x-protobuf"),
+            ),
+            (
+                HeaderName::from_static(GREPTIME_TRACE_SERVICES_TABLE_NAME_HEADER_NAME),
+                HeaderValue::from_static(test_trace_services_table_name),
+            ),
+        ],
         "/v1/otlp/v1/traces",
         body.clone(),
         false,
@@ -2208,7 +2216,10 @@ pub async fn test_otlp_traces_v0(store_type: StorageType) {
     validate_data(
         "otlp_traces",
         &client,
-        &format!("select service_name from {};", TRACE_SERVICES_TABLE_NAME),
+        &format!(
+            "select service_name from {};",
+            test_trace_services_table_name
+        ),
         expected,
     )
     .await;
@@ -2267,6 +2278,7 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
 
     let req: ExportTraceServiceRequest = serde_json::from_str(content).unwrap();
     let body = req.encode_to_vec();
+    let test_trace_services_table_name = "test_trace_services_table";
 
     // handshake
     let client = TestClient::new(app).await;
@@ -2287,6 +2299,10 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
                 HeaderName::from_static("x-greptime-trace-table-name"),
                 HeaderValue::from_static("mytable"),
             ),
+            (
+                HeaderName::from_static(GREPTIME_TRACE_SERVICES_TABLE_NAME_HEADER_NAME),
+                HeaderValue::from_static(test_trace_services_table_name),
+            ),
         ],
         "/v1/otlp/v1/traces",
         body.clone(),
@@ -2299,7 +2315,10 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
     validate_data(
         "otlp_traces",
         &client,
-        &format!("select service_name from {};", TRACE_SERVICES_TABLE_NAME),
+        &format!(
+            "select service_name from {};",
+            test_trace_services_table_name
+        ),
         expected,
     )
     .await;
@@ -2317,11 +2336,11 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
     )
     .await;
 
-    let expected_ddl = r#"[["greptime_trace_services","CREATE TABLE IF NOT EXISTS \"greptime_trace_services\" (\n  \"timestamp\" TIMESTAMP(9) NOT NULL,\n  \"service_name\" STRING NULL,\n  TIME INDEX (\"timestamp\")\n)\n\nENGINE=mito\nWITH(\n  append_mode = 'true'\n)"]]"#;
+    let expected_ddl = r#"[["test_trace_services_table","CREATE TABLE IF NOT EXISTS \"test_trace_services_table\" (\n  \"timestamp\" TIMESTAMP(9) NOT NULL,\n  \"service_name\" STRING NULL,\n  TIME INDEX (\"timestamp\")\n)\n\nENGINE=mito\nWITH(\n  append_mode = 'true'\n)"]]"#;
     validate_data(
         "otlp_traces",
         &client,
-        &format!("show create table {};", TRACE_SERVICES_TABLE_NAME),
+        &format!("show create table {};", test_trace_services_table_name),
         expected_ddl,
     )
     .await;
