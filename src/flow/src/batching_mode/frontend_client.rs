@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Frontend client to run flow as recording rule which is time-window-aware normal query triggered every tick set by user
+//! Frontend client to run flow as batching task which is time-window-aware normal query triggered every tick set by user
 
 use std::sync::Arc;
 
@@ -25,8 +25,8 @@ use common_meta::rpc::store::RangeRequest;
 use meta_client::client::MetaClient;
 use snafu::ResultExt;
 
+use crate::batching_mode::DEFAULT_RULE_ENGINE_QUERY_TIMEOUT;
 use crate::error::{ExternalSnafu, UnexpectedSnafu};
-use crate::recording_rules::DEFAULT_RULE_ENGINE_QUERY_TIMEOUT;
 use crate::Error;
 
 fn default_channel_mgr() -> ChannelManager {

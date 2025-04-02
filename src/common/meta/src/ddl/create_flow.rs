@@ -309,7 +309,7 @@ impl Procedure for CreateFlowProcedure {
 
 pub fn determine_flow_type(_flow_task: &CreateFlowTask) -> FlowType {
     // TODO(discord9): determine flow type
-    FlowType::RecordingRule
+    FlowType::Batching
 }
 
 /// The state of [CreateFlowProcedure].
@@ -328,8 +328,8 @@ pub enum CreateFlowState {
 /// The type of flow.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum FlowType {
-    /// The flow is a recording rule task.
-    RecordingRule,
+    /// The flow is a batching task.
+    Batching,
     /// The flow is a streaming task.
     Streaming,
 }
@@ -342,14 +342,14 @@ impl FlowType {
 
 impl Default for FlowType {
     fn default() -> Self {
-        Self::RecordingRule
+        Self::Batching
     }
 }
 
 impl fmt::Display for FlowType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            FlowType::RecordingRule => write!(f, "{}", FlowType::RECORDING_RULE),
+            FlowType::Batching => write!(f, "{}", FlowType::RECORDING_RULE),
             FlowType::Streaming => write!(f, "{}", FlowType::STREAMING),
         }
     }

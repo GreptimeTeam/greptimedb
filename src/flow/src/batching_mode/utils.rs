@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! some utils for helping with recording rule
+//! some utils for helping with batching mode
 
 use std::collections::HashSet;
 use std::sync::Arc;

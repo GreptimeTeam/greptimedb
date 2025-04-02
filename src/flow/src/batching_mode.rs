@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Run flow as recording rule which is time-window-aware normal query triggered when new data arrives
+//! Run flow as batching mode which is time-window-aware normal query triggered when new data arrives
 
 use std::time::Duration;
 

@@ -26,6 +26,7 @@
 
 // allow unused for now because it should be use later
 mod adapter;
+mod batching_mode;
 mod compute;
 mod df_optimizer;
 pub mod error;
@@ -33,7 +34,6 @@ mod expr;
 pub mod heartbeat;
 mod metrics;
 mod plan;
-mod recording_rules;
 mod repr;
 mod server;
 mod transform;

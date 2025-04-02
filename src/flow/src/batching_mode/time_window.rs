@@ -661,7 +661,7 @@ mod test {
     use session::context::QueryContext;
 
     use super::*;
-    use crate::recording_rules::utils::{df_plan_to_sql, sql_to_df_plan, AddFilterRewriter};
+    use crate::batching_mode::utils::{df_plan_to_sql, sql_to_df_plan, AddFilterRewriter};
     use crate::test_utils::create_test_query_engine;
 
     #[tokio::test]

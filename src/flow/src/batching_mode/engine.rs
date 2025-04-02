@@ -44,15 +44,15 @@ use tokio::time::Instant;
 
 use super::frontend_client::FrontendClient;
 use crate::adapter::{CreateFlowArgs, FlowId, TableName, AUTO_CREATED_PLACEHOLDER_TS_COL};
+use crate::batching_mode::time_window::{find_time_window_expr, TimeWindowExpr};
+use crate::batching_mode::utils::{
+    df_plan_to_sql, sql_to_df_plan, AddAutoColumnRewriter, AddFilterRewriter, FindGroupByFinalName,
+};
 use crate::error::{
     DatafusionSnafu, DatatypesSnafu, ExternalSnafu, FlowAlreadyExistSnafu, InternalSnafu,
     InvalidRequestSnafu, TableNotFoundMetaSnafu, TableNotFoundSnafu, TimeSnafu, UnexpectedSnafu,
 };
 use crate::metrics::{METRIC_FLOW_RULE_ENGINE_QUERY_TIME, METRIC_FLOW_RULE_ENGINE_SLOW_QUERY};
-use crate::recording_rules::time_window::{find_time_window_expr, TimeWindowExpr};
-use crate::recording_rules::utils::{
-    df_plan_to_sql, sql_to_df_plan, AddAutoColumnRewriter, AddFilterRewriter, FindGroupByFinalName,
-};
 use crate::Error;
 
 /// TODO(discord9): make those constants configurable
@@ -62,12 +62,12 @@ pub const DEFAULT_RULE_ENGINE_QUERY_TIMEOUT: Duration = Duration::from_secs(10 *
 /// will output a warn log for any query that runs for more that 1 minutes, and also every 1 minutes when that query is still running
 pub const SLOW_QUERY_THRESHOLD: Duration = Duration::from_secs(60);
 
-/// The minimum duration between two queries execution by recording rule
+/// The minimum duration between two queries execution by batching mode task
 const MIN_REFRESH_DURATION: Duration = Duration::new(5, 0);
 
 /// TODO(discord9): determine how to configure refresh rate
-pub struct RecordingRuleEngine {
-    tasks: RwLock<BTreeMap<FlowId, RecordingRuleTask>>,
+pub struct BatchingEngine {
+    tasks: RwLock<BTreeMap<FlowId, BatchingTask>>,
     shutdown_txs: RwLock<BTreeMap<FlowId, oneshot::Sender<()>>>,
     frontend_client: Arc<FrontendClient>,
     flow_metadata_manager: FlowMetadataManagerRef,
@@ -75,7 +75,7 @@ pub struct RecordingRuleEngine {
     query_engine: QueryEngineRef,
 }
 
-impl RecordingRuleEngine {
+impl BatchingEngine {
     pub fn new(
         frontend_client: Arc<FrontendClient>,
         query_engine: QueryEngineRef,
@@ -145,7 +145,7 @@ async fn get_table_name(
         .map(|name| [name.catalog_name, name.schema_name, name.table_name])
 }
 
-impl RecordingRuleEngine {
+impl BatchingEngine {
     pub async fn create_flow(&self, args: CreateFlowArgs) -> Result<Option<FlowId>, Error> {
         let CreateFlowArgs {
             flow_id,
@@ -183,7 +183,7 @@ impl RecordingRuleEngine {
         let flow_type = flow_options.get(FlowType::FLOW_TYPE_KEY);
 
         ensure!(
-            flow_type == Some(&FlowType::RecordingRule.to_string()) || flow_type.is_none(),
+            flow_type == Some(&FlowType::Batching.to_string()) || flow_type.is_none(),
             UnexpectedSnafu {
                 reason: format!("Flow type is not RecordingRule nor None, got {flow_type:?}")
             }
@@ -236,7 +236,7 @@ impl RecordingRuleEngine {
 
         info!("Flow id={}, found time window expr={:?}", flow_id, phy_expr);
 
-        let task = RecordingRuleTask::new(
+        let task = BatchingTask::new(
             flow_id,
             &sql,
             plan,
@@ -308,7 +308,7 @@ impl RecordingRuleEngine {
 }
 
 #[derive(Clone)]
-pub struct RecordingRuleTask {
+pub struct BatchingTask {
     pub flow_id: FlowId,
     query: String,
     plan: LogicalPlan,
@@ -318,10 +318,10 @@ pub struct RecordingRuleTask {
     sink_table_name: [String; 3],
     source_table_names: HashSet<[String; 3]>,
     table_meta: TableMetadataManagerRef,
-    state: Arc<RwLock<RecordingRuleState>>,
+    state: Arc<RwLock<TaskState>>,
 }
 
-impl RecordingRuleTask {
+impl BatchingTask {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         flow_id: FlowId,
@@ -344,7 +344,7 @@ impl RecordingRuleTask {
             sink_table_name,
             source_table_names: source_table_names.into_iter().collect(),
             table_meta,
-            state: Arc::new(RwLock::new(RecordingRuleState::new(query_ctx, shutdown_rx))),
+            state: Arc::new(RwLock::new(TaskState::new(query_ctx, shutdown_rx))),
         }
     }
 
@@ -767,7 +767,7 @@ fn build_primary_key_constraint(
 }
 
 #[derive(Debug)]
-pub struct RecordingRuleState {
+pub struct TaskState {
     query_ctx: QueryContextRef,
     /// last query complete time
     last_update_time: Instant,
@@ -779,7 +779,7 @@ pub struct RecordingRuleState {
     exec_state: ExecState,
     shutdown_rx: oneshot::Receiver<()>,
 }
-impl RecordingRuleState {
+impl TaskState {
     pub fn new(query_ctx: QueryContextRef, shutdown_rx: oneshot::Receiver<()>) -> Self {
         Self {
             query_ctx,
@@ -845,7 +845,7 @@ impl DirtyTimeWindows {
         expire_lower_bound: Option<Timestamp>,
         window_size: chrono::Duration,
         flow_id: FlowId,
-        task_ctx: Option<&RecordingRuleTask>,
+        task_ctx: Option<&BatchingTask>,
     ) -> Result<Option<datafusion_expr::Expr>, Error> {
         debug!(
             "expire_lower_bound: {:?}, window_size: {:?}",
