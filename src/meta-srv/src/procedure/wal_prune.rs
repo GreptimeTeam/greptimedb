@@ -115,11 +115,8 @@ impl WalPruneProcedure {
             .collect();
 
         // Check if the `flush_entry_ids_map` contains all region ids.
-        let heartbeat_collected_region_ids = flush_entry_ids_map.keys().collect::<Vec<_>>();
-        if !check_heartbeat_collected_region_ids(
-            &region_ids.iter().collect::<Vec<_>>(),
-            &heartbeat_collected_region_ids,
-        ) || region_ids.is_empty()
+        if !check_heartbeat_collected_region_ids(&region_ids, &flush_entry_ids_map)
+            || region_ids.is_empty()
         {
             return Ok(Status::done());
         }
@@ -200,10 +197,10 @@ impl Procedure for WalPruneProcedure {
 
 /// Check if the heartbeat collected region ids contains all region ids in the topic-region map.
 fn check_heartbeat_collected_region_ids(
-    region_ids: &[&RegionId],
-    heartbeat_collected_region_ids: &[&RegionId],
+    region_ids: &[RegionId],
+    heartbeat_collected_region_ids: &HashMap<RegionId, u64>,
 ) -> bool {
     region_ids
         .iter()
-        .all(|region_id| heartbeat_collected_region_ids.contains(region_id))
+        .all(|region_id| heartbeat_collected_region_ids.contains_key(region_id))
 }
