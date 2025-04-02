@@ -184,6 +184,13 @@ pub fn extract_region_wal_options(
     Ok(region_wal_options)
 }
 
+/// The result of multiple operations.
+///
+/// - Ok: all operations are successful.
+/// - PartialRetryable: if any operation is retryable and without non retryable error, the result is retryable.
+/// - PartialNonRetryable: if any operation is non retryable, the result is non retryable.
+/// - AllRetryable: all operations are retryable.
+/// - AllNonRetryable: all operations are not retryable.
 pub enum MultipleResults {
     Ok,
     PartialRetryable(Error),
