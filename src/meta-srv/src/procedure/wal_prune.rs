@@ -61,7 +61,7 @@ pub struct WalPruneData {
     pub topic: String,
     /// The minimum flush entry id for topic, which is used to prune the WAL.
     /// If the topic has no region, the value is set to `None`.
-    pub min_flush_entry_id: EntryId,
+    pub min_flushed_entry_id: EntryId,
     /// The state.
     pub state: WalPruneState,
 }
@@ -79,7 +79,7 @@ impl WalPruneProcedure {
         Self {
             data: WalPruneData {
                 topic,
-                min_flush_entry_id: 0,
+                min_flushed_entry_id: 0,
                 state: WalPruneState::Prepare,
             },
             context,
@@ -123,7 +123,7 @@ impl WalPruneProcedure {
         }
 
         // Safety: `flush_entry_ids_map` are not empty.
-        self.data.min_flush_entry_id = *(flush_entry_ids_map.values().min().unwrap());
+        self.data.min_flushed_entry_id = *(flush_entry_ids_map.values().min().unwrap());
         self.data.state = WalPruneState::Prune;
         Ok(Status::executing(true))
     }
@@ -146,13 +146,14 @@ impl WalPruneProcedure {
             })?;
 
         partition_client
-            .delete_records(self.data.min_flush_entry_id as i64, TIMEOUT)
+            .delete_records(self.data.min_flushed_entry_id as i64, TIMEOUT)
             .await
             .context(DeleteRecordSnafu {
                 topic: self.data.topic.clone(),
                 partition: DEFAULT_PARTITION,
-                offset: self.data.min_flush_entry_id,
+                offset: self.data.min_flushed_entry_id,
             })?;
+
         Ok(Status::done())
     }
 }
@@ -205,4 +206,194 @@ fn check_heartbeat_collected_region_ids(
     region_ids
         .iter()
         .all(|region_id| heartbeat_collected_region_ids.contains_key(region_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::assert_matches::assert_matches;
+
+    use common_meta::key::TableMetadataManager;
+    use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_meta::region_registry::LeaderRegionRegistry;
+    use common_meta::wal_options_allocator::build_kafka_topic_creator;
+    use common_wal::config::kafka::common::{KafkaConnectionConfig, KafkaTopicConfig};
+    use common_wal::config::kafka::MetasrvKafkaConfig;
+    use common_wal::test_util::run_test_with_kafka_wal;
+    use rskafka::record::Record;
+
+    use super::*;
+    use crate::procedure::test_util::new_wal_prune_metadata;
+
+    struct TestEnv {
+        table_metadata_manager: TableMetadataManagerRef,
+        leader_region_registry: LeaderRegionRegistryRef,
+    }
+
+    impl TestEnv {
+        fn new() -> Self {
+            let kv_backend = Arc::new(MemoryKvBackend::new());
+            let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+            let leader_region_registry = Arc::new(LeaderRegionRegistry::new());
+            Self {
+                table_metadata_manager,
+                leader_region_registry,
+            }
+        }
+
+        fn table_metadata_manager(&self) -> &TableMetadataManagerRef {
+            &self.table_metadata_manager
+        }
+
+        fn leader_region_registry(&self) -> &LeaderRegionRegistryRef {
+            &self.leader_region_registry
+        }
+    }
+
+    /// Mock a test env for testing.
+    /// Including:
+    /// 1. Create a test env with a mailbox, a table metadata manager and a in-memory kv backend.
+    /// 2. Prepare some data in the table metadata manager and in-memory kv backend.
+    /// 3. Generate a `WalPruneProcedure` with the test env.
+    /// 4. Return the test env, the procedure, the minimum last entry id to prune and the regions to flush.
+    async fn mock_test_env(
+        topic: String,
+        broker_endpoints: Vec<String>,
+        env: &TestEnv,
+    ) -> (WalPruneProcedure, u64, Vec<RegionId>) {
+        // Creates a topic manager.
+        let kafka_topic = KafkaTopicConfig {
+            replication_factor: broker_endpoints.len() as i16,
+            ..Default::default()
+        };
+        let config = MetasrvKafkaConfig {
+            connection: KafkaConnectionConfig {
+                broker_endpoints,
+                ..Default::default()
+            },
+            kafka_topic,
+            ..Default::default()
+        };
+        let topic_creator = build_kafka_topic_creator(&config).await.unwrap();
+        let table_metadata_manager = env.table_metadata_manager().clone();
+        let leader_region_registry = env.leader_region_registry().clone();
+        let offsets = mock_wal_entries(topic_creator.client().clone(), &topic, 10).await;
+
+        let (min_last_entry_id, regions_to_flush) = new_wal_prune_metadata(
+            table_metadata_manager.clone(),
+            leader_region_registry.clone(),
+            10,
+            5,
+            &offsets,
+            10,
+            topic.clone(),
+        )
+        .await;
+
+        let context = Context {
+            client: topic_creator.client().clone(),
+            table_metadata_manager,
+            leader_region_registry,
+        };
+
+        let wal_prune_procedure = WalPruneProcedure::new(topic, context);
+        (wal_prune_procedure, min_last_entry_id, regions_to_flush)
+    }
+
+    fn record(i: usize) -> Record {
+        let key = format!("key_{i}");
+        let value = format!("value_{i}");
+        Record {
+            key: Some(key.into()),
+            value: Some(value.into()),
+            timestamp: chrono::Utc::now(),
+            headers: Default::default(),
+        }
+    }
+
+    async fn mock_wal_entries(
+        client: KafkaClientRef,
+        topic_name: &str,
+        n_entries: usize,
+    ) -> Vec<i64> {
+        let controller_client = client.controller_client().unwrap();
+        let _ = controller_client
+            .create_topic(topic_name, 1, 1, 5_000)
+            .await;
+        let partition_client = client
+            .partition_client(topic_name, 0, UnknownTopicHandling::Retry)
+            .await
+            .unwrap();
+        let mut offsets = Vec::with_capacity(n_entries);
+        for i in 0..n_entries {
+            let record = vec![record(i)];
+            let offset = partition_client
+                .produce(
+                    record,
+                    rskafka::client::partition::Compression::NoCompression,
+                )
+                .await
+                .unwrap();
+            offsets.extend(offset);
+        }
+        offsets
+    }
+
+    async fn check_entry_id_existence(
+        client: KafkaClientRef,
+        topic_name: &str,
+        entry_id: i64,
+    ) -> bool {
+        let partition_client = client
+            .partition_client(topic_name, 0, UnknownTopicHandling::Retry)
+            .await
+            .unwrap();
+        let (records, _high_watermark) = partition_client
+            .fetch_records(entry_id, 0..10001, 5_000)
+            .await
+            .unwrap();
+        !records.is_empty()
+    }
+
+    async fn delete_topic(client: KafkaClientRef, topic_name: &str) {
+        let controller_client = client.controller_client().unwrap();
+        controller_client
+            .delete_topic(topic_name, 5_000)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_procedure_execution() {
+        run_test_with_kafka_wal(|broker_endpoints| {
+            Box::pin(async {
+                common_telemetry::init_default_ut_logging();
+                let topic_name = "greptime_test_topic".to_string();
+                let env = TestEnv::new();
+                let (mut procedure, min_last_entry_id, _) =
+                    mock_test_env(topic_name.clone(), broker_endpoints, &env).await;
+
+                // Step 1: Test `on_prepare`.
+                let status = procedure.on_prepare().await.unwrap();
+                assert_matches!(status, Status::Executing { persist: true });
+                assert_matches!(procedure.data.state, WalPruneState::Prune);
+                assert_eq!(procedure.data.min_flushed_entry_id, min_last_entry_id);
+
+                // Step 2: Test `on_prune`.
+                let status = procedure.on_prune().await.unwrap();
+                assert_matches!(status, Status::Done { output: None });
+                assert!(
+                    check_entry_id_existence(
+                        procedure.context.client.clone(),
+                        &topic_name,
+                        procedure.data.min_flushed_entry_id as i64,
+                    )
+                    .await
+                );
+
+                // Clean up the topic.
+                delete_topic(procedure.context.client, &topic_name).await;
+            })
+        })
+        .await;
+    }
 }
