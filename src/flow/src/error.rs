@@ -263,11 +263,9 @@ impl ErrorExt for Error {
             | Self::FlowNotFound { .. }
             | Self::ListFlows { .. } => StatusCode::TableNotFound,
             Self::Plan { .. } | Self::Datatypes { .. } => StatusCode::PlanQuery,
-            Self::InvalidQuery { .. }
-            | Self::InvalidRequest { .. }
-            | Self::CreateFlow { .. }
-            | Self::Arrow { .. }
-            | Self::Time { .. } => StatusCode::EngineExecuteQuery,
+            Self::CreateFlow { .. } | Self::Arrow { .. } | Self::Time { .. } => {
+                StatusCode::EngineExecuteQuery
+            }
             Self::Unexpected { .. } => StatusCode::Unexpected,
             Self::NotImplemented { .. } | Self::UnsupportedTemporalFilter { .. } => {
                 StatusCode::Unsupported
@@ -278,7 +276,10 @@ impl ErrorExt for Error {
                 source.status_code()
             }
             Self::MetaClientInit { source, .. } => source.status_code(),
-            Self::ParseAddr { .. } => StatusCode::InvalidArguments,
+
+            Self::InvalidQuery { .. } | Self::InvalidRequest { .. } | Self::ParseAddr { .. } => {
+                StatusCode::InvalidArguments
+            }
         }
     }
 

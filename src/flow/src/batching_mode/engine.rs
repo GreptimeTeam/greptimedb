@@ -67,6 +67,8 @@ pub const SLOW_QUERY_THRESHOLD: Duration = Duration::from_secs(60);
 /// The minimum duration between two queries execution by batching mode task
 const MIN_REFRESH_DURATION: Duration = Duration::new(5, 0);
 
+/// Batching mode Engine, responsible for driving all the batching mode tasks
+///
 /// TODO(discord9): determine how to configure refresh rate
 pub struct BatchingEngine {
     tasks: RwLock<BTreeMap<FlowId, BatchingTask>>,
@@ -185,9 +187,9 @@ impl BatchingEngine {
         let flow_type = flow_options.get(FlowType::FLOW_TYPE_KEY);
 
         ensure!(
-            flow_type == Some(&FlowType::Batching.to_string()) || flow_type.is_none(),
+            matches!(flow_type, Some(ty) if ty == "batching"),
             UnexpectedSnafu {
-                reason: format!("Flow type is not RecordingRule nor None, got {flow_type:?}")
+                reason: format!("Flow type is not batching nor None, got {flow_type:?}")
             }
         );
 
@@ -200,18 +202,7 @@ impl BatchingEngine {
         let query_ctx = Arc::new(query_ctx);
         let mut source_table_names = Vec::new();
         for src_id in source_table_ids {
-            let table_name = self
-                .table_meta
-                .table_info_manager()
-                .get(src_id)
-                .await
-                .map_err(BoxedError::new)
-                .context(ExternalSnafu)?
-                .with_context(|| UnexpectedSnafu {
-                    reason: format!("Table id = {:?}, couldn't found table name", src_id),
-                })
-                .map(|name| name.table_name())
-                .map(|name| [name.catalog_name, name.schema_name, name.table_name])?;
+            let table_name = get_table_name(self.table_meta.table_info_manager(), &src_id).await?;
             source_table_names.push(table_name);
         }
 
@@ -255,17 +246,12 @@ impl BatchingEngine {
         let engine = self.query_engine.clone();
         let frontend = self.frontend_client.clone();
 
+        // check execute once first to detect any error early
         task.check_execute(&engine, &frontend).await?;
 
         // TODO(discord9): also save handle & use time wheel or what for better
         let _handle = common_runtime::spawn_global(async move {
-            match task_inner.start_executing_loop(engine, frontend).await {
-                Ok(()) => info!("Flow {} shutdown", task_inner.flow_id),
-                Err(err) => common_telemetry::error!(
-                    "Flow {} encounter unrecoverable error: {err:?}",
-                    task_inner.flow_id
-                ),
-            }
+            task_inner.start_executing_loop(engine, frontend).await;
         });
 
         // only replace here not earlier because we want the old one intact if something went wrong before this line
@@ -304,6 +290,7 @@ impl BatchingEngine {
         Ok(())
     }
 
+    /// Determine if the batching mode flow task exists with given flow id
     pub async fn flow_exist(&self, flow_id: FlowId) -> bool {
         self.tasks.read().await.contains_key(&flow_id)
     }
@@ -484,14 +471,14 @@ impl BatchingTask {
         drop(timer);
 
         let elapsed = instant.elapsed();
-        if let Ok(res1) = &res {
+        if let Ok(affected_rows) = &res {
             debug!(
-                "Flow {flow_id} executed, result: {res1:?}, elapsed: {:?}",
+                "Flow {flow_id} executed, affected_rows: {affected_rows:?}, elapsed: {:?}",
                 elapsed
             );
-        } else if let Err(res) = &res {
+        } else if let Err(err) = &res {
             warn!(
-                "Failed to execute Flow {flow_id} on frontend {}, result: {res:?}, elapsed: {:?} with query: {}",
+                "Failed to execute Flow {flow_id} on frontend {}, result: {err:?}, elapsed: {:?} with query: {}",
                 peer_addr, elapsed, &sql
             );
         }
@@ -523,34 +510,59 @@ impl BatchingTask {
     }
 
     /// start executing query in a loop, break when receive shutdown signal
+    ///
+    /// any error will be logged when executing query
     pub async fn start_executing_loop(
         &self,
         engine: QueryEngineRef,
         frontend_client: Arc<FrontendClient>,
-    ) -> Result<(), Error> {
+    ) {
         loop {
-            let Some(_) = self.gen_exec_once(&engine, &frontend_client).await? else {
-                debug!(
-                    "Flow id = {:?} found no new data, sleep for {:?} then continue",
-                    self.flow_id, MIN_REFRESH_DURATION
-                );
-                tokio::time::sleep(MIN_REFRESH_DURATION).await;
-                continue;
-            };
-
-            let sleep_until = {
-                let mut state = self.state.write().await;
-                match state.shutdown_rx.try_recv() {
-                    Ok(()) => break Ok(()),
-                    Err(TryRecvError::Closed) => {
-                        warn!("Unexpected shutdown flow {}, shutdown anyway", self.flow_id);
-                        break Ok(());
-                    }
-                    Err(TryRecvError::Empty) => (),
+            let mut new_query = None;
+            let mut gen_and_exec = async || {
+                new_query = self.gen_insert_sql(&engine).await?;
+                if let Some(new_query) = &new_query {
+                    self.execute_sql(&frontend_client, new_query).await
+                } else {
+                    Ok(None)
                 }
-                state.get_next_start_query_time(None)
             };
-            tokio::time::sleep_until(sleep_until).await;
+            match gen_and_exec().await {
+                // normal execute, sleep for some time before doing next query
+                Ok(Some(_)) => {
+                    let sleep_until = {
+                        let mut state = self.state.write().await;
+                        match state.shutdown_rx.try_recv() {
+                            Ok(()) => break,
+                            Err(TryRecvError::Closed) => {
+                                warn!("Unexpected shutdown flow {}, shutdown anyway", self.flow_id);
+                                break;
+                            }
+                            Err(TryRecvError::Empty) => (),
+                        }
+                        state.get_next_start_query_time(None)
+                    };
+                    tokio::time::sleep_until(sleep_until).await;
+                }
+                // no new data, sleep for some time before checking for new data
+                Ok(None) => {
+                    debug!(
+                        "Flow id = {:?} found no new data, sleep for {:?} then continue",
+                        self.flow_id, MIN_REFRESH_DURATION
+                    );
+                    tokio::time::sleep(MIN_REFRESH_DURATION).await;
+                    continue;
+                }
+                // TODO(discord9): this error should have better place to go, but for now just print error, also more context is needed
+                Err(err) => match new_query {
+                    Some(query) => {
+                        common_telemetry::error!(err; "Failed to execute query for flow={} with query: {query}", self.flow_id)
+                    }
+                    None => {
+                        common_telemetry::error!(err; "Failed to generate query for flow={}", self.flow_id)
+                    }
+                },
+            }
         }
     }
 
