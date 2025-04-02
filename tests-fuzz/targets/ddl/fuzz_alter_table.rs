@@ -187,14 +187,6 @@ async fn execute_alter_table(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
         // Applies changes
         table_ctx = Arc::new(Arc::unwrap_or_clone(table_ctx).alter(expr).unwrap());
 
-        // select from table to make sure the table is still ok
-        let sql = format!("SELECT * FROM {}", table_ctx.name);
-        let result = sqlx::query(&sql)
-            .execute(&ctx.greptime)
-            .await
-            .context(error::ExecuteQuerySnafu { sql: &sql })?;
-        info!("Select from table: {sql}, result: {result:?}");
-
         // Validates columns
         let mut column_entries = validator::column::fetch_columns(
             &ctx.greptime,
@@ -231,6 +223,14 @@ async fn execute_alter_table(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
                     assert_eq!(a, b);
                 }
             });
+
+        // select from table to make sure the table is still ok
+        let sql = format!("SELECT * FROM {}", table_ctx.name);
+        let result = sqlx::query(&sql)
+            .execute(&ctx.greptime)
+            .await
+            .context(error::ExecuteQuerySnafu { sql: &sql })?;
+        info!("Select from table: {sql}, result: {result:?}");
     }
 
     // Cleans up
