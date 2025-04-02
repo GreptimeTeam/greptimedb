@@ -92,8 +92,22 @@ pub struct RegionStat {
     pub sst_size: u64,
     /// The size of the SST index files in bytes.
     pub index_size: u64,
-    /// The version of manifest.
-    pub manifest_version: u64,
+    /// The manifest infoof the region.
+    pub region_manifest: RegionManifestInfo,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum RegionManifestInfo {
+    Mito {
+        manifest_version: u64,
+        flushed_entry_id: u64,
+    },
+    Metric {
+        data_manifest_version: u64,
+        data_flushed_entry_id: u64,
+        metadata_manifest_version: u64,
+        metadata_flushed_entry_id: u64,
+    },
 }
 
 impl Stat {
@@ -167,6 +181,31 @@ impl TryFrom<&HeartbeatRequest> for Stat {
     }
 }
 
+impl From<store_api::region_engine::RegionManifestInfo> for RegionManifestInfo {
+    fn from(value: store_api::region_engine::RegionManifestInfo) -> Self {
+        match value {
+            store_api::region_engine::RegionManifestInfo::Mito {
+                manifest_version,
+                flushed_entry_id,
+            } => RegionManifestInfo::Mito {
+                manifest_version,
+                flushed_entry_id,
+            },
+            store_api::region_engine::RegionManifestInfo::Metric {
+                data_manifest_version,
+                data_flushed_entry_id,
+                metadata_manifest_version,
+                metadata_flushed_entry_id,
+            } => RegionManifestInfo::Metric {
+                data_manifest_version,
+                data_flushed_entry_id,
+                metadata_manifest_version,
+                metadata_flushed_entry_id,
+            },
+        }
+    }
+}
+
 impl From<&api::v1::meta::RegionStat> for RegionStat {
     fn from(value: &api::v1::meta::RegionStat) -> Self {
         let region_stat = value
@@ -187,7 +226,7 @@ impl From<&api::v1::meta::RegionStat> for RegionStat {
             manifest_size: region_stat.manifest_size,
             sst_size: region_stat.sst_size,
             index_size: region_stat.index_size,
-            manifest_version: region_stat.manifest_version,
+            region_manifest: region_stat.manifest.into(),
         }
     }
 }
