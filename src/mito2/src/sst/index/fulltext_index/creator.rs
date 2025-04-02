@@ -486,12 +486,12 @@ mod tests {
             Arc::new(UInt64Vector::from_iter_values(
                 (0..num_rows).map(|n| n as u64),
             )),
-            Arc::new(UInt64Vector::from_iter_values(
-                std::iter::repeat(0).take(num_rows),
-            )),
-            Arc::new(UInt8Vector::from_iter_values(
-                std::iter::repeat(1).take(num_rows),
-            )),
+            Arc::new(UInt64Vector::from_iter_values(std::iter::repeat_n(
+                0, num_rows,
+            ))),
+            Arc::new(UInt8Vector::from_iter_values(std::iter::repeat_n(
+                1, num_rows,
+            ))),
             vec![
                 BatchColumn {
                     column_id: 1,

@@ -498,10 +498,7 @@ async fn create_datanode_client(datanode: &Datanode) -> (String, Client) {
                     if let Some(client) = client {
                         Ok(TokioIo::new(client))
                     } else {
-                        Err(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            "Client already taken",
-                        ))
+                        Err(std::io::Error::other("Client already taken"))
                     }
                 }
             }),

@@ -326,7 +326,6 @@ impl InvertedIndexer {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
-    use std::iter;
 
     use api::v1::SemanticType;
     use datafusion_expr::{binary_expr, col, lit, Expr as DfExpr, Operator};
@@ -424,15 +423,15 @@ mod tests {
 
         Batch::new(
             primary_key,
-            Arc::new(UInt64Vector::from_iter_values(
-                iter::repeat(0).take(num_rows),
-            )),
-            Arc::new(UInt64Vector::from_iter_values(
-                iter::repeat(0).take(num_rows),
-            )),
-            Arc::new(UInt8Vector::from_iter_values(
-                iter::repeat(1).take(num_rows),
-            )),
+            Arc::new(UInt64Vector::from_iter_values(std::iter::repeat_n(
+                0, num_rows,
+            ))),
+            Arc::new(UInt64Vector::from_iter_values(std::iter::repeat_n(
+                0, num_rows,
+            ))),
+            Arc::new(UInt8Vector::from_iter_values(std::iter::repeat_n(
+                1, num_rows,
+            ))),
             vec![u64_field],
         )
         .unwrap()

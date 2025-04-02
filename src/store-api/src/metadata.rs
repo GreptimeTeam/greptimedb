@@ -289,7 +289,7 @@ impl RegionMetadata {
     pub fn project(&self, projection: &[ColumnId]) -> Result<RegionMetadata> {
         // check time index
         ensure!(
-            projection.iter().any(|id| *id == self.time_index),
+            projection.contains(&self.time_index),
             TimeIndexNotFoundSnafu
         );
 

@@ -186,7 +186,6 @@ impl DfLogicalPlanner {
         self.engine_state
             .optimize_logical_plan(plan)
             .context(DataFusionSnafu)
-            .map(Into::into)
     }
 }
 
