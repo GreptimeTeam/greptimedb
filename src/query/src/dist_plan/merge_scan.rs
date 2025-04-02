@@ -29,11 +29,12 @@ use common_recordbatch::{
 };
 use common_telemetry::tracing_context::TracingContext;
 use datafusion::execution::TaskContext;
+use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::metrics::{
     Count, ExecutionPlanMetricsSet, Gauge, MetricBuilder, MetricsSet, Time,
 };
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, Partitioning, PlanProperties,
+    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
 };
 use datafusion_common::Result;
 use datafusion_expr::{Extension, LogicalPlan, UserDefinedLogicalNodeCore};
@@ -163,7 +164,8 @@ impl MergeScanExec {
         let properties = PlanProperties::new(
             EquivalenceProperties::new(arrow_schema.clone()),
             Partitioning::UnknownPartitioning(target_partition),
-            ExecutionMode::Bounded,
+            EmissionType::Incremental,
+            Boundedness::Bounded,
         );
         let schema = Self::arrow_schema_to_schema(arrow_schema.clone())?;
         Ok(Self {

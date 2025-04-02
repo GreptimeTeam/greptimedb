@@ -16,17 +16,19 @@ use std::sync::Arc;
 
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
-use datafusion::common::Statistics;
+use datafusion::common::{Constraints, Statistics};
+use datafusion::datasource::file_format::file_compression_type::FileCompressionType;
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::object_store::ObjectStoreUrl;
-use datafusion::datasource::physical_plan::{FileScanConfig, FileStream};
+use datafusion::datasource::physical_plan::{
+    CsvConfig, CsvOpener, FileScanConfig, FileStream, JsonOpener,
+};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use object_store::services::Fs;
 use object_store::ObjectStore;
 
-use crate::compression::CompressionType;
-use crate::file_format::csv::{stream_to_csv, CsvConfigBuilder, CsvOpener};
-use crate::file_format::json::{stream_to_json, JsonOpener};
+use crate::file_format::csv::stream_to_csv;
+use crate::file_format::json::stream_to_json;
 use crate::test_util;
 
 pub const TEST_BATCH_SIZE: usize = 100;
@@ -74,6 +76,7 @@ pub fn scan_config(file_schema: SchemaRef, limit: Option<usize>, filename: &str)
         object_store_url: ObjectStoreUrl::parse("empty://").unwrap(), // won't be used
         file_schema,
         file_groups: vec![vec![PartitionedFile::new(filename.to_string(), 10)]],
+        constraints: Constraints::empty(),
         statistics,
         projection: None,
         limit,
@@ -90,8 +93,8 @@ pub async fn setup_stream_to_json_test(origin_path: &str, threshold: impl Fn(usi
     let json_opener = JsonOpener::new(
         test_util::TEST_BATCH_SIZE,
         schema.clone(),
-        store.clone(),
-        CompressionType::Uncompressed,
+        FileCompressionType::UNCOMPRESSED,
+        Arc::new(object_store_opendal::OpendalStore::new(store.clone())),
     );
 
     let size = store.read(origin_path).await.unwrap().len();
@@ -124,13 +127,19 @@ pub async fn setup_stream_to_csv_test(origin_path: &str, threshold: impl Fn(usiz
 
     let schema = test_basic_schema();
 
-    let csv_conf = CsvConfigBuilder::default()
-        .batch_size(test_util::TEST_BATCH_SIZE)
-        .file_schema(schema.clone())
-        .build()
-        .unwrap();
+    let csv_config = Arc::new(CsvConfig::new(
+        TEST_BATCH_SIZE,
+        schema.clone(),
+        None,
+        true,
+        b',',
+        b'"',
+        None,
+        Arc::new(object_store_opendal::OpendalStore::new(store.clone())),
+        None,
+    ));
 
-    let csv_opener = CsvOpener::new(csv_conf, store.clone(), CompressionType::Uncompressed);
+    let csv_opener = CsvOpener::new(csv_config, FileCompressionType::UNCOMPRESSED);
 
     let size = store.read(origin_path).await.unwrap().len();
 

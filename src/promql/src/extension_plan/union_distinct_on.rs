@@ -26,10 +26,11 @@ use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::EquivalenceProperties;
+use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
-    hash_utils, DisplayAs, DisplayFormatType, Distribution, ExecutionMode, ExecutionPlan,
-    Partitioning, PlanProperties, RecordBatchStream, SendableRecordBatchStream,
+    hash_utils, DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, Partitioning,
+    PlanProperties, RecordBatchStream, SendableRecordBatchStream,
 };
 use datatypes::arrow::compute;
 use futures::future::BoxFuture;
@@ -95,7 +96,8 @@ impl UnionDistinctOn {
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),
             Partitioning::UnknownPartitioning(1),
-            ExecutionMode::Bounded,
+            EmissionType::Incremental,
+            Boundedness::Bounded,
         ));
         Arc::new(UnionDistinctOnExec {
             left: left_exec,

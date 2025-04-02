@@ -514,14 +514,6 @@ pub enum Error {
         source: common_datasource::error::Error,
     },
 
-    #[snafu(display("Failed to build csv config"))]
-    BuildCsvConfig {
-        #[snafu(source)]
-        error: common_datasource::file_format::csv::CsvConfigBuilderError,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to write stream to path: {}", path))]
     WriteStreamToFile {
         path: String,
@@ -825,7 +817,6 @@ impl ErrorExt for Error {
             | Error::ColumnNotFound { .. }
             | Error::BuildRegex { .. }
             | Error::InvalidSchema { .. }
-            | Error::BuildCsvConfig { .. }
             | Error::ProjectSchema { .. }
             | Error::UnsupportedFormat { .. }
             | Error::ColumnNoneDefaultValue { .. }
