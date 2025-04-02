@@ -567,6 +567,10 @@ fn interval_only_in_expr(expr: &Expr) -> bool {
                 | Expr::Literal(ScalarValue::IntervalMonthDayNano(_))
                 | Expr::Literal(ScalarValue::IntervalYearMonth(_))
                 | Expr::BinaryExpr(_)
+                | Expr::Cast(Cast {
+                    data_type: DataType::Interval(_),
+                    ..
+                })
         ) {
             all_interval = false;
             Ok(TreeNodeRecursion::Stop)
@@ -995,6 +999,24 @@ mod test {
                 IntervalDayTime::new(10, 0).into(),
             )))),
         });
+        assert!(interval_only_in_expr(&expr));
+
+        let expr = Expr::Cast(Cast {
+            expr: Box::new(Expr::BinaryExpr(BinaryExpr {
+                left: Box::new(Expr::Cast(Cast {
+                    expr: Box::new(Expr::Literal(ScalarValue::Utf8(Some(
+                        "15 minute".to_string(),
+                    )))),
+                    data_type: DataType::Interval(IntervalUnit::MonthDayNano),
+                })),
+                op: Operator::Minus,
+                right: Box::new(Expr::Literal(ScalarValue::IntervalDayTime(Some(
+                    IntervalDayTime::new(10, 0).into(),
+                )))),
+            })),
+            data_type: DataType::Interval(IntervalUnit::MonthDayNano),
+        });
+
         assert!(interval_only_in_expr(&expr));
     }
 }

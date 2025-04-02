@@ -24,4 +24,7 @@ SELECT ts, host, min(val) RANGE ('1 hour'::INTERVAL) FROM host ALIGN ('1 hour'::
 
 SELECT ts, host, min(val) RANGE ('30 minute'::INTERVAL + '30 minute'::INTERVAL) FROM host ALIGN ('30 minute'::INTERVAL + '30 minute'::INTERVAL) ORDER BY host, ts;
 
+--- Test nested cast, even though it is meaningless ----
+SELECT ts, host, min(val) RANGE ((INTERVAL '1' hour)::INTERVAL) FROM host ALIGN ('1 hour'::INTERVAL::INTERVAL) ORDER BY host, ts;
+
 DROP TABLE host;
