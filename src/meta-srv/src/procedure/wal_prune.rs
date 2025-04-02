@@ -17,11 +17,12 @@ use std::sync::Arc;
 
 use common_error::ext::BoxedError;
 use common_meta::key::TableMetadataManagerRef;
+use common_meta::lock_key::RemoteWalLock;
 use common_meta::region_registry::LeaderRegionRegistryRef;
 use common_procedure::error::ToJsonSnafu;
 use common_procedure::{
     Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
-    Result as ProcedureResult, Status,
+    Result as ProcedureResult, Status, StringKey,
 };
 use log_store::kafka::DEFAULT_PARTITION;
 use rskafka::client::partition::UnknownTopicHandling;
@@ -191,7 +192,8 @@ impl Procedure for WalPruneProcedure {
     /// But the modifications are atomic, so it does not conflict with the procedure.
     /// It only abort the procedure sometimes since the `check_heartbeat_collected_region_ids` fails.
     fn lock_key(&self) -> LockKey {
-        LockKey::new(vec![])
+        let lock_key: StringKey = RemoteWalLock::Write(self.data.topic.clone()).into();
+        LockKey::new(vec![lock_key])
     }
 }
 

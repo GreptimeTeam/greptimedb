@@ -27,6 +27,7 @@ const TABLE_NAME_LOCK_PREFIX: &str = "__table_name_lock";
 const FLOW_NAME_LOCK_PREFIX: &str = "__flow_name_lock";
 const REGION_LOCK_PREFIX: &str = "__region_lock";
 const FLOW_LOCK_PREFIX: &str = "__flow_lock";
+const REMOTE_WAL_LOCK_PREFIX: &str = "__remote_wal_lock";
 
 /// [CatalogLock] acquires the lock on the tenant level.
 pub enum CatalogLock<'a> {
@@ -231,6 +232,33 @@ impl From<FlowLock> for StringKey {
     }
 }
 
+/// [RemoteWalLock] acquires the lock on the remote wal level.
+///
+/// Note: Locks all the remote wal operations.
+pub enum RemoteWalLock {
+    Read(String),
+    Write(String),
+}
+
+impl Display for RemoteWalLock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let key = match self {
+            RemoteWalLock::Read(s) => s,
+            RemoteWalLock::Write(s) => s,
+        };
+        write!(f, "{}/{}", REMOTE_WAL_LOCK_PREFIX, key)
+    }
+}
+
+impl From<RemoteWalLock> for StringKey {
+    fn from(value: RemoteWalLock) -> Self {
+        match value {
+            RemoteWalLock::Write(_) => StringKey::Exclusive(value.to_string()),
+            RemoteWalLock::Read(_) => StringKey::Share(value.to_string()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use common_procedure::StringKey;
@@ -307,6 +335,17 @@ mod tests {
         assert_eq!(
             string_key,
             StringKey::Exclusive(format!("{}/{}", FLOW_LOCK_PREFIX, flow_id))
+        );
+        // The remote wal lock
+        let string_key: StringKey = RemoteWalLock::Read("foo".to_string()).into();
+        assert_eq!(
+            string_key,
+            StringKey::Share(format!("{}/{}", REMOTE_WAL_LOCK_PREFIX, "foo"))
+        );
+        let string_key: StringKey = RemoteWalLock::Write("foo".to_string()).into();
+        assert_eq!(
+            string_key,
+            StringKey::Exclusive(format!("{}/{}", REMOTE_WAL_LOCK_PREFIX, "foo"))
         );
     }
 }
