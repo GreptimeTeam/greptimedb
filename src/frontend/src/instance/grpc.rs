@@ -20,17 +20,19 @@ use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use common_query::Output;
 use common_telemetry::tracing::{self};
+use datafusion::execution::SessionStateBuilder;
 use query::parser::PromQuery;
 use servers::interceptor::{GrpcQueryInterceptor, GrpcQueryInterceptorRef};
 use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
+use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::table_name::TableName;
 
 use crate::error::{
     Error, InFlightWriteBytesExceededSnafu, IncompleteGrpcRequestSnafu, NotSupportedSnafu,
-    PermissionSnafu, Result, TableOperationSnafu,
+    PermissionSnafu, Result, SubstraitDecodeLogicalPlanSnafu, TableOperationSnafu,
 };
 use crate::instance::{attach_timer, Instance};
 use crate::metrics::{GRPC_HANDLE_PROMQL_ELAPSED, GRPC_HANDLE_SQL_ELAPSED};
@@ -82,11 +84,15 @@ impl GrpcQueryHandler for Instance {
                         let output = result.remove(0)?;
                         attach_timer(output, timer)
                     }
-                    Query::LogicalPlan(_) => {
-                        return NotSupportedSnafu {
-                            feat: "Execute LogicalPlan in Frontend",
-                        }
-                        .fail();
+                    Query::LogicalPlan(plan) => {
+                        let timer = GRPC_HANDLE_SQL_ELAPSED.start_timer();
+                        let plan = DFLogicalSubstraitConvertor {}
+                            .decode(&*plan, SessionStateBuilder::default().build())
+                            .await
+                            .context(SubstraitDecodeLogicalPlanSnafu)?;
+                        let output = SqlQueryHandler::do_exec_plan(self, plan, ctx.clone()).await?;
+
+                        attach_timer(output, timer)
                     }
                     Query::PromRangeQuery(promql) => {
                         let timer = GRPC_HANDLE_PROMQL_ELAPSED.start_timer();

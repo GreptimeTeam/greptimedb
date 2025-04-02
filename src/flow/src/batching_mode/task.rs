@@ -16,6 +16,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use api::v1::CreateTableExpr;
 use arrow_schema::Fields;
 use common_error::ext::BoxedError;
 use common_meta::key::table_name::TableNameKey;
@@ -25,12 +26,17 @@ use common_telemetry::{debug, info};
 use common_time::Timestamp;
 use datafusion::sql::unparser::expr_to_sql;
 use datafusion_common::tree_node::TreeNode;
-use datafusion_expr::LogicalPlan;
+use datafusion_expr::{DmlStatement, LogicalPlan, WriteOp};
 use datatypes::prelude::ConcreteDataType;
-use itertools::Itertools;
+use datatypes::schema::constraint::NOW_FN;
+use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
+use datatypes::value::Value;
+use operator::expr_helper::column_schemas_to_defs;
+use query::query_engine::DefaultSerializer;
 use query::QueryEngineRef;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
+use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::RawTableMeta;
 use tokio::sync::oneshot::error::TryRecvError;
 use tokio::sync::{oneshot, RwLock};
@@ -41,12 +47,12 @@ use crate::adapter::{FlowId, AUTO_CREATED_PLACEHOLDER_TS_COL};
 use crate::batching_mode::state::TaskState;
 use crate::batching_mode::time_window::TimeWindowExpr;
 use crate::batching_mode::utils::{
-    df_plan_to_sql, sql_to_df_plan, AddAutoColumnRewriter, AddFilterRewriter, FindGroupByFinalName,
+    sql_to_df_plan, AddAutoColumnRewriter, AddFilterRewriter, FindGroupByFinalName,
 };
 use crate::batching_mode::{MIN_REFRESH_DURATION, SLOW_QUERY_THRESHOLD};
 use crate::error::{
-    DatafusionSnafu, ExternalSnafu, InvalidRequestSnafu, TableNotFoundMetaSnafu,
-    TableNotFoundSnafu, UnexpectedSnafu,
+    ConvertColumnSchemaSnafu, DatafusionSnafu, DatatypesSnafu, ExternalSnafu, InvalidRequestSnafu,
+    SubstraitEncodeLogicalPlanSnafu, TableNotFoundMetaSnafu, TableNotFoundSnafu, UnexpectedSnafu,
 };
 use crate::metrics::{
     METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME, METRIC_FLOW_BATCHING_ENGINE_SLOW_QUERY,
@@ -115,12 +121,12 @@ impl BatchingTask {
             .add_lower_bounds(vec![ts].into_iter());
 
         if !self.is_table_exist(&self.sink_table_name).await? {
-            let create_table = self.gen_create_table_sql(engine.clone()).await?;
+            let create_table = self.gen_create_table_expr(engine.clone()).await?;
             info!(
-                "Try creating sink table(if not exists) with query: {}",
+                "Try creating sink table(if not exists) with expr: {:?}",
                 create_table
             );
-            self.execute_sql(frontend_client, &create_table).await?;
+            self.create_table(frontend_client, create_table).await?;
             info!(
                 "Sink table {}(if not exists) created",
                 self.sink_table_name.join(".")
@@ -148,14 +154,17 @@ impl BatchingTask {
         engine: &QueryEngineRef,
         frontend_client: &Arc<FrontendClient>,
     ) -> Result<Option<(u32, Duration)>, Error> {
-        if let Some(new_query) = self.gen_insert_sql(engine).await? {
-            self.execute_sql(frontend_client, &new_query).await
+        if let Some(new_query) = self.gen_insert_plan(engine).await? {
+            self.execute_logical_plan(frontend_client, &new_query).await
         } else {
             Ok(None)
         }
     }
 
-    pub async fn gen_insert_sql(&self, engine: &QueryEngineRef) -> Result<Option<String>, Error> {
+    pub async fn gen_insert_plan(
+        &self,
+        engine: &QueryEngineRef,
+    ) -> Result<Option<LogicalPlan>, Error> {
         let table_name_mgr = self.table_meta.table_name_manager();
 
         let full_table_name = self.sink_table_name.clone().join(".");
@@ -188,20 +197,137 @@ impl BatchingTask {
             })?
             .into_inner();
 
+        let schema: datatypes::schema::Schema = table
+            .table_info
+            .meta
+            .schema
+            .clone()
+            .try_into()
+            .with_context(|_| DatatypesSnafu {
+                extra: format!(
+                    "Failed to convert schema from raw schema, raw_schema={:?}",
+                    table.table_info.meta.schema
+                ),
+            })?;
+
+        let df_schema = Arc::new(schema.arrow_schema().clone().try_into().with_context(|_| {
+            DatafusionSnafu {
+                context: format!(
+                    "Failed to convert arrow schema to datafusion schema, arrow_schema={:?}",
+                    schema.arrow_schema()
+                ),
+            }
+        })?);
+
         let new_query = self
             .gen_query_with_time_window(engine.clone(), &table.table_info.meta)
             .await?;
 
         let insert_into = if let Some((new_query, _column_cnt)) = new_query {
-            // TODO(discord9): also assign column name to compat update_at column
-            format!("INSERT INTO {} {}", full_table_name, new_query)
+            // update_at& time index placeholder (if exists) should have default value
+            LogicalPlan::Dml(DmlStatement::new(
+                datafusion_common::TableReference::Full {
+                    catalog: self.sink_table_name[0].clone().into(),
+                    schema: self.sink_table_name[1].clone().into(),
+                    table: self.sink_table_name[2].clone().into(),
+                },
+                df_schema,
+                WriteOp::Insert(datafusion_expr::dml::InsertOp::Append),
+                Arc::new(new_query),
+            ))
         } else {
             return Ok(None);
         };
         Ok(Some(insert_into))
     }
 
+    pub async fn create_table(
+        &self,
+        frontend_client: &Arc<FrontendClient>,
+        expr: CreateTableExpr,
+    ) -> Result<(), Error> {
+        let db_client = frontend_client.get_database_client().await?;
+        db_client
+            .database
+            .create(expr.clone())
+            .await
+            .with_context(|_| InvalidRequestSnafu {
+                context: format!("Failed to create table with expr: {:?}", expr),
+            })?;
+        Ok(())
+    }
+
+    pub async fn execute_logical_plan(
+        &self,
+        frontend_client: &Arc<FrontendClient>,
+        plan: &LogicalPlan,
+    ) -> Result<Option<(u32, Duration)>, Error> {
+        let instant = Instant::now();
+        let flow_id = self.flow_id;
+        let db_client = frontend_client.get_database_client().await?;
+        let peer_addr = db_client.peer.addr;
+        debug!(
+            "Executing flow {flow_id}(expire_after={:?} secs) on {:?} with query {}",
+            self.expire_after, peer_addr, &plan
+        );
+
+        let timer = METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME
+            .with_label_values(&[flow_id.to_string().as_str()])
+            .start_timer();
+
+        let message = DFLogicalSubstraitConvertor {}
+            .encode(plan, DefaultSerializer)
+            .context(SubstraitEncodeLogicalPlanSnafu)?;
+
+        let req = api::v1::greptime_request::Request::Query(api::v1::QueryRequest {
+            query: Some(api::v1::query_request::Query::LogicalPlan(message.to_vec())),
+        });
+
+        let res = db_client.database.handle(req).await;
+        drop(timer);
+
+        let elapsed = instant.elapsed();
+        if let Ok(affected_rows) = &res {
+            debug!(
+                "Flow {flow_id} executed, affected_rows: {affected_rows:?}, elapsed: {:?}",
+                elapsed
+            );
+        } else if let Err(err) = &res {
+            warn!(
+                "Failed to execute Flow {flow_id} on frontend {}, result: {err:?}, elapsed: {:?} with query: {}",
+                peer_addr, elapsed, &plan
+            );
+        }
+
+        // record slow query
+        if elapsed >= SLOW_QUERY_THRESHOLD {
+            warn!(
+                "Flow {flow_id} on frontend {} executed for {:?} before complete, query: {}",
+                peer_addr, elapsed, &plan
+            );
+            METRIC_FLOW_BATCHING_ENGINE_SLOW_QUERY
+                .with_label_values(&[flow_id.to_string().as_str(), &plan.to_string(), &peer_addr])
+                .observe(elapsed.as_secs_f64());
+        }
+
+        self.state
+            .write()
+            .await
+            .after_query_exec(elapsed, res.is_ok());
+
+        let res = res.context(InvalidRequestSnafu {
+            context: format!(
+                "Failed to execute query for flow={}: \'{}\'",
+                self.flow_id, &plan
+            ),
+        })?;
+
+        Ok(Some((res, elapsed)))
+    }
+
     /// Execute the query once and return the output and the time it took
+    ///
+    #[deprecated(since = "0.1.0", note = "use execute_logical_plan instead")]
     pub async fn execute_sql(
         &self,
         frontend_client: &Arc<FrontendClient>,
@@ -277,9 +403,9 @@ impl BatchingTask {
         loop {
             let mut new_query = None;
             let mut gen_and_exec = async || {
-                new_query = self.gen_insert_sql(&engine).await?;
+                new_query = self.gen_insert_plan(&engine).await?;
                 if let Some(new_query) = &new_query {
-                    self.execute_sql(&frontend_client, new_query).await
+                    self.execute_logical_plan(&frontend_client, new_query).await
                 } else {
                     Ok(None)
                 }
@@ -329,10 +455,13 @@ impl BatchingTask {
     /// (for compatibility with flow streaming mode)
     ///
     /// and it will use first timestamp column as time index, all other columns will be added as normal columns and nullable
-    async fn gen_create_table_sql(&self, engine: QueryEngineRef) -> Result<String, Error> {
+    async fn gen_create_table_expr(
+        &self,
+        engine: QueryEngineRef,
+    ) -> Result<CreateTableExpr, Error> {
         let query_ctx = self.state.read().await.query_ctx.clone();
         let plan = sql_to_df_plan(query_ctx.clone(), engine.clone(), &self.query, true).await?;
-        create_table_with(&plan, &self.sink_table_name.join("."))
+        create_table_with_expr(&plan, &self.sink_table_name)
     }
 
     /// will merge and use the first ten time window in query
@@ -340,7 +469,7 @@ impl BatchingTask {
         &self,
         engine: QueryEngineRef,
         sink_table_meta: &RawTableMeta,
-    ) -> Result<Option<(String, usize)>, Error> {
+    ) -> Result<Option<(LogicalPlan, usize)>, Error> {
         let query_ctx = self.state.read().await.query_ctx.clone();
         let start = SystemTime::now();
         let since_the_epoch = start
@@ -363,7 +492,7 @@ impl BatchingTask {
             .map(|expr| expr.eval(low_bound))
             .transpose()?;
 
-        let new_sql = {
+        let new_plan = {
             let expr = {
                 match expire_time_window_bound {
                     Some((Some(l), Some(u))) => {
@@ -408,11 +537,10 @@ impl BatchingTask {
                                 context: format!("Failed to rewrite plan {:?}", self.plan),
                             })?
                             .data;
-                        let new_query = df_plan_to_sql(&plan)?;
                         let schema_len = plan.schema().fields().len();
 
                         // since no time window lower/upper bound is found, just return the original query(with auto columns)
-                        return Ok(Some((new_query, schema_len)));
+                        return Ok(Some((plan, schema_len)));
                     }
                 }
             };
@@ -439,57 +567,90 @@ impl BatchingTask {
             // make a not optimized plan for clearer unparse
             let plan =
                 sql_to_df_plan(query_ctx.clone(), engine.clone(), &self.query, false).await?;
-            let plan = plan
-                .clone()
+            plan.clone()
                 .rewrite(&mut add_filter)
                 .and_then(|p| p.data.rewrite(&mut add_auto_column))
                 .with_context(|_| DatafusionSnafu {
                     context: format!("Failed to rewrite plan {plan:?}"),
                 })?
-                .data;
-            df_plan_to_sql(&plan)?
+                .data
         };
 
-        Ok(Some((new_sql, schema_len)))
+        Ok(Some((new_plan, schema_len)))
     }
 }
 
 // auto created table have a auto added column `update_at`, and optional have a `AUTO_CREATED_PLACEHOLDER_TS_COL` column for time index placeholder if no timestamp column is specified
-fn create_table_with(plan: &LogicalPlan, sink_table_name: &str) -> Result<String, Error> {
-    let schema = plan.schema().fields();
-    let (first_time_stamp, all_pk_cols) = build_primary_key_constraint(plan, schema)?;
+// TODO(discord9): unit test
+fn create_table_with_expr(
+    plan: &LogicalPlan,
+    sink_table_name: &[String; 3],
+) -> Result<CreateTableExpr, Error> {
+    let catalog_name = &sink_table_name[0];
+    let schema_name = &sink_table_name[1];
+    let table_name = &sink_table_name[2];
 
-    let mut schema_in_sql: Vec<String> = Vec::new();
-    for field in schema {
+    let fields = plan.schema().fields();
+    let (first_time_stamp, primary_keys) = build_primary_key_constraint(plan, fields)?;
+
+    let mut column_schemas = Vec::new();
+    for field in fields {
+        let name = field.name();
         let ty = ConcreteDataType::from_arrow_type(field.data_type());
-        if first_time_stamp == Some(field.name().clone()) {
-            schema_in_sql.push(format!("\"{}\" {} TIME INDEX", field.name(), ty));
+        let col_schema = if first_time_stamp == Some(name.clone()) {
+            ColumnSchema::new(name, ty, false).with_time_index(true)
         } else {
-            schema_in_sql.push(format!("\"{}\" {} NULL", field.name(), ty));
-        }
-    }
-    if first_time_stamp.is_none() {
-        schema_in_sql.push("\"update_at\" TimestampMillisecond default now()".to_string());
-        schema_in_sql.push(format!(
-            "\"{}\" TimestampMillisecond TIME INDEX default 0",
-            AUTO_CREATED_PLACEHOLDER_TS_COL
-        ));
-    } else {
-        schema_in_sql.push("\"update_at\" TimestampMillisecond default now()".to_string());
+            ColumnSchema::new(name, ty, true)
+        };
+        column_schemas.push(col_schema);
     }
 
-    if !all_pk_cols.is_empty() {
-        schema_in_sql.push(format!("PRIMARY KEY ({})", all_pk_cols.iter().join(",")))
+    let update_at_schema = ColumnSchema::new(
+        "update_at",
+        ConcreteDataType::timestamp_millisecond_datatype(),
+        true,
+    )
+    .with_default_constraint(Some(ColumnDefaultConstraint::Function(NOW_FN.to_string())))
+    .context(DatatypesSnafu {
+        extra: "Failed to build column `update_at TimestampMillisecond default now()`",
+    })?;
+    column_schemas.push(update_at_schema);
+
+    let time_index = if let Some(time_index) = first_time_stamp {
+        time_index
+    } else {
+        column_schemas.push(
+            ColumnSchema::new(
+                AUTO_CREATED_PLACEHOLDER_TS_COL,
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true)
+            .with_default_constraint(Some(ColumnDefaultConstraint::Value(Value::Timestamp(
+                Timestamp::new_millisecond(0),
+            ))))
+            .context(DatatypesSnafu {
+                extra: "Failed to build column `{} TimestampMillisecond default 0`",
+            })?,
+        );
+        AUTO_CREATED_PLACEHOLDER_TS_COL.to_string()
     };
 
-    let col_defs = schema_in_sql.join(", ");
-
-    let create_table_sql = format!(
-        "CREATE TABLE IF NOT EXISTS {} ({})",
-        sink_table_name, col_defs
-    );
-
-    Ok(create_table_sql)
+    let column_defs =
+        column_schemas_to_defs(column_schemas, &primary_keys).context(ConvertColumnSchemaSnafu)?;
+    Ok(CreateTableExpr {
+        catalog_name: catalog_name.clone(),
+        schema_name: schema_name.clone(),
+        table_name: table_name.clone(),
+        desc: "Auto created table by flow engine".to_string(),
+        column_defs,
+        time_index,
+        primary_keys,
+        create_if_not_exists: true,
+        table_options: Default::default(),
+        table_id: None,
+        engine: "mito".to_string(),
+    })
 }
 
 /// Return first timestamp column which is in group by clause and other columns which are also in group by clause
@@ -539,6 +700,7 @@ fn build_primary_key_constraint(
 
 #[cfg(test)]
 mod test {
+    use api::v1::column_def::try_as_column_schema;
     use pretty_assertions::assert_eq;
     use session::context::QueryContext;
 
@@ -552,36 +714,123 @@ mod test {
         struct TestCase {
             sql: String,
             sink_table_name: String,
-            create: String,
+            column_schemas: Vec<ColumnSchema>,
+            primary_keys: Vec<String>,
+            time_index: String,
         }
+
+        let update_at_schema = ColumnSchema::new(
+            "update_at",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            true,
+        )
+        .with_default_constraint(Some(ColumnDefaultConstraint::Function(NOW_FN.to_string())))
+        .unwrap();
+
+        let ts_placeholder_schema = ColumnSchema::new(
+            AUTO_CREATED_PLACEHOLDER_TS_COL,
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true)
+        .with_default_constraint(Some(ColumnDefaultConstraint::Value(Value::Timestamp(
+            Timestamp::new_millisecond(0),
+        ))))
+        .unwrap();
+
         let testcases = vec![
             TestCase {
-            sql: "SELECT number, ts FROM numbers_with_ts".to_string(),
-            sink_table_name: "new_table".to_string(),
-            create: r#"CREATE TABLE IF NOT EXISTS new_table ("number" UInt32 NULL, "ts" TimestampMillisecond NULL, "update_at" TimestampMillisecond default now(), "__ts_placeholder" TimestampMillisecond TIME INDEX default 0)"#.to_string(),
-        },
-        TestCase {
-            sql: "SELECT number, max(ts) FROM numbers_with_ts GROUP BY number".to_string(),
-            sink_table_name: "new_table".to_string(),
-            create: r#"CREATE TABLE IF NOT EXISTS new_table ("number" UInt32 NULL, "max(numbers_with_ts.ts)" TimestampMillisecond NULL, "update_at" TimestampMillisecond default now(), "__ts_placeholder" TimestampMillisecond TIME INDEX default 0, PRIMARY KEY (number))"#.to_string(),
-        },
-        TestCase {
-            sql: "SELECT max(number), ts FROM numbers_with_ts GROUP BY ts".to_string(),
-            sink_table_name: "new_table".to_string(),
-            create: r#"CREATE TABLE IF NOT EXISTS new_table ("max(numbers_with_ts.number)" UInt32 NULL, "ts" TimestampMillisecond TIME INDEX, "update_at" TimestampMillisecond default now())"#.to_string(),
-        },
-        TestCase {
-            sql: "SELECT number, ts FROM numbers_with_ts GROUP BY ts, number".to_string(),
-            sink_table_name: "new_table".to_string(),
-            create: r#"CREATE TABLE IF NOT EXISTS new_table ("number" UInt32 NULL, "ts" TimestampMillisecond TIME INDEX, "update_at" TimestampMillisecond default now(), PRIMARY KEY (number))"#.to_string(),
-        }];
+                sql: "SELECT number, ts FROM numbers_with_ts".to_string(),
+                sink_table_name: "new_table".to_string(),
+                column_schemas: vec![
+                    ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
+                    ColumnSchema::new(
+                        "ts",
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        true,
+                    ),
+                    update_at_schema.clone(),
+                    ts_placeholder_schema.clone(),
+                ],
+                primary_keys: vec![],
+                time_index: "__ts_placeholder".to_string(),
+            },
+            TestCase {
+                sql: "SELECT number, max(ts) FROM numbers_with_ts GROUP BY number".to_string(),
+                sink_table_name: "new_table".to_string(),
+                column_schemas: vec![
+                    ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
+                    ColumnSchema::new(
+                        "max(numbers_with_ts.ts)",
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        true,
+                    ),
+                    update_at_schema.clone(),
+                    ts_placeholder_schema.clone(),
+                ],
+                primary_keys: vec!["number".to_string()],
+                time_index: "__ts_placeholder".to_string(),
+            },
+            TestCase {
+                sql: "SELECT max(number), ts FROM numbers_with_ts GROUP BY ts".to_string(),
+                sink_table_name: "new_table".to_string(),
+                column_schemas: vec![
+                    ColumnSchema::new(
+                        "max(numbers_with_ts.number)",
+                        ConcreteDataType::uint32_datatype(),
+                        true,
+                    ),
+                    ColumnSchema::new(
+                        "ts",
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    )
+                    .with_time_index(true),
+                    update_at_schema.clone(),
+                ],
+                primary_keys: vec![],
+                time_index: "ts".to_string(),
+            },
+            TestCase {
+                sql: "SELECT number, ts FROM numbers_with_ts GROUP BY ts, number".to_string(),
+                sink_table_name: "new_table".to_string(),
+                column_schemas: vec![
+                    ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
+                    ColumnSchema::new(
+                        "ts",
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    )
+                    .with_time_index(true),
+                    update_at_schema.clone(),
+                ],
+                primary_keys: vec!["number".to_string()],
+                time_index: "ts".to_string(),
+            },
+        ];
 
         for tc in testcases {
             let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), &tc.sql, true)
                 .await
                 .unwrap();
-            let real = create_table_with(&plan, &tc.sink_table_name).unwrap();
-            assert_eq!(tc.create, real);
+            let expr = create_table_with_expr(
+                &plan,
+                &[
+                    "greptime".to_string(),
+                    "public".to_string(),
+                    tc.sink_table_name.clone(),
+                ],
+            )
+            .unwrap();
+            // TODO(discord9): assert expr
+            let column_schemas = expr
+                .column_defs
+                .iter()
+                .map(|c| try_as_column_schema(c).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(tc.column_schemas, column_schemas);
+            assert_eq!(tc.primary_keys, expr.primary_keys);
+            assert_eq!(tc.time_index, expr.time_index);
         }
     }
 }
