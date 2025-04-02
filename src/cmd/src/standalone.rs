@@ -127,7 +127,6 @@ impl SubCommand {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct StandaloneOptions {
-    pub mode: Mode,
     pub enable_telemetry: bool,
     pub default_timezone: Option<String>,
     pub http: HttpOptions,
@@ -157,7 +156,6 @@ pub struct StandaloneOptions {
 impl Default for StandaloneOptions {
     fn default() -> Self {
         Self {
-            mode: Mode::Standalone,
             enable_telemetry: true,
             default_timezone: None,
             http: HttpOptions::default(),
@@ -238,7 +236,6 @@ impl StandaloneOptions {
             grpc: cloned_opts.grpc,
             init_regions_in_background: cloned_opts.init_regions_in_background,
             init_regions_parallelism: cloned_opts.init_regions_parallelism,
-            mode: Mode::Standalone,
             ..Default::default()
         }
     }
@@ -382,9 +379,6 @@ impl StartCommand {
         global_options: &GlobalOptions,
         opts: &mut StandaloneOptions,
     ) -> Result<()> {
-        // Should always be standalone mode.
-        opts.mode = Mode::Standalone;
-
         if let Some(dir) = &global_options.log_dir {
             opts.logging.dir.clone_from(dir);
         }
@@ -509,7 +503,7 @@ impl StartCommand {
             .build(),
         );
 
-        let datanode = DatanodeBuilder::new(dn_opts, plugins.clone())
+        let datanode = DatanodeBuilder::new(dn_opts, plugins.clone(), Mode::Standalone)
             .with_kv_backend(kv_backend.clone())
             .with_cache_registry(layered_cache_registry.clone())
             .build()
@@ -789,7 +783,7 @@ impl InformationExtension for StandaloneInformationExtension {
                     manifest_size: region_stat.manifest_size,
                     sst_size: region_stat.sst_size,
                     index_size: region_stat.index_size,
-                    manifest_version: region_stat.manifest_version,
+                    region_manifest: region_stat.manifest.into(),
                 }
             })
             .collect::<Vec<_>>();
@@ -1066,7 +1060,6 @@ mod tests {
         let options =
             StandaloneOptions::load_layered_options(None, "GREPTIMEDB_STANDALONE").unwrap();
         let default_options = StandaloneOptions::default();
-        assert_eq!(options.mode, default_options.mode);
         assert_eq!(options.enable_telemetry, default_options.enable_telemetry);
         assert_eq!(options.http, default_options.http);
         assert_eq!(options.grpc, default_options.grpc);

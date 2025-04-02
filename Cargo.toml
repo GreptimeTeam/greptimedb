@@ -29,6 +29,7 @@ members = [
     "src/common/query",
     "src/common/recordbatch",
     "src/common/runtime",
+    "src/common/session",
     "src/common/substrait",
     "src/common/telemetry",
     "src/common/test-util",
@@ -186,6 +187,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
 serde_with = "3"
 shadow-rs = "1.1"
+simd-json = "0.15"
 similar-asserts = "1.6.0"
 smallvec = { version = "1", features = ["serde"] }
 snafu = "0.8"
@@ -248,6 +250,7 @@ common-procedure-test = { path = "src/common/procedure-test" }
 common-query = { path = "src/common/query" }
 common-recordbatch = { path = "src/common/recordbatch" }
 common-runtime = { path = "src/common/runtime" }
+common-session = { path = "src/common/session" }
 common-telemetry = { path = "src/common/telemetry" }
 common-test-util = { path = "src/common/test-util" }
 common-time = { path = "src/common/time" }

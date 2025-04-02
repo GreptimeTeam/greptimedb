@@ -43,6 +43,7 @@ pub mod constants {
     pub const GREPTIME_DB_HEADER_EXECUTION_TIME: &str = "x-greptime-execution-time";
     pub const GREPTIME_DB_HEADER_METRICS: &str = "x-greptime-metrics";
     pub const GREPTIME_DB_HEADER_NAME: &str = "x-greptime-db-name";
+    pub const GREPTIME_DB_HEADER_READ_PREFERENCE: &str = "x-greptime-read-preference";
     pub const GREPTIME_TIMEZONE_HEADER_NAME: &str = "x-greptime-timezone";
     pub const GREPTIME_DB_HEADER_ERROR_CODE: &str = common_error::GREPTIME_DB_HEADER_ERROR_CODE;
 
@@ -75,6 +76,10 @@ pub static GREPTIME_DB_HEADER_NAME: HeaderName =
 /// Header key of query specific timezone. Example format of the header value is `Asia/Shanghai` or `+08:00`.
 pub static GREPTIME_TIMEZONE_HEADER_NAME: HeaderName =
     HeaderName::from_static(constants::GREPTIME_TIMEZONE_HEADER_NAME);
+
+/// Header key of query specific read preference. Example format of the header value is `leader`.
+pub static GREPTIME_DB_HEADER_READ_PREFERENCE: HeaderName =
+    HeaderName::from_static(constants::GREPTIME_DB_HEADER_READ_PREFERENCE);
 
 pub static CONTENT_TYPE_PROTOBUF_STR: &str = "application/x-protobuf";
 pub static CONTENT_TYPE_PROTOBUF: HeaderValue = HeaderValue::from_static(CONTENT_TYPE_PROTOBUF_STR);

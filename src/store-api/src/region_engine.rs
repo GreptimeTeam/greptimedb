@@ -382,9 +382,60 @@ pub struct RegionStatistic {
     /// The size of SST index files in bytes.
     #[serde(default)]
     pub index_size: u64,
-    /// The version of manifest.
+    /// The details of the region.
     #[serde(default)]
-    pub manifest_version: u64,
+    pub manifest: RegionManifestInfo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RegionManifestInfo {
+    Mito {
+        manifest_version: u64,
+        flushed_entry_id: u64,
+    },
+    Metric {
+        data_manifest_version: u64,
+        data_flushed_entry_id: u64,
+        metadata_manifest_version: u64,
+        metadata_flushed_entry_id: u64,
+    },
+}
+
+impl RegionManifestInfo {
+    /// Returns the flushed entry id of the data region.
+    pub fn flushed_entry_id(&self) -> u64 {
+        match self {
+            RegionManifestInfo::Mito {
+                flushed_entry_id, ..
+            } => *flushed_entry_id,
+            RegionManifestInfo::Metric {
+                metadata_flushed_entry_id,
+                ..
+            } => *metadata_flushed_entry_id,
+        }
+    }
+
+    /// Returns the manifest version of the data region.
+    pub fn manifest_version(&self) -> u64 {
+        match self {
+            RegionManifestInfo::Mito {
+                manifest_version, ..
+            } => *manifest_version,
+            RegionManifestInfo::Metric {
+                metadata_manifest_version,
+                ..
+            } => *metadata_manifest_version,
+        }
+    }
+}
+
+impl Default for RegionManifestInfo {
+    fn default() -> Self {
+        Self::Mito {
+            manifest_version: 0,
+            flushed_entry_id: 0,
+        }
+    }
 }
 
 impl RegionStatistic {

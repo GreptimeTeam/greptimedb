@@ -19,13 +19,82 @@ use std::sync::{Arc, RwLock};
 use common_telemetry::warn;
 use store_api::storage::RegionId;
 
+use crate::datanode::RegionManifestInfo;
+
 /// Represents information about a leader region in the cluster.
 /// Contains the datanode id where the leader is located,
 /// and the current manifest version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LeaderRegion {
     pub datanode_id: u64,
-    pub manifest_version: u64,
+    pub manifest: LeaderRegionManifestInfo,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LeaderRegionManifestInfo {
+    Mito {
+        manifest_version: u64,
+        flushed_entry_id: u64,
+    },
+    Metric {
+        data_manifest_version: u64,
+        data_flushed_entry_id: u64,
+        metadata_manifest_version: u64,
+        metadata_flushed_entry_id: u64,
+    },
+}
+
+impl From<RegionManifestInfo> for LeaderRegionManifestInfo {
+    fn from(value: RegionManifestInfo) -> Self {
+        match value {
+            RegionManifestInfo::Mito {
+                manifest_version,
+                flushed_entry_id,
+            } => LeaderRegionManifestInfo::Mito {
+                manifest_version,
+                flushed_entry_id,
+            },
+            RegionManifestInfo::Metric {
+                data_manifest_version,
+                data_flushed_entry_id,
+                metadata_manifest_version,
+                metadata_flushed_entry_id,
+            } => LeaderRegionManifestInfo::Metric {
+                data_manifest_version,
+                data_flushed_entry_id,
+                metadata_manifest_version,
+                metadata_flushed_entry_id,
+            },
+        }
+    }
+}
+
+impl LeaderRegionManifestInfo {
+    /// Returns the manifest version of the leader region.
+    pub fn manifest_version(&self) -> u64 {
+        match self {
+            LeaderRegionManifestInfo::Mito {
+                manifest_version, ..
+            } => *manifest_version,
+            LeaderRegionManifestInfo::Metric {
+                data_manifest_version,
+                ..
+            } => *data_manifest_version,
+        }
+    }
+
+    /// Returns the flushed entry id of the leader region.
+    pub fn flushed_entry_id(&self) -> u64 {
+        match self {
+            LeaderRegionManifestInfo::Mito {
+                flushed_entry_id, ..
+            } => *flushed_entry_id,
+            LeaderRegionManifestInfo::Metric {
+                data_flushed_entry_id,
+                ..
+            } => *data_flushed_entry_id,
+        }
+    }
 }
 
 pub type LeaderRegionRegistryRef = Arc<LeaderRegionRegistry>;
@@ -71,13 +140,13 @@ impl LeaderRegionRegistry {
                     entry.insert(leader_region);
                 }
                 Entry::Occupied(mut entry) => {
-                    let manifest_version = entry.get().manifest_version;
-                    if manifest_version > leader_region.manifest_version {
+                    let manifest_version = entry.get().manifest.manifest_version();
+                    if manifest_version > leader_region.manifest.manifest_version() {
                         warn!(
                             "Received a leader region with a smaller manifest version than the existing one, ignore it. region: {}, existing_manifest_version: {}, new_manifest_version: {}",
                             region_id,
                             manifest_version,
-                            leader_region.manifest_version
+                            leader_region.manifest.manifest_version()
                         );
                     } else {
                         entry.insert(leader_region);

@@ -73,11 +73,7 @@ pub fn send_mock_reply(
 }
 
 /// Generates a [InstructionReply::OpenRegion] reply.
-pub(crate) fn new_open_region_reply(
-    id: u64,
-    result: bool,
-    error: Option<String>,
-) -> MailboxMessage {
+pub fn new_open_region_reply(id: u64, result: bool, error: Option<String>) -> MailboxMessage {
     MailboxMessage {
         id,
         subject: "mock".to_string(),
