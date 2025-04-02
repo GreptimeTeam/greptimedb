@@ -19,6 +19,7 @@ pub mod expression;
 pub mod geo;
 pub mod json;
 pub mod matches;
+pub mod matches_term;
 pub mod math;
 pub mod vector;
 

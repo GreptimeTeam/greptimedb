@@ -2031,6 +2031,7 @@ dependencies = [
  "geohash",
  "h3o",
  "jsonb",
+ "memchr",
  "nalgebra 0.33.2",
  "num",
  "num-traits",

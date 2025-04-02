@@ -33,6 +33,7 @@ geo-types = { version = "0.7", optional = true }
 geohash = { version = "0.13", optional = true }
 h3o = { version = "0.6", optional = true }
 jsonb.workspace = true
+memchr = "2.7"
 nalgebra.workspace = true
 num = "0.4"
 num-traits = "0.2"
