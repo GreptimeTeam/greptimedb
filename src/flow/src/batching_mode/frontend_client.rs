@@ -25,12 +25,12 @@ use common_meta::rpc::store::RangeRequest;
 use meta_client::client::MetaClient;
 use snafu::ResultExt;
 
-use crate::batching_mode::DEFAULT_RULE_ENGINE_QUERY_TIMEOUT;
+use crate::batching_mode::DEFAULT_BATCHING_ENGINE_QUERY_TIMEOUT;
 use crate::error::{ExternalSnafu, UnexpectedSnafu};
 use crate::Error;
 
 fn default_channel_mgr() -> ChannelManager {
-    let cfg = ChannelConfig::new().timeout(DEFAULT_RULE_ENGINE_QUERY_TIMEOUT);
+    let cfg = ChannelConfig::new().timeout(DEFAULT_BATCHING_ENGINE_QUERY_TIMEOUT);
     ChannelManager::with_config(cfg)
 }
 

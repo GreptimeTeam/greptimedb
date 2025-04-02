@@ -22,5 +22,5 @@ mod time_window;
 mod utils;
 
 /// TODO(discord9): make those constants configurable
-/// The default rule engine query timeout is 10 minutes
-pub const DEFAULT_RULE_ENGINE_QUERY_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// The default batching engine query timeout is 10 minutes
+pub const DEFAULT_BATCHING_ENGINE_QUERY_TIMEOUT: Duration = Duration::from_secs(10 * 60);

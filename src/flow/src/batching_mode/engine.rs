@@ -52,7 +52,9 @@ use crate::error::{
     DatafusionSnafu, DatatypesSnafu, ExternalSnafu, FlowAlreadyExistSnafu, InternalSnafu,
     InvalidRequestSnafu, TableNotFoundMetaSnafu, TableNotFoundSnafu, TimeSnafu, UnexpectedSnafu,
 };
-use crate::metrics::{METRIC_FLOW_RULE_ENGINE_QUERY_TIME, METRIC_FLOW_RULE_ENGINE_SLOW_QUERY};
+use crate::metrics::{
+    METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME, METRIC_FLOW_BATCHING_ENGINE_SLOW_QUERY,
+};
 use crate::Error;
 
 /// TODO(discord9): make those constants configurable
@@ -470,7 +472,7 @@ impl BatchingTask {
             self.expire_after, peer_addr, &sql
         );
 
-        let timer = METRIC_FLOW_RULE_ENGINE_QUERY_TIME
+        let timer = METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME
             .with_label_values(&[flow_id.to_string().as_str()])
             .start_timer();
 
@@ -500,7 +502,7 @@ impl BatchingTask {
                 "Flow {flow_id} on frontend {} executed for {:?} before complete, query: {}",
                 peer_addr, elapsed, &sql
             );
-            METRIC_FLOW_RULE_ENGINE_SLOW_QUERY
+            METRIC_FLOW_BATCHING_ENGINE_SLOW_QUERY
                 .with_label_values(&[flow_id.to_string().as_str(), sql, &peer_addr])
                 .observe(elapsed.as_secs_f64());
         }

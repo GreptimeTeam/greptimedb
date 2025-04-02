@@ -335,7 +335,7 @@ pub enum FlowType {
 }
 
 impl FlowType {
-    pub const RECORDING_RULE: &str = "recording_rule";
+    pub const BATCHING: &str = "batching";
     pub const STREAMING: &str = "streaming";
     pub const FLOW_TYPE_KEY: &str = "flow_type";
 }
@@ -349,7 +349,7 @@ impl Default for FlowType {
 impl fmt::Display for FlowType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            FlowType::Batching => write!(f, "{}", FlowType::RECORDING_RULE),
+            FlowType::Batching => write!(f, "{}", FlowType::BATCHING),
             FlowType::Streaming => write!(f, "{}", FlowType::STREAMING),
         }
     }
