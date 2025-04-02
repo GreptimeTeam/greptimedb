@@ -121,7 +121,7 @@ pub type OpenSystemTableHook =
 
 /// Register system table request:
 /// - When system table is already created and registered, the hook will be called
-///   with table ref after opening the system table
+///     with table ref after opening the system table
 /// - When system table is not exists, create and register the table by `create_table_expr` and calls `open_hook` with the created table.
 pub struct RegisterSystemTableRequest {
     pub create_table_expr: CreateTableExpr,
