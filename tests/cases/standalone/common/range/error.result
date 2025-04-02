@@ -41,7 +41,7 @@ Error: 2000(InvalidSyntax), Invalid SQL syntax: sql parser error: Illegal Range 
 
 SELECT min(val) RANGE '10s', max(val) FROM host ALIGN '5s';
 
-Error: 3001(EngineExecuteQuery), DataFusion error: No field named "max(host.val)". Valid fields are "min(host.val) RANGE 10s", host.ts, host.host.
+Error: 3001(EngineExecuteQuery), No field named "max(host.val)". Valid fields are "min(host.val) RANGE 10s", host.ts, host.host.
 
 SELECT min(val) * 2 RANGE '10s' FROM host ALIGN '5s';
 
@@ -54,7 +54,7 @@ Error: 2000(InvalidSyntax), Invalid SQL syntax: sql parser error: Can't use the 
 -- 2.2 no align param
 SELECT min(val) RANGE '5s' FROM host;
 
-Error: 3000(PlanQuery), DataFusion error: Error during planning: Missing argument in range select query
+Error: 3000(PlanQuery), Error during planning: Missing argument in range select query
 
 -- 2.3 type mismatch
 SELECT covar(ceil(val), floor(val)) RANGE '20s' FROM host ALIGN '10s';
@@ -85,24 +85,24 @@ Error: 2000(InvalidSyntax), Range Query: Window functions is not allowed in Rang
 -- 2.6 invalid fill
 SELECT min(val) RANGE '5s' FROM host ALIGN '5s' FILL 3.0;
 
-Error: 3000(PlanQuery), DataFusion error: Error during planning: 3.0 is not a valid fill option, fail to convert to a const value. { Arrow error: Cast error: Cannot cast string '3.0' to value of Int64 type }
+Error: 3000(PlanQuery), Error during planning: 3.0 is not a valid fill option, fail to convert to a const value. { Arrow error: Cast error: Cannot cast string '3.0' to value of Int64 type }
 
 -- 2.7 zero align/range
 SELECT min(val) RANGE '5s' FROM host ALIGN '0s';
 
-Error: 3000(PlanQuery), DataFusion error: Error during planning: duration must be greater than 0
+Error: 3000(PlanQuery), Error during planning: duration must be greater than 0
 
 SELECT min(val) RANGE '0s' FROM host ALIGN '5s';
 
-Error: 3000(PlanQuery), DataFusion error: Error during planning: duration must be greater than 0
+Error: 3000(PlanQuery), Error during planning: duration must be greater than 0
 
 SELECT min(val) RANGE '5s' FROM host ALIGN (INTERVAL '0' day);
 
-Error: 3000(PlanQuery), DataFusion error: Error during planning: Illegal argument `IntervalMonthDayNano("IntervalMonthDayNano { months: 0, days: 0, nanoseconds: 0 }")` in range select query
+Error: 3000(PlanQuery), Error during planning: Illegal argument `IntervalMonthDayNano("IntervalMonthDayNano { months: 0, days: 0, nanoseconds: 0 }")` in range select query
 
 SELECT min(val) RANGE (INTERVAL '0' day) FROM host ALIGN '5s';
 
-Error: 3000(PlanQuery), DataFusion error: Error during planning: Illegal argument `IntervalMonthDayNano("IntervalMonthDayNano { months: 0, days: 0, nanoseconds: 0 }")` in range select query
+Error: 3000(PlanQuery), Error during planning: Illegal argument `IntervalMonthDayNano("IntervalMonthDayNano { months: 0, days: 0, nanoseconds: 0 }")` in range select query
 
 DROP TABLE host;
 

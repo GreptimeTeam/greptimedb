@@ -50,9 +50,9 @@ use crate::dataframe::DataFrame;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
 use crate::dist_plan::MergeScanLogicalPlan;
 use crate::error::{
-    CatalogSnafu, ConvertSchemaSnafu, CreateRecordBatchSnafu, MissingTableMutationHandlerSnafu,
-    MissingTimestampColumnSnafu, QueryExecutionSnafu, Result, TableMutationSnafu,
-    TableNotFoundSnafu, TableReadOnlySnafu, UnsupportedExprSnafu,
+    CatalogSnafu, ConvertSchemaSnafu, CreateRecordBatchSnafu, DataFusionSnafu,
+    MissingTableMutationHandlerSnafu, MissingTimestampColumnSnafu, QueryExecutionSnafu, Result,
+    TableMutationSnafu, TableNotFoundSnafu, TableReadOnlySnafu, UnsupportedExprSnafu,
 };
 use crate::executor::QueryExecutor;
 use crate::metrics::{OnDone, QUERY_STAGE_ELAPSED};
@@ -309,9 +309,7 @@ impl DatafusionQueryEngine {
             .query_planner()
             .create_physical_plan(&optimized_plan, state)
             .await
-            .context(error::DatafusionSnafu)
-            .map_err(BoxedError::new)
-            .context(QueryExecutionSnafu)?;
+            .context(DataFusionSnafu)?;
 
         Ok(physical_plan)
     }
