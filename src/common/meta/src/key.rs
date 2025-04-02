@@ -62,8 +62,8 @@
 //! 13. Topic name to region map key `__topic_region/{topic_name}/{region_id}`
 //!     - Mapping {topic_name} to {region_id}
 //!
-//! 14. Consistency guard key `__consistency_guard/{resource_type}/{resource_id}`
-//!     - The key is used to guard the consistency of the resource.
+//! 14. Consistency poison key `__consistency_poison/{resource_type}/{resource_id}`
+//!     - The key is used to indicate the inconsistency of the resource.
 //!     - When an operation on a resource begins, a key is inserted into the metadata store.
 //!     - If the operation completes successfully, the key is removed from the metadata store.
 //!     - If the operation fails, the key remains in the metadata store.
@@ -103,7 +103,7 @@
 //!            {partition_id}
 
 pub mod catalog_name;
-pub mod consistency_guard;
+pub mod consistency_poison;
 pub mod datanode_table;
 pub mod flow;
 pub mod maintenance;
@@ -132,7 +132,7 @@ use common_catalog::consts::{
 };
 use common_telemetry::warn;
 use common_wal::options::WalOptions;
-use consistency_guard::{ConsistencyGuardManager, ConsistencyGuardValue};
+use consistency_poison::{ConsistencyPoisonManager, ConsistencyPoisonValue};
 use datanode_table::{DatanodeTableKey, DatanodeTableManager, DatanodeTableValue};
 use flow::flow_route::FlowRouteValue;
 use flow::table_flow::TableFlowValue;
@@ -183,7 +183,7 @@ pub const KAFKA_TOPIC_KEY_PREFIX: &str = "__topic_name/kafka";
 // The legacy topic key prefix is used to store the topic name in previous versions.
 pub const LEGACY_TOPIC_KEY_PREFIX: &str = "__created_wal_topics/kafka";
 pub const TOPIC_REGION_PREFIX: &str = "__topic_region";
-pub const CONSISTENCY_GUARD_PREFIX: &str = "__consistency_guard";
+pub const CONSISTENCY_POISON_PREFIX: &str = "__consistency_poison";
 
 /// The keys with these prefixes will be loaded into the cache when the leader starts.
 pub const CACHE_KEY_PREFIXES: [&str; 5] = [
@@ -266,8 +266,8 @@ lazy_static! {
 }
 
 lazy_static! {
-    pub static ref CONSISTENCY_GUARD_KEY_PATTERN: Regex = Regex::new(&format!(
-        "^{CONSISTENCY_GUARD_PREFIX}/({NAME_PATTERN})/([0-9]+)$"
+    pub static ref CONSISTENCY_POISON_KEY_PATTERN: Regex = Regex::new(&format!(
+        "^{CONSISTENCY_POISON_PREFIX}/({NAME_PATTERN})/([0-9]+)$"
     ))
     .unwrap();
 }
@@ -326,7 +326,7 @@ pub struct TableMetadataManager {
     table_route_manager: TableRouteManager,
     tombstone_manager: TombstoneManager,
     topic_region_manager: TopicRegionManager,
-    consistency_guard_manager: ConsistencyGuardManager,
+    consistency_poison_manager: ConsistencyPoisonManager,
     kv_backend: KvBackendRef,
 }
 
@@ -478,7 +478,7 @@ impl TableMetadataManager {
             table_route_manager: TableRouteManager::new(kv_backend.clone()),
             tombstone_manager: TombstoneManager::new(kv_backend.clone()),
             topic_region_manager: TopicRegionManager::new(kv_backend.clone()),
-            consistency_guard_manager: ConsistencyGuardManager::new(kv_backend.clone()),
+            consistency_poison_manager: ConsistencyPoisonManager::new(kv_backend.clone()),
             kv_backend,
         }
     }
@@ -531,8 +531,8 @@ impl TableMetadataManager {
         &self.table_route_manager
     }
 
-    pub fn consistency_guard_manager(&self) -> &ConsistencyGuardManager {
-        &self.consistency_guard_manager
+    pub fn consistency_poison_manager(&self) -> &ConsistencyPoisonManager {
+        &self.consistency_poison_manager
     }
 
     #[cfg(feature = "testing")]
@@ -1344,7 +1344,7 @@ impl_metadata_value! {
     NodeAddressValue,
     SchemaNameValue,
     FlowStateValue,
-    ConsistencyGuardValue
+    ConsistencyPoisonValue
 }
 
 impl_optional_metadata_value! {

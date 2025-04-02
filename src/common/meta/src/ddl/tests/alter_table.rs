@@ -38,7 +38,7 @@ use crate::ddl::test_util::datanode_handler::{
     RequestOutdatedErrorDatanodeHandler,
 };
 use crate::error::Error;
-use crate::key::consistency_guard::{ConsistencyGuardKey, ConsistencyGuardResourceType};
+use crate::key::consistency_poison::{ConsistencyPoisonKey, ResourceType};
 use crate::key::datanode_table::DatanodeTableKey;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
@@ -183,10 +183,10 @@ async fn test_on_submit_alter_request() {
     let (peer, request) = results.remove(0);
     check(peer, request, 3, RegionId::new(table_id, 3));
 
-    let key = ConsistencyGuardKey::new(ConsistencyGuardResourceType::Table, table_id as u64);
+    let key = ConsistencyPoisonKey::new(ResourceType::Table, table_id as u64);
     let value = ddl_context
         .table_metadata_manager
-        .consistency_guard_manager()
+        .consistency_poison_manager()
         .get(&key)
         .await
         .unwrap();
@@ -487,10 +487,10 @@ async fn on_submit_alter_request_with_partial_success(retryable: bool) {
     } else {
         assert!(!err.is_retry_later());
     }
-    let key = ConsistencyGuardKey::new(ConsistencyGuardResourceType::Table, table_id as u64);
+    let key = ConsistencyPoisonKey::new(ResourceType::Table, table_id as u64);
     let value = ddl_context
         .table_metadata_manager
-        .consistency_guard_manager()
+        .consistency_poison_manager()
         .get(&key)
         .await
         .unwrap();
@@ -549,10 +549,10 @@ async fn on_submit_alter_request_with_all_failure(retryable: bool) {
         .await
         .unwrap_err();
 
-    let key = ConsistencyGuardKey::new(ConsistencyGuardResourceType::Table, table_id as u64);
+    let key = ConsistencyPoisonKey::new(ResourceType::Table, table_id as u64);
     let value = ddl_context
         .table_metadata_manager
-        .consistency_guard_manager()
+        .consistency_poison_manager()
         .get(&key)
         .await
         .unwrap();
@@ -599,12 +599,12 @@ async fn test_on_submit_alter_request_with_conflict() {
             })),
         },
     };
-    let key = ConsistencyGuardKey::new(ConsistencyGuardResourceType::Table, table_id as u64);
+    let key = ConsistencyPoisonKey::new(ResourceType::Table, table_id as u64);
     let another_procedure_id = ProcedureId::random();
     ddl_context
         .table_metadata_manager
-        .consistency_guard_manager()
-        .acquire(&key, another_procedure_id)
+        .consistency_poison_manager()
+        .put(&key, another_procedure_id)
         .await
         .unwrap();
 
@@ -616,5 +616,5 @@ async fn test_on_submit_alter_request_with_conflict() {
         .submit_alter_region_requests(procedure_id)
         .await
         .unwrap_err();
-    assert_matches!(err, Error::ConsistencyGuardConflict { .. });
+    assert_matches!(err, Error::ConsistencyPoison { .. });
 }

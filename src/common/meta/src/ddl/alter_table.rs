@@ -42,7 +42,7 @@ use crate::ddl::utils::{add_peer_context_if_needed, handle_multiple_results, Mul
 use crate::ddl::DdlContext;
 use crate::error::{Error, NoLeaderSnafu, Result, RetryLaterSnafu};
 use crate::instruction::CacheIdent;
-use crate::key::consistency_guard::{ConsistencyGuardKey, ConsistencyGuardResourceType};
+use crate::key::consistency_poison::{ConsistencyPoisonKey, ResourceType};
 use crate::key::table_info::TableInfoValue;
 use crate::key::{DeserializedValueWithBytes, RegionDistribution};
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
@@ -105,7 +105,7 @@ impl AlterTableProcedure {
         Ok(Status::executing(true))
     }
 
-    async fn acquire_consistency_guard(
+    async fn put_consistency_poison(
         &self,
         table_id: TableId,
         procedure_id: ProcedureId,
@@ -113,14 +113,14 @@ impl AlterTableProcedure {
         if let Err(e) = self
             .context
             .table_metadata_manager
-            .consistency_guard_manager()
-            .acquire(
-                &ConsistencyGuardKey::new(ConsistencyGuardResourceType::Table, table_id as u64),
+            .consistency_poison_manager()
+            .put(
+                &ConsistencyPoisonKey::new(ResourceType::Table, table_id as u64),
                 procedure_id,
             )
             .await
         {
-            if !e.is_consistency_guard_conflict() {
+            if !e.is_consistency_poison() {
                 return Err(BoxedError::new(e)).context(RetryLaterSnafu);
             }
             return Err(e);
@@ -129,7 +129,7 @@ impl AlterTableProcedure {
         Ok(())
     }
 
-    async fn release_consistency_guard(
+    async fn delete_consistency_poison(
         &self,
         table_id: TableId,
         procedure_id: ProcedureId,
@@ -137,14 +137,14 @@ impl AlterTableProcedure {
         if let Err(e) = self
             .context
             .table_metadata_manager
-            .consistency_guard_manager()
-            .release(
-                &ConsistencyGuardKey::new(ConsistencyGuardResourceType::Table, table_id as u64),
+            .consistency_poison_manager()
+            .delete(
+                &ConsistencyPoisonKey::new(ResourceType::Table, table_id as u64),
                 procedure_id,
             )
             .await
         {
-            if !e.is_consistency_guard_conflict() {
+            if !e.is_consistency_poison() {
                 return Err(BoxedError::new(e)).context(RetryLaterSnafu);
             }
             return Err(e);
@@ -179,9 +179,8 @@ impl AlterTableProcedure {
         );
 
         ensure!(!leaders.is_empty(), NoLeaderSnafu { table_id });
-        // Acquires the consistency guard before submitting alter region requests.
-        self.acquire_consistency_guard(table_id, procedure_id)
-            .await?;
+        // Put the consistency poison before submitting alter region requests.
+        self.put_consistency_poison(table_id, procedure_id).await?;
         for datanode in leaders {
             let requester = self.context.node_manager.datanode(&datanode).await;
             let regions = find_leader_regions(&physical_table_route.region_routes, &datanode);
@@ -223,15 +222,15 @@ impl AlterTableProcedure {
             }
             MultipleResults::Ok => {
                 // continue
-                self.release_consistency_guard(table_id, procedure_id)
+                self.delete_consistency_poison(table_id, procedure_id)
                     .await?;
             }
             MultipleResults::AllNonRetryable(error) => {
                 // It assumes the metadata on datanode is not changed.
                 // Case: The alter region request is sent but not applied. (e.g., InvalidArgument)
 
-                // Release resource lock before returning the error.
-                self.release_consistency_guard(table_id, procedure_id)
+                // Delete consistency poison before returning the error.
+                self.delete_consistency_poison(table_id, procedure_id)
                     .await?;
                 return Err(error);
             }

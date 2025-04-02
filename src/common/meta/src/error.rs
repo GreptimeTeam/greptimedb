@@ -756,8 +756,8 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Consistency guard conflict: {}", msg))]
-    ConsistencyGuardConflict {
+    #[snafu(display("Consistency poison: {}", msg))]
+    ConsistencyPoison {
         msg: String,
         #[snafu(implicit)]
         location: Location,
@@ -782,7 +782,7 @@ impl ErrorExt for Error {
 
             NoLeader { .. } => StatusCode::TableUnavailable,
 
-            ValueNotExist { .. } | ConsistencyGuardConflict { .. } => StatusCode::Unexpected,
+            ValueNotExist { .. } | ConsistencyPoison { .. } => StatusCode::Unexpected,
 
             Unsupported { .. } => StatusCode::Unsupported,
 
@@ -919,9 +919,9 @@ impl Error {
         }
     }
 
-    /// Determine whether it is a consistency guard conflict.
-    pub fn is_consistency_guard_conflict(&self) -> bool {
-        matches!(self, Error::ConsistencyGuardConflict { .. })
+    /// Determine whether it is a consistency poison.
+    pub fn is_consistency_poison(&self) -> bool {
+        matches!(self, Error::ConsistencyPoison { .. })
     }
 
     /// Determine whether it is a retry later type through [StatusCode]

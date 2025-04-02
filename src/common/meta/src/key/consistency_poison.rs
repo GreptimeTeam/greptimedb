@@ -25,8 +25,8 @@
 //!   - New operations on the same resource are rejected until the metadata is repaired.
 //!
 //! ## Example Keys:
-//! - `__consistency_guard/table/1234` → Ensures consistency for table ID `1234`.
-//! - `__consistency_guard/index/5678` → Ensures consistency for index ID `5678`.
+//! - `__consistency_poison/table/1234` → Ensures consistency for table ID `1234`.
+//! - `__consistency_poison/index/5678` → Ensures consistency for index ID `5678`.
 //!
 //! ## Usage Considerations:
 //! - Before performing a new operation on a resource, check for the existence of this key.
@@ -44,28 +44,28 @@ use strum::{AsRefStr, EnumString};
 use crate::error::{self, InvalidMetadataSnafu, Result};
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{
-    DeserializedValueWithBytes, MetadataKey, MetadataValue, CONSISTENCY_GUARD_KEY_PATTERN,
-    CONSISTENCY_GUARD_PREFIX,
+    DeserializedValueWithBytes, MetadataKey, MetadataValue, CONSISTENCY_POISON_KEY_PATTERN,
+    CONSISTENCY_POISON_PREFIX,
 };
 use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, AsRefStr, EnumString)]
 #[strum(serialize_all = "snake_case")]
-pub enum ConsistencyGuardResourceType {
+pub enum ResourceType {
     Table,
 }
 
-/// The key of consistency guard.
+/// The key of consistency poison.
 ///
-/// The format is `__consistency_guard/{resource_type}/{resource_id}`.
-pub struct ConsistencyGuardKey {
-    resource_type: ConsistencyGuardResourceType,
+/// The format is `__consistency_poison/{resource_type}/{resource_id}`.
+pub struct ConsistencyPoisonKey {
+    resource_type: ResourceType,
     resource_id: u64,
 }
 
-impl ConsistencyGuardKey {
-    pub fn new(resource_type: ConsistencyGuardResourceType, resource_id: u64) -> Self {
+impl ConsistencyPoisonKey {
+    pub fn new(resource_type: ResourceType, resource_id: u64) -> Self {
         Self {
             resource_type,
             resource_id,
@@ -73,80 +73,81 @@ impl ConsistencyGuardKey {
     }
 }
 
-impl Display for ConsistencyGuardKey {
+impl Display for ConsistencyPoisonKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
             "{}/{}/{}",
-            CONSISTENCY_GUARD_PREFIX,
+            CONSISTENCY_POISON_PREFIX,
             self.resource_type.as_ref(),
             self.resource_id
         )
     }
 }
 
-impl MetadataKey<'_, ConsistencyGuardKey> for ConsistencyGuardKey {
+impl MetadataKey<'_, ConsistencyPoisonKey> for ConsistencyPoisonKey {
     fn to_bytes(&self) -> Vec<u8> {
         self.to_string().into_bytes()
     }
 
-    fn from_bytes(bytes: &[u8]) -> Result<ConsistencyGuardKey> {
+    fn from_bytes(bytes: &[u8]) -> Result<ConsistencyPoisonKey> {
         let key = std::str::from_utf8(bytes).map_err(|e| {
             InvalidMetadataSnafu {
                 err_msg: format!(
-                    "ConsistencyGuardKey '{}' is not a valid UTF8 string: {e}",
+                    "ConsistencyPoisonKey '{}' is not a valid UTF8 string: {e}",
                     String::from_utf8_lossy(bytes)
                 ),
             }
             .build()
         })?;
-        let captures = CONSISTENCY_GUARD_KEY_PATTERN
+        let captures = CONSISTENCY_POISON_KEY_PATTERN
             .captures(key)
             .with_context(|| InvalidMetadataSnafu {
-                err_msg: format!("Invalid ConsistencyGuardKey '{key}'"),
+                err_msg: format!("Invalid ConsistencyPoisonKey '{key}'"),
             })?;
         // Safety: pass the regex check above
-        let resource_type = ConsistencyGuardResourceType::from_str(&captures[1])
-            .ok()
-            .with_context(|| InvalidMetadataSnafu {
-                err_msg: format!("Invalid ConsistencyGuardResourceType '{}'", &captures[1]),
-            })?;
+        let resource_type =
+            ResourceType::from_str(&captures[1])
+                .ok()
+                .with_context(|| InvalidMetadataSnafu {
+                    err_msg: format!("Invalid ResourceType '{}'", &captures[1]),
+                })?;
         let resource_id = captures[2].parse::<u64>().unwrap();
-        Ok(ConsistencyGuardKey {
+        Ok(ConsistencyPoisonKey {
             resource_type,
             resource_id,
         })
     }
 }
 
-/// The value of consistency guard.
+/// The value of consistency poison.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ConsistencyGuardValue {
+pub struct ConsistencyPoisonValue {
     procedure_id: String,
 }
 
 #[derive(Clone)]
 
-pub struct ConsistencyGuardManager {
+pub struct ConsistencyPoisonManager {
     kv_backend: KvBackendRef,
 }
 
-pub type ConsistencyGuardDecodeResult =
-    Result<Option<DeserializedValueWithBytes<ConsistencyGuardValue>>>;
+pub type ConsistencyPoisonDecodeResult =
+    Result<Option<DeserializedValueWithBytes<ConsistencyPoisonValue>>>;
 
-impl ConsistencyGuardManager {
+impl ConsistencyPoisonManager {
     pub fn new(kv_backend: KvBackendRef) -> Self {
         Self { kv_backend }
     }
 
-    /// Builds a create consistency guard transaction, it expected the `__consistency_guard/{resource_type}/{resource_id}` wasn't occupied.
+    /// Builds a create consistency poison transaction, it expected the `__consistency_poison/{resource_type}/{resource_id}` wasn't occupied.
     fn build_create_txn(
         &self,
-        key: &ConsistencyGuardKey,
-        value: &ConsistencyGuardValue,
+        key: &ConsistencyPoisonKey,
+        value: &ConsistencyPoisonValue,
     ) -> Result<(
         Txn,
-        impl FnOnce(&mut TxnOpGetResponseSet) -> ConsistencyGuardDecodeResult,
+        impl FnOnce(&mut TxnOpGetResponseSet) -> ConsistencyPoisonDecodeResult,
     )> {
         let key = key.to_bytes();
         let value = value.try_as_raw_value()?;
@@ -161,11 +162,11 @@ impl ConsistencyGuardManager {
 
     fn build_delete_txn(
         &self,
-        key: &ConsistencyGuardKey,
-        value: ConsistencyGuardValue,
+        key: &ConsistencyPoisonKey,
+        value: ConsistencyPoisonValue,
     ) -> Result<(
         Txn,
-        impl FnOnce(&mut TxnOpGetResponseSet) -> ConsistencyGuardDecodeResult,
+        impl FnOnce(&mut TxnOpGetResponseSet) -> ConsistencyPoisonDecodeResult,
     )> {
         let key = key.to_bytes();
         let value = value.try_as_raw_value()?;
@@ -186,23 +187,19 @@ impl ConsistencyGuardManager {
     }
 
     #[cfg(test)]
-    pub async fn get(&self, key: &ConsistencyGuardKey) -> Result<Option<ConsistencyGuardValue>> {
+    pub async fn get(&self, key: &ConsistencyPoisonKey) -> Result<Option<ConsistencyPoisonValue>> {
         let key = key.to_bytes();
         let value = self.kv_backend.get(&key).await?;
-        Ok(value.map(|v| ConsistencyGuardValue::try_from_raw_value(&v.value).unwrap()))
+        Ok(value.map(|v| ConsistencyPoisonValue::try_from_raw_value(&v.value).unwrap()))
     }
 
-    /// Acquires the consistency guard.
+    /// Put the consistency poison.
     ///
-    /// If the consistency guard is already acquired by other procedure, it will return an error.
-    pub async fn acquire(
-        &self,
-        key: &ConsistencyGuardKey,
-        procedure_id: ProcedureId,
-    ) -> Result<()> {
+    /// If the consistency poison is already put by other procedure, it will return an error.
+    pub async fn put(&self, key: &ConsistencyPoisonKey, procedure_id: ProcedureId) -> Result<()> {
         let (txn, on_failure) = self.build_create_txn(
             key,
-            &ConsistencyGuardValue {
+            &ConsistencyPoisonValue {
                 procedure_id: procedure_id.to_string(),
             },
         )?;
@@ -212,16 +209,16 @@ impl ConsistencyGuardManager {
         if !resp.succeeded {
             let mut set = TxnOpGetResponseSet::from(&mut resp.responses);
             let remote_value = on_failure(&mut set)?
-                .context(error::ConsistencyGuardConflictSnafu {
-                    msg: "Reads the empty consistency guard value in comparing operation of the lock consistency guard",
+                .context(error::ConsistencyPoisonSnafu {
+                    msg: "Reads the empty consistency poison value in comparing operation of the put consistency poison",
                 })?
                 .into_inner();
 
             ensure!(
                 remote_value.procedure_id == procedure_id.to_string(),
-                error::ConsistencyGuardConflictSnafu {
+                error::ConsistencyPoisonSnafu {
                     msg: format!(
-                        "The consistency guard value is already acquired by other procedure {}",
+                        "The consistency poison value is already put by other procedure {}",
                         remote_value.procedure_id
                     ),
                 }
@@ -231,15 +228,15 @@ impl ConsistencyGuardManager {
         Ok(())
     }
 
-    /// Releases the consistency guard.
-    pub async fn release(
+    /// Deletes the consistency poison.
+    pub async fn delete(
         &self,
-        key: &ConsistencyGuardKey,
+        key: &ConsistencyPoisonKey,
         procedure_id: ProcedureId,
     ) -> Result<()> {
         let (txn, on_failure) = self.build_delete_txn(
             key,
-            ConsistencyGuardValue {
+            ConsistencyPoisonValue {
                 procedure_id: procedure_id.to_string(),
             },
         )?;
@@ -252,9 +249,9 @@ impl ConsistencyGuardManager {
 
             ensure!(
                 remote_value.is_none(),
-                error::ConsistencyGuardConflictSnafu {
+                error::ConsistencyPoisonSnafu {
                     msg: format!(
-                        "The consistency guard value is not locked by the procedure {}",
+                        "The consistency poison value is not put by the procedure {}",
                         remote_value.unwrap().into_inner().procedure_id
                     ),
                 }
@@ -275,48 +272,48 @@ mod tests {
     use crate::kv_backend::memory::MemoryKvBackend;
 
     #[tokio::test]
-    async fn test_consistency_guard() {
+    async fn test_consistency_poison() {
         let mem_kv = Arc::new(MemoryKvBackend::default());
-        let consistency_guard_manager = ConsistencyGuardManager::new(mem_kv.clone());
+        let consistency_guard_manager = ConsistencyPoisonManager::new(mem_kv.clone());
 
-        let key = ConsistencyGuardKey {
-            resource_type: ConsistencyGuardResourceType::Table,
+        let key = ConsistencyPoisonKey {
+            resource_type: ResourceType::Table,
             resource_id: 1,
         };
 
         let procedure_id = ProcedureId::random();
 
         consistency_guard_manager
-            .acquire(&key, procedure_id)
+            .put(&key, procedure_id)
             .await
             .unwrap();
 
-        // Lock again, should be ok.
+        // Put again, should be ok.
         consistency_guard_manager
-            .acquire(&key, procedure_id)
+            .put(&key, procedure_id)
             .await
             .unwrap();
 
-        // Release, should be ok.
+        // Delete, should be ok.
         consistency_guard_manager
-            .release(&key, procedure_id)
+            .delete(&key, procedure_id)
             .await
             .unwrap();
 
-        // Release again, should be ok.
+        // Delete again, should be ok.
         consistency_guard_manager
-            .release(&key, procedure_id)
+            .delete(&key, procedure_id)
             .await
             .unwrap();
     }
 
     #[tokio::test]
-    async fn test_consistency_guard_failed() {
+    async fn test_consistency_poison_failed() {
         let mem_kv = Arc::new(MemoryKvBackend::default());
-        let consistency_guard_manager = ConsistencyGuardManager::new(mem_kv.clone());
+        let consistency_guard_manager = ConsistencyPoisonManager::new(mem_kv.clone());
 
-        let key = ConsistencyGuardKey {
-            resource_type: ConsistencyGuardResourceType::Table,
+        let key = ConsistencyPoisonKey {
+            resource_type: ResourceType::Table,
             resource_id: 1,
         };
 
@@ -324,37 +321,37 @@ mod tests {
         let procedure_id2 = ProcedureId::random();
 
         consistency_guard_manager
-            .acquire(&key, procedure_id)
+            .put(&key, procedure_id)
             .await
             .unwrap();
 
         let err = consistency_guard_manager
-            .acquire(&key, procedure_id2)
+            .put(&key, procedure_id2)
             .await
             .unwrap_err();
-        assert_matches!(err, Error::ConsistencyGuardConflict { .. });
+        assert_matches!(err, Error::ConsistencyPoison { .. });
 
         let err = consistency_guard_manager
-            .release(&key, procedure_id2)
+            .delete(&key, procedure_id2)
             .await
             .unwrap_err();
-        assert_matches!(err, Error::ConsistencyGuardConflict { .. });
+        assert_matches!(err, Error::ConsistencyPoison { .. });
     }
 
     #[test]
     fn test_serialize_deserialize() {
-        let key = ConsistencyGuardKey {
-            resource_type: ConsistencyGuardResourceType::Table,
+        let key = ConsistencyPoisonKey {
+            resource_type: ResourceType::Table,
             resource_id: 1,
         };
-        let value = ConsistencyGuardValue {
+        let value = ConsistencyPoisonValue {
             procedure_id: "1".to_string(),
         };
 
         let serialized_key = key.to_bytes();
         let serialized_value = value.try_as_raw_value().unwrap();
 
-        let expected_key = "__consistency_guard/table/1";
+        let expected_key = "__consistency_poison/table/1";
         let expected_value = r#"{"procedure_id":"1"}"#;
 
         assert_eq!(expected_key.as_bytes(), serialized_key);
