@@ -32,7 +32,6 @@ use std::fmt::{self, Display};
 use common_wal::options::WalOptions;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
-use store_api::logstore::EntryId;
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
@@ -244,15 +243,6 @@ impl TopicRegionManager {
             result.insert(t, regions);
         }
         Ok(result)
-    }
-
-    /// Retrieves a mapping of [`RegionId`]s to their corresponding last entry IDs.
-    /// Should be maintained through heartbeats. Not implemented yet.
-    pub async fn get_region_last_entry_ids(
-        &self,
-        _regions: &[RegionId],
-    ) -> HashMap<RegionId, EntryId> {
-        todo!()
     }
 }
 

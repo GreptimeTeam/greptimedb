@@ -12,10 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_error::ext::BoxedError;
 use common_meta::key::TableMetadataManagerRef;
+use common_meta::region_registry::LeaderRegionRegistryRef;
 use common_procedure::error::ToJsonSnafu;
 use common_procedure::{
     Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
@@ -47,7 +49,8 @@ pub struct Context {
     /// The Kafka client.
     client: KafkaClientRef,
     /// The table metadata manager.
-    pub table_metadata_manager: TableMetadataManagerRef,
+    table_metadata_manager: TableMetadataManagerRef,
+    leader_region_registry: LeaderRegionRegistryRef,
 }
 
 /// The data of WAL pruning.
@@ -100,13 +103,16 @@ impl WalPruneProcedure {
             .with_context(|_| error::RetryLaterWithSourceSnafu {
                 reason: "Failed to get topic-region map",
             })?;
-        // TODO(CookiePie): Should store in memory instead of getting from table metadata manager.
-        let flush_entry_ids_map = self
+        let flush_entry_ids_map: HashMap<_, _> = self
             .context
-            .table_metadata_manager
-            .topic_region_manager()
-            .get_region_last_entry_ids(&region_ids)
-            .await;
+            .leader_region_registry
+            .batch_get(region_ids.iter().cloned())
+            .into_iter()
+            .map(|(region_id, region)| {
+                let flushed_entry_id = region.manifest.min_flushed_entry_id();
+                (region_id, flushed_entry_id)
+            })
+            .collect();
 
         // Check if the `flush_entry_ids_map` contains all region ids.
         let heartbeat_collected_region_ids = flush_entry_ids_map.keys().collect::<Vec<_>>();

@@ -409,9 +409,9 @@ impl RegionManifestInfo {
                 flushed_entry_id, ..
             } => *flushed_entry_id,
             RegionManifestInfo::Metric {
-                metadata_flushed_entry_id,
+                data_flushed_entry_id,
                 ..
-            } => *metadata_flushed_entry_id,
+            } => *data_flushed_entry_id,
         }
     }
 

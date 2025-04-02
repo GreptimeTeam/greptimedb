@@ -95,6 +95,19 @@ impl LeaderRegionManifestInfo {
             } => *data_flushed_entry_id,
         }
     }
+
+    pub fn min_flushed_entry_id(&self) -> u64 {
+        match self {
+            LeaderRegionManifestInfo::Mito {
+                flushed_entry_id, ..
+            } => *flushed_entry_id,
+            LeaderRegionManifestInfo::Metric {
+                data_flushed_entry_id,
+                metadata_flushed_entry_id,
+                ..
+            } => (*data_flushed_entry_id).min(*metadata_flushed_entry_id),
+        }
+    }
 }
 
 pub type LeaderRegionRegistryRef = Arc<LeaderRegionRegistry>;
