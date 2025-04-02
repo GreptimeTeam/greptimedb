@@ -32,8 +32,8 @@ use datafusion_expr::execution_props::ExecutionProps;
 use datafusion_expr::expr::WildcardOptions;
 use datafusion_expr::simplify::SimplifyContext;
 use datafusion_expr::{
-    Aggregate, Analyze, Explain, Expr, ExprSchemable, Extension, LogicalPlan, LogicalPlanBuilder,
-    Projection,
+    Aggregate, Analyze, Cast, Explain, Expr, ExprSchemable, Extension, LogicalPlan,
+    LogicalPlanBuilder, Projection,
 };
 use datafusion_optimizer::simplify_expressions::ExprSimplifier;
 use datatypes::prelude::ConcreteDataType;
@@ -548,6 +548,19 @@ fn have_range_in_exprs(exprs: &[Expr]) -> bool {
 fn interval_only_in_expr(expr: &Expr) -> bool {
     let mut all_interval = true;
     let _ = expr.apply(|expr| {
+        // A cast expression for an interval.
+        if matches!(
+            expr,
+            Expr::Cast(Cast{
+                expr,
+                data_type: DataType::Interval(_)
+            }) if matches!(&**expr, Expr::Literal(ScalarValue::Utf8(_)))
+        ) {
+            // Stop checking the sub `expr`,
+            // which is a `Utf8` type and has already been tested above.
+            return Ok(TreeNodeRecursion::Stop);
+        }
+
         if !matches!(
             expr,
             Expr::Literal(ScalarValue::IntervalDayTime(_))
@@ -561,6 +574,7 @@ fn interval_only_in_expr(expr: &Expr) -> bool {
             Ok(TreeNodeRecursion::Continue)
         }
     });
+
     all_interval
 }
 
@@ -569,6 +583,7 @@ mod test {
 
     use std::error::Error;
 
+    use arrow::datatypes::IntervalUnit;
     use catalog::memory::MemoryCatalogManager;
     use catalog::RegisterTableRequest;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -844,6 +859,15 @@ mod test {
             parse_duration_expr(&args, 0).unwrap(),
             parse_duration("1y4w").unwrap()
         );
+        // test cast expression
+        let args = vec![Expr::Cast(Cast {
+            expr: Box::new(Expr::Literal(ScalarValue::Utf8(Some("15 minutes".into())))),
+            data_type: DataType::Interval(IntervalUnit::MonthDayNano),
+        })];
+        assert_eq!(
+            parse_duration_expr(&args, 0).unwrap(),
+            parse_duration("15m").unwrap()
+        );
         // test index err
         assert!(parse_duration_expr(&args, 10).is_err());
         // test evaluate expr
@@ -952,6 +976,20 @@ mod test {
             left: Box::new(Expr::Literal(ScalarValue::IntervalDayTime(Some(
                 IntervalDayTime::new(10, 0).into(),
             )))),
+            op: Operator::Minus,
+            right: Box::new(Expr::Literal(ScalarValue::IntervalDayTime(Some(
+                IntervalDayTime::new(10, 0).into(),
+            )))),
+        });
+        assert!(interval_only_in_expr(&expr));
+
+        let expr = Expr::BinaryExpr(BinaryExpr {
+            left: Box::new(Expr::Cast(Cast {
+                expr: Box::new(Expr::Literal(ScalarValue::Utf8(Some(
+                    "15 minute".to_string(),
+                )))),
+                data_type: DataType::Interval(IntervalUnit::MonthDayNano),
+            })),
             op: Operator::Minus,
             right: Box::new(Expr::Literal(ScalarValue::IntervalDayTime(Some(
                 IntervalDayTime::new(10, 0).into(),

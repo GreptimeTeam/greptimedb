@@ -18,4 +18,10 @@ SELECT ts, host, min(val) RANGE (INTERVAL '1 year') FROM host ALIGN (INTERVAL '1
 
 SELECT ts, host, min(val) RANGE (INTERVAL '1' day) FROM host ALIGN (INTERVAL '1' day) ORDER BY host, ts;
 
+SELECT ts, host, min(val) RANGE ('1 day'::INTERVAL) FROM host ALIGN ('1 day'::INTERVAL) ORDER BY host, ts;
+
+SELECT ts, host, min(val) RANGE ('1 hour'::INTERVAL) FROM host ALIGN ('1 hour'::INTERVAL) ORDER BY host, ts;
+
+SELECT ts, host, min(val) RANGE ('30 minute'::INTERVAL + '30 minute'::INTERVAL) FROM host ALIGN ('30 minute'::INTERVAL + '30 minute'::INTERVAL) ORDER BY host, ts;
+
 DROP TABLE host;
