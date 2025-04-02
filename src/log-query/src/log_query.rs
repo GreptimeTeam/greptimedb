@@ -114,22 +114,22 @@ impl Default for LogQuery {
 /// This struct allows various formats to express a time range from the user side
 /// for best flexibility:
 /// - Only `start` is provided: the `start` string can be any valid "date" or vaguer
-///     content. For example: "2024-12-01", "2024-12", "2024", etc. It will be treated
-///     as an time range corresponding to the provided date. E.g., "2024-12-01" refers
-///     to the entire 24 hours in that day. In this case, the `start` field cannot be a
-///     timestamp (like "2024-12-01T12:00:00Z").
+///   content. For example: "2024-12-01", "2024-12", "2024", etc. It will be treated
+///   as an time range corresponding to the provided date. E.g., "2024-12-01" refers
+///   to the entire 24 hours in that day. In this case, the `start` field cannot be a
+///   timestamp (like "2024-12-01T12:00:00Z").
 /// - Both `start` and `end` are provided: the `start` and `end` strings can be either
-///     a date or a timestamp. The `end` field is exclusive (`[start, end)`). When
-///     `start` is a date it implies the start of the day, and when `end` is a date it
-///     implies the end of the day.
+///   a date or a timestamp. The `end` field is exclusive (`[start, end)`). When
+///   `start` is a date it implies the start of the day, and when `end` is a date it
+///   implies the end of the day.
 /// - `span` with `start` OR `end`: the `span` string can be any valid "interval"
-///     For example: "1024s", "1 week", "1 month", etc. The `span` field is applied to
-///     the `start` or `end` field to calculate the other one correspondingly. If `start`
-///     is provided, `end` is calculated as `start + span` and vice versa.
+///   For example: "1024s", "1 week", "1 month", etc. The `span` field is applied to
+///   the `start` or `end` field to calculate the other one correspondingly. If `start`
+///   is provided, `end` is calculated as `start + span` and vice versa.
 /// - Only `span` is provided: the `span` string can be any valid "interval" as mentioned
-///     above. In this case, the current time (on the server side) is considered as the `end`.
+///   above. In this case, the current time (on the server side) is considered as the `end`.
 /// - All fields are provided: in this case, the `start` and `end` fields are considered
-///     with higher priority, and the `span` field is ignored.
+///   with higher priority, and the `span` field is ignored.
 ///
 /// This struct doesn't require a timezone to be presented. When the timezone is not
 /// provided, it will fill the default timezone with the same rules akin to other queries.

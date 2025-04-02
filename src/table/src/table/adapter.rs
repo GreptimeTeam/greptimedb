@@ -95,7 +95,7 @@ impl TableProvider for DfTableProviderAdapter {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
-        let filters: Vec<Expr> = filters.iter().map(Clone::clone).map(Into::into).collect();
+        let filters: Vec<Expr> = filters.iter().map(Clone::clone).collect();
         let request = {
             let mut request = self.scan_req.lock().unwrap();
             request.filters = filters;

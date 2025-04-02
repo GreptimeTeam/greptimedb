@@ -346,7 +346,6 @@ impl BloomFilterIndexer {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::iter;
 
     use api::v1::SemanticType;
     use datatypes::data_type::ConcreteDataType;
@@ -461,15 +460,15 @@ pub(crate) mod tests {
 
         Batch::new(
             primary_key,
-            Arc::new(UInt64Vector::from_iter_values(
-                iter::repeat(0).take(num_rows),
-            )),
-            Arc::new(UInt64Vector::from_iter_values(
-                iter::repeat(0).take(num_rows),
-            )),
-            Arc::new(UInt8Vector::from_iter_values(
-                iter::repeat(1).take(num_rows),
-            )),
+            Arc::new(UInt64Vector::from_iter_values(std::iter::repeat_n(
+                0, num_rows,
+            ))),
+            Arc::new(UInt64Vector::from_iter_values(std::iter::repeat_n(
+                0, num_rows,
+            ))),
+            Arc::new(UInt8Vector::from_iter_values(std::iter::repeat_n(
+                1, num_rows,
+            ))),
             vec![u64_field],
         )
         .unwrap()

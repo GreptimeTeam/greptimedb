@@ -255,15 +255,15 @@ pub struct Arrangement {
     /// Indicates whether the arrangement maintains a complete history of updates.
     /// - `true`: Maintains all past and future updates, necessary for full state reconstruction at any point in time.
     /// - `false`: Only future updates are retained, optimizing for scenarios where past state is irrelevant and conserving resources.
-    ///            Useful for case like `map -> arrange -> reduce`.
+    ///   Useful for case like `map -> arrange -> reduce`.
     full_arrangement: bool,
 
     /// Indicates whether the arrangement has been modified since its creation.
     /// - `true`: The arrangement has been written to, meaning it has received updates.
-    ///           Cloning this arrangement is generally unsafe as it may lead to inconsistencies if the clone is modified independently.
-    ///           However, cloning is safe when both the original and the clone require a full arrangement, as this ensures consistency.
+    ///   Cloning this arrangement is generally unsafe as it may lead to inconsistencies if the clone is modified independently.
+    ///   However, cloning is safe when both the original and the clone require a full arrangement, as this ensures consistency.
     /// - `false`: The arrangement is in its initial state and has not been modified. It can be safely cloned and shared
-    ///            without concerns of carrying over unintended state changes.
+    ///   without concerns of carrying over unintended state changes.
     is_written: bool,
 
     /// Manage the expire state of the arrangement.
