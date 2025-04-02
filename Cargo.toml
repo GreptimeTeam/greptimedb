@@ -73,13 +73,14 @@ edition = "2021"
 license = "Apache-2.0"
 
 [workspace.lints]
-clippy.print_stdout = "warn"
-clippy.print_stderr = "warn"
 clippy.dbg_macro = "warn"
 clippy.implicit_clone = "warn"
+clippy.print_stderr = "warn"
+clippy.print_stdout = "warn"
+clippy.doc_overindented_list_items = "allow"
+clippy.large_enum_variant = "allow"
 clippy.readonly_write_lock = "allow"
 clippy.result_large_err = "allow"
-clippy.large_enum_variant = "allow"
 rust.unknown_lints = "deny"
 rust.unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
 

@@ -131,10 +131,10 @@ fn pr(s: &str, k: &str, v: Option<&str>) -> Result<Value> {
 /// 5. If headers are used for data transmission, then custom keys SHOULD be
 ///    allocated to one of the four defined header names based upon their expected
 ///    level of variability:
-///    a. CMCD-Request: keys whose values vary with each request.
-///    b. CMCD-Object: keys whose values vary with the object being requested.
-///    c. CMCD-Status: keys whose values do not vary with every request or object.
-///    d. CMCD-Session: keys whose values are expected to be invariant over the life of the session.
+///       a. CMCD-Request: keys whose values vary with each request.
+///       b. CMCD-Object: keys whose values vary with the object being requested.
+///       c. CMCD-Status: keys whose values do not vary with every request or object.
+///       d. CMCD-Session: keys whose values are expected to be invariant over the life of the session.
 /// 6. All key names are case-sensitive.
 /// 7. Any value of type String MUST be enclosed by opening and closing double
 ///    quotes Unicode 0x22. Double quotes and backslashes MUST be escaped using a
