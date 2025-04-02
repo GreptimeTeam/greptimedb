@@ -24,6 +24,7 @@ use common_procedure::{
     Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
     Result as ProcedureResult, Status, StringKey,
 };
+use common_telemetry::warn;
 use log_store::kafka::DEFAULT_PARTITION;
 use rskafka::client::partition::UnknownTopicHandling;
 use rskafka::client::Client;
@@ -119,6 +120,7 @@ impl WalPruneProcedure {
         if !check_heartbeat_collected_region_ids(&region_ids, &flush_entry_ids_map)
             || region_ids.is_empty()
         {
+            warn!("The heartbeat collected region ids do not contain all region ids in the topic-region map. Aborting the WAL prune procedure.");
             return Ok(Status::done());
         }
 
@@ -154,6 +156,7 @@ impl WalPruneProcedure {
                 offset: self.data.min_flushed_entry_id,
             })?;
 
+        // TODO(CookiePie): Persist the minimum flushed entry id to the table metadata manager.
         Ok(Status::done())
     }
 }
@@ -381,6 +384,7 @@ mod tests {
                 // Step 2: Test `on_prune`.
                 let status = procedure.on_prune().await.unwrap();
                 assert_matches!(status, Status::Done { output: None });
+                // Check if the entry ids after `min_flushed_entry_id` still exist.
                 assert!(
                     check_entry_id_existence(
                         procedure.context.client.clone(),
@@ -389,6 +393,22 @@ mod tests {
                     )
                     .await
                 );
+                // Check if the entry s before `min_flushed_entry_id` are deleted.
+                assert!(
+                    procedure.data.min_flushed_entry_id == 0
+                        || !check_entry_id_existence(
+                            procedure.context.client.clone(),
+                            &topic_name,
+                            procedure.data.min_flushed_entry_id as i64 - 1,
+                        )
+                        .await
+                );
+
+                // `check_heartbeat_collected_region_ids` fails.
+                // Should log a warning and return `Status::Done`.
+                procedure.context.leader_region_registry.reset();
+                let status = procedure.on_prepare().await.unwrap();
+                assert_matches!(status, Status::Done { output: None });
 
                 // Clean up the topic.
                 delete_topic(procedure.context.client, &topic_name).await;

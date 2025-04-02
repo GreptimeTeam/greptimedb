@@ -96,6 +96,8 @@ impl LeaderRegionManifestInfo {
         }
     }
 
+    /// Returns the minimum flushed entry id of the leader region.
+    /// It is used to determine the minimum flushed entry id that can be pruned in remote wal.
     pub fn min_flushed_entry_id(&self) -> u64 {
         match self {
             LeaderRegionManifestInfo::Mito {
