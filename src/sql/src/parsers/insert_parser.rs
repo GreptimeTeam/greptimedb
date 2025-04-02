@@ -22,17 +22,31 @@ use crate::statements::statement::Statement;
 
 /// INSERT/REPLACE statement parser implementation
 impl ParserContext<'_> {
-    pub(crate) fn parse_insert(&mut self, replace: bool) -> Result<Statement> {
+    pub(crate) fn parse_insert(&mut self) -> Result<Statement> {
         let _ = self.parser.next_token();
-        let spstatement = if replace {
-            self.parser.parse_replace().context(error::SyntaxSnafu)?
-        } else {
-            self.parser.parse_insert().context(error::SyntaxSnafu)?
-        };
+        let spstatement = self.parser.parse_insert().context(error::SyntaxSnafu)?;
 
         match spstatement {
             SpStatement::Insert { .. } => {
                 Ok(Statement::Insert(Box::new(Insert { inner: spstatement })))
+            }
+            unexp => error::UnsupportedSnafu {
+                keyword: unexp.to_string(),
+            }
+            .fail(),
+        }
+    }
+
+    pub(crate) fn parse_replace(&mut self) -> Result<Statement> {
+        let _ = self.parser.next_token();
+        let spstatement = self.parser.parse_insert().context(error::SyntaxSnafu)?;
+
+        match spstatement {
+            SpStatement::Insert(mut insert_stmt) => {
+                insert_stmt.replace_into = true;
+                Ok(Statement::Insert(Box::new(Insert {
+                    inner: SpStatement::Insert(insert_stmt),
+                })))
             }
             unexp => error::UnsupportedSnafu {
                 keyword: unexp.to_string(),

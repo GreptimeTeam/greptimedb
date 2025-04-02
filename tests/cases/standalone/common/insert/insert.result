@@ -9,6 +9,10 @@ INSERT INTO integers VALUES (1), (2), (3), (4), (5);
 
 Affected Rows: 5
 
+REPLACE INTO integers VALUES (6), (7);
+
+Affected Rows: 2
+
 SELECT * FROM integers;
 
 +-------------------------+
@@ -19,6 +23,8 @@ SELECT * FROM integers;
 | 1970-01-01T00:00:00.003 |
 | 1970-01-01T00:00:00.004 |
 | 1970-01-01T00:00:00.005 |
+| 1970-01-01T00:00:00.006 |
+| 1970-01-01T00:00:00.007 |
 +-------------------------+
 
 -- Test insert with long string constant
