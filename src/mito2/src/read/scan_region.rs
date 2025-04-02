@@ -319,7 +319,7 @@ impl ScanRegion {
 
     /// Returns true if the region can use series scan for current request.
     fn use_series_scan(&self) -> bool {
-        self.request.distribution == Some(TimeSeriesDistribution::TimeWindowed)
+        self.request.distribution == Some(TimeSeriesDistribution::PerSeries)
     }
 
     /// Creates a scan input.
