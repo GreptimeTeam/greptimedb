@@ -532,6 +532,7 @@ impl fmt::Display for FulltextOptions {
     }
 }
 
+/// The backend of the fulltext index.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Visit, VisitMut)]
 #[serde(rename_all = "kebab-case")]
 pub enum FulltextBackend {
