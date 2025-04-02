@@ -20,11 +20,15 @@ use crate::parser::ParserContext;
 use crate::statements::insert::Insert;
 use crate::statements::statement::Statement;
 
-/// INSERT statement parser implementation
+/// INSERT/REPLACE statement parser implementation
 impl ParserContext<'_> {
-    pub(crate) fn parse_insert(&mut self) -> Result<Statement> {
+    pub(crate) fn parse_insert(&mut self, replace: bool) -> Result<Statement> {
         let _ = self.parser.next_token();
-        let spstatement = self.parser.parse_insert().context(error::SyntaxSnafu)?;
+        let spstatement = if replace {
+            self.parser.parse_replace().context(error::SyntaxSnafu)?
+        } else {
+            self.parser.parse_insert().context(error::SyntaxSnafu)?
+        };
 
         match spstatement {
             SpStatement::Insert { .. } => {
