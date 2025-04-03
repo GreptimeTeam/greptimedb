@@ -347,6 +347,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to decode logical plan from substrait"))]
+    SubstraitDecodeLogicalPlan {
+        #[snafu(implicit)]
+        location: Location,
+        source: substrait::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -379,6 +386,8 @@ impl ErrorExt for Error {
             Error::PromStoreRemoteQueryPlan { source, .. }
             | Error::PrometheusMetricNamesQueryPlan { source, .. }
             | Error::ExecutePromql { source, .. } => source.status_code(),
+
+            Error::SubstraitDecodeLogicalPlan { source, .. } => source.status_code(),
 
             Error::PrometheusLabelValuesQueryPlan { source, .. } => source.status_code(),
 

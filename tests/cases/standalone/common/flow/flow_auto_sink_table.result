@@ -26,7 +26,7 @@ SHOW CREATE TABLE out_num_cnt_basic;
 |                   |   "sum(numbers_input_basic.number)" BIGINT NULL, |
 |                   |   "window_start" TIMESTAMP(3) NOT NULL,          |
 |                   |   "window_end" TIMESTAMP(3) NULL,                |
-|                   |   "update_at" TIMESTAMP(3) NULL,                 |
+|                   |   "__update_at" TIMESTAMP(3) NULL,               |
 |                   |   TIME INDEX ("window_start"),                   |
 |                   |   PRIMARY KEY ("window_end")                     |
 |                   | )                                                |
@@ -54,7 +54,7 @@ SHOW CREATE TABLE out_num_cnt_basic;
 |                   |   "sum(numbers_input_basic.number)" BIGINT NULL, |
 |                   |   "window_start" TIMESTAMP(3) NOT NULL,          |
 |                   |   "window_end" TIMESTAMP(3) NULL,                |
-|                   |   "update_at" TIMESTAMP(3) NULL,                 |
+|                   |   "__update_at" TIMESTAMP(3) NULL,               |
 |                   |   TIME INDEX ("window_start"),                   |
 |                   |   PRIMARY KEY ("window_end")                     |
 |                   | )                                                |
@@ -112,7 +112,7 @@ SHOW CREATE TABLE out_num_cnt_basic;
 | out_num_cnt_basic | CREATE TABLE IF NOT EXISTS "out_num_cnt_basic" ( |
 |                   |   "sumup" BIGINT NULL,                           |
 |                   |   "event_time" TIMESTAMP(3) NOT NULL,            |
-|                   |   "update_at" TIMESTAMP(3) NULL,                 |
+|                   |   "__update_at" TIMESTAMP(3) NULL,               |
 |                   |   TIME INDEX ("event_time")                      |
 |                   | )                                                |
 |                   |                                                  |
@@ -139,7 +139,7 @@ SHOW CREATE TABLE out_num_cnt_basic;
 | out_num_cnt_basic | CREATE TABLE IF NOT EXISTS "out_num_cnt_basic" ( |
 |                   |   "sumup" BIGINT NULL,                           |
 |                   |   "event_time" TIMESTAMP(3) NOT NULL,            |
-|                   |   "update_at" TIMESTAMP(3) NULL,                 |
+|                   |   "__update_at" TIMESTAMP(3) NULL,               |
 |                   |   TIME INDEX ("event_time")                      |
 |                   | )                                                |
 |                   |                                                  |

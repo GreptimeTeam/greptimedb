@@ -26,6 +26,8 @@ lazy_static! {
     .unwrap();
     pub static ref GRPC_HANDLE_SQL_ELAPSED: Histogram = GRPC_HANDLE_QUERY_ELAPSED
         .with_label_values(&["sql"]);
+    pub static ref GRPC_HANDLE_PLAN_ELAPSED: Histogram = GRPC_HANDLE_QUERY_ELAPSED
+        .with_label_values(&["plan"]);
     pub static ref GRPC_HANDLE_PROMQL_ELAPSED: Histogram = GRPC_HANDLE_QUERY_ELAPSED
         .with_label_values(&["promql"]);
 
