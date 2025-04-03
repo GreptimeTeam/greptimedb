@@ -17,10 +17,10 @@ use std::fmt::{self, Display};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 
-use crate::key::MetadataValue;
 use crate::error::{DecodeJsonSnafu, Error, InvalidMetadataSnafu, Result};
 use crate::key::{
-    MetadataKey, KAFKA_TOPIC_KEY_PATTERN, KAFKA_TOPIC_KEY_PREFIX, LEGACY_TOPIC_KEY_PREFIX,
+    MetadataKey, MetadataValue, KAFKA_TOPIC_KEY_PATTERN, KAFKA_TOPIC_KEY_PREFIX,
+    LEGACY_TOPIC_KEY_PREFIX,
 };
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
