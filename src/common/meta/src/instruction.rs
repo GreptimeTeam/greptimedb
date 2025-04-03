@@ -194,7 +194,6 @@ pub struct DropFlow {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FlushRegions {
-    pub datanode_id: u64,
     pub region_ids: Vec<RegionId>,
 }
 

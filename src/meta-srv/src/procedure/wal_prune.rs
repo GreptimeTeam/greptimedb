@@ -110,11 +110,11 @@ impl WalPruneProcedure {
         Ok(Self { data, context })
     }
 
-    async fn build_flush_region_instruction(
+    async fn build_peer_to_region_ids_map(
         &self,
         ctx: &Context,
         region_ids: &[RegionId],
-    ) -> Result<Vec<(Peer, Instruction)>> {
+    ) -> Result<HashMap<Peer, Vec<RegionId>>> {
         let mut table_ids = HashSet::new();
         for region_id in region_ids {
             let table_id = region_id.table_id();
@@ -144,20 +144,23 @@ impl WalPruneProcedure {
                 }
                 if let Some(peer) = &region_route.leader_peer {
                     peer_region_ids_map
-                        .entry(peer)
+                        .entry(peer.clone())
                         .or_insert_with(Vec::new)
                         .push(*region_id);
                 }
             }
         }
+        Ok(peer_region_ids_map)
+    }
 
+    fn build_flush_region_instruction(
+        &self,
+        peer_region_ids_map: HashMap<Peer, Vec<RegionId>>,
+    ) -> Result<Vec<(Peer, Instruction)>> {
         let peer_and_instructions = peer_region_ids_map
             .into_iter()
             .map(|(peer, region_ids)| {
-                let flush_instruction = Instruction::FlushRegion(FlushRegions {
-                    datanode_id: peer.id,
-                    region_ids,
-                });
+                let flush_instruction = Instruction::FlushRegion(FlushRegions { region_ids });
                 (peer.clone(), flush_instruction)
             })
             .collect();
@@ -228,10 +231,10 @@ impl WalPruneProcedure {
 
     /// Send the flush request to regions with low flush entry id.
     pub async fn on_sending_flush_request(&mut self) -> Result<Status> {
-        // Safety: regions_to_flush is loaded in on_prepare.
-        let flush_instructions = self
-            .build_flush_region_instruction(&self.context, &self.data.regions_to_flush)
+        let peer_to_region_ids_map = self
+            .build_peer_to_region_ids_map(&self.context, &self.data.regions_to_flush)
             .await?;
+        let flush_instructions = self.build_flush_region_instruction(peer_to_region_ids_map)?;
         for (peer, flush_instruction) in flush_instructions.into_iter() {
             let msg = MailboxMessage::json_message(
                 &format!("Flush regions: {}", flush_instruction),
@@ -255,6 +258,7 @@ impl WalPruneProcedure {
     /// Prune the WAL and persist the minimum flushed entry id.
     ///
     /// Retry:
+    /// - Failed to update the minimum flushed entry id in kvbackend.
     /// - Failed to delete records.
     pub async fn on_prune(&mut self) -> Result<Status> {
         // Safety: last_entry_ids are loaded in on_prepare.
@@ -272,6 +276,8 @@ impl WalPruneProcedure {
                 partition: DEFAULT_PARTITION,
             })?;
 
+        // Should update the min flushed entry id in the kv backend before deleting records.
+        // Otherwise, when a datanode restarts, it will not be able to find the wal entries.
         self.context
             .table_metadata_manager
             .topic_name_manager()
@@ -279,6 +285,10 @@ impl WalPruneProcedure {
             .await
             .context(UpdateMinEntryIdSnafu {
                 topic: self.data.topic.clone(),
+            })
+            .map_err(BoxedError::new)
+            .with_context(|_| error::RetryLaterWithSourceSnafu {
+                reason: "Failed to update min flushed entry id in kvbackend",
             })?;
         partition_client
             .delete_records(

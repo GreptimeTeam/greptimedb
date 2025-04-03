@@ -56,3 +56,35 @@ impl HandlerContext {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::assert_matches::assert_matches;
+
+    use common_meta::instruction::FlushRegions;
+    use mito2::engine::MITO_ENGINE_NAME;
+    use store_api::storage::RegionId;
+
+    use super::*;
+    use crate::tests::{mock_region_server, MockRegionEngine};
+
+    #[tokio::test]
+    async fn test_handle_flush_region_instruction() {
+        let mut mock_region_server = mock_region_server();
+        let (mock_engine, _) = MockRegionEngine::new(MITO_ENGINE_NAME);
+        mock_region_server.register_engine(mock_engine);
+
+        let handler_context = HandlerContext::new_for_test(mock_region_server);
+
+        let region_ids = (0..16).map(|i| RegionId::new(1024, i)).collect::<Vec<_>>();
+
+        let reply = handler_context
+            .handle_flush_region_instruction(FlushRegions { region_ids })
+            .await;
+        assert_matches!(reply, InstructionReply::FlushRegion(_));
+        if let InstructionReply::FlushRegion(SimpleReply { result, error }) = reply {
+            assert!(result);
+            assert!(error.is_none());
+        }
+    }
+}

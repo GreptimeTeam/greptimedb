@@ -24,7 +24,7 @@ use crate::key::{
 };
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
-use crate::rpc::store::{BatchPutRequest, PutRequest, RangeRequest};
+use crate::rpc::store::{BatchPutRequest, CompareAndPutRequest, PutRequest, RangeRequest};
 use crate::rpc::KeyValue;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -153,7 +153,7 @@ impl TopicNameManager {
         Ok(())
     }
 
-    /// Range query for topics.
+    /// Range query for topics. Only the keys are returned.
     /// Caution: this method returns keys as String instead of values of range query since the topics are stored in keys.
     pub async fn range(&self) -> Result<Vec<String>> {
         let prefix = TopicNameKey::range_start_key();
@@ -166,7 +166,7 @@ impl TopicNameManager {
             .collect::<Result<Vec<String>>>()
     }
 
-    /// Put topics into kvbackend.
+    /// Put topics into kvbackend. The value is set to 0 by default.
     pub async fn batch_put(&self, topic_name_keys: Vec<TopicNameKey<'_>>) -> Result<()> {
         let mut kvs = Vec::with_capacity(topic_name_keys.len());
         for topic_name_key in &topic_name_keys {
@@ -201,16 +201,23 @@ impl TopicNameManager {
     pub async fn put(&self, topic: &str, pruned_entry_id: u64) -> Result<()> {
         let key = TopicNameKey::new(topic);
         let value = TopicNameValue::new(pruned_entry_id);
-        let kv = KeyValue {
-            key: key.to_bytes(),
-            value: value.try_as_raw_value()?,
-        };
-        let put_req = PutRequest {
-            key: kv.key.clone(),
-            value: kv.value.clone(),
-            prev_kv: false,
-        };
-        self.kv_backend.put(put_req).await?;
+        let prev = self.get(topic).await?;
+        if let Some(prev) = prev {
+            let cas_req = CompareAndPutRequest {
+                key: key.to_bytes(),
+                value: value.try_as_raw_value()?,
+                expect: prev.try_as_raw_value()?,
+            };
+            self.kv_backend.compare_and_put(cas_req).await?;
+        } else {
+            // Legacy version metadata may not contains value.
+            let put_req = PutRequest {
+                key: key.to_bytes(),
+                value: value.try_as_raw_value()?,
+                prev_kv: false,
+            };
+            self.kv_backend.put(put_req).await?;
+        }
         Ok(())
     }
 }
@@ -263,6 +270,9 @@ mod tests {
         for topic in &topics {
             let value = manager.get(topic).await.unwrap().unwrap();
             assert_eq!(value.pruned_entry_id, 0);
+            manager.put(topic, 1).await.unwrap();
+            let value = manager.get(topic).await.unwrap().unwrap();
+            assert_eq!(value.pruned_entry_id, 1);
         }
     }
 }
