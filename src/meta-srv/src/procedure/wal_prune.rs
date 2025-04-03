@@ -119,6 +119,10 @@ impl WalPruneProcedure {
             })
             .collect();
 
+        if region_ids.is_empty() {
+            // No regions to prune.
+            return Ok(Status::done());
+        }
         // Check if the `flush_entry_ids_map` contains all region ids.
         let non_collected_region_ids =
             check_heartbeat_collected_region_ids(&region_ids, &flush_entry_ids_map);
@@ -188,6 +192,10 @@ impl WalPruneProcedure {
                 topic: self.data.topic.clone(),
                 partition: DEFAULT_PARTITION,
                 offset: self.data.min_flushed_entry_id,
+            })
+            .map_err(BoxedError::new)
+            .with_context(|_| error::RetryLaterWithSourceSnafu {
+                reason: "Failed to delete records",
             })?;
         Ok(Status::done())
     }
