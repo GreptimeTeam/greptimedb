@@ -119,10 +119,6 @@ impl WalPruneProcedure {
             })
             .collect();
 
-        if region_ids.is_empty() {
-            // No regions to prune.
-            return Ok(Status::done());
-        }
         // Check if the `flush_entry_ids_map` contains all region ids.
         let non_collected_region_ids =
             check_heartbeat_collected_region_ids(&region_ids, &flush_entry_ids_map);
@@ -140,7 +136,7 @@ impl WalPruneProcedure {
         Ok(Status::executing(true))
     }
 
-    /// Prune the WAL.
+    /// Prune the WAL and persist the minimum flushed entry id.
     pub async fn on_prune(&mut self) -> Result<Status> {
         // Safety: last_entry_ids are loaded in on_prepare.
         let partition_client = self
@@ -157,6 +153,7 @@ impl WalPruneProcedure {
                 partition: DEFAULT_PARTITION,
             })?;
 
+<<<<<<< HEAD
         partition_client
             .delete_records(self.data.min_flushed_entry_id as i64, TIMEOUT)
             .await
@@ -170,6 +167,9 @@ impl WalPruneProcedure {
                 reason: "Failed to delete records",
             })?;
 
+=======
+        // Should persist before deleting records.
+>>>>>>> e40c310c5 (fix: persist before delete)
         self.context
             .table_metadata_manager
             .topic_name_manager()
@@ -177,6 +177,17 @@ impl WalPruneProcedure {
             .await
             .context(UpdateMinEntryIdSnafu {
                 topic: self.data.topic.clone(),
+            })?;
+        partition_client
+            .delete_records(
+                self.data.min_flushed_entry_id as i64,
+                DELETE_RECORDS_TIMEOUT,
+            )
+            .await
+            .context(DeleteRecordSnafu {
+                topic: self.data.topic.clone(),
+                partition: DEFAULT_PARTITION,
+                offset: self.data.min_flushed_entry_id,
             })?;
         Ok(Status::done())
     }
