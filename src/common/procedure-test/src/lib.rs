@@ -18,8 +18,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use common_procedure::poison::PoisonManager;
-use common_procedure::test_util::InMemoryPoisonManager;
+use common_procedure::store::poison_store::PoisonStore;
+use common_procedure::test_util::InMemoryPoisonStore;
 use common_procedure::{
     Context, ContextProvider, Output, PoisonKey, Procedure, ProcedureId, ProcedureState,
     ProcedureWithId, Result, Status,
@@ -29,7 +29,7 @@ use common_procedure::{
 #[derive(Default)]
 pub struct MockContextProvider {
     states: HashMap<ProcedureId, ProcedureState>,
-    poison_manager: InMemoryPoisonManager,
+    poison_manager: InMemoryPoisonStore,
 }
 
 impl MockContextProvider {
@@ -37,7 +37,7 @@ impl MockContextProvider {
     pub fn new(states: HashMap<ProcedureId, ProcedureState>) -> MockContextProvider {
         MockContextProvider {
             states,
-            poison_manager: InMemoryPoisonManager::default(),
+            poison_manager: InMemoryPoisonStore::default(),
         }
     }
 }
@@ -49,7 +49,9 @@ impl ContextProvider for MockContextProvider {
     }
 
     async fn put_poison(&self, key: &PoisonKey, procedure_id: ProcedureId) -> Result<()> {
-        self.poison_manager.set_poison(key, procedure_id).await
+        self.poison_manager
+            .set_poison(key.to_string(), procedure_id.to_string())
+            .await
     }
 }
 

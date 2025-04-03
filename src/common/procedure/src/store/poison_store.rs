@@ -15,21 +15,12 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use strum::{AsRefStr, Display, EnumString};
 
 use crate::error::Result;
-use crate::procedure::PoisonKey;
-use crate::ProcedureId;
 
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, AsRefStr, EnumString, Display)]
-#[strum(serialize_all = "snake_case")]
-pub enum ResourceType {
-    Table,
-}
+pub type PoisonStoreRef = Arc<dyn PoisonStore>;
 
-pub type PoisonManagerRef = Arc<dyn PoisonManager>;
-
-/// Poison manager for procedure.
+/// Poison store.
 ///
 /// This trait is used to manage the state of operations on resources, particularly
 /// when an operation encounters an unrecoverable error, potentially leading to
@@ -50,10 +41,10 @@ pub type PoisonManagerRef = Arc<dyn PoisonManager>;
 ///   - New operations on the same resource are rejected until the resource is
 ///     manually recovered and the poison key is removed.
 #[async_trait]
-pub trait PoisonManager: Send + Sync {
-    async fn set_poison(&self, key: &PoisonKey, procedure_id: ProcedureId) -> Result<()>;
+pub trait PoisonStore: Send + Sync {
+    async fn set_poison(&self, key: String, token: String) -> Result<()>;
 
-    async fn delete_poison(&self, key: &PoisonKey, procedure_id: ProcedureId) -> Result<()>;
+    async fn delete_poison(&self, key: String, token: String) -> Result<()>;
 
-    async fn get_poison(&self, key: &PoisonKey) -> Result<Option<ProcedureId>>;
+    async fn get_poison(&self, key: &str) -> Result<Option<String>>;
 }

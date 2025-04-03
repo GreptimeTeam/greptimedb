@@ -37,7 +37,6 @@ pub mod metrics;
 pub mod node_expiry_listener;
 pub mod node_manager;
 pub mod peer;
-pub mod poison_manager;
 pub mod range_stream;
 pub mod region_keeper;
 pub mod region_registry;

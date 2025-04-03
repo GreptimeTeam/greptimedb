@@ -74,10 +74,10 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to put poison, key: '{key}', procedure_id: '{procedure_id}'"))]
+    #[snafu(display("Failed to put poison, key: '{key}', token: '{token}'"))]
     PutPoison {
-        key: PoisonKey,
-        procedure_id: ProcedureId,
+        key: String,
+        token: String,
         #[snafu(implicit)]
         location: Location,
         source: BoxedError,
@@ -85,16 +85,16 @@ pub enum Error {
 
     #[snafu(display("Failed to get poison, key: '{key}'"))]
     GetPoison {
-        key: PoisonKey,
+        key: String,
         #[snafu(implicit)]
         location: Location,
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to delete poison, key: '{key}', procedure_id: '{procedure_id}'"))]
+    #[snafu(display("Failed to delete poison, key: '{key}', token: '{token}'"))]
     DeletePoison {
-        key: PoisonKey,
-        procedure_id: ProcedureId,
+        key: String,
+        token: String,
         #[snafu(implicit)]
         location: Location,
         source: BoxedError,

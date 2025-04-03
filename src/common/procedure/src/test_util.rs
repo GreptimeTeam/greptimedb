@@ -20,16 +20,15 @@ use snafu::ensure;
 
 use super::*;
 use crate::error;
-use crate::poison::PoisonManager;
-use crate::procedure::PoisonKey;
+use crate::store::poison_store::PoisonStore;
 
-/// A poison manager that uses an in-memory map to store the poison state.
+/// A poison store that uses an in-memory map to store the poison state.
 #[derive(Debug, Default)]
-pub struct InMemoryPoisonManager {
-    map: Arc<RwLock<HashMap<String, ProcedureId>>>,
+pub struct InMemoryPoisonStore {
+    map: Arc<RwLock<HashMap<String, String>>>,
 }
 
-impl InMemoryPoisonManager {
+impl InMemoryPoisonStore {
     /// Create a new in-memory poison manager.
     pub fn new() -> Self {
         Self::default()
@@ -37,24 +36,19 @@ impl InMemoryPoisonManager {
 }
 
 #[async_trait::async_trait]
-impl PoisonManager for InMemoryPoisonManager {
-    async fn set_poison(&self, token: &PoisonKey, procedure_id: ProcedureId) -> Result<()> {
+impl PoisonStore for InMemoryPoisonStore {
+    async fn set_poison(&self, key: String, token: String) -> Result<()> {
         let mut map = self.map.write().unwrap();
-
-        let key = token.to_string();
         match map.entry(key) {
             Entry::Vacant(v) => {
-                v.insert(procedure_id);
+                v.insert(token.to_string());
             }
             Entry::Occupied(o) => {
-                let procedure = o.get();
+                let value = o.get();
                 ensure!(
-                    procedure == &procedure_id,
+                    value == &token,
                     error::UnexpectedSnafu {
-                        err_msg: format!(
-                            "The poison is already set by other procedure {}",
-                            procedure
-                        )
+                        err_msg: format!("The poison is already set by other token {}", value)
                     }
                 );
             }
@@ -62,20 +56,18 @@ impl PoisonManager for InMemoryPoisonManager {
         Ok(())
     }
 
-    async fn delete_poison(&self, token: &PoisonKey, procedure_id: ProcedureId) -> Result<()> {
+    async fn delete_poison(&self, key: String, token: String) -> Result<()> {
         let mut map = self.map.write().unwrap();
-        let key = token.to_string();
-
         match map.entry(key) {
             Entry::Vacant(_) => {
                 // do nothing
             }
             Entry::Occupied(o) => {
-                let procedure = o.get();
+                let value = o.get();
                 ensure!(
-                    procedure == &procedure_id,
+                    value == &token,
                     error::UnexpectedSnafu {
-                        err_msg: format!("The poison is not set by the procedure {}", procedure)
+                        err_msg: format!("The poison is not set by the token {}", value)
                     }
                 );
 
@@ -85,7 +77,7 @@ impl PoisonManager for InMemoryPoisonManager {
         Ok(())
     }
 
-    async fn get_poison(&self, key: &PoisonKey) -> Result<Option<ProcedureId>> {
+    async fn get_poison(&self, key: &str) -> Result<Option<String>> {
         let map = self.map.read().unwrap();
         let key = key.to_string();
         Ok(map.get(&key).cloned())

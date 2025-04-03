@@ -31,7 +31,7 @@ use common_meta::sequence::SequenceBuilder;
 use common_meta::state_store::KvStateStore;
 use common_meta::DatanodeId;
 use common_procedure::local::{LocalManager, ManagerConfig};
-use common_procedure::test_util::InMemoryPoisonManager;
+use common_procedure::test_util::InMemoryPoisonStore;
 use common_procedure::{Context as ProcedureContext, ProcedureId, ProcedureManagerRef, Status};
 use common_procedure_test::MockContextProvider;
 use common_telemetry::debug;
@@ -86,7 +86,7 @@ impl TestingEnv {
         let opening_region_keeper = Arc::new(MemoryRegionKeeper::default());
 
         let state_store = Arc::new(KvStateStore::new(kv_backend.clone()));
-        let poison_manager = Arc::new(InMemoryPoisonManager::default());
+        let poison_manager = Arc::new(InMemoryPoisonStore::default());
         let procedure_manager = Arc::new(LocalManager::new(
             ManagerConfig::default(),
             state_store,

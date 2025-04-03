@@ -67,7 +67,7 @@ mod tests {
     use crate::local::{test_util, LocalManager, ManagerConfig};
     use crate::procedure::PoisonKeys;
     use crate::store::state_store::ObjectStateStore;
-    use crate::test_util::InMemoryPoisonManager;
+    use crate::test_util::InMemoryPoisonStore;
     use crate::{
         Context, LockKey, Procedure, ProcedureId, ProcedureManager, ProcedureWithId, Status,
     };
@@ -82,7 +82,7 @@ mod tests {
             ..Default::default()
         };
         let state_store = Arc::new(ObjectStateStore::new(test_util::new_object_store(&dir)));
-        let poison_manager = Arc::new(InMemoryPoisonManager::default());
+        let poison_manager = Arc::new(InMemoryPoisonStore::default());
         let manager = LocalManager::new(config, state_store, poison_manager);
         manager.start().await.unwrap();
 

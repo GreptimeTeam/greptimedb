@@ -37,7 +37,6 @@ use common_config::KvBackendConfig;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
-use common_meta::poison_manager::KvBackendPoisonManager;
 use common_meta::state_store::KvStateStore;
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::options::ProcedureConfig;
@@ -114,7 +113,7 @@ impl Instance {
             .context(error::OpenRaftEngineBackendSnafu)?;
 
         let kv_backend = Arc::new(kv_backend);
-        let state_store = Arc::new(KvStateStore::new(kv_backend.clone()));
+        let kv_state_store = Arc::new(KvStateStore::new(kv_backend.clone()));
 
         let manager_config = ManagerConfig {
             max_retry_times: procedure_config.max_retry_times,
@@ -122,11 +121,10 @@ impl Instance {
             max_running_procedures: procedure_config.max_running_procedures,
             ..Default::default()
         };
-        let poison_manager = Arc::new(KvBackendPoisonManager::new(kv_backend.clone()));
         let procedure_manager = Arc::new(LocalManager::new(
             manager_config,
-            state_store,
-            poison_manager,
+            kv_state_store.clone(),
+            kv_state_store.clone(),
         ));
 
         Ok((kv_backend, procedure_manager))

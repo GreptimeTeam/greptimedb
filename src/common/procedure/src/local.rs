@@ -37,8 +37,8 @@ use crate::error::{
     StopRemoveOutdatedMetaTaskSnafu, TooManyRunningProceduresSnafu,
 };
 use crate::local::runner::Runner;
-use crate::poison::PoisonManagerRef;
 use crate::procedure::{BoxedProcedureLoader, InitProcedureState, PoisonKeys, ProcedureInfo};
+use crate::store::poison_store::PoisonStoreRef;
 use crate::store::{ProcedureMessage, ProcedureMessages, ProcedureStore, StateStoreRef};
 use crate::{
     BoxedProcedure, ContextProvider, LockKey, PoisonKey, ProcedureId, ProcedureManager,
@@ -169,7 +169,7 @@ pub(crate) struct ManagerContext {
     /// Running flag.
     running: Arc<AtomicBool>,
     /// Poison manager.
-    poison_manager: PoisonManagerRef,
+    poison_manager: PoisonStoreRef,
 }
 
 #[async_trait]
@@ -195,13 +195,15 @@ impl ContextProvider for ManagerContext {
                 }
             );
         }
+        let key = key.to_string();
+        let procedure_id = procedure_id.to_string();
         self.poison_manager.set_poison(key, procedure_id).await
     }
 }
 
 impl ManagerContext {
     /// Returns a new [ManagerContext].
-    fn new(poison_manager: PoisonManagerRef) -> ManagerContext {
+    fn new(poison_manager: PoisonStoreRef) -> ManagerContext {
         ManagerContext {
             key_lock: KeyRwLock::new(),
             loaders: Mutex::new(HashMap::new()),
@@ -464,9 +466,9 @@ impl LocalManager {
     pub fn new(
         config: ManagerConfig,
         state_store: StateStoreRef,
-        poison_manager: PoisonManagerRef,
+        poison_store: PoisonStoreRef,
     ) -> LocalManager {
-        let manager_ctx = Arc::new(ManagerContext::new(poison_manager));
+        let manager_ctx = Arc::new(ManagerContext::new(poison_store));
 
         LocalManager {
             manager_ctx,
@@ -778,11 +780,11 @@ mod tests {
     use super::*;
     use crate::error::{self, Error};
     use crate::store::state_store::ObjectStateStore;
-    use crate::test_util::InMemoryPoisonManager;
+    use crate::test_util::InMemoryPoisonStore;
     use crate::{Context, Procedure, Status};
 
     fn new_test_manager_context() -> ManagerContext {
-        let poison_manager = Arc::new(InMemoryPoisonManager::default());
+        let poison_manager = Arc::new(InMemoryPoisonStore::default());
         ManagerContext::new(poison_manager)
     }
 
@@ -904,7 +906,7 @@ mod tests {
             ..Default::default()
         };
         let state_store = Arc::new(ObjectStateStore::new(test_util::new_object_store(&dir)));
-        let poison_manager = Arc::new(InMemoryPoisonManager::new());
+        let poison_manager = Arc::new(InMemoryPoisonStore::new());
         let manager = LocalManager::new(config, state_store, poison_manager);
         manager.manager_ctx.start();
 
@@ -929,7 +931,7 @@ mod tests {
             ..Default::default()
         };
         let state_store = Arc::new(ObjectStateStore::new(object_store.clone()));
-        let poison_manager = Arc::new(InMemoryPoisonManager::new());
+        let poison_manager = Arc::new(InMemoryPoisonStore::new());
         let manager = LocalManager::new(config, state_store, poison_manager);
         manager.manager_ctx.start();
 
@@ -983,7 +985,7 @@ mod tests {
             ..Default::default()
         };
         let state_store = Arc::new(ObjectStateStore::new(test_util::new_object_store(&dir)));
-        let poison_manager = Arc::new(InMemoryPoisonManager::new());
+        let poison_manager = Arc::new(InMemoryPoisonStore::new());
         let manager = LocalManager::new(config, state_store, poison_manager);
         manager.manager_ctx.start();
 
@@ -1035,7 +1037,7 @@ mod tests {
             ..Default::default()
         };
         let state_store = Arc::new(ObjectStateStore::new(test_util::new_object_store(&dir)));
-        let poison_manager = Arc::new(InMemoryPoisonManager::new());
+        let poison_manager = Arc::new(InMemoryPoisonStore::new());
         let manager = LocalManager::new(config, state_store, poison_manager);
         manager.manager_ctx.start();
 
@@ -1116,7 +1118,7 @@ mod tests {
             ..Default::default()
         };
         let state_store = Arc::new(ObjectStateStore::new(test_util::new_object_store(&dir)));
-        let poison_manager = Arc::new(InMemoryPoisonManager::new());
+        let poison_manager = Arc::new(InMemoryPoisonStore::new());
         let manager = LocalManager::new(config, state_store, poison_manager);
 
         let mut procedure = ProcedureToLoad::new("submit");
@@ -1144,7 +1146,7 @@ mod tests {
             ..Default::default()
         };
         let state_store = Arc::new(ObjectStateStore::new(test_util::new_object_store(&dir)));
-        let poison_manager = Arc::new(InMemoryPoisonManager::new());
+        let poison_manager = Arc::new(InMemoryPoisonStore::new());
         let manager = LocalManager::new(config, state_store, poison_manager);
 
         manager.start().await.unwrap();
@@ -1181,7 +1183,7 @@ mod tests {
             max_running_procedures: 128,
         };
         let state_store = Arc::new(ObjectStateStore::new(object_store.clone()));
-        let poison_manager = Arc::new(InMemoryPoisonManager::new());
+        let poison_manager = Arc::new(InMemoryPoisonStore::new());
         let manager = LocalManager::new(config, state_store, poison_manager);
         manager.manager_ctx.set_running();
 
@@ -1263,7 +1265,7 @@ mod tests {
             ..Default::default()
         };
         let state_store = Arc::new(ObjectStateStore::new(test_util::new_object_store(&dir)));
-        let poison_manager = Arc::new(InMemoryPoisonManager::new());
+        let poison_manager = Arc::new(InMemoryPoisonStore::new());
         let manager = LocalManager::new(config, state_store, poison_manager);
         manager.manager_ctx.set_running();
 
@@ -1388,7 +1390,7 @@ mod tests {
             ..Default::default()
         };
         let state_store = Arc::new(ObjectStateStore::new(object_store.clone()));
-        let poison_manager = Arc::new(InMemoryPoisonManager::new());
+        let poison_manager = Arc::new(InMemoryPoisonStore::new());
         let manager = LocalManager::new(config, state_store, poison_manager);
         manager.manager_ctx.start();
 

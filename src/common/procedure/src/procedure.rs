@@ -22,10 +22,10 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
 use snafu::{ResultExt, Snafu};
+use strum::AsRefStr;
 use uuid::Uuid;
 
 use crate::error::{self, Error, Result};
-use crate::poison::ResourceType;
 use crate::watcher::Watcher;
 
 pub type Output = Arc<dyn Any + Send + Sync>;
@@ -219,6 +219,11 @@ impl<T: Procedure + ?Sized> Procedure for Box<T> {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, AsRefStr)]
+pub enum ResourceType {
+    Table,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PoisonKey(String);
 
@@ -231,7 +236,7 @@ impl Display for PoisonKey {
 impl PoisonKey {
     /// Creates a new [PoisonKey] from a [ResourceType] and a [String].
     pub fn new(resource_type: ResourceType, resource_token: &str) -> Self {
-        Self(format!("{}/{}", resource_type, resource_token))
+        Self(format!("{}/{}", resource_type.as_ref(), resource_token))
     }
 }
 

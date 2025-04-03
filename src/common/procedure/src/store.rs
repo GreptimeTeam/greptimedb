@@ -24,6 +24,7 @@ use crate::error::{Result, ToJsonSnafu};
 pub(crate) use crate::store::state_store::StateStoreRef;
 use crate::ProcedureId;
 
+pub mod poison_store;
 pub mod state_store;
 pub mod util;
 

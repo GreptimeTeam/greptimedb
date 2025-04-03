@@ -247,9 +247,10 @@ impl Runner {
     async fn clean_poisons(&mut self) -> Result<()> {
         for key in self.meta.poison_keys.iter() {
             debug!("clean poison: {key}");
+            let key = key.to_string();
             self.manager_ctx
                 .poison_manager
-                .delete_poison(key, self.meta.id)
+                .delete_poison(key, self.meta.id.to_string())
                 .await?;
         }
         Ok(())
@@ -576,10 +577,9 @@ mod tests {
 
     use super::*;
     use crate::local::test_util;
-    use crate::poison::ResourceType;
-    use crate::procedure::PoisonKeys;
+    use crate::procedure::{PoisonKeys, ResourceType};
     use crate::store::proc_path;
-    use crate::test_util::InMemoryPoisonManager;
+    use crate::test_util::InMemoryPoisonStore;
     use crate::{ContextProvider, Error, LockKey, PoisonKey, Procedure};
 
     const ROOT_ID: &str = "9f805a1f-05f7-490c-9f91-bd56e3cc54c1";
@@ -592,9 +592,9 @@ mod tests {
         Runner {
             meta,
             procedure,
-            manager_ctx: Arc::new(ManagerContext::new(Arc::new(
-                InMemoryPoisonManager::default(),
-            ))),
+            manager_ctx: Arc::new(ManagerContext::new(
+                Arc::new(InMemoryPoisonStore::default()),
+            )),
             step: 0,
             exponential_builder: ExponentialBuilder::default(),
             store,
@@ -909,7 +909,7 @@ mod tests {
         let object_store = test_util::new_object_store(&dir);
         let procedure_store = Arc::new(ProcedureStore::from_object_store(object_store.clone()));
         let mut runner = new_runner(meta.clone(), Box::new(parent), procedure_store.clone());
-        let poison_manager = Arc::new(InMemoryPoisonManager::default());
+        let poison_manager = Arc::new(InMemoryPoisonStore::default());
         let manager_ctx = Arc::new(ManagerContext::new(poison_manager));
         manager_ctx.start();
         // Manually add this procedure to the manager ctx.
@@ -1315,7 +1315,7 @@ mod tests {
         let object_store = test_util::new_object_store(&dir);
         let procedure_store = Arc::new(ProcedureStore::from_object_store(object_store.clone()));
         let mut runner = new_runner(meta.clone(), Box::new(parent), procedure_store);
-        let poison_manager = Arc::new(InMemoryPoisonManager::default());
+        let poison_manager = Arc::new(InMemoryPoisonStore::default());
         let manager_ctx = Arc::new(ManagerContext::new(poison_manager));
         manager_ctx.start();
         // Manually add this procedure to the manager ctx.
@@ -1393,7 +1393,7 @@ mod tests {
         let procedure_id = runner
             .manager_ctx
             .poison_manager
-            .get_poison(&poison_key)
+            .get_poison(&poison_key.to_string())
             .await
             .unwrap();
         // poison key should be deleted.
@@ -1469,7 +1469,7 @@ mod tests {
         let procedure_id = runner
             .manager_ctx
             .poison_manager
-            .get_poison(&poison_key)
+            .get_poison(&poison_key.to_string())
             .await
             .unwrap()
             .unwrap();
@@ -1552,12 +1552,12 @@ mod tests {
         let procedure_id = runner
             .manager_ctx
             .poison_manager
-            .get_poison(&poison_key)
+            .get_poison(&poison_key.to_string())
             .await
             .unwrap()
             .unwrap();
 
         // If the procedure is poisoned, the poison key shouldn't be deleted.
-        assert_eq!(&procedure_id.to_string(), ROOT_ID);
+        assert_eq!(procedure_id, ROOT_ID);
     }
 }

@@ -19,7 +19,6 @@
 pub mod error;
 pub mod local;
 pub mod options;
-pub mod poison;
 mod procedure;
 pub mod store;
 pub mod watcher;

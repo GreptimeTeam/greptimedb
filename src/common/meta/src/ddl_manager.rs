@@ -834,7 +834,7 @@ mod tests {
     use std::sync::Arc;
 
     use common_procedure::local::LocalManager;
-    use common_procedure::test_util::InMemoryPoisonManager;
+    use common_procedure::test_util::InMemoryPoisonStore;
 
     use super::DdlManager;
     use crate::cache_invalidator::DummyCacheInvalidator;
@@ -884,7 +884,7 @@ mod tests {
         ));
 
         let state_store = Arc::new(KvStateStore::new(kv_backend.clone()));
-        let poison_manager = Arc::new(InMemoryPoisonManager::default());
+        let poison_manager = Arc::new(InMemoryPoisonStore::default());
         let procedure_manager = Arc::new(LocalManager::new(
             Default::default(),
             state_store,
