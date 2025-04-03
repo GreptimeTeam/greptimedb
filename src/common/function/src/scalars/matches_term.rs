@@ -18,8 +18,10 @@ use std::{fmt, iter};
 use common_query::error::{InvalidFuncArgsSnafu, Result};
 use common_query::prelude::Volatility;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::scalars::ScalarVectorBuilder;
-use datatypes::vectors::{BooleanVector, BooleanVectorBuilder, MutableVector, VectorRef};
+use datatypes::scalars::{ScalarVector, ScalarVectorBuilder};
+use datatypes::vectors::{
+    BooleanVector, BooleanVectorBuilder, MutableVector, StringVector, Vector, VectorRef,
+};
 use memchr::memmem;
 use snafu::ensure;
 
@@ -120,6 +122,7 @@ impl Function for MatchesTermFunction {
         if text_column.is_empty() {
             return Ok(Arc::new(BooleanVector::from(Vec::<bool>::with_capacity(0))));
         }
+        let text_column = text_column.as_any().downcast_ref::<StringVector>().unwrap();
 
         let term_column = &columns[1];
         let compiled_finder = if term_column.is_const() {
@@ -138,8 +141,7 @@ impl Function for MatchesTermFunction {
 
         let len = text_column.len();
         let mut result = BooleanVectorBuilder::with_capacity(len);
-        for i in 0..len {
-            let text = text_column.get_ref(i).as_string().unwrap();
+        for (i, text) in text_column.iter_data().enumerate() {
             let Some(text) = text else {
                 result.push_null();
                 continue;
@@ -312,7 +314,10 @@ mod tests {
     #[test]
     fn different_unicode_boundaries() {
         assert!(MatchesTermFinder::new("café").find("café>"));
+        assert!(!MatchesTermFinder::new("café").find("口café>"));
+        assert!(!MatchesTermFinder::new("café").find("café口"));
         assert!(MatchesTermFinder::new("русский").find("русский!"));
+        assert!(MatchesTermFinder::new("русский").find("русский！"));
     }
 
     #[test]
