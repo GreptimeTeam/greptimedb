@@ -171,7 +171,7 @@ fn write_trace_services_to_row(writer: &mut TableData, services: HashSet<String>
         row_writer::write_ts_to_nanos(
             writer,
             TIMESTAMP_COLUMN,
-            Some(0),
+            Some(4102444800000000000), // Use a timestamp(2100-01-01 00:00:00) as large as possible.
             Precision::Nanosecond,
             &mut row,
         )?;
