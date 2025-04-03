@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["IndexOrDefault"],"fn":["has_same_columns_and_pk_encoding","may_compat_fields","may_compat_primary_key","may_rewrite_primary_key"],"struct":["CompatBatch","CompatFields","CompatPrimaryKey","CompatReader","RewritePrimaryKey"]};

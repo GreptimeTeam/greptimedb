@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_VERSION","MIN_VERSION"],"mod":["action","storage"],"trait":["Checkpoint","LogIterator","Manifest","ManifestLogStorage","MetaAction","MetaActionIterator"],"type":["ManifestVersion"]};

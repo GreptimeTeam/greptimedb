@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CODEC_V1_MAGIC"],"struct":["IntermediateBloomFilterCodecV1"]};
