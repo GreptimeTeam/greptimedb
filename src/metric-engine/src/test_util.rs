@@ -177,7 +177,6 @@ pub fn alter_logical_region_add_tag_columns(
         });
     }
     RegionAlterRequest {
-        schema_version: 0,
         kind: AlterKind::AddColumns {
             columns: new_columns,
         },

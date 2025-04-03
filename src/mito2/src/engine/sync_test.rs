@@ -35,7 +35,6 @@ use crate::test_util::{
 
 fn add_tag1() -> RegionAlterRequest {
     RegionAlterRequest {
-        schema_version: 0,
         kind: AlterKind::AddColumns {
             columns: vec![AddColumn {
                 column_metadata: ColumnMetadata {

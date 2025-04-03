@@ -103,7 +103,6 @@ impl DataRegion {
             .get_metadata(region_id)
             .await
             .context(MitoReadOperationSnafu)?;
-        let version = region_metadata.schema_version;
 
         // find the max column id
         let new_column_id_start = 1 + region_metadata
@@ -166,7 +165,6 @@ impl DataRegion {
         debug!("Adding (Column id assigned) columns {new_columns:?} to region {region_id:?}");
         // assemble alter request
         let alter_request = RegionRequest::Alter(RegionAlterRequest {
-            schema_version: version,
             kind: AlterKind::AddColumns {
                 columns: new_columns,
             },

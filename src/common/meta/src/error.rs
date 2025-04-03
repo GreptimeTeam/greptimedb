@@ -748,6 +748,20 @@ pub enum Error {
         #[snafu(source)]
         error: serde_json::Error,
     },
+
+    #[snafu(display("No leader found for table_id: {}", table_id))]
+    NoLeader {
+        table_id: TableId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Consistency poison: {}", msg))]
+    ConsistencyPoison {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -766,7 +780,9 @@ impl ErrorExt for Error {
             | SerializeToJson { .. }
             | DeserializeFromJson { .. } => StatusCode::Internal,
 
-            ValueNotExist { .. } => StatusCode::Unexpected,
+            NoLeader { .. } => StatusCode::TableUnavailable,
+
+            ValueNotExist { .. } | ConsistencyPoison { .. } => StatusCode::Unexpected,
 
             Unsupported { .. } => StatusCode::Unsupported,
 
@@ -901,6 +917,11 @@ impl Error {
         Error::RetryLater {
             source: BoxedError::new(err),
         }
+    }
+
+    /// Determine whether it is a consistency poison.
+    pub fn is_consistency_poison(&self) -> bool {
+        matches!(self, Error::ConsistencyPoison { .. })
     }
 
     /// Determine whether it is a retry later type through [StatusCode]

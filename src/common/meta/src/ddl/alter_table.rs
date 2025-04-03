@@ -22,26 +22,27 @@ use std::vec;
 use api::v1::alter_table_expr::Kind;
 use api::v1::RenameTable;
 use async_trait::async_trait;
-use common_error::ext::ErrorExt;
-use common_error::status_code::StatusCode;
+use common_error::ext::BoxedError;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure, Status, StringKey,
+    Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure, ProcedureId, Status,
+    StringKey,
 };
 use common_telemetry::{debug, error, info};
 use futures::future;
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
+use snafu::{ensure, ResultExt};
 use store_api::storage::RegionId;
 use strum::AsRefStr;
 use table::metadata::{RawTableInfo, TableId, TableInfo};
 use table::table_reference::TableReference;
 
 use crate::cache_invalidator::Context;
-use crate::ddl::utils::add_peer_context_if_needed;
+use crate::ddl::utils::{add_peer_context_if_needed, handle_multiple_results, MultipleResults};
 use crate::ddl::DdlContext;
-use crate::error::{Error, Result};
+use crate::error::{Error, NoLeaderSnafu, Result, RetryLaterSnafu};
 use crate::instruction::CacheIdent;
+use crate::key::consistency_poison::{ConsistencyPoisonKey, ResourceType};
 use crate::key::table_info::TableInfoValue;
 use crate::key::{DeserializedValueWithBytes, RegionDistribution};
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
@@ -104,7 +105,57 @@ impl AlterTableProcedure {
         Ok(Status::executing(true))
     }
 
-    pub async fn submit_alter_region_requests(&mut self) -> Result<Status> {
+    async fn put_consistency_poison(
+        &self,
+        table_id: TableId,
+        procedure_id: ProcedureId,
+    ) -> Result<()> {
+        if let Err(e) = self
+            .context
+            .table_metadata_manager
+            .consistency_poison_manager()
+            .put(
+                &ConsistencyPoisonKey::new(ResourceType::Table, table_id as u64),
+                procedure_id,
+            )
+            .await
+        {
+            if !e.is_consistency_poison() {
+                return Err(BoxedError::new(e)).context(RetryLaterSnafu);
+            }
+            return Err(e);
+        }
+
+        Ok(())
+    }
+
+    async fn delete_consistency_poison(
+        &self,
+        table_id: TableId,
+        procedure_id: ProcedureId,
+    ) -> Result<()> {
+        if let Err(e) = self
+            .context
+            .table_metadata_manager
+            .consistency_poison_manager()
+            .delete(
+                &ConsistencyPoisonKey::new(ResourceType::Table, table_id as u64),
+                procedure_id,
+            )
+            .await
+        {
+            if !e.is_consistency_poison() {
+                return Err(BoxedError::new(e)).context(RetryLaterSnafu);
+            }
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    pub async fn submit_alter_region_requests(
+        &mut self,
+        procedure_id: ProcedureId,
+    ) -> Result<Status> {
         let table_id = self.data.table_id();
         let (_, physical_table_route) = self
             .context
@@ -127,6 +178,9 @@ impl AlterTableProcedure {
             alter_kind,
         );
 
+        ensure!(!leaders.is_empty(), NoLeaderSnafu { table_id });
+        // Put the consistency poison before submitting alter region requests.
+        self.put_consistency_poison(table_id, procedure_id).await?;
         for datanode in leaders {
             let requester = self.context.node_manager.datanode(&datanode).await;
             let regions = find_leader_regions(&physical_table_route.region_routes, &datanode);
@@ -140,24 +194,47 @@ impl AlterTableProcedure {
                 let requester = requester.clone();
 
                 alter_region_tasks.push(async move {
-                    if let Err(err) = requester.handle(request).await {
-                        if err.status_code() != StatusCode::RequestOutdated {
-                            // Treat request outdated as success.
-                            // The engine will throw this code when the schema version not match.
-                            // As this procedure has locked the table, the only reason for this error
-                            // is procedure is succeeded before and is retrying.
-                            return Err(add_peer_context_if_needed(datanode)(err));
-                        }
-                    }
-                    Ok(())
+                    requester
+                        .handle(request)
+                        .await
+                        .map_err(add_peer_context_if_needed(datanode))
                 });
             }
         }
 
-        future::join_all(alter_region_tasks)
+        let results = future::join_all(alter_region_tasks)
             .await
             .into_iter()
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Vec<_>>();
+
+        match handle_multiple_results(results) {
+            MultipleResults::PartialRetryable(error) => {
+                // Just returns the error, and wait for the next try.
+                return Err(error);
+            }
+            MultipleResults::PartialNonRetryable(error) => {
+                // No retry will be done.
+                return Err(error);
+            }
+            MultipleResults::AllRetryable(error) => {
+                // Just returns the error, and wait for the next try.
+                return Err(error);
+            }
+            MultipleResults::Ok => {
+                // continue
+                self.delete_consistency_poison(table_id, procedure_id)
+                    .await?;
+            }
+            MultipleResults::AllNonRetryable(error) => {
+                // It assumes the metadata on datanode is not changed.
+                // Case: The alter region request is sent but not applied. (e.g., InvalidArgument)
+
+                // Delete consistency poison before returning the error.
+                self.delete_consistency_poison(table_id, procedure_id)
+                    .await?;
+                return Err(error);
+            }
+        }
 
         self.data.state = AlterTableState::UpdateMetadata;
 
@@ -250,7 +327,7 @@ impl Procedure for AlterTableProcedure {
         Self::TYPE_NAME
     }
 
-    async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
+    async fn execute(&mut self, ctx: &ProcedureContext) -> ProcedureResult<Status> {
         let error_handler = |e: Error| {
             if e.is_retry_later() {
                 ProcedureError::retry_later(e)
@@ -269,7 +346,9 @@ impl Procedure for AlterTableProcedure {
 
         match state {
             AlterTableState::Prepare => self.on_prepare().await,
-            AlterTableState::SubmitAlterRegionRequests => self.submit_alter_region_requests().await,
+            AlterTableState::SubmitAlterRegionRequests => {
+                self.submit_alter_region_requests(ctx.procedure_id).await
+            }
             AlterTableState::UpdateMetadata => self.on_update_metadata().await,
             AlterTableState::InvalidateTableCache => self.on_broadcast().await,
         }

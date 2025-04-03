@@ -25,6 +25,7 @@ use api::v1::{
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_procedure::ProcedureId;
 use store_api::storage::RegionId;
 use table::requests::TTL_KEY;
 use tokio::sync::mpsc::{self};
@@ -33,8 +34,11 @@ use crate::ddl::alter_table::AlterTableProcedure;
 use crate::ddl::test_util::alter_table::TestAlterTableExprBuilder;
 use crate::ddl::test_util::create_table::test_create_table_task;
 use crate::ddl::test_util::datanode_handler::{
-    DatanodeWatcher, RequestOutdatedErrorDatanodeHandler,
+    AllFailureDatanodeHandler, DatanodeWatcher, PartialSuccessDatanodeHandler,
+    RequestOutdatedErrorDatanodeHandler,
 };
+use crate::error::Error;
+use crate::key::consistency_poison::{ConsistencyPoisonKey, ResourceType};
 use crate::key::datanode_table::DatanodeTableKey;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
@@ -42,6 +46,32 @@ use crate::peer::Peer;
 use crate::rpc::ddl::AlterTableTask;
 use crate::rpc::router::{Region, RegionRoute};
 use crate::test_util::{new_ddl_context, MockDatanodeManager};
+
+fn prepare_table_route(table_id: u32) -> TableRouteValue {
+    TableRouteValue::physical(vec![
+        RegionRoute {
+            region: Region::new_test(RegionId::new(table_id, 1)),
+            leader_peer: Some(Peer::empty(1)),
+            follower_peers: vec![Peer::empty(5)],
+            leader_state: None,
+            leader_down_since: None,
+        },
+        RegionRoute {
+            region: Region::new_test(RegionId::new(table_id, 2)),
+            leader_peer: Some(Peer::empty(2)),
+            follower_peers: vec![Peer::empty(4)],
+            leader_state: None,
+            leader_down_since: None,
+        },
+        RegionRoute {
+            region: Region::new_test(RegionId::new(table_id, 3)),
+            leader_peer: Some(Peer::empty(3)),
+            follower_peers: vec![],
+            leader_state: None,
+            leader_down_since: None,
+        },
+    ])
+}
 
 fn test_rename_alter_table_task(table_name: &str, new_table_name: &str) -> AlterTableTask {
     let builder = TestAlterTableExprBuilder::default()
@@ -101,29 +131,7 @@ async fn test_on_submit_alter_request() {
         .table_metadata_manager
         .create_table_metadata(
             task.table_info.clone(),
-            TableRouteValue::physical(vec![
-                RegionRoute {
-                    region: Region::new_test(RegionId::new(table_id, 1)),
-                    leader_peer: Some(Peer::empty(1)),
-                    follower_peers: vec![Peer::empty(5)],
-                    leader_state: None,
-                    leader_down_since: None,
-                },
-                RegionRoute {
-                    region: Region::new_test(RegionId::new(table_id, 2)),
-                    leader_peer: Some(Peer::empty(2)),
-                    follower_peers: vec![Peer::empty(4)],
-                    leader_state: None,
-                    leader_down_since: None,
-                },
-                RegionRoute {
-                    region: Region::new_test(RegionId::new(table_id, 3)),
-                    leader_peer: Some(Peer::empty(3)),
-                    follower_peers: vec![],
-                    leader_state: None,
-                    leader_down_since: None,
-                },
-            ]),
+            prepare_table_route(table_id),
             HashMap::new(),
         )
         .await
@@ -141,9 +149,14 @@ async fn test_on_submit_alter_request() {
             })),
         },
     };
-    let mut procedure = AlterTableProcedure::new(table_id, alter_table_task, ddl_context).unwrap();
+    let procedure_id = ProcedureId::random();
+    let mut procedure =
+        AlterTableProcedure::new(table_id, alter_table_task, ddl_context.clone()).unwrap();
     procedure.on_prepare().await.unwrap();
-    procedure.submit_alter_region_requests().await.unwrap();
+    procedure
+        .submit_alter_region_requests(procedure_id)
+        .await
+        .unwrap();
 
     let check = |peer: Peer,
                  request: RegionRequest,
@@ -169,6 +182,15 @@ async fn test_on_submit_alter_request() {
     check(peer, request, 2, RegionId::new(table_id, 2));
     let (peer, request) = results.remove(0);
     check(peer, request, 3, RegionId::new(table_id, 3));
+
+    let key = ConsistencyPoisonKey::new(ResourceType::Table, table_id as u64);
+    let value = ddl_context
+        .table_metadata_manager
+        .consistency_poison_manager()
+        .get(&key)
+        .await
+        .unwrap();
+    assert!(value.is_none());
 }
 
 #[tokio::test]
@@ -185,29 +207,7 @@ async fn test_on_submit_alter_request_with_outdated_request() {
         .table_metadata_manager
         .create_table_metadata(
             task.table_info.clone(),
-            TableRouteValue::physical(vec![
-                RegionRoute {
-                    region: Region::new_test(RegionId::new(table_id, 1)),
-                    leader_peer: Some(Peer::empty(1)),
-                    follower_peers: vec![Peer::empty(5)],
-                    leader_state: None,
-                    leader_down_since: None,
-                },
-                RegionRoute {
-                    region: Region::new_test(RegionId::new(table_id, 2)),
-                    leader_peer: Some(Peer::empty(2)),
-                    follower_peers: vec![Peer::empty(4)],
-                    leader_state: None,
-                    leader_down_since: None,
-                },
-                RegionRoute {
-                    region: Region::new_test(RegionId::new(table_id, 3)),
-                    leader_peer: Some(Peer::empty(3)),
-                    follower_peers: vec![],
-                    leader_state: None,
-                    leader_down_since: None,
-                },
-            ]),
+            prepare_table_route(table_id),
             HashMap::new(),
         )
         .await
@@ -225,9 +225,14 @@ async fn test_on_submit_alter_request_with_outdated_request() {
             })),
         },
     };
+    let procedure_id = ProcedureId::random();
     let mut procedure = AlterTableProcedure::new(table_id, alter_table_task, ddl_context).unwrap();
     procedure.on_prepare().await.unwrap();
-    procedure.submit_alter_region_requests().await.unwrap();
+    let err = procedure
+        .submit_alter_region_requests(procedure_id)
+        .await
+        .unwrap_err();
+    assert!(!err.is_retry_later());
 }
 
 #[tokio::test]
@@ -326,9 +331,13 @@ async fn test_on_update_metadata_add_columns() {
             })),
         },
     };
+    let procedure_id = ProcedureId::random();
     let mut procedure = AlterTableProcedure::new(table_id, task, ddl_context.clone()).unwrap();
     procedure.on_prepare().await.unwrap();
-    procedure.submit_alter_region_requests().await.unwrap();
+    procedure
+        .submit_alter_region_requests(procedure_id)
+        .await
+        .unwrap();
     procedure.on_update_metadata().await.unwrap();
 
     let table_info = ddl_context
@@ -387,9 +396,13 @@ async fn test_on_update_table_options() {
             })),
         },
     };
+    let procedure_id = ProcedureId::random();
     let mut procedure = AlterTableProcedure::new(table_id, task, ddl_context.clone()).unwrap();
     procedure.on_prepare().await.unwrap();
-    procedure.submit_alter_region_requests().await.unwrap();
+    procedure
+        .submit_alter_region_requests(procedure_id)
+        .await
+        .unwrap();
     procedure.on_update_metadata().await.unwrap();
 
     let table_info = ddl_context
@@ -416,4 +429,192 @@ async fn test_on_update_table_options() {
         region_info.region_options,
         HashMap::from(&table_info.meta.options)
     );
+}
+
+#[tokio::test]
+async fn test_on_submit_alter_request_with_partial_success() {
+    on_submit_alter_request_with_partial_success(true).await;
+    on_submit_alter_request_with_partial_success(false).await;
+}
+
+async fn on_submit_alter_request_with_partial_success(retryable: bool) {
+    common_telemetry::init_default_ut_logging();
+    let node_manager = Arc::new(MockDatanodeManager::new(PartialSuccessDatanodeHandler {
+        retryable,
+    }));
+    let ddl_context = new_ddl_context(node_manager);
+    let table_id = 1024;
+    let table_name = "foo";
+    let task = test_create_table_task(table_name, table_id);
+    // Puts a value to table name key.
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info.clone(),
+            prepare_table_route(table_id),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let alter_table_task = AlterTableTask {
+        alter_table: AlterTableExpr {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: table_name.to_string(),
+            kind: Some(Kind::DropColumns(DropColumns {
+                drop_columns: vec![DropColumn {
+                    name: "cpu".to_string(),
+                }],
+            })),
+        },
+    };
+    let procedure_id = ProcedureId::random();
+    let mut procedure =
+        AlterTableProcedure::new(table_id, alter_table_task, ddl_context.clone()).unwrap();
+    procedure.on_prepare().await.unwrap();
+    procedure
+        .submit_alter_region_requests(procedure_id)
+        .await
+        .unwrap_err();
+    // submit again
+    let err = procedure
+        .submit_alter_region_requests(procedure_id)
+        .await
+        .unwrap_err();
+    if retryable {
+        assert!(err.is_retry_later());
+    } else {
+        assert!(!err.is_retry_later());
+    }
+    let key = ConsistencyPoisonKey::new(ResourceType::Table, table_id as u64);
+    let value = ddl_context
+        .table_metadata_manager
+        .consistency_poison_manager()
+        .get(&key)
+        .await
+        .unwrap();
+    assert!(value.is_some());
+}
+
+#[tokio::test]
+async fn test_on_submit_alter_request_with_all_failure() {
+    on_submit_alter_request_with_all_failure(true).await;
+    on_submit_alter_request_with_all_failure(false).await;
+}
+
+async fn on_submit_alter_request_with_all_failure(retryable: bool) {
+    common_telemetry::init_default_ut_logging();
+    let node_manager = Arc::new(MockDatanodeManager::new(AllFailureDatanodeHandler {
+        retryable,
+    }));
+    let ddl_context = new_ddl_context(node_manager);
+    let table_id = 1024;
+    let table_name = "foo";
+    let task = test_create_table_task(table_name, table_id);
+    // Puts a value to table name key.
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info.clone(),
+            prepare_table_route(table_id),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let alter_table_task = AlterTableTask {
+        alter_table: AlterTableExpr {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: table_name.to_string(),
+            kind: Some(Kind::DropColumns(DropColumns {
+                drop_columns: vec![DropColumn {
+                    name: "cpu".to_string(),
+                }],
+            })),
+        },
+    };
+    let procedure_id = ProcedureId::random();
+    let mut procedure =
+        AlterTableProcedure::new(table_id, alter_table_task, ddl_context.clone()).unwrap();
+    procedure.on_prepare().await.unwrap();
+    procedure
+        .submit_alter_region_requests(procedure_id)
+        .await
+        .unwrap_err();
+    // submit again
+    let err = procedure
+        .submit_alter_region_requests(procedure_id)
+        .await
+        .unwrap_err();
+
+    let key = ConsistencyPoisonKey::new(ResourceType::Table, table_id as u64);
+    let value = ddl_context
+        .table_metadata_manager
+        .consistency_poison_manager()
+        .get(&key)
+        .await
+        .unwrap();
+    if retryable {
+        assert!(err.is_retry_later());
+        assert!(value.is_some());
+    } else {
+        assert!(!err.is_retry_later());
+        // all failure, the consistency guard should be removed
+        assert!(value.is_none());
+    }
+}
+
+#[tokio::test]
+async fn test_on_submit_alter_request_with_conflict() {
+    common_telemetry::init_default_ut_logging();
+    let node_manager = Arc::new(MockDatanodeManager::new(AllFailureDatanodeHandler {
+        retryable: false,
+    }));
+    let ddl_context = new_ddl_context(node_manager);
+    let table_id = 1024;
+    let table_name = "foo";
+    let task = test_create_table_task(table_name, table_id);
+    // Puts a value to table name key.
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info.clone(),
+            prepare_table_route(table_id),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let alter_table_task = AlterTableTask {
+        alter_table: AlterTableExpr {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: table_name.to_string(),
+            kind: Some(Kind::DropColumns(DropColumns {
+                drop_columns: vec![DropColumn {
+                    name: "cpu".to_string(),
+                }],
+            })),
+        },
+    };
+    let key = ConsistencyPoisonKey::new(ResourceType::Table, table_id as u64);
+    let another_procedure_id = ProcedureId::random();
+    ddl_context
+        .table_metadata_manager
+        .consistency_poison_manager()
+        .put(&key, another_procedure_id)
+        .await
+        .unwrap();
+
+    let procedure_id = ProcedureId::random();
+    let mut procedure =
+        AlterTableProcedure::new(table_id, alter_table_task, ddl_context.clone()).unwrap();
+    procedure.on_prepare().await.unwrap();
+    let err = procedure
+        .submit_alter_region_requests(procedure_id)
+        .await
+        .unwrap_err();
+    assert_matches!(err, Error::ConsistencyPoison { .. });
 }
