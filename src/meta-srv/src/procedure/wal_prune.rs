@@ -244,7 +244,9 @@ impl WalPruneProcedure {
                 input: flush_instruction.to_string(),
             })?;
             let ch = Channel::Datanode(peer.id);
-            let _ = self.context.mailbox.send(&ch, msg, FLUSH_TIMEOUT).await?;
+            // Instantly drop the receiver to not block.
+            let recv = self.context.mailbox.send(&ch, msg, FLUSH_TIMEOUT).await?;
+            std::mem::drop(recv);
         }
         self.data.state = WalPruneState::Prune;
         Ok(Status::executing(true))
@@ -542,9 +544,9 @@ mod tests {
         let sorted_region_ids = region_ids
             .iter()
             .cloned()
-            .sorted_by(|a, b| a.as_u64().cmp(&b.as_u64()))
+            .sorted_by_key(|a| a.as_u64())
             .collect::<Vec<_>>();
-        flush_requested_region_ids.sort_by(|a, b| a.as_u64().cmp(&b.as_u64()));
+        flush_requested_region_ids.sort_by_key(|a| a.as_u64());
         assert_eq!(flush_requested_region_ids, sorted_region_ids);
     }
 
