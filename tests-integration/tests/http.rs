@@ -3139,10 +3139,10 @@ pub async fn test_jaeger_query_api(store_type: StorageType) {
       "spans": [
         {
           "traceID": "5611dce1bc9ebed65352d99a027b08ea",
-          "spanID": "008421dbbd33a3e9",
-          "operationName": "access-mysql",
+          "spanID": "ffa03416a7b9ea48",
+          "operationName": "access-redis",
           "references": [],
-          "startTime": 1738726754492421,
+          "startTime": 1738726754492422,
           "duration": 100000,
           "tags": [
             {
@@ -3153,7 +3153,7 @@ pub async fn test_jaeger_query_api(store_type: StorageType) {
             {
               "key": "operation.type",
               "type": "string",
-              "value": "access-mysql"
+              "value": "access-redis"
             },
             {
               "key": "otel.scope.name",
@@ -3181,10 +3181,10 @@ pub async fn test_jaeger_query_api(store_type: StorageType) {
         },
         {
           "traceID": "5611dce1bc9ebed65352d99a027b08ea",
-          "spanID": "ffa03416a7b9ea48",
-          "operationName": "access-redis",
+          "spanID": "008421dbbd33a3e9",
+          "operationName": "access-mysql",
           "references": [],
-          "startTime": 1738726754492422,
+          "startTime": 1738726754492421,
           "duration": 100000,
           "tags": [
             {
@@ -3195,7 +3195,7 @@ pub async fn test_jaeger_query_api(store_type: StorageType) {
             {
               "key": "operation.type",
               "type": "string",
-              "value": "access-redis"
+              "value": "access-mysql"
             },
             {
               "key": "otel.scope.name",
@@ -3602,10 +3602,10 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
       "spans": [
         {
           "traceID": "5611dce1bc9ebed65352d99a027b08ea",
-          "spanID": "008421dbbd33a3e9",
-          "operationName": "access-mysql",
+          "spanID": "ffa03416a7b9ea48",
+          "operationName": "access-redis",
           "references": [],
-          "startTime": 1738726754492421,
+          "startTime": 1738726754492422,
           "duration": 100000,
           "tags": [
             {
@@ -3616,7 +3616,7 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
             {
               "key": "operation.type",
               "type": "string",
-              "value": "access-mysql"
+              "value": "access-redis"
             },
             {
               "key": "otel.scope.name",
@@ -3644,10 +3644,10 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
         },
         {
           "traceID": "5611dce1bc9ebed65352d99a027b08ea",
-          "spanID": "ffa03416a7b9ea48",
-          "operationName": "access-redis",
+          "spanID": "008421dbbd33a3e9",
+          "operationName": "access-mysql",
           "references": [],
-          "startTime": 1738726754492422,
+          "startTime": 1738726754492421,
           "duration": 100000,
           "tags": [
             {
@@ -3658,7 +3658,7 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
             {
               "key": "operation.type",
               "type": "string",
-              "value": "access-redis"
+              "value": "access-mysql"
             },
             {
               "key": "otel.scope.name",

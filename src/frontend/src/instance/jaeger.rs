@@ -28,7 +28,7 @@ use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use datafusion::dataframe::DataFrame;
 use datafusion::execution::context::SessionContext;
 use datafusion::execution::SessionStateBuilder;
-use datafusion_expr::{col, lit, lit_timestamp_nano, wildcard, Expr};
+use datafusion_expr::{col, lit, lit_timestamp_nano, wildcard, Expr, SortExpr};
 use query::QueryEngineRef;
 use serde_json::Value as JsonValue;
 use servers::error::{
@@ -107,6 +107,8 @@ impl JaegerQueryHandler for Instance {
         //   timestamp >= {start_time} AND
         //   timestamp <= {end_time} AND
         //   span_kind = '{span_kind}'
+        // ORDER BY
+        //   span_name ASC
         // ```.
         Ok(query_trace_table(
             ctx,
@@ -119,7 +121,7 @@ impl JaegerQueryHandler for Instance {
                 col(TIMESTAMP_COLUMN),
             ],
             filters,
-            vec![col(SPAN_NAME_COLUMN)],
+            vec![col(SPAN_NAME_COLUMN).sort(true, false)], // Sort by span_name in ascending order.
             Some(DEFAULT_LIMIT),
             None,
             vec![col(SPAN_NAME_COLUMN), col(SPAN_KIND_COLUMN)],
@@ -138,7 +140,7 @@ impl JaegerQueryHandler for Instance {
         // WHERE
         //   trace_id = '{trace_id}'
         // ORDER BY
-        //   timestamp
+        //   timestamp DESC
         // ```.
         let selects = vec![wildcard()];
 
@@ -150,7 +152,7 @@ impl JaegerQueryHandler for Instance {
             self.query_engine(),
             selects,
             filters,
-            vec![col(TIMESTAMP_COLUMN)],
+            vec![col(TIMESTAMP_COLUMN).sort(false, false)], // Sort by timestamp in descending order.
             Some(DEFAULT_LIMIT),
             None,
             vec![],
@@ -193,7 +195,7 @@ impl JaegerQueryHandler for Instance {
             self.query_engine(),
             selects,
             filters,
-            vec![col(TIMESTAMP_COLUMN)],
+            vec![col(TIMESTAMP_COLUMN).sort(false, false)], // Sort by timestamp in descending order.
             Some(DEFAULT_LIMIT),
             query_params.tags,
             vec![],
@@ -209,7 +211,7 @@ async fn query_trace_table(
     query_engine: &QueryEngineRef,
     selects: Vec<Expr>,
     filters: Vec<Expr>,
-    sorts: Vec<Expr>,
+    sorts: Vec<SortExpr>,
     limit: Option<usize>,
     tags: Option<HashMap<String, JsonValue>>,
     distincts: Vec<Expr>,
@@ -271,7 +273,7 @@ async fn query_trace_table(
 
     // Apply the sorts if needed.
     let dataframe = if !sorts.is_empty() {
-        dataframe.sort_by(sorts).context(DataFusionSnafu)?
+        dataframe.sort(sorts).context(DataFusionSnafu)?
     } else {
         dataframe
     };
