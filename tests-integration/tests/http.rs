@@ -32,7 +32,9 @@ use pipeline::GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME;
 use prost::Message;
 use serde_json::{json, Value};
 use servers::http::handler::HealthResponse;
-use servers::http::header::constants::GREPTIME_LOG_TABLE_NAME_HEADER_NAME;
+use servers::http::header::constants::{
+    GREPTIME_LOG_TABLE_NAME_HEADER_NAME, GREPTIME_TRACE_SERVICES_TABLE_NAME_HEADER_NAME,
+};
 use servers::http::header::{GREPTIME_DB_HEADER_NAME, GREPTIME_TIMEZONE_HEADER_NAME};
 use servers::http::prometheus::{PrometheusJsonResponse, PrometheusResponse};
 use servers::http::result::error_result::ErrorResponse;
@@ -2328,6 +2330,7 @@ pub async fn test_otlp_traces_v0(store_type: StorageType) {
 {"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"telemetrygen"}}],"droppedAttributesCount":0},"scopeSpans":[{"scope":{"name":"telemetrygen","version":"","attributes":[],"droppedAttributesCount":0},"spans":[{"traceId":"c05d7a4ec8e1f231f02ed6e8da8655b4","spanId":"9630f2916e2f7909","traceState":"","parentSpanId":"d24f921c75f68e23","flags":256,"name":"okey-dokey-0","kind":2,"startTimeUnixNano":"1736480942444376000","endTimeUnixNano":"1736480942444499000","attributes":[{"key":"net.peer.ip","value":{"stringValue":"1.2.3.4"}},{"key":"peer.service","value":{"stringValue":"telemetrygen-client"}}],"droppedAttributesCount":0,"events":[],"droppedEventsCount":0,"links":[],"droppedLinksCount":0,"status":{"message":"","code":0}},{"traceId":"c05d7a4ec8e1f231f02ed6e8da8655b4","spanId":"d24f921c75f68e23","traceState":"","parentSpanId":"","flags":256,"name":"lets-go","kind":3,"startTimeUnixNano":"1736480942444376000","endTimeUnixNano":"1736480942444499000","attributes":[{"key":"net.peer.ip","value":{"stringValue":"1.2.3.4"}},{"key":"peer.service","value":{"stringValue":"telemetrygen-server"}}],"droppedAttributesCount":0,"events":[],"droppedEventsCount":0,"links":[],"droppedLinksCount":0,"status":{"message":"","code":0}},{"traceId":"cc9e0991a2e63d274984bd44ee669203","spanId":"8f847259b0f6e1ab","traceState":"","parentSpanId":"eba7be77e3558179","flags":256,"name":"okey-dokey-0","kind":2,"startTimeUnixNano":"1736480942444589000","endTimeUnixNano":"1736480942444712000","attributes":[{"key":"net.peer.ip","value":{"stringValue":"1.2.3.4"}},{"key":"peer.service","value":{"stringValue":"telemetrygen-client"}}],"droppedAttributesCount":0,"events":[],"droppedEventsCount":0,"links":[],"droppedLinksCount":0,"status":{"message":"","code":0}},{"traceId":"cc9e0991a2e63d274984bd44ee669203","spanId":"eba7be77e3558179","traceState":"","parentSpanId":"","flags":256,"name":"lets-go","kind":3,"startTimeUnixNano":"1736480942444589000","endTimeUnixNano":"1736480942444712000","attributes":[{"key":"net.peer.ip","value":{"stringValue":"1.2.3.4"}},{"key":"peer.service","value":{"stringValue":"telemetrygen-server"}}],"droppedAttributesCount":0,"events":[],"droppedEventsCount":0,"links":[],"droppedLinksCount":0,"status":{"message":"","code":0}}],"schemaUrl":""}],"schemaUrl":"https://opentelemetry.io/schemas/1.4.0"}]}
 "#;
 
+    let test_trace_services_table_name = "test_trace_services_table";
     let req: ExportTraceServiceRequest = serde_json::from_str(content).unwrap();
     let body = req.encode_to_vec();
 
@@ -2337,16 +2340,34 @@ pub async fn test_otlp_traces_v0(store_type: StorageType) {
     // write traces data
     let res = send_req(
         &client,
-        vec![(
-            HeaderName::from_static("content-type"),
-            HeaderValue::from_static("application/x-protobuf"),
-        )],
+        vec![
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/x-protobuf"),
+            ),
+            (
+                HeaderName::from_static(GREPTIME_TRACE_SERVICES_TABLE_NAME_HEADER_NAME),
+                HeaderValue::from_static(test_trace_services_table_name),
+            ),
+        ],
         "/v1/otlp/v1/traces",
         body.clone(),
         false,
     )
     .await;
     assert_eq!(StatusCode::OK, res.status());
+
+    let expected = r#"[["telemetrygen"]]"#;
+    validate_data(
+        "otlp_traces",
+        &client,
+        &format!(
+            "select service_name from {};",
+            test_trace_services_table_name
+        ),
+        expected,
+    )
+    .await;
 
     // select traces data
     let expected = r#"[[1736480942444376000,1736480942444499000,123000,"telemetrygen","c05d7a4ec8e1f231f02ed6e8da8655b4","d24f921c75f68e23","","SPAN_KIND_CLIENT","lets-go","STATUS_CODE_UNSET","","",{"net.peer.ip":"1.2.3.4","peer.service":"telemetrygen-server"},[],[],"telemetrygen","",{},{"service.name":"telemetrygen"}],[1736480942444376000,1736480942444499000,123000,"telemetrygen","c05d7a4ec8e1f231f02ed6e8da8655b4","9630f2916e2f7909","d24f921c75f68e23","SPAN_KIND_SERVER","okey-dokey-0","STATUS_CODE_UNSET","","",{"net.peer.ip":"1.2.3.4","peer.service":"telemetrygen-client"},[],[],"telemetrygen","",{},{"service.name":"telemetrygen"}],[1736480942444589000,1736480942444712000,123000,"telemetrygen","cc9e0991a2e63d274984bd44ee669203","eba7be77e3558179","","SPAN_KIND_CLIENT","lets-go","STATUS_CODE_UNSET","","",{"net.peer.ip":"1.2.3.4","peer.service":"telemetrygen-server"},[],[],"telemetrygen","",{},{"service.name":"telemetrygen"}],[1736480942444589000,1736480942444712000,123000,"telemetrygen","cc9e0991a2e63d274984bd44ee669203","8f847259b0f6e1ab","eba7be77e3558179","SPAN_KIND_SERVER","okey-dokey-0","STATUS_CODE_UNSET","","",{"net.peer.ip":"1.2.3.4","peer.service":"telemetrygen-client"},[],[],"telemetrygen","",{},{"service.name":"telemetrygen"}]]"#;
@@ -2402,6 +2423,7 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
 
     let req: ExportTraceServiceRequest = serde_json::from_str(content).unwrap();
     let body = req.encode_to_vec();
+    let test_trace_services_table_name = "test_trace_services_table";
 
     // handshake
     let client = TestClient::new(app).await;
@@ -2422,6 +2444,10 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
                 HeaderName::from_static("x-greptime-trace-table-name"),
                 HeaderValue::from_static("mytable"),
             ),
+            (
+                HeaderName::from_static(GREPTIME_TRACE_SERVICES_TABLE_NAME_HEADER_NAME),
+                HeaderValue::from_static(test_trace_services_table_name),
+            ),
         ],
         "/v1/otlp/v1/traces",
         body.clone(),
@@ -2429,6 +2455,18 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
     )
     .await;
     assert_eq!(StatusCode::OK, res.status());
+
+    let expected = r#"[["telemetrygen"]]"#;
+    validate_data(
+        "otlp_traces",
+        &client,
+        &format!(
+            "select service_name from {};",
+            test_trace_services_table_name
+        ),
+        expected,
+    )
+    .await;
 
     // select traces data
     let expected = r#"[[1736480942444376000,1736480942444499000,123000,null,"c05d7a4ec8e1f231f02ed6e8da8655b4","d24f921c75f68e23","SPAN_KIND_CLIENT","lets-go","STATUS_CODE_UNSET","","","telemetrygen","","telemetrygen","1.2.3.4","telemetrygen-server",[],[]],[1736480942444376000,1736480942444499000,123000,"d24f921c75f68e23","c05d7a4ec8e1f231f02ed6e8da8655b4","9630f2916e2f7909","SPAN_KIND_SERVER","okey-dokey-0","STATUS_CODE_UNSET","","","telemetrygen","","telemetrygen","1.2.3.4","telemetrygen-client",[],[]],[1736480942444589000,1736480942444712000,123000,null,"cc9e0991a2e63d274984bd44ee669203","eba7be77e3558179","SPAN_KIND_CLIENT","lets-go","STATUS_CODE_UNSET","","","telemetrygen","","telemetrygen","1.2.3.4","telemetrygen-server",[],[]],[1736480942444589000,1736480942444712000,123000,"eba7be77e3558179","cc9e0991a2e63d274984bd44ee669203","8f847259b0f6e1ab","SPAN_KIND_SERVER","okey-dokey-0","STATUS_CODE_UNSET","","","telemetrygen","","telemetrygen","1.2.3.4","telemetrygen-client",[],[]]]"#;
@@ -2439,6 +2477,15 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
         "otlp_traces",
         &client,
         "show create table mytable;",
+        expected_ddl,
+    )
+    .await;
+
+    let expected_ddl = r#"[["test_trace_services_table","CREATE TABLE IF NOT EXISTS \"test_trace_services_table\" (\n  \"timestamp\" TIMESTAMP(9) NOT NULL,\n  \"service_name\" STRING NULL,\n  TIME INDEX (\"timestamp\")\n)\n\nENGINE=mito\nWITH(\n  append_mode = 'true'\n)"]]"#;
+    validate_data(
+        "otlp_traces",
+        &client,
+        &format!("show create table {};", test_trace_services_table_name),
         expected_ddl,
     )
     .await;
@@ -3327,11 +3374,7 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     let client = TestClient::new(app).await;
 
     // Test empty response for `/api/services` API before writing any traces.
-    let res = client
-        .get("/v1/jaeger/api/services")
-        .header("x-greptime-trace-table-name", "mytable")
-        .send()
-        .await;
+    let res = client.get("/v1/jaeger/api/services").send().await;
     assert_eq!(StatusCode::OK, res.status());
     let expected = r#"
     {
@@ -3475,11 +3518,7 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     assert_eq!(StatusCode::OK, res.status());
 
     // Test `/api/services` API.
-    let res = client
-        .get("/v1/jaeger/api/services")
-        .header("x-greptime-trace-table-name", "mytable")
-        .send()
-        .await;
+    let res = client.get("/v1/jaeger/api/services").send().await;
     assert_eq!(StatusCode::OK, res.status());
     let expected = r#"
     {

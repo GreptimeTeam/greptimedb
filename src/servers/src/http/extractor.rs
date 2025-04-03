@@ -24,7 +24,8 @@ use crate::http::header::constants::{
     GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME, GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME,
     GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME, GREPTIME_LOG_TABLE_NAME_HEADER_NAME,
     GREPTIME_PIPELINE_NAME_HEADER_NAME, GREPTIME_PIPELINE_PARAMS_HEADER,
-    GREPTIME_PIPELINE_VERSION_HEADER_NAME, GREPTIME_TRACE_TABLE_NAME_HEADER_NAME,
+    GREPTIME_PIPELINE_VERSION_HEADER_NAME, GREPTIME_TRACE_SERVICES_TABLE_NAME_HEADER_NAME,
+    GREPTIME_TRACE_TABLE_NAME_HEADER_NAME,
 };
 
 /// Axum extractor for optional target log table name from HTTP header
@@ -45,9 +46,14 @@ where
 
 /// Axum extractor for optional target trace table name from HTTP header
 /// using [`GREPTIME_TRACE_TABLE_NAME_HEADER_NAME`] as key.
-pub struct TraceTableName(pub Option<String>);
+pub struct TraceTables {
+    /// The name of the trace table.
+    pub trace_table_name: Option<String>,
+    /// The name of the trace services table.
+    pub trace_services_table_name: Option<String>,
+}
 
-impl<S> FromRequestParts<S> for TraceTableName
+impl<S> FromRequestParts<S> for TraceTables
 where
     S: Send + Sync,
 {
@@ -55,8 +61,16 @@ where
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         let headers = &parts.headers;
-        string_value_from_header(headers, &[GREPTIME_TRACE_TABLE_NAME_HEADER_NAME])
-            .map(TraceTableName)
+        Ok(TraceTables {
+            trace_table_name: string_value_from_header(
+                headers,
+                &[GREPTIME_TRACE_TABLE_NAME_HEADER_NAME],
+            )?,
+            trace_services_table_name: string_value_from_header(
+                headers,
+                &[GREPTIME_TRACE_SERVICES_TABLE_NAME_HEADER_NAME],
+            )?,
+        })
     }
 }
 
