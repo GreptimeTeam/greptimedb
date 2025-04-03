@@ -15,12 +15,13 @@
 use std::ops::{Deref, DerefMut};
 use std::str::FromStr;
 
+use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 
 use crate::error::{EmptyInputFieldSnafu, Error, MissingInputFieldSnafu, Result};
 
 /// Raw processor-defined inputs and outputs
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Field {
     input_field: String,
     target_field: Option<String>,
@@ -79,7 +80,7 @@ impl Field {
 }
 
 /// A collection of fields.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Fields(Vec<Field>);
 
 impl Fields {

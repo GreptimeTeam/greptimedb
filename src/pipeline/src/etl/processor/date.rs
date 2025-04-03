@@ -17,6 +17,7 @@ use std::sync::Arc;
 use chrono::{DateTime, NaiveDateTime};
 use chrono_tz::Tz;
 use lazy_static::lazy_static;
+use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{
@@ -63,7 +64,7 @@ lazy_static! {
                 .collect();
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 struct Formats(Vec<Arc<String>>);
 
 impl Default for Formats {
@@ -147,7 +148,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for DateProcessor {
 
 /// deprecated it should be removed in the future
 /// Reserved for compatibility only
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct DateProcessor {
     fields: Fields,
     formats: Formats,

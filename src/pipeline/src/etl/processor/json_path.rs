@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use jsonpath_rust::JsonPath;
+use serde::{Deserialize, Serialize, Serializer};
 use snafu::{OptionExt, ResultExt};
 
 use super::{
@@ -66,13 +67,13 @@ impl TryFrom<&yaml_rust::yaml::Hash> for JsonPathProcessor {
                 _ => {}
             }
         }
-
+        let json_path = json_path.context(ProcessorMissingFieldSnafu {
+            processor: PROCESSOR_JSON_PATH,
+            field: JSON_PATH_NAME,
+        })?;
         let processor = JsonPathProcessor {
             fields,
-            json_path: json_path.context(ProcessorMissingFieldSnafu {
-                processor: PROCESSOR_JSON_PATH,
-                field: JSON_PATH_NAME,
-            })?,
+            json_path: JsonPathWrapper(json_path),
             ignore_missing,
             result_index: result_idex,
         };
@@ -82,18 +83,40 @@ impl TryFrom<&yaml_rust::yaml::Hash> for JsonPathProcessor {
 }
 
 #[derive(Debug)]
+struct JsonPathWrapper(JsonPath<Value>);
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct JsonPathProcessor {
     fields: Fields,
-    json_path: JsonPath<Value>,
+    json_path: JsonPathWrapper,
     ignore_missing: bool,
     result_index: Option<usize>,
+}
+
+impl Serialize for JsonPathWrapper {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.0.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for JsonPathWrapper {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Ok(JsonPathWrapper(JsonPath::try_from(s.as_str()).unwrap()))
+    }
 }
 
 impl Default for JsonPathProcessor {
     fn default() -> Self {
         JsonPathProcessor {
             fields: Fields::default(),
-            json_path: JsonPath::try_from("$").unwrap(),
+            json_path: JsonPathWrapper(JsonPath::try_from("$").unwrap()),
             ignore_missing: false,
             result_index: None,
         }
@@ -102,7 +125,7 @@ impl Default for JsonPathProcessor {
 
 impl JsonPathProcessor {
     fn process_field(&self, val: &Value) -> Result<Value> {
-        let processed = self.json_path.find(val);
+        let processed = self.json_path.0.find(val);
         match processed {
             Value::Array(arr) => {
                 if let Some(index) = self.result_index {
@@ -158,9 +181,9 @@ mod test {
         use super::*;
         use crate::Value;
 
-        let json_path = JsonPath::try_from("$.hello").unwrap();
+        let json_path: JsonPath<Value> = JsonPath::try_from("$.hello").unwrap();
         let processor = JsonPathProcessor {
-            json_path,
+            json_path: JsonPathWrapper(json_path),
             result_index: Some(0),
             ..Default::default()
         };

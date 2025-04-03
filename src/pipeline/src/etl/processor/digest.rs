@@ -22,8 +22,10 @@
 use std::borrow::Cow;
 
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 
+use super::regex::RegexWrapper;
 use crate::error::{
     DigestPatternInvalidSnafu, Error, KeyMustBeStringSnafu, ProcessorExpectStringSnafu,
     ProcessorMissingFieldSnafu, Result,
@@ -88,11 +90,11 @@ impl PresetPattern {
 }
 
 /// Computes a digest (hash) of the input string.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct DigestProcessor {
     fields: Fields,
     ignore_missing: bool,
-    patterns: Vec<Regex>,
+    patterns: Vec<RegexWrapper>,
 }
 
 impl DigestProcessor {
@@ -104,7 +106,7 @@ impl DigestProcessor {
     fn process_string(&self, val: &str) -> Result<Value> {
         let mut input = Cow::from(val);
         for pattern in &self.patterns {
-            if let Cow::Owned(new_string) = pattern.replace_all(&input, "") {
+            if let Cow::Owned(new_string) = pattern.0.replace_all(&input, "") {
                 input = Cow::Owned(new_string);
             }
         }
@@ -159,7 +161,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for DigestProcessor {
                     for pattern in preset_patterns {
                         let preset_pattern = pattern.parse::<PresetPattern>()?;
                         let regex = preset_pattern.regex();
-                        patterns.push(regex);
+                        patterns.push(RegexWrapper(regex));
                     }
                 }
                 REGEX_PATTERNS_NAME => {
@@ -173,7 +175,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for DigestProcessor {
                         .collect();
                     for pattern in regex_patterns {
                         let regex = Regex::new(&pattern).unwrap();
-                        patterns.push(regex);
+                        patterns.push(RegexWrapper(regex));
                     }
                 }
                 _ => {}
@@ -235,7 +237,7 @@ mod tests {
         let processor = DigestProcessor {
             fields: Fields::default(),
             ignore_missing: false,
-            patterns: vec![PresetPattern::Ip.regex()],
+            patterns: vec![RegexWrapper(PresetPattern::Ip.regex())],
         };
 
         let input = Value::String("192.168.1.1".to_string());
@@ -263,7 +265,7 @@ mod tests {
         let processor = DigestProcessor {
             fields: Fields::default(),
             ignore_missing: false,
-            patterns: vec![PresetPattern::Uuid.regex()],
+            patterns: vec![RegexWrapper(PresetPattern::Uuid.regex())],
         };
         // UUID v4
         let input = Value::String("123e4567-e89b-12d3-a456-426614174000".to_string());
@@ -296,7 +298,7 @@ mod tests {
         let processor = DigestProcessor {
             fields: Fields::default(),
             ignore_missing: false,
-            patterns: vec![PresetPattern::Bracketed.regex()],
+            patterns: vec![RegexWrapper(PresetPattern::Bracketed.regex())],
         };
 
         // Basic brackets
@@ -346,7 +348,7 @@ mod tests {
         let processor = DigestProcessor {
             fields: Fields::default(),
             ignore_missing: false,
-            patterns: vec![PresetPattern::Quoted.regex()],
+            patterns: vec![RegexWrapper(PresetPattern::Quoted.regex())],
         };
 
         let input = Value::String("\"quoted content\"".to_string());
@@ -366,7 +368,7 @@ mod tests {
         let processor = DigestProcessor {
             fields: Fields::default(),
             ignore_missing: false,
-            patterns: vec![Regex::new(r"\d+").unwrap()],
+            patterns: vec![RegexWrapper(Regex::new(r"\d+").unwrap())],
         };
 
         let input = Value::String("12345".to_string());

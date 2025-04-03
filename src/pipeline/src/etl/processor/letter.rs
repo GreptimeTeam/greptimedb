@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 
 use crate::error::{
@@ -28,7 +29,7 @@ use crate::etl::PipelineMap;
 
 pub(crate) const PROCESSOR_LETTER: &str = "letter";
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 enum Method {
     Upper,
     #[default]
@@ -60,7 +61,7 @@ impl std::str::FromStr for Method {
 }
 
 /// only support string value
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct LetterProcessor {
     fields: Fields,
     method: Method,

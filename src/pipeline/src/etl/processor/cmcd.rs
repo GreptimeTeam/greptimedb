@@ -16,6 +16,7 @@
 //!
 //! Refer to [`CmcdProcessor`] for more information.
 
+use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use urlencoding::decode;
 
@@ -148,7 +149,7 @@ fn pr(s: &str, k: &str, v: Option<&str>) -> Result<Value> {
 ///     MUST NOT be URLEncoded.
 /// 11. The data payload syntax is intended to be compliant with Structured Field Values for HTTP [6].
 /// 12. Transport Layer Security SHOULD be used to protect all transmission of CMCD data.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct CmcdProcessor {
     fields: Fields,
     ignore_missing: bool,

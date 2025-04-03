@@ -17,6 +17,7 @@
 use csv::{ReaderBuilder, Trim};
 use itertools::EitherOrBoth::{Both, Left, Right};
 use itertools::Itertools;
+use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{
@@ -40,8 +41,9 @@ const EMPTY_VALUE_NAME: &str = "empty_value";
 const TARGET_FIELDS: &str = "target_fields";
 
 /// only support string value
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct CsvProcessor {
+    #[serde(skip)]
     reader: ReaderBuilder,
     fields: Fields,
 

@@ -51,6 +51,7 @@ paste.workspace = true
 prometheus.workspace = true
 query.workspace = true
 regex.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 session.workspace = true
 simd-json.workspace = true

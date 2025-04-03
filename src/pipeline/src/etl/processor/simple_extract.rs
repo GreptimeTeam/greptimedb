@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use serde::{Deserialize, Serialize};
 use snafu::OptionExt as _;
 
 use crate::error::{Error, KeyMustBeStringSnafu, ProcessorMissingFieldSnafu, Result};
@@ -24,7 +25,7 @@ use crate::{PipelineMap, Processor, Value};
 
 pub(crate) const PROCESSOR_SIMPLE_EXTRACT: &str = "simple_extract";
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct SimpleExtractProcessor {
     fields: Fields,
     /// simple keys to extract nested JSON field

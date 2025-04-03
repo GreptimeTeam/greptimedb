@@ -16,6 +16,7 @@ use std::ops::Deref;
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use itertools::Itertools;
+use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 
 use crate::error::{
@@ -37,7 +38,7 @@ pub(crate) const PROCESSOR_DISSECT: &str = "dissect";
 
 const APPEND_SEPARATOR_NAME: &str = "append_separator";
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 enum StartModifier {
     Append(Option<u32>),
     NamedSkip,
@@ -59,7 +60,7 @@ impl std::fmt::Display for StartModifier {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 struct EndModifier;
 
 impl std::fmt::Display for EndModifier {
@@ -132,7 +133,7 @@ impl Name {
     }
 }
 
-#[derive(Debug, PartialEq, Default)]
+#[derive(Debug, PartialEq, Default, Serialize, Deserialize)]
 struct Name {
     name: String,
     start_modifier: Option<StartModifier>,
@@ -155,7 +156,7 @@ impl From<&str> for Name {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 enum Part {
     Split(String),
     Name(Name),
@@ -185,7 +186,7 @@ impl Part {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 struct Pattern {
     origin: String,
     parts: Vec<Part>,
@@ -407,7 +408,7 @@ impl Pattern {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct DissectProcessor {
     fields: Fields,
     patterns: Vec<Pattern>,

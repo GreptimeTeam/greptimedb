@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{
@@ -34,7 +35,7 @@ use crate::etl::PipelineMap;
 pub(crate) const PROCESSOR_EPOCH: &str = "epoch";
 const RESOLUTION_NAME: &str = "resolution";
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 enum Resolution {
     Second,
     #[default]
@@ -60,7 +61,7 @@ impl TryFrom<&str> for Resolution {
 /// support string, integer, float, time, epoch
 /// deprecated it should be removed in the future
 /// Reserved for compatibility only
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct EpochProcessor {
     fields: Fields,
     resolution: Resolution,
