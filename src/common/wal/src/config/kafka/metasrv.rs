@@ -15,7 +15,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::common::KafkaConnectionConfig;
-use crate::config::kafka::common::{backoff_prefix, BackoffConfig, KafkaTopicConfig};
+use crate::config::kafka::common::KafkaTopicConfig;
 
 /// Kafka wal configurations for metasrv.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -24,9 +24,6 @@ pub struct MetasrvKafkaConfig {
     /// The kafka connection config.
     #[serde(flatten)]
     pub connection: KafkaConnectionConfig,
-    /// The backoff config.
-    #[serde(flatten, with = "backoff_prefix")]
-    pub backoff: BackoffConfig,
     /// The kafka config.
     #[serde(flatten)]
     pub kafka_topic: KafkaTopicConfig,
@@ -38,7 +35,6 @@ impl Default for MetasrvKafkaConfig {
     fn default() -> Self {
         Self {
             connection: Default::default(),
-            backoff: Default::default(),
             kafka_topic: Default::default(),
             auto_create_topics: true,
         }
