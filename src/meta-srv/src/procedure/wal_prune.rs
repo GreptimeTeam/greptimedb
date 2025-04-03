@@ -38,7 +38,7 @@ use crate::Result;
 
 type KafkaClientRef = Arc<Client>;
 
-const TIMEOUT: i32 = 100;
+const TIMEOUT: i32 = 1000;
 
 /// The state of WAL pruning.
 #[derive(Debug, Serialize, Deserialize)]
@@ -116,11 +116,18 @@ impl WalPruneProcedure {
             })
             .collect();
 
+        if region_ids.is_empty() {
+            // No regions to prune.
+            return Ok(Status::done());
+        }
         // Check if the `flush_entry_ids_map` contains all region ids.
-        if !check_heartbeat_collected_region_ids(&region_ids, &flush_entry_ids_map)
-            || region_ids.is_empty()
-        {
-            warn!("The heartbeat collected region ids do not contain all region ids in the topic-region map. Aborting the WAL prune procedure.");
+        let non_collected_region_ids =
+            check_heartbeat_collected_region_ids(&region_ids, &flush_entry_ids_map);
+        if !non_collected_region_ids.is_empty() {
+            // The heartbeat collected region ids do not contain all region ids in the topic-region map.
+            // In this case, we should not prune the WAL.
+            warn!("The heartbeat collected region ids do not contain all region ids in the topic-region map. Aborting the WAL prune procedure.
+            topic: {}, non-collected region ids: {:?}", self.data.topic, non_collected_region_ids);
             return Ok(Status::done());
         }
 
@@ -154,6 +161,10 @@ impl WalPruneProcedure {
                 topic: self.data.topic.clone(),
                 partition: DEFAULT_PARTITION,
                 offset: self.data.min_flushed_entry_id,
+            })
+            .map_err(BoxedError::new)
+            .with_context(|_| error::RetryLaterWithSourceSnafu {
+                reason: "Failed to delete records",
             })?;
 
         // TODO(CookiePie): Persist the minimum flushed entry id to the table metadata manager.
@@ -205,10 +216,14 @@ impl Procedure for WalPruneProcedure {
 fn check_heartbeat_collected_region_ids(
     region_ids: &[RegionId],
     heartbeat_collected_region_ids: &HashMap<RegionId, u64>,
-) -> bool {
-    region_ids
-        .iter()
-        .all(|region_id| heartbeat_collected_region_ids.contains_key(region_id))
+) -> Vec<RegionId> {
+    let mut non_collected_region_ids = Vec::new();
+    for region_id in region_ids {
+        if !heartbeat_collected_region_ids.contains_key(region_id) {
+            non_collected_region_ids.push(*region_id);
+        }
+    }
+    non_collected_region_ids
 }
 
 #[cfg(test)]

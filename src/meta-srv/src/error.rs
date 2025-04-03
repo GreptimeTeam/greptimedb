@@ -859,7 +859,9 @@ impl ErrorExt for Error {
             | Error::ExceededDeadline { .. }
             | Error::ChooseItems { .. }
             | Error::FlowStateHandler { .. }
-            | Error::BuildWalOptionsAllocator { .. } => StatusCode::Internal,
+            | Error::BuildWalOptionsAllocator { .. }
+            | Error::BuildPartitionClient { .. }
+            | Error::DeleteRecord { .. } => StatusCode::Internal,
 
             Error::Unsupported { .. } => StatusCode::Unsupported,
 
@@ -894,9 +896,7 @@ impl ErrorExt for Error {
             | Error::RegionOpeningRace { .. }
             | Error::RegionRouteNotFound { .. }
             | Error::MigrationAbort { .. }
-            | Error::MigrationRunning { .. }
-            | Error::BuildPartitionClient { .. }
-            | Error::DeleteRecord { .. } => StatusCode::Unexpected,
+            | Error::MigrationRunning { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::SaveClusterInfo { source, .. }
             | Error::InvalidClusterInfoFormat { source, .. }
