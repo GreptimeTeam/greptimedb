@@ -31,7 +31,7 @@ use crate::kafka::producer::{OrderedBatchProducer, OrderedBatchProducerRef};
 
 // Each topic only has one partition for now.
 // The `DEFAULT_PARTITION` refers to the index of the partition.
-const DEFAULT_PARTITION: i32 = 0;
+pub const DEFAULT_PARTITION: i32 = 0;
 
 /// Arc wrapper of ClientManager.
 pub(crate) type ClientManagerRef = Arc<ClientManager>;

@@ -12,13 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use api::v1::meta::mailbox_message::Payload;
 use api::v1::meta::{HeartbeatResponse, MailboxMessage};
 use common_meta::instruction::{
     DowngradeRegionReply, InstructionReply, SimpleReply, UpgradeRegionReply,
 };
+use common_meta::key::table_route::TableRouteValue;
+use common_meta::key::test_utils::new_test_table_info;
+use common_meta::key::TableMetadataManagerRef;
+use common_meta::peer::Peer;
+use common_meta::region_registry::{
+    LeaderRegion, LeaderRegionManifestInfo, LeaderRegionRegistryRef,
+};
+use common_meta::rpc::router::{Region, RegionRoute};
 use common_meta::sequence::Sequence;
 use common_time::util::current_time_millis;
+use common_wal::options::{KafkaWalOptions, WalOptions};
+use store_api::logstore::EntryId;
+use store_api::storage::RegionId;
 use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::error::Result;
@@ -151,4 +164,95 @@ pub fn new_upgrade_region_reply(
             .unwrap(),
         )),
     }
+}
+
+pub async fn new_wal_prune_metadata(
+    table_metadata_manager: TableMetadataManagerRef,
+    leader_region_registry: LeaderRegionRegistryRef,
+    n_region: u32,
+    n_table: u32,
+    offsets: &[i64],
+    threshold: u64,
+    topic: String,
+) -> (EntryId, Vec<RegionId>) {
+    let datanode_id = 1;
+    let from_peer = Peer::empty(datanode_id);
+    let mut min_last_entry_id = 0;
+    let mut region_entry_ids = HashMap::with_capacity(n_table as usize * n_region as usize);
+    for table_id in 0..n_table {
+        let region_ids = (0..n_region)
+            .map(|i| RegionId::new(table_id, i))
+            .collect::<Vec<_>>();
+        let table_info = new_test_table_info(table_id, 0..n_region).into();
+        let region_routes = region_ids
+            .iter()
+            .map(|region_id| RegionRoute {
+                region: Region::new_test(*region_id),
+                leader_peer: Some(from_peer.clone()),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        let wal_options = WalOptions::Kafka(KafkaWalOptions {
+            topic: topic.clone(),
+        });
+        let wal_options = serde_json::to_string(&wal_options).unwrap();
+        let region_wal_options: HashMap<u32, String> = (0..n_region)
+            .map(|region_number| (region_number, wal_options.clone()))
+            .collect();
+
+        table_metadata_manager
+            .create_table_metadata(
+                table_info,
+                TableRouteValue::physical(region_routes),
+                region_wal_options,
+            )
+            .await
+            .unwrap();
+
+        let current_region_entry_ids = region_ids
+            .iter()
+            .map(|region_id| {
+                let rand_n = rand::random::<u64>() as usize;
+                let current_last_entry_id = offsets[rand_n % offsets.len()] as u64;
+                min_last_entry_id = min_last_entry_id.min(current_last_entry_id);
+                (*region_id, current_last_entry_id)
+            })
+            .collect::<HashMap<_, _>>();
+        region_entry_ids.extend(current_region_entry_ids.clone());
+        update_in_memory_region_last_entry_id(&leader_region_registry, current_region_entry_ids)
+            .await
+            .unwrap();
+    }
+
+    let regions_to_flush = region_entry_ids
+        .iter()
+        .filter_map(|(region_id, last_entry_id)| {
+            if last_entry_id - min_last_entry_id > threshold {
+                Some(*region_id)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    (min_last_entry_id, regions_to_flush)
+}
+
+pub async fn update_in_memory_region_last_entry_id(
+    leader_region_registry: &LeaderRegionRegistryRef,
+    region_entry_ids: HashMap<RegionId, u64>,
+) -> Result<()> {
+    let mut key_values = Vec::with_capacity(region_entry_ids.len());
+    for (region_id, flushed_entry_id) in region_entry_ids {
+        let value = LeaderRegion {
+            datanode_id: 1,
+            manifest: LeaderRegionManifestInfo::Mito {
+                manifest_version: 0,
+                flushed_entry_id,
+            },
+        };
+        key_values.push((region_id, value));
+    }
+    leader_region_registry.batch_put(key_values);
+
+    Ok(())
 }
