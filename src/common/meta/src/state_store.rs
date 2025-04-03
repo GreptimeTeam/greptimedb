@@ -629,10 +629,10 @@ mod tests {
             token: "expected_token".to_string(),
         };
 
-        let serialized_key = key.to_string().as_bytes().to_vec();
+        let serialized_key = with_poison_prefix(key).as_bytes().to_vec();
         let serialized_value = value.try_as_raw_value().unwrap();
 
-        let expected_key = "__procedure_poison/table/1";
+        let expected_key = "/__procedure_poison/table/1";
         let expected_value = r#"{"token":"expected_token"}"#;
 
         assert_eq!(expected_key.as_bytes(), serialized_key);

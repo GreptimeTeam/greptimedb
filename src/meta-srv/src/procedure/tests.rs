@@ -301,7 +301,7 @@ async fn test_on_datanode_create_logical_regions() {
         status,
         Status::Executing {
             persist: true,
-            clean_poisons: true
+            clean_poisons: false,
         }
     ));
     assert!(matches!(
