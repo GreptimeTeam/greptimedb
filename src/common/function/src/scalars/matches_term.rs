@@ -18,10 +18,8 @@ use std::{fmt, iter};
 use common_query::error::{InvalidFuncArgsSnafu, Result};
 use common_query::prelude::Volatility;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::scalars::{ScalarVector, ScalarVectorBuilder};
-use datatypes::vectors::{
-    BooleanVector, BooleanVectorBuilder, MutableVector, StringVector, Vector, VectorRef,
-};
+use datatypes::scalars::ScalarVectorBuilder;
+use datatypes::vectors::{BooleanVector, BooleanVectorBuilder, MutableVector, VectorRef};
 use memchr::memmem;
 use snafu::ensure;
 
@@ -122,7 +120,6 @@ impl Function for MatchesTermFunction {
         if text_column.is_empty() {
             return Ok(Arc::new(BooleanVector::from(Vec::<bool>::with_capacity(0))));
         }
-        let text_column = text_column.as_any().downcast_ref::<StringVector>().unwrap();
 
         let term_column = &columns[1];
         let compiled_finder = if term_column.is_const() {
@@ -141,7 +138,8 @@ impl Function for MatchesTermFunction {
 
         let len = text_column.len();
         let mut result = BooleanVectorBuilder::with_capacity(len);
-        for (i, text) in text_column.iter_data().enumerate() {
+        for i in 0..len {
+            let text = text_column.get_ref(i).as_string().unwrap();
             let Some(text) = text else {
                 result.push_null();
                 continue;
@@ -243,7 +241,11 @@ impl MatchesTermFinder {
                 }
             }
 
-            pos = actual_pos + 1;
+            if let Some(next_char) = text[actual_pos..].chars().next() {
+                pos = actual_pos + next_char.len_utf8();
+            } else {
+                break;
+            }
         }
 
         false
@@ -316,6 +318,7 @@ mod tests {
         assert!(MatchesTermFinder::new("café").find("café>"));
         assert!(!MatchesTermFinder::new("café").find("口café>"));
         assert!(!MatchesTermFinder::new("café").find("café口"));
+        assert!(!MatchesTermFinder::new("café").find("cafémore"));
         assert!(MatchesTermFinder::new("русский").find("русский!"));
         assert!(MatchesTermFinder::new("русский").find("русский！"));
     }
@@ -350,5 +353,23 @@ mod tests {
         assert!(MatchesTermFinder::new("/cat").find("dog/cat"));
         assert!(MatchesTermFinder::new("dog/").find("dog/cat"));
         assert!(MatchesTermFinder::new("dog/cat").find("dog/cat"));
+    }
+
+    #[test]
+    fn continues_searching_after_boundary_mismatch() {
+        assert!(!MatchesTermFinder::new("log").find("bloglog!"));
+        assert!(MatchesTermFinder::new("log").find("bloglog log"));
+        assert!(MatchesTermFinder::new("log").find("alogblog_log!"));
+
+        assert!(MatchesTermFinder::new("error").find("errorlog_error_case"));
+        assert!(MatchesTermFinder::new("test").find("atestbtestc_test_end"));
+        assert!(MatchesTermFinder::new("data").find("database_data_store"));
+        assert!(!MatchesTermFinder::new("data").find("database_datastore"));
+        assert!(MatchesTermFinder::new("log.txt").find("catalog.txt_log.txt!"));
+        assert!(!MatchesTermFinder::new("log.txt").find("catalog.txtlog.txt!"));
+        assert!(MatchesTermFinder::new("data-set").find("bigdata-set_data-set!"));
+
+        assert!(MatchesTermFinder::new("中文").find("这是中文测试，中文！"));
+        assert!(MatchesTermFinder::new("error").find("错误errorerror日志_error!"));
     }
 }
