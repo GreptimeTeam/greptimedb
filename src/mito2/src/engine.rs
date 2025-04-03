@@ -81,8 +81,8 @@ use store_api::logstore::LogStore;
 use store_api::manifest::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
-    BatchResponses, RegionEngine, RegionRole, RegionScannerRef, RegionStatistic,
-    SetRegionRoleStateResponse, SettableRegionRoleState,
+    BatchResponses, RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef,
+    RegionStatistic, SetRegionRoleStateResponse, SettableRegionRoleState,
 };
 use store_api::region_request::{AffectedRows, RegionOpenRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
@@ -91,7 +91,8 @@ use tokio::sync::{oneshot, Semaphore};
 use crate::cache::CacheStrategy;
 use crate::config::MitoConfig;
 use crate::error::{
-    InvalidRequestSnafu, JoinSnafu, RecvSnafu, RegionNotFoundSnafu, Result, SerdeJsonSnafu,
+    InvalidRequestSnafu, JoinSnafu, MitoManifestInfoSnafu, RecvSnafu, RegionNotFoundSnafu, Result,
+    SerdeJsonSnafu,
 };
 use crate::manifest::action::RegionEdit;
 use crate::metrics::HANDLE_REQUEST_ELAPSED;
@@ -494,8 +495,10 @@ impl EngineInner {
     async fn sync_region(
         &self,
         region_id: RegionId,
-        manifest_version: ManifestVersion,
+        manifest_info: RegionManifestInfo,
     ) -> Result<ManifestVersion> {
+        ensure!(manifest_info.is_mito(), MitoManifestInfoSnafu);
+        let manifest_version = manifest_info.data_manifest_version();
         let (request, receiver) =
             WorkerRequest::new_sync_region_request(region_id, manifest_version);
         self.workers.submit_to_worker(region_id, request).await?;
@@ -627,10 +630,10 @@ impl RegionEngine for MitoEngine {
     async fn sync_region(
         &self,
         region_id: RegionId,
-        manifest_version: ManifestVersion,
+        manifest_info: RegionManifestInfo,
     ) -> Result<(), BoxedError> {
         self.inner
-            .sync_region(region_id, manifest_version)
+            .sync_region(region_id, manifest_info)
             .await
             .map_err(BoxedError::new)
             .map(|_| ())

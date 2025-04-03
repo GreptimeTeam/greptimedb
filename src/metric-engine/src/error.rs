@@ -260,8 +260,9 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Unsupported sync region request"))]
-    UnsupportedSyncRegion {
+    #[snafu(display("Expected metric manifest info, region: {}", region_id))]
+    MetricManifestInfo {
+        region_id: RegionId,
         #[snafu(implicit)]
         location: Location,
     },
@@ -286,9 +287,9 @@ impl ErrorExt for Error {
             | UnexpectedRequest { .. }
             | UnsupportedAlterKind { .. } => StatusCode::InvalidArguments,
 
-            ForbiddenPhysicalAlter { .. }
-            | UnsupportedRegionRequest { .. }
-            | UnsupportedSyncRegion { .. } => StatusCode::Unsupported,
+            ForbiddenPhysicalAlter { .. } | UnsupportedRegionRequest { .. } => {
+                StatusCode::Unsupported
+            }
 
             DeserializeColumnMetadata { .. }
             | SerializeColumnMetadata { .. }
@@ -315,6 +316,8 @@ impl ErrorExt for Error {
             EncodePrimaryKey { source, .. } => source.status_code(),
 
             CollectRecordBatchStream { source, .. } => source.status_code(),
+
+            MetricManifestInfo { .. } => StatusCode::Internal,
         }
     }
 

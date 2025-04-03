@@ -36,7 +36,6 @@ use common_error::status_code::StatusCode;
 use mito2::engine::MitoEngine;
 pub(crate) use options::IndexOptions;
 use snafu::ResultExt;
-use store_api::manifest::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
 use store_api::region_engine::{
@@ -49,7 +48,7 @@ use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 use self::state::MetricEngineState;
 use crate::config::EngineConfig;
 use crate::data_region::DataRegion;
-use crate::error::{self, Result, UnsupportedRegionRequestSnafu, UnsupportedSyncRegionSnafu};
+use crate::error::{self, MetricManifestInfoSnafu, Result, UnsupportedRegionRequestSnafu};
 use crate::metadata_region::MetadataRegion;
 use crate::row_modifier::RowModifier;
 use crate::utils;
@@ -274,10 +273,10 @@ impl RegionEngine for MetricEngine {
                     sst_size: metadata_stat.sst_size + data_stat.sst_size,
                     index_size: metadata_stat.index_size + data_stat.index_size,
                     manifest: RegionManifestInfo::Metric {
-                        data_flushed_entry_id: data_stat.manifest.flushed_entry_id(),
-                        data_manifest_version: data_stat.manifest.manifest_version(),
-                        metadata_flushed_entry_id: metadata_stat.manifest.flushed_entry_id(),
-                        metadata_manifest_version: metadata_stat.manifest.manifest_version(),
+                        data_flushed_entry_id: data_stat.manifest.data_flushed_entry_id(),
+                        data_manifest_version: data_stat.manifest.data_manifest_version(),
+                        metadata_flushed_entry_id: metadata_stat.manifest.data_flushed_entry_id(),
+                        metadata_manifest_version: metadata_stat.manifest.data_manifest_version(),
                     },
                 }),
                 _ => None,
@@ -310,11 +309,38 @@ impl RegionEngine for MetricEngine {
 
     async fn sync_region(
         &self,
-        _region_id: RegionId,
-        _manifest_version: ManifestVersion,
+        region_id: RegionId,
+        manifest_info: RegionManifestInfo,
     ) -> Result<(), BoxedError> {
-        // TODO(weny): implement it later.
-        Err(BoxedError::new(UnsupportedSyncRegionSnafu {}.build()))
+        if !manifest_info.is_metric() {
+            return Err(BoxedError::new(
+                MetricManifestInfoSnafu { region_id }.build(),
+            ));
+        }
+
+        let metadata_region_id = utils::to_metadata_region_id(region_id);
+        // checked by ensure above
+        let metadata_manifest_version = manifest_info.metadata_manifest_version().unwrap();
+        let metadata_flushed_entry_id = manifest_info.metadata_flushed_entry_id().unwrap();
+        let metadata_region_manifest =
+            RegionManifestInfo::mito(metadata_manifest_version, metadata_flushed_entry_id);
+        self.inner
+            .mito
+            .sync_region(metadata_region_id, metadata_region_manifest)
+            .await?;
+
+        let data_region_id = utils::to_data_region_id(region_id);
+        let data_manifest_version = manifest_info.data_manifest_version();
+        let data_flushed_entry_id = manifest_info.data_flushed_entry_id();
+        let data_region_manifest =
+            RegionManifestInfo::mito(data_manifest_version, data_flushed_entry_id);
+
+        self.inner
+            .mito
+            .sync_region(data_region_id, data_region_manifest)
+            .await?;
+
+        Ok(())
     }
 
     async fn set_region_role_state_gracefully(

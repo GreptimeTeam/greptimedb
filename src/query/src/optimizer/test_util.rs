@@ -24,13 +24,12 @@ use async_trait::async_trait;
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
 use datatypes::schema::ColumnSchema;
-use store_api::manifest::ManifestVersion;
 use store_api::metadata::{
     ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
 };
 use store_api::region_engine::{
-    RegionEngine, RegionRole, RegionScannerRef, RegionStatistic, SetRegionRoleStateResponse,
-    SettableRegionRoleState,
+    RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef, RegionStatistic,
+    SetRegionRoleStateResponse, SettableRegionRoleState,
 };
 use store_api::region_request::RegionRequest;
 use store_api::storage::{ConcreteDataType, RegionId, ScanRequest, SequenceNumber};
@@ -113,7 +112,7 @@ impl RegionEngine for MetaRegionEngine {
     async fn sync_region(
         &self,
         _region_id: RegionId,
-        _manifest_version: ManifestVersion,
+        _manifest_info: RegionManifestInfo,
     ) -> Result<(), BoxedError> {
         unimplemented!()
     }

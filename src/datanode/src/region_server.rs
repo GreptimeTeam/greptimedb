@@ -55,7 +55,7 @@ use store_api::metric_engine_consts::{
     FILE_ENGINE_NAME, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME,
 };
 use store_api::region_engine::{
-    RegionEngineRef, RegionRole, RegionStatistic, SetRegionRoleStateResponse,
+    RegionEngineRef, RegionManifestInfo, RegionRole, RegionStatistic, SetRegionRoleStateResponse,
     SettableRegionRoleState,
 };
 use store_api::region_request::{
@@ -305,6 +305,22 @@ impl RegionServer {
             .with_context(|| RegionNotFoundSnafu { region_id })?;
         engine
             .set_region_role(region_id, role)
+            .with_context(|_| HandleRegionRequestSnafu { region_id })
+    }
+
+    pub async fn sync_region_manifest(
+        &self,
+        region_id: RegionId,
+        manifest_info: RegionManifestInfo,
+    ) -> Result<()> {
+        let engine = self
+            .inner
+            .region_map
+            .get(&region_id)
+            .with_context(|| RegionNotFoundSnafu { region_id })?;
+        engine
+            .sync_region(region_id, manifest_info)
+            .await
             .with_context(|_| HandleRegionRequestSnafu { region_id })
     }
 
