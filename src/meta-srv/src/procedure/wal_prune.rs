@@ -267,23 +267,6 @@ impl WalPruneProcedure {
                 partition: DEFAULT_PARTITION,
             })?;
 
-<<<<<<< HEAD
-        partition_client
-            .delete_records(self.data.min_flushed_entry_id as i64, TIMEOUT)
-            .await
-            .context(DeleteRecordSnafu {
-                topic: self.data.topic.clone(),
-                partition: DEFAULT_PARTITION,
-                offset: self.data.min_flushed_entry_id,
-            })
-            .map_err(BoxedError::new)
-            .with_context(|_| error::RetryLaterWithSourceSnafu {
-                reason: "Failed to delete records",
-            })?;
-
-=======
-        // Should persist before deleting records.
->>>>>>> e40c310c5 (fix: persist before delete)
         self.context
             .table_metadata_manager
             .topic_name_manager()
