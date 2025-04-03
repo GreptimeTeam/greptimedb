@@ -33,7 +33,10 @@ use snafu::ResultExt;
 use store_api::logstore::EntryId;
 use store_api::storage::RegionId;
 
-use crate::error::{self, BuildPartitionClientSnafu, DeleteRecordSnafu, TableMetadataManagerSnafu};
+use crate::error::{
+    self, BuildPartitionClientSnafu, DeleteRecordSnafu, TableMetadataManagerSnafu,
+    UpdateMinEntryIdSnafu,
+};
 use crate::Result;
 
 type KafkaClientRef = Arc<Client>;
@@ -167,7 +170,14 @@ impl WalPruneProcedure {
                 reason: "Failed to delete records",
             })?;
 
-        // TODO(CookiePie): Persist the minimum flushed entry id to the table metadata manager.
+        self.context
+            .table_metadata_manager
+            .topic_name_manager()
+            .put(&self.data.topic, self.data.min_flushed_entry_id)
+            .await
+            .context(UpdateMinEntryIdSnafu {
+                topic: self.data.topic.clone(),
+            })?;
         Ok(Status::done())
     }
 }
@@ -418,6 +428,15 @@ mod tests {
                         )
                         .await
                 );
+
+                let min_entry_id = env
+                    .table_metadata_manager()
+                    .topic_name_manager()
+                    .get(&topic_name)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(min_entry_id.pruned_entry_id, procedure.data.min_flushed_entry_id);
 
                 // `check_heartbeat_collected_region_ids` fails.
                 // Should log a warning and return `Status::Done`.
