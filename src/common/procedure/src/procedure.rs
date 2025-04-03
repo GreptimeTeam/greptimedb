@@ -14,6 +14,7 @@
 
 use std::any::Any;
 use std::fmt;
+use std::fmt::Display;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -24,6 +25,7 @@ use snafu::{ResultExt, Snafu};
 use uuid::Uuid;
 
 use crate::error::{self, Error, Result};
+use crate::poison::ResourceType;
 use crate::watcher::Watcher;
 
 pub type Output = Arc<dyn Any + Send + Sync>;
@@ -41,6 +43,13 @@ pub enum Status {
         subprocedures: Vec<ProcedureWithId>,
         /// Whether the framework needs to persist the procedure.
         persist: bool,
+    },
+    /// The procedure is poisoned.
+    Poisoned {
+        /// The keys that cause the procedure to be poisoned.
+        keys: PoisonKeys,
+        /// The error that cause the procedure to be poisoned.
+        error: Error,
     },
     /// the procedure is done.
     Done { output: Option<Output> },
@@ -86,11 +95,11 @@ impl Status {
 
     /// Returns `true` if the procedure needs the framework to persist its intermediate state.
     pub fn need_persist(&self) -> bool {
-        // If the procedure is done, the framework doesn't need to persist the procedure
-        // anymore. It only needs to mark the procedure as committed.
         match self {
+            // If the procedure is done/poisoned, the framework doesn't need to persist the procedure
+            // anymore. It only needs to mark the procedure as committed.
             Status::Executing { persist } | Status::Suspended { persist, .. } => *persist,
-            Status::Done { .. } => false,
+            Status::Done { .. } | Status::Poisoned { .. } => false,
         }
     }
 }
@@ -100,6 +109,9 @@ impl Status {
 pub trait ContextProvider: Send + Sync {
     /// Query the procedure state.
     async fn procedure_state(&self, procedure_id: ProcedureId) -> Result<Option<ProcedureState>>;
+
+    /// Put the poison.
+    async fn put_poison(&self, key: &PoisonKey, procedure_id: ProcedureId) -> Result<()>;
 }
 
 /// Reference-counted pointer to [ContextProvider].
@@ -147,6 +159,11 @@ pub trait Procedure: Send {
 
     /// Returns the [LockKey] that this procedure needs to acquire.
     fn lock_key(&self) -> LockKey;
+
+    /// Returns the [PoisonKeys] that may cause this procedure to become poisoned during execution.
+    fn poison_keys(&self) -> PoisonKeys {
+        PoisonKeys::default()
+    }
 }
 
 #[async_trait]
@@ -173,6 +190,44 @@ impl<T: Procedure + ?Sized> Procedure for Box<T> {
 
     fn lock_key(&self) -> LockKey {
         (**self).lock_key()
+    }
+
+    fn poison_keys(&self) -> PoisonKeys {
+        (**self).poison_keys()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PoisonKey(String);
+
+impl Display for PoisonKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl PoisonKey {
+    /// Creates a new [PoisonKey] from a [ResourceType] and a [String].
+    pub fn new(resource_type: ResourceType, resource_token: &str) -> Self {
+        Self(format!("{}/{}", resource_type, resource_token))
+    }
+}
+
+/// A collection of [PoisonKey]s.
+///
+/// This type is used to represent the keys that may cause the procedure to become poisoned during execution.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+pub struct PoisonKeys(SmallVec<[PoisonKey; 2]>);
+
+impl PoisonKeys {
+    /// Creates a new [PoisonKeys] from a [ResourceType] and a [String].
+    pub fn single(resource_type: ResourceType, resource_token: &str) -> Self {
+        Self(smallvec![PoisonKey::new(resource_type, resource_token)])
+    }
+
+    /// Returns `true` if the [PoisonKeys] contains the given [PoisonKey].
+    pub fn contains(&self, key: &PoisonKey) -> bool {
+        self.0.contains(key)
     }
 }
 
@@ -325,6 +380,8 @@ pub enum ProcedureState {
     RollingBack { error: Arc<Error> },
     /// The procedure is failed and cannot proceed anymore.
     Failed { error: Arc<Error> },
+    /// The procedure is poisoned.
+    Poisoned { keys: PoisonKeys, error: Arc<Error> },
 }
 
 impl ProcedureState {
@@ -346,6 +403,11 @@ impl ProcedureState {
     /// Returns a [ProcedureState] with retrying state.
     pub fn retrying(error: Arc<Error>) -> ProcedureState {
         ProcedureState::Retrying { error }
+    }
+
+    /// Returns a [ProcedureState] with poisoned state.
+    pub fn poisoned(keys: PoisonKeys, error: Arc<Error>) -> ProcedureState {
+        ProcedureState::Poisoned { keys, error }
     }
 
     /// Returns true if the procedure state is running.
@@ -384,6 +446,7 @@ impl ProcedureState {
             ProcedureState::Failed { error } => Some(error),
             ProcedureState::Retrying { error } => Some(error),
             ProcedureState::RollingBack { error } => Some(error),
+            ProcedureState::Poisoned { error, .. } => Some(error),
             _ => None,
         }
     }
@@ -397,6 +460,7 @@ impl ProcedureState {
             ProcedureState::Failed { .. } => "Failed",
             ProcedureState::PrepareRollback { .. } => "PrepareRollback",
             ProcedureState::RollingBack { .. } => "RollingBack",
+            ProcedureState::Poisoned { .. } => "Poisoned",
         }
     }
 }

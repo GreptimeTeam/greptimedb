@@ -238,6 +238,7 @@ impl Runner {
                 }
                 ProcedureState::Done { .. } => return,
                 ProcedureState::Failed { .. } => return,
+                ProcedureState::Poisoned { .. } => return,
             }
             self.execute_once(ctx).await;
         }
@@ -255,7 +256,7 @@ impl Runner {
     }
 
     async fn prepare_rollback(&mut self, err: Arc<Error>) {
-        if let Err(e) = self.write_procedure_state(err.to_string()).await {
+        if let Err(e) = self.write_rollback_procedure_state(err.to_string()).await {
             self.meta
                 .set_state(ProcedureState::prepare_rollback(Arc::new(e)));
             return;
@@ -308,6 +309,17 @@ impl Runner {
 
                                 self.done(output);
                             }
+                            Status::Poisoned { error, keys } => {
+                                error!(
+                                    error;
+                                    "Procedure {}-{} is poisoned, keys: {:?}",
+                                    self.procedure.type_name(),
+                                    self.meta.id,
+                                    keys,
+                                );
+                                self.meta
+                                    .set_state(ProcedureState::poisoned(keys, Arc::new(error)));
+                            }
                         }
                     }
                     Err(e) => {
@@ -339,7 +351,9 @@ impl Runner {
             }
             ProcedureState::PrepareRollback { error } => self.prepare_rollback(error).await,
             ProcedureState::RollingBack { error } => self.rollback(ctx, error).await,
-            ProcedureState::Failed { .. } | ProcedureState::Done { .. } => (),
+            ProcedureState::Failed { .. }
+            | ProcedureState::Done { .. }
+            | ProcedureState::Poisoned { .. } => (),
         }
     }
 
@@ -362,6 +376,7 @@ impl Runner {
             procedure_state,
             Some(self.meta.id),
             procedure.lock_key(),
+            procedure.poison_keys(),
             procedure.type_name(),
         ));
         let runner = Runner {
@@ -484,7 +499,7 @@ impl Runner {
         Ok(())
     }
 
-    async fn write_procedure_state(&mut self, error: String) -> Result<()> {
+    async fn write_rollback_procedure_state(&mut self, error: String) -> Result<()> {
         // Persists procedure state
         let type_name = self.procedure.type_name().to_string();
         let data = self.procedure.dump()?;
@@ -539,8 +554,10 @@ mod tests {
 
     use super::*;
     use crate::local::test_util;
+    use crate::procedure::PoisonKeys;
     use crate::store::proc_path;
-    use crate::{ContextProvider, Error, LockKey, Procedure};
+    use crate::test_util::InMemoryPoisonManager;
+    use crate::{ContextProvider, Error, LockKey, PoisonKey, Procedure};
 
     const ROOT_ID: &str = "9f805a1f-05f7-490c-9f91-bd56e3cc54c1";
 
@@ -552,7 +569,9 @@ mod tests {
         Runner {
             meta,
             procedure,
-            manager_ctx: Arc::new(ManagerContext::new()),
+            manager_ctx: Arc::new(ManagerContext::new(Arc::new(
+                InMemoryPoisonManager::default(),
+            ))),
             step: 0,
             exponential_builder: ExponentialBuilder::default(),
             store,
@@ -588,6 +607,10 @@ mod tests {
             ) -> Result<Option<ProcedureState>> {
                 unimplemented!()
             }
+
+            async fn put_poison(&self, _key: &PoisonKey, _procedure_id: ProcedureId) -> Result<()> {
+                unimplemented!()
+            }
         }
 
         Context {
@@ -601,6 +624,7 @@ mod tests {
     struct ProcedureAdapter<F> {
         data: String,
         lock_key: LockKey,
+        poison_keys: PoisonKeys,
         exec_fn: F,
         rollback_fn: Option<RollbackFn>,
     }
@@ -647,6 +671,10 @@ mod tests {
         fn lock_key(&self) -> LockKey {
             self.lock_key.clone()
         }
+
+        fn poison_keys(&self) -> PoisonKeys {
+            self.poison_keys.clone()
+        }
     }
 
     async fn execute_once_normal(persist: bool, first_files: &[&str], second_files: &[&str]) {
@@ -665,6 +693,7 @@ mod tests {
         let normal = ProcedureAdapter {
             data: "normal".to_string(),
             lock_key: LockKey::single_exclusive("catalog.schema.table"),
+            poison_keys: PoisonKeys::default(),
             exec_fn,
             rollback_fn: None,
         };
@@ -729,6 +758,7 @@ mod tests {
         let suspend = ProcedureAdapter {
             data: "suspend".to_string(),
             lock_key: LockKey::single_exclusive("catalog.schema.table"),
+            poison_keys: PoisonKeys::default(),
             exec_fn,
             rollback_fn: None,
         };
@@ -763,6 +793,7 @@ mod tests {
         let child = ProcedureAdapter {
             data: "child".to_string(),
             lock_key: LockKey::new_exclusive(keys.iter().map(|k| k.to_string())),
+            poison_keys: PoisonKeys::default(),
             exec_fn,
             rollback_fn: None,
         };
@@ -832,6 +863,7 @@ mod tests {
         let parent = ProcedureAdapter {
             data: "parent".to_string(),
             lock_key: LockKey::single_exclusive("catalog.schema.table"),
+            poison_keys: PoisonKeys::default(),
             exec_fn,
             rollback_fn: None,
         };
@@ -843,7 +875,8 @@ mod tests {
         let object_store = test_util::new_object_store(&dir);
         let procedure_store = Arc::new(ProcedureStore::from_object_store(object_store.clone()));
         let mut runner = new_runner(meta.clone(), Box::new(parent), procedure_store.clone());
-        let manager_ctx = Arc::new(ManagerContext::new());
+        let poison_manager = Arc::new(InMemoryPoisonManager::default());
+        let manager_ctx = Arc::new(ManagerContext::new(poison_manager));
         manager_ctx.start();
         // Manually add this procedure to the manager ctx.
         assert!(manager_ctx.try_insert_procedure(meta));
@@ -879,6 +912,7 @@ mod tests {
         let normal = ProcedureAdapter {
             data: "normal".to_string(),
             lock_key: LockKey::single_exclusive("catalog.schema.table"),
+            poison_keys: PoisonKeys::default(),
             exec_fn,
             rollback_fn: None,
         };
@@ -923,6 +957,7 @@ mod tests {
         let normal = ProcedureAdapter {
             data: "fail".to_string(),
             lock_key: LockKey::single_exclusive("catalog.schema.table"),
+            poison_keys: PoisonKeys::default(),
             exec_fn,
             rollback_fn: None,
         };
@@ -949,6 +984,7 @@ mod tests {
         let fail = ProcedureAdapter {
             data: "fail".to_string(),
             lock_key: LockKey::single_exclusive("catalog.schema.table"),
+            poison_keys: PoisonKeys::default(),
             exec_fn,
             rollback_fn: None,
         };
@@ -985,6 +1021,7 @@ mod tests {
         let fail = ProcedureAdapter {
             data: "fail".to_string(),
             lock_key: LockKey::single_exclusive("catalog.schema.table"),
+            poison_keys: PoisonKeys::default(),
             exec_fn,
             rollback_fn: Some(Box::new(rollback_fn)),
         };
@@ -1036,6 +1073,7 @@ mod tests {
         let retry_later = ProcedureAdapter {
             data: "retry_later".to_string(),
             lock_key: LockKey::single_exclusive("catalog.schema.table"),
+            poison_keys: PoisonKeys::default(),
             exec_fn,
             rollback_fn: None,
         };
@@ -1072,6 +1110,7 @@ mod tests {
         let exceed_max_retry_later = ProcedureAdapter {
             data: "exceed_max_retry_later".to_string(),
             lock_key: LockKey::single_exclusive("catalog.schema.table"),
+            poison_keys: PoisonKeys::default(),
             exec_fn,
             rollback_fn: None,
         };
@@ -1107,6 +1146,7 @@ mod tests {
         let exceed_max_retry_later = ProcedureAdapter {
             data: "exceed_max_rollback".to_string(),
             lock_key: LockKey::single_exclusive("catalog.schema.table"),
+            poison_keys: PoisonKeys::default(),
             exec_fn,
             rollback_fn: Some(Box::new(rollback_fn)),
         };
@@ -1149,6 +1189,7 @@ mod tests {
         let retry_later = ProcedureAdapter {
             data: "rollback_after_retry_fail".to_string(),
             lock_key: LockKey::single_exclusive("catalog.schema.table"),
+            poison_keys: PoisonKeys::default(),
             exec_fn,
             rollback_fn: Some(Box::new(rollback_fn)),
         };
@@ -1193,6 +1234,7 @@ mod tests {
                     let fail = ProcedureAdapter {
                         data: "fail".to_string(),
                         lock_key: LockKey::single_exclusive("catalog.schema.table.region-0"),
+                        poison_keys: PoisonKeys::default(),
                         exec_fn,
                         rollback_fn: None,
                     };
@@ -1228,6 +1270,7 @@ mod tests {
         let parent = ProcedureAdapter {
             data: "parent".to_string(),
             lock_key: LockKey::single_exclusive("catalog.schema.table"),
+            poison_keys: PoisonKeys::default(),
             exec_fn,
             rollback_fn: None,
         };
@@ -1238,7 +1281,8 @@ mod tests {
         let object_store = test_util::new_object_store(&dir);
         let procedure_store = Arc::new(ProcedureStore::from_object_store(object_store.clone()));
         let mut runner = new_runner(meta.clone(), Box::new(parent), procedure_store);
-        let manager_ctx = Arc::new(ManagerContext::new());
+        let poison_manager = Arc::new(InMemoryPoisonManager::default());
+        let manager_ctx = Arc::new(ManagerContext::new(poison_manager));
         manager_ctx.start();
         // Manually add this procedure to the manager ctx.
         assert!(manager_ctx.try_insert_procedure(meta.clone()));

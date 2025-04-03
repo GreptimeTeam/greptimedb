@@ -341,6 +341,7 @@ mod tests {
 
     use object_store::ObjectStore;
 
+    use crate::procedure::PoisonKeys;
     use crate::store::state_store::ObjectStateStore;
     use crate::BoxedProcedure;
 
@@ -502,6 +503,10 @@ mod tests {
 
         fn lock_key(&self) -> LockKey {
             LockKey::default()
+        }
+
+        fn poison_keys(&self) -> PoisonKeys {
+            PoisonKeys::default()
         }
     }
 

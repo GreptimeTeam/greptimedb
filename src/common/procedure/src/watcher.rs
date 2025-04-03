@@ -43,6 +43,10 @@ pub async fn wait(watcher: &mut Watcher) -> Result<Option<Output>> {
             ProcedureState::PrepareRollback { error } => {
                 debug!("commit rollback, source: {}", error)
             }
+            ProcedureState::Poisoned { error, .. } => {
+                debug!("poisoned, source: {}", error);
+                return Err(error.clone()).context(ProcedureExecSnafu);
+            }
         }
     }
 }
@@ -61,7 +65,9 @@ mod tests {
     use super::*;
     use crate::error::Error;
     use crate::local::{test_util, LocalManager, ManagerConfig};
+    use crate::procedure::PoisonKeys;
     use crate::store::state_store::ObjectStateStore;
+    use crate::test_util::InMemoryPoisonManager;
     use crate::{
         Context, LockKey, Procedure, ProcedureId, ProcedureManager, ProcedureWithId, Status,
     };
@@ -76,7 +82,8 @@ mod tests {
             ..Default::default()
         };
         let state_store = Arc::new(ObjectStateStore::new(test_util::new_object_store(&dir)));
-        let manager = LocalManager::new(config, state_store);
+        let poison_manager = Arc::new(InMemoryPoisonManager::default());
+        let manager = LocalManager::new(config, state_store, poison_manager);
         manager.start().await.unwrap();
 
         #[derive(Debug)]
@@ -105,6 +112,10 @@ mod tests {
 
             fn lock_key(&self) -> LockKey {
                 LockKey::single_exclusive("test.submit")
+            }
+
+            fn poison_keys(&self) -> PoisonKeys {
+                PoisonKeys::default()
             }
         }
 

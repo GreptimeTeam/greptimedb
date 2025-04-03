@@ -18,21 +18,27 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use common_procedure::poison::PoisonManager;
+use common_procedure::test_util::InMemoryPoisonManager;
 use common_procedure::{
-    Context, ContextProvider, Output, Procedure, ProcedureId, ProcedureState, ProcedureWithId,
-    Result, Status,
+    Context, ContextProvider, Output, PoisonKey, Procedure, ProcedureId, ProcedureState,
+    ProcedureWithId, Result, Status,
 };
 
 /// A Mock [ContextProvider].
 #[derive(Default)]
 pub struct MockContextProvider {
     states: HashMap<ProcedureId, ProcedureState>,
+    poison_manager: InMemoryPoisonManager,
 }
 
 impl MockContextProvider {
     /// Returns a new provider.
     pub fn new(states: HashMap<ProcedureId, ProcedureState>) -> MockContextProvider {
-        MockContextProvider { states }
+        MockContextProvider {
+            states,
+            poison_manager: InMemoryPoisonManager::default(),
+        }
     }
 }
 
@@ -40,6 +46,10 @@ impl MockContextProvider {
 impl ContextProvider for MockContextProvider {
     async fn procedure_state(&self, procedure_id: ProcedureId) -> Result<Option<ProcedureState>> {
         Ok(self.states.get(&procedure_id).cloned())
+    }
+
+    async fn put_poison(&self, key: &PoisonKey, procedure_id: ProcedureId) -> Result<()> {
+        self.poison_manager.set_poison(key, procedure_id).await
     }
 }
 
@@ -61,6 +71,7 @@ pub async fn execute_procedure_until_done(procedure: &mut dyn Procedure) -> Opti
                 "Executing subprocedure is unsupported"
             ),
             Status::Done { output } => return output,
+            Status::Poisoned { .. } => return None,
         }
     }
 }
@@ -88,6 +99,7 @@ pub async fn execute_procedure_once(
             false
         }
         Status::Done { .. } => true,
+        Status::Poisoned { .. } => false,
     }
 }
 
@@ -109,6 +121,7 @@ pub async fn execute_until_suspended_or_done(
             Status::Executing { .. } => (),
             Status::Suspended { subprocedures, .. } => return Some(subprocedures),
             Status::Done { .. } => break,
+            Status::Poisoned { .. } => unreachable!(),
         }
     }
 

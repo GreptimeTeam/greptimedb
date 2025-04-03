@@ -748,6 +748,13 @@ pub enum Error {
         #[snafu(source)]
         error: serde_json::Error,
     },
+
+    #[snafu(display("Procedure poison conflict: {}", msg))]
+    ProcedurePoisonConflict {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -766,7 +773,7 @@ impl ErrorExt for Error {
             | SerializeToJson { .. }
             | DeserializeFromJson { .. } => StatusCode::Internal,
 
-            ValueNotExist { .. } => StatusCode::Unexpected,
+            ValueNotExist { .. } | ProcedurePoisonConflict { .. } => StatusCode::Unexpected,
 
             Unsupported { .. } => StatusCode::Unsupported,
 

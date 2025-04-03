@@ -33,6 +33,7 @@ use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_meta::node_manager::NodeManagerRef;
+use common_meta::poison_manager::KvBackendPoisonManager;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::region_registry::LeaderRegionRegistry;
 use common_meta::sequence::SequenceBuilder;
@@ -448,7 +449,12 @@ fn build_procedure_manager(
             .max_metadata_value_size
             .map(|v| v.as_bytes() as usize),
     );
-    Arc::new(LocalManager::new(manager_config, Arc::new(state_store)))
+    let poison_manager = Arc::new(KvBackendPoisonManager::new(kv_backend.clone()));
+    Arc::new(LocalManager::new(
+        manager_config,
+        Arc::new(state_store),
+        poison_manager,
+    ))
 }
 
 impl Default for MetasrvBuilder {

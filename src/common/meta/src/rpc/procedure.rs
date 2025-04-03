@@ -81,6 +81,8 @@ pub fn procedure_state_to_pb_state(state: &ProcedureState) -> (PbProcedureStatus
         ProcedureState::RollingBack { error } => {
             (PbProcedureStatus::RollingBack, error.to_string())
         }
+        // TODO(weny): define a new status for poisoned.
+        ProcedureState::Poisoned { error, .. } => (PbProcedureStatus::Failed, error.to_string()),
     }
 }
 

@@ -37,6 +37,7 @@ use common_config::KvBackendConfig;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
+use common_meta::poison_manager::KvBackendPoisonManager;
 use common_meta::state_store::KvStateStore;
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::options::ProcedureConfig;
@@ -121,7 +122,12 @@ impl Instance {
             max_running_procedures: procedure_config.max_running_procedures,
             ..Default::default()
         };
-        let procedure_manager = Arc::new(LocalManager::new(manager_config, state_store));
+        let poison_manager = Arc::new(KvBackendPoisonManager::new(kv_backend.clone()));
+        let procedure_manager = Arc::new(LocalManager::new(
+            manager_config,
+            state_store,
+            poison_manager,
+        ));
 
         Ok((kv_backend, procedure_manager))
     }

@@ -19,14 +19,18 @@
 pub mod error;
 pub mod local;
 pub mod options;
+pub mod poison;
 mod procedure;
 pub mod store;
 pub mod watcher;
 
+#[cfg(any(test, feature = "testing"))]
+pub mod test_util;
+
 pub use crate::error::{Error, Result};
 pub use crate::procedure::{
     BoxedProcedure, BoxedProcedureLoader, Context, ContextProvider, LockKey, Output, ParseIdError,
-    Procedure, ProcedureId, ProcedureInfo, ProcedureManager, ProcedureManagerRef, ProcedureState,
-    ProcedureWithId, Status, StringKey,
+    PoisonKey, Procedure, ProcedureId, ProcedureInfo, ProcedureManager, ProcedureManagerRef,
+    ProcedureState, ProcedureWithId, Status, StringKey,
 };
 pub use crate::watcher::Watcher;
