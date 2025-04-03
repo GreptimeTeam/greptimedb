@@ -2258,6 +2258,7 @@ dependencies = [
  "serde_json",
  "smallvec",
  "snafu 0.8.5",
+ "strum 0.27.1",
  "tokio",
  "uuid",
 ]
@@ -2268,6 +2269,7 @@ version = "0.14.0"
 dependencies = [
  "async-trait",
  "common-procedure",
+ "snafu 0.8.5",
 ]
 
 [[package]]

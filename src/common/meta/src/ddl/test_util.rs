@@ -80,7 +80,13 @@ pub async fn create_logical_table(
     let tasks = vec![test_create_logical_table_task(table_name)];
     let mut procedure = CreateLogicalTablesProcedure::new(tasks, physical_table_id, ddl_context);
     let status = procedure.on_prepare().await.unwrap();
-    assert_matches!(status, Status::Executing { persist: true });
+    assert_matches!(
+        status,
+        Status::Executing {
+            persist: true,
+            clean_poisons: false
+        }
+    );
     let status = procedure.on_create_metadata().await.unwrap();
     assert_matches!(status, Status::Done { .. });
 
