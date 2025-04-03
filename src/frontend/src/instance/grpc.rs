@@ -35,7 +35,9 @@ use crate::error::{
     PermissionSnafu, Result, SubstraitDecodeLogicalPlanSnafu, TableOperationSnafu,
 };
 use crate::instance::{attach_timer, Instance};
-use crate::metrics::{GRPC_HANDLE_PROMQL_ELAPSED, GRPC_HANDLE_SQL_ELAPSED};
+use crate::metrics::{
+    GRPC_HANDLE_PLAN_ELAPSED, GRPC_HANDLE_PROMQL_ELAPSED, GRPC_HANDLE_SQL_ELAPSED,
+};
 
 #[async_trait]
 impl GrpcQueryHandler for Instance {
@@ -85,7 +87,7 @@ impl GrpcQueryHandler for Instance {
                         attach_timer(output, timer)
                     }
                     Query::LogicalPlan(plan) => {
-                        let timer = GRPC_HANDLE_SQL_ELAPSED.start_timer();
+                        let timer = GRPC_HANDLE_PLAN_ELAPSED.start_timer();
                         let plan = DFLogicalSubstraitConvertor {}
                             .decode(&*plan, SessionStateBuilder::default().build())
                             .await

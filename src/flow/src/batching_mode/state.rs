@@ -221,6 +221,7 @@ impl DirtyTimeWindows {
             })?;
 
             // if cur.lower - prev.upper <= window_size * MERGE_DIST, merge
+            // this also deal with overlap windows because cur.lower > prev.lower is always true
             let prev_upper = prev_tw
                 .1
                 .unwrap_or(prev_tw.0.add_duration(std_window_size).context(TimeSnafu)?);
@@ -336,6 +337,24 @@ mod test {
                     "((ts >= CAST('1970-01-01 00:00:00' AS TIMESTAMP)) AND (ts < CAST('1970-01-01 00:20:00' AS TIMESTAMP)))",
                 )
             ),
+            // complex overlapping
+            (
+                vec![
+                    Timestamp::new_second(0),
+                    Timestamp::new_second((DirtyTimeWindows::MERGE_DIST as i64) * 3),
+                    Timestamp::new_second((DirtyTimeWindows::MERGE_DIST as i64) * 3 * 2),
+                ],
+                (chrono::Duration::seconds(3), None),
+                BTreeMap::from([(
+                    Timestamp::new_second(0),
+                    Some(Timestamp::new_second(
+                        (DirtyTimeWindows::MERGE_DIST as i64) * 7
+                    )),
+                )]),
+                Some(
+                    "((ts >= CAST('1970-01-01 00:00:00' AS TIMESTAMP)) AND (ts < CAST('1970-01-01 00:00:21' AS TIMESTAMP)))",
+                )
+            ),
             // expired
             (
                 vec![
@@ -360,7 +379,7 @@ mod test {
             dirty
                 .merge_dirty_time_windows(window_size, expire_lower_bound)
                 .unwrap();
-            assert_eq!(dirty.windows, expected);
+            assert_eq!(expected, dirty.windows);
             let filter_expr = dirty
                 .gen_filter_exprs("ts", expire_lower_bound, window_size, 0, None)
                 .unwrap();
