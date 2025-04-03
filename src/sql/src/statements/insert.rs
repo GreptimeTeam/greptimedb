@@ -14,7 +14,7 @@
 
 use serde::Serialize;
 use sqlparser::ast::{
-    Insert as SpInsert, ObjectName, Query, SetExpr, Statement, UnaryOperator, Values,
+    Insert as SpInsert, ObjectName, Query, SetExpr, Statement, TableObject, UnaryOperator, Values,
 };
 use sqlparser::parser::ParserError;
 use sqlparser_derive::{Visit, VisitMut};
@@ -41,7 +41,10 @@ macro_rules! parse_fail {
 impl Insert {
     pub fn table_name(&self) -> &ObjectName {
         match &self.inner {
-            Statement::Insert(insert) => &insert.table_name,
+            Statement::Insert(insert) => match &insert.table {
+                TableObject::TableName(name) => name,
+                TableObject::TableFunction(_) => unimplemented!(),
+            },
             _ => unreachable!(),
         }
     }

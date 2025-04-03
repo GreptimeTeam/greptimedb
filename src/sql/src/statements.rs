@@ -281,12 +281,7 @@ pub fn sql_value_to_value(
     if let Some(unary_op) = unary_op {
         match unary_op {
             UnaryOperator::Plus | UnaryOperator::Minus | UnaryOperator::Not => {}
-            UnaryOperator::PGBitwiseNot
-            | UnaryOperator::PGSquareRoot
-            | UnaryOperator::PGCubeRoot
-            | UnaryOperator::PGPostfixFactorial
-            | UnaryOperator::PGPrefixFactorial
-            | UnaryOperator::PGAbs => {
+            _ => {
                 return UnsupportedUnaryOpSnafu { unary_op }.fail();
             }
         }
@@ -570,9 +565,12 @@ pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Co
         SqlDataType::Char(_)
         | SqlDataType::Varchar(_)
         | SqlDataType::Text
+        | SqlDataType::TinyText
+        | SqlDataType::MediumText
+        | SqlDataType::LongText
         | SqlDataType::String(_) => Ok(ConcreteDataType::string_datatype()),
         SqlDataType::Float(_) => Ok(ConcreteDataType::float32_datatype()),
-        SqlDataType::Double | SqlDataType::Float64 => Ok(ConcreteDataType::float64_datatype()),
+        SqlDataType::Double(_) | SqlDataType::Float64 => Ok(ConcreteDataType::float64_datatype()),
         SqlDataType::Boolean => Ok(ConcreteDataType::boolean_datatype()),
         SqlDataType::Date => Ok(ConcreteDataType::date_datatype()),
         SqlDataType::Binary(_)
@@ -636,7 +634,7 @@ pub fn concrete_data_type_to_sql_data_type(data_type: &ConcreteDataType) -> Resu
         ConcreteDataType::UInt8(_) => Ok(SqlDataType::UnsignedTinyInt(None)),
         ConcreteDataType::String(_) => Ok(SqlDataType::String(None)),
         ConcreteDataType::Float32(_) => Ok(SqlDataType::Float(None)),
-        ConcreteDataType::Float64(_) => Ok(SqlDataType::Double),
+        ConcreteDataType::Float64(_) => Ok(SqlDataType::Double(ExactNumberInfo::None)),
         ConcreteDataType::Boolean(_) => Ok(SqlDataType::Boolean),
         ConcreteDataType::Date(_) => Ok(SqlDataType::Date),
         ConcreteDataType::Timestamp(ts_type) => Ok(SqlDataType::Timestamp(
@@ -721,7 +719,10 @@ mod tests {
             SqlDataType::Float(None),
             ConcreteDataType::float32_datatype(),
         );
-        check_type(SqlDataType::Double, ConcreteDataType::float64_datatype());
+        check_type(
+            SqlDataType::Double(ExactNumberInfo::None),
+            ConcreteDataType::float64_datatype(),
+        );
         check_type(SqlDataType::Boolean, ConcreteDataType::boolean_datatype());
         check_type(SqlDataType::Date, ConcreteDataType::date_datatype());
         check_type(
@@ -1187,7 +1188,7 @@ mod tests {
         // test basic
         let column_def = ColumnDef {
             name: "col".into(),
-            data_type: SqlDataType::Double,
+            data_type: SqlDataType::Double(ExactNumberInfo::None),
             collation: None,
             options: vec![],
         };
@@ -1203,7 +1204,7 @@ mod tests {
         // test not null
         let column_def = ColumnDef {
             name: "col".into(),
-            data_type: SqlDataType::Double,
+            data_type: SqlDataType::Double(ExactNumberInfo::None),
             collation: None,
             options: vec![ColumnOptionDef {
                 name: None,
@@ -1217,7 +1218,7 @@ mod tests {
         // test primary key
         let column_def = ColumnDef {
             name: "col".into(),
-            data_type: SqlDataType::Double,
+            data_type: SqlDataType::Double(ExactNumberInfo::None),
             collation: None,
             options: vec![ColumnOptionDef {
                 name: None,
@@ -1290,7 +1291,7 @@ mod tests {
     pub fn test_has_primary_key_option() {
         let column_def = ColumnDef {
             name: "col".into(),
-            data_type: SqlDataType::Double,
+            data_type: SqlDataType::Double(ExactNumberInfo::None),
             collation: None,
             options: vec![],
         };
@@ -1298,7 +1299,7 @@ mod tests {
 
         let column_def = ColumnDef {
             name: "col".into(),
-            data_type: SqlDataType::Double,
+            data_type: SqlDataType::Double(ExactNumberInfo::None),
             collation: None,
             options: vec![ColumnOptionDef {
                 name: None,
@@ -1316,7 +1317,7 @@ mod tests {
         let column_def = Column {
             column_def: ColumnDef {
                 name: "col".into(),
-                data_type: SqlDataType::Double,
+                data_type: SqlDataType::Double(ExactNumberInfo::None),
                 collation: None,
                 options: vec![],
             },

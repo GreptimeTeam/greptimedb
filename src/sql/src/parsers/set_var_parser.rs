@@ -38,10 +38,7 @@ impl ParserContext<'_> {
             })),
 
             SpStatement::SetTimeZone { value, .. } => Ok(Statement::SetVariables(SetVariables {
-                variable: ObjectName(vec![Ident {
-                    value: "TIMEZONE".to_string(),
-                    quote_style: None,
-                }]),
+                variable: ObjectName(vec![Ident::new("TIMEZONE")]),
                 value: vec![value],
             })),
 

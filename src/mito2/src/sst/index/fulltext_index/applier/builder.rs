@@ -172,10 +172,7 @@ mod tests {
 
         let expr = Expr::ScalarFunction(ScalarFunction {
             args: vec![
-                Expr::Column(Column {
-                    name: "text".to_string(),
-                    relation: None,
-                }),
+                Expr::Column(Column::from_name("text")),
                 Expr::Literal(ScalarValue::Utf8(Some("foo".to_string()))),
             ],
             func: matches_func(),
@@ -192,10 +189,7 @@ mod tests {
         let metadata = mock_metadata();
 
         let expr = Expr::ScalarFunction(ScalarFunction {
-            args: vec![Expr::Column(Column {
-                name: "text".to_string(),
-                relation: None,
-            })],
+            args: vec![Expr::Column(Column::from_name("text"))],
             func: matches_func(),
         });
 
@@ -208,10 +202,7 @@ mod tests {
 
         let expr = Expr::ScalarFunction(ScalarFunction {
             args: vec![
-                Expr::Column(Column {
-                    name: "not_found".to_string(),
-                    relation: None,
-                }),
+                Expr::Column(Column::from_name("not_found")),
                 Expr::Literal(ScalarValue::Utf8(Some("foo".to_string()))),
             ],
             func: matches_func(),
@@ -226,10 +217,7 @@ mod tests {
 
         let expr = Expr::ScalarFunction(ScalarFunction {
             args: vec![
-                Expr::Column(Column {
-                    name: "ts".to_string(),
-                    relation: None,
-                }),
+                Expr::Column(Column::from_name("ts")),
                 Expr::Literal(ScalarValue::Utf8(Some("foo".to_string()))),
             ],
             func: matches_func(),
@@ -244,10 +232,7 @@ mod tests {
 
         let expr = Expr::ScalarFunction(ScalarFunction {
             args: vec![
-                Expr::Column(Column {
-                    name: "text".to_string(),
-                    relation: None,
-                }),
+                Expr::Column(Column::from_name("text")),
                 Expr::Literal(ScalarValue::Int64(Some(42))),
             ],
             func: matches_func(),

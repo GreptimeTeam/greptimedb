@@ -20,7 +20,7 @@ use snafu::{ensure, ResultExt};
 use sqlparser::ast::Ident;
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::{Parser, ParserError};
-use sqlparser::tokenizer::{Token, TokenWithLocation};
+use sqlparser::tokenizer::{Token, TokenWithSpan};
 
 use crate::error::{self, InvalidColumnOptionSnafu, Result, SetFulltextOptionSnafu};
 use crate::parser::ParserContext;
@@ -124,8 +124,7 @@ impl ParserContext<'_> {
                                 .expect_keyword(Keyword::COLUMN)
                                 .context(error::SyntaxSnafu)?;
                             let name = Self::canonicalize_identifier(
-                                Self::parse_identifier(&mut self.parser)
-                                    .context(error::SyntaxSnafu)?,
+                                self.parser.parse_identifier().context(error::SyntaxSnafu)?,
                             );
                             AlterTableOperation::DropColumn { name }
                         }
@@ -205,9 +204,7 @@ impl ParserContext<'_> {
             .expect_keyword(Keyword::COLUMN)
             .context(error::SyntaxSnafu)?;
         let column_name = Self::canonicalize_identifier(
-            self.parser
-                .parse_identifier(false)
-                .context(error::SyntaxSnafu)?,
+            self.parser.parse_identifier().context(error::SyntaxSnafu)?,
         );
 
         match self.parser.peek_token().token {
@@ -240,7 +237,7 @@ impl ParserContext<'_> {
         column_name: Ident,
     ) -> Result<AlterTableOperation> {
         match self.parser.next_token() {
-            TokenWithLocation {
+            TokenWithSpan {
                 token: Token::Word(w),
                 ..
             } if w.keyword == Keyword::FULLTEXT => {
@@ -252,7 +249,7 @@ impl ParserContext<'_> {
                 })
             }
 
-            TokenWithLocation {
+            TokenWithSpan {
                 token: Token::Word(w),
                 ..
             } if w.value.eq_ignore_ascii_case(INVERTED) => {
@@ -264,7 +261,7 @@ impl ParserContext<'_> {
                 })
             }
 
-            TokenWithLocation {
+            TokenWithSpan {
                 token: Token::Word(w),
                 ..
             } if w.value.eq_ignore_ascii_case("SKIPPING") => {
@@ -288,7 +285,7 @@ impl ParserContext<'_> {
 
     fn parse_alter_column_set_index(&mut self, column_name: Ident) -> Result<AlterTableOperation> {
         match self.parser.next_token() {
-            TokenWithLocation {
+            TokenWithSpan {
                 token: Token::Word(w),
                 ..
             } if w.keyword == Keyword::FULLTEXT => {
@@ -298,7 +295,7 @@ impl ParserContext<'_> {
                 self.parse_alter_column_fulltext(column_name)
             }
 
-            TokenWithLocation {
+            TokenWithSpan {
                 token: Token::Word(w),
                 ..
             } if w.value.eq_ignore_ascii_case(INVERTED) => {
@@ -310,7 +307,7 @@ impl ParserContext<'_> {
                 })
             }
 
-            TokenWithLocation {
+            TokenWithSpan {
                 token: Token::Word(w),
                 ..
             } if w.value.eq_ignore_ascii_case("SKIPPING") => {
@@ -416,8 +413,7 @@ fn parse_add_columns(parser: &mut Parser) -> std::result::Result<AddColumn, Pars
     } else if let Token::Word(word) = parser.peek_token().token {
         if word.value.eq_ignore_ascii_case("AFTER") {
             let _ = parser.next_token();
-            let name =
-                ParserContext::canonicalize_identifier(ParserContext::parse_identifier(parser)?);
+            let name = ParserContext::canonicalize_identifier(parser.parse_identifier()?);
             Some(AddColumnLocation::After {
                 column_name: name.value,
             })
@@ -810,7 +806,7 @@ mod tests {
                         target_type,
                     } => {
                         assert_eq!("a", column_name.value);
-                        assert_eq!(DataType::Text, *target_type);
+                        assert_eq!(DataType::MediumText, *target_type);
                     }
                     _ => unreachable!(),
                 }
@@ -1012,10 +1008,7 @@ mod tests {
                     alter_operation,
                     &AlterTableOperation::UnsetIndex {
                         options: UnsetIndexOperation::Fulltext {
-                            column_name: Ident {
-                                value: "a".to_string(),
-                                quote_style: None
-                            }
+                            column_name: Ident::new("a"),
                         }
                     }
                 );
@@ -1079,10 +1072,7 @@ mod tests {
                     alter_operation,
                     &AlterTableOperation::UnsetIndex {
                         options: UnsetIndexOperation::Inverted {
-                            column_name: Ident {
-                                value: "a".to_string(),
-                                quote_style: None
-                            }
+                            column_name: Ident::new("a"),
                         }
                     }
                 );

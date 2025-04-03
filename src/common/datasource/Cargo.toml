@@ -31,7 +31,8 @@ derive_builder.workspace = true
 futures.workspace = true
 lazy_static.workspace = true
 object-store.workspace = true
-orc-rust = { version = "0.5", default-features = false, features = [
+object_store_opendal.workspace = true
+orc-rust = { git = "https://github.com/GreptimeTeam/orc-rust", rev = "dbb9d7906751deaf2c9cc0c490c6c78406fc70da", default-features = false, features = [
     "async",
 ] }
 parquet.workspace = true

@@ -31,7 +31,7 @@ SELECT ts, host, min(val) RANGE '1d' FROM host ALIGN '1d' ORDER BY host, ts;
 
 SELECT ts, host, min(val) RANGE '1d' FROM host ALIGN '1d' TO UNKNOWN ORDER BY host, ts;
 
-Error: 3000(PlanQuery), DataFusion error: Error during planning: Illegal `align to` argument `UNKNOWN` in range select query, can't be parse as NOW/CALENDAR/Timestamp, error: Failed to parse a string into Timestamp, raw string: UNKNOWN
+Error: 3000(PlanQuery), Error during planning: Illegal `align to` argument `UNKNOWN` in range select query, can't be parse as NOW/CALENDAR/Timestamp, error: Failed to parse a string into Timestamp, raw string: UNKNOWN
 
 SELECT ts, host, min(val) RANGE '1d' FROM host ALIGN '1d' TO '1900-01-01T00:00:00+01:00' ORDER BY host, ts;
 
@@ -95,16 +95,16 @@ SELECT ts, min(val) RANGE (INTERVAL '2' day - INTERVAL '1' day) FROM host ALIGN 
 -- non-positive duration
 SELECT ts, min(val) RANGE (INTERVAL '1' day - INTERVAL '2' day) FROM host ALIGN (INTERVAL '1' day) TO '1900-01-01T00:00:00+01:00' by (1) ORDER BY ts;
 
-Error: 3000(PlanQuery), DataFusion error: Error during planning: Illegal argument `IntervalMonthDayNano("IntervalMonthDayNano { months: 0, days: 1, nanoseconds: 0 }") - IntervalMonthDayNano("IntervalMonthDayNano { months: 0, days: 2, nanoseconds: 0 }")` in range select query
+Error: 3000(PlanQuery), Error during planning: Illegal argument `IntervalMonthDayNano("IntervalMonthDayNano { months: 0, days: 1, nanoseconds: 0 }") - IntervalMonthDayNano("IntervalMonthDayNano { months: 0, days: 2, nanoseconds: 0 }")` in range select query
 
 SELECT ts, min(val) RANGE (INTERVAL '1' day - INTERVAL '1' day) FROM host ALIGN (INTERVAL '1' day) TO '1900-01-01T00:00:00+01:00' by (1) ORDER BY ts;
 
-Error: 3000(PlanQuery), DataFusion error: Error during planning: Illegal argument `IntervalMonthDayNano("IntervalMonthDayNano { months: 0, days: 1, nanoseconds: 0 }") - IntervalMonthDayNano("IntervalMonthDayNano { months: 0, days: 1, nanoseconds: 0 }")` in range select query
+Error: 3000(PlanQuery), Error during planning: Illegal argument `IntervalMonthDayNano("IntervalMonthDayNano { months: 0, days: 1, nanoseconds: 0 }") - IntervalMonthDayNano("IntervalMonthDayNano { months: 0, days: 1, nanoseconds: 0 }")` in range select query
 
 -- duration not all interval
 SELECT ts, min(val) RANGE (now() - INTERVAL '1' day) FROM host ALIGN (INTERVAL '1' day) TO '1900-01-01T00:00:00+01:00' by (1) ORDER BY ts;
 
-Error: 3000(PlanQuery), DataFusion error: Error during planning: Illegal argument `now() - IntervalMonthDayNano("IntervalMonthDayNano { months: 0, days: 1, nanoseconds: 0 }")` in range select query
+Error: 3000(PlanQuery), Error during planning: Illegal argument `now() - IntervalMonthDayNano("IntervalMonthDayNano { months: 0, days: 1, nanoseconds: 0 }")` in range select query
 
 --- ALIGN TO with time zone ---
 set time_zone='Asia/Shanghai';

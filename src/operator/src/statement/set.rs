@@ -147,6 +147,7 @@ pub fn validate_client_encoding(set: SetVariables) -> Result<()> {
         | Expr::Identifier(Ident {
             value: x,
             quote_style: _,
+            span: _,
         }) => x.to_uppercase(),
         _ => {
             return InvalidSqlSnafu {
@@ -203,6 +204,7 @@ fn try_parse_datestyle(expr: &Expr) -> Result<(Option<PGDateTimeStyle>, Option<P
         Expr::Identifier(Ident {
             value: s,
             quote_style: _,
+            span: _,
         })
         | Expr::Value(Value::SingleQuotedString(s))
         | Expr::Value(Value::DoubleQuotedString(s)) => {

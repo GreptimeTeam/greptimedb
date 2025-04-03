@@ -20,7 +20,7 @@ Affected Rows: 8
 
 SELECT ts, host, min(val) RANGE (INTERVAL '1 year') FROM host ALIGN (INTERVAL '1 year') ORDER BY host, ts;
 
-Error: 3000(PlanQuery), DataFusion error: Error during planning: Year or month interval is not allowed in range query: IntervalMonthDayNano("IntervalMonthDayNano { months: 12, days: 0, nanoseconds: 0 }")
+Error: 3000(PlanQuery), Error during planning: Year or month interval is not allowed in range query: IntervalMonthDayNano("IntervalMonthDayNano { months: 12, days: 0, nanoseconds: 0 }")
 
 SELECT ts, host, min(val) RANGE (INTERVAL '1' day) FROM host ALIGN (INTERVAL '1' day) ORDER BY host, ts;
 

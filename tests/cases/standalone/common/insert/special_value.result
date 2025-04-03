@@ -23,7 +23,7 @@ select * from data;
 
 insert into data values (4, 'infinityyyy'::double);
 
-Error: 3001(EngineExecuteQuery), DataFusion error: Cast error: Cannot cast string 'infinityyyy' to value of Float64 type
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast string 'infinityyyy' to value of Float64 type
 
 drop table data;
 

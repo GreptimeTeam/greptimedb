@@ -16,8 +16,8 @@ use std::ops::ControlFlow;
 
 use datatypes::data_type::DataType as GreptimeDataType;
 use sqlparser::ast::{
-    DataType, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArgumentList, Ident,
-    ObjectName, Value,
+    DataType, ExactNumberInfo, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArgumentList,
+    Ident, ObjectName, Value,
 };
 
 use crate::error::Result;
@@ -91,6 +91,7 @@ impl TransformRule for TypeAliasTransformRule {
                 over: None,
                 parameters: sqlparser::ast::FunctionArguments::None,
                 within_group: vec![],
+                uses_odbc_syntax: false,
             }
         }
 
@@ -166,7 +167,7 @@ pub(crate) fn get_type_by_alias(data_type: &DataType) -> Option<DataType> {
         DataType::UInt32 => Some(DataType::UnsignedInt(None)),
         DataType::UInt64 => Some(DataType::UnsignedBigInt(None)),
         DataType::Float32 => Some(DataType::Float(None)),
-        DataType::Float64 => Some(DataType::Double),
+        DataType::Float64 => Some(DataType::Double(ExactNumberInfo::None)),
         DataType::Bool => Some(DataType::Boolean),
         DataType::Datetime(_) => Some(DataType::Timestamp(Some(6), TimezoneInfo::None)),
         _ => None,
@@ -207,7 +208,7 @@ pub(crate) fn get_data_type_by_alias_name(name: &str) -> Option<DataType> {
         "UINT32" => Some(DataType::UnsignedInt(None)),
         "UINT64" => Some(DataType::UnsignedBigInt(None)),
         "FLOAT32" => Some(DataType::Float(None)),
-        "FLOAT64" => Some(DataType::Double),
+        "FLOAT64" => Some(DataType::Double(ExactNumberInfo::None)),
         // String type alias
         "TINYTEXT" | "MEDIUMTEXT" | "LONGTEXT" => Some(DataType::Text),
         _ => None,
@@ -226,15 +227,15 @@ mod tests {
     fn test_get_data_type_by_alias_name() {
         assert_eq!(
             get_data_type_by_alias_name("float64"),
-            Some(DataType::Double)
+            Some(DataType::Double(ExactNumberInfo::None))
         );
         assert_eq!(
             get_data_type_by_alias_name("Float64"),
-            Some(DataType::Double)
+            Some(DataType::Double(ExactNumberInfo::None))
         );
         assert_eq!(
             get_data_type_by_alias_name("FLOAT64"),
-            Some(DataType::Double)
+            Some(DataType::Double(ExactNumberInfo::None))
         );
 
         assert_eq!(
@@ -410,9 +411,9 @@ CREATE TABLE data_types (
             Statement::CreateTable(c) => {
                 let expected = r#"CREATE TABLE data_types (
   s STRING,
-  tt TEXT,
-  mt TEXT,
-  lt TEXT,
+  tt TINYTEXT,
+  mt MEDIUMTEXT,
+  lt LONGTEXT,
   tint TINYINT,
   sint SMALLINT,
   i INT,

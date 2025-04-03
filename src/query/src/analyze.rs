@@ -30,7 +30,7 @@ use datafusion::execution::TaskContext;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
-    accept, DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, PlanProperties,
+    accept, DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
 };
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_common::{internal_err, DataFusionError};
@@ -76,8 +76,13 @@ impl DistAnalyzeExec {
     fn compute_properties(input: &Arc<dyn ExecutionPlan>, schema: SchemaRef) -> PlanProperties {
         let eq_properties = EquivalenceProperties::new(schema);
         let output_partitioning = Partitioning::UnknownPartitioning(1);
-        let exec_mode = input.execution_mode();
-        PlanProperties::new(eq_properties, output_partitioning, exec_mode)
+        let properties = input.properties();
+        PlanProperties::new(
+            eq_properties,
+            output_partitioning,
+            properties.emission_type,
+            properties.boundedness,
+        )
     }
 }
 

@@ -254,30 +254,7 @@ fn extract_from_binary_expr(
             let right = extract_time_range_from_expr(ts_col_name, ts_col_unit, right)?;
             Some(left.or(&right))
         }
-        Operator::NotEq
-        | Operator::Plus
-        | Operator::Minus
-        | Operator::Multiply
-        | Operator::Divide
-        | Operator::Modulo
-        | Operator::IsDistinctFrom
-        | Operator::IsNotDistinctFrom
-        | Operator::RegexMatch
-        | Operator::RegexIMatch
-        | Operator::RegexNotMatch
-        | Operator::RegexNotIMatch
-        | Operator::BitwiseAnd
-        | Operator::BitwiseOr
-        | Operator::BitwiseXor
-        | Operator::BitwiseShiftRight
-        | Operator::BitwiseShiftLeft
-        | Operator::StringConcat
-        | Operator::ArrowAt
-        | Operator::AtArrow
-        | Operator::LikeMatch
-        | Operator::ILikeMatch
-        | Operator::NotLikeMatch
-        | Operator::NotILikeMatch => None,
+        _ => None,
     }
 }
 

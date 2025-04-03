@@ -74,6 +74,7 @@ impl Round {
 
 #[cfg(test)]
 mod tests {
+    use datafusion_expr::ScalarFunctionArgs;
     use datatypes::arrow::array::Float64Array;
 
     use super::*;
@@ -81,7 +82,12 @@ mod tests {
     fn test_round_f64(value: Vec<f64>, nearest: f64, expected: Vec<f64>) {
         let round_udf = Round::scalar_udf(nearest);
         let input = vec![ColumnarValue::Array(Arc::new(Float64Array::from(value)))];
-        let result = round_udf.invoke_batch(&input, 1).unwrap();
+        let args = ScalarFunctionArgs {
+            args: input,
+            number_rows: 1,
+            return_type: &DataType::Float64,
+        };
+        let result = round_udf.invoke_with_args(args).unwrap();
         let result_array = extract_array(&result).unwrap();
         assert_eq!(result_array.len(), 1);
         assert_eq!(
