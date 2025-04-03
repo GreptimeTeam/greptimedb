@@ -220,7 +220,7 @@ impl DirtyTimeWindows {
                 .build()
             })?;
 
-            // if cur.lower - prev.upper <= window_size * 2, merge
+            // if cur.lower - prev.upper <= window_size * MERGE_DIST, merge
             let prev_upper = prev_tw
                 .1
                 .unwrap_or(prev_tw.0.add_duration(std_window_size).context(TimeSnafu)?);

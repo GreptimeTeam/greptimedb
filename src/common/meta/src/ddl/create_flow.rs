@@ -308,7 +308,6 @@ impl Procedure for CreateFlowProcedure {
 }
 
 pub fn determine_flow_type(_flow_task: &CreateFlowTask) -> FlowType {
-    // TODO(discord9): determine flow type
     FlowType::Batching
 }
 

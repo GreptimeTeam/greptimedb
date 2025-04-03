@@ -157,7 +157,11 @@ impl BatchingEngine {
         let flow_type = flow_options.get(FlowType::FLOW_TYPE_KEY);
 
         ensure!(
-            matches!(flow_type, Some(ty) if ty == "batching"),
+            match flow_type {
+                None => true,
+                Some(ty) if ty == "batching" => true,
+                _ => false,
+            },
             UnexpectedSnafu {
                 reason: format!("Flow type is not batching nor None, got {flow_type:?}")
             }
