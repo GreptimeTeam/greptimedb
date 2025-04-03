@@ -253,6 +253,9 @@ impl WalPruneProcedure {
     }
 
     /// Prune the WAL and persist the minimum flushed entry id.
+    ///
+    /// Retry:
+    /// - Failed to delete records.
     pub async fn on_prune(&mut self) -> Result<Status> {
         // Safety: last_entry_ids are loaded in on_prepare.
         let partition_client = self
