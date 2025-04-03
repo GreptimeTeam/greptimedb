@@ -24,11 +24,10 @@ use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::{error, info};
 use object_store::ObjectStore;
 use snafu::{ensure, OptionExt};
-use store_api::manifest::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
-    RegionEngine, RegionRole, RegionScannerRef, RegionStatistic, SetRegionRoleStateResponse,
-    SettableRegionRoleState, SinglePartitionScanner,
+    RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef, RegionStatistic,
+    SetRegionRoleStateResponse, SettableRegionRoleState, SinglePartitionScanner,
 };
 use store_api::region_request::{
     AffectedRows, RegionCloseRequest, RegionCreateRequest, RegionDropRequest, RegionOpenRequest,
@@ -142,7 +141,7 @@ impl RegionEngine for FileRegionEngine {
     async fn sync_region(
         &self,
         _region_id: RegionId,
-        _manifest_version: ManifestVersion,
+        _manifest_info: RegionManifestInfo,
     ) -> Result<(), BoxedError> {
         // File engine doesn't need to sync region manifest.
         Ok(())
