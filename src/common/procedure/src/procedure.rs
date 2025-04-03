@@ -37,6 +37,8 @@ pub enum Status {
     Executing {
         /// Whether the framework needs to persist the procedure.
         persist: bool,
+        /// Whether the framework needs to clean the poisons.
+        clean_poisons: bool,
     },
     /// The procedure has suspended itself and is waiting for subprocedures.
     Suspended {
@@ -58,7 +60,18 @@ pub enum Status {
 impl Status {
     /// Returns a [Status::Executing] with given `persist` flag.
     pub fn executing(persist: bool) -> Status {
-        Status::Executing { persist }
+        Status::Executing {
+            persist,
+            clean_poisons: false,
+        }
+    }
+
+    /// Returns a [Status::Executing] with given `persist` flag and clean poisons.
+    pub fn executing_with_clean_poisons(persist: bool) -> Status {
+        Status::Executing {
+            persist,
+            clean_poisons: true,
+        }
     }
 
     /// Returns a [Status::Done] without output.
@@ -98,8 +111,17 @@ impl Status {
         match self {
             // If the procedure is done/poisoned, the framework doesn't need to persist the procedure
             // anymore. It only needs to mark the procedure as committed.
-            Status::Executing { persist } | Status::Suspended { persist, .. } => *persist,
+            Status::Executing { persist, .. } | Status::Suspended { persist, .. } => *persist,
             Status::Done { .. } | Status::Poisoned { .. } => false,
+        }
+    }
+
+    /// Returns `true` if the framework needs to clean the poisons.
+    pub fn need_clean_poisons(&self) -> bool {
+        match self {
+            Status::Executing { clean_poisons, .. } => *clean_poisons,
+            Status::Done { .. } => true,
+            _ => false,
         }
     }
 }
@@ -225,9 +247,19 @@ impl PoisonKeys {
         Self(smallvec![PoisonKey::new(resource_type, resource_token)])
     }
 
+    /// Creates a new [PoisonKeys] from a [PoisonKey].
+    pub fn new(keys: impl IntoIterator<Item = PoisonKey>) -> Self {
+        Self(keys.into_iter().collect())
+    }
+
     /// Returns `true` if the [PoisonKeys] contains the given [PoisonKey].
     pub fn contains(&self, key: &PoisonKey) -> bool {
         self.0.contains(key)
+    }
+
+    /// Returns an iterator over the [PoisonKey]s.
+    pub fn iter(&self) -> impl Iterator<Item = &PoisonKey> {
+        self.0.iter()
     }
 }
 
@@ -420,6 +452,11 @@ impl ProcedureState {
         matches!(self, ProcedureState::Done { .. })
     }
 
+    /// Returns true if the procedure state is poisoned.
+    pub fn is_poisoned(&self) -> bool {
+        matches!(self, ProcedureState::Poisoned { .. })
+    }
+
     /// Returns true if the procedure state failed.
     pub fn is_failed(&self) -> bool {
         matches!(self, ProcedureState::Failed { .. })
@@ -534,11 +571,17 @@ mod tests {
 
     #[test]
     fn test_status() {
-        let status = Status::Executing { persist: false };
+        let status = Status::executing(false);
         assert!(!status.need_persist());
 
-        let status = Status::Executing { persist: true };
+        let status = Status::executing(true);
         assert!(status.need_persist());
+
+        let status = Status::executing_with_clean_poisons(false);
+        assert!(!status.need_clean_poisons());
+
+        let status = Status::executing_with_clean_poisons(true);
+        assert!(status.need_clean_poisons());
 
         let status = Status::Suspended {
             subprocedures: Vec::new(),
@@ -554,6 +597,7 @@ mod tests {
 
         let status = Status::done();
         assert!(!status.need_persist());
+        assert!(status.need_clean_poisons());
     }
 
     #[test]

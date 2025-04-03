@@ -78,8 +78,16 @@ impl PoisonManager for InMemoryPoisonManager {
                         err_msg: format!("The poison is not set by the procedure {}", procedure)
                     }
                 );
+
+                o.remove();
             }
         }
         Ok(())
+    }
+
+    async fn get_poison(&self, key: &PoisonKey) -> Result<Option<ProcedureId>> {
+        let map = self.map.read().unwrap();
+        let key = key.to_string();
+        Ok(map.get(&key).cloned())
     }
 }

@@ -14,7 +14,9 @@
 
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
-use common_procedure::error::{PutPoisonSnafu, Result as ProcedureResult};
+use common_procedure::error::{
+    DeletePoisonSnafu, GetPoisonSnafu, PutPoisonSnafu, Result as ProcedureResult,
+};
 use common_procedure::poison::PoisonManager;
 use common_procedure::{PoisonKey, ProcedureId};
 use serde::{Deserialize, Serialize};
@@ -97,11 +99,12 @@ impl KvBackendPoisonManager {
         ))
     }
 
-    #[cfg(test)]
-    pub async fn get(&self, token: &PoisonKey) -> Result<Option<PoisonValue>> {
+    async fn get(&self, token: &PoisonKey) -> Result<Option<PoisonValue>> {
         let key = to_meta_key(token);
         let value = self.kv_backend.get(key.as_bytes()).await?;
-        Ok(value.map(|v| PoisonValue::try_from_raw_value(&v.value).unwrap()))
+        value
+            .map(|v| PoisonValue::try_from_raw_value(&v.value))
+            .transpose()
     }
 
     /// Put the poison.
@@ -183,10 +186,18 @@ impl PoisonManager for KvBackendPoisonManager {
         self.delete(key, procedure_id)
             .await
             .map_err(BoxedError::new)
-            .with_context(|_| PutPoisonSnafu {
+            .with_context(|_| DeletePoisonSnafu {
                 key: key.clone(),
                 procedure_id,
             })
+    }
+
+    async fn get_poison(&self, key: &PoisonKey) -> ProcedureResult<Option<ProcedureId>> {
+        self.get(key)
+            .await
+            .map(|v| v.map(|v| v.procedure_id))
+            .map_err(BoxedError::new)
+            .with_context(|_| GetPoisonSnafu { key: key.clone() })
     }
 }
 

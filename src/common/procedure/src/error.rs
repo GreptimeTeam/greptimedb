@@ -83,6 +83,14 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Failed to get poison, key: '{key}'"))]
+    GetPoison {
+        key: PoisonKey,
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
     #[snafu(display("Failed to delete poison, key: '{key}', procedure_id: '{procedure_id}'"))]
     DeletePoison {
         key: PoisonKey,
@@ -228,7 +236,8 @@ impl ErrorExt for Error {
             | Error::DeleteStates { source, .. }
             | Error::ListState { source, .. }
             | Error::PutPoison { source, .. }
-            | Error::DeletePoison { source, .. } => source.status_code(),
+            | Error::DeletePoison { source, .. }
+            | Error::GetPoison { source, .. } => source.status_code(),
 
             Error::ToJson { .. }
             | Error::DeleteState { .. }

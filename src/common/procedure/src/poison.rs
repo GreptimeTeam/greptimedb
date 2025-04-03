@@ -54,4 +54,6 @@ pub trait PoisonManager: Send + Sync {
     async fn set_poison(&self, key: &PoisonKey, procedure_id: ProcedureId) -> Result<()>;
 
     async fn delete_poison(&self, key: &PoisonKey, procedure_id: ProcedureId) -> Result<()>;
+
+    async fn get_poison(&self, key: &PoisonKey) -> Result<Option<ProcedureId>>;
 }
