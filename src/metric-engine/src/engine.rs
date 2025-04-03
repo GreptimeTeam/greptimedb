@@ -320,8 +320,12 @@ impl RegionEngine for MetricEngine {
 
         let metadata_region_id = utils::to_metadata_region_id(region_id);
         // checked by ensure above
-        let metadata_manifest_version = manifest_info.metadata_manifest_version().unwrap();
-        let metadata_flushed_entry_id = manifest_info.metadata_flushed_entry_id().unwrap();
+        let metadata_manifest_version = manifest_info
+            .metadata_manifest_version()
+            .unwrap_or_default();
+        let metadata_flushed_entry_id = manifest_info
+            .metadata_flushed_entry_id()
+            .unwrap_or_default();
         let metadata_region_manifest =
             RegionManifestInfo::mito(metadata_manifest_version, metadata_flushed_entry_id);
         self.inner
