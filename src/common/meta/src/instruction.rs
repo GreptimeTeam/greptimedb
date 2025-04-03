@@ -192,6 +192,12 @@ pub struct DropFlow {
     pub flownode_ids: Vec<FlownodeId>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FlushRegions {
+    pub datanode_id: u64,
+    pub region_ids: Vec<RegionId>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Display, PartialEq)]
 pub enum Instruction {
     /// Opens a region.
@@ -208,6 +214,8 @@ pub enum Instruction {
     DowngradeRegion(DowngradeRegion),
     /// Invalidates batch cache.
     InvalidateCaches(Vec<CacheIdent>),
+    /// Flushes a region.
+    FlushRegion(FlushRegions),
 }
 
 /// The reply of [UpgradeRegion].
@@ -238,6 +246,7 @@ pub enum InstructionReply {
     CloseRegion(SimpleReply),
     UpgradeRegion(UpgradeRegionReply),
     DowngradeRegion(DowngradeRegionReply),
+    FlushRegion(SimpleReply),
 }
 
 impl Display for InstructionReply {
@@ -249,6 +258,7 @@ impl Display for InstructionReply {
             Self::DowngradeRegion(reply) => {
                 write!(f, "InstructionReply::DowngradeRegion({})", reply)
             }
+            Self::FlushRegion(reply) => write!(f, "InstructionReply::FlushRegion({})", reply),
         }
     }
 }
