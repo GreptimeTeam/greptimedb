@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_error::ext::BoxedError;
 use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
 
@@ -110,5 +111,27 @@ pub enum Error {
         #[snafu(source)]
         error: nix::Error,
         pid: Pid,
+    },
+
+    #[snafu(display("External Error"))]
+    External {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to send prometheus remote request"))]
+    SendPromRemoteRequest {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: reqwest::Error,
+    },
+
+    #[snafu(display("Connection with database aborted"))]
+    ConnAborted {
+        #[snafu(implicit)]
+        location: Location,
     },
 }
