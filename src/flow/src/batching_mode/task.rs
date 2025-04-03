@@ -43,7 +43,7 @@ use tokio::sync::{oneshot, RwLock};
 use tokio::time::Instant;
 
 use super::frontend_client::FrontendClient;
-use crate::adapter::{FlowId, AUTO_CREATED_PLACEHOLDER_TS_COL};
+use crate::adapter::{FlowId, AUTO_CREATED_PLACEHOLDER_TS_COL, AUTO_CREATED_UPDATE_AT_TS_COL};
 use crate::batching_mode::state::TaskState;
 use crate::batching_mode::time_window::TimeWindowExpr;
 use crate::batching_mode::utils::{
@@ -325,73 +325,6 @@ impl BatchingTask {
         Ok(Some((res, elapsed)))
     }
 
-    /// Execute the query once and return the output and the time it took
-    ///
-    #[deprecated(since = "0.1.0", note = "use execute_logical_plan instead")]
-    pub async fn execute_sql(
-        &self,
-        frontend_client: &Arc<FrontendClient>,
-        sql: &str,
-    ) -> Result<Option<(u32, Duration)>, Error> {
-        let instant = Instant::now();
-        let flow_id = self.flow_id;
-        let db_client = frontend_client.get_database_client().await?;
-        let peer_addr = db_client.peer.addr;
-        debug!(
-            "Executing flow {flow_id}(expire_after={:?} secs) on {:?} with query {}",
-            self.expire_after, peer_addr, &sql
-        );
-
-        let timer = METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME
-            .with_label_values(&[flow_id.to_string().as_str()])
-            .start_timer();
-
-        let req = api::v1::greptime_request::Request::Query(api::v1::QueryRequest {
-            query: Some(api::v1::query_request::Query::Sql(sql.to_string())),
-        });
-
-        let res = db_client.database.handle(req).await;
-        drop(timer);
-
-        let elapsed = instant.elapsed();
-        if let Ok(affected_rows) = &res {
-            debug!(
-                "Flow {flow_id} executed, affected_rows: {affected_rows:?}, elapsed: {:?}",
-                elapsed
-            );
-        } else if let Err(err) = &res {
-            warn!(
-                "Failed to execute Flow {flow_id} on frontend {}, result: {err:?}, elapsed: {:?} with query: {}",
-                peer_addr, elapsed, &sql
-            );
-        }
-
-        // record slow query
-        if elapsed >= SLOW_QUERY_THRESHOLD {
-            warn!(
-                "Flow {flow_id} on frontend {} executed for {:?} before complete, query: {}",
-                peer_addr, elapsed, &sql
-            );
-            METRIC_FLOW_BATCHING_ENGINE_SLOW_QUERY
-                .with_label_values(&[flow_id.to_string().as_str(), sql, &peer_addr])
-                .observe(elapsed.as_secs_f64());
-        }
-
-        self.state
-            .write()
-            .await
-            .after_query_exec(elapsed, res.is_ok());
-
-        let res = res.context(InvalidRequestSnafu {
-            context: format!(
-                "Failed to execute query for flow={}: \'{}\'",
-                self.flow_id, &sql
-            ),
-        })?;
-
-        Ok(Some((res, elapsed)))
-    }
-
     /// start executing query in a loop, break when receive shutdown signal
     ///
     /// any error will be logged when executing query
@@ -606,7 +539,7 @@ fn create_table_with_expr(
     }
 
     let update_at_schema = ColumnSchema::new(
-        "update_at",
+        AUTO_CREATED_UPDATE_AT_TS_COL,
         ConcreteDataType::timestamp_millisecond_datatype(),
         true,
     )
@@ -720,7 +653,7 @@ mod test {
         }
 
         let update_at_schema = ColumnSchema::new(
-            "update_at",
+            AUTO_CREATED_UPDATE_AT_TS_COL,
             ConcreteDataType::timestamp_millisecond_datatype(),
             true,
         )
@@ -753,7 +686,7 @@ mod test {
                     ts_placeholder_schema.clone(),
                 ],
                 primary_keys: vec![],
-                time_index: "__ts_placeholder".to_string(),
+                time_index: AUTO_CREATED_PLACEHOLDER_TS_COL.to_string(),
             },
             TestCase {
                 sql: "SELECT number, max(ts) FROM numbers_with_ts GROUP BY number".to_string(),
@@ -769,7 +702,7 @@ mod test {
                     ts_placeholder_schema.clone(),
                 ],
                 primary_keys: vec!["number".to_string()],
-                time_index: "__ts_placeholder".to_string(),
+                time_index: AUTO_CREATED_PLACEHOLDER_TS_COL.to_string(),
             },
             TestCase {
                 sql: "SELECT max(number), ts FROM numbers_with_ts GROUP BY ts".to_string(),

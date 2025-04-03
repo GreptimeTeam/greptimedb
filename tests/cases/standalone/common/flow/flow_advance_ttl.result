@@ -60,7 +60,7 @@ SHOW CREATE TABLE out_distinct_basic;
 +--------------------+---------------------------------------------------+
 | out_distinct_basic | CREATE TABLE IF NOT EXISTS "out_distinct_basic" ( |
 |                    |   "dis" INT NULL,                                 |
-|                    |   "update_at" TIMESTAMP(3) NULL,                  |
+|                    |   "__update_at" TIMESTAMP(3) NULL,                |
 |                    |   "__ts_placeholder" TIMESTAMP(3) NOT NULL,       |
 |                    |   TIME INDEX ("__ts_placeholder"),                |
 |                    |   PRIMARY KEY ("dis")                             |

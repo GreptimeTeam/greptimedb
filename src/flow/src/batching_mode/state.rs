@@ -32,6 +32,7 @@ use crate::batching_mode::MIN_REFRESH_DURATION;
 use crate::error::{DatatypesSnafu, InternalSnafu, TimeSnafu};
 use crate::Error;
 
+/// The state of the [`BatchingTask`].
 #[derive(Debug)]
 pub struct TaskState {
     /// Query context
@@ -78,6 +79,8 @@ impl TaskState {
     }
 }
 
+/// For keep recording of dirty time windows, which is time window that have new data inserted
+/// since last query.
 #[derive(Debug, Clone, Default)]
 pub struct DirtyTimeWindows {
     /// windows's `start -> end` and non-overlapping

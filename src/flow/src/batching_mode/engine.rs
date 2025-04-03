@@ -34,7 +34,7 @@ use crate::adapter::{CreateFlowArgs, FlowId, TableName};
 use crate::batching_mode::task::BatchingTask;
 use crate::batching_mode::time_window::{find_time_window_expr, TimeWindowExpr};
 use crate::batching_mode::utils::sql_to_df_plan;
-use crate::error::{ExternalSnafu, FlowAlreadyExistSnafu, UnexpectedSnafu};
+use crate::error::{ExternalSnafu, FlowAlreadyExistSnafu, TableNotFoundMetaSnafu, UnexpectedSnafu};
 use crate::Error;
 
 /// Batching mode Engine, responsible for driving all the batching mode tasks
@@ -71,15 +71,36 @@ impl BatchingEngine {
         request: api::v1::region::InsertRequests,
     ) -> Result<FlowResponse, Error> {
         let table_info_mgr = self.table_meta.table_info_manager();
-        let mut group_by_table_name: HashMap<TableName, Vec<api::v1::Rows>> = HashMap::new();
+        let mut group_by_table_id: HashMap<TableId, Vec<api::v1::Rows>> = HashMap::new();
+
         for r in request.requests {
             let tid = RegionId::from(r.region_id).table_id();
-            let name = get_table_name(table_info_mgr, &tid).await?;
-            let entry = group_by_table_name.entry(name).or_default();
+            let entry = group_by_table_id.entry(tid).or_default();
             if let Some(rows) = r.rows {
                 entry.push(rows);
             }
         }
+
+        let tids = group_by_table_id.keys().cloned().collect::<Vec<TableId>>();
+        let table_infos =
+            table_info_mgr
+                .batch_get(&tids)
+                .await
+                .with_context(|_| TableNotFoundMetaSnafu {
+                    msg: format!("Failed to get table info for table ids: {:?}", tids),
+                })?;
+        let group_by_table_name = group_by_table_id
+            .into_iter()
+            .map(|(id, rows)| {
+                let table_name = table_infos[&id].table_name();
+                let table_name = [
+                    table_name.catalog_name,
+                    table_name.schema_name,
+                    table_name.table_name,
+                ];
+                (table_name, rows)
+            })
+            .collect::<HashMap<_, _>>();
 
         // TODO(discord9): not use one lock for all tasks
         for (_flow_id, task) in self.tasks.read().await.iter() {
@@ -159,7 +180,7 @@ impl BatchingEngine {
         ensure!(
             match flow_type {
                 None => true,
-                Some(ty) if ty == "batching" => true,
+                Some(ty) if ty == FlowType::BATCHING => true,
                 _ => false,
             },
             UnexpectedSnafu {
