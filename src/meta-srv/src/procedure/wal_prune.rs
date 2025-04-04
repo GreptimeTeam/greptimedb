@@ -77,8 +77,8 @@ pub struct WalPruneData {
     /// The minimum flush entry id for topic, which is used to prune the WAL.
     pub min_flushed_entry_id: EntryId,
     pub regions_to_flush: Vec<RegionId>,
-    /// If `flushed_entry_id` + `threshold` < `max_flushed_entry_id`, send a flush request to the region.
-    pub threshold: u64,
+    /// If `flushed_entry_id` + `trigger_flush_threshold` < `max_flushed_entry_id`, send a flush request to the region.
+    pub trigger_flush_threshold: Option<u64>,
     /// The state.
     pub state: WalPruneState,
 }
@@ -92,12 +92,12 @@ pub struct WalPruneProcedure {
 impl WalPruneProcedure {
     const TYPE_NAME: &'static str = "metasrv-procedure::WalPrune";
 
-    pub fn new(topic: String, context: Context, threshold: u64) -> Self {
+    pub fn new(topic: String, context: Context, threshold: Option<u64>) -> Self {
         Self {
             data: WalPruneData {
                 topic,
                 min_flushed_entry_id: 0,
-                threshold,
+                trigger_flush_threshold: threshold,
                 regions_to_flush: vec![],
                 state: WalPruneState::Prepare,
             },
@@ -219,13 +219,16 @@ impl WalPruneProcedure {
                 *max_flushed_entry_id
             }
         };
-        for (region_id, flushed_entry_id) in flush_entry_ids_map {
-            if flushed_entry_id + self.data.threshold < max_flushed_entry_id {
-                self.data.regions_to_flush.push(region_id);
+        if let Some(threshold) = self.data.trigger_flush_threshold {
+            for (region_id, flushed_entry_id) in flush_entry_ids_map {
+                if flushed_entry_id + threshold < max_flushed_entry_id {
+                    self.data.regions_to_flush.push(region_id);
+                }
             }
+            self.data.state = WalPruneState::SendingFlushRequest;
+        } else {
+            self.data.state = WalPruneState::Prune;
         }
-
-        self.data.state = WalPruneState::SendingFlushRequest;
         Ok(Status::executing(true))
     }
 
@@ -484,7 +487,7 @@ mod tests {
             server_addr: env.server_addr().to_string(),
         };
 
-        let wal_prune_procedure = WalPruneProcedure::new(topic, context, threshold);
+        let wal_prune_procedure = WalPruneProcedure::new(topic, context, Some(threshold));
         (wal_prune_procedure, min_last_entry_id, regions_to_flush)
     }
 
@@ -633,11 +636,20 @@ mod tests {
                     procedure.data.min_flushed_entry_id
                 );
 
-                // `check_heartbeat_collected_region_ids` fails.
+                // Step 4: Test `on_prepare`, `check_heartbeat_collected_region_ids` fails.
                 // Should log a warning and return `Status::Done`.
                 procedure.context.leader_region_registry.reset();
                 let status = procedure.on_prepare().await.unwrap();
                 assert_matches!(status, Status::Done { output: None });
+
+                // Step 5: Test `on_prepare`, don't flush regions.
+                procedure.data.trigger_flush_threshold = None;
+                procedure.on_prepare().await.unwrap();
+                assert_matches!(procedure.data.state, WalPruneState::Prune);
+                assert_eq!(
+                    min_entry_id.pruned_entry_id,
+                    procedure.data.min_flushed_entry_id
+                );
 
                 // Clean up the topic.
                 delete_topic(procedure.context.client, &topic_name).await;
