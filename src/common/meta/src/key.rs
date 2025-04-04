@@ -57,6 +57,7 @@
 //!     - This key is mainly used in constructing the view in Datanode and Frontend.
 //!
 //! 12. Kafka topic key: `__topic_name/kafka/{topic_name}`
+//!     - The value is a [TopicNameValue] struct; it contains the minimum available entry id of the topic.
 //!     - The key is used to mark existing topics in kafka for WAL.
 //!
 //! 13. Topic name to region map key `__topic_region/{topic_name}/{region_id}`
@@ -137,6 +138,7 @@ use table::metadata::{RawTableInfo, TableId};
 use table::table_name::TableName;
 use table_info::{TableInfoKey, TableInfoManager, TableInfoValue};
 use table_name::{TableNameKey, TableNameManager, TableNameValue};
+use topic_name::TopicNameManager;
 use topic_region::{TopicRegionKey, TopicRegionManager};
 use view_info::{ViewInfoKey, ViewInfoManager, ViewInfoValue};
 
@@ -308,6 +310,7 @@ pub struct TableMetadataManager {
     schema_manager: SchemaManager,
     table_route_manager: TableRouteManager,
     tombstone_manager: TombstoneManager,
+    topic_name_manager: TopicNameManager,
     topic_region_manager: TopicRegionManager,
     kv_backend: KvBackendRef,
 }
@@ -459,6 +462,7 @@ impl TableMetadataManager {
             schema_manager: SchemaManager::new(kv_backend.clone()),
             table_route_manager: TableRouteManager::new(kv_backend.clone()),
             tombstone_manager: TombstoneManager::new(kv_backend.clone()),
+            topic_name_manager: TopicNameManager::new(kv_backend.clone()),
             topic_region_manager: TopicRegionManager::new(kv_backend.clone()),
             kv_backend,
         }
@@ -510,6 +514,10 @@ impl TableMetadataManager {
 
     pub fn table_route_manager(&self) -> &TableRouteManager {
         &self.table_route_manager
+    }
+
+    pub fn topic_name_manager(&self) -> &TopicNameManager {
+        &self.topic_name_manager
     }
 
     pub fn topic_region_manager(&self) -> &TopicRegionManager {

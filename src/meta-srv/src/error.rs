@@ -812,6 +812,15 @@ pub enum Error {
         partition: i32,
         offset: u64,
     },
+
+    #[snafu(display("Update minimum entry id in remote WAL, topic: {}", topic))]
+    UpdateMinEntryId {
+        topic: String,
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        source: common_meta::error::Error,
+    },
 }
 
 impl Error {
@@ -924,7 +933,8 @@ impl ErrorExt for Error {
             | Error::TableMetadataManager { source, .. }
             | Error::MaintenanceModeManager { source, .. }
             | Error::KvBackend { source, .. }
-            | Error::UnexpectedLogicalRouteTable { source, .. } => source.status_code(),
+            | Error::UnexpectedLogicalRouteTable { source, .. }
+            | Error::UpdateMinEntryId { source, .. } => source.status_code(),
 
             Error::InitMetadata { source, .. } | Error::InitDdlManager { source, .. } => {
                 source.status_code()

@@ -19,11 +19,12 @@ use snafu::{OptionExt, ResultExt};
 
 use crate::error::{DecodeJsonSnafu, Error, InvalidMetadataSnafu, Result};
 use crate::key::{
-    MetadataKey, KAFKA_TOPIC_KEY_PATTERN, KAFKA_TOPIC_KEY_PREFIX, LEGACY_TOPIC_KEY_PREFIX,
+    MetadataKey, MetadataValue, KAFKA_TOPIC_KEY_PATTERN, KAFKA_TOPIC_KEY_PREFIX,
+    LEGACY_TOPIC_KEY_PREFIX,
 };
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
-use crate::rpc::store::{BatchPutRequest, RangeRequest};
+use crate::rpc::store::{BatchPutRequest, CompareAndPutRequest, PutRequest, RangeRequest};
 use crate::rpc::KeyValue;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -31,8 +32,28 @@ pub struct TopicNameKey<'a> {
     pub topic: &'a str,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct TopicNameValue;
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct TopicNameValue {
+    pub pruned_entry_id: u64,
+}
+
+impl TopicNameValue {
+    pub fn new(pruned_entry_id: u64) -> Self {
+        Self { pruned_entry_id }
+    }
+}
+
+impl MetadataValue for TopicNameValue {
+    fn try_from_raw_value(raw_value: &[u8]) -> Result<Self> {
+        let value = serde_json::from_slice::<TopicNameValue>(raw_value).context(DecodeJsonSnafu)?;
+        Ok(value)
+    }
+
+    fn try_as_raw_value(&self) -> Result<Vec<u8>> {
+        let raw_value = serde_json::to_vec(self).context(DecodeJsonSnafu)?;
+        Ok(raw_value)
+    }
+}
 
 impl<'a> TopicNameKey<'a> {
     pub fn new(topic: &'a str) -> Self {
@@ -114,13 +135,16 @@ impl TopicNameManager {
         {
             let topics =
                 serde_json::from_slice::<Vec<String>>(&kv.value).context(DecodeJsonSnafu)?;
-            let mut reqs = topics
-                .iter()
-                .map(|topic| {
-                    let key = TopicNameKey::new(topic);
-                    TxnOp::Put(key.to_bytes(), vec![])
-                })
-                .collect::<Vec<_>>();
+            let mut reqs = Vec::with_capacity(topics.len() + 1);
+            for topic in topics {
+                let topic_name_key = TopicNameKey::new(&topic);
+                let topic_name_value = TopicNameValue::new(0);
+                let put_req = TxnOp::Put(
+                    topic_name_key.to_bytes(),
+                    topic_name_value.try_as_raw_value()?,
+                );
+                reqs.push(put_req);
+            }
             let delete_req = TxnOp::Delete(LEGACY_TOPIC_KEY_PREFIX.as_bytes().to_vec());
             reqs.push(delete_req);
             let txn = Txn::new().and_then(reqs);
@@ -129,7 +153,7 @@ impl TopicNameManager {
         Ok(())
     }
 
-    /// Range query for topics.
+    /// Range query for topics. Only the keys are returned.
     /// Caution: this method returns keys as String instead of values of range query since the topics are stored in keys.
     pub async fn range(&self) -> Result<Vec<String>> {
         let prefix = TopicNameKey::range_start_key();
@@ -142,19 +166,58 @@ impl TopicNameManager {
             .collect::<Result<Vec<String>>>()
     }
 
-    /// Put topics into kvbackend.
+    /// Put topics into kvbackend. The value is set to 0 by default.
     pub async fn batch_put(&self, topic_name_keys: Vec<TopicNameKey<'_>>) -> Result<()> {
+        let mut kvs = Vec::with_capacity(topic_name_keys.len());
+        for topic_name_key in &topic_name_keys {
+            let topic_name_value = TopicNameValue::new(0);
+            let kv = KeyValue {
+                key: topic_name_key.to_bytes(),
+                value: topic_name_value.try_as_raw_value()?,
+            };
+            kvs.push(kv);
+        }
         let req = BatchPutRequest {
-            kvs: topic_name_keys
-                .iter()
-                .map(|key| KeyValue {
-                    key: key.to_bytes(),
-                    value: vec![],
-                })
-                .collect(),
+            kvs,
             prev_kv: false,
         };
         self.kv_backend.batch_put(req).await?;
+        Ok(())
+    }
+
+    /// Get value for a specific topic.
+    pub async fn get(&self, topic: &str) -> Result<Option<TopicNameValue>> {
+        let key = TopicNameKey::new(topic);
+        match self.kv_backend.get(&key.to_bytes()).await? {
+            Some(kv) => {
+                let value = TopicNameValue::try_from_raw_value(&kv.value)?;
+                Ok(Some(value))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Update the topic name key and value in the kv backend.
+    pub async fn put(&self, topic: &str, pruned_entry_id: u64) -> Result<()> {
+        let key = TopicNameKey::new(topic);
+        let value = TopicNameValue::new(pruned_entry_id);
+        let prev = self.get(topic).await?;
+        if let Some(prev) = prev {
+            let cas_req = CompareAndPutRequest {
+                key: key.to_bytes(),
+                value: value.try_as_raw_value()?,
+                expect: prev.try_as_raw_value()?,
+            };
+            self.kv_backend.compare_and_put(cas_req).await?;
+        } else {
+            // Legacy version metadata may not contains value.
+            let put_req = PutRequest {
+                key: key.to_bytes(),
+                value: value.try_as_raw_value()?,
+                prev_kv: false,
+            };
+            self.kv_backend.put(put_req).await?;
+        }
         Ok(())
     }
 }
@@ -204,7 +267,12 @@ mod tests {
         let topics = manager.range().await.unwrap();
         assert_eq!(topics, all_topics);
 
-        let topics = manager.range().await.unwrap();
-        assert_eq!(topics, all_topics);
+        for topic in &topics {
+            let value = manager.get(topic).await.unwrap().unwrap();
+            assert_eq!(value.pruned_entry_id, 0);
+            manager.put(topic, 1).await.unwrap();
+            let value = manager.get(topic).await.unwrap().unwrap();
+            assert_eq!(value.pruned_entry_id, 1);
+        }
     }
 }
