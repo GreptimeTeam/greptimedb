@@ -428,10 +428,9 @@ mod tests {
 
     /// Mock a test env for testing.
     /// Including:
-    /// 1. Create a test env with a mailbox, a table metadata manager and a in-memory kv backend.
-    /// 2. Prepare some data in the table metadata manager and in-memory kv backend.
-    /// 3. Generate a `WalPruneProcedure` with the test env.
-    /// 4. Return the test env, the procedure, the minimum last entry id to prune and the regions to flush.
+    /// 1. Prepare some data in the table metadata manager and in-memory kv backend.
+    /// 2. Generate a `WalPruneProcedure` with the test env.
+    /// 3. Return the procedure, the minimum last entry id to prune and the regions to flush.
     async fn mock_test_env(
         topic: String,
         broker_endpoints: Vec<String>,
@@ -454,14 +453,23 @@ mod tests {
         let table_metadata_manager = env.table_metadata_manager().clone();
         let leader_region_registry = env.leader_region_registry().clone();
         let mailbox = env.mailbox_context().mailbox().clone();
-        let offsets = mock_wal_entries(topic_creator.client().clone(), &topic, 10).await;
+
+        let n_region = 10;
+        let n_table = 5;
         let threshold = 10;
+        // 5 entries per region.
+        let offsets = mock_wal_entries(
+            topic_creator.client().clone(),
+            &topic,
+            (n_region * n_table * 5) as usize,
+        )
+        .await;
 
         let (min_last_entry_id, regions_to_flush) = new_wal_prune_metadata(
             table_metadata_manager.clone(),
             leader_region_registry.clone(),
-            10,
-            5,
+            n_region,
+            n_table,
             &offsets,
             threshold,
             topic.clone(),

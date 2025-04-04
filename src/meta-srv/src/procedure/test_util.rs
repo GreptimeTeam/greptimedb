@@ -177,7 +177,7 @@ pub async fn new_wal_prune_metadata(
 ) -> (EntryId, Vec<RegionId>) {
     let datanode_id = 1;
     let from_peer = Peer::empty(datanode_id);
-    let mut min_last_entry_id = 0;
+    let mut min_last_entry_id = u64::MAX;
     let mut region_entry_ids = HashMap::with_capacity(n_table as usize * n_region as usize);
     for table_id in 0..n_table {
         let region_ids = (0..n_region)
