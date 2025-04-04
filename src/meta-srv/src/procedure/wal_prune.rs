@@ -264,7 +264,7 @@ impl WalPruneProcedure {
     /// - Failed to update the minimum flushed entry id in kvbackend.
     /// - Failed to delete records.
     pub async fn on_prune(&mut self) -> Result<Status> {
-        // Safety: last_entry_ids are loaded in on_prepare.
+        // Safety: flushed_entry_ids are loaded in on_prepare.
         let partition_client = self
             .context
             .client
@@ -468,7 +468,7 @@ mod tests {
         )
         .await;
 
-        let (min_last_entry_id, regions_to_flush) = new_wal_prune_metadata(
+        let (min_flushed_entry_id, regions_to_flush) = new_wal_prune_metadata(
             table_metadata_manager.clone(),
             leader_region_registry.clone(),
             n_region,
@@ -488,7 +488,7 @@ mod tests {
         };
 
         let wal_prune_procedure = WalPruneProcedure::new(topic, context, Some(threshold));
-        (wal_prune_procedure, min_last_entry_id, regions_to_flush)
+        (wal_prune_procedure, min_flushed_entry_id, regions_to_flush)
     }
 
     fn record(i: usize) -> Record {
@@ -581,15 +581,21 @@ mod tests {
                 common_telemetry::init_default_ut_logging();
                 let topic_name = "greptime_test_topic".to_string();
                 let mut env = TestEnv::new();
-                let (mut procedure, min_last_entry_id, regions_to_flush) =
+                let (mut procedure, min_flushed_entry_id, regions_to_flush) =
                     mock_test_env(topic_name.clone(), broker_endpoints, &env).await;
 
                 // Step 1: Test `on_prepare`.
                 let status = procedure.on_prepare().await.unwrap();
                 assert_matches!(status, Status::Executing { persist: true });
                 assert_matches!(procedure.data.state, WalPruneState::SendingFlushRequest);
-                assert_eq!(procedure.data.min_flushed_entry_id, min_last_entry_id);
-                assert_eq!(procedure.data.regions_to_flush, regions_to_flush);
+                assert_eq!(procedure.data.min_flushed_entry_id, min_flushed_entry_id);
+                assert_eq!(
+                    procedure.data.regions_to_flush.len(),
+                    regions_to_flush.len()
+                );
+                for region_id in &regions_to_flush {
+                    assert!(procedure.data.regions_to_flush.contains(region_id));
+                }
 
                 // Step 2: Test `on_sending_flush_request`.
                 let (tx, mut rx) = tokio::sync::mpsc::channel(1);

@@ -177,7 +177,8 @@ pub async fn new_wal_prune_metadata(
 ) -> (EntryId, Vec<RegionId>) {
     let datanode_id = 1;
     let from_peer = Peer::empty(datanode_id);
-    let mut min_last_entry_id = u64::MAX;
+    let mut min_flushed_entry_id = u64::MAX;
+    let mut max_flushed_entry_id = 0;
     let mut region_entry_ids = HashMap::with_capacity(n_table as usize * n_region as usize);
     for table_id in 0..n_table {
         let region_ids = (0..n_region)
@@ -213,31 +214,32 @@ pub async fn new_wal_prune_metadata(
             .iter()
             .map(|region_id| {
                 let rand_n = rand::random::<u64>() as usize;
-                let current_last_entry_id = offsets[rand_n % offsets.len()] as u64;
-                min_last_entry_id = min_last_entry_id.min(current_last_entry_id);
-                (*region_id, current_last_entry_id)
+                let current_flushed_entry_id = offsets[rand_n % offsets.len()] as u64;
+                min_flushed_entry_id = min_flushed_entry_id.min(current_flushed_entry_id);
+                max_flushed_entry_id = max_flushed_entry_id.max(current_flushed_entry_id);
+                (*region_id, current_flushed_entry_id)
             })
             .collect::<HashMap<_, _>>();
         region_entry_ids.extend(current_region_entry_ids.clone());
-        update_in_memory_region_last_entry_id(&leader_region_registry, current_region_entry_ids)
+        update_in_memory_region_flushed_entry_id(&leader_region_registry, current_region_entry_ids)
             .await
             .unwrap();
     }
 
     let regions_to_flush = region_entry_ids
         .iter()
-        .filter_map(|(region_id, last_entry_id)| {
-            if last_entry_id - min_last_entry_id > threshold {
+        .filter_map(|(region_id, flushed_entry_id)| {
+            if max_flushed_entry_id - flushed_entry_id > threshold {
                 Some(*region_id)
             } else {
                 None
             }
         })
         .collect::<Vec<_>>();
-    (min_last_entry_id, regions_to_flush)
+    (min_flushed_entry_id, regions_to_flush)
 }
 
-pub async fn update_in_memory_region_last_entry_id(
+pub async fn update_in_memory_region_flushed_entry_id(
     leader_region_registry: &LeaderRegionRegistryRef,
     region_entry_ids: HashMap<RegionId, u64>,
 ) -> Result<()> {
