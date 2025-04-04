@@ -2392,6 +2392,20 @@ pub async fn test_otlp_traces_v0(store_type: StorageType) {
     .await;
     assert_eq!(StatusCode::OK, res.status());
 
+    // write traces data without pipeline
+    let res = send_req(
+        &client,
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/x-protobuf"),
+        )],
+        "/v1/otlp/v1/traces",
+        body.clone(),
+        true,
+    )
+    .await;
+    assert_eq!(StatusCode::BAD_REQUEST, res.status());
+
     // select traces data again
     validate_data(
         "otlp_traces_with_gzip",
