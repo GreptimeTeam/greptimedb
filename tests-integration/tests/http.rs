@@ -2337,10 +2337,16 @@ pub async fn test_otlp_traces_v0(store_type: StorageType) {
     // write traces data
     let res = send_req(
         &client,
-        vec![(
-            HeaderName::from_static("content-type"),
-            HeaderValue::from_static("application/x-protobuf"),
-        )],
+        vec![
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/x-protobuf"),
+            ),
+            (
+                HeaderName::from_static("x-greptime-pipeline-name"),
+                HeaderValue::from_static("greptime_trace_v0"),
+            ),
+        ],
         "/v1/otlp/v1/traces",
         body.clone(),
         false,
@@ -2368,6 +2374,26 @@ pub async fn test_otlp_traces_v0(store_type: StorageType) {
     // write traces data with gzip
     let res = send_req(
         &client,
+        vec![
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/x-protobuf"),
+            ),
+            (
+                HeaderName::from_static("x-greptime-pipeline-name"),
+                HeaderValue::from_static("greptime_trace_v0"),
+            ),
+        ],
+        "/v1/otlp/v1/traces",
+        body.clone(),
+        true,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    // write traces data without pipeline
+    let res = send_req(
+        &client,
         vec![(
             HeaderName::from_static("content-type"),
             HeaderValue::from_static("application/x-protobuf"),
@@ -2377,7 +2403,7 @@ pub async fn test_otlp_traces_v0(store_type: StorageType) {
         true,
     )
     .await;
-    assert_eq!(StatusCode::OK, res.status());
+    assert_eq!(StatusCode::BAD_REQUEST, res.status());
 
     // select traces data again
     validate_data(
@@ -3045,10 +3071,16 @@ pub async fn test_jaeger_query_api(store_type: StorageType) {
     // write traces data.
     let res = send_req(
         &client,
-        vec![(
-            HeaderName::from_static("content-type"),
-            HeaderValue::from_static("application/x-protobuf"),
-        )],
+        vec![
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/x-protobuf"),
+            ),
+            (
+                HeaderName::from_static("x-greptime-pipeline-name"),
+                HeaderValue::from_static("greptime_trace_v0"),
+            ),
+        ],
         "/v1/otlp/v1/traces",
         body.clone(),
         false,
