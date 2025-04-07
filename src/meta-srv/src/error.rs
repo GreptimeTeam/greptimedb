@@ -818,7 +818,7 @@ pub enum Error {
         offset: u64,
     },
 
-    #[snafu(display("Update the TopicNameValue in kvbackend, topic: {}", topic))]
+    #[snafu(display("Failed to update the TopicNameValue in kvbackend, topic: {}", topic))]
     UpdateTopicNameValue {
         topic: String,
         #[snafu(implicit)]

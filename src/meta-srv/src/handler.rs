@@ -429,6 +429,18 @@ impl HeartbeatMailbox {
 
 #[async_trait::async_trait]
 impl Mailbox for HeartbeatMailbox {
+    async fn send_oneway(&self, ch: &Channel, mut msg: MailboxMessage) -> Result<()> {
+        let message_id = 0; // one-way message, same as `broadcast`
+        msg.id = message_id;
+
+        let pusher_id = ch.pusher_id();
+        debug!("Sending mailbox message {msg:?} to {pusher_id}");
+
+        self.pushers.push(pusher_id, msg).await?;
+
+        Ok(())
+    }
+
     async fn send(
         &self,
         ch: &Channel,
@@ -467,18 +479,6 @@ impl Mailbox for HeartbeatMailbox {
         } else if let Ok(finally_msg) = maybe_msg {
             warn!("The response arrived too late: {finally_msg:?}");
         }
-
-        Ok(())
-    }
-
-    async fn send_oneway(&self, ch: &Channel, mut msg: MailboxMessage) -> Result<()> {
-        let message_id = 0; // one-way message, same as `broadcast`
-        msg.id = message_id;
-
-        let pusher_id = ch.pusher_id();
-        debug!("Sending mailbox message {msg:?} to {pusher_id}");
-
-        self.pushers.push(pusher_id, msg).await?;
 
         Ok(())
     }
