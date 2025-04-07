@@ -34,8 +34,10 @@ pub struct TopicNameKey<'a> {
     pub topic: &'a str,
 }
 
-/// The value of the topic name key.
-/// `pruned_entry_id`: The offset already pruned in remote WAL. Region using this topic should replay from at least this offset + 1.
+/// The value associated with a topic name key.
+///
+/// The `pruned_entry_id` is the highest entry id that has been pruned from the remote WAL.
+/// When a region uses this topic, it should start replaying entries from `pruned_entry_id + 1` (minimal available entry id).
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct TopicNameValue {
     pub pruned_entry_id: u64,

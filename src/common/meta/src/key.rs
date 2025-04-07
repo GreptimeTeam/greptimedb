@@ -57,8 +57,10 @@
 //!     - This key is mainly used in constructing the view in Datanode and Frontend.
 //!
 //! 12. Kafka topic key: `__topic_name/kafka/{topic_name}`
-//!     - The value is a [TopicNameValue] struct; it contains the [minimum available offset] - 1 of the topic.
-//!     - The key is used to mark existing topics in kafka for WAL.
+//!     - The key is used to track existing topics in Kafka.
+//!     - The value is a [TopicNameValue](crate::key::topic_name::TopicNameValue) struct; it contains the `pruned_entry_id` which represents
+//!       the highest entry id that has been pruned from the remote WAL.
+//!     - When a region uses this topic, it should start replaying entries from `pruned_entry_id + 1` (minimum available entry id).
 //!
 //! 13. Topic name to region map key `__topic_region/{topic_name}/{region_id}`
 //!     - Mapping {topic_name} to {region_id}

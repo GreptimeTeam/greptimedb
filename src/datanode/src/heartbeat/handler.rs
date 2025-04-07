@@ -43,7 +43,7 @@ pub struct RegionHeartbeatResponseHandler {
 
 /// Handler of the instruction.
 pub type InstructionHandler =
-    Box<dyn FnOnce(HandlerContext) -> BoxFuture<'static, InstructionReply> + Send>;
+    Box<dyn FnOnce(HandlerContext) -> BoxFuture<'static, Option<InstructionReply>> + Send>;
 
 #[derive(Clone)]
 pub struct HandlerContext {
@@ -133,8 +133,10 @@ impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
             })
             .await;
 
-            if let Err(e) = mailbox.send((meta, reply)).await {
-                error!(e; "Failed to send reply to mailbox");
+            if let Some(reply) = reply {
+                if let Err(e) = mailbox.send((meta, reply)).await {
+                    error!(e; "Failed to send reply to mailbox");
+                }
             }
         });
 

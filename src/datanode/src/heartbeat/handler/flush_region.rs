@@ -24,7 +24,7 @@ impl HandlerContext {
     pub(crate) fn handle_flush_region_instruction(
         self,
         flush_regions: FlushRegions,
-    ) -> BoxFuture<'static, InstructionReply> {
+    ) -> BoxFuture<'static, Option<InstructionReply>> {
         Box::pin(async move {
             for region_id in flush_regions.region_ids {
                 let request = RegionRequest::Flush(RegionFlushRequest {
@@ -46,14 +46,13 @@ impl HandlerContext {
                     }
                 }
             }
-            InstructionReply::FlushRegion
+            None
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
     use std::sync::{Arc, RwLock};
 
     use common_meta::instruction::FlushRegions;
@@ -89,7 +88,7 @@ mod tests {
                 region_ids: region_ids.clone(),
             })
             .await;
-        assert_matches!(reply, InstructionReply::FlushRegion);
+        assert!(reply.is_none());
         assert_eq!(*flushed_region_ids.read().unwrap(), region_ids);
 
         flushed_region_ids.write().unwrap().clear();
@@ -99,7 +98,7 @@ mod tests {
                 region_ids: not_found_region_ids.clone(),
             })
             .await;
-        assert_matches!(reply, InstructionReply::FlushRegion);
+        assert!(reply.is_none());
         assert!(flushed_region_ids.read().unwrap().is_empty());
     }
 }

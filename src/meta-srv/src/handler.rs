@@ -472,7 +472,7 @@ impl Mailbox for HeartbeatMailbox {
     }
 
     async fn send_oneway(&self, ch: &Channel, mut msg: MailboxMessage) -> Result<()> {
-        let message_id = 0;
+        let message_id = 0; // one-way message, same as `broadcast`
         msg.id = message_id;
 
         let pusher_id = ch.pusher_id();

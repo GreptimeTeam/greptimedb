@@ -803,7 +803,7 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Failed to delete record from Kafka, topic: {}, partition: {}, offset: {}",
+        "Failed to delete records from Kafka, topic: {}, partition: {}, offset: {}",
         topic,
         partition,
         offset
