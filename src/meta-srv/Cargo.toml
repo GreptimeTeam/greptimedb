@@ -8,6 +8,7 @@ license.workspace = true
 mock = []
 pg_kvbackend = ["dep:tokio-postgres", "common-meta/pg_kvbackend", "dep:deadpool-postgres", "dep:deadpool"]
 mysql_kvbackend = ["dep:sqlx", "common-meta/mysql_kvbackend"]
+testing = ["common-wal/testing"]
 
 [lints]
 workspace = true
@@ -51,12 +52,14 @@ humantime-serde.workspace = true
 hyper-util = { workspace = true, features = ["tokio"] }
 itertools.workspace = true
 lazy_static.workspace = true
+log-store.workspace = true
 once_cell.workspace = true
 parking_lot.workspace = true
 prometheus.workspace = true
 prost.workspace = true
 rand.workspace = true
 regex.workspace = true
+rskafka.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 servers.workspace = true

@@ -92,7 +92,7 @@ pub async fn traces(
     let pipeline = PipelineWay::from_name_and_default(
         pipeline_info.pipeline_name.as_deref(),
         pipeline_info.pipeline_version.as_deref(),
-        PipelineWay::OtlpTraceDirectV0,
+        None,
     )
     .context(PipelineSnafu)?;
 
@@ -142,7 +142,7 @@ pub async fn logs(
     let pipeline = PipelineWay::from_name_and_default(
         pipeline_info.pipeline_name.as_deref(),
         pipeline_info.pipeline_version.as_deref(),
-        PipelineWay::OtlpLogDirect(Box::new(select_info)),
+        Some(PipelineWay::OtlpLogDirect(Box::new(select_info))),
     )
     .context(PipelineSnafu)?;
     let pipeline_params = pipeline_info.pipeline_params;

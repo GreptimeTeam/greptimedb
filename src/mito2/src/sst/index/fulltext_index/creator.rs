@@ -13,9 +13,11 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
 
 use common_telemetry::warn;
-use datatypes::schema::FulltextAnalyzer;
+use datatypes::schema::{FulltextAnalyzer, FulltextBackend};
 use index::fulltext_index::create::{
     BloomFilterFulltextIndexCreator, FulltextIndexCreator, TantivyFulltextIndexCreator,
 };
@@ -33,7 +35,9 @@ use crate::error::{
 use crate::read::Batch;
 use crate::sst::file::FileId;
 use crate::sst::index::fulltext_index::{INDEX_BLOB_TYPE_BLOOM, INDEX_BLOB_TYPE_TANTIVY};
-use crate::sst::index::intermediate::IntermediateManager;
+use crate::sst::index::intermediate::{
+    IntermediateLocation, IntermediateManager, TempFileProvider,
+};
 use crate::sst::index::puffin_manager::SstPuffinWriter;
 use crate::sst::index::statistics::{ByteCount, RowCount, Statistics};
 use crate::sst::index::TYPE_FULLTEXT_INDEX;
@@ -56,6 +60,7 @@ impl FulltextIndexer {
         intermediate_manager: &IntermediateManager,
         metadata: &RegionMetadataRef,
         compress: bool,
+        bloom_row_granularity: usize,
         mem_limit: usize,
     ) -> Result<Option<Self>> {
         let mut creators = HashMap::new();
@@ -86,11 +91,29 @@ impl FulltextIndexer {
                 case_sensitive: options.case_sensitive,
             };
 
-            // TODO(zhongzc): according to fulltext options, choose in the Tantivy flavor or Bloom Filter flavor.
-            let creator = TantivyFulltextIndexCreator::new(&intm_path, config, mem_limit)
-                .await
-                .context(CreateFulltextCreatorSnafu)?;
-            let inner = AltFulltextCreator::Tantivy(creator);
+            let inner = match options.backend {
+                FulltextBackend::Tantivy => {
+                    let creator = TantivyFulltextIndexCreator::new(&intm_path, config, mem_limit)
+                        .await
+                        .context(CreateFulltextCreatorSnafu)?;
+                    AltFulltextCreator::Tantivy(creator)
+                }
+                FulltextBackend::Bloom => {
+                    let temp_file_provider = Arc::new(TempFileProvider::new(
+                        IntermediateLocation::new(&metadata.region_id, sst_file_id),
+                        intermediate_manager.clone(),
+                    ));
+                    let global_memory_usage = Arc::new(AtomicUsize::new(0));
+                    let creator = BloomFilterFulltextIndexCreator::new(
+                        config,
+                        bloom_row_granularity,
+                        temp_file_provider,
+                        global_memory_usage,
+                        Some(mem_limit),
+                    );
+                    AltFulltextCreator::Bloom(creator)
+                }
+            };
 
             creators.insert(
                 column_id,
@@ -377,6 +400,7 @@ mod tests {
                     enable: true,
                     analyzer: FulltextAnalyzer::English,
                     case_sensitive: true,
+                    backend: FulltextBackend::Tantivy,
                 })
                 .unwrap(),
                 semantic_type: SemanticType::Field,
@@ -392,6 +416,7 @@ mod tests {
                     enable: true,
                     analyzer: FulltextAnalyzer::English,
                     case_sensitive: false,
+                    backend: FulltextBackend::Tantivy,
                 })
                 .unwrap(),
                 semantic_type: SemanticType::Field,
@@ -407,6 +432,7 @@ mod tests {
                     enable: true,
                     analyzer: FulltextAnalyzer::Chinese,
                     case_sensitive: false,
+                    backend: FulltextBackend::Tantivy,
                 })
                 .unwrap(),
                 semantic_type: SemanticType::Field,
@@ -504,6 +530,7 @@ mod tests {
             &intm_mgr,
             &region_metadata,
             true,
+            8096,
             1024,
         )
         .await

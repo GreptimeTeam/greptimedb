@@ -257,6 +257,7 @@ impl MergeScanExec {
         let dbname = context.task_id().unwrap_or_default();
         let tracing_context = TracingContext::from_json(context.session_id().as_str());
         let current_channel = self.query_ctx.channel();
+        let read_preference = self.query_ctx.read_preference();
 
         let stream = Box::pin(stream!({
             // only report metrics once for each MergeScan
@@ -285,7 +286,7 @@ impl MergeScanExec {
                 };
                 let do_get_start = Instant::now();
                 let mut stream = region_query_handler
-                    .do_get(request)
+                    .do_get(read_preference, request)
                     .await
                     .map_err(|e| {
                         MERGE_SCAN_ERRORS_TOTAL.inc();

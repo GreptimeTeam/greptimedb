@@ -23,8 +23,8 @@ use common_error::ext::ErrorExt;
 use common_query::Output;
 use datafusion_expr::LogicalPlan;
 use log_query::LogQuery;
+use pipeline::PipelineMap;
 use query::parser::PromQuery;
-use serde_json::Value;
 use session::context::QueryContextRef;
 use sql::statements::statement::Statement;
 
@@ -385,9 +385,9 @@ pub trait LogIngestInterceptor {
     /// Called before pipeline execution.
     fn pre_pipeline(
         &self,
-        values: Vec<Value>,
+        values: Vec<PipelineMap>,
         _query_ctx: QueryContextRef,
-    ) -> Result<Vec<Value>, Self::Error> {
+    ) -> Result<Vec<PipelineMap>, Self::Error> {
         Ok(values)
     }
 
@@ -412,9 +412,9 @@ where
 
     fn pre_pipeline(
         &self,
-        values: Vec<Value>,
+        values: Vec<PipelineMap>,
         query_ctx: QueryContextRef,
-    ) -> Result<Vec<Value>, Self::Error> {
+    ) -> Result<Vec<PipelineMap>, Self::Error> {
         if let Some(this) = self {
             this.pre_pipeline(values, query_ctx)
         } else {

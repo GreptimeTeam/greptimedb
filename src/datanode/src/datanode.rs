@@ -157,6 +157,7 @@ impl Datanode {
 
 pub struct DatanodeBuilder {
     opts: DatanodeOptions,
+    mode: Mode,
     plugins: Plugins,
     meta_client: Option<MetaClientRef>,
     kv_backend: Option<KvBackendRef>,
@@ -166,9 +167,10 @@ pub struct DatanodeBuilder {
 impl DatanodeBuilder {
     /// `kv_backend` is optional. If absent, the builder will try to build one
     /// by using the given `opts`
-    pub fn new(opts: DatanodeOptions, plugins: Plugins) -> Self {
+    pub fn new(opts: DatanodeOptions, plugins: Plugins, mode: Mode) -> Self {
         Self {
             opts,
+            mode,
             plugins,
             meta_client: None,
             kv_backend: None,
@@ -198,7 +200,7 @@ impl DatanodeBuilder {
     }
 
     pub async fn build(mut self) -> Result<Datanode> {
-        let mode = &self.opts.mode;
+        let mode = &self.mode;
         let node_id = self.opts.node_id.context(MissingNodeIdSnafu)?;
 
         let meta_client = self.meta_client.take();
@@ -263,6 +265,7 @@ impl DatanodeBuilder {
                     region_server.clone(),
                     meta_client,
                     cache_registry,
+                    self.plugins.clone(),
                 )
                 .await?,
             )
@@ -629,6 +632,7 @@ mod tests {
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::kv_backend::KvBackendRef;
     use mito2::engine::MITO_ENGINE_NAME;
+    use servers::Mode;
     use store_api::region_request::RegionRequest;
     use store_api::storage::RegionId;
 
@@ -674,6 +678,7 @@ mod tests {
                 ..Default::default()
             },
             Plugins::default(),
+            Mode::Standalone,
         )
         .with_cache_registry(layered_cache_registry);
 

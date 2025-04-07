@@ -147,6 +147,8 @@ impl ParserContext<'_> {
 
                     Keyword::INSERT => self.parse_insert(),
 
+                    Keyword::REPLACE => self.parse_replace(),
+
                     Keyword::SELECT | Keyword::WITH | Keyword::VALUES => self.parse_query(),
 
                     Keyword::ALTER => self.parse_alter(),

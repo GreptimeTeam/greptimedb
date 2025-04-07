@@ -259,6 +259,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Expected metric manifest info, region: {}", region_id))]
+    MetricManifestInfo {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -309,6 +316,8 @@ impl ErrorExt for Error {
             EncodePrimaryKey { source, .. } => source.status_code(),
 
             CollectRecordBatchStream { source, .. } => source.status_code(),
+
+            MetricManifestInfo { .. } => StatusCode::Internal,
         }
     }
 

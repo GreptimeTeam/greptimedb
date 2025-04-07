@@ -55,6 +55,8 @@ mod row_selector_test;
 #[cfg(test)]
 mod set_role_state_test;
 #[cfg(test)]
+mod sync_test;
+#[cfg(test)]
 mod truncate_test;
 
 use std::any::Any;
@@ -76,10 +78,11 @@ use snafu::{ensure, OptionExt, ResultExt};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::logstore::provider::Provider;
 use store_api::logstore::LogStore;
+use store_api::manifest::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
-    BatchResponses, RegionEngine, RegionRole, RegionScannerRef, RegionStatistic,
-    SetRegionRoleStateResponse, SettableRegionRoleState,
+    BatchResponses, RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef,
+    RegionStatistic, SetRegionRoleStateResponse, SettableRegionRoleState,
 };
 use store_api::region_request::{AffectedRows, RegionOpenRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
@@ -88,7 +91,8 @@ use tokio::sync::{oneshot, Semaphore};
 use crate::cache::CacheStrategy;
 use crate::config::MitoConfig;
 use crate::error::{
-    InvalidRequestSnafu, JoinSnafu, RecvSnafu, RegionNotFoundSnafu, Result, SerdeJsonSnafu,
+    InvalidRequestSnafu, JoinSnafu, MitoManifestInfoSnafu, RecvSnafu, RegionNotFoundSnafu, Result,
+    SerdeJsonSnafu,
 };
 use crate::manifest::action::RegionEdit;
 use crate::metrics::HANDLE_REQUEST_ELAPSED;
@@ -488,6 +492,20 @@ impl EngineInner {
         receiver.await.context(RecvSnafu)
     }
 
+    async fn sync_region(
+        &self,
+        region_id: RegionId,
+        manifest_info: RegionManifestInfo,
+    ) -> Result<ManifestVersion> {
+        ensure!(manifest_info.is_mito(), MitoManifestInfoSnafu);
+        let manifest_version = manifest_info.data_manifest_version();
+        let (request, receiver) =
+            WorkerRequest::new_sync_region_request(region_id, manifest_version);
+        self.workers.submit_to_worker(region_id, request).await?;
+
+        receiver.await.context(RecvSnafu)?
+    }
+
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {
         self.workers.get_region(region_id).map(|region| {
             if region.is_follower() {
@@ -607,6 +625,18 @@ impl RegionEngine for MitoEngine {
             .set_region_role_state_gracefully(region_id, region_role_state)
             .await
             .map_err(BoxedError::new)
+    }
+
+    async fn sync_region(
+        &self,
+        region_id: RegionId,
+        manifest_info: RegionManifestInfo,
+    ) -> Result<(), BoxedError> {
+        self.inner
+            .sync_region(region_id, manifest_info)
+            .await
+            .map_err(BoxedError::new)
+            .map(|_| ())
     }
 
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {
