@@ -173,11 +173,11 @@ impl TopicNameManager {
     /// Put topics into kvbackend. The value is set to 0 by default.
     pub async fn batch_put(&self, topic_name_keys: Vec<TopicNameKey<'_>>) -> Result<()> {
         let mut kvs = Vec::with_capacity(topic_name_keys.len());
+        let topic_name_value = TopicNameValue::new(0);
         for topic_name_key in &topic_name_keys {
-            let topic_name_value = TopicNameValue::new(0);
             let kv = KeyValue {
                 key: topic_name_key.to_bytes(),
-                value: topic_name_value.try_as_raw_value()?,
+                value: topic_name_value.clone().try_as_raw_value()?,
             };
             kvs.push(kv);
         }

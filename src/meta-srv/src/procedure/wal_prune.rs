@@ -655,15 +655,13 @@ mod tests {
                 )
                 .await;
                 // Check if the entry s before `min_flushed_entry_id` are deleted.
-                if procedure.data.min_flushed_entry_id > 0 {
-                    check_entry_id_existence(
-                        procedure.context.client.clone(),
-                        &topic_name,
-                        procedure.data.min_flushed_entry_id as i64 - 1,
-                        false,
-                    )
-                    .await;
-                }
+                check_entry_id_existence(
+                    procedure.context.client.clone(),
+                    &topic_name,
+                    procedure.data.min_flushed_entry_id as i64,
+                    false,
+                )
+                .await;
 
                 let min_entry_id = env
                     .table_metadata_manager()

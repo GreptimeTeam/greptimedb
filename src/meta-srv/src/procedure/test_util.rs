@@ -21,6 +21,7 @@ use common_meta::instruction::{
 };
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::test_utils::new_test_table_info;
+use common_meta::key::topic_name::TopicNameKey;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::peer::Peer;
 use common_meta::region_registry::{
@@ -207,6 +208,11 @@ pub async fn new_wal_prune_metadata(
                 TableRouteValue::physical(region_routes),
                 region_wal_options,
             )
+            .await
+            .unwrap();
+        table_metadata_manager
+            .topic_name_manager()
+            .batch_put(vec![TopicNameKey::new(&topic)])
             .await
             .unwrap();
 
