@@ -21,6 +21,7 @@ use common_meta::ddl::create_flow::FlowType;
 use common_meta::key::flow::FlowMetadataManagerRef;
 use common_meta::key::table_info::TableInfoManager;
 use common_meta::key::TableMetadataManagerRef;
+use common_runtime::JoinHandle;
 use common_telemetry::info;
 use common_telemetry::tracing::warn;
 use query::QueryEngineRef;
@@ -119,23 +120,56 @@ impl BatchingEngine {
             })
             .collect::<HashMap<_, _>>();
 
-        // TODO(discord9): not use one lock for all tasks
-        for (_flow_id, task) in self.tasks.read().await.iter() {
+        let group_by_table_name = Arc::new(group_by_table_name);
+
+        let mut handles = Vec::new();
+        let tasks = self.tasks.read().await;
+        for (_flow_id, task) in tasks.iter() {
             let src_table_names = &task.source_table_names;
 
-            for src_table_name in src_table_names {
-                if let Some(entry) = group_by_table_name.get(src_table_name) {
-                    let Some(expr) = &task.time_window_expr else {
-                        continue;
-                    };
-                    let involved_time_windows = expr.handle_rows(entry.clone()).await?;
-                    let mut state = task.state.write().await;
-                    state
-                        .dirty_time_windows
-                        .add_lower_bounds(involved_time_windows.into_iter());
+            if src_table_names
+                .iter()
+                .all(|name| !group_by_table_name.contains_key(name))
+            {
+                continue;
+            }
+
+            let group_by_table_name = group_by_table_name.clone();
+            // TODO(discord9): make clone task less costy
+            let task = task.clone();
+
+            let handle: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
+                let src_table_names = &task.source_table_names;
+
+                for src_table_name in src_table_names {
+                    if let Some(entry) = group_by_table_name.get(src_table_name) {
+                        let Some(expr) = &task.time_window_expr else {
+                            continue;
+                        };
+                        let involved_time_windows = expr.handle_rows(entry.clone()).await?;
+                        let mut state = task.state.write().unwrap();
+                        state
+                            .dirty_time_windows
+                            .add_lower_bounds(involved_time_windows.into_iter());
+                    }
+                }
+                Ok(())
+            });
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            match handle.await {
+                Err(e) => {
+                    warn!("Failed to handle inserts: {e}");
+                }
+                Ok(Ok(())) => (),
+                Ok(Err(e)) => {
+                    warn!("Failed to handle inserts: {e}");
                 }
             }
         }
+        drop(tasks);
 
         Ok(Default::default())
     }

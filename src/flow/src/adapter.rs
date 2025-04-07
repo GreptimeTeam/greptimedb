@@ -75,7 +75,7 @@ use crate::FrontendInvoker;
 // `GREPTIME_TIMESTAMP` is not used to distinguish when table is created automatically by flow
 pub const AUTO_CREATED_PLACEHOLDER_TS_COL: &str = "__ts_placeholder";
 
-pub const AUTO_CREATED_UPDATE_AT_TS_COL: &str = "__update_at";
+pub const AUTO_CREATED_UPDATE_AT_TS_COL: &str = "update_at";
 
 // TODO(discord9): refactor common types for flow to a separate module
 /// FlowId is a unique identifier for a flow task

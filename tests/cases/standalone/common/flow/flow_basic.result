@@ -26,7 +26,7 @@ SHOW CREATE TABLE out_num_cnt_basic;
 |                   |   "sum(numbers_input_basic.number)" BIGINT NULL, |
 |                   |   "window_start" TIMESTAMP(3) NOT NULL,          |
 |                   |   "window_end" TIMESTAMP(3) NULL,                |
-|                   |   "__update_at" TIMESTAMP(3) NULL,               |
+|                   |   "update_at" TIMESTAMP(3) NULL,                 |
 |                   |   TIME INDEX ("window_start"),                   |
 |                   |   PRIMARY KEY ("window_end")                     |
 |                   | )                                                |
@@ -55,7 +55,7 @@ SHOW CREATE TABLE out_num_cnt_basic;
 |                   |   "sum(numbers_input_basic.number)" BIGINT NULL, |
 |                   |   "window_start" TIMESTAMP(3) NOT NULL,          |
 |                   |   "window_end" TIMESTAMP(3) NULL,                |
-|                   |   "__update_at" TIMESTAMP(3) NULL,               |
+|                   |   "update_at" TIMESTAMP(3) NULL,                 |
 |                   |   TIME INDEX ("window_start"),                   |
 |                   |   PRIMARY KEY ("window_end")                     |
 |                   | )                                                |
@@ -173,7 +173,7 @@ SHOW CREATE TABLE out_basic;
 +-----------+---------------------------------------------+
 | out_basic | CREATE TABLE IF NOT EXISTS "out_basic" (    |
 |           |   "wildcard" BIGINT NULL,                   |
-|           |   "__update_at" TIMESTAMP(3) NULL,          |
+|           |   "update_at" TIMESTAMP(3) NULL,            |
 |           |   "__ts_placeholder" TIMESTAMP(3) NOT NULL, |
 |           |   TIME INDEX ("__ts_placeholder")           |
 |           | )                                           |
@@ -201,7 +201,7 @@ SHOW CREATE TABLE out_basic;
 +-----------+---------------------------------------------+
 | out_basic | CREATE TABLE IF NOT EXISTS "out_basic" (    |
 |           |   "wildcard" BIGINT NULL,                   |
-|           |   "__update_at" TIMESTAMP(3) NULL,          |
+|           |   "update_at" TIMESTAMP(3) NULL,            |
 |           |   "__ts_placeholder" TIMESTAMP(3) NOT NULL, |
 |           |   TIME INDEX ("__ts_placeholder")           |
 |           | )                                           |
@@ -235,7 +235,7 @@ SHOW CREATE TABLE out_basic;
 +-----------+---------------------------------------------+
 | out_basic | CREATE TABLE IF NOT EXISTS "out_basic" (    |
 |           |   "wildcard" BIGINT NULL,                   |
-|           |   "__update_at" TIMESTAMP(3) NULL,          |
+|           |   "update_at" TIMESTAMP(3) NULL,            |
 |           |   "__ts_placeholder" TIMESTAMP(3) NOT NULL, |
 |           |   TIME INDEX ("__ts_placeholder")           |
 |           | )                                           |
@@ -289,7 +289,7 @@ SHOW CREATE TABLE out_distinct_basic;
 +--------------------+---------------------------------------------------+
 | out_distinct_basic | CREATE TABLE IF NOT EXISTS "out_distinct_basic" ( |
 |                    |   "dis" INT NULL,                                 |
-|                    |   "__update_at" TIMESTAMP(3) NULL,                |
+|                    |   "update_at" TIMESTAMP(3) NULL,                  |
 |                    |   "__ts_placeholder" TIMESTAMP(3) NOT NULL,       |
 |                    |   TIME INDEX ("__ts_placeholder"),                |
 |                    |   PRIMARY KEY ("dis")                             |
@@ -336,7 +336,7 @@ SHOW CREATE TABLE out_distinct_basic;
 +--------------------+---------------------------------------------------+
 | out_distinct_basic | CREATE TABLE IF NOT EXISTS "out_distinct_basic" ( |
 |                    |   "dis" INT NULL,                                 |
-|                    |   "__update_at" TIMESTAMP(3) NULL,                |
+|                    |   "update_at" TIMESTAMP(3) NULL,                  |
 |                    |   "__ts_placeholder" TIMESTAMP(3) NOT NULL,       |
 |                    |   TIME INDEX ("__ts_placeholder"),                |
 |                    |   PRIMARY KEY ("dis")                             |
@@ -616,7 +616,7 @@ SHOW CREATE TABLE ngx_country;
 +-------------+---------------------------------------------+
 | ngx_country | CREATE TABLE IF NOT EXISTS "ngx_country" (  |
 |             |   "country" STRING NULL,                    |
-|             |   "__update_at" TIMESTAMP(3) NULL,          |
+|             |   "update_at" TIMESTAMP(3) NULL,            |
 |             |   "__ts_placeholder" TIMESTAMP(3) NOT NULL, |
 |             |   TIME INDEX ("__ts_placeholder"),          |
 |             |   PRIMARY KEY ("country")                   |
@@ -649,7 +649,7 @@ SHOW CREATE TABLE ngx_country;
 +-------------+---------------------------------------------+
 | ngx_country | CREATE TABLE IF NOT EXISTS "ngx_country" (  |
 |             |   "country" STRING NULL,                    |
-|             |   "__update_at" TIMESTAMP(3) NULL,          |
+|             |   "update_at" TIMESTAMP(3) NULL,            |
 |             |   "__ts_placeholder" TIMESTAMP(3) NOT NULL, |
 |             |   TIME INDEX ("__ts_placeholder"),          |
 |             |   PRIMARY KEY ("country")                   |
@@ -767,7 +767,7 @@ SHOW CREATE TABLE ngx_country;
 | ngx_country | CREATE TABLE IF NOT EXISTS "ngx_country" ( |
 |             |   "country" STRING NULL,                   |
 |             |   "time_window" TIMESTAMP(3) NOT NULL,     |
-|             |   "__update_at" TIMESTAMP(3) NULL,         |
+|             |   "update_at" TIMESTAMP(3) NULL,           |
 |             |   TIME INDEX ("time_window"),              |
 |             |   PRIMARY KEY ("country")                  |
 |             | )                                          |
@@ -800,7 +800,7 @@ SHOW CREATE TABLE ngx_country;
 | ngx_country | CREATE TABLE IF NOT EXISTS "ngx_country" ( |
 |             |   "country" STRING NULL,                   |
 |             |   "time_window" TIMESTAMP(3) NOT NULL,     |
-|             |   "__update_at" TIMESTAMP(3) NULL,         |
+|             |   "update_at" TIMESTAMP(3) NULL,           |
 |             |   TIME INDEX ("time_window"),              |
 |             |   PRIMARY KEY ("country")                  |
 |             | )                                          |
@@ -1634,7 +1634,7 @@ SHOW CREATE TABLE out_num_cnt_basic;
 +-------------------+--------------------------------------------------+
 | out_num_cnt_basic | CREATE TABLE IF NOT EXISTS "out_num_cnt_basic" ( |
 |                   |   "avg_after_filter_num" BIGINT NULL,            |
-|                   |   "__update_at" TIMESTAMP(3) NULL,               |
+|                   |   "update_at" TIMESTAMP(3) NULL,                 |
 |                   |   "__ts_placeholder" TIMESTAMP(3) NOT NULL,      |
 |                   |   TIME INDEX ("__ts_placeholder")                |
 |                   | )                                                |

@@ -69,13 +69,20 @@ impl TaskState {
     }
 
     /// wait for at least `last_query_duration`, at most `max_timeout` to start next query
+    ///
+    /// if have more dirty time window, exec next query immediately
     pub fn get_next_start_query_time(&self, max_timeout: Option<Duration>) -> Instant {
         let next_duration = max_timeout
             .unwrap_or(self.last_query_duration)
             .min(self.last_query_duration);
         let next_duration = next_duration.max(MIN_REFRESH_DURATION);
 
-        self.last_update_time + next_duration
+        // if have dirty time window, execute immediately to clean dirty time window
+        if self.dirty_time_windows.windows.is_empty() {
+            self.last_update_time + next_duration
+        } else {
+            Instant::now()
+        }
     }
 }
 

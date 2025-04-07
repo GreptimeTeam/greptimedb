@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::ops::Deref;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use api::v1::CreateTableExpr;
@@ -38,18 +39,20 @@ use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::RawTableMeta;
+use tokio::sync::oneshot;
 use tokio::sync::oneshot::error::TryRecvError;
-use tokio::sync::{oneshot, RwLock};
 use tokio::time::Instant;
 
-use super::frontend_client::FrontendClient;
 use crate::adapter::{FlowId, AUTO_CREATED_PLACEHOLDER_TS_COL, AUTO_CREATED_UPDATE_AT_TS_COL};
+use crate::batching_mode::frontend_client::FrontendClient;
 use crate::batching_mode::state::TaskState;
 use crate::batching_mode::time_window::TimeWindowExpr;
 use crate::batching_mode::utils::{
     sql_to_df_plan, AddAutoColumnRewriter, AddFilterRewriter, FindGroupByFinalName,
 };
-use crate::batching_mode::{MIN_REFRESH_DURATION, SLOW_QUERY_THRESHOLD};
+use crate::batching_mode::{
+    DEFAULT_BATCHING_ENGINE_QUERY_TIMEOUT, MIN_REFRESH_DURATION, SLOW_QUERY_THRESHOLD,
+};
 use crate::error::{
     ConvertColumnSchemaSnafu, DatafusionSnafu, DatatypesSnafu, ExternalSnafu, InvalidRequestSnafu,
     SubstraitEncodeLogicalPlanSnafu, TableNotFoundMetaSnafu, TableNotFoundSnafu, UnexpectedSnafu,
@@ -63,7 +66,7 @@ use crate::Error;
 pub struct BatchingTask {
     pub flow_id: FlowId,
     pub query: String,
-    plan: LogicalPlan,
+    plan: Arc<LogicalPlan>,
     pub time_window_expr: Option<TimeWindowExpr>,
     /// in seconds
     pub expire_after: Option<i64>,
@@ -90,7 +93,7 @@ impl BatchingTask {
         Self {
             flow_id,
             query: query.to_string(),
-            plan,
+            plan: Arc::new(plan),
             time_window_expr,
             expire_after,
             sink_table_name,
@@ -116,7 +119,7 @@ impl BatchingTask {
         );
         self.state
             .write()
-            .await
+            .unwrap()
             .dirty_time_windows
             .add_lower_bounds(vec![ts].into_iter());
 
@@ -311,7 +314,7 @@ impl BatchingTask {
 
         self.state
             .write()
-            .await
+            .unwrap()
             .after_query_exec(elapsed, res.is_ok());
 
         let res = res.context(InvalidRequestSnafu {
@@ -346,7 +349,7 @@ impl BatchingTask {
                 // normal execute, sleep for some time before doing next query
                 Ok(Some(_)) => {
                     let sleep_until = {
-                        let mut state = self.state.write().await;
+                        let mut state = self.state.write().unwrap();
                         match state.shutdown_rx.try_recv() {
                             Ok(()) => break,
                             Err(TryRecvError::Closed) => {
@@ -355,7 +358,7 @@ impl BatchingTask {
                             }
                             Err(TryRecvError::Empty) => (),
                         }
-                        state.get_next_start_query_time(None)
+                        state.get_next_start_query_time(Some(DEFAULT_BATCHING_ENGINE_QUERY_TIMEOUT))
                     };
                     tokio::time::sleep_until(sleep_until).await;
                 }
@@ -391,7 +394,7 @@ impl BatchingTask {
         &self,
         engine: QueryEngineRef,
     ) -> Result<CreateTableExpr, Error> {
-        let query_ctx = self.state.read().await.query_ctx.clone();
+        let query_ctx = self.state.read().unwrap().query_ctx.clone();
         let plan = sql_to_df_plan(query_ctx.clone(), engine.clone(), &self.query, true).await?;
         create_table_with_expr(&plan, &self.sink_table_name)
     }
@@ -402,7 +405,7 @@ impl BatchingTask {
         engine: QueryEngineRef,
         sink_table_meta: &RawTableMeta,
     ) -> Result<Option<(LogicalPlan, usize)>, Error> {
-        let query_ctx = self.state.read().await.query_ctx.clone();
+        let query_ctx = self.state.read().unwrap().query_ctx.clone();
         let start = SystemTime::now();
         let since_the_epoch = start
             .duration_since(UNIX_EPOCH)
@@ -444,7 +447,7 @@ impl BatchingTask {
 
                         self.state
                             .write()
-                            .await
+                            .unwrap()
                             .dirty_time_windows
                             .gen_filter_exprs(
                                 &col_name,
@@ -463,6 +466,7 @@ impl BatchingTask {
                             AddAutoColumnRewriter::new(sink_table_meta.schema.clone());
                         let plan = self
                             .plan
+                            .deref()
                             .clone()
                             .rewrite(&mut add_auto_column)
                             .with_context(|_| DatafusionSnafu {
