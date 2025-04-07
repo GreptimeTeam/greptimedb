@@ -59,14 +59,14 @@ pub struct RegionAliveKeeper {
     /// duration acts like an "invariant point" for region's keep alive lease.
     epoch: Instant,
 
-    countdown_task_ext_handler: Option<CountdownTaskHandlerExtRef>,
+    countdown_task_handler_ext: Option<CountdownTaskHandlerExtRef>,
 }
 
 impl RegionAliveKeeper {
     /// Returns an empty [RegionAliveKeeper].
     pub fn new(
         region_server: RegionServer,
-        countdown_task_ext_handler: Option<CountdownTaskHandlerExtRef>,
+        countdown_task_handler_ext: Option<CountdownTaskHandlerExtRef>,
         heartbeat_interval_millis: u64,
     ) -> Self {
         Self {
@@ -75,7 +75,7 @@ impl RegionAliveKeeper {
             heartbeat_interval_millis,
             started: Arc::new(AtomicBool::new(false)),
             epoch: Instant::now(),
-            countdown_task_ext_handler,
+            countdown_task_handler_ext,
         }
     }
 
@@ -92,7 +92,7 @@ impl RegionAliveKeeper {
 
         let handle = Arc::new(CountdownTaskHandle::new(
             self.region_server.clone(),
-            self.countdown_task_ext_handler.clone(),
+            self.countdown_task_handler_ext.clone(),
             region_id,
         ));
 
@@ -282,14 +282,15 @@ enum CountdownCommand {
     Deadline(oneshot::Sender<Instant>),
 }
 
-pub type CountdownTaskHandlerExtRef = Arc<dyn CountdownTaskExtHandler>;
+pub type CountdownTaskHandlerExtRef = Arc<dyn CountdownTaskHandlerExt>;
 
-/// Extension trait for [CountdownTaskHandle] to reset deadline method.
+/// Extension trait for [CountdownTaskHandlerExt] to reset deadline of a region.
 #[async_trait]
-pub trait CountdownTaskExtHandler: Send + Sync {
+pub trait CountdownTaskHandlerExt: Send + Sync {
     async fn reset_deadline(
         &self,
         region_server: &RegionServer,
+        region_id: RegionId,
         role: RegionRole,
         deadline: Instant,
         extension_info: HashMap<String, Vec<u8>>,
@@ -421,6 +422,7 @@ impl CountdownTask {
                             if let Some(ext_handler) = self.handler_ext.as_ref() {
                                 ext_handler.reset_deadline(
                                     &self.region_server,
+                                    self.region_id,
                                     role,
                                     deadline,
                                     extension_info,
