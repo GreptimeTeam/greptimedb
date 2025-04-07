@@ -164,11 +164,11 @@ impl BatchingTask {
         &self,
         engine: &QueryEngineRef,
     ) -> Result<Option<LogicalPlan>, Error> {
-        let table_name_mgr = self.table_meta.table_name_manager();
-
         let full_table_name = self.sink_table_name.clone().join(".");
 
-        let table_id = table_name_mgr
+        let table_id = self
+            .table_meta
+            .table_name_manager()
             .get(common_meta::key::table_name::TableNameKey::new(
                 &self.sink_table_name[0],
                 &self.sink_table_name[1],
