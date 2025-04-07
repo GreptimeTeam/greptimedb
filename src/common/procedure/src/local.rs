@@ -178,7 +178,7 @@ impl ContextProvider for ManagerContext {
         Ok(self.state(procedure_id))
     }
 
-    async fn put_poison(&self, key: &PoisonKey, procedure_id: ProcedureId) -> Result<()> {
+    async fn try_put_poison(&self, key: &PoisonKey, procedure_id: ProcedureId) -> Result<()> {
         {
             // validate the procedure exists
             let procedures = self.procedures.read().unwrap();
@@ -197,7 +197,7 @@ impl ContextProvider for ManagerContext {
         }
         let key = key.to_string();
         let procedure_id = procedure_id.to_string();
-        self.poison_manager.set_poison(key, procedure_id).await
+        self.poison_manager.try_put_poison(key, procedure_id).await
     }
 }
 

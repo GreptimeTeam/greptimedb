@@ -245,13 +245,23 @@ impl Runner {
     }
 
     async fn clean_poisons(&mut self) -> Result<()> {
+        let mut error = None;
         for key in self.meta.poison_keys.iter() {
-            debug!("clean poison: {key}");
             let key = key.to_string();
-            self.manager_ctx
+            if let Err(e) = self
+                .manager_ctx
                 .poison_manager
                 .delete_poison(key, self.meta.id.to_string())
-                .await?;
+                .await
+            {
+                error!(e; "Failed to clean poisons for procedure: {}", self.meta.id);
+                error = Some(e);
+            }
+        }
+
+        // returns the last error if any.
+        if let Some(e) = error {
+            return Err(e);
         }
         Ok(())
     }
@@ -305,7 +315,7 @@ impl Runner {
                         if status.need_clean_poisons() {
                             if let Err(e) = self.clean_poisons().await {
                                 error!(e; "Failed to clean poison for procedure: {}", self.meta.id);
-                                // TODO(weny): Finds a better way to handle the retry.
+                                self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
                                 return;
                             }
                         }
@@ -641,7 +651,11 @@ mod tests {
                 unimplemented!()
             }
 
-            async fn put_poison(&self, _key: &PoisonKey, _procedure_id: ProcedureId) -> Result<()> {
+            async fn try_put_poison(
+                &self,
+                _key: &PoisonKey,
+                _procedure_id: ProcedureId,
+            ) -> Result<()> {
                 unimplemented!()
             }
         }
@@ -1343,7 +1357,7 @@ mod tests {
                 if times == 1 {
                     // Put the poison to the context.
                     ctx.provider
-                        .put_poison(&poison_key, ctx.procedure_id)
+                        .try_put_poison(&poison_key, ctx.procedure_id)
                         .await
                         .unwrap();
 
@@ -1414,7 +1428,7 @@ mod tests {
                 } else {
                     // Put the poison to the context.
                     ctx.provider
-                        .put_poison(&poison_key, ctx.procedure_id)
+                        .try_put_poison(&poison_key, ctx.procedure_id)
                         .await
                         .unwrap();
                     Err(Error::external(MockError::new(StatusCode::Unexpected)))
@@ -1492,7 +1506,7 @@ mod tests {
                 } else {
                     // Put the poison to the context.
                     ctx.provider
-                        .put_poison(&poison_key, ctx.procedure_id)
+                        .try_put_poison(&poison_key, ctx.procedure_id)
                         .await
                         .unwrap();
                     Ok(Status::Poisoned {

@@ -749,9 +749,14 @@ pub enum Error {
         error: serde_json::Error,
     },
 
-    #[snafu(display("Procedure poison conflict: {}", msg))]
+    #[snafu(display(
+        "Procedure poison key already exists with a different value, key: {}, value: {}",
+        key,
+        value
+    ))]
     ProcedurePoisonConflict {
-        msg: String,
+        key: String,
+        value: String,
         #[snafu(implicit)]
         location: Location,
     },

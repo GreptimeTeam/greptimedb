@@ -42,9 +42,18 @@ pub type PoisonStoreRef = Arc<dyn PoisonStore>;
 ///     manually recovered and the poison key is removed.
 #[async_trait]
 pub trait PoisonStore: Send + Sync {
-    async fn set_poison(&self, key: String, token: String) -> Result<()>;
+    /// Try to put the poison key.
+    ///
+    /// If the poison key already exists with a different value, the operation will fail.
+    async fn try_put_poison(&self, key: String, token: String) -> Result<()>;
 
+    /// Delete the poison key.
+    ///
+    /// If the poison key exists with a different value, the operation will fail.
     async fn delete_poison(&self, key: String, token: String) -> Result<()>;
 
+    /// Get the poison key.
+    ///
+    /// If the poison key does not exist, the operation will return `None`.
     async fn get_poison(&self, key: &str) -> Result<Option<String>>;
 }

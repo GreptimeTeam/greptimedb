@@ -124,7 +124,7 @@ impl Instance {
         let procedure_manager = Arc::new(LocalManager::new(
             manager_config,
             kv_state_store.clone(),
-            kv_state_store.clone(),
+            kv_state_store,
         ));
 
         Ok((kv_backend, procedure_manager))

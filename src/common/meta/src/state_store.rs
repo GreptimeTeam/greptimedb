@@ -27,7 +27,7 @@ use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 
-use crate::error::{ProcedurePoisonConflictSnafu, Result};
+use crate::error::{ProcedurePoisonConflictSnafu, Result, UnexpectedSnafu};
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{DeserializedValueWithBytes, MetadataValue};
 use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
@@ -300,18 +300,16 @@ impl KvStateStore {
         if !resp.succeeded {
             let mut set = TxnOpGetResponseSet::from(&mut resp.responses);
             let remote_value = on_failure(&mut set)?
-                .context(ProcedurePoisonConflictSnafu {
-                    msg: "Reads the empty poison value in comparing operation of the put consistency poison",
+                .context(UnexpectedSnafu {
+                    err_msg: "Reads the empty poison value in comparing operation of the put consistency poison",
                 })?
                 .into_inner();
 
             ensure!(
                 remote_value.token == token,
                 ProcedurePoisonConflictSnafu {
-                    msg: format!(
-                        "The poison is already put by other token {}",
-                        remote_value.token
-                    ),
+                    key: &key,
+                    value: &remote_value.token,
                 }
             );
         }
@@ -340,10 +338,8 @@ impl KvStateStore {
             ensure!(
                 remote_value.is_none(),
                 ProcedurePoisonConflictSnafu {
-                    msg: format!(
-                        "The poison is already put by other token {}",
-                        remote_value.unwrap().into_inner().token
-                    ),
+                    key: &key,
+                    value: &remote_value.unwrap().into_inner().token,
                 }
             );
         }
@@ -354,7 +350,7 @@ impl KvStateStore {
 
 #[async_trait]
 impl PoisonStore for KvStateStore {
-    async fn set_poison(&self, key: String, token: String) -> ProcedureResult<()> {
+    async fn try_put_poison(&self, key: String, token: String) -> ProcedureResult<()> {
         self.set_poison_inner(&key, &token)
             .await
             .map_err(BoxedError::new)

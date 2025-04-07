@@ -132,8 +132,11 @@ pub trait ContextProvider: Send + Sync {
     /// Query the procedure state.
     async fn procedure_state(&self, procedure_id: ProcedureId) -> Result<Option<ProcedureState>>;
 
-    /// Put the poison.
-    async fn put_poison(&self, key: &PoisonKey, procedure_id: ProcedureId) -> Result<()>;
+    /// Try to put a poison key for a procedure.
+    ///
+    /// This method is used to mark a resource as being operated on by a procedure.
+    /// If the poison key already exists with a different value, the operation will fail.
+    async fn try_put_poison(&self, key: &PoisonKey, procedure_id: ProcedureId) -> Result<()>;
 }
 
 /// Reference-counted pointer to [ContextProvider].

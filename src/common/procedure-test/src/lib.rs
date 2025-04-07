@@ -48,9 +48,9 @@ impl ContextProvider for MockContextProvider {
         Ok(self.states.get(&procedure_id).cloned())
     }
 
-    async fn put_poison(&self, key: &PoisonKey, procedure_id: ProcedureId) -> Result<()> {
+    async fn try_put_poison(&self, key: &PoisonKey, procedure_id: ProcedureId) -> Result<()> {
         self.poison_manager
-            .set_poison(key.to_string(), procedure_id.to_string())
+            .try_put_poison(key.to_string(), procedure_id.to_string())
             .await
     }
 }

@@ -37,7 +37,7 @@ impl InMemoryPoisonStore {
 
 #[async_trait::async_trait]
 impl PoisonStore for InMemoryPoisonStore {
-    async fn set_poison(&self, key: String, token: String) -> Result<()> {
+    async fn try_put_poison(&self, key: String, token: String) -> Result<()> {
         let mut map = self.map.write().unwrap();
         match map.entry(key) {
             Entry::Vacant(v) => {
