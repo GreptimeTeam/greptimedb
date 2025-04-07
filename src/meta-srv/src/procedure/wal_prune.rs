@@ -29,7 +29,7 @@ use common_procedure::{
     Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
     Result as ProcedureResult, Status, StringKey,
 };
-use common_telemetry::warn;
+use common_telemetry::{debug, warn};
 use itertools::{Itertools, MinMaxResult};
 use log_store::kafka::DEFAULT_PARTITION;
 use rskafka::client::partition::UnknownTopicHandling;
@@ -293,16 +293,20 @@ impl WalPruneProcedure {
             .with_context(|_| error::RetryLaterWithSourceSnafu {
                 reason: "Failed to update min flushed entry id in kvbackend",
             })?;
+        debug!(
+            "Delete records from topic: {}, min flushed entry id: {}",
+            self.data.topic, self.data.min_flushed_entry_id
+        );
         partition_client
             .delete_records(
-                self.data.min_flushed_entry_id as i64,
+                (self.data.min_flushed_entry_id + 1) as i64,
                 DELETE_RECORDS_TIMEOUT,
             )
             .await
             .context(DeleteRecordSnafu {
                 topic: self.data.topic.clone(),
                 partition: DEFAULT_PARTITION,
-                offset: self.data.min_flushed_entry_id,
+                offset: (self.data.min_flushed_entry_id + 1),
             })
             .map_err(BoxedError::new)
             .with_context(|_| error::RetryLaterWithSourceSnafu {
@@ -534,16 +538,24 @@ mod tests {
         client: KafkaClientRef,
         topic_name: &str,
         entry_id: i64,
-    ) -> bool {
+        expect_success: bool,
+    ) {
         let partition_client = client
             .partition_client(topic_name, 0, UnknownTopicHandling::Retry)
             .await
             .unwrap();
-        let (records, _high_watermark) = partition_client
+        let res = partition_client
             .fetch_records(entry_id, 0..10001, 5_000)
-            .await
-            .unwrap();
-        !records.is_empty()
+            .await;
+        if expect_success {
+            assert!(res.is_ok());
+            let (record, _high_watermark) = res.unwrap();
+            assert!(!record.is_empty());
+        } else {
+            let err = res.unwrap_err();
+            // The error is in a private module so we check it through `to_string()`.
+            assert!(err.to_string().contains("OffsetOutOfRange"));
+        }
     }
 
     async fn delete_topic(client: KafkaClientRef, topic_name: &str) {
@@ -611,24 +623,23 @@ mod tests {
                 let status = procedure.on_prune().await.unwrap();
                 assert_matches!(status, Status::Done { output: None });
                 // Check if the entry ids after `min_flushed_entry_id` still exist.
-                assert!(
+                check_entry_id_existence(
+                    procedure.context.client.clone(),
+                    &topic_name,
+                    procedure.data.min_flushed_entry_id as i64 + 1,
+                    true,
+                )
+                .await;
+                // Check if the entry s before `min_flushed_entry_id` are deleted.
+                if procedure.data.min_flushed_entry_id > 0 {
                     check_entry_id_existence(
                         procedure.context.client.clone(),
                         &topic_name,
-                        procedure.data.min_flushed_entry_id as i64,
+                        procedure.data.min_flushed_entry_id as i64 - 1,
+                        false,
                     )
-                    .await
-                );
-                // Check if the entry s before `min_flushed_entry_id` are deleted.
-                assert!(
-                    procedure.data.min_flushed_entry_id == 0
-                        || !check_entry_id_existence(
-                            procedure.context.client.clone(),
-                            &topic_name,
-                            procedure.data.min_flushed_entry_id as i64 - 1,
-                        )
-                        .await
-                );
+                    .await;
+                }
 
                 let min_entry_id = env
                     .table_metadata_manager()

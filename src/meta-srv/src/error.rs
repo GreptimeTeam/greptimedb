@@ -802,7 +802,12 @@ pub enum Error {
         error: rskafka::client::error::Error,
     },
 
-    #[snafu(display("Failed to delete record from Kafka"))]
+    #[snafu(display(
+        "Failed to delete record from Kafka, topic: {}, partition: {}, offset: {}",
+        topic,
+        partition,
+        offset
+    ))]
     DeleteRecord {
         #[snafu(implicit)]
         location: Location,
