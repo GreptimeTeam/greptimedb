@@ -129,14 +129,14 @@ impl Future for MailboxReceiver {
 
 #[async_trait::async_trait]
 pub trait Mailbox: Send + Sync {
-    async fn send_oneway(&self, ch: &Channel, msg: MailboxMessage) -> Result<()>;
-
     async fn send(
         &self,
         ch: &Channel,
         msg: MailboxMessage,
         timeout: Duration,
     ) -> Result<MailboxReceiver>;
+
+    async fn send_oneway(&self, ch: &Channel, msg: MailboxMessage) -> Result<()>;
 
     async fn broadcast(&self, ch: &BroadcastChannel, msg: &MailboxMessage) -> Result<()>;
 
