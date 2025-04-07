@@ -181,6 +181,7 @@ rstest = "0.25"
 rstest_reuse = "0.7"
 rust_decimal = "1.33"
 rustc-hash = "2.0"
+# It is worth noting that we should try to avoid using aws-lc-rs until it is stable.
 rustls = { version = "0.23.25", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
