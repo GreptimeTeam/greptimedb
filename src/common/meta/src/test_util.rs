@@ -35,6 +35,7 @@ use crate::node_manager::{
 };
 use crate::peer::{Peer, PeerLookupService};
 use crate::region_keeper::MemoryRegionKeeper;
+use crate::region_registry::LeaderRegionRegistry;
 use crate::sequence::SequenceBuilder;
 use crate::wal_options_allocator::WalOptionsAllocator;
 use crate::{DatanodeId, FlownodeId};
@@ -177,6 +178,7 @@ pub fn new_ddl_context_with_kv_backend(
         node_manager,
         cache_invalidator: Arc::new(DummyCacheInvalidator),
         memory_region_keeper: Arc::new(MemoryRegionKeeper::new()),
+        leader_region_registry: Arc::new(LeaderRegionRegistry::default()),
         table_metadata_allocator,
         table_metadata_manager,
         flow_metadata_allocator,

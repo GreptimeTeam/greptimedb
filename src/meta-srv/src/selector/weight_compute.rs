@@ -94,7 +94,9 @@ impl WeightCompute for RegionNumsBasedWeightCompute {
 mod tests {
     use std::collections::HashMap;
 
-    use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue, RegionStat, Stat};
+    use common_meta::datanode::{
+        DatanodeStatKey, DatanodeStatValue, RegionManifestInfo, RegionStat, Stat,
+    };
     use common_meta::peer::Peer;
     use store_api::region_engine::RegionRole;
     use store_api::storage::RegionId;
@@ -189,6 +191,10 @@ mod tests {
                 manifest_size: 0,
                 sst_size: 0,
                 index_size: 0,
+                region_manifest: RegionManifestInfo::Mito {
+                    manifest_version: 0,
+                    flushed_entry_id: 0,
+                },
             }],
             ..Default::default()
         }
@@ -210,6 +216,10 @@ mod tests {
                 manifest_size: 0,
                 sst_size: 0,
                 index_size: 0,
+                region_manifest: RegionManifestInfo::Mito {
+                    manifest_version: 0,
+                    flushed_entry_id: 0,
+                },
             }],
             ..Default::default()
         }
@@ -231,6 +241,10 @@ mod tests {
                 manifest_size: 0,
                 sst_size: 0,
                 index_size: 0,
+                region_manifest: RegionManifestInfo::Mito {
+                    manifest_version: 0,
+                    flushed_entry_id: 0,
+                },
             }],
             ..Default::default()
         }

@@ -5,6 +5,8 @@ CREATE TABLE integers (
 
 INSERT INTO integers VALUES (1), (2), (3), (4), (5);
 
+REPLACE INTO integers VALUES (6), (7);
+
 SELECT * FROM integers;
 
 -- Test insert with long string constant

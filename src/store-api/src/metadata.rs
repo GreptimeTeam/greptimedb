@@ -1030,7 +1030,7 @@ fn unset_column_fulltext_options(
 #[cfg(test)]
 mod test {
     use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::ColumnSchema;
+    use datatypes::schema::{ColumnSchema, FulltextAnalyzer, FulltextBackend};
 
     use super::*;
 
@@ -1455,8 +1455,9 @@ mod test {
                     column_name: "b".to_string(),
                     options: FulltextOptions {
                         enable: true,
-                        analyzer: datatypes::schema::FulltextAnalyzer::Chinese,
+                        analyzer: FulltextAnalyzer::Chinese,
                         case_sensitive: true,
+                        backend: FulltextBackend::Bloom,
                     },
                 },
             })

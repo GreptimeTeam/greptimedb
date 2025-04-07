@@ -28,8 +28,9 @@ use datafusion_sql::planner::{ContextProvider, SqlToRel};
 use datafusion_sql::TableReference;
 use datatypes::arrow::datatypes::DataType;
 use datatypes::schema::{
-    COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE,
-    COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY, COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE,
+    COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_BACKEND,
+    COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE, COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY,
+    COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE,
 };
 use snafu::ResultExt;
 
@@ -124,6 +125,7 @@ pub fn validate_column_fulltext_create_option(key: &str) -> bool {
     [
         COLUMN_FULLTEXT_OPT_KEY_ANALYZER,
         COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE,
+        COLUMN_FULLTEXT_OPT_KEY_BACKEND,
     ]
     .contains(&key)
 }

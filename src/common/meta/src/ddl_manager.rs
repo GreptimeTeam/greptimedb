@@ -834,6 +834,7 @@ mod tests {
     use std::sync::Arc;
 
     use common_procedure::local::LocalManager;
+    use common_procedure::test_util::InMemoryPoisonStore;
 
     use super::DdlManager;
     use crate::cache_invalidator::DummyCacheInvalidator;
@@ -850,6 +851,7 @@ mod tests {
     use crate::node_manager::{DatanodeRef, FlownodeRef, NodeManager};
     use crate::peer::Peer;
     use crate::region_keeper::MemoryRegionKeeper;
+    use crate::region_registry::LeaderRegionRegistry;
     use crate::sequence::SequenceBuilder;
     use crate::state_store::KvStateStore;
     use crate::wal_options_allocator::WalOptionsAllocator;
@@ -882,7 +884,12 @@ mod tests {
         ));
 
         let state_store = Arc::new(KvStateStore::new(kv_backend.clone()));
-        let procedure_manager = Arc::new(LocalManager::new(Default::default(), state_store));
+        let poison_manager = Arc::new(InMemoryPoisonStore::default());
+        let procedure_manager = Arc::new(LocalManager::new(
+            Default::default(),
+            state_store,
+            poison_manager,
+        ));
 
         let _ = DdlManager::try_new(
             DdlContext {
@@ -893,6 +900,7 @@ mod tests {
                 flow_metadata_manager,
                 flow_metadata_allocator,
                 memory_region_keeper: Arc::new(MemoryRegionKeeper::default()),
+                leader_region_registry: Arc::new(LeaderRegionRegistry::default()),
                 region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
             },
             procedure_manager.clone(),

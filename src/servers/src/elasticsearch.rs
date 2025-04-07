@@ -30,7 +30,7 @@ use session::context::{Channel, QueryContext};
 use snafu::{ensure, ResultExt};
 
 use crate::error::{
-    status_code_to_http_status, InvalidElasticsearchInputSnafu, ParseJsonSnafu,
+    status_code_to_http_status, InvalidElasticsearchInputSnafu, ParseJsonSnafu, PipelineSnafu,
     Result as ServersResult,
 };
 use crate::http::event::{ingest_logs_inner, LogIngestRequest, LogIngesterQueryParams, LogState};
@@ -330,6 +330,7 @@ fn parse_bulk_request(
                 }
             );
 
+            let log_value = pipeline::json_to_map(log_value).context(PipelineSnafu)?;
             requests.push(LogIngestRequest {
                 table: index.unwrap_or_else(|| index_from_url.as_ref().unwrap().clone()),
                 values: vec![log_value],
@@ -371,8 +372,8 @@ fn get_log_value_from_msg_field(mut v: Value, msg_field: &str) -> Value {
         match message {
             Value::String(s) => match serde_json::from_str::<Value>(&s) {
                 Ok(s) => s,
-                // If the message is not a valid JSON, just use the original message as the log value.
-                Err(_) => Value::String(s),
+                // If the message is not a valid JSON, return a map with the original message key and value.
+                Err(_) => json!({msg_field: s}),
             },
             // If the message is not a string, just use the original message as the log value.
             _ => message,
@@ -404,12 +405,12 @@ mod tests {
                     LogIngestRequest {
                         table: "test".to_string(),
                         values: vec![
-                            json!({"foo1": "foo1_value", "bar1": "bar1_value"}),
+                            pipeline::json_to_map(json!({"foo1": "foo1_value", "bar1": "bar1_value"})).unwrap(),
                         ],
                     },
                     LogIngestRequest {
                         table: "test".to_string(),
-                        values: vec![json!({"foo2": "foo2_value", "bar2": "bar2_value"})],
+                        values: vec![pipeline::json_to_map(json!({"foo2": "foo2_value", "bar2": "bar2_value"})).unwrap()],
                     },
                 ]),
             ),
@@ -426,11 +427,11 @@ mod tests {
                 Ok(vec![
                     LogIngestRequest {
                         table: "test".to_string(),
-                        values: vec![json!({"foo1": "foo1_value", "bar1": "bar1_value"})],
+                        values: vec![pipeline::json_to_map(json!({"foo1": "foo1_value", "bar1": "bar1_value"})).unwrap()],
                     },
                     LogIngestRequest {
                         table: "logs".to_string(),
-                        values: vec![json!({"foo2": "foo2_value", "bar2": "bar2_value"})],
+                        values: vec![pipeline::json_to_map(json!({"foo2": "foo2_value", "bar2": "bar2_value"})).unwrap()],
                     },
                 ]),
             ),
@@ -447,11 +448,11 @@ mod tests {
                 Ok(vec![
                     LogIngestRequest {
                         table: "test".to_string(),
-                        values: vec![json!({"foo1": "foo1_value", "bar1": "bar1_value"})],
+                        values: vec![pipeline::json_to_map(json!({"foo1": "foo1_value", "bar1": "bar1_value"})).unwrap()],
                     },
                     LogIngestRequest {
                         table: "logs".to_string(),
-                        values: vec![json!({"foo2": "foo2_value", "bar2": "bar2_value"})],
+                        values: vec![pipeline::json_to_map(json!({"foo2": "foo2_value", "bar2": "bar2_value"})).unwrap()],
                     },
                 ]),
             ),
@@ -467,7 +468,7 @@ mod tests {
                 Ok(vec![
                     LogIngestRequest {
                         table: "test".to_string(),
-                        values: vec![json!({"foo1": "foo1_value", "bar1": "bar1_value"})],
+                        values: vec![pipeline::json_to_map(json!({"foo1": "foo1_value", "bar1": "bar1_value"})).unwrap()],
                     },
                 ]),
             ),
@@ -484,11 +485,11 @@ mod tests {
                 Ok(vec![
                     LogIngestRequest {
                         table: "test".to_string(),
-                        values: vec![json!({"foo1": "foo1_value", "bar1": "bar1_value"})],
+                        values: vec![pipeline::json_to_map(json!({"foo1": "foo1_value", "bar1": "bar1_value"})).unwrap()],
                     },
                     LogIngestRequest {
                         table: "test".to_string(),
-                        values: vec![json!({"foo2": "foo2_value", "bar2": "bar2_value"})],
+                        values: vec![pipeline::json_to_map(json!({"foo2": "foo2_value", "bar2": "bar2_value"})).unwrap()],
                     },
                 ]),
             ),
@@ -506,13 +507,13 @@ mod tests {
                     LogIngestRequest {
                         table: "logs-generic-default".to_string(),
                         values: vec![
-                            json!("172.16.0.1 - - [25/May/2024:20:19:37 +0000] \"GET /contact HTTP/1.1\" 404 162 \"-\" \"Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1\""),
+                            pipeline::json_to_map(json!({"message": "172.16.0.1 - - [25/May/2024:20:19:37 +0000] \"GET /contact HTTP/1.1\" 404 162 \"-\" \"Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1\""})).unwrap(),
                         ],
                     },
                     LogIngestRequest {
                         table: "logs-generic-default".to_string(),
                         values: vec![
-                            json!("10.0.0.1 - - [25/May/2024:20:18:37 +0000] \"GET /images/logo.png HTTP/1.1\" 304 0 \"-\" \"Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:89.0) Gecko/20100101 Firefox/89.0\""),
+                            pipeline::json_to_map(json!({"message": "10.0.0.1 - - [25/May/2024:20:18:37 +0000] \"GET /images/logo.png HTTP/1.1\" 304 0 \"-\" \"Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:89.0) Gecko/20100101 Firefox/89.0\""})).unwrap(),
                         ],
                     },
                 ]),

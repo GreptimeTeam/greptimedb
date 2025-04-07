@@ -130,7 +130,9 @@ impl Procedure for DropDatabaseProcedure {
         self.state
             .recover(&self.runtime_context)
             .map_err(BoxedError::new)
-            .context(ExternalSnafu)
+            .context(ExternalSnafu {
+                clean_poisons: false,
+            })
     }
 
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {

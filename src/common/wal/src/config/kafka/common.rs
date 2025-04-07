@@ -17,43 +17,21 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rskafka::client::{Credentials, SaslConfig};
+use rskafka::BackoffConfig;
 use rustls::{ClientConfig, RootCertStore};
 use serde::{Deserialize, Serialize};
-use serde_with::with_prefix;
 use snafu::{OptionExt, ResultExt};
+
+/// The default backoff config for kafka client.
+pub const DEFAULT_BACKOFF_CONFIG: BackoffConfig = BackoffConfig {
+    init_backoff: Duration::from_millis(100),
+    max_backoff: Duration::from_secs(10),
+    base: 2.0,
+    deadline: Some(Duration::from_secs(120)),
+};
 
 use crate::error::{self, Result};
 use crate::{TopicSelectorType, BROKER_ENDPOINT, TOPIC_NAME_PREFIX};
-
-with_prefix!(pub backoff_prefix "backoff_");
-
-/// Backoff configurations for kafka client.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct BackoffConfig {
-    /// The initial backoff delay.
-    #[serde(with = "humantime_serde")]
-    pub init: Duration,
-    /// The maximum backoff delay.
-    #[serde(with = "humantime_serde")]
-    pub max: Duration,
-    /// The exponential backoff rate, i.e. next backoff = base * current backoff.
-    pub base: u32,
-    /// The deadline of retries. `None` stands for no deadline.
-    #[serde(with = "humantime_serde")]
-    pub deadline: Option<Duration>,
-}
-
-impl Default for BackoffConfig {
-    fn default() -> Self {
-        Self {
-            init: Duration::from_millis(500),
-            max: Duration::from_secs(10),
-            base: 2,
-            deadline: Some(Duration::from_secs(60 * 5)), // 5 mins
-        }
-    }
-}
 
 /// The SASL configurations for kafka client.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

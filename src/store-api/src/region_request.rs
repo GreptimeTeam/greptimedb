@@ -17,15 +17,17 @@ use std::fmt::{self, Display};
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::add_column_location::LocationType;
-use api::v1::column_def::{as_fulltext_option, as_skipping_index_type};
+use api::v1::column_def::{
+    as_fulltext_option_analyzer, as_fulltext_option_backend, as_skipping_index_type,
+};
 use api::v1::region::{
     alter_request, compact_request, region_request, AlterRequest, AlterRequests, CloseRequest,
     CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest, DropRequests,
     FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
 };
 use api::v1::{
-    self, set_index, Analyzer, Option as PbOption, Rows, SemanticType,
-    SkippingIndexType as PbSkippingIndexType, WriteHint,
+    self, set_index, Analyzer, FulltextBackend as PbFulltextBackend, Option as PbOption, Rows,
+    SemanticType, SkippingIndexType as PbSkippingIndexType, WriteHint,
 };
 pub use common_base::AffectedRows;
 use common_time::TimeToLive;
@@ -713,10 +715,13 @@ impl TryFrom<alter_request::Kind> for AlterKind {
                         column_name: x.column_name.clone(),
                         options: FulltextOptions {
                             enable: x.enable,
-                            analyzer: as_fulltext_option(
+                            analyzer: as_fulltext_option_analyzer(
                                 Analyzer::try_from(x.analyzer).context(DecodeProtoSnafu)?,
                             ),
                             case_sensitive: x.case_sensitive,
+                            backend: as_fulltext_option_backend(
+                                PbFulltextBackend::try_from(x.backend).context(DecodeProtoSnafu)?,
+                            ),
                         },
                     },
                 },
@@ -1133,7 +1138,7 @@ mod tests {
     use api::v1::region::RegionColumnDef;
     use api::v1::{ColumnDataType, ColumnDef};
     use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::{ColumnSchema, FulltextAnalyzer};
+    use datatypes::schema::{ColumnSchema, FulltextAnalyzer, FulltextBackend};
 
     use super::*;
     use crate::metadata::RegionMetadataBuilder;
@@ -1596,6 +1601,7 @@ mod tests {
                     enable: true,
                     analyzer: FulltextAnalyzer::Chinese,
                     case_sensitive: false,
+                    backend: FulltextBackend::Bloom,
                 },
             },
         };

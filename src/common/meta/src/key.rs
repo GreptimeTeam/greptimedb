@@ -62,14 +62,6 @@
 //! 13. Topic name to region map key `__topic_region/{topic_name}/{region_id}`
 //!     - Mapping {topic_name} to {region_id}
 //!
-//! 14. Consistency poison key `__consistency_poison/{resource_type}/{resource_id}`
-//!     - The key is used to indicate the inconsistency of the resource.
-//!     - When an operation on a resource begins, a key is inserted into the metadata store.
-//!     - If the operation completes successfully, the key is removed from the metadata store.
-//!     - If the operation fails, the key remains in the metadata store.
-//!     - The presence of this key indicates possible metadata inconsistencies between the datanodes and the metadata.
-//!     - Further operations on the same resource are rejected until the inconsistency is resolved.
-//!
 //! All keys have related managers. The managers take care of the serialization and deserialization
 //! of keys and values, and the interaction with the underlying KV store backend.
 //!
@@ -103,7 +95,6 @@
 //!            {partition_id}
 
 pub mod catalog_name;
-pub mod consistency_poison;
 pub mod datanode_table;
 pub mod flow;
 pub mod maintenance;
@@ -132,7 +123,6 @@ use common_catalog::consts::{
 };
 use common_telemetry::warn;
 use common_wal::options::WalOptions;
-use consistency_poison::{ConsistencyPoisonManager, ConsistencyPoisonValue};
 use datanode_table::{DatanodeTableKey, DatanodeTableManager, DatanodeTableValue};
 use flow::flow_route::FlowRouteValue;
 use flow::table_flow::TableFlowValue;
@@ -166,6 +156,7 @@ use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::router::{region_distribution, LeaderState, RegionRoute};
 use crate::rpc::store::BatchDeleteRequest;
+use crate::state_store::PoisonValue;
 use crate::DatanodeId;
 
 pub const NAME_PATTERN: &str = r"[a-zA-Z_:-][a-zA-Z0-9_:\-\.@#]*";
@@ -326,7 +317,6 @@ pub struct TableMetadataManager {
     table_route_manager: TableRouteManager,
     tombstone_manager: TombstoneManager,
     topic_region_manager: TopicRegionManager,
-    consistency_poison_manager: ConsistencyPoisonManager,
     kv_backend: KvBackendRef,
 }
 
@@ -478,7 +468,6 @@ impl TableMetadataManager {
             table_route_manager: TableRouteManager::new(kv_backend.clone()),
             tombstone_manager: TombstoneManager::new(kv_backend.clone()),
             topic_region_manager: TopicRegionManager::new(kv_backend.clone()),
-            consistency_poison_manager: ConsistencyPoisonManager::new(kv_backend.clone()),
             kv_backend,
         }
     }
@@ -531,8 +520,8 @@ impl TableMetadataManager {
         &self.table_route_manager
     }
 
-    pub fn consistency_poison_manager(&self) -> &ConsistencyPoisonManager {
-        &self.consistency_poison_manager
+    pub fn topic_region_manager(&self) -> &TopicRegionManager {
+        &self.topic_region_manager
     }
 
     #[cfg(feature = "testing")]
@@ -1344,7 +1333,7 @@ impl_metadata_value! {
     NodeAddressValue,
     SchemaNameValue,
     FlowStateValue,
-    ConsistencyPoisonValue
+    PoisonValue
 }
 
 impl_optional_metadata_value! {

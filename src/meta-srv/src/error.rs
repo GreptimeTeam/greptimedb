@@ -787,6 +787,31 @@ pub enum Error {
         location: Location,
         source: common_meta::error::Error,
     },
+
+    #[snafu(display(
+        "Failed to build a Kafka partition client, topic: {}, partition: {}",
+        topic,
+        partition
+    ))]
+    BuildPartitionClient {
+        topic: String,
+        partition: i32,
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: rskafka::client::error::Error,
+    },
+
+    #[snafu(display("Failed to delete record from Kafka"))]
+    DeleteRecord {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: rskafka::client::error::Error,
+        topic: String,
+        partition: i32,
+        offset: u64,
+    },
 }
 
 impl Error {
@@ -834,7 +859,9 @@ impl ErrorExt for Error {
             | Error::ExceededDeadline { .. }
             | Error::ChooseItems { .. }
             | Error::FlowStateHandler { .. }
-            | Error::BuildWalOptionsAllocator { .. } => StatusCode::Internal,
+            | Error::BuildWalOptionsAllocator { .. }
+            | Error::BuildPartitionClient { .. }
+            | Error::DeleteRecord { .. } => StatusCode::Internal,
 
             Error::Unsupported { .. } => StatusCode::Unsupported,
 

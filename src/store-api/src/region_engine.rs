@@ -34,7 +34,6 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
 use crate::logstore::entry;
-use crate::manifest::ManifestVersion;
 use crate::metadata::RegionMetadataRef;
 use crate::region_request::{
     BatchRegionDdlRequest, RegionOpenRequest, RegionRequest, RegionSequencesRequest,
@@ -81,11 +80,11 @@ impl SetRegionRoleStateResponse {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrantedRegion {
     pub region_id: RegionId,
     pub region_role: RegionRole,
-    pub manifest_version: u64,
+    pub extensions: HashMap<String, Vec<u8>>,
 }
 
 impl GrantedRegion {
@@ -93,8 +92,7 @@ impl GrantedRegion {
         Self {
             region_id,
             region_role,
-            // TODO(weny): use real manifest version
-            manifest_version: 0,
+            extensions: HashMap::new(),
         }
     }
 }
@@ -104,7 +102,7 @@ impl From<GrantedRegion> for PbGrantedRegion {
         PbGrantedRegion {
             region_id: value.region_id.as_u64(),
             role: PbRegionRole::from(value.region_role).into(),
-            manifest_version: value.manifest_version,
+            extensions: value.extensions,
         }
     }
 }
@@ -114,7 +112,7 @@ impl From<PbGrantedRegion> for GrantedRegion {
         GrantedRegion {
             region_id: RegionId::from_u64(value.region_id),
             region_role: value.role().into(),
-            manifest_version: value.manifest_version,
+            extensions: value.extensions,
         }
     }
 }
@@ -383,6 +381,116 @@ pub struct RegionStatistic {
     /// The size of SST index files in bytes.
     #[serde(default)]
     pub index_size: u64,
+    /// The details of the region.
+    #[serde(default)]
+    pub manifest: RegionManifestInfo,
+}
+
+/// The manifest info of a region.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RegionManifestInfo {
+    Mito {
+        manifest_version: u64,
+        flushed_entry_id: u64,
+    },
+    Metric {
+        data_manifest_version: u64,
+        data_flushed_entry_id: u64,
+        metadata_manifest_version: u64,
+        metadata_flushed_entry_id: u64,
+    },
+}
+
+impl RegionManifestInfo {
+    /// Creates a new [RegionManifestInfo] for mito2 engine.
+    pub fn mito(manifest_version: u64, flushed_entry_id: u64) -> Self {
+        Self::Mito {
+            manifest_version,
+            flushed_entry_id,
+        }
+    }
+
+    /// Creates a new [RegionManifestInfo] for metric engine.
+    pub fn metric(
+        data_manifest_version: u64,
+        data_flushed_entry_id: u64,
+        metadata_manifest_version: u64,
+        metadata_flushed_entry_id: u64,
+    ) -> Self {
+        Self::Metric {
+            data_manifest_version,
+            data_flushed_entry_id,
+            metadata_manifest_version,
+            metadata_flushed_entry_id,
+        }
+    }
+
+    /// Returns true if the region is a mito2 region.
+    pub fn is_mito(&self) -> bool {
+        matches!(self, RegionManifestInfo::Mito { .. })
+    }
+
+    /// Returns true if the region is a metric region.
+    pub fn is_metric(&self) -> bool {
+        matches!(self, RegionManifestInfo::Metric { .. })
+    }
+
+    /// Returns the flushed entry id of the data region.
+    pub fn data_flushed_entry_id(&self) -> u64 {
+        match self {
+            RegionManifestInfo::Mito {
+                flushed_entry_id, ..
+            } => *flushed_entry_id,
+            RegionManifestInfo::Metric {
+                data_flushed_entry_id,
+                ..
+            } => *data_flushed_entry_id,
+        }
+    }
+
+    /// Returns the manifest version of the data region.
+    pub fn data_manifest_version(&self) -> u64 {
+        match self {
+            RegionManifestInfo::Mito {
+                manifest_version, ..
+            } => *manifest_version,
+            RegionManifestInfo::Metric {
+                data_manifest_version,
+                ..
+            } => *data_manifest_version,
+        }
+    }
+
+    /// Returns the manifest version of the metadata region.
+    pub fn metadata_manifest_version(&self) -> Option<u64> {
+        match self {
+            RegionManifestInfo::Mito { .. } => None,
+            RegionManifestInfo::Metric {
+                metadata_manifest_version,
+                ..
+            } => Some(*metadata_manifest_version),
+        }
+    }
+
+    /// Returns the flushed entry id of the metadata region.
+    pub fn metadata_flushed_entry_id(&self) -> Option<u64> {
+        match self {
+            RegionManifestInfo::Mito { .. } => None,
+            RegionManifestInfo::Metric {
+                metadata_flushed_entry_id,
+                ..
+            } => Some(*metadata_flushed_entry_id),
+        }
+    }
+}
+
+impl Default for RegionManifestInfo {
+    fn default() -> Self {
+        Self::Mito {
+            manifest_version: 0,
+            flushed_entry_id: 0,
+        }
+    }
 }
 
 impl RegionStatistic {
@@ -513,7 +621,7 @@ pub trait RegionEngine: Send + Sync {
     async fn sync_region(
         &self,
         region_id: RegionId,
-        manifest_version: ManifestVersion,
+        manifest_info: RegionManifestInfo,
     ) -> Result<(), BoxedError>;
 
     /// Sets region role state gracefully.

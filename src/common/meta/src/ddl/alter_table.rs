@@ -25,8 +25,8 @@ use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure, ProcedureId, Status,
-    StringKey,
+    Context as ProcedureContext, ContextProvider, Error as ProcedureError, LockKey, PoisonKey,
+    Procedure, ProcedureId, Status, StringKey,
 };
 use common_telemetry::{debug, error, info};
 use futures::future;
@@ -40,13 +40,13 @@ use table::table_reference::TableReference;
 use crate::cache_invalidator::Context;
 use crate::ddl::utils::{add_peer_context_if_needed, handle_multiple_results, MultipleResults};
 use crate::ddl::DdlContext;
-use crate::error::{Error, NoLeaderSnafu, Result, RetryLaterSnafu};
+use crate::error::{AbortProcedureSnafu, Error, NoLeaderSnafu, PutPoisonSnafu, Result};
 use crate::instruction::CacheIdent;
-use crate::key::consistency_poison::{ConsistencyPoisonKey, ResourceType};
 use crate::key::table_info::TableInfoValue;
 use crate::key::{DeserializedValueWithBytes, RegionDistribution};
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
 use crate::metrics;
+use crate::poison_key::table_poison_key;
 use crate::rpc::ddl::AlterTableTask;
 use crate::rpc::router::{find_leader_regions, find_leaders, region_distribution};
 
@@ -105,56 +105,26 @@ impl AlterTableProcedure {
         Ok(Status::executing(true))
     }
 
-    async fn put_consistency_poison(
-        &self,
-        table_id: TableId,
-        procedure_id: ProcedureId,
-    ) -> Result<()> {
-        if let Err(e) = self
-            .context
-            .table_metadata_manager
-            .consistency_poison_manager()
-            .put(
-                &ConsistencyPoisonKey::new(ResourceType::Table, table_id as u64),
-                procedure_id,
-            )
-            .await
-        {
-            if !e.is_consistency_poison() {
-                return Err(BoxedError::new(e)).context(RetryLaterSnafu);
-            }
-            return Err(e);
-        }
-
-        Ok(())
+    fn table_poison_key(&self) -> PoisonKey {
+        table_poison_key(self.data.table_id())
     }
 
-    async fn delete_consistency_poison(
+    async fn put_poison(
         &self,
-        table_id: TableId,
+        ctx_provider: &dyn ContextProvider,
         procedure_id: ProcedureId,
     ) -> Result<()> {
-        if let Err(e) = self
-            .context
-            .table_metadata_manager
-            .consistency_poison_manager()
-            .delete(
-                &ConsistencyPoisonKey::new(ResourceType::Table, table_id as u64),
-                procedure_id,
-            )
+        let poison_key = self.table_poison_key();
+        ctx_provider
+            .try_put_poison(&poison_key, procedure_id)
             .await
-        {
-            if !e.is_consistency_poison() {
-                return Err(BoxedError::new(e)).context(RetryLaterSnafu);
-            }
-            return Err(e);
-        }
-        Ok(())
+            .context(PutPoisonSnafu)
     }
 
     pub async fn submit_alter_region_requests(
         &mut self,
         procedure_id: ProcedureId,
+        ctx_provider: &dyn ContextProvider,
     ) -> Result<Status> {
         let table_id = self.data.table_id();
         let (_, physical_table_route) = self
@@ -179,8 +149,8 @@ impl AlterTableProcedure {
         );
 
         ensure!(!leaders.is_empty(), NoLeaderSnafu { table_id });
-        // Put the consistency poison before submitting alter region requests.
-        self.put_consistency_poison(table_id, procedure_id).await?;
+        // Puts the poison before submitting alter region requests to datanodes.
+        self.put_poison(ctx_provider, procedure_id).await?;
         for datanode in leaders {
             let requester = self.context.node_manager.datanode(&datanode).await;
             let regions = find_leader_regions(&physical_table_route.region_routes, &datanode);
@@ -210,35 +180,34 @@ impl AlterTableProcedure {
         match handle_multiple_results(results) {
             MultipleResults::PartialRetryable(error) => {
                 // Just returns the error, and wait for the next try.
-                return Err(error);
+                Err(error)
             }
             MultipleResults::PartialNonRetryable(error) => {
                 // No retry will be done.
-                return Err(error);
+                Ok(Status::poisoned(
+                    Some(self.table_poison_key()),
+                    ProcedureError::external(error),
+                ))
             }
             MultipleResults::AllRetryable(error) => {
                 // Just returns the error, and wait for the next try.
-                return Err(error);
+                Err(error)
             }
             MultipleResults::Ok => {
-                // continue
-                self.delete_consistency_poison(table_id, procedure_id)
-                    .await?;
+                self.data.state = AlterTableState::UpdateMetadata;
+                Ok(Status::executing_with_clean_poisons(true))
             }
             MultipleResults::AllNonRetryable(error) => {
+                error!(error; "All alter requests returned non-retryable errors for table {}, table_id: {}", self.data.table_ref(), self.data.table_id());
                 // It assumes the metadata on datanode is not changed.
                 // Case: The alter region request is sent but not applied. (e.g., InvalidArgument)
 
-                // Delete consistency poison before returning the error.
-                self.delete_consistency_poison(table_id, procedure_id)
-                    .await?;
-                return Err(error);
+                let err = BoxedError::new(error);
+                Err(err).context(AbortProcedureSnafu {
+                    clean_poisons: true,
+                })
             }
         }
-
-        self.data.state = AlterTableState::UpdateMetadata;
-
-        Ok(Status::executing(true))
     }
 
     /// Update table metadata.
@@ -331,6 +300,8 @@ impl Procedure for AlterTableProcedure {
         let error_handler = |e: Error| {
             if e.is_retry_later() {
                 ProcedureError::retry_later(e)
+            } else if e.need_clean_poisons() {
+                ProcedureError::external_and_clean_poisons(e)
             } else {
                 ProcedureError::external(e)
             }
@@ -347,7 +318,8 @@ impl Procedure for AlterTableProcedure {
         match state {
             AlterTableState::Prepare => self.on_prepare().await,
             AlterTableState::SubmitAlterRegionRequests => {
-                self.submit_alter_region_requests(ctx.procedure_id).await
+                self.submit_alter_region_requests(ctx.procedure_id, ctx.provider.as_ref())
+                    .await
             }
             AlterTableState::UpdateMetadata => self.on_update_metadata().await,
             AlterTableState::InvalidateTableCache => self.on_broadcast().await,

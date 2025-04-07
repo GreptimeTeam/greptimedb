@@ -20,7 +20,7 @@ use common_recordbatch::RecordBatches;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use store_api::metadata::ColumnMetadata;
-use store_api::region_engine::RegionEngine;
+use store_api::region_engine::{RegionEngine, RegionManifestInfo};
 use store_api::region_request::{
     AddColumn, AddColumnLocation, AlterKind, RegionAlterRequest, RegionOpenRequest, RegionRequest,
 };
@@ -133,11 +133,19 @@ async fn test_sync_after_flush_region() {
     scan_check(&follower_engine, region_id, expected, 0, 0).await;
 
     // Returns error since the max manifest is 1
-    let err = follower_engine.sync_region(region_id, 2).await.unwrap_err();
+    let manifest_info = RegionManifestInfo::mito(2, 0);
+    let err = follower_engine
+        .sync_region(region_id, manifest_info)
+        .await
+        .unwrap_err();
     let err = err.as_any().downcast_ref::<Error>().unwrap();
     assert_matches!(err, Error::InstallManifestTo { .. });
 
-    follower_engine.sync_region(region_id, 1).await.unwrap();
+    let manifest_info = RegionManifestInfo::mito(1, 0);
+    follower_engine
+        .sync_region(region_id, manifest_info)
+        .await
+        .unwrap();
     common_telemetry::info!("Scan the region on the follower engine after sync");
     // Scan the region on the follower engine
     let expected = "\
@@ -221,7 +229,11 @@ async fn test_sync_after_alter_region() {
     scan_check(&follower_engine, region_id, expected, 0, 0).await;
 
     // Sync the region from the leader engine to the follower engine
-    follower_engine.sync_region(region_id, 2).await.unwrap();
+    let manifest_info = RegionManifestInfo::mito(2, 0);
+    follower_engine
+        .sync_region(region_id, manifest_info)
+        .await
+        .unwrap();
     let expected = "\
 +-------+-------+---------+---------------------+
 | tag_1 | tag_0 | field_0 | ts                  |
