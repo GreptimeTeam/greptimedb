@@ -18,7 +18,6 @@ use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
 use common_error::ext::BoxedError;
-use common_meta::distributed_time_constants::MAILBOX_RTT_SECS;
 use common_meta::instruction::{FlushRegions, Instruction};
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::lock_key::RemoteWalLock;
@@ -48,7 +47,8 @@ use crate::Result;
 
 type KafkaClientRef = Arc<Client>;
 
-const FLUSH_TIMEOUT: Duration = Duration::from_secs(MAILBOX_RTT_SECS);
+/// No timeout for flush request.
+const FLUSH_TIMEOUT: Duration = Duration::from_secs(0);
 const DELETE_RECORDS_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// The state of WAL pruning.

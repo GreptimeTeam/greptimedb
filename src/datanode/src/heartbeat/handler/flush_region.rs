@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_meta::instruction::{FlushRegions, InstructionReply, SimpleReply};
+use common_meta::instruction::{FlushRegions, InstructionReply};
 use common_telemetry::warn;
 use futures_util::future::BoxFuture;
 use store_api::region_request::{RegionFlushRequest, RegionRequest};
@@ -36,23 +36,17 @@ impl HandlerContext {
                     Ok(_) => {}
                     Err(error::Error::RegionNotFound { .. }) => {
                         warn!("Received a flush region instruction from meta, but target region: {region_id} is not found.");
-                        return InstructionReply::FlushRegion(SimpleReply {
-                            result: true,
-                            error: None,
-                        });
                     }
                     Err(err) => {
-                        return InstructionReply::FlushRegion(SimpleReply {
-                            result: false,
-                            error: Some(format!("{err:?}")),
-                        })
+                        warn!(
+                            "Failed to flush region: {region_id}, error: {err}",
+                            region_id = region_id,
+                            err = err,
+                        );
                     }
                 }
             }
-            InstructionReply::FlushRegion(SimpleReply {
-                result: true,
-                error: None,
-            })
+            InstructionReply::FlushRegion
         })
     }
 }
@@ -60,6 +54,7 @@ impl HandlerContext {
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
+    use std::sync::{Arc, RwLock};
 
     use common_meta::instruction::FlushRegions;
     use mito2::engine::MITO_ENGINE_NAME;
@@ -70,43 +65,41 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_flush_region_instruction() {
-        let mut mock_region_server = mock_region_server();
-        let (mock_engine, _) =
-            MockRegionEngine::with_custom_apply_fn(MITO_ENGINE_NAME, |region_engine| {
-                region_engine.handle_request_mock_fn = Some(Box::new(|region_id, _request| {
-                    if region_id.table_id() == 1024 {
-                        Ok(0)
-                    } else {
-                        error::RegionNotFoundSnafu { region_id }.fail()
-                    }
-                }))
-            });
-        mock_region_server.register_engine(mock_engine);
+        let flushed_region_ids: Arc<RwLock<Vec<RegionId>>> = Arc::new(RwLock::new(Vec::new()));
 
-        let handler_context = HandlerContext::new_for_test(mock_region_server);
-
+        let mock_region_server = mock_region_server();
         let region_ids = (0..16).map(|i| RegionId::new(1024, i)).collect::<Vec<_>>();
+        for region_id in &region_ids {
+            let flushed_region_ids_ref = flushed_region_ids.clone();
+            let (mock_engine, _) =
+                MockRegionEngine::with_custom_apply_fn(MITO_ENGINE_NAME, move |region_engine| {
+                    region_engine.handle_request_mock_fn =
+                        Some(Box::new(move |region_id, _request| {
+                            flushed_region_ids_ref.write().unwrap().push(region_id);
+                            Ok(0)
+                        }))
+                });
+            mock_region_server.register_test_region(*region_id, mock_engine);
+        }
+        let handler_context = HandlerContext::new_for_test(mock_region_server);
 
         let reply = handler_context
             .clone()
-            .handle_flush_region_instruction(FlushRegions { region_ids })
-            .await;
-        assert_matches!(reply, InstructionReply::FlushRegion(_));
-        if let InstructionReply::FlushRegion(SimpleReply { result, error }) = reply {
-            assert!(result);
-            assert!(error.is_none());
-        }
-
-        let not_found_region_ids = (0..16).map(|i| RegionId::new(2048, i)).collect::<Vec<_>>();
-        let reply = handler_context
             .handle_flush_region_instruction(FlushRegions {
-                region_ids: not_found_region_ids,
+                region_ids: region_ids.clone(),
             })
             .await;
-        assert_matches!(reply, InstructionReply::FlushRegion(_));
-        if let InstructionReply::FlushRegion(SimpleReply { result, error }) = reply {
-            assert!(result);
-            assert!(error.is_none());
-        }
+        assert_matches!(reply, InstructionReply::FlushRegion);
+        assert_eq!(*flushed_region_ids.read().unwrap(), region_ids);
+
+        flushed_region_ids.write().unwrap().clear();
+        let not_found_region_ids = (0..2).map(|i| RegionId::new(2048, i)).collect::<Vec<_>>();
+        let reply = handler_context
+            .handle_flush_region_instruction(FlushRegions {
+                region_ids: not_found_region_ids.clone(),
+            })
+            .await;
+        assert_matches!(reply, InstructionReply::FlushRegion);
+        assert!(flushed_region_ids.read().unwrap().is_empty());
     }
 }

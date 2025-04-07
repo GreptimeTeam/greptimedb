@@ -444,8 +444,10 @@ impl Mailbox for HeartbeatMailbox {
         let (tx, rx) = oneshot::channel();
         let _ = self.senders.insert(message_id, tx);
         let deadline = Instant::now() + timeout;
-        let _ = self.timeouts.insert(message_id, deadline);
-        self.timeout_notify.notify_one();
+        if timeout > Duration::ZERO {
+            self.timeouts.insert(message_id, deadline);
+            self.timeout_notify.notify_one();
+        }
 
         self.pushers.push(pusher_id, msg).await?;
 

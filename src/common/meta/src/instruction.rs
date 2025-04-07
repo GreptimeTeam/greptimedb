@@ -246,7 +246,7 @@ pub enum InstructionReply {
     CloseRegion(SimpleReply),
     UpgradeRegion(UpgradeRegionReply),
     DowngradeRegion(DowngradeRegionReply),
-    FlushRegion(SimpleReply),
+    FlushRegion,
 }
 
 impl Display for InstructionReply {
@@ -258,7 +258,7 @@ impl Display for InstructionReply {
             Self::DowngradeRegion(reply) => {
                 write!(f, "InstructionReply::DowngradeRegion({})", reply)
             }
-            Self::FlushRegion(reply) => write!(f, "InstructionReply::FlushRegion({})", reply),
+            Self::FlushRegion => write!(f, "InstructionReply::FlushRegion"),
         }
     }
 }
