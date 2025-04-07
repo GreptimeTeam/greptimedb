@@ -39,8 +39,8 @@ use store_api::logstore::EntryId;
 use store_api::storage::RegionId;
 
 use crate::error::{
-    self, BuildPartitionClientSnafu, DeleteRecordSnafu, TableMetadataManagerSnafu,
-    UpdateMinEntryIdSnafu,
+    self, BuildPartitionClientSnafu, DeleteRecordsSnafu, TableMetadataManagerSnafu,
+    UpdateTopicNameValueSnafu,
 };
 use crate::service::mailbox::{Channel, MailboxRef};
 use crate::Result;
@@ -64,8 +64,11 @@ pub struct Context {
     client: KafkaClientRef,
     /// The table metadata manager.
     table_metadata_manager: TableMetadataManagerRef,
+    /// The leader region registry.
     leader_region_registry: LeaderRegionRegistryRef,
+    /// Server address of metasrv.
     server_addr: String,
+    /// The mailbox to send messages.
     mailbox: MailboxRef,
 }
 
@@ -92,12 +95,12 @@ pub struct WalPruneProcedure {
 impl WalPruneProcedure {
     const TYPE_NAME: &'static str = "metasrv-procedure::WalPrune";
 
-    pub fn new(topic: String, context: Context, threshold: Option<u64>) -> Self {
+    pub fn new(topic: String, context: Context, trigger_flush_threshold: Option<u64>) -> Self {
         Self {
             data: WalPruneData {
                 topic,
                 min_flushed_entry_id: 0,
-                trigger_flush_threshold: threshold,
+                trigger_flush_threshold,
                 regions_to_flush: vec![],
                 state: WalPruneState::Prepare,
             },
@@ -118,12 +121,13 @@ impl WalPruneProcedure {
         let table_ids = region_ids
             .iter()
             .map(|region_id| region_id.table_id())
-            .collect::<HashSet<_>>();
-        let table_id_vec = table_ids.into_iter().collect::<Vec<_>>();
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
         let table_ids_table_routes_map = ctx
             .table_metadata_manager
             .table_route_manager()
-            .batch_get_physical_table_routes(&table_id_vec)
+            .batch_get_physical_table_routes(&table_ids)
             .await
             .context(TableMetadataManagerSnafu)?;
 
@@ -293,7 +297,7 @@ impl WalPruneProcedure {
             .topic_name_manager()
             .update(&self.data.topic, self.data.min_flushed_entry_id, prev)
             .await
-            .context(UpdateMinEntryIdSnafu {
+            .context(UpdateTopicNameValueSnafu {
                 topic: &self.data.topic,
             })
             .map_err(BoxedError::new)
@@ -309,7 +313,7 @@ impl WalPruneProcedure {
                 DELETE_RECORDS_TIMEOUT.as_millis() as i32,
             )
             .await
-            .context(DeleteRecordSnafu {
+            .context(DeleteRecordsSnafu {
                 topic: &self.data.topic,
                 partition: DEFAULT_PARTITION,
                 offset: (self.data.min_flushed_entry_id + 1),

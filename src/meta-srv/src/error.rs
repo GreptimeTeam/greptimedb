@@ -808,7 +808,7 @@ pub enum Error {
         partition,
         offset
     ))]
-    DeleteRecord {
+    DeleteRecords {
         #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
@@ -818,8 +818,8 @@ pub enum Error {
         offset: u64,
     },
 
-    #[snafu(display("Update minimum entry id in remote WAL, topic: {}", topic))]
-    UpdateMinEntryId {
+    #[snafu(display("Update the TopicNameValue in kvbackend, topic: {}", topic))]
+    UpdateTopicNameValue {
         topic: String,
         #[snafu(implicit)]
         location: Location,
@@ -875,7 +875,7 @@ impl ErrorExt for Error {
             | Error::FlowStateHandler { .. }
             | Error::BuildWalOptionsAllocator { .. }
             | Error::BuildPartitionClient { .. }
-            | Error::DeleteRecord { .. } => StatusCode::Internal,
+            | Error::DeleteRecords { .. } => StatusCode::Internal,
 
             Error::Unsupported { .. } => StatusCode::Unsupported,
 
@@ -939,7 +939,7 @@ impl ErrorExt for Error {
             | Error::MaintenanceModeManager { source, .. }
             | Error::KvBackend { source, .. }
             | Error::UnexpectedLogicalRouteTable { source, .. }
-            | Error::UpdateMinEntryId { source, .. } => source.status_code(),
+            | Error::UpdateTopicNameValue { source, .. } => source.status_code(),
 
             Error::InitMetadata { source, .. } | Error::InitDdlManager { source, .. } => {
                 source.status_code()

@@ -15,16 +15,18 @@
 use std::fmt::{self, Display};
 
 use serde::{Deserialize, Serialize};
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 
-use crate::error::{DecodeJsonSnafu, Error, InvalidMetadataSnafu, Result};
+use crate::ensure_values;
+use crate::error::{self, DecodeJsonSnafu, Error, InvalidMetadataSnafu, Result, UnexpectedSnafu};
+use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{
     DeserializedValueWithBytes, MetadataKey, MetadataValue, KAFKA_TOPIC_KEY_PATTERN,
     KAFKA_TOPIC_KEY_PREFIX, LEGACY_TOPIC_KEY_PREFIX,
 };
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
-use crate::rpc::store::{BatchPutRequest, CompareAndPutRequest, RangeRequest};
+use crate::rpc::store::{BatchPutRequest, RangeRequest};
 use crate::rpc::KeyValue;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -33,8 +35,8 @@ pub struct TopicNameKey<'a> {
 }
 
 /// The value of the topic name key.
-/// `pruned_entry_id`: Minimum offset in the topic of remote WAL. Region using this topic should replay from at least this offset.
-#[derive(Debug, Serialize, Deserialize, Default)]
+/// `pruned_entry_id`: The offset already pruned in remote WAL. Region using this topic should replay from at least this offset + 1.
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct TopicNameValue {
     pub pruned_entry_id: u64,
 }
@@ -209,22 +211,25 @@ impl TopicNameManager {
         prev: Option<DeserializedValueWithBytes<TopicNameValue>>,
     ) -> Result<()> {
         let key = TopicNameKey::new(topic);
+        let raw_key = key.to_bytes();
         let value = TopicNameValue::new(pruned_entry_id);
-        let prev = prev.map(|v| v.get_raw_bytes()).unwrap_or_default();
-        let cas_req = CompareAndPutRequest {
-            key: key.to_bytes(),
-            value: value.try_as_raw_value()?,
-            expect: prev.clone(),
-        };
-        let result = self.kv_backend.compare_and_put(cas_req).await?;
-        if !result.is_success() {
-            return InvalidMetadataSnafu {
-                err_msg: format!(
-                    "Failed to update topic name key: {}, expect: {:?}, actual: {:?}",
-                    topic, prev, result.prev_kv,
-                ),
-            }
-            .fail();
+        let new_raw_value = value.try_as_raw_value()?;
+        let raw_value = prev.map(|v| v.get_raw_bytes()).unwrap_or_default();
+
+        let txn = Txn::compare_and_put(raw_key.clone(), raw_value, new_raw_value.clone());
+        let mut r = self.kv_backend.txn(txn).await?;
+
+        if !r.succeeded {
+            let mut set = TxnOpGetResponseSet::from(&mut r.responses);
+            let raw_value = TxnOpGetResponseSet::filter(raw_key)(&mut set)
+                .context(UnexpectedSnafu {
+                    err_msg: format!(
+                        "Reads the empty topic name value in comparing operation of the update topic name key-value",
+                    )
+                })?;
+
+            let op_name = "the update topic name key-value";
+            ensure_values!(raw_value, new_raw_value, op_name);
         }
         Ok(())
     }
@@ -232,6 +237,7 @@ impl TopicNameManager {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches::assert_matches;
     use std::sync::Arc;
 
     use super::*;
@@ -278,9 +284,16 @@ mod tests {
         for topic in &topics {
             let value = manager.get(topic).await.unwrap().unwrap();
             assert_eq!(value.pruned_entry_id, 0);
-            manager.update(topic, 1, Some(value)).await.unwrap();
-            let value = manager.get(topic).await.unwrap().unwrap();
-            assert_eq!(value.pruned_entry_id, 1);
+            manager.update(topic, 1, Some(value.clone())).await.unwrap();
+            let new_value = manager.get(topic).await.unwrap().unwrap();
+            assert_eq!(new_value.pruned_entry_id, 1);
+            // Update twice, nothing changed
+            manager.update(topic, 1, Some(value.clone())).await.unwrap();
+            let new_value = manager.get(topic).await.unwrap().unwrap();
+            assert_eq!(new_value.pruned_entry_id, 1);
+            // Bad cas, emit error
+            let err = manager.update(topic, 3, Some(value)).await.unwrap_err();
+            assert_matches!(err, error::Error::Unexpected { .. });
         }
     }
 }
