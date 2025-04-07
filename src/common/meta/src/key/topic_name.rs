@@ -19,12 +19,12 @@ use snafu::{OptionExt, ResultExt};
 
 use crate::error::{DecodeJsonSnafu, Error, InvalidMetadataSnafu, Result};
 use crate::key::{
-    MetadataKey, MetadataValue, KAFKA_TOPIC_KEY_PATTERN, KAFKA_TOPIC_KEY_PREFIX,
-    LEGACY_TOPIC_KEY_PREFIX,
+    DeserializedValueWithBytes, MetadataKey, MetadataValue, KAFKA_TOPIC_KEY_PATTERN,
+    KAFKA_TOPIC_KEY_PREFIX, LEGACY_TOPIC_KEY_PREFIX,
 };
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
-use crate::rpc::store::{BatchPutRequest, CompareAndPutRequest, PutRequest, RangeRequest};
+use crate::rpc::store::{BatchPutRequest, CompareAndPutRequest, RangeRequest};
 use crate::rpc::KeyValue;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -186,38 +186,34 @@ impl TopicNameManager {
     }
 
     /// Get value for a specific topic.
-    pub async fn get(&self, topic: &str) -> Result<Option<TopicNameValue>> {
+    pub async fn get(
+        &self,
+        topic: &str,
+    ) -> Result<Option<DeserializedValueWithBytes<TopicNameValue>>> {
         let key = TopicNameKey::new(topic);
-        match self.kv_backend.get(&key.to_bytes()).await? {
-            Some(kv) => {
-                let value = TopicNameValue::try_from_raw_value(&kv.value)?;
-                Ok(Some(value))
-            }
-            None => Ok(None),
-        }
+        let raw_key = key.to_bytes();
+        self.kv_backend
+            .get(&raw_key)
+            .await?
+            .map(|x| DeserializedValueWithBytes::from_inner_slice(&x.value))
+            .transpose()
     }
 
     /// Update the topic name key and value in the kv backend.
-    pub async fn put(&self, topic: &str, pruned_entry_id: u64) -> Result<()> {
+    pub async fn update(
+        &self,
+        topic: &str,
+        pruned_entry_id: u64,
+        prev: Option<DeserializedValueWithBytes<TopicNameValue>>,
+    ) -> Result<()> {
         let key = TopicNameKey::new(topic);
         let value = TopicNameValue::new(pruned_entry_id);
-        let prev = self.get(topic).await?;
-        if let Some(prev) = prev {
-            let cas_req = CompareAndPutRequest {
-                key: key.to_bytes(),
-                value: value.try_as_raw_value()?,
-                expect: prev.try_as_raw_value()?,
-            };
-            self.kv_backend.compare_and_put(cas_req).await?;
-        } else {
-            // Legacy version metadata may not contains value.
-            let put_req = PutRequest {
-                key: key.to_bytes(),
-                value: value.try_as_raw_value()?,
-                prev_kv: false,
-            };
-            self.kv_backend.put(put_req).await?;
-        }
+        let cas_req = CompareAndPutRequest {
+            key: key.to_bytes(),
+            value: value.try_as_raw_value()?,
+            expect: prev.map(|v| v.get_raw_bytes()).unwrap_or_else(|| vec![]),
+        };
+        self.kv_backend.compare_and_put(cas_req).await?;
         Ok(())
     }
 }
@@ -270,7 +266,7 @@ mod tests {
         for topic in &topics {
             let value = manager.get(topic).await.unwrap().unwrap();
             assert_eq!(value.pruned_entry_id, 0);
-            manager.put(topic, 1).await.unwrap();
+            manager.update(topic, 1, Some(value)).await.unwrap();
             let value = manager.get(topic).await.unwrap().unwrap();
             assert_eq!(value.pruned_entry_id, 1);
         }

@@ -281,10 +281,21 @@ impl WalPruneProcedure {
 
         // Should update the min flushed entry id in the kv backend before deleting records.
         // Otherwise, when a datanode restarts, it will not be able to find the wal entries.
+        let prev = self
+            .context
+            .table_metadata_manager
+            .topic_name_manager()
+            .get(&self.data.topic)
+            .await
+            .context(TableMetadataManagerSnafu)
+            .map_err(BoxedError::new)
+            .with_context(|_| error::RetryLaterWithSourceSnafu {
+                reason: "Failed to get topic name",
+            })?;
         self.context
             .table_metadata_manager
             .topic_name_manager()
-            .put(&self.data.topic, self.data.min_flushed_entry_id)
+            .update(&self.data.topic, self.data.min_flushed_entry_id, prev)
             .await
             .context(UpdateMinEntryIdSnafu {
                 topic: self.data.topic.clone(),
