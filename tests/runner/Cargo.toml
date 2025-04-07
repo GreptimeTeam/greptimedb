@@ -19,7 +19,7 @@ datatypes = { workspace = true }
 flate2 = "1.0"
 hex = "0.4"
 local-ip-address = "0.6"
-mysql = { version = "25.0.1", default-features = false, features = ["minimal", "rustls-tls"] }
+mysql = { version = "26", default-features = false, features = ["minimal", "rustls-tls-ring"] }
 num_cpus = "1.16"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 serde.workspace = true
