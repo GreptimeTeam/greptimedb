@@ -40,6 +40,11 @@ impl MockContextProvider {
             poison_manager: InMemoryPoisonStore::default(),
         }
     }
+
+    /// Returns a reference to the poison manager.
+    pub fn poison_manager(&self) -> &InMemoryPoisonStore {
+        &self.poison_manager
+    }
 }
 
 #[async_trait]

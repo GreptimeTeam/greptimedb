@@ -449,6 +449,14 @@ pub enum Error {
     #[snafu(display("Retry later"))]
     RetryLater { source: BoxedError },
 
+    #[snafu(display("Abort procedure"))]
+    AbortProcedure {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+        clean_poisons: bool,
+    },
+
     #[snafu(display(
         "Failed to encode a wal options to json string, wal_options: {:?}",
         wal_options
@@ -749,6 +757,13 @@ pub enum Error {
         error: serde_json::Error,
     },
 
+    #[snafu(display("No leader found for table_id: {}", table_id))]
+    NoLeader {
+        table_id: TableId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
         "Procedure poison key already exists with a different value, key: {}, value: {}",
         key,
@@ -759,6 +774,14 @@ pub enum Error {
         value: String,
         #[snafu(implicit)]
         location: Location,
+    },
+
+    #[snafu(display("Failed to put poison, table metadata may be corrupted"))]
+    PutPoison {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        source: common_procedure::error::Error,
     },
 }
 
@@ -778,6 +801,7 @@ impl ErrorExt for Error {
             | SerializeToJson { .. }
             | DeserializeFromJson { .. } => StatusCode::Internal,
 
+            NoLeader { .. } => StatusCode::TableUnavailable,
             ValueNotExist { .. } | ProcedurePoisonConflict { .. } => StatusCode::Unexpected,
 
             Unsupported { .. } => StatusCode::Unsupported,
@@ -849,7 +873,9 @@ impl ErrorExt for Error {
             OperateDatanode { source, .. } => source.status_code(),
             Table { source, .. } => source.status_code(),
             RetryLater { source, .. } => source.status_code(),
+            AbortProcedure { source, .. } => source.status_code(),
             ConvertAlterTableRequest { source, .. } => source.status_code(),
+            PutPoison { source, .. } => source.status_code(),
 
             ParseProcedureId { .. }
             | InvalidNumTopics { .. }
@@ -918,6 +944,11 @@ impl Error {
     /// Determine whether it is a retry later type through [StatusCode]
     pub fn is_retry_later(&self) -> bool {
         matches!(self, Error::RetryLater { .. })
+    }
+
+    /// Determine whether it needs to clean poisons.
+    pub fn need_clean_poisons(&self) -> bool {
+        matches!(self, Error::AbortProcedure { clean_poisons, .. } if *clean_poisons)
     }
 
     /// Returns true if the response exceeds the size limit.

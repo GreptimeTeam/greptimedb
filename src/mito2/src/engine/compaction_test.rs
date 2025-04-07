@@ -535,7 +535,6 @@ async fn test_change_region_compaction_window() {
 
     // Change compaction window.
     let request = RegionRequest::Alter(RegionAlterRequest {
-        schema_version: region.metadata().schema_version,
         kind: SetRegionOptions {
             options: vec![SetRegionOption::Twsc(
                 "compaction.twcs.time_window".to_string(),

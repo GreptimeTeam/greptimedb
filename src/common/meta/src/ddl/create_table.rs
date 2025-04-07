@@ -299,7 +299,9 @@ impl Procedure for CreateTableProcedure {
                 .creator
                 .register_opening_regions(&self.context, &x.region_routes)
                 .map_err(BoxedError::new)
-                .context(ExternalSnafu)?;
+                .context(ExternalSnafu {
+                    clean_poisons: false,
+                })?;
         }
 
         Ok(())
