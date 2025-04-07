@@ -89,16 +89,30 @@ impl BatchingEngine {
                 .with_context(|_| TableNotFoundMetaSnafu {
                     msg: format!("Failed to get table info for table ids: {:?}", tids),
                 })?;
+
+        if !tids.iter().all(|id| table_infos.contains_key(id)) {
+            warn!(
+                "Failed to get all the table info for table ids, expected table ids: {:?}, actual table infos' table id: {:?}, those table doesn't exist: {:?}",
+                tids,
+                table_infos.keys(),
+                tids.iter().filter(|id| !table_infos.contains_key(id)).collect::<Vec<_>>()
+            );
+        }
+
         let group_by_table_name = group_by_table_id
             .into_iter()
-            .map(|(id, rows)| {
-                let table_name = table_infos[&id].table_name();
+            .filter_map(|(id, rows)| {
+                let table_name = table_infos.get(&id).map(|info| info.table_name());
+                let Some(table_name) = table_name else {
+                    warn!("Failed to get table infos for table id: {:?}", id);
+                    return None;
+                };
                 let table_name = [
                     table_name.catalog_name,
                     table_name.schema_name,
                     table_name.table_name,
                 ];
-                (table_name, rows)
+                Some((table_name, rows))
             })
             .collect::<HashMap<_, _>>();
 
@@ -195,7 +209,7 @@ impl BatchingEngine {
             .fail()?
         };
         let query_ctx = Arc::new(query_ctx);
-        let mut source_table_names = Vec::new();
+        let mut source_table_names = Vec::with_capacity(2);
         for src_id in source_table_ids {
             let table_name = get_table_name(self.table_meta.table_info_manager(), &src_id).await?;
             source_table_names.push(table_name);

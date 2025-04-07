@@ -199,7 +199,18 @@ impl DirtyTimeWindows {
         window_size: chrono::Duration,
         expire_lower_bound: Option<Timestamp>,
     ) -> Result<(), Error> {
+        if self.windows.is_empty() {
+            return Ok(());
+        }
+
         let mut new_windows = BTreeMap::new();
+
+        let std_window_size = window_size.to_std().map_err(|e| {
+            InternalSnafu {
+                reason: e.to_string(),
+            }
+            .build()
+        })?;
 
         // previous time window
         let mut prev_tw = None;
@@ -215,13 +226,6 @@ impl DirtyTimeWindows {
                 prev_tw = Some((lower_bound, upper_bound));
                 continue;
             };
-
-            let std_window_size = window_size.to_std().map_err(|e| {
-                InternalSnafu {
-                    reason: e.to_string(),
-                }
-                .build()
-            })?;
 
             // if cur.lower - prev.upper <= window_size * MERGE_DIST, merge
             // this also deal with overlap windows because cur.lower > prev.lower is always true

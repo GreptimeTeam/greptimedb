@@ -138,7 +138,7 @@ impl BatchingTask {
     async fn is_table_exist(&self, table_name: &[String; 3]) -> Result<bool, Error> {
         self.table_meta
             .table_name_manager()
-            .get(TableNameKey {
+            .exists(TableNameKey {
                 catalog: &table_name[0],
                 schema: &table_name[1],
                 table: &table_name[2],
@@ -146,7 +146,6 @@ impl BatchingTask {
             .await
             .map_err(BoxedError::new)
             .context(ExternalSnafu)
-            .map(|v| v.is_some())
     }
 
     pub async fn gen_exec_once(
