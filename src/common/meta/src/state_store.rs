@@ -233,7 +233,7 @@ type PoisonDecodeResult = Result<Option<DeserializedValueWithBytes<PoisonValue>>
 
 impl KvStateStore {
     /// Builds a create poison transaction,
-    /// it expected the `__procedure_poison/{resource_type}/{resource_id}` wasn't occupied.
+    /// it expected the `__procedure_poison/{key}` wasn't occupied.
     fn build_create_poison_txn(
         &self,
         key: &str,
@@ -253,7 +253,7 @@ impl KvStateStore {
     }
 
     /// Builds a delete poison transaction,
-    /// it expected the `__procedure_poison/{resource_type}/{resource_id}` was occupied.
+    /// it expected the `__procedure_poison/{key}` was occupied.
     fn build_delete_poison_txn(
         &self,
         key: &str,
