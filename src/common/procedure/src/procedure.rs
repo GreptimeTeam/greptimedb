@@ -22,7 +22,6 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
 use snafu::{ResultExt, Snafu};
-use strum::AsRefStr;
 use uuid::Uuid;
 
 use crate::error::{self, Error, Result};
@@ -222,11 +221,6 @@ impl<T: Procedure + ?Sized> Procedure for Box<T> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, AsRefStr)]
-pub enum ResourceType {
-    Table,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PoisonKey(String);
 
@@ -237,9 +231,9 @@ impl Display for PoisonKey {
 }
 
 impl PoisonKey {
-    /// Creates a new [PoisonKey] from a [ResourceType] and a [String].
-    pub fn new(resource_type: ResourceType, resource_token: &str) -> Self {
-        Self(format!("{}/{}", resource_type.as_ref(), resource_token))
+    /// Creates a new [PoisonKey] from a [String].
+    pub fn new(key: impl Into<String>) -> Self {
+        Self(key.into())
     }
 }
 
@@ -251,8 +245,8 @@ pub struct PoisonKeys(SmallVec<[PoisonKey; 2]>);
 
 impl PoisonKeys {
     /// Creates a new [PoisonKeys] from a [ResourceType] and a [String].
-    pub fn single(resource_type: ResourceType, resource_token: &str) -> Self {
-        Self(smallvec![PoisonKey::new(resource_type, resource_token)])
+    pub fn single(key: impl Into<String>) -> Self {
+        Self(smallvec![PoisonKey::new(key)])
     }
 
     /// Creates a new [PoisonKeys] from a [PoisonKey].

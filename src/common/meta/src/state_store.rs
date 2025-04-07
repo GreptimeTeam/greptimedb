@@ -219,6 +219,11 @@ impl StateStore for KvStateStore {
     }
 }
 
+/// The value of the poison key.
+///
+/// Each poison value contains a unique token that identifies the procedure.
+/// While multiple procedures may use the same poison key (representing the same resource),
+/// each procedure will have a distinct token value to differentiate its ownership.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PoisonValue {
     token: String,

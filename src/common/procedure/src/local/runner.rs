@@ -587,7 +587,7 @@ mod tests {
 
     use super::*;
     use crate::local::test_util;
-    use crate::procedure::{PoisonKeys, ResourceType};
+    use crate::procedure::PoisonKeys;
     use crate::store::proc_path;
     use crate::test_util::InMemoryPoisonStore;
     use crate::{ContextProvider, Error, LockKey, PoisonKey, Procedure};
@@ -1348,7 +1348,7 @@ mod tests {
     async fn test_execute_with_clean_poisons() {
         common_telemetry::init_default_ut_logging();
         let mut times = 0;
-        let poison_key = PoisonKey::new(ResourceType::Table, "1024");
+        let poison_key = PoisonKey::new("table/1024");
         let moved_poison_key = poison_key.clone();
         let exec_fn = move |ctx: Context| {
             times += 1;
@@ -1417,7 +1417,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_failed_after_set_poison() {
         let mut times = 0;
-        let poison_key = PoisonKey::new(ResourceType::Table, "1024");
+        let poison_key = PoisonKey::new("table/1024");
         let moved_poison_key = poison_key.clone();
         let exec_fn = move |ctx: Context| {
             times += 1;
@@ -1495,7 +1495,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_poisoned() {
         let mut times = 0;
-        let poison_key = PoisonKey::new(ResourceType::Table, "1024");
+        let poison_key = PoisonKey::new("table/1024");
         let moved_poison_key = poison_key.clone();
         let exec_fn = move |ctx: Context| {
             times += 1;

@@ -2257,7 +2257,6 @@ dependencies = [
  "serde_json",
  "smallvec",
  "snafu 0.8.5",
- "strum 0.27.1",
  "tokio",
  "uuid",
 ]
