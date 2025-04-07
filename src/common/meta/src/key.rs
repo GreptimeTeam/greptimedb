@@ -57,7 +57,7 @@
 //!     - This key is mainly used in constructing the view in Datanode and Frontend.
 //!
 //! 12. Kafka topic key: `__topic_name/kafka/{topic_name}`
-//!     - The value is a [TopicNameValue] struct; it contains the minimum available entry id of the topic.
+//!     - The value is a [TopicNameValue] struct; it contains the minimum available offset of the topic.
 //!     - The key is used to mark existing topics in kafka for WAL.
 //!
 //! 13. Topic name to region map key `__topic_region/{topic_name}/{region_id}`

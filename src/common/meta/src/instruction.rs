@@ -192,6 +192,7 @@ pub struct DropFlow {
     pub flownode_ids: Vec<FlownodeId>,
 }
 
+/// Flushes a batch of regions, usually with the same remote WAL topic.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FlushRegions {
     pub region_ids: Vec<RegionId>,
