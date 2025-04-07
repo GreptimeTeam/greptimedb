@@ -167,6 +167,7 @@ impl From<QueryContext> for api::v1::QueryContext {
             snapshot_seqs: Some(api::v1::SnapshotSequences {
                 snapshot_seqs: snapshot_seqs.read().unwrap().clone(),
             }),
+            explain: None,
         }
     }
 }

@@ -25,21 +25,23 @@ use backon::ExponentialBuilder;
 use common_runtime::{RepeatedTask, TaskFunction};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{error, info, tracing};
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use tokio::sync::watch::{self, Receiver, Sender};
 use tokio::sync::{Mutex as TokioMutex, Notify};
 
 use self::rwlock::KeyRwLock;
 use crate::error::{
-    self, DuplicateProcedureSnafu, Error, LoaderConflictSnafu, ManagerNotStartSnafu, Result,
-    StartRemoveOutdatedMetaTaskSnafu, StopRemoveOutdatedMetaTaskSnafu,
+    self, DuplicateProcedureSnafu, Error, LoaderConflictSnafu, ManagerNotStartSnafu,
+    PoisonKeyNotDefinedSnafu, ProcedureNotFoundSnafu, Result, StartRemoveOutdatedMetaTaskSnafu,
+    StopRemoveOutdatedMetaTaskSnafu,
 };
 use crate::local::runner::Runner;
-use crate::procedure::{BoxedProcedureLoader, InitProcedureState, ProcedureInfo};
+use crate::procedure::{BoxedProcedureLoader, InitProcedureState, PoisonKeys, ProcedureInfo};
+use crate::store::poison_store::PoisonStoreRef;
 use crate::store::{ProcedureMessage, ProcedureMessages, ProcedureStore, StateStoreRef};
 use crate::{
-    BoxedProcedure, ContextProvider, LockKey, ProcedureId, ProcedureManager, ProcedureState,
-    ProcedureWithId, Watcher,
+    BoxedProcedure, ContextProvider, LockKey, PoisonKey, ProcedureId, ProcedureManager,
+    ProcedureState, ProcedureWithId, Watcher,
 };
 
 /// The expired time of a procedure's metadata.
@@ -65,6 +67,8 @@ pub(crate) struct ProcedureMeta {
     child_notify: Notify,
     /// Lock required by this procedure.
     lock_key: LockKey,
+    /// Poison keys that may cause this procedure to become poisoned during execution.
+    poison_keys: PoisonKeys,
     /// Sender to notify the procedure state.
     state_sender: Sender<ProcedureState>,
     /// Receiver to watch the procedure state.
@@ -83,6 +87,7 @@ impl ProcedureMeta {
         procedure_state: ProcedureState,
         parent_id: Option<ProcedureId>,
         lock_key: LockKey,
+        poison_keys: PoisonKeys,
         type_name: &str,
     ) -> ProcedureMeta {
         let (state_sender, state_receiver) = watch::channel(procedure_state);
@@ -91,6 +96,7 @@ impl ProcedureMeta {
             parent_id,
             child_notify: Notify::new(),
             lock_key,
+            poison_keys,
             state_sender,
             state_receiver,
             children: Mutex::new(Vec::new()),
@@ -163,6 +169,8 @@ pub(crate) struct ManagerContext {
     finished_procedures: Mutex<VecDeque<(ProcedureId, Instant)>>,
     /// Running flag.
     running: Arc<AtomicBool>,
+    /// Poison manager.
+    poison_manager: PoisonStoreRef,
 }
 
 #[async_trait]
@@ -170,11 +178,33 @@ impl ContextProvider for ManagerContext {
     async fn procedure_state(&self, procedure_id: ProcedureId) -> Result<Option<ProcedureState>> {
         Ok(self.state(procedure_id))
     }
+
+    async fn try_put_poison(&self, key: &PoisonKey, procedure_id: ProcedureId) -> Result<()> {
+        {
+            // validate the procedure exists
+            let procedures = self.procedures.read().unwrap();
+            let procedure = procedures
+                .get(&procedure_id)
+                .context(ProcedureNotFoundSnafu { procedure_id })?;
+
+            // validate the poison key is defined
+            ensure!(
+                procedure.poison_keys.contains(key),
+                PoisonKeyNotDefinedSnafu {
+                    key: key.clone(),
+                    procedure_id
+                }
+            );
+        }
+        let key = key.to_string();
+        let procedure_id = procedure_id.to_string();
+        self.poison_manager.try_put_poison(key, procedure_id).await
+    }
 }
 
 impl ManagerContext {
     /// Returns a new [ManagerContext].
-    fn new() -> ManagerContext {
+    fn new(poison_manager: PoisonStoreRef) -> ManagerContext {
         ManagerContext {
             key_lock: KeyRwLock::new(),
             loaders: Mutex::new(HashMap::new()),
@@ -182,6 +212,7 @@ impl ManagerContext {
             messages: Mutex::new(HashMap::new()),
             finished_procedures: Mutex::new(VecDeque::new()),
             running: Arc::new(AtomicBool::new(false)),
+            poison_manager,
         }
     }
 
@@ -437,8 +468,12 @@ pub struct LocalManager {
 
 impl LocalManager {
     /// Create a new [LocalManager] with specific `config`.
-    pub fn new(config: ManagerConfig, state_store: StateStoreRef) -> LocalManager {
-        let manager_ctx = Arc::new(ManagerContext::new());
+    pub fn new(
+        config: ManagerConfig,
+        state_store: StateStoreRef,
+        poison_store: PoisonStoreRef,
+    ) -> LocalManager {
+        let manager_ctx = Arc::new(ManagerContext::new(poison_store));
 
         LocalManager {
             manager_ctx,
@@ -476,6 +511,7 @@ impl LocalManager {
             procedure_state,
             None,
             procedure.lock_key(),
+            procedure.poison_keys(),
             procedure.type_name(),
         ));
         let runner = Runner {
@@ -718,6 +754,7 @@ pub(crate) mod test_util {
             ProcedureState::Running,
             None,
             LockKey::default(),
+            PoisonKeys::default(),
             "ProcedureAdapter",
         )
     }
@@ -741,11 +778,17 @@ mod tests {
     use super::*;
     use crate::error::{self, Error};
     use crate::store::state_store::ObjectStateStore;
+    use crate::test_util::InMemoryPoisonStore;
     use crate::{Context, Procedure, Status};
+
+    fn new_test_manager_context() -> ManagerContext {
+        let poison_manager = Arc::new(InMemoryPoisonStore::default());
+        ManagerContext::new(poison_manager)
+    }
 
     #[test]
     fn test_manager_context() {
-        let ctx = ManagerContext::new();
+        let ctx = new_test_manager_context();
         let meta = Arc::new(test_util::procedure_meta_for_test());
 
         assert!(!ctx.contains_procedure(meta.id));
@@ -761,7 +804,7 @@ mod tests {
 
     #[test]
     fn test_manager_context_insert_duplicate() {
-        let ctx = ManagerContext::new();
+        let ctx = new_test_manager_context();
         let meta = Arc::new(test_util::procedure_meta_for_test());
 
         assert!(ctx.try_insert_procedure(meta.clone()));
@@ -783,7 +826,7 @@ mod tests {
 
     #[test]
     fn test_procedures_in_tree() {
-        let ctx = ManagerContext::new();
+        let ctx = new_test_manager_context();
         let root = Arc::new(test_util::procedure_meta_for_test());
         assert!(ctx.try_insert_procedure(root.clone()));
 
@@ -807,6 +850,7 @@ mod tests {
     struct ProcedureToLoad {
         content: String,
         lock_key: LockKey,
+        poison_keys: PoisonKeys,
     }
 
     #[async_trait]
@@ -826,6 +870,10 @@ mod tests {
         fn lock_key(&self) -> LockKey {
             self.lock_key.clone()
         }
+
+        fn poison_keys(&self) -> PoisonKeys {
+            self.poison_keys.clone()
+        }
     }
 
     impl ProcedureToLoad {
@@ -833,6 +881,7 @@ mod tests {
             ProcedureToLoad {
                 content: content.to_string(),
                 lock_key: LockKey::default(),
+                poison_keys: PoisonKeys::default(),
             }
         }
 
@@ -855,7 +904,8 @@ mod tests {
             ..Default::default()
         };
         let state_store = Arc::new(ObjectStateStore::new(test_util::new_object_store(&dir)));
-        let manager = LocalManager::new(config, state_store);
+        let poison_manager = Arc::new(InMemoryPoisonStore::new());
+        let manager = LocalManager::new(config, state_store, poison_manager);
         manager.manager_ctx.start();
 
         manager
@@ -879,7 +929,8 @@ mod tests {
             ..Default::default()
         };
         let state_store = Arc::new(ObjectStateStore::new(object_store.clone()));
-        let manager = LocalManager::new(config, state_store);
+        let poison_manager = Arc::new(InMemoryPoisonStore::new());
+        let manager = LocalManager::new(config, state_store, poison_manager);
         manager.manager_ctx.start();
 
         manager
@@ -932,7 +983,8 @@ mod tests {
             ..Default::default()
         };
         let state_store = Arc::new(ObjectStateStore::new(test_util::new_object_store(&dir)));
-        let manager = LocalManager::new(config, state_store);
+        let poison_manager = Arc::new(InMemoryPoisonStore::new());
+        let manager = LocalManager::new(config, state_store, poison_manager);
         manager.manager_ctx.start();
 
         let procedure_id = ProcedureId::random();
@@ -983,7 +1035,8 @@ mod tests {
             ..Default::default()
         };
         let state_store = Arc::new(ObjectStateStore::new(test_util::new_object_store(&dir)));
-        let manager = LocalManager::new(config, state_store);
+        let poison_manager = Arc::new(InMemoryPoisonStore::new());
+        let manager = LocalManager::new(config, state_store, poison_manager);
         manager.manager_ctx.start();
 
         #[derive(Debug)]
@@ -1022,6 +1075,10 @@ mod tests {
             fn lock_key(&self) -> LockKey {
                 LockKey::single_exclusive("test.submit")
             }
+
+            fn poison_keys(&self) -> PoisonKeys {
+                PoisonKeys::default()
+            }
         }
 
         let check_procedure = |procedure| async {
@@ -1059,7 +1116,8 @@ mod tests {
             ..Default::default()
         };
         let state_store = Arc::new(ObjectStateStore::new(test_util::new_object_store(&dir)));
-        let manager = LocalManager::new(config, state_store);
+        let poison_manager = Arc::new(InMemoryPoisonStore::new());
+        let manager = LocalManager::new(config, state_store, poison_manager);
 
         let mut procedure = ProcedureToLoad::new("submit");
         procedure.lock_key = LockKey::single_exclusive("test.submit");
@@ -1086,7 +1144,8 @@ mod tests {
             ..Default::default()
         };
         let state_store = Arc::new(ObjectStateStore::new(test_util::new_object_store(&dir)));
-        let manager = LocalManager::new(config, state_store);
+        let poison_manager = Arc::new(InMemoryPoisonStore::new());
+        let manager = LocalManager::new(config, state_store, poison_manager);
 
         manager.start().await.unwrap();
         manager.stop().await.unwrap();
@@ -1121,7 +1180,8 @@ mod tests {
             remove_outdated_meta_ttl: Duration::from_millis(1),
         };
         let state_store = Arc::new(ObjectStateStore::new(object_store.clone()));
-        let manager = LocalManager::new(config, state_store);
+        let poison_manager = Arc::new(InMemoryPoisonStore::new());
+        let manager = LocalManager::new(config, state_store, poison_manager);
         manager.manager_ctx.set_running();
 
         let mut procedure = ProcedureToLoad::new("submit");
@@ -1196,6 +1256,7 @@ mod tests {
         content: String,
         lock_key: LockKey,
         notify: Option<Arc<Notify>>,
+        poison_keys: PoisonKeys,
     }
 
     #[async_trait]
@@ -1220,6 +1281,10 @@ mod tests {
             self.notify.as_ref().unwrap().notify_one();
             Ok(())
         }
+
+        fn poison_keys(&self) -> PoisonKeys {
+            self.poison_keys.clone()
+        }
     }
 
     impl ProcedureToRecover {
@@ -1227,6 +1292,7 @@ mod tests {
             ProcedureToRecover {
                 content: content.to_string(),
                 lock_key: LockKey::default(),
+                poison_keys: PoisonKeys::default(),
                 notify: None,
             }
         }
@@ -1236,6 +1302,7 @@ mod tests {
                 let procedure = ProcedureToRecover {
                     content: json.to_string(),
                     lock_key: LockKey::default(),
+                    poison_keys: PoisonKeys::default(),
                     notify: Some(notify.clone()),
                 };
                 Ok(Box::new(procedure) as _)
@@ -1256,7 +1323,8 @@ mod tests {
             ..Default::default()
         };
         let state_store = Arc::new(ObjectStateStore::new(object_store.clone()));
-        let manager = LocalManager::new(config, state_store);
+        let poison_manager = Arc::new(InMemoryPoisonStore::new());
+        let manager = LocalManager::new(config, state_store, poison_manager);
         manager.manager_ctx.start();
 
         let notify = Arc::new(Notify::new());

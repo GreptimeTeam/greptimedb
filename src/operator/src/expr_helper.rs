@@ -21,8 +21,8 @@ use api::v1::column_def::options_from_column_schema;
 use api::v1::{
     set_index, unset_index, AddColumn, AddColumns, AlterDatabaseExpr, AlterTableExpr, Analyzer,
     ColumnDataType, ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
-    DropColumn, DropColumns, ExpireAfter, ModifyColumnType, ModifyColumnTypes, RenameTable,
-    SemanticType, SetDatabaseOptions, SetFulltext, SetIndex, SetInverted, SetSkipping,
+    DropColumn, DropColumns, ExpireAfter, FulltextBackend, ModifyColumnType, ModifyColumnTypes,
+    RenameTable, SemanticType, SetDatabaseOptions, SetFulltext, SetIndex, SetInverted, SetSkipping,
     SetTableOptions, SkippingIndexType as PbSkippingIndexType, TableName, UnsetDatabaseOptions,
     UnsetFulltext, UnsetIndex, UnsetInverted, UnsetSkipping, UnsetTableOptions,
 };
@@ -581,6 +581,7 @@ pub(crate) fn to_alter_table_expr(
                         FulltextAnalyzer::Chinese => Analyzer::Chinese.into(),
                     },
                     case_sensitive: options.case_sensitive,
+                    backend: FulltextBackend::Tantivy.into(),
                 })),
             },
             sql::statements::alter::SetIndexOperation::Inverted { column_name } => SetIndex {

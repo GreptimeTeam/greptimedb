@@ -55,7 +55,11 @@ impl TestingEnv {
         let mailbox_ctx = MailboxContext::new(mailbox_sequence);
 
         let state_store = Arc::new(KvStateStore::new(kv_backend));
-        let procedure_manager = Arc::new(LocalManager::new(ManagerConfig::default(), state_store));
+        let procedure_manager = Arc::new(LocalManager::new(
+            ManagerConfig::default(),
+            state_store.clone(),
+            state_store,
+        ));
 
         Self {
             table_metadata_manager,
