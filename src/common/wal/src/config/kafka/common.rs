@@ -22,11 +22,12 @@ use rustls::{ClientConfig, RootCertStore};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 
+/// The default backoff config for kafka client.
 pub const DEFAULT_BACKOFF_CONFIG: BackoffConfig = BackoffConfig {
     init_backoff: Duration::from_millis(100),
     max_backoff: Duration::from_secs(10),
     base: 2.0,
-    deadline: Some(Duration::from_secs(40)),
+    deadline: Some(Duration::from_secs(120)),
 };
 
 use crate::error::{self, Result};
