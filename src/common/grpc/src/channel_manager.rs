@@ -445,10 +445,16 @@ impl Pool {
 
 async fn recycle_channel_in_loop(pool: Arc<Pool>, interval_secs: u64) {
     let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
-
+    // use weak ref here to prevent pool being leaked
+    let pool_weak = Arc::downgrade(&pool);
     loop {
         let _ = interval.tick().await;
-        pool.retain_channel(|_, c| c.access.swap(0, Ordering::Relaxed) != 0)
+        if let Some(pool) = pool_weak.upgrade() {
+            pool.retain_channel(|_, c| c.access.swap(0, Ordering::Relaxed) != 0)
+        } else {
+            // no one is using this pool, so we can also let go
+            break;
+        }
     }
 }
 

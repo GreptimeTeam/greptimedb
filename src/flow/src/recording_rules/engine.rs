@@ -378,6 +378,8 @@ impl RecordingRuleTask {
                 .write()
                 .await
                 .after_query_exec(elapsed, res.is_ok());
+            // drop the result to free client-related resources
+            drop(res);
 
             let sleep_until = {
                 let mut state = self.state.write().await;

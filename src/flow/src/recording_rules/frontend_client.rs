@@ -43,6 +43,7 @@ fn client_from_urls(addrs: Vec<String>) -> Client {
 pub enum FrontendClient {
     Distributed {
         meta_client: Arc<MetaClient>,
+        channel_mgr: ChannelManager,
     },
     Standalone {
         /// for the sake of simplicity still use grpc even in standalone mode
@@ -66,7 +67,10 @@ impl DatabaseWithPeer {
 
 impl FrontendClient {
     pub fn from_meta_client(meta_client: Arc<MetaClient>) -> Self {
-        Self::Distributed { meta_client }
+        Self::Distributed {
+            meta_client,
+            channel_mgr: default_channel_mgr(),
+        }
     }
 
     pub fn from_static_grpc_addr(addr: String) -> Self {
@@ -75,7 +79,8 @@ impl FrontendClient {
             addr: addr.clone(),
         };
 
-        let client = client_from_urls(vec![addr]);
+        let mgr = default_channel_mgr();
+        let client = Client::with_manager_and_urls(mgr.clone(), vec![addr]);
         let database = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
         Self::Standalone {
             database_client: DatabaseWithPeer::new(database, peer),
@@ -119,32 +124,40 @@ impl FrontendClient {
         if let Self::Standalone { database_client } = self {
             return Ok(database_client.clone());
         }
-
-        let frontends = self.scan_for_frontend().await?;
-        let mut last_activity_ts = i64::MIN;
-        let mut peer = None;
-        for (_key, val) in frontends.iter() {
-            if val.last_activity_ts > last_activity_ts {
-                last_activity_ts = val.last_activity_ts;
-                peer = Some(val.peer.clone());
+        match &self {
+            Self::Standalone { database_client } => Ok(database_client.clone()),
+            Self::Distributed {
+                meta_client: _,
+                channel_mgr,
+            } => {
+                let frontends = self.scan_for_frontend().await?;
+                let mut last_activity_ts = i64::MIN;
+                let mut peer = None;
+                for (_key, val) in frontends.iter() {
+                    if val.last_activity_ts > last_activity_ts {
+                        last_activity_ts = val.last_activity_ts;
+                        peer = Some(val.peer.clone());
+                    }
+                }
+                let Some(peer) = peer else {
+                    UnexpectedSnafu {
+                        reason: format!("No frontend available: {:?}", frontends),
+                    }
+                    .fail()?
+                };
+                let client =
+                    Client::with_manager_and_urls(channel_mgr.clone(), vec![peer.addr.clone()]);
+                let database = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
+                Ok(DatabaseWithPeer::new(database, peer))
             }
         }
-        let Some(peer) = peer else {
-            UnexpectedSnafu {
-                reason: format!("No frontend available: {:?}", frontends),
-            }
-            .fail()?
-        };
-        let client = client_from_urls(vec![peer.addr.clone()]);
-        let database = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
-        Ok(DatabaseWithPeer::new(database, peer))
     }
 
     /// Get a database client, and possibly update it before returning.
     pub async fn get_database_client(&self) -> Result<DatabaseWithPeer, Error> {
         match self {
             Self::Standalone { database_client } => Ok(database_client.clone()),
-            Self::Distributed { meta_client: _ } => self.get_last_active_frontend().await,
+            Self::Distributed { meta_client: _, .. } => self.get_last_active_frontend().await,
         }
     }
 }
