@@ -140,9 +140,6 @@ pub enum Error {
     #[snafu(display("Procedure exec failed"))]
     RetryLater { source: BoxedError },
 
-    #[snafu(display("Procedure poisoned"))]
-    Poisoned { source: BoxedError },
-
     #[snafu(display("Procedure panics, procedure_id: {}", procedure_id))]
     ProcedurePanic { procedure_id: ProcedureId },
 
@@ -246,8 +243,7 @@ impl ErrorExt for Error {
             | Error::ListState { source, .. }
             | Error::PutPoison { source, .. }
             | Error::DeletePoison { source, .. }
-            | Error::GetPoison { source, .. }
-            | Error::Poisoned { source, .. } => source.status_code(),
+            | Error::GetPoison { source, .. } => source.status_code(),
 
             Error::ToJson { .. }
             | Error::DeleteState { .. }
@@ -282,13 +278,6 @@ impl ErrorExt for Error {
 }
 
 impl Error {
-    /// Creates a new [Error::Poisoned] error from source `err`.
-    pub fn poisoned<E: ErrorExt + Send + Sync + 'static>(err: E) -> Error {
-        Error::Poisoned {
-            source: BoxedError::new(err),
-        }
-    }
-
     /// Creates a new [Error::External] error from source `err`.
     pub fn external<E: ErrorExt + Send + Sync + 'static>(err: E) -> Error {
         Error::External {
