@@ -518,10 +518,6 @@ fn create_table_with_expr(
     plan: &LogicalPlan,
     sink_table_name: &[String; 3],
 ) -> Result<CreateTableExpr, Error> {
-    let catalog_name = &sink_table_name[0];
-    let schema_name = &sink_table_name[1];
-    let table_name = &sink_table_name[2];
-
     let fields = plan.schema().fields();
     let (first_time_stamp, primary_keys) = build_primary_key_constraint(plan, fields)?;
 
@@ -562,7 +558,10 @@ fn create_table_with_expr(
                 Timestamp::new_millisecond(0),
             ))))
             .context(DatatypesSnafu {
-                extra: "Failed to build column `{} TimestampMillisecond default 0`",
+                extra: format!(
+                    "Failed to build column `{} TimestampMillisecond TIME INDEX default 0`",
+                    AUTO_CREATED_PLACEHOLDER_TS_COL
+                ),
             })?,
         );
         AUTO_CREATED_PLACEHOLDER_TS_COL.to_string()
@@ -571,9 +570,9 @@ fn create_table_with_expr(
     let column_defs =
         column_schemas_to_defs(column_schemas, &primary_keys).context(ConvertColumnSchemaSnafu)?;
     Ok(CreateTableExpr {
-        catalog_name: catalog_name.clone(),
-        schema_name: schema_name.clone(),
-        table_name: table_name.clone(),
+        catalog_name: sink_table_name[0].clone(),
+        schema_name: sink_table_name[1].clone(),
+        table_name: sink_table_name[2].clone(),
         desc: "Auto created table by flow engine".to_string(),
         column_defs,
         time_index,
