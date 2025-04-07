@@ -15,11 +15,14 @@
 use std::fmt::{self, Display};
 
 use serde::{Deserialize, Serialize};
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 
-use crate::error::{DecodeJsonSnafu, Error, InvalidMetadataSnafu, Result};
+use crate::ensure_values;
+use crate::error::{self, DecodeJsonSnafu, Error, InvalidMetadataSnafu, Result, UnexpectedSnafu};
+use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{
-    MetadataKey, KAFKA_TOPIC_KEY_PATTERN, KAFKA_TOPIC_KEY_PREFIX, LEGACY_TOPIC_KEY_PREFIX,
+    DeserializedValueWithBytes, MetadataKey, MetadataValue, KAFKA_TOPIC_KEY_PATTERN,
+    KAFKA_TOPIC_KEY_PREFIX, LEGACY_TOPIC_KEY_PREFIX,
 };
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
@@ -31,8 +34,32 @@ pub struct TopicNameKey<'a> {
     pub topic: &'a str,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct TopicNameValue;
+/// The value associated with a topic name key.
+///
+/// The `pruned_entry_id` is the highest entry id that has been pruned from the remote WAL.
+/// When a region uses this topic, it should start replaying entries from `pruned_entry_id + 1` (minimal available entry id).
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
+pub struct TopicNameValue {
+    pub pruned_entry_id: u64,
+}
+
+impl TopicNameValue {
+    pub fn new(pruned_entry_id: u64) -> Self {
+        Self { pruned_entry_id }
+    }
+}
+
+impl MetadataValue for TopicNameValue {
+    fn try_from_raw_value(raw_value: &[u8]) -> Result<Self> {
+        let value = serde_json::from_slice::<TopicNameValue>(raw_value).context(DecodeJsonSnafu)?;
+        Ok(value)
+    }
+
+    fn try_as_raw_value(&self) -> Result<Vec<u8>> {
+        let raw_value = serde_json::to_vec(self).context(DecodeJsonSnafu)?;
+        Ok(raw_value)
+    }
+}
 
 impl<'a> TopicNameKey<'a> {
     pub fn new(topic: &'a str) -> Self {
@@ -114,13 +141,16 @@ impl TopicNameManager {
         {
             let topics =
                 serde_json::from_slice::<Vec<String>>(&kv.value).context(DecodeJsonSnafu)?;
-            let mut reqs = topics
-                .iter()
-                .map(|topic| {
-                    let key = TopicNameKey::new(topic);
-                    TxnOp::Put(key.to_bytes(), vec![])
-                })
-                .collect::<Vec<_>>();
+            let mut reqs = Vec::with_capacity(topics.len() + 1);
+            for topic in topics {
+                let topic_name_key = TopicNameKey::new(&topic);
+                let topic_name_value = TopicNameValue::new(0);
+                let put_req = TxnOp::Put(
+                    topic_name_key.to_bytes(),
+                    topic_name_value.try_as_raw_value()?,
+                );
+                reqs.push(put_req);
+            }
             let delete_req = TxnOp::Delete(LEGACY_TOPIC_KEY_PREFIX.as_bytes().to_vec());
             reqs.push(delete_req);
             let txn = Txn::new().and_then(reqs);
@@ -129,7 +159,7 @@ impl TopicNameManager {
         Ok(())
     }
 
-    /// Range query for topics.
+    /// Range query for topics. Only the keys are returned.
     /// Caution: this method returns keys as String instead of values of range query since the topics are stored in keys.
     pub async fn range(&self) -> Result<Vec<String>> {
         let prefix = TopicNameKey::range_start_key();
@@ -142,25 +172,72 @@ impl TopicNameManager {
             .collect::<Result<Vec<String>>>()
     }
 
-    /// Put topics into kvbackend.
+    /// Put topics into kvbackend. The value is set to 0 by default.
     pub async fn batch_put(&self, topic_name_keys: Vec<TopicNameKey<'_>>) -> Result<()> {
+        let mut kvs = Vec::with_capacity(topic_name_keys.len());
+        let topic_name_value = TopicNameValue::new(0);
+        for topic_name_key in &topic_name_keys {
+            let kv = KeyValue {
+                key: topic_name_key.to_bytes(),
+                value: topic_name_value.clone().try_as_raw_value()?,
+            };
+            kvs.push(kv);
+        }
         let req = BatchPutRequest {
-            kvs: topic_name_keys
-                .iter()
-                .map(|key| KeyValue {
-                    key: key.to_bytes(),
-                    value: vec![],
-                })
-                .collect(),
+            kvs,
             prev_kv: false,
         };
         self.kv_backend.batch_put(req).await?;
+        Ok(())
+    }
+
+    /// Get value for a specific topic.
+    pub async fn get(
+        &self,
+        topic: &str,
+    ) -> Result<Option<DeserializedValueWithBytes<TopicNameValue>>> {
+        let key = TopicNameKey::new(topic);
+        let raw_key = key.to_bytes();
+        self.kv_backend
+            .get(&raw_key)
+            .await?
+            .map(|x| DeserializedValueWithBytes::from_inner_slice(&x.value))
+            .transpose()
+    }
+
+    /// Update the topic name key and value in the kv backend.
+    pub async fn update(
+        &self,
+        topic: &str,
+        pruned_entry_id: u64,
+        prev: Option<DeserializedValueWithBytes<TopicNameValue>>,
+    ) -> Result<()> {
+        let key = TopicNameKey::new(topic);
+        let raw_key = key.to_bytes();
+        let value = TopicNameValue::new(pruned_entry_id);
+        let new_raw_value = value.try_as_raw_value()?;
+        let raw_value = prev.map(|v| v.get_raw_bytes()).unwrap_or_default();
+
+        let txn = Txn::compare_and_put(raw_key.clone(), raw_value, new_raw_value.clone());
+        let mut r = self.kv_backend.txn(txn).await?;
+
+        if !r.succeeded {
+            let mut set = TxnOpGetResponseSet::from(&mut r.responses);
+            let raw_value = TxnOpGetResponseSet::filter(raw_key)(&mut set)
+                .context(UnexpectedSnafu {
+                    err_msg: "Reads the empty topic name value in comparing operation while updating TopicNameValue",
+                })?;
+
+            let op_name = "updating TopicNameValue";
+            ensure_values!(raw_value, new_raw_value, op_name);
+        }
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches::assert_matches;
     use std::sync::Arc;
 
     use super::*;
@@ -204,7 +281,19 @@ mod tests {
         let topics = manager.range().await.unwrap();
         assert_eq!(topics, all_topics);
 
-        let topics = manager.range().await.unwrap();
-        assert_eq!(topics, all_topics);
+        for topic in &topics {
+            let value = manager.get(topic).await.unwrap().unwrap();
+            assert_eq!(value.pruned_entry_id, 0);
+            manager.update(topic, 1, Some(value.clone())).await.unwrap();
+            let new_value = manager.get(topic).await.unwrap().unwrap();
+            assert_eq!(new_value.pruned_entry_id, 1);
+            // Update twice, nothing changed
+            manager.update(topic, 1, Some(value.clone())).await.unwrap();
+            let new_value = manager.get(topic).await.unwrap().unwrap();
+            assert_eq!(new_value.pruned_entry_id, 1);
+            // Bad cas, emit error
+            let err = manager.update(topic, 3, Some(value)).await.unwrap_err();
+            assert_matches!(err, error::Error::Unexpected { .. });
+        }
     }
 }

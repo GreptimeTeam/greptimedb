@@ -26,28 +26,28 @@ impl HandlerContext {
     pub(crate) fn handle_close_region_instruction(
         self,
         region_ident: RegionIdent,
-    ) -> BoxFuture<'static, InstructionReply> {
+    ) -> BoxFuture<'static, Option<InstructionReply>> {
         Box::pin(async move {
             let region_id = Self::region_ident_to_region_id(&region_ident);
             let request = RegionRequest::Close(RegionCloseRequest {});
             let result = self.region_server.handle_request(region_id, request).await;
 
             match result {
-                Ok(_) => InstructionReply::CloseRegion(SimpleReply {
+                Ok(_) => Some(InstructionReply::CloseRegion(SimpleReply {
                     result: true,
                     error: None,
-                }),
+                })),
                 Err(error::Error::RegionNotFound { .. }) => {
                     warn!("Received a close region instruction from meta, but target region:{region_id} is not found.");
-                    InstructionReply::CloseRegion(SimpleReply {
+                    Some(InstructionReply::CloseRegion(SimpleReply {
                         result: true,
                         error: None,
-                    })
+                    }))
                 }
-                Err(err) => InstructionReply::CloseRegion(SimpleReply {
+                Err(err) => Some(InstructionReply::CloseRegion(SimpleReply {
                     result: false,
                     error: Some(format!("{err:?}")),
-                }),
+                })),
             }
         })
     }

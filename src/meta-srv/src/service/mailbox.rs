@@ -136,6 +136,8 @@ pub trait Mailbox: Send + Sync {
         timeout: Duration,
     ) -> Result<MailboxReceiver>;
 
+    async fn send_oneway(&self, ch: &Channel, msg: MailboxMessage) -> Result<()>;
+
     async fn broadcast(&self, ch: &BroadcastChannel, msg: &MailboxMessage) -> Result<()>;
 
     async fn on_recv(&self, id: MessageId, maybe_msg: Result<MailboxMessage>) -> Result<()>;

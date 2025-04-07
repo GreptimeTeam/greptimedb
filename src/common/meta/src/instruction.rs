@@ -192,6 +192,12 @@ pub struct DropFlow {
     pub flownode_ids: Vec<FlownodeId>,
 }
 
+/// Flushes a batch of regions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FlushRegions {
+    pub region_ids: Vec<RegionId>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Display, PartialEq)]
 pub enum Instruction {
     /// Opens a region.
@@ -208,6 +214,8 @@ pub enum Instruction {
     DowngradeRegion(DowngradeRegion),
     /// Invalidates batch cache.
     InvalidateCaches(Vec<CacheIdent>),
+    /// Flushes regions.
+    FlushRegion(FlushRegions),
 }
 
 /// The reply of [UpgradeRegion].
