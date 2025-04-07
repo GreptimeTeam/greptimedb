@@ -7,6 +7,7 @@ license.workspace = true
 [features]
 mock = []
 pg_kvbackend = ["dep:tokio-postgres", "common-meta/pg_kvbackend"]
+mysql_kvbackend = []                                              # placeholder features so CI can compile
 
 [lints]
 workspace = true
