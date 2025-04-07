@@ -35,6 +35,7 @@ use serde_json::{json, Value};
 use servers::http::handler::HealthResponse;
 use servers::http::header::constants::GREPTIME_LOG_TABLE_NAME_HEADER_NAME;
 use servers::http::header::{GREPTIME_DB_HEADER_NAME, GREPTIME_TIMEZONE_HEADER_NAME};
+use servers::http::jaeger::JAEGER_TIME_RANGE_FOR_OPERATIONS_HEADER;
 use servers::http::prometheus::{PrometheusJsonResponse, PrometheusResponse};
 use servers::http::result::error_result::ErrorResponse;
 use servers::http::result::greptime_result_v1::GreptimedbV1Response;
@@ -3543,7 +3544,7 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     let res = client
         .get("/v1/jaeger/api/operations?service=test-jaeger-query-api")
         .header("x-greptime-trace-table-name", "mytable")
-        .header("x-greptime-jaeger-time-range-for-operations", "3 days")
+        .header(JAEGER_TIME_RANGE_FOR_OPERATIONS_HEADER, "3 days")
         .send()
         .await;
     assert_eq!(StatusCode::OK, res.status());
