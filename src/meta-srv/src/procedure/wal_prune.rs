@@ -610,7 +610,13 @@ mod tests {
 
                 // Step 1: Test `on_prepare`.
                 let status = procedure.on_prepare().await.unwrap();
-                assert_matches!(status, Status::Executing { persist: true });
+                assert_matches!(
+                    status,
+                    Status::Executing {
+                        persist: true,
+                        clean_poisons: false
+                    }
+                );
                 assert_matches!(procedure.data.state, WalPruneState::FlushRegion);
                 assert_eq!(procedure.data.min_flushed_entry_id, min_flushed_entry_id);
                 assert_eq!(
@@ -628,7 +634,13 @@ mod tests {
                     .await;
                 let status = procedure.on_sending_flush_request().await.unwrap();
                 check_flush_request(&mut rx, &regions_to_flush).await;
-                assert_matches!(status, Status::Executing { persist: true });
+                assert_matches!(
+                    status,
+                    Status::Executing {
+                        persist: true,
+                        clean_poisons: false
+                    }
+                );
                 assert_matches!(procedure.data.state, WalPruneState::Prune);
 
                 // Step 3: Test `on_prune`.

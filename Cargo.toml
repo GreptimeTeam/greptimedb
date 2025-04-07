@@ -130,8 +130,7 @@ etcd-client = "0.14"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", branch = "zhongzc/alter-fulltext-backend" }
-# greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "103948cbce833e1a17ee7083f5ba79564d08d6ec" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "2be0f36b3264e28ab0e1c22a980d0bb634eb3a77" }
 hex = "0.4"
 http = "1"
 humantime = "2.1"
@@ -182,7 +181,8 @@ rstest = "0.25"
 rstest_reuse = "0.7"
 rust_decimal = "1.33"
 rustc-hash = "2.0"
-rustls = { version = "0.23.20", default-features = false } # override by patch, see [patch.crates-io]
+# It is worth noting that we should try to avoid using aws-lc-rs until it can be compiled on various platforms.
+rustls = { version = "0.23.25", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
 serde_with = "3"
@@ -207,7 +207,7 @@ strum = { version = "0.27", features = ["derive"] }
 tempfile = "3"
 tokio = { version = "1.40", features = ["full"] }
 tokio-postgres = "0.7"
-tokio-rustls = { version = "0.26.0", default-features = false } # override by patch, see [patch.crates-io]
+tokio-rustls = { version = "0.26.2", default-features = false }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["io-util", "compat"] }
 toml = "0.8.8"
@@ -282,15 +282,6 @@ sql = { path = "src/sql" }
 store-api = { path = "src/store-api" }
 substrait = { path = "src/common/substrait" }
 table = { path = "src/table" }
-
-[patch.crates-io]
-# change all rustls dependencies to use our fork to default to `ring` to make it "just work"
-hyper-rustls = { git = "https://github.com/GreptimeTeam/hyper-rustls", rev = "a951e03" } # version = "0.27.5" with ring patch
-rustls = { git = "https://github.com/GreptimeTeam/rustls", rev = "34fd0c6" }             # version = "0.23.20" with ring patch
-tokio-rustls = { git = "https://github.com/GreptimeTeam/tokio-rustls", rev = "4604ca6" } # version = "0.26.0" with ring patch
-# This is commented, since we are not using aws-lc-sys, if we need to use it, we need to uncomment this line or use a release after this commit, or it wouldn't compile with gcc < 8.1
-# see https://github.com/aws/aws-lc-rs/pull/526
-# aws-lc-sys = { git ="https://github.com/aws/aws-lc-rs", rev = "556558441e3494af4b156ae95ebc07ebc2fd38aa" }
 
 [workspace.dependencies.meter-macros]
 git = "https://github.com/GreptimeTeam/greptime-meter.git"

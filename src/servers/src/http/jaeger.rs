@@ -16,9 +16,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode as HttpStatusCode;
+use axum::http::{HeaderMap, StatusCode as HttpStatusCode};
 use axum::response::IntoResponse;
 use axum::Extension;
+use chrono::Utc;
 use common_catalog::consts::PARENT_SPAN_ID_COLUMN;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
@@ -49,6 +50,7 @@ pub const JAEGER_QUERY_TABLE_NAME_KEY: &str = "jaeger_query_table_name";
 
 const REF_TYPE_CHILD_OF: &str = "CHILD_OF";
 const SPAN_KIND_TIME_FMTS: [&str; 2] = ["%Y-%m-%d %H:%M:%S%.6f%z", "%Y-%m-%d %H:%M:%S%.9f%z"];
+pub const JAEGER_TIME_RANGE_FOR_OPERATIONS_HEADER: &str = "x-greptime-jaeger-query-time-range";
 
 /// JaegerAPIResponse is the response of Jaeger HTTP API.
 /// The original version is `structuredResponse` which is defined in https://github.com/jaegertracing/jaeger/blob/main/cmd/query/app/http_handler.go.
@@ -489,11 +491,20 @@ pub async fn handle_get_operations(
     Query(query_params): Query<JaegerQueryParams>,
     Extension(mut query_ctx): Extension<QueryContext>,
     TraceTableName(table_name): TraceTableName,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
     debug!(
-        "Received Jaeger '/api/operations' request, query_params: {:?}, query_ctx: {:?}",
-        query_params, query_ctx
+        "Received Jaeger '/api/operations' request, query_params: {:?}, query_ctx: {:?}, headers: {:?}",
+        query_params, query_ctx, headers
     );
+
+    let (start, end) = match parse_jaeger_time_range_for_operations(&headers, &query_params) {
+        Ok((start, end)) => (start, end),
+        Err(e) => return error_response(e),
+    };
+
+    debug!("Get operations with start: {:?}, end: {:?}", start, end);
+
     if let Some(service_name) = &query_params.service_name {
         update_query_context(&mut query_ctx, table_name);
         let query_ctx = Arc::new(query_ctx);
@@ -505,7 +516,13 @@ pub async fn handle_get_operations(
             .start_timer();
 
         match handler
-            .get_operations(query_ctx, service_name, query_params.span_kind.as_deref())
+            .get_operations(
+                query_ctx,
+                service_name,
+                query_params.span_kind.as_deref(),
+                start,
+                end,
+            )
             .await
         {
             Ok(output) => match covert_to_records(output).await {
@@ -562,10 +579,11 @@ pub async fn handle_get_operations_by_service(
     Query(query_params): Query<JaegerQueryParams>,
     Extension(mut query_ctx): Extension<QueryContext>,
     TraceTableName(table_name): TraceTableName,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
     debug!(
-        "Received Jaeger '/api/services/{}/operations' request, query_params: {:?}, query_ctx: {:?}",
-        service_name, query_params, query_ctx
+        "Received Jaeger '/api/services/{}/operations' request, query_params: {:?}, query_ctx: {:?}, headers: {:?}",
+        service_name, query_params, query_ctx, headers
     );
 
     update_query_context(&mut query_ctx, table_name);
@@ -577,7 +595,15 @@ pub async fn handle_get_operations_by_service(
         .with_label_values(&[&db, "/api/services"])
         .start_timer();
 
-    match handler.get_operations(query_ctx, &service_name, None).await {
+    let (start, end) = match parse_jaeger_time_range_for_operations(&headers, &query_params) {
+        Ok((start, end)) => (start, end),
+        Err(e) => return error_response(e),
+    };
+
+    match handler
+        .get_operations(query_ctx, &service_name, None, start, end)
+        .await
+    {
         Ok(output) => match covert_to_records(output).await {
             Ok(Some(records)) => match operations_from_records(records, false) {
                 Ok(operations) => {
@@ -969,11 +995,7 @@ fn operations_from_records(
     records: HttpRecordsOutput,
     contain_span_kind: bool,
 ) -> Result<Vec<Operation>> {
-    let expected_schema = vec![
-        (SPAN_NAME_COLUMN, "String"),
-        (SPAN_KIND_COLUMN, "String"),
-        (SERVICE_NAME_COLUMN, "String"),
-    ];
+    let expected_schema = vec![(SPAN_NAME_COLUMN, "String"), (SPAN_KIND_COLUMN, "String")];
     check_schema(&records, &expected_schema)?;
 
     let mut operations = Vec::with_capacity(records.total_rows);
@@ -1062,6 +1084,42 @@ fn convert_string_to_boolean(input: &serde_json::Value) -> Option<serde_json::Va
     }
 
     None
+}
+
+fn parse_jaeger_time_range_for_operations(
+    headers: &HeaderMap,
+    query_params: &JaegerQueryParams,
+) -> Result<(Option<i64>, Option<i64>)> {
+    if let Some(time_range) = headers.get(JAEGER_TIME_RANGE_FOR_OPERATIONS_HEADER) {
+        match time_range.to_str() {
+            Ok(time_range) => match humantime::parse_duration(time_range) {
+                Ok(duration) => {
+                    debug!(
+                        "Get operations with time range: {:?}, duration: {:?}",
+                        time_range, duration
+                    );
+                    let now = Utc::now().timestamp_micros();
+                    Ok((Some(now - duration.as_micros() as i64), Some(now)))
+                }
+                Err(e) => {
+                    error!("Failed to parse time range header: {:?}", e);
+                    Err(InvalidJaegerQuerySnafu {
+                        reason: format!("invalid time range header: {:?}", time_range),
+                    }
+                    .build())
+                }
+            },
+            Err(e) => {
+                error!("Failed to convert time range header to string: {:?}", e);
+                Err(InvalidJaegerQuerySnafu {
+                    reason: format!("invalid time range header: {:?}", time_range),
+                }
+                .build())
+            }
+        }
+    } else {
+        Ok((query_params.start, query_params.end))
+    }
 }
 
 #[cfg(test)]
