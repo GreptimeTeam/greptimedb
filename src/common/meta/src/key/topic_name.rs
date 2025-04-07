@@ -33,7 +33,7 @@ pub struct TopicNameKey<'a> {
 }
 
 /// The value of the topic name key.
-/// `pruned_entry_id`: Minimum offset in the topic of remote WAL. Region using this topic shuold replay from at least this offset.
+/// `pruned_entry_id`: Minimum offset in the topic of remote WAL. Region using this topic should replay from at least this offset.
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct TopicNameValue {
     pub pruned_entry_id: u64,

@@ -29,7 +29,7 @@ use common_procedure::{
     Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
     Result as ProcedureResult, Status, StringKey,
 };
-use common_telemetry::{debug, warn};
+use common_telemetry::warn;
 use itertools::{Itertools, MinMaxResult};
 use log_store::kafka::DEFAULT_PARTITION;
 use rskafka::client::partition::UnknownTopicHandling;
@@ -303,10 +303,6 @@ impl WalPruneProcedure {
                     self.data.topic
                 ),
             })?;
-        debug!(
-            "Delete records from topic: {}, min flushed entry id: {}",
-            self.data.topic, self.data.min_flushed_entry_id
-        );
         partition_client
             .delete_records(
                 (self.data.min_flushed_entry_id + 1) as i64,
@@ -320,7 +316,12 @@ impl WalPruneProcedure {
             })
             .map_err(BoxedError::new)
             .with_context(|_| error::RetryLaterWithSourceSnafu {
-                reason: "Failed to delete records",
+                reason: format!(
+                    "Failed to delete records for topic: {}, partition: {}, offset: {}",
+                    self.data.topic,
+                    DEFAULT_PARTITION,
+                    self.data.min_flushed_entry_id + 1
+                ),
             })?;
         Ok(Status::done())
     }
