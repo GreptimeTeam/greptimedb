@@ -48,7 +48,6 @@ use crate::Result;
 type KafkaClientRef = Arc<Client>;
 
 /// No timeout for flush request.
-const FLUSH_TIMEOUT: Duration = Duration::from_secs(0);
 const DELETE_RECORDS_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// The state of WAL pruning.
@@ -250,9 +249,7 @@ impl WalPruneProcedure {
                 input: flush_instruction.to_string(),
             })?;
             let ch = Channel::Datanode(peer.id);
-            // Instantly drop the receiver to not block.
-            let recv = self.context.mailbox.send(&ch, msg, FLUSH_TIMEOUT).await?;
-            std::mem::drop(recv);
+            self.context.mailbox.send_oneway(&ch, msg).await?;
         }
         self.data.state = WalPruneState::Prune;
         Ok(Status::executing(true))

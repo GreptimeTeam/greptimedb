@@ -444,10 +444,8 @@ impl Mailbox for HeartbeatMailbox {
         let (tx, rx) = oneshot::channel();
         let _ = self.senders.insert(message_id, tx);
         let deadline = Instant::now() + timeout;
-        if timeout > Duration::ZERO {
-            self.timeouts.insert(message_id, deadline);
-            self.timeout_notify.notify_one();
-        }
+        self.timeouts.insert(message_id, deadline);
+        self.timeout_notify.notify_one();
 
         self.pushers.push(pusher_id, msg).await?;
 
@@ -469,6 +467,18 @@ impl Mailbox for HeartbeatMailbox {
         } else if let Ok(finally_msg) = maybe_msg {
             warn!("The response arrived too late: {finally_msg:?}");
         }
+
+        Ok(())
+    }
+
+    async fn send_oneway(&self, ch: &Channel, mut msg: MailboxMessage) -> Result<()> {
+        let message_id = 0;
+        msg.id = message_id;
+
+        let pusher_id = ch.pusher_id();
+        debug!("Sending mailbox message {msg:?} to {pusher_id}");
+
+        self.pushers.push(pusher_id, msg).await?;
 
         Ok(())
     }
