@@ -244,7 +244,7 @@ impl PoisonKey {
 pub struct PoisonKeys(SmallVec<[PoisonKey; 2]>);
 
 impl PoisonKeys {
-    /// Creates a new [PoisonKeys] from a [ResourceType] and a [String].
+    /// Creates a new [PoisonKeys] from a [String].
     pub fn single(key: impl Into<String>) -> Self {
         Self(smallvec![PoisonKey::new(key)])
     }
