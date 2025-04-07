@@ -1021,6 +1021,17 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display(
+        "Failed to convert ConcreteDataType to ColumnDataType: {:?}",
+        data_type
+    ))]
+    ConvertDataType {
+        data_type: ConcreteDataType,
+        source: api::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -1172,6 +1183,7 @@ impl ErrorExt for Error {
             ManualCompactionOverride {} => StatusCode::Cancelled,
 
             IncompatibleWalProviderChange { .. } => StatusCode::InvalidArguments,
+            Error::ConvertDataType { .. } => StatusCode::Internal,
         }
     }
 
