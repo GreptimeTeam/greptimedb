@@ -223,10 +223,10 @@ impl TopicNameManager {
             let mut set = TxnOpGetResponseSet::from(&mut r.responses);
             let raw_value = TxnOpGetResponseSet::filter(raw_key)(&mut set)
                 .context(UnexpectedSnafu {
-                    err_msg: "Reads the empty topic name value in comparing operation of the update topic name key-value",
+                    err_msg: "Reads the empty topic name value in comparing operation while updating TopicNameValue",
                 })?;
 
-            let op_name = "the update topic name key-value";
+            let op_name = "updating TopicNameValue";
             ensure_values!(raw_value, new_raw_value, op_name);
         }
         Ok(())
