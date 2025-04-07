@@ -51,8 +51,8 @@ loki-proto.workspace = true
 meta-client.workspace = true
 meta-srv = { workspace = true, features = ["mock"] }
 moka.workspace = true
-mysql_async = { version = "0.33", default-features = false, features = [
-    "default-rustls",
+mysql_async = { version = "0.35", default-features = false, features = [
+    "default-rustls-ring",
 ] }
 object-store.workspace = true
 operator = { workspace = true, features = ["testing"] }

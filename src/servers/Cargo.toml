@@ -133,8 +133,8 @@ common-base.workspace = true
 common-test-util.workspace = true
 criterion = "0.5"
 json5 = "0.4"
-mysql_async = { version = "0.33", default-features = false, features = [
-    "default-rustls",
+mysql_async = { version = "0.35", default-features = false, features = [
+    "default-rustls-ring",
 ] }
 permutation = "0.4"
 rand.workspace = true
