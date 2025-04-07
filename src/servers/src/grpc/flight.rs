@@ -17,7 +17,7 @@ mod stream;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use api::v1::GreptimeRequest;
+use api::v1::{GreptimeRequest, GreptimeResponse};
 use arrow_flight::flight_service_server::FlightService;
 use arrow_flight::{
     Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightInfo,
@@ -28,17 +28,23 @@ use common_grpc::flight::{FlightEncoder, FlightMessage};
 use common_query::{Output, OutputData};
 use common_telemetry::tracing::info_span;
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
-use futures::Stream;
+use futures::{future, Stream};
+use futures_util::{StreamExt, TryStreamExt};
 use prost::Message;
-use snafu::ResultExt;
+use snafu::{ensure, ResultExt};
+use table::table_name::TableName;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::error;
+use crate::error::InvalidParameterSnafu;
 pub use crate::grpc::flight::stream::FlightRecordBatchStream;
 use crate::grpc::greptime_handler::{get_request_type, GreptimeRequestHandler};
 use crate::grpc::TonicResult;
+use crate::query_handler::grpc::RawRecordBatch;
 
-pub type TonicStream<T> = Pin<Box<dyn Stream<Item = TonicResult<T>> + Send + Sync + 'static>>;
+pub type TonicStream<T> = Pin<Box<dyn Stream<Item = TonicResult<T>> + Send + 'static>>;
 
 /// A subset of [FlightService]
 #[async_trait]
@@ -47,6 +53,14 @@ pub trait FlightCraft: Send + Sync + 'static {
         &self,
         request: Request<Ticket>,
     ) -> TonicResult<Response<TonicStream<FlightData>>>;
+
+    async fn do_put(
+        &self,
+        request: Request<Streaming<FlightData>>,
+    ) -> TonicResult<Response<TonicStream<PutResult>>> {
+        let _ = request;
+        Err(Status::unimplemented("Not yet implemented"))
+    }
 }
 
 pub type FlightCraftRef = Arc<dyn FlightCraft>;
@@ -66,6 +80,13 @@ impl FlightCraft for FlightCraftRef {
         request: Request<Ticket>,
     ) -> TonicResult<Response<TonicStream<FlightData>>> {
         (**self).do_get(request).await
+    }
+
+    async fn do_put(
+        &self,
+        request: Request<Streaming<FlightData>>,
+    ) -> TonicResult<Response<TonicStream<PutResult>>> {
+        self.as_ref().do_put(request).await
     }
 }
 
@@ -120,9 +141,9 @@ impl<T: FlightCraft> FlightService for FlightCraftWrapper<T> {
 
     async fn do_put(
         &self,
-        _: Request<Streaming<FlightData>>,
+        request: Request<Streaming<FlightData>>,
     ) -> TonicResult<Response<Self::DoPutStream>> {
-        Err(Status::unimplemented("Not yet implemented"))
+        self.0.do_put(request).await
     }
 
     type DoExchangeStream = TonicStream<FlightData>;
@@ -168,12 +189,69 @@ impl FlightCraft for GreptimeRequestHandler {
         );
         async {
             let output = self.handle_request(request, Default::default()).await?;
-            let stream: Pin<Box<dyn Stream<Item = Result<FlightData, Status>> + Send + Sync>> =
-                to_flight_data_stream(output, TracingContext::from_current_span());
+            let stream = to_flight_data_stream(output, TracingContext::from_current_span());
             Ok(Response::new(stream))
         }
         .trace(span)
         .await
+    }
+
+    async fn do_put(
+        &self,
+        request: Request<Streaming<FlightData>>,
+    ) -> TonicResult<Response<TonicStream<PutResult>>> {
+        const MAX_PENDING_RESPONSES: usize = 32;
+        let (tx, rx) = mpsc::channel::<TonicResult<GreptimeResponse>>(MAX_PENDING_RESPONSES);
+
+        let stream = request.into_inner();
+        let stream: PutRecordBatchRequestStream = stream
+            .and_then(|x| future::ready(PutRecordBatchRequest::try_from(x).map_err(Into::into)))
+            .boxed();
+        self.put_record_batches(stream, tx).await;
+
+        let response = ReceiverStream::new(rx)
+            .map_ok(|x| PutResult {
+                app_metadata: bytes::Bytes::from(x.encode_to_vec()),
+            })
+            .boxed();
+        Ok(Response::new(response))
+    }
+}
+
+pub(crate) type PutRecordBatchRequestStream =
+    Pin<Box<dyn Stream<Item = TonicResult<PutRecordBatchRequest>> + Send>>;
+
+pub(crate) enum PutRecordBatchRequest {
+    First((TableName, RawRecordBatch)),
+    Rest(RawRecordBatch),
+}
+
+impl TryFrom<FlightData> for PutRecordBatchRequest {
+    type Error = error::Error;
+
+    fn try_from(value: FlightData) -> Result<Self, Self::Error> {
+        let FlightData {
+            flight_descriptor,
+            data_body,
+            ..
+        } = value;
+        if let Some(descriptor) = flight_descriptor {
+            ensure!(
+                descriptor.r#type == arrow_flight::flight_descriptor::DescriptorType::Path as i32,
+                InvalidParameterSnafu {
+                    reason: "expect FlightDescriptor::type == 'Path' only",
+                }
+            );
+            let table_name: TableName = descriptor.path.try_into().map_err(|e| {
+                InvalidParameterSnafu {
+                    reason: format!("{e}"),
+                }
+                .build()
+            })?;
+            Ok(Self::First((table_name, data_body)))
+        } else {
+            Ok(Self::Rest(data_body))
+        }
     }
 }
 

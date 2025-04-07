@@ -299,6 +299,34 @@ impl TestGuard {
     }
 }
 
+impl Drop for TestGuard {
+    fn drop(&mut self) {
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        let guards = std::mem::take(&mut self.storage_guards);
+        common_runtime::spawn_global(async move {
+            let mut errors = vec![];
+            for guard in guards {
+                if let TempDirGuard::S3(guard)
+                | TempDirGuard::Oss(guard)
+                | TempDirGuard::Azblob(guard)
+                | TempDirGuard::Gcs(guard) = guard.0
+                {
+                    if let Err(e) = guard.remove_all().await {
+                        errors.push(e);
+                    }
+                }
+            }
+            if errors.is_empty() {
+                tx.send(Ok(())).unwrap();
+            } else {
+                tx.send(Err(errors)).unwrap();
+            }
+        });
+        rx.recv().unwrap().unwrap_or_else(|e| panic!("{:?}", e));
+    }
+}
+
 pub fn create_tmp_dir_and_datanode_opts(
     default_store_type: StorageType,
     store_provider_types: Vec<StorageType>,
@@ -504,7 +532,7 @@ pub async fn setup_test_prom_app_with_frontend(
 pub async fn setup_grpc_server(
     store_type: StorageType,
     name: &str,
-) -> (String, TestGuard, Arc<GrpcServer>) {
+) -> (String, GreptimeDbStandalone, Arc<GrpcServer>) {
     setup_grpc_server_with(store_type, name, None, None).await
 }
 
@@ -512,7 +540,7 @@ pub async fn setup_grpc_server_with_user_provider(
     store_type: StorageType,
     name: &str,
     user_provider: Option<UserProviderRef>,
-) -> (String, TestGuard, Arc<GrpcServer>) {
+) -> (String, GreptimeDbStandalone, Arc<GrpcServer>) {
     setup_grpc_server_with(store_type, name, user_provider, None).await
 }
 
@@ -521,7 +549,7 @@ pub async fn setup_grpc_server_with(
     name: &str,
     user_provider: Option<UserProviderRef>,
     grpc_config: Option<GrpcServerConfig>,
-) -> (String, TestGuard, Arc<GrpcServer>) {
+) -> (String, GreptimeDbStandalone, Arc<GrpcServer>) {
     let instance = setup_standalone_instance(name, store_type).await;
 
     let runtime: Runtime = RuntimeBuilder::default()
@@ -560,7 +588,7 @@ pub async fn setup_grpc_server_with(
     // wait for GRPC server to start
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    (fe_grpc_addr, instance.guard, fe_grpc_server)
+    (fe_grpc_addr, instance, fe_grpc_server)
 }
 
 pub async fn setup_mysql_server(
