@@ -265,6 +265,7 @@ impl DatanodeBuilder {
                     region_server.clone(),
                     meta_client,
                     cache_registry,
+                    self.plugins.clone(),
                 )
                 .await?,
             )

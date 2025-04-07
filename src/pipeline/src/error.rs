@@ -710,6 +710,12 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Pipeline is required for this API."))]
+    PipelineMissing {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -819,7 +825,8 @@ impl ErrorExt for Error {
             | ValueRequiredForDispatcherRule
             | ReachedMaxNestedLevels { .. }
             | RequiredTableSuffixTemplate
-            | InvalidTableSuffixTemplate { .. } => StatusCode::InvalidArguments,
+            | InvalidTableSuffixTemplate { .. }
+            | PipelineMissing { .. } => StatusCode::InvalidArguments,
         }
     }
 
