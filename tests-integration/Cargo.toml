@@ -52,6 +52,7 @@ meta-client.workspace = true
 meta-srv = { workspace = true, features = ["mock"] }
 moka.workspace = true
 mysql_async = { version = "0.35", default-features = false, features = [
+    "time",
     "default-rustls-ring",
 ] }
 object-store.workspace = true
