@@ -392,7 +392,13 @@ mod tests {
 
                 // Step 1: Test `on_prepare`.
                 let status = procedure.on_prepare().await.unwrap();
-                assert_matches!(status, Status::Executing { persist: true });
+                assert_matches!(
+                    status,
+                    Status::Executing {
+                        persist: true,
+                        clean_poisons: false
+                    }
+                );
                 assert_matches!(procedure.data.state, WalPruneState::Prune);
                 assert_eq!(procedure.data.min_flushed_entry_id, min_last_entry_id);
 

@@ -24,6 +24,7 @@ use crate::error::{Result, ToJsonSnafu};
 pub(crate) use crate::store::state_store::StateStoreRef;
 use crate::ProcedureId;
 
+pub mod poison_store;
 pub mod state_store;
 pub mod util;
 
@@ -341,6 +342,7 @@ mod tests {
 
     use object_store::ObjectStore;
 
+    use crate::procedure::PoisonKeys;
     use crate::store::state_store::ObjectStateStore;
     use crate::BoxedProcedure;
 
@@ -502,6 +504,10 @@ mod tests {
 
         fn lock_key(&self) -> LockKey {
             LockKey::default()
+        }
+
+        fn poison_keys(&self) -> PoisonKeys {
+            PoisonKeys::default()
         }
     }
 
