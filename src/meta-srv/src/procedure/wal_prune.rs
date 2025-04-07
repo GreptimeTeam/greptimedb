@@ -286,7 +286,7 @@ impl WalPruneProcedure {
             .context(TableMetadataManagerSnafu)
             .map_err(BoxedError::new)
             .with_context(|_| error::RetryLaterWithSourceSnafu {
-                reason: "Failed to get topic name",
+                reason: format!("Failed to get TopicNameValue, topic: {}", self.data.topic),
             })?;
         self.context
             .table_metadata_manager
