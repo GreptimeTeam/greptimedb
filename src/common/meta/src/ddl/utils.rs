@@ -13,10 +13,12 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::fmt::Debug;
 
 use common_catalog::consts::METRIC_ENGINE;
 use common_error::ext::BoxedError;
 use common_procedure::error::Error as ProcedureError;
+use common_telemetry::{error, warn};
 use common_wal::options::WalOptions;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metric_engine_consts::LOGICAL_TABLE_METADATA_KEY;
@@ -38,6 +40,7 @@ use crate::rpc::router::RegionRoute;
 /// Adds [Peer] context if the error is unretryable.
 pub fn add_peer_context_if_needed(datanode: Peer) -> impl FnOnce(Error) -> Error {
     move |err| {
+        error!(err; "Failed to operate datanode, peer: {}", datanode);
         if !err.is_retry_later() {
             return Err::<(), BoxedError>(BoxedError::new(err))
                 .context(OperateDatanodeSnafu { peer: datanode })
@@ -180,6 +183,85 @@ pub fn extract_region_wal_options(
         region_wal_options.extend(parsed_options);
     }
     Ok(region_wal_options)
+}
+
+/// The result of multiple operations.
+///
+/// - Ok: all operations are successful.
+/// - PartialRetryable: if any operation is retryable and without non retryable error, the result is retryable.
+/// - PartialNonRetryable: if any operation is non retryable, the result is non retryable.
+/// - AllRetryable: all operations are retryable.
+/// - AllNonRetryable: all operations are not retryable.
+pub enum MultipleResults {
+    Ok,
+    PartialRetryable(Error),
+    PartialNonRetryable(Error),
+    AllRetryable(Error),
+    AllNonRetryable(Error),
+}
+
+/// Handles the results of alter region requests.
+///
+/// For partial success, we need to check if the errors are retryable.
+/// If all the errors are retryable, we return a retryable error.
+/// Otherwise, we return the first error.
+pub fn handle_multiple_results<T: Debug>(results: Vec<Result<T>>) -> MultipleResults {
+    if results.is_empty() {
+        return MultipleResults::Ok;
+    }
+    let num_results = results.len();
+    let mut retryable_results = Vec::new();
+    let mut non_retryable_results = Vec::new();
+    let mut ok_results = Vec::new();
+
+    for result in results {
+        match result {
+            Ok(_) => ok_results.push(result),
+            Err(err) => {
+                if err.is_retry_later() {
+                    retryable_results.push(err);
+                } else {
+                    non_retryable_results.push(err);
+                }
+            }
+        }
+    }
+
+    common_telemetry::debug!(
+        "retryable_results: {}, non_retryable_results: {}, ok_results: {}",
+        retryable_results.len(),
+        non_retryable_results.len(),
+        ok_results.len()
+    );
+
+    if retryable_results.len() == num_results {
+        return MultipleResults::AllRetryable(retryable_results.into_iter().next().unwrap());
+    } else if non_retryable_results.len() == num_results {
+        warn!("all non retryable results: {}", non_retryable_results.len());
+        for err in &non_retryable_results {
+            error!(err; "non retryable error");
+        }
+        return MultipleResults::AllNonRetryable(non_retryable_results.into_iter().next().unwrap());
+    } else if ok_results.len() == num_results {
+        return MultipleResults::Ok;
+    } else if !retryable_results.is_empty()
+        && !ok_results.is_empty()
+        && non_retryable_results.is_empty()
+    {
+        return MultipleResults::PartialRetryable(retryable_results.into_iter().next().unwrap());
+    }
+
+    warn!(
+        "partial non retryable results: {}, retryable results: {}, ok results: {}",
+        non_retryable_results.len(),
+        retryable_results.len(),
+        ok_results.len()
+    );
+    for err in &non_retryable_results {
+        error!(err; "non retryable error");
+    }
+    // non_retryable_results.len() > 0
+    MultipleResults::PartialNonRetryable(non_retryable_results.into_iter().next().unwrap())
 }
 
 #[cfg(test)]

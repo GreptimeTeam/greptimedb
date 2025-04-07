@@ -29,7 +29,7 @@ pub mod test_util;
 pub use crate::error::{Error, Result};
 pub use crate::procedure::{
     BoxedProcedure, BoxedProcedureLoader, Context, ContextProvider, LockKey, Output, ParseIdError,
-    PoisonKey, Procedure, ProcedureId, ProcedureInfo, ProcedureManager, ProcedureManagerRef,
-    ProcedureState, ProcedureWithId, Status, StringKey,
+    PoisonKey, PoisonKeys, Procedure, ProcedureId, ProcedureInfo, ProcedureManager,
+    ProcedureManagerRef, ProcedureState, ProcedureWithId, Status, StringKey,
 };
 pub use crate::watcher::Watcher;

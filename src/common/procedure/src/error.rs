@@ -28,8 +28,14 @@ use crate::PoisonKey;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
-    #[snafu(display("Failed to execute procedure due to external error"))]
-    External { source: BoxedError },
+    #[snafu(display(
+        "Failed to execute procedure due to external error, clean poisons: {}",
+        clean_poisons
+    ))]
+    External {
+        source: BoxedError,
+        clean_poisons: bool,
+    },
 
     #[snafu(display("Loader {} is already registered", name))]
     LoaderConflict {
@@ -268,6 +274,15 @@ impl Error {
     pub fn external<E: ErrorExt + Send + Sync + 'static>(err: E) -> Error {
         Error::External {
             source: BoxedError::new(err),
+            clean_poisons: false,
+        }
+    }
+
+    /// Creates a new [Error::External] error from source `err` and clean poisons.
+    pub fn external_and_clean_poisons<E: ErrorExt + Send + Sync + 'static>(err: E) -> Error {
+        Error::External {
+            source: BoxedError::new(err),
+            clean_poisons: true,
         }
     }
 
@@ -281,6 +296,11 @@ impl Error {
     /// Determine whether it is a retry later type through [StatusCode]
     pub fn is_retry_later(&self) -> bool {
         matches!(self, Error::RetryLater { .. })
+    }
+
+    /// Determine whether it needs to clean poisons.
+    pub fn need_clean_poisons(&self) -> bool {
+        matches!(self, Error::External { clean_poisons, .. } if *clean_poisons)
     }
 
     /// Creates a new [Error::RetryLater] or [Error::External] error from source `err` according

@@ -372,6 +372,14 @@ impl Runner {
                             return;
                         }
 
+                        if e.need_clean_poisons() {
+                            if let Err(e) = self.clean_poisons().await {
+                                error!(e; "Failed to clean poison for procedure: {}", self.meta.id);
+                                self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
+                                return;
+                            }
+                        }
+
                         if e.is_retry_later() {
                             self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
                             return;
@@ -1371,12 +1379,9 @@ mod tests {
                         .await
                         .unwrap();
 
-                    Ok(Status::executing_with_clean_poisons(true))
+                    Ok(Status::executing(true))
                 } else {
-                    Ok(Status::Poisoned {
-                        keys: PoisonKeys::new(vec![poison_key.clone()]),
-                        error: Error::external(MockError::new(StatusCode::Unexpected)),
-                    })
+                    Ok(Status::executing_with_clean_poisons(true))
                 }
             }
             .boxed()
@@ -1413,6 +1418,101 @@ mod tests {
         runner.execute_once(&ctx).await;
         let state = runner.meta.state();
         assert!(state.is_running(), "{state:?}");
+
+        let procedure_id = runner
+            .manager_ctx
+            .poison_manager
+            .get_poison(&poison_key.to_string())
+            .await
+            .unwrap();
+        // poison key should be exist.
+        assert!(procedure_id.is_some());
+
+        runner.execute_once(&ctx).await;
+        let state = runner.meta.state();
+        assert!(state.is_running(), "{state:?}");
+
+        let procedure_id = runner
+            .manager_ctx
+            .poison_manager
+            .get_poison(&poison_key.to_string())
+            .await
+            .unwrap();
+        // poison key should be deleted.
+        assert!(procedure_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_execute_error_with_clean_poisons() {
+        common_telemetry::init_default_ut_logging();
+        let mut times = 0;
+        let poison_key = PoisonKey::new("table/1024");
+        let moved_poison_key = poison_key.clone();
+        let exec_fn = move |ctx: Context| {
+            times += 1;
+            let poison_key = moved_poison_key.clone();
+            async move {
+                if times == 1 {
+                    // Put the poison to the context.
+                    ctx.provider
+                        .try_put_poison(&poison_key, ctx.procedure_id)
+                        .await
+                        .unwrap();
+
+                    Ok(Status::executing(true))
+                } else {
+                    Err(Error::external_and_clean_poisons(MockError::new(
+                        StatusCode::Unexpected,
+                    )))
+                }
+            }
+            .boxed()
+        };
+        let poison = ProcedureAdapter {
+            data: "poison".to_string(),
+            lock_key: LockKey::single_exclusive("catalog.schema.table"),
+            poison_keys: PoisonKeys::new(vec![poison_key.clone()]),
+            exec_fn,
+            rollback_fn: None,
+        };
+
+        let dir = create_temp_dir("error_with_clean_poisons");
+        let meta = poison.new_meta(ROOT_ID);
+
+        let object_store = test_util::new_object_store(&dir);
+        let procedure_store = Arc::new(ProcedureStore::from_object_store(object_store.clone()));
+        let mut runner = new_runner(meta.clone(), Box::new(poison), procedure_store.clone());
+
+        // Use the manager ctx as the context provider.
+        let ctx = context_with_provider(
+            meta.id,
+            runner.manager_ctx.clone() as Arc<dyn ContextProvider>,
+        );
+        // Manually add this procedure to the manager ctx.
+        runner
+            .manager_ctx
+            .procedures
+            .write()
+            .unwrap()
+            .insert(meta.id, runner.meta.clone());
+
+        runner.manager_ctx.start();
+        runner.execute_once(&ctx).await;
+        let state = runner.meta.state();
+        assert!(state.is_running(), "{state:?}");
+
+        let procedure_id = runner
+            .manager_ctx
+            .poison_manager
+            .get_poison(&poison_key.to_string())
+            .await
+            .unwrap();
+        // poison key should be exist.
+        assert!(procedure_id.is_some());
+
+        runner.execute_once(&ctx).await;
+        let state = runner.meta.state();
+        assert!(state.is_prepare_rollback(), "{state:?}");
 
         let procedure_id = runner
             .manager_ctx

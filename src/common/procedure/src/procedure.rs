@@ -57,6 +57,14 @@ pub enum Status {
 }
 
 impl Status {
+    /// Returns a [Status::Poisoned] with given `keys` and `error`.
+    pub fn poisoned(keys: impl IntoIterator<Item = PoisonKey>, error: Error) -> Status {
+        Status::Poisoned {
+            keys: PoisonKeys::new(keys),
+            error,
+        }
+    }
+
     /// Returns a [Status::Executing] with given `persist` flag.
     pub fn executing(persist: bool) -> Status {
         Status::Executing {
