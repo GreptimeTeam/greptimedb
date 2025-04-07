@@ -183,6 +183,7 @@ impl AlterTableProcedure {
                 Err(error)
             }
             MultipleResults::PartialNonRetryable(error) => {
+                error!(error; "Partial non-retryable errors occurred during alter table, table {}, table_id: {}", self.data.table_ref(), self.data.table_id());
                 // No retry will be done.
                 Ok(Status::poisoned(
                     Some(self.table_poison_key()),

@@ -40,6 +40,7 @@ use crate::rpc::router::RegionRoute;
 /// Adds [Peer] context if the error is unretryable.
 pub fn add_peer_context_if_needed(datanode: Peer) -> impl FnOnce(Error) -> Error {
     move |err| {
+        error!(err; "Failed to operate datanode, peer: {}", datanode);
         if !err.is_retry_later() {
             return Err::<(), BoxedError>(BoxedError::new(err))
                 .context(OperateDatanodeSnafu { peer: datanode })
@@ -205,6 +206,9 @@ pub enum MultipleResults {
 /// If all the errors are retryable, we return a retryable error.
 /// Otherwise, we return the first error.
 pub fn handle_multiple_results<T: Debug>(results: Vec<Result<T>>) -> MultipleResults {
+    if results.is_empty() {
+        return MultipleResults::Ok;
+    }
     let num_results = results.len();
     let mut retryable_results = Vec::new();
     let mut non_retryable_results = Vec::new();
