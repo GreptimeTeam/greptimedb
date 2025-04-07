@@ -49,13 +49,13 @@ use crate::Result;
 type KafkaClientRef = Arc<Client>;
 
 const FLUSH_TIMEOUT: Duration = Duration::from_secs(MAILBOX_RTT_SECS);
-const DELETE_RECORDS_TIMEOUT: i32 = 1000;
+const DELETE_RECORDS_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// The state of WAL pruning.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum WalPruneState {
     Prepare,
-    SendingFlushRequest,
+    FlushRegion,
     Prune,
 }
 
@@ -115,11 +115,10 @@ impl WalPruneProcedure {
         ctx: &Context,
         region_ids: &[RegionId],
     ) -> Result<HashMap<Peer, Vec<RegionId>>> {
-        let mut table_ids = HashSet::new();
-        for region_id in region_ids {
-            let table_id = region_id.table_id();
-            table_ids.insert(table_id);
-        }
+        let table_ids = region_ids
+            .iter()
+            .map(|region_id| region_id.table_id())
+            .collect::<HashSet<_>>();
         let table_id_vec = table_ids.into_iter().collect::<Vec<_>>();
         let table_ids_table_routes_map = ctx
             .table_metadata_manager
@@ -133,10 +132,7 @@ impl WalPruneProcedure {
             let table_id = region_id.table_id();
             let table_route = match table_ids_table_routes_map.get(&table_id) {
                 Some(route) => route,
-                None => {
-                    warn!("Failed to get table route for region: {region_id}");
-                    continue;
-                }
+                None => return error::TableRouteNotFoundSnafu { table_id }.fail(),
             };
             for region_route in &table_route.region_routes {
                 if region_route.region.id != *region_id {
@@ -225,7 +221,7 @@ impl WalPruneProcedure {
                     self.data.regions_to_flush.push(region_id);
                 }
             }
-            self.data.state = WalPruneState::SendingFlushRequest;
+            self.data.state = WalPruneState::FlushRegion;
         } else {
             self.data.state = WalPruneState::Prune;
         }
@@ -298,11 +294,14 @@ impl WalPruneProcedure {
             .update(&self.data.topic, self.data.min_flushed_entry_id, prev)
             .await
             .context(UpdateMinEntryIdSnafu {
-                topic: self.data.topic.clone(),
+                topic: &self.data.topic,
             })
             .map_err(BoxedError::new)
             .with_context(|_| error::RetryLaterWithSourceSnafu {
-                reason: "Failed to update min flushed entry id in kvbackend",
+                reason: format!(
+                    "Failed to update pruned entry id for topic: {}",
+                    self.data.topic
+                ),
             })?;
         debug!(
             "Delete records from topic: {}, min flushed entry id: {}",
@@ -311,11 +310,11 @@ impl WalPruneProcedure {
         partition_client
             .delete_records(
                 (self.data.min_flushed_entry_id + 1) as i64,
-                DELETE_RECORDS_TIMEOUT,
+                DELETE_RECORDS_TIMEOUT.as_millis() as i32,
             )
             .await
             .context(DeleteRecordSnafu {
-                topic: self.data.topic.clone(),
+                topic: &self.data.topic,
                 partition: DEFAULT_PARTITION,
                 offset: (self.data.min_flushed_entry_id + 1),
             })
@@ -342,7 +341,7 @@ impl Procedure for WalPruneProcedure {
 
         match state {
             WalPruneState::Prepare => self.on_prepare().await,
-            WalPruneState::SendingFlushRequest => self.on_sending_flush_request().await,
+            WalPruneState::FlushRegion => self.on_sending_flush_request().await,
             WalPruneState::Prune => self.on_prune().await,
         }
         .map_err(|e| {
@@ -610,7 +609,7 @@ mod tests {
                 // Step 1: Test `on_prepare`.
                 let status = procedure.on_prepare().await.unwrap();
                 assert_matches!(status, Status::Executing { persist: true });
-                assert_matches!(procedure.data.state, WalPruneState::SendingFlushRequest);
+                assert_matches!(procedure.data.state, WalPruneState::FlushRegion);
                 assert_eq!(procedure.data.min_flushed_entry_id, min_flushed_entry_id);
                 assert_eq!(
                     procedure.data.regions_to_flush.len(),

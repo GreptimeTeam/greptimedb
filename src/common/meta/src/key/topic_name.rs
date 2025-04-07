@@ -210,12 +210,22 @@ impl TopicNameManager {
     ) -> Result<()> {
         let key = TopicNameKey::new(topic);
         let value = TopicNameValue::new(pruned_entry_id);
+        let prev = prev.map(|v| v.get_raw_bytes()).unwrap_or_default();
         let cas_req = CompareAndPutRequest {
             key: key.to_bytes(),
             value: value.try_as_raw_value()?,
-            expect: prev.map(|v| v.get_raw_bytes()).unwrap_or_else(|| vec![]),
+            expect: prev.clone(),
         };
-        self.kv_backend.compare_and_put(cas_req).await?;
+        let result = self.kv_backend.compare_and_put(cas_req).await?;
+        if !result.is_success() {
+            return InvalidMetadataSnafu {
+                err_msg: format!(
+                    "Failed to update topic name key: {}, expect: {:?}, actual: {:?}",
+                    topic, prev, result.prev_kv,
+                ),
+            }
+            .fail();
+        }
         Ok(())
     }
 }

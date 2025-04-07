@@ -71,7 +71,16 @@ mod tests {
     #[tokio::test]
     async fn test_handle_flush_region_instruction() {
         let mut mock_region_server = mock_region_server();
-        let (mock_engine, _) = MockRegionEngine::new(MITO_ENGINE_NAME);
+        let (mock_engine, _) =
+            MockRegionEngine::with_custom_apply_fn(MITO_ENGINE_NAME, |region_engine| {
+                region_engine.handle_request_mock_fn = Some(Box::new(|region_id, _request| {
+                    if region_id.table_id() == 1024 {
+                        Ok(0)
+                    } else {
+                        error::RegionNotFoundSnafu { region_id }.fail()
+                    }
+                }))
+            });
         mock_region_server.register_engine(mock_engine);
 
         let handler_context = HandlerContext::new_for_test(mock_region_server);
@@ -79,7 +88,20 @@ mod tests {
         let region_ids = (0..16).map(|i| RegionId::new(1024, i)).collect::<Vec<_>>();
 
         let reply = handler_context
+            .clone()
             .handle_flush_region_instruction(FlushRegions { region_ids })
+            .await;
+        assert_matches!(reply, InstructionReply::FlushRegion(_));
+        if let InstructionReply::FlushRegion(SimpleReply { result, error }) = reply {
+            assert!(result);
+            assert!(error.is_none());
+        }
+
+        let not_found_region_ids = (0..16).map(|i| RegionId::new(2048, i)).collect::<Vec<_>>();
+        let reply = handler_context
+            .handle_flush_region_instruction(FlushRegions {
+                region_ids: not_found_region_ids,
+            })
             .await;
         assert_matches!(reply, InstructionReply::FlushRegion(_));
         if let InstructionReply::FlushRegion(SimpleReply { result, error }) = reply {
