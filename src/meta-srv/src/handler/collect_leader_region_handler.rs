@@ -14,7 +14,6 @@
 
 use api::v1::meta::{HeartbeatRequest, Role};
 use common_meta::region_registry::LeaderRegion;
-use common_telemetry::info;
 use store_api::region_engine::RegionRole;
 
 use crate::error::Result;
@@ -52,7 +51,6 @@ impl HeartbeatHandler for CollectLeaderRegionHandler {
             };
             key_values.push((stat.id, value));
         }
-        info!("collect leader region: {:?}", key_values);
         ctx.leader_region_registry.batch_put(key_values);
 
         Ok(HandleControl::Continue)

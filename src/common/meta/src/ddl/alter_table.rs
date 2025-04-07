@@ -26,7 +26,7 @@ use common_error::ext::BoxedError;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{
     Context as ProcedureContext, ContextProvider, Error as ProcedureError, LockKey, PoisonKey,
-    Procedure, ProcedureId, Status, StringKey,
+    PoisonKeys, Procedure, ProcedureId, Status, StringKey,
 };
 use common_telemetry::{debug, error, info};
 use futures::future;
@@ -335,6 +335,10 @@ impl Procedure for AlterTableProcedure {
         let key = self.lock_key_inner();
 
         LockKey::new(key)
+    }
+
+    fn poison_keys(&self) -> PoisonKeys {
+        PoisonKeys::new(vec![self.table_poison_key()])
     }
 }
 

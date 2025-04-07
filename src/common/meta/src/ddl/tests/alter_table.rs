@@ -186,10 +186,6 @@ async fn test_on_submit_alter_request() {
     check(peer, request, 2, RegionId::new(table_id, 2));
     let (peer, request) = results.remove(0);
     check(peer, request, 3, RegionId::new(table_id, 3));
-
-    let key = table_poison_key(table_id).to_string();
-    let value = provider.poison_manager().get_poison(&key).await.unwrap();
-    assert!(value.is_none());
 }
 
 #[tokio::test]

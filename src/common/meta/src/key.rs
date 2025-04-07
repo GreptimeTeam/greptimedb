@@ -174,7 +174,6 @@ pub const KAFKA_TOPIC_KEY_PREFIX: &str = "__topic_name/kafka";
 // The legacy topic key prefix is used to store the topic name in previous versions.
 pub const LEGACY_TOPIC_KEY_PREFIX: &str = "__created_wal_topics/kafka";
 pub const TOPIC_REGION_PREFIX: &str = "__topic_region";
-pub const CONSISTENCY_POISON_PREFIX: &str = "__consistency_poison";
 
 /// The keys with these prefixes will be loaded into the cache when the leader starts.
 pub const CACHE_KEY_PREFIXES: [&str; 5] = [
@@ -256,12 +255,6 @@ lazy_static! {
     .unwrap();
 }
 
-lazy_static! {
-    pub static ref CONSISTENCY_POISON_KEY_PATTERN: Regex = Regex::new(&format!(
-        "^{CONSISTENCY_POISON_PREFIX}/({NAME_PATTERN})/([0-9]+)$"
-    ))
-    .unwrap();
-}
 /// The key of metadata.
 pub trait MetadataKey<'a, T> {
     fn to_bytes(&self) -> Vec<u8>;
