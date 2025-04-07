@@ -60,6 +60,8 @@ impl PassDistribution {
         let result = plan.transform_down(|plan| {
             if let Some(distribution) = plan.required_input_distribution().first()
                 && !matches!(distribution, Distribution::UnspecifiedDistribution)
+                // incorrect workaround, doesn't fix the actual issue
+                && plan.name() != "HashJoinExec"
             {
                 distribution_requirement = Some(distribution.clone());
             }

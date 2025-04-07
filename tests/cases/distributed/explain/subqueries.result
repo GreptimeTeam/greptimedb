@@ -21,7 +21,11 @@ EXPLAIN SELECT * FROM integers WHERE i IN ((SELECT i FROM integers)) ORDER BY i;
 |_|_SortExec: expr=[i@0 ASC NULLS LAST], preserve_partitioning=[true]_|
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_REDACTED
+|_|_CoalesceBatchesExec: target_batch_size=8192_|
+|_|_RepartitionExec: partitioning=REDACTED
 |_|_MergeScanExec: REDACTED
+|_|_CoalesceBatchesExec: target_batch_size=8192_|
+|_|_RepartitionExec: partitioning=REDACTED
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -47,7 +51,11 @@ EXPLAIN SELECT * FROM integers i1 WHERE EXISTS(SELECT i FROM integers WHERE i=i1
 |_|_SortExec: expr=[i@0 ASC NULLS LAST], preserve_partitioning=[true]_|
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_REDACTED
+|_|_CoalesceBatchesExec: target_batch_size=8192_|
+|_|_RepartitionExec: partitioning=REDACTED
 |_|_MergeScanExec: REDACTED
+|_|_CoalesceBatchesExec: target_batch_size=8192_|
+|_|_RepartitionExec: partitioning=REDACTED
 |_|_ProjectionExec: expr=[i@0 as i]_|
 |_|_MergeScanExec: REDACTED
 |_|_|
