@@ -88,7 +88,6 @@ impl ExtensionAnalyzerRule for TypeConversionRule {
             | LogicalPlan::Sort { .. }
             | LogicalPlan::Union { .. }
             | LogicalPlan::Join { .. }
-            | LogicalPlan::Distinct { .. }
             | LogicalPlan::Values { .. }
             | LogicalPlan::Analyze { .. } => {
                 let mut converter = TypeConverter {
@@ -105,7 +104,8 @@ impl ExtensionAnalyzerRule for TypeConversionRule {
                 plan.with_new_exprs(expr, inputs).map(Transformed::yes)
             }
 
-            LogicalPlan::Limit { .. }
+            LogicalPlan::Distinct { .. }
+            | LogicalPlan::Limit { .. }
             | LogicalPlan::Subquery { .. }
             | LogicalPlan::Explain { .. }
             | LogicalPlan::SubqueryAlias { .. }

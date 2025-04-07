@@ -32,8 +32,8 @@ use datafusion_expr::execution_props::ExecutionProps;
 use datafusion_expr::expr::WildcardOptions;
 use datafusion_expr::simplify::SimplifyContext;
 use datafusion_expr::{
-    Aggregate, Analyze, Cast, Explain, Expr, ExprSchemable, Extension, LogicalPlan,
-    LogicalPlanBuilder, Projection,
+    Aggregate, Analyze, Cast, Distinct, DistinctOn, Explain, Expr, ExprSchemable, Extension,
+    LogicalPlan, LogicalPlanBuilder, Projection,
 };
 use datafusion_optimizer::simplify_expressions::ExprSimplifier;
 use datatypes::prelude::ConcreteDataType;
@@ -450,6 +450,28 @@ impl RangePlanRewriter {
                             );
                             LogicalPlanBuilder::from(inputs[0].clone())
                                 .explain(*verbose, false)
+                                .context(DataFusionSnafu)?
+                                .build()
+                        }
+                        LogicalPlan::Distinct(Distinct::On(DistinctOn {
+                            on_expr,
+                            select_expr,
+                            sort_expr,
+                            ..
+                        })) => {
+                            ensure!(
+                                inputs.len() == 1,
+                                RangeQuerySnafu {
+                                    msg:
+                                        "Illegal subplan nums when rewrite DistinctOn logical plan",
+                                }
+                            );
+                            LogicalPlanBuilder::from(inputs[0].clone())
+                                .distinct_on(
+                                    on_expr.clone(),
+                                    select_expr.clone(),
+                                    sort_expr.clone(),
+                                )
                                 .context(DataFusionSnafu)?
                                 .build()
                         }
