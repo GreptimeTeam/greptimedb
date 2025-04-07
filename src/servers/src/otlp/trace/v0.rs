@@ -16,7 +16,7 @@ use std::collections::HashSet;
 
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, RowInsertRequests};
-use common_catalog::consts::{TRACE_SERVICES_TABLE_NAME, TRACE_SERVICES_TABLE_NAME_SESSION_KEY};
+use common_catalog::consts::trace_services_table_name;
 use common_grpc::precision::Precision;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use pipeline::{GreptimePipelineParams, PipelineWay};
@@ -42,7 +42,7 @@ pub fn v0_to_grpc_insert_requests(
     _pipeline: PipelineWay,
     _pipeline_params: GreptimePipelineParams,
     table_name: String,
-    query_ctx: &QueryContextRef,
+    _query_ctx: &QueryContextRef,
     _pipeline_handler: PipelineHandlerRef,
 ) -> Result<(RowInsertRequests, usize)> {
     let spans = parse(request);
@@ -62,12 +62,11 @@ pub fn v0_to_grpc_insert_requests(
     }
     write_trace_services_to_row(&mut trace_services_writer, services)?;
 
-    let trace_services_table_name = query_ctx
-        .extension(TRACE_SERVICES_TABLE_NAME_SESSION_KEY)
-        .unwrap_or(TRACE_SERVICES_TABLE_NAME);
-
+    multi_table_writer.add_table_data(
+        trace_services_table_name(&table_name),
+        trace_services_writer,
+    );
     multi_table_writer.add_table_data(table_name, trace_writer);
-    multi_table_writer.add_table_data(trace_services_table_name, trace_services_writer);
 
     Ok(multi_table_writer.into_row_insert_requests())
 }

@@ -138,7 +138,11 @@ pub const SPAN_NAME_COLUMN: &str = "span_name";
 pub const SERVICE_NAME_COLUMN: &str = "service_name";
 pub const PARENT_SPAN_ID_COLUMN: &str = "parent_span_id";
 pub const TRACE_TABLE_NAME: &str = "opentelemetry_traces";
-pub const TRACE_SERVICES_TABLE_NAME: &str = "greptime_otlp_trace_services";
 pub const TRACE_TABLE_NAME_SESSION_KEY: &str = "trace_table_name";
-pub const TRACE_SERVICES_TABLE_NAME_SESSION_KEY: &str = "trace_services_table_name";
+// ---- End of special table and fields ----
+
+/// Generate the trace services table name from the trace table name by adding `_services` suffix.
+pub fn trace_services_table_name(trace_table_name: &str) -> String {
+    format!("{}_services", trace_table_name)
+}
 // ---- End of special table and fields ----

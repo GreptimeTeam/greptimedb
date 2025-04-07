@@ -28,8 +28,8 @@ use api::v1::{
 use catalog::CatalogManagerRef;
 use client::{OutputData, OutputMeta};
 use common_catalog::consts::{
-    default_engine, PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN, TRACE_ID_COLUMN,
-    TRACE_SERVICES_TABLE_NAME, TRACE_SERVICES_TABLE_NAME_SESSION_KEY,
+    default_engine, trace_services_table_name, PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN,
+    TRACE_ID_COLUMN, TRACE_TABLE_NAME, TRACE_TABLE_NAME_SESSION_KEY,
 };
 use common_grpc_expr::util::ColumnExpr;
 use common_meta::cache::TableFlownodeSetCacheRef;
@@ -572,14 +572,14 @@ impl Inserter {
             }
 
             AutoCreateTableType::Trace => {
-                let trace_services_table_name = ctx
-                    .extension(TRACE_SERVICES_TABLE_NAME_SESSION_KEY)
-                    .unwrap_or(TRACE_SERVICES_TABLE_NAME);
+                let trace_table_name = ctx
+                    .extension(TRACE_TABLE_NAME_SESSION_KEY)
+                    .unwrap_or(TRACE_TABLE_NAME);
 
                 // note that auto create table shouldn't be ttl instant table
                 // for it's a very unexpected behavior and should be set by user explicitly
                 for mut create_table in create_tables {
-                    if create_table.table_name == trace_services_table_name {
+                    if create_table.table_name == trace_services_table_name(trace_table_name) {
                         let table = self
                             .create_physical_table(create_table, None, ctx, statement_executor)
                             .await?;

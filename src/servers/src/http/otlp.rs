@@ -19,7 +19,7 @@ use axum::http::header;
 use axum::response::IntoResponse;
 use axum::Extension;
 use bytes::Bytes;
-use common_catalog::consts::{TRACE_SERVICES_TABLE_NAME_SESSION_KEY, TRACE_TABLE_NAME};
+use common_catalog::consts::{TRACE_TABLE_NAME, TRACE_TABLE_NAME_SESSION_KEY};
 use common_telemetry::tracing;
 use opentelemetry_proto::tonic::collector::logs::v1::{
     ExportLogsServiceRequest, ExportLogsServiceResponse,
@@ -37,7 +37,7 @@ use snafu::prelude::*;
 
 use super::header::{write_cost_header_map, CONTENT_TYPE_PROTOBUF};
 use crate::error::{self, PipelineSnafu, Result};
-use crate::http::extractor::{LogTableName, PipelineInfo, SelectInfoWrapper, TraceTables};
+use crate::http::extractor::{LogTableName, PipelineInfo, SelectInfoWrapper, TraceTableName};
 use crate::metrics::METRIC_HTTP_OPENTELEMETRY_LOGS_ELAPSED;
 use crate::query_handler::{OpenTelemetryProtocolHandlerRef, PipelineHandler};
 
@@ -73,21 +73,16 @@ pub async fn metrics(
 #[tracing::instrument(skip_all, fields(protocol = "otlp", request_type = "traces"))]
 pub async fn traces(
     State(handler): State<OpenTelemetryProtocolHandlerRef>,
-    TraceTables {
-        trace_table_name,
-        trace_services_table_name,
-    }: TraceTables,
+    TraceTableName(table_name): TraceTableName,
     pipeline_info: PipelineInfo,
     Extension(mut query_ctx): Extension<QueryContext>,
     bytes: Bytes,
 ) -> Result<OtlpResponse<ExportTraceServiceResponse>> {
     let db = query_ctx.get_db_string();
-    let table_name = trace_table_name.unwrap_or_else(|| TRACE_TABLE_NAME.to_string());
+    let table_name = table_name.unwrap_or_else(|| TRACE_TABLE_NAME.to_string());
 
     query_ctx.set_channel(Channel::Otlp);
-    if let Some(table) = trace_services_table_name {
-        query_ctx.set_extension(TRACE_SERVICES_TABLE_NAME_SESSION_KEY, table);
-    }
+    query_ctx.set_extension(TRACE_TABLE_NAME_SESSION_KEY, &table_name);
 
     let query_ctx = Arc::new(query_ctx);
     let _timer = crate::metrics::METRIC_HTTP_OPENTELEMETRY_TRACES_ELAPSED
