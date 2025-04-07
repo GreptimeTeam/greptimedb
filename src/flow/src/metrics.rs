@@ -29,27 +29,15 @@ lazy_static! {
     )
     .unwrap();
     pub static ref METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME: HistogramVec = register_histogram_vec!(
-        "greptime_flow_batching_engine_query_time",
-        "flow batching engine query time",
+        "greptime_flow_batching_engine_query_time_secs",
+        "flow batching engine query time(seconds)",
         &["flow_id"],
-        vec![
-            0.0,
-            1.,
-            3.,
-            5.,
-            10.,
-            20.,
-            30.,
-            60.,
-            2. * 60.,
-            5. * 60.,
-            10. * 60.
-        ]
+        vec![0.0, 5., 10., 20., 40., 80., 160., 320., 640.,]
     )
     .unwrap();
     pub static ref METRIC_FLOW_BATCHING_ENGINE_SLOW_QUERY: HistogramVec = register_histogram_vec!(
-        "greptime_flow_batching_engine_slow_query",
-        "flow batching engine slow query",
+        "greptime_flow_batching_engine_slow_query_secs",
+        "flow batching engine slow query(seconds)",
         &["flow_id", "sql", "peer"],
         vec![60., 2. * 60., 3. * 60., 5. * 60., 10. * 60.]
     )

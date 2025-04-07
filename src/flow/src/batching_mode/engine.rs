@@ -90,12 +90,15 @@ impl BatchingEngine {
                     msg: format!("Failed to get table info for table ids: {:?}", tids),
                 })?;
 
-        if !tids.iter().all(|id| table_infos.contains_key(id)) {
+        let missing_tids = tids
+            .iter()
+            .filter(|id| !table_infos.contains_key(id))
+            .collect::<Vec<_>>();
+        if !missing_tids.is_empty() {
             warn!(
-                "Failed to get all the table info for table ids, expected table ids: {:?}, actual table infos' table id: {:?}, those table doesn't exist: {:?}",
+                "Failed to get all the table info for table ids, expected table ids: {:?}, those table doesn't exist: {:?}",
                 tids,
-                table_infos.keys(),
-                tids.iter().filter(|id| !table_infos.contains_key(id)).collect::<Vec<_>>()
+                missing_tids
             );
         }
 
