@@ -2268,6 +2268,7 @@ version = "0.14.0"
 dependencies = [
  "async-trait",
  "common-procedure",
+ "snafu 0.8.5",
 ]
 
 [[package]]
@@ -4690,7 +4691,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=fb8e20ce29afd81835e3ea3c1164c8ce10de2c65#fb8e20ce29afd81835e3ea3c1164c8ce10de2c65"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=2be0f36b3264e28ab0e1c22a980d0bb634eb3a77#2be0f36b3264e28ab0e1c22a980d0bb634eb3a77"
 dependencies = [
  "prost 0.13.3",
  "serde",

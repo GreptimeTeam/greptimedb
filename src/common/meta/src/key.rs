@@ -156,6 +156,7 @@ use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::router::{region_distribution, LeaderState, RegionRoute};
 use crate::rpc::store::BatchDeleteRequest;
+use crate::state_store::PoisonValue;
 use crate::DatanodeId;
 
 pub const NAME_PATTERN: &str = r"[a-zA-Z_:-][a-zA-Z0-9_:\-\.@#]*";
@@ -1324,7 +1325,8 @@ impl_metadata_value! {
     TableFlowValue,
     NodeAddressValue,
     SchemaNameValue,
-    FlowStateValue
+    FlowStateValue,
+    PoisonValue
 }
 
 impl_optional_metadata_value! {
