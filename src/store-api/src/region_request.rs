@@ -356,7 +356,10 @@ fn make_region_bulk_inserts(
         .map(|(region_id, payloads)| {
             (
                 region_id.into(),
-                RegionRequest::BulkInserts(RegionBulkInsertsRequest { payloads }),
+                RegionRequest::BulkInserts(RegionBulkInsertsRequest {
+                    region_id: region_id.into(),
+                    payloads,
+                }),
             )
         })
         .collect::<Vec<_>>();
@@ -1169,6 +1172,7 @@ pub struct RegionSequencesRequest {
 
 #[derive(Debug, Clone)]
 pub struct RegionBulkInsertsRequest {
+    pub region_id: RegionId,
     pub payloads: Vec<BulkInsertPayload>,
 }
 

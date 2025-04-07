@@ -828,8 +828,17 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 WorkerRequest::SyncRegion(req) => {
                     self.handle_region_sync(req).await;
                 }
-                WorkerRequest::BulkInserts(region_bulk_inserts_request) => {
-                    self.handle_bulk_inserts(region_bulk_inserts_request).await;
+                WorkerRequest::BulkInserts {
+                    metadata,
+                    request,
+                    sender,
+                } => {
+                    if let Some(region_metadata) = metadata {
+                        self.handle_bulk_inserts(request, region_metadata, write_requests, sender)
+                            .await;
+                    } else {
+                        // todo(hl): region metadata not found while receiving request.
+                    }
                 }
             }
         }

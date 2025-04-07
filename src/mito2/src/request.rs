@@ -570,8 +570,12 @@ pub(crate) enum WorkerRequest {
     /// Keep the manifest of a region up to date.
     SyncRegion(RegionSyncRequest),
 
-    /// Bulk inserts request.
-    BulkInserts(RegionBulkInsertsRequest),
+    /// Bulk inserts request and region metadata.
+    BulkInserts {
+        metadata: Option<RegionMetadataRef>,
+        request: RegionBulkInsertsRequest,
+        sender: OptionOutputTx,
+    },
 }
 
 impl WorkerRequest {
@@ -671,9 +675,11 @@ impl WorkerRequest {
                 sender: sender.into(),
                 request: DdlRequest::Catchup(v),
             }),
-            RegionRequest::BulkInserts(region_bulk_inserts_request) => {
-                WorkerRequest::BulkInserts(region_bulk_inserts_request)
-            }
+            RegionRequest::BulkInserts(region_bulk_inserts_request) => WorkerRequest::BulkInserts {
+                metadata: region_metadata,
+                sender: sender.into(),
+                request: region_bulk_inserts_request,
+            },
         };
 
         Ok((worker_request, receiver))
