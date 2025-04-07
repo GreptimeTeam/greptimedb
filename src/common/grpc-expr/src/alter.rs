@@ -15,11 +15,13 @@
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::add_column_location::LocationType;
 use api::v1::alter_table_expr::Kind;
-use api::v1::column_def::{as_fulltext_option, as_skipping_index_type};
+use api::v1::column_def::{
+    as_fulltext_option_analyzer, as_fulltext_option_backend, as_skipping_index_type,
+};
 use api::v1::{
     column_def, AddColumnLocation as Location, AlterTableExpr, Analyzer, CreateTableExpr,
-    DropColumns, ModifyColumnTypes, RenameTable, SemanticType,
-    SkippingIndexType as PbSkippingIndexType,
+    DropColumns, FulltextBackend as PbFulltextBackend, ModifyColumnTypes, RenameTable,
+    SemanticType, SkippingIndexType as PbSkippingIndexType,
 };
 use common_query::AddColumnLocation;
 use datatypes::schema::{ColumnSchema, FulltextOptions, RawSchema, SkippingIndexOptions};
@@ -126,11 +128,15 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterTableExpr) -> Result<
                         column_name: f.column_name.clone(),
                         options: FulltextOptions {
                             enable: f.enable,
-                            analyzer: as_fulltext_option(
+                            analyzer: as_fulltext_option_analyzer(
                                 Analyzer::try_from(f.analyzer)
                                     .context(InvalidSetFulltextOptionRequestSnafu)?,
                             ),
                             case_sensitive: f.case_sensitive,
+                            backend: as_fulltext_option_backend(
+                                PbFulltextBackend::try_from(f.backend)
+                                    .context(InvalidSetFulltextOptionRequestSnafu)?,
+                            ),
                         },
                     },
                 },

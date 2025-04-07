@@ -30,7 +30,7 @@ use datanode::datanode::{Datanode, DatanodeBuilder};
 use datanode::service::DatanodeServiceBuilder;
 use meta_client::{MetaClientOptions, MetaClientType};
 use servers::Mode;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{
@@ -223,15 +223,14 @@ impl StartCommand {
                 .get_or_insert_with(MetaClientOptions::default)
                 .metasrv_addrs
                 .clone_from(metasrv_addrs);
-            opts.mode = Mode::Distributed;
         }
 
-        if let (Mode::Distributed, None) = (&opts.mode, &opts.node_id) {
-            return MissingConfigSnafu {
-                msg: "Missing node id option",
+        ensure!(
+            opts.node_id.is_some(),
+            MissingConfigSnafu {
+                msg: "Missing node id option"
             }
-            .fail();
-        }
+        );
 
         if let Some(data_home) = &self.data_home {
             opts.storage.data_home.clone_from(data_home);
@@ -295,10 +294,13 @@ impl StartCommand {
             msg: "'meta_client_options'",
         })?;
 
-        let meta_client =
-            meta_client::create_meta_client(MetaClientType::Datanode { member_id }, meta_config)
-                .await
-                .context(MetaClientInitSnafu)?;
+        let meta_client = meta_client::create_meta_client(
+            MetaClientType::Datanode { member_id },
+            meta_config,
+            None,
+        )
+        .await
+        .context(MetaClientInitSnafu)?;
 
         let meta_backend = Arc::new(MetaKvBackend {
             client: meta_client.clone(),
@@ -311,7 +313,7 @@ impl StartCommand {
                 .build(),
         );
 
-        let mut datanode = DatanodeBuilder::new(opts.clone(), plugins)
+        let mut datanode = DatanodeBuilder::new(opts.clone(), plugins, Mode::Distributed)
             .with_meta_client(meta_client)
             .with_kv_backend(meta_backend)
             .with_cache_registry(layered_cache_registry)
@@ -333,6 +335,7 @@ impl StartCommand {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches::assert_matches;
     use std::io::Write;
     use std::time::Duration;
 
@@ -340,7 +343,6 @@ mod tests {
     use common_test_util::temp_dir::create_named_temp_file;
     use datanode::config::{FileConfig, GcsConfig, ObjectStoreConfig, S3Config};
     use servers::heartbeat_options::HeartbeatOptions;
-    use servers::Mode;
 
     use super::*;
     use crate::options::GlobalOptions;
@@ -491,22 +493,6 @@ mod tests {
 
     #[test]
     fn test_try_from_cmd() {
-        let opt = StartCommand::default()
-            .load_options(&GlobalOptions::default())
-            .unwrap()
-            .component;
-        assert_eq!(Mode::Standalone, opt.mode);
-
-        let opt = (StartCommand {
-            node_id: Some(42),
-            metasrv_addrs: Some(vec!["127.0.0.1:3002".to_string()]),
-            ..Default::default()
-        })
-        .load_options(&GlobalOptions::default())
-        .unwrap()
-        .component;
-        assert_eq!(Mode::Distributed, opt.mode);
-
         assert!((StartCommand {
             metasrv_addrs: Some(vec!["127.0.0.1:3002".to_string()]),
             ..Default::default()
@@ -525,7 +511,19 @@ mod tests {
 
     #[test]
     fn test_load_log_options_from_cli() {
-        let cmd = StartCommand::default();
+        let mut cmd = StartCommand::default();
+
+        let result = cmd.load_options(&GlobalOptions {
+            log_dir: Some("./greptimedb_data/test/logs".to_string()),
+            log_level: Some("debug".to_string()),
+
+            #[cfg(feature = "tokio-console")]
+            tokio_console_addr: None,
+        });
+        // Missing node_id.
+        assert_matches!(result, Err(crate::error::Error::MissingConfig { .. }));
+
+        cmd.node_id = Some(42);
 
         let options = cmd
             .load_options(&GlobalOptions {

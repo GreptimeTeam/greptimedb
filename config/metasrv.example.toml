@@ -79,6 +79,11 @@ retry_delay = "500ms"
 ## Comments out the `max_metadata_value_size`, for don't split large value (no limit).
 max_metadata_value_size = "1500KiB"
 
+## Max running procedures.
+## The maximum number of procedures that can be running at the same time.
+## If the number of running procedures exceeds this limit, the procedure will be rejected.
+max_running_procedures = 128
+
 # Failure detectors options.
 [failure_detector]
 
@@ -144,17 +149,6 @@ replication_factor = 1
 
 ## Above which a topic creation operation will be cancelled.
 create_topic_timeout = "30s"
-## The initial backoff for kafka clients.
-backoff_init = "500ms"
-
-## The maximum backoff for kafka clients.
-backoff_max = "10s"
-
-## Exponential backoff rate, i.e. next backoff = base * current backoff.
-backoff_base = 2
-
-## Stop reconnecting if the total wait time reaches the deadline. If this config is missing, the reconnecting won't terminate.
-backoff_deadline = "5mins"
 
 # The Kafka SASL configuration.
 # **It's only used when the provider is `kafka`**.

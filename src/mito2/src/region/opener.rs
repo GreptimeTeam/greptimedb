@@ -224,6 +224,7 @@ impl RegionOpener {
             metadata.clone(),
             region_manifest_options,
             self.stats.total_manifest_size.clone(),
+            self.stats.manifest_version.clone(),
         )
         .await?;
 
@@ -331,6 +332,7 @@ impl RegionOpener {
                 );
                 Ok(Provider::kafka_provider(options.topic.to_string()))
             }
+            WalOptions::Noop => Ok(Provider::noop_provider()),
         }
     }
 
@@ -351,6 +353,7 @@ impl RegionOpener {
         let Some(manifest_manager) = RegionManifestManager::open(
             region_manifest_options,
             self.stats.total_manifest_size.clone(),
+            self.stats.manifest_version.clone(),
         )
         .await?
         else {
@@ -528,9 +531,12 @@ impl RegionMetadataLoader {
             region_dir,
             &self.object_store_manager,
         )?;
-        let Some(manifest_manager) =
-            RegionManifestManager::open(region_manifest_options, Arc::new(AtomicU64::new(0)))
-                .await?
+        let Some(manifest_manager) = RegionManifestManager::open(
+            region_manifest_options,
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+        )
+        .await?
         else {
             return Ok(None);
         };

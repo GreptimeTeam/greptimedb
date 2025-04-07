@@ -58,17 +58,24 @@ pub struct RegionAliveKeeper {
     /// non-decreasing). The heartbeat requests will carry the duration since this epoch, and the
     /// duration acts like an "invariant point" for region's keep alive lease.
     epoch: Instant,
+
+    countdown_task_handler_ext: Option<CountdownTaskHandlerExtRef>,
 }
 
 impl RegionAliveKeeper {
     /// Returns an empty [RegionAliveKeeper].
-    pub fn new(region_server: RegionServer, heartbeat_interval_millis: u64) -> Self {
+    pub fn new(
+        region_server: RegionServer,
+        countdown_task_handler_ext: Option<CountdownTaskHandlerExtRef>,
+        heartbeat_interval_millis: u64,
+    ) -> Self {
         Self {
             region_server,
             tasks: Arc::new(Mutex::new(HashMap::new())),
             heartbeat_interval_millis,
             started: Arc::new(AtomicBool::new(false)),
             epoch: Instant::now(),
+            countdown_task_handler_ext,
         }
     }
 
@@ -85,6 +92,7 @@ impl RegionAliveKeeper {
 
         let handle = Arc::new(CountdownTaskHandle::new(
             self.region_server.clone(),
+            self.countdown_task_handler_ext.clone(),
             region_id,
         ));
 
@@ -114,7 +122,9 @@ impl RegionAliveKeeper {
         for region in regions {
             let (role, region_id) = (region.role().into(), RegionId::from(region.region_id));
             if let Some(handle) = self.find_handle(region_id).await {
-                handle.reset_deadline(role, deadline).await;
+                handle
+                    .reset_deadline(role, deadline, region.extensions.clone())
+                    .await;
             } else {
                 warn!(
                     "Trying to renew the lease for region {region_id}, the keeper handler is not found!"
@@ -265,11 +275,26 @@ enum CountdownCommand {
     /// 4 * `heartbeat_interval_millis`
     Start(u64),
     /// Reset countdown deadline to the given instance.
-    /// (NextRole, Deadline)
-    Reset((RegionRole, Instant)),
+    /// (NextRole, Deadline, ExtensionInfo)
+    Reset((RegionRole, Instant, HashMap<String, Vec<u8>>)),
     /// Returns the current deadline of the countdown task.
     #[cfg(test)]
     Deadline(oneshot::Sender<Instant>),
+}
+
+pub type CountdownTaskHandlerExtRef = Arc<dyn CountdownTaskHandlerExt>;
+
+/// Extension trait for [CountdownTaskHandlerExt] to reset deadline of a region.
+#[async_trait]
+pub trait CountdownTaskHandlerExt: Send + Sync {
+    async fn reset_deadline(
+        &self,
+        region_server: &RegionServer,
+        region_id: RegionId,
+        role: RegionRole,
+        deadline: Instant,
+        extension_info: HashMap<String, Vec<u8>>,
+    );
 }
 
 struct CountdownTaskHandle {
@@ -280,11 +305,16 @@ struct CountdownTaskHandle {
 
 impl CountdownTaskHandle {
     /// Creates a new [CountdownTaskHandle] and starts the countdown task.
-    fn new(region_server: RegionServer, region_id: RegionId) -> Self {
+    fn new(
+        region_server: RegionServer,
+        handler_ext: Option<CountdownTaskHandlerExtRef>,
+        region_id: RegionId,
+    ) -> Self {
         let (tx, rx) = mpsc::channel(1024);
 
         let mut countdown_task = CountdownTask {
             region_server,
+            handler_ext,
             region_id,
             rx,
         };
@@ -323,10 +353,15 @@ impl CountdownTaskHandle {
         None
     }
 
-    async fn reset_deadline(&self, role: RegionRole, deadline: Instant) {
+    async fn reset_deadline(
+        &self,
+        role: RegionRole,
+        deadline: Instant,
+        extension_info: HashMap<String, Vec<u8>>,
+    ) {
         if let Err(e) = self
             .tx
-            .send(CountdownCommand::Reset((role, deadline)))
+            .send(CountdownCommand::Reset((role, deadline, extension_info)))
             .await
         {
             warn!(
@@ -350,6 +385,7 @@ impl Drop for CountdownTaskHandle {
 struct CountdownTask {
     region_server: RegionServer,
     region_id: RegionId,
+    handler_ext: Option<CountdownTaskHandlerExtRef>,
     rx: mpsc::Receiver<CountdownCommand>,
 }
 
@@ -379,8 +415,19 @@ impl CountdownTask {
                                 started = true;
                             }
                         },
-                        Some(CountdownCommand::Reset((role, deadline))) => {
-                            let _ = self.region_server.set_region_role(self.region_id, role);
+                        Some(CountdownCommand::Reset((role, deadline, extension_info))) => {
+                            if let Err(err) = self.region_server.set_region_role(self.region_id, role) {
+                                error!(err; "Failed to set region role to {role} for region {region_id}");
+                            }
+                            if let Some(ext_handler) = self.handler_ext.as_ref() {
+                                ext_handler.reset_deadline(
+                                    &self.region_server,
+                                    self.region_id,
+                                    role,
+                                    deadline,
+                                    extension_info,
+                                ).await;
+                            }
                             trace!(
                                 "Reset deadline of region {region_id} to approximately {} seconds later.",
                                 (deadline - Instant::now()).as_secs_f32(),
@@ -402,7 +449,9 @@ impl CountdownTask {
                 }
                 () = &mut countdown => {
                     warn!("The region {region_id} lease is expired, convert region to follower.");
-                    let _ = self.region_server.set_region_role(self.region_id, RegionRole::Follower);
+                    if let Err(err) = self.region_server.set_region_role(self.region_id, RegionRole::Follower) {
+                        error!(err; "Failed to set region role to follower for region {region_id}");
+                    }
                     // resets the countdown.
                     let far_future = Instant::now() + Duration::from_secs(86400 * 365 * 30);
                     countdown.as_mut().reset(far_future);
@@ -431,7 +480,7 @@ mod test {
         let engine = Arc::new(engine);
         region_server.register_engine(engine.clone());
 
-        let alive_keeper = Arc::new(RegionAliveKeeper::new(region_server.clone(), 100));
+        let alive_keeper = Arc::new(RegionAliveKeeper::new(region_server.clone(), None, 100));
 
         let region_id = RegionId::new(1024, 1);
         let builder = CreateRequestBuilder::new();
@@ -468,6 +517,7 @@ mod test {
                 &[GrantedRegion {
                     region_id: region_id.as_u64(),
                     role: api::v1::meta::RegionRole::Leader.into(),
+                    extensions: HashMap::new(),
                 }],
                 Instant::now() + Duration::from_millis(200),
             )
@@ -492,7 +542,8 @@ mod test {
     async fn countdown_task() {
         let region_server = mock_region_server();
 
-        let countdown_handle = CountdownTaskHandle::new(region_server, RegionId::new(9999, 2));
+        let countdown_handle =
+            CountdownTaskHandle::new(region_server, None, RegionId::new(9999, 2));
 
         // If countdown task is not started, its deadline is set to far future.
         assert!(
@@ -522,6 +573,7 @@ mod test {
             .reset_deadline(
                 RegionRole::Leader,
                 Instant::now() + Duration::from_millis(heartbeat_interval_millis * 5),
+                HashMap::new(),
             )
             .await;
         assert!(

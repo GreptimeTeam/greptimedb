@@ -49,6 +49,13 @@ pub const DEFAULT_ENCODING: &str = "snappy";
 pub const VM_ENCODING: &str = "zstd";
 pub const VM_PROTO_VERSION: &str = "1";
 
+#[derive(Clone)]
+pub struct PromStoreState {
+    pub prom_store_handler: PromStoreProtocolHandlerRef,
+    pub prom_store_with_metric_engine: bool,
+    pub is_strict_mode: bool,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RemoteWriteQuery {
     pub db: Option<String>,
@@ -69,99 +76,32 @@ impl Default for RemoteWriteQuery {
     }
 }
 
-/// Same with [remote_write] but won't store data to metric engine.
-#[axum_macros::debug_handler]
-pub async fn route_write_without_metric_engine(
-    handler: State<PromStoreProtocolHandlerRef>,
-    query: Query<RemoteWriteQuery>,
-    extension: Extension<QueryContext>,
-    content_encoding: TypedHeader<headers::ContentEncoding>,
-    raw_body: Bytes,
-) -> Result<impl IntoResponse> {
-    remote_write_impl(
-        handler,
-        query,
-        extension,
-        content_encoding,
-        raw_body,
-        true,
-        false,
-    )
-    .await
-}
-
-/// Same with [remote_write] but won't store data to metric engine.
-/// And without strict_mode on will not check invalid UTF-8.
-#[axum_macros::debug_handler]
-pub async fn route_write_without_metric_engine_and_strict_mode(
-    handler: State<PromStoreProtocolHandlerRef>,
-    query: Query<RemoteWriteQuery>,
-    extension: Extension<QueryContext>,
-    content_encoding: TypedHeader<headers::ContentEncoding>,
-    raw_body: Bytes,
-) -> Result<impl IntoResponse> {
-    remote_write_impl(
-        handler,
-        query,
-        extension,
-        content_encoding,
-        raw_body,
-        false,
-        false,
-    )
-    .await
-}
-
 #[axum_macros::debug_handler]
 #[tracing::instrument(
     skip_all,
     fields(protocol = "prometheus", request_type = "remote_write")
 )]
 pub async fn remote_write(
-    handler: State<PromStoreProtocolHandlerRef>,
+    State(state): State<PromStoreState>,
     query: Query<RemoteWriteQuery>,
     extension: Extension<QueryContext>,
     content_encoding: TypedHeader<headers::ContentEncoding>,
     raw_body: Bytes,
 ) -> Result<impl IntoResponse> {
     remote_write_impl(
-        handler,
+        state.prom_store_handler,
         query,
         extension,
         content_encoding,
         raw_body,
-        true,
-        true,
-    )
-    .await
-}
-
-#[axum_macros::debug_handler]
-#[tracing::instrument(
-    skip_all,
-    fields(protocol = "prometheus", request_type = "remote_write")
-)]
-pub async fn remote_write_without_strict_mode(
-    handler: State<PromStoreProtocolHandlerRef>,
-    query: Query<RemoteWriteQuery>,
-    extension: Extension<QueryContext>,
-    content_encoding: TypedHeader<headers::ContentEncoding>,
-    raw_body: Bytes,
-) -> Result<impl IntoResponse> {
-    remote_write_impl(
-        handler,
-        query,
-        extension,
-        content_encoding,
-        raw_body,
-        false,
-        true,
+        state.is_strict_mode,
+        state.prom_store_with_metric_engine,
     )
     .await
 }
 
 async fn remote_write_impl(
-    State(handler): State<PromStoreProtocolHandlerRef>,
+    handler: PromStoreProtocolHandlerRef,
     Query(params): Query<RemoteWriteQuery>,
     Extension(mut query_ctx): Extension<QueryContext>,
     content_encoding: TypedHeader<headers::ContentEncoding>,
@@ -222,7 +162,7 @@ impl IntoResponse for PromStoreResponse {
     fields(protocol = "prometheus", request_type = "remote_read")
 )]
 pub async fn remote_read(
-    State(handler): State<PromStoreProtocolHandlerRef>,
+    State(state): State<PromStoreState>,
     Query(params): Query<RemoteWriteQuery>,
     Extension(mut query_ctx): Extension<QueryContext>,
     body: Bytes,
@@ -236,7 +176,7 @@ pub async fn remote_read(
 
     let request = decode_remote_read_request(body).await?;
 
-    handler.read(request, query_ctx).await
+    state.prom_store_handler.read(request, query_ctx).await
 }
 
 fn try_decompress(is_zstd: bool, body: &[u8]) -> Result<Bytes> {

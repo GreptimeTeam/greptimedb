@@ -81,6 +81,7 @@ pub fn procedure_state_to_pb_state(state: &ProcedureState) -> (PbProcedureStatus
         ProcedureState::RollingBack { error } => {
             (PbProcedureStatus::RollingBack, error.to_string())
         }
+        ProcedureState::Poisoned { error, .. } => (PbProcedureStatus::Poisoned, error.to_string()),
     }
 }
 

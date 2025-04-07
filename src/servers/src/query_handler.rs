@@ -39,10 +39,7 @@ use log_query::LogQuery;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
-use pipeline::{
-    GreptimePipelineParams, GreptimeTransformer, Pipeline, PipelineInfo, PipelineVersion,
-    PipelineWay,
-};
+use pipeline::{GreptimePipelineParams, Pipeline, PipelineInfo, PipelineVersion, PipelineWay};
 use serde_json::Value;
 use session::context::{QueryContext, QueryContextRef};
 
@@ -143,7 +140,7 @@ pub trait PipelineHandler {
         name: &str,
         version: PipelineVersion,
         query_ctx: QueryContextRef,
-    ) -> Result<Arc<Pipeline<GreptimeTransformer>>>;
+    ) -> Result<Arc<Pipeline>>;
 
     async fn insert_pipeline(
         &self,
@@ -167,7 +164,7 @@ pub trait PipelineHandler {
     ) -> std::result::Result<Option<Arc<table::Table>>, catalog::error::Error>;
 
     //// Build a pipeline from a string.
-    fn build_pipeline(&self, pipeline: &str) -> Result<Pipeline<GreptimeTransformer>>;
+    fn build_pipeline(&self, pipeline: &str) -> Result<Pipeline>;
 }
 
 /// Handle log query requests.
@@ -192,6 +189,8 @@ pub trait JaegerQueryHandler {
         ctx: QueryContextRef,
         service_name: &str,
         span_kind: Option<&str>,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
     ) -> Result<Output>;
 
     /// Get trace by trace id. It's used for `/api/traces/{trace_id}` API.

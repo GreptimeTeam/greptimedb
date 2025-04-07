@@ -57,7 +57,7 @@ impl Arbitrary<'_> for FuzzInput {
 
 fn generate_expr(input: FuzzInput) -> Result<CreateDatabaseExpr> {
     let mut rng = ChaChaRng::seed_from_u64(input.seed);
-    let if_not_exists = rng.gen_bool(0.5);
+    let if_not_exists = rng.random_bool(0.5);
     let create_database_generator = CreateDatabaseExprGeneratorBuilder::default()
         .name_generator(Box::new(MappedGenerator::new(
             WordGenerator,

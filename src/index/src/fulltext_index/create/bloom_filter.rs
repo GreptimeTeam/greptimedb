@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
@@ -26,16 +27,20 @@ use crate::external_provider::ExternalTempFileProvider;
 use crate::fulltext_index::create::FulltextIndexCreator;
 use crate::fulltext_index::error::{
     AbortedSnafu, BiErrorsSnafu, BloomFilterFinishSnafu, ExternalSnafu, PuffinAddBlobSnafu, Result,
+    SerializeToJsonSnafu,
 };
 use crate::fulltext_index::tokenizer::{Analyzer, ChineseTokenizer, EnglishTokenizer};
 use crate::fulltext_index::Config;
 
 const PIPE_BUFFER_SIZE_FOR_SENDING_BLOB: usize = 8192;
 
+pub const KEY_FULLTEXT_CONFIG: &str = "fulltext_config";
+
 /// `BloomFilterFulltextIndexCreator` is for creating a fulltext index using a bloom filter.
 pub struct BloomFilterFulltextIndexCreator {
     inner: Option<BloomFilterCreator>,
     analyzer: Analyzer,
+    config: Config,
 }
 
 impl BloomFilterFulltextIndexCreator {
@@ -61,6 +66,7 @@ impl BloomFilterFulltextIndexCreator {
         Self {
             inner: Some(inner),
             analyzer,
+            config,
         }
     }
 }
@@ -89,9 +95,17 @@ impl FulltextIndexCreator for BloomFilterFulltextIndexCreator {
 
         let (tx, rx) = tokio::io::duplex(PIPE_BUFFER_SIZE_FOR_SENDING_BLOB);
 
+        let property_key = KEY_FULLTEXT_CONFIG.to_string();
+        let property_value = serde_json::to_string(&self.config).context(SerializeToJsonSnafu)?;
+
         let (index_finish, puffin_add_blob) = futures::join!(
             creator.finish(tx.compat_write()),
-            puffin_writer.put_blob(blob_key, rx.compat(), put_options)
+            puffin_writer.put_blob(
+                blob_key,
+                rx.compat(),
+                put_options,
+                HashMap::from([(property_key, property_value)]),
+            )
         );
 
         match (

@@ -36,7 +36,7 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
-        error: rand::distributions::WeightedError,
+        error: rand::distr::weighted::Error,
     },
 
     #[snafu(display("Exceeded deadline, operation: {}", operation))]
@@ -788,39 +788,29 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
-    #[snafu(display("Logical table cannot add follower: {table_id}"))]
-    LogicalTableCannotAddFollower {
-        table_id: TableId,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display(
-        "A region follower cannot be placed on the same node as the leader: {region_id}, {peer_id}"
+        "Failed to build a Kafka partition client, topic: {}, partition: {}",
+        topic,
+        partition
     ))]
-    RegionFollowerLeaderConflict {
-        region_id: RegionId,
-        peer_id: u64,
+    BuildPartitionClient {
+        topic: String,
+        partition: i32,
         #[snafu(implicit)]
         location: Location,
+        #[snafu(source)]
+        error: rskafka::client::error::Error,
     },
 
-    #[snafu(display(
-        "Multiple region followers cannot be placed on the same node: {region_id}, {peer_id}"
-    ))]
-    MultipleRegionFollowersOnSameNode {
-        region_id: RegionId,
-        peer_id: u64,
+    #[snafu(display("Failed to delete record from Kafka"))]
+    DeleteRecord {
         #[snafu(implicit)]
         location: Location,
-    },
-
-    #[snafu(display("Region follower not exists: {region_id}, {peer_id}"))]
-    RegionFollowerNotExists {
-        region_id: RegionId,
-        peer_id: u64,
-        #[snafu(implicit)]
-        location: Location,
+        #[snafu(source)]
+        error: rskafka::client::error::Error,
+        topic: String,
+        partition: i32,
+        offset: u64,
     },
 }
 
@@ -869,7 +859,9 @@ impl ErrorExt for Error {
             | Error::ExceededDeadline { .. }
             | Error::ChooseItems { .. }
             | Error::FlowStateHandler { .. }
-            | Error::BuildWalOptionsAllocator { .. } => StatusCode::Internal,
+            | Error::BuildWalOptionsAllocator { .. }
+            | Error::BuildPartitionClient { .. }
+            | Error::DeleteRecord { .. } => StatusCode::Internal,
 
             Error::Unsupported { .. } => StatusCode::Unsupported,
 
@@ -891,10 +883,6 @@ impl ErrorExt for Error {
             | Error::ProcedureNotFound { .. }
             | Error::TooManyPartitions { .. }
             | Error::TomlFormat { .. }
-            | Error::LogicalTableCannotAddFollower { .. }
-            | Error::RegionFollowerLeaderConflict { .. }
-            | Error::MultipleRegionFollowersOnSameNode { .. }
-            | Error::RegionFollowerNotExists { .. }
             | Error::HandlerNotFound { .. } => StatusCode::InvalidArguments,
             Error::LeaseKeyFromUtf8 { .. }
             | Error::LeaseValueFromUtf8 { .. }

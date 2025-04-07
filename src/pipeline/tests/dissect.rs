@@ -272,7 +272,7 @@ transform:
     let input_value = serde_json::from_str::<serde_json::Value>(input_str).unwrap();
 
     let yaml_content = pipeline::Content::Yaml(pipeline_yaml);
-    let pipeline: pipeline::Pipeline<pipeline::GreptimeTransformer> =
+    let pipeline: pipeline::Pipeline =
         pipeline::parse(&yaml_content).expect("failed to parse pipeline");
     let mut result = json_to_map(input_value).unwrap();
 

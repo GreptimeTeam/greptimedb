@@ -19,7 +19,7 @@ mod information_memory_table;
 pub mod key_column_usage;
 mod partitions;
 mod procedure_info;
-mod region_peers;
+pub mod region_peers;
 mod region_statistics;
 mod runtime_metrics;
 pub mod schemata;

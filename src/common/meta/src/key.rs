@@ -156,6 +156,7 @@ use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::router::{region_distribution, LeaderState, RegionRoute};
 use crate::rpc::store::BatchDeleteRequest;
+use crate::state_store::PoisonValue;
 use crate::DatanodeId;
 
 pub const NAME_PATTERN: &str = r"[a-zA-Z_:-][a-zA-Z0-9_:\-\.@#]*";
@@ -510,6 +511,10 @@ impl TableMetadataManager {
 
     pub fn table_route_manager(&self) -> &TableRouteManager {
         &self.table_route_manager
+    }
+
+    pub fn topic_region_manager(&self) -> &TopicRegionManager {
+        &self.topic_region_manager
     }
 
     #[cfg(feature = "testing")]
@@ -1320,7 +1325,8 @@ impl_metadata_value! {
     TableFlowValue,
     NodeAddressValue,
     SchemaNameValue,
-    FlowStateValue
+    FlowStateValue,
+    PoisonValue
 }
 
 impl_optional_metadata_value! {
@@ -1471,7 +1477,8 @@ mod tests {
             new_test_table_info(region_routes.iter().map(|r| r.region.id.region_number())).into();
         let wal_allocator = WalOptionsAllocator::RaftEngine;
         let regions = (0..16).collect();
-        let region_wal_options = allocate_region_wal_options(regions, &wal_allocator).unwrap();
+        let region_wal_options =
+            allocate_region_wal_options(regions, &wal_allocator, false).unwrap();
         create_physical_table_metadata(
             &table_metadata_manager,
             table_info.clone(),

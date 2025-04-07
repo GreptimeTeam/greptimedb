@@ -30,7 +30,7 @@ use crate::error::{EncodeWalOptionsSnafu, InvalidTopicNamePrefixSnafu, Result};
 use crate::key::NAME_PATTERN_REGEX;
 use crate::kv_backend::KvBackendRef;
 use crate::leadership_notifier::LeadershipChangeListener;
-use crate::wal_options_allocator::topic_creator::build_kafka_topic_creator;
+pub use crate::wal_options_allocator::topic_creator::build_kafka_topic_creator;
 use crate::wal_options_allocator::topic_pool::KafkaTopicPool;
 
 /// Allocates wal options in region granularity.
@@ -53,21 +53,12 @@ impl WalOptionsAllocator {
         }
     }
 
-    /// Allocates a wal options for a region.
-    pub fn alloc(&self) -> Result<WalOptions> {
-        match self {
-            Self::RaftEngine => Ok(WalOptions::RaftEngine),
-            Self::Kafka(topic_manager) => {
-                let topic = topic_manager.select()?;
-                Ok(WalOptions::Kafka(KafkaWalOptions {
-                    topic: topic.clone(),
-                }))
-            }
-        }
-    }
-
     /// Allocates a batch of wal options where each wal options goes to a region.
-    pub fn alloc_batch(&self, num_regions: usize) -> Result<Vec<WalOptions>> {
+    /// If skip_wal is true, the wal options will be set to Noop regardless of the allocator type.
+    pub fn alloc_batch(&self, num_regions: usize, skip_wal: bool) -> Result<Vec<WalOptions>> {
+        if skip_wal {
+            return Ok(vec![WalOptions::Noop; num_regions]);
+        }
         match self {
             WalOptionsAllocator::RaftEngine => Ok(vec![WalOptions::RaftEngine; num_regions]),
             WalOptionsAllocator::Kafka(topic_manager) => {
@@ -130,9 +121,10 @@ pub async fn build_wal_options_allocator(
 pub fn allocate_region_wal_options(
     regions: Vec<RegionNumber>,
     wal_options_allocator: &WalOptionsAllocator,
+    skip_wal: bool,
 ) -> Result<HashMap<RegionNumber, String>> {
     let wal_options = wal_options_allocator
-        .alloc_batch(regions.len())?
+        .alloc_batch(regions.len(), skip_wal)?
         .into_iter()
         .map(|wal_options| {
             serde_json::to_string(&wal_options).context(EncodeWalOptionsSnafu { wal_options })
@@ -177,7 +169,7 @@ mod tests {
 
         let num_regions = 32;
         let regions = (0..num_regions).collect::<Vec<_>>();
-        let got = allocate_region_wal_options(regions.clone(), &allocator).unwrap();
+        let got = allocate_region_wal_options(regions.clone(), &allocator, false).unwrap();
 
         let encoded_wal_options = serde_json::to_string(&WalOptions::RaftEngine).unwrap();
         let expected = regions
@@ -237,7 +229,7 @@ mod tests {
 
                 let num_regions = 32;
                 let regions = (0..num_regions).collect::<Vec<_>>();
-                let got = allocate_region_wal_options(regions.clone(), &allocator).unwrap();
+                let got = allocate_region_wal_options(regions.clone(), &allocator, false).unwrap();
 
                 // Check the allocated wal options contain the expected topics.
                 let expected = (0..num_regions)
@@ -252,5 +244,19 @@ mod tests {
             })
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn test_allocator_with_skip_wal() {
+        let allocator = WalOptionsAllocator::RaftEngine;
+        allocator.start().await.unwrap();
+
+        let num_regions = 32;
+        let regions = (0..num_regions).collect::<Vec<_>>();
+        let got = allocate_region_wal_options(regions.clone(), &allocator, true).unwrap();
+        assert_eq!(got.len(), num_regions as usize);
+        for wal_options in got.values() {
+            assert_eq!(wal_options, &"{\"wal.provider\":\"noop\"}");
+        }
     }
 }

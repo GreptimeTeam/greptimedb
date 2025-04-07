@@ -31,7 +31,6 @@ use servers::export_metrics::ExportMetricsOption;
 use servers::grpc::GrpcOptions;
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
-use servers::Mode;
 
 pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize::gb(5);
 
@@ -359,7 +358,6 @@ impl Default for ObjectStoreConfig {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct DatanodeOptions {
-    pub mode: Mode,
     pub node_id: Option<u64>,
     pub require_lease_before_startup: bool,
     pub init_regions_in_background: bool,
@@ -395,7 +393,6 @@ impl Default for DatanodeOptions {
     #[allow(deprecated)]
     fn default() -> Self {
         Self {
-            mode: Mode::Standalone,
             node_id: None,
             require_lease_before_startup: false,
             init_regions_in_background: false,

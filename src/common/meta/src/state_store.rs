@@ -14,16 +14,23 @@
 
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
-use common_procedure::error::{DeleteStatesSnafu, ListStateSnafu, PutStateSnafu};
+use common_procedure::error::{
+    DeletePoisonSnafu, DeleteStatesSnafu, GetPoisonSnafu, ListStateSnafu, PutPoisonSnafu,
+    PutStateSnafu, Result as ProcedureResult,
+};
+use common_procedure::store::poison_store::PoisonStore;
 use common_procedure::store::state_store::{KeySet, KeyValueStream, StateStore};
 use common_procedure::store::util::multiple_value_stream;
-use common_procedure::Result as ProcedureResult;
 use futures::future::try_join_all;
 use futures::StreamExt;
 use itertools::Itertools;
-use snafu::ResultExt;
+use serde::{Deserialize, Serialize};
+use snafu::{ensure, OptionExt, ResultExt};
 
-use crate::error::Result;
+use crate::error::{ProcedurePoisonConflictSnafu, Result, UnexpectedSnafu};
+use crate::key::txn_helper::TxnOpGetResponseSet;
+use crate::key::{DeserializedValueWithBytes, MetadataValue};
+use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 use crate::range_stream::PaginationStream;
 use crate::rpc::store::{BatchDeleteRequest, PutRequest, RangeRequest};
@@ -32,9 +39,14 @@ use crate::rpc::KeyValue;
 const DELIMITER: &str = "/";
 
 const PROCEDURE_PREFIX: &str = "/__procedure__/";
+const PROCEDURE_POISON_KEY_PREFIX: &str = "/__procedure_poison/";
 
 fn with_prefix(key: &str) -> String {
     format!("{PROCEDURE_PREFIX}{key}")
+}
+
+fn with_poison_prefix(key: &str) -> String {
+    format!("{}{}", PROCEDURE_POISON_KEY_PREFIX, key)
 }
 
 fn strip_prefix(key: &str) -> String {
@@ -207,8 +219,168 @@ impl StateStore for KvStateStore {
     }
 }
 
+/// The value of the poison key.
+///
+/// Each poison value contains a unique token that identifies the procedure.
+/// While multiple procedures may use the same poison key (representing the same resource),
+/// each procedure will have a distinct token value to differentiate its ownership.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoisonValue {
+    token: String,
+}
+
+type PoisonDecodeResult = Result<Option<DeserializedValueWithBytes<PoisonValue>>>;
+
+impl KvStateStore {
+    /// Builds a create poison transaction,
+    /// it expected the `__procedure_poison/{key}` wasn't occupied.
+    fn build_create_poison_txn(
+        &self,
+        key: &str,
+        value: &PoisonValue,
+    ) -> Result<(
+        Txn,
+        impl FnOnce(&mut TxnOpGetResponseSet) -> PoisonDecodeResult,
+    )> {
+        let key = key.as_bytes().to_vec();
+        let value = value.try_as_raw_value()?;
+        let txn = Txn::put_if_not_exists(key.clone(), value);
+
+        Ok((
+            txn,
+            TxnOpGetResponseSet::decode_with(TxnOpGetResponseSet::filter(key)),
+        ))
+    }
+
+    /// Builds a delete poison transaction,
+    /// it expected the `__procedure_poison/{key}` was occupied.
+    fn build_delete_poison_txn(
+        &self,
+        key: &str,
+        value: PoisonValue,
+    ) -> Result<(
+        Txn,
+        impl FnOnce(&mut TxnOpGetResponseSet) -> PoisonDecodeResult,
+    )> {
+        let key = key.as_bytes().to_vec();
+        let value = value.try_as_raw_value()?;
+
+        let txn = Txn::new()
+            .when(vec![Compare::with_value(
+                key.clone(),
+                CompareOp::Equal,
+                value,
+            )])
+            .and_then(vec![TxnOp::Delete(key.clone())])
+            .or_else(vec![TxnOp::Get(key.clone())]);
+
+        Ok((
+            txn,
+            TxnOpGetResponseSet::decode_with(TxnOpGetResponseSet::filter(key)),
+        ))
+    }
+
+    async fn get_poison_inner(&self, key: &str) -> Result<Option<PoisonValue>> {
+        let key = with_poison_prefix(key);
+        let value = self.kv_backend.get(key.as_bytes()).await?;
+        value
+            .map(|v| PoisonValue::try_from_raw_value(&v.value))
+            .transpose()
+    }
+
+    /// Put the poison.
+    ///
+    /// If the poison is already put by other procedure, it will return an error.
+    async fn set_poison_inner(&self, key: &str, token: &str) -> Result<()> {
+        let key = with_poison_prefix(key);
+        let (txn, on_failure) = self.build_create_poison_txn(
+            &key,
+            &PoisonValue {
+                token: token.to_string(),
+            },
+        )?;
+
+        let mut resp = self.kv_backend.txn(txn).await?;
+
+        if !resp.succeeded {
+            let mut set = TxnOpGetResponseSet::from(&mut resp.responses);
+            let remote_value = on_failure(&mut set)?
+                .context(UnexpectedSnafu {
+                    err_msg: "Reads the empty poison value in comparing operation of the put consistency poison",
+                })?
+                .into_inner();
+
+            ensure!(
+                remote_value.token == token,
+                ProcedurePoisonConflictSnafu {
+                    key: &key,
+                    value: &remote_value.token,
+                }
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Deletes the poison.
+    ///
+    /// If the poison is not put by the procedure, it will return an error.
+    async fn delete_poison_inner(&self, key: &str, token: &str) -> Result<()> {
+        let key = with_poison_prefix(key);
+        let (txn, on_failure) = self.build_delete_poison_txn(
+            &key,
+            PoisonValue {
+                token: token.to_string(),
+            },
+        )?;
+
+        let mut resp = self.kv_backend.txn(txn).await?;
+
+        if !resp.succeeded {
+            let mut set = TxnOpGetResponseSet::from(&mut resp.responses);
+            let remote_value = on_failure(&mut set)?;
+
+            ensure!(
+                remote_value.is_none(),
+                ProcedurePoisonConflictSnafu {
+                    key: &key,
+                    value: &remote_value.unwrap().into_inner().token,
+                }
+            );
+        }
+
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl PoisonStore for KvStateStore {
+    async fn try_put_poison(&self, key: String, token: String) -> ProcedureResult<()> {
+        self.set_poison_inner(&key, &token)
+            .await
+            .map_err(BoxedError::new)
+            .context(PutPoisonSnafu { key, token })
+    }
+
+    async fn delete_poison(&self, key: String, token: String) -> ProcedureResult<()> {
+        self.delete_poison_inner(&key, &token)
+            .await
+            .map_err(BoxedError::new)
+            .context(DeletePoisonSnafu { key, token })
+    }
+
+    async fn get_poison(&self, key: &str) -> ProcedureResult<Option<String>> {
+        self.get_poison_inner(key)
+            .await
+            .map(|v| v.map(|v| v.token))
+            .map_err(BoxedError::new)
+            .context(GetPoisonSnafu { key })
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::assert_matches::assert_matches;
     use std::env;
     use std::sync::Arc;
 
@@ -219,6 +391,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+    use crate::error::Error;
     use crate::kv_backend::chroot::ChrootKvBackend;
     use crate::kv_backend::etcd::EtcdStore;
     use crate::kv_backend::memory::MemoryKvBackend;
@@ -290,13 +463,13 @@ mod tests {
         num_per_range: u32,
         max_bytes: u32,
     ) {
-        let num_cases = rand::thread_rng().gen_range(1..=8);
+        let num_cases = rand::rng().random_range(1..=8);
         common_telemetry::info!("num_cases: {}", num_cases);
         let mut cases = Vec::with_capacity(num_cases);
         for i in 0..num_cases {
-            let size = rand::thread_rng().gen_range(size_limit..=max_bytes);
+            let size = rand::rng().random_range(size_limit..=max_bytes);
             let mut large_value = vec![0u8; size as usize];
-            rand::thread_rng().fill_bytes(&mut large_value);
+            rand::rng().fill_bytes(&mut large_value);
 
             // Starts from `a`.
             let prefix = format!("{}/", std::char::from_u32(97 + i as u32).unwrap());
@@ -354,8 +527,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_meta_state_store_split_value() {
-        let size_limit = rand::thread_rng().gen_range(128..=512);
-        let page_size = rand::thread_rng().gen_range(1..10);
+        let size_limit = rand::rng().random_range(128..=512);
+        let page_size = rand::rng().random_range(1..10);
         let kv_backend = Arc::new(MemoryKvBackend::new());
         test_meta_state_store_split_value_with_size_limit(kv_backend, size_limit, page_size, 8192)
             .await;
@@ -388,7 +561,7 @@ mod tests {
         // However, some KvBackends, the `ChrootKvBackend`, will add the prefix to `key`;
         // we don't know the exact size of the key.
         let size_limit = 1536 * 1024 - key_size;
-        let page_size = rand::thread_rng().gen_range(1..10);
+        let page_size = rand::rng().random_range(1..10);
         test_meta_state_store_split_value_with_size_limit(
             kv_backend,
             size_limit,
@@ -396,5 +569,74 @@ mod tests {
             size_limit * 10,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn test_poison() {
+        let mem_kv = Arc::new(MemoryKvBackend::default());
+        let poison_manager = KvStateStore::new(mem_kv.clone());
+
+        let key = "table/1";
+
+        let token = "expected_token";
+
+        poison_manager.set_poison_inner(key, token).await.unwrap();
+
+        // Put again, should be ok.
+        poison_manager.set_poison_inner(key, token).await.unwrap();
+
+        // Delete, should be ok.
+        poison_manager
+            .delete_poison_inner(key, token)
+            .await
+            .unwrap();
+
+        // Delete again, should be ok.
+        poison_manager
+            .delete_poison_inner(key, token)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_consistency_poison_failed() {
+        let mem_kv = Arc::new(MemoryKvBackend::default());
+        let poison_manager = KvStateStore::new(mem_kv.clone());
+
+        let key = "table/1";
+
+        let token = "expected_token";
+        let token2 = "expected_token2";
+
+        poison_manager.set_poison_inner(key, token).await.unwrap();
+
+        let err = poison_manager
+            .set_poison_inner(key, token2)
+            .await
+            .unwrap_err();
+        assert_matches!(err, Error::ProcedurePoisonConflict { .. });
+
+        let err = poison_manager
+            .delete_poison_inner(key, token2)
+            .await
+            .unwrap_err();
+        assert_matches!(err, Error::ProcedurePoisonConflict { .. });
+    }
+
+    #[test]
+    fn test_serialize_deserialize() {
+        let key = "table/1";
+        let value = PoisonValue {
+            token: "expected_token".to_string(),
+        };
+
+        let serialized_key = with_poison_prefix(key).as_bytes().to_vec();
+        let serialized_value = value.try_as_raw_value().unwrap();
+
+        let expected_key = "/__procedure_poison/table/1";
+        let expected_value = r#"{"token":"expected_token"}"#;
+
+        assert_eq!(expected_key.as_bytes(), serialized_key);
+        assert_eq!(expected_value.as_bytes(), serialized_value);
     }
 }

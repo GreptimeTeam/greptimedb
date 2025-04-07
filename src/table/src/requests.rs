@@ -46,6 +46,24 @@ pub const FILE_TABLE_FORMAT_KEY: &str = "format";
 pub const TABLE_DATA_MODEL: &str = "table_data_model";
 pub const TABLE_DATA_MODEL_TRACE_V1: &str = "greptime_trace_v1";
 
+pub const VALID_TABLE_OPTION_KEYS: [&str; 11] = [
+    // common keys:
+    WRITE_BUFFER_SIZE_KEY,
+    TTL_KEY,
+    STORAGE_KEY,
+    COMMENT_KEY,
+    SKIP_WAL_KEY,
+    // file engine keys:
+    FILE_TABLE_LOCATION_KEY,
+    FILE_TABLE_FORMAT_KEY,
+    FILE_TABLE_PATTERN_KEY,
+    // metric engine keys:
+    PHYSICAL_TABLE_METADATA_KEY,
+    LOGICAL_TABLE_METADATA_KEY,
+    // table model info
+    TABLE_DATA_MODEL,
+];
+
 /// Returns true if the `key` is a valid key for any engine or storage.
 pub fn validate_table_option(key: &str) -> bool {
     if is_supported_in_s3(key) {
@@ -60,23 +78,7 @@ pub fn validate_table_option(key: &str) -> bool {
         return true;
     }
 
-    [
-        // common keys:
-        WRITE_BUFFER_SIZE_KEY,
-        TTL_KEY,
-        STORAGE_KEY,
-        COMMENT_KEY,
-        // file engine keys:
-        FILE_TABLE_LOCATION_KEY,
-        FILE_TABLE_FORMAT_KEY,
-        FILE_TABLE_PATTERN_KEY,
-        // metric engine keys:
-        PHYSICAL_TABLE_METADATA_KEY,
-        LOGICAL_TABLE_METADATA_KEY,
-        // table model info
-        TABLE_DATA_MODEL,
-    ]
-    .contains(&key)
+    VALID_TABLE_OPTION_KEYS.contains(&key)
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -86,6 +88,8 @@ pub struct TableOptions {
     pub write_buffer_size: Option<ReadableSize>,
     /// Time-to-live of table. Expired data will be automatically purged.
     pub ttl: Option<TimeToLive>,
+    /// Skip wal write for this table.
+    pub skip_wal: bool,
     /// Extra options that may not applicable to all table engines.
     pub extra_options: HashMap<String, String>,
 }
@@ -95,6 +99,7 @@ pub const TTL_KEY: &str = store_api::mito_engine_options::TTL_KEY;
 pub const STORAGE_KEY: &str = "storage";
 pub const COMMENT_KEY: &str = "comment";
 pub const AUTO_CREATE_TABLE_KEY: &str = "auto_create_table";
+pub const SKIP_WAL_KEY: &str = "skip_wal";
 
 impl TableOptions {
     pub fn try_from_iter<T: ToString, U: IntoIterator<Item = (T, T)>>(
@@ -129,6 +134,16 @@ impl TableOptions {
             options.ttl = Some(ttl_value);
         }
 
+        if let Some(skip_wal) = kvs.get(SKIP_WAL_KEY) {
+            options.skip_wal = skip_wal.parse().map_err(|_| {
+                ParseTableOptionSnafu {
+                    key: SKIP_WAL_KEY,
+                    value: skip_wal,
+                }
+                .build()
+            })?;
+        }
+
         options.extra_options = HashMap::from_iter(
             kvs.into_iter()
                 .filter(|(k, _)| k != WRITE_BUFFER_SIZE_KEY && k != TTL_KEY),
@@ -147,6 +162,10 @@ impl fmt::Display for TableOptions {
 
         if let Some(ttl) = self.ttl.map(|ttl| ttl.to_string()) {
             key_vals.push(format!("{}={}", TTL_KEY, ttl));
+        }
+
+        if self.skip_wal {
+            key_vals.push(format!("{}={}", SKIP_WAL_KEY, self.skip_wal));
         }
 
         for (k, v) in &self.extra_options {
@@ -383,6 +402,7 @@ mod tests {
             write_buffer_size: None,
             ttl: Some(Duration::from_secs(1000).into()),
             extra_options: HashMap::new(),
+            skip_wal: false,
         };
         let serialized = serde_json::to_string(&options).unwrap();
         let deserialized: TableOptions = serde_json::from_str(&serialized).unwrap();
@@ -395,6 +415,7 @@ mod tests {
             write_buffer_size: Some(ReadableSize::mb(128)),
             ttl: Some(Duration::from_secs(1000).into()),
             extra_options: HashMap::new(),
+            skip_wal: false,
         };
         let serialized_map = HashMap::from(&options);
         let serialized = TableOptions::try_from_iter(&serialized_map).unwrap();
@@ -404,6 +425,7 @@ mod tests {
             write_buffer_size: None,
             ttl: Default::default(),
             extra_options: HashMap::new(),
+            skip_wal: false,
         };
         let serialized_map = HashMap::from(&options);
         let serialized = TableOptions::try_from_iter(&serialized_map).unwrap();
@@ -413,6 +435,7 @@ mod tests {
             write_buffer_size: Some(ReadableSize::mb(128)),
             ttl: Some(Duration::from_secs(1000).into()),
             extra_options: HashMap::from([("a".to_string(), "A".to_string())]),
+            skip_wal: false,
         };
         let serialized_map = HashMap::from(&options);
         let serialized = TableOptions::try_from_iter(&serialized_map).unwrap();
@@ -425,6 +448,7 @@ mod tests {
             write_buffer_size: Some(ReadableSize::mb(128)),
             ttl: Some(Duration::from_secs(1000).into()),
             extra_options: HashMap::new(),
+            skip_wal: false,
         };
 
         assert_eq!(
@@ -436,10 +460,22 @@ mod tests {
             write_buffer_size: Some(ReadableSize::mb(128)),
             ttl: Some(Duration::from_secs(1000).into()),
             extra_options: HashMap::from([("a".to_string(), "A".to_string())]),
+            skip_wal: false,
         };
 
         assert_eq!(
             "write_buffer_size=128.0MiB ttl=16m 40s a=A",
+            options.to_string()
+        );
+
+        let options = TableOptions {
+            write_buffer_size: Some(ReadableSize::mb(128)),
+            ttl: Some(Duration::from_secs(1000).into()),
+            extra_options: HashMap::new(),
+            skip_wal: true,
+        };
+        assert_eq!(
+            "write_buffer_size=128.0MiB ttl=16m 40s skip_wal=true",
             options.to_string()
         );
     }

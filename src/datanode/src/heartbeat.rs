@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::{HeartbeatRequest, NodeInfo, Peer, RegionRole, RegionStat};
+use common_base::Plugins;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::datanode::REGION_STATISTIC_KEY;
 use common_meta::distributed_time_constants::META_KEEP_ALIVE_INTERVAL_SECS;
@@ -37,7 +38,7 @@ use tokio::sync::{mpsc, Notify};
 use tokio::time::Instant;
 
 use self::handler::RegionHeartbeatResponseHandler;
-use crate::alive_keeper::RegionAliveKeeper;
+use crate::alive_keeper::{CountdownTaskHandlerExtRef, RegionAliveKeeper};
 use crate::config::DatanodeOptions;
 use crate::error::{self, MetaClientInitSnafu, Result};
 use crate::event_listener::RegionServerEventReceiver;
@@ -73,9 +74,12 @@ impl HeartbeatTask {
         region_server: RegionServer,
         meta_client: MetaClientRef,
         cache_invalidator: CacheInvalidatorRef,
+        plugins: Plugins,
     ) -> Result<Self> {
+        let countdown_task_handler_ext = plugins.get::<CountdownTaskHandlerExtRef>();
         let region_alive_keeper = Arc::new(RegionAliveKeeper::new(
             region_server.clone(),
+            countdown_task_handler_ext,
             opts.heartbeat.interval.as_millis() as u64,
         ));
         let resp_handler_executor = Arc::new(HandlerGroupExecutor::new(vec![

@@ -191,9 +191,9 @@ impl UnstableProcessController {
         self.running.store(true, Ordering::Relaxed);
         let mut rng = ChaChaRng::seed_from_u64(self.seed);
         while self.running.load(Ordering::Relaxed) {
-            let min = rng.gen_range(50..100);
-            let max = rng.gen_range(300..600);
-            let ms = rng.gen_range(min..max);
+            let min = rng.random_range(50..100);
+            let max = rng.random_range(300..600);
+            let ms = rng.random_range(min..max);
             let pid = self
                 .start_process_with_retry(3)
                 .await

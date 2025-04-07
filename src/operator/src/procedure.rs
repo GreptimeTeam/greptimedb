@@ -16,7 +16,10 @@ use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_function::handlers::ProcedureServiceHandler;
 use common_meta::ddl::{ExecutorContext, ProcedureExecutorRef};
-use common_meta::rpc::procedure::{MigrateRegionRequest, ProcedureStateResponse};
+use common_meta::rpc::procedure::{
+    AddRegionFollowerRequest, MigrateRegionRequest, ProcedureStateResponse,
+    RemoveRegionFollowerRequest,
+};
 use common_query::error as query_error;
 use common_query::error::Result as QueryResult;
 use snafu::ResultExt;
@@ -49,6 +52,25 @@ impl ProcedureServiceHandler for ProcedureServiceOperator {
     async fn query_procedure_state(&self, pid: &str) -> QueryResult<ProcedureStateResponse> {
         self.procedure_executor
             .query_procedure_state(&ExecutorContext::default(), pid)
+            .await
+            .map_err(BoxedError::new)
+            .context(query_error::ProcedureServiceSnafu)
+    }
+
+    async fn add_region_follower(&self, request: AddRegionFollowerRequest) -> QueryResult<()> {
+        self.procedure_executor
+            .add_region_follower(&ExecutorContext::default(), request)
+            .await
+            .map_err(BoxedError::new)
+            .context(query_error::ProcedureServiceSnafu)
+    }
+
+    async fn remove_region_follower(
+        &self,
+        request: RemoveRegionFollowerRequest,
+    ) -> QueryResult<()> {
+        self.procedure_executor
+            .remove_region_follower(&ExecutorContext::default(), request)
             .await
             .map_err(BoxedError::new)
             .context(query_error::ProcedureServiceSnafu)

@@ -21,6 +21,7 @@ use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
 
 use crate::procedure::ProcedureId;
+use crate::PoisonKey;
 
 /// Procedure error.
 #[derive(Snafu)]
@@ -58,9 +59,42 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Too many running procedures, max: {}", max_running_procedures))]
+    TooManyRunningProcedures {
+        max_running_procedures: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to put state, key: '{key}'"))]
     PutState {
         key: String,
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to put poison, key: '{key}', token: '{token}'"))]
+    PutPoison {
+        key: String,
+        token: String,
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to get poison, key: '{key}'"))]
+    GetPoison {
+        key: String,
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to delete poison, key: '{key}', token: '{token}'"))]
+    DeletePoison {
+        key: String,
+        token: String,
         #[snafu(implicit)]
         location: Location,
         source: BoxedError,
@@ -175,6 +209,21 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Procedure not found, procedure_id: {}", procedure_id))]
+    ProcedureNotFound {
+        procedure_id: ProcedureId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Poison key not defined, key: '{key}', procedure_id: '{procedure_id}'"))]
+    PoisonKeyNotDefined {
+        key: PoisonKey,
+        procedure_id: ProcedureId,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -185,14 +234,19 @@ impl ErrorExt for Error {
             Error::External { source, .. }
             | Error::PutState { source, .. }
             | Error::DeleteStates { source, .. }
-            | Error::ListState { source, .. } => source.status_code(),
+            | Error::ListState { source, .. }
+            | Error::PutPoison { source, .. }
+            | Error::DeletePoison { source, .. }
+            | Error::GetPoison { source, .. } => source.status_code(),
 
             Error::ToJson { .. }
             | Error::DeleteState { .. }
             | Error::FromJson { .. }
             | Error::WaitWatcher { .. }
             | Error::RetryLater { .. }
-            | Error::RollbackProcedureRecovered { .. } => StatusCode::Internal,
+            | Error::RollbackProcedureRecovered { .. }
+            | Error::TooManyRunningProcedures { .. }
+            | Error::PoisonKeyNotDefined { .. } => StatusCode::Internal,
 
             Error::RetryTimesExceeded { .. }
             | Error::RollbackTimesExceeded { .. }
@@ -204,7 +258,8 @@ impl ErrorExt for Error {
             }
             Error::ProcedurePanic { .. }
             | Error::ParseSegmentKey { .. }
-            | Error::Unexpected { .. } => StatusCode::Unexpected,
+            | Error::Unexpected { .. }
+            | &Error::ProcedureNotFound { .. } => StatusCode::Unexpected,
             Error::ProcedureExec { source, .. } => source.status_code(),
             Error::StartRemoveOutdatedMetaTask { source, .. }
             | Error::StopRemoveOutdatedMetaTask { source, .. } => source.status_code(),

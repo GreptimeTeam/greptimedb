@@ -20,6 +20,7 @@ use datafusion_expr::expr::InList;
 use datafusion_expr::{BinaryExpr, Expr, Operator};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::value::Value;
+use index::bloom_filter::applier::InListPredicate;
 use index::Bytes;
 use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
@@ -35,21 +36,6 @@ use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplier;
 use crate::sst::index::codec::IndexValueCodec;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 
-/// Enumerates types of predicates for value filtering.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Predicate {
-    /// Predicate for matching values in a list.
-    InList(InListPredicate),
-}
-
-/// `InListPredicate` contains a list of acceptable values. A value needs to match at least
-/// one of the elements (logical OR semantic) for the predicate to be satisfied.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InListPredicate {
-    /// List of acceptable values.
-    pub list: HashSet<Bytes>,
-}
-
 pub struct BloomFilterIndexApplierBuilder<'a> {
     region_dir: String,
     object_store: ObjectStore,
@@ -58,7 +44,7 @@ pub struct BloomFilterIndexApplierBuilder<'a> {
     file_cache: Option<FileCacheRef>,
     puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
     bloom_filter_index_cache: Option<BloomFilterIndexCacheRef>,
-    output: HashMap<ColumnId, Vec<Predicate>>,
+    predicates: HashMap<ColumnId, Vec<InListPredicate>>,
 }
 
 impl<'a> BloomFilterIndexApplierBuilder<'a> {
@@ -76,7 +62,7 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
             file_cache: None,
             puffin_metadata_cache: None,
             bloom_filter_index_cache: None,
-            output: HashMap::default(),
+            predicates: HashMap::default(),
         }
     }
 
@@ -107,7 +93,7 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
             self.traverse_and_collect(expr);
         }
 
-        if self.output.is_empty() {
+        if self.predicates.is_empty() {
             return Ok(None);
         }
 
@@ -116,7 +102,7 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
             self.metadata.region_id,
             self.object_store,
             self.puffin_manager_factory,
-            self.output,
+            self.predicates,
         )
         .with_file_cache(self.file_cache)
         .with_puffin_metadata_cache(self.puffin_metadata_cache)
@@ -178,14 +164,12 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
             return Ok(());
         };
         let value = encode_lit(lit, data_type)?;
-
-        // Create bloom filter predicate
-        let mut set = HashSet::new();
-        set.insert(value);
-        let predicate = Predicate::InList(InListPredicate { list: set });
-
-        // Add to output predicates
-        self.output.entry(column_id).or_default().push(predicate);
+        self.predicates
+            .entry(column_id)
+            .or_default()
+            .push(InListPredicate {
+                list: HashSet::from([value]),
+            });
 
         Ok(())
     }
@@ -223,12 +207,12 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
         }
 
         if !valid_predicates.is_empty() {
-            self.output
+            self.predicates
                 .entry(column_id)
                 .or_default()
-                .push(Predicate::InList(InListPredicate {
+                .push(InListPredicate {
                     list: valid_predicates,
-                }));
+                });
         }
 
         Ok(())
@@ -245,7 +229,7 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
 
 // TODO(ruihang): extract this and the one under inverted_index into a common util mod.
 /// Helper function to encode a literal into bytes.
-fn encode_lit(lit: &ScalarValue, data_type: ConcreteDataType) -> Result<Vec<u8>> {
+fn encode_lit(lit: &ScalarValue, data_type: ConcreteDataType) -> Result<Bytes> {
     let value = Value::try_from(lit.clone()).context(ConvertValueSnafu)?;
     let mut bytes = vec![];
     let field = SortField::new(data_type);
@@ -323,20 +307,18 @@ mod tests {
             &metadata,
             factory,
         );
-
         let exprs = vec![Expr::BinaryExpr(BinaryExpr {
             left: Box::new(column("column1")),
             op: Operator::Eq,
             right: Box::new(string_lit("value1")),
         })];
-
         let result = builder.build(&exprs).unwrap();
         assert!(result.is_some());
 
-        let filters = result.unwrap().filters;
-        assert_eq!(filters.len(), 1);
+        let predicates = result.unwrap().predicates;
+        assert_eq!(predicates.len(), 1);
 
-        let column_predicates = filters.get(&1).unwrap();
+        let column_predicates = predicates.get(&1).unwrap();
         assert_eq!(column_predicates.len(), 1);
 
         let expected = encode_lit(
@@ -344,11 +326,7 @@ mod tests {
             ConcreteDataType::string_datatype(),
         )
         .unwrap();
-        match &column_predicates[0] {
-            Predicate::InList(p) => {
-                assert_eq!(p.list.iter().next().unwrap(), &expected);
-            }
-        }
+        assert_eq!(column_predicates[0].list, HashSet::from([expected]));
     }
 
     fn int64_lit(i: i64) -> Expr {
@@ -375,15 +353,10 @@ mod tests {
         let result = builder.build(&exprs).unwrap();
         assert!(result.is_some());
 
-        let filters = result.unwrap().filters;
-        let column_predicates = filters.get(&2).unwrap();
+        let predicates = result.unwrap().predicates;
+        let column_predicates = predicates.get(&2).unwrap();
         assert_eq!(column_predicates.len(), 1);
-
-        match &column_predicates[0] {
-            Predicate::InList(p) => {
-                assert_eq!(p.list.len(), 3);
-            }
-        }
+        assert_eq!(column_predicates[0].list.len(), 3);
     }
 
     #[test]
@@ -396,7 +369,6 @@ mod tests {
             &metadata,
             factory,
         );
-
         let exprs = vec![Expr::BinaryExpr(BinaryExpr {
             left: Box::new(Expr::BinaryExpr(BinaryExpr {
                 left: Box::new(column("column1")),
@@ -410,14 +382,13 @@ mod tests {
                 right: Box::new(int64_lit(42)),
             })),
         })];
-
         let result = builder.build(&exprs).unwrap();
         assert!(result.is_some());
 
-        let filters = result.unwrap().filters;
-        assert_eq!(filters.len(), 2);
-        assert!(filters.contains_key(&1));
-        assert!(filters.contains_key(&2));
+        let predicates = result.unwrap().predicates;
+        assert_eq!(predicates.len(), 2);
+        assert!(predicates.contains_key(&1));
+        assert!(predicates.contains_key(&2));
     }
 
     #[test]
@@ -451,14 +422,10 @@ mod tests {
         let result = builder.build(&exprs).unwrap();
         assert!(result.is_some());
 
-        let filters = result.unwrap().filters;
-        assert!(!filters.contains_key(&1)); // Null equality should be ignored
-        let column2_predicates = filters.get(&2).unwrap();
-        match &column2_predicates[0] {
-            Predicate::InList(p) => {
-                assert_eq!(p.list.len(), 2); // Only non-null values should be included
-            }
-        }
+        let predicates = result.unwrap().predicates;
+        assert!(!predicates.contains_key(&1)); // Null equality should be ignored
+        let column2_predicates = predicates.get(&2).unwrap();
+        assert_eq!(column2_predicates[0].list.len(), 2);
     }
 
     #[test]
@@ -471,7 +438,6 @@ mod tests {
             &metadata,
             factory,
         );
-
         let exprs = vec![
             // Non-equality operator
             Expr::BinaryExpr(BinaryExpr {
@@ -507,7 +473,6 @@ mod tests {
             &metadata,
             factory,
         );
-
         let exprs = vec![
             Expr::BinaryExpr(BinaryExpr {
                 left: Box::new(column("column1")),
@@ -524,8 +489,8 @@ mod tests {
         let result = builder.build(&exprs).unwrap();
         assert!(result.is_some());
 
-        let filters = result.unwrap().filters;
-        let column_predicates = filters.get(&1).unwrap();
+        let predicates = result.unwrap().predicates;
+        let column_predicates = predicates.get(&1).unwrap();
         assert_eq!(column_predicates.len(), 2);
     }
 }

@@ -437,9 +437,9 @@ mod tests {
     }
 
     fn random_option_bytes(size: usize) -> Option<Vec<u8>> {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
-        if rng.gen() {
+        if rng.random() {
             let mut buffer = vec![0u8; size];
             rng.fill(&mut buffer[..]);
             Some(buffer)
@@ -469,11 +469,11 @@ mod tests {
         segment_row_count: usize,
     ) -> (DictionaryValues, ValueSegIds) {
         let mut n = row_count;
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let mut dic_values = Vec::new();
 
         while n > 0 {
-            let size = rng.gen_range(1..=n);
+            let size = rng.random_range(1..=n);
             let value = random_option_bytes(100);
             dic_values.push((value, size));
             n -= size;

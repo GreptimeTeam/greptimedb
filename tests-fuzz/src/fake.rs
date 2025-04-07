@@ -16,6 +16,7 @@ use std::collections::HashSet;
 use std::marker::PhantomData;
 
 use lazy_static::lazy_static;
+use rand::prelude::IndexedRandom;
 use rand::seq::{IteratorRandom, SliceRandom};
 use rand::Rng;
 
@@ -33,9 +34,9 @@ lazy_static! {
 /// Modified from https://github.com/ucarion/faker_rand/blob/ea70c660e1ecd7320156eddb31d2830a511f8842/src/lib.rs
 macro_rules! faker_impl_from_values {
     ($name: ident, $values: expr) => {
-        impl rand::distributions::Distribution<$name> for rand::distributions::Standard {
+        impl rand::distr::Distribution<$name> for rand::distr::StandardUniform {
             fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> $name {
-                $name($values[rng.gen_range(0..$values.len())].clone())
+                $name($values[rng.random_range(0..$values.len())].clone())
             }
         }
 
@@ -68,7 +69,7 @@ pub fn random_capitalize_map<R: Rng + 'static>(rng: &mut R, s: Ident) -> Ident {
     let mut v = s.value.chars().collect::<Vec<_>>();
 
     let str_len = s.value.len();
-    let select = rng.gen_range(0..str_len);
+    let select = rng.random_range(0..str_len);
     for idx in (0..str_len).choose_multiple(rng, select) {
         v[idx] = v[idx].to_uppercase().next().unwrap();
     }

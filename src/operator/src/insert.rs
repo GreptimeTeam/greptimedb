@@ -57,7 +57,7 @@ use store_api::storage::{RegionId, TableId};
 use table::metadata::TableInfo;
 use table::requests::{
     InsertRequest as TableInsertRequest, AUTO_CREATE_TABLE_KEY, TABLE_DATA_MODEL,
-    TABLE_DATA_MODEL_TRACE_V1, TTL_KEY,
+    TABLE_DATA_MODEL_TRACE_V1, VALID_TABLE_OPTION_KEYS,
 };
 use table::table_reference::TableReference;
 use table::TableRef;
@@ -732,8 +732,10 @@ impl Inserter {
         ctx: &QueryContextRef,
     ) -> Result<CreateTableExpr> {
         let mut table_options = Vec::with_capacity(4);
-        if let Some(ttl) = ctx.extension(TTL_KEY) {
-            table_options.push((TTL_KEY, ttl));
+        for key in VALID_TABLE_OPTION_KEYS {
+            if let Some(value) = ctx.extension(key) {
+                table_options.push((key, value));
+            }
         }
 
         let mut engine_name = default_engine();

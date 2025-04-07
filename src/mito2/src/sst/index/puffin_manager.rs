@@ -210,7 +210,12 @@ mod tests {
 
         let mut writer = manager.writer(&file_id).await.unwrap();
         writer
-            .put_blob(blob_key, Cursor::new(raw_data), PutOptions::default())
+            .put_blob(
+                blob_key,
+                Cursor::new(raw_data),
+                PutOptions::default(),
+                Default::default(),
+            )
             .await
             .unwrap();
         let dir_data = create_temp_dir("test_puffin_manager_factory_dir_data_");

@@ -113,14 +113,19 @@ impl Instance {
             .context(error::OpenRaftEngineBackendSnafu)?;
 
         let kv_backend = Arc::new(kv_backend);
-        let state_store = Arc::new(KvStateStore::new(kv_backend.clone()));
+        let kv_state_store = Arc::new(KvStateStore::new(kv_backend.clone()));
 
         let manager_config = ManagerConfig {
             max_retry_times: procedure_config.max_retry_times,
             retry_delay: procedure_config.retry_delay,
+            max_running_procedures: procedure_config.max_running_procedures,
             ..Default::default()
         };
-        let procedure_manager = Arc::new(LocalManager::new(manager_config, state_store));
+        let procedure_manager = Arc::new(LocalManager::new(
+            manager_config,
+            kv_state_store.clone(),
+            kv_state_store,
+        ));
 
         Ok((kv_backend, procedure_manager))
     }
@@ -522,6 +527,9 @@ pub fn check_permission(
             validate_db_permission!(stmt, query_ctx);
         }
         Statement::ShowIndex(stmt) => {
+            validate_db_permission!(stmt, query_ctx);
+        }
+        Statement::ShowRegion(stmt) => {
             validate_db_permission!(stmt, query_ctx);
         }
         Statement::ShowViews(stmt) => {

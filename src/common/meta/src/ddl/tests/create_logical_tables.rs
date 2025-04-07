@@ -69,7 +69,13 @@ async fn test_on_prepare() {
     let physical_table_id = table_id;
     let mut procedure = CreateLogicalTablesProcedure::new(tasks, physical_table_id, ddl_context);
     let status = procedure.on_prepare().await.unwrap();
-    assert_matches!(status, Status::Executing { persist: true });
+    assert_matches!(
+        status,
+        Status::Executing {
+            persist: true,
+            clean_poisons: false
+        }
+    );
 }
 
 #[tokio::test]
@@ -202,7 +208,13 @@ async fn test_on_prepare_part_logical_tables_exist() {
         ddl_context,
     );
     let status = procedure.on_prepare().await.unwrap();
-    assert_matches!(status, Status::Executing { persist: true });
+    assert_matches!(
+        status,
+        Status::Executing {
+            persist: true,
+            clean_poisons: false
+        }
+    );
 }
 
 #[tokio::test]
@@ -238,7 +250,13 @@ async fn test_on_create_metadata() {
         ddl_context,
     );
     let status = procedure.on_prepare().await.unwrap();
-    assert_matches!(status, Status::Executing { persist: true });
+    assert_matches!(
+        status,
+        Status::Executing {
+            persist: true,
+            clean_poisons: false
+        }
+    );
     let ctx = ProcedureContext {
         procedure_id: ProcedureId::random(),
         provider: Arc::new(MockContextProvider::default()),
@@ -294,7 +312,13 @@ async fn test_on_create_metadata_part_logical_tables_exist() {
         ddl_context,
     );
     let status = procedure.on_prepare().await.unwrap();
-    assert_matches!(status, Status::Executing { persist: true });
+    assert_matches!(
+        status,
+        Status::Executing {
+            persist: true,
+            clean_poisons: false
+        }
+    );
     let ctx = ProcedureContext {
         procedure_id: ProcedureId::random(),
         provider: Arc::new(MockContextProvider::default()),
@@ -339,7 +363,13 @@ async fn test_on_create_metadata_err() {
         ddl_context.clone(),
     );
     let status = procedure.on_prepare().await.unwrap();
-    assert_matches!(status, Status::Executing { persist: true });
+    assert_matches!(
+        status,
+        Status::Executing {
+            persist: true,
+            clean_poisons: false
+        }
+    );
     let ctx = ProcedureContext {
         procedure_id: ProcedureId::random(),
         provider: Arc::new(MockContextProvider::default()),

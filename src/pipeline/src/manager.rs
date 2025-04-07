@@ -23,10 +23,10 @@ use itertools::Itertools;
 use snafu::ensure;
 use util::to_pipeline_version;
 
-use crate::error::{CastTypeSnafu, InvalidCustomTimeIndexSnafu, Result};
+use crate::error::{CastTypeSnafu, InvalidCustomTimeIndexSnafu, PipelineMissingSnafu, Result};
 use crate::etl::value::time::{MS_RESOLUTION, NS_RESOLUTION, S_RESOLUTION, US_RESOLUTION};
 use crate::table::PipelineTable;
-use crate::{GreptimeTransformer, Pipeline, Value};
+use crate::{Pipeline, Value};
 
 pub mod pipeline_operator;
 pub mod table;
@@ -43,7 +43,7 @@ pub type PipelineVersion = Option<TimestampNanosecond>;
 pub type PipelineInfo = (Timestamp, PipelineRef);
 
 pub type PipelineTableRef = Arc<PipelineTable>;
-pub type PipelineRef = Arc<Pipeline<GreptimeTransformer>>;
+pub type PipelineRef = Arc<Pipeline>;
 
 /// SelectInfo is used to store the selected keys from OpenTelemetry record attrs
 /// The key is used to uplift value from the attributes and serve as column name in the table
@@ -72,13 +72,14 @@ impl SelectInfo {
 }
 
 pub const GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME: &str = "greptime_identity";
+pub const GREPTIME_INTERNAL_TRACE_PIPELINE_V0_NAME: &str = "greptime_trace_v0";
 pub const GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME: &str = "greptime_trace_v1";
 
 /// Enum for holding information of a pipeline, which is either pipeline itself,
 /// or information that be used to retrieve a pipeline from `PipelineHandler`
 #[derive(Debug, Clone)]
 pub enum PipelineDefinition {
-    Resolved(Arc<Pipeline<GreptimeTransformer>>),
+    Resolved(Arc<Pipeline>),
     ByNameAndValue((String, PipelineVersion)),
     GreptimeIdentityPipeline(Option<IdentityTimeIndex>),
 }
@@ -114,11 +115,13 @@ impl PipelineWay {
     pub fn from_name_and_default(
         name: Option<&str>,
         version: Option<&str>,
-        default_pipeline: PipelineWay,
+        default_pipeline: Option<PipelineWay>,
     ) -> Result<PipelineWay> {
         if let Some(pipeline_name) = name {
             if pipeline_name == GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME {
                 Ok(PipelineWay::OtlpTraceDirectV1)
+            } else if pipeline_name == GREPTIME_INTERNAL_TRACE_PIPELINE_V0_NAME {
+                Ok(PipelineWay::OtlpTraceDirectV0)
             } else {
                 Ok(PipelineWay::Pipeline(PipelineDefinition::from_name(
                     pipeline_name,
@@ -126,8 +129,10 @@ impl PipelineWay {
                     None,
                 )?))
             }
-        } else {
+        } else if let Some(default_pipeline) = default_pipeline {
             Ok(default_pipeline)
+        } else {
+            PipelineMissingSnafu.fail()
         }
     }
 }

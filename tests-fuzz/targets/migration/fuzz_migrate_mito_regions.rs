@@ -76,10 +76,10 @@ impl Arbitrary<'_> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
         let seed = u.int_in_range(u64::MIN..=u64::MAX)?;
         let mut rng = ChaChaRng::seed_from_u64(seed);
-        let partitions = rng.gen_range(3..32);
-        let columns = rng.gen_range(2..30);
-        let rows = rng.gen_range(128..1024);
-        let inserts = rng.gen_range(2..8);
+        let partitions = rng.random_range(3..32);
+        let columns = rng.random_range(2..30);
+        let rows = rng.random_range(128..1024);
+        let inserts = rng.random_range(2..8);
         Ok(FuzzInput {
             seed,
             columns,
@@ -113,7 +113,7 @@ fn generate_insert_exprs<R: Rng + 'static>(
     rng: &mut R,
     table_ctx: TableContextRef,
 ) -> Result<Vec<InsertIntoExpr>> {
-    let omit_column_list = rng.gen_bool(0.2);
+    let omit_column_list = rng.random_bool(0.2);
     let insert_generator = InsertExprGeneratorBuilder::default()
         .table_ctx(table_ctx.clone())
         .omit_column_list(omit_column_list)
@@ -161,10 +161,10 @@ async fn insert_values<R: Rng + 'static>(
                 )
             }
         );
-        if rng.gen_bool(0.2) {
+        if rng.random_bool(0.2) {
             flush_memtable(&ctx.greptime, &table_ctx.name).await?;
         }
-        if rng.gen_bool(0.1) {
+        if rng.random_bool(0.1) {
             compact_table(&ctx.greptime, &table_ctx.name).await?;
         }
     }
@@ -309,7 +309,7 @@ async fn execute_region_migration(ctx: FuzzContext, input: FuzzInput) -> Result<
     let mut migrations = Vec::with_capacity(num_partitions);
     let mut new_distribution: BTreeMap<u64, HashSet<_>> = BTreeMap::new();
     for (datanode_id, regions) in region_distribution {
-        let step = rng.gen_range(1..datanodes.len());
+        let step = rng.random_range(1..datanodes.len());
         for region in regions {
             let to_peer = (datanode_id + step as u64) % datanodes.len() as u64;
             new_distribution.entry(to_peer).or_default().insert(region);

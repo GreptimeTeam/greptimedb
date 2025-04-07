@@ -26,8 +26,8 @@ use object_store::ObjectStore;
 use snafu::{ensure, OptionExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
-    RegionEngine, RegionRole, RegionScannerRef, RegionStatistic, SetRegionRoleStateResponse,
-    SettableRegionRoleState, SinglePartitionScanner,
+    RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef, RegionStatistic,
+    SetRegionRoleStateResponse, SettableRegionRoleState, SinglePartitionScanner,
 };
 use store_api::region_request::{
     AffectedRows, RegionCloseRequest, RegionCreateRequest, RegionDropRequest, RegionOpenRequest,
@@ -136,6 +136,15 @@ impl RegionEngine for FileRegionEngine {
         } else {
             Ok(SetRegionRoleStateResponse::NotFound)
         }
+    }
+
+    async fn sync_region(
+        &self,
+        _region_id: RegionId,
+        _manifest_info: RegionManifestInfo,
+    ) -> Result<(), BoxedError> {
+        // File engine doesn't need to sync region manifest.
+        Ok(())
     }
 
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {
