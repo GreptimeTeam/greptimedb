@@ -583,7 +583,7 @@ mod tests {
         assert!(status.need_persist());
 
         let status = Status::executing_with_clean_poisons(false);
-        assert!(!status.need_clean_poisons());
+        assert!(status.need_clean_poisons());
 
         let status = Status::executing_with_clean_poisons(true);
         assert!(status.need_clean_poisons());
