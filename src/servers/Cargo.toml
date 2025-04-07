@@ -82,7 +82,7 @@ simd-json.workspace = true
 socket2 = "0.5"
 # use crates.io version after current revision is merged in next release
 # opensrv-mysql = "0.7.0"
-opensrv-mysql = { git = "https://github.com/datafuselabs/opensrv", rev = "6bbc3b65e6b19212c4f7fc4f40c20daf6f452deb" }
+opensrv-mysql = { git = "https://github.com/datafuselabs/opensrv", rev = "a1fb4da215c8693c7e4f62be249a01b7fec52997" }
 opentelemetry-proto.workspace = true
 parking_lot.workspace = true
 pgwire = { version = "0.28.0", default-features = false, features = ["server-api-ring"] }
