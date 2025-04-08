@@ -104,10 +104,10 @@ impl FulltextIndexApplier {
                 continue;
             };
 
-            if row_ids.is_none() {
-                row_ids = Some(result);
-            } else if let Some(ids) = row_ids.as_mut() {
+            if let Some(ids) = row_ids.as_mut() {
                 ids.retain(|id| result.contains(id));
+            } else {
+                row_ids = Some(result);
             }
 
             if let Some(ids) = row_ids.as_ref() {
@@ -148,10 +148,10 @@ impl FulltextIndexApplier {
                 .await
                 .context(ApplyFulltextIndexSnafu)?;
 
-            if row_ids.is_none() {
-                row_ids = Some(result);
-            } else if let Some(ids) = row_ids.as_mut() {
+            if let Some(ids) = row_ids.as_mut() {
                 ids.retain(|id| result.contains(id));
+            } else {
+                row_ids = Some(result);
             }
 
             if let Some(ids) = row_ids.as_ref() {
