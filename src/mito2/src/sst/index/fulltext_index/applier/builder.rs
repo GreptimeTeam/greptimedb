@@ -139,18 +139,10 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
             }
             Expr::ScalarFunction(func) => {
                 if let Some((column_id, query)) = Self::expr_to_query(metadata, func) {
-                    requests
-                        .entry(column_id)
-                        .or_default()
-                        .queries
-                        .push(query);
+                    requests.entry(column_id).or_default().queries.push(query);
                 }
                 if let Some((column_id, term)) = Self::expr_to_term(metadata, func) {
-                    requests
-                        .entry(column_id)
-                        .or_default()
-                        .terms
-                        .push(term);
+                    requests.entry(column_id).or_default().terms.push(term);
                 }
             }
             _ => {}
