@@ -489,13 +489,7 @@ mod test {
 
         let config = ConfigOptions::default();
         let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
-        let expected = [
-            "Sort: t.number ASC NULLS LAST",
-            "  Distinct:",
-            "    Projection: t.number",
-            "      MergeScan [is_placeholder=false]",
-        ]
-        .join("\n");
+        let expected = ["Projection: t.number", "  MergeScan [is_placeholder=false]"].join("\n");
         assert_eq!(expected, result.to_string());
     }
 
