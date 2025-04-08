@@ -96,7 +96,7 @@ impl ArrowMetricsService for OtelArrowServiceHandler<OpenTelemetryProtocolHandle
                     error!("Failed to ingest metrics from otel-arrow, error: {}", e);
                     return;
                 }
-                sender.send(Ok(batch_status)).await.unwrap();
+                let _ = sender.send(Ok(batch_status)).await;
             }
         });
         Ok(Response::new(receiver))
@@ -109,7 +109,7 @@ pub struct HeaderInterceptor;
 
 impl Interceptor for HeaderInterceptor {
     fn call(&mut self, mut request: Request<()>) -> Result<Request<()>, Status> {
-        if let Entry::Occupied(mut e) = request.metadata_mut().entry("grpc-encoding").unwrap() {
+        if let Ok(Entry::Occupied(mut e)) = request.metadata_mut().entry("grpc-encoding") {
             // This works as a workaround to handle customized compression type (zstdarrow*) in otel-arrow.
             if e.get().as_bytes().starts_with(b"zstdarrow") {
                 e.insert(MetadataValue::from_static("zstd"));
