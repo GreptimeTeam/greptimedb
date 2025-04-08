@@ -8,6 +8,7 @@ license.workspace = true
 workspace = true
 
 [features]
+testing = []
 default = ["geo"]
 geo = ["geohash", "h3o", "s2", "wkt", "geo-types", "dep:geo"]
 
