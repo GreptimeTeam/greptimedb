@@ -19,7 +19,6 @@ mod jaeger;
 mod log_handler;
 mod logs;
 mod opentsdb;
-mod otel_arrow;
 mod otlp;
 pub mod prom_store;
 mod promql;
