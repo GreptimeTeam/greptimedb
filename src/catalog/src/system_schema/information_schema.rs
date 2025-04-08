@@ -49,7 +49,6 @@ pub use table_names::*;
 use views::InformationSchemaViews;
 
 use self::columns::InformationSchemaColumns;
-use super::{SystemSchemaProviderInner, SystemTable, SystemTableRef};
 use crate::error::{Error, Result};
 use crate::system_schema::information_schema::cluster_info::InformationSchemaClusterInfo;
 use crate::system_schema::information_schema::flows::InformationSchemaFlows;
@@ -63,7 +62,9 @@ use crate::system_schema::information_schema::table_constraints::InformationSche
 use crate::system_schema::information_schema::tables::InformationSchemaTables;
 use crate::system_schema::memory_table::MemoryTable;
 pub(crate) use crate::system_schema::predicate::Predicates;
-use crate::system_schema::SystemSchemaProvider;
+use crate::system_schema::{
+    SystemSchemaProvider, SystemSchemaProviderInner, SystemTable, SystemTableRef,
+};
 use crate::CatalogManager;
 
 lazy_static! {

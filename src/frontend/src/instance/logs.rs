@@ -26,7 +26,7 @@ use session::context::{QueryContext, QueryContextRef};
 use snafu::ResultExt;
 use tonic::async_trait;
 
-use super::Instance;
+use crate::instance::Instance;
 
 #[async_trait]
 impl LogQueryHandler for Instance {

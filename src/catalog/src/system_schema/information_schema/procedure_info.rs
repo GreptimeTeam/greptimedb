@@ -33,9 +33,8 @@ use datatypes::vectors::{StringVectorBuilder, TimestampMillisecondVectorBuilder}
 use snafu::ResultExt;
 use store_api::storage::{ScanRequest, TableId};
 
-use super::PROCEDURE_INFO;
 use crate::error::{CreateRecordBatchSnafu, InternalSnafu, Result};
-use crate::system_schema::information_schema::{InformationTable, Predicates};
+use crate::system_schema::information_schema::{InformationTable, Predicates, PROCEDURE_INFO};
 use crate::system_schema::utils;
 use crate::CatalogManager;
 

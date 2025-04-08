@@ -30,7 +30,7 @@ mod flush_region;
 mod open_region;
 mod upgrade_region;
 
-use super::task_tracker::TaskTracker;
+use crate::heartbeat::task_tracker::TaskTracker;
 use crate::region_server::RegionServer;
 
 /// Handler for [Instruction::OpenRegion] and [Instruction::CloseRegion].

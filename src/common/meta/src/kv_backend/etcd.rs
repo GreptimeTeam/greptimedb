@@ -21,10 +21,9 @@ use etcd_client::{
 };
 use snafu::{ensure, ResultExt};
 
-use super::KvBackendRef;
 use crate::error::{self, Error, Result};
 use crate::kv_backend::txn::{Txn as KvTxn, TxnResponse as KvTxnResponse};
-use crate::kv_backend::{KvBackend, TxnService};
+use crate::kv_backend::{KvBackend, KvBackendRef, TxnService};
 use crate::metrics::METRIC_META_TXN_REQUEST;
 use crate::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,

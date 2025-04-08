@@ -28,7 +28,6 @@ use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, TokenWithLocation, Word};
 use table::requests::validate_table_option;
 
-use super::utils;
 use crate::ast::{ColumnDef, Ident};
 use crate::error::{
     self, InvalidColumnOptionSnafu, InvalidDatabaseOptionSnafu, InvalidIntervalSnafu,
@@ -37,7 +36,7 @@ use crate::error::{
 };
 use crate::parser::{ParserContext, FLOW};
 use crate::parsers::utils::{
-    validate_column_fulltext_create_option, validate_column_skipping_index_create_option,
+    self, validate_column_fulltext_create_option, validate_column_skipping_index_create_option,
 };
 use crate::statements::create::{
     Column, ColumnExtensions, CreateDatabase, CreateExternalTable, CreateFlow, CreateTable,

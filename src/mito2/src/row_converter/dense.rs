@@ -32,13 +32,14 @@ use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 
-use super::{CompositeValues, PrimaryKeyFilter};
 use crate::error::{
     self, FieldTypeMismatchSnafu, NotSupportedFieldSnafu, Result, SerializeFieldSnafu,
 };
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::partition_tree::DensePrimaryKeyFilter;
-use crate::row_converter::{PrimaryKeyCodec, PrimaryKeyCodecExt};
+use crate::row_converter::{
+    CompositeValues, PrimaryKeyCodec, PrimaryKeyCodecExt, PrimaryKeyFilter,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SortField {

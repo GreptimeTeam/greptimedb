@@ -31,11 +31,10 @@ use futures_util::TryStreamExt;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{ScanRequest, TableId};
 
-use super::KEY_COLUMN_USAGE;
 use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
-use crate::system_schema::information_schema::{InformationTable, Predicates};
+use crate::system_schema::information_schema::{InformationTable, Predicates, KEY_COLUMN_USAGE};
 use crate::CatalogManager;
 
 pub const CONSTRAINT_SCHEMA: &str = "constraint_schema";

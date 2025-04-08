@@ -31,8 +31,7 @@ use table::metadata::{RawTableInfo, TableId};
 use table::table_name::TableName;
 use table::table_reference::TableReference;
 
-use super::utils::handle_retry_error;
-use crate::ddl::utils::add_peer_context_if_needed;
+use crate::ddl::utils::{add_peer_context_if_needed, handle_retry_error};
 use crate::ddl::DdlContext;
 use crate::error::{Result, TableNotFoundSnafu};
 use crate::key::table_info::TableInfoValue;

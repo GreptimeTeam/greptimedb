@@ -28,8 +28,8 @@ use pin_project::{pin_project, pinned_drop};
 use snafu::ResultExt;
 use tokio::task::JoinHandle;
 
-use super::TonicResult;
 use crate::error;
+use crate::grpc::flight::TonicResult;
 
 #[pin_project(PinnedDrop)]
 pub struct FlightRecordBatchStream {
