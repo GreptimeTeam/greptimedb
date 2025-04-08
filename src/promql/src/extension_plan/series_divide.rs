@@ -34,6 +34,7 @@ use datafusion::physical_plan::{
     SendableRecordBatchStream,
 };
 use datatypes::arrow::compute;
+use datatypes::compute::SortOptions;
 use futures::{ready, Stream, StreamExt};
 use greptime_proto::substrait_extension as pb;
 use prost::Message;
@@ -146,7 +147,14 @@ impl ExecutionPlan for SeriesDivideExec {
     }
 
     fn required_input_distribution(&self) -> Vec<Distribution> {
-        vec![Distribution::SinglePartition]
+        let schema = self.input.schema();
+        vec![Distribution::HashPartitioned(
+            self.tag_columns
+                .iter()
+                // Safety: the tag column names is verified in the planning phase
+                .map(|tag| Arc::new(ColumnExpr::new_with_schema(tag, &schema).unwrap()) as _)
+                .collect(),
+        )]
     }
 
     fn required_input_ordering(&self) -> Vec<Option<LexRequirement>> {
@@ -157,7 +165,10 @@ impl ExecutionPlan for SeriesDivideExec {
             .map(|tag| PhysicalSortRequirement {
                 // Safety: the tag column names is verified in the planning phase
                 expr: Arc::new(ColumnExpr::new_with_schema(tag, &input_schema).unwrap()),
-                options: None,
+                options: Some(SortOptions {
+                    descending: false,
+                    nulls_first: true,
+                }),
             })
             .collect();
         if !exprs.is_empty() {
@@ -267,9 +278,9 @@ impl Stream for SeriesDivideStream {
     type Item = DataFusionResult<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let timer = std::time::Instant::now();
         loop {
             if !self.buffer.is_empty() {
+                let timer = std::time::Instant::now();
                 let cut_at = match self.find_first_diff_row() {
                     Ok(cut_at) => cut_at,
                     Err(e) => return Poll::Ready(Some(Err(e))),
@@ -287,7 +298,11 @@ impl Stream for SeriesDivideStream {
                         .drain(0..batch_index)
                         .chain([half_batch_of_first_series])
                         .collect::<Vec<_>>();
-                    self.buffer[0] = half_batch_of_second_series;
+                    if half_batch_of_second_series.num_rows() > 0 {
+                        self.buffer[0] = half_batch_of_second_series;
+                    } else {
+                        self.buffer.remove(0);
+                    }
                     let result_batch = compute::concat_batches(&self.schema, &result_batches)?;
 
                     self.inspect_start = 0;
@@ -295,8 +310,10 @@ impl Stream for SeriesDivideStream {
                     self.metric.elapsed_compute().add_elapsed(timer);
                     return Poll::Ready(Some(Ok(result_batch)));
                 } else {
+                    self.metric.elapsed_compute().add_elapsed(timer);
                     // continue to fetch next batch as the current buffer only contains one time series.
                     let next_batch = ready!(self.as_mut().fetch_next_batch(cx)).transpose()?;
+                    let timer = std::time::Instant::now();
                     if let Some(next_batch) = next_batch {
                         self.buffer.push(next_batch);
                         continue;
@@ -350,7 +367,7 @@ impl SeriesDivideStream {
             let mut result_index = num_rows;
 
             // check if the first row is the same with last batch's last row
-            if resumed_batch_index > self.inspect_start {
+            if resumed_batch_index > self.inspect_start.checked_sub(1).unwrap_or_default() {
                 let last_batch = &self.buffer[resumed_batch_index - 1];
                 let last_row = last_batch.num_rows() - 1;
                 for index in &self.tag_indices {
@@ -375,9 +392,32 @@ impl SeriesDivideStream {
                     let current_value = current_string_array.value(0);
                     let last_value = last_string_array.value(last_row);
                     if current_value != last_value {
-                        return Ok(Some((resumed_batch_index, 0)));
+                        return Ok(Some((resumed_batch_index - 1, last_batch.num_rows() - 1)));
                     }
                 }
+            }
+
+            // quick check if all rows are the same by comparing the first and last row in this batch
+            let mut all_same = true;
+            for index in &self.tag_indices {
+                let array = batch.column(*index);
+                let string_array =
+                    array
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .ok_or_else(|| {
+                            datafusion::error::DataFusionError::Internal(
+                                "Failed to downcast tag column to StringArray".to_string(),
+                            )
+                        })?;
+                if string_array.value(0) != string_array.value(num_rows - 1) {
+                    all_same = false;
+                    break;
+                }
+            }
+            if all_same {
+                resumed_batch_index += 1;
+                continue;
             }
 
             // check column by column
@@ -594,5 +634,188 @@ mod test {
             let expected = expectations.pop().unwrap();
             assert_eq!(formatted, expected);
         }
+    }
+
+    #[tokio::test]
+    async fn test_all_batches_same_combination() {
+        // Create a schema with host and path columns, same as prepare_test_data
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("host", DataType::Utf8, true),
+            Field::new("path", DataType::Utf8, true),
+        ]));
+
+        // Create batches with three different combinations
+        // Each batch contains only one combination
+        // Batches with the same combination are adjacent
+
+        // First combination: "server1", "/var/log"
+        let batch1 = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["server1", "server1", "server1"])) as _,
+                Arc::new(StringArray::from(vec!["/var/log", "/var/log", "/var/log"])) as _,
+            ],
+        )
+        .unwrap();
+
+        let batch2 = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["server1", "server1"])) as _,
+                Arc::new(StringArray::from(vec!["/var/log", "/var/log"])) as _,
+            ],
+        )
+        .unwrap();
+
+        // Second combination: "server2", "/var/data"
+        let batch3 = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["server2", "server2", "server2"])) as _,
+                Arc::new(StringArray::from(vec![
+                    "/var/data",
+                    "/var/data",
+                    "/var/data",
+                ])) as _,
+            ],
+        )
+        .unwrap();
+
+        let batch4 = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["server2"])) as _,
+                Arc::new(StringArray::from(vec!["/var/data"])) as _,
+            ],
+        )
+        .unwrap();
+
+        // Third combination: "server3", "/opt/logs"
+        let batch5 = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["server3", "server3"])) as _,
+                Arc::new(StringArray::from(vec!["/opt/logs", "/opt/logs"])) as _,
+            ],
+        )
+        .unwrap();
+
+        let batch6 = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["server3", "server3", "server3"])) as _,
+                Arc::new(StringArray::from(vec![
+                    "/opt/logs",
+                    "/opt/logs",
+                    "/opt/logs",
+                ])) as _,
+            ],
+        )
+        .unwrap();
+
+        // Create MemoryExec with these batches, keeping same combinations adjacent
+        let memory_exec = Arc::new(
+            MemoryExec::try_new(
+                &[vec![batch1, batch2, batch3, batch4, batch5, batch6]],
+                schema.clone(),
+                None,
+            )
+            .unwrap(),
+        );
+
+        // Create SeriesDivideExec
+        let divide_exec = Arc::new(SeriesDivideExec {
+            tag_columns: vec!["host".to_string(), "path".to_string()],
+            input: memory_exec,
+            metric: ExecutionPlanMetricsSet::new(),
+        });
+
+        // Execute the division
+        let session_context = SessionContext::default();
+        let result =
+            datafusion::physical_plan::collect(divide_exec.clone(), session_context.task_ctx())
+                .await
+                .unwrap();
+
+        // Verify that we got 3 batches (one for each combination)
+        assert_eq!(result.len(), 3);
+
+        // First batch should have 5 rows (3 + 2 from the "server1" combination)
+        assert_eq!(result[0].num_rows(), 5);
+
+        // Second batch should have 4 rows (3 + 1 from the "server2" combination)
+        assert_eq!(result[1].num_rows(), 4);
+
+        // Third batch should have 5 rows (2 + 3 from the "server3" combination)
+        assert_eq!(result[2].num_rows(), 5);
+
+        // Verify values in first batch (server1, /var/log)
+        let host_array1 = result[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let path_array1 = result[0]
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+
+        for i in 0..5 {
+            assert_eq!(host_array1.value(i), "server1");
+            assert_eq!(path_array1.value(i), "/var/log");
+        }
+
+        // Verify values in second batch (server2, /var/data)
+        let host_array2 = result[1]
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let path_array2 = result[1]
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+
+        for i in 0..4 {
+            assert_eq!(host_array2.value(i), "server2");
+            assert_eq!(path_array2.value(i), "/var/data");
+        }
+
+        // Verify values in third batch (server3, /opt/logs)
+        let host_array3 = result[2]
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let path_array3 = result[2]
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+
+        for i in 0..5 {
+            assert_eq!(host_array3.value(i), "server3");
+            assert_eq!(path_array3.value(i), "/opt/logs");
+        }
+
+        // Also verify streaming behavior
+        let mut divide_stream = divide_exec
+            .execute(0, SessionContext::default().task_ctx())
+            .unwrap();
+
+        // Should produce three batches, one for each combination
+        let batch1 = divide_stream.next().await.unwrap().unwrap();
+        assert_eq!(batch1.num_rows(), 5); // server1 combination
+
+        let batch2 = divide_stream.next().await.unwrap().unwrap();
+        assert_eq!(batch2.num_rows(), 4); // server2 combination
+
+        let batch3 = divide_stream.next().await.unwrap().unwrap();
+        assert_eq!(batch3.num_rows(), 5); // server3 combination
+
+        // No more batches should be produced
+        assert!(divide_stream.next().await.is_none());
     }
 }

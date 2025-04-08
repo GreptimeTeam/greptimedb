@@ -16,7 +16,8 @@ use std::any::Any;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use arrow_schema::{Schema as ArrowSchema, SchemaRef as ArrowSchemaRef};
+use ahash::HashSet;
+use arrow_schema::{Schema as ArrowSchema, SchemaRef as ArrowSchemaRef, SortOptions};
 use async_stream::stream;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::BoxedError;
@@ -28,16 +29,19 @@ use common_recordbatch::{
     DfSendableRecordBatchStream, RecordBatch, RecordBatchStreamWrapper, SendableRecordBatchStream,
 };
 use common_telemetry::tracing_context::TracingContext;
-use datafusion::execution::TaskContext;
+use datafusion::execution::{SessionState, TaskContext};
 use datafusion::physical_plan::metrics::{
     Count, ExecutionPlanMetricsSet, Gauge, MetricBuilder, MetricsSet, Time,
 };
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, Partitioning, PlanProperties,
 };
-use datafusion_common::Result;
-use datafusion_expr::{Extension, LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion_physical_expr::EquivalenceProperties;
+use datafusion_common::{Column as ColumnExpr, Result};
+use datafusion_expr::{Expr, Extension, LogicalPlan, UserDefinedLogicalNodeCore};
+use datafusion_physical_expr::expressions::Column;
+use datafusion_physical_expr::{
+    Distribution, EquivalenceProperties, LexOrdering, PhysicalSortExpr,
+};
 use datatypes::schema::{Schema, SchemaRef};
 use futures_util::StreamExt;
 use greptime_proto::v1::region::RegionRequestHeader;
@@ -59,6 +63,7 @@ pub struct MergeScanLogicalPlan {
     input: LogicalPlan,
     /// If this plan is a placeholder
     is_placeholder: bool,
+    partition_cols: Vec<String>,
 }
 
 impl UserDefinedLogicalNodeCore for MergeScanLogicalPlan {
@@ -95,10 +100,11 @@ impl UserDefinedLogicalNodeCore for MergeScanLogicalPlan {
 }
 
 impl MergeScanLogicalPlan {
-    pub fn new(input: LogicalPlan, is_placeholder: bool) -> Self {
+    pub fn new(input: LogicalPlan, is_placeholder: bool, partition_cols: Vec<String>) -> Self {
         Self {
             input,
             is_placeholder,
+            partition_cols,
         }
     }
 
@@ -120,7 +126,12 @@ impl MergeScanLogicalPlan {
     pub fn input(&self) -> &LogicalPlan {
         &self.input
     }
+
+    pub fn partition_cols(&self) -> &[String] {
+        &self.partition_cols
+    }
 }
+
 pub struct MergeScanExec {
     table: TableName,
     regions: Vec<RegionId>,
@@ -134,6 +145,7 @@ pub struct MergeScanExec {
     sub_stage_metrics: Arc<Mutex<Vec<RecordBatchMetrics>>>,
     query_ctx: QueryContextRef,
     target_partition: usize,
+    partition_cols: Vec<String>,
 }
 
 impl std::fmt::Debug for MergeScanExec {
@@ -147,7 +159,9 @@ impl std::fmt::Debug for MergeScanExec {
 }
 
 impl MergeScanExec {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
+        session_state: &SessionState,
         table: TableName,
         regions: Vec<RegionId>,
         plan: LogicalPlan,
@@ -155,16 +169,60 @@ impl MergeScanExec {
         region_query_handler: RegionQueryHandlerRef,
         query_ctx: QueryContextRef,
         target_partition: usize,
+        partition_cols: Vec<String>,
     ) -> Result<Self> {
         // TODO(CookiePieWw): Initially we removed the metadata from the schema in #2000, but we have to
         // keep it for #4619 to identify json type in src/datatypes/src/schema/column_schema.rs.
         // Reconsider if it's possible to remove it.
         let arrow_schema = Arc::new(arrow_schema.clone());
-        let properties = PlanProperties::new(
-            EquivalenceProperties::new(arrow_schema.clone()),
-            Partitioning::UnknownPartitioning(target_partition),
-            ExecutionMode::Bounded,
-        );
+
+        // States the output ordering of the plan.
+        //
+        // When the input plan is a sort, we can use the sort ordering as the output ordering
+        // if the target partition is greater than the number of regions, which means we won't
+        // break the ordering on merging (of MergeScan).
+        //
+        // Otherwise, we need to use the default ordering.
+        let eq_properties = if let LogicalPlan::Sort(sort) = &plan
+            && target_partition >= regions.len()
+        {
+            let lex_ordering = sort
+                .expr
+                .iter()
+                .map(|sort_expr| {
+                    let physical_expr = session_state
+                        .create_physical_expr(sort_expr.expr.clone(), plan.schema())?;
+                    Ok(PhysicalSortExpr::new(
+                        physical_expr,
+                        SortOptions {
+                            descending: !sort_expr.asc,
+                            nulls_first: sort_expr.nulls_first,
+                        },
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            EquivalenceProperties::new_with_orderings(
+                arrow_schema.clone(),
+                &[LexOrdering::new(lex_ordering)],
+            )
+        } else {
+            EquivalenceProperties::new(arrow_schema.clone())
+        };
+
+        let partition_exprs = partition_cols
+            .iter()
+            .filter_map(|col| {
+                session_state
+                    .create_physical_expr(
+                        Expr::Column(ColumnExpr::new_unqualified(col)),
+                        plan.schema(),
+                    )
+                    .ok()
+            })
+            .collect();
+        let partitioning = Partitioning::Hash(partition_exprs, target_partition);
+
+        let properties = PlanProperties::new(eq_properties, partitioning, ExecutionMode::Bounded);
         let schema = Self::arrow_schema_to_schema(arrow_schema.clone())?;
         Ok(Self {
             table,
@@ -178,6 +236,7 @@ impl MergeScanExec {
             properties,
             query_ctx,
             target_partition,
+            partition_cols,
         })
     }
 
@@ -289,6 +348,52 @@ impl MergeScanExec {
             output_ordering: None,
             metrics: Default::default(),
         }))
+    }
+
+    pub fn try_with_new_distribution(&self, distribution: Distribution) -> Option<Self> {
+        let Distribution::HashPartitioned(hash_exprs) = distribution else {
+            // not applicable
+            return None;
+        };
+
+        if let Partitioning::Hash(curr_dist, _) = &self.properties.partitioning
+            && curr_dist == &hash_exprs
+        {
+            // No need to change the distribution
+            return None;
+        }
+
+        let mut hash_cols = HashSet::default();
+        for expr in &hash_exprs {
+            if let Some(col_expr) = expr.as_any().downcast_ref::<Column>() {
+                hash_cols.insert(col_expr.name());
+            }
+        }
+        for col in &self.partition_cols {
+            if !hash_cols.contains(col.as_str()) {
+                // The partitioning columns are not the same
+                return None;
+            }
+        }
+
+        Some(Self {
+            table: self.table.clone(),
+            regions: self.regions.clone(),
+            plan: self.plan.clone(),
+            schema: self.schema.clone(),
+            arrow_schema: self.arrow_schema.clone(),
+            region_query_handler: self.region_query_handler.clone(),
+            metric: self.metric.clone(),
+            properties: PlanProperties::new(
+                self.properties.eq_properties.clone(),
+                Partitioning::Hash(hash_exprs, self.target_partition),
+                self.properties.execution_mode,
+            ),
+            sub_stage_metrics: self.sub_stage_metrics.clone(),
+            query_ctx: self.query_ctx.clone(),
+            target_partition: self.target_partition,
+            partition_cols: self.partition_cols.clone(),
+        })
     }
 
     fn arrow_schema_to_schema(arrow_schema: ArrowSchemaRef) -> Result<SchemaRef> {
