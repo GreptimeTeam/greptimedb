@@ -24,7 +24,7 @@ use api::v1::meta::{
 };
 use common_grpc::channel_manager::ChannelManager;
 use common_telemetry::tracing_context::TracingContext;
-use common_telemetry::{info, warn};
+use common_telemetry::{error, info, warn};
 use snafu::{ensure, ResultExt};
 use tokio::sync::RwLock;
 use tonic::codec::CompressionEncoding;
@@ -199,7 +199,7 @@ impl Inner {
                             times += 1;
                             continue;
                         } else {
-                            warn!("An error occurred in gRPC, status: {status}");
+                            error!("An error occurred in gRPC, status: {status}");
                             return Err(error::Error::from(status));
                         }
                     }

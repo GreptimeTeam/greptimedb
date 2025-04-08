@@ -201,12 +201,11 @@ impl RegionRequester {
             .await
             .map_err(|e| {
                 let code = e.code();
-                let err: error::Error = e.into();
                 // Uses `Error::RegionServer` instead of `Error::Server`
                 error::Error::RegionServer {
                     addr,
                     code,
-                    source: BoxedError::new(err),
+                    source: BoxedError::new(error::Error::from(e)),
                     location: location!(),
                 }
             })?
