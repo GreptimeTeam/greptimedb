@@ -758,7 +758,10 @@ mod test {
                 ranges: [Some(0..1), Some(0..2), Some(0..3), Some(0..4), Some(1..5), Some(2..5), Some(3..6), Some(4..6), Some(5..7), Some(5..8), Some(6..10)] \
             }",
 );
-        do_normalize_test(0, 310_000, 30_000, 90_000, expected).await;
+        do_normalize_test(0, 310_000, 30_000, 90_000, expected.clone()).await;
+
+        // dump large range
+        do_normalize_test(-300000, 310_000, 30_000, 90_000, expected).await;
     }
 
     #[tokio::test]
