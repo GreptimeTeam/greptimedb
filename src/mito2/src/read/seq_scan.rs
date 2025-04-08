@@ -241,14 +241,14 @@ impl SeqScan {
                     &mut sources,
                 );
 
+                let mut metrics = ScannerMetrics::default();
+                let mut fetch_start = Instant::now();
                 let mut reader =
                     Self::build_reader_from_sources(&stream_ctx, sources, semaphore.clone())
                         .await
                         .map_err(BoxedError::new)
                         .context(ExternalSnafu)?;
                 let cache = &stream_ctx.input.cache_strategy;
-                let mut metrics = ScannerMetrics::default();
-                let mut fetch_start = Instant::now();
                 #[cfg(debug_assertions)]
                 let mut checker = crate::read::BatchChecker::default()
                     .with_start(Some(part_range.start))
