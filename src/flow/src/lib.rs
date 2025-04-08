@@ -43,6 +43,7 @@ mod utils;
 mod test_utils;
 
 pub use adapter::{FlowConfig, FlowWorkerManager, FlowWorkerManagerRef, FlownodeOptions};
+pub use batching_mode::frontend_client::FrontendClient;
 pub use error::{Error, Result};
 pub use server::{
     FlownodeBuilder, FlownodeInstance, FlownodeServer, FlownodeServiceBuilder, FrontendInvoker,

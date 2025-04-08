@@ -57,7 +57,7 @@ use datanode::region_server::RegionServer;
 use file_engine::config::EngineConfig as FileEngineConfig;
 use flow::{
     FlowConfig, FlowWorkerManager, FlownodeBuilder, FlownodeInstance, FlownodeOptions,
-    FrontendInvoker,
+    FrontendClient, FrontendInvoker,
 };
 use frontend::frontend::{Frontend, FrontendOptions};
 use frontend::instance::builder::FrontendBuilder;
@@ -523,6 +523,11 @@ impl StartCommand {
             flow: opts.flow.clone(),
             ..Default::default()
         };
+
+        // TODO(discord9): for standalone not use grpc, but just somehow get a handler to frontend grpc client without
+        // actually make a connection
+        let fe_server_addr = fe_opts.grpc.bind_addr.clone();
+        let frontend_client = FrontendClient::from_static_grpc_addr(fe_server_addr);
         let flow_builder = FlownodeBuilder::new(
             flownode_options,
             plugins.clone(),
