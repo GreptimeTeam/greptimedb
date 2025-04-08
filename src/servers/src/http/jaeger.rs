@@ -20,7 +20,7 @@ use axum::http::{HeaderMap, StatusCode as HttpStatusCode};
 use axum::response::IntoResponse;
 use axum::Extension;
 use chrono::Utc;
-use common_catalog::consts::PARENT_SPAN_ID_COLUMN;
+use common_catalog::consts::{PARENT_SPAN_ID_COLUMN, TRACE_TABLE_NAME};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::{Output, OutputData};
@@ -42,7 +42,7 @@ use crate::otlp::trace::{
     KEY_SERVICE_NAME, KEY_SPAN_KIND, RESOURCE_ATTRIBUTES_COLUMN, SCOPE_NAME_COLUMN,
     SCOPE_VERSION_COLUMN, SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN, SPAN_EVENTS_COLUMN,
     SPAN_ID_COLUMN, SPAN_KIND_COLUMN, SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, SPAN_STATUS_CODE,
-    SPAN_STATUS_PREFIX, SPAN_STATUS_UNSET, TIMESTAMP_COLUMN, TRACE_ID_COLUMN, TRACE_TABLE_NAME,
+    SPAN_STATUS_PREFIX, SPAN_STATUS_UNSET, TIMESTAMP_COLUMN, TRACE_ID_COLUMN,
 };
 use crate::query_handler::JaegerQueryHandlerRef;
 
@@ -337,7 +337,11 @@ pub async fn handle_get_services(
         query_params, query_ctx
     );
 
-    update_query_context(&mut query_ctx, table_name);
+    query_ctx.set_channel(Channel::Jaeger);
+    if let Some(table) = table_name {
+        query_ctx.set_extension(JAEGER_QUERY_TABLE_NAME_KEY, table);
+    }
+
     let query_ctx = Arc::new(query_ctx);
     let db = query_ctx.get_db_string();
 
