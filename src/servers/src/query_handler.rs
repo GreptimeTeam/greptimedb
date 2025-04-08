@@ -124,62 +124,6 @@ pub trait OpenTelemetryProtocolHandler: PipelineHandler {
     ) -> Result<Output>;
 }
 
-#[async_trait]
-impl<T> OpenTelemetryProtocolHandler for Arc<T>
-where
-    T: OpenTelemetryProtocolHandler + Send + Sync + Clone + 'static,
-{
-    async fn metrics(
-        &self,
-        request: ExportMetricsServiceRequest,
-        ctx: QueryContextRef,
-    ) -> Result<Output> {
-        self.as_ref().metrics(request, ctx).await
-    }
-
-    async fn traces(
-        &self,
-        pipeline_handler: PipelineHandlerRef,
-        request: ExportTraceServiceRequest,
-        pipeline: PipelineWay,
-        pipeline_params: GreptimePipelineParams,
-        table_name: String,
-        ctx: QueryContextRef,
-    ) -> Result<Output> {
-        self.as_ref()
-            .traces(
-                pipeline_handler,
-                request,
-                pipeline,
-                pipeline_params,
-                table_name,
-                ctx,
-            )
-            .await
-    }
-
-    async fn logs(
-        &self,
-        pipeline_handler: PipelineHandlerRef,
-        request: ExportLogsServiceRequest,
-        pipeline: PipelineWay,
-        pipeline_params: GreptimePipelineParams,
-        table_name: String,
-        ctx: QueryContextRef,
-    ) -> Result<Output> {
-        self.as_ref()
-            .logs(
-                pipeline_handler,
-                request,
-                pipeline,
-                pipeline_params,
-                table_name,
-                ctx,
-            )
-            .await
-    }
-}
-
 /// PipelineHandler is responsible for handling pipeline related requests.
 ///
 /// The "Pipeline" is a series of transformations that can be applied to unstructured
@@ -221,61 +165,6 @@ pub trait PipelineHandler {
 
     //// Build a pipeline from a string.
     fn build_pipeline(&self, pipeline: &str) -> Result<Pipeline>;
-}
-
-#[async_trait]
-impl<T> PipelineHandler for Arc<T>
-where
-    T: PipelineHandler + Send + Sync + Clone + 'static,
-{
-    async fn insert(&self, input: RowInsertRequests, ctx: QueryContextRef) -> Result<Output> {
-        self.as_ref().insert(input, ctx).await
-    }
-
-    async fn get_pipeline(
-        &self,
-        name: &str,
-        version: PipelineVersion,
-        query_ctx: QueryContextRef,
-    ) -> Result<Arc<Pipeline>> {
-        self.as_ref().get_pipeline(name, version, query_ctx).await
-    }
-
-    async fn insert_pipeline(
-        &self,
-        name: &str,
-        content_type: &str,
-        pipeline: &str,
-        query_ctx: QueryContextRef,
-    ) -> Result<PipelineInfo> {
-        self.as_ref()
-            .insert_pipeline(name, content_type, pipeline, query_ctx)
-            .await
-    }
-
-    async fn delete_pipeline(
-        &self,
-        name: &str,
-        version: PipelineVersion,
-        query_ctx: QueryContextRef,
-    ) -> Result<Option<()>> {
-        self.as_ref()
-            .delete_pipeline(name, version, query_ctx)
-            .await
-    }
-
-    async fn get_table(
-        &self,
-        table: &str,
-        query_ctx: &QueryContext,
-    ) -> std::result::Result<Option<Arc<table::Table>>, catalog::error::Error> {
-        self.as_ref().get_table(table, query_ctx).await
-    }
-
-    //// Build a pipeline from a string.
-    fn build_pipeline(&self, pipeline: &str) -> Result<Pipeline> {
-        self.as_ref().build_pipeline(pipeline)
-    }
 }
 
 /// Handle log query requests.
