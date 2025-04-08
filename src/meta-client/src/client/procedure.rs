@@ -199,6 +199,7 @@ impl Inner {
                             times += 1;
                             continue;
                         } else {
+                            warn!("An error occurred in gRPC, status: {status}");
                             return Err(error::Error::from(status));
                         }
                     }

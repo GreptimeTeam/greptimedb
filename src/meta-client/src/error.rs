@@ -13,10 +13,10 @@
 // limitations under the License.
 
 use common_error::ext::ErrorExt;
-use common_error::status_code::StatusCode;
+use common_error::status_code::{tonic_code_to_status_code, StatusCode};
 use common_error::{GREPTIME_DB_HEADER_ERROR_CODE, GREPTIME_DB_HEADER_ERROR_MSG};
 use common_macro::stack_trace_debug;
-use snafu::{Location, Snafu};
+use snafu::{location, Location, Snafu};
 use tonic::Status;
 
 #[derive(Snafu)]
@@ -35,6 +35,8 @@ pub enum Error {
         code: StatusCode,
         msg: String,
         tonic_code: tonic::Code,
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display("No leader, should ask leader first"))]
@@ -168,15 +170,15 @@ impl From<Status> for Error {
                 .and_then(|v| String::from_utf8(v.as_bytes().to_vec()).ok())
         }
 
-        let code = get_metadata_value(&e, GREPTIME_DB_HEADER_ERROR_CODE)
-            .and_then(|s| {
-                if let Ok(code) = s.parse::<u32>() {
-                    StatusCode::from_u32(code)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(StatusCode::Internal);
+        let code = get_metadata_value(&e, GREPTIME_DB_HEADER_ERROR_CODE).and_then(|s| {
+            if let Ok(code) = s.parse::<u32>() {
+                StatusCode::from_u32(code)
+            } else {
+                None
+            }
+        });
+        let tonic_code = e.code();
+        let code = code.unwrap_or_else(|| tonic_code_to_status_code(tonic_code));
 
         let msg = get_metadata_value(&e, GREPTIME_DB_HEADER_ERROR_MSG)
             .unwrap_or_else(|| e.message().to_string());
@@ -184,7 +186,8 @@ impl From<Status> for Error {
         Self::MetaServer {
             code,
             msg,
-            tonic_code: e.code(),
+            tonic_code,
+            location: location!(),
         }
     }
 }
