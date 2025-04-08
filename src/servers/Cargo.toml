@@ -85,6 +85,7 @@ socket2 = "0.5"
 # 2. Use ring, instead of aws-lc-rs in https://github.com/databendlabs/opensrv/pull/72
 opensrv-mysql = { git = "https://github.com/datafuselabs/opensrv", rev = "a1fb4da215c8693c7e4f62be249a01b7fec52997" }
 opentelemetry-proto.workspace = true
+otel-arrow-rust.workspace = true
 parking_lot.workspace = true
 pgwire = { version = "0.28.0", default-features = false, features = ["server-api-ring"] }
 pin-project = "1.0"

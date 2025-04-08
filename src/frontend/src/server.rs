@@ -27,6 +27,7 @@ use servers::http::{HttpServer, HttpServerBuilder};
 use servers::interceptor::LogIngestInterceptorRef;
 use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
+use servers::otel_arrow::OtelArrowServiceHandler;
 use servers::postgres::PostgresServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdapter;
 use servers::query_handler::sql::ServerSqlQueryHandlerAdapter;
@@ -162,6 +163,7 @@ where
         let grpc_server = builder
             .database_handler(greptime_request_handler.clone())
             .prometheus_handler(self.instance.clone(), user_provider.clone())
+            .otel_arrow_handler(OtelArrowServiceHandler(self.instance.clone()))
             .flight_handler(Arc::new(greptime_request_handler))
             .build();
         Ok(grpc_server)
