@@ -283,7 +283,7 @@ impl Server for GrpcServer {
             .add_routes(routes)
             .add_service(self.create_healthcheck_service())
             .add_service(self.create_reflection_service());
-        
+
         if let Some(otel_arrow_service) = self.otel_arrow_service.lock().await.take() {
             builder = builder.add_service(otel_arrow_service);
         }

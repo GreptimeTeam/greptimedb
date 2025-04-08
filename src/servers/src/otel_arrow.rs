@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_error::ext::ErrorExt;
+use common_error::status_code::status_to_tonic_code;
+use common_telemetry::error;
 use futures::SinkExt;
 use otel_arrow_rust::opentelemetry::{ArrowMetricsService, BatchArrowRecords, BatchStatus};
 use otel_arrow_rust::Consumer;
@@ -20,6 +23,7 @@ use tonic::metadata::{Entry, MetadataValue};
 use tonic::service::Interceptor;
 use tonic::{Request, Response, Status, Streaming};
 
+use crate::error;
 use crate::query_handler::OpenTelemetryProtocolHandlerRef;
 
 pub struct OtelArrowServiceHandler<T>(pub T);
@@ -44,17 +48,54 @@ impl ArrowMetricsService for OtelArrowServiceHandler<OpenTelemetryProtocolHandle
         // handles incoming requests
         common_runtime::spawn_global(async move {
             let mut consumer = Consumer::default();
-            while let Some(mut batch) = incoming_requests.message().await.unwrap() {
+            while let Some(batch_res) = incoming_requests.message().await.transpose() {
+                let mut batch = match batch_res {
+                    Ok(batch) => batch,
+                    Err(e) => {
+                        error!(
+                            "Failed to receive batch from otel-arrow client, error: {}",
+                            e
+                        );
+                        let _ = sender.send(Err(e)).await;
+                        return;
+                    }
+                };
                 let batch_status = BatchStatus {
                     batch_id: batch.batch_id,
                     status_code: 0,
                     status_message: Default::default(),
                 };
-                let request = consumer.consume_batches(&mut batch).unwrap();
-                handler
-                    .metrics(request, query_context.clone())
-                    .await
-                    .unwrap();
+                let request = match consumer.consume_batches(&mut batch).map_err(|e| {
+                    error::HandleOtelArrowRequestSnafu {
+                        err_msg: e.to_string(),
+                    }
+                    .build()
+                }) {
+                    Ok(request) => request,
+                    Err(e) => {
+                        let _ = sender
+                            .send(Err(Status::new(
+                                status_to_tonic_code(e.status_code()),
+                                e.to_string(),
+                            )))
+                            .await;
+                        error!(
+                            "Failed to consume batch from otel-arrow client, error: {}",
+                            e
+                        );
+                        return;
+                    }
+                };
+                if let Err(e) = handler.metrics(request, query_context.clone()).await {
+                    let _ = sender
+                        .send(Err(Status::new(
+                            status_to_tonic_code(e.status_code()),
+                            e.to_string(),
+                        )))
+                        .await;
+                    error!("Failed to ingest metrics from otel-arrow, error: {}", e);
+                    return;
+                }
                 sender.send(Ok(batch_status)).await.unwrap();
             }
         });

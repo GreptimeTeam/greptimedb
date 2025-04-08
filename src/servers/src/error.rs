@@ -615,6 +615,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to handle otel-arrow request, error message: {}", err_msg))]
+    HandleOtelArrowRequest {
+        err_msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -734,6 +741,8 @@ impl ErrorExt for Error {
             ConvertSqlValue { source, .. } => source.status_code(),
 
             InFlightWriteBytesExceeded { .. } => StatusCode::RateLimited,
+
+            HandleOtelArrowRequest { .. } => StatusCode::Internal,
         }
     }
 
