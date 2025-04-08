@@ -20,8 +20,8 @@ use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
 use strum::AsRefStr;
 
-use super::utils::handle_retry_error;
 use crate::cache_invalidator::Context;
+use crate::ddl::utils::handle_retry_error;
 use crate::ddl::DdlContext;
 use crate::error::{Result, SchemaNotFoundSnafu};
 use crate::instruction::CacheIdent;

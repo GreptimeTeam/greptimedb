@@ -802,8 +802,13 @@ pub enum Error {
         error: rskafka::client::error::Error,
     },
 
-    #[snafu(display("Failed to delete record from Kafka"))]
-    DeleteRecord {
+    #[snafu(display(
+        "Failed to delete records from Kafka, topic: {}, partition: {}, offset: {}",
+        topic,
+        partition,
+        offset
+    ))]
+    DeleteRecords {
         #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
@@ -811,6 +816,15 @@ pub enum Error {
         topic: String,
         partition: i32,
         offset: u64,
+    },
+
+    #[snafu(display("Failed to update the TopicNameValue in kvbackend, topic: {}", topic))]
+    UpdateTopicNameValue {
+        topic: String,
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        source: common_meta::error::Error,
     },
 }
 
@@ -861,7 +875,7 @@ impl ErrorExt for Error {
             | Error::FlowStateHandler { .. }
             | Error::BuildWalOptionsAllocator { .. }
             | Error::BuildPartitionClient { .. }
-            | Error::DeleteRecord { .. } => StatusCode::Internal,
+            | Error::DeleteRecords { .. } => StatusCode::Internal,
 
             Error::Unsupported { .. } => StatusCode::Unsupported,
 
@@ -924,7 +938,8 @@ impl ErrorExt for Error {
             | Error::TableMetadataManager { source, .. }
             | Error::MaintenanceModeManager { source, .. }
             | Error::KvBackend { source, .. }
-            | Error::UnexpectedLogicalRouteTable { source, .. } => source.status_code(),
+            | Error::UnexpectedLogicalRouteTable { source, .. }
+            | Error::UpdateTopicNameValue { source, .. } => source.status_code(),
 
             Error::InitMetadata { source, .. } | Error::InitDdlManager { source, .. } => {
                 source.status_code()

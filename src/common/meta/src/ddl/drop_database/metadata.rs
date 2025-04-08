@@ -17,8 +17,8 @@ use std::any::Any;
 use common_procedure::Status;
 use serde::{Deserialize, Serialize};
 
-use super::end::DropDatabaseEnd;
 use crate::cache_invalidator::Context;
+use crate::ddl::drop_database::end::DropDatabaseEnd;
 use crate::ddl::drop_database::{DropDatabaseContext, State};
 use crate::ddl::DdlContext;
 use crate::error::Result;

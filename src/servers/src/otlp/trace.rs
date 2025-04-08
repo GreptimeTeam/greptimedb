@@ -28,8 +28,6 @@ use session::context::QueryContextRef;
 use crate::error::{NotSupportedSnafu, Result};
 use crate::query_handler::PipelineHandlerRef;
 
-pub const TRACE_TABLE_NAME: &str = "opentelemetry_traces";
-
 // column names
 pub const SERVICE_NAME_COLUMN: &str = "service_name";
 pub const TIMESTAMP_COLUMN: &str = "timestamp";

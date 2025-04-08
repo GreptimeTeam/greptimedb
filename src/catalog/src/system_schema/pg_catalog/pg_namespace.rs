@@ -35,11 +35,13 @@ use datatypes::vectors::{StringVectorBuilder, UInt32VectorBuilder, VectorRef};
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::ScanRequest;
 
-use super::{query_ctx, PGNamespaceOidMapRef, OID_COLUMN_NAME, PG_NAMESPACE};
 use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
 use crate::information_schema::Predicates;
+use crate::system_schema::pg_catalog::{
+    query_ctx, PGNamespaceOidMapRef, OID_COLUMN_NAME, PG_NAMESPACE,
+};
 use crate::system_schema::utils::tables::{string_column, u32_column};
 use crate::system_schema::SystemTable;
 use crate::CatalogManager;

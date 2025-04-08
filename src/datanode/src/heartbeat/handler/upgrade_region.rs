@@ -29,22 +29,22 @@ impl HandlerContext {
             replay_timeout,
             location_id,
         }: UpgradeRegion,
-    ) -> BoxFuture<'static, InstructionReply> {
+    ) -> BoxFuture<'static, Option<InstructionReply>> {
         Box::pin(async move {
             let Some(writable) = self.region_server.is_region_leader(region_id) else {
-                return InstructionReply::UpgradeRegion(UpgradeRegionReply {
+                return Some(InstructionReply::UpgradeRegion(UpgradeRegionReply {
                     ready: false,
                     exists: false,
                     error: None,
-                });
+                }));
             };
 
             if writable {
-                return InstructionReply::UpgradeRegion(UpgradeRegionReply {
+                return Some(InstructionReply::UpgradeRegion(UpgradeRegionReply {
                     ready: true,
                     exists: true,
                     error: None,
-                });
+                }));
             }
 
             let region_server_moved = self.region_server.clone();
@@ -79,11 +79,11 @@ impl HandlerContext {
 
             // Returns immediately
             let Some(replay_timeout) = replay_timeout else {
-                return InstructionReply::UpgradeRegion(UpgradeRegionReply {
+                return Some(InstructionReply::UpgradeRegion(UpgradeRegionReply {
                     ready: false,
                     exists: true,
                     error: None,
-                });
+                }));
             };
 
             // We don't care that it returns a newly registered or running task.
@@ -91,22 +91,24 @@ impl HandlerContext {
             let result = self.catchup_tasks.wait(&mut watcher, replay_timeout).await;
 
             match result {
-                WaitResult::Timeout => InstructionReply::UpgradeRegion(UpgradeRegionReply {
+                WaitResult::Timeout => Some(InstructionReply::UpgradeRegion(UpgradeRegionReply {
                     ready: false,
                     exists: true,
                     error: None,
-                }),
-                WaitResult::Finish(Ok(_)) => InstructionReply::UpgradeRegion(UpgradeRegionReply {
-                    ready: true,
-                    exists: true,
-                    error: None,
-                }),
+                })),
+                WaitResult::Finish(Ok(_)) => {
+                    Some(InstructionReply::UpgradeRegion(UpgradeRegionReply {
+                        ready: true,
+                        exists: true,
+                        error: None,
+                    }))
+                }
                 WaitResult::Finish(Err(err)) => {
-                    InstructionReply::UpgradeRegion(UpgradeRegionReply {
+                    Some(InstructionReply::UpgradeRegion(UpgradeRegionReply {
                         ready: false,
                         exists: true,
                         error: Some(format!("{err:?}")),
-                    })
+                    }))
                 }
             }
         })
@@ -149,9 +151,9 @@ mod tests {
                     location_id: None,
                 })
                 .await;
-            assert_matches!(reply, InstructionReply::UpgradeRegion(_));
+            assert_matches!(reply, Some(InstructionReply::UpgradeRegion(_)));
 
-            if let InstructionReply::UpgradeRegion(reply) = reply {
+            if let InstructionReply::UpgradeRegion(reply) = reply.unwrap() {
                 assert!(!reply.exists);
                 assert!(reply.error.is_none());
             }
@@ -187,9 +189,9 @@ mod tests {
                     location_id: None,
                 })
                 .await;
-            assert_matches!(reply, InstructionReply::UpgradeRegion(_));
+            assert_matches!(reply, Some(InstructionReply::UpgradeRegion(_)));
 
-            if let InstructionReply::UpgradeRegion(reply) = reply {
+            if let InstructionReply::UpgradeRegion(reply) = reply.unwrap() {
                 assert!(reply.ready);
                 assert!(reply.exists);
                 assert!(reply.error.is_none());
@@ -226,9 +228,9 @@ mod tests {
                     location_id: None,
                 })
                 .await;
-            assert_matches!(reply, InstructionReply::UpgradeRegion(_));
+            assert_matches!(reply, Some(InstructionReply::UpgradeRegion(_)));
 
-            if let InstructionReply::UpgradeRegion(reply) = reply {
+            if let InstructionReply::UpgradeRegion(reply) = reply.unwrap() {
                 assert!(!reply.ready);
                 assert!(reply.exists);
                 assert!(reply.error.is_none());
@@ -268,9 +270,9 @@ mod tests {
                     location_id: None,
                 })
                 .await;
-            assert_matches!(reply, InstructionReply::UpgradeRegion(_));
+            assert_matches!(reply, Some(InstructionReply::UpgradeRegion(_)));
 
-            if let InstructionReply::UpgradeRegion(reply) = reply {
+            if let InstructionReply::UpgradeRegion(reply) = reply.unwrap() {
                 assert!(!reply.ready);
                 assert!(reply.exists);
                 assert!(reply.error.is_none());
@@ -286,11 +288,11 @@ mod tests {
                 location_id: None,
             })
             .await;
-        assert_matches!(reply, InstructionReply::UpgradeRegion(_));
+        assert_matches!(reply, Some(InstructionReply::UpgradeRegion(_)));
         // Must less than 300 ms.
         assert!(timer.elapsed().as_millis() < 300);
 
-        if let InstructionReply::UpgradeRegion(reply) = reply {
+        if let InstructionReply::UpgradeRegion(reply) = reply.unwrap() {
             assert!(reply.ready);
             assert!(reply.exists);
             assert!(reply.error.is_none());
@@ -328,10 +330,10 @@ mod tests {
                 location_id: None,
             })
             .await;
-        assert_matches!(reply, InstructionReply::UpgradeRegion(_));
+        assert_matches!(reply, Some(InstructionReply::UpgradeRegion(_)));
 
         // It didn't wait for handle returns; it had no idea about the error.
-        if let InstructionReply::UpgradeRegion(reply) = reply {
+        if let InstructionReply::UpgradeRegion(reply) = reply.unwrap() {
             assert!(!reply.ready);
             assert!(reply.exists);
             assert!(reply.error.is_none());
@@ -346,9 +348,9 @@ mod tests {
                 location_id: None,
             })
             .await;
-        assert_matches!(reply, InstructionReply::UpgradeRegion(_));
+        assert_matches!(reply, Some(InstructionReply::UpgradeRegion(_)));
 
-        if let InstructionReply::UpgradeRegion(reply) = reply {
+        if let InstructionReply::UpgradeRegion(reply) = reply.unwrap() {
             assert!(!reply.ready);
             assert!(reply.exists);
             assert!(reply.error.is_some());

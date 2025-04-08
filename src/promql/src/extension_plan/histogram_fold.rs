@@ -301,7 +301,7 @@ impl ExecutionPlan for HistogramFoldExec {
     }
 
     fn required_input_distribution(&self) -> Vec<Distribution> {
-        vec![Distribution::SinglePartition; self.children().len()]
+        self.input.required_input_distribution()
     }
 
     fn maintains_input_order(&self) -> Vec<bool> {

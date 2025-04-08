@@ -29,8 +29,8 @@ use datatypes::vectors::VectorRef;
 use snafu::ResultExt;
 use store_api::storage::{ScanRequest, TableId};
 
-use super::SystemTable;
 use crate::error::{CreateRecordBatchSnafu, InternalSnafu, Result};
+use crate::system_schema::SystemTable;
 
 /// A memory table with specified schema and columns.
 #[derive(Debug)]

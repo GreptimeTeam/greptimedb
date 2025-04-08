@@ -436,8 +436,6 @@ pub struct RegionCloseRequest {}
 /// Alter metadata of a region.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct RegionAlterRequest {
-    /// The version of the schema before applying the alteration.
-    pub schema_version: u64,
     /// Kind of alteration to do.
     pub kind: AlterKind,
 }
@@ -445,17 +443,6 @@ pub struct RegionAlterRequest {
 impl RegionAlterRequest {
     /// Checks whether the request is valid, returns an error if it is invalid.
     pub fn validate(&self, metadata: &RegionMetadata) -> Result<()> {
-        ensure!(
-            metadata.schema_version == self.schema_version,
-            InvalidRegionRequestSnafu {
-                region_id: metadata.region_id,
-                err: format!(
-                    "region schema version {} is not equal to request schema version {}",
-                    metadata.schema_version, self.schema_version
-                ),
-            }
-        );
-
         self.kind.validate(metadata)?;
 
         Ok(())
@@ -479,10 +466,7 @@ impl TryFrom<AlterRequest> for RegionAlterRequest {
         })?;
 
         let kind = AlterKind::try_from(kind)?;
-        Ok(RegionAlterRequest {
-            schema_version: value.schema_version,
-            kind,
-        })
+        Ok(RegionAlterRequest { kind })
     }
 }
 
@@ -1234,7 +1218,6 @@ mod tests {
         assert_eq!(
             request,
             RegionAlterRequest {
-                schema_version: 1,
                 kind: AlterKind::AddColumns {
                     columns: vec![AddColumn {
                         column_metadata: ColumnMetadata {
@@ -1532,21 +1515,6 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_schema_version() {
-        let mut metadata = new_metadata();
-        metadata.schema_version = 2;
-
-        RegionAlterRequest {
-            schema_version: 1,
-            kind: AlterKind::DropColumns {
-                names: vec!["field_0".to_string()],
-            },
-        }
-        .validate(&metadata)
-        .unwrap_err();
-    }
-
-    #[test]
     fn test_validate_add_columns() {
         let kind = AlterKind::AddColumns {
             columns: vec![
@@ -1576,10 +1544,7 @@ mod tests {
                 },
             ],
         };
-        let request = RegionAlterRequest {
-            schema_version: 1,
-            kind,
-        };
+        let request = RegionAlterRequest { kind };
         let mut metadata = new_metadata();
         metadata.schema_version = 1;
         request.validate(&metadata).unwrap();
@@ -1640,10 +1605,7 @@ mod tests {
                 },
             },
         };
-        let request = RegionAlterRequest {
-            schema_version: 1,
-            kind,
-        };
+        let request = RegionAlterRequest { kind };
         let mut metadata = new_metadata();
         metadata.schema_version = 1;
         request.validate(&metadata).unwrap();
@@ -1653,10 +1615,7 @@ mod tests {
                 column_name: "tag_0".to_string(),
             },
         };
-        let request = RegionAlterRequest {
-            schema_version: 1,
-            kind,
-        };
+        let request = RegionAlterRequest { kind };
         let mut metadata = new_metadata();
         metadata.schema_version = 1;
         request.validate(&metadata).unwrap();

@@ -162,6 +162,7 @@ impl ExtensionPlanner for DistExtensionPlanner {
             .get_extension()
             .unwrap_or_else(QueryContext::arc);
         let merge_scan_plan = MergeScanExec::new(
+            session_state,
             table_name,
             regions,
             input_plan.clone(),
@@ -169,6 +170,7 @@ impl ExtensionPlanner for DistExtensionPlanner {
             self.region_query_handler.clone(),
             query_ctx,
             session_state.config().target_partitions(),
+            merge_scan.partition_cols().to_vec(),
         )?;
         Ok(Some(Arc::new(merge_scan_plan) as _))
     }

@@ -24,31 +24,34 @@ use crate::heartbeat::handler::HandlerContext;
 use crate::heartbeat::task_tracker::WaitResult;
 
 impl HandlerContext {
-    async fn downgrade_to_follower_gracefully(&self, region_id: RegionId) -> InstructionReply {
+    async fn downgrade_to_follower_gracefully(
+        &self,
+        region_id: RegionId,
+    ) -> Option<InstructionReply> {
         match self
             .region_server
             .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Follower)
             .await
         {
             Ok(SetRegionRoleStateResponse::Success { last_entry_id }) => {
-                InstructionReply::DowngradeRegion(DowngradeRegionReply {
+                Some(InstructionReply::DowngradeRegion(DowngradeRegionReply {
                     last_entry_id,
                     exists: true,
                     error: None,
-                })
+                }))
             }
             Ok(SetRegionRoleStateResponse::NotFound) => {
-                InstructionReply::DowngradeRegion(DowngradeRegionReply {
+                Some(InstructionReply::DowngradeRegion(DowngradeRegionReply {
                     last_entry_id: None,
                     exists: false,
                     error: None,
-                })
+                }))
             }
-            Err(err) => InstructionReply::DowngradeRegion(DowngradeRegionReply {
+            Err(err) => Some(InstructionReply::DowngradeRegion(DowngradeRegionReply {
                 last_entry_id: None,
                 exists: true,
                 error: Some(format!("{err:?}")),
-            }),
+            })),
         }
     }
 
@@ -59,15 +62,15 @@ impl HandlerContext {
             flush_timeout,
             reject_write,
         }: DowngradeRegion,
-    ) -> BoxFuture<'static, InstructionReply> {
+    ) -> BoxFuture<'static, Option<InstructionReply>> {
         Box::pin(async move {
             let Some(writable) = self.region_server.is_region_leader(region_id) else {
                 warn!("Region: {region_id} is not found");
-                return InstructionReply::DowngradeRegion(DowngradeRegionReply {
+                return Some(InstructionReply::DowngradeRegion(DowngradeRegionReply {
                     last_entry_id: None,
                     exists: false,
                     error: None,
-                });
+                }));
             };
 
             let region_server_moved = self.region_server.clone();
@@ -99,19 +102,19 @@ impl HandlerContext {
                     Ok(SetRegionRoleStateResponse::Success { .. }) => {}
                     Ok(SetRegionRoleStateResponse::NotFound) => {
                         warn!("Region: {region_id} is not found");
-                        return InstructionReply::DowngradeRegion(DowngradeRegionReply {
+                        return Some(InstructionReply::DowngradeRegion(DowngradeRegionReply {
                             last_entry_id: None,
                             exists: false,
                             error: None,
-                        });
+                        }));
                     }
                     Err(err) => {
                         warn!(err; "Failed to convert region to downgrading leader");
-                        return InstructionReply::DowngradeRegion(DowngradeRegionReply {
+                        return Some(InstructionReply::DowngradeRegion(DowngradeRegionReply {
                             last_entry_id: None,
                             exists: true,
                             error: Some(format!("{err:?}")),
-                        });
+                        }));
                     }
                 }
             }
@@ -144,18 +147,20 @@ impl HandlerContext {
             let result = self.catchup_tasks.wait(&mut watcher, flush_timeout).await;
 
             match result {
-                WaitResult::Timeout => InstructionReply::DowngradeRegion(DowngradeRegionReply {
-                    last_entry_id: None,
-                    exists: true,
-                    error: Some(format!("Flush region: {region_id} is timeout")),
-                }),
+                WaitResult::Timeout => {
+                    Some(InstructionReply::DowngradeRegion(DowngradeRegionReply {
+                        last_entry_id: None,
+                        exists: true,
+                        error: Some(format!("Flush region: {region_id} is timeout")),
+                    }))
+                }
                 WaitResult::Finish(Ok(_)) => self.downgrade_to_follower_gracefully(region_id).await,
                 WaitResult::Finish(Err(err)) => {
-                    InstructionReply::DowngradeRegion(DowngradeRegionReply {
+                    Some(InstructionReply::DowngradeRegion(DowngradeRegionReply {
                         last_entry_id: None,
                         exists: true,
                         error: Some(format!("{err:?}")),
-                    })
+                    }))
                 }
             }
         })
@@ -196,9 +201,9 @@ mod tests {
                     reject_write: false,
                 })
                 .await;
-            assert_matches!(reply, InstructionReply::DowngradeRegion(_));
+            assert_matches!(reply, Some(InstructionReply::DowngradeRegion(_)));
 
-            if let InstructionReply::DowngradeRegion(reply) = reply {
+            if let InstructionReply::DowngradeRegion(reply) = reply.unwrap() {
                 assert!(!reply.exists);
                 assert!(reply.error.is_none());
                 assert!(reply.last_entry_id.is_none());
@@ -238,9 +243,9 @@ mod tests {
                     reject_write: false,
                 })
                 .await;
-            assert_matches!(reply, InstructionReply::DowngradeRegion(_));
+            assert_matches!(reply, Some(InstructionReply::DowngradeRegion(_)));
 
-            if let InstructionReply::DowngradeRegion(reply) = reply {
+            if let InstructionReply::DowngradeRegion(reply) = reply.unwrap() {
                 assert!(reply.exists);
                 assert!(reply.error.is_none());
                 assert_eq!(reply.last_entry_id.unwrap(), 1024);
@@ -272,9 +277,9 @@ mod tests {
                 reject_write: false,
             })
             .await;
-        assert_matches!(reply, InstructionReply::DowngradeRegion(_));
+        assert_matches!(reply, Some(InstructionReply::DowngradeRegion(_)));
 
-        if let InstructionReply::DowngradeRegion(reply) = reply {
+        if let InstructionReply::DowngradeRegion(reply) = reply.unwrap() {
             assert!(reply.exists);
             assert!(reply.error.unwrap().contains("timeout"));
             assert!(reply.last_entry_id.is_none());
@@ -310,8 +315,8 @@ mod tests {
                     reject_write: false,
                 })
                 .await;
-            assert_matches!(reply, InstructionReply::DowngradeRegion(_));
-            if let InstructionReply::DowngradeRegion(reply) = reply {
+            assert_matches!(reply, Some(InstructionReply::DowngradeRegion(_)));
+            if let InstructionReply::DowngradeRegion(reply) = reply.unwrap() {
                 assert!(reply.exists);
                 assert!(reply.error.unwrap().contains("timeout"));
                 assert!(reply.last_entry_id.is_none());
@@ -325,11 +330,11 @@ mod tests {
                 reject_write: false,
             })
             .await;
-        assert_matches!(reply, InstructionReply::DowngradeRegion(_));
+        assert_matches!(reply, Some(InstructionReply::DowngradeRegion(_)));
         // Must less than 300 ms.
         assert!(timer.elapsed().as_millis() < 300);
 
-        if let InstructionReply::DowngradeRegion(reply) = reply {
+        if let InstructionReply::DowngradeRegion(reply) = reply.unwrap() {
             assert!(reply.exists);
             assert!(reply.error.is_none());
             assert_eq!(reply.last_entry_id.unwrap(), 1024);
@@ -371,8 +376,8 @@ mod tests {
                     reject_write: false,
                 })
                 .await;
-            assert_matches!(reply, InstructionReply::DowngradeRegion(_));
-            if let InstructionReply::DowngradeRegion(reply) = reply {
+            assert_matches!(reply, Some(InstructionReply::DowngradeRegion(_)));
+            if let InstructionReply::DowngradeRegion(reply) = reply.unwrap() {
                 assert!(reply.exists);
                 assert!(reply.error.unwrap().contains("timeout"));
                 assert!(reply.last_entry_id.is_none());
@@ -386,11 +391,11 @@ mod tests {
                 reject_write: false,
             })
             .await;
-        assert_matches!(reply, InstructionReply::DowngradeRegion(_));
+        assert_matches!(reply, Some(InstructionReply::DowngradeRegion(_)));
         // Must less than 300 ms.
         assert!(timer.elapsed().as_millis() < 300);
 
-        if let InstructionReply::DowngradeRegion(reply) = reply {
+        if let InstructionReply::DowngradeRegion(reply) = reply.unwrap() {
             assert!(reply.exists);
             assert!(reply.error.unwrap().contains("flush failed"));
             assert!(reply.last_entry_id.is_none());
@@ -417,8 +422,8 @@ mod tests {
                 reject_write: false,
             })
             .await;
-        assert_matches!(reply, InstructionReply::DowngradeRegion(_));
-        if let InstructionReply::DowngradeRegion(reply) = reply {
+        assert_matches!(reply, Some(InstructionReply::DowngradeRegion(_)));
+        if let InstructionReply::DowngradeRegion(reply) = reply.unwrap() {
             assert!(!reply.exists);
             assert!(reply.error.is_none());
             assert!(reply.last_entry_id.is_none());
@@ -449,8 +454,8 @@ mod tests {
                 reject_write: false,
             })
             .await;
-        assert_matches!(reply, InstructionReply::DowngradeRegion(_));
-        if let InstructionReply::DowngradeRegion(reply) = reply {
+        assert_matches!(reply, Some(InstructionReply::DowngradeRegion(_)));
+        if let InstructionReply::DowngradeRegion(reply) = reply.unwrap() {
             assert!(reply.exists);
             assert!(reply
                 .error

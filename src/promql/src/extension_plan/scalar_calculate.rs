@@ -40,8 +40,8 @@ use greptime_proto::substrait_extension as pb;
 use prost::Message;
 use snafu::ResultExt;
 
-use super::Millisecond;
 use crate::error::{ColumnNotFoundSnafu, DataFusionPlanningSnafu, DeserializeSnafu, Result};
+use crate::extension_plan::Millisecond;
 
 /// `ScalarCalculate` is the custom logical plan to calculate
 /// [`scalar`](https://prometheus.io/docs/prometheus/latest/querying/functions/#scalar)
@@ -504,7 +504,10 @@ impl Stream for ScalarCalculateStream {
                 None => {
                     self.done = true;
                     return match self.batch.take() {
-                        Some(batch) if !self.have_multi_series => Poll::Ready(Some(Ok(batch))),
+                        Some(batch) if !self.have_multi_series => {
+                            self.metric.record_output(batch.num_rows());
+                            Poll::Ready(Some(Ok(batch)))
+                        }
                         _ => {
                             let time_array = (self.start..=self.end)
                                 .step_by(self.interval as _)
@@ -517,6 +520,7 @@ impl Stream for ScalarCalculateStream {
                                     Arc::new(Float64Array::from(vec![f64::NAN; nums])),
                                 ],
                             )?;
+                            self.metric.record_output(nan_batch.num_rows());
                             Poll::Ready(Some(Ok(nan_batch)))
                         }
                     };
