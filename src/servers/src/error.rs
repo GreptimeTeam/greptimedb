@@ -539,12 +539,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Missing query context"))]
-    MissingQueryContext {
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Invalid table name"))]
     InvalidTableName {
         #[snafu(source)]
@@ -680,7 +674,6 @@ impl ErrorExt for Error {
             | TimePrecision { .. }
             | UrlDecode { .. }
             | IncompatibleSchema { .. }
-            | MissingQueryContext { .. }
             | MysqlValueConversion { .. }
             | ParseJson { .. }
             | InvalidLokiLabels { .. }
