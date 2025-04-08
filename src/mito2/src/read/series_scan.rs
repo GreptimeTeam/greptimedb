@@ -292,6 +292,10 @@ struct SeriesDistributor {
     /// Senders of all partitions.
     senders: SenderList,
     /// Metrics set to report.
+    /// The distributor report the metrics as an addtional partition.
+    /// This may double the scan cost of the [SeriesScan] metrics. We can
+    /// get per-partition metrics in verbose mode to see the metrics of the
+    /// distributor.
     metrics_set: ExecutionPlanMetricsSet,
 }
 
