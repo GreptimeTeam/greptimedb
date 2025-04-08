@@ -23,7 +23,6 @@ use datafusion::physical_plan::ExecutionPlan;
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::{DataFusionError, Result};
 use store_api::region_engine::PartitionRange;
-use store_api::storage::TimeSeriesDistribution;
 use table::table::scan::RegionScanExec;
 
 #[derive(Debug)]
@@ -63,14 +62,6 @@ impl ParallelizeScan {
                     plan.as_any().downcast_ref::<RegionScanExec>()
                 {
                     if region_scan_exec.is_partition_set() {
-                        return Ok(Transformed::no(plan));
-                    }
-
-                    // don't parallelize if we want per series distribution
-                    if matches!(
-                        region_scan_exec.distribution(),
-                        Some(TimeSeriesDistribution::PerSeries)
-                    ) {
                         return Ok(Transformed::no(plan));
                     }
 
