@@ -20,6 +20,7 @@ use api::v1::CreateTableExpr;
 use catalog::{CatalogManagerRef, RegisterSystemTableRequest};
 use common_catalog::consts::{default_engine, DEFAULT_PRIVATE_SCHEMA_NAME};
 use common_telemetry::info;
+use datatypes::timestamp::TimestampNanosecond;
 use futures::FutureExt;
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutorRef;
@@ -190,6 +191,29 @@ impl PipelineOperator {
         self.get_pipeline_table_from_cache(query_ctx.current_catalog())
             .context(PipelineTableNotFoundSnafu)?
             .get_pipeline(&schema, name, version)
+            .inspect(|re| {
+                METRIC_PIPELINE_RETRIEVE_HISTOGRAM
+                    .with_label_values(&[&re.is_ok().to_string()])
+                    .observe(timer.elapsed().as_secs_f64())
+            })
+            .await
+    }
+
+    /// Get a original pipeline by name.
+    pub async fn get_original_pipeline(
+        &self,
+        name: &str,
+        version: PipelineVersion,
+        query_ctx: QueryContextRef,
+    ) -> Result<(String, TimestampNanosecond)> {
+        let schema = query_ctx.current_schema();
+        self.create_pipeline_table_if_not_exists(query_ctx.clone())
+            .await?;
+
+        let timer = Instant::now();
+        self.get_pipeline_table_from_cache(query_ctx.current_catalog())
+            .context(PipelineTableNotFoundSnafu)?
+            .get_original_pipeline(&schema, name, version)
             .inspect(|re| {
                 METRIC_PIPELINE_RETRIEVE_HISTOGRAM
                     .with_label_values(&[&re.is_ok().to_string()])

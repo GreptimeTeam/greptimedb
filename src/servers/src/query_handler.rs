@@ -34,6 +34,7 @@ use api::v1::RowInsertRequests;
 use async_trait::async_trait;
 use catalog::CatalogManager;
 use common_query::Output;
+use datatypes::timestamp::TimestampNanosecond;
 use headers::HeaderValue;
 use log_query::LogQuery;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
@@ -165,6 +166,14 @@ pub trait PipelineHandler {
 
     //// Build a pipeline from a string.
     fn build_pipeline(&self, pipeline: &str) -> Result<Pipeline>;
+
+    /// Get a original pipeline by name.
+    async fn get_original_pipeline(
+        &self,
+        name: &str,
+        version: PipelineVersion,
+        query_ctx: QueryContextRef,
+    ) -> Result<(String, TimestampNanosecond)>;
 }
 
 /// Handle log query requests.

@@ -19,6 +19,7 @@ use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use client::Output;
 use common_error::ext::BoxedError;
+use datatypes::timestamp::TimestampNanosecond;
 use pipeline::pipeline_operator::PipelineOperator;
 use pipeline::{Pipeline, PipelineInfo, PipelineVersion};
 use servers::error::{
@@ -102,6 +103,18 @@ impl PipelineHandler for Instance {
 
     fn build_pipeline(&self, pipeline: &str) -> ServerResult<Pipeline> {
         PipelineOperator::build_pipeline(pipeline).context(PipelineSnafu)
+    }
+
+    async fn get_original_pipeline(
+        &self,
+        name: &str,
+        version: PipelineVersion,
+        query_ctx: QueryContextRef,
+    ) -> ServerResult<(String, TimestampNanosecond)> {
+        self.pipeline_operator
+            .get_original_pipeline(name, version, query_ctx)
+            .await
+            .context(PipelineSnafu)
     }
 }
 
