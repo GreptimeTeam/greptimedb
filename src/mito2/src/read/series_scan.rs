@@ -27,6 +27,7 @@ use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::compute::concat_batches;
 use datatypes::schema::SchemaRef;
 use futures::StreamExt;
+use smallvec::{smallvec, SmallVec};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{PartitionRange, PrepareRequest, RegionScanner, ScannerProperties};
@@ -384,15 +385,14 @@ impl SeriesDistributor {
 /// Batches of the same series.
 #[derive(Default)]
 struct SeriesBatch {
-    // FIXME: Use smallvec
-    batches: Vec<Batch>,
+    batches: SmallVec<[Batch; 4]>,
 }
 
 impl SeriesBatch {
     /// Creates a new [SeriesBatch] from a single [Batch].
     fn single(batch: Batch) -> Self {
         Self {
-            batches: vec![batch],
+            batches: smallvec![batch],
         }
     }
 
