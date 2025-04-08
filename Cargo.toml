@@ -258,7 +258,7 @@ common-version = { path = "src/common/version" }
 common-wal = { path = "src/common/wal" }
 datanode = { path = "src/datanode" }
 datatypes = { path = "src/datatypes" }
-otel-arrow-rust = { path = "/home/lei/workspace/otel-arrow/rust/otel-arrow-rust" , features = ["server"]}
+otel-arrow-rust = { git = "https://github.com/open-telemetry/otel-arrow", rev = "5d551412d2a12e689cde4d84c14ef29e36784e51", features = ["server"] }
 file-engine = { path = "src/file-engine" }
 flow = { path = "src/flow" }
 frontend = { path = "src/frontend", default-features = false }
