@@ -570,7 +570,7 @@ mod tests {
                 factory.clone(),
             );
 
-            async move { applier.apply(sst_file_id, None).await.unwrap() }.boxed()
+            async move { applier.apply(sst_file_id, None).await.unwrap().unwrap() }.boxed()
         }
     }
 
