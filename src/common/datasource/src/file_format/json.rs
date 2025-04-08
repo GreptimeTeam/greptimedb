@@ -33,11 +33,10 @@ use snafu::ResultExt;
 use tokio_util::compat::FuturesAsyncReadCompatExt;
 use tokio_util::io::SyncIoBridge;
 
-use super::stream_to_file;
 use crate::buffered_writer::DfRecordBatchEncoder;
 use crate::compression::CompressionType;
 use crate::error::{self, Result};
-use crate::file_format::{self, open_with_decoder, FileFormat};
+use crate::file_format::{self, open_with_decoder, stream_to_file, FileFormat};
 use crate::share_buffer::SharedBuffer;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

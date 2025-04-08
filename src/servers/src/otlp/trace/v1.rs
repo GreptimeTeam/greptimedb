@@ -23,14 +23,14 @@ use opentelemetry_proto::tonic::common::v1::any_value::Value as OtlpValue;
 use pipeline::{GreptimePipelineParams, PipelineWay};
 use session::context::QueryContextRef;
 
-use super::attributes::Attributes;
-use super::span::{parse, TraceSpan};
-use super::{
-    DURATION_NANO_COLUMN, PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN, SPAN_ID_COLUMN,
-    SPAN_KIND_COLUMN, SPAN_NAME_COLUMN, TIMESTAMP_COLUMN, TRACE_ID_COLUMN,
-};
 use crate::error::Result;
-use crate::otlp::trace::{KEY_SERVICE_NAME, SPAN_EVENTS_COLUMN};
+use crate::otlp::trace::attributes::Attributes;
+use crate::otlp::trace::span::{parse, TraceSpan};
+use crate::otlp::trace::{
+    DURATION_NANO_COLUMN, KEY_SERVICE_NAME, PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN,
+    SPAN_EVENTS_COLUMN, SPAN_ID_COLUMN, SPAN_KIND_COLUMN, SPAN_NAME_COLUMN, TIMESTAMP_COLUMN,
+    TRACE_ID_COLUMN,
+};
 use crate::otlp::utils::{any_value_to_jsonb, make_column_data, make_string_column_data};
 use crate::query_handler::PipelineHandlerRef;
 use crate::row_writer::{self, MultiTableData, TableData};

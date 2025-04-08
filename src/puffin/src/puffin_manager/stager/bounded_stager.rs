@@ -34,12 +34,13 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio_util::compat::TokioAsyncWriteCompatExt;
 
-use super::StagerNotifier;
 use crate::error::{
     CacheGetSnafu, CreateSnafu, MetadataSnafu, OpenSnafu, ReadSnafu, RemoveSnafu, RenameSnafu,
     Result, WalkDirSnafu,
 };
-use crate::puffin_manager::stager::{BoxWriter, DirWriterProvider, InitBlobFn, InitDirFn, Stager};
+use crate::puffin_manager::stager::{
+    BoxWriter, DirWriterProvider, InitBlobFn, InitDirFn, Stager, StagerNotifier,
+};
 use crate::puffin_manager::{BlobGuard, DirGuard};
 
 const DELETE_QUEUE_SIZE: usize = 10240;

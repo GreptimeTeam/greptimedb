@@ -40,8 +40,8 @@ use greptime_proto::substrait_extension as pb;
 use prost::Message;
 use snafu::ResultExt;
 
-use super::Millisecond;
 use crate::error::{ColumnNotFoundSnafu, DataFusionPlanningSnafu, DeserializeSnafu, Result};
+use crate::extension_plan::Millisecond;
 
 /// `ScalarCalculate` is the custom logical plan to calculate
 /// [`scalar`](https://prometheus.io/docs/prometheus/latest/querying/functions/#scalar)

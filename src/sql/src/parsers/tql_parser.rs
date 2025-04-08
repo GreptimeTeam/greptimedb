@@ -31,9 +31,10 @@ const VERBOSE: &str = "VERBOSE";
 
 use sqlparser::parser::Parser;
 
-use super::error::ConvertToLogicalExpressionSnafu;
 use crate::dialect::GreptimeDbDialect;
-use crate::parsers::error::{EvaluationSnafu, ParserSnafu, TQLError};
+use crate::parsers::error::{
+    ConvertToLogicalExpressionSnafu, EvaluationSnafu, ParserSnafu, TQLError,
+};
 
 /// TQL extension parser, including:
 /// - `TQL EVAL <query>`

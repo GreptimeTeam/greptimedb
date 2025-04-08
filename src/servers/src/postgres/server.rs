@@ -25,8 +25,8 @@ use futures::StreamExt;
 use pgwire::tokio::process_socket;
 use tokio_rustls::TlsAcceptor;
 
-use super::{MakePostgresServerHandler, MakePostgresServerHandlerBuilder};
 use crate::error::Result;
+use crate::postgres::{MakePostgresServerHandler, MakePostgresServerHandlerBuilder};
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::server::{AbortableStream, BaseTcpServer, Server};
 use crate::tls::ReloadableTlsServerConfig;

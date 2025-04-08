@@ -14,8 +14,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::common::KafkaConnectionConfig;
-use crate::config::kafka::common::KafkaTopicConfig;
+use crate::config::kafka::common::{KafkaConnectionConfig, KafkaTopicConfig};
 
 /// Kafka wal configurations for metasrv.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

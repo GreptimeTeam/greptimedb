@@ -22,8 +22,8 @@ use rand::Rng;
 use snafu::ResultExt;
 use tokio::time;
 
-use super::rwlock::OwnedKeyRwLockGuard;
 use crate::error::{self, ProcedurePanicSnafu, Result, RollbackTimesExceededSnafu};
+use crate::local::rwlock::OwnedKeyRwLockGuard;
 use crate::local::{ManagerContext, ProcedureMeta, ProcedureMetaRef};
 use crate::procedure::{Output, StringKey};
 use crate::store::{ProcedureMessage, ProcedureStore};

@@ -17,8 +17,8 @@ use etcd_client::{
     TxnOpResponse as EtcdTxnOpResponse, TxnResponse as EtcdTxnResponse,
 };
 
-use super::{Compare, CompareOp, Txn, TxnOp, TxnOpResponse, TxnResponse};
 use crate::error::{self, Result};
+use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp, TxnOpResponse, TxnResponse};
 use crate::rpc::store::{DeleteRangeResponse, PutResponse, RangeResponse};
 use crate::rpc::KeyValue;
 

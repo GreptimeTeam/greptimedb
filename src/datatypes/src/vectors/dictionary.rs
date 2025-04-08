@@ -21,12 +21,12 @@ use arrow_array::{ArrayRef, DictionaryArray, Int32Array};
 use serde_json::Value as JsonValue;
 use snafu::ResultExt;
 
-use super::operations::VectorOp;
 use crate::data_type::ConcreteDataType;
 use crate::error::{self, Result};
 use crate::serialize::Serializable;
 use crate::types::DictionaryType;
 use crate::value::{Value, ValueRef};
+use crate::vectors::operations::VectorOp;
 use crate::vectors::{self, Helper, Validity, Vector, VectorRef};
 
 /// Vector of dictionaries, basically backed by Arrow's `DictionaryArray`.

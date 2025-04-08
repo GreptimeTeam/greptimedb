@@ -23,7 +23,6 @@ use snafu::{ensure, OptionExt, ResultExt};
 use store_api::manifest::{ManifestVersion, MAX_VERSION, MIN_VERSION};
 use store_api::metadata::RegionMetadataRef;
 
-use super::storage::is_checkpoint_file;
 use crate::error::{
     self, InstallManifestToSnafu, NoCheckpointSnafu, NoManifestsSnafu, RegionStoppedSnafu, Result,
 };
@@ -32,7 +31,9 @@ use crate::manifest::action::{
     RegionMetaActionList,
 };
 use crate::manifest::checkpointer::Checkpointer;
-use crate::manifest::storage::{file_version, is_delta_file, ManifestObjectStore};
+use crate::manifest::storage::{
+    file_version, is_checkpoint_file, is_delta_file, ManifestObjectStore,
+};
 use crate::metrics::MANIFEST_OP_ELAPSED;
 
 /// Options for [RegionManifestManager].

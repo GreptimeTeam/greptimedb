@@ -18,7 +18,7 @@ use serde::Serialize;
 use sqlparser::ast::ObjectName;
 use sqlparser_derive::{Visit, VisitMut};
 
-use super::query::Query;
+use crate::statements::query::Query;
 
 /// Represents a DECLARE CURSOR statement
 ///

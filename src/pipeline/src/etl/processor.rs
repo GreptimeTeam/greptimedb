@@ -45,13 +45,13 @@ use snafu::{OptionExt, ResultExt};
 use timestamp::TimestampProcessor;
 use urlencoding::UrlEncodingProcessor;
 
-use super::field::{Field, Fields};
-use super::PipelineMap;
 use crate::error::{
     Error, FailedParseFieldFromStringSnafu, FieldMustBeTypeSnafu, ProcessorKeyMustBeStringSnafu,
     ProcessorMustBeMapSnafu, ProcessorMustHaveStringKeySnafu, Result, UnsupportedProcessorSnafu,
 };
+use crate::etl::field::{Field, Fields};
 use crate::etl::processor::simple_extract::SimpleExtractProcessor;
+use crate::etl::PipelineMap;
 
 const FIELD_NAME: &str = "field";
 const FIELDS_NAME: &str = "fields";

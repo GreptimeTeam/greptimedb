@@ -34,9 +34,9 @@ use table::TableRef;
 pub use table_names::*;
 
 use self::pg_namespace::oid_map::{PGNamespaceOidMap, PGNamespaceOidMapRef};
-use super::memory_table::MemoryTable;
-use super::utils::tables::u32_column;
-use super::{SystemSchemaProvider, SystemSchemaProviderInner, SystemTableRef};
+use crate::system_schema::memory_table::MemoryTable;
+use crate::system_schema::utils::tables::u32_column;
+use crate::system_schema::{SystemSchemaProvider, SystemSchemaProviderInner, SystemTableRef};
 use crate::CatalogManager;
 
 lazy_static! {

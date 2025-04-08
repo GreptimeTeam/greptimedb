@@ -22,7 +22,7 @@ use opentelemetry_proto::tonic::trace::v1::span::{Event, Link};
 use opentelemetry_proto::tonic::trace::v1::{Span, Status};
 use serde::Serialize;
 
-use super::attributes::Attributes;
+use crate::otlp::trace::attributes::Attributes;
 use crate::otlp::trace::KEY_SERVICE_NAME;
 use crate::otlp::utils::bytes_to_hex_string;
 

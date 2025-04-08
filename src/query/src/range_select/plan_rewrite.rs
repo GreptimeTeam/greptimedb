@@ -42,13 +42,12 @@ use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use table::table::adapter::DfTableProviderAdapter;
 
-use super::plan::Fill;
 use crate::error::{
     CatalogSnafu, DataFusionSnafu, RangeQuerySnafu, Result, TimeIndexNotFoundSnafu,
     UnknownTableSnafu,
 };
 use crate::plan::ExtractExpr;
-use crate::range_select::plan::{RangeFn, RangeSelect};
+use crate::range_select::plan::{Fill, RangeFn, RangeSelect};
 
 /// `RangeExprRewriter` will recursively search certain `Expr`, find all `range_fn` scalar udf contained in `Expr`,
 /// and collect the information required by the RangeSelect query,
