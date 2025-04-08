@@ -376,6 +376,7 @@ mod tests {
     use crate::access_layer::RegionFilePathFactory;
     use crate::read::{Batch, BatchColumn};
     use crate::sst::file::FileId;
+    use crate::sst::index::fulltext_index::applier::builder::{FulltextQuery, FulltextRequest};
     use crate::sst::index::fulltext_index::applier::FulltextIndexApplier;
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
 
@@ -556,7 +557,15 @@ mod tests {
                 object_store.clone(),
                 queries
                     .into_iter()
-                    .map(|(a, b)| (a, b.to_string()))
+                    .map(|(a, b)| {
+                        (
+                            a,
+                            FulltextRequest {
+                                queries: vec![FulltextQuery(b.to_string())],
+                                terms: vec![],
+                            },
+                        )
+                    })
                     .collect(),
                 factory.clone(),
             );

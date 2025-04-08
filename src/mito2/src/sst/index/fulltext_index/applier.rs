@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use common_telemetry::warn;
@@ -28,6 +28,7 @@ use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::error::{ApplyFulltextIndexSnafu, PuffinBuildReaderSnafu, PuffinReadBlobSnafu, Result};
 use crate::metrics::INDEX_APPLY_ELAPSED;
 use crate::sst::file::FileId;
+use crate::sst::index::fulltext_index::applier::builder::FulltextRequest;
 use crate::sst::index::fulltext_index::INDEX_BLOB_TYPE_TANTIVY;
 use crate::sst::index::puffin_manager::{PuffinManagerFactory, SstPuffinDir};
 use crate::sst::index::TYPE_FULLTEXT_INDEX;
@@ -42,8 +43,8 @@ pub struct FulltextIndexApplier {
     /// The region ID.
     region_id: RegionId,
 
-    /// Queries to apply to the index.
-    queries: Vec<(ColumnId, String)>,
+    /// Requests to be applied.
+    requests: HashMap<ColumnId, FulltextRequest>,
 
     /// The puffin manager factory.
     puffin_manager_factory: PuffinManagerFactory,
@@ -66,14 +67,14 @@ impl FulltextIndexApplier {
         region_dir: String,
         region_id: RegionId,
         store: ObjectStore,
-        queries: Vec<(ColumnId, String)>,
+        requests: HashMap<ColumnId, FulltextRequest>,
         puffin_manager_factory: PuffinManagerFactory,
     ) -> Self {
         Self {
             region_dir,
             region_id,
             store,
-            queries,
+            requests,
             puffin_manager_factory,
             file_cache: None,
             puffin_metadata_cache: None,
@@ -108,7 +109,7 @@ impl FulltextIndexApplier {
         let mut inited = false;
         let mut row_ids = BTreeSet::new();
 
-        for (column_id, query) in &self.queries {
+        'outer: for (column_id, request) in &self.requests {
             let dir = self
                 .index_dir_path(file_id, *column_id, file_size_hint)
                 .await?;
@@ -122,20 +123,23 @@ impl FulltextIndexApplier {
 
             let searcher =
                 TantivyFulltextIndexSearcher::new(path).context(ApplyFulltextIndexSnafu)?;
-            let result = searcher
-                .search(query)
-                .await
-                .context(ApplyFulltextIndexSnafu)?;
 
-            if !inited {
-                row_ids = result;
-                inited = true;
-                continue;
-            }
+            for query in &request.queries {
+                let result = searcher
+                    .search(&query.0)
+                    .await
+                    .context(ApplyFulltextIndexSnafu)?;
 
-            row_ids.retain(|id| result.contains(id));
-            if row_ids.is_empty() {
-                break;
+                if !inited {
+                    row_ids = result;
+                    inited = true;
+                    continue;
+                }
+
+                row_ids.retain(|id| result.contains(id));
+                if row_ids.is_empty() {
+                    break 'outer;
+                }
             }
         }
 
