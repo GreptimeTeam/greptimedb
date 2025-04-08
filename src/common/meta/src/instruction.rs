@@ -57,6 +57,8 @@ impl Display for RegionIdent {
 pub struct DowngradeRegionReply {
     /// Returns the `last_entry_id` if available.
     pub last_entry_id: Option<u64>,
+    /// Returns the `metadata_last_entry_id` if available (Only available for metric engine).
+    pub metadata_last_entry_id: Option<u64>,
     /// Indicates whether the region exists.
     pub exists: bool,
     /// Return error if any during the operation.
@@ -136,16 +138,14 @@ pub struct DowngradeRegion {
     /// `None` stands for don't flush before downgrading the region.
     #[serde(default)]
     pub flush_timeout: Option<Duration>,
-    /// Rejects all write requests after flushing.
-    pub reject_write: bool,
 }
 
 impl Display for DowngradeRegion {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "DowngradeRegion(region_id={}, flush_timeout={:?}, rejct_write={})",
-            self.region_id, self.flush_timeout, self.reject_write
+            "DowngradeRegion(region_id={}, flush_timeout={:?})",
+            self.region_id, self.flush_timeout,
         )
     }
 }
@@ -157,6 +157,8 @@ pub struct UpgradeRegion {
     pub region_id: RegionId,
     /// The `last_entry_id` of old leader region.
     pub last_entry_id: Option<u64>,
+    /// The `last_entry_id` of old leader metadata region (Only used for metrics).
+    pub metadata_last_entry_id: Option<u64>,
     /// The timeout of waiting for a wal replay.
     ///
     /// `None` stands for no wait,

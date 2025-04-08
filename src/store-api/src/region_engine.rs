@@ -47,6 +47,15 @@ pub enum SettableRegionRoleState {
     DowngradingLeader,
 }
 
+impl Display for SettableRegionRoleState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SettableRegionRoleState::Follower => write!(f, "Follower"),
+            SettableRegionRoleState::DowngradingLeader => write!(f, "Leader(Downgrading)"),
+        }
+    }
+}
+
 impl From<SettableRegionRoleState> for RegionRole {
     fn from(value: SettableRegionRoleState) -> Self {
         match value {
@@ -63,20 +72,78 @@ pub struct SetRegionRoleStateRequest {
     region_role_state: SettableRegionRoleState,
 }
 
+/// The success response of setting region role state.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SetRegionRoleStateSuccess {
+    File,
+    Mito {
+        last_entry_id: entry::Id,
+    },
+    Metric {
+        last_entry_id: entry::Id,
+        metadata_last_entry_id: entry::Id,
+    },
+}
+
+impl SetRegionRoleStateSuccess {
+    /// Returns a [SetRegionRoleStateSuccess::File].
+    pub fn file() -> Self {
+        Self::File
+    }
+
+    /// Returns a [SetRegionRoleStateSuccess::Mito] with the `last_entry_id`.
+    pub fn mito(last_entry_id: entry::Id) -> Self {
+        SetRegionRoleStateSuccess::Mito { last_entry_id }
+    }
+
+    /// Returns a [SetRegionRoleStateSuccess::Metric] with the `last_entry_id` and `metadata_last_entry_id`.
+    pub fn metric(last_entry_id: entry::Id, metadata_last_entry_id: entry::Id) -> Self {
+        SetRegionRoleStateSuccess::Metric {
+            last_entry_id,
+            metadata_last_entry_id,
+        }
+    }
+}
+
+impl SetRegionRoleStateSuccess {
+    /// Returns the last entry id of the region.
+    pub fn last_entry_id(&self) -> Option<entry::Id> {
+        match self {
+            SetRegionRoleStateSuccess::File => None,
+            SetRegionRoleStateSuccess::Mito { last_entry_id } => Some(*last_entry_id),
+            SetRegionRoleStateSuccess::Metric { last_entry_id, .. } => Some(*last_entry_id),
+        }
+    }
+
+    /// Returns the last entry id of the metadata of the region.
+    pub fn metadata_last_entry_id(&self) -> Option<entry::Id> {
+        match self {
+            SetRegionRoleStateSuccess::File => None,
+            SetRegionRoleStateSuccess::Mito { .. } => None,
+            SetRegionRoleStateSuccess::Metric {
+                metadata_last_entry_id,
+                ..
+            } => Some(*metadata_last_entry_id),
+        }
+    }
+}
+
 /// The response of setting region role state.
 #[derive(Debug, PartialEq, Eq)]
 pub enum SetRegionRoleStateResponse {
-    Success {
-        /// Returns `last_entry_id` of the region if available(e.g., It's not available in file engine).
-        last_entry_id: Option<entry::Id>,
-    },
+    Success(SetRegionRoleStateSuccess),
     NotFound,
 }
 
 impl SetRegionRoleStateResponse {
-    /// Returns a [SetRegionRoleStateResponse::Success] with the `last_entry_id`.
-    pub fn success(last_entry_id: Option<entry::Id>) -> Self {
-        Self::Success { last_entry_id }
+    /// Returns a [SetRegionRoleStateResponse::Success] with the `File` success.
+    pub fn success(success: SetRegionRoleStateSuccess) -> Self {
+        Self::Success(success)
+    }
+
+    /// Returns true if the response is a [SetRegionRoleStateResponse::NotFound].
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, SetRegionRoleStateResponse::NotFound)
     }
 }
 

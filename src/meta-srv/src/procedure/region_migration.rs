@@ -127,6 +127,8 @@ pub struct VolatileContext {
     leader_region_lease_deadline: Option<Instant>,
     /// The last_entry_id of leader region.
     leader_region_last_entry_id: Option<u64>,
+    /// The last_entry_id of leader metadata region (Only used for metrics).
+    leader_region_metadata_last_entry_id: Option<u64>,
     /// Elapsed time of downgrading region and upgrading region.
     operations_elapsed: Duration,
 }
@@ -147,6 +149,11 @@ impl VolatileContext {
     /// Sets the `leader_region_last_entry_id`.
     pub fn set_last_entry_id(&mut self, last_entry_id: u64) {
         self.leader_region_last_entry_id = Some(last_entry_id)
+    }
+
+    /// Sets the `leader_region_metadata_last_entry_id`.
+    pub fn set_metadata_last_entry_id(&mut self, last_entry_id: u64) {
+        self.leader_region_metadata_last_entry_id = Some(last_entry_id);
     }
 }
 

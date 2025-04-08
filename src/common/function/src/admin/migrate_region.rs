@@ -25,12 +25,12 @@ use session::context::QueryContextRef;
 use crate::handlers::ProcedureServiceHandlerRef;
 use crate::helper::cast_u64;
 
-const DEFAULT_TIMEOUT_SECS: u64 = 30;
+const DEFAULT_TIMEOUT_SECS: u64 = 120;
 
 /// A function to migrate a region from source peer to target peer.
 /// Returns the submitted procedure id if success. Only available in cluster mode.
 ///
-/// - `migrate_region(region_id, from_peer, to_peer)`, with timeout(30 seconds).
+/// - `migrate_region(region_id, from_peer, to_peer)`, with timeout(120 seconds).
 /// - `migrate_region(region_id, from_peer, to_peer, timeout(secs))`.
 ///
 /// The parameters:

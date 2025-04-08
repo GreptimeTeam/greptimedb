@@ -40,7 +40,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
 use store_api::region_engine::{
     RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef, RegionStatistic,
-    SetRegionRoleStateResponse, SettableRegionRoleState,
+    SetRegionRoleStateResponse, SetRegionRoleStateSuccess, SettableRegionRoleState,
 };
 use store_api::region_request::{BatchRegionDdlRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
@@ -352,17 +352,39 @@ impl RegionEngine for MetricEngine {
         region_id: RegionId,
         region_role_state: SettableRegionRoleState,
     ) -> std::result::Result<SetRegionRoleStateResponse, BoxedError> {
-        self.inner
+        let metadata_result = match self
+            .inner
             .mito
             .set_region_role_state_gracefully(
                 utils::to_metadata_region_id(region_id),
                 region_role_state,
             )
-            .await?;
-        self.inner
+            .await?
+        {
+            SetRegionRoleStateResponse::Success(success) => success,
+            SetRegionRoleStateResponse::NotFound => {
+                return Ok(SetRegionRoleStateResponse::NotFound)
+            }
+        };
+
+        let data_result = match self
+            .inner
             .mito
             .set_region_role_state_gracefully(region_id, region_role_state)
-            .await
+            .await?
+        {
+            SetRegionRoleStateResponse::Success(success) => success,
+            SetRegionRoleStateResponse::NotFound => {
+                return Ok(SetRegionRoleStateResponse::NotFound)
+            }
+        };
+
+        Ok(SetRegionRoleStateResponse::success(
+            SetRegionRoleStateSuccess::metric(
+                data_result.last_entry_id().unwrap_or_default(),
+                metadata_result.last_entry_id().unwrap_or_default(),
+            ),
+        ))
     }
 
     /// Returns the physical region role.

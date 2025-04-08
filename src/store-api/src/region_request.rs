@@ -1105,6 +1105,10 @@ pub struct RegionCatchupRequest {
     /// The `entry_id` that was expected to reply to.
     /// `None` stands replaying to latest.
     pub entry_id: Option<entry::Id>,
+    /// Used for metrics metadata region.
+    /// The `entry_id` that was expected to reply to.
+    /// `None` stands replaying to latest.
+    pub metadata_entry_id: Option<entry::Id>,
     /// The hint for replaying memtable.
     pub location_id: Option<u64>,
 }
