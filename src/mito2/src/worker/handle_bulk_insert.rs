@@ -47,15 +47,21 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         for req in request.payloads {
             match req {
                 BulkInsertPayload::ArrowIpc(df_record_batch) => {
-                    let rows = Rows {
-                        schema: schema.clone(),
-                        rows: record_batch_to_rows(&region_metadata, &df_record_batch),
+                    let rows = match record_batch_to_rows(&region_metadata, &df_record_batch) {
+                        Ok(rows) => rows,
+                        Err(e) => {
+                            sender.send(Err(e));
+                            return;
+                        }
                     };
 
                     let write_request = match WriteRequest::new(
                         region_metadata.region_id,
                         OpType::Put,
-                        rows,
+                        Rows {
+                            schema: schema.clone(),
+                            rows,
+                        },
                         Some(region_metadata.clone()),
                     ) {
                         Ok(write_request) => write_request,
@@ -106,7 +112,7 @@ fn region_metadata_to_column_schema(
                     data_type: c.column_schema.data_type.clone(),
                 })?;
 
-            Ok(api::v1::ColumnSchema {
+            Ok(ColumnSchema {
                 column_name: c.column_schema.name.clone(),
                 datatype: wrapper.datatype() as i32,
                 semantic_type: c.semantic_type as i32,
@@ -116,18 +122,25 @@ fn region_metadata_to_column_schema(
         .collect::<error::Result<_>>()
 }
 
-fn record_batch_to_rows(region_metadata: &RegionMetadataRef, rb: &DfRecordBatch) -> Vec<Row> {
+/// Convert [DfRecordBatch] to gRPC rows.
+fn record_batch_to_rows(
+    region_metadata: &RegionMetadataRef,
+    rb: &DfRecordBatch,
+) -> error::Result<Vec<Row>> {
     let num_rows = rb.num_rows();
     let mut rows = Vec::with_capacity(num_rows);
-
-    let vectors: Vec<_> = region_metadata
+    if num_rows == 0 {
+        return Ok(rows);
+    }
+    let vectors: Vec<Option<VectorRef>> = region_metadata
         .column_metadatas
         .iter()
         .map(|c| {
             rb.column_by_name(&c.column_schema.name)
-                .map(|arr| Helper::try_into_vector(arr).unwrap())
+                .map(|column| Helper::try_into_vector(column).context(error::ConvertVectorSnafu))
+                .transpose()
         })
-        .collect();
+        .collect::<error::Result<_>>()?;
 
     let mut current_row = Vec::with_capacity(region_metadata.column_metadatas.len());
     for row_idx in 0..num_rows {
@@ -137,7 +150,7 @@ fn record_batch_to_rows(region_metadata: &RegionMetadataRef, rb: &DfRecordBatch)
         };
         rows.push(row);
     }
-    rows
+    Ok(rows)
 }
 
 fn row_at(vectors: &[Option<VectorRef>], row_idx: usize, row: &mut Vec<api::v1::Value>) {
@@ -148,5 +161,87 @@ fn row_at(vectors: &[Option<VectorRef>], row_idx: usize, row: &mut Vec<api::v1::
             api::v1::Value { value_data: None }
         };
         row.push(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use api::v1::SemanticType;
+    use datatypes::arrow::array::{Int64Array, TimestampMillisecondArray};
+
+    use super::*;
+    use crate::test_util::meta_util::TestRegionMetadataBuilder;
+
+    fn build_record_batch(num_rows: usize) -> DfRecordBatch {
+        let region_metadata = Arc::new(TestRegionMetadataBuilder::default().build());
+        let schema = region_metadata.schema.arrow_schema().clone();
+        let values = (0..num_rows).map(|v| v as i64).collect::<Vec<_>>();
+        let ts_array = Arc::new(TimestampMillisecondArray::from_iter_values(values.clone()));
+        let k0_array = Arc::new(Int64Array::from_iter_values(values.clone()));
+        let v0_array = Arc::new(Int64Array::from_iter_values(values));
+        DfRecordBatch::try_new(schema, vec![ts_array, k0_array, v0_array]).unwrap()
+    }
+
+    #[test]
+    fn test_region_metadata_to_column_schema() {
+        let region_metadata = Arc::new(TestRegionMetadataBuilder::default().build());
+        let result = region_metadata_to_column_schema(&region_metadata).unwrap();
+        assert_eq!(result.len(), 3);
+
+        assert_eq!(result[0].column_name, "ts");
+        assert_eq!(result[0].semantic_type, SemanticType::Timestamp as i32);
+
+        assert_eq!(result[1].column_name, "k0");
+        assert_eq!(result[1].semantic_type, SemanticType::Tag as i32);
+
+        assert_eq!(result[2].column_name, "v0");
+        assert_eq!(result[2].semantic_type, SemanticType::Field as i32);
+    }
+
+    #[test]
+    fn test_record_batch_to_rows() {
+        // Create record batch
+        let region_metadata = Arc::new(TestRegionMetadataBuilder::default().build());
+        let record_batch = build_record_batch(10);
+        let rows = record_batch_to_rows(&region_metadata, &record_batch).unwrap();
+
+        assert_eq!(rows.len(), 10);
+        assert_eq!(rows[0].values.len(), 3);
+
+        for (row_idx, row) in rows.iter().enumerate().take(10) {
+            assert_eq!(
+                row.values[0].value_data.as_ref().unwrap(),
+                &api::v1::value::ValueData::TimestampMillisecondValue(row_idx as i64)
+            );
+        }
+    }
+
+    #[test]
+    fn test_record_batch_to_rows_schema_mismatch() {
+        let region_metadata = Arc::new(TestRegionMetadataBuilder::default().num_fields(2).build());
+        let record_batch = build_record_batch(1);
+
+        let rows = record_batch_to_rows(&region_metadata, &record_batch).unwrap();
+        assert_eq!(rows.len(), 1);
+
+        // Check first row
+        let row1 = &rows[0];
+        assert_eq!(row1.values.len(), 4);
+        assert_eq!(
+            row1.values[0].value_data.as_ref().unwrap(),
+            &api::v1::value::ValueData::TimestampMillisecondValue(0)
+        );
+        assert_eq!(
+            row1.values[1].value_data.as_ref().unwrap(),
+            &api::v1::value::ValueData::I64Value(0)
+        );
+        assert_eq!(
+            row1.values[2].value_data.as_ref().unwrap(),
+            &api::v1::value::ValueData::I64Value(0)
+        );
+
+        assert!(row1.values[3].value_data.is_none());
     }
 }
