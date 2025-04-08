@@ -192,3 +192,46 @@ DROP TABLE phy;
 
 Affected Rows: 0
 
+CREATE TABLE grpc_latencies (
+  ts TIMESTAMP TIME INDEX,
+  host STRING,
+  method_name STRING,
+  latency DOUBLE,
+  PRIMARY KEY (host, method_name)
+) with('append_mode'='true');
+
+Affected Rows: 0
+
+INSERT INTO grpc_latencies (ts, host, method_name, latency) VALUES
+  ('2024-07-11 20:00:06', 'host1', 'GetUser', 103.0);
+
+Affected Rows: 1
+
+SELECT * FROM grpc_latencies;
+
++---------------------+-------+-------------+---------+
+| ts                  | host  | method_name | latency |
++---------------------+-------+-------------+---------+
+| 2024-07-11T20:00:06 | host1 | GetUser     | 103.0   |
++---------------------+-------+-------------+---------+
+
+ALTER TABLE grpc_latencies SET ttl = '10d';
+
+Affected Rows: 0
+
+ALTER TABLE grpc_latencies ADD COLUMN home INTEGER FIRST;
+
+Affected Rows: 0
+
+SELECT * FROM grpc_latencies;
+
++------+---------------------+-------+-------------+---------+
+| home | ts                  | host  | method_name | latency |
++------+---------------------+-------+-------------+---------+
+|      | 2024-07-11T20:00:06 | host1 | GetUser     | 103.0   |
++------+---------------------+-------+-------------+---------+
+
+DROP TABLE grpc_latencies;
+
+Affected Rows: 0
+

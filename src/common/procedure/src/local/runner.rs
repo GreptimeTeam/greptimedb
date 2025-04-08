@@ -238,9 +238,32 @@ impl Runner {
                 }
                 ProcedureState::Done { .. } => return,
                 ProcedureState::Failed { .. } => return,
+                ProcedureState::Poisoned { .. } => return,
             }
             self.execute_once(ctx).await;
         }
+    }
+
+    async fn clean_poisons(&mut self) -> Result<()> {
+        let mut error = None;
+        for key in self.meta.poison_keys.iter() {
+            let key = key.to_string();
+            if let Err(e) = self
+                .manager_ctx
+                .poison_manager
+                .delete_poison(key, self.meta.id.to_string())
+                .await
+            {
+                error!(e; "Failed to clean poisons for procedure: {}", self.meta.id);
+                error = Some(e);
+            }
+        }
+
+        // returns the last error if any.
+        if let Some(e) = error {
+            return Err(e);
+        }
+        Ok(())
     }
 
     async fn rollback(&mut self, ctx: &Context, err: Arc<Error>) {
@@ -255,7 +278,7 @@ impl Runner {
     }
 
     async fn prepare_rollback(&mut self, err: Arc<Error>) {
-        if let Err(e) = self.write_procedure_state(err.to_string()).await {
+        if let Err(e) = self.write_rollback_procedure_state(err.to_string()).await {
             self.meta
                 .set_state(ProcedureState::prepare_rollback(Arc::new(e)));
             return;
@@ -288,25 +311,47 @@ impl Runner {
                             return;
                         }
 
+                        // Cleans poisons before persist.
+                        if status.need_clean_poisons() {
+                            if let Err(e) = self.clean_poisons().await {
+                                error!(e; "Failed to clean poison for procedure: {}", self.meta.id);
+                                self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
+                                return;
+                            }
+                        }
+
                         if status.need_persist() {
-                            if let Err(err) = self.persist_procedure().await {
-                                self.meta.set_state(ProcedureState::retrying(Arc::new(err)));
+                            if let Err(e) = self.persist_procedure().await {
+                                error!(e; "Failed to persist procedure: {}", self.meta.id);
+                                self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
                                 return;
                             }
                         }
 
                         match status {
-                            Status::Executing { .. } => (),
+                            Status::Executing { .. } => {}
                             Status::Suspended { subprocedures, .. } => {
                                 self.on_suspended(subprocedures).await;
                             }
                             Status::Done { output } => {
                                 if let Err(e) = self.commit_procedure().await {
+                                    error!(e; "Failed to commit procedure: {}", self.meta.id);
                                     self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
                                     return;
                                 }
 
                                 self.done(output);
+                            }
+                            Status::Poisoned { error, keys } => {
+                                error!(
+                                    error;
+                                    "Procedure {}-{} is poisoned, keys: {:?}",
+                                    self.procedure.type_name(),
+                                    self.meta.id,
+                                    keys,
+                                );
+                                self.meta
+                                    .set_state(ProcedureState::poisoned(keys, Arc::new(error)));
                             }
                         }
                     }
@@ -327,6 +372,14 @@ impl Runner {
                             return;
                         }
 
+                        if e.need_clean_poisons() {
+                            if let Err(e) = self.clean_poisons().await {
+                                error!(e; "Failed to clean poison for procedure: {}", self.meta.id);
+                                self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
+                                return;
+                            }
+                        }
+
                         if e.is_retry_later() {
                             self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
                             return;
@@ -339,7 +392,9 @@ impl Runner {
             }
             ProcedureState::PrepareRollback { error } => self.prepare_rollback(error).await,
             ProcedureState::RollingBack { error } => self.rollback(ctx, error).await,
-            ProcedureState::Failed { .. } | ProcedureState::Done { .. } => (),
+            ProcedureState::Failed { .. }
+            | ProcedureState::Done { .. }
+            | ProcedureState::Poisoned { .. } => (),
         }
     }
 
@@ -372,6 +427,7 @@ impl Runner {
             procedure_state,
             Some(self.meta.id),
             procedure.lock_key(),
+            procedure.poison_keys(),
             procedure.type_name(),
         ));
         let runner = Runner {
@@ -494,7 +550,7 @@ impl Runner {
         Ok(())
     }
 
-    async fn write_procedure_state(&mut self, error: String) -> Result<()> {
+    async fn write_rollback_procedure_state(&mut self, error: String) -> Result<()> {
         // Persists procedure state
         let type_name = self.procedure.type_name().to_string();
         let data = self.procedure.dump()?;
@@ -549,8 +605,10 @@ mod tests {
 
     use super::*;
     use crate::local::test_util;
+    use crate::procedure::PoisonKeys;
     use crate::store::proc_path;
-    use crate::{ContextProvider, Error, LockKey, Procedure};
+    use crate::test_util::InMemoryPoisonStore;
+    use crate::{ContextProvider, Error, LockKey, PoisonKey, Procedure};
 
     const ROOT_ID: &str = "9f805a1f-05f7-490c-9f91-bd56e3cc54c1";
 
@@ -562,7 +620,9 @@ mod tests {
         Runner {
             meta,
             procedure,
-            manager_ctx: Arc::new(ManagerContext::new()),
+            manager_ctx: Arc::new(ManagerContext::new(
+                Arc::new(InMemoryPoisonStore::default()),
+            )),
             step: 0,
             exponential_builder: ExponentialBuilder::default(),
             store,
@@ -587,6 +647,16 @@ mod tests {
         assert_eq!(files, files_in_dir);
     }
 
+    fn context_with_provider(
+        procedure_id: ProcedureId,
+        provider: Arc<dyn ContextProvider>,
+    ) -> Context {
+        Context {
+            procedure_id,
+            provider,
+        }
+    }
+
     fn context_without_provider(procedure_id: ProcedureId) -> Context {
         struct MockProvider;
 
@@ -596,6 +666,14 @@ mod tests {
                 &self,
                 _procedure_id: ProcedureId,
             ) -> Result<Option<ProcedureState>> {
+                unimplemented!()
+            }
+
+            async fn try_put_poison(
+                &self,
+                _key: &PoisonKey,
+                _procedure_id: ProcedureId,
+            ) -> Result<()> {
                 unimplemented!()
             }
         }
@@ -611,6 +689,7 @@ mod tests {
     struct ProcedureAdapter<F> {
         data: String,
         lock_key: LockKey,
+        poison_keys: PoisonKeys,
         exec_fn: F,
         rollback_fn: Option<RollbackFn>,
     }
@@ -620,6 +699,7 @@ mod tests {
             let mut meta = test_util::procedure_meta_for_test();
             meta.id = ProcedureId::parse_str(uuid).unwrap();
             meta.lock_key = self.lock_key.clone();
+            meta.poison_keys = self.poison_keys.clone();
 
             Arc::new(meta)
         }
@@ -657,6 +737,10 @@ mod tests {
         fn lock_key(&self) -> LockKey {
             self.lock_key.clone()
         }
+
+        fn poison_keys(&self) -> PoisonKeys {
+            self.poison_keys.clone()
+        }
     }
 
     async fn execute_once_normal(persist: bool, first_files: &[&str], second_files: &[&str]) {
@@ -665,7 +749,7 @@ mod tests {
             times += 1;
             async move {
                 if times == 1 {
-                    Ok(Status::Executing { persist })
+                    Ok(Status::executing(persist))
                 } else {
                     Ok(Status::done())
                 }
@@ -675,6 +759,7 @@ mod tests {
         let normal = ProcedureAdapter {
             data: "normal".to_string(),
             lock_key: LockKey::single_exclusive("catalog.schema.table"),
+            poison_keys: PoisonKeys::default(),
             exec_fn,
             rollback_fn: None,
         };
@@ -739,6 +824,7 @@ mod tests {
         let suspend = ProcedureAdapter {
             data: "suspend".to_string(),
             lock_key: LockKey::single_exclusive("catalog.schema.table"),
+            poison_keys: PoisonKeys::default(),
             exec_fn,
             rollback_fn: None,
         };
@@ -763,7 +849,7 @@ mod tests {
             async move {
                 if times == 1 {
                     time::sleep(Duration::from_millis(200)).await;
-                    Ok(Status::Executing { persist: true })
+                    Ok(Status::executing(true))
                 } else {
                     Ok(Status::done())
                 }
@@ -773,6 +859,7 @@ mod tests {
         let child = ProcedureAdapter {
             data: "child".to_string(),
             lock_key: LockKey::new_exclusive(keys.iter().map(|k| k.to_string())),
+            poison_keys: PoisonKeys::default(),
             exec_fn,
             rollback_fn: None,
         };
@@ -842,6 +929,7 @@ mod tests {
         let parent = ProcedureAdapter {
             data: "parent".to_string(),
             lock_key: LockKey::single_exclusive("catalog.schema.table"),
+            poison_keys: PoisonKeys::default(),
             exec_fn,
             rollback_fn: None,
         };
@@ -853,7 +941,8 @@ mod tests {
         let object_store = test_util::new_object_store(&dir);
         let procedure_store = Arc::new(ProcedureStore::from_object_store(object_store.clone()));
         let mut runner = new_runner(meta.clone(), Box::new(parent), procedure_store.clone());
-        let manager_ctx = Arc::new(ManagerContext::new());
+        let poison_manager = Arc::new(InMemoryPoisonStore::default());
+        let manager_ctx = Arc::new(ManagerContext::new(poison_manager));
         manager_ctx.start();
         // Manually add this procedure to the manager ctx.
         assert!(manager_ctx.try_insert_procedure(meta));
@@ -885,10 +974,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_running_is_stopped() {
-        let exec_fn = move |_| async move { Ok(Status::Executing { persist: true }) }.boxed();
+        let exec_fn = move |_| async move { Ok(Status::executing(true)) }.boxed();
         let normal = ProcedureAdapter {
             data: "normal".to_string(),
             lock_key: LockKey::single_exclusive("catalog.schema.table"),
+            poison_keys: PoisonKeys::default(),
             exec_fn,
             rollback_fn: None,
         };
@@ -933,6 +1023,7 @@ mod tests {
         let normal = ProcedureAdapter {
             data: "fail".to_string(),
             lock_key: LockKey::single_exclusive("catalog.schema.table"),
+            poison_keys: PoisonKeys::default(),
             exec_fn,
             rollback_fn: None,
         };
@@ -959,6 +1050,7 @@ mod tests {
         let fail = ProcedureAdapter {
             data: "fail".to_string(),
             lock_key: LockKey::single_exclusive("catalog.schema.table"),
+            poison_keys: PoisonKeys::default(),
             exec_fn,
             rollback_fn: None,
         };
@@ -995,6 +1087,7 @@ mod tests {
         let fail = ProcedureAdapter {
             data: "fail".to_string(),
             lock_key: LockKey::single_exclusive("catalog.schema.table"),
+            poison_keys: PoisonKeys::default(),
             exec_fn,
             rollback_fn: Some(Box::new(rollback_fn)),
         };
@@ -1046,6 +1139,7 @@ mod tests {
         let retry_later = ProcedureAdapter {
             data: "retry_later".to_string(),
             lock_key: LockKey::single_exclusive("catalog.schema.table"),
+            poison_keys: PoisonKeys::default(),
             exec_fn,
             rollback_fn: None,
         };
@@ -1082,6 +1176,7 @@ mod tests {
         let exceed_max_retry_later = ProcedureAdapter {
             data: "exceed_max_retry_later".to_string(),
             lock_key: LockKey::single_exclusive("catalog.schema.table"),
+            poison_keys: PoisonKeys::default(),
             exec_fn,
             rollback_fn: None,
         };
@@ -1117,6 +1212,7 @@ mod tests {
         let exceed_max_retry_later = ProcedureAdapter {
             data: "exceed_max_rollback".to_string(),
             lock_key: LockKey::single_exclusive("catalog.schema.table"),
+            poison_keys: PoisonKeys::default(),
             exec_fn,
             rollback_fn: Some(Box::new(rollback_fn)),
         };
@@ -1159,6 +1255,7 @@ mod tests {
         let retry_later = ProcedureAdapter {
             data: "rollback_after_retry_fail".to_string(),
             lock_key: LockKey::single_exclusive("catalog.schema.table"),
+            poison_keys: PoisonKeys::default(),
             exec_fn,
             rollback_fn: Some(Box::new(rollback_fn)),
         };
@@ -1203,6 +1300,7 @@ mod tests {
                     let fail = ProcedureAdapter {
                         data: "fail".to_string(),
                         lock_key: LockKey::single_exclusive("catalog.schema.table.region-0"),
+                        poison_keys: PoisonKeys::default(),
                         exec_fn,
                         rollback_fn: None,
                     };
@@ -1238,6 +1336,7 @@ mod tests {
         let parent = ProcedureAdapter {
             data: "parent".to_string(),
             lock_key: LockKey::single_exclusive("catalog.schema.table"),
+            poison_keys: PoisonKeys::default(),
             exec_fn,
             rollback_fn: None,
         };
@@ -1248,7 +1347,8 @@ mod tests {
         let object_store = test_util::new_object_store(&dir);
         let procedure_store = Arc::new(ProcedureStore::from_object_store(object_store.clone()));
         let mut runner = new_runner(meta.clone(), Box::new(parent), procedure_store);
-        let manager_ctx = Arc::new(ManagerContext::new());
+        let poison_manager = Arc::new(InMemoryPoisonStore::default());
+        let manager_ctx = Arc::new(ManagerContext::new(poison_manager));
         manager_ctx.start();
         // Manually add this procedure to the manager ctx.
         assert!(manager_ctx.try_insert_procedure(meta.clone()));
@@ -1260,5 +1360,328 @@ mod tests {
         assert!(manager_ctx.key_lock.is_empty());
         let err = meta.state().error().unwrap().output_msg();
         assert!(err.contains("subprocedure failed"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_execute_with_clean_poisons() {
+        common_telemetry::init_default_ut_logging();
+        let mut times = 0;
+        let poison_key = PoisonKey::new("table/1024");
+        let moved_poison_key = poison_key.clone();
+        let exec_fn = move |ctx: Context| {
+            times += 1;
+            let poison_key = moved_poison_key.clone();
+            async move {
+                if times == 1 {
+                    // Put the poison to the context.
+                    ctx.provider
+                        .try_put_poison(&poison_key, ctx.procedure_id)
+                        .await
+                        .unwrap();
+
+                    Ok(Status::executing(true))
+                } else {
+                    Ok(Status::executing_with_clean_poisons(true))
+                }
+            }
+            .boxed()
+        };
+        let poison = ProcedureAdapter {
+            data: "poison".to_string(),
+            lock_key: LockKey::single_exclusive("catalog.schema.table"),
+            poison_keys: PoisonKeys::new(vec![poison_key.clone()]),
+            exec_fn,
+            rollback_fn: None,
+        };
+
+        let dir = create_temp_dir("clean_poisons");
+        let meta = poison.new_meta(ROOT_ID);
+
+        let object_store = test_util::new_object_store(&dir);
+        let procedure_store = Arc::new(ProcedureStore::from_object_store(object_store.clone()));
+        let mut runner = new_runner(meta.clone(), Box::new(poison), procedure_store.clone());
+
+        // Use the manager ctx as the context provider.
+        let ctx = context_with_provider(
+            meta.id,
+            runner.manager_ctx.clone() as Arc<dyn ContextProvider>,
+        );
+        // Manually add this procedure to the manager ctx.
+        runner
+            .manager_ctx
+            .procedures
+            .write()
+            .unwrap()
+            .insert(meta.id, runner.meta.clone());
+
+        runner.manager_ctx.start();
+        runner.execute_once(&ctx).await;
+        let state = runner.meta.state();
+        assert!(state.is_running(), "{state:?}");
+
+        let procedure_id = runner
+            .manager_ctx
+            .poison_manager
+            .get_poison(&poison_key.to_string())
+            .await
+            .unwrap();
+        // poison key should be exist.
+        assert!(procedure_id.is_some());
+
+        runner.execute_once(&ctx).await;
+        let state = runner.meta.state();
+        assert!(state.is_running(), "{state:?}");
+
+        let procedure_id = runner
+            .manager_ctx
+            .poison_manager
+            .get_poison(&poison_key.to_string())
+            .await
+            .unwrap();
+        // poison key should be deleted.
+        assert!(procedure_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_execute_error_with_clean_poisons() {
+        common_telemetry::init_default_ut_logging();
+        let mut times = 0;
+        let poison_key = PoisonKey::new("table/1024");
+        let moved_poison_key = poison_key.clone();
+        let exec_fn = move |ctx: Context| {
+            times += 1;
+            let poison_key = moved_poison_key.clone();
+            async move {
+                if times == 1 {
+                    // Put the poison to the context.
+                    ctx.provider
+                        .try_put_poison(&poison_key, ctx.procedure_id)
+                        .await
+                        .unwrap();
+
+                    Ok(Status::executing(true))
+                } else {
+                    Err(Error::external_and_clean_poisons(MockError::new(
+                        StatusCode::Unexpected,
+                    )))
+                }
+            }
+            .boxed()
+        };
+        let poison = ProcedureAdapter {
+            data: "poison".to_string(),
+            lock_key: LockKey::single_exclusive("catalog.schema.table"),
+            poison_keys: PoisonKeys::new(vec![poison_key.clone()]),
+            exec_fn,
+            rollback_fn: None,
+        };
+
+        let dir = create_temp_dir("error_with_clean_poisons");
+        let meta = poison.new_meta(ROOT_ID);
+
+        let object_store = test_util::new_object_store(&dir);
+        let procedure_store = Arc::new(ProcedureStore::from_object_store(object_store.clone()));
+        let mut runner = new_runner(meta.clone(), Box::new(poison), procedure_store.clone());
+
+        // Use the manager ctx as the context provider.
+        let ctx = context_with_provider(
+            meta.id,
+            runner.manager_ctx.clone() as Arc<dyn ContextProvider>,
+        );
+        // Manually add this procedure to the manager ctx.
+        runner
+            .manager_ctx
+            .procedures
+            .write()
+            .unwrap()
+            .insert(meta.id, runner.meta.clone());
+
+        runner.manager_ctx.start();
+        runner.execute_once(&ctx).await;
+        let state = runner.meta.state();
+        assert!(state.is_running(), "{state:?}");
+
+        let procedure_id = runner
+            .manager_ctx
+            .poison_manager
+            .get_poison(&poison_key.to_string())
+            .await
+            .unwrap();
+        // poison key should be exist.
+        assert!(procedure_id.is_some());
+
+        runner.execute_once(&ctx).await;
+        let state = runner.meta.state();
+        assert!(state.is_prepare_rollback(), "{state:?}");
+
+        let procedure_id = runner
+            .manager_ctx
+            .poison_manager
+            .get_poison(&poison_key.to_string())
+            .await
+            .unwrap();
+        // poison key should be deleted.
+        assert!(procedure_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_execute_failed_after_set_poison() {
+        let mut times = 0;
+        let poison_key = PoisonKey::new("table/1024");
+        let moved_poison_key = poison_key.clone();
+        let exec_fn = move |ctx: Context| {
+            times += 1;
+            let poison_key = moved_poison_key.clone();
+            async move {
+                if times == 1 {
+                    Ok(Status::executing(true))
+                } else {
+                    // Put the poison to the context.
+                    ctx.provider
+                        .try_put_poison(&poison_key, ctx.procedure_id)
+                        .await
+                        .unwrap();
+                    Err(Error::external(MockError::new(StatusCode::Unexpected)))
+                }
+            }
+            .boxed()
+        };
+        let poison = ProcedureAdapter {
+            data: "poison".to_string(),
+            lock_key: LockKey::single_exclusive("catalog.schema.table"),
+            poison_keys: PoisonKeys::new(vec![poison_key.clone()]),
+            exec_fn,
+            rollback_fn: None,
+        };
+
+        let dir = create_temp_dir("poison");
+        let meta = poison.new_meta(ROOT_ID);
+
+        let object_store = test_util::new_object_store(&dir);
+        let procedure_store = Arc::new(ProcedureStore::from_object_store(object_store.clone()));
+        let mut runner = new_runner(meta.clone(), Box::new(poison), procedure_store.clone());
+
+        // Use the manager ctx as the context provider.
+        let ctx = context_with_provider(
+            meta.id,
+            runner.manager_ctx.clone() as Arc<dyn ContextProvider>,
+        );
+        // Manually add this procedure to the manager ctx.
+        runner
+            .manager_ctx
+            .procedures
+            .write()
+            .unwrap()
+            .insert(meta.id, runner.meta.clone());
+
+        runner.manager_ctx.start();
+        runner.execute_once(&ctx).await;
+        let state = runner.meta.state();
+        assert!(state.is_running(), "{state:?}");
+
+        runner.execute_once(&ctx).await;
+        let state = runner.meta.state();
+        assert!(state.is_prepare_rollback(), "{state:?}");
+        assert!(meta.state().is_prepare_rollback());
+
+        runner.execute_once(&ctx).await;
+        let state = runner.meta.state();
+        assert!(state.is_failed(), "{state:?}");
+        assert!(meta.state().is_failed());
+
+        // Check the poison is set.
+        let procedure_id = runner
+            .manager_ctx
+            .poison_manager
+            .get_poison(&poison_key.to_string())
+            .await
+            .unwrap()
+            .unwrap();
+
+        // If the procedure is poisoned, the poison key shouldn't be deleted.
+        assert_eq!(&procedure_id.to_string(), ROOT_ID);
+    }
+
+    #[tokio::test]
+    async fn test_execute_poisoned() {
+        let mut times = 0;
+        let poison_key = PoisonKey::new("table/1024");
+        let moved_poison_key = poison_key.clone();
+        let exec_fn = move |ctx: Context| {
+            times += 1;
+            let poison_key = moved_poison_key.clone();
+            async move {
+                if times == 1 {
+                    Ok(Status::executing(true))
+                } else {
+                    // Put the poison to the context.
+                    ctx.provider
+                        .try_put_poison(&poison_key, ctx.procedure_id)
+                        .await
+                        .unwrap();
+                    Ok(Status::Poisoned {
+                        keys: PoisonKeys::new(vec![poison_key.clone()]),
+                        error: Error::external(MockError::new(StatusCode::Unexpected)),
+                    })
+                }
+            }
+            .boxed()
+        };
+        let poison = ProcedureAdapter {
+            data: "poison".to_string(),
+            lock_key: LockKey::single_exclusive("catalog.schema.table"),
+            poison_keys: PoisonKeys::new(vec![poison_key.clone()]),
+            exec_fn,
+            rollback_fn: None,
+        };
+
+        let dir = create_temp_dir("poison");
+        let meta = poison.new_meta(ROOT_ID);
+
+        let object_store = test_util::new_object_store(&dir);
+        let procedure_store = Arc::new(ProcedureStore::from_object_store(object_store.clone()));
+        let mut runner = new_runner(meta.clone(), Box::new(poison), procedure_store.clone());
+
+        // Use the manager ctx as the context provider.
+        let ctx = context_with_provider(
+            meta.id,
+            runner.manager_ctx.clone() as Arc<dyn ContextProvider>,
+        );
+        // Manually add this procedure to the manager ctx.
+        runner
+            .manager_ctx
+            .procedures
+            .write()
+            .unwrap()
+            .insert(meta.id, runner.meta.clone());
+
+        runner.manager_ctx.start();
+        runner.execute_once(&ctx).await;
+        let state = runner.meta.state();
+        assert!(state.is_running(), "{state:?}");
+
+        runner.execute_once(&ctx).await;
+        let state = runner.meta.state();
+        assert!(state.is_poisoned(), "{state:?}");
+        assert!(meta.state().is_poisoned());
+        check_files(
+            &object_store,
+            &procedure_store,
+            ctx.procedure_id,
+            &["0000000000.step"],
+        )
+        .await;
+
+        // Check the poison is set.
+        let procedure_id = runner
+            .manager_ctx
+            .poison_manager
+            .get_poison(&poison_key.to_string())
+            .await
+            .unwrap()
+            .unwrap();
+
+        // If the procedure is poisoned, the poison key shouldn't be deleted.
+        assert_eq!(procedure_id, ROOT_ID);
     }
 }

@@ -468,6 +468,7 @@ mod test {
                 &[GrantedRegion {
                     region_id: region_id.as_u64(),
                     role: api::v1::meta::RegionRole::Leader.into(),
+                    extensions: HashMap::new(),
                 }],
                 Instant::now() + Duration::from_millis(200),
             )

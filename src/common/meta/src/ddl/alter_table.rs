@@ -22,30 +22,31 @@ use std::vec;
 use api::v1::alter_table_expr::Kind;
 use api::v1::RenameTable;
 use async_trait::async_trait;
-use common_error::ext::ErrorExt;
-use common_error::status_code::StatusCode;
+use common_error::ext::BoxedError;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure, Status, StringKey,
+    Context as ProcedureContext, ContextProvider, Error as ProcedureError, LockKey, PoisonKey,
+    PoisonKeys, Procedure, ProcedureId, Status, StringKey,
 };
 use common_telemetry::{debug, error, info};
 use futures::future;
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
+use snafu::{ensure, ResultExt};
 use store_api::storage::RegionId;
 use strum::AsRefStr;
 use table::metadata::{RawTableInfo, TableId, TableInfo};
 use table::table_reference::TableReference;
 
 use crate::cache_invalidator::Context;
-use crate::ddl::utils::add_peer_context_if_needed;
+use crate::ddl::utils::{add_peer_context_if_needed, handle_multiple_results, MultipleResults};
 use crate::ddl::DdlContext;
-use crate::error::{Error, Result};
+use crate::error::{AbortProcedureSnafu, Error, NoLeaderSnafu, PutPoisonSnafu, Result};
 use crate::instruction::CacheIdent;
 use crate::key::table_info::TableInfoValue;
 use crate::key::{DeserializedValueWithBytes, RegionDistribution};
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
 use crate::metrics;
+use crate::poison_key::table_poison_key;
 use crate::rpc::ddl::AlterTableTask;
 use crate::rpc::router::{find_leader_regions, find_leaders, region_distribution};
 
@@ -104,7 +105,27 @@ impl AlterTableProcedure {
         Ok(Status::executing(true))
     }
 
-    pub async fn submit_alter_region_requests(&mut self) -> Result<Status> {
+    fn table_poison_key(&self) -> PoisonKey {
+        table_poison_key(self.data.table_id())
+    }
+
+    async fn put_poison(
+        &self,
+        ctx_provider: &dyn ContextProvider,
+        procedure_id: ProcedureId,
+    ) -> Result<()> {
+        let poison_key = self.table_poison_key();
+        ctx_provider
+            .try_put_poison(&poison_key, procedure_id)
+            .await
+            .context(PutPoisonSnafu)
+    }
+
+    pub async fn submit_alter_region_requests(
+        &mut self,
+        procedure_id: ProcedureId,
+        ctx_provider: &dyn ContextProvider,
+    ) -> Result<Status> {
         let table_id = self.data.table_id();
         let (_, physical_table_route) = self
             .context
@@ -127,6 +148,9 @@ impl AlterTableProcedure {
             alter_kind,
         );
 
+        ensure!(!leaders.is_empty(), NoLeaderSnafu { table_id });
+        // Puts the poison before submitting alter region requests to datanodes.
+        self.put_poison(ctx_provider, procedure_id).await?;
         for datanode in leaders {
             let requester = self.context.node_manager.datanode(&datanode).await;
             let regions = find_leader_regions(&physical_table_route.region_routes, &datanode);
@@ -140,28 +164,51 @@ impl AlterTableProcedure {
                 let requester = requester.clone();
 
                 alter_region_tasks.push(async move {
-                    if let Err(err) = requester.handle(request).await {
-                        if err.status_code() != StatusCode::RequestOutdated {
-                            // Treat request outdated as success.
-                            // The engine will throw this code when the schema version not match.
-                            // As this procedure has locked the table, the only reason for this error
-                            // is procedure is succeeded before and is retrying.
-                            return Err(add_peer_context_if_needed(datanode)(err));
-                        }
-                    }
-                    Ok(())
+                    requester
+                        .handle(request)
+                        .await
+                        .map_err(add_peer_context_if_needed(datanode))
                 });
             }
         }
 
-        future::join_all(alter_region_tasks)
+        let results = future::join_all(alter_region_tasks)
             .await
             .into_iter()
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Vec<_>>();
 
-        self.data.state = AlterTableState::UpdateMetadata;
+        match handle_multiple_results(results) {
+            MultipleResults::PartialRetryable(error) => {
+                // Just returns the error, and wait for the next try.
+                Err(error)
+            }
+            MultipleResults::PartialNonRetryable(error) => {
+                error!(error; "Partial non-retryable errors occurred during alter table, table {}, table_id: {}", self.data.table_ref(), self.data.table_id());
+                // No retry will be done.
+                Ok(Status::poisoned(
+                    Some(self.table_poison_key()),
+                    ProcedureError::external(error),
+                ))
+            }
+            MultipleResults::AllRetryable(error) => {
+                // Just returns the error, and wait for the next try.
+                Err(error)
+            }
+            MultipleResults::Ok => {
+                self.data.state = AlterTableState::UpdateMetadata;
+                Ok(Status::executing_with_clean_poisons(true))
+            }
+            MultipleResults::AllNonRetryable(error) => {
+                error!(error; "All alter requests returned non-retryable errors for table {}, table_id: {}", self.data.table_ref(), self.data.table_id());
+                // It assumes the metadata on datanode is not changed.
+                // Case: The alter region request is sent but not applied. (e.g., InvalidArgument)
 
-        Ok(Status::executing(true))
+                let err = BoxedError::new(error);
+                Err(err).context(AbortProcedureSnafu {
+                    clean_poisons: true,
+                })
+            }
+        }
     }
 
     /// Update table metadata.
@@ -250,10 +297,12 @@ impl Procedure for AlterTableProcedure {
         Self::TYPE_NAME
     }
 
-    async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
+    async fn execute(&mut self, ctx: &ProcedureContext) -> ProcedureResult<Status> {
         let error_handler = |e: Error| {
             if e.is_retry_later() {
                 ProcedureError::retry_later(e)
+            } else if e.need_clean_poisons() {
+                ProcedureError::external_and_clean_poisons(e)
             } else {
                 ProcedureError::external(e)
             }
@@ -269,7 +318,10 @@ impl Procedure for AlterTableProcedure {
 
         match state {
             AlterTableState::Prepare => self.on_prepare().await,
-            AlterTableState::SubmitAlterRegionRequests => self.submit_alter_region_requests().await,
+            AlterTableState::SubmitAlterRegionRequests => {
+                self.submit_alter_region_requests(ctx.procedure_id, ctx.provider.as_ref())
+                    .await
+            }
             AlterTableState::UpdateMetadata => self.on_update_metadata().await,
             AlterTableState::InvalidateTableCache => self.on_broadcast().await,
         }
@@ -284,6 +336,10 @@ impl Procedure for AlterTableProcedure {
         let key = self.lock_key_inner();
 
         LockKey::new(key)
+    }
+
+    fn poison_keys(&self) -> PoisonKeys {
+        PoisonKeys::new(vec![self.table_poison_key()])
     }
 }
 
