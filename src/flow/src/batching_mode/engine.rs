@@ -30,8 +30,8 @@ use store_api::storage::RegionId;
 use table::metadata::TableId;
 use tokio::sync::{oneshot, RwLock};
 
-use super::frontend_client::FrontendClient;
 use crate::adapter::{CreateFlowArgs, FlowId, TableName};
+use crate::batching_mode::frontend_client::FrontendClient;
 use crate::batching_mode::task::BatchingTask;
 use crate::batching_mode::time_window::{find_time_window_expr, TimeWindowExpr};
 use crate::batching_mode::utils::sql_to_df_plan;
