@@ -600,12 +600,14 @@ impl RangeManipulateStream {
         let mut last_range_start = 0;
         let mut start_delta = 0;
         for curr_ts in (start..=end).step_by(self.interval as _) {
-            // determin range start
+            // determine range start
             let start_ts = curr_ts - self.range;
 
+            // advance cursor based on last range
             let mut range_start = ts_column.len();
             let mut range_end = 0;
             let mut cursor = range_start_index + start_delta;
+            // search back to keep the result correct
             while cursor < ts_column.len() && ts_column.value(cursor) > start_ts && cursor > 0 {
                 cursor -= 1;
             }
