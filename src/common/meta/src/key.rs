@@ -1347,7 +1347,7 @@ impl_metadata_value! {
     NodeAddressValue,
     SchemaNameValue,
     FlowStateValue,
-    PoisonValue
+    PoisonValue,
     ProcessValue
 }
 
