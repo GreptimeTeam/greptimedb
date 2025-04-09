@@ -43,7 +43,7 @@ use datafusion_sql::parser::Statement as DfStatement;
 use session::context::QueryContextRef;
 use snafu::{Location, ResultExt};
 
-use crate::error::{CatalogSnafu, DataFusionSnafu, Result};
+use crate::error::{CatalogSnafu, Result};
 use crate::query_engine::{DefaultPlanDecoder, QueryEngineState};
 
 pub struct DfContextProviderAdapter {
@@ -70,9 +70,7 @@ impl DfContextProviderAdapter {
         query_ctx: QueryContextRef,
     ) -> Result<Self> {
         let table_names = if let Some(df_stmt) = df_stmt {
-            session_state
-                .resolve_table_references(df_stmt)
-                .context(DataFusionSnafu)?
+            session_state.resolve_table_references(df_stmt)?
         } else {
             vec![]
         };
