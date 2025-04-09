@@ -66,9 +66,9 @@ impl AnalyzerRule for DistPlannerAnalyzer {
 
 impl DistPlannerAnalyzer {
     fn inspect_plan_with_subquery(plan: LogicalPlan) -> DfResult<Transformed<LogicalPlan>> {
-        // Workaround for https://github.com/GreptimeTeam/greptimedb/issues/5469 and https://github.com/GreptimeTeam/greptimedb/issues/5799
-        // FIXME(yingwen): Remove the `Limit` plan once we update DataFusion.
-        if let LogicalPlan::Limit(_) | LogicalPlan::Distinct(_) = &plan {
+        // Some plans that are special treated (should not call `with_new_exprs` on them)
+        // We don't call `with_new_exprs()` for LogicalPlan::Distinct(_). See https://github.com/GreptimeTeam/greptimedb/issues/5799
+        if matches!(plan, LogicalPlan::Unnest(_) | LogicalPlan::Distinct(_)) {
             return Ok(Transformed::no(plan));
         }
 
@@ -78,13 +78,8 @@ impl DistPlannerAnalyzer {
             .map(|e| e.transform(&Self::transform_subquery).map(|x| x.data))
             .collect::<DfResult<Vec<_>>>()?;
 
-        // Some plans that are special treated (should not call `with_new_exprs` on them)
-        if !matches!(plan, LogicalPlan::Unnest(_)) {
-            let inputs = plan.inputs().into_iter().cloned().collect::<Vec<_>>();
-            Ok(Transformed::yes(plan.with_new_exprs(exprs, inputs)?))
-        } else {
-            Ok(Transformed::no(plan))
-        }
+        let inputs = plan.inputs().into_iter().cloned().collect::<Vec<_>>();
+        Ok(Transformed::yes(plan.with_new_exprs(exprs, inputs)?))
     }
 
     fn transform_subquery(expr: Expr) -> DfResult<Transformed<Expr>> {
