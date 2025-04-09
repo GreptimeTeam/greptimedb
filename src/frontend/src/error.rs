@@ -128,13 +128,6 @@ pub enum Error {
         source: catalog::error::Error,
     },
 
-    #[snafu(display("Failed to start Meta client"))]
-    StartMetaClient {
-        #[snafu(implicit)]
-        location: Location,
-        source: meta_client::error::Error,
-    },
-
     #[snafu(display("Failed to create heartbeat stream to Metasrv"))]
     CreateMetaHeartbeatStream {
         source: meta_client::error::Error,
@@ -406,8 +399,7 @@ impl ErrorExt for Error {
 
             Error::Catalog { source, .. } => source.status_code(),
 
-            Error::StartMetaClient { source, .. }
-            | Error::CreateMetaHeartbeatStream { source, .. } => source.status_code(),
+            Error::CreateMetaHeartbeatStream { source, .. } => source.status_code(),
 
             Error::PlanStatement { source, .. }
             | Error::ReadTable { source, .. }
