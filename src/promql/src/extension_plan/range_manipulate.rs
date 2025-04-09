@@ -578,7 +578,6 @@ impl RangeManipulateStream {
                 )
             })?;
 
-        let mut ranges = Vec::with_capacity(((self.end - self.start) / self.interval + 1) as usize);
         let len = ts_column.len();
         if len == 0 {
             return Ok((vec![], (self.start, self.end)));
@@ -594,6 +593,7 @@ impl RangeManipulateStream {
         if start > end {
             return Ok((vec![], (start, end)));
         }
+        let mut ranges = Vec::with_capacity(((self.end - self.start) / self.interval + 1) as usize);
 
         // calculate for every aligned timestamp (`curr_ts`), assume the ts column is ordered.
         let mut range_start_index = 0usize;
