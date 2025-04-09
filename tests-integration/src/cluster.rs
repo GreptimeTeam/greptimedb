@@ -417,6 +417,7 @@ impl GreptimeDbClusterBuilder {
             datanode_clients,
             meta_client,
             StatementStatistics::default(),
+            None,
         )
         .with_local_cache_invalidator(cache_registry)
         .try_build()

@@ -287,10 +287,9 @@ impl InformationSchemaProvider {
             self.build_table(TABLE_CONSTRAINTS).unwrap(),
         );
         tables.insert(FLOWS.to_string(), self.build_table(FLOWS).unwrap());
-        tables.insert(
-            PROCESS_LIST.to_string(),
-            self.build_table(PROCESS_LIST).unwrap(),
-        );
+        if let Some(process_list) = self.build_table(PROCESS_LIST) {
+            tables.insert(PROCESS_LIST.to_string(), process_list);
+        }
         // Add memory tables
         for name in MEMORY_TABLES.iter() {
             tables.insert((*name).to_string(), self.build_table(name).expect(name));

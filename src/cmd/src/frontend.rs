@@ -342,7 +342,7 @@ impl StartCommand {
             cached_meta_backend.clone(),
             layered_cache_registry.clone(),
             None,
-            Some(process_manager),
+            Some(process_manager.clone()),
         );
 
         let executor = HandlerGroupExecutor::new(vec![
@@ -376,6 +376,7 @@ impl StartCommand {
             Arc::new(client),
             meta_client,
             StatementStatistics::new(opts.logging.slow_query.clone()),
+            Some(process_manager),
         )
         .with_plugin(plugins.clone())
         .with_local_cache_invalidator(layered_cache_registry)
