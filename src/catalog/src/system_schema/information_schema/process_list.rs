@@ -37,13 +37,21 @@ use store_api::storage::{ScanRequest, TableId};
 use super::{InformationTable, Predicates};
 use crate::error::{self, InternalSnafu};
 
+/// Column names of `information_schema.process_list`
+const ID: &str = "id";
+const DATABASE: &str = "database";
+const QUERY: &str = "query";
+const START_TIMESTAMP: &str = "start_timestamp";
+const ELAPSED_TIME: &str = "elapsed_time";
+
+/// `information_schema.process_list` table implementation that tracks running
+/// queries in current cluster.
 pub struct InformationSchemaProcessList {
     schema: SchemaRef,
     process_manager: Arc<ProcessManager>,
 }
 
 impl InformationSchemaProcessList {
-    #[allow(dead_code)]
     pub fn new(process_manager: Arc<ProcessManager>) -> Self {
         Self {
             schema: Self::schema(),
@@ -52,26 +60,21 @@ impl InformationSchemaProcessList {
     }
 
     fn schema() -> SchemaRef {
-        Arc::new(Schema::new(
-            vec![
-                ("id", ConcreteDataType::uint64_datatype(), false),
-                ("database", ConcreteDataType::string_datatype(), false),
-                ("query", ConcreteDataType::string_datatype(), false),
-                (
-                    "start_timestamp_ms",
-                    ConcreteDataType::timestamp_millisecond_datatype(),
-                    false,
-                ),
-                (
-                    "elapsed_time",
-                    ConcreteDataType::duration_millisecond_datatype(),
-                    false,
-                ),
-            ]
-            .into_iter()
-            .map(|(name, ty, nullable)| ColumnSchema::new(name, ty, nullable))
-            .collect(),
-        ))
+        Arc::new(Schema::new(vec![
+            ColumnSchema::new(ID, ConcreteDataType::uint64_datatype(), false),
+            ColumnSchema::new(DATABASE, ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(QUERY, ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(
+                START_TIMESTAMP,
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                ELAPSED_TIME,
+                ConcreteDataType::duration_millisecond_datatype(),
+                false,
+            ),
+        ]))
     }
 }
 
@@ -88,10 +91,7 @@ impl InformationTable for InformationSchemaProcessList {
         self.schema.clone()
     }
 
-    fn to_stream(
-        &self,
-        request: store_api::storage::ScanRequest,
-    ) -> error::Result<SendableRecordBatchStream> {
+    fn to_stream(&self, request: ScanRequest) -> error::Result<SendableRecordBatchStream> {
         let schema = self.schema.arrow_schema().clone();
         let process_manager = self.process_manager.clone();
         let stream = Box::pin(DfRecordBatchStreamAdapter::new(
@@ -112,43 +112,55 @@ impl InformationTable for InformationSchemaProcessList {
     }
 }
 
+/// Build running process list.
 async fn make_process_list(
     process_manager: Arc<ProcessManager>,
     request: ScanRequest,
 ) -> error::Result<RecordBatch> {
     let predicates = Predicates::from_scan_request(&Some(request));
     let current_time = current_time_millis();
-    let mut stream = Box::pin(process_manager.list_all_processes().unwrap().into_stream());
+    let mut stream = Box::pin(
+        process_manager
+            .list_all_processes()
+            .context(error::ListProcessSnafu)?
+            .into_stream(),
+    );
 
     let mut rows = Vec::new();
-    while let Some(process) = stream.next().await.transpose().unwrap() {
+    while let Some(process) = stream
+        .next()
+        .await
+        .transpose()
+        .context(error::ListProcessSnafu)?
+    {
         let row = process_to_row(process, current_time);
         if predicates.eval(&row) {
             rows.push(row);
         }
     }
-    Ok(rows_to_record_batch(rows).unwrap())
+    rows_to_record_batch(rows)
 }
 
+/// Convert [Process] structs to rows.
 fn process_to_row(process: Process, current_time: i64) -> Vec<(&'static str, Value)> {
     vec![
-        ("id", Value::UInt64(process.query_id())),
+        (ID, Value::UInt64(process.query_id())),
         (
-            "database",
+            DATABASE,
             Value::String(process.database().to_string().into()),
         ),
         (
-            "query",
+            QUERY,
             Value::String(process.query_string().to_string().into()),
         ),
         (
-            "start_timestamp_ms",
+            START_TIMESTAMP,
             Value::Timestamp(Timestamp::new_millisecond(
                 process.query_start_timestamp_ms(),
             )),
         ),
         (
-            "elapsed_time",
+            ELAPSED_TIME,
             Value::Duration(Duration::new_millisecond(
                 current_time - process.query_start_timestamp_ms(),
             )),
@@ -156,6 +168,7 @@ fn process_to_row(process: Process, current_time: i64) -> Vec<(&'static str, Val
     ]
 }
 
+/// Convert rows to [RecordBatch].
 fn rows_to_record_batch(rows: Vec<Vec<(&'static str, Value)>>) -> error::Result<RecordBatch> {
     let mut id_builder = UInt64VectorBuilder::with_capacity(rows.len());
     let mut database_builder = StringVectorBuilder::with_capacity(rows.len());
@@ -179,5 +192,6 @@ fn rows_to_record_batch(rows: Vec<Vec<(&'static str, Value)>>) -> error::Result<
         Arc::new(elapsed_time_builder.finish()),
     ];
 
-    Ok(RecordBatch::new(InformationSchemaProcessList::schema(), columns).unwrap())
+    RecordBatch::new(InformationSchemaProcessList::schema(), columns)
+        .context(error::CreateRecordBatchSnafu)
 }

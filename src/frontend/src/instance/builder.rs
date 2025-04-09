@@ -60,6 +60,7 @@ pub struct FrontendBuilder {
 }
 
 impl FrontendBuilder {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         options: FrontendOptions,
         kv_backend: KvBackendRef,
