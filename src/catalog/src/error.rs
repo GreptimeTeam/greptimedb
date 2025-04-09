@@ -277,6 +277,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to list running processes"))]
+    ListProcess {
+        source: common_meta::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl Error {
@@ -342,9 +349,9 @@ impl ErrorExt for Error {
             Error::Datafusion { error, .. } => datafusion_status_code::<Self>(error, None),
             Error::ProjectViewColumns { .. } => StatusCode::EngineExecuteQuery,
             Error::TableMetadataManager { source, .. } => source.status_code(),
-            Error::GetViewCache { source, .. } | Error::GetTableCache { source, .. } => {
-                source.status_code()
-            }
+            Error::GetViewCache { source, .. }
+            | Error::GetTableCache { source, .. }
+            | Error::ListProcess { source, .. } => source.status_code(),
         }
     }
 
