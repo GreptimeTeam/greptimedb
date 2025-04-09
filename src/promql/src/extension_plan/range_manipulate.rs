@@ -606,7 +606,7 @@ impl RangeManipulateStream {
             let mut range_start = ts_column.len();
             let mut range_end = 0;
             let mut cursor = range_start_index + start_delta;
-            while cursor < ts_column.len() && ts_column.value(cursor) > start_ts {
+            while cursor < ts_column.len() && ts_column.value(cursor) > start_ts && cursor > 0 {
                 cursor -= 1;
             }
 
