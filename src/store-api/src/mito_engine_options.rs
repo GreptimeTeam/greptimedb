@@ -61,6 +61,7 @@ pub const MEMTABLE_PARTITION_TREE_FORK_DICTIONARY_BYTES: &str =
     "memtable.partition_tree.fork_dictionary_bytes";
 /// Option key for skipping WAL.
 pub const SKIP_WAL_KEY: &str = "skip_wal";
+// Note: Adding new options here should also check if this option should be removed in [metric_engine::engine::create::region_options_for_metadata_region].
 
 /// Returns true if the `key` is a valid option key for the mito engine.
 pub fn is_mito_engine_option_key(key: &str) -> bool {
