@@ -28,6 +28,7 @@ use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
 use common_meta::heartbeat::handler::invalidate_table_cache::InvalidateCacheHandler;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
+use common_meta::key::process_list::ProcessManager;
 use common_telemetry::info;
 use common_telemetry::logging::TracingOptions;
 use common_time::timezone::set_default_timezone;
@@ -331,12 +332,17 @@ impl StartCommand {
 
         let information_extension =
             Arc::new(DistributedInformationExtension::new(meta_client.clone()));
+
+        let process_manager = Arc::new(ProcessManager::new(
+            opts.grpc.server_addr.clone(),
+            cached_meta_backend.clone(),
+        ));
         let catalog_manager = KvBackendCatalogManager::new(
             information_extension,
             cached_meta_backend.clone(),
             layered_cache_registry.clone(),
             None,
-            None,
+            Some(process_manager),
         );
 
         let executor = HandlerGroupExecutor::new(vec![
