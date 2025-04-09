@@ -187,9 +187,6 @@ impl Error {
             } | Self::RegionServer {
                 code: Code::Unavailable,
                 ..
-            } | Self::RegionServer {
-                code: Code::Unknown,
-                ..
             }
         )
     }
