@@ -1691,7 +1691,7 @@ dependencies = [
  "humantime",
  "meta-client",
  "nu-ansi-term",
- "opendal 0.51.1",
+ "opendal 0.51.2",
  "query",
  "rand 0.9.0",
  "reqwest",
@@ -7613,9 +7613,9 @@ dependencies = [
 
 [[package]]
 name = "object_store_opendal"
-version = "0.49.1"
+version = "0.50.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b18eb960885330175ec89daa991b0bc9050dc7f259b31a887fbfbb297312f83"
+checksum = "59db4de9230e630346e3fd821e2b8d1fd03ddd509c32c964836588e82241762a"
 dependencies = [
  "async-trait",
  "bytes",
@@ -7623,7 +7623,7 @@ dependencies = [
  "futures",
  "futures-util",
  "object_store",
- "opendal",
+ "opendal 0.52.0",
  "pin-project",
  "tokio",
 ]
@@ -8956,7 +8956,7 @@ dependencies = [
  "log",
  "multimap",
  "once_cell",
- "petgraph 0.6.5",
+ "petgraph 0.7.1",
  "prettyplease",
  "prost 0.13.5",
  "prost-types 0.13.5",
