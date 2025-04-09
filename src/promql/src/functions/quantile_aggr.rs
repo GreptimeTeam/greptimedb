@@ -45,7 +45,7 @@ pub fn quantile_udaf(q: f64) -> Arc<AggregateUDF> {
         vec![DataType::Float64],
         // Output type: the φ-quantile
         Arc::new(DataType::Float64),
-        Volatility::Immutable,
+        Volatility::Volatile,
         // Create the accumulator
         Arc::new(move |_| Ok(Box::new(QuantileAccumulator::new(q)))),
         // Intermediate state types

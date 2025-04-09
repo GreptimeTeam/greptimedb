@@ -48,7 +48,7 @@ impl Round {
             Self::name(),
             Self::input_type(),
             Self::return_type(),
-            Volatility::Immutable,
+            Volatility::Volatile,
             Arc::new(move |input: &_| Self::new(nearest).calc(input)) as _,
         )
     }
