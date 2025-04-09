@@ -337,6 +337,15 @@ impl PipelineTable {
                 generate_pipeline_cache_key(schema, name, Some(TimestampNanosecond(version))),
                 compiled_pipeline.clone(),
             );
+
+            self.original_pipelines.insert(
+                generate_pipeline_cache_key(schema, name, None),
+                (pipeline.to_owned(), TimestampNanosecond(version)),
+            );
+            self.original_pipelines.insert(
+                generate_pipeline_cache_key(schema, name, Some(TimestampNanosecond(version))),
+                (pipeline.to_owned(), TimestampNanosecond(version)),
+            );
         }
 
         Ok((version, compiled_pipeline))
