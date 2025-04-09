@@ -24,9 +24,9 @@ use store_api::region_engine::RegionEngine;
 use store_api::region_request::{AffectedRows, RegionOpenRequest, RegionRequest};
 use store_api::storage::RegionId;
 
-use super::MetricEngineInner;
 use crate::engine::create::region_options_for_metadata_region;
 use crate::engine::options::{set_data_region_options, PhysicalRegionOptions};
+use crate::engine::MetricEngineInner;
 use crate::error::{OpenMitoRegionSnafu, PhysicalRegionNotFoundSnafu, Result};
 use crate::metrics::{LOGICAL_REGION_COUNT, PHYSICAL_REGION_COUNT};
 use crate::utils;

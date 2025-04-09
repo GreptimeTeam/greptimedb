@@ -16,7 +16,7 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::spanned::Spanned;
 use syn::{
-    parse_macro_input, Attribute, Ident, ItemFn, Signature, Type, TypePath, TypeReference,
+    parse_macro_input, Attribute, Ident, ItemFn, Path, Signature, Type, TypePath, TypeReference,
     Visibility,
 };
 
@@ -44,6 +44,7 @@ pub(crate) fn process_admin_fn(args: TokenStream, input: TokenStream) -> TokenSt
     let mut display_name: Option<Ident> = None;
     let mut sig_fn: Option<Ident> = None;
     let mut ret: Option<Ident> = None;
+    let mut user_path: Option<Path> = None;
 
     let parser = syn::meta::parser(|meta| {
         if meta.path.is_ident("name") {
@@ -58,6 +59,9 @@ pub(crate) fn process_admin_fn(args: TokenStream, input: TokenStream) -> TokenSt
         } else if meta.path.is_ident("ret") {
             ret = Some(meta.value()?.parse()?);
             Ok(())
+        } else if meta.path.is_ident("user_path") {
+            user_path = Some(meta.value()?.parse()?);
+            Ok(())
         } else {
             Err(meta.error("unsupported property"))
         }
@@ -65,6 +69,10 @@ pub(crate) fn process_admin_fn(args: TokenStream, input: TokenStream) -> TokenSt
 
     // extract arg map
     parse_macro_input!(args with parser);
+
+    if user_path.is_none() {
+        user_path = Some(syn::parse_str("crate").expect("failed to parse user path"));
+    }
 
     // decompose the fn block
     let compute_fn = parse_macro_input!(input as ItemFn);
@@ -104,6 +112,7 @@ pub(crate) fn process_admin_fn(args: TokenStream, input: TokenStream) -> TokenSt
             ret.expect("ret required"),
             handler_type,
             display_name,
+            user_path.expect("user_path required"),
         );
         result.extend(struct_code);
     }
@@ -148,6 +157,7 @@ fn build_struct(
     ret: Ident,
     handler_type: &Ident,
     display_name_ident: Ident,
+    user_path: Path,
 ) -> TokenStream {
     let display_name = display_name_ident.to_string();
     let ret = Ident::new(&format!("{ret}_datatype"), ret.span());
@@ -188,7 +198,7 @@ fn build_struct(
 
 
         #[async_trait::async_trait]
-        impl crate::function::AsyncFunction for #name {
+        impl #user_path::function::AsyncFunction for #name {
             fn name(&self) -> &'static str {
                 #display_name
             }
@@ -201,9 +211,9 @@ fn build_struct(
                 #sig_fn()
             }
 
-            async fn eval(&self, func_ctx: crate::function::FunctionContext, columns: &[datatypes::vectors::VectorRef]) ->  common_query::error::Result<datatypes::vectors::VectorRef> {
+            async fn eval(&self, func_ctx: #user_path::function::FunctionContext, columns: &[datatypes::vectors::VectorRef]) ->  common_query::error::Result<datatypes::vectors::VectorRef> {
                 // Ensure under the `greptime` catalog for security
-                crate::ensure_greptime!(func_ctx);
+                #user_path::ensure_greptime!(func_ctx);
 
                 let columns_num = columns.len();
                 let rows_num = if columns.is_empty() {

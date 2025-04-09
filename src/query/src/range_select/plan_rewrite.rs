@@ -42,13 +42,12 @@ use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use table::table::adapter::DfTableProviderAdapter;
 
-use super::plan::Fill;
 use crate::error::{
     CatalogSnafu, DataFusionSnafu, RangeQuerySnafu, Result, TimeIndexNotFoundSnafu,
     UnknownTableSnafu,
 };
 use crate::plan::ExtractExpr;
-use crate::range_select::plan::{RangeFn, RangeSelect};
+use crate::range_select::plan::{Fill, RangeFn, RangeSelect};
 
 /// `RangeExprRewriter` will recursively search certain `Expr`, find all `range_fn` scalar udf contained in `Expr`,
 /// and collect the information required by the RangeSelect query,
@@ -493,7 +492,7 @@ impl RangePlanRewriter {
     async fn get_index_by(&mut self, schema: &Arc<DFSchema>) -> Result<(Expr, Vec<Expr>)> {
         let mut time_index_expr = Expr::Wildcard {
             qualifier: None,
-            options: WildcardOptions::default(),
+            options: Box::new(WildcardOptions::default()),
         };
         let mut default_by = vec![];
         for i in 0..schema.fields().len() {

@@ -75,13 +75,13 @@ SELECT MAX(t) FROM timestamp;
 
 SELECT SUM(t) FROM timestamp;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Execution error: User-defined coercion failed with Execution("Sum not supported for Timestamp(Millisecond, None)") No function matches the given name and argument types 'sum(Timestamp(Millisecond, None))'. You might need to add explicit type casts.
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Execution error: Function 'sum' user-defined coercion failed with Execution("Sum not supported for Timestamp(Millisecond, None)") No function matches the given name and argument types 'sum(Timestamp(Millisecond, None))'. You might need to add explicit type casts.
 	Candidate functions:
 	sum(UserDefined)
 
 SELECT AVG(t) FROM timestamp;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Execution error: User-defined coercion failed with Plan("The function \"avg\" does not support inputs of type Timestamp(Millisecond, None).") No function matches the given name and argument types 'avg(Timestamp(Millisecond, None))'. You might need to add explicit type casts.
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Execution error: Function 'avg' user-defined coercion failed with Plan("The function \"avg\" does not support inputs of type Timestamp(Millisecond, None).") No function matches the given name and argument types 'avg(Timestamp(Millisecond, None))'. You might need to add explicit type casts.
 	Candidate functions:
 	avg(UserDefined)
 

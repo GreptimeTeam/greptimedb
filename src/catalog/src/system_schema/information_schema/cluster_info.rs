@@ -36,9 +36,8 @@ use datatypes::vectors::{
 use snafu::ResultExt;
 use store_api::storage::{ScanRequest, TableId};
 
-use super::CLUSTER_INFO;
 use crate::error::{CreateRecordBatchSnafu, InternalSnafu, Result};
-use crate::system_schema::information_schema::{InformationTable, Predicates};
+use crate::system_schema::information_schema::{InformationTable, Predicates, CLUSTER_INFO};
 use crate::system_schema::utils;
 use crate::CatalogManager;
 

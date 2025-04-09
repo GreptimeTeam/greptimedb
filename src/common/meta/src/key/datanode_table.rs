@@ -21,11 +21,11 @@ use snafu::OptionExt;
 use store_api::storage::RegionNumber;
 use table::metadata::TableId;
 
-use super::table_route::PhysicalTableRouteValue;
-use super::MetadataKey;
 use crate::error::{DatanodeTableInfoNotFoundSnafu, InvalidMetadataSnafu, Result};
+use crate::key::table_route::PhysicalTableRouteValue;
 use crate::key::{
-    MetadataValue, RegionDistribution, DATANODE_TABLE_KEY_PATTERN, DATANODE_TABLE_KEY_PREFIX,
+    MetadataKey, MetadataValue, RegionDistribution, DATANODE_TABLE_KEY_PATTERN,
+    DATANODE_TABLE_KEY_PREFIX,
 };
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;

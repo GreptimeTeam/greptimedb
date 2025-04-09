@@ -21,9 +21,8 @@ use common_recordbatch::SendableRecordBatchStream;
 use datafusion::execution::context::TaskContext;
 use datafusion::execution::SendableRecordBatchStream as DfSendableRecordBatchStream;
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning, PhysicalSortExpr};
-use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, PlanProperties,
-};
+use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use datafusion_common::DataFusionError;
 use datatypes::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use datatypes::schema::SchemaRef;
@@ -53,7 +52,8 @@ impl StreamScanAdapter {
         let properties = PlanProperties::new(
             EquivalenceProperties::new(arrow_schema.clone()),
             Partitioning::UnknownPartitioning(1),
-            ExecutionMode::Bounded,
+            EmissionType::Incremental,
+            Boundedness::Bounded,
         );
 
         Self {

@@ -40,9 +40,9 @@ use session::Session;
 use sql::dialect::PostgreSqlDialect;
 use sql::parser::{ParseOptions, ParserContext};
 
-use super::types::*;
-use super::{fixtures, PostgresServerHandlerInner};
 use crate::error::Result;
+use crate::postgres::types::*;
+use crate::postgres::{fixtures, PostgresServerHandlerInner};
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::SqlPlan;
 

@@ -63,7 +63,8 @@ impl<'a> StatementToRegion<'a> {
         stmt: &Insert,
         query_ctx: &QueryContextRef,
     ) -> Result<(InstantAndNormalInsertRequests, TableInfoRef)> {
-        let (catalog, schema, table_name) = self.get_full_name(stmt.table_name())?;
+        let name = stmt.table_name().context(ParseSqlSnafu)?;
+        let (catalog, schema, table_name) = self.get_full_name(name)?;
         let table = self.get_table(&catalog, &schema, &table_name).await?;
         let table_schema = table.schema();
         let table_info = table.table_info();

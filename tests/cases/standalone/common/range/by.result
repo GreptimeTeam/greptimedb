@@ -63,7 +63,7 @@ SELECT ts, length(host)::INT64 + 2, max(val) RANGE '5s' FROM host ALIGN '20s' BY
 -- project non-aggregation key
 SELECT ts, host, max(val) RANGE '5s' FROM host ALIGN '20s' BY () ORDER BY ts;
 
-Error: 3001(EngineExecuteQuery), DataFusion error: No field named host.host. Valid fields are "max(host.val) RANGE 5s", host.ts, "Int64(1)".
+Error: 3001(EngineExecuteQuery), No field named host.host. Valid fields are "max(host.val) RANGE 5s", host.ts, "Int64(1)".
 
 DROP TABLE host;
 

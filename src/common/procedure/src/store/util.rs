@@ -18,9 +18,9 @@ use async_stream::try_stream;
 use futures::{Stream, TryStreamExt};
 use snafu::{ensure, ResultExt};
 
-use super::state_store::KeySet;
 use crate::error;
 use crate::error::Result;
+use crate::store::state_store::KeySet;
 
 struct CollectingState {
     pairs: Vec<(String, Vec<u8>)>,

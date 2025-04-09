@@ -19,8 +19,8 @@ use session::context::QueryContextRef;
 use sql::statements::insert::Insert;
 use sql::statements::statement::Statement;
 
-use super::StatementExecutor;
 use crate::error::Result;
+use crate::statement::StatementExecutor;
 
 impl StatementExecutor {
     #[tracing::instrument(skip_all)]

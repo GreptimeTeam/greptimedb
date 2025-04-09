@@ -37,6 +37,7 @@ impl ParserContext<'_> {
 
 #[cfg(test)]
 mod tests {
+    use sqlparser::ast::helpers::attached_token::AttachedToken;
     use sqlparser::ast::{
         GroupByExpr, Query as SpQuery, Statement as SpStatement, WildcardAdditionalOptions,
     };
@@ -69,6 +70,8 @@ mod tests {
                     partitions: vec![],
                     version: None,
                     with_ordinality: false,
+                    json_path: None,
+                    sample: None,
                 },
                 joins: vec![],
             }],
@@ -86,6 +89,7 @@ mod tests {
             prewhere: None,
             window_before_qualify: false,
             connect_by: None,
+            select_token: AttachedToken::empty(),
         };
 
         let sp_statement = SpStatement::Query(Box::new(SpQuery {
@@ -110,6 +114,7 @@ mod tests {
             format: None,
             query_plan: false,
             options: None,
+            estimate: false,
         })
         .unwrap();
 

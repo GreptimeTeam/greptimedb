@@ -35,8 +35,8 @@ use itertools::Itertools;
 use snafu::ResultExt;
 use store_api::storage::{ScanRequest, TableId};
 
-use super::{InformationTable, RUNTIME_METRICS};
 use crate::error::{CreateRecordBatchSnafu, InternalSnafu, Result};
+use crate::system_schema::information_schema::{InformationTable, RUNTIME_METRICS};
 
 #[derive(Debug)]
 pub(super) struct InformationSchemaMetrics {

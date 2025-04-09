@@ -21,7 +21,6 @@ use api::v1::flow::{
 use api::v1::region::InsertRequests;
 use common_error::ext::BoxedError;
 use common_meta::error::{ExternalSnafu, Result, UnexpectedSnafu};
-use common_meta::node_manager::Flownode;
 use common_telemetry::{debug, trace};
 use datatypes::value::Value;
 use itertools::Itertools;
@@ -46,7 +45,7 @@ fn to_meta_err(
 }
 
 #[async_trait::async_trait]
-impl Flownode for FlowWorkerManager {
+impl common_meta::node_manager::Flownode for FlowWorkerManager {
     async fn handle(&self, request: FlowRequest) -> Result<FlowResponse> {
         let query_ctx = request
             .header

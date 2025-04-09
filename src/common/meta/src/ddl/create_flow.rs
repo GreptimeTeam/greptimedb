@@ -35,9 +35,8 @@ use snafu::{ensure, ResultExt};
 use strum::AsRefStr;
 use table::metadata::TableId;
 
-use super::utils::add_peer_context_if_needed;
 use crate::cache_invalidator::Context;
-use crate::ddl::utils::handle_retry_error;
+use crate::ddl::utils::{add_peer_context_if_needed, handle_retry_error};
 use crate::ddl::DdlContext;
 use crate::error::{self, Result};
 use crate::instruction::{CacheIdent, CreateFlow};

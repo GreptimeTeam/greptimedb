@@ -28,7 +28,7 @@ pub struct FunctionState {
 
 impl FunctionState {
     /// Create a mock [`FunctionState`] for test.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     pub fn mock() -> Self {
         use std::sync::Arc;
 

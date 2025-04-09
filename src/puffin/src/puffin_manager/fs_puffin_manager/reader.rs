@@ -24,7 +24,6 @@ use futures::io::BufReader;
 use futures::{AsyncRead, AsyncWrite};
 use snafu::{ensure, OptionExt, ResultExt};
 
-use super::PuffinMetadataCacheRef;
 use crate::blob_metadata::{BlobMetadata, CompressionCodec};
 use crate::error::{
     BlobIndexOutOfBoundSnafu, BlobNotFoundSnafu, DeserializeJsonSnafu, FileKeyNotMatchSnafu,
@@ -35,6 +34,7 @@ use crate::file_metadata::FileMetadata;
 use crate::partial_reader::PartialReader;
 use crate::puffin_manager::file_accessor::PuffinFileAccessor;
 use crate::puffin_manager::fs_puffin_manager::dir_meta::DirMetadata;
+use crate::puffin_manager::fs_puffin_manager::PuffinMetadataCacheRef;
 use crate::puffin_manager::stager::{BoxWriter, DirWriterProviderRef, Stager};
 use crate::puffin_manager::{BlobGuard, BlobWithMetadata, PuffinReader};
 

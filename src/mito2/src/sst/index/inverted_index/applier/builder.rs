@@ -287,31 +287,19 @@ mod tests {
     }
 
     pub(crate) fn tag_column() -> Expr {
-        Expr::Column(Column {
-            relation: None,
-            name: "a".to_string(),
-        })
+        Expr::Column(Column::from_name("a"))
     }
 
     pub(crate) fn tag_column2() -> Expr {
-        Expr::Column(Column {
-            relation: None,
-            name: "b".to_string(),
-        })
+        Expr::Column(Column::from_name("b"))
     }
 
     pub(crate) fn field_column() -> Expr {
-        Expr::Column(Column {
-            relation: None,
-            name: "c".to_string(),
-        })
+        Expr::Column(Column::from_name("c"))
     }
 
     pub(crate) fn nonexistent_column() -> Expr {
-        Expr::Column(Column {
-            relation: None,
-            name: "nonexistent".to_string(),
-        })
+        Expr::Column(Column::from_name("nonexistence"))
     }
 
     pub(crate) fn string_lit(s: impl Into<String>) -> Expr {

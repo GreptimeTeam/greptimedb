@@ -392,7 +392,10 @@ impl ParquetReaderBuilder {
             .apply(self.file_handle.file_id(), Some(file_size_hint))
             .await
         {
-            Ok(res) => res,
+            Ok(Some(res)) => res,
+            Ok(None) => {
+                return false;
+            }
             Err(err) => {
                 if cfg!(any(test, feature = "test")) {
                     panic!(

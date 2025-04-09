@@ -18,7 +18,7 @@ use common_catalog::consts::{METRIC_ENGINE, MITO_ENGINE};
 use datatypes::schema::{Schema, SchemaRef};
 use datatypes::vectors::{Int64Vector, StringVector, VectorRef};
 
-use super::table_names::*;
+use crate::system_schema::information_schema::table_names::*;
 use crate::system_schema::utils::tables::{
     bigint_column, string_column, string_columns, timestamp_micro_column,
 };

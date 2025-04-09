@@ -158,10 +158,12 @@ impl RangeManipulate {
 
     pub fn to_execution_plan(&self, exec_input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
         let output_schema: SchemaRef = SchemaRef::new(self.output_schema.as_ref().into());
+        let properties = exec_input.properties();
         let properties = PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),
-            exec_input.properties().partitioning.clone(),
-            exec_input.properties().execution_mode,
+            properties.partitioning.clone(),
+            properties.emission_type,
+            properties.boundedness,
         );
         Arc::new(RangeManipulateExec {
             start: self.start,
@@ -336,10 +338,12 @@ impl ExecutionPlan for RangeManipulateExec {
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         assert!(!children.is_empty());
         let exec_input = children[0].clone();
+        let properties = exec_input.properties();
         let properties = PlanProperties::new(
             EquivalenceProperties::new(self.output_schema.clone()),
-            exec_input.properties().partitioning.clone(),
-            exec_input.properties().execution_mode,
+            properties.partitioning.clone(),
+            properties.emission_type,
+            properties.boundedness,
         );
         Ok(Arc::new(Self {
             start: self.start,
@@ -506,7 +510,7 @@ impl RangeManipulateStream {
     pub fn manipulate(&self, input: RecordBatch) -> DataFusionResult<Option<RecordBatch>> {
         let mut other_columns = (0..input.columns().len()).collect::<HashSet<_>>();
         // calculate the range
-        let ranges = self.calculate_range(&input)?;
+        let (ranges, (start, end)) = self.calculate_range(&input)?;
         // ignore this if all ranges are empty
         if ranges.iter().all(|(_, len)| *len == 0) {
             return Ok(None);
@@ -538,7 +542,12 @@ impl RangeManipulateStream {
             new_columns[index] = compute::take(&input.column(index), &take_indices, None)?;
         }
         // replace timestamp with the aligned one
-        new_columns[self.time_index] = self.aligned_ts_array.clone();
+        let new_time_index = if ranges.len() != self.aligned_ts_array.len() {
+            Self::build_aligned_ts_array(start, end, self.interval)
+        } else {
+            self.aligned_ts_array.clone()
+        };
+        new_columns[self.time_index] = new_time_index;
 
         RecordBatch::try_new(self.output_schema.clone(), new_columns)
             .map(Some)
@@ -551,7 +560,14 @@ impl RangeManipulateStream {
         ))
     }
 
-    fn calculate_range(&self, input: &RecordBatch) -> DataFusionResult<Vec<(u32, u32)>> {
+    /// Return values:
+    /// - A vector of tuples where each tuple contains the start index and length of the range.
+    /// - A tuple of the actual start/end timestamp used to calculate the range.
+    #[allow(clippy::type_complexity)]
+    fn calculate_range(
+        &self,
+        input: &RecordBatch,
+    ) -> DataFusionResult<(Vec<(u32, u32)>, (i64, i64))> {
         let ts_column = input
             .column(self.time_index)
             .as_any()
@@ -565,14 +581,25 @@ impl RangeManipulateStream {
         let mut ranges = Vec::with_capacity(((self.end - self.start) / self.interval + 1) as usize);
         let len = ts_column.len();
         if len == 0 {
-            return Ok(vec![]);
+            return Ok((vec![], (self.start, self.end)));
+        }
+
+        // shorten the range to calculate
+        let first_ts = ts_column.value(0);
+        let first_ts_aligned = (first_ts / self.interval) * self.interval;
+        let last_ts = ts_column.value(ts_column.len() - 1);
+        let last_ts_aligned = ((last_ts + self.range) / self.interval) * self.interval;
+        let start = self.start.max(first_ts_aligned);
+        let end = self.end.min(last_ts_aligned);
+        if start > end {
+            return Ok((vec![], (start, end)));
         }
 
         // calculate for every aligned timestamp (`curr_ts`), assume the ts column is ordered.
         let mut range_start_index = 0usize;
         let mut last_range_start = 0;
         let mut start_delta = 0;
-        for curr_ts in (self.start..=self.end).step_by(self.interval as _) {
+        for curr_ts in (start..=end).step_by(self.interval as _) {
             // determin range start
             let start_ts = curr_ts - self.range;
 
@@ -607,7 +634,7 @@ impl RangeManipulateStream {
             }
         }
 
-        Ok(ranges)
+        Ok((ranges, (start, end)))
     }
 }
 
@@ -619,8 +646,8 @@ mod test {
     };
     use datafusion::common::ToDFSchema;
     use datafusion::physical_expr::Partitioning;
+    use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
     use datafusion::physical_plan::memory::MemoryExec;
-    use datafusion::physical_plan::ExecutionMode;
     use datafusion::prelude::SessionContext;
     use datatypes::arrow::array::TimestampMillisecondArray;
 
@@ -679,7 +706,8 @@ mod test {
         let properties = PlanProperties::new(
             EquivalenceProperties::new(manipulate_output_schema.clone()),
             Partitioning::UnknownPartitioning(1),
-            ExecutionMode::Bounded,
+            EmissionType::Incremental,
+            Boundedness::Bounded,
         );
         let normalize_exec = Arc::new(RangeManipulateExec {
             start,
@@ -752,7 +780,10 @@ mod test {
                 ranges: [Some(0..1), Some(0..2), Some(0..3), Some(0..4), Some(1..5), Some(2..5), Some(3..6), Some(4..6), Some(5..7), Some(5..8), Some(6..10)] \
             }",
 );
-        do_normalize_test(0, 310_000, 30_000, 90_000, expected).await;
+        do_normalize_test(0, 310_000, 30_000, 90_000, expected.clone()).await;
+
+        // dump large range
+        do_normalize_test(-300000, 310_000, 30_000, 90_000, expected).await;
     }
 
     #[tokio::test]

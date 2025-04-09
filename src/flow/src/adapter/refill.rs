@@ -30,9 +30,8 @@ use session::context::QueryContextBuilder;
 use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::TableId;
 
-use super::{FlowId, FlowWorkerManager};
 use crate::adapter::table_source::ManagedTableSource;
-use crate::adapter::FlowWorkerManagerRef;
+use crate::adapter::{FlowId, FlowWorkerManager, FlowWorkerManagerRef};
 use crate::error::{FlowNotFoundSnafu, JoinTaskSnafu, UnexpectedSnafu};
 use crate::expr::error::ExternalSnafu;
 use crate::expr::utils::find_plan_time_window_expr_lower_bound;

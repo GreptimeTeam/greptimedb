@@ -27,7 +27,7 @@ use datatypes::value::{ListValue, Value};
 use datatypes::vectors::VectorRef;
 use snafu::{ensure, ResultExt};
 
-use super::helpers::{ensure_columns_len, ensure_columns_n};
+use crate::scalars::geo::helpers::{ensure_columns_len, ensure_columns_n};
 
 /// Accumulator of lat, lng, timestamp tuples
 #[derive(Debug)]

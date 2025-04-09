@@ -45,6 +45,7 @@ meter-core.workspace = true
 meter-macros.workspace = true
 moka.workspace = true
 object-store.workspace = true
+object_store_opendal.workspace = true
 partition.workspace = true
 prometheus.workspace = true
 query.workspace = true

@@ -30,9 +30,9 @@ use datatypes::vectors::{StringVectorBuilder, UInt32VectorBuilder, UInt64VectorB
 use snafu::ResultExt;
 use store_api::storage::{ScanRequest, TableId};
 
-use super::{InformationTable, REGION_STATISTICS};
 use crate::error::{CreateRecordBatchSnafu, InternalSnafu, Result};
 use crate::information_schema::Predicates;
+use crate::system_schema::information_schema::{InformationTable, REGION_STATISTICS};
 use crate::system_schema::utils;
 use crate::CatalogManager;
 

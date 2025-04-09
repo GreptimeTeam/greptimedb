@@ -374,6 +374,7 @@ impl From<StatusCode> for PgErrorCode {
             StatusCode::Unsupported => PgErrorCode::Ec0A000,
             StatusCode::InvalidArguments => PgErrorCode::Ec22023,
             StatusCode::Cancelled => PgErrorCode::Ec57000,
+            StatusCode::DeadlineExceeded => PgErrorCode::Ec57000,
             StatusCode::External => PgErrorCode::Ec58000,
 
             StatusCode::Unknown
