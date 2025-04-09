@@ -160,7 +160,10 @@ impl TreeNodeVisitor<'_> for FindGroupByFinalName {
     }
 }
 
-/// Add to the final select columns like `update_at`(which doesn't necessary need to have exact name just need to be a extra timestamp column) and `__ts_placeholder`(this column need to have exact this name and be a timestamp) with values like `now()` and `0`
+/// Add to the final select columns like `update_at`
+/// (which doesn't necessary need to have exact name just need to be a extra timestamp column)
+/// and `__ts_placeholder`(this column need to have exact this name and be a timestamp)
+/// with values like `now()` and `0`
 #[derive(Debug)]
 pub struct AddAutoColumnRewriter {
     pub schema: RawSchema,

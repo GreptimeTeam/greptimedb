@@ -125,7 +125,7 @@ impl BatchingEngine {
         let mut handles = Vec::new();
         let tasks = self.tasks.read().await;
         for (_flow_id, task) in tasks.iter() {
-            let src_table_names = &task.source_table_names;
+            let src_table_names = &task.config.source_table_names;
 
             if src_table_names
                 .iter()
@@ -135,15 +135,14 @@ impl BatchingEngine {
             }
 
             let group_by_table_name = group_by_table_name.clone();
-            // TODO(discord9): make clone task less costy
             let task = task.clone();
 
             let handle: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
-                let src_table_names = &task.source_table_names;
+                let src_table_names = &task.config.source_table_names;
 
                 for src_table_name in src_table_names {
                     if let Some(entry) = group_by_table_name.get(src_table_name) {
-                        let Some(expr) = &task.time_window_expr else {
+                        let Some(expr) = &task.config.time_window_expr else {
                             continue;
                         };
                         let involved_time_windows = expr.handle_rows(entry.clone()).await?;

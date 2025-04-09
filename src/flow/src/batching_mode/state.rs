@@ -139,14 +139,14 @@ impl DirtyTimeWindows {
             if let Some(task_ctx) = task_ctx {
                 warn!(
                 "Flow id = {:?}, too many time windows: {}, only the first {} are taken for this query, the group by expression might be wrong. Time window expr={:?}, expire_after={:?}, first_time_window={:?}, last_time_window={:?}, the original query: {:?}",
-                task_ctx.flow_id,
+                task_ctx.config.flow_id,
                 self.windows.len(),
                 Self::MAX_FILTER_NUM,
-                task_ctx.time_window_expr,
-                task_ctx.expire_after,
+                task_ctx.config.time_window_expr,
+                task_ctx.config.expire_after,
                 first_time_window,
                 last_time_window,
-                task_ctx.query
+                task_ctx.config.query
             );
             } else {
                 warn!("Flow id = {:?}, too many time windows: {}, only the first {} are taken for this query, the group by expression might be wrong. first_time_window={:?}, last_time_window={:?}",
