@@ -315,14 +315,14 @@ impl InformationSchemaColumnsBuilder {
         };
 
         let row = [
-            (TABLE_CATALOG, &Value::from(catalog_name)),
-            (TABLE_SCHEMA, &Value::from(schema_name)),
-            (TABLE_NAME, &Value::from(table_name)),
-            (COLUMN_NAME, &Value::from(column_schema.name.as_str())),
-            (DATA_TYPE, &Value::from(data_type.as_str())),
-            (SEMANTIC_TYPE, &Value::from(semantic_type)),
-            (ORDINAL_POSITION, &Value::from((index + 1) as i64)),
-            (COLUMN_KEY, &Value::from(column_key)),
+            (TABLE_CATALOG, Value::from(catalog_name)),
+            (TABLE_SCHEMA, Value::from(schema_name)),
+            (TABLE_NAME, Value::from(table_name)),
+            (COLUMN_NAME, Value::from(column_schema.name.as_str())),
+            (DATA_TYPE, Value::from(data_type.as_str())),
+            (SEMANTIC_TYPE, Value::from(semantic_type)),
+            (ORDINAL_POSITION, Value::from((index + 1) as i64)),
+            (COLUMN_KEY, Value::from(column_key)),
         ];
 
         if !predicates.eval(&row) {

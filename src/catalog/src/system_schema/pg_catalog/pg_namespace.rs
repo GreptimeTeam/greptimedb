@@ -209,8 +209,8 @@ impl PGNamespaceBuilder {
     fn add_namespace(&mut self, predicates: &Predicates, schema_name: &str) {
         let oid = self.namespace_oid_map.get_oid(schema_name);
         let row = [
-            (OID_COLUMN_NAME, &Value::from(oid)),
-            (NSPNAME, &Value::from(schema_name)),
+            (OID_COLUMN_NAME, Value::from(oid)),
+            (NSPNAME, Value::from(schema_name)),
         ];
         if !predicates.eval(&row) {
             return;

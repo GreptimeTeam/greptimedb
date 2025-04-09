@@ -81,6 +81,8 @@ impl MetadataKey<'_, ProcessKey> for ProcessKey {
 /// Detail value of process.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProcessValue {
+    /// Database name.
+    pub database: String,
     /// The running query sql.
     pub query: String,
     /// Query start timestamp in milliseconds.
@@ -102,6 +104,11 @@ impl Process {
         &self.key.frontend_ip
     }
 
+    /// Returns database name of running process.
+    pub fn database(&self) -> &str {
+        &self.value.database
+    }
+
     /// Returns id of query.
     pub fn query_id(&self) -> u64 {
         self.key.id
@@ -110,6 +117,11 @@ impl Process {
     /// Returns query string details.
     pub fn query_string(&self) -> &str {
         &self.value.query
+    }
+
+    /// Returns query start timestamp in milliseconds.
+    pub fn query_start_timestamp_ms(&self) -> i64 {
+        self.value.start_timestamp_ms
     }
 
     /// Calculates the elapsed time of query. Returns None of system clock jumps backwards.
@@ -148,7 +160,7 @@ impl ProcessManager {
     }
 
     /// Registers a submitted query.
-    pub async fn register_query(&self, query: String) -> error::Result<u64> {
+    pub async fn register_query(&self, database: String, query: String) -> error::Result<u64> {
         let process_id = self.sequencer.next().await?;
         let key = ProcessKey {
             frontend_ip: self.server_addr.clone(),
@@ -157,6 +169,7 @@ impl ProcessManager {
         .to_bytes();
         let current_time = current_time_millis();
         let value = ProcessValue {
+            database,
             query,
             start_timestamp_ms: current_time,
         }
@@ -282,6 +295,7 @@ mod tests {
         let value = ProcessValue {
             query: "SELECT * FROM test".to_string(),
             start_timestamp_ms: 1690000000000,
+            database: "public".to_string(),
         };
 
         // Test serialization roundtrip
@@ -290,6 +304,7 @@ mod tests {
 
         assert_eq!(value.query, deserialized.query);
         assert_eq!(value.start_timestamp_ms, deserialized.start_timestamp_ms);
+        assert_eq!(value.database, deserialized.database);
     }
 
     use std::sync::Arc;
@@ -302,7 +317,7 @@ mod tests {
         let kv_client = Arc::new(MemoryKvBackend::new());
         let process_manager = ProcessManager::new("127.0.0.1:8000".to_string(), kv_client.clone());
         let process_id = process_manager
-            .register_query("SELECT * FROM table".to_string())
+            .register_query("public".to_string(), "SELECT * FROM table".to_string())
             .await
             .unwrap();
 
@@ -323,15 +338,15 @@ mod tests {
 
         // Register multiple queries
         let id1 = process_manager
-            .register_query("SELECT 1".to_string())
+            .register_query("public".to_string(), "SELECT 1".to_string())
             .await
             .unwrap();
         let id2 = process_manager
-            .register_query("SELECT 2".to_string())
+            .register_query("public".to_string(), "SELECT 2".to_string())
             .await
             .unwrap();
         let id3 = process_manager
-            .register_query("SELECT 3".to_string())
+            .register_query("public".to_string(), "SELECT 3".to_string())
             .await
             .unwrap();
 
@@ -367,7 +382,7 @@ mod tests {
             .as_millis() as i64;
 
         process_manager
-            .register_query("SELECT NOW()".to_string())
+            .register_query("public".to_string(), "SELECT NOW()".to_string())
             .await
             .unwrap();
 
@@ -391,8 +406,14 @@ mod tests {
         let pm1 = ProcessManager::new("127.0.0.1:8000".to_string(), kv_client.clone());
         let pm2 = ProcessManager::new("127.0.0.1:8001".to_string(), kv_client.clone());
 
-        let id1 = pm1.register_query("SELECT 1".to_string()).await.unwrap();
-        let id2 = pm2.register_query("SELECT 2".to_string()).await.unwrap();
+        let id1 = pm1
+            .register_query("public".to_string(), "SELECT 1".to_string())
+            .await
+            .unwrap();
+        let id2 = pm2
+            .register_query("public".to_string(), "SELECT 2".to_string())
+            .await
+            .unwrap();
 
         // Verify both processes are registered with correct frontend IPs
         let pm1_processes = pm1.dump().await.unwrap();
@@ -405,7 +426,7 @@ mod tests {
         assert_eq!(p2_processes.len(), 1);
         let p2 = p2_processes.iter().find(|p| p.key.id == id2).unwrap();
         assert_eq!(p2.key.frontend_ip, "127.0.0.1:8001");
-
+        assert_eq!(p2.value.database, "public");
         // deregister all queries on instance 1
         pm1.deregister_all_queries().await.unwrap();
 
@@ -430,15 +451,15 @@ mod tests {
 
         // Register multiple queries
         process_manager
-            .register_query("SELECT 1".to_string())
+            .register_query("public".to_string(), "SELECT 1".to_string())
             .await
             .unwrap();
         process_manager
-            .register_query("SELECT 2".to_string())
+            .register_query("public".to_string(), "SELECT 2".to_string())
             .await
             .unwrap();
         process_manager
-            .register_query("SELECT 3".to_string())
+            .register_query("public".to_string(), "SELECT 3".to_string())
             .await
             .unwrap();
 

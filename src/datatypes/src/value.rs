@@ -326,6 +326,14 @@ impl Value {
         }
     }
 
+    /// Cast Value to [Duration]. Return None if value is not a valid duration data type.
+    pub fn as_duration(&self) -> Option<Duration> {
+        match self {
+            Value::Duration(d) => Some(*d),
+            _ => None,
+        }
+    }
+
     /// Returns the logical type of the value.
     pub fn logical_type_id(&self) -> LogicalTypeId {
         match self {

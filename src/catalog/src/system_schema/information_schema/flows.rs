@@ -273,11 +273,11 @@ impl InformationSchemaFlowsBuilder {
         flow_stat: &Option<FlowStat>,
     ) -> Result<()> {
         let row = [
-            (FLOW_NAME, &Value::from(flow_info.flow_name().to_string())),
-            (FLOW_ID, &Value::from(flow_id)),
+            (FLOW_NAME, Value::from(flow_info.flow_name().to_string())),
+            (FLOW_ID, Value::from(flow_id)),
             (
                 TABLE_CATALOG,
-                &Value::from(flow_info.catalog_name().to_string()),
+                Value::from(flow_info.catalog_name().to_string()),
             ),
         ];
         if !predicates.eval(&row) {
