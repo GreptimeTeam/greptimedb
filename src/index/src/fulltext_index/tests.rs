@@ -71,6 +71,7 @@ async fn test_search(
     let blob_key = "fulltext_index".to_string();
     let mut writer = puffin_manager.writer(&file_name).await.unwrap();
     create_index(prefix, &mut writer, &blob_key, texts, config).await;
+    writer.finish().await.unwrap();
 
     let reader = puffin_manager.reader(&file_name).await.unwrap();
     let index_dir = reader.dir(&blob_key).await.unwrap();
