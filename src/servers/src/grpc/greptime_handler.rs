@@ -18,7 +18,10 @@ use std::time::Instant;
 
 use api::helper::request_type;
 use api::v1::auth_header::AuthScheme;
-use api::v1::{Basic, GreptimeRequest, RequestHeader};
+use api::v1::{
+    greptime_response, AffectedRows, Basic, GreptimeRequest, GreptimeResponse, RequestHeader,
+    ResponseHeader, Status,
+};
 use auth::{Identity, Password, UserInfoRef, UserProviderRef};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::parse_catalog_and_schema_from_db_string;
@@ -28,13 +31,18 @@ use common_query::Output;
 use common_runtime::runtime::RuntimeTrait;
 use common_runtime::Runtime;
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
-use common_telemetry::{debug, error, tracing};
+use common_telemetry::{debug, error, tracing, warn};
 use common_time::timezone::parse_timezone;
+use futures_util::StreamExt;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
+use table::table_name::TableName;
+use tokio::sync::mpsc;
 
 use crate::error::Error::UnsupportedAuthScheme;
 use crate::error::{AuthSnafu, InvalidQuerySnafu, JoinTaskSnafu, NotFoundAuthHeaderSnafu, Result};
+use crate::grpc::flight::{PutRecordBatchRequest, PutRecordBatchRequestStream};
+use crate::grpc::TonicResult;
 use crate::metrics::{METRIC_AUTH_FAILURE, METRIC_SERVER_GRPC_DB_REQUEST_TIMER};
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 
@@ -117,6 +125,70 @@ impl GreptimeRequestHandler {
             }
             None => result_future.await,
         }
+    }
+
+    pub(crate) async fn put_record_batches(
+        &self,
+        mut stream: PutRecordBatchRequestStream,
+        result_sender: mpsc::Sender<TonicResult<GreptimeResponse>>,
+    ) {
+        // TODO(LFC): handle authentication, too
+
+        let handler = self.handler.clone();
+        let runtime = self
+            .runtime
+            .clone()
+            .unwrap_or_else(common_runtime::global_runtime);
+        runtime.spawn(async move {
+            let mut table_to_put: Option<TableName> = None;
+
+            while let Some(request) = stream.next().await {
+                let request = match request {
+                    Ok(request) => request,
+                    Err(e) => {
+                        let _ = result_sender.try_send(Err(e));
+                        break;
+                    }
+                };
+
+                let (table, record_batch) = match request {
+                    PutRecordBatchRequest::First((table, record_batch)) => {
+                        let table = table_to_put.insert(table);
+                        debug!(r#"start putting record batches for "{}""#, table);
+                        (&*table, record_batch)
+                    }
+                    PutRecordBatchRequest::Rest(record_batch) => {
+                        let Some(table) = table_to_put.as_ref() else {
+                            let _ = result_sender.try_send(Ok(GreptimeResponse {
+                                header: Some(ResponseHeader {
+                                    status: Some(Status {
+                                        status_code: StatusCode::InvalidArguments as u32,
+                                        err_msg: "must specify a table to put first".to_string(),
+                                    }),
+                                }),
+                                ..Default::default()
+                            }));
+                            break;
+                        };
+                        (table, record_batch)
+                    }
+                };
+
+                let result = handler.put_record_batch(table, record_batch).await;
+                let result = result
+                    .map(|x| GreptimeResponse {
+                        response: Some(greptime_response::Response::AffectedRows(AffectedRows {
+                            value: x as u32,
+                        })),
+                        ..Default::default()
+                    })
+                    .map_err(Into::into);
+                if result_sender.try_send(result).is_err() {
+                    warn!(r#""DoPut" client maybe unreachable, abort handling its message"#);
+                    break;
+                }
+            }
+        });
     }
 }
 

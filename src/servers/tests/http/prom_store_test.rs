@@ -17,7 +17,6 @@ use std::sync::Arc;
 use api::prom_store::remote::{
     LabelMatcher, Query, QueryResult, ReadRequest, ReadResponse, WriteRequest,
 };
-use api::v1::greptime_request::Request;
 use api::v1::RowInsertRequests;
 use async_trait::async_trait;
 use axum::Router;
@@ -33,7 +32,6 @@ use servers::http::test_helpers::TestClient;
 use servers::http::{HttpOptions, HttpServerBuilder};
 use servers::prom_store;
 use servers::prom_store::{snappy_compress, Metrics};
-use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::{PromStoreProtocolHandler, PromStoreResponse};
 use session::context::QueryContextRef;
@@ -41,19 +39,6 @@ use tokio::sync::mpsc;
 
 struct DummyInstance {
     tx: mpsc::Sender<(String, Vec<u8>)>,
-}
-
-#[async_trait]
-impl GrpcQueryHandler for DummyInstance {
-    type Error = Error;
-
-    async fn do_query(
-        &self,
-        _query: Request,
-        _ctx: QueryContextRef,
-    ) -> std::result::Result<Output, Self::Error> {
-        unimplemented!()
-    }
 }
 
 #[async_trait]

@@ -18,19 +18,20 @@ use api::v1::query_request::Query;
 use api::v1::{DeleteRequests, DropFlowExpr, InsertRequests, RowDeleteRequests, RowInsertRequests};
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
+use common_base::AffectedRows;
 use common_query::Output;
 use common_telemetry::tracing::{self};
 use query::parser::PromQuery;
 use servers::interceptor::{GrpcQueryInterceptor, GrpcQueryInterceptorRef};
-use servers::query_handler::grpc::GrpcQueryHandler;
+use servers::query_handler::grpc::{GrpcQueryHandler, RawRecordBatch};
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use table::table_name::TableName;
 
 use crate::error::{
-    Error, InFlightWriteBytesExceededSnafu, IncompleteGrpcRequestSnafu, NotSupportedSnafu,
-    PermissionSnafu, Result, TableOperationSnafu,
+    CatalogSnafu, Error, InFlightWriteBytesExceededSnafu, IncompleteGrpcRequestSnafu,
+    NotSupportedSnafu, PermissionSnafu, Result, TableNotFoundSnafu, TableOperationSnafu,
 };
 use crate::instance::{attach_timer, Instance};
 use crate::metrics::{GRPC_HANDLE_PROMQL_ELAPSED, GRPC_HANDLE_SQL_ELAPSED};
@@ -193,6 +194,34 @@ impl GrpcQueryHandler for Instance {
 
         let output = interceptor.post_execute(output, ctx)?;
         Ok(output)
+    }
+
+    async fn put_record_batch(
+        &self,
+        table: &TableName,
+        record_batch: RawRecordBatch,
+    ) -> Result<AffectedRows> {
+        let _table = self
+            .catalog_manager()
+            .table(
+                &table.catalog_name,
+                &table.schema_name,
+                &table.table_name,
+                None,
+            )
+            .await
+            .context(CatalogSnafu)?
+            .with_context(|| TableNotFoundSnafu {
+                table_name: table.to_string(),
+            })?;
+
+        // TODO(LFC): Implement it.
+        common_telemetry::debug!(
+            "calling put_record_batch with table: {:?} and record_batch size: {}",
+            table,
+            record_batch.len()
+        );
+        Ok(record_batch.len())
     }
 }
 
