@@ -87,7 +87,7 @@ impl GrpcQueryHandler for Instance {
                         attach_timer(output, timer)
                     }
                     Query::LogicalPlan(plan) => {
-                        // this path is useful internally when flownode need to execute a logical plan through GRPC interface
+                        // this path is useful internally when flownode needs to execute a logical plan through gRPC interface
                         let timer = GRPC_HANDLE_PLAN_ELAPSED.start_timer();
                         let plan = DFLogicalSubstraitConvertor {}
                             .decode(&*plan, SessionStateBuilder::default().build())
