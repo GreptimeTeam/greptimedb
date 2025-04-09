@@ -174,12 +174,13 @@ impl PuffinFileAccessor for ObjectStorePuffinFileAccessor {
 
 #[cfg(test)]
 mod tests {
+
     use common_base::range_read::RangeReader;
     use common_test_util::temp_dir::create_temp_dir;
     use futures::io::Cursor;
     use object_store::services::Memory;
     use puffin::blob_metadata::CompressionCodec;
-    use puffin::puffin_manager::{DirGuard, PuffinManager, PuffinReader, PuffinWriter, PutOptions};
+    use puffin::puffin_manager::{PuffinManager, PuffinReader, PuffinWriter, PutOptions};
 
     use super::*;
 
@@ -229,6 +230,7 @@ mod tests {
                 PutOptions {
                     compression: Some(CompressionCodec::Zstd),
                 },
+                Default::default(),
             )
             .await
             .unwrap();

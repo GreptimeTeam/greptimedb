@@ -30,10 +30,35 @@ use crate::sst::index::puffin_manager::PuffinManagerFactory;
 /// A request for fulltext index.
 ///
 /// It contains all the queries and terms for a column.
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct FulltextRequest {
     pub queries: Vec<FulltextQuery>,
     pub terms: Vec<FulltextTerm>,
+}
+
+impl FulltextRequest {
+    /// Convert terms to a query string.
+    ///
+    /// For example, if the terms are ["foo", "bar"], the query string will be `r#"+"foo" +"bar""#`.
+    /// Need to escape the `"` in the term.
+    ///
+    /// `skip_lowercased` is used for the situation that lowercased terms are not indexed.
+    pub fn terms_as_query(&self, skip_lowercased: bool) -> FulltextQuery {
+        let mut query = String::new();
+        for term in &self.terms {
+            if skip_lowercased && term.col_lowered {
+                continue;
+            }
+            // Escape the `"` in the term.
+            let escaped_term = term.term.replace("\"", "\\\"");
+            if query.is_empty() {
+                query = format!("+\"{escaped_term}\"");
+            } else {
+                query.push_str(&format!(" +\"{escaped_term}\""));
+            }
+        }
+        FulltextQuery(query)
+    }
 }
 
 /// A query to be matched in fulltext index.
@@ -541,6 +566,94 @@ mod tests {
                 col_lowered: false,
                 term: "bar".to_string(),
             }
+        );
+    }
+
+    #[test]
+    fn test_terms_as_query() {
+        // Test with empty terms
+        let request = FulltextRequest::default();
+        assert_eq!(request.terms_as_query(false), FulltextQuery(String::new()));
+        assert_eq!(request.terms_as_query(true), FulltextQuery(String::new()));
+
+        // Test with a single term (not lowercased)
+        let mut request = FulltextRequest::default();
+        request.terms.push(FulltextTerm {
+            col_lowered: false,
+            term: "foo".to_string(),
+        });
+        assert_eq!(
+            request.terms_as_query(false),
+            FulltextQuery("+\"foo\"".to_string())
+        );
+        assert_eq!(
+            request.terms_as_query(true),
+            FulltextQuery("+\"foo\"".to_string())
+        );
+
+        // Test with a single lowercased term and skip_lowercased=true
+        let mut request = FulltextRequest::default();
+        request.terms.push(FulltextTerm {
+            col_lowered: true,
+            term: "foo".to_string(),
+        });
+        assert_eq!(
+            request.terms_as_query(false),
+            FulltextQuery("+\"foo\"".to_string())
+        );
+        assert_eq!(request.terms_as_query(true), FulltextQuery(String::new())); // Should skip lowercased term
+
+        // Test with multiple terms, mix of lowercased and not
+        let mut request = FulltextRequest::default();
+        request.terms.push(FulltextTerm {
+            col_lowered: false,
+            term: "foo".to_string(),
+        });
+        request.terms.push(FulltextTerm {
+            col_lowered: true,
+            term: "bar".to_string(),
+        });
+        assert_eq!(
+            request.terms_as_query(false),
+            FulltextQuery("+\"foo\" +\"bar\"".to_string())
+        );
+        assert_eq!(
+            request.terms_as_query(true),
+            FulltextQuery("+\"foo\"".to_string()) // Only the non-lowercased term
+        );
+
+        // Test with term containing quotes that need escaping
+        let mut request = FulltextRequest::default();
+        request.terms.push(FulltextTerm {
+            col_lowered: false,
+            term: "foo\"bar".to_string(),
+        });
+        assert_eq!(
+            request.terms_as_query(false),
+            FulltextQuery("+\"foo\\\"bar\"".to_string())
+        );
+
+        // Test with a complex mix of terms
+        let mut request = FulltextRequest::default();
+        request.terms.push(FulltextTerm {
+            col_lowered: false,
+            term: "foo".to_string(),
+        });
+        request.terms.push(FulltextTerm {
+            col_lowered: true,
+            term: "bar\"quoted\"".to_string(),
+        });
+        request.terms.push(FulltextTerm {
+            col_lowered: false,
+            term: "baz\\escape".to_string(),
+        });
+        assert_eq!(
+            request.terms_as_query(false),
+            FulltextQuery("+\"foo\" +\"bar\\\"quoted\\\"\" +\"baz\\escape\"".to_string())
+        );
+        assert_eq!(
+            request.terms_as_query(true),
+            FulltextQuery("+\"foo\" +\"baz\\escape\"".to_string()) // Skips the lowercased term
         );
     }
 }

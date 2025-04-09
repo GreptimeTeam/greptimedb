@@ -36,7 +36,7 @@ use crate::puffin_manager::file_accessor::PuffinFileAccessor;
 use crate::puffin_manager::fs_puffin_manager::dir_meta::DirMetadata;
 use crate::puffin_manager::fs_puffin_manager::PuffinMetadataCacheRef;
 use crate::puffin_manager::stager::{BoxWriter, DirWriterProviderRef, Stager};
-use crate::puffin_manager::{BlobGuard, BlobWithMetadata, PuffinReader};
+use crate::puffin_manager::{BlobGuard, GuardWithMetadata, PuffinReader};
 
 /// `FsPuffinReader` is a `PuffinReader` that provides fs readers for puffin files.
 pub struct FsPuffinReader<S, F>
@@ -101,7 +101,7 @@ where
         self.get_puffin_file_metadata(&mut file).await
     }
 
-    async fn blob(&self, key: &str) -> Result<BlobWithMetadata<Self::Blob>> {
+    async fn blob(&self, key: &str) -> Result<GuardWithMetadata<Self::Blob>> {
         let mut reader = self.puffin_file_accessor.reader(&self.handle).await?;
         if let Some(file_size_hint) = self.file_size_hint {
             reader.with_file_size_hint(file_size_hint);
@@ -140,11 +140,26 @@ where
             Either::R(staged_blob)
         };
 
-        Ok(BlobWithMetadata::new(blob, blob_metadata))
+        Ok(GuardWithMetadata::new(blob, blob_metadata))
     }
 
-    async fn dir(&self, key: &str) -> Result<Self::Dir> {
-        self.stager
+    async fn dir(&self, key: &str) -> Result<GuardWithMetadata<Self::Dir>> {
+        let mut reader = self.puffin_file_accessor.reader(&self.handle).await?;
+        if let Some(file_size_hint) = self.file_size_hint {
+            reader.with_file_size_hint(file_size_hint);
+        }
+        let mut file = PuffinFileReader::new(reader);
+
+        let metadata = self.get_puffin_file_metadata(&mut file).await?;
+        let blob_metadata = metadata
+            .blobs
+            .iter()
+            .find(|m| m.blob_type == key)
+            .context(BlobNotFoundSnafu { blob: key })?
+            .clone();
+
+        let dir = self
+            .stager
             .get_dir(
                 &self.handle,
                 key,
@@ -161,7 +176,9 @@ where
                     ))
                 }),
             )
-            .await
+            .await?;
+
+        Ok(GuardWithMetadata::new(dir, blob_metadata))
     }
 }
 

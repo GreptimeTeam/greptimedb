@@ -12,18 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use puffin::blob_metadata::BlobMetadata;
 use serde::{Deserialize, Serialize};
-
+use snafu::ResultExt;
+use tantivy::tokenizer::{LowerCaser, SimpleTokenizer, TextAnalyzer, TokenizerManager};
+use tantivy_jieba::JiebaTokenizer;
 pub mod create;
 pub mod error;
 pub mod search;
 pub mod tokenizer;
 
+pub const KEY_FULLTEXT_CONFIG: &str = "fulltext_config";
+
+use crate::fulltext_index::error::{DeserializeFromJsonSnafu, Result};
+
 #[cfg(test)]
 mod tests;
 
 /// Configuration for fulltext index.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Config {
     /// Analyzer to use for tokenization.
     pub analyzer: Analyzer,
@@ -33,10 +40,38 @@ pub struct Config {
 }
 
 /// Analyzer to use for tokenization.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Analyzer {
     #[default]
     English,
 
     Chinese,
+}
+
+impl Config {
+    fn build_tantivy_tokenizer(&self) -> TokenizerManager {
+        let mut builder = match self.analyzer {
+            Analyzer::English => TextAnalyzer::builder(SimpleTokenizer::default()).dynamic(),
+            Analyzer::Chinese => TextAnalyzer::builder(JiebaTokenizer {}).dynamic(),
+        };
+
+        if !self.case_sensitive {
+            builder = builder.filter_dynamic(LowerCaser);
+        }
+
+        let tokenizer = builder.build();
+        let tokenizer_manager = TokenizerManager::new();
+        tokenizer_manager.register("default", tokenizer);
+        tokenizer_manager
+    }
+
+    /// Extracts the fulltext index configuration from the blob metadata.
+    pub fn from_blob_metadata(metadata: &BlobMetadata) -> Result<Self> {
+        if let Some(config) = metadata.properties.get(KEY_FULLTEXT_CONFIG) {
+            let config = serde_json::from_str(config).context(DeserializeFromJsonSnafu)?;
+            return Ok(config);
+        }
+
+        Ok(Self::default())
+    }
 }

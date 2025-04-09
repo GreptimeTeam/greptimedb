@@ -29,6 +29,7 @@ use crate::fulltext_index::error::{
     Result, TantivyDocNotFoundSnafu, TantivyParserSnafu, TantivySnafu,
 };
 use crate::fulltext_index::search::{FulltextIndexSearcher, RowId};
+use crate::fulltext_index::Config;
 
 /// `TantivyFulltextIndexSearcher` is a searcher using Tantivy.
 pub struct TantivyFulltextIndexSearcher {
@@ -42,10 +43,11 @@ pub struct TantivyFulltextIndexSearcher {
 
 impl TantivyFulltextIndexSearcher {
     /// Creates a new `TantivyFulltextIndexSearcher`.
-    pub fn new(path: impl AsRef<Path>) -> Result<Self> {
+    pub fn new(path: impl AsRef<Path>, config: Config) -> Result<Self> {
         let now = Instant::now();
 
-        let index = Index::open_in_dir(path.as_ref()).context(TantivySnafu)?;
+        let mut index = Index::open_in_dir(path.as_ref()).context(TantivySnafu)?;
+        index.set_tokenizers(config.build_tantivy_tokenizer());
         let reader = index
             .reader_builder()
             .reload_policy(ReloadPolicy::Manual)
