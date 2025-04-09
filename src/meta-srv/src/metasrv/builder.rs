@@ -37,7 +37,7 @@ use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::region_registry::LeaderRegionRegistry;
 use common_meta::sequence::SequenceBuilder;
 use common_meta::state_store::KvStateStore;
-use common_meta::wal_options_allocator::build_wal_options_allocator;
+use common_meta::wal_options_allocator::{build_wal_options_allocator, WalOptionsAllocator};
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::ProcedureManagerRef;
 use snafu::ResultExt;
@@ -58,6 +58,11 @@ use crate::metasrv::{
 };
 use crate::procedure::region_migration::manager::RegionMigrationManager;
 use crate::procedure::region_migration::DefaultContextFactory;
+use crate::procedure::wal_prune::manager::{
+    WalPruneManager, WalPruneTicker, DEFAULT_WAL_PRUNE_FLUSH_THRESHOLD, DEFAULT_WAL_PRUNE_INTERVAL,
+    DEFAULT_WAL_PRUNE_LIMIT,
+};
+use crate::procedure::wal_prune::Context as WalPruneContext;
 use crate::region::supervisor::{
     HeartbeatAcceptor, RegionFailureDetectorControl, RegionSupervisor, RegionSupervisorTicker,
     DEFAULT_TICK_INTERVAL,
@@ -346,6 +351,42 @@ impl MetasrvBuilder {
             .context(error::InitDdlManagerSnafu)?,
         );
 
+        // remote WAL prune manager
+        let (tx, rx) = WalPruneManager::channel();
+        let wal_prune_ticker = if is_remote_wal {
+            let wal_prune_ticker =
+                Arc::new(WalPruneTicker::new(DEFAULT_WAL_PRUNE_INTERVAL, tx.clone()));
+            Some(wal_prune_ticker)
+        } else {
+            None
+        };
+
+        let kafka_client = match wal_options_allocator.as_ref() {
+            WalOptionsAllocator::Kafka(kafak_topic_pool) => {
+                kafak_topic_pool.topic_creator.client().clone()
+            }
+            _ => unreachable!(),
+        };
+        let wal_prune_context = WalPruneContext {
+            client: kafka_client,
+            table_metadata_manager: table_metadata_manager.clone(),
+            leader_region_registry: leader_region_registry.clone(),
+            server_addr: options.server_addr.clone(),
+            mailbox: mailbox.clone(),
+        };
+        let mut wal_prune_manager = WalPruneManager::new(
+            table_metadata_manager.clone(),
+            DEFAULT_WAL_PRUNE_LIMIT,
+            rx,
+            procedure_manager.clone(),
+            wal_prune_context,
+            DEFAULT_WAL_PRUNE_FLUSH_THRESHOLD,
+        );
+        wal_prune_manager.init().await?;
+        common_runtime::spawn_global(async move {
+            wal_prune_manager.run().await;
+        });
+
         let customized_region_lease_renewer = plugins
             .as_ref()
             .and_then(|plugins| plugins.get::<CustomizedRegionLeaseRenewerRef>());
@@ -406,6 +447,7 @@ impl MetasrvBuilder {
             region_supervisor_ticker,
             cache_invalidator,
             leader_region_registry,
+            wal_prune_ticker,
         })
     }
 }

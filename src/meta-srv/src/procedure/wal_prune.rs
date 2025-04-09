@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) mod manager;
+#[cfg(test)]
+mod test_util;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,6 +35,7 @@ use common_procedure::{
 use common_telemetry::warn;
 use itertools::{Itertools, MinMaxResult};
 use log_store::kafka::DEFAULT_PARTITION;
+use manager::WalPruneProcedureGuard;
 use rskafka::client::partition::UnknownTopicHandling;
 use rskafka::client::Client;
 use serde::{Deserialize, Serialize};
@@ -45,7 +50,7 @@ use crate::error::{
 use crate::service::mailbox::{Channel, MailboxRef};
 use crate::Result;
 
-type KafkaClientRef = Arc<Client>;
+pub type KafkaClientRef = Arc<Client>;
 
 /// No timeout for flush request.
 const DELETE_RECORDS_TIMEOUT: Duration = Duration::from_secs(1);
@@ -58,17 +63,18 @@ pub enum WalPruneState {
     Prune,
 }
 
+#[derive(Clone)]
 pub struct Context {
     /// The Kafka client.
-    client: KafkaClientRef,
+    pub client: KafkaClientRef,
     /// The table metadata manager.
-    table_metadata_manager: TableMetadataManagerRef,
+    pub table_metadata_manager: TableMetadataManagerRef,
     /// The leader region registry.
-    leader_region_registry: LeaderRegionRegistryRef,
+    pub leader_region_registry: LeaderRegionRegistryRef,
     /// Server address of metasrv.
-    server_addr: String,
+    pub server_addr: String,
     /// The mailbox to send messages.
-    mailbox: MailboxRef,
+    pub mailbox: MailboxRef,
 }
 
 /// The data of WAL pruning.
@@ -89,12 +95,18 @@ pub struct WalPruneData {
 pub struct WalPruneProcedure {
     pub data: WalPruneData,
     pub context: Context,
+    pub _guard: Option<WalPruneProcedureGuard>,
 }
 
 impl WalPruneProcedure {
     const TYPE_NAME: &'static str = "metasrv-procedure::WalPrune";
 
-    pub fn new(topic: String, context: Context, trigger_flush_threshold: Option<u64>) -> Self {
+    pub fn new(
+        topic: String,
+        context: Context,
+        trigger_flush_threshold: Option<u64>,
+        guard: Option<WalPruneProcedureGuard>,
+    ) -> Self {
         Self {
             data: WalPruneData {
                 topic,
@@ -104,12 +116,17 @@ impl WalPruneProcedure {
                 state: WalPruneState::Prepare,
             },
             context,
+            _guard: guard,
         }
     }
 
-    pub fn from_json(json: &str, context: Context) -> ProcedureResult<Self> {
+    pub fn from_json(json: &str, context: &Context) -> ProcedureResult<Self> {
         let data: WalPruneData = serde_json::from_str(json).context(ToJsonSnafu)?;
-        Ok(Self { data, context })
+        Ok(Self {
+            data,
+            context: context.clone(),
+            _guard: None,
+        })
     }
 
     async fn build_peer_to_region_ids_map(
@@ -388,10 +405,6 @@ mod tests {
     use std::assert_matches::assert_matches;
 
     use api::v1::meta::HeartbeatResponse;
-    use common_meta::key::TableMetadataManager;
-    use common_meta::kv_backend::memory::MemoryKvBackend;
-    use common_meta::region_registry::LeaderRegionRegistry;
-    use common_meta::sequence::SequenceBuilder;
     use common_meta::wal_options_allocator::build_kafka_topic_creator;
     use common_wal::config::kafka::common::{KafkaConnectionConfig, KafkaTopicConfig};
     use common_wal::config::kafka::MetasrvKafkaConfig;
@@ -401,49 +414,9 @@ mod tests {
 
     use super::*;
     use crate::handler::HeartbeatMailbox;
-    use crate::procedure::test_util::{new_wal_prune_metadata, MailboxContext};
-
-    struct TestEnv {
-        table_metadata_manager: TableMetadataManagerRef,
-        leader_region_registry: LeaderRegionRegistryRef,
-        mailbox: MailboxContext,
-        server_addr: String,
-    }
-
-    impl TestEnv {
-        fn new() -> Self {
-            let kv_backend = Arc::new(MemoryKvBackend::new());
-            let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
-            let leader_region_registry = Arc::new(LeaderRegionRegistry::new());
-            let mailbox_sequence =
-                SequenceBuilder::new("test_heartbeat_mailbox", kv_backend.clone()).build();
-
-            let mailbox_ctx = MailboxContext::new(mailbox_sequence);
-
-            Self {
-                table_metadata_manager,
-                leader_region_registry,
-                mailbox: mailbox_ctx,
-                server_addr: "localhost".to_string(),
-            }
-        }
-
-        fn table_metadata_manager(&self) -> &TableMetadataManagerRef {
-            &self.table_metadata_manager
-        }
-
-        fn leader_region_registry(&self) -> &LeaderRegionRegistryRef {
-            &self.leader_region_registry
-        }
-
-        fn mailbox_context(&self) -> &MailboxContext {
-            &self.mailbox
-        }
-
-        fn server_addr(&self) -> &str {
-            &self.server_addr
-        }
-    }
+    use crate::procedure::test_util::new_wal_prune_metadata;
+    // Fix this import to correctly point to the test_util module
+    use crate::procedure::wal_prune::test_util::TestEnv;
 
     /// Mock a test env for testing.
     /// Including:
@@ -469,9 +442,9 @@ mod tests {
             ..Default::default()
         };
         let topic_creator = build_kafka_topic_creator(&config).await.unwrap();
-        let table_metadata_manager = env.table_metadata_manager().clone();
-        let leader_region_registry = env.leader_region_registry().clone();
-        let mailbox = env.mailbox_context().mailbox().clone();
+        let table_metadata_manager = env.table_metadata_manager.clone();
+        let leader_region_registry = env.leader_region_registry.clone();
+        let mailbox = env.mailbox.mailbox().clone();
 
         let n_region = 10;
         let n_table = 5;
@@ -500,10 +473,10 @@ mod tests {
             table_metadata_manager,
             leader_region_registry,
             mailbox,
-            server_addr: env.server_addr().to_string(),
+            server_addr: env.server_addr.to_string(),
         };
 
-        let wal_prune_procedure = WalPruneProcedure::new(topic, context, Some(threshold));
+        let wal_prune_procedure = WalPruneProcedure::new(topic, context, Some(threshold), None);
         (wal_prune_procedure, min_flushed_entry_id, regions_to_flush)
     }
 
@@ -664,7 +637,7 @@ mod tests {
                 .await;
 
                 let min_entry_id = env
-                    .table_metadata_manager()
+                    .table_metadata_manager
                     .topic_name_manager()
                     .get(&topic_name)
                     .await

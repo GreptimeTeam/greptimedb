@@ -66,4 +66,7 @@ lazy_static! {
     /// The remove region follower execute histogram.
     pub static ref METRIC_META_REMOVE_REGION_FOLLOWER_EXECUTE: HistogramVec =
         register_histogram_vec!("greptime_meta_remove_region_follower_execute", "meta remove region follower execute", &["state"]).unwrap();
+    /// The remote WAL prune execute counter.
+    pub static ref METRIC_META_REMOTE_WAL_PRUNE_EXECUTE: IntCounterVec =
+        register_int_counter_vec!("greptime_meta_remote_wal_prune_execute", "meta remote wal prune execute", &["topic_name"]).unwrap();
 }
