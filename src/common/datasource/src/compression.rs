@@ -19,6 +19,7 @@ use std::str::FromStr;
 use async_compression::tokio::bufread::{BzDecoder, GzipDecoder, XzDecoder, ZstdDecoder};
 use async_compression::tokio::write;
 use bytes::Bytes;
+use datafusion::datasource::file_format::file_compression_type::FileCompressionType;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use strum::EnumIter;
@@ -192,3 +193,15 @@ macro_rules! impl_compression_type {
 }
 
 impl_compression_type!((Gzip, Gzip), (Bzip2, Bz), (Xz, Xz), (Zstd, Zstd));
+
+impl From<CompressionType> for FileCompressionType {
+    fn from(t: CompressionType) -> Self {
+        match t {
+            CompressionType::Gzip => FileCompressionType::GZIP,
+            CompressionType::Bzip2 => FileCompressionType::BZIP2,
+            CompressionType::Xz => FileCompressionType::XZ,
+            CompressionType::Zstd => FileCompressionType::ZSTD,
+            CompressionType::Uncompressed => FileCompressionType::UNCOMPRESSED,
+        }
+    }
+}

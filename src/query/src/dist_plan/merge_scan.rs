@@ -30,11 +30,12 @@ use common_recordbatch::{
 };
 use common_telemetry::tracing_context::TracingContext;
 use datafusion::execution::{SessionState, TaskContext};
+use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::metrics::{
     Count, ExecutionPlanMetricsSet, Gauge, MetricBuilder, MetricsSet, Time,
 };
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, Partitioning, PlanProperties,
+    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
 };
 use datafusion_common::{Column as ColumnExpr, Result};
 use datafusion_expr::{Expr, Extension, LogicalPlan, UserDefinedLogicalNodeCore};
@@ -222,7 +223,12 @@ impl MergeScanExec {
             .collect();
         let partitioning = Partitioning::Hash(partition_exprs, target_partition);
 
-        let properties = PlanProperties::new(eq_properties, partitioning, ExecutionMode::Bounded);
+        let properties = PlanProperties::new(
+            eq_properties,
+            partitioning,
+            EmissionType::Incremental,
+            Boundedness::Bounded,
+        );
         let schema = Self::arrow_schema_to_schema(arrow_schema.clone())?;
         Ok(Self {
             table,
@@ -387,7 +393,8 @@ impl MergeScanExec {
             properties: PlanProperties::new(
                 self.properties.eq_properties.clone(),
                 Partitioning::Hash(hash_exprs, self.target_partition),
-                self.properties.execution_mode,
+                self.properties.emission_type,
+                self.properties.boundedness,
             ),
             sub_stage_metrics: self.sub_stage_metrics.clone(),
             query_ctx: self.query_ctx.clone(),

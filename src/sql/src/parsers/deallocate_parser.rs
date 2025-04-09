@@ -24,7 +24,7 @@ impl ParserContext<'_> {
         self.parser
             .expect_keyword(Keyword::DEALLOCATE)
             .context(SyntaxSnafu)?;
-        let stmt_name = self.parser.parse_identifier(false).context(SyntaxSnafu)?;
+        let stmt_name = self.parser.parse_identifier().context(SyntaxSnafu)?;
         Ok(stmt_name.value)
     }
 }

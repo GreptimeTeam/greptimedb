@@ -300,10 +300,7 @@ mod tests {
 
         let func = ScalarFunction {
             args: vec![
-                Expr::Column(Column {
-                    name: "text".to_string(),
-                    relation: None,
-                }),
+                Expr::Column(Column::from_name("text")),
                 Expr::Literal(ScalarValue::Utf8(Some("foo".to_string()))),
             ],
             func: matches_func(),
@@ -320,10 +317,7 @@ mod tests {
         let metadata = mock_metadata();
 
         let func = ScalarFunction {
-            args: vec![Expr::Column(Column {
-                name: "text".to_string(),
-                relation: None,
-            })],
+            args: vec![Expr::Column(Column::from_name("text"))],
             func: matches_func(),
         };
 
@@ -336,10 +330,7 @@ mod tests {
 
         let func = ScalarFunction {
             args: vec![
-                Expr::Column(Column {
-                    name: "not_found".to_string(),
-                    relation: None,
-                }),
+                Expr::Column(Column::from_name("not_found")),
                 Expr::Literal(ScalarValue::Utf8(Some("foo".to_string()))),
             ],
             func: matches_func(),
@@ -354,10 +345,7 @@ mod tests {
 
         let func = ScalarFunction {
             args: vec![
-                Expr::Column(Column {
-                    name: "ts".to_string(),
-                    relation: None,
-                }),
+                Expr::Column(Column::from_name("ts")),
                 Expr::Literal(ScalarValue::Utf8(Some("foo".to_string()))),
             ],
             func: matches_func(),
@@ -372,10 +360,7 @@ mod tests {
 
         let func = ScalarFunction {
             args: vec![
-                Expr::Column(Column {
-                    name: "text".to_string(),
-                    relation: None,
-                }),
+                Expr::Column(Column::from_name("text")),
                 Expr::Literal(ScalarValue::Int64(Some(42))),
             ],
             func: matches_func(),
@@ -390,10 +375,7 @@ mod tests {
 
         let func = ScalarFunction {
             args: vec![
-                Expr::Column(Column {
-                    name: "text".to_string(),
-                    relation: None,
-                }),
+                Expr::Column(Column::from_name("text")),
                 Expr::Literal(ScalarValue::Utf8(Some("foo".to_string()))),
             ],
             func: matches_term_func(),
@@ -416,10 +398,7 @@ mod tests {
         let metadata = mock_metadata();
 
         let lower_func_expr = ScalarFunction {
-            args: vec![Expr::Column(Column {
-                name: "text".to_string(),
-                relation: None,
-            })],
+            args: vec![Expr::Column(Column::from_name("text"))],
             func: lower(),
         };
 
@@ -448,10 +427,7 @@ mod tests {
         let metadata = mock_metadata();
 
         let func = ScalarFunction {
-            args: vec![Expr::Column(Column {
-                name: "text".to_string(),
-                relation: None,
-            })],
+            args: vec![Expr::Column(Column::from_name("text"))],
             func: matches_term_func(),
         };
 
@@ -464,10 +440,7 @@ mod tests {
 
         let func = ScalarFunction {
             args: vec![
-                Expr::Column(Column {
-                    name: "text".to_string(),
-                    relation: None,
-                }),
+                Expr::Column(Column::from_name("text")),
                 Expr::Literal(ScalarValue::Utf8(Some("foo".to_string()))),
             ],
             func: matches_func(), // Using 'matches' instead of 'matches_term'
@@ -479,10 +452,7 @@ mod tests {
     #[test]
     fn test_extract_lower_arg() {
         let func = ScalarFunction {
-            args: vec![Expr::Column(Column {
-                name: "text".to_string(),
-                relation: None,
-            })],
+            args: vec![Expr::Column(Column::from_name("text"))],
             func: lower(),
         };
 
@@ -498,10 +468,7 @@ mod tests {
     #[test]
     fn test_extract_lower_arg_wrong_function() {
         let func = ScalarFunction {
-            args: vec![Expr::Column(Column {
-                name: "text".to_string(),
-                relation: None,
-            })],
+            args: vec![Expr::Column(Column::from_name("text"))],
             func: matches_func(), // Not 'lower'
         };
 
@@ -515,10 +482,7 @@ mod tests {
         // Create a matches expression
         let matches_expr = Expr::ScalarFunction(ScalarFunction {
             args: vec![
-                Expr::Column(Column {
-                    name: "text".to_string(),
-                    relation: None,
-                }),
+                Expr::Column(Column::from_name("text")),
                 Expr::Literal(ScalarValue::Utf8(Some("foo".to_string()))),
             ],
             func: matches_func(),
@@ -541,10 +505,7 @@ mod tests {
         // Create a matches expression
         let matches_expr = Expr::ScalarFunction(ScalarFunction {
             args: vec![
-                Expr::Column(Column {
-                    name: "text".to_string(),
-                    relation: None,
-                }),
+                Expr::Column(Column::from_name("text")),
                 Expr::Literal(ScalarValue::Utf8(Some("foo".to_string()))),
             ],
             func: matches_func(),
@@ -553,10 +514,7 @@ mod tests {
         // Create a matches_term expression
         let matches_term_expr = Expr::ScalarFunction(ScalarFunction {
             args: vec![
-                Expr::Column(Column {
-                    name: "text".to_string(),
-                    relation: None,
-                }),
+                Expr::Column(Column::from_name("text")),
                 Expr::Literal(ScalarValue::Utf8(Some("bar".to_string()))),
             ],
             func: matches_term_func(),

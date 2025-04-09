@@ -64,12 +64,12 @@ SELECT ts, host, first_value(addon ORDER BY val DESC) RANGE '5s', last_value(add
 | ts                  | host  | first_value(host.addon) ORDER BY [host.val DESC NULLS FIRST] RANGE 5s | last_value(host.addon) ORDER BY [host.val DESC NULLS FIRST] RANGE 5s |
 +---------------------+-------+-----------------------------------------------------------------------+----------------------------------------------------------------------+
 | 1970-01-01T00:00:00 | host1 | 3                                                                     | 1                                                                    |
-| 1970-01-01T00:00:05 | host1 | 4                                                                     | 4                                                                    |
+| 1970-01-01T00:00:05 | host1 | 4                                                                     | 6                                                                    |
 | 1970-01-01T00:00:10 | host1 | 7                                                                     | 8                                                                    |
 | 1970-01-01T00:00:15 | host1 | 11                                                                    | 10                                                                   |
 | 1970-01-01T00:00:20 | host1 | 15                                                                    | 13                                                                   |
 | 1970-01-01T00:00:00 | host2 | 18                                                                    | 16                                                                   |
-| 1970-01-01T00:00:05 | host2 | 19                                                                    | 19                                                                   |
+| 1970-01-01T00:00:05 | host2 | 19                                                                    | 21                                                                   |
 | 1970-01-01T00:00:10 | host2 | 22                                                                    | 23                                                                   |
 | 1970-01-01T00:00:15 | host2 | 26                                                                    | 25                                                                   |
 | 1970-01-01T00:00:20 | host2 | 30                                                                    | 28                                                                   |
@@ -81,12 +81,12 @@ SELECT ts, host, first_value(addon ORDER BY val DESC NULLS LAST) RANGE '5s', las
 | ts                  | host  | first_value(host.addon) ORDER BY [host.val DESC NULLS LAST] RANGE 5s | last_value(host.addon) ORDER BY [host.val DESC NULLS LAST] RANGE 5s |
 +---------------------+-------+----------------------------------------------------------------------+---------------------------------------------------------------------+
 | 1970-01-01T00:00:00 | host1 | 3                                                                    | 1                                                                   |
-| 1970-01-01T00:00:05 | host1 | 4                                                                    | 4                                                                   |
+| 1970-01-01T00:00:05 | host1 | 4                                                                    | 6                                                                   |
 | 1970-01-01T00:00:10 | host1 | 9                                                                    | 7                                                                   |
 | 1970-01-01T00:00:15 | host1 | 12                                                                   | 11                                                                  |
 | 1970-01-01T00:00:20 | host1 | 14                                                                   | 15                                                                  |
 | 1970-01-01T00:00:00 | host2 | 18                                                                   | 16                                                                  |
-| 1970-01-01T00:00:05 | host2 | 19                                                                   | 19                                                                  |
+| 1970-01-01T00:00:05 | host2 | 19                                                                   | 21                                                                  |
 | 1970-01-01T00:00:10 | host2 | 24                                                                   | 22                                                                  |
 | 1970-01-01T00:00:15 | host2 | 27                                                                   | 26                                                                  |
 | 1970-01-01T00:00:20 | host2 | 29                                                                   | 30                                                                  |
@@ -98,12 +98,12 @@ SELECT ts, host, first_value(addon ORDER BY val ASC) RANGE '5s', last_value(addo
 | ts                  | host  | first_value(host.addon) ORDER BY [host.val ASC NULLS LAST] RANGE 5s | last_value(host.addon) ORDER BY [host.val ASC NULLS LAST] RANGE 5s |
 +---------------------+-------+---------------------------------------------------------------------+--------------------------------------------------------------------+
 | 1970-01-01T00:00:00 | host1 | 1                                                                   | 3                                                                  |
-| 1970-01-01T00:00:05 | host1 | 4                                                                   | 4                                                                  |
+| 1970-01-01T00:00:05 | host1 | 4                                                                   | 6                                                                  |
 | 1970-01-01T00:00:10 | host1 | 8                                                                   | 7                                                                  |
 | 1970-01-01T00:00:15 | host1 | 10                                                                  | 11                                                                 |
 | 1970-01-01T00:00:20 | host1 | 13                                                                  | 15                                                                 |
 | 1970-01-01T00:00:00 | host2 | 16                                                                  | 18                                                                 |
-| 1970-01-01T00:00:05 | host2 | 19                                                                  | 19                                                                 |
+| 1970-01-01T00:00:05 | host2 | 19                                                                  | 21                                                                 |
 | 1970-01-01T00:00:10 | host2 | 23                                                                  | 22                                                                 |
 | 1970-01-01T00:00:15 | host2 | 25                                                                  | 26                                                                 |
 | 1970-01-01T00:00:20 | host2 | 28                                                                  | 30                                                                 |
@@ -115,12 +115,12 @@ SELECT ts, host, first_value(addon ORDER BY val ASC NULLS FIRST) RANGE '5s', las
 | ts                  | host  | first_value(host.addon) ORDER BY [host.val ASC NULLS FIRST] RANGE 5s | last_value(host.addon) ORDER BY [host.val ASC NULLS FIRST] RANGE 5s |
 +---------------------+-------+----------------------------------------------------------------------+---------------------------------------------------------------------+
 | 1970-01-01T00:00:00 | host1 | 1                                                                    | 3                                                                   |
-| 1970-01-01T00:00:05 | host1 | 4                                                                    | 4                                                                   |
+| 1970-01-01T00:00:05 | host1 | 4                                                                    | 6                                                                   |
 | 1970-01-01T00:00:10 | host1 | 7                                                                    | 9                                                                   |
 | 1970-01-01T00:00:15 | host1 | 11                                                                   | 12                                                                  |
 | 1970-01-01T00:00:20 | host1 | 15                                                                   | 14                                                                  |
 | 1970-01-01T00:00:00 | host2 | 16                                                                   | 18                                                                  |
-| 1970-01-01T00:00:05 | host2 | 19                                                                   | 19                                                                  |
+| 1970-01-01T00:00:05 | host2 | 19                                                                   | 21                                                                  |
 | 1970-01-01T00:00:10 | host2 | 22                                                                   | 24                                                                  |
 | 1970-01-01T00:00:15 | host2 | 26                                                                   | 27                                                                  |
 | 1970-01-01T00:00:20 | host2 | 30                                                                   | 29                                                                  |
@@ -231,7 +231,7 @@ SELECT ts, host, count(distinct *) RANGE '5s' FROM host ALIGN '5s' ORDER BY host
 -- Test error first_value/last_value
 SELECT ts, host, first_value(val, val) RANGE '5s' FROM host ALIGN '5s' ORDER BY host, ts;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Error during planning: The function expected 1 arguments but received 2 No function matches the given name and argument types 'first_value(Int64, Int64)'. You might need to add explicit type casts.
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: The function 'first_value' expected 1 arguments but received 2 No function matches the given name and argument types 'first_value(Int64, Int64)'. You might need to add explicit type casts.
 	Candidate functions:
 	first_value(Any)
 

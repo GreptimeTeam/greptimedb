@@ -25,9 +25,10 @@ use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::warn;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::TaskContext;
+use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, PlanProperties,
+    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
     RecordBatchStream as DfRecordBatchStream,
 };
 use datafusion_common::stats::Precision;
@@ -134,7 +135,8 @@ impl RegionScanExec {
         let properties = PlanProperties::new(
             eq_props,
             Partitioning::UnknownPartitioning(num_output_partition),
-            ExecutionMode::Bounded,
+            EmissionType::Incremental,
+            Boundedness::Bounded,
         );
         let append_mode = scanner_props.append_mode();
         let total_rows = scanner_props.total_rows();

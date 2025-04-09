@@ -606,10 +606,7 @@ mod tests {
         for i in 0..100 {
             let timestamps: Vec<_> = (0..10).map(|v| i as i64 * 1000 + v).collect();
             let expr = Expr::BinaryExpr(BinaryExpr {
-                left: Box::new(Expr::Column(Column {
-                    relation: None,
-                    name: "k1".to_string(),
-                })),
+                left: Box::new(Expr::Column(Column::from_name("k1"))),
                 op: Operator::Eq,
                 right: Box::new(Expr::Literal(ScalarValue::UInt32(Some(i)))),
             });
