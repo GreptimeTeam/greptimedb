@@ -59,6 +59,8 @@ pub const MEMTABLE_PARTITION_TREE_DATA_FREEZE_THRESHOLD: &str =
 /// Option key for memtable partition tree fork dictionary bytes.
 pub const MEMTABLE_PARTITION_TREE_FORK_DICTIONARY_BYTES: &str =
     "memtable.partition_tree.fork_dictionary_bytes";
+/// Option key for skipping WAL.
+pub const SKIP_WAL_KEY: &str = "skip_wal";
 
 /// Returns true if the `key` is a valid option key for the mito engine.
 pub fn is_mito_engine_option_key(key: &str) -> bool {
