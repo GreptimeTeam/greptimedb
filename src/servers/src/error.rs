@@ -779,7 +779,7 @@ pub fn status_code_to_http_status(status_code: &StatusCode) -> HttpStatusCode {
 
         // When a request is cancelled by the client (e.g., by a client side timeout),
         // we should return a gateway timeout status code to the external client.
-        StatusCode::Cancelled => HttpStatusCode::GATEWAY_TIMEOUT,
+        StatusCode::Cancelled | StatusCode::DeadlineExceeded => HttpStatusCode::GATEWAY_TIMEOUT,
 
         StatusCode::Unsupported
         | StatusCode::InvalidArguments

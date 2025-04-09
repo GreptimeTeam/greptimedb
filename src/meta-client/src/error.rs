@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use common_error::ext::ErrorExt;
-use common_error::status_code::{convert_client_side_tonic_code_to_status_code, StatusCode};
+use common_error::status_code::{convert_tonic_code_to_status_code, StatusCode};
 use common_error::{GREPTIME_DB_HEADER_ERROR_CODE, GREPTIME_DB_HEADER_ERROR_MSG};
 use common_macro::stack_trace_debug;
 use snafu::{location, Location, Snafu};
@@ -178,8 +178,7 @@ impl From<Status> for Error {
             }
         });
         let tonic_code = e.code();
-        let code =
-            code.unwrap_or_else(|| convert_client_side_tonic_code_to_status_code(tonic_code));
+        let code = code.unwrap_or_else(|| convert_tonic_code_to_status_code(tonic_code));
 
         let msg = get_metadata_value(&e, GREPTIME_DB_HEADER_ERROR_MSG)
             .unwrap_or_else(|| e.message().to_string());
