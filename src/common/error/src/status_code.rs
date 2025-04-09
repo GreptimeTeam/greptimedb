@@ -34,7 +34,7 @@ pub enum StatusCode {
     Internal = 1003,
     /// Invalid arguments.
     InvalidArguments = 1004,
-    /// The task is cancelled.
+    /// The task is cancelled (typically caller-side).
     Cancelled = 1005,
     /// Illegal state, can be exposed to users.
     IllegalState = 1006,
@@ -299,25 +299,15 @@ pub fn status_to_tonic_code(status_code: StatusCode) -> Code {
     }
 }
 
-/// Converts tonic [Code] to [StatusCode].
-pub fn tonic_code_to_status_code(code: Code) -> StatusCode {
-    match code {
-        Code::Ok => StatusCode::Success,
-        Code::Unknown => StatusCode::Unknown,
-        Code::PermissionDenied => StatusCode::PermissionDenied,
-        Code::ResourceExhausted => StatusCode::RateLimited,
-        Code::InvalidArgument | Code::FailedPrecondition | Code::OutOfRange => {
-            StatusCode::InvalidArguments
-        }
-        Code::DeadlineExceeded | Code::Cancelled | Code::Aborted => StatusCode::Cancelled,
-        Code::NotFound
-        | Code::Unavailable
-        | Code::AlreadyExists
-        | Code::Internal
-        | Code::Unauthenticated
-        | Code::DataLoss => StatusCode::Internal,
-        Code::Unimplemented => StatusCode::Unsupported,
+/// Converts client side thrown tonic [Code] to [StatusCode].
+pub fn convert_client_side_tonic_code_to_status_code(code: Code) -> StatusCode {
+    // The cancelled is thrown by client side,
+    // if the client side timeout expired, we should throws an Cancelled error.
+    if code == Code::Cancelled {
+        return StatusCode::Cancelled;
     }
+
+    StatusCode::Internal
 }
 
 #[cfg(test)]
