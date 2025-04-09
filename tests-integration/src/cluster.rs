@@ -393,6 +393,7 @@ impl GreptimeDbClusterBuilder {
             cached_meta_backend.clone(),
             cache_registry.clone(),
             None,
+            None,
         );
 
         let handlers_executor = HandlerGroupExecutor::new(vec![

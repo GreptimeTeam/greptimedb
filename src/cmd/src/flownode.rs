@@ -291,6 +291,7 @@ impl StartCommand {
             cached_meta_backend.clone(),
             layered_cache_registry.clone(),
             None,
+            None,
         );
 
         let table_metadata_manager =

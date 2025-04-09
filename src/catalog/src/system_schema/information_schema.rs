@@ -38,11 +38,13 @@ use common_meta::cluster::NodeInfo;
 use common_meta::datanode::RegionStat;
 use common_meta::key::flow::flow_state::FlowStat;
 use common_meta::key::flow::FlowMetadataManager;
+use common_meta::key::process_list::ProcessManager;
 use common_procedure::ProcedureInfo;
 use common_recordbatch::SendableRecordBatchStream;
 use datatypes::schema::SchemaRef;
 use lazy_static::lazy_static;
 use paste::paste;
+use process_list::InformationSchemaProcessList;
 use store_api::storage::{ScanRequest, TableId};
 use table::metadata::TableType;
 use table::TableRef;
@@ -114,6 +116,7 @@ macro_rules! setup_memory_table {
 pub struct InformationSchemaProvider {
     catalog_name: String,
     catalog_manager: Weak<dyn CatalogManager>,
+    process_manager: Option<Arc<ProcessManager>>,
     flow_metadata_manager: Arc<FlowMetadataManager>,
     tables: HashMap<String, TableRef>,
 }
@@ -208,6 +211,10 @@ impl SystemSchemaProviderInner for InformationSchemaProvider {
                     self.catalog_manager.clone(),
                 ),
             ) as _),
+            PROCESS_LIST => self
+                .process_manager
+                .as_ref()
+                .map(|p| Arc::new(InformationSchemaProcessList::new(p.clone())) as _),
             _ => None,
         }
     }
@@ -218,11 +225,13 @@ impl InformationSchemaProvider {
         catalog_name: String,
         catalog_manager: Weak<dyn CatalogManager>,
         flow_metadata_manager: Arc<FlowMetadataManager>,
+        process_manager: Option<Arc<ProcessManager>>,
     ) -> Self {
         let mut provider = Self {
             catalog_name,
             catalog_manager,
             flow_metadata_manager,
+            process_manager,
             tables: HashMap::new(),
         };
 
@@ -278,6 +287,10 @@ impl InformationSchemaProvider {
             self.build_table(TABLE_CONSTRAINTS).unwrap(),
         );
         tables.insert(FLOWS.to_string(), self.build_table(FLOWS).unwrap());
+        tables.insert(
+            PROCESS_LIST.to_string(),
+            self.build_table(PROCESS_LIST).unwrap(),
+        );
         // Add memory tables
         for name in MEMORY_TABLES.iter() {
             tables.insert((*name).to_string(), self.build_table(name).expect(name));

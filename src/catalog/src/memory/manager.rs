@@ -356,6 +356,7 @@ impl MemoryCatalogManager {
             catalog,
             Arc::downgrade(self) as Weak<dyn CatalogManager>,
             Arc::new(FlowMetadataManager::new(Arc::new(MemoryKvBackend::new()))),
+            None, // we don't need ProcessManager on regions server.
         );
         let information_schema = information_schema_provider.tables().clone();
 
