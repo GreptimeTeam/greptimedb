@@ -152,6 +152,7 @@ impl FrontendBuilder {
 
         let procedure_service_handler = Arc::new(ProcedureServiceOperator::new(
             self.procedure_executor.clone(),
+            self.catalog_manager.clone(),
         ));
 
         let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
