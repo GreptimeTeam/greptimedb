@@ -34,8 +34,9 @@ use futures::StreamExt;
 use snafu::ResultExt;
 use store_api::storage::{ScanRequest, TableId};
 
-use super::{InformationTable, Predicates};
 use crate::error::{self, InternalSnafu};
+use crate::information_schema::Predicates;
+use crate::system_schema::information_schema::InformationTable;
 
 /// Column names of `information_schema.process_list`
 const ID: &str = "id";
