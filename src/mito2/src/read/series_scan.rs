@@ -464,6 +464,7 @@ impl SenderList {
 
     /// Finds a partition and sends the batch to the partition.
     async fn send_batch(&mut self, mut batch: SeriesBatch) -> Result<()> {
+        // Sends the batch without blocking first.
         match self.try_send_batch(batch)? {
             Some(b) => {
                 // Unable to send batch to partition.
