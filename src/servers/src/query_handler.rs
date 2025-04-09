@@ -168,7 +168,7 @@ pub trait PipelineHandler {
     fn build_pipeline(&self, pipeline: &str) -> Result<Pipeline>;
 
     /// Get a original pipeline by name.
-    async fn get_original_pipeline(
+    async fn get_pipeline_str(
         &self,
         name: &str,
         version: PipelineVersion,

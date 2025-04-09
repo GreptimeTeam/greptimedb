@@ -169,7 +169,7 @@ pub async fn query_pipeline(
     let query_ctx = Arc::new(query_ctx);
 
     let (pipeline, pipeline_version) = handler
-        .get_original_pipeline(&pipeline_name, version, query_ctx)
+        .get_pipeline_str(&pipeline_name, version, query_ctx)
         .await?;
 
     Ok(GreptimedbManageResponse::from_pipeline(

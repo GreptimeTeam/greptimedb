@@ -200,7 +200,7 @@ impl PipelineOperator {
     }
 
     /// Get a original pipeline by name.
-    pub async fn get_original_pipeline(
+    pub async fn get_pipeline_str(
         &self,
         name: &str,
         version: PipelineVersion,
@@ -213,7 +213,7 @@ impl PipelineOperator {
         let timer = Instant::now();
         self.get_pipeline_table_from_cache(query_ctx.current_catalog())
             .context(PipelineTableNotFoundSnafu)?
-            .get_original_pipeline(&schema, name, version)
+            .get_pipeline_str(&schema, name, version)
             .inspect(|re| {
                 METRIC_PIPELINE_RETRIEVE_HISTOGRAM
                     .with_label_values(&[&re.is_ok().to_string()])

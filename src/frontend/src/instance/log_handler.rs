@@ -105,14 +105,14 @@ impl PipelineHandler for Instance {
         PipelineOperator::build_pipeline(pipeline).context(PipelineSnafu)
     }
 
-    async fn get_original_pipeline(
+    async fn get_pipeline_str(
         &self,
         name: &str,
         version: PipelineVersion,
         query_ctx: QueryContextRef,
     ) -> ServerResult<(String, TimestampNanosecond)> {
         self.pipeline_operator
-            .get_original_pipeline(name, version, query_ctx)
+            .get_pipeline_str(name, version, query_ctx)
             .await
             .context(PipelineSnafu)
     }

@@ -278,7 +278,7 @@ impl PipelineTable {
             return Ok(pipeline);
         }
 
-        let pipeline = self.get_original_pipeline(schema, name, version).await?;
+        let pipeline = self.get_pipeline_str(schema, name, version).await?;
         let compiled_pipeline = Arc::new(Self::compile_pipeline(&pipeline.0)?);
 
         self.pipelines.insert(
@@ -290,7 +290,7 @@ impl PipelineTable {
 
     /// Get a original pipeline by name.
     /// If the pipeline is not in the cache, it will be get from table and compiled and inserted into the cache.
-    pub async fn get_original_pipeline(
+    pub async fn get_pipeline_str(
         &self,
         schema: &str,
         name: &str,
