@@ -519,7 +519,7 @@ impl StartCommand {
             kv_backend.clone(),
             layered_cache_registry.clone(),
             Some(procedure_manager.clone()),
-            Some(process_manager),
+            Some(process_manager.clone()),
         );
 
         let table_metadata_manager =
@@ -600,6 +600,7 @@ impl StartCommand {
             node_manager.clone(),
             ddl_task_executor.clone(),
             StatementStatistics::new(opts.logging.slow_query.clone()),
+            Some(process_manager),
         )
         .with_plugin(plugins.clone())
         .try_build()

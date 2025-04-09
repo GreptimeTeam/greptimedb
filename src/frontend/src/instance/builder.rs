@@ -21,6 +21,7 @@ use common_meta::cache::{LayeredCacheRegistryRef, TableRouteCacheRef};
 use common_meta::cache_invalidator::{CacheInvalidatorRef, DummyCacheInvalidator};
 use common_meta::ddl::ProcedureExecutorRef;
 use common_meta::key::flow::FlowMetadataManager;
+use common_meta::key::process_list::ProcessManager;
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::NodeManagerRef;
@@ -55,6 +56,7 @@ pub struct FrontendBuilder {
     plugins: Option<Plugins>,
     procedure_executor: ProcedureExecutorRef,
     stats: StatementStatistics,
+    process_manager: Option<Arc<ProcessManager>>,
 }
 
 impl FrontendBuilder {
@@ -66,6 +68,7 @@ impl FrontendBuilder {
         node_manager: NodeManagerRef,
         procedure_executor: ProcedureExecutorRef,
         stats: StatementStatistics,
+        process_manager: Option<Arc<ProcessManager>>,
     ) -> Self {
         Self {
             options,
@@ -77,6 +80,7 @@ impl FrontendBuilder {
             plugins: None,
             procedure_executor,
             stats,
+            process_manager,
         }
     }
 
@@ -98,7 +102,7 @@ impl FrontendBuilder {
         let kv_backend = self.kv_backend;
         let node_manager = self.node_manager;
         let plugins = self.plugins.unwrap_or_default();
-
+        let process_manager = self.process_manager;
         let table_route_cache: TableRouteCacheRef =
             self.layered_cache_registry
                 .get()
@@ -207,6 +211,7 @@ impl FrontendBuilder {
             table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend)),
             stats: self.stats,
             limiter,
+            process_manager,
         })
     }
 }

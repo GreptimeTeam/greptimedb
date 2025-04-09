@@ -35,6 +35,7 @@ use client::OutputData;
 use common_base::Plugins;
 use common_config::KvBackendConfig;
 use common_error::ext::{BoxedError, ErrorExt};
+use common_meta::key::process_list::ProcessManager;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::state_store::KvStateStore;
@@ -96,6 +97,7 @@ pub struct Instance {
     table_metadata_manager: TableMetadataManagerRef,
     stats: StatementStatistics,
     limiter: Option<LimiterRef>,
+    process_manager: Option<Arc<ProcessManager>>,
 }
 
 impl Instance {
@@ -170,6 +172,27 @@ impl Instance {
             .stats
             .start_slow_query_timer(QueryStatement::Sql(stmt.clone()));
 
+        let query_finish_notifier = if let Some(process_manager) = &self.process_manager {
+            let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+            let process_manager = process_manager.clone();
+            let database = query_ctx.current_schema();
+            let query = stmt.to_string();
+            common_runtime::spawn_global(async move {
+                match process_manager.register_query(database, query).await {
+                    Ok(id) => {
+                        let _ = rx.await;
+                        process_manager.deregister_query(id).await.unwrap();
+                    }
+                    Err(e) => {
+                        error!(e; "Failed to register query id");
+                    }
+                }
+            });
+            Some(tx)
+        } else {
+            None
+        };
+
         let output = match stmt {
             Statement::Query(_) | Statement::Explain(_) | Statement::Delete(_) => {
                 // TODO: remove this when format is supported in datafusion
@@ -212,6 +235,10 @@ impl Instance {
                 self.statement_executor.execute_sql(stmt, query_ctx).await
             }
         };
+
+        if let Some(query_finish_notifier) = query_finish_notifier {
+            let _ = query_finish_notifier.send(());
+        }
         output.context(TableOperationSnafu)
     }
 }
