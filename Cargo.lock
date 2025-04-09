@@ -4332,6 +4332,7 @@ dependencies = [
  "sqlparser 0.54.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=e98e6b322426a9d397a71efef17075966223c089)",
  "store-api",
  "strfmt",
+ "substrait 0.14.0",
  "table",
  "tokio",
  "toml 0.8.19",
