@@ -14,7 +14,7 @@
 
 use std::any::Any;
 
-use common_error::ext::{ErrorExt, PlainError};
+use common_error::ext::{ErrorExt, PlainError, StackError};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use snafu::{Location, ResultExt, Snafu};
@@ -99,4 +99,13 @@ fn test_debug_format() {
         r#"0: <transparent>, at src/common/error/tests/ext.rs:60:5
 1: PlainError { msg: "<root cause>", status_code: Unexpected }"#
     );
+}
+
+#[test]
+fn test_transparent_flag() {
+    let result = normal_error();
+    assert!(!result.unwrap_err().transparent());
+
+    let result = transparent_error();
+    assert!(result.unwrap_err().transparent());
 }
