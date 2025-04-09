@@ -348,7 +348,7 @@ impl PartSortStream {
         &self,
         sort_column: &ArrayRef,
     ) -> datafusion_common::Result<Option<usize>> {
-        if sort_column.len() == 0 {
+        if sort_column.is_empty() {
             return Ok(Some(0));
         }
 

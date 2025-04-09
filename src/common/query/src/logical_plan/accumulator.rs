@@ -24,7 +24,7 @@ use datatypes::prelude::*;
 use datatypes::vectors::{Helper as VectorHelper, VectorRef};
 use snafu::ResultExt;
 
-use crate::error::{self, Error, FromScalarValueSnafu, IntoVectorSnafu, Result};
+use crate::error::{self, FromScalarValueSnafu, IntoVectorSnafu, Result};
 use crate::prelude::*;
 
 pub type AggregateFunctionCreatorRef = Arc<dyn AggregateFunctionCreator>;
@@ -166,8 +166,7 @@ impl DfAccumulator for DfAccumulatorAdaptor {
         let output_type = self.creator.output_type()?;
         let scalar_value = value
             .try_to_scalar_value(&output_type)
-            .context(error::ToScalarValueSnafu)
-            .map_err(Error::from)?;
+            .context(error::ToScalarValueSnafu)?;
         Ok(scalar_value)
     }
 

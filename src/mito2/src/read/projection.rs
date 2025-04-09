@@ -363,9 +363,9 @@ mod tests {
             builder
                 .push_field_array(
                     *column_id,
-                    Arc::new(Int64Array::from_iter_values(
-                        std::iter::repeat(*field).take(num_rows),
-                    )),
+                    Arc::new(Int64Array::from_iter_values(std::iter::repeat_n(
+                        *field, num_rows,
+                    ))),
                 )
                 .unwrap();
         }

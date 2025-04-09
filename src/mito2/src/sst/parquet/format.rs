@@ -755,7 +755,7 @@ mod tests {
         ));
         let mut keys = vec![];
         for (index, num_rows) in pk_row_nums.iter().map(|v| v.1).enumerate() {
-            keys.extend(std::iter::repeat(index as u32).take(num_rows));
+            keys.extend(std::iter::repeat_n(index as u32, num_rows));
         }
         let keys = UInt32Array::from(keys);
         Arc::new(DictionaryArray::new(keys, values))

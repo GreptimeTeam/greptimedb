@@ -14,7 +14,6 @@
 
 #![feature(result_flattening)]
 #![feature(assert_matches)]
-#![feature(extract_if)]
 
 pub mod bootstrap;
 pub mod cache_invalidator;
