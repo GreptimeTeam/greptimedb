@@ -51,7 +51,7 @@ struct Inner {
     config: ChannelConfig,
     client_tls_config: Option<ClientTlsConfig>,
     pool: Arc<Pool>,
-    channel_recycle_started: Arc<AtomicBool>,
+    channel_recycle_started: AtomicBool,
     cancel: CancellationToken,
 }
 
@@ -81,7 +81,7 @@ impl Inner {
             config,
             client_tls_config: None,
             pool,
-            channel_recycle_started: Arc::new(AtomicBool::new(false)),
+            channel_recycle_started: AtomicBool::new(false),
             cancel,
         }
     }
@@ -261,8 +261,9 @@ impl ChannelManager {
 
         let pool = self.pool().clone();
         let cancel = self.inner.cancel.clone();
-        let _handle = common_runtime::spawn_global(async {
-            recycle_channel_in_loop(pool, cancel, RECYCLE_CHANNEL_INTERVAL_SECS).await;
+        let id = self.inner.id;
+        let _handle = common_runtime::spawn_global(async move {
+            recycle_channel_in_loop(pool, id, cancel, RECYCLE_CHANNEL_INTERVAL_SECS).await;
         });
         info!(
             "ChannelManager: {}, channel recycle is started, running in the background!",
@@ -479,12 +480,20 @@ impl Pool {
     }
 }
 
-async fn recycle_channel_in_loop(pool: Arc<Pool>, cancel: CancellationToken, interval_secs: u64) {
+async fn recycle_channel_in_loop(
+    pool: Arc<Pool>,
+    id: u64,
+    cancel: CancellationToken,
+    interval_secs: u64,
+) {
     let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
 
     loop {
         tokio::select! {
-            _ = cancel.cancelled() => break,
+            _ = cancel.cancelled() => {
+                info!("Stop channel recycle, ChannelManager id: {}", id);
+                break;
+            },
             _ = interval.tick() => {}
         }
 
