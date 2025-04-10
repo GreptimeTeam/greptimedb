@@ -671,4 +671,49 @@ mod tests {
             true
         });
     }
+
+    #[tokio::test]
+    async fn test_pool_release_with_channel_recycle() {
+        let mgr = ChannelManager::new();
+
+        let pool_holder = mgr.pool().clone();
+
+        // start channel recycle task
+        let addr = "test_addr";
+        let _ = mgr.get(addr);
+
+        let mgr_clone_1 = mgr.clone();
+        let mgr_clone_2 = mgr.clone();
+        assert_eq!(3, Arc::strong_count(mgr.pool()));
+
+        drop(mgr_clone_1);
+        drop(mgr_clone_2);
+        assert_eq!(3, Arc::strong_count(mgr.pool()));
+
+        drop(mgr);
+
+        // wait for the channel recycle task to finish
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        assert_eq!(1, Arc::strong_count(&pool_holder));
+    }
+
+    #[tokio::test]
+    async fn test_pool_release_without_channel_recycle() {
+        let mgr = ChannelManager::new();
+
+        let pool_holder = mgr.pool().clone();
+
+        let mgr_clone_1 = mgr.clone();
+        let mgr_clone_2 = mgr.clone();
+        assert_eq!(2, Arc::strong_count(mgr.pool()));
+
+        drop(mgr_clone_1);
+        drop(mgr_clone_2);
+        assert_eq!(2, Arc::strong_count(mgr.pool()));
+
+        drop(mgr);
+
+        assert_eq!(1, Arc::strong_count(&pool_holder));
+    }
 }
