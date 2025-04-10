@@ -317,6 +317,7 @@ mod test {
     use common_wal::config::kafka::common::{KafkaConnectionConfig, KafkaTopicConfig};
     use common_wal::config::kafka::MetasrvKafkaConfig;
     use common_wal::test_util::run_test_with_kafka_wal;
+    use tokio::time::sleep;
 
     use super::*;
     use crate::procedure::wal_prune::test_util::TestEnv;
@@ -373,10 +374,11 @@ mod test {
     #[tokio::test]
     async fn test_wal_prune_ticker() {
         let (tx, mut rx) = WalPruneManager::channel();
-        let ticker = WalPruneTicker::new(DEFAULT_WAL_PRUNE_INTERVAL, tx);
+        let interval = Duration::from_millis(10);
+        let ticker = WalPruneTicker::new(interval, tx);
         for _ in 0..2 {
             ticker.start();
-            ticker.stop();
+            sleep(2 * interval).await;
             assert!(!rx.is_empty());
             while let Ok(event) = rx.try_recv() {
                 assert_matches!(event, Event::Tick);
