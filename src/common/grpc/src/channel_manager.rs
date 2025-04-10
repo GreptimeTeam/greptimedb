@@ -63,7 +63,10 @@ impl Default for Inner {
 
 impl Drop for Inner {
     fn drop(&mut self) {
-        self.cancel.cancel();
+        // Cancel the channel recycle task if it is running.
+        if self.channel_recycle_started.load(Ordering::Relaxed) {
+            self.cancel.cancel();
+        }
     }
 }
 
