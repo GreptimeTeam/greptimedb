@@ -127,7 +127,7 @@ pub struct VolatileContext {
     leader_region_lease_deadline: Option<Instant>,
     /// The last_entry_id of leader region.
     leader_region_last_entry_id: Option<u64>,
-    /// The last_entry_id of leader metadata region (Only used for metrics).
+    /// The last_entry_id of leader metadata region (Only used for metric engine).
     leader_region_metadata_last_entry_id: Option<u64>,
     /// Elapsed time of downgrading region and upgrading region.
     operations_elapsed: Duration,

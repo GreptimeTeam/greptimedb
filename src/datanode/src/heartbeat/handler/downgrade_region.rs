@@ -14,7 +14,7 @@
 
 use common_meta::instruction::{DowngradeRegion, DowngradeRegionReply, InstructionReply};
 use common_telemetry::tracing::info;
-use common_telemetry::warn;
+use common_telemetry::{error, warn};
 use futures_util::future::BoxFuture;
 use store_api::region_engine::{SetRegionRoleStateResponse, SettableRegionRoleState};
 use store_api::region_request::{RegionFlushRequest, RegionRequest};
@@ -51,7 +51,7 @@ impl HandlerContext {
                 }))
             }
             Err(err) => {
-                warn!(err; "Failed to convert region to {}", SettableRegionRoleState::Follower);
+                error!(err; "Failed to convert region to {}", SettableRegionRoleState::Follower);
                 Some(InstructionReply::DowngradeRegion(DowngradeRegionReply {
                     last_entry_id: None,
                     metadata_last_entry_id: None,
@@ -118,7 +118,7 @@ impl HandlerContext {
                     }));
                 }
                 Err(err) => {
-                    warn!(err; "Failed to convert region to downgrading leader");
+                    error!(err; "Failed to convert region to downgrading leader");
                     return Some(InstructionReply::DowngradeRegion(DowngradeRegionReply {
                         last_entry_id: None,
                         metadata_last_entry_id: None,

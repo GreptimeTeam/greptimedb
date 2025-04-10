@@ -157,7 +157,7 @@ pub struct UpgradeRegion {
     pub region_id: RegionId,
     /// The `last_entry_id` of old leader region.
     pub last_entry_id: Option<u64>,
-    /// The `last_entry_id` of old leader metadata region (Only used for metrics).
+    /// The `last_entry_id` of old leader metadata region (Only used for metric engine).
     pub metadata_last_entry_id: Option<u64>,
     /// The timeout of waiting for a wal replay.
     ///
