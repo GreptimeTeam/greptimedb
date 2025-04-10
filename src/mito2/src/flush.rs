@@ -275,6 +275,16 @@ impl RegionFlushTask {
         })
     }
 
+    fn into_update_high_watermark_job(self) -> Job {
+        Box::pin(async move {
+            let worker_request = WorkerRequest::Background {
+                region_id: self.region_id,
+                notify: BackgroundNotify::UpdateHighWatermark,
+            };
+            self.send_worker_request(worker_request).await;
+        })
+    }
+
     /// Runs the flush task.
     async fn do_flush(&mut self, version_data: VersionControlData) {
         let timer = FLUSH_ELAPSED.with_label_values(&["total"]).start_timer();
@@ -487,8 +497,12 @@ impl FlushScheduler {
         let version = version_control.current().version;
         if version.memtables.is_empty() {
             debug_assert!(!self.region_status.contains_key(&region_id));
-            // The region has nothing to flush.
-            task.on_success();
+            // The region has nothing to flush. Submit a job to update high watermark.
+            let job = task.into_update_high_watermark_job();
+            if let Err(e) = self.scheduler.schedule(job) {
+                error!(e; "Update high watermark for region {}", region_id);
+                return Err(e);
+            }
             return Ok(());
         }
 

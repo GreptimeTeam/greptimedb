@@ -915,6 +915,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 self.handle_manifest_region_change_result(req).await
             }
             BackgroundNotify::RegionEdit(req) => self.handle_region_edit_result(req).await,
+            BackgroundNotify::UpdateHighWatermark => {
+                self.handle_update_high_watermark_request(region_id).await
+            }
         }
     }
 
