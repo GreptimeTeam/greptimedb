@@ -2014,6 +2014,7 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "bincode",
+ "catalog",
  "chrono",
  "common-base",
  "common-catalog",
