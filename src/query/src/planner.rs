@@ -31,7 +31,7 @@ use snafu::ResultExt;
 use sql::ast::Expr as SqlExpr;
 use sql::statements::statement::Statement;
 
-use crate::error::{DataFusionSnafu, PlanSqlSnafu, QueryPlanSnafu, Result, SqlSnafu};
+use crate::error::{PlanSqlSnafu, QueryPlanSnafu, Result, SqlSnafu};
 use crate::log_query::planner::LogQueryPlanner;
 use crate::parser::QueryStatement;
 use crate::promql::planner::PromPlanner;
@@ -118,8 +118,7 @@ impl DfLogicalPlanner {
         let context = QueryEngineContext::new(self.session_state.clone(), query_ctx);
         let plan = self
             .engine_state
-            .optimize_by_extension_rules(plan, &context)
-            .context(DataFusionSnafu)?;
+            .optimize_by_extension_rules(plan, &context)?;
         common_telemetry::debug!("Logical planner, optimize result: {plan}");
 
         Ok(plan)
@@ -154,9 +153,7 @@ impl DfLogicalPlanner {
 
         let sql_to_rel = SqlToRel::new_with_options(&context_provider, parser_options);
 
-        sql_to_rel
-            .sql_to_expr(sql.into(), schema, &mut PlannerContext::new())
-            .context(DataFusionSnafu)
+        Ok(sql_to_rel.sql_to_expr(sql.into(), schema, &mut PlannerContext::new())?)
     }
 
     #[tracing::instrument(skip_all)]
@@ -183,10 +180,7 @@ impl DfLogicalPlanner {
 
     #[tracing::instrument(skip_all)]
     fn optimize_logical_plan(&self, plan: LogicalPlan) -> Result<LogicalPlan> {
-        self.engine_state
-            .optimize_logical_plan(plan)
-            .context(DataFusionSnafu)
-            .map(Into::into)
+        Ok(self.engine_state.optimize_logical_plan(plan)?)
     }
 }
 

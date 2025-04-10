@@ -1988,6 +1988,7 @@ dependencies = [
 name = "common-error"
 version = "0.14.0"
 dependencies = [
+ "common-macro",
  "http 1.1.0",
  "snafu 0.8.5",
  "strum 0.27.1",

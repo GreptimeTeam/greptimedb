@@ -301,8 +301,7 @@ async fn query_from_information_schema_table(
                     .state()
                     .clone(),
             )
-            .read_table(view)
-            .context(error::DataFusionSnafu)?;
+            .read_table(view)?;
 
             let planner = query_engine.planner();
             let planner = planner
@@ -319,10 +318,7 @@ async fn query_from_information_schema_table(
         }
     };
 
-    let stream = dataframe
-        .execute_stream()
-        .await
-        .context(error::DataFusionSnafu)?;
+    let stream = dataframe.execute_stream().await?;
 
     Ok(Output::new_with_stream(Box::pin(
         RecordBatchStreamAdapter::try_new(stream).context(error::CreateRecordBatchSnafu)?,
