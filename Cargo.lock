@@ -2098,6 +2098,7 @@ dependencies = [
  "rand 0.9.0",
  "snafu 0.8.5",
  "tokio",
+ "tokio-util",
  "tonic 0.12.3",
  "tower 0.5.2",
 ]
