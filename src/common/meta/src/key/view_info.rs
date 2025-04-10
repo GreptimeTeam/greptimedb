@@ -70,11 +70,12 @@ impl MetadataKey<'_, ViewInfoKey> for ViewInfoKey {
             }
             .build()
         })?;
-        let captures = VIEW_INFO_KEY_PATTERN
-            .captures(key)
-            .context(InvalidViewInfoSnafu {
-                err_msg: format!("Invalid ViewInfoKey '{key}'"),
-            })?;
+        let captures =
+            VIEW_INFO_KEY_PATTERN
+                .captures(key)
+                .with_context(|| InvalidViewInfoSnafu {
+                    err_msg: format!("Invalid ViewInfoKey '{key}'"),
+                })?;
         // Safety: pass the regex check above
         let view_id = captures[1].parse::<TableId>().unwrap();
         Ok(ViewInfoKey { view_id })

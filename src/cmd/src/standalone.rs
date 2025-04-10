@@ -37,6 +37,7 @@ use common_meta::ddl::{DdlContext, NoopRegionFailureDetectorControl, ProcedureEx
 use common_meta::ddl_manager::DdlManager;
 use common_meta::key::flow::flow_state::FlowStat;
 use common_meta::key::flow::{FlowMetadataManager, FlowMetadataManagerRef};
+use common_meta::key::process_list::ProcessManager;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::NodeManagerRef;
@@ -508,11 +509,17 @@ impl StartCommand {
             datanode.region_server(),
             procedure_manager.clone(),
         ));
+
+        let process_manager = Arc::new(ProcessManager::new(
+            opts.grpc.server_addr.clone(),
+            kv_backend.clone(),
+        ));
         let catalog_manager = KvBackendCatalogManager::new(
             information_extension.clone(),
             kv_backend.clone(),
             layered_cache_registry.clone(),
             Some(procedure_manager.clone()),
+            Some(process_manager.clone()),
         );
 
         let table_metadata_manager =
@@ -593,6 +600,7 @@ impl StartCommand {
             node_manager.clone(),
             ddl_task_executor.clone(),
             StatementStatistics::new(opts.logging.slow_query.clone()),
+            Some(process_manager),
         )
         .with_plugin(plugins.clone())
         .try_build()

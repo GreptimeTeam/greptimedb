@@ -25,6 +25,7 @@ use common_error::ext::BoxedError;
 use common_meta::cache::{LayeredCacheRegistryRef, ViewInfoCacheRef};
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::flow::FlowMetadataManager;
+use common_meta::key::process_list::ProcessManager;
 use common_meta::key::schema_name::SchemaNameKey;
 use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_name::TableNameKey;
@@ -84,6 +85,7 @@ impl KvBackendCatalogManager {
         backend: KvBackendRef,
         cache_registry: LayeredCacheRegistryRef,
         procedure_manager: Option<ProcedureManagerRef>,
+        process_manager: Option<Arc<ProcessManager>>,
     ) -> Arc<Self> {
         Arc::new_cyclic(|me| Self {
             information_extension,
@@ -102,12 +104,14 @@ impl KvBackendCatalogManager {
                     DEFAULT_CATALOG_NAME.to_string(),
                     me.clone(),
                     Arc::new(FlowMetadataManager::new(backend.clone())),
+                    process_manager.clone(),
                 )),
                 pg_catalog_provider: Arc::new(PGCatalogProvider::new(
                     DEFAULT_CATALOG_NAME.to_string(),
                     me.clone(),
                 )),
                 backend,
+                process_manager,
             },
             cache_registry,
             procedure_manager,
@@ -419,6 +423,7 @@ struct SystemCatalog {
     information_schema_provider: Arc<InformationSchemaProvider>,
     pg_catalog_provider: Arc<PGCatalogProvider>,
     backend: KvBackendRef,
+    process_manager: Option<Arc<ProcessManager>>,
 }
 
 impl SystemCatalog {
@@ -486,6 +491,7 @@ impl SystemCatalog {
                         catalog.to_string(),
                         self.catalog_manager.clone(),
                         Arc::new(FlowMetadataManager::new(self.backend.clone())),
+                        self.process_manager.clone(),
                     ))
                 });
             information_schema_provider.table(table_name)
