@@ -225,7 +225,7 @@ impl ChannelManager {
         }
 
         let id = self.id;
-        let pool = self.pool.clone();
+        let pool = Arc::downgrade(&self.pool);
         let _handle = common_runtime::spawn_global(async move {
             recycle_channel_in_loop(id, pool, RECYCLE_CHANNEL_INTERVAL_SECS).await;
         });
@@ -444,17 +444,13 @@ impl Pool {
     }
 }
 
-async fn recycle_channel_in_loop(mgr_id: u64, pool: Arc<Pool>, interval_secs: u64) {
+/// Use weak ref here to prevent pool being leaked after all Channel Manager using it drops
+async fn recycle_channel_in_loop(mgr_id: u64, pool: std::sync::Weak<Pool>, interval_secs: u64) {
     let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
-    // use weak ref here to prevent pool being leaked
-    let pool_weak = {
-        let weak = Arc::downgrade(&pool);
-        drop(pool);
-        weak
-    };
+
     loop {
         let _ = interval.tick().await;
-        if let Some(pool) = pool_weak.upgrade() {
+        if let Some(pool) = pool.upgrade() {
             pool.retain_channel(|_, c| c.access.swap(0, Ordering::Relaxed) != 0)
         } else {
             // no one is using this pool, so we can also let go
