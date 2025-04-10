@@ -110,7 +110,7 @@ FROM (
          UNION ALL
          SELECT '[8.0]' AS v
      )
-WHERE vec_kth_elem(v, 0) > 2.0;
+WHERE vec_kth_elem(v, 0) > 2.0 ORDER BY v;
 
 SELECT vec_to_string(vec_subvector('[1.0,2.0,3.0,4.0,5.0]', 0, 3));
 
