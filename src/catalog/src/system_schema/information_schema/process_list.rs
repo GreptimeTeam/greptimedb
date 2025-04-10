@@ -127,62 +127,27 @@ async fn make_process_list(
             .into_stream(),
     );
 
-    let mut rows = Vec::new();
+    let mut id_builder = UInt64VectorBuilder::with_capacity(8);
+    let mut database_builder = StringVectorBuilder::with_capacity(8);
+    let mut query_builder = StringVectorBuilder::with_capacity(8);
+    let mut start_time_builder = TimestampMillisecondVectorBuilder::with_capacity(8);
+    let mut elapsed_time_builder = DurationMillisecondVectorBuilder::with_capacity(8);
+
+    let mut current_row = Vec::with_capacity(5);
     while let Some(process) = stream
         .next()
         .await
         .transpose()
         .context(error::ListProcessSnafu)?
     {
-        let row = process_to_row(process, current_time);
-        if predicates.eval(&row) {
-            rows.push(row);
+        process_to_row(process, current_time, &mut current_row);
+        if predicates.eval(&current_row) {
+            id_builder.push(current_row[0].1.as_u64());
+            database_builder.push(current_row[1].1.as_string().as_deref());
+            query_builder.push(current_row[2].1.as_string().as_deref());
+            start_time_builder.push(current_row[3].1.as_timestamp().map(|t| t.value().into()));
+            elapsed_time_builder.push(current_row[4].1.as_duration().map(|d| d.value().into()));
         }
-    }
-    rows_to_record_batch(rows)
-}
-
-/// Convert [Process] structs to rows.
-fn process_to_row(process: Process, current_time: i64) -> Vec<(&'static str, Value)> {
-    vec![
-        (ID, Value::UInt64(process.query_id())),
-        (
-            DATABASE,
-            Value::String(process.database().to_string().into()),
-        ),
-        (
-            QUERY,
-            Value::String(process.query_string().to_string().into()),
-        ),
-        (
-            START_TIMESTAMP,
-            Value::Timestamp(Timestamp::new_millisecond(
-                process.query_start_timestamp_ms(),
-            )),
-        ),
-        (
-            ELAPSED_TIME,
-            Value::Duration(Duration::new_millisecond(
-                current_time - process.query_start_timestamp_ms(),
-            )),
-        ),
-    ]
-}
-
-/// Convert rows to [RecordBatch].
-fn rows_to_record_batch(rows: Vec<Vec<(&'static str, Value)>>) -> error::Result<RecordBatch> {
-    let mut id_builder = UInt64VectorBuilder::with_capacity(rows.len());
-    let mut database_builder = StringVectorBuilder::with_capacity(rows.len());
-    let mut query_builder = StringVectorBuilder::with_capacity(rows.len());
-    let mut start_time_builder = TimestampMillisecondVectorBuilder::with_capacity(rows.len());
-    let mut elapsed_time_builder = DurationMillisecondVectorBuilder::with_capacity(rows.len());
-
-    for row in rows {
-        id_builder.push(row[0].1.as_u64());
-        database_builder.push(row[1].1.as_string().as_deref());
-        query_builder.push(row[2].1.as_string().as_deref());
-        start_time_builder.push(row[3].1.as_timestamp().map(|t| t.value().into()));
-        elapsed_time_builder.push(row[4].1.as_duration().map(|d| d.value().into()));
     }
 
     let columns: Vec<VectorRef> = vec![
@@ -195,4 +160,35 @@ fn rows_to_record_batch(rows: Vec<Vec<(&'static str, Value)>>) -> error::Result<
 
     RecordBatch::new(InformationSchemaProcessList::schema(), columns)
         .context(error::CreateRecordBatchSnafu)
+}
+
+// Convert [Process] structs to rows.
+fn process_to_row(
+    process: Process,
+    current_time_ms: i64,
+    current_row: &mut Vec<(&'static str, Value)>,
+) {
+    current_row.clear();
+    current_row.push((ID, Value::UInt64(process.query_id())));
+    current_row.push((
+        DATABASE,
+        Value::String(process.database().to_string().into()),
+    ));
+    current_row.push((
+        QUERY,
+        Value::String(process.query_string().to_string().into()),
+    ));
+
+    current_row.push((
+        START_TIMESTAMP,
+        Value::Timestamp(Timestamp::new_millisecond(
+            process.query_start_timestamp_ms(),
+        )),
+    ));
+    current_row.push((
+        ELAPSED_TIME,
+        Value::Duration(Duration::new_millisecond(
+            current_time_ms - process.query_start_timestamp_ms(),
+        )),
+    ));
 }
