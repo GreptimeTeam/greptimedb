@@ -224,9 +224,10 @@ impl ChannelManager {
             return;
         }
 
+        let id = self.id;
         let pool = self.pool.clone();
-        let _handle = common_runtime::spawn_global(async {
-            recycle_channel_in_loop(pool, RECYCLE_CHANNEL_INTERVAL_SECS).await;
+        let _handle = common_runtime::spawn_global(async move {
+            recycle_channel_in_loop(id, pool, RECYCLE_CHANNEL_INTERVAL_SECS).await;
         });
         info!(
             "ChannelManager: {}, channel recycle is started, running in the background!",
@@ -443,7 +444,7 @@ impl Pool {
     }
 }
 
-async fn recycle_channel_in_loop(pool: Arc<Pool>, interval_secs: u64) {
+async fn recycle_channel_in_loop(mgr_id: u64, pool: Arc<Pool>, interval_secs: u64) {
     let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
     // use weak ref here to prevent pool being leaked
     let pool_weak = {
@@ -457,6 +458,7 @@ async fn recycle_channel_in_loop(pool: Arc<Pool>, interval_secs: u64) {
             pool.retain_channel(|_, c| c.access.swap(0, Ordering::Relaxed) != 0)
         } else {
             // no one is using this pool, so we can also let go
+            info!("Stop channel recycle for ChannelManager: {}", mgr_id);
             break;
         }
     }
