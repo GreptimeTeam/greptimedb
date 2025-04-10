@@ -113,15 +113,15 @@ clap = { version = "4.4", features = ["derive"] }
 config = "0.13.0"
 crossbeam-utils = "0.8"
 dashmap = "6.1"
-datafusion = { git = "https://github.com/apache/datafusion.git", rev = "8ebed674dd71f8a466f658626877944cd16a4375" }
-datafusion-common = { git = "https://github.com/apache/datafusion.git", rev = "8ebed674dd71f8a466f658626877944cd16a4375" }
-datafusion-expr = { git = "https://github.com/apache/datafusion.git", rev = "8ebed674dd71f8a466f658626877944cd16a4375" }
-datafusion-functions = { git = "https://github.com/apache/datafusion.git", rev = "8ebed674dd71f8a466f658626877944cd16a4375" }
-datafusion-optimizer = { git = "https://github.com/apache/datafusion.git", rev = "8ebed674dd71f8a466f658626877944cd16a4375" }
-datafusion-physical-expr = { git = "https://github.com/apache/datafusion.git", rev = "8ebed674dd71f8a466f658626877944cd16a4375" }
-datafusion-physical-plan = { git = "https://github.com/apache/datafusion.git", rev = "8ebed674dd71f8a466f658626877944cd16a4375" }
-datafusion-sql = { git = "https://github.com/apache/datafusion.git", rev = "8ebed674dd71f8a466f658626877944cd16a4375" }
-datafusion-substrait = { git = "https://github.com/apache/datafusion.git", rev = "8ebed674dd71f8a466f658626877944cd16a4375" }
+datafusion = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "90dba8f3ff278df3a6b1de64e145c275e7e84663" }
+datafusion-common = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "90dba8f3ff278df3a6b1de64e145c275e7e84663" }
+datafusion-expr = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "90dba8f3ff278df3a6b1de64e145c275e7e84663" }
+datafusion-functions = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "90dba8f3ff278df3a6b1de64e145c275e7e84663" }
+datafusion-optimizer = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "90dba8f3ff278df3a6b1de64e145c275e7e84663" }
+datafusion-physical-expr = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "90dba8f3ff278df3a6b1de64e145c275e7e84663" }
+datafusion-physical-plan = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "90dba8f3ff278df3a6b1de64e145c275e7e84663" }
+datafusion-sql = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "90dba8f3ff278df3a6b1de64e145c275e7e84663" }
+datafusion-substrait = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "90dba8f3ff278df3a6b1de64e145c275e7e84663" }
 deadpool = "0.12"
 deadpool-postgres = "0.14"
 derive_builder = "0.20"

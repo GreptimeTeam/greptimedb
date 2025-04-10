@@ -94,7 +94,7 @@ impl Categorizer {
                 }
             }
             LogicalPlan::Extension(extension) => {
-                Self::check_extension_plan(extension.node.as_ref() as _)
+                Self::check_extension_plan(extension.node.as_ref() as _, &partition_cols)
             }
             LogicalPlan::Distinct(_) => {
                 if partition_cols.is_empty() {
@@ -116,13 +116,30 @@ impl Categorizer {
         }
     }
 
-    pub fn check_extension_plan(plan: &dyn UserDefinedLogicalNode) -> Commutativity {
+    pub fn check_extension_plan(
+        plan: &dyn UserDefinedLogicalNode,
+        partition_cols: &[String],
+    ) -> Commutativity {
         match plan.name() {
-            name if name == EmptyMetric::name()
+            name if name == SeriesDivide::name() => {
+                let series_divide = plan.as_any().downcast_ref::<SeriesDivide>().unwrap();
+                let tags = series_divide.tags().into_iter().collect::<HashSet<_>>();
+                for partition_col in partition_cols {
+                    if !tags.contains(partition_col) {
+                        return Commutativity::NonCommutative;
+                    }
+                }
+                Commutativity::Commutative
+            }
+            name if name == SeriesNormalize::name()
                 || name == InstantManipulate::name()
-                || name == SeriesNormalize::name()
-                || name == RangeManipulate::name()
-                || name == SeriesDivide::name()
+                || name == RangeManipulate::name() =>
+            {
+                // They should always follows Series Divide.
+                // Either commutative or non-commutative (which will be blocked by SeriesDivide).
+                Commutativity::Commutative
+            }
+            name if name == EmptyMetric::name()
                 || name == MergeScanLogicalPlan::name()
                 || name == MergeSortLogicalPlan::name() =>
             {

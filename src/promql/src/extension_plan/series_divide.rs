@@ -106,6 +106,10 @@ impl SeriesDivide {
         })
     }
 
+    pub fn tags(&self) -> &[String] {
+        &self.tag_columns
+    }
+
     pub fn serialize(&self) -> Vec<u8> {
         pb::SeriesDivide {
             tag_columns: self.tag_columns.clone(),
