@@ -14,6 +14,7 @@
 
 use std::collections::hash_set::Entry;
 use std::collections::HashSet;
+use std::fmt::{Debug, Formatter};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -84,6 +85,14 @@ impl Drop for WalPruneProcedureGuard {
 /// - `Tick`: Trigger a submission of [WalPruneProcedure] to prune remote WAL.
 pub(crate) enum Event {
     Tick,
+}
+
+impl Debug for Event {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Event::Tick => write!(f, "Tick"),
+        }
+    }
 }
 
 pub(crate) struct WalPruneTicker {
@@ -302,6 +311,8 @@ impl WalPruneManager {
 
 #[cfg(test)]
 mod test {
+    use std::assert_matches::assert_matches;
+
     use common_meta::wal_options_allocator::build_kafka_topic_creator;
     use common_wal::config::kafka::common::{KafkaConnectionConfig, KafkaTopicConfig};
     use common_wal::config::kafka::MetasrvKafkaConfig;
@@ -350,12 +361,26 @@ mod test {
                     .running_procedures
                     .write()
                     .unwrap()
-                    .insert("test_topic1".to_string());
+                    .insert("test_topic".to_string());
 
-                let result = manager.submit_procedure("test_topic1").await;
+                let result = manager.submit_procedure("test_topic").await;
                 assert!(result.is_none());
             })
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn test_wal_prune_ticker() {
+        let (tx, mut rx) = WalPruneManager::channel();
+        let ticker = WalPruneTicker::new(DEFAULT_WAL_PRUNE_INTERVAL, tx);
+        for _ in 0..2 {
+            ticker.start();
+            ticker.stop();
+            assert!(!rx.is_empty());
+            while let Ok(event) = rx.try_recv() {
+                assert_matches!(event, Event::Tick);
+            }
+        }
     }
 }
