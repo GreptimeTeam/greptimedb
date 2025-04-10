@@ -61,7 +61,7 @@ impl From<DatanodeWalConfig> for MetasrvWalConfig {
 
 impl MetasrvWalConfig {
     /// Returns if active wal pruning is enabled.
-    pub fn is_active_wal_pruning(&self) -> bool {
+    pub fn enable_active_wal_pruning(&self) -> bool {
         match self {
             MetasrvWalConfig::RaftEngine => false,
             MetasrvWalConfig::Kafka(config) => config.active_wal_pruning,

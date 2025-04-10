@@ -353,15 +353,7 @@ impl MetasrvBuilder {
 
         // remote WAL prune ticker and manager
         let (tx, rx) = WalPruneManager::channel();
-        let wal_prune_ticker = if is_remote_wal {
-            let wal_prune_ticker =
-                Arc::new(WalPruneTicker::new(DEFAULT_WAL_PRUNE_INTERVAL, tx.clone()));
-            Some(wal_prune_ticker)
-        } else {
-            None
-        };
-
-        if is_remote_wal && options.wal.is_active_wal_pruning() {
+        let wal_prune_ticker = if is_remote_wal && options.wal.enable_active_wal_pruning() {
             let kafka_client = match wal_options_allocator.as_ref() {
                 WalOptionsAllocator::Kafka(kafak_topic_pool) => {
                     kafak_topic_pool.topic_creator.client().clone()
@@ -388,7 +380,13 @@ impl MetasrvBuilder {
             common_runtime::spawn_global(async move {
                 wal_prune_manager.run().await;
             });
-        }
+
+            let wal_prune_ticker =
+                Arc::new(WalPruneTicker::new(DEFAULT_WAL_PRUNE_INTERVAL, tx.clone()));
+            Some(wal_prune_ticker)
+        } else {
+            None
+        };
 
         let customized_region_lease_renewer = plugins
             .as_ref()

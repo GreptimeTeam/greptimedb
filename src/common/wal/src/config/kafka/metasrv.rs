@@ -38,7 +38,7 @@ impl Default for MetasrvKafkaConfig {
             connection: Default::default(),
             kafka_topic: Default::default(),
             auto_create_topics: true,
-            active_wal_pruning: true,
+            active_wal_pruning: false,
         }
     }
 }
