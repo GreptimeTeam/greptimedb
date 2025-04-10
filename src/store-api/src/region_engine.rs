@@ -583,6 +583,60 @@ impl RegionStatistic {
     }
 }
 
+/// The response of syncing the manifest.
+#[derive(Debug)]
+pub enum SyncManifestResponse {
+    NotSupported,
+    Mito {
+        synced: bool,
+    },
+    Metric {
+        metadata_synced: bool,
+        data_synced: bool,
+        new_opened_logical_region_ids: Vec<RegionId>,
+    },
+}
+
+impl SyncManifestResponse {
+    /// Returns the manifest version.
+    pub fn synced(&self) -> bool {
+        match self {
+            SyncManifestResponse::NotSupported => false,
+            SyncManifestResponse::Mito { synced } => *synced,
+            SyncManifestResponse::Metric {
+                metadata_synced,
+                data_synced,
+                ..
+            } => *metadata_synced || *data_synced,
+        }
+    }
+
+    pub fn is_supported(&self) -> bool {
+        matches!(self, SyncManifestResponse::NotSupported)
+    }
+
+    /// Returns true if the engine is a mito2 engine.
+    pub fn is_mito(&self) -> bool {
+        matches!(self, SyncManifestResponse::Mito { .. })
+    }
+
+    /// Returns true if the engine is a metric engine.
+    pub fn is_metric(&self) -> bool {
+        matches!(self, SyncManifestResponse::Metric { .. })
+    }
+
+    /// Returns the new opened logical region ids.
+    pub fn new_opened_logical_region_ids(self) -> Option<Vec<RegionId>> {
+        match self {
+            SyncManifestResponse::Metric {
+                new_opened_logical_region_ids,
+                ..
+            } => Some(new_opened_logical_region_ids),
+            _ => None,
+        }
+    }
+}
+
 #[async_trait]
 pub trait RegionEngine: Send + Sync {
     /// Name of this engine
@@ -689,7 +743,7 @@ pub trait RegionEngine: Send + Sync {
         &self,
         region_id: RegionId,
         manifest_info: RegionManifestInfo,
-    ) -> Result<(), BoxedError>;
+    ) -> Result<SyncManifestResponse, BoxedError>;
 
     /// Sets region role state gracefully.
     ///

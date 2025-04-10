@@ -82,7 +82,7 @@ use store_api::manifest::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
     BatchResponses, RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef,
-    RegionStatistic, SetRegionRoleStateResponse, SettableRegionRoleState,
+    RegionStatistic, SetRegionRoleStateResponse, SettableRegionRoleState, SyncManifestResponse,
 };
 use store_api::region_request::{AffectedRows, RegionOpenRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
@@ -496,7 +496,7 @@ impl EngineInner {
         &self,
         region_id: RegionId,
         manifest_info: RegionManifestInfo,
-    ) -> Result<ManifestVersion> {
+    ) -> Result<(ManifestVersion, bool)> {
         ensure!(manifest_info.is_mito(), MitoManifestInfoSnafu);
         let manifest_version = manifest_info.data_manifest_version();
         let (request, receiver) =
@@ -631,12 +631,14 @@ impl RegionEngine for MitoEngine {
         &self,
         region_id: RegionId,
         manifest_info: RegionManifestInfo,
-    ) -> Result<(), BoxedError> {
-        self.inner
+    ) -> Result<SyncManifestResponse, BoxedError> {
+        let (_, synced) = self
+            .inner
             .sync_region(region_id, manifest_info)
             .await
-            .map_err(BoxedError::new)
-            .map(|_| ())
+            .map_err(BoxedError::new)?;
+
+        Ok(SyncManifestResponse::Mito { synced })
     }
 
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {

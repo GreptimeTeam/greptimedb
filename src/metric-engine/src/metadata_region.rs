@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -21,6 +22,7 @@ use async_stream::try_stream;
 use base64::engine::general_purpose::STANDARD_NO_PAD;
 use base64::Engine;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
+use common_telemetry::info;
 use datafusion::prelude::{col, lit};
 use futures_util::stream::BoxStream;
 use futures_util::TryStreamExt;
@@ -76,11 +78,34 @@ impl MetadataRegion {
         }
     }
 
-    pub async fn open_logical_region(&self, logical_region_id: RegionId) {
+    /// Open a logical region.
+    ///
+    /// Returns true if the logical region is opened for the first time.
+    pub async fn open_logical_region(&self, logical_region_id: RegionId) -> bool {
+        info!("open_logical_region: {:?}", logical_region_id);
+        match self
+            .logical_region_lock
+            .write()
+            .await
+            .entry(logical_region_id)
+        {
+            Entry::Occupied(_) => false,
+            Entry::Vacant(vacant_entry) => {
+                vacant_entry.insert(Arc::new(RwLock::new(())));
+                true
+            }
+        }
+    }
+
+    /// Add a logical region to the metadata region.
+    ///
+    /// This method doesn't check if the logical region already exists.
+    pub async fn add_logical_region(&self, logical_region_id: RegionId) -> Result<()> {
         self.logical_region_lock
             .write()
             .await
             .insert(logical_region_id, Arc::new(RwLock::new(())));
+        Ok(())
     }
 
     /// Retrieve a read lock guard of given logical region id.
@@ -178,6 +203,7 @@ impl MetadataRegion {
         Ok(columns)
     }
 
+    /// Return all logical regions associated with the physical region.
     pub async fn logical_regions(&self, physical_region_id: RegionId) -> Result<Vec<RegionId>> {
         let metadata_region_id = utils::to_metadata_region_id(physical_region_id);
 
@@ -477,22 +503,23 @@ impl MetadataRegion {
         logical_regions: impl Iterator<Item = (RegionId, HashMap<&str, &ColumnMetadata>)>,
     ) -> Result<()> {
         let region_id = utils::to_metadata_region_id(physical_region_id);
+        let logical_regions = logical_regions.into_iter().collect::<Vec<_>>();
         let iter = logical_regions
-            .into_iter()
+            .iter()
             .flat_map(|(logical_region_id, column_metadatas)| {
                 if write_region_id {
                     Some((
-                        MetadataRegion::concat_region_key(logical_region_id),
+                        MetadataRegion::concat_region_key(*logical_region_id),
                         String::new(),
                     ))
                 } else {
                     None
                 }
                 .into_iter()
-                .chain(column_metadatas.into_iter().map(
+                .chain(column_metadatas.iter().map(
                     move |(name, column_metadata)| {
                         (
-                            MetadataRegion::concat_column_key(logical_region_id, name),
+                            MetadataRegion::concat_column_key(*logical_region_id, name),
                             MetadataRegion::serialize_column_metadata(column_metadata),
                         )
                     },
@@ -508,6 +535,10 @@ impl MetadataRegion {
             )
             .await
             .context(MitoWriteOperationSnafu)?;
+
+        for (logical_region_id, _) in logical_regions {
+            self.add_logical_region(logical_region_id).await?;
+        }
 
         Ok(())
     }
