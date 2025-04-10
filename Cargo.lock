@@ -1832,7 +1832,6 @@ dependencies = [
  "regex",
  "reqwest",
  "rexpect",
- "rustyline",
  "serde",
  "serde_json",
  "servers",
