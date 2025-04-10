@@ -17,9 +17,10 @@ use std::sync::Arc;
 
 use common_telemetry::warn;
 use index::fulltext_index::search::{FulltextIndexSearcher, RowId, TantivyFulltextIndexSearcher};
+use index::fulltext_index::Config;
 use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
-use puffin::puffin_manager::{BlobWithMetadata, DirGuard, PuffinManager, PuffinReader};
+use puffin::puffin_manager::{GuardWithMetadata, PuffinManager, PuffinReader};
 use snafu::ResultExt;
 use store_api::storage::{ColumnId, RegionId};
 
@@ -93,7 +94,7 @@ impl FulltextIndexApplier {
 
         let mut row_ids: Option<BTreeSet<RowId>> = None;
         for (column_id, request) in &self.requests {
-            if request.queries.is_empty() {
+            if request.queries.is_empty() && request.terms.is_empty() {
                 continue;
             }
 
@@ -133,15 +134,21 @@ impl FulltextIndexApplier {
             .dir(file_id, &blob_key, file_size_hint)
             .await?;
 
-        let path = match &dir {
-            Some(dir) => dir.path(),
+        let dir = match &dir {
+            Some(dir) => dir,
             None => {
                 return Ok(None);
             }
         };
 
-        let searcher = TantivyFulltextIndexSearcher::new(path).context(ApplyFulltextIndexSnafu)?;
+        let config = Config::from_blob_metadata(dir.metadata()).context(ApplyFulltextIndexSnafu)?;
+        let path = dir.path();
+
+        let searcher =
+            TantivyFulltextIndexSearcher::new(path, config).context(ApplyFulltextIndexSnafu)?;
         let mut row_ids: Option<BTreeSet<RowId>> = None;
+
+        // 1. Apply queries
         for query in &request.queries {
             let result = searcher
                 .search(&query.0)
@@ -158,6 +165,21 @@ impl FulltextIndexApplier {
                 if ids.is_empty() {
                     break;
                 }
+            }
+        }
+
+        // 2. Apply terms
+        let query = request.terms_as_query(config.case_sensitive);
+        if !query.0.is_empty() {
+            let result = searcher
+                .search(&query.0)
+                .await
+                .context(ApplyFulltextIndexSnafu)?;
+
+            if let Some(ids) = row_ids.as_mut() {
+                ids.retain(|id| result.contains(id));
+            } else {
+                row_ids = Some(result);
             }
         }
 
@@ -217,7 +239,7 @@ impl IndexSource {
         file_id: FileId,
         key: &str,
         file_size_hint: Option<u64>,
-    ) -> Result<Option<BlobWithMetadata<SstPuffinBlob>>> {
+    ) -> Result<Option<GuardWithMetadata<SstPuffinBlob>>> {
         let (reader, fallbacked) = self.ensure_reader(file_id, file_size_hint).await?;
         let res = reader.blob(key).await;
         match res {
@@ -248,7 +270,7 @@ impl IndexSource {
         file_id: FileId,
         key: &str,
         file_size_hint: Option<u64>,
-    ) -> Result<Option<SstPuffinDir>> {
+    ) -> Result<Option<GuardWithMetadata<SstPuffinDir>>> {
         let (reader, fallbacked) = self.ensure_reader(file_id, file_size_hint).await?;
         let res = reader.dir(key).await;
         match res {
