@@ -534,6 +534,7 @@ impl StartCommand {
             table_metadata_manager.clone(),
             catalog_manager.clone(),
             flow_metadata_manager.clone(),
+            Arc::new(frontend_client),
         );
         let flownode = flow_builder
             .build()

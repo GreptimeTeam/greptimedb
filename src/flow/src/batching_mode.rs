@@ -16,7 +16,7 @@
 
 use std::time::Duration;
 
-mod engine;
+pub(crate) mod engine;
 pub(crate) mod frontend_client;
 mod state;
 mod task;

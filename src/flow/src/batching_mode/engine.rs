@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Batching mode engine
+
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
@@ -30,13 +32,13 @@ use store_api::storage::RegionId;
 use table::metadata::TableId;
 use tokio::sync::{oneshot, RwLock};
 
-use crate::adapter::{CreateFlowArgs, FlowId, TableName};
 use crate::batching_mode::frontend_client::FrontendClient;
 use crate::batching_mode::task::BatchingTask;
 use crate::batching_mode::time_window::{find_time_window_expr, TimeWindowExpr};
 use crate::batching_mode::utils::sql_to_df_plan;
+use crate::engine::FlowEngine;
 use crate::error::{ExternalSnafu, FlowAlreadyExistSnafu, TableNotFoundMetaSnafu, UnexpectedSnafu};
-use crate::Error;
+use crate::{CreateFlowArgs, Error, FlowId, TableName};
 
 /// Batching mode Engine, responsible for driving all the batching mode tasks
 ///
@@ -191,7 +193,7 @@ async fn get_table_name(
 }
 
 impl BatchingEngine {
-    pub async fn create_flow(&self, args: CreateFlowArgs) -> Result<Option<FlowId>, Error> {
+    pub async fn create_flow_inner(&self, args: CreateFlowArgs) -> Result<Option<FlowId>, Error> {
         let CreateFlowArgs {
             flow_id,
             sink_table_name,
@@ -308,7 +310,7 @@ impl BatchingEngine {
         Ok(Some(flow_id))
     }
 
-    pub async fn remove_flow(&self, flow_id: FlowId) -> Result<(), Error> {
+    pub async fn remove_flow_inner(&self, flow_id: FlowId) -> Result<(), Error> {
         if self.tasks.write().await.remove(&flow_id).is_none() {
             warn!("Flow {flow_id} not found in tasks")
         }
@@ -324,7 +326,7 @@ impl BatchingEngine {
         Ok(())
     }
 
-    pub async fn flush_flow(&self, flow_id: FlowId) -> Result<(), Error> {
+    pub async fn flush_flow_inner(&self, flow_id: FlowId) -> Result<(), Error> {
         let task = self.tasks.read().await.get(&flow_id).cloned();
         let task = task.with_context(|| UnexpectedSnafu {
             reason: format!("Can't found task for flow {flow_id}"),
@@ -336,7 +338,22 @@ impl BatchingEngine {
     }
 
     /// Determine if the batching mode flow task exists with given flow id
-    pub async fn flow_exist(&self, flow_id: FlowId) -> bool {
+    pub async fn flow_exist_inner(&self, flow_id: FlowId) -> bool {
         self.tasks.read().await.contains_key(&flow_id)
+    }
+}
+
+impl FlowEngine for BatchingEngine {
+    async fn create_flow(&self, args: CreateFlowArgs) -> Result<Option<FlowId>, Error> {
+        self.create_flow_inner(args).await
+    }
+    async fn remove_flow(&self, flow_id: FlowId) -> Result<(), Error> {
+        self.remove_flow_inner(flow_id).await
+    }
+    async fn flush_flow(&self, flow_id: FlowId) -> Result<(), Error> {
+        self.flush_flow_inner(flow_id).await
+    }
+    async fn flow_exist(&self, flow_id: FlowId) -> Result<bool, Error> {
+        Ok(self.flow_exist_inner(flow_id).await)
     }
 }

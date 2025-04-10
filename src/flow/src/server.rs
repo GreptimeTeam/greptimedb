@@ -50,7 +50,8 @@ use tonic::codec::CompressionEncoding;
 use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
 
-use crate::adapter::{create_worker, CreateFlowArgs, FlowWorkerManagerRef};
+use crate::adapter::{create_worker, FlowWorkerManagerRef};
+use crate::batching_mode::engine::BatchingEngine;
 use crate::error::{
     to_status_with_last_err, CacheRequiredSnafu, CreateFlowSnafu, ExternalSnafu, FlowNotFoundSnafu,
     ListFlowsSnafu, ParseAddrSnafu, ShutdownServerSnafu, StartServerSnafu, UnexpectedSnafu,
@@ -59,7 +60,7 @@ use crate::heartbeat::HeartbeatTask;
 use crate::metrics::{METRIC_FLOW_PROCESSING_TIME, METRIC_FLOW_ROWS};
 use crate::transform::register_function_to_query_engine;
 use crate::utils::{SizeReportSender, StateReportHandler};
-use crate::{Error, FlowWorkerManager, FlownodeOptions};
+use crate::{CreateFlowArgs, Error, FlowWorkerManager, FlownodeOptions, FrontendClient};
 
 pub const FLOW_NODE_SERVER_NAME: &str = "FLOW_NODE_SERVER";
 /// wrapping flow node manager to avoid orphan rule with Arc<...>
@@ -290,6 +291,7 @@ pub struct FlownodeBuilder {
     heartbeat_task: Option<HeartbeatTask>,
     /// receive a oneshot sender to send state size report
     state_report_handler: Option<StateReportHandler>,
+    frontend_client: Arc<FrontendClient>,
 }
 
 impl FlownodeBuilder {
@@ -300,6 +302,7 @@ impl FlownodeBuilder {
         table_meta: TableMetadataManagerRef,
         catalog_manager: CatalogManagerRef,
         flow_metadata_manager: FlowMetadataManagerRef,
+        frontend_client: Arc<FrontendClient>,
     ) -> Self {
         Self {
             opts,
@@ -309,6 +312,7 @@ impl FlownodeBuilder {
             flow_metadata_manager,
             heartbeat_task: None,
             state_report_handler: None,
+            frontend_client,
         }
     }
 
@@ -456,7 +460,13 @@ impl FlownodeBuilder {
 
         let node_id = self.opts.node_id.map(|id| id as u32);
 
-        let mut man = FlowWorkerManager::new(node_id, query_engine, table_meta);
+        let batch_engine = BatchingEngine::new(
+            self.frontend_client.clone(),
+            query_engine.clone(),
+            self.flow_metadata_manager.clone(),
+            table_meta.clone(),
+        );
+        let mut man = FlowWorkerManager::new(node_id, query_engine, table_meta, batch_engine);
         for worker_id in 0..num_workers {
             let (tx, rx) = oneshot::channel();
 

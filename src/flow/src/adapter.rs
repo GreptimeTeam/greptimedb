@@ -16,7 +16,7 @@
 //! and communicating with other parts of the database
 #![warn(unused_imports)]
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -49,12 +49,14 @@ use crate::adapter::refill::RefillTask;
 use crate::adapter::table_source::ManagedTableSource;
 use crate::adapter::util::relation_desc_to_column_schemas_with_fallback;
 pub(crate) use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
+use crate::batching_mode::engine::BatchingEngine;
 use crate::compute::ErrCollector;
 use crate::df_optimizer::sql_to_flow_plan;
 use crate::error::{EvalSnafu, ExternalSnafu, InternalSnafu, InvalidQuerySnafu, UnexpectedSnafu};
 use crate::expr::Batch;
 use crate::metrics::{METRIC_FLOW_INSERT_ELAPSED, METRIC_FLOW_ROWS, METRIC_FLOW_RUN_INTERVAL_MS};
 use crate::repr::{self, DiffRow, RelationDesc, Row, BATCH_SIZE};
+use crate::{CreateFlowArgs, FlowId, TableName};
 
 mod flownode_impl;
 mod parse_expr;
@@ -76,11 +78,6 @@ use crate::FrontendInvoker;
 pub const AUTO_CREATED_PLACEHOLDER_TS_COL: &str = "__ts_placeholder";
 
 pub const AUTO_CREATED_UPDATE_AT_TS_COL: &str = "update_at";
-
-// TODO(discord9): refactor common types for flow to a separate module
-/// FlowId is a unique identifier for a flow task
-pub type FlowId = u64;
-pub type TableName = [String; 3];
 
 /// Flow config that exists both in standalone&distributed mode
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -166,6 +163,8 @@ pub struct FlowWorkerManager {
     flush_lock: RwLock<()>,
     /// receive a oneshot sender to send state size report
     state_report_handler: RwLock<Option<StateReportHandler>>,
+    /// Batching mode engine
+    batching_engine: BatchingEngine,
 }
 
 /// Building FlownodeManager
@@ -180,6 +179,7 @@ impl FlowWorkerManager {
         node_id: Option<u32>,
         query_engine: Arc<dyn QueryEngine>,
         table_meta: TableMetadataManagerRef,
+        batching_engine: BatchingEngine,
     ) -> Self {
         let srv_map = ManagedTableSource::new(
             table_meta.table_info_manager().clone(),
@@ -202,6 +202,7 @@ impl FlowWorkerManager {
             node_id,
             flush_lock: RwLock::new(()),
             state_report_handler: RwLock::new(None),
+            batching_engine,
         }
     }
 
@@ -216,8 +217,9 @@ impl FlowWorkerManager {
         query_engine: Arc<dyn QueryEngine>,
         table_meta: TableMetadataManagerRef,
         num_workers: usize,
+        batching_engine: BatchingEngine,
     ) -> (Self, Vec<Worker<'s>>) {
-        let mut zelf = Self::new(node_id, query_engine, table_meta);
+        let mut zelf = Self::new(node_id, query_engine, table_meta, batching_engine);
 
         let workers: Vec<_> = (0..num_workers)
             .map(|_| {
@@ -726,21 +728,6 @@ impl FlowWorkerManager {
         );
         Ok(())
     }
-}
-
-/// The arguments to create a flow in [`FlowWorkerManager`].
-#[derive(Debug, Clone)]
-pub struct CreateFlowArgs {
-    pub flow_id: FlowId,
-    pub sink_table_name: TableName,
-    pub source_table_ids: Vec<TableId>,
-    pub create_if_not_exists: bool,
-    pub or_replace: bool,
-    pub expire_after: Option<i64>,
-    pub comment: Option<String>,
-    pub sql: String,
-    pub flow_options: HashMap<String, String>,
-    pub query_ctx: Option<QueryContext>,
 }
 
 /// Create&Remove flow
