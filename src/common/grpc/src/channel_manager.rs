@@ -240,8 +240,8 @@ impl ChannelManager {
         }
 
         endpoint = endpoint
-            .tcp_keepalive(self.inner.config.tcp_keepalive)
-            .tcp_nodelay(self.inner.config.tcp_nodelay);
+            .tcp_keepalive(self.config().tcp_keepalive)
+            .tcp_nodelay(self.config().tcp_nodelay);
 
         Ok(endpoint)
     }
