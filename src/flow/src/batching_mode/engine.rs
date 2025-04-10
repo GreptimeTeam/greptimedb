@@ -69,10 +69,10 @@ impl BatchingEngine {
         }
     }
 
-    pub async fn handle_inserts(
+    pub async fn handle_inserts_inner(
         &self,
         request: api::v1::region::InsertRequests,
-    ) -> Result<FlowResponse, Error> {
+    ) -> Result<(), Error> {
         let table_info_mgr = self.table_meta.table_info_manager();
         let mut group_by_table_id: HashMap<TableId, Vec<api::v1::Rows>> = HashMap::new();
 
@@ -172,7 +172,7 @@ impl BatchingEngine {
         }
         drop(tasks);
 
-        Ok(Default::default())
+        Ok(())
     }
 }
 
@@ -326,15 +326,17 @@ impl BatchingEngine {
         Ok(())
     }
 
-    pub async fn flush_flow_inner(&self, flow_id: FlowId) -> Result<(), Error> {
+    pub async fn flush_flow_inner(&self, flow_id: FlowId) -> Result<usize, Error> {
         let task = self.tasks.read().await.get(&flow_id).cloned();
         let task = task.with_context(|| UnexpectedSnafu {
             reason: format!("Can't found task for flow {flow_id}"),
         })?;
 
-        task.gen_exec_once(&self.query_engine, &self.frontend_client)
+        let res = task
+            .gen_exec_once(&self.query_engine, &self.frontend_client)
             .await?;
-        Ok(())
+        let affected_rows = res.map(|(r, _)| r).unwrap_or_default() as usize;
+        Ok(affected_rows)
     }
 
     /// Determine if the batching mode flow task exists with given flow id
@@ -350,10 +352,13 @@ impl FlowEngine for BatchingEngine {
     async fn remove_flow(&self, flow_id: FlowId) -> Result<(), Error> {
         self.remove_flow_inner(flow_id).await
     }
-    async fn flush_flow(&self, flow_id: FlowId) -> Result<(), Error> {
+    async fn flush_flow(&self, flow_id: FlowId) -> Result<usize, Error> {
         self.flush_flow_inner(flow_id).await
     }
     async fn flow_exist(&self, flow_id: FlowId) -> Result<bool, Error> {
         Ok(self.flow_exist_inner(flow_id).await)
+    }
+    async fn handle_inserts(&self, request: api::v1::region::InsertRequests) -> Result<(), Error> {
+        self.handle_inserts_inner(request).await
     }
 }

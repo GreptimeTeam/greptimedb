@@ -20,14 +20,15 @@ use api::v1::flow::{
 };
 use api::v1::region::InsertRequests;
 use common_error::ext::BoxedError;
-use common_meta::error::{ExternalSnafu, Result, UnexpectedSnafu};
-use common_telemetry::{debug, trace};
+use common_meta::error::{Result as MetaResult, UnexpectedSnafu};
+use common_telemetry::trace;
 use datatypes::value::Value;
 use itertools::Itertools;
 use snafu::{IntoError, OptionExt, ResultExt};
 use store_api::storage::RegionId;
 
 use crate::adapter::{CreateFlowArgs, FlowWorkerManager};
+use crate::engine::FlowEngine;
 use crate::error::{CreateFlowSnafu, InsertIntoFlowSnafu, InternalSnafu};
 use crate::metrics::METRIC_FLOW_TASK_COUNT;
 use crate::repr::{self, DiffRow};
@@ -46,7 +47,7 @@ fn to_meta_err(
 
 #[async_trait::async_trait]
 impl common_meta::node_manager::Flownode for FlowWorkerManager {
-    async fn handle(&self, request: FlowRequest) -> Result<FlowResponse> {
+    async fn handle(&self, request: FlowRequest) -> MetaResult<FlowResponse> {
         let query_ctx = request
             .header
             .and_then(|h| h.query_context)
@@ -109,31 +110,10 @@ impl common_meta::node_manager::Flownode for FlowWorkerManager {
             Some(flow_request::Body::Flush(FlushFlow {
                 flow_id: Some(flow_id),
             })) => {
-                // TODO(discord9): impl individual flush
-                debug!("Starting to flush flow_id={:?}", flow_id);
-                // lock to make sure writes before flush are written to flow
-                // and immediately drop to prevent following writes to be blocked
-                drop(self.flush_lock.write().await);
-                let flushed_input_rows = self
-                    .node_context
-                    .read()
-                    .await
-                    .flush_all_sender()
-                    .await
-                    .map_err(to_meta_err(snafu::location!()))?;
-                let rows_send = self
-                    .run_available(true)
-                    .await
-                    .map_err(to_meta_err(snafu::location!()))?;
                 let row = self
-                    .send_writeback_requests()
+                    .flush_flow_inner(flow_id.id as u64)
                     .await
                     .map_err(to_meta_err(snafu::location!()))?;
-
-                debug!(
-                    "Done to flush flow_id={:?} with {} input rows flushed, {} rows sended and {} output rows flushed",
-                    flow_id, flushed_input_rows, rows_send, row
-                );
                 Ok(FlowResponse {
                     affected_flows: vec![flow_id],
                     affected_rows: row as u64,
@@ -151,7 +131,64 @@ impl common_meta::node_manager::Flownode for FlowWorkerManager {
         }
     }
 
-    async fn handle_inserts(&self, request: InsertRequests) -> Result<FlowResponse> {
+    async fn handle_inserts(&self, request: InsertRequests) -> MetaResult<FlowResponse> {
+        self.handle_inserts_inner(request)
+            .await
+            .map(|_| Default::default())
+            .map_err(to_meta_err(snafu::location!()))
+    }
+}
+
+impl FlowEngine for FlowWorkerManager {
+    async fn create_flow(
+        &self,
+        args: CreateFlowArgs,
+    ) -> Result<Option<crate::FlowId>, crate::Error> {
+        self.create_flow_inner(args).await
+    }
+
+    async fn remove_flow(&self, flow_id: crate::FlowId) -> Result<(), crate::Error> {
+        self.remove_flow_inner(flow_id).await
+    }
+
+    async fn flush_flow(&self, flow_id: crate::FlowId) -> Result<usize, crate::Error> {
+        self.flush_flow_inner(flow_id).await
+    }
+
+    async fn flow_exist(&self, flow_id: crate::FlowId) -> Result<bool, crate::Error> {
+        self.flow_exist_inner(flow_id).await
+    }
+
+    async fn handle_inserts(
+        &self,
+        request: api::v1::region::InsertRequests,
+    ) -> Result<(), crate::Error> {
+        self.handle_inserts_inner(request).await
+    }
+}
+
+/// Simple helper enum for fetching value from row with default value
+#[derive(Debug, Clone)]
+enum FetchFromRow {
+    Idx(usize),
+    Default(Value),
+}
+
+impl FetchFromRow {
+    /// Panic if idx is out of bound
+    fn fetch(&self, row: &repr::Row) -> Value {
+        match self {
+            FetchFromRow::Idx(idx) => row.get(*idx).unwrap().clone(),
+            FetchFromRow::Default(v) => v.clone(),
+        }
+    }
+}
+
+impl FlowWorkerManager {
+    async fn handle_inserts_inner(
+        &self,
+        request: InsertRequests,
+    ) -> std::result::Result<(), crate::Error> {
         // using try_read to ensure two things:
         // 1. flush wouldn't happen until inserts before it is inserted
         // 2. inserts happening concurrently with flush wouldn't be block by flush
@@ -172,11 +209,7 @@ impl common_meta::node_manager::Flownode for FlowWorkerManager {
                 let ctx = self.node_context.read().await;
 
                 // TODO(discord9): also check schema version so that altered table can be reported
-                let table_schema = ctx
-                    .table_source
-                    .table_from_id(&table_id)
-                    .await
-                    .map_err(to_meta_err(snafu::location!()))?;
+                let table_schema = ctx.table_source.table_from_id(&table_id).await?;
                 let default_vals = table_schema
                     .default_values
                     .iter()
@@ -210,9 +243,9 @@ impl common_meta::node_manager::Flownode for FlowWorkerManager {
                         None => InternalSnafu {
                             reason: format!("Expect column {idx} of table id={table_id} to have name in table schema, found None"),
                         }
-                        .fail().map_err(BoxedError::new).context(ExternalSnafu),
+                        .fail(),
                     })
-                    .collect::<Result<Vec<_>>>()?;
+                    .collect::<Result<Vec<_>, _>>()?;
                 let name_to_col = HashMap::<_, _>::from_iter(
                     insert_schema
                         .iter()
@@ -229,8 +262,8 @@ impl common_meta::node_manager::Flownode for FlowWorkerManager {
                             .copied()
                             .map(FetchFromRow::Idx)
                             .or_else(|| col_default_val.clone().map(FetchFromRow::Default))
-                            .with_context(|| UnexpectedSnafu {
-                                err_msg: format!(
+                            .with_context(|| crate::error::UnexpectedSnafu {
+                                reason: format!(
                                     "Column not found: {}, default_value: {:?}",
                                     col_name, col_default_val
                                 ),
@@ -272,27 +305,9 @@ impl common_meta::node_manager::Flownode for FlowWorkerManager {
                 }
                 .into_error(err);
                 common_telemetry::error!(err; "Failed to handle write request");
-                let err = to_meta_err(snafu::location!())(err);
                 return Err(err);
             }
         }
-        Ok(Default::default())
-    }
-}
-
-/// Simple helper enum for fetching value from row with default value
-#[derive(Debug, Clone)]
-enum FetchFromRow {
-    Idx(usize),
-    Default(Value),
-}
-
-impl FetchFromRow {
-    /// Panic if idx is out of bound
-    fn fetch(&self, row: &repr::Row) -> Value {
-        match self {
-            FetchFromRow::Idx(idx) => row.get(*idx).unwrap().clone(),
-            FetchFromRow::Default(v) => v.clone(),
-        }
+        Ok(())
     }
 }

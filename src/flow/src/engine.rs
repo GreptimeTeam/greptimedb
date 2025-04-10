@@ -43,6 +43,7 @@ pub struct CreateFlowArgs {
 pub trait FlowEngine {
     async fn create_flow(&self, args: CreateFlowArgs) -> Result<Option<FlowId>, Error>;
     async fn remove_flow(&self, flow_id: FlowId) -> Result<(), Error>;
-    async fn flush_flow(&self, flow_id: FlowId) -> Result<(), Error>;
+    async fn flush_flow(&self, flow_id: FlowId) -> Result<usize, Error>;
     async fn flow_exist(&self, flow_id: FlowId) -> Result<bool, Error>;
+    async fn handle_inserts(&self, request: api::v1::region::InsertRequests) -> Result<(), Error>;
 }

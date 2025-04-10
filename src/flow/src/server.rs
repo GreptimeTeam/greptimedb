@@ -435,7 +435,7 @@ impl FlownodeBuilder {
                 ),
             };
             manager
-                .create_flow(args)
+                .create_flow_inner(args)
                 .await
                 .map_err(BoxedError::new)
                 .with_context(|_| CreateFlowSnafu {

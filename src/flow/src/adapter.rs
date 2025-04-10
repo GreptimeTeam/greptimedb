@@ -733,7 +733,7 @@ impl FlowWorkerManager {
 /// Create&Remove flow
 impl FlowWorkerManager {
     /// remove a flow by it's id
-    pub async fn remove_flow(&self, flow_id: FlowId) -> Result<(), Error> {
+    pub async fn remove_flow_inner(&self, flow_id: FlowId) -> Result<(), Error> {
         for handle in self.worker_handles.iter() {
             if handle.contains_flow(flow_id).await? {
                 handle.remove_flow(flow_id).await?;
@@ -750,7 +750,7 @@ impl FlowWorkerManager {
     /// 1. parse query into typed plan(and optional parse expire_after expr)
     /// 2. render source/sink with output table id and used input table id
     #[allow(clippy::too_many_arguments)]
-    pub async fn create_flow(&self, args: CreateFlowArgs) -> Result<Option<FlowId>, Error> {
+    pub async fn create_flow_inner(&self, args: CreateFlowArgs) -> Result<Option<FlowId>, Error> {
         let CreateFlowArgs {
             flow_id,
             sink_table_name,
@@ -888,6 +888,32 @@ impl FlowWorkerManager {
         handle.create_flow(create_request).await?;
         info!("Successfully create flow with id={}", flow_id);
         Ok(Some(flow_id))
+    }
+
+    pub async fn flush_flow_inner(&self, flow_id: FlowId) -> Result<usize, Error> {
+        debug!("Starting to flush flow_id={:?}", flow_id);
+        // lock to make sure writes before flush are written to flow
+        // and immediately drop to prevent following writes to be blocked
+        drop(self.flush_lock.write().await);
+        let flushed_input_rows = self.node_context.read().await.flush_all_sender().await?;
+        let rows_send = self.run_available(true).await?;
+        let row = self.send_writeback_requests().await?;
+        debug!(
+            "Done to flush flow_id={:?} with {} input rows flushed, {} rows sended and {} output rows flushed",
+            flow_id, flushed_input_rows, rows_send, row
+        );
+        Ok(row)
+    }
+
+    pub async fn flow_exist_inner(&self, flow_id: FlowId) -> Result<bool, Error> {
+        let mut exist = false;
+        for handle in self.worker_handles.iter() {
+            if handle.contains_flow(flow_id).await? {
+                exist = true;
+                break;
+            }
+        }
+        Ok(exist)
     }
 }
 
