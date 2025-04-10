@@ -6408,6 +6408,7 @@ dependencies = [
  "common-test-util",
  "common-time",
  "common-wal",
+ "dashmap",
  "delta-encoding",
  "derive_builder 0.20.1",
  "futures",

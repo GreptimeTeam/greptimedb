@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use common_telemetry::{debug, warn};
 use common_wal::config::kafka::DatanodeKafkaConfig;
+use dashmap::DashMap;
 use futures::future::try_join_all;
 use futures_util::StreamExt;
 use rskafka::client::partition::OffsetAt;
@@ -52,6 +53,8 @@ pub struct KafkaLogStore {
     consumer_wait_timeout: Duration,
     /// Ignore missing entries during read WAL.
     overwrite_entry_start_id: bool,
+    /// High watermark offset of the last record in the topic.
+    high_watermark: DashMap<String, u64>,
 }
 
 impl KafkaLogStore {
@@ -68,6 +71,7 @@ impl KafkaLogStore {
             max_batch_bytes: config.max_batch_bytes.as_bytes() as usize,
             consumer_wait_timeout: config.consumer_wait_timeout,
             overwrite_entry_start_id: config.overwrite_entry_start_id,
+            high_watermark: DashMap::new(),
         })
     }
 }
@@ -158,6 +162,7 @@ impl LogStore for KafkaLogStore {
             .collect::<HashSet<_>>();
         let mut region_grouped_records: HashMap<RegionId, (OrderedBatchProducerRef, Vec<_>)> =
             HashMap::with_capacity(region_ids.len());
+        let mut region_to_provider = HashMap::with_capacity(region_ids.len());
         for entry in entries {
             let provider = entry.provider().as_kafka_provider().with_context(|| {
                 error::InvalidProviderSnafu {
@@ -165,6 +170,7 @@ impl LogStore for KafkaLogStore {
                     actual: entry.provider().type_name(),
                 }
             })?;
+            region_to_provider.insert(entry.region_id(), provider.clone());
             let region_id = entry.region_id();
             match region_grouped_records.entry(region_id) {
                 std::collections::hash_map::Entry::Occupied(mut slot) => {
@@ -198,6 +204,13 @@ impl LogStore for KafkaLogStore {
                 },
             ))
             .await?;
+
+        // Updates the high watermark offset of the last record in the topic.
+        for (region_id, offset) in &region_grouped_max_offset {
+            // Safety: `region_id` is always valid.
+            let provider = region_to_provider.get(region_id).unwrap();
+            self.high_watermark.insert(provider.topic.clone(), *offset);
+        }
 
         Ok(AppendBatchResponse {
             last_entry_ids: region_grouped_max_offset.into_iter().collect(),
@@ -381,6 +394,25 @@ impl LogStore for KafkaLogStore {
             collector.truncate(provider, region_id, entry_id).await?;
         }
         Ok(())
+    }
+
+    /// Returns the highest entry id of the specified topic in remote WAL.
+    async fn high_watermark(&self, provider: &Provider) -> Result<EntryId> {
+        let provider = provider
+            .as_kafka_provider()
+            .with_context(|| InvalidProviderSnafu {
+                expected: KafkaProvider::type_name(),
+                actual: provider.type_name(),
+            })?;
+
+        let high_watermark = self
+            .high_watermark
+            .get(&provider.topic)
+            .as_deref()
+            .copied()
+            .unwrap_or(0);
+
+        Ok(high_watermark)
     }
 
     /// Stops components of the logstore.
