@@ -17,7 +17,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use api::v1::flow::FlowResponse;
 use common_error::ext::BoxedError;
 use common_meta::ddl::create_flow::FlowType;
 use common_meta::key::flow::FlowMetadataManagerRef;

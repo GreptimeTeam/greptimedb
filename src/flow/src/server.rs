@@ -51,7 +51,6 @@ use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
 
 use crate::adapter::{create_worker, FlowWorkerManagerRef};
-use crate::batching_mode::engine::BatchingEngine;
 use crate::error::{
     to_status_with_last_err, CacheRequiredSnafu, CreateFlowSnafu, ExternalSnafu, FlowNotFoundSnafu,
     ListFlowsSnafu, ParseAddrSnafu, ShutdownServerSnafu, StartServerSnafu, UnexpectedSnafu,
@@ -460,13 +459,7 @@ impl FlownodeBuilder {
 
         let node_id = self.opts.node_id.map(|id| id as u32);
 
-        let batch_engine = BatchingEngine::new(
-            self.frontend_client.clone(),
-            query_engine.clone(),
-            self.flow_metadata_manager.clone(),
-            table_meta.clone(),
-        );
-        let mut man = FlowWorkerManager::new(node_id, query_engine, table_meta, batch_engine);
+        let mut man = FlowWorkerManager::new(node_id, query_engine, table_meta);
         for worker_id in 0..num_workers {
             let (tx, rx) = oneshot::channel();
 

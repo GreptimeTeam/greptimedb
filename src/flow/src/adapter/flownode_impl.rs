@@ -28,10 +28,16 @@ use snafu::{IntoError, OptionExt, ResultExt};
 use store_api::storage::RegionId;
 
 use crate::adapter::{CreateFlowArgs, FlowWorkerManager};
+use crate::batching_mode::engine::BatchingEngine;
 use crate::engine::FlowEngine;
 use crate::error::{CreateFlowSnafu, InsertIntoFlowSnafu, InternalSnafu};
 use crate::metrics::METRIC_FLOW_TASK_COUNT;
 use crate::repr::{self, DiffRow};
+
+pub struct FlowDualEngine {
+    streaming_engine: FlowWorkerManager,
+    batching_engine: BatchingEngine,
+}
 
 /// return a function to convert `crate::error::Error` to `common_meta::error::Error`
 fn to_meta_err(

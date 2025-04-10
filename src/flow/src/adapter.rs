@@ -49,7 +49,6 @@ use crate::adapter::refill::RefillTask;
 use crate::adapter::table_source::ManagedTableSource;
 use crate::adapter::util::relation_desc_to_column_schemas_with_fallback;
 pub(crate) use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
-use crate::batching_mode::engine::BatchingEngine;
 use crate::compute::ErrCollector;
 use crate::df_optimizer::sql_to_flow_plan;
 use crate::error::{EvalSnafu, ExternalSnafu, InternalSnafu, InvalidQuerySnafu, UnexpectedSnafu};
@@ -163,8 +162,6 @@ pub struct FlowWorkerManager {
     flush_lock: RwLock<()>,
     /// receive a oneshot sender to send state size report
     state_report_handler: RwLock<Option<StateReportHandler>>,
-    /// Batching mode engine
-    batching_engine: BatchingEngine,
 }
 
 /// Building FlownodeManager
@@ -179,7 +176,6 @@ impl FlowWorkerManager {
         node_id: Option<u32>,
         query_engine: Arc<dyn QueryEngine>,
         table_meta: TableMetadataManagerRef,
-        batching_engine: BatchingEngine,
     ) -> Self {
         let srv_map = ManagedTableSource::new(
             table_meta.table_info_manager().clone(),
@@ -202,7 +198,6 @@ impl FlowWorkerManager {
             node_id,
             flush_lock: RwLock::new(()),
             state_report_handler: RwLock::new(None),
-            batching_engine,
         }
     }
 
@@ -217,9 +212,8 @@ impl FlowWorkerManager {
         query_engine: Arc<dyn QueryEngine>,
         table_meta: TableMetadataManagerRef,
         num_workers: usize,
-        batching_engine: BatchingEngine,
     ) -> (Self, Vec<Worker<'s>>) {
-        let mut zelf = Self::new(node_id, query_engine, table_meta, batching_engine);
+        let mut zelf = Self::new(node_id, query_engine, table_meta);
 
         let workers: Vec<_> = (0..num_workers)
             .map(|_| {
