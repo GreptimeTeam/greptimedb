@@ -77,7 +77,6 @@ clippy.print_stdout = "warn"
 clippy.print_stderr = "warn"
 clippy.dbg_macro = "warn"
 clippy.implicit_clone = "warn"
-clippy.readonly_write_lock = "allow"
 rust.unknown_lints = "deny"
 rust.unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
 
