@@ -275,7 +275,11 @@ impl RegionFlushTask {
         })
     }
 
-    fn into_update_high_watermark_job(self) -> Job {
+    fn into_update_high_watermark_job(mut self) -> Job {
+        let senders = std::mem::take(&mut self.senders);
+        for sender in senders {
+            sender.send(Ok(0));
+        }
         Box::pin(async move {
             let worker_request = WorkerRequest::Background {
                 region_id: self.region_id,
