@@ -357,7 +357,10 @@ impl FlowEngine for BatchingEngine {
     async fn flow_exist(&self, flow_id: FlowId) -> Result<bool, Error> {
         Ok(self.flow_exist_inner(flow_id).await)
     }
-    async fn handle_inserts(&self, request: api::v1::region::InsertRequests) -> Result<(), Error> {
+    async fn handle_flow_inserts(
+        &self,
+        request: api::v1::region::InsertRequests,
+    ) -> Result<(), Error> {
         self.handle_inserts_inner(request).await
     }
 }

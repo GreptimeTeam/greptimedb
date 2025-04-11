@@ -41,9 +41,17 @@ pub struct CreateFlowArgs {
 }
 
 pub trait FlowEngine {
+    /// Create a flow using the provided arguments, return previous flow id if exists and is replaced
     async fn create_flow(&self, args: CreateFlowArgs) -> Result<Option<FlowId>, Error>;
+    /// Remove a flow by its ID
     async fn remove_flow(&self, flow_id: FlowId) -> Result<(), Error>;
+    /// Flush the flow, return the number of rows flushed
     async fn flush_flow(&self, flow_id: FlowId) -> Result<usize, Error>;
+    /// Check if the flow exists
     async fn flow_exist(&self, flow_id: FlowId) -> Result<bool, Error>;
-    async fn handle_inserts(&self, request: api::v1::region::InsertRequests) -> Result<(), Error>;
+    /// Handle the insert requests for the flow
+    async fn handle_flow_inserts(
+        &self,
+        request: api::v1::region::InsertRequests,
+    ) -> Result<(), Error>;
 }

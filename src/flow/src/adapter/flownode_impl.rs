@@ -13,30 +13,329 @@
 // limitations under the License.
 
 //! impl `FlowNode` trait for FlowNodeManager so standalone can call them
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use api::v1::flow::{
     flow_request, CreateRequest, DropRequest, FlowRequest, FlowResponse, FlushFlow,
 };
 use api::v1::region::InsertRequests;
 use common_error::ext::BoxedError;
+use common_meta::ddl::create_flow::FlowType;
 use common_meta::error::{Result as MetaResult, UnexpectedSnafu};
+use common_runtime::JoinHandle;
 use common_telemetry::trace;
 use datatypes::value::Value;
 use itertools::Itertools;
 use snafu::{IntoError, OptionExt, ResultExt};
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, TableId};
 
 use crate::adapter::{CreateFlowArgs, FlowWorkerManager};
 use crate::batching_mode::engine::BatchingEngine;
 use crate::engine::FlowEngine;
-use crate::error::{CreateFlowSnafu, InsertIntoFlowSnafu, InternalSnafu};
+use crate::error::{CreateFlowSnafu, FlowNotFoundSnafu, InsertIntoFlowSnafu, InternalSnafu};
 use crate::metrics::METRIC_FLOW_TASK_COUNT;
 use crate::repr::{self, DiffRow};
+use crate::{Error, FlowId};
 
+/// Manage both streaming and batching mode engine
+///
+/// including create/drop/flush flow
+/// and redirect insert requests to the appropriate engine
 pub struct FlowDualEngine {
-    streaming_engine: FlowWorkerManager,
-    batching_engine: BatchingEngine,
+    streaming_engine: Arc<FlowWorkerManager>,
+    batching_engine: Arc<BatchingEngine>,
+    /// mapping of table ids to (flow ids, flow types)
+    src_table2flow: std::sync::RwLock<SrcTableToFlow>,
+    /// mapping of flow ids to (flow type, source table ids)
+    flow_infos: std::sync::RwLock<HashMap<FlowId, (FlowType, Vec<TableId>)>>,
+}
+
+struct SrcTableToFlow {
+    stream: HashMap<TableId, HashSet<FlowId>>,
+    batch: HashMap<TableId, HashSet<FlowId>>,
+}
+
+impl SrcTableToFlow {
+    fn in_stream(&self, table_id: TableId) -> bool {
+        self.stream.contains_key(&table_id)
+    }
+    fn in_batch(&self, table_id: TableId) -> bool {
+        self.batch.contains_key(&table_id)
+    }
+    fn add_flow(&mut self, flow_id: FlowId, flow_type: FlowType, src_table_ids: Vec<TableId>) {
+        let mapping = match flow_type {
+            FlowType::Streaming => &mut self.stream,
+            FlowType::Batching => &mut self.batch,
+        };
+
+        for src_table in src_table_ids {
+            mapping
+                .entry(src_table)
+                .and_modify(|flows| {
+                    flows.insert(flow_id);
+                })
+                .or_insert_with(|| {
+                    let mut set = HashSet::new();
+                    set.insert(flow_id);
+                    set
+                });
+        }
+    }
+
+    fn remove_flow(&mut self, flow_id: FlowId, flow_type: FlowType, src_table_ids: Vec<TableId>) {
+        let mapping = match flow_type {
+            FlowType::Streaming => &mut self.stream,
+            FlowType::Batching => &mut self.batch,
+        };
+
+        for src_table in src_table_ids {
+            if let Some(flows) = mapping.get_mut(&src_table) {
+                flows.remove(&flow_id);
+            }
+        }
+    }
+}
+
+impl FlowEngine for FlowDualEngine {
+    async fn create_flow(&self, args: CreateFlowArgs) -> Result<Option<FlowId>, Error> {
+        let flow_type = args
+            .flow_options
+            .get(FlowType::FLOW_TYPE_KEY)
+            .map(|s| s.as_str());
+
+        let flow_type = match flow_type {
+            Some(FlowType::BATCHING) => FlowType::Batching,
+            Some(FlowType::STREAMING) => FlowType::Streaming,
+            None => FlowType::Batching,
+            Some(flow_type) => {
+                return InternalSnafu {
+                    reason: format!("Invalid flow type: {}", flow_type),
+                }
+                .fail()
+            }
+        };
+
+        let flow_id = args.flow_id;
+        let src_table_ids = args.source_table_ids.clone();
+
+        let res = match flow_type {
+            FlowType::Batching => self.batching_engine.create_flow(args).await,
+            FlowType::Streaming => self.streaming_engine.create_flow(args).await,
+        }?;
+
+        {
+            let mut flow_infos = self.flow_infos.write().unwrap();
+            flow_infos.insert(flow_id, (flow_type, src_table_ids.clone()));
+        }
+
+        self.src_table2flow
+            .write()
+            .unwrap()
+            .add_flow(flow_id, flow_type, src_table_ids);
+
+        Ok(res)
+    }
+
+    async fn remove_flow(&self, flow_id: FlowId) -> Result<(), Error> {
+        let flow_type = self
+            .flow_infos
+            .read()
+            .unwrap()
+            .get(&flow_id)
+            .cloned()
+            .map(|(flow_type, _)| flow_type);
+        match flow_type {
+            Some(FlowType::Batching) => self.batching_engine.remove_flow(flow_id).await,
+            Some(FlowType::Streaming) => self.streaming_engine.remove_flow(flow_id).await,
+            None => FlowNotFoundSnafu { id: flow_id }.fail(),
+        }?;
+        // remove mapping
+        if let Some((flow_type, src_table_ids)) = {
+            let mut flow_infos = self.flow_infos.write().unwrap();
+            flow_infos.remove(&flow_id)
+        } {
+            self.src_table2flow
+                .write()
+                .unwrap()
+                .remove_flow(flow_id, flow_type, src_table_ids);
+        }
+        Ok(())
+    }
+
+    async fn flush_flow(&self, flow_id: FlowId) -> Result<usize, Error> {
+        let flow_type = self
+            .flow_infos
+            .read()
+            .unwrap()
+            .get(&flow_id)
+            .cloned()
+            .map(|(flow_type, _)| flow_type);
+        match flow_type {
+            Some(FlowType::Batching) => self.batching_engine.flush_flow(flow_id).await,
+            Some(FlowType::Streaming) => self.streaming_engine.flush_flow(flow_id).await,
+            None => FlowNotFoundSnafu { id: flow_id }.fail(),
+        }
+    }
+
+    async fn flow_exist(&self, flow_id: FlowId) -> Result<bool, Error> {
+        let flow_type = self
+            .flow_infos
+            .read()
+            .unwrap()
+            .get(&flow_id)
+            .cloned()
+            .map(|(flow_type, _)| flow_type);
+        match flow_type {
+            Some(FlowType::Batching) => self.batching_engine.flow_exist(flow_id).await,
+            Some(FlowType::Streaming) => self.streaming_engine.flow_exist(flow_id).await,
+            None => Ok(false),
+        }
+    }
+
+    async fn handle_flow_inserts(
+        &self,
+        request: api::v1::region::InsertRequests,
+    ) -> Result<(), Error> {
+        // TODO(discord9): make as little clone as possible
+        let mut to_stream_engine = Vec::with_capacity(request.requests.len());
+        let mut to_batch_engine = request.requests;
+
+        {
+            let src_table2flow = self.src_table2flow.read().unwrap();
+            to_batch_engine.retain(|req| {
+                let region_id = RegionId::from(req.region_id);
+                let table_id = region_id.table_id();
+                if src_table2flow.in_stream(table_id) {
+                    to_stream_engine.push(req.clone());
+                }
+                if src_table2flow.in_batch(table_id) {
+                    return true;
+                }
+                false
+            });
+            // drop(src_table2flow);
+            // can't use drop due to https://github.com/rust-lang/rust/pull/128846
+        }
+
+        let stream_engine = self.streaming_engine.clone();
+        let stream_handler: JoinHandle<Result<(), Error>> =
+            common_runtime::spawn_global(async move {
+                stream_engine
+                    .handle_flow_inserts(api::v1::region::InsertRequests {
+                        requests: to_stream_engine,
+                    })
+                    .await?;
+                Ok(())
+            });
+        self.batching_engine
+            .handle_flow_inserts(api::v1::region::InsertRequests {
+                requests: to_batch_engine,
+            })
+            .await?;
+        stream_handler.await.map_err(|e| {
+            crate::error::UnexpectedSnafu {
+                reason: format!("JoinError when handle inserts for flow stream engine: {e:?}"),
+            }
+            .build()
+        })??;
+
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl common_meta::node_manager::Flownode for FlowDualEngine {
+    async fn handle(&self, request: FlowRequest) -> MetaResult<FlowResponse> {
+        let query_ctx = request
+            .header
+            .and_then(|h| h.query_context)
+            .map(|ctx| ctx.into());
+        match request.body {
+            Some(flow_request::Body::Create(CreateRequest {
+                flow_id: Some(task_id),
+                source_table_ids,
+                sink_table_name: Some(sink_table_name),
+                create_if_not_exists,
+                expire_after,
+                comment,
+                sql,
+                flow_options,
+                or_replace,
+            })) => {
+                let source_table_ids = source_table_ids.into_iter().map(|id| id.id).collect_vec();
+                let sink_table_name = [
+                    sink_table_name.catalog_name,
+                    sink_table_name.schema_name,
+                    sink_table_name.table_name,
+                ];
+                let expire_after = expire_after.map(|e| e.value);
+                let args = CreateFlowArgs {
+                    flow_id: task_id.id as u64,
+                    sink_table_name,
+                    source_table_ids,
+                    create_if_not_exists,
+                    or_replace,
+                    expire_after,
+                    comment: Some(comment),
+                    sql: sql.clone(),
+                    flow_options,
+                    query_ctx,
+                };
+                let ret = self
+                    .create_flow(args)
+                    .await
+                    .map_err(BoxedError::new)
+                    .with_context(|_| CreateFlowSnafu { sql: sql.clone() })
+                    .map_err(to_meta_err(snafu::location!()))?;
+                METRIC_FLOW_TASK_COUNT.inc();
+                Ok(FlowResponse {
+                    affected_flows: ret
+                        .map(|id| greptime_proto::v1::FlowId { id: id as u32 })
+                        .into_iter()
+                        .collect_vec(),
+                    ..Default::default()
+                })
+            }
+            Some(flow_request::Body::Drop(DropRequest {
+                flow_id: Some(flow_id),
+            })) => {
+                self.remove_flow(flow_id.id as u64)
+                    .await
+                    .map_err(to_meta_err(snafu::location!()))?;
+                METRIC_FLOW_TASK_COUNT.dec();
+                Ok(Default::default())
+            }
+            Some(flow_request::Body::Flush(FlushFlow {
+                flow_id: Some(flow_id),
+            })) => {
+                let row = self
+                    .flush_flow(flow_id.id as u64)
+                    .await
+                    .map_err(to_meta_err(snafu::location!()))?;
+                Ok(FlowResponse {
+                    affected_flows: vec![flow_id],
+                    affected_rows: row as u64,
+                    ..Default::default()
+                })
+            }
+            None => UnexpectedSnafu {
+                err_msg: "Missing request body",
+            }
+            .fail(),
+            _ => UnexpectedSnafu {
+                err_msg: "Invalid request body.",
+            }
+            .fail(),
+        }
+    }
+
+    async fn handle_inserts(&self, request: InsertRequests) -> MetaResult<FlowResponse> {
+        FlowEngine::handle_flow_inserts(self, request)
+            .await
+            .map(|_| Default::default())
+            .map_err(to_meta_err(snafu::location!()))
+    }
 }
 
 /// return a function to convert `crate::error::Error` to `common_meta::error::Error`
@@ -146,29 +445,26 @@ impl common_meta::node_manager::Flownode for FlowWorkerManager {
 }
 
 impl FlowEngine for FlowWorkerManager {
-    async fn create_flow(
-        &self,
-        args: CreateFlowArgs,
-    ) -> Result<Option<crate::FlowId>, crate::Error> {
+    async fn create_flow(&self, args: CreateFlowArgs) -> Result<Option<FlowId>, Error> {
         self.create_flow_inner(args).await
     }
 
-    async fn remove_flow(&self, flow_id: crate::FlowId) -> Result<(), crate::Error> {
+    async fn remove_flow(&self, flow_id: FlowId) -> Result<(), Error> {
         self.remove_flow_inner(flow_id).await
     }
 
-    async fn flush_flow(&self, flow_id: crate::FlowId) -> Result<usize, crate::Error> {
+    async fn flush_flow(&self, flow_id: FlowId) -> Result<usize, Error> {
         self.flush_flow_inner(flow_id).await
     }
 
-    async fn flow_exist(&self, flow_id: crate::FlowId) -> Result<bool, crate::Error> {
+    async fn flow_exist(&self, flow_id: FlowId) -> Result<bool, Error> {
         self.flow_exist_inner(flow_id).await
     }
 
-    async fn handle_inserts(
+    async fn handle_flow_inserts(
         &self,
         request: api::v1::region::InsertRequests,
-    ) -> Result<(), crate::Error> {
+    ) -> Result<(), Error> {
         self.handle_inserts_inner(request).await
     }
 }
@@ -194,7 +490,7 @@ impl FlowWorkerManager {
     async fn handle_inserts_inner(
         &self,
         request: InsertRequests,
-    ) -> std::result::Result<(), crate::Error> {
+    ) -> std::result::Result<(), Error> {
         // using try_read to ensure two things:
         // 1. flush wouldn't happen until inserts before it is inserted
         // 2. inserts happening concurrently with flush wouldn't be block by flush
