@@ -299,7 +299,7 @@ impl<S> RegionWorkerLoop<S> {
     }
 
     /// Returns true if the engine needs to reject some write requests.
-    fn should_reject_write(&self) -> bool {
+    pub(crate) fn should_reject_write(&self) -> bool {
         // If memory usage reaches high threshold (we should also consider stalled requests) returns true.
         self.write_buffer_manager.memory_usage() + self.stalled_requests.estimated_size
             >= self.config.global_write_buffer_reject_size.as_bytes() as usize
