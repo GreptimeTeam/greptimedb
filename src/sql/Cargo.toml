@@ -37,6 +37,7 @@ sqlparser.workspace = true
 sqlparser_derive = "0.1"
 store-api.workspace = true
 table.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 common-datasource.workspace = true

@@ -63,8 +63,8 @@ use table::table_reference::TableReference;
 use table::TableRef;
 
 use crate::error::{
-    CatalogSnafu, ColumnOptionsSnafu, FindRegionLeaderSnafu, InvalidInsertRequestSnafu,
-    JoinTaskSnafu, RequestInsertsSnafu, Result, TableNotFoundSnafu,
+    CatalogSnafu, ColumnOptionsSnafu, CreatePartitionRulesSnafu, FindRegionLeaderSnafu,
+    InvalidInsertRequestSnafu, JoinTaskSnafu, RequestInsertsSnafu, Result, TableNotFoundSnafu,
 };
 use crate::expr_helper;
 use crate::region_req_factory::RegionRequestFactory;
@@ -591,7 +591,8 @@ impl Inserter {
                     } else {
                         // prebuilt partition rules for uuid data: see the function
                         // for more information
-                        let partitions = partition_rule_for_hexstring(TRACE_ID_COLUMN);
+                        let partitions = partition_rule_for_hexstring(TRACE_ID_COLUMN)
+                            .context(CreatePartitionRulesSnafu)?;
                         // add skip index to
                         // - trace_id: when searching by trace id
                         // - parent_span_id: when searching root span
