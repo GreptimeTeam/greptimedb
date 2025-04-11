@@ -20,6 +20,7 @@ use async_trait::async_trait;
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
 use catalog::information_schema::InformationExtension;
 use catalog::kvbackend::KvBackendCatalogManager;
+use catalog::process_manager::ProcessManager;
 use clap::Parser;
 use client::api::v1::meta::RegionRole;
 use common_base::readable_size::ReadableSize;
@@ -37,7 +38,6 @@ use common_meta::ddl::{DdlContext, NoopRegionFailureDetectorControl, ProcedureEx
 use common_meta::ddl_manager::DdlManager;
 use common_meta::key::flow::flow_state::FlowStat;
 use common_meta::key::flow::{FlowMetadataManager, FlowMetadataManagerRef};
-use common_meta::key::process_list::ProcessManager;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::NodeManagerRef;

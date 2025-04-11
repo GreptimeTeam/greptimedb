@@ -38,7 +38,6 @@ use common_meta::cluster::NodeInfo;
 use common_meta::datanode::RegionStat;
 use common_meta::key::flow::flow_state::FlowStat;
 use common_meta::key::flow::FlowMetadataManager;
-use common_meta::key::process_list::ProcessManager;
 use common_procedure::ProcedureInfo;
 use common_recordbatch::SendableRecordBatchStream;
 use datatypes::schema::SchemaRef;
@@ -53,6 +52,7 @@ use views::InformationSchemaViews;
 
 use self::columns::InformationSchemaColumns;
 use crate::error::{Error, Result};
+use crate::process_manager::ProcessManager;
 use crate::system_schema::information_schema::cluster_info::InformationSchemaClusterInfo;
 use crate::system_schema::information_schema::flows::InformationSchemaFlows;
 use crate::system_schema::information_schema::information_memory_table::get_schema_columns;
