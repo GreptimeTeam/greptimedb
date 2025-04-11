@@ -25,6 +25,7 @@ lazy_static.workspace = true
 prost.workspace = true
 snafu.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tonic.workspace = true
 tower.workspace = true
 
