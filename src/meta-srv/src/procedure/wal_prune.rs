@@ -52,7 +52,6 @@ use crate::Result;
 
 pub type KafkaClientRef = Arc<Client>;
 
-/// No timeout for flush request.
 const DELETE_RECORDS_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// The state of WAL pruning.

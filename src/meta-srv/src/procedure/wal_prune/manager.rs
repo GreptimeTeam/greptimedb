@@ -33,13 +33,6 @@ use crate::error::{RegisterProcedureLoaderSnafu, Result, TableMetadataManagerSna
 use crate::metrics::METRIC_META_REMOTE_WAL_PRUNE_EXECUTE;
 use crate::procedure::wal_prune::{Context as WalPruneContext, WalPruneProcedure};
 
-/// Default limit of submitting [WalPruneProcedure]s. We prune `limit` topics at a time.
-pub const DEFAULT_WAL_PRUNE_LIMIT: usize = 10;
-/// Default interval of [WalPruneTicker].
-pub const DEFAULT_WAL_PRUNE_INTERVAL: Duration = Duration::from_secs(60 * 5);
-/// Default flush threshold of [WalPruneProcedure].
-pub const DEFAULT_WAL_PRUNE_FLUSH_THRESHOLD: Option<u64> = None;
-
 pub type WalPruneTickerRef = Arc<WalPruneTicker>;
 
 /// Tracks running [WalPruneProcedure]s.
@@ -359,7 +352,7 @@ mod test {
                 let (_tx, rx) = WalPruneManager::channel();
                 let manager = WalPruneManager::new(
                     test_env.table_metadata_manager.clone(),
-                    DEFAULT_WAL_PRUNE_LIMIT,
+                    10,
                     rx,
                     test_env.procedure_manager.clone(),
                     wal_prune_context,

@@ -132,7 +132,7 @@ auto_create_topics = true
 
 ## Active WAL pruning.
 ## Set to `true` to enable active WAL pruning to delete remote WAL entries periodically.
-auto_prune_wal = false
+auto_prune = false
 
 ## Number of topics.
 num_topics = 64

@@ -58,10 +58,7 @@ use crate::metasrv::{
 };
 use crate::procedure::region_migration::manager::RegionMigrationManager;
 use crate::procedure::region_migration::DefaultContextFactory;
-use crate::procedure::wal_prune::manager::{
-    WalPruneManager, WalPruneTicker, DEFAULT_WAL_PRUNE_FLUSH_THRESHOLD, DEFAULT_WAL_PRUNE_INTERVAL,
-    DEFAULT_WAL_PRUNE_LIMIT,
-};
+use crate::procedure::wal_prune::manager::{WalPruneManager, WalPruneTicker};
 use crate::procedure::wal_prune::Context as WalPruneContext;
 use crate::region::supervisor::{
     HeartbeatAcceptor, RegionFailureDetectorControl, RegionSupervisor, RegionSupervisorTicker,
@@ -354,7 +351,9 @@ impl MetasrvBuilder {
         // remote WAL prune ticker and manager
         let wal_prune_ticker = if is_remote_wal && options.wal.enable_active_wal_pruning() {
             let (tx, rx) = WalPruneManager::channel();
-            let kafka_client = build_kafka_client(options.wal.kafka_connection_config().unwrap())
+            // Safety: Must be remote WAL.
+            let remote_wal_options = options.wal.remote_wal_options().unwrap();
+            let kafka_client = build_kafka_client(&remote_wal_options)
                 .await
                 .context(error::BuildKafkaClientSnafu)?;
             let wal_prune_context = WalPruneContext {
@@ -364,19 +363,20 @@ impl MetasrvBuilder {
                 server_addr: options.server_addr.clone(),
                 mailbox: mailbox.clone(),
             };
-            // TODO(CookiePie): Add options for wal prune manager parameters.
             let wal_prune_manager = WalPruneManager::new(
                 table_metadata_manager.clone(),
-                DEFAULT_WAL_PRUNE_LIMIT,
+                remote_wal_options.active_prune_task_limit,
                 rx,
                 procedure_manager.clone(),
                 wal_prune_context,
-                DEFAULT_WAL_PRUNE_FLUSH_THRESHOLD,
+                remote_wal_options.trigger_flush_threhold,
             );
             // Start manager in background. Ticker will be started in the main thread to send ticks.
             wal_prune_manager.try_start().await?;
-            let wal_prune_ticker =
-                Arc::new(WalPruneTicker::new(DEFAULT_WAL_PRUNE_INTERVAL, tx.clone()));
+            let wal_prune_ticker = Arc::new(WalPruneTicker::new(
+                remote_wal_options.active_prune_interval,
+                tx.clone(),
+            ));
             Some(wal_prune_ticker)
         } else {
             None
