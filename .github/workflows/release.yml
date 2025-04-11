@@ -7,6 +7,9 @@ on:
   push:
     tags:
       - "v*.*.*"
+  schedule:
+    # At 00:00 on Monday.
+    - cron: '0 0 * * 1'
   workflow_dispatch: # Allows you to run this workflow manually.
     # Notes: The GitHub Actions ONLY support 10 inputs, and it's already used up.
     inputs:
@@ -314,7 +317,7 @@ jobs:
           image-registry-username: ${{ secrets.DOCKERHUB_USERNAME }}
           image-registry-password: ${{ secrets.DOCKERHUB_TOKEN }}
           version: ${{ needs.allocate-runners.outputs.version }}
-          push-latest-tag: true
+          push-latest-tag: ${{ github.event_name != 'schedule' }}
 
       - name: Set build image result
         id: set-build-image-result
@@ -361,7 +364,7 @@ jobs:
           dev-mode: false
           upload-to-s3: true
           update-version-info: true
-          push-latest-tag: true
+          push-latest-tag: ${{ github.event_name != 'schedule' }}
 
   publish-github-release:
     name: Create GitHub release and upload artifacts
