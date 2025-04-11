@@ -24,7 +24,7 @@ use common_error::ext::BoxedError;
 use common_meta::ddl::create_flow::FlowType;
 use common_meta::error::{Result as MetaResult, UnexpectedSnafu};
 use common_runtime::JoinHandle;
-use common_telemetry::trace;
+use common_telemetry::{trace, warn};
 use datatypes::value::Value;
 use itertools::Itertools;
 use snafu::{IntoError, OptionExt, ResultExt};
@@ -188,11 +188,17 @@ impl FlowEngine for FlowDualEngine {
             to_batch_engine.retain(|req| {
                 let region_id = RegionId::from(req.region_id);
                 let table_id = region_id.table_id();
-                if src_table2flow.in_stream(table_id) {
+                let is_in_stream = src_table2flow.in_stream(table_id);
+                let is_in_batch = src_table2flow.in_batch(table_id);
+                if is_in_stream {
                     to_stream_engine.push(req.clone());
                 }
-                if src_table2flow.in_batch(table_id) {
+                if is_in_batch {
                     return true;
+                }
+                if !is_in_batch && !is_in_stream {
+                    // TODO(discord9): also put to centralized logging for flow once it implemented
+                    warn!("Table {} is not any flow's source table", table_id)
                 }
                 false
             });
