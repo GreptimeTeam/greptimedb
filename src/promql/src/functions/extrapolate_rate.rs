@@ -204,7 +204,7 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
 
 // delta
 impl ExtrapolatedRate<false, false> {
-    pub fn name() -> &'static str {
+    pub const fn name() -> &'static str {
         "prom_delta"
     }
 
@@ -215,7 +215,7 @@ impl ExtrapolatedRate<false, false> {
 
 // rate
 impl ExtrapolatedRate<true, true> {
-    pub fn name() -> &'static str {
+    pub const fn name() -> &'static str {
         "prom_rate"
     }
 
@@ -226,7 +226,7 @@ impl ExtrapolatedRate<true, true> {
 
 // increase
 impl ExtrapolatedRate<true, false> {
-    pub fn name() -> &'static str {
+    pub const fn name() -> &'static str {
         "prom_increase"
     }
 

@@ -19,6 +19,9 @@ use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
 use promql::extension_plan::{
     EmptyMetric, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
 };
+use promql::functions::{
+    Delta, HoltWinters, Increase, PredictLinear, QuantileOverTime, Rate, Round, QUANTILE_NAME,
+};
 
 use crate::dist_plan::merge_sort::{merge_sort_transformer, MergeSortLogicalPlan};
 use crate::dist_plan::MergeScanLogicalPlan;
@@ -55,12 +58,16 @@ impl Categorizer {
             LogicalPlan::Filter(filter) => Self::check_expr(&filter.predicate),
             LogicalPlan::Window(_) => Commutativity::Unimplemented,
             LogicalPlan::Aggregate(aggr) => {
-                if Self::check_partition(&aggr.group_expr, &partition_cols) {
-                    return Commutativity::Commutative;
+                if !Self::check_partition(&aggr.group_expr, &partition_cols) {
+                    return Commutativity::NonCommutative;
                 }
-
-                // check all children exprs and uses the strictest level
-                Commutativity::Unimplemented
+                for expr in &aggr.aggr_expr {
+                    let commutativity = Self::check_expr(expr);
+                    if !matches!(commutativity, Commutativity::Commutative) {
+                        return commutativity;
+                    }
+                }
+                Commutativity::Commutative
             }
             LogicalPlan::Sort(_) => {
                 if partition_cols.is_empty() {
@@ -136,7 +143,7 @@ impl Categorizer {
                 || name == RangeManipulate::name() =>
             {
                 // They should always follows Series Divide.
-                // Either commutative or non-commutative (which will be blocked by SeriesDivide).
+                // Either all commutative or all non-commutative (which will be blocked by SeriesDivide).
                 Commutativity::Commutative
             }
             name if name == EmptyMetric::name()
@@ -165,8 +172,24 @@ impl Categorizer {
             | Expr::Negative(_)
             | Expr::Between(_)
             | Expr::Exists(_)
-            | Expr::InList(_)
-            | Expr::ScalarFunction(_) => Commutativity::Commutative,
+            | Expr::InList(_) => Commutativity::Commutative,
+            Expr::ScalarFunction(udf) => match udf.name() {
+                name if name == Delta::name()
+                    || name == Rate::name()
+                    || name == Increase::name()
+                    || name == QuantileOverTime::name()
+                    || name == PredictLinear::name()
+                    || name == HoltWinters::name()
+                    || name == Round::name() =>
+                {
+                    Commutativity::Unimplemented
+                }
+                _ => Commutativity::Commutative,
+            },
+            Expr::AggregateFunction(udaf) => match udaf.func.name() {
+                name if name == QUANTILE_NAME => Commutativity::Unimplemented,
+                _ => Commutativity::Commutative,
+            },
 
             Expr::Like(_)
             | Expr::SimilarTo(_)
@@ -175,7 +198,6 @@ impl Categorizer {
             | Expr::Case(_)
             | Expr::Cast(_)
             | Expr::TryCast(_)
-            | Expr::AggregateFunction(_)
             | Expr::WindowFunction(_)
             | Expr::InSubquery(_)
             | Expr::ScalarSubquery(_)

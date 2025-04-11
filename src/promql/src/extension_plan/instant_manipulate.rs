@@ -91,9 +91,9 @@ impl UserDefinedLogicalNodeCore for InstantManipulate {
         _exprs: Vec<Expr>,
         inputs: Vec<LogicalPlan>,
     ) -> DataFusionResult<Self> {
-        if inputs.is_empty() {
+        if inputs.len() != 1 {
             return Err(DataFusionError::Internal(
-                "InstantManipulate should have at least one input".to_string(),
+                "InstantManipulate should have exact one input".to_string(),
             ));
         }
 
