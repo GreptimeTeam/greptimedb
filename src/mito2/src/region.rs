@@ -119,6 +119,9 @@ pub(crate) struct MitoRegion {
     last_compaction_millis: AtomicI64,
     /// Provider to get current time.
     time_provider: TimeProviderRef,
+    /// The highest watermark of remote WAL since last flushing.
+    /// Sends this to meta-srv for active remote WAL pruning.
+    pub(crate) high_watermark_since_flush: AtomicU64,
     /// Memtable builder for the region.
     pub(crate) memtable_builder: MemtableBuilderRef,
     /// manifest stats
@@ -292,7 +295,9 @@ impl MitoRegion {
         let manifest_usage = self.stats.total_manifest_size();
         let num_rows = version.ssts.num_rows() + version.memtables.num_rows();
         let manifest_version = self.stats.manifest_version();
-        let flushed_entry_id = version.flushed_entry_id;
+        let flushed_entry_id = version
+            .flushed_entry_id
+            .max(self.high_watermark_since_flush.load(Ordering::Relaxed));
 
         RegionStatistic {
             num_rows,

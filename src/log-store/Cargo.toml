@@ -26,6 +26,7 @@ common-runtime.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
 common-wal.workspace = true
+dashmap.workspace = true
 delta-encoding = "0.4"
 derive_builder.workspace = true
 futures.workspace = true

@@ -14,6 +14,7 @@
 
 //! Handling flush related requests.
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use common_telemetry::{error, info};
@@ -28,7 +29,7 @@ use crate::region::MitoRegionRef;
 use crate::request::{FlushFailed, FlushFinished, OnFailure, OptionOutputTx};
 use crate::worker::RegionWorkerLoop;
 
-impl<S> RegionWorkerLoop<S> {
+impl<S: LogStore> RegionWorkerLoop<S> {
     /// Handles manual flush request.
     pub(crate) async fn handle_flush_request(
         &mut self,
@@ -39,6 +40,9 @@ impl<S> RegionWorkerLoop<S> {
         let Some(region) = self.regions.flushable_region_or(region_id, &mut sender) else {
             return;
         };
+
+        // Update high watermark for remote WAL if memtables are empty.
+        self.update_high_watermark(&region).await;
 
         let reason = if region.is_downgrading() {
             FlushReason::Downgrading
@@ -246,5 +250,30 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         self.schedule_compaction(&region).await;
 
         self.listener.on_flush_success(region_id);
+    }
+
+    pub(crate) async fn handle_update_high_watermark_request(&mut self, region_id: RegionId) {
+        let region = match self.regions.get_region(region_id) {
+            Some(region) => region,
+            None => return,
+        };
+        self.update_high_watermark(&region).await;
+    }
+
+    /// Updates high watermark of the region when a flush request is scheduled but the memtable is empty.
+    pub(crate) async fn update_high_watermark(&mut self, region: &MitoRegionRef) {
+        if region.provider.is_remote_wal() && region.version().memtables.is_empty() {
+            let high_watermark = self
+                .wal
+                .store()
+                .high_watermark(&region.provider)
+                .await
+                .unwrap_or(0);
+            if high_watermark != 0 {
+                region
+                    .high_watermark_since_flush
+                    .store(high_watermark, Ordering::Relaxed);
+            }
+        }
     }
 }
