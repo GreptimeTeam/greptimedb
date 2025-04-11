@@ -25,7 +25,7 @@ function create_version() {
   fi
 
   # Reuse $NEXT_RELEASE_VERSION to identify whether it's a nightly build.
-  # It will be like 'nigtly-20230808-7d0d8dc6'.
+  # It will be like 'nightly-20230808-7d0d8dc6'.
   if [ "$NEXT_RELEASE_VERSION" = nightly ]; then
     echo "$NIGHTLY_RELEASE_PREFIX-$(date "+%Y%m%d")-$(git rev-parse --short HEAD)"
     exit 0
