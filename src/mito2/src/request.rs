@@ -747,8 +747,6 @@ pub(crate) enum BackgroundNotify {
     RegionChange(RegionChangeResult),
     /// Region edit result.
     RegionEdit(RegionEditResult),
-    /// Update high watermark.
-    UpdateHighWatermark,
 }
 
 /// Notifies a flush job is finished.
