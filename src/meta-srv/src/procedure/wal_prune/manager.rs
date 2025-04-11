@@ -39,12 +39,13 @@ pub type WalPruneTickerRef = Arc<WalPruneTicker>;
 /// Currently we only track the topic name of the running procedures.
 ///
 /// TODO(CookiePie): Similar to [RegionMigrationProcedureTracker], maybe can refactor to a unified framework.
-pub(crate) struct WalPruneProcedureTracker {
+#[derive(Clone)]
+pub struct WalPruneProcedureTracker {
     running_procedures: Arc<RwLock<HashSet<String>>>,
 }
 
 impl WalPruneProcedureTracker {
-    pub(crate) fn insert_running_procedure(
+    pub fn insert_running_procedure(
         &self,
         topic_name: String,
         semaphore: Arc<Semaphore>,
@@ -84,7 +85,7 @@ impl Drop for WalPruneProcedureGuard {
 /// Event is used to notify the [WalPruneManager] to do some work.
 ///
 /// - `Tick`: Trigger a submission of [WalPruneProcedure] to prune remote WAL.
-pub(crate) enum Event {
+pub enum Event {
     Tick,
 }
 
@@ -221,11 +222,16 @@ impl WalPruneManager {
     /// Start the [WalPruneManager]. It will register [WalPruneProcedure] loader in the procedure manager.
     pub async fn try_start(mut self) -> Result<()> {
         let context = self.wal_prune_context.clone();
+        let tracker = self.tracker.clone();
+        let semaphore = self.semaphore.clone();
         self.procedure_manager
             .register_loader(
                 WalPruneProcedure::TYPE_NAME,
                 Box::new(move |json| {
-                    WalPruneProcedure::from_json(json, &context).map(|p| Box::new(p) as _)
+                    let tracker = tracker.clone();
+                    let semaphore = semaphore.clone();
+                    WalPruneProcedure::from_json(json, &context, tracker, semaphore)
+                        .map(|p| Box::new(p) as _)
                 }),
             )
             .context(RegisterProcedureLoaderSnafu {

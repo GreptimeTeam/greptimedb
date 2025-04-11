@@ -35,13 +35,14 @@ use common_procedure::{
 use common_telemetry::warn;
 use itertools::{Itertools, MinMaxResult};
 use log_store::kafka::DEFAULT_PARTITION;
-use manager::WalPruneProcedureGuard;
+use manager::{WalPruneProcedureGuard, WalPruneProcedureTracker};
 use rskafka::client::partition::UnknownTopicHandling;
 use rskafka::client::Client;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use store_api::logstore::EntryId;
 use store_api::storage::RegionId;
+use tokio::sync::Semaphore;
 
 use crate::error::{
     self, BuildPartitionClientSnafu, DeleteRecordsSnafu, TableMetadataManagerSnafu,
@@ -120,12 +121,18 @@ impl WalPruneProcedure {
         }
     }
 
-    pub fn from_json(json: &str, context: &Context) -> ProcedureResult<Self> {
+    pub fn from_json(
+        json: &str,
+        context: &Context,
+        tracker: WalPruneProcedureTracker,
+        semaphore: Arc<Semaphore>,
+    ) -> ProcedureResult<Self> {
         let data: WalPruneData = serde_json::from_str(json).context(ToJsonSnafu)?;
+        let guard = tracker.insert_running_procedure(data.topic.clone(), semaphore);
         Ok(Self {
             data,
             context: context.clone(),
-            _guard: None,
+            _guard: guard,
         })
     }
 
