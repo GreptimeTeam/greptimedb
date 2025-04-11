@@ -26,6 +26,7 @@ use common_telemetry::{error, info, warn};
 use itertools::Itertools;
 use snafu::ResultExt;
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::Semaphore;
 use tokio::time::{interval, MissedTickBehavior};
 
 use crate::error::{RegisterProcedureLoaderSnafu, Result, TableMetadataManagerSnafu};
@@ -53,6 +54,7 @@ impl WalPruneProcedureTracker {
     pub(crate) fn insert_running_procedure(
         &self,
         topic_name: String,
+        semaphore: Arc<Semaphore>,
     ) -> Option<WalPruneProcedureGuard> {
         let mut running_procedures = self.running_procedures.write().unwrap();
         match running_procedures.entry(topic_name.clone()) {
@@ -62,6 +64,7 @@ impl WalPruneProcedureTracker {
                 Some(WalPruneProcedureGuard {
                     topic_name,
                     running_procedures: self.running_procedures.clone(),
+                    semaphore,
                 })
             }
         }
@@ -71,12 +74,14 @@ impl WalPruneProcedureTracker {
 pub struct WalPruneProcedureGuard {
     topic_name: String,
     running_procedures: Arc<RwLock<HashSet<String>>>,
+    semaphore: Arc<Semaphore>,
 }
 
 impl Drop for WalPruneProcedureGuard {
     fn drop(&mut self) {
         let mut running_procedures = self.running_procedures.write().unwrap();
         running_procedures.remove(&self.topic_name);
+        self.semaphore.add_permits(1);
     }
 }
 
@@ -174,17 +179,19 @@ impl Drop for WalPruneTicker {
 pub(crate) struct WalPruneManager {
     /// Table metadata manager to restore topics from kvbackend.
     table_metadata_manager: TableMetadataManagerRef,
-    /// Limit of submitting [WalPruneProcedure]s. Since each topic has a [WalPruneProcedure], the limit is the number of topics.
-    limit: usize,
     /// Receives [Event]s.
     receiver: Receiver<Event>,
     /// Procedure manager.
     procedure_manager: ProcedureManagerRef,
     /// Tracker for running [WalPruneProcedure]s.
     tracker: WalPruneProcedureTracker,
+    /// Semaphore to limit the number of concurrent [WalPruneProcedure]s.
+    semaphore: Arc<Semaphore>,
 
     /// Context for [WalPruneProcedure].
     wal_prune_context: WalPruneContext,
+    /// Trigger flush threshold for [WalPruneProcedure].
+    /// If `None`, never send flush requests.
     trigger_flush_threshold: Option<u64>,
 }
 
@@ -200,13 +207,13 @@ impl WalPruneManager {
     ) -> Self {
         Self {
             table_metadata_manager,
-            limit,
             receiver,
             procedure_manager,
             wal_prune_context,
             tracker: WalPruneProcedureTracker {
                 running_procedures: Arc::new(RwLock::new(HashSet::new())),
             },
+            semaphore: Arc::new(Semaphore::new(limit)),
             trigger_flush_threshold,
         }
     }
@@ -235,24 +242,11 @@ impl WalPruneManager {
     ///
     /// - `Tick`: Submit `limit` [WalPruneProcedure]s to prune remote WAL.
     pub(crate) async fn run(&mut self) {
-        let mut offset = 0;
-
         while let Some(event) = self.receiver.recv().await {
             match event {
-                Event::Tick => {
-                    let topics = self.retrieve_sorted_topics().await;
-                    if let Err(e) = topics {
-                        error!(e; "Failed to retrieve topics from table metadata manager");
-                        continue;
-                    }
-                    let topics = topics.unwrap();
-                    for topic_name in topics.iter().cycle().skip(offset).take(self.limit) {
-                        if self.submit_procedure(topic_name).await.is_none() {
-                            warn!("A remote WAL prune procedure for topic {topic_name} is already running");
-                        }
-                    }
-                    offset += self.limit;
-                }
+                Event::Tick => self.handle_tick_request().await.unwrap_or_else(|e| {
+                    error!(e; "Failed to handle tick request");
+                }),
             }
         }
     }
@@ -261,7 +255,7 @@ impl WalPruneManager {
     pub async fn submit_procedure(&self, topic_name: &str) -> Option<ProcedureId> {
         let guard = self
             .tracker
-            .insert_running_procedure(topic_name.to_string())?;
+            .insert_running_procedure(topic_name.to_string(), self.semaphore.clone())?;
 
         let procedure = WalPruneProcedure::new(
             topic_name.to_string(),
@@ -276,11 +270,12 @@ impl WalPruneManager {
             .inc();
         let topic_name = topic_name.to_string();
         let procedure_manager = self.procedure_manager.clone();
+        let _permit = self.semaphore.acquire().await.unwrap();
         common_runtime::spawn_global(async move {
             let watcher = &mut match procedure_manager.submit(procedure_with_id).await {
                 Ok(watcher) => watcher,
                 Err(e) => {
-                    info!("Failed to submit procedure: {}", e);
+                    error!("Failed to submit procedure: {}", e);
                     return;
                 }
             };
@@ -291,6 +286,16 @@ impl WalPruneManager {
         });
 
         Some(procedure_id)
+    }
+
+    async fn handle_tick_request(&self) -> Result<()> {
+        let topics = self.retrieve_sorted_topics().await?;
+        for topic_name in topics.iter() {
+            if self.submit_procedure(topic_name).await.is_none() {
+                warn!("A remote WAL prune procedure for topic {topic_name} is already running");
+            }
+        }
+        Ok(())
     }
 
     /// Retrieve topics from the table metadata manager.

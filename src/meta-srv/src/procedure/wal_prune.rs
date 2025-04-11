@@ -86,6 +86,7 @@ pub struct WalPruneData {
     pub min_flushed_entry_id: EntryId,
     pub regions_to_flush: Vec<RegionId>,
     /// If `flushed_entry_id` + `trigger_flush_threshold` < `max_flushed_entry_id`, send a flush request to the region.
+    /// If `None`, never send flush requests.
     pub trigger_flush_threshold: Option<u64>,
     /// The state.
     pub state: WalPruneState,
