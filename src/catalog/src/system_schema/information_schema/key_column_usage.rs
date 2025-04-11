@@ -290,13 +290,13 @@ impl InformationSchemaKeyColumnUsageBuilder {
         ordinal_position: u32,
     ) {
         let row = [
-            (CONSTRAINT_SCHEMA, Value::from(constraint_schema)),
-            (CONSTRAINT_NAME, Value::from(constraint_name)),
-            (REAL_TABLE_CATALOG, Value::from(table_catalog)),
-            (TABLE_SCHEMA, Value::from(table_schema)),
-            (TABLE_NAME, Value::from(table_name)),
-            (COLUMN_NAME, Value::from(column_name)),
-            (ORDINAL_POSITION, Value::from(ordinal_position)),
+            (CONSTRAINT_SCHEMA, &Value::from(constraint_schema)),
+            (CONSTRAINT_NAME, &Value::from(constraint_name)),
+            (REAL_TABLE_CATALOG, &Value::from(table_catalog)),
+            (TABLE_SCHEMA, &Value::from(table_schema)),
+            (TABLE_NAME, &Value::from(table_name)),
+            (COLUMN_NAME, &Value::from(column_name)),
+            (ORDINAL_POSITION, &Value::from(ordinal_position)),
         ];
 
         if !predicates.eval(&row) {

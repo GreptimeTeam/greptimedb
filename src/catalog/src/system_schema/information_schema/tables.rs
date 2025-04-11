@@ -324,12 +324,12 @@ impl InformationSchemaTablesBuilder {
         };
 
         let row = [
-            (TABLE_CATALOG, Value::from(catalog_name)),
-            (TABLE_ID, Value::from(table_id)),
-            (TABLE_SCHEMA, Value::from(schema_name)),
-            (ENGINE, Value::from(engine)),
-            (TABLE_NAME, Value::from(table_name)),
-            (TABLE_TYPE, Value::from(table_type_text)),
+            (TABLE_CATALOG, &Value::from(catalog_name)),
+            (TABLE_ID, &Value::from(table_id)),
+            (TABLE_SCHEMA, &Value::from(schema_name)),
+            (ENGINE, &Value::from(engine)),
+            (TABLE_NAME, &Value::from(table_name)),
+            (TABLE_TYPE, &Value::from(table_type_text)),
         ];
 
         if !predicates.eval(&row) {

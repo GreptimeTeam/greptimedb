@@ -189,17 +189,17 @@ impl InformationSchemaRegionStatisticsBuilder {
 
     fn add_region_statistic(&mut self, predicate: &Predicates, region_stat: RegionStat) {
         let row = [
-            (REGION_ID, Value::from(region_stat.id.as_u64())),
-            (TABLE_ID, Value::from(region_stat.id.table_id())),
-            (REGION_NUMBER, Value::from(region_stat.id.region_number())),
-            (REGION_ROWS, Value::from(region_stat.num_rows)),
-            (DISK_SIZE, Value::from(region_stat.approximate_bytes)),
-            (MEMTABLE_SIZE, Value::from(region_stat.memtable_size)),
-            (MANIFEST_SIZE, Value::from(region_stat.manifest_size)),
-            (SST_SIZE, Value::from(region_stat.sst_size)),
-            (INDEX_SIZE, Value::from(region_stat.index_size)),
-            (ENGINE, Value::from(region_stat.engine.as_str())),
-            (REGION_ROLE, Value::from(region_stat.role.to_string())),
+            (REGION_ID, &Value::from(region_stat.id.as_u64())),
+            (TABLE_ID, &Value::from(region_stat.id.table_id())),
+            (REGION_NUMBER, &Value::from(region_stat.id.region_number())),
+            (REGION_ROWS, &Value::from(region_stat.num_rows)),
+            (DISK_SIZE, &Value::from(region_stat.approximate_bytes)),
+            (MEMTABLE_SIZE, &Value::from(region_stat.memtable_size)),
+            (MANIFEST_SIZE, &Value::from(region_stat.manifest_size)),
+            (SST_SIZE, &Value::from(region_stat.sst_size)),
+            (INDEX_SIZE, &Value::from(region_stat.index_size)),
+            (ENGINE, &Value::from(region_stat.engine.as_str())),
+            (REGION_ROLE, &Value::from(region_stat.role.to_string())),
         ];
 
         if !predicate.eval(&row) {

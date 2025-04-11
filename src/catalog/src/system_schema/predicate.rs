@@ -40,14 +40,14 @@ impl Predicate {
     /// - `None` when the predicate can't evaluate with the row.
     /// - `Some(true)` when the predicate is satisfied,
     /// - `Some(false)` when the predicate is not satisfied,
-    fn eval(&self, row: &[(&str, Value)]) -> Option<bool> {
+    fn eval(&self, row: &[(&str, &Value)]) -> Option<bool> {
         match self {
             Predicate::Eq(c, v) => {
                 for (column, value) in row {
                     if c != column {
                         continue;
                     }
-                    return Some(v == value);
+                    return Some(v == *value);
                 }
             }
             Predicate::Like(c, pattern, case_insensitive) => {
@@ -68,7 +68,7 @@ impl Predicate {
                     if c != column {
                         continue;
                     }
-                    return Some(v != value);
+                    return Some(v != *value);
                 }
             }
             Predicate::InList(c, values) => {
@@ -76,7 +76,7 @@ impl Predicate {
                     if c != column {
                         continue;
                     }
-                    return Some(values.iter().any(|v| v == value));
+                    return Some(values.iter().any(|v| v == *value));
                 }
             }
             Predicate::And(left, right) => {
@@ -271,7 +271,7 @@ impl Predicates {
 
     /// Evaluate the predicates with the row.
     /// returns true when all the predicates are satisfied or can't be evaluated.
-    pub fn eval(&self, row: &[(&str, Value)]) -> bool {
+    pub fn eval(&self, row: &[(&str, &Value)]) -> bool {
         // fast path
         if self.predicates.is_empty() {
             return true;
@@ -305,9 +305,9 @@ mod tests {
         let b_value = Value::from("b_value");
         let wrong_value = Value::from("wrong_value");
 
-        let a_row = [(a_col.as_str(), a_value.clone())];
-        let b_row = [("b", wrong_value.clone())];
-        let wrong_row = [(a_col.as_str(), wrong_value.clone())];
+        let a_row = [(a_col.as_str(), &a_value)];
+        let b_row = [("b", &wrong_value)];
+        let wrong_row = [(a_col.as_str(), &wrong_value)];
 
         // Predicate::Eq
         let p = Predicate::Eq(a_col.clone(), a_value.clone());
@@ -326,42 +326,30 @@ mod tests {
         assert!(p.eval(&a_row).unwrap());
         assert!(p.eval(&b_row).is_none());
         assert!(!p.eval(&wrong_row).unwrap());
-        assert!(p.eval(&[(&a_col, b_value.clone())]).unwrap());
+        assert!(p.eval(&[(&a_col, &b_value)]).unwrap());
 
         let p1 = Predicate::Eq(a_col.clone(), a_value.clone());
         let p2 = Predicate::Eq(b_col.clone(), b_value.clone());
-        let row = [
-            (a_col.as_str(), a_value.clone()),
-            (b_col.as_str(), b_value.clone()),
-        ];
-        let wrong_row = [
-            (a_col.as_str(), a_value.clone()),
-            (b_col.as_str(), wrong_value.clone()),
-        ];
+        let row = [(a_col.as_str(), &a_value), (b_col.as_str(), &b_value)];
+        let wrong_row = [(a_col.as_str(), &a_value), (b_col.as_str(), &wrong_value)];
 
         //Predicate::And
         let p = Predicate::And(Box::new(p1.clone()), Box::new(p2.clone()));
         assert!(p.eval(&row).unwrap());
         assert!(!p.eval(&wrong_row).unwrap());
         assert!(p.eval(&[]).is_none());
-        assert!(p.eval(&[("c", a_value.clone())]).is_none());
+        assert!(p.eval(&[("c", &a_value)]).is_none());
         assert!(!p
-            .eval(&[
-                (a_col.as_str(), b_value.clone()),
-                (b_col.as_str(), a_value.clone())
-            ])
+            .eval(&[(a_col.as_str(), &b_value), (b_col.as_str(), &a_value)])
             .unwrap());
         assert!(!p
-            .eval(&[
-                (a_col.as_str(), b_value.clone()),
-                (b_col.as_str(), b_value.clone())
-            ])
+            .eval(&[(a_col.as_str(), &b_value), (b_col.as_str(), &b_value)])
             .unwrap());
         assert!(p
-            .eval(&[(a_col.as_ref(), a_value.clone()), ("c", a_value.clone())])
+            .eval(&[(a_col.as_ref(), &a_value), ("c", &a_value)])
             .is_none());
         assert!(!p
-            .eval(&[(a_col.as_ref(), b_value.clone()), ("c", a_value.clone())])
+            .eval(&[(a_col.as_ref(), &b_value), ("c", &a_value)])
             .unwrap());
 
         //Predicate::Or
@@ -369,24 +357,18 @@ mod tests {
         assert!(p.eval(&row).unwrap());
         assert!(p.eval(&wrong_row).unwrap());
         assert!(p.eval(&[]).is_none());
-        assert!(p.eval(&[("c", a_value.clone())]).is_none());
+        assert!(p.eval(&[("c", &a_value)]).is_none());
         assert!(!p
-            .eval(&[
-                (a_col.as_str(), b_value.clone()),
-                (b_col.as_str(), a_value.clone())
-            ])
+            .eval(&[(a_col.as_str(), &b_value), (b_col.as_str(), &a_value)])
             .unwrap());
         assert!(p
-            .eval(&[
-                (a_col.as_str(), b_value.clone()),
-                (b_col.as_str(), b_value.clone())
-            ])
+            .eval(&[(a_col.as_str(), &b_value), (b_col.as_str(), &b_value)])
             .unwrap());
         assert!(p
-            .eval(&[(a_col.as_ref(), a_value.clone()), ("c", a_value.clone())])
+            .eval(&[(a_col.as_ref(), &a_value), ("c", &a_value)])
             .unwrap());
         assert!(p
-            .eval(&[(a_col.as_ref(), b_value.clone()), ("c", a_value.clone())])
+            .eval(&[(a_col.as_ref(), &b_value), ("c", &a_value)])
             .is_none());
     }
 
@@ -410,10 +392,10 @@ mod tests {
         );
 
         let match_row = [
-            ("a", Value::from("hello AbC")),
-            ("b", Value::from("b value")),
+            ("a", &Value::from("hello AbC")),
+            ("b", &Value::from("b value")),
         ];
-        let unmatch_row = [("a", Value::from("bca")), ("b", Value::from("b value"))];
+        let unmatch_row = [("a", &Value::from("bca")), ("b", &Value::from("b value"))];
 
         assert!(p.eval(&match_row).unwrap());
         assert!(!p.eval(&unmatch_row).unwrap());
@@ -573,16 +555,16 @@ mod tests {
     #[test]
     fn test_predicates_eval_row() {
         let wrong_row = [
-            ("a", Value::from("a_value")),
-            ("b", Value::from("b_value")),
-            ("c", Value::from("c_value")),
+            ("a", &Value::from("a_value")),
+            ("b", &Value::from("b_value")),
+            ("c", &Value::from("c_value")),
         ];
         let row = [
-            ("a", Value::from("a_value")),
-            ("b", Value::from("not_b_value")),
-            ("c", Value::from("c_value")),
+            ("a", &Value::from("a_value")),
+            ("b", &Value::from("not_b_value")),
+            ("c", &Value::from("c_value")),
         ];
-        let c_row = [("c", Value::from("c_value"))];
+        let c_row = [("c", &Value::from("c_value"))];
 
         // test empty predicates, always returns true
         let predicates = Predicates::from_scan_request(&None);

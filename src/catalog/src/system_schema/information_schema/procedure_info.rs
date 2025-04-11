@@ -187,12 +187,12 @@ impl InformationSchemaProcedureInfoBuilder {
         let lock_keys = lock_keys.join(",");
 
         let row = [
-            (PROCEDURE_ID, Value::from(pid.clone())),
-            (PROCEDURE_TYPE, Value::from(type_name.clone())),
-            (START_TIME, Value::from(start_time)),
-            (END_TIME, Value::from(end_time)),
-            (STATUS, Value::from(status.clone())),
-            (LOCK_KEYS, Value::from(lock_keys.clone())),
+            (PROCEDURE_ID, &Value::from(pid.clone())),
+            (PROCEDURE_TYPE, &Value::from(type_name.clone())),
+            (START_TIME, &Value::from(start_time)),
+            (END_TIME, &Value::from(end_time)),
+            (STATUS, &Value::from(status.clone())),
+            (LOCK_KEYS, &Value::from(lock_keys.clone())),
         ];
         if !predicates.eval(&row) {
             return;

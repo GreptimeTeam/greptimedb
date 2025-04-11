@@ -202,9 +202,9 @@ impl PGCDatabaseBuilder {
 
     fn add_database(&mut self, predicates: &Predicates, schema_name: &str) {
         let oid = self.namespace_oid_map.get_oid(schema_name);
-        let row: [(&str, Value); 2] = [
-            (OID_COLUMN_NAME, Value::from(oid)),
-            (DATNAME, Value::from(schema_name)),
+        let row: [(&str, &Value); 2] = [
+            (OID_COLUMN_NAME, &Value::from(oid)),
+            (DATNAME, &Value::from(schema_name)),
         ];
 
         if !predicates.eval(&row) {

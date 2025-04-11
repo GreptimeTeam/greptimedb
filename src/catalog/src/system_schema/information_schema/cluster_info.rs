@@ -178,11 +178,11 @@ impl InformationSchemaClusterInfoBuilder {
         let peer_type = node_info.status.role_name();
 
         let row = [
-            (PEER_ID, Value::from(node_info.peer.id)),
-            (PEER_TYPE, Value::from(peer_type)),
-            (PEER_ADDR, Value::from(node_info.peer.addr.as_str())),
-            (VERSION, Value::from(node_info.version.as_str())),
-            (GIT_COMMIT, Value::from(node_info.git_commit.as_str())),
+            (PEER_ID, &Value::from(node_info.peer.id)),
+            (PEER_TYPE, &Value::from(peer_type)),
+            (PEER_ADDR, &Value::from(node_info.peer.addr.as_str())),
+            (VERSION, &Value::from(node_info.version.as_str())),
+            (GIT_COMMIT, &Value::from(node_info.git_commit.as_str())),
         ];
 
         if !predicates.eval(&row) {

@@ -228,9 +228,9 @@ impl InformationSchemaViewsBuilder {
         definition: &str,
     ) {
         let row = [
-            (TABLE_CATALOG, Value::from(catalog_name)),
-            (TABLE_SCHEMA, Value::from(schema_name)),
-            (TABLE_NAME, Value::from(table_name)),
+            (TABLE_CATALOG, &Value::from(catalog_name)),
+            (TABLE_SCHEMA, &Value::from(schema_name)),
+            (TABLE_NAME, &Value::from(table_name)),
         ];
 
         if !predicates.eval(&row) {
