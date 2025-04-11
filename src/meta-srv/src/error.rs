@@ -788,6 +788,14 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
+    #[snafu(display("Failed to build kafka client."))]
+    BuildKafkaClient {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: common_meta::error::Error,
+    },
+
     #[snafu(display(
         "Failed to build a Kafka partition client, topic: {}, partition: {}",
         topic,
@@ -875,6 +883,7 @@ impl ErrorExt for Error {
             | Error::FlowStateHandler { .. }
             | Error::BuildWalOptionsAllocator { .. }
             | Error::BuildPartitionClient { .. }
+            | Error::BuildKafkaClient { .. }
             | Error::DeleteRecords { .. } => StatusCode::Internal,
 
             Error::Unsupported { .. } => StatusCode::Unsupported,

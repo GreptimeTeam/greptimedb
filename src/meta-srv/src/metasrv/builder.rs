@@ -37,7 +37,7 @@ use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::region_registry::LeaderRegionRegistry;
 use common_meta::sequence::SequenceBuilder;
 use common_meta::state_store::KvStateStore;
-use common_meta::wal_options_allocator::{build_wal_options_allocator, WalOptionsAllocator};
+use common_meta::wal_options_allocator::{build_kafka_client, build_wal_options_allocator};
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::ProcedureManagerRef;
 use snafu::ResultExt;
@@ -352,23 +352,20 @@ impl MetasrvBuilder {
         );
 
         // remote WAL prune ticker and manager
-        let (tx, rx) = WalPruneManager::channel();
         let wal_prune_ticker = if is_remote_wal && options.wal.enable_active_wal_pruning() {
-            let kafka_client = match wal_options_allocator.as_ref() {
-                WalOptionsAllocator::Kafka(kafak_topic_pool) => {
-                    kafak_topic_pool.topic_creator.client().clone()
-                }
-                _ => unreachable!(),
-            };
+            let (tx, rx) = WalPruneManager::channel();
+            let kafka_client = build_kafka_client(options.wal.kafka_connection_config().unwrap())
+                .await
+                .context(error::BuildKafkaClientSnafu)?;
             let wal_prune_context = WalPruneContext {
-                client: kafka_client,
+                client: Arc::new(kafka_client),
                 table_metadata_manager: table_metadata_manager.clone(),
                 leader_region_registry: leader_region_registry.clone(),
                 server_addr: options.server_addr.clone(),
                 mailbox: mailbox.clone(),
             };
             // TODO(CookiePie): Add options for wal prune manager parameters.
-            let mut wal_prune_manager = WalPruneManager::new(
+            let wal_prune_manager = WalPruneManager::new(
                 table_metadata_manager.clone(),
                 DEFAULT_WAL_PRUNE_LIMIT,
                 rx,
@@ -376,11 +373,8 @@ impl MetasrvBuilder {
                 wal_prune_context,
                 DEFAULT_WAL_PRUNE_FLUSH_THRESHOLD,
             );
-            wal_prune_manager.init().await?;
-            common_runtime::spawn_global(async move {
-                wal_prune_manager.run().await;
-            });
-
+            // Start manager in background. Ticker will be started in the main thread to send ticks.
+            wal_prune_manager.try_start().await?;
             let wal_prune_ticker =
                 Arc::new(WalPruneTicker::new(DEFAULT_WAL_PRUNE_INTERVAL, tx.clone()));
             Some(wal_prune_ticker)

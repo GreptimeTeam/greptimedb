@@ -218,8 +218,8 @@ impl WalPruneManager {
         }
     }
 
-    /// Initializes the [WalPruneManager]. It will register [WalPruneProcedure] loader in the procedure manager.
-    pub async fn init(&self) -> Result<()> {
+    /// Start the [WalPruneManager]. It will register [WalPruneProcedure] loader in the procedure manager.
+    pub async fn try_start(mut self) -> Result<()> {
         let context = self.wal_prune_context.clone();
         self.procedure_manager
             .register_loader(
@@ -230,7 +230,11 @@ impl WalPruneManager {
             )
             .context(RegisterProcedureLoaderSnafu {
                 type_name: WalPruneProcedure::TYPE_NAME,
-            })
+            })?;
+        common_runtime::spawn_global(async move {
+            self.run().await;
+        });
+        Ok(())
     }
 
     /// Returns a mpsc channel with a buffer capacity of 1024 for sending and receiving `Event` messages.
@@ -318,7 +322,7 @@ impl WalPruneManager {
 mod test {
     use std::assert_matches::assert_matches;
 
-    use common_meta::wal_options_allocator::build_kafka_topic_creator;
+    use common_meta::wal_options_allocator::build_kafka_client;
     use common_wal::config::kafka::common::{KafkaConnectionConfig, KafkaTopicConfig};
     use common_wal::config::kafka::MetasrvKafkaConfig;
     use common_wal::test_util::run_test_with_kafka_wal;
@@ -344,9 +348,9 @@ mod test {
                     kafka_topic,
                     ..Default::default()
                 };
-                let topic_creator = build_kafka_topic_creator(&config).await.unwrap();
+                let client = Arc::new(build_kafka_client(&config).await.unwrap());
                 let wal_prune_context = WalPruneContext {
-                    client: topic_creator.client().clone(),
+                    client,
                     table_metadata_manager: test_env.table_metadata_manager.clone(),
                     leader_region_registry: test_env.leader_region_registry.clone(),
                     server_addr: test_env.server_addr.to_string(),

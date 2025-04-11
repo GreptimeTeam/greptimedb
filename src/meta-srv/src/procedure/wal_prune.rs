@@ -406,7 +406,7 @@ mod tests {
     use std::assert_matches::assert_matches;
 
     use api::v1::meta::HeartbeatResponse;
-    use common_meta::wal_options_allocator::build_kafka_topic_creator;
+    use common_meta::wal_options_allocator::build_kafka_client;
     use common_wal::config::kafka::common::{KafkaConnectionConfig, KafkaTopicConfig};
     use common_wal::config::kafka::MetasrvKafkaConfig;
     use common_wal::test_util::run_test_with_kafka_wal;
@@ -442,7 +442,7 @@ mod tests {
             kafka_topic,
             ..Default::default()
         };
-        let topic_creator = build_kafka_topic_creator(&config).await.unwrap();
+        let client = Arc::new(build_kafka_client(&config).await.unwrap());
         let table_metadata_manager = env.table_metadata_manager.clone();
         let leader_region_registry = env.leader_region_registry.clone();
         let mailbox = env.mailbox.mailbox().clone();
@@ -451,12 +451,8 @@ mod tests {
         let n_table = 5;
         let threshold = 10;
         // 5 entries per region.
-        let offsets = mock_wal_entries(
-            topic_creator.client().clone(),
-            &topic,
-            (n_region * n_table * 5) as usize,
-        )
-        .await;
+        let offsets =
+            mock_wal_entries(client.clone(), &topic, (n_region * n_table * 5) as usize).await;
 
         let (min_flushed_entry_id, regions_to_flush) = new_wal_prune_metadata(
             table_metadata_manager.clone(),
@@ -470,7 +466,7 @@ mod tests {
         .await;
 
         let context = Context {
-            client: topic_creator.client().clone(),
+            client,
             table_metadata_manager,
             leader_region_registry,
             mailbox,

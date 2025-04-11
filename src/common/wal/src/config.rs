@@ -67,6 +67,14 @@ impl MetasrvWalConfig {
             MetasrvWalConfig::Kafka(config) => config.active_prune_wal,
         }
     }
+
+    /// Gets the kafka connection config.
+    pub fn kafka_connection_config(&self) -> Option<&MetasrvKafkaConfig> {
+        match self {
+            MetasrvWalConfig::RaftEngine => None,
+            MetasrvWalConfig::Kafka(config) => Some(&config),
+        }
+    }
 }
 
 impl From<MetasrvWalConfig> for DatanodeWalConfig {
