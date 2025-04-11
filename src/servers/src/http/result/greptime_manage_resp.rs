@@ -30,10 +30,19 @@ pub struct GreptimedbManageResponse {
 }
 
 impl GreptimedbManageResponse {
-    pub fn from_pipeline(name: String, version: String, execution_time_ms: u64) -> Self {
+    pub fn from_pipeline(
+        name: String,
+        version: String,
+        execution_time_ms: u64,
+        pipeline: Option<String>,
+    ) -> Self {
         GreptimedbManageResponse {
             manage_result: ManageResult::Pipelines {
-                pipelines: vec![PipelineOutput { name, version }],
+                pipelines: vec![PipelineOutput {
+                    name,
+                    version,
+                    pipeline,
+                }],
             },
             execution_time_ms,
         }
@@ -68,6 +77,8 @@ pub enum ManageResult {
 pub struct PipelineOutput {
     name: String,
     version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pipeline: Option<String>,
 }
 
 impl IntoResponse for GreptimedbManageResponse {
@@ -109,6 +120,7 @@ mod tests {
                 pipelines: vec![PipelineOutput {
                     name: "test_name".to_string(),
                     version: "test_version".to_string(),
+                    pipeline: None,
                 }],
             },
             execution_time_ms: 42,

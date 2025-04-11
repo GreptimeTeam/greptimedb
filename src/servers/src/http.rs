@@ -930,6 +930,10 @@ impl HttpServer {
             .route("/logs", routing::post(event::log_ingester))
             .route(
                 "/pipelines/{pipeline_name}",
+                routing::get(event::query_pipeline),
+            )
+            .route(
+                "/pipelines/{pipeline_name}",
                 routing::post(event::add_pipeline),
             )
             .route(
@@ -947,6 +951,10 @@ impl HttpServer {
     fn route_pipelines<S>(log_state: LogState) -> Router<S> {
         Router::new()
             .route("/ingest", routing::post(event::log_ingester))
+            .route(
+                "/pipelines/{pipeline_name}",
+                routing::get(event::query_pipeline),
+            )
             .route(
                 "/pipelines/{pipeline_name}",
                 routing::post(event::add_pipeline),

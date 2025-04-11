@@ -100,3 +100,4 @@ session = { workspace = true, features = ["testing"] }
 store-api.workspace = true
 tokio-postgres = { workspace = true }
 url = "2.3"
+yaml-rust = "0.4"

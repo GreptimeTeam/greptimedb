@@ -12053,6 +12053,7 @@ dependencies = [
  "tower 0.5.2",
  "url",
  "uuid",
+ "yaml-rust",
  "zstd 0.13.2",
 ]
 
