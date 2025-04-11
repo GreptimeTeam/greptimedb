@@ -26,11 +26,10 @@ use snafu::ResultExt;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 
-use crate::adapter::FlowId;
 use crate::batching_mode::task::BatchingTask;
 use crate::batching_mode::MIN_REFRESH_DURATION;
 use crate::error::{DatatypesSnafu, InternalSnafu, TimeSnafu};
-use crate::Error;
+use crate::{Error, FlowId};
 
 /// The state of the [`BatchingTask`].
 #[derive(Debug)]

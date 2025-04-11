@@ -25,8 +25,8 @@ use common_telemetry::common_error::status_code::StatusCode;
 use snafu::{Location, ResultExt, Snafu};
 use tonic::metadata::MetadataMap;
 
-use crate::adapter::FlowId;
 use crate::expr::EvalError;
+use crate::FlowId;
 
 /// This error is used to represent all possible errors that can occur in the flow module.
 #[derive(Snafu)]
