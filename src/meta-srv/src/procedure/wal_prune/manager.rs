@@ -64,6 +64,9 @@ impl WalPruneProcedureTracker {
     }
 }
 
+/// [WalPruneProcedureGuard] is a guard for [WalPruneProcedure].
+/// It is used to track the running [WalPruneProcedure]s.
+/// When the guard is dropped, it will remove the topic name from the running procedures and release the semaphore.
 pub struct WalPruneProcedureGuard {
     topic_name: String,
     running_procedures: Arc<RwLock<HashSet<String>>>,
@@ -93,6 +96,8 @@ impl Debug for Event {
     }
 }
 
+/// [WalPruneTicker] is a ticker that periodically sends [Event]s to the [WalPruneManager].
+/// It is used to trigger the [WalPruneManager] to submit [WalPruneProcedure]s.
 pub(crate) struct WalPruneTicker {
     /// Handle of ticker thread.
     pub(crate) tick_handle: Mutex<Option<JoinHandle<()>>>,
@@ -148,6 +153,7 @@ impl WalPruneTicker {
             });
             *handle = Some(ticker_loop);
         }
+        info!("WalPruneTicker started.");
     }
 
     /// Stops the ticker.
@@ -156,6 +162,7 @@ impl WalPruneTicker {
         if let Some(handle) = handle.take() {
             handle.abort();
         }
+        info!("WalPruneTicker stopped.");
     }
 }
 
