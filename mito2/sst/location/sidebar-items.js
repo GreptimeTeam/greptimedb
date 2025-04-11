@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["index_file_path","sst_file_path"]};

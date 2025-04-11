@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CURRENT_SCHEMA_FUNCTION_NAME","DATABASE_FUNCTION_NAME","READ_PREFERENCE_FUNCTION_NAME","SESSION_USER_FUNCTION_NAME"],"struct":["CurrentSchemaFunction","DatabaseFunction","ReadPreferenceFunction","SessionUserFunction"]};

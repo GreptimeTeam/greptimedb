@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["adapter","batching_mode","compute","df_optimizer","error","expr","heartbeat","metrics","plan","repr","server","transform","utils"],"struct":["FlowConfig","FlowWorkerManager","FlownodeBuilder","FlownodeInstance","FlownodeOptions","FlownodeServer","FlownodeServiceBuilder","FrontendInvoker"],"type":["FlowWorkerManagerRef"]};

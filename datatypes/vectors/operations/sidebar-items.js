@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"macro":["impl_scalar_vector_op"],"mod":["cast","filter","replicate","take"],"trait":["VectorOp"]};

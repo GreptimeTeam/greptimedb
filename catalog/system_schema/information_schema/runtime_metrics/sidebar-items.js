@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["METRIC_LABELS","METRIC_NAME","METRIC_VALUE","PEER_ADDR","PEER_TYPE","TIMESTAMP"],"struct":["InformationSchemaMetrics","InformationSchemaMetricsBuilder"]};
