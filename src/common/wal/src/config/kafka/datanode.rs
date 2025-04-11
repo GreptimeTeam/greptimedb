@@ -45,7 +45,7 @@ pub struct DatanodeKafkaConfig {
     /// Ignore missing entries during read WAL.
     pub overwrite_entry_start_id: bool,
     // Active WAL pruning.
-    pub active_wal_pruning: bool,
+    pub active_prune_wal: bool,
 }
 
 impl Default for DatanodeKafkaConfig {
@@ -60,7 +60,7 @@ impl Default for DatanodeKafkaConfig {
             create_index: true,
             dump_index_interval: Duration::from_secs(60),
             overwrite_entry_start_id: false,
-            active_wal_pruning: false,
+            active_prune_wal: false,
         }
     }
 }

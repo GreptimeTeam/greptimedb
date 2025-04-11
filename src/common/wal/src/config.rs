@@ -53,7 +53,7 @@ impl From<DatanodeWalConfig> for MetasrvWalConfig {
                 connection: config.connection,
                 kafka_topic: config.kafka_topic,
                 auto_create_topics: config.auto_create_topics,
-                active_wal_pruning: config.active_wal_pruning,
+                active_prune_wal: config.active_prune_wal,
             }),
         }
     }
@@ -64,7 +64,7 @@ impl MetasrvWalConfig {
     pub fn enable_active_wal_pruning(&self) -> bool {
         match self {
             MetasrvWalConfig::RaftEngine => false,
-            MetasrvWalConfig::Kafka(config) => config.active_wal_pruning,
+            MetasrvWalConfig::Kafka(config) => config.active_prune_wal,
         }
     }
 }
@@ -192,7 +192,7 @@ mod tests {
                 create_topic_timeout: Duration::from_secs(30),
             },
             auto_create_topics: true,
-            active_wal_pruning: false,
+            active_prune_wal: false,
         };
         assert_eq!(metasrv_wal_config, MetasrvWalConfig::Kafka(expected));
 

@@ -130,6 +130,10 @@ broker_endpoints = ["127.0.0.1:9092"]
 ## Otherwise, use topics named `topic_name_prefix_[0..num_topics)`
 auto_create_topics = true
 
+## Active WAL pruning.
+## Set to `true` to enable active WAL pruning to delete remote WAL entries periodically.
+auto_prune_wal = false
+
 ## Number of topics.
 num_topics = 64
 

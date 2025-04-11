@@ -29,7 +29,7 @@ pub struct MetasrvKafkaConfig {
     // Automatically create topics for WAL.
     pub auto_create_topics: bool,
     // Active WAL pruning.
-    pub active_wal_pruning: bool,
+    pub active_prune_wal: bool,
 }
 
 impl Default for MetasrvKafkaConfig {
@@ -38,7 +38,7 @@ impl Default for MetasrvKafkaConfig {
             connection: Default::default(),
             kafka_topic: Default::default(),
             auto_create_topics: true,
-            active_wal_pruning: false,
+            active_prune_wal: false,
         }
     }
 }
