@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use common_catalog::consts::INFORMATION_SCHEMA_PROCESS_LIST_TABLE_ID;
 use common_error::ext::BoxedError;
-use common_meta::key::process_list::{Process, ProcessManager};
+use common_meta::key::process_list::Process;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use common_time::util::current_time_millis;
@@ -36,6 +36,7 @@ use store_api::storage::{ScanRequest, TableId};
 
 use crate::error::{self, InternalSnafu};
 use crate::information_schema::Predicates;
+use crate::process_manager::ProcessManager;
 use crate::system_schema::information_schema::InformationTable;
 
 /// Column names of `information_schema.process_list`
