@@ -389,6 +389,9 @@ impl ServerMode {
                     format!("--metasrv-addrs={metasrv_addr}"),
                     format!("--http-addr={http_addr}"),
                     format!("--rpc-addr={rpc_bind_addr}"),
+                    // since sqlness run on local, bind addr is the same as server addr
+                    // this is needed so that `cluster_info`'s server addr column can be correct
+                    format!("--rpc-server-addr={rpc_bind_addr}"),
                     format!("--mysql-addr={mysql_addr}"),
                     format!("--postgres-addr={postgres_addr}"),
                     format!(

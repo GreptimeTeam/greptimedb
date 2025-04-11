@@ -3,6 +3,8 @@ CREATE TABLE input_basic (
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(number),
     TIME INDEX(ts)
+)WITH(
+    append_mode = 'true'
 );
 
 Affected Rows: 0
@@ -166,11 +168,19 @@ ADMIN FLUSH_FLOW('test_wildcard_basic');
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
 
--- 3 is also expected, since flow don't have persisent state
+-- flow batching mode
 SELECT wildcard FROM out_basic;
 
 +----------+
 | wildcard |
++----------+
+| 3        |
++----------+
+
+SELECT count(*) FROM input_basic;
+
++----------+
+| count(*) |
 +----------+
 | 3        |
 +----------+
@@ -302,6 +312,15 @@ FROM
 Affected Rows: 0
 
 -- SQLNESS ARG restart=true
+SELECT 1;
+
++----------+
+| Int64(1) |
++----------+
+| 1        |
++----------+
+
+-- SQLNESS SLEEP 3s
 INSERT INTO
     input_basic
 VALUES
@@ -310,6 +329,8 @@ VALUES
 
 Affected Rows: 2
 
+-- give flownode a second to rebuild flow
+-- SQLNESS SLEEP 3s
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_wildcard_basic');
 
@@ -358,6 +379,15 @@ FROM
 Affected Rows: 0
 
 -- SQLNESS ARG restart=true
+SELECT 1;
+
++----------+
+| Int64(1) |
++----------+
+| 1        |
++----------+
+
+-- SQLNESS SLEEP 3s
 INSERT INTO
     input_basic
 VALUES
@@ -366,6 +396,8 @@ VALUES
 
 Affected Rows: 2
 
+-- give flownode a second to rebuild flow
+-- SQLNESS SLEEP 3s
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_wildcard_basic');
 
@@ -397,6 +429,15 @@ CREATE TABLE input_basic (
 Affected Rows: 0
 
 -- SQLNESS ARG restart=true
+SELECT 1;
+
++----------+
+| Int64(1) |
++----------+
+| 1        |
++----------+
+
+-- SQLNESS SLEEP 3s
 INSERT INTO
     input_basic
 VALUES
@@ -406,6 +447,8 @@ VALUES
 
 Affected Rows: 3
 
+-- give flownode a second to rebuild flow
+-- SQLNESS SLEEP 3s
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_wildcard_basic');
 
@@ -438,7 +481,17 @@ FROM
 
 Affected Rows: 0
 
+-- give flownode a second to rebuild flow
 -- SQLNESS ARG restart=true
+SELECT 1;
+
++----------+
+| Int64(1) |
++----------+
+| 1        |
++----------+
+
+-- SQLNESS SLEEP 3s
 INSERT INTO
     input_basic
 VALUES
@@ -457,13 +510,21 @@ ADMIN FLUSH_FLOW('test_wildcard_basic');
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
 
--- 3 is also expected, since flow don't have persisent state
+-- 4 is also expected, since flow batching mode
 SELECT wildcard FROM out_basic;
 
 +----------+
 | wildcard |
 +----------+
-| 3        |
+| 4        |
++----------+
+
+SELECT count(*) FROM input_basic;
+
++----------+
+| count(*) |
++----------+
+| 4        |
 +----------+
 
 DROP TABLE input_basic;
@@ -496,6 +557,15 @@ FROM
 Affected Rows: 0
 
 -- SQLNESS ARG restart=true
+SELECT 1;
+
++----------+
+| Int64(1) |
++----------+
+| 1        |
++----------+
+
+-- SQLNESS SLEEP 3s
 INSERT INTO
     input_basic
 VALUES
@@ -504,6 +574,8 @@ VALUES
 
 Affected Rows: 2
 
+-- give flownode a second to rebuild flow
+-- SQLNESS SLEEP 3s
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_wildcard_basic');
 
@@ -538,6 +610,15 @@ FROM
 Affected Rows: 0
 
 -- SQLNESS ARG restart=true
+SELECT 1;
+
++----------+
+| Int64(1) |
++----------+
+| 1        |
++----------+
+
+-- SQLNESS SLEEP 3s
 INSERT INTO
     input_basic
 VALUES
@@ -547,6 +628,7 @@ VALUES
 
 Affected Rows: 3
 
+-- give flownode a second to rebuild flow
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_wildcard_basic');
 

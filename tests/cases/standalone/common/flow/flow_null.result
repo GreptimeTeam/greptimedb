@@ -5,6 +5,8 @@ CREATE TABLE requests (
     service_ip STRING,
     val INT,
     ts TIMESTAMP TIME INDEX
+)WITH(
+    append_mode = 'true'
 );
 
 Affected Rows: 0
@@ -93,6 +95,8 @@ CREATE TABLE ngx_access_log (
     client STRING,
     country STRING,
     access_time TIMESTAMP TIME INDEX
+)WITH(
+    append_mode = 'true'
 );
 
 Affected Rows: 0
