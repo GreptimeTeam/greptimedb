@@ -502,7 +502,7 @@ impl ScanRegion {
 
         let file_cache = self.cache_strategy.write_cache().map(|w| w.file_cache());
         let puffin_metadata_cache = self.cache_strategy.puffin_metadata_cache().cloned();
-
+        let bloom_filter_index_cache = self.cache_strategy.bloom_filter_index_cache().cloned();
         FulltextIndexApplierBuilder::new(
             self.access_layer.region_dir().to_string(),
             self.version.metadata.region_id,
@@ -512,6 +512,7 @@ impl ScanRegion {
         )
         .with_file_cache(file_cache)
         .with_puffin_metadata_cache(puffin_metadata_cache)
+        .with_bloom_filter_cache(bloom_filter_index_cache)
         .build(&self.request.filters)
         .inspect_err(|err| warn!(err; "Failed to build fulltext index applier"))
         .ok()

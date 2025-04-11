@@ -31,7 +31,7 @@ use store_api::storage::{ColumnId, RegionId};
 use crate::access_layer::{RegionFilePathFactory, WriteCachePathProvider};
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::index::bloom_filter_index::{
-    BloomFilterIndexCacheRef, CachedBloomFilterIndexBlobReader,
+    BloomFilterIndexCacheRef, CachedBloomFilterIndexBlobReader, Tag,
 };
 use crate::error::{
     ApplyBloomFilterIndexSnafu, Error, MetadataSnafu, PuffinBuildReaderSnafu, PuffinReadBlobSnafu,
@@ -165,6 +165,7 @@ impl BloomFilterIndexApplier {
                 let reader = CachedBloomFilterIndexBlobReader::new(
                     file_id,
                     *column_id,
+                    Tag::Skipping,
                     blob_size,
                     BloomFilterReaderImpl::new(blob),
                     bloom_filter_cache.clone(),

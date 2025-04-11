@@ -369,6 +369,9 @@ impl ParquetReaderBuilder {
         self.prune_row_groups_by_bloom_filter(parquet_meta, &mut output, metrics)
             .await;
 
+        self.prune_row_groups_by_fulltext_bloom(parquet_meta, &mut output, metrics)
+            .await;
+
         output
     }
 
@@ -389,7 +392,7 @@ impl ParquetReaderBuilder {
 
         let file_size_hint = self.file_handle.meta_ref().index_file_size();
         let apply_res = match index_applier
-            .apply(self.file_handle.file_id(), Some(file_size_hint))
+            .apply_fine(self.file_handle.file_id(), Some(file_size_hint))
             .await
         {
             Ok(Some(res)) => res,
@@ -626,6 +629,67 @@ impl ParquetReaderBuilder {
             output,
             &mut metrics.rg_bloom_filtered,
             &mut metrics.rows_bloom_filtered,
+        );
+
+        true
+    }
+
+    async fn prune_row_groups_by_fulltext_bloom(
+        &self,
+        parquet_meta: &ParquetMetaData,
+        output: &mut BTreeMap<usize, Option<RowSelection>>,
+        metrics: &mut ReaderFilterMetrics,
+    ) -> bool {
+        let Some(index_applier) = &self.fulltext_index_applier else {
+            return false;
+        };
+
+        if !self.file_handle.meta_ref().fulltext_index_available() {
+            return false;
+        }
+
+        let file_size_hint = self.file_handle.meta_ref().index_file_size();
+        let apply_output = match index_applier
+            .apply_coarse(
+                self.file_handle.file_id(),
+                Some(file_size_hint),
+                parquet_meta
+                    .row_groups()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, rg)| (rg.num_rows() as usize, output.contains_key(&i))),
+            )
+            .await
+        {
+            Ok(Some(apply_output)) => apply_output,
+            Ok(None) => return false,
+            Err(err) => {
+                if cfg!(any(test, feature = "test")) {
+                    panic!(
+                        "Failed to apply fulltext index, region_id: {}, file_id: {}, err: {:?}",
+                        self.file_handle.region_id(),
+                        self.file_handle.file_id(),
+                        err
+                    );
+                } else {
+                    warn!(
+                        err; "Failed to apply fulltext index, region_id: {}, file_id: {}",
+                        self.file_handle.region_id(), self.file_handle.file_id()
+                    );
+                }
+
+                return false;
+            }
+        };
+
+        Self::prune_row_groups_by_ranges(
+            parquet_meta,
+            apply_output
+                .into_iter()
+                .map(|(rg, ranges)| (rg, ranges.into_iter())),
+            output,
+            &mut metrics.rg_fulltext_filtered,
+            &mut metrics.rows_fulltext_filtered,
         );
 
         true

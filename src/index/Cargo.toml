@@ -23,6 +23,7 @@ futures.workspace = true
 greptime-proto.workspace = true
 itertools.workspace = true
 jieba-rs = "0.7"
+lazy_static.workspace = true
 mockall.workspace = true
 pin-project.workspace = true
 prost.workspace = true
