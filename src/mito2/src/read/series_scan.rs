@@ -116,11 +116,12 @@ impl SeriesScan {
             let mut fetch_start = Instant::now();
             while let Some(result) = receiver.recv().await {
                 let series = result.map_err(BoxedError::new).context(ExternalSnafu)?;
+                metrics.scan_cost += fetch_start.elapsed();
+                fetch_start = Instant::now();
 
                 let convert_start = Instant::now();
                 df_record_batches.reserve(series.batches.len());
                 for batch in series.batches {
-                    metrics.scan_cost += fetch_start.elapsed();
                     metrics.num_batches += 1;
                     metrics.num_rows += batch.num_rows();
 
@@ -143,9 +144,7 @@ impl SeriesScan {
                 yield record_batch;
                 metrics.yield_cost += yield_start.elapsed();
 
-                metrics.scan_cost += fetch_start.elapsed();
                 part_metrics.merge_metrics(&metrics);
-                fetch_start = Instant::now();
             }
         };
 
