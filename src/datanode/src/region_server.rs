@@ -334,7 +334,7 @@ impl RegionServer {
                 region,
                 RegionEngineWithStatus::Ready(engine_with_status.engine().clone()),
             );
-            debug!("Logical region {} is opened", region);
+            info!("Logical region {} is registered!", region);
         }
 
         Ok(())
@@ -1054,7 +1054,7 @@ impl RegionServerInner {
         for region in logical_regions {
             self.region_map
                 .insert(region, RegionEngineWithStatus::Ready(engine.clone()));
-            debug!("Logical region {} is registered!", region);
+            info!("Logical region {} is registered!", region);
         }
         Ok(())
     }

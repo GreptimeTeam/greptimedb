@@ -22,7 +22,6 @@ use async_stream::try_stream;
 use base64::engine::general_purpose::STANDARD_NO_PAD;
 use base64::Engine;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
-use common_telemetry::info;
 use datafusion::prelude::{col, lit};
 use futures_util::stream::BoxStream;
 use futures_util::TryStreamExt;
@@ -82,7 +81,6 @@ impl MetadataRegion {
     ///
     /// Returns true if the logical region is opened for the first time.
     pub async fn open_logical_region(&self, logical_region_id: RegionId) -> bool {
-        info!("open_logical_region: {:?}", logical_region_id);
         match self
             .logical_region_lock
             .write()

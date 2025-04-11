@@ -598,7 +598,7 @@ pub enum SyncManifestResponse {
 }
 
 impl SyncManifestResponse {
-    /// Returns the manifest version.
+    /// Returns true if new manifest is installed.
     pub fn synced(&self) -> bool {
         match self {
             SyncManifestResponse::NotSupported => false,
