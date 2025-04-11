@@ -3,6 +3,8 @@ CREATE TABLE input_basic (
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(number),
     TIME INDEX(ts)
+)WITH(
+    append_mode = 'true'
 );
 
 CREATE FLOW test_wildcard_basic sink TO out_basic AS
@@ -95,8 +97,10 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_wildcard_basic');
 
--- 3 is also expected, since flow don't have persisent state
+-- flow batching mode
 SELECT wildcard FROM out_basic;
+
+SELECT count(*) FROM input_basic;
 
 DROP TABLE input_basic;
 DROP FLOW test_wildcard_basic;
@@ -168,12 +172,17 @@ FROM
     input_basic;
 
 -- SQLNESS ARG restart=true
+SELECT 1;
+
+-- SQLNESS SLEEP 3s
 INSERT INTO
     input_basic
 VALUES
     (23, "2021-07-01 00:00:01.000"),
     (24, "2021-07-01 00:00:01.500");
 
+-- give flownode a second to rebuild flow
+-- SQLNESS SLEEP 3s
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_wildcard_basic');
 
@@ -201,12 +210,17 @@ FROM
     input_basic;
 
 -- SQLNESS ARG restart=true
+SELECT 1;
+
+-- SQLNESS SLEEP 3s
 INSERT INTO
     input_basic
 VALUES
     (23, "2021-07-01 00:00:01.000"),
     (24, "2021-07-01 00:00:01.500");
 
+-- give flownode a second to rebuild flow
+-- SQLNESS SLEEP 3s
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_wildcard_basic');
 
@@ -222,6 +236,9 @@ CREATE TABLE input_basic (
 );
 
 -- SQLNESS ARG restart=true
+SELECT 1;
+
+-- SQLNESS SLEEP 3s
 INSERT INTO
     input_basic
 VALUES
@@ -229,6 +246,8 @@ VALUES
     (24, "2021-07-01 00:00:01.500"),
     (26, "2021-07-01 00:00:02.000");
 
+-- give flownode a second to rebuild flow
+-- SQLNESS SLEEP 3s
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_wildcard_basic');
 
@@ -245,7 +264,11 @@ SELECT
 FROM
     input_basic;
 
+-- give flownode a second to rebuild flow
 -- SQLNESS ARG restart=true
+SELECT 1;
+
+-- SQLNESS SLEEP 3s
 INSERT INTO
     input_basic
 VALUES
@@ -256,8 +279,10 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_wildcard_basic');
 
--- 3 is also expected, since flow don't have persisent state
+-- 4 is also expected, since flow batching mode
 SELECT wildcard FROM out_basic;
+
+SELECT count(*) FROM input_basic;
 
 DROP TABLE input_basic;
 DROP FLOW test_wildcard_basic;
@@ -277,13 +302,17 @@ FROM
     input_basic;
 
 -- SQLNESS ARG restart=true
+SELECT 1;
+
+-- SQLNESS SLEEP 3s
 INSERT INTO
     input_basic
 VALUES
     (23, "2021-07-01 00:00:01.000"),
     (24, "2021-07-01 00:00:01.500");
 
-
+-- give flownode a second to rebuild flow
+-- SQLNESS SLEEP 3s
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_wildcard_basic');
 
@@ -300,6 +329,9 @@ FROM
     input_basic;
 
 -- SQLNESS ARG restart=true
+SELECT 1;
+
+-- SQLNESS SLEEP 3s
 INSERT INTO
     input_basic
 VALUES
@@ -307,6 +339,7 @@ VALUES
     (24, "2021-07-01 00:00:01.500"),
     (25, "2021-07-01 00:00:01.700");
 
+-- give flownode a second to rebuild flow
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_wildcard_basic');
 

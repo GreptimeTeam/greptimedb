@@ -345,7 +345,7 @@ impl StartCommand {
         let client = Arc::new(NodeClients::new(channel_config));
 
         let invoker = FrontendInvoker::build_from(
-            flownode.flow_worker_manager().clone(),
+            flownode.flow_engine().streaming_engine(),
             catalog_manager.clone(),
             cached_meta_backend.clone(),
             layered_cache_registry.clone(),
@@ -355,7 +355,8 @@ impl StartCommand {
         .await
         .context(StartFlownodeSnafu)?;
         flownode
-            .flow_worker_manager()
+            .flow_engine()
+            .streaming_engine()
             .set_frontend_invoker(invoker)
             .await;
 

@@ -46,6 +46,8 @@ pub struct TaskState {
     exec_state: ExecState,
     /// Shutdown receiver
     pub(crate) shutdown_rx: oneshot::Receiver<()>,
+    /// Task handle
+    pub(crate) task_handle: Option<tokio::task::JoinHandle<()>>,
 }
 impl TaskState {
     pub fn new(query_ctx: QueryContextRef, shutdown_rx: oneshot::Receiver<()>) -> Self {
@@ -56,6 +58,7 @@ impl TaskState {
             dirty_time_windows: Default::default(),
             exec_state: ExecState::Idle,
             shutdown_rx,
+            task_handle: None,
         }
     }
 

@@ -20,23 +20,34 @@ use api::v1::flow::{
     flow_request, CreateRequest, DropRequest, FlowRequest, FlowResponse, FlushFlow,
 };
 use api::v1::region::InsertRequests;
+use catalog::CatalogManager;
 use common_error::ext::BoxedError;
 use common_meta::ddl::create_flow::FlowType;
 use common_meta::error::{Result as MetaResult, UnexpectedSnafu};
+use common_meta::key::flow::FlowMetadataManager;
 use common_runtime::JoinHandle;
-use common_telemetry::{trace, warn};
+use common_telemetry::{error, info, trace, warn};
 use datatypes::value::Value;
+use futures::TryStreamExt;
 use itertools::Itertools;
+use session::context::QueryContextBuilder;
 use snafu::{IntoError, OptionExt, ResultExt};
 use store_api::storage::{RegionId, TableId};
+use tokio::sync::Mutex;
 
 use crate::adapter::{CreateFlowArgs, FlowWorkerManager};
 use crate::batching_mode::engine::BatchingEngine;
 use crate::engine::FlowEngine;
-use crate::error::{CreateFlowSnafu, FlowNotFoundSnafu, InsertIntoFlowSnafu, InternalSnafu};
+use crate::error::{
+    CreateFlowSnafu, ExternalSnafu, FlowNotFoundSnafu, InsertIntoFlowSnafu, InternalSnafu,
+    ListFlowsSnafu,
+};
 use crate::metrics::METRIC_FLOW_TASK_COUNT;
 use crate::repr::{self, DiffRow};
 use crate::{Error, FlowId};
+
+/// Ref to [`FlowDualEngine`]
+pub type FlowDualEngineRef = Arc<FlowDualEngine>;
 
 /// Manage both streaming and batching mode engine
 ///
@@ -47,8 +58,293 @@ pub struct FlowDualEngine {
     batching_engine: Arc<BatchingEngine>,
     /// helper struct for faster query flow by table id or vice versa
     src_table2flow: std::sync::RwLock<SrcTableToFlow>,
+    flow_metadata_manager: Arc<FlowMetadataManager>,
+    catalog_manager: Arc<dyn CatalogManager>,
+    check_task: tokio::sync::Mutex<Option<ConsistentCheckTask>>,
 }
 
+impl FlowDualEngine {
+    pub fn new(
+        streaming_engine: Arc<FlowWorkerManager>,
+        batching_engine: Arc<BatchingEngine>,
+        flow_metadata_manager: Arc<FlowMetadataManager>,
+        catalog_manager: Arc<dyn CatalogManager>,
+    ) -> Self {
+        Self {
+            streaming_engine,
+            batching_engine,
+            src_table2flow: std::sync::RwLock::new(SrcTableToFlow::default()),
+            flow_metadata_manager,
+            catalog_manager,
+            check_task: Mutex::new(None),
+        }
+    }
+
+    pub fn streaming_engine(&self) -> Arc<FlowWorkerManager> {
+        self.streaming_engine.clone()
+    }
+
+    pub fn batching_engine(&self) -> Arc<BatchingEngine> {
+        self.batching_engine.clone()
+    }
+
+    /// Spawn a task to consistently check if all flow tasks in metasrv is created on flownode,
+    /// so on startup, this will create all missing flow tasks, and constantly check at a interval
+    async fn check_flow_consistent(
+        &self,
+        allow_create: bool,
+        allow_drop: bool,
+    ) -> Result<(), Error> {
+        let nodeid = self.streaming_engine.node_id;
+        let should_exists: Vec<_> = if let Some(nodeid) = nodeid {
+            let to_be_recover = self
+                .flow_metadata_manager
+                .flownode_flow_manager()
+                .flows(nodeid.into())
+                .try_collect::<Vec<_>>()
+                .await
+                .context(ListFlowsSnafu {
+                    id: Some(nodeid.into()),
+                })?;
+            to_be_recover.into_iter().map(|(id, _)| id).collect()
+        } else {
+            let all_catalogs = self
+                .catalog_manager
+                .catalog_names()
+                .await
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?;
+            let mut all_flow_ids = vec![];
+            for catalog in all_catalogs {
+                let flows = self
+                    .flow_metadata_manager
+                    .flow_name_manager()
+                    .flow_names(&catalog)
+                    .await
+                    .try_collect::<Vec<_>>()
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)?;
+
+                all_flow_ids.extend(flows.into_iter().map(|(_, id)| id.flow_id()));
+            }
+            all_flow_ids
+        };
+        let should_exists = should_exists
+            .into_iter()
+            .map(|i| i as FlowId)
+            .collect::<HashSet<_>>();
+        let actual_exist = self.list_flows().await?.into_iter().collect::<HashSet<_>>();
+        let to_be_created = should_exists
+            .iter()
+            .filter(|id| !actual_exist.contains(id))
+            .collect::<Vec<_>>();
+        let to_be_dropped = actual_exist
+            .iter()
+            .filter(|id| !should_exists.contains(id))
+            .collect::<Vec<_>>();
+
+        if !to_be_created.is_empty() {
+            if allow_create {
+                info!(
+                    "Recovering {} flows: {:?}",
+                    to_be_created.len(),
+                    to_be_created
+                );
+                let mut errors = vec![];
+                for flow_id in to_be_created {
+                    let flow_id = *flow_id;
+                    let info = self
+                        .flow_metadata_manager
+                        .flow_info_manager()
+                        .get(flow_id as u32)
+                        .await
+                        .map_err(BoxedError::new)
+                        .context(ExternalSnafu)?
+                        .context(FlowNotFoundSnafu { id: flow_id })?;
+
+                    let sink_table_name = [
+                        info.sink_table_name().catalog_name.clone(),
+                        info.sink_table_name().schema_name.clone(),
+                        info.sink_table_name().table_name.clone(),
+                    ];
+                    let args = CreateFlowArgs {
+                        flow_id,
+                        sink_table_name,
+                        source_table_ids: info.source_table_ids().to_vec(),
+                        // because recover should only happen on restart the `create_if_not_exists` and `or_replace` can be arbitrary value(since flow doesn't exist)
+                        // but for the sake of consistency and to make sure recover of flow actually happen, we set both to true
+                        // (which is also fine since checks for not allow both to be true is on metasrv and we already pass that)
+                        create_if_not_exists: true,
+                        or_replace: true,
+                        expire_after: info.expire_after(),
+                        comment: Some(info.comment().clone()),
+                        sql: info.raw_sql().clone(),
+                        flow_options: info.options().clone(),
+                        query_ctx: Some(
+                            QueryContextBuilder::default()
+                                .current_catalog(info.catalog_name().clone())
+                                .build(),
+                        ),
+                    };
+                    if let Err(err) = self
+                        .create_flow(args)
+                        .await
+                        .map_err(BoxedError::new)
+                        .with_context(|_| CreateFlowSnafu {
+                            sql: info.raw_sql().clone(),
+                        })
+                    {
+                        errors.push((flow_id, err));
+                    }
+                }
+                for (flow_id, err) in errors {
+                    warn!("Failed to recreate flow {}, err={:#?}", flow_id, err);
+                }
+            } else {
+                warn!(
+                    "Flownode {:?} found flows not exist in flownode, flow_ids={:?}",
+                    nodeid, to_be_created
+                );
+            }
+        }
+        if !to_be_dropped.is_empty() {
+            if allow_drop {
+                info!("Dropping flows: {:?}", to_be_dropped);
+                let mut errors = vec![];
+                for flow_id in to_be_dropped {
+                    let flow_id = *flow_id;
+                    if let Err(err) = self.remove_flow(flow_id).await {
+                        errors.push((flow_id, err));
+                    }
+                }
+                for (flow_id, err) in errors {
+                    warn!("Failed to drop flow {}, err={:#?}", flow_id, err);
+                }
+            } else {
+                warn!(
+                    "Flownode {:?} found flows not exist in flownode, flow_ids={:?}",
+                    nodeid, to_be_dropped
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn start_flow_consistent_check_task(self: &Arc<Self>) -> Result<(), Error> {
+        if self.check_task.lock().await.is_some() {
+            crate::error::UnexpectedSnafu {
+                reason: "Flow consistent check task already exists",
+            }
+            .fail()?;
+        }
+        let task = ConsistentCheckTask::start_check_task(self).await?;
+        self.check_task.lock().await.replace(task);
+        Ok(())
+    }
+
+    pub async fn stop_flow_consistent_check_task(&self) -> Result<(), Error> {
+        info!("Stopping flow consistent check task");
+        if let Some(task) = self.check_task.lock().await.take() {
+            task.stop().await?;
+        } else {
+            crate::error::UnexpectedSnafu {
+                reason: "Flow consistent check task does not exist",
+            }
+            .fail()?;
+        }
+        info!("Stopped flow consistent check task");
+        Ok(())
+    }
+
+    async fn flow_exist_in_metadata(&self, flow_id: FlowId) -> Result<bool, Error> {
+        self.flow_metadata_manager
+            .flow_info_manager()
+            .get(flow_id as u32)
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)
+            .map(|info| info.is_some())
+    }
+}
+
+struct ConsistentCheckTask {
+    handle: JoinHandle<()>,
+    shutdown_tx: tokio::sync::mpsc::Sender<()>,
+    trigger_tx: tokio::sync::mpsc::Sender<(bool, bool, tokio::sync::oneshot::Sender<()>)>,
+}
+
+impl ConsistentCheckTask {
+    async fn start_check_task(engine: &Arc<FlowDualEngine>) -> Result<Self, Error> {
+        // first do recover flows
+        engine.check_flow_consistent(true, false).await?;
+
+        let inner = engine.clone();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let (trigger_tx, mut trigger_rx) =
+            tokio::sync::mpsc::channel::<(bool, bool, tokio::sync::oneshot::Sender<()>)>(10);
+        let handle = common_runtime::spawn_global(async move {
+            let mut args = (false, false);
+            let mut ret_signal: Option<tokio::sync::oneshot::Sender<()>> = None;
+            loop {
+                if let Err(err) = inner.check_flow_consistent(args.0, args.1).await {
+                    error!(err; "Failed to check flow consistent");
+                }
+                if let Some(done) = ret_signal.take() {
+                    let _ = done.send(());
+                }
+
+                tokio::select! {
+                    _ = rx.recv() => break,
+                    incoming = trigger_rx.recv() => if let Some(incoming) = incoming {
+                        args = (incoming.0, incoming.1);
+                        ret_signal = Some(incoming.2);
+                    },
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => args=(false,false),
+                }
+            }
+        });
+        Ok(ConsistentCheckTask {
+            handle,
+            shutdown_tx: tx,
+            trigger_tx,
+        })
+    }
+
+    async fn trigger(&self, allow_create: bool, allow_drop: bool) -> Result<(), Error> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.trigger_tx
+            .send((allow_create, allow_drop, tx))
+            .await
+            .map_err(|_| {
+                crate::error::UnexpectedSnafu {
+                    reason: "Failed to send trigger signal",
+                }
+                .build()
+            })?;
+        rx.await.map_err(|_| {
+            crate::error::UnexpectedSnafu {
+                reason: "Failed to receive trigger signal",
+            }
+            .build()
+        })?;
+        Ok(())
+    }
+
+    async fn stop(self) -> Result<(), Error> {
+        self.shutdown_tx.send(()).await.map_err(|_| {
+            crate::error::UnexpectedSnafu {
+                reason: "Failed to send shutdown signal",
+            }
+            .build()
+        })?;
+        // abort so no need to wait
+        self.handle.abort();
+        Ok(())
+    }
+}
+
+#[derive(Default)]
 struct SrcTableToFlow {
     /// mapping of table ids to flow ids for streaming mode
     stream: HashMap<TableId, HashSet<FlowId>>,
@@ -149,7 +445,36 @@ impl FlowEngine for FlowDualEngine {
         match flow_type {
             Some(FlowType::Batching) => self.batching_engine.remove_flow(flow_id).await,
             Some(FlowType::Streaming) => self.streaming_engine.remove_flow(flow_id).await,
-            None => FlowNotFoundSnafu { id: flow_id }.fail(),
+            None => {
+                // this can happen if flownode just restart, and is stilling creating the flow
+                // since now that this flow should dropped, we need to trigger the consistent check and allow drop
+                // this rely on drop flow ddl delete metadata first, see src/common/meta/src/ddl/drop_flow.rs
+                warn!(
+                    "Flow {} is not exist in the underlying engine, but exist in metadata",
+                    flow_id
+                );
+                let mut retry = 0;
+                let max_retry = 10;
+                // keep trying to trigger consistent check
+                while retry < max_retry {
+                    if let Some(task) = self.check_task.lock().await.as_ref() {
+                        task.trigger(false, true).await?;
+                        break;
+                    }
+                    retry += 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+
+                if retry == max_retry {
+                    error!(
+                        "Failed to trigger consistent check after {} retries while dropping flow {}",
+                        max_retry, flow_id
+                    );
+                    return FlowNotFoundSnafu { id: flow_id }.fail();
+                }
+
+                Ok(())
+            }
         }?;
         // remove mapping
         self.src_table2flow.write().unwrap().remove_flow(flow_id);
@@ -161,7 +486,18 @@ impl FlowEngine for FlowDualEngine {
         match flow_type {
             Some(FlowType::Batching) => self.batching_engine.flush_flow(flow_id).await,
             Some(FlowType::Streaming) => self.streaming_engine.flush_flow(flow_id).await,
-            None => FlowNotFoundSnafu { id: flow_id }.fail(),
+            None => {
+                // this might happen if flownode only just started
+                if self.flow_exist_in_metadata(flow_id).await? {
+                    warn!(
+                        "Flow {} is not exist in the underlying engine, but exist in metadata",
+                        flow_id
+                    );
+                    Ok(0)
+                } else {
+                    FlowNotFoundSnafu { id: flow_id }.fail()
+                }
+            }
         }
     }
 
@@ -173,6 +509,13 @@ impl FlowEngine for FlowDualEngine {
             Some(FlowType::Streaming) => self.streaming_engine.flow_exist(flow_id).await,
             None => Ok(false),
         }
+    }
+
+    async fn list_flows(&self) -> Result<Vec<FlowId>, Error> {
+        let mut stream_flows = self.streaming_engine.list_flows().await?;
+        let batch_flows = self.batching_engine.list_flows().await?;
+        stream_flows.extend(batch_flows);
+        Ok(stream_flows)
     }
 
     async fn handle_flow_inserts(
@@ -447,6 +790,16 @@ impl FlowEngine for FlowWorkerManager {
 
     async fn flow_exist(&self, flow_id: FlowId) -> Result<bool, Error> {
         self.flow_exist_inner(flow_id).await
+    }
+
+    async fn list_flows(&self) -> Result<Vec<FlowId>, Error> {
+        Ok(self
+            .flow_err_collectors
+            .read()
+            .await
+            .keys()
+            .cloned()
+            .collect())
     }
 
     async fn handle_flow_inserts(
