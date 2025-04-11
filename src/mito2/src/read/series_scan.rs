@@ -357,6 +357,7 @@ impl SeriesDistributor {
         let mut current_series = SeriesBatch::default();
         while let Some(batch) = reader.next_batch().await? {
             metrics.scan_cost += fetch_start.elapsed();
+            fetch_start = Instant::now();
             metrics.num_batches += 1;
             metrics.num_rows += batch.num_rows();
 
@@ -380,8 +381,6 @@ impl SeriesDistributor {
             let yield_start = Instant::now();
             self.senders.send_batch(to_send).await?;
             metrics.yield_cost += yield_start.elapsed();
-
-            fetch_start = Instant::now();
         }
 
         // todo: if not empty
