@@ -317,7 +317,7 @@ jobs:
           image-registry-username: ${{ secrets.DOCKERHUB_USERNAME }}
           image-registry-password: ${{ secrets.DOCKERHUB_TOKEN }}
           version: ${{ needs.allocate-runners.outputs.version }}
-          push-latest-tag: true
+          push-latest-tag: ${{ github.ref_type == 'tag' && !contains(github.ref_name, 'nightly') && github.event_name != 'schedule' }}
 
       - name: Set build image result
         id: set-build-image-result
@@ -364,7 +364,7 @@ jobs:
           dev-mode: false
           upload-to-s3: true
           update-version-info: true
-          push-latest-tag: true
+          push-latest-tag: ${{ github.ref_type == 'tag' && !contains(github.ref_name, 'nightly') && github.event_name != 'schedule' }}
 
   publish-github-release:
     name: Create GitHub release and upload artifacts
