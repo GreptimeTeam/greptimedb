@@ -28,7 +28,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
     RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef, RegionStatistic,
     SetRegionRoleStateResponse, SetRegionRoleStateSuccess, SettableRegionRoleState,
-    SinglePartitionScanner,
+    SinglePartitionScanner, SyncManifestResponse,
 };
 use store_api::region_request::{
     AffectedRows, RegionCloseRequest, RegionCreateRequest, RegionDropRequest, RegionOpenRequest,
@@ -145,9 +145,9 @@ impl RegionEngine for FileRegionEngine {
         &self,
         _region_id: RegionId,
         _manifest_info: RegionManifestInfo,
-    ) -> Result<(), BoxedError> {
+    ) -> Result<SyncManifestResponse, BoxedError> {
         // File engine doesn't need to sync region manifest.
-        Ok(())
+        Ok(SyncManifestResponse::NotSupported)
     }
 
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {

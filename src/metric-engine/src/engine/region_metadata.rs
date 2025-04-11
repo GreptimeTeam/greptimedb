@@ -46,7 +46,7 @@ impl MetricEngineInner {
         let _read_guard = self
             .metadata_region
             .read_lock_logical_region(logical_region_id)
-            .await;
+            .await?;
         // Load logical and physical columns, and intersect them to get logical column metadata.
         let logical_column_metadata = self
             .metadata_region

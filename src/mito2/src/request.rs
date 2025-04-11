@@ -692,7 +692,7 @@ impl WorkerRequest {
     pub(crate) fn new_sync_region_request(
         region_id: RegionId,
         manifest_version: ManifestVersion,
-    ) -> (WorkerRequest, Receiver<Result<ManifestVersion>>) {
+    ) -> (WorkerRequest, Receiver<Result<(ManifestVersion, bool)>>) {
         let (sender, receiver) = oneshot::channel();
         (
             WorkerRequest::SyncRegion(RegionSyncRequest {
@@ -892,7 +892,8 @@ pub(crate) struct RegionEditResult {
 pub(crate) struct RegionSyncRequest {
     pub(crate) region_id: RegionId,
     pub(crate) manifest_version: ManifestVersion,
-    pub(crate) sender: Sender<Result<ManifestVersion>>,
+    /// Returns the latest manifest version and a boolean indicating whether new maniefst is installed.
+    pub(crate) sender: Sender<Result<(ManifestVersion, bool)>>,
 }
 
 #[cfg(test)]

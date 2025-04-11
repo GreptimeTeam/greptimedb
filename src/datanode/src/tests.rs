@@ -33,7 +33,7 @@ use session::context::QueryContextRef;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
     RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef, RegionStatistic,
-    SetRegionRoleStateResponse, SettableRegionRoleState,
+    SetRegionRoleStateResponse, SettableRegionRoleState, SyncManifestResponse,
 };
 use store_api::region_request::{AffectedRows, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
@@ -250,7 +250,7 @@ impl RegionEngine for MockRegionEngine {
         &self,
         _region_id: RegionId,
         _manifest_info: RegionManifestInfo,
-    ) -> Result<(), BoxedError> {
+    ) -> Result<SyncManifestResponse, BoxedError> {
         unimplemented!()
     }
 

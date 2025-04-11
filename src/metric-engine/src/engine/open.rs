@@ -132,12 +132,14 @@ impl MetricEngineInner {
     /// Includes:
     /// - Record physical region's column names
     /// - Record the mapping between logical region id and physical region id
+    ///
+    /// Returns new opened logical region ids.
     pub(crate) async fn recover_states(
         &self,
         physical_region_id: RegionId,
         primary_key_encoding: PrimaryKeyEncoding,
         physical_region_options: PhysicalRegionOptions,
-    ) -> Result<()> {
+    ) -> Result<Vec<RegionId>> {
         // load logical regions and physical column names
         let logical_regions = self
             .metadata_region
@@ -147,7 +149,6 @@ impl MetricEngineInner {
             .data_region
             .physical_columns(physical_region_id)
             .await?;
-        let logical_region_num = logical_regions.len();
 
         {
             let mut state = self.state.write().unwrap();
@@ -168,15 +169,22 @@ impl MetricEngineInner {
             }
         }
 
+        let mut opened_logical_region_ids = Vec::new();
+        // The `recover_states` may be called multiple times, we only count the logical regions
+        // that are opened for the first time.
         for logical_region_id in logical_regions {
-            self.metadata_region
+            if self
+                .metadata_region
                 .open_logical_region(logical_region_id)
-                .await;
+                .await
+            {
+                opened_logical_region_ids.push(logical_region_id);
+            }
         }
 
-        LOGICAL_REGION_COUNT.add(logical_region_num as i64);
+        LOGICAL_REGION_COUNT.add(opened_logical_region_ids.len() as i64);
 
-        Ok(())
+        Ok(opened_logical_region_ids)
     }
 }
 
