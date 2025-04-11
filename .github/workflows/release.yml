@@ -7,9 +7,6 @@ on:
   push:
     tags:
       - "v*.*.*"
-  schedule:
-    # At 00:00 on Monday.
-    - cron: '0 0 * * 1'
   workflow_dispatch: # Allows you to run this workflow manually.
     # Notes: The GitHub Actions ONLY support 10 inputs, and it's already used up.
     inputs:

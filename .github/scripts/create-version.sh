@@ -60,9 +60,9 @@ function create_version() {
 }
 
 # You can run as following examples:
-#  GITHUB_EVENT_NAME=push NEXT_RELEASE_VERSION=v0.4.0 NIGHTLY_RELEASE_PREFIX=nigtly GITHUB_REF_NAME=v0.3.0 ./create-version.sh
-#  GITHUB_EVENT_NAME=workflow_dispatch NEXT_RELEASE_VERSION=v0.4.0 NIGHTLY_RELEASE_PREFIX=nigtly ./create-version.sh
-#  GITHUB_EVENT_NAME=schedule NEXT_RELEASE_VERSION=v0.4.0 NIGHTLY_RELEASE_PREFIX=nigtly ./create-version.sh
-#  GITHUB_EVENT_NAME=schedule NEXT_RELEASE_VERSION=nightly NIGHTLY_RELEASE_PREFIX=nigtly ./create-version.sh
-#  GITHUB_EVENT_NAME=workflow_dispatch COMMIT_SHA=f0e7216c4bb6acce9b29a21ec2d683be2e3f984a NEXT_RELEASE_VERSION=dev NIGHTLY_RELEASE_PREFIX=nigtly ./create-version.sh
+#  GITHUB_EVENT_NAME=push NEXT_RELEASE_VERSION=v0.4.0 NIGHTLY_RELEASE_PREFIX=nightly GITHUB_REF_NAME=v0.3.0 ./create-version.sh
+#  GITHUB_EVENT_NAME=workflow_dispatch NEXT_RELEASE_VERSION=v0.4.0 NIGHTLY_RELEASE_PREFIX=nightly ./create-version.sh
+#  GITHUB_EVENT_NAME=schedule NEXT_RELEASE_VERSION=v0.4.0 NIGHTLY_RELEASE_PREFIX=nightly ./create-version.sh
+#  GITHUB_EVENT_NAME=schedule NEXT_RELEASE_VERSION=nightly NIGHTLY_RELEASE_PREFIX=nightly ./create-version.sh
+#  GITHUB_EVENT_NAME=workflow_dispatch COMMIT_SHA=f0e7216c4bb6acce9b29a21ec2d683be2e3f984a NEXT_RELEASE_VERSION=dev NIGHTLY_RELEASE_PREFIX=nightly ./create-version.sh
 create_version
