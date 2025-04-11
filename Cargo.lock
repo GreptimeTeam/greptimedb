@@ -4505,6 +4505,7 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "auth",
+ "bytes",
  "cache",
  "catalog",
  "client",
@@ -4943,7 +4944,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=b6d9cffd43c4e6358805a798f17e03e232994b82#b6d9cffd43c4e6358805a798f17e03e232994b82"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=e8fce283e78186dca9ed4990a7535c4b38633370#e8fce283e78186dca9ed4990a7535c4b38633370"
 dependencies = [
  "prost 0.13.5",
  "serde",

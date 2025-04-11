@@ -57,7 +57,7 @@ use datanode::region_server::RegionServer;
 use file_engine::config::EngineConfig as FileEngineConfig;
 use flow::{
     FlowConfig, FlowWorkerManager, FlownodeBuilder, FlownodeInstance, FlownodeOptions,
-    FrontendClient, FrontendInvoker,
+    FrontendClient, FrontendInvoker, GrpcQueryHandlerWithBoxedError,
 };
 use frontend::frontend::{Frontend, FrontendOptions};
 use frontend::instance::builder::FrontendBuilder;
@@ -527,14 +527,15 @@ impl StartCommand {
         // TODO(discord9): for standalone not use grpc, but just somehow get a handler to frontend grpc client without
         // actually make a connection
         let fe_server_addr = fe_opts.grpc.bind_addr.clone();
-        let frontend_client = FrontendClient::from_static_grpc_addr(fe_server_addr);
+        let (frontend_client, frontend_instance_handler) =
+            FrontendClient::from_empty_grpc_handler();
         let flow_builder = FlownodeBuilder::new(
             flownode_options,
             plugins.clone(),
             table_metadata_manager.clone(),
             catalog_manager.clone(),
             flow_metadata_manager.clone(),
-            Arc::new(frontend_client),
+            Arc::new(frontend_client.clone()),
         );
         let flownode = flow_builder
             .build()
@@ -544,15 +545,15 @@ impl StartCommand {
 
         // set the ref to query for the local flow state
         {
-            let flow_worker_manager = flownode.flow_worker_manager();
+            let flow_worker_manager = flownode.flow_engine().streaming_engine();
             information_extension
-                .set_flow_worker_manager(flow_worker_manager.clone())
+                .set_flow_worker_manager(flow_worker_manager)
                 .await;
         }
 
         let node_manager = Arc::new(StandaloneDatanodeManager {
             region_server: datanode.region_server(),
-            flow_server: flownode.flow_worker_manager(),
+            flow_server: flownode.flow_engine(),
         });
 
         let table_id_sequence = Arc::new(
@@ -606,7 +607,16 @@ impl StartCommand {
         .context(error::StartFrontendSnafu)?;
         let fe_instance = Arc::new(fe_instance);
 
-        let flow_worker_manager = flownode.flow_worker_manager();
+        // set the frontend client for flownode
+        let grpc_handler = fe_instance.clone() as Arc<dyn GrpcQueryHandlerWithBoxedError>;
+        let weak_grpc_handler = Arc::downgrade(&grpc_handler);
+        frontend_instance_handler
+            .lock()
+            .unwrap()
+            .replace(weak_grpc_handler);
+
+        // set the frontend invoker for flownode
+        let flow_worker_manager = flownode.flow_engine().streaming_engine();
         // flow server need to be able to use frontend to write insert requests back
         let invoker = FrontendInvoker::build_from(
             flow_worker_manager.clone(),

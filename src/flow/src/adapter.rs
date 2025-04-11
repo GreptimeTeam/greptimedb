@@ -58,7 +58,7 @@ use crate::metrics::{METRIC_FLOW_INSERT_ELAPSED, METRIC_FLOW_ROWS, METRIC_FLOW_R
 use crate::repr::{self, DiffRow, RelationDesc, Row, BATCH_SIZE};
 use crate::{CreateFlowArgs, FlowId, TableName};
 
-mod flownode_impl;
+pub(crate) mod flownode_impl;
 mod parse_expr;
 pub(crate) mod refill;
 mod stat;
@@ -158,7 +158,7 @@ pub struct FlowWorkerManager {
     flow_err_collectors: RwLock<BTreeMap<FlowId, ErrCollector>>,
     src_send_buf_lens: RwLock<BTreeMap<TableId, watch::Receiver<usize>>>,
     tick_manager: FlowTickManager,
-    node_id: Option<u32>,
+    pub node_id: Option<u32>,
     /// Lock for flushing, will be `read` by `handle_inserts` and `write` by `flush_flow`
     ///
     /// So that a series of event like `inserts -> flush` can be handled correctly

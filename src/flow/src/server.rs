@@ -50,7 +50,10 @@ use tonic::codec::CompressionEncoding;
 use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
 
+use crate::adapter::flownode_impl::{FlowDualEngine, FlowDualEngineRef};
 use crate::adapter::{create_worker, FlowWorkerManagerRef};
+use crate::batching_mode::engine::BatchingEngine;
+use crate::engine::FlowEngine;
 use crate::error::{
     to_status_with_last_err, CacheRequiredSnafu, CreateFlowSnafu, ExternalSnafu, FlowNotFoundSnafu,
     ListFlowsSnafu, ParseAddrSnafu, ShutdownServerSnafu, StartServerSnafu, UnexpectedSnafu,
@@ -66,12 +69,14 @@ pub const FLOW_NODE_SERVER_NAME: &str = "FLOW_NODE_SERVER";
 #[derive(Clone)]
 pub struct FlowService {
     /// TODO(discord9): replace with dual engine
-    pub manager: FlowWorkerManagerRef,
+    pub dual_engine: FlowDualEngineRef,
 }
 
 impl FlowService {
-    pub fn new(manager: FlowWorkerManagerRef) -> Self {
-        Self { manager }
+    pub fn new(manager: FlowDualEngineRef) -> Self {
+        Self {
+            dual_engine: manager,
+        }
     }
 }
 
@@ -86,7 +91,7 @@ impl flow_server::Flow for FlowService {
             .start_timer();
 
         let request = request.into_inner();
-        self.manager
+        self.dual_engine
             .handle(request)
             .await
             .map_err(|err| {
@@ -126,7 +131,7 @@ impl flow_server::Flow for FlowService {
             .with_label_values(&["in"])
             .inc_by(row_count as u64);
 
-        self.manager
+        self.dual_engine
             .handle_inserts(request)
             .await
             .map(Response::new)
@@ -162,10 +167,15 @@ impl FlownodeServer {
 
     /// Start the background task for streaming computation.
     async fn start_workers(&self) -> Result<(), Error> {
-        let manager_ref = self.inner.flow_service.manager.clone();
+        let manager_ref = self.inner.flow_service.dual_engine.clone();
         let _handle = manager_ref
-            .clone()
+            .streaming_engine()
             .run_background(Some(self.inner.worker_shutdown_tx.lock().await.subscribe()));
+        self.inner
+            .flow_service
+            .dual_engine
+            .start_flow_consistent_check_task()
+            .await?;
 
         Ok(())
     }
@@ -176,6 +186,11 @@ impl FlownodeServer {
         if tx.send(()).is_err() {
             info!("Receiver dropped, the flow node server has already shutdown");
         }
+        self.inner
+            .flow_service
+            .dual_engine
+            .stop_flow_consistent_check_task()
+            .await?;
         Ok(())
     }
 }
@@ -272,8 +287,8 @@ impl FlownodeInstance {
         &self.flownode_server
     }
 
-    pub fn flow_worker_manager(&self) -> FlowWorkerManagerRef {
-        self.flownode_server.inner.flow_service.manager.clone()
+    pub fn flow_engine(&self) -> FlowDualEngineRef {
+        self.flownode_server.inner.flow_service.dual_engine.clone()
     }
 
     pub fn setup_services(&mut self, services: ServerHandlers) {
@@ -342,12 +357,21 @@ impl FlownodeBuilder {
             self.build_manager(query_engine_factory.query_engine())
                 .await?,
         );
+        let batching = Arc::new(BatchingEngine::new(
+            self.frontend_client.clone(),
+            query_engine_factory.query_engine(),
+            self.flow_metadata_manager.clone(),
+            self.table_meta.clone(),
+            self.catalog_manager.clone(),
+        ));
+        let dual = FlowDualEngine::new(
+            manager.clone(),
+            batching,
+            self.flow_metadata_manager.clone(),
+            self.catalog_manager.clone(),
+        );
 
-        if let Err(err) = self.recover_flows(&manager).await {
-            common_telemetry::error!(err; "Failed to recover flows");
-        }
-
-        let server = FlownodeServer::new(FlowService::new(manager.clone()));
+        let server = FlownodeServer::new(FlowService::new(Arc::new(dual)));
 
         let heartbeat_task = self.heartbeat_task;
 
@@ -364,7 +388,7 @@ impl FlownodeBuilder {
     /// or recover all existing flow tasks if in standalone mode(nodeid is None)
     ///
     /// TODO(discord9): persistent flow tasks with internal state
-    async fn recover_flows(&self, manager: &FlowWorkerManagerRef) -> Result<usize, Error> {
+    async fn recover_flows(&self, manager: &FlowDualEngine) -> Result<usize, Error> {
         let nodeid = self.opts.node_id;
         let to_be_recovered: Vec<_> = if let Some(nodeid) = nodeid {
             let to_be_recover = self
@@ -451,7 +475,7 @@ impl FlownodeBuilder {
                     }),
             };
             manager
-                .create_flow_inner(args)
+                .create_flow(args)
                 .await
                 .map_err(BoxedError::new)
                 .with_context(|_| CreateFlowSnafu {
@@ -558,6 +582,10 @@ impl<'a> FlownodeServiceBuilder<'a> {
     }
 }
 
+/// Basically a tiny frontend that communicates with datanode, different from [`FrontendClient`] which
+/// connect to a real frontend instead, this is used for flow's streaming engine. And is for simple query.
+///
+/// For heavy query use [`FrontendClient`] which offload computation to frontend, lifting the load from flownode
 #[derive(Clone)]
 pub struct FrontendInvoker {
     inserter: Arc<Inserter>,

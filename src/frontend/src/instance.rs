@@ -278,7 +278,7 @@ impl SqlQueryHandler for Instance {
         // plan should be prepared before exec
         // we'll do check there
         self.query_engine
-            .execute(plan, query_ctx)
+            .execute(plan.clone(), query_ctx)
             .await
             .context(ExecLogicalPlanSnafu)
     }

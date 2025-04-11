@@ -72,6 +72,17 @@ pub struct TimeWindowExpr {
     df_schema: DFSchema,
 }
 
+impl std::fmt::Display for TimeWindowExpr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TimeWindowExpr")
+            .field("phy_expr", &self.phy_expr.to_string())
+            .field("column_name", &self.column_name)
+            .field("logical_expr", &self.logical_expr.to_string())
+            .field("df_schema", &self.df_schema)
+            .finish()
+    }
+}
+
 impl TimeWindowExpr {
     pub fn from_expr(
         expr: &Expr,
