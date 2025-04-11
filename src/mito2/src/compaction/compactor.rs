@@ -286,6 +286,7 @@ impl Compactor for DefaultCompactor {
             compacted_inputs.extend(output.inputs.iter().map(|f| f.meta_ref().clone()));
             let write_opts = WriteOptions {
                 write_buffer_size: compaction_region.engine_config.sst_write_buffer_size,
+                max_file_size: picker_output.max_file_size,
                 ..Default::default()
             };
 
