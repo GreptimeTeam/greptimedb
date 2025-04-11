@@ -45,15 +45,17 @@ use crate::{Error, FlowId};
 pub struct FlowDualEngine {
     streaming_engine: Arc<FlowWorkerManager>,
     batching_engine: Arc<BatchingEngine>,
-    /// mapping of table ids to (flow ids, flow types)
+    /// helper struct for faster query flow by table id or vice versa
     src_table2flow: std::sync::RwLock<SrcTableToFlow>,
-    /// mapping of flow ids to (flow type, source table ids)
-    flow_infos: std::sync::RwLock<HashMap<FlowId, (FlowType, Vec<TableId>)>>,
 }
 
 struct SrcTableToFlow {
+    /// mapping of table ids to flow ids for streaming mode
     stream: HashMap<TableId, HashSet<FlowId>>,
+    /// mapping of table ids to flow ids for batching mode
     batch: HashMap<TableId, HashSet<FlowId>>,
+    /// mapping of flow ids to (flow type, source table ids)
+    flow_infos: HashMap<FlowId, (FlowType, Vec<TableId>)>,
 }
 
 impl SrcTableToFlow {
@@ -69,7 +71,7 @@ impl SrcTableToFlow {
             FlowType::Batching => &mut self.batch,
         };
 
-        for src_table in src_table_ids {
+        for src_table in src_table_ids.clone() {
             mapping
                 .entry(src_table)
                 .and_modify(|flows| {
@@ -81,19 +83,29 @@ impl SrcTableToFlow {
                     set
                 });
         }
+        self.flow_infos.insert(flow_id, (flow_type, src_table_ids));
     }
 
-    fn remove_flow(&mut self, flow_id: FlowId, flow_type: FlowType, src_table_ids: Vec<TableId>) {
-        let mapping = match flow_type {
-            FlowType::Streaming => &mut self.stream,
-            FlowType::Batching => &mut self.batch,
+    fn remove_flow(&mut self, flow_id: FlowId) {
+        let mapping = match self.get_flow_type(flow_id) {
+            Some(FlowType::Streaming) => &mut self.stream,
+            Some(FlowType::Batching) => &mut self.batch,
+            None => return,
         };
-
-        for src_table in src_table_ids {
-            if let Some(flows) = mapping.get_mut(&src_table) {
-                flows.remove(&flow_id);
+        if let Some((_, src_table_ids)) = self.flow_infos.remove(&flow_id) {
+            for src_table in src_table_ids {
+                if let Some(flows) = mapping.get_mut(&src_table) {
+                    flows.remove(&flow_id);
+                }
             }
         }
+    }
+
+    fn get_flow_type(&self, flow_id: FlowId) -> Option<FlowType> {
+        self.flow_infos
+            .get(&flow_id)
+            .map(|(flow_type, _)| flow_type)
+            .cloned()
     }
 }
 
@@ -124,11 +136,6 @@ impl FlowEngine for FlowDualEngine {
             FlowType::Streaming => self.streaming_engine.create_flow(args).await,
         }?;
 
-        {
-            let mut flow_infos = self.flow_infos.write().unwrap();
-            flow_infos.insert(flow_id, (flow_type, src_table_ids.clone()));
-        }
-
         self.src_table2flow
             .write()
             .unwrap()
@@ -138,39 +145,19 @@ impl FlowEngine for FlowDualEngine {
     }
 
     async fn remove_flow(&self, flow_id: FlowId) -> Result<(), Error> {
-        let flow_type = self
-            .flow_infos
-            .read()
-            .unwrap()
-            .get(&flow_id)
-            .cloned()
-            .map(|(flow_type, _)| flow_type);
+        let flow_type = self.src_table2flow.read().unwrap().get_flow_type(flow_id);
         match flow_type {
             Some(FlowType::Batching) => self.batching_engine.remove_flow(flow_id).await,
             Some(FlowType::Streaming) => self.streaming_engine.remove_flow(flow_id).await,
             None => FlowNotFoundSnafu { id: flow_id }.fail(),
         }?;
         // remove mapping
-        if let Some((flow_type, src_table_ids)) = {
-            let mut flow_infos = self.flow_infos.write().unwrap();
-            flow_infos.remove(&flow_id)
-        } {
-            self.src_table2flow
-                .write()
-                .unwrap()
-                .remove_flow(flow_id, flow_type, src_table_ids);
-        }
+        self.src_table2flow.write().unwrap().remove_flow(flow_id);
         Ok(())
     }
 
     async fn flush_flow(&self, flow_id: FlowId) -> Result<usize, Error> {
-        let flow_type = self
-            .flow_infos
-            .read()
-            .unwrap()
-            .get(&flow_id)
-            .cloned()
-            .map(|(flow_type, _)| flow_type);
+        let flow_type = self.src_table2flow.read().unwrap().get_flow_type(flow_id);
         match flow_type {
             Some(FlowType::Batching) => self.batching_engine.flush_flow(flow_id).await,
             Some(FlowType::Streaming) => self.streaming_engine.flush_flow(flow_id).await,
@@ -179,13 +166,8 @@ impl FlowEngine for FlowDualEngine {
     }
 
     async fn flow_exist(&self, flow_id: FlowId) -> Result<bool, Error> {
-        let flow_type = self
-            .flow_infos
-            .read()
-            .unwrap()
-            .get(&flow_id)
-            .cloned()
-            .map(|(flow_type, _)| flow_type);
+        let flow_type = self.src_table2flow.read().unwrap().get_flow_type(flow_id);
+        // not using `flow_type.is_some()` to make sure the flow is actually exist in the underlying engine
         match flow_type {
             Some(FlowType::Batching) => self.batching_engine.flow_exist(flow_id).await,
             Some(FlowType::Streaming) => self.streaming_engine.flow_exist(flow_id).await,

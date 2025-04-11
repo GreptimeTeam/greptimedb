@@ -65,6 +65,7 @@ pub const FLOW_NODE_SERVER_NAME: &str = "FLOW_NODE_SERVER";
 /// wrapping flow node manager to avoid orphan rule with Arc<...>
 #[derive(Clone)]
 pub struct FlowService {
+    /// TODO(discord9): replace with dual engine
     pub manager: FlowWorkerManagerRef,
 }
 
