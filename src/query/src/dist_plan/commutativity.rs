@@ -19,6 +19,9 @@ use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
 use promql::extension_plan::{
     EmptyMetric, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
 };
+use promql::functions::{
+    Delta, HoltWinters, Increase, PredictLinear, QuantileOverTime, Rate, Round, QUANTILE_NAME,
+};
 
 use crate::dist_plan::merge_sort::{merge_sort_transformer, MergeSortLogicalPlan};
 use crate::dist_plan::MergeScanLogicalPlan;
@@ -55,12 +58,16 @@ impl Categorizer {
             LogicalPlan::Filter(filter) => Self::check_expr(&filter.predicate),
             LogicalPlan::Window(_) => Commutativity::Unimplemented,
             LogicalPlan::Aggregate(aggr) => {
-                if Self::check_partition(&aggr.group_expr, &partition_cols) {
-                    return Commutativity::Commutative;
+                if !Self::check_partition(&aggr.group_expr, &partition_cols) {
+                    return Commutativity::NonCommutative;
                 }
-
-                // check all children exprs and uses the strictest level
-                Commutativity::Unimplemented
+                for expr in &aggr.aggr_expr {
+                    let commutativity = Self::check_expr(expr);
+                    if !matches!(commutativity, Commutativity::Commutative) {
+                        return commutativity;
+                    }
+                }
+                Commutativity::Commutative
             }
             LogicalPlan::Sort(_) => {
                 if partition_cols.is_empty() {
@@ -94,7 +101,7 @@ impl Categorizer {
                 }
             }
             LogicalPlan::Extension(extension) => {
-                Self::check_extension_plan(extension.node.as_ref() as _)
+                Self::check_extension_plan(extension.node.as_ref() as _, &partition_cols)
             }
             LogicalPlan::Distinct(_) => {
                 if partition_cols.is_empty() {
@@ -116,13 +123,30 @@ impl Categorizer {
         }
     }
 
-    pub fn check_extension_plan(plan: &dyn UserDefinedLogicalNode) -> Commutativity {
+    pub fn check_extension_plan(
+        plan: &dyn UserDefinedLogicalNode,
+        partition_cols: &[String],
+    ) -> Commutativity {
         match plan.name() {
-            name if name == EmptyMetric::name()
+            name if name == SeriesDivide::name() => {
+                let series_divide = plan.as_any().downcast_ref::<SeriesDivide>().unwrap();
+                let tags = series_divide.tags().into_iter().collect::<HashSet<_>>();
+                for partition_col in partition_cols {
+                    if !tags.contains(partition_col) {
+                        return Commutativity::NonCommutative;
+                    }
+                }
+                Commutativity::Commutative
+            }
+            name if name == SeriesNormalize::name()
                 || name == InstantManipulate::name()
-                || name == SeriesNormalize::name()
-                || name == RangeManipulate::name()
-                || name == SeriesDivide::name()
+                || name == RangeManipulate::name() =>
+            {
+                // They should always follows Series Divide.
+                // Either all commutative or all non-commutative (which will be blocked by SeriesDivide).
+                Commutativity::Commutative
+            }
+            name if name == EmptyMetric::name()
                 || name == MergeScanLogicalPlan::name()
                 || name == MergeSortLogicalPlan::name() =>
             {
@@ -148,8 +172,24 @@ impl Categorizer {
             | Expr::Negative(_)
             | Expr::Between(_)
             | Expr::Exists(_)
-            | Expr::InList(_)
-            | Expr::ScalarFunction(_) => Commutativity::Commutative,
+            | Expr::InList(_) => Commutativity::Commutative,
+            Expr::ScalarFunction(udf) => match udf.name() {
+                name if name == Delta::name()
+                    || name == Rate::name()
+                    || name == Increase::name()
+                    || name == QuantileOverTime::name()
+                    || name == PredictLinear::name()
+                    || name == HoltWinters::name()
+                    || name == Round::name() =>
+                {
+                    Commutativity::Unimplemented
+                }
+                _ => Commutativity::Commutative,
+            },
+            Expr::AggregateFunction(udaf) => match udaf.func.name() {
+                name if name == QUANTILE_NAME => Commutativity::Unimplemented,
+                _ => Commutativity::Commutative,
+            },
 
             Expr::Like(_)
             | Expr::SimilarTo(_)
@@ -158,7 +198,6 @@ impl Categorizer {
             | Expr::Case(_)
             | Expr::Cast(_)
             | Expr::TryCast(_)
-            | Expr::AggregateFunction(_)
             | Expr::WindowFunction(_)
             | Expr::InSubquery(_)
             | Expr::ScalarSubquery(_)
