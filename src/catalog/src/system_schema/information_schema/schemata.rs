@@ -204,11 +204,11 @@ impl InformationSchemaSchemataBuilder {
         schema_options: &str,
     ) {
         let row = [
-            (CATALOG_NAME, Value::from(catalog_name)),
-            (SCHEMA_NAME, Value::from(schema_name)),
-            (DEFAULT_CHARACTER_SET_NAME, Value::from("utf8")),
-            (DEFAULT_COLLATION_NAME, Value::from("utf8_bin")),
-            (SCHEMA_OPTS, Value::from(schema_options)),
+            (CATALOG_NAME, &Value::from(catalog_name)),
+            (SCHEMA_NAME, &Value::from(schema_name)),
+            (DEFAULT_CHARACTER_SET_NAME, &Value::from("utf8")),
+            (DEFAULT_COLLATION_NAME, &Value::from("utf8_bin")),
+            (SCHEMA_OPTS, &Value::from(schema_options)),
         ];
 
         if !predicates.eval(&row) {

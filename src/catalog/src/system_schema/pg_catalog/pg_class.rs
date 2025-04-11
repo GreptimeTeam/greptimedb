@@ -245,11 +245,11 @@ impl PGClassBuilder {
     ) {
         let namespace_oid = self.namespace_oid_map.get_oid(schema);
         let row = [
-            (OID_COLUMN_NAME, Value::from(oid)),
-            (RELNAMESPACE, Value::from(schema)),
-            (RELNAME, Value::from(table)),
-            (RELKIND, Value::from(kind)),
-            (RELOWNER, Value::from(DUMMY_OWNER_ID)),
+            (OID_COLUMN_NAME, &Value::from(oid)),
+            (RELNAMESPACE, &Value::from(schema)),
+            (RELNAME, &Value::from(table)),
+            (RELKIND, &Value::from(kind)),
+            (RELOWNER, &Value::from(DUMMY_OWNER_ID)),
         ];
 
         if !predicates.eval(&row) {

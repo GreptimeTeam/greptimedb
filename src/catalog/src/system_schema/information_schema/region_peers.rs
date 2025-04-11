@@ -263,10 +263,10 @@ impl InformationSchemaRegionPeersBuilder {
             };
 
             let row = [
-                (TABLE_CATALOG, Value::from(table_catalog)),
-                (TABLE_SCHEMA, Value::from(table_schema)),
-                (TABLE_NAME, Value::from(table_name)),
-                (REGION_ID, Value::from(region_id)),
+                (TABLE_CATALOG, &Value::from(table_catalog)),
+                (TABLE_SCHEMA, &Value::from(table_schema)),
+                (TABLE_NAME, &Value::from(table_name)),
+                (REGION_ID, &Value::from(region_id)),
             ];
 
             if !predicates.eval(&row) {

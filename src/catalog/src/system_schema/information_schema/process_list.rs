@@ -16,7 +16,6 @@ use std::sync::Arc;
 
 use common_catalog::consts::INFORMATION_SCHEMA_PROCESS_LIST_TABLE_ID;
 use common_error::ext::BoxedError;
-use common_meta::key::process_list::Process;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use common_time::util::current_time_millis;
@@ -134,20 +133,35 @@ async fn make_process_list(
     let mut start_time_builder = TimestampMillisecondVectorBuilder::with_capacity(8);
     let mut elapsed_time_builder = DurationMillisecondVectorBuilder::with_capacity(8);
 
-    let mut current_row = Vec::with_capacity(5);
     while let Some(process) = stream
         .next()
         .await
         .transpose()
         .context(error::ListProcessSnafu)?
     {
-        process_to_row(process, current_time, &mut current_row);
-        if predicates.eval(&current_row) {
-            id_builder.push(current_row[0].1.as_u64());
-            database_builder.push(current_row[1].1.as_string().as_deref());
-            query_builder.push(current_row[2].1.as_string().as_deref());
-            start_time_builder.push(current_row[3].1.as_timestamp().map(|t| t.value().into()));
-            elapsed_time_builder.push(current_row[4].1.as_duration().map(|d| d.value().into()));
+        let row = [
+            (ID, &Value::from(process.query_id())),
+            (DATABASE, &Value::from(process.database())),
+            (QUERY, &Value::from(process.query_string())),
+            (
+                START_TIMESTAMP,
+                &Value::from(Timestamp::new_millisecond(
+                    process.query_start_timestamp_ms(),
+                )),
+            ),
+            (
+                ELAPSED_TIME,
+                &Value::from(Duration::new_millisecond(
+                    current_time - process.query_start_timestamp_ms(),
+                )),
+            ),
+        ];
+        if predicates.eval(&row) {
+            id_builder.push(row[0].1.as_u64());
+            database_builder.push(row[1].1.as_string().as_deref());
+            query_builder.push(row[2].1.as_string().as_deref());
+            start_time_builder.push(row[3].1.as_timestamp().map(|t| t.value().into()));
+            elapsed_time_builder.push(row[4].1.as_duration().map(|d| d.value().into()));
         }
     }
 
@@ -161,35 +175,4 @@ async fn make_process_list(
 
     RecordBatch::new(InformationSchemaProcessList::schema(), columns)
         .context(error::CreateRecordBatchSnafu)
-}
-
-// Convert [Process] structs to rows.
-fn process_to_row(
-    process: Process,
-    current_time_ms: i64,
-    current_row: &mut Vec<(&'static str, Value)>,
-) {
-    current_row.clear();
-    current_row.push((ID, Value::UInt64(process.query_id())));
-    current_row.push((
-        DATABASE,
-        Value::String(process.database().to_string().into()),
-    ));
-    current_row.push((
-        QUERY,
-        Value::String(process.query_string().to_string().into()),
-    ));
-
-    current_row.push((
-        START_TIMESTAMP,
-        Value::Timestamp(Timestamp::new_millisecond(
-            process.query_start_timestamp_ms(),
-        )),
-    ));
-    current_row.push((
-        ELAPSED_TIME,
-        Value::Duration(Duration::new_millisecond(
-            current_time_ms - process.query_start_timestamp_ms(),
-        )),
-    ));
 }

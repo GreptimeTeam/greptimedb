@@ -221,11 +221,11 @@ impl InformationSchemaTableConstraintsBuilder {
         constraint_type: &str,
     ) {
         let row = [
-            (CONSTRAINT_SCHEMA, Value::from(constraint_schema)),
-            (CONSTRAINT_NAME, Value::from(constraint_name)),
-            (TABLE_SCHEMA, Value::from(table_schema)),
-            (TABLE_NAME, Value::from(table_name)),
-            (CONSTRAINT_TYPE, Value::from(constraint_type)),
+            (CONSTRAINT_SCHEMA, &Value::from(constraint_schema)),
+            (CONSTRAINT_NAME, &Value::from(constraint_name)),
+            (TABLE_SCHEMA, &Value::from(table_schema)),
+            (TABLE_NAME, &Value::from(table_name)),
+            (CONSTRAINT_TYPE, &Value::from(constraint_type)),
         ];
 
         if !predicates.eval(&row) {
