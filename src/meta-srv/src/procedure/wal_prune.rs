@@ -42,7 +42,7 @@ use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use store_api::logstore::EntryId;
 use store_api::storage::RegionId;
-use tokio::sync::Semaphore;
+use tokio::sync::OwnedSemaphorePermit;
 
 use crate::error::{
     self, BuildPartitionClientSnafu, DeleteRecordsSnafu, TableMetadataManagerSnafu,
@@ -125,10 +125,10 @@ impl WalPruneProcedure {
         json: &str,
         context: &Context,
         tracker: WalPruneProcedureTracker,
-        semaphore: Arc<Semaphore>,
+        permit: Option<OwnedSemaphorePermit>,
     ) -> ProcedureResult<Self> {
         let data: WalPruneData = serde_json::from_str(json).context(ToJsonSnafu)?;
-        let guard = tracker.insert_running_procedure(data.topic.clone(), semaphore);
+        let guard = tracker.insert_running_procedure(data.topic.clone(), permit);
         Ok(Self {
             data,
             context: context.clone(),

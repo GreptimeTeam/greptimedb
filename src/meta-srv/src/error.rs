@@ -518,6 +518,20 @@ pub enum Error {
         source: common_procedure::Error,
     },
 
+    #[snafu(display("A prune task for topic {} is already running", topic))]
+    PruneTaskAlreadyRunning {
+        topic: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Reached the maximum number: {} of prune tasks", max))]
+    MaxPruneTaskReached {
+        #[snafu(implicit)]
+        location: Location,
+        max: usize,
+    },
+
     #[snafu(display("Schema already exists, name: {schema_name}"))]
     SchemaAlreadyExists {
         schema_name: String,
@@ -884,7 +898,9 @@ impl ErrorExt for Error {
             | Error::BuildWalOptionsAllocator { .. }
             | Error::BuildPartitionClient { .. }
             | Error::BuildKafkaClient { .. }
-            | Error::DeleteRecords { .. } => StatusCode::Internal,
+            | Error::DeleteRecords { .. }
+            | Error::MaxPruneTaskReached { .. }
+            | Error::PruneTaskAlreadyRunning { .. } => StatusCode::Internal,
 
             Error::Unsupported { .. } => StatusCode::Unsupported,
 

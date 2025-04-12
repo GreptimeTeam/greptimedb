@@ -24,19 +24,19 @@ use common_procedure::{watcher, ProcedureId, ProcedureManagerRef, ProcedureWithI
 use common_runtime::JoinHandle;
 use common_telemetry::{error, info, warn};
 use itertools::Itertools;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::{interval, MissedTickBehavior};
 
-use crate::error::{RegisterProcedureLoaderSnafu, Result, TableMetadataManagerSnafu};
+use crate::error::{self, RegisterProcedureLoaderSnafu, Result, TableMetadataManagerSnafu};
 use crate::metrics::METRIC_META_REMOTE_WAL_PRUNE_EXECUTE;
 use crate::procedure::wal_prune::{Context as WalPruneContext, WalPruneProcedure};
 
 pub type WalPruneTickerRef = Arc<WalPruneTicker>;
 
-/// Tracks running [WalPruneProcedure]s.
-/// Currently we only track the topic name of the running procedures.
+/// Tracks running [WalPruneProcedure]s and the resources they hold.
+/// A [WalPruneProcedure] is holding a semaphore permit to limit the number of concurrent procedures.
 ///
 /// TODO(CookiePie): Similar to [RegionMigrationProcedureTracker], maybe can refactor to a unified framework.
 #[derive(Clone)]
@@ -45,10 +45,12 @@ pub struct WalPruneProcedureTracker {
 }
 
 impl WalPruneProcedureTracker {
+    /// Insert a running [WalPruneProcedure] for the given topic name and
+    /// consume acquire a semaphore permit for the given topic name.
     pub fn insert_running_procedure(
         &self,
         topic_name: String,
-        semaphore: Arc<Semaphore>,
+        permit: Option<OwnedSemaphorePermit>,
     ) -> Option<WalPruneProcedureGuard> {
         let mut running_procedures = self.running_procedures.write().unwrap();
         match running_procedures.entry(topic_name.clone()) {
@@ -58,7 +60,7 @@ impl WalPruneProcedureTracker {
                 Some(WalPruneProcedureGuard {
                     topic_name,
                     running_procedures: self.running_procedures.clone(),
-                    semaphore,
+                    _permit: permit,
                 })
             }
         }
@@ -71,14 +73,13 @@ impl WalPruneProcedureTracker {
 pub struct WalPruneProcedureGuard {
     topic_name: String,
     running_procedures: Arc<RwLock<HashSet<String>>>,
-    semaphore: Arc<Semaphore>,
+    _permit: Option<OwnedSemaphorePermit>,
 }
 
 impl Drop for WalPruneProcedureGuard {
     fn drop(&mut self) {
         let mut running_procedures = self.running_procedures.write().unwrap();
         running_procedures.remove(&self.topic_name);
-        self.semaphore.add_permits(1);
     }
 }
 
@@ -176,7 +177,9 @@ impl Drop for WalPruneTicker {
 /// [WalPruneManager] manages all remote WAL related tasks in metasrv.
 ///
 /// [WalPruneManager] is responsible for:
-/// 1. Periodically submit [WalPruneProcedure] to prune remote WAL.
+/// 1. Registering [WalPruneProcedure] loader in the procedure manager.
+/// 2. Periodically receive [Event::Tick] to submit [WalPruneProcedure] to prune remote WAL.
+/// 3. Use a semaphore to limit the number of concurrent [WalPruneProcedure]s.
 pub(crate) struct WalPruneManager {
     /// Table metadata manager to restore topics from kvbackend.
     table_metadata_manager: TableMetadataManagerRef,
@@ -186,6 +189,8 @@ pub(crate) struct WalPruneManager {
     procedure_manager: ProcedureManagerRef,
     /// Tracker for running [WalPruneProcedure]s.
     tracker: WalPruneProcedureTracker,
+    /// The limit of concurrent [WalPruneProcedure]s.
+    limit: usize,
     /// Semaphore to limit the number of concurrent [WalPruneProcedure]s.
     semaphore: Arc<Semaphore>,
 
@@ -214,6 +219,7 @@ impl WalPruneManager {
             tracker: WalPruneProcedureTracker {
                 running_procedures: Arc::new(RwLock::new(HashSet::new())),
             },
+            limit,
             semaphore: Arc::new(Semaphore::new(limit)),
             trigger_flush_threshold,
         }
@@ -230,7 +236,8 @@ impl WalPruneManager {
                 Box::new(move |json| {
                     let tracker = tracker.clone();
                     let semaphore = semaphore.clone();
-                    WalPruneProcedure::from_json(json, &context, tracker, semaphore)
+                    let permit = semaphore.try_acquire_owned().ok();
+                    WalPruneProcedure::from_json(json, &context, tracker, permit)
                         .map(|p| Box::new(p) as _)
                 }),
             )
@@ -262,10 +269,19 @@ impl WalPruneManager {
     }
 
     /// Submits a [WalPruneProcedure] for the given topic name.
-    pub async fn submit_procedure(&self, topic_name: &str) -> Option<ProcedureId> {
+    pub async fn submit_procedure(&self, topic_name: &str) -> Result<ProcedureId> {
+        let permit = self
+            .semaphore
+            .clone()
+            .try_acquire_owned()
+            .ok()
+            .context(error::MaxPruneTaskReachedSnafu { max: self.limit })?;
         let guard = self
             .tracker
-            .insert_running_procedure(topic_name.to_string(), self.semaphore.clone())?;
+            .insert_running_procedure(topic_name.to_string(), Some(permit))
+            .context(error::PruneTaskAlreadyRunningSnafu {
+                topic: topic_name.to_string(),
+            })?;
 
         let procedure = WalPruneProcedure::new(
             topic_name.to_string(),
@@ -280,7 +296,6 @@ impl WalPruneManager {
             .inc();
         let topic_name = topic_name.to_string();
         let procedure_manager = self.procedure_manager.clone();
-        let _permit = self.semaphore.acquire().await.unwrap();
         common_runtime::spawn_global(async move {
             let watcher = &mut match procedure_manager.submit(procedure_with_id).await {
                 Ok(watcher) => watcher,
@@ -295,14 +310,25 @@ impl WalPruneManager {
             }
         });
 
-        Some(procedure_id)
+        Ok(procedure_id)
     }
 
     async fn handle_tick_request(&self) -> Result<()> {
         let topics = self.retrieve_sorted_topics().await?;
         for topic_name in topics.iter() {
-            if self.submit_procedure(topic_name).await.is_none() {
-                warn!("A remote WAL prune procedure for topic {topic_name} is already running");
+            match self.submit_procedure(topic_name).await {
+                Err(error::Error::MaxPruneTaskReached { .. }) => {
+                    warn!("Max prune task limit reached, skip remaining topics.");
+                    break;
+                }
+                Err(error::Error::PruneTaskAlreadyRunning { .. }) => {
+                    warn!("Prune task already running for topic: {}", topic_name);
+                    break;
+                }
+                Err(e) => {
+                    error!(e; "Failed to submit procedure for topic: {}", topic_name);
+                }
+                Ok(_) => {}
             }
         }
         Ok(())
