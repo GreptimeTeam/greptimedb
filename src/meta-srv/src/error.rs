@@ -525,13 +525,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Reached the maximum number: {} of prune tasks", max))]
-    MaxPruneTaskReached {
-        #[snafu(implicit)]
-        location: Location,
-        max: usize,
-    },
-
     #[snafu(display("Schema already exists, name: {schema_name}"))]
     SchemaAlreadyExists {
         schema_name: String,
@@ -899,7 +892,6 @@ impl ErrorExt for Error {
             | Error::BuildPartitionClient { .. }
             | Error::BuildKafkaClient { .. }
             | Error::DeleteRecords { .. }
-            | Error::MaxPruneTaskReached { .. }
             | Error::PruneTaskAlreadyRunning { .. } => StatusCode::Internal,
 
             Error::Unsupported { .. } => StatusCode::Unsupported,

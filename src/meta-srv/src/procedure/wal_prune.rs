@@ -412,9 +412,7 @@ mod tests {
     use std::assert_matches::assert_matches;
 
     use api::v1::meta::HeartbeatResponse;
-    use common_meta::wal_options_allocator::build_kafka_client;
-    use common_wal::config::kafka::common::{KafkaConnectionConfig, KafkaTopicConfig};
-    use common_wal::config::kafka::MetasrvKafkaConfig;
+    use common_procedure::test_util::MockProcedureManager;
     use common_wal::test_util::run_test_with_kafka_wal;
     use rskafka::record::Record;
     use tokio::sync::mpsc::Receiver;
@@ -432,37 +430,22 @@ mod tests {
     /// 3. Return the procedure, the minimum last entry id to prune and the regions to flush.
     async fn mock_test_env(
         topic: String,
-        broker_endpoints: Vec<String>,
-        env: &TestEnv,
+        context: Context,
     ) -> (WalPruneProcedure, u64, Vec<RegionId>) {
-        // Creates a topic manager.
-        let kafka_topic = KafkaTopicConfig {
-            replication_factor: broker_endpoints.len() as i16,
-            ..Default::default()
-        };
-        let config = MetasrvKafkaConfig {
-            connection: KafkaConnectionConfig {
-                broker_endpoints,
-                ..Default::default()
-            },
-            kafka_topic,
-            ..Default::default()
-        };
-        let client = Arc::new(build_kafka_client(&config).await.unwrap());
-        let table_metadata_manager = env.table_metadata_manager.clone();
-        let leader_region_registry = env.leader_region_registry.clone();
-        let mailbox = env.mailbox.mailbox().clone();
-
         let n_region = 10;
         let n_table = 5;
         let threshold = 10;
         // 5 entries per region.
-        let offsets =
-            mock_wal_entries(client.clone(), &topic, (n_region * n_table * 5) as usize).await;
+        let offsets = mock_wal_entries(
+            context.client.clone(),
+            &topic,
+            (n_region * n_table * 5) as usize,
+        )
+        .await;
 
         let (min_flushed_entry_id, regions_to_flush) = new_wal_prune_metadata(
-            table_metadata_manager.clone(),
-            leader_region_registry.clone(),
+            context.table_metadata_manager.clone(),
+            context.leader_region_registry.clone(),
             n_region,
             n_table,
             &offsets,
@@ -470,14 +453,6 @@ mod tests {
             topic.clone(),
         )
         .await;
-
-        let context = Context {
-            client,
-            table_metadata_manager,
-            leader_region_registry,
-            mailbox,
-            server_addr: env.server_addr.to_string(),
-        };
 
         let wal_prune_procedure = WalPruneProcedure::new(topic, context, Some(threshold), None);
         (wal_prune_procedure, min_flushed_entry_id, regions_to_flush)
@@ -580,9 +555,11 @@ mod tests {
             Box::pin(async {
                 common_telemetry::init_default_ut_logging();
                 let topic_name = "greptime_test_topic".to_string();
-                let mut env = TestEnv::new();
+                let procedure_manager = Arc::new(MockProcedureManager::default());
+                let mut env = TestEnv::new(procedure_manager);
+                let context = env.build_wal_prune_context(broker_endpoints).await;
                 let (mut procedure, min_flushed_entry_id, regions_to_flush) =
-                    mock_test_env(topic_name.clone(), broker_endpoints, &env).await;
+                    mock_test_env(topic_name.clone(), context).await;
 
                 // Step 1: Test `on_prepare`.
                 let status = procedure.on_prepare().await.unwrap();

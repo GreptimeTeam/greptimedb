@@ -16,7 +16,9 @@ use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+use futures::lock::Mutex;
 use snafu::ensure;
+use tokio::sync::watch::{self, Receiver, Sender};
 
 use super::*;
 use crate::error;
@@ -81,5 +83,99 @@ impl PoisonStore for InMemoryPoisonStore {
         let map = self.map.read().unwrap();
         let key = key.to_string();
         Ok(map.get(&key).cloned())
+    }
+}
+
+type ProcedureMap = HashMap<
+    ProcedureId,
+    (
+        Box<dyn Procedure>,
+        Sender<ProcedureState>,
+        Receiver<ProcedureState>,
+    ),
+>;
+
+#[derive(Debug, Default)]
+pub struct MockProcedureManager {
+    pub procedures: Mutex<ProcedureMap>,
+}
+
+#[async_trait::async_trait]
+impl ProcedureManager for MockProcedureManager {
+    fn register_loader(&self, _name: &str, _loader: BoxedProcedureLoader) -> Result<()> {
+        Ok(())
+    }
+
+    async fn start(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn submit(&self, procedure: ProcedureWithId) -> Result<Watcher> {
+        let (state_sender, state_receiver) = watch::channel(ProcedureState::Running);
+        self.procedures.lock().await.insert(
+            procedure.id,
+            (procedure.procedure, state_sender, state_receiver.clone()),
+        );
+        Ok(state_receiver)
+    }
+
+    async fn procedure_state(&self, procedure_id: ProcedureId) -> Result<Option<ProcedureState>> {
+        let procedures = self.procedures.lock().await;
+        if let Some((_, state_sender, _)) = procedures.get(&procedure_id) {
+            Ok(Some(state_sender.borrow().clone()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn procedure_watcher(&self, _procedure_id: ProcedureId) -> Option<Watcher> {
+        None
+    }
+
+    async fn list_procedures(&self) -> Result<Vec<ProcedureInfo>> {
+        Ok(vec![])
+    }
+}
+
+impl MockProcedureManager {
+    pub async fn len(&self) -> usize {
+        let procedures = self.procedures.lock().await;
+        procedures.len()
+    }
+
+    pub async fn is_empty(&self) -> bool {
+        let procedures = self.procedures.lock().await;
+        procedures.is_empty()
+    }
+
+    pub async fn contains_procedure(&self, procedure_id: ProcedureId) -> bool {
+        let procedures = self.procedures.lock().await;
+        procedures.contains_key(&procedure_id)
+    }
+
+    pub async fn finish_procedure(&self, procedure_id: ProcedureId) -> Result<()> {
+        let mut procedures = self.procedures.lock().await;
+        assert!(procedures.contains_key(&procedure_id));
+        let (_, state_sender, _) = procedures.remove(&procedure_id).unwrap();
+        state_sender
+            .send(ProcedureState::Done { output: None })
+            .unwrap();
+        Ok(())
+    }
+
+    pub async fn finish_k_procedures(&self, k: usize) -> Result<()> {
+        let mut procedures = self.procedures.lock().await;
+        let procedure_ids = procedures.keys().take(k).cloned().collect::<Vec<_>>();
+        for procedure_id in procedure_ids {
+            let (_, state_sender, _) = procedures.remove(&procedure_id).unwrap();
+            state_sender
+                .send(ProcedureState::Done { output: None })
+                .unwrap();
+        }
+        Ok(())
     }
 }

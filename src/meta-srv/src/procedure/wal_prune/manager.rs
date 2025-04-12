@@ -65,6 +65,11 @@ impl WalPruneProcedureTracker {
             }
         }
     }
+
+    /// Number of running [WalPruneProcedure]s.
+    pub fn len(&self) -> usize {
+        self.running_procedures.read().unwrap().len()
+    }
 }
 
 /// [WalPruneProcedureGuard] is a guard for [WalPruneProcedure].
@@ -270,12 +275,7 @@ impl WalPruneManager {
 
     /// Submits a [WalPruneProcedure] for the given topic name.
     pub async fn submit_procedure(&self, topic_name: &str) -> Result<ProcedureId> {
-        let permit = self
-            .semaphore
-            .clone()
-            .try_acquire_owned()
-            .ok()
-            .context(error::MaxPruneTaskReachedSnafu { max: self.limit })?;
+        let permit = self.semaphore.clone().acquire_owned().await.unwrap();
         let guard = self
             .tracker
             .insert_running_procedure(topic_name.to_string(), Some(permit))
@@ -314,13 +314,17 @@ impl WalPruneManager {
     }
 
     async fn handle_tick_request(&self) -> Result<()> {
+        if self.tracker.len() >= self.limit / 2 {
+            warn!(
+                "Number of running procedures {} is greater than {}, skipping tick",
+                self.tracker.len(),
+                self.limit / 2
+            );
+            return Ok(());
+        }
         let topics = self.retrieve_sorted_topics().await?;
         for topic_name in topics.iter() {
             match self.submit_procedure(topic_name).await {
-                Err(error::Error::MaxPruneTaskReached { .. }) => {
-                    warn!("Max prune task limit reached, skip remaining topics.");
-                    break;
-                }
                 Err(error::Error::PruneTaskAlreadyRunning { .. }) => {
                     warn!("Prune task already running for topic: {}", topic_name);
                     break;
@@ -354,69 +358,22 @@ impl WalPruneManager {
 mod test {
     use std::assert_matches::assert_matches;
 
-    use common_meta::wal_options_allocator::build_kafka_client;
-    use common_wal::config::kafka::common::{KafkaConnectionConfig, KafkaTopicConfig};
-    use common_wal::config::kafka::MetasrvKafkaConfig;
+    use common_meta::key::topic_name::TopicNameKey;
+    use common_procedure::test_util::MockProcedureManager;
+    use common_procedure::{ProcedureManager, ProcedureState};
     use common_wal::test_util::run_test_with_kafka_wal;
-    use tokio::time::sleep;
+    use tokio::time::{sleep, timeout};
 
     use super::*;
     use crate::procedure::wal_prune::test_util::TestEnv;
-
-    #[tokio::test]
-    async fn test_insert_running_procedure() {
-        run_test_with_kafka_wal(|broker_endpoints| {
-            Box::pin(async {
-                let test_env = TestEnv::new();
-                let kafka_topic = KafkaTopicConfig {
-                    replication_factor: broker_endpoints.len() as i16,
-                    ..Default::default()
-                };
-                let config = MetasrvKafkaConfig {
-                    connection: KafkaConnectionConfig {
-                        broker_endpoints,
-                        ..Default::default()
-                    },
-                    kafka_topic,
-                    ..Default::default()
-                };
-                let client = Arc::new(build_kafka_client(&config).await.unwrap());
-                let wal_prune_context = WalPruneContext {
-                    client,
-                    table_metadata_manager: test_env.table_metadata_manager.clone(),
-                    leader_region_registry: test_env.leader_region_registry.clone(),
-                    server_addr: test_env.server_addr.to_string(),
-                    mailbox: test_env.mailbox.mailbox().clone(),
-                };
-                let (_tx, rx) = WalPruneManager::channel();
-                let manager = WalPruneManager::new(
-                    test_env.table_metadata_manager.clone(),
-                    10,
-                    rx,
-                    test_env.procedure_manager.clone(),
-                    wal_prune_context,
-                    None,
-                );
-
-                manager
-                    .tracker
-                    .running_procedures
-                    .write()
-                    .unwrap()
-                    .insert("test_topic".to_string());
-
-                let result = manager.submit_procedure("test_topic").await;
-                assert!(result.is_none());
-            })
-        })
-        .await;
-    }
 
     #[tokio::test]
     async fn test_wal_prune_ticker() {
         let (tx, mut rx) = WalPruneManager::channel();
         let interval = Duration::from_millis(10);
         let ticker = WalPruneTicker::new(interval, tx);
+        assert_eq!(ticker.name(), "WalPruneTicker");
+
         for _ in 0..2 {
             ticker.start();
             sleep(2 * interval).await;
@@ -425,5 +382,195 @@ mod test {
                 assert_matches!(event, Event::Tick);
             }
         }
+        ticker.stop();
+    }
+
+    #[tokio::test]
+    async fn test_wal_prune_tracker_and_guard() {
+        let tracker = WalPruneProcedureTracker {
+            running_procedures: Arc::new(RwLock::new(HashSet::new())),
+        };
+        let semaphore = Arc::new(Semaphore::new(1));
+        let topic_name = uuid::Uuid::new_v4().to_string();
+        let permit = semaphore.clone().try_acquire_owned().ok();
+        {
+            let guard = tracker
+                .insert_running_procedure(topic_name.clone(), permit)
+                .unwrap();
+            assert_eq!(guard.topic_name, topic_name);
+            assert_eq!(guard.running_procedures.read().unwrap().len(), 1);
+            assert_eq!(semaphore.available_permits(), 0);
+        }
+        assert_eq!(tracker.running_procedures.read().unwrap().len(), 0);
+        assert_eq!(semaphore.available_permits(), 1);
+    }
+
+    async fn mock_wal_prune_manager(
+        broker_endpoints: Vec<String>,
+        procedure_manager: Arc<MockProcedureManager>,
+        limit: usize,
+    ) -> (Sender<Event>, WalPruneManager) {
+        let test_env = TestEnv::new(procedure_manager);
+        let (tx, rx) = WalPruneManager::channel();
+        let wal_prune_context = test_env.build_wal_prune_context(broker_endpoints).await;
+        (
+            tx,
+            WalPruneManager::new(
+                test_env.table_metadata_manager.clone(),
+                limit,
+                rx,
+                test_env.procedure_manager.clone(),
+                wal_prune_context,
+                None,
+            ),
+        )
+    }
+
+    async fn mock_topics(manager: &WalPruneManager, topics: &[String]) {
+        let topic_name_keys = topics
+            .iter()
+            .map(|topic| TopicNameKey::new(topic))
+            .collect::<Vec<_>>();
+        manager
+            .table_metadata_manager
+            .topic_name_manager()
+            .batch_put(topic_name_keys)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_submit_procedure() {
+        run_test_with_kafka_wal(|broker_endpoints| {
+            Box::pin(async {
+                common_telemetry::init_default_ut_logging();
+                let procedure_manager = Arc::new(MockProcedureManager::default());
+                let (_tx, manager) =
+                    mock_wal_prune_manager(broker_endpoints, procedure_manager.clone(), 2).await;
+                let test_topic = uuid::Uuid::new_v4().to_string();
+                manager.submit_procedure(&test_topic).await.unwrap();
+                assert_eq!(manager.semaphore.available_permits(), 1);
+
+                let result = manager.submit_procedure(&test_topic).await;
+                assert_matches!(result, Err(error::Error::PruneTaskAlreadyRunning { .. }));
+                assert_eq!(manager.semaphore.available_permits(), 1);
+
+                let test_topic = uuid::Uuid::new_v4().to_string();
+                let procedure_id = manager.submit_procedure(&test_topic).await.unwrap();
+                assert_eq!(manager.semaphore.available_permits(), 0);
+
+                let procedure_manager_copy = procedure_manager.clone();
+                timeout(Duration::from_millis(100), async move {
+                    while procedure_manager_copy
+                        .procedure_state(procedure_id)
+                        .await
+                        .unwrap()
+                        .is_none()
+                    {
+                        sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                assert_matches!(
+                    procedure_manager
+                        .procedure_state(procedure_id)
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                    ProcedureState::Running
+                );
+                procedure_manager
+                    .finish_procedure(procedure_id)
+                    .await
+                    .unwrap();
+                assert_eq!(manager.semaphore.available_permits(), 1);
+            })
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_wal_prune_manager() {
+        run_test_with_kafka_wal(|broker_endpoints| {
+            Box::pin(async {
+                let limit = 6;
+                let procedure_manager = Arc::new(MockProcedureManager::default());
+                let (tx, manager) =
+                    mock_wal_prune_manager(broker_endpoints, procedure_manager.clone(), limit)
+                        .await;
+                let topics = (0..limit * 2)
+                    .map(|_| uuid::Uuid::new_v4().to_string())
+                    .collect::<Vec<_>>();
+                mock_topics(&manager, &topics).await;
+
+                let semaphore = manager.semaphore.clone();
+                let tracker = manager.tracker.clone();
+                let handler =
+                    common_runtime::spawn_global(async move { manager.try_start().await.unwrap() });
+                handler.await.unwrap();
+
+                tx.send(Event::Tick).await.unwrap();
+                let tracker_copy = tracker.clone();
+                timeout(Duration::from_millis(100), async move {
+                    while tracker_copy.len() < limit {
+                        sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                assert_eq!(tracker.len(), limit);
+                assert_eq!(semaphore.available_permits(), 0);
+
+                procedure_manager
+                    .finish_k_procedures(limit / 2)
+                    .await
+                    .unwrap();
+                tx.send(Event::Tick).await.unwrap();
+                let tracker_copy = tracker.clone();
+                timeout(Duration::from_millis(100), async move {
+                    while tracker_copy.len() < limit {
+                        sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                assert_eq!(tracker.len(), limit);
+                assert_eq!(semaphore.available_permits(), 0);
+
+                procedure_manager.finish_k_procedures(limit).await.unwrap();
+                let tracker_copy = tracker.clone();
+                timeout(Duration::from_millis(100), async move {
+                    while tracker_copy.len() < limit / 2 {
+                        sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                assert_eq!(tracker.len(), limit / 2);
+                assert_eq!(semaphore.available_permits(), limit / 2);
+
+                tx.send(Event::Tick).await.unwrap();
+                assert_eq!(tracker.len(), limit / 2);
+                assert_eq!(semaphore.available_permits(), limit / 2);
+
+                procedure_manager
+                    .finish_k_procedures(limit / 2)
+                    .await
+                    .unwrap();
+                tx.send(Event::Tick).await.unwrap();
+                let tracker_copy = tracker.clone();
+                timeout(Duration::from_millis(100), async move {
+                    while tracker_copy.len() < limit {
+                        sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                assert_eq!(tracker.len(), limit);
+                assert_eq!(semaphore.available_permits(), 0);
+            })
+        })
+        .await;
     }
 }

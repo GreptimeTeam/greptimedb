@@ -75,7 +75,7 @@ impl MetasrvWalConfig {
     pub fn remote_wal_options(&self) -> Option<&MetasrvKafkaConfig> {
         match self {
             MetasrvWalConfig::RaftEngine => None,
-            MetasrvWalConfig::Kafka(config) => Some(&config),
+            MetasrvWalConfig::Kafka(config) => Some(config),
         }
     }
 }
