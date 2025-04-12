@@ -369,7 +369,7 @@ impl MetasrvBuilder {
                 rx,
                 procedure_manager.clone(),
                 wal_prune_context,
-                remote_wal_options.trigger_flush_threhold,
+                remote_wal_options.trigger_flush_threshold,
             );
             // Start manager in background. Ticker will be started in the main thread to send ticks.
             wal_prune_manager.try_start().await?;

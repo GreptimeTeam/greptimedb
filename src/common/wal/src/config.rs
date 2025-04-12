@@ -55,7 +55,7 @@ impl From<DatanodeWalConfig> for MetasrvWalConfig {
                 auto_create_topics: config.auto_create_topics,
                 active_prune: config.active_prune,
                 active_prune_interval: config.active_prune_interval,
-                trigger_flush_threhold: config.trigger_flush_threhold,
+                trigger_flush_threshold: config.trigger_flush_threshold,
                 active_prune_task_limit: config.active_prune_task_limit,
             }),
         }
@@ -205,7 +205,7 @@ mod tests {
             auto_create_topics: true,
             active_prune: false,
             active_prune_interval: Duration::from_secs(60),
-            trigger_flush_threhold: None,
+            trigger_flush_threshold: None,
             active_prune_task_limit: 10,
         };
         assert_eq!(metasrv_wal_config, MetasrvWalConfig::Kafka(expected));
