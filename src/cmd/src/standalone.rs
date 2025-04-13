@@ -510,10 +510,10 @@ impl StartCommand {
             procedure_manager.clone(),
         ));
 
-        let process_manager = Arc::new(ProcessManager::new(
-            opts.grpc.server_addr.clone(),
-            kv_backend.clone(),
-        ));
+        let process_manager = Arc::new(
+            ProcessManager::new(opts.grpc.server_addr.clone(), kv_backend.clone())
+                .context(error::BuildProcessManagerSnafu)?,
+        );
         let catalog_manager = KvBackendCatalogManager::new(
             information_extension.clone(),
             kv_backend.clone(),

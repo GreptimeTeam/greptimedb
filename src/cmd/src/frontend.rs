@@ -333,10 +333,10 @@ impl StartCommand {
         let information_extension =
             Arc::new(DistributedInformationExtension::new(meta_client.clone()));
 
-        let process_manager = Arc::new(ProcessManager::new(
-            opts.grpc.server_addr.clone(),
-            cached_meta_backend.clone(),
-        ));
+        let process_manager = Arc::new(
+            ProcessManager::new(opts.grpc.server_addr.clone(), cached_meta_backend.clone())
+                .context(error::BuildProcessManagerSnafu)?,
+        );
         let catalog_manager = KvBackendCatalogManager::new(
             information_extension,
             cached_meta_backend.clone(),

@@ -21,7 +21,8 @@ use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 
 use crate::error;
-use crate::key::{MetadataKey, PROCESS_LIST_PATTERN, PROCESS_LIST_PREFIX};
+use crate::key::{MetadataKey, MetadataValue, PROCESS_LIST_PATTERN, PROCESS_LIST_PREFIX};
+use crate::rpc::KeyValue;
 
 /// Key for running queries tracked in metasrv.
 /// Layout: `__process/{frontend server addr}-{query id}`
@@ -87,9 +88,21 @@ pub struct ProcessValue {
 pub const PROCESS_ID_SEQ: &str = "process_id_seq";
 
 /// Running process instance.
+#[derive(Clone, Debug)]
 pub struct Process {
     pub key: ProcessKey,
     pub value: ProcessValue,
+}
+
+impl TryFrom<&Process> for KeyValue {
+    type Error = error::Error;
+
+    fn try_from(process: &Process) -> Result<Self, Self::Error> {
+        Ok(KeyValue {
+            key: process.key.to_bytes(),
+            value: process.value.try_as_raw_value()?,
+        })
+    }
 }
 
 impl Process {

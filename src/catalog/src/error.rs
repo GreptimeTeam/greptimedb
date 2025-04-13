@@ -278,8 +278,29 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to bump sequence for process manager"))]
+    BumpSequence {
+        source: common_meta::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to list running processes"))]
     ListProcess {
+        source: common_meta::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to start process report task"))]
+    StartReportTask {
+        source: common_runtime::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to report process state"))]
+    ReportProcess {
         source: common_meta::error::Error,
         #[snafu(implicit)]
         location: Location,
@@ -351,7 +372,10 @@ impl ErrorExt for Error {
             Error::TableMetadataManager { source, .. } => source.status_code(),
             Error::GetViewCache { source, .. }
             | Error::GetTableCache { source, .. }
-            | Error::ListProcess { source, .. } => source.status_code(),
+            | Error::BumpSequence { source, .. }
+            | Error::ListProcess { source, .. }
+            | Error::ReportProcess { source, .. } => source.status_code(),
+            Error::StartReportTask { .. } => StatusCode::Internal,
         }
     }
 

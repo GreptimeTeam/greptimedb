@@ -21,7 +21,7 @@ use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use common_time::util::current_time_millis;
 use common_time::{Duration, Timestamp};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
-use datatypes::prelude::ConcreteDataType;
+use datatypes::prelude::ConcreteDataType as CDT;
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::value::Value;
@@ -29,7 +29,6 @@ use datatypes::vectors::{
     DurationMillisecondVectorBuilder, StringVectorBuilder, TimestampMillisecondVectorBuilder,
     UInt64VectorBuilder, VectorRef,
 };
-use futures::StreamExt;
 use snafu::ResultExt;
 use store_api::storage::{ScanRequest, TableId};
 
@@ -62,19 +61,15 @@ impl InformationSchemaProcessList {
 
     fn schema() -> SchemaRef {
         Arc::new(Schema::new(vec![
-            ColumnSchema::new(ID, ConcreteDataType::uint64_datatype(), false),
-            ColumnSchema::new(DATABASE, ConcreteDataType::string_datatype(), false),
-            ColumnSchema::new(QUERY, ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(ID, CDT::uint64_datatype(), false),
+            ColumnSchema::new(DATABASE, CDT::string_datatype(), false),
+            ColumnSchema::new(QUERY, CDT::string_datatype(), false),
             ColumnSchema::new(
                 START_TIMESTAMP,
-                ConcreteDataType::timestamp_millisecond_datatype(),
+                CDT::timestamp_millisecond_datatype(),
                 false,
             ),
-            ColumnSchema::new(
-                ELAPSED_TIME,
-                ConcreteDataType::duration_millisecond_datatype(),
-                false,
-            ),
+            ColumnSchema::new(ELAPSED_TIME, CDT::duration_millisecond_datatype(), false),
         ]))
     }
 }
@@ -93,10 +88,9 @@ impl InformationTable for InformationSchemaProcessList {
     }
 
     fn to_stream(&self, request: ScanRequest) -> error::Result<SendableRecordBatchStream> {
-        let schema = self.schema.arrow_schema().clone();
         let process_manager = self.process_manager.clone();
         let stream = Box::pin(DfRecordBatchStreamAdapter::new(
-            schema,
+            self.schema.arrow_schema().clone(),
             futures::stream::once(async move {
                 make_process_list(process_manager, request)
                     .await
@@ -120,25 +114,15 @@ async fn make_process_list(
 ) -> error::Result<RecordBatch> {
     let predicates = Predicates::from_scan_request(&Some(request));
     let current_time = current_time_millis();
-    let mut stream = Box::pin(
-        process_manager
-            .list_all_processes()
-            .context(error::ListProcessSnafu)?
-            .into_stream(),
-    );
+    let queries = process_manager.list_all_processes()?;
 
-    let mut id_builder = UInt64VectorBuilder::with_capacity(8);
-    let mut database_builder = StringVectorBuilder::with_capacity(8);
-    let mut query_builder = StringVectorBuilder::with_capacity(8);
-    let mut start_time_builder = TimestampMillisecondVectorBuilder::with_capacity(8);
-    let mut elapsed_time_builder = DurationMillisecondVectorBuilder::with_capacity(8);
+    let mut id_builder = UInt64VectorBuilder::with_capacity(queries.len());
+    let mut database_builder = StringVectorBuilder::with_capacity(queries.len());
+    let mut query_builder = StringVectorBuilder::with_capacity(queries.len());
+    let mut start_time_builder = TimestampMillisecondVectorBuilder::with_capacity(queries.len());
+    let mut elapsed_time_builder = DurationMillisecondVectorBuilder::with_capacity(queries.len());
 
-    while let Some(process) = stream
-        .next()
-        .await
-        .transpose()
-        .context(error::ListProcessSnafu)?
-    {
+    for process in queries {
         let row = [
             (ID, &Value::from(process.query_id())),
             (DATABASE, &Value::from(process.database())),
@@ -165,14 +149,15 @@ async fn make_process_list(
         }
     }
 
-    let columns: Vec<VectorRef> = vec![
-        Arc::new(id_builder.finish()),
-        Arc::new(database_builder.finish()),
-        Arc::new(query_builder.finish()),
-        Arc::new(start_time_builder.finish()),
-        Arc::new(elapsed_time_builder.finish()),
-    ];
-
-    RecordBatch::new(InformationSchemaProcessList::schema(), columns)
-        .context(error::CreateRecordBatchSnafu)
+    RecordBatch::new(
+        InformationSchemaProcessList::schema(),
+        vec![
+            Arc::new(id_builder.finish()),
+            Arc::new(database_builder.finish()),
+            Arc::new(query_builder.finish()),
+            Arc::new(start_time_builder.finish()),
+            Arc::new(elapsed_time_builder.finish()),
+        ],
+    )
+    .context(error::CreateRecordBatchSnafu)
 }
