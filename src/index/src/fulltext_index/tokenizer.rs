@@ -12,10 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use jieba_rs::Jieba;
-
 use crate::fulltext_index::error::Result;
 use crate::Bytes;
+
+lazy_static::lazy_static! {
+    static ref JIEBA: jieba_rs::Jieba = jieba_rs::Jieba::new();
+}
 
 /// `Tokenizer` tokenizes a text into a list of tokens.
 pub trait Tokenizer: Send {
@@ -44,8 +46,7 @@ pub struct ChineseTokenizer;
 
 impl Tokenizer for ChineseTokenizer {
     fn tokenize<'a>(&self, text: &'a str) -> Vec<&'a str> {
-        let jieba = Jieba::new();
-        jieba.cut(text, false)
+        JIEBA.cut(text, false)
     }
 }
 

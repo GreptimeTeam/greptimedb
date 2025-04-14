@@ -5591,6 +5591,7 @@ dependencies = [
  "greptime-proto",
  "itertools 0.14.0",
  "jieba-rs",
+ "lazy_static",
  "mockall",
  "pin-project",
  "prost 0.13.5",
