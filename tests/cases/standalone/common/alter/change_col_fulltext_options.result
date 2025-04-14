@@ -79,29 +79,29 @@ SELECT * FROM test WHERE MATCHES(message, 'hello') ORDER BY message;
 -- SQLNESS ARG restart=true
 SHOW CREATE TABLE test;
 
-+-------+---------------------------------------------------------------------------------------------+
-| Table | Create Table                                                                                |
-+-------+---------------------------------------------------------------------------------------------+
-| test  | CREATE TABLE IF NOT EXISTS "test" (                                                         |
-|       |   "message" STRING NULL FULLTEXT INDEX WITH(analyzer = 'Chinese', case_sensitive = 'true'), |
-|       |   "time" TIMESTAMP(3) NOT NULL,                                                             |
-|       |   TIME INDEX ("time")                                                                       |
-|       | )                                                                                           |
-|       |                                                                                             |
-|       | ENGINE=mito                                                                                 |
-|       | WITH(                                                                                       |
-|       |   append_mode = 'true'                                                                      |
-|       | )                                                                                           |
-+-------+---------------------------------------------------------------------------------------------+
++-------+----------------------------------------------------------------------------------------------------------------+
+| Table | Create Table                                                                                                   |
++-------+----------------------------------------------------------------------------------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" (                                                                            |
+|       |   "message" STRING NULL FULLTEXT INDEX WITH(analyzer = 'Chinese', backend = 'bloom', case_sensitive = 'true'), |
+|       |   "time" TIMESTAMP(3) NOT NULL,                                                                                |
+|       |   TIME INDEX ("time")                                                                                          |
+|       | )                                                                                                              |
+|       |                                                                                                                |
+|       | ENGINE=mito                                                                                                    |
+|       | WITH(                                                                                                          |
+|       |   append_mode = 'true'                                                                                         |
+|       | )                                                                                                              |
++-------+----------------------------------------------------------------------------------------------------------------+
 
 SHOW INDEX FROM test;
 
-+-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+----------------------------+---------+---------------+---------+------------+
-| Table | Non_unique | Key_name       | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type                 | Comment | Index_comment | Visible | Expression |
-+-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+----------------------------+---------+---------------+---------+------------+
-| test  | 1          | FULLTEXT INDEX | 1            | message     | A         |             |          |        | YES  | greptime-fulltext-index-v1 |         |               | YES     |            |
-| test  | 1          | TIME INDEX     | 1            | time        | A         |             |          |        | NO   |                            |         |               | YES     |            |
-+-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+----------------------------+---------+---------------+---------+------------+
++-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------------+---------+---------------+---------+------------+
+| Table | Non_unique | Key_name       | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type                    | Comment | Index_comment | Visible | Expression |
++-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------------+---------+---------------+---------+------------+
+| test  | 1          | FULLTEXT INDEX | 1            | message     | A         |             |          |        | YES  | greptime-fulltext-index-bloom |         |               | YES     |            |
+| test  | 1          | TIME INDEX     | 1            | time        | A         |             |          |        | NO   |                               |         |               | YES     |            |
++-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------------+---------+---------------+---------+------------+
 
 ALTER TABLE test MODIFY COLUMN message UNSET FULLTEXT INDEX;
 
@@ -138,33 +138,33 @@ Affected Rows: 0
 
 SHOW CREATE TABLE test;
 
-+-------+---------------------------------------------------------------------------------------------+
-| Table | Create Table                                                                                |
-+-------+---------------------------------------------------------------------------------------------+
-| test  | CREATE TABLE IF NOT EXISTS "test" (                                                         |
-|       |   "message" STRING NULL FULLTEXT INDEX WITH(analyzer = 'Chinese', case_sensitive = 'true'), |
-|       |   "time" TIMESTAMP(3) NOT NULL,                                                             |
-|       |   TIME INDEX ("time")                                                                       |
-|       | )                                                                                           |
-|       |                                                                                             |
-|       | ENGINE=mito                                                                                 |
-|       | WITH(                                                                                       |
-|       |   append_mode = 'true'                                                                      |
-|       | )                                                                                           |
-+-------+---------------------------------------------------------------------------------------------+
++-------+----------------------------------------------------------------------------------------------------------------+
+| Table | Create Table                                                                                                   |
++-------+----------------------------------------------------------------------------------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" (                                                                            |
+|       |   "message" STRING NULL FULLTEXT INDEX WITH(analyzer = 'Chinese', backend = 'bloom', case_sensitive = 'true'), |
+|       |   "time" TIMESTAMP(3) NOT NULL,                                                                                |
+|       |   TIME INDEX ("time")                                                                                          |
+|       | )                                                                                                              |
+|       |                                                                                                                |
+|       | ENGINE=mito                                                                                                    |
+|       | WITH(                                                                                                          |
+|       |   append_mode = 'true'                                                                                         |
+|       | )                                                                                                              |
++-------+----------------------------------------------------------------------------------------------------------------+
 
 SHOW INDEX FROM test;
 
-+-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+----------------------------+---------+---------------+---------+------------+
-| Table | Non_unique | Key_name       | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type                 | Comment | Index_comment | Visible | Expression |
-+-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+----------------------------+---------+---------------+---------+------------+
-| test  | 1          | FULLTEXT INDEX | 1            | message     | A         |             |          |        | YES  | greptime-fulltext-index-v1 |         |               | YES     |            |
-| test  | 1          | TIME INDEX     | 1            | time        | A         |             |          |        | NO   |                            |         |               | YES     |            |
-+-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+----------------------------+---------+---------------+---------+------------+
++-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------------+---------+---------------+---------+------------+
+| Table | Non_unique | Key_name       | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type                    | Comment | Index_comment | Visible | Expression |
++-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------------+---------+---------------+---------+------------+
+| test  | 1          | FULLTEXT INDEX | 1            | message     | A         |             |          |        | YES  | greptime-fulltext-index-bloom |         |               | YES     |            |
+| test  | 1          | TIME INDEX     | 1            | time        | A         |             |          |        | NO   |                               |         |               | YES     |            |
++-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------------+---------+---------------+---------+------------+
 
 ALTER TABLE test MODIFY COLUMN message SET FULLTEXT INDEX WITH(analyzer = 'Chinese', case_sensitive = 'false');
 
-Error: 1004(InvalidArguments), Invalid column option, column name: message, error: FULLTEXT index already enabled
+Error: 1004(InvalidArguments), Invalid column option, column name: message, error: Cannot change analyzer or case_sensitive if FULLTEXT index is set before. Previous analyzer: Chinese, previous case_sensitive: true
 
 ALTER TABLE test MODIFY COLUMN message UNSET FULLTEXT INDEX;
 
@@ -201,20 +201,20 @@ Affected Rows: 0
 
 SHOW CREATE TABLE test;
 
-+-------+---------------------------------------------------------------------------------------------+
-| Table | Create Table                                                                                |
-+-------+---------------------------------------------------------------------------------------------+
-| test  | CREATE TABLE IF NOT EXISTS "test" (                                                         |
-|       |   "message" STRING NULL FULLTEXT INDEX WITH(analyzer = 'Chinese', case_sensitive = 'true'), |
-|       |   "time" TIMESTAMP(3) NOT NULL,                                                             |
-|       |   TIME INDEX ("time")                                                                       |
-|       | )                                                                                           |
-|       |                                                                                             |
-|       | ENGINE=mito                                                                                 |
-|       | WITH(                                                                                       |
-|       |   append_mode = 'true'                                                                      |
-|       | )                                                                                           |
-+-------+---------------------------------------------------------------------------------------------+
++-------+----------------------------------------------------------------------------------------------------------------+
+| Table | Create Table                                                                                                   |
++-------+----------------------------------------------------------------------------------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" (                                                                            |
+|       |   "message" STRING NULL FULLTEXT INDEX WITH(analyzer = 'Chinese', backend = 'bloom', case_sensitive = 'true'), |
+|       |   "time" TIMESTAMP(3) NOT NULL,                                                                                |
+|       |   TIME INDEX ("time")                                                                                          |
+|       | )                                                                                                              |
+|       |                                                                                                                |
+|       | ENGINE=mito                                                                                                    |
+|       | WITH(                                                                                                          |
+|       |   append_mode = 'true'                                                                                         |
+|       | )                                                                                                              |
++-------+----------------------------------------------------------------------------------------------------------------+
 
 SHOW INDEX FROM test;
 
@@ -227,33 +227,33 @@ SHOW INDEX FROM test;
 
 ALTER TABLE test MODIFY COLUMN message SET FULLTEXT INDEX WITH(analyzer = 'Chinese', case_sensitive = 'true', backend = 'tantivy');
 
-Error: 1004(InvalidArguments), Invalid column option, column name: message, error: FULLTEXT index already enabled
+Affected Rows: 0
 
 SHOW CREATE TABLE test;
 
-+-------+---------------------------------------------------------------------------------------------+
-| Table | Create Table                                                                                |
-+-------+---------------------------------------------------------------------------------------------+
-| test  | CREATE TABLE IF NOT EXISTS "test" (                                                         |
-|       |   "message" STRING NULL FULLTEXT INDEX WITH(analyzer = 'Chinese', case_sensitive = 'true'), |
-|       |   "time" TIMESTAMP(3) NOT NULL,                                                             |
-|       |   TIME INDEX ("time")                                                                       |
-|       | )                                                                                           |
-|       |                                                                                             |
-|       | ENGINE=mito                                                                                 |
-|       | WITH(                                                                                       |
-|       |   append_mode = 'true'                                                                      |
-|       | )                                                                                           |
-+-------+---------------------------------------------------------------------------------------------+
++-------+------------------------------------------------------------------------------------------------------------------+
+| Table | Create Table                                                                                                     |
++-------+------------------------------------------------------------------------------------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" (                                                                              |
+|       |   "message" STRING NULL FULLTEXT INDEX WITH(analyzer = 'Chinese', backend = 'tantivy', case_sensitive = 'true'), |
+|       |   "time" TIMESTAMP(3) NOT NULL,                                                                                  |
+|       |   TIME INDEX ("time")                                                                                            |
+|       | )                                                                                                                |
+|       |                                                                                                                  |
+|       | ENGINE=mito                                                                                                      |
+|       | WITH(                                                                                                            |
+|       |   append_mode = 'true'                                                                                           |
+|       | )                                                                                                                |
++-------+------------------------------------------------------------------------------------------------------------------+
 
 SHOW INDEX FROM test;
 
-+-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------------+---------+---------------+---------+------------+
-| Table | Non_unique | Key_name       | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type                    | Comment | Index_comment | Visible | Expression |
-+-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------------+---------+---------------+---------+------------+
-| test  | 1          | FULLTEXT INDEX | 1            | message     | A         |             |          |        | YES  | greptime-fulltext-index-bloom |         |               | YES     |            |
-| test  | 1          | TIME INDEX     | 1            | time        | A         |             |          |        | NO   |                               |         |               | YES     |            |
-+-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+-------------------------------+---------+---------------+---------+------------+
++-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+----------------------------+---------+---------------+---------+------------+
+| Table | Non_unique | Key_name       | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type                 | Comment | Index_comment | Visible | Expression |
++-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+----------------------------+---------+---------------+---------+------------+
+| test  | 1          | FULLTEXT INDEX | 1            | message     | A         |             |          |        | YES  | greptime-fulltext-index-v1 |         |               | YES     |            |
+| test  | 1          | TIME INDEX     | 1            | time        | A         |             |          |        | NO   |                            |         |               | YES     |            |
++-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+----------------------------+---------+---------------+---------+------------+
 
 ALTER TABLE test MODIFY COLUMN message SET FULLTEXT INDEX WITH(analyzer = 'Chinglish', case_sensitive = 'false');
 
@@ -269,7 +269,7 @@ Error: 1004(InvalidArguments), Invalid column option, column name: time, error: 
 
 ALTER TABLE test MODIFY COLUMN message SET FULLTEXT INDEX WITH(analyzer = 'English', case_sensitive = 'true');
 
-Error: 1004(InvalidArguments), Invalid column option, column name: message, error: FULLTEXT index already enabled
+Error: 1004(InvalidArguments), Invalid column option, column name: message, error: Cannot change analyzer or case_sensitive if FULLTEXT index is set before. Previous analyzer: Chinese, previous case_sensitive: true
 
 ALTER TABLE test MODIFY COLUMN message SET FULLTEXT INDEX WITH(backend = 'xor');
 
