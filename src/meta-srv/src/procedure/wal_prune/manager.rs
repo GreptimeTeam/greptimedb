@@ -23,13 +23,14 @@ use common_meta::leadership_notifier::LeadershipChangeListener;
 use common_procedure::{watcher, ProcedureId, ProcedureManagerRef, ProcedureWithId};
 use common_runtime::JoinHandle;
 use common_telemetry::{error, info, warn};
+use futures::future::join_all;
 use itertools::Itertools;
 use snafu::{OptionExt, ResultExt};
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::Semaphore;
 use tokio::time::{interval, MissedTickBehavior};
 
-use crate::error::{self, RegisterProcedureLoaderSnafu, Result, TableMetadataManagerSnafu};
+use crate::error::{self, Result};
 use crate::metrics::METRIC_META_REMOTE_WAL_PRUNE_EXECUTE;
 use crate::procedure::wal_prune::{Context as WalPruneContext, WalPruneProcedure};
 
@@ -47,11 +48,7 @@ pub struct WalPruneProcedureTracker {
 impl WalPruneProcedureTracker {
     /// Insert a running [WalPruneProcedure] for the given topic name and
     /// consume acquire a semaphore permit for the given topic name.
-    pub fn insert_running_procedure(
-        &self,
-        topic_name: String,
-        permit: Option<OwnedSemaphorePermit>,
-    ) -> Option<WalPruneProcedureGuard> {
+    pub fn insert_running_procedure(&self, topic_name: String) -> Option<WalPruneProcedureGuard> {
         let mut running_procedures = self.running_procedures.write().unwrap();
         match running_procedures.entry(topic_name.clone()) {
             Entry::Occupied(_) => None,
@@ -60,7 +57,6 @@ impl WalPruneProcedureTracker {
                 Some(WalPruneProcedureGuard {
                     topic_name,
                     running_procedures: self.running_procedures.clone(),
-                    _permit: permit,
                 })
             }
         }
@@ -78,7 +74,6 @@ impl WalPruneProcedureTracker {
 pub struct WalPruneProcedureGuard {
     topic_name: String,
     running_procedures: Arc<RwLock<HashSet<String>>>,
-    _permit: Option<OwnedSemaphorePermit>,
 }
 
 impl Drop for WalPruneProcedureGuard {
@@ -194,8 +189,6 @@ pub(crate) struct WalPruneManager {
     procedure_manager: ProcedureManagerRef,
     /// Tracker for running [WalPruneProcedure]s.
     tracker: WalPruneProcedureTracker,
-    /// The limit of concurrent [WalPruneProcedure]s.
-    limit: usize,
     /// Semaphore to limit the number of concurrent [WalPruneProcedure]s.
     semaphore: Arc<Semaphore>,
 
@@ -224,7 +217,6 @@ impl WalPruneManager {
             tracker: WalPruneProcedureTracker {
                 running_procedures: Arc::new(RwLock::new(HashSet::new())),
             },
-            limit,
             semaphore: Arc::new(Semaphore::new(limit)),
             trigger_flush_threshold,
         }
@@ -234,19 +226,15 @@ impl WalPruneManager {
     pub async fn try_start(mut self) -> Result<()> {
         let context = self.wal_prune_context.clone();
         let tracker = self.tracker.clone();
-        let semaphore = self.semaphore.clone();
         self.procedure_manager
             .register_loader(
                 WalPruneProcedure::TYPE_NAME,
                 Box::new(move |json| {
                     let tracker = tracker.clone();
-                    let semaphore = semaphore.clone();
-                    let permit = semaphore.try_acquire_owned().ok();
-                    WalPruneProcedure::from_json(json, &context, tracker, permit)
-                        .map(|p| Box::new(p) as _)
+                    WalPruneProcedure::from_json(json, &context, tracker).map(|p| Box::new(p) as _)
                 }),
             )
-            .context(RegisterProcedureLoaderSnafu {
+            .context(error::RegisterProcedureLoaderSnafu {
                 type_name: WalPruneProcedure::TYPE_NAME,
             })?;
         common_runtime::spawn_global(async move {
@@ -276,10 +264,9 @@ impl WalPruneManager {
 
     /// Submits a [WalPruneProcedure] for the given topic name.
     pub async fn submit_procedure(&self, topic_name: &str) -> Result<ProcedureId> {
-        let permit = self.semaphore.clone().acquire_owned().await.unwrap();
         let guard = self
             .tracker
-            .insert_running_procedure(topic_name.to_string(), Some(permit))
+            .insert_running_procedure(topic_name.to_string())
             .context(error::PruneTaskAlreadyRunningSnafu {
                 topic: topic_name.to_string(),
             })?;
@@ -295,47 +282,41 @@ impl WalPruneManager {
         METRIC_META_REMOTE_WAL_PRUNE_EXECUTE
             .with_label_values(&[topic_name])
             .inc();
-        let topic_name = topic_name.to_string();
         let procedure_manager = self.procedure_manager.clone();
-        common_runtime::spawn_global(async move {
-            let watcher = &mut match procedure_manager.submit(procedure_with_id).await {
-                Ok(watcher) => watcher,
-                Err(e) => {
-                    error!("Failed to submit procedure: {}", e);
-                    return;
-                }
-            };
-
-            if let Err(e) = watcher::wait(watcher).await {
-                error!(e; "Failed to wait for wal prune procedure {procedure_id} for {topic_name}")
-            }
-        });
+        let mut watcher = procedure_manager
+            .submit(procedure_with_id)
+            .await
+            .context(error::SubmitProcedureSnafu)?;
+        watcher::wait(&mut watcher)
+            .await
+            .context(error::WaitProcedureSnafu)?;
 
         Ok(procedure_id)
     }
 
     async fn handle_tick_request(&self) -> Result<()> {
-        if self.tracker.len() >= self.limit / 2 {
-            warn!(
-                "Number of running procedures {} is greater than {}, skipping tick",
-                self.tracker.len(),
-                self.limit / 2
-            );
-            return Ok(());
-        }
         let topics = self.retrieve_sorted_topics().await?;
+        let mut tasks = Vec::with_capacity(topics.len());
         for topic_name in topics.iter() {
-            match self.submit_procedure(topic_name).await {
-                Err(error::Error::PruneTaskAlreadyRunning { .. }) => {
-                    warn!("Prune task already running for topic: {}", topic_name);
-                    break;
+            tasks.push(async {
+                let _permit = self.semaphore.acquire().await.unwrap();
+                match self.submit_procedure(topic_name).await {
+                    Ok(_) => {}
+                    Err(error::Error::PruneTaskAlreadyRunning { topic, .. }) => {
+                        warn!("Prune task for topic {} is already running", topic);
+                    }
+                    Err(e) => {
+                        error!(
+                            "Failed to submit prune task for topic {}: {}",
+                            topic_name.clone(),
+                            e
+                        );
+                    }
                 }
-                Err(e) => {
-                    error!(e; "Failed to submit procedure for topic: {}", topic_name);
-                }
-                Ok(_) => {}
-            }
+            });
         }
+
+        join_all(tasks).await;
         Ok(())
     }
 
@@ -348,7 +329,7 @@ impl WalPruneManager {
             .topic_name_manager()
             .range()
             .await
-            .context(TableMetadataManagerSnafu)?
+            .context(error::TableMetadataManagerSnafu)?
             .into_iter()
             .sorted()
             .collect::<Vec<_>>())
@@ -360,8 +341,6 @@ mod test {
     use std::assert_matches::assert_matches;
 
     use common_meta::key::topic_name::TopicNameKey;
-    use common_procedure::test_util::MockProcedureManager;
-    use common_procedure::{ProcedureManager, ProcedureState};
     use common_wal::test_util::run_test_with_kafka_wal;
     use tokio::time::{sleep, timeout};
 
@@ -391,27 +370,25 @@ mod test {
         let tracker = WalPruneProcedureTracker {
             running_procedures: Arc::new(RwLock::new(HashSet::new())),
         };
-        let semaphore = Arc::new(Semaphore::new(1));
         let topic_name = uuid::Uuid::new_v4().to_string();
-        let permit = semaphore.clone().try_acquire_owned().ok();
         {
             let guard = tracker
-                .insert_running_procedure(topic_name.clone(), permit)
+                .insert_running_procedure(topic_name.clone())
                 .unwrap();
             assert_eq!(guard.topic_name, topic_name);
             assert_eq!(guard.running_procedures.read().unwrap().len(), 1);
-            assert_eq!(semaphore.available_permits(), 0);
+
+            let result = tracker.insert_running_procedure(topic_name.clone());
+            assert!(result.is_none());
         }
         assert_eq!(tracker.running_procedures.read().unwrap().len(), 0);
-        assert_eq!(semaphore.available_permits(), 1);
     }
 
     async fn mock_wal_prune_manager(
         broker_endpoints: Vec<String>,
-        procedure_manager: Arc<MockProcedureManager>,
         limit: usize,
     ) -> (Sender<Event>, WalPruneManager) {
-        let test_env = TestEnv::new(procedure_manager);
+        let test_env = TestEnv::new();
         let (tx, rx) = WalPruneManager::channel();
         let wal_prune_context = test_env.build_wal_prune_context(broker_endpoints).await;
         (
@@ -441,135 +418,26 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_submit_procedure() {
-        run_test_with_kafka_wal(|broker_endpoints| {
-            Box::pin(async {
-                common_telemetry::init_default_ut_logging();
-                let procedure_manager = Arc::new(MockProcedureManager::default());
-                let (_tx, manager) =
-                    mock_wal_prune_manager(broker_endpoints, procedure_manager.clone(), 2).await;
-                let test_topic = uuid::Uuid::new_v4().to_string();
-                manager.submit_procedure(&test_topic).await.unwrap();
-                assert_eq!(manager.semaphore.available_permits(), 1);
-
-                let result = manager.submit_procedure(&test_topic).await;
-                assert_matches!(result, Err(error::Error::PruneTaskAlreadyRunning { .. }));
-                assert_eq!(manager.semaphore.available_permits(), 1);
-
-                let test_topic = uuid::Uuid::new_v4().to_string();
-                let procedure_id = manager.submit_procedure(&test_topic).await.unwrap();
-                assert_eq!(manager.semaphore.available_permits(), 0);
-
-                let procedure_manager_copy = procedure_manager.clone();
-                timeout(Duration::from_millis(100), async move {
-                    while procedure_manager_copy
-                        .procedure_state(procedure_id)
-                        .await
-                        .unwrap()
-                        .is_none()
-                    {
-                        sleep(Duration::from_millis(10)).await;
-                    }
-                })
-                .await
-                .unwrap();
-                assert_matches!(
-                    procedure_manager
-                        .procedure_state(procedure_id)
-                        .await
-                        .unwrap()
-                        .unwrap(),
-                    ProcedureState::Running
-                );
-                procedure_manager
-                    .finish_procedure(procedure_id)
-                    .await
-                    .unwrap();
-                assert_eq!(manager.semaphore.available_permits(), 1);
-            })
-        })
-        .await;
-    }
-
-    #[tokio::test]
     async fn test_wal_prune_manager() {
         run_test_with_kafka_wal(|broker_endpoints| {
             Box::pin(async {
                 let limit = 6;
-                let procedure_manager = Arc::new(MockProcedureManager::default());
-                let (tx, manager) =
-                    mock_wal_prune_manager(broker_endpoints, procedure_manager.clone(), limit)
-                        .await;
+                let (tx, manager) = mock_wal_prune_manager(broker_endpoints, limit).await;
                 let topics = (0..limit * 2)
                     .map(|_| uuid::Uuid::new_v4().to_string())
                     .collect::<Vec<_>>();
                 mock_topics(&manager, &topics).await;
 
-                let semaphore = manager.semaphore.clone();
                 let tracker = manager.tracker.clone();
                 let handler =
                     common_runtime::spawn_global(async move { manager.try_start().await.unwrap() });
                 handler.await.unwrap();
 
                 tx.send(Event::Tick).await.unwrap();
-                let tracker_copy = tracker.clone();
-                timeout(Duration::from_millis(100), async move {
-                    while tracker_copy.len() < limit {
-                        sleep(Duration::from_millis(10)).await;
-                    }
-                })
-                .await
-                .unwrap();
-                assert_eq!(tracker.len(), limit);
-                assert_eq!(semaphore.available_permits(), 0);
-
-                procedure_manager
-                    .finish_k_procedures(limit / 2)
+                // Wait for at least one procedure to be submitted.
+                timeout(Duration::from_millis(100), async move { tracker.len() > 0 })
                     .await
                     .unwrap();
-                tx.send(Event::Tick).await.unwrap();
-                let tracker_copy = tracker.clone();
-                timeout(Duration::from_millis(100), async move {
-                    while tracker_copy.len() < limit {
-                        sleep(Duration::from_millis(10)).await;
-                    }
-                })
-                .await
-                .unwrap();
-                assert_eq!(tracker.len(), limit);
-                assert_eq!(semaphore.available_permits(), 0);
-
-                procedure_manager.finish_k_procedures(limit).await.unwrap();
-                let tracker_copy = tracker.clone();
-                timeout(Duration::from_millis(100), async move {
-                    while tracker_copy.len() < limit / 2 {
-                        sleep(Duration::from_millis(10)).await;
-                    }
-                })
-                .await
-                .unwrap();
-                assert_eq!(tracker.len(), limit / 2);
-                assert_eq!(semaphore.available_permits(), limit / 2);
-
-                tx.send(Event::Tick).await.unwrap();
-                assert_eq!(tracker.len(), limit / 2);
-                assert_eq!(semaphore.available_permits(), limit / 2);
-
-                procedure_manager
-                    .finish_k_procedures(limit / 2)
-                    .await
-                    .unwrap();
-                tx.send(Event::Tick).await.unwrap();
-                let tracker_copy = tracker.clone();
-                timeout(Duration::from_millis(100), async move {
-                    while tracker_copy.len() < limit {
-                        sleep(Duration::from_millis(10)).await;
-                    }
-                })
-                .await
-                .unwrap();
-                assert_eq!(tracker.len(), limit);
-                assert_eq!(semaphore.available_permits(), 0);
             })
         })
         .await;

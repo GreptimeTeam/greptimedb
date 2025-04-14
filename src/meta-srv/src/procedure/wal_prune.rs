@@ -42,7 +42,6 @@ use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use store_api::logstore::EntryId;
 use store_api::storage::RegionId;
-use tokio::sync::OwnedSemaphorePermit;
 
 use crate::error::{
     self, BuildPartitionClientSnafu, DeleteRecordsSnafu, TableMetadataManagerSnafu,
@@ -126,10 +125,9 @@ impl WalPruneProcedure {
         json: &str,
         context: &Context,
         tracker: WalPruneProcedureTracker,
-        permit: Option<OwnedSemaphorePermit>,
     ) -> ProcedureResult<Self> {
         let data: WalPruneData = serde_json::from_str(json).context(ToJsonSnafu)?;
-        let guard = tracker.insert_running_procedure(data.topic.clone(), permit);
+        let guard = tracker.insert_running_procedure(data.topic.clone());
         Ok(Self {
             data,
             context: context.clone(),
@@ -416,7 +414,6 @@ mod tests {
     use std::assert_matches::assert_matches;
 
     use api::v1::meta::HeartbeatResponse;
-    use common_procedure::test_util::MockProcedureManager;
     use common_wal::test_util::run_test_with_kafka_wal;
     use rskafka::record::Record;
     use tokio::sync::mpsc::Receiver;
@@ -559,8 +556,7 @@ mod tests {
             Box::pin(async {
                 common_telemetry::init_default_ut_logging();
                 let topic_name = "greptime_test_topic".to_string();
-                let procedure_manager = Arc::new(MockProcedureManager::default());
-                let mut env = TestEnv::new(procedure_manager);
+                let mut env = TestEnv::new();
                 let context = env.build_wal_prune_context(broker_endpoints).await;
                 let (mut procedure, prunable_entry_id, regions_to_flush) =
                     mock_test_env(topic_name.clone(), context).await;
@@ -620,7 +616,7 @@ mod tests {
                 )
                 .await;
 
-                let min_entry_id = env
+                let value = env
                     .table_metadata_manager
                     .topic_name_manager()
                     .get(&topic_name)
@@ -628,7 +624,7 @@ mod tests {
                     .unwrap()
                     .unwrap();
                 assert_eq!(
-                    min_entry_id.pruned_entry_id,
+                    value.pruned_entry_id,
                     procedure.data.prunable_entry_id
                 );
 
@@ -643,7 +639,7 @@ mod tests {
                 procedure.on_prepare().await.unwrap();
                 assert_matches!(procedure.data.state, WalPruneState::Prune);
                 assert_eq!(
-                    min_entry_id.pruned_entry_id,
+                    value.pruned_entry_id,
                     procedure.data.prunable_entry_id
                 );
 
