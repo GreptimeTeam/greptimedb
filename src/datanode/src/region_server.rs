@@ -55,8 +55,8 @@ use store_api::metric_engine_consts::{
     FILE_ENGINE_NAME, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME,
 };
 use store_api::region_engine::{
-    RegionEngineRef, RegionManifestInfo, RegionRole, RegionStatistic, SetRegionRoleStateResponse,
-    SettableRegionRoleState,
+    RegionEngine, RegionEngineRef, RegionManifestInfo, RegionRole, RegionStatistic,
+    SetRegionRoleStateResponse, SettableRegionRoleState,
 };
 use store_api::region_request::{
     AffectedRows, BatchRegionDdlRequest, RegionCloseRequest, RegionOpenRequest, RegionRequest,
@@ -910,6 +910,7 @@ impl RegionServerInner {
             | RegionRequest::Compact(_)
             | RegionRequest::Truncate(_) => RegionChange::None,
             RegionRequest::Catchup(_) => RegionChange::Catchup,
+            RegionRequest::Sync(_) => RegionChange::Sync,
         };
 
         let engine = match self.get_engine(region_id, &region_change)? {
@@ -945,6 +946,32 @@ impl RegionServerInner {
                 self.unset_region_status(region_id, &engine, region_change);
                 Err(err)
             }
+        }
+    }
+
+    fn add_manifest_version_to_response(
+        region_id: RegionId,
+        engine: Arc<dyn RegionEngine>,
+        result: &mut RegionResponse,
+    ) {
+        if let Some(region_stat) = engine.region_statistic(region_id) {
+            let metadata_manifest_version = region_stat.manifest.metadata_manifest_version();
+            let data_manifest_version = region_stat.manifest.data_manifest_version();
+
+            if let Some(metadata_manifest_version) = metadata_manifest_version {
+                result.extensions.insert(
+                    METADATA_MANIFEST_VERSION_EXTENSION_KEY.to_string(),
+                    metadata_manifest_version.to_string().into_bytes(),
+                );
+            }
+            result.extensions.insert(
+                DATA_MANIFEST_VERSION_EXTENSION_KEY.to_string(),
+                data_manifest_version.to_string().into_bytes(),
+            );
+            info!(
+                "Region {} is altered, data_manifest_version: {}, metadata_manifest_version: {:?}",
+                region_id, data_manifest_version, metadata_manifest_version
+            );
         }
     }
 
@@ -987,6 +1014,7 @@ impl RegionServerInner {
                     .insert(region_id, RegionEngineWithStatus::Ready(engine.clone()));
             }
             RegionChange::Catchup => {}
+            RegionChange::Sync => {}
         }
     }
 
@@ -1034,6 +1062,9 @@ impl RegionServerInner {
                     // Registers the logical regions belong to the physical region (`region_id`).
                     self.register_logical_regions(&engine, region_id).await?;
                 }
+            }
+            RegionChange::Sync => {
+                // TODO(weny): sync the region
             }
         }
         Ok(())

@@ -603,6 +603,8 @@ impl WorkerRequest {
     ) -> Result<(WorkerRequest, Receiver<Result<AffectedRows>>)> {
         let (sender, receiver) = oneshot::channel();
         let worker_request = match value {
+            // Handles out side of worker.
+            RegionRequest::Sync(_) => unreachable!(),
             RegionRequest::Put(v) => {
                 let mut write_request =
                     WriteRequest::new(region_id, OpType::Put, v.rows, region_metadata.clone())?

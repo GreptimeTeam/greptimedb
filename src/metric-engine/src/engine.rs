@@ -180,6 +180,7 @@ impl RegionEngine for MetricEngine {
         let mut extension_return_value = HashMap::new();
 
         let result = match request {
+            RegionRequest::Sync(_) => unreachable!(),
             RegionRequest::Put(put) => self.inner.put_region(region_id, put).await,
             RegionRequest::Create(create) => {
                 self.inner
