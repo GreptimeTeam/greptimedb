@@ -309,13 +309,13 @@ impl BloomFilterIndexApplier {
     ) -> std::result::Result<(), index::bloom_filter::error::Error> {
         let mut applier = BloomFilterApplier::new(Box::new(reader)).await?;
 
-        for (_, output) in output.iter_mut() {
+        for (_, row_group_output) in output.iter_mut() {
             // All rows are filtered out, skip the search
-            if output.is_empty() {
+            if row_group_output.is_empty() {
                 continue;
             }
 
-            *output = applier.search(predicates, output).await?;
+            *row_group_output = applier.search(predicates, row_group_output).await?;
         }
 
         Ok(())

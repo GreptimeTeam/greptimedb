@@ -306,14 +306,14 @@ impl FulltextIndexApplier {
         let mut applier = BloomFilterApplier::new(reader)
             .await
             .context(ApplyBloomFilterIndexSnafu)?;
-        for (_, output) in output.iter_mut() {
+        for (_, row_group_output) in output.iter_mut() {
             // All rows are filtered out, skip the search
-            if output.is_empty() {
+            if row_group_output.is_empty() {
                 continue;
             }
 
-            *output = applier
-                .search(&predicates, output)
+            *row_group_output = applier
+                .search(&predicates, row_group_output)
                 .await
                 .context(ApplyBloomFilterIndexSnafu)?;
         }
@@ -322,6 +322,12 @@ impl FulltextIndexApplier {
     }
 
     /// Initializes the coarse output. Must call `adjust_coarse_output` after applying bloom filters.
+    ///
+    /// `row_groups` is a list of (row group length, whether to search).
+    ///
+    /// Returns (`input`, `output`):
+    /// * `input` is a list of (row group index to search, row group range based on start of the file).
+    /// * `output` is a list of (row group index to search, row group ranges based on start of the file).
     #[allow(clippy::type_complexity)]
     fn init_coarse_output(
         row_groups: impl Iterator<Item = (usize, bool)>,
@@ -347,6 +353,7 @@ impl FulltextIndexApplier {
         (input, output)
     }
 
+    /// Adjusts the coarse output. Makes the output ranges based on row group start.
     fn adjust_coarse_output(
         input: Vec<(usize, Range<usize>)>,
         output: &mut Vec<(usize, Vec<Range<usize>>)>,
