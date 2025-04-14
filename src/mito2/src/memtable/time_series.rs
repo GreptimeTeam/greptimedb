@@ -1265,7 +1265,7 @@ mod tests {
             let column_schemas = schema
                 .column_metadatas
                 .iter()
-                .map(|c| column_metadata_to_column_schema(c))
+                .map(column_metadata_to_column_schema)
                 .collect::<Vec<_>>();
             let handle = std::thread::spawn(move || {
                 for j in i * 100..(i + 1) * 100 {
@@ -1492,7 +1492,7 @@ mod tests {
 
         // Spawn reader threads
         let mut reader_handles = Vec::with_capacity(num_readers);
-        for reader_id in 0..num_readers {
+        for _ in 0..num_readers {
             let memtable = memtable.clone();
             let barrier = barrier.clone();
 
@@ -1501,14 +1501,9 @@ mod tests {
 
                 for _ in 0..10 {
                     let iter = memtable.iter(None, None, None).unwrap();
-                    let mut count = 0;
-
                     for batch_result in iter {
-                        let batch = batch_result.unwrap();
-                        count += batch.num_rows();
+                        let _ = batch_result.unwrap();
                     }
-
-                    assert!(count >= 0);
                 }
             });
 
