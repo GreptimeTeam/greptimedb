@@ -152,11 +152,11 @@ async fn make_process_list(
     RecordBatch::new(
         InformationSchemaProcessList::schema(),
         vec![
-            Arc::new(id_builder.finish()),
-            Arc::new(database_builder.finish()),
-            Arc::new(query_builder.finish()),
-            Arc::new(start_time_builder.finish()),
-            Arc::new(elapsed_time_builder.finish()),
+            Arc::new(id_builder.finish()) as VectorRef,
+            Arc::new(database_builder.finish()) as VectorRef,
+            Arc::new(query_builder.finish()) as VectorRef,
+            Arc::new(start_time_builder.finish()) as VectorRef,
+            Arc::new(elapsed_time_builder.finish()) as VectorRef,
         ],
     )
     .context(error::CreateRecordBatchSnafu)
