@@ -46,6 +46,7 @@ SHOW TABLES;
 | parameters                            |
 | partitions                            |
 | procedure_info                        |
+| process_list                          |
 | profiling                             |
 | referential_constraints               |
 | region_peers                          |
@@ -94,6 +95,7 @@ SHOW FULL TABLES;
 | parameters                            | LOCAL TEMPORARY |
 | partitions                            | LOCAL TEMPORARY |
 | procedure_info                        | LOCAL TEMPORARY |
+| process_list                          | LOCAL TEMPORARY |
 | profiling                             | LOCAL TEMPORARY |
 | referential_constraints               | LOCAL TEMPORARY |
 | region_peers                          | LOCAL TEMPORARY |
@@ -136,6 +138,7 @@ SHOW TABLE STATUS;
 |parameters||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
 |partitions||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
 |procedure_info||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
+|process_list||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
 |profiling||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
 |referential_constraints||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
 |region_peers||11|Fixed|0|0|0|0|0|0|0|DATETIME|||utf8_bin|0|||
