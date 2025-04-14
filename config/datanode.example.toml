@@ -243,6 +243,12 @@ overwrite_entry_start_id = false
 # credential = "base64-credential"
 # endpoint = "https://storage.googleapis.com"
 
+## The query engine options.
+[query]
+## Parallelism of the query engine.
+## Default to 0, which means the number of CPU cores.
+parallelism = 0
+
 ## The data storage options.
 [storage]
 ## The working home directory.
