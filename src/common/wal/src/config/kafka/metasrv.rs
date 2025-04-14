@@ -16,10 +16,10 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use super::common::{
-    DEFAULT_ACTIVE_PRUNE_INTERVAL, DEFAULT_ACTIVE_PRUNE_TASK_LIMIT, DEFAULT_TRIGGER_FLUSH_THRESHOLD,
+use crate::config::kafka::common::{
+    KafkaConnectionConfig, KafkaTopicConfig, DEFAULT_ACTIVE_PRUNE_INTERVAL,
+    DEFAULT_ACTIVE_PRUNE_TASK_LIMIT, DEFAULT_TRIGGER_FLUSH_THRESHOLD,
 };
-use crate::config::kafka::common::{KafkaConnectionConfig, KafkaTopicConfig};
 
 /// Kafka wal configurations for metasrv.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
