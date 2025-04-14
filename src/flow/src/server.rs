@@ -332,6 +332,7 @@ impl FlownodeBuilder {
             None,
             false,
             Default::default(),
+            self.opts.query.clone(),
         );
         let manager = Arc::new(
             self.build_manager(query_engine_factory.query_engine())

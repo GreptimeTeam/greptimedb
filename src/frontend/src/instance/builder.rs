@@ -166,6 +166,7 @@ impl FrontendBuilder {
             Some(Arc::new(flow_service)),
             true,
             plugins.clone(),
+            self.options.query.clone(),
         )
         .query_engine();
 
