@@ -32,6 +32,7 @@ use datatypes::value::Value;
 use greptime_proto::v1;
 use itertools::{EitherOrBoth, Itertools};
 use meta_client::MetaClientOptions;
+use query::options::QueryOptions;
 use query::QueryEngine;
 use serde::{Deserialize, Serialize};
 use servers::grpc::GrpcOptions;
@@ -109,6 +110,7 @@ pub struct FlownodeOptions {
     pub logging: LoggingOptions,
     pub tracing: TracingOptions,
     pub heartbeat: HeartbeatOptions,
+    pub query: QueryOptions,
 }
 
 impl Default for FlownodeOptions {
@@ -122,6 +124,7 @@ impl Default for FlownodeOptions {
             logging: LoggingOptions::default(),
             tracing: TracingOptions::default(),
             heartbeat: HeartbeatOptions::default(),
+            query: QueryOptions::default(),
         }
     }
 }
