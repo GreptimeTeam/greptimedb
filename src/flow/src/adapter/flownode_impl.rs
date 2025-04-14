@@ -206,10 +206,10 @@ impl FlowEngine for FlowDualEngine {
             // can't use drop due to https://github.com/rust-lang/rust/pull/128846
         }
 
-        let stream_engine = self.streaming_engine.clone();
+        let streaming_engine = self.streaming_engine.clone();
         let stream_handler: JoinHandle<Result<(), Error>> =
             common_runtime::spawn_global(async move {
-                stream_engine
+                streaming_engine
                     .handle_flow_inserts(api::v1::region::InsertRequests {
                         requests: to_stream_engine,
                     })
