@@ -27,7 +27,7 @@ use futures::future::join_all;
 use snafu::{OptionExt, ResultExt};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::Semaphore;
-use tokio::time::{interval, MissedTickBehavior};
+use tokio::time::{interval_at, Instant, MissedTickBehavior};
 
 use crate::error::{self, Result};
 use crate::metrics::METRIC_META_REMOTE_WAL_PRUNE_EXECUTE;
@@ -142,7 +142,7 @@ impl WalPruneTicker {
             let sender = self.sender.clone();
             let tick_interval = self.tick_interval;
             let ticker_loop = tokio::spawn(async move {
-                let mut interval = interval(tick_interval);
+                let mut interval = interval_at(Instant::now() + tick_interval, tick_interval);
                 interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
                 loop {
                     interval.tick().await;
