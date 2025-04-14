@@ -112,9 +112,9 @@ impl SeriesScan {
 
             let cache = &stream_ctx.input.cache_strategy;
             let mut df_record_batches = Vec::new();
-            let mut metrics = ScannerMetrics::default();
             let mut fetch_start = Instant::now();
             while let Some(result) = receiver.recv().await {
+                let mut metrics = ScannerMetrics::default();
                 let series = result.map_err(BoxedError::new).context(ExternalSnafu)?;
                 metrics.scan_cost += fetch_start.elapsed();
                 fetch_start = Instant::now();
