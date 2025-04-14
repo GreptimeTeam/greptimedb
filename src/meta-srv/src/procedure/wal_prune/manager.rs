@@ -24,7 +24,6 @@ use common_procedure::{watcher, ProcedureId, ProcedureManagerRef, ProcedureWithI
 use common_runtime::JoinHandle;
 use common_telemetry::{error, info, warn};
 use futures::future::join_all;
-use itertools::Itertools;
 use snafu::{OptionExt, ResultExt};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::Semaphore;
@@ -329,10 +328,7 @@ impl WalPruneManager {
             .topic_name_manager()
             .range()
             .await
-            .context(error::TableMetadataManagerSnafu)?
-            .into_iter()
-            .sorted()
-            .collect::<Vec<_>>())
+            .context(error::TableMetadataManagerSnafu)?)
     }
 }
 
