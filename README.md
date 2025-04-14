@@ -62,7 +62,7 @@
 
 ## Introduction
 
-**GreptimeDB** is an open-source, cloud-native, unified & cost-effective observability  database for **Metrics**, **Logs**, and **Traces**. You can gain real-time insights from Edge to Cloud at Any Scale.
+**GreptimeDB** is an open-source, cloud-native, unified & cost-effective observability database for **Metrics**, **Logs**, and **Traces**. You can gain real-time insights from Edge to Cloud at Any Scale.
 
 ## News
 
