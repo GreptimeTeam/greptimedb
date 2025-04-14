@@ -73,6 +73,10 @@ pub const LOGICAL_TABLE_METADATA_KEY: &str = "on_physical_table";
 /// Represent a list of column metadata that are added to physical table.
 pub const ALTER_PHYSICAL_EXTENSION_KEY: &str = "ALTER_PHYSICAL";
 
+/// HashMap key to be used in the region server's extension response.
+/// Represent the manifest info of a region.
+pub const MANIFEST_INFO_EXTENSION_KEY: &str = "MANIFEST_INFO";
+
 /// Returns true if it's a internal column of the metric engine.
 pub fn is_metric_engine_internal_column(name: &str) -> bool {
     name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME || name == DATA_SCHEMA_TSID_COLUMN_NAME
