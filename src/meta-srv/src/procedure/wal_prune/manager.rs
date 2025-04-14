@@ -252,6 +252,7 @@ impl WalPruneManager {
         common_runtime::spawn_global(async move {
             self.run().await;
         });
+        info!("WalPruneProcedureManager Started.");
         Ok(())
     }
 

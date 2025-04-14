@@ -38,8 +38,9 @@ pub struct MetasrvKafkaConfig {
     // Interval of WAL pruning.
     pub active_prune_interval: Duration,
     // Threshold for sending flush request when pruning remote WAL.
+    // `None` stands for never sending flush request.
     pub trigger_flush_threshold: Option<u64>,
-    // Limit of cuncurrent active pruning procedures.
+    // Limit of concurrent active pruning procedures.
     pub active_prune_task_limit: usize,
 }
 
