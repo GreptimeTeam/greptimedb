@@ -136,6 +136,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
         };
 
+        let original_manifest_version = region.manifest_ctx.manifest_version().await;
         let manifest = match region
             .manifest_ctx
             .install_manifest_to(request.manifest_version)
@@ -173,7 +174,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             .build();
         region.version_control.overwrite_current(Arc::new(version));
 
-        let _ = sender.send(Ok(manifest.manifest_version));
+        let updated = manifest.manifest_version > original_manifest_version;
+        let _ = sender.send(Ok((manifest.manifest_version, updated)));
     }
 }
 
