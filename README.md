@@ -74,12 +74,11 @@ Our core developers have been building observability data platforms for years. B
 
 * **Unified Processing of Observability Data**
 
-  GreptimeDB unifies observability data processing by treating all data - whether metrics, logs, or traces - as timestamped wide events with context. Users can analyze this data using either [SQL](https://docs.greptime.com/user-guide/query-data/sql) or [PromQL](https://docs.greptime.com/user-guide/query-data/promql) and leverage stream processing ([Flow](https://docs.greptime.com/user-guide/flow-computation/overview)) to enable continuous aggregation. It replaces complex legacy data stacks with a high-performance single solution.
+  A unified database that treats metrics, logs, and traces as timestamped wide events with context, supporting [SQL](https://docs.greptime.com/user-guide/query-data/sql)/[PromQL](https://docs.greptime.com/user-guide/query-data/promql) queries and [stream processing](https://docs.greptime.com/user-guide/flow-computation/overview) to simplify complex data stacks.
 
 * **High Performance and Cost-effective**
 
-   Written in pure Rust for superior performance and reliability. GreptimeDB features a distributed query engine with [rich indexing](https://docs.greptime.com/user-guide/manage-data/data-index) technologies (inverted, fulltext, skip data, and vector) to accelerate queries, enabling sub-second responses on petabyte-scale datasets and handling hundreds of thousands of concurrent requests. 
-Its optimized columnar storage achieves 50x cost efficiency on cloud object storage through advanced compression. 
+   Written in Rust, combines a distributed query engine with [rich indexing](https://docs.greptime.com/user-guide/manage-data/data-index) (inverted, fulltext, skip data, and vector) and optimized columnar storage to deliver sub-second responses on petabyte-scale data and high-cost efficiency.
 
 * **Cloud-native Distributed Database**
 
