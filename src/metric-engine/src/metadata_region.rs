@@ -95,17 +95,6 @@ impl MetadataRegion {
         }
     }
 
-    /// Add a logical region to the metadata region.
-    ///
-    /// This method doesn't check if the logical region already exists.
-    pub async fn add_logical_region(&self, logical_region_id: RegionId) -> Result<()> {
-        self.logical_region_lock
-            .write()
-            .await
-            .insert(logical_region_id, Arc::new(RwLock::new(())));
-        Ok(())
-    }
-
     /// Retrieve a read lock guard of given logical region id.
     pub async fn read_lock_logical_region(
         &self,
@@ -501,23 +490,22 @@ impl MetadataRegion {
         logical_regions: impl Iterator<Item = (RegionId, HashMap<&str, &ColumnMetadata>)>,
     ) -> Result<()> {
         let region_id = utils::to_metadata_region_id(physical_region_id);
-        let logical_regions = logical_regions.into_iter().collect::<Vec<_>>();
         let iter = logical_regions
-            .iter()
+            .into_iter()
             .flat_map(|(logical_region_id, column_metadatas)| {
                 if write_region_id {
                     Some((
-                        MetadataRegion::concat_region_key(*logical_region_id),
+                        MetadataRegion::concat_region_key(logical_region_id),
                         String::new(),
                     ))
                 } else {
                     None
                 }
                 .into_iter()
-                .chain(column_metadatas.iter().map(
+                .chain(column_metadatas.into_iter().map(
                     move |(name, column_metadata)| {
                         (
-                            MetadataRegion::concat_column_key(*logical_region_id, name),
+                            MetadataRegion::concat_column_key(logical_region_id, name),
                             MetadataRegion::serialize_column_metadata(column_metadata),
                         )
                     },
@@ -533,10 +521,6 @@ impl MetadataRegion {
             )
             .await
             .context(MitoWriteOperationSnafu)?;
-
-        for (logical_region_id, _) in logical_regions {
-            self.add_logical_region(logical_region_id).await?;
-        }
 
         Ok(())
     }

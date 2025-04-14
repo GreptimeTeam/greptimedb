@@ -51,7 +51,7 @@ impl MetricEngineInner {
             .sync_region(metadata_region_id, metadata_region_manifest)
             .await
             .context(MitoSyncOperationSnafu)?
-            .synced();
+            .is_data_synced();
 
         let data_region_id = utils::to_data_region_id(region_id);
         let data_manifest_version = manifest_info.data_manifest_version();
@@ -64,7 +64,7 @@ impl MetricEngineInner {
             .sync_region(data_region_id, data_region_manifest)
             .await
             .context(MitoSyncOperationSnafu)?
-            .synced();
+            .is_data_synced();
 
         if !metadata_synced {
             return Ok(SyncManifestResponse::Metric {
