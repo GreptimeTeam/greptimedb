@@ -84,7 +84,7 @@ Our core developers have been building observability data platforms for years. B
 
   Built for [Kubernetes](https://docs.greptime.com/user-guide/deployments/deploy-on-kubernetes/greptimedb-operator-management). GreptimeDB achieves seamless scalability with its [cloud-native architecture](https://docs.greptime.com/user-guide/concepts/architecture) of separated compute and storage, built on object storage (AWS S3, Azure Blob Storage, etc.) while enabling cross-cloud deployment through a unified data access layer.
 
-* **Developer-Friendly, SQL & PromQL Ready**
+* **Developer-Friendly**
 
   Access standardized SQL/PromQL interfaces through built-in web dashboard, REST API, and MySQL/PostgreSQL protocols. Supports widely adopted data ingestion [protocols](https://docs.greptime.com/user-guide/protocols/overview) for seamless migration and integration.
 
