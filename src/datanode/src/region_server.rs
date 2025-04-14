@@ -665,7 +665,7 @@ impl RegionServerInner {
                 },
                 None => return Ok(CurrentEngine::EarlyReturn(0)),
             },
-            RegionChange::None | RegionChange::Catchup | RegionChange::Update => {
+            RegionChange::None | RegionChange::Catchup | RegionChange::Ingest => {
                 match current_region_status {
                     Some(status) => match status.clone() {
                         RegionEngineWithStatus::Registering(_) => {
@@ -877,7 +877,7 @@ impl RegionServerInner {
                 RegionChange::Register(attribute)
             }
             RegionRequest::Close(_) | RegionRequest::Drop(_) => RegionChange::Deregisters,
-            RegionRequest::Put(_) | RegionRequest::Delete(_) => RegionChange::Update,
+            RegionRequest::Put(_) | RegionRequest::Delete(_) => RegionChange::Ingest,
             RegionRequest::Alter(_)
             | RegionRequest::Flush(_)
             | RegionRequest::Compact(_)
@@ -900,7 +900,7 @@ impl RegionServerInner {
         {
             Ok(result) => {
                 // Update metrics
-                if matches!(region_change, RegionChange::Update) {
+                if matches!(region_change, RegionChange::Ingest) {
                     crate::metrics::REGION_CHANGED_ROW_COUNT
                         .with_label_values(&[&region_id_str, request_type])
                         .inc_by(result.affected_rows as u64);
@@ -951,7 +951,7 @@ impl RegionServerInner {
         region_change: RegionChange,
     ) {
         match region_change {
-            RegionChange::None | RegionChange::Update => {}
+            RegionChange::None | RegionChange::Ingest => {}
             RegionChange::Register(_) => {
                 self.region_map.remove(&region_id);
             }
@@ -971,7 +971,7 @@ impl RegionServerInner {
     ) -> Result<()> {
         let engine_type = engine.name();
         match region_change {
-            RegionChange::None | RegionChange::Update => {}
+            RegionChange::None | RegionChange::Ingest => {}
             RegionChange::Register(attribute) => {
                 info!(
                     "Region {region_id} is registered to engine {}",
@@ -1112,7 +1112,7 @@ enum RegionChange {
     Register(RegionAttribute),
     Deregisters,
     Catchup,
-    Update,
+    Ingest,
 }
 
 fn is_metric_engine(engine: &str) -> bool {
