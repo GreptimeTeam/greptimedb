@@ -255,10 +255,17 @@ impl WalPruneProcedure {
     }
 
     /// Send the flush request to regions with low flush entry id.
+    ///
+    /// Retry:
+    /// - Failed to build peer to region ids map. It means failure in retrieving metadata.
     pub async fn on_sending_flush_request(&mut self) -> Result<Status> {
         let peer_to_region_ids_map = self
             .build_peer_to_region_ids_map(&self.context, &self.data.regions_to_flush)
-            .await?;
+            .await
+            .map_err(BoxedError::new)
+            .with_context(|_| error::RetryLaterWithSourceSnafu {
+                reason: "Failed to build peer to region ids map",
+            })?;
         let flush_instructions = self.build_flush_region_instruction(peer_to_region_ids_map)?;
         for (peer, flush_instruction) in flush_instructions.into_iter() {
             let msg = MailboxMessage::json_message(
@@ -427,36 +434,28 @@ mod tests {
     /// Mock a test env for testing.
     /// Including:
     /// 1. Prepare some data in the table metadata manager and in-memory kv backend.
-    /// 2. Generate a `WalPruneProcedure` with the test env.
-    /// 3. Return the procedure, the minimum last entry id to prune and the regions to flush.
-    async fn mock_test_env(
-        topic: String,
-        context: Context,
-    ) -> (WalPruneProcedure, u64, Vec<RegionId>) {
+    /// 2. Return the procedure, the minimum last entry id to prune and the regions to flush.
+    async fn mock_test_data(procedure: &WalPruneProcedure) -> (u64, Vec<RegionId>) {
         let n_region = 10;
         let n_table = 5;
-        let threshold = 10;
         // 5 entries per region.
         let offsets = mock_wal_entries(
-            context.client.clone(),
-            &topic,
+            procedure.context.client.clone(),
+            &procedure.data.topic,
             (n_region * n_table * 5) as usize,
         )
         .await;
-
         let (prunable_entry_id, regions_to_flush) = new_wal_prune_metadata(
-            context.table_metadata_manager.clone(),
-            context.leader_region_registry.clone(),
+            procedure.context.table_metadata_manager.clone(),
+            procedure.context.leader_region_registry.clone(),
             n_region,
             n_table,
             &offsets,
-            threshold,
-            topic.clone(),
+            procedure.data.trigger_flush_threshold,
+            procedure.data.topic.clone(),
         )
         .await;
-
-        let wal_prune_procedure = WalPruneProcedure::new(topic, context, threshold, None);
-        (wal_prune_procedure, prunable_entry_id, regions_to_flush)
+        (prunable_entry_id, regions_to_flush)
     }
 
     fn record(i: usize) -> Record {
@@ -555,11 +554,20 @@ mod tests {
         run_test_with_kafka_wal(|broker_endpoints| {
             Box::pin(async {
                 common_telemetry::init_default_ut_logging();
-                let topic_name = "greptime_test_topic".to_string();
+                let topic_name = uuid::Uuid::new_v4().to_string();
                 let mut env = TestEnv::new();
                 let context = env.build_wal_prune_context(broker_endpoints).await;
-                let (mut procedure, prunable_entry_id, regions_to_flush) =
-                    mock_test_env(topic_name.clone(), context).await;
+                let mut procedure = WalPruneProcedure::new(topic_name.clone(), context, 10, None);
+
+                // Before any data in kvbackend is mocked, should return a retryable error.
+                let result = procedure.on_prepare().await;
+                assert_matches!(result, Err(e) if e.is_retryable());
+                let result = procedure.on_sending_flush_request().await;
+                assert_matches!(result, Err(e) if e.is_retryable());
+                let result = procedure.on_prune().await;
+                assert_matches!(result, Err(e) if e.is_retryable());
+
+                let (prunable_entry_id, regions_to_flush) = mock_test_data(&procedure).await;
 
                 // Step 1: Test `on_prepare`.
                 let status = procedure.on_prepare().await.unwrap();
