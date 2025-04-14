@@ -195,7 +195,7 @@ pub(crate) struct WalPruneManager {
     wal_prune_context: WalPruneContext,
     /// Trigger flush threshold for [WalPruneProcedure].
     /// If `None`, never send flush requests.
-    trigger_flush_threshold: Option<u64>,
+    trigger_flush_threshold: u64,
 }
 
 impl WalPruneManager {
@@ -206,7 +206,7 @@ impl WalPruneManager {
         receiver: Receiver<Event>,
         procedure_manager: ProcedureManagerRef,
         wal_prune_context: WalPruneContext,
-        trigger_flush_threshold: Option<u64>,
+        trigger_flush_threshold: u64,
     ) -> Self {
         Self {
             table_metadata_manager,
@@ -323,12 +323,11 @@ impl WalPruneManager {
     /// Since [WalPruneManager] submits procedures depending on the order of the topics, we should sort the topics.
     /// TODO(CookiePie): Can register topics in memory instead of retrieving from the table metadata manager every time.
     async fn retrieve_sorted_topics(&self) -> Result<Vec<String>> {
-        Ok(self
-            .table_metadata_manager
+        self.table_metadata_manager
             .topic_name_manager()
             .range()
             .await
-            .context(error::TableMetadataManagerSnafu)?)
+            .context(error::TableMetadataManagerSnafu)
     }
 }
 
@@ -395,7 +394,7 @@ mod test {
                 rx,
                 test_env.procedure_manager.clone(),
                 wal_prune_context,
-                None,
+                0,
             ),
         )
     }

@@ -34,14 +34,14 @@ pub struct MetasrvKafkaConfig {
     // Automatically create topics for WAL.
     pub auto_create_topics: bool,
     // Active WAL pruning.
-    pub active_prune: bool,
+    pub auto_prune_topic_records: bool,
     // Interval of WAL pruning.
-    pub active_prune_interval: Duration,
+    pub auto_prune_interval: Duration,
     // Threshold for sending flush request when pruning remote WAL.
     // `None` stands for never sending flush request.
-    pub trigger_flush_threshold: Option<u64>,
+    pub trigger_flush_threshold: u64,
     // Limit of concurrent active pruning procedures.
-    pub active_prune_task_limit: usize,
+    pub auto_prune_task_limit: usize,
 }
 
 impl Default for MetasrvKafkaConfig {
@@ -50,10 +50,10 @@ impl Default for MetasrvKafkaConfig {
             connection: Default::default(),
             kafka_topic: Default::default(),
             auto_create_topics: true,
-            active_prune: false,
-            active_prune_interval: DEFAULT_ACTIVE_PRUNE_INTERVAL,
+            auto_prune_topic_records: false,
+            auto_prune_interval: DEFAULT_ACTIVE_PRUNE_INTERVAL,
             trigger_flush_threshold: DEFAULT_TRIGGER_FLUSH_THRESHOLD,
-            active_prune_task_limit: DEFAULT_ACTIVE_PRUNE_TASK_LIMIT,
+            auto_prune_task_limit: DEFAULT_ACTIVE_PRUNE_TASK_LIMIT,
         }
     }
 }

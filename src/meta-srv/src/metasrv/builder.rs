@@ -365,7 +365,7 @@ impl MetasrvBuilder {
             };
             let wal_prune_manager = WalPruneManager::new(
                 table_metadata_manager.clone(),
-                remote_wal_options.active_prune_task_limit,
+                remote_wal_options.auto_prune_task_limit,
                 rx,
                 procedure_manager.clone(),
                 wal_prune_context,
@@ -374,7 +374,7 @@ impl MetasrvBuilder {
             // Start manager in background. Ticker will be started in the main thread to send ticks.
             wal_prune_manager.try_start().await?;
             let wal_prune_ticker = Arc::new(WalPruneTicker::new(
-                remote_wal_options.active_prune_interval,
+                remote_wal_options.auto_prune_interval,
                 tx.clone(),
             ));
             Some(wal_prune_ticker)

@@ -87,7 +87,7 @@ pub struct WalPruneData {
     pub regions_to_flush: Vec<RegionId>,
     /// If `prunable_entry_id` + `trigger_flush_threshold` < `max_prunable_entry_id`, send a flush request to the region.
     /// If `None`, never send flush requests.
-    pub trigger_flush_threshold: Option<u64>,
+    pub trigger_flush_threshold: u64,
     /// The state.
     pub state: WalPruneState,
 }
@@ -105,7 +105,7 @@ impl WalPruneProcedure {
     pub fn new(
         topic: String,
         context: Context,
-        trigger_flush_threshold: Option<u64>,
+        trigger_flush_threshold: u64,
         guard: Option<WalPruneProcedureGuard>,
     ) -> Self {
         Self {
@@ -241,9 +241,9 @@ impl WalPruneProcedure {
                 *max_prunable_entry_id
             }
         };
-        if let Some(threshold) = self.data.trigger_flush_threshold {
+        if self.data.trigger_flush_threshold != 0 {
             for (region_id, prunable_entry_id) in prunable_entry_ids_map {
-                if prunable_entry_id + threshold < max_prunable_entry_id {
+                if prunable_entry_id + self.data.trigger_flush_threshold < max_prunable_entry_id {
                     self.data.regions_to_flush.push(region_id);
                 }
             }
@@ -455,7 +455,7 @@ mod tests {
         )
         .await;
 
-        let wal_prune_procedure = WalPruneProcedure::new(topic, context, Some(threshold), None);
+        let wal_prune_procedure = WalPruneProcedure::new(topic, context, threshold, None);
         (wal_prune_procedure, prunable_entry_id, regions_to_flush)
     }
 
@@ -623,10 +623,7 @@ mod tests {
                     .await
                     .unwrap()
                     .unwrap();
-                assert_eq!(
-                    value.pruned_entry_id,
-                    procedure.data.prunable_entry_id
-                );
+                assert_eq!(value.pruned_entry_id, procedure.data.prunable_entry_id);
 
                 // Step 4: Test `on_prepare`, `check_heartbeat_collected_region_ids` fails.
                 // Should log a warning and return `Status::Done`.
@@ -635,13 +632,10 @@ mod tests {
                 assert_matches!(status, Status::Done { output: None });
 
                 // Step 5: Test `on_prepare`, don't flush regions.
-                procedure.data.trigger_flush_threshold = None;
+                procedure.data.trigger_flush_threshold = 0;
                 procedure.on_prepare().await.unwrap();
                 assert_matches!(procedure.data.state, WalPruneState::Prune);
-                assert_eq!(
-                    value.pruned_entry_id,
-                    procedure.data.prunable_entry_id
-                );
+                assert_eq!(value.pruned_entry_id, procedure.data.prunable_entry_id);
 
                 // Clean up the topic.
                 delete_topic(procedure.context.client, &topic_name).await;

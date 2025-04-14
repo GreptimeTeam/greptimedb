@@ -35,7 +35,7 @@ pub const DEFAULT_ACTIVE_PRUNE_INTERVAL: Duration = Duration::from_secs(60 * 5);
 /// Default limit for concurrent active pruning tasks.
 pub const DEFAULT_ACTIVE_PRUNE_TASK_LIMIT: usize = 10;
 /// Default interval for sending flush request to regions when pruning remote WAL.
-pub const DEFAULT_TRIGGER_FLUSH_THRESHOLD: Option<u64> = None;
+pub const DEFAULT_TRIGGER_FLUSH_THRESHOLD: u64 = 0;
 
 use crate::error::{self, Result};
 use crate::{TopicSelectorType, BROKER_ENDPOINT, TOPIC_NAME_PREFIX};

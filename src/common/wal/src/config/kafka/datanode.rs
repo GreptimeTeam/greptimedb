@@ -48,14 +48,14 @@ pub struct DatanodeKafkaConfig {
     /// Ignore missing entries during read WAL.
     pub overwrite_entry_start_id: bool,
     // Active WAL pruning.
-    pub active_prune: bool,
+    pub auto_prune_topic_records: bool,
     // Interval of WAL pruning.
-    pub active_prune_interval: Duration,
+    pub auto_prune_interval: Duration,
     // Threshold for sending flush request when pruning remote WAL.
     // `None` stands for never sending flush request.
-    pub trigger_flush_threshold: Option<u64>,
+    pub trigger_flush_threshold: u64,
     // Limit of concurrent active pruning procedures.
-    pub active_prune_task_limit: usize,
+    pub auto_prune_task_limit: usize,
 }
 
 impl Default for DatanodeKafkaConfig {
@@ -70,10 +70,10 @@ impl Default for DatanodeKafkaConfig {
             create_index: true,
             dump_index_interval: Duration::from_secs(60),
             overwrite_entry_start_id: false,
-            active_prune: false,
-            active_prune_interval: DEFAULT_ACTIVE_PRUNE_INTERVAL,
+            auto_prune_topic_records: false,
+            auto_prune_interval: DEFAULT_ACTIVE_PRUNE_INTERVAL,
             trigger_flush_threshold: DEFAULT_TRIGGER_FLUSH_THRESHOLD,
-            active_prune_task_limit: DEFAULT_ACTIVE_PRUNE_TASK_LIMIT,
+            auto_prune_task_limit: DEFAULT_ACTIVE_PRUNE_TASK_LIMIT,
         }
     }
 }
