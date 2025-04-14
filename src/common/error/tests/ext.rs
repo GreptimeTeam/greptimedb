@@ -87,15 +87,19 @@ fn test_to_string() {
 #[test]
 fn test_debug_format() {
     let result = normal_error();
+    let debug_output = format!("{:?}", result.unwrap_err());
+    let normalized_output = debug_output.replace('\\', "/");
     assert_eq!(
-        format!("{:?}", result.unwrap_err()),
+        normalized_output,
         r#"0: A normal error with "display" attribute, message "blabla", at src/common/error/tests/ext.rs:55:22
 1: PlainError { msg: "<root cause>", status_code: Unexpected }"#
     );
 
     let result = transparent_error();
+    let debug_output = format!("{:?}", result.unwrap_err());
+    let normalized_output = debug_output.replace('\\', "/");
     assert_eq!(
-        format!("{:?}", result.unwrap_err()),
+        normalized_output,
         r#"0: <transparent>, at src/common/error/tests/ext.rs:60:5
 1: PlainError { msg: "<root cause>", status_code: Unexpected }"#
     );
