@@ -74,24 +74,24 @@ Our core developers have been building observability data platforms for years. B
 
 * **Unified Processing of Observability Data**
 
- GreptimeDB unifies observability data processing by treating all data - whether metrics, logs, or traces - as timestamped wide events with context. Users can analyze this data using either [SQL](https://docs.greptime.com/user-guide/query-data/sql) or [PromQL](https://docs.greptime.com/user-guide/query-data/promql) and leverage stream processing ([Flow](https://docs.greptime.com/user-guide/flow-computation/overview)) to enable continuous aggregation. [Read more](https://docs.greptime.com/user-guide/concepts/data-model). It replaces complex legacy data stacks with a high-performance single solution.
+  GreptimeDB unifies observability data processing by treating all data - whether metrics, logs, or traces - as timestamped wide events with context. Users can analyze this data using either [SQL](https://docs.greptime.com/user-guide/query-data/sql) or [PromQL](https://docs.greptime.com/user-guide/query-data/promql) and leverage stream processing ([Flow](https://docs.greptime.com/user-guide/flow-computation/overview)) to enable continuous aggregation. It replaces complex legacy data stacks with a high-performance single solution.
 
 * **High Performance and Cost-effective**
 
- Written in pure Rust for superior performance and reliability. GreptimeDB features a distributed query engine with rich indexing technologies (inverted, fulltext, skip data, and vector) to accelerate queries, enabling sub-second responses on petabyte-scale datasets and handling hundreds of thousands of concurrent requests. 
-Its optimized columnar storage achieves 50x cost efficiency on cloud object storage through advanced compression. [Benchmark reports](https://www.greptime.com/blogs/2024-09-09-report-summary).
-  
+   Written in pure Rust for superior performance and reliability. GreptimeDB features a distributed query engine with [rich indexing](https://docs.greptime.com/user-guide/manage-data/data-index) technologies (inverted, fulltext, skip data, and vector) to accelerate queries, enabling sub-second responses on petabyte-scale datasets and handling hundreds of thousands of concurrent requests. 
+Its optimized columnar storage achieves 50x cost efficiency on cloud object storage through advanced compression. 
+
 * **Cloud-native Distributed Database**
 
   Built for [Kubernetes](https://docs.greptime.com/user-guide/deployments/deploy-on-kubernetes/greptimedb-operator-management). GreptimeDB achieves seamless scalability with its [cloud-native architecture](https://docs.greptime.com/user-guide/concepts/architecture) of separated compute and storage, built on object storage (AWS S3, Azure Blob Storage, etc.) while enabling cross-cloud deployment through a unified data access layer.
 
 * **Developer-Friendly, SQL & PromQL Ready**
 
-Access standardized SQL/PromQL interfaces through built-in web dashboard, REST API, and MySQL/PostgreSQL protocols. Supports widely adopted data ingestion [protocols](https://docs.greptime.com/user-guide/protocols/overview) for seamless migration and integration.
+  Access standardized SQL/PromQL interfaces through built-in web dashboard, REST API, and MySQL/PostgreSQL protocols. Supports widely adopted data ingestion [protocols](https://docs.greptime.com/user-guide/protocols/overview) for seamless migration and integration.
 
 * **Flexible Deployment Options**
 
-Deploy GreptimeDB anywhere from ARM-based edge devices to cloud environments with unified APIs and bandwidth-efficient data synchronization. Query edge and cloud data seamlessly through identical APIs. [Learn how to run on Android](https://docs.greptime.com/user-guide/deployments/run-on-android/).
+  Deploy GreptimeDB anywhere from ARM-based edge devices to cloud environments with unified APIs and bandwidth-efficient data synchronization. Query edge and cloud data seamlessly through identical APIs. [Learn how to run on Android](https://docs.greptime.com/user-guide/deployments/run-on-android/).
 
 For more detailed info please read  [Why GreptimeDB](https://docs.greptime.com/user-guide/concepts/why-greptimedb).
 
