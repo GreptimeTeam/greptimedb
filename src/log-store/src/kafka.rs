@@ -14,6 +14,7 @@
 
 pub(crate) mod client_manager;
 pub(crate) mod consumer;
+mod high_watermark_manager;
 pub(crate) mod index;
 pub mod log_store;
 pub(crate) mod producer;

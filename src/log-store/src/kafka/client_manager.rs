@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use common_wal::config::kafka::common::DEFAULT_BACKOFF_CONFIG;
 use common_wal::config::kafka::DatanodeKafkaConfig;
+use dashmap::DashMap;
 use rskafka::client::partition::{Compression, PartitionClient, UnknownTopicHandling};
 use rskafka::client::ClientBuilder;
 use snafu::ResultExt;
@@ -64,6 +65,9 @@ pub(crate) struct ClientManager {
 
     flush_batch_size: usize,
     compression: Compression,
+
+    /// High watermark for each topic.
+    high_watermark: Arc<DashMap<Arc<KafkaProvider>, u64>>,
 }
 
 impl ClientManager {
@@ -71,6 +75,7 @@ impl ClientManager {
     pub(crate) async fn try_new(
         config: &DatanodeKafkaConfig,
         global_index_collector: Option<GlobalIndexCollector>,
+        high_watermark: Arc<DashMap<Arc<KafkaProvider>, u64>>,
     ) -> Result<Self> {
         // Sets backoff config for the top-level kafka client and all clients constructed by it.
         let broker_endpoints = common_wal::resolve_to_ipv4(&config.connection.broker_endpoints)
@@ -96,6 +101,7 @@ impl ClientManager {
             flush_batch_size: config.max_batch_bytes.as_bytes() as usize,
             compression: Compression::Lz4,
             global_index_collector,
+            high_watermark,
         })
     }
 
@@ -159,6 +165,7 @@ impl ClientManager {
             self.compression,
             self.flush_batch_size,
             index_collector,
+            self.high_watermark.clone(),
         ));
 
         Ok(Client { client, producer })
@@ -223,7 +230,10 @@ mod tests {
             },
             ..Default::default()
         };
-        let manager = ClientManager::try_new(&config, None).await.unwrap();
+        let high_watermark = Arc::new(DashMap::new());
+        let manager = ClientManager::try_new(&config, None, high_watermark)
+            .await
+            .unwrap();
 
         (manager, topics)
     }

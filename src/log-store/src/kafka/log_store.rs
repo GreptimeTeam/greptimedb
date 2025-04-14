@@ -33,6 +33,7 @@ use store_api::storage::RegionId;
 use crate::error::{self, ConsumeRecordSnafu, Error, GetOffsetSnafu, InvalidProviderSnafu, Result};
 use crate::kafka::client_manager::{ClientManager, ClientManagerRef};
 use crate::kafka::consumer::{ConsumerBuilder, RecordsBuffer};
+use crate::kafka::high_watermark_manager::HighWatermarkManager;
 use crate::kafka::index::{
     build_region_wal_index_iterator, GlobalIndexCollector, MIN_BATCH_WINDOW_SIZE,
 };
@@ -41,6 +42,8 @@ use crate::kafka::util::record::{
     convert_to_kafka_records, maybe_emit_entry, remaining_entries, Record, ESTIMATED_META_SIZE,
 };
 use crate::metrics;
+
+const DEFAULT_HIGH_WATERMARK_UPDATE_INTERVAL: Duration = Duration::from_secs(60);
 
 /// A log store backed by Kafka.
 #[derive(Debug)]
@@ -53,8 +56,8 @@ pub struct KafkaLogStore {
     consumer_wait_timeout: Duration,
     /// Ignore missing entries during read WAL.
     overwrite_entry_start_id: bool,
-    /// High watermark offset of the last record in the topic.
-    high_watermark: DashMap<String, u64>,
+    /// High watermark offset of the last record for all topics.
+    high_watermark: Arc<DashMap<Arc<KafkaProvider>, u64>>,
 }
 
 impl KafkaLogStore {
@@ -63,15 +66,23 @@ impl KafkaLogStore {
         config: &DatanodeKafkaConfig,
         global_index_collector: Option<GlobalIndexCollector>,
     ) -> Result<Self> {
-        let client_manager =
-            Arc::new(ClientManager::try_new(config, global_index_collector).await?);
+        let high_watermark = Arc::new(DashMap::new());
+        let client_manager = Arc::new(
+            ClientManager::try_new(config, global_index_collector, high_watermark.clone()).await?,
+        );
+        let high_watermark_manager = HighWatermarkManager::new(
+            DEFAULT_HIGH_WATERMARK_UPDATE_INTERVAL,
+            high_watermark.clone(),
+            client_manager.clone(),
+        );
+        high_watermark_manager.run().await;
 
         Ok(Self {
             client_manager,
             max_batch_bytes: config.max_batch_bytes.as_bytes() as usize,
             consumer_wait_timeout: config.consumer_wait_timeout,
             overwrite_entry_start_id: config.overwrite_entry_start_id,
-            high_watermark: DashMap::new(),
+            high_watermark,
         })
     }
 }
@@ -209,7 +220,7 @@ impl LogStore for KafkaLogStore {
         for (region_id, offset) in &region_grouped_max_offset {
             // Safety: `region_id` is always valid.
             let provider = region_to_provider.get(region_id).unwrap();
-            self.high_watermark.insert(provider.topic.clone(), *offset);
+            self.high_watermark.insert(provider.clone(), *offset);
         }
 
         Ok(AppendBatchResponse {
@@ -407,7 +418,7 @@ impl LogStore for KafkaLogStore {
 
         let high_watermark = self
             .high_watermark
-            .get(&provider.topic)
+            .get(provider)
             .as_deref()
             .copied()
             .unwrap_or(0);

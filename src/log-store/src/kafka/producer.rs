@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use common_telemetry::warn;
+use dashmap::DashMap;
 use rskafka::client::partition::{Compression, OffsetAt, PartitionClient};
 use rskafka::record::Record;
 use store_api::logstore::provider::KafkaProvider;
@@ -56,6 +57,7 @@ impl OrderedBatchProducer {
         compression: Compression,
         max_batch_bytes: usize,
         index_collector: Box<dyn IndexCollector>,
+        high_watermark: Arc<DashMap<Arc<KafkaProvider>, u64>>,
     ) -> Self {
         let mut worker = BackgroundProducerWorker {
             provider,
@@ -65,6 +67,7 @@ impl OrderedBatchProducer {
             request_batch_size: REQUEST_BATCH_SIZE,
             max_batch_bytes,
             index_collector,
+            high_watermark,
         };
         tokio::spawn(async move { worker.run().await });
         Self { sender: tx }
@@ -89,6 +92,21 @@ impl OrderedBatchProducer {
         }
 
         Ok(handle)
+    }
+
+    /// Send an [WorkerRequest::UpdateHighWatermark] request to the producer.
+    /// This is used to update the high watermark for the topic.
+    pub(crate) async fn update_high_watermark(&self) -> Result<()> {
+        if self
+            .sender
+            .send(WorkerRequest::UpdateHighWatermark)
+            .await
+            .is_err()
+        {
+            warn!("OrderedBatchProducer is already exited");
+            return error::OrderedBatchProducerStoppedSnafu {}.fail();
+        }
+        Ok(())
     }
 }
 
@@ -224,6 +242,7 @@ mod tests {
             Compression::NoCompression,
             ReadableSize((record.approximate_size() * 2) as u64).as_bytes() as usize,
             Box::new(NoopCollector),
+            Arc::new(DashMap::new()),
         );
 
         let region_id = RegionId::new(1, 1);
@@ -272,6 +291,7 @@ mod tests {
             Compression::NoCompression,
             ReadableSize((record.approximate_size() * 2) as u64).as_bytes() as usize,
             Box::new(NoopCollector),
+            Arc::new(DashMap::new()),
         );
 
         let region_id = RegionId::new(1, 1);
@@ -324,6 +344,7 @@ mod tests {
             Compression::NoCompression,
             ReadableSize((record.approximate_size() * 2) as u64).as_bytes() as usize,
             Box::new(NoopCollector),
+            Arc::new(DashMap::new()),
         );
 
         let region_id = RegionId::new(1, 1);

@@ -15,10 +15,12 @@
 pub(crate) mod dump_index;
 pub(crate) mod flush;
 pub(crate) mod produce;
+pub(crate) mod update_high_watermark;
 
 use std::sync::Arc;
 
 use common_telemetry::debug;
+use dashmap::DashMap;
 use futures::future::try_join_all;
 use rskafka::client::partition::Compression;
 use rskafka::record::Record;
@@ -37,6 +39,7 @@ pub(crate) enum WorkerRequest {
     Produce(ProduceRequest),
     TruncateIndex(TruncateIndexRequest),
     DumpIndex(DumpIndexRequest),
+    UpdateHighWatermark,
 }
 
 impl WorkerRequest {
@@ -157,6 +160,8 @@ pub(crate) struct BackgroundProducerWorker {
     pub(crate) max_batch_bytes: usize,
     /// Collecting ids of WAL entries.
     pub(crate) index_collector: Box<dyn IndexCollector>,
+    /// High watermark for all topics.
+    pub(crate) high_watermark: Arc<DashMap<Arc<KafkaProvider>, u64>>,
 }
 
 impl BackgroundProducerWorker {
@@ -194,6 +199,9 @@ impl BackgroundProducerWorker {
                     entry_id,
                 }) => self.index_collector.truncate(region_id, entry_id),
                 WorkerRequest::DumpIndex(req) => self.dump_index(req).await,
+                WorkerRequest::UpdateHighWatermark => {
+                    self.update_high_watermark().await;
+                }
             }
         }
 
