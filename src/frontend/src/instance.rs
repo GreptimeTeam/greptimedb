@@ -30,6 +30,7 @@ use std::time::SystemTime;
 
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
+use catalog::process_manager::ProcessManager;
 use catalog::CatalogManagerRef;
 use client::OutputData;
 use common_base::Plugins;
@@ -96,6 +97,8 @@ pub struct Instance {
     table_metadata_manager: TableMetadataManagerRef,
     stats: StatementStatistics,
     limiter: Option<LimiterRef>,
+    #[allow(dead_code)]
+    process_manager: Option<Arc<ProcessManager>>,
 }
 
 impl Instance {

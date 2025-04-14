@@ -19,6 +19,7 @@ use async_trait::async_trait;
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
 use catalog::information_extension::DistributedInformationExtension;
 use catalog::kvbackend::{CachedKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
+use catalog::process_manager::ProcessManager;
 use clap::Parser;
 use client::client_manager::NodeClients;
 use common_base::Plugins;
@@ -331,11 +332,17 @@ impl StartCommand {
 
         let information_extension =
             Arc::new(DistributedInformationExtension::new(meta_client.clone()));
+
+        let process_manager = Arc::new(
+            ProcessManager::new(opts.grpc.server_addr.clone(), cached_meta_backend.clone())
+                .context(error::BuildProcessManagerSnafu)?,
+        );
         let catalog_manager = KvBackendCatalogManager::new(
             information_extension,
             cached_meta_backend.clone(),
             layered_cache_registry.clone(),
             None,
+            Some(process_manager.clone()),
         );
 
         let executor = HandlerGroupExecutor::new(vec![
@@ -369,6 +376,7 @@ impl StartCommand {
             Arc::new(client),
             meta_client,
             StatementStatistics::new(opts.logging.slow_query.clone()),
+            Some(process_manager),
         )
         .with_plugin(plugins.clone())
         .with_local_cache_invalidator(layered_cache_registry)

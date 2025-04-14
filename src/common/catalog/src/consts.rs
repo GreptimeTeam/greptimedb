@@ -102,6 +102,8 @@ pub const INFORMATION_SCHEMA_FLOW_TABLE_ID: u32 = 33;
 pub const INFORMATION_SCHEMA_PROCEDURE_INFO_TABLE_ID: u32 = 34;
 /// id for information_schema.region_statistics
 pub const INFORMATION_SCHEMA_REGION_STATISTICS_TABLE_ID: u32 = 35;
+/// id for information_schema.process_list
+pub const INFORMATION_SCHEMA_PROCESS_LIST_TABLE_ID: u32 = 36;
 
 // ----- End of information_schema tables -----
 

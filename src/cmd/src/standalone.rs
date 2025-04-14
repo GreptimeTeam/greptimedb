@@ -20,6 +20,7 @@ use async_trait::async_trait;
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
 use catalog::information_schema::InformationExtension;
 use catalog::kvbackend::KvBackendCatalogManager;
+use catalog::process_manager::ProcessManager;
 use clap::Parser;
 use client::api::v1::meta::RegionRole;
 use common_base::readable_size::ReadableSize;
@@ -508,11 +509,17 @@ impl StartCommand {
             datanode.region_server(),
             procedure_manager.clone(),
         ));
+
+        let process_manager = Arc::new(
+            ProcessManager::new(opts.grpc.server_addr.clone(), kv_backend.clone())
+                .context(error::BuildProcessManagerSnafu)?,
+        );
         let catalog_manager = KvBackendCatalogManager::new(
             information_extension.clone(),
             kv_backend.clone(),
             layered_cache_registry.clone(),
             Some(procedure_manager.clone()),
+            Some(process_manager.clone()),
         );
 
         let table_metadata_manager =
@@ -593,6 +600,7 @@ impl StartCommand {
             node_manager.clone(),
             ddl_task_executor.clone(),
             StatementStatistics::new(opts.logging.slow_query.clone()),
+            Some(process_manager),
         )
         .with_plugin(plugins.clone())
         .try_build()

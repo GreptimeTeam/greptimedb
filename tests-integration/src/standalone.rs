@@ -172,6 +172,7 @@ impl GreptimeDbStandaloneBuilder {
             kv_backend.clone(),
             cache_registry.clone(),
             Some(procedure_manager.clone()),
+            None,
         );
 
         let flow_builder = FlownodeBuilder::new(
@@ -240,6 +241,7 @@ impl GreptimeDbStandaloneBuilder {
             node_manager.clone(),
             ddl_task_executor.clone(),
             StatementStatistics::default(),
+            None,
         )
         .with_plugin(plugins)
         .try_build()

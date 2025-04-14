@@ -40,6 +40,7 @@ pub mod information_schema {
     pub use crate::system_schema::information_schema::*;
 }
 
+pub mod process_manager;
 pub mod table_source;
 
 #[async_trait::async_trait]
