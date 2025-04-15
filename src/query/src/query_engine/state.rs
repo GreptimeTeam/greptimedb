@@ -52,6 +52,7 @@ use crate::optimizer::pass_distribution::PassDistribution;
 use crate::optimizer::remove_duplicate::RemoveDuplicate;
 use crate::optimizer::scan_hint::ScanHintRule;
 use crate::optimizer::string_normalization::StringNormalizationRule;
+use crate::optimizer::transcribe_atat::TranscribeAtatRule;
 use crate::optimizer::type_conversion::TypeConversionRule;
 use crate::optimizer::windowed_sort::WindowedSortPhysicalRule;
 use crate::optimizer::ExtensionAnalyzerRule;
@@ -115,6 +116,7 @@ impl QueryEngineState {
 
         // Apply the datafusion rules
         let mut analyzer = Analyzer::new();
+        analyzer.rules.insert(0, Arc::new(TranscribeAtatRule));
         analyzer.rules.insert(0, Arc::new(StringNormalizationRule));
 
         // Use our custom rule instead to optimize the count(*) query
