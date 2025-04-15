@@ -537,8 +537,8 @@ impl fmt::Display for FulltextOptions {
 #[serde(rename_all = "kebab-case")]
 pub enum FulltextBackend {
     #[default]
+    Bloom,
     Tantivy,
-    Bloom, // TODO(zhongzc): when bloom is ready, use it as default
 }
 
 impl fmt::Display for FulltextBackend {

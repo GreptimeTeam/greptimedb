@@ -799,6 +799,14 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to create partition rules"))]
+    CreatePartitionRules {
+        #[snafu(source)]
+        source: sql::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -840,7 +848,8 @@ impl ErrorExt for Error {
             | Error::PhysicalExpr { .. }
             | Error::InvalidJsonFormat { .. }
             | Error::CursorNotFound { .. }
-            | Error::CursorExists { .. } => StatusCode::InvalidArguments,
+            | Error::CursorExists { .. }
+            | Error::CreatePartitionRules { .. } => StatusCode::InvalidArguments,
 
             Error::TableAlreadyExists { .. } | Error::ViewAlreadyExists { .. } => {
                 StatusCode::TableAlreadyExists
