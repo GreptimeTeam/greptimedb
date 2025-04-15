@@ -902,12 +902,13 @@ impl RegionServerInner {
                 RegionChange::Register(attribute)
             }
             RegionRequest::Close(_) | RegionRequest::Drop(_) => RegionChange::Deregisters,
-            RegionRequest::Put(_) | RegionRequest::Delete(_) => RegionChange::Ingest,
+            RegionRequest::Put(_) | RegionRequest::Delete(_) | RegionRequest::BulkInserts(_) => {
+                RegionChange::Ingest
+            }
             RegionRequest::Alter(_)
             | RegionRequest::Flush(_)
             | RegionRequest::Compact(_)
-            | RegionRequest::Truncate(_)
-            | RegionRequest::BulkInserts(_) => RegionChange::None,
+            | RegionRequest::Truncate(_) => RegionChange::None,
             RegionRequest::Catchup(_) => RegionChange::Catchup,
         };
 
