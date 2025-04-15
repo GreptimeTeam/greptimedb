@@ -1183,7 +1183,7 @@ impl ErrorExt for Error {
             ManualCompactionOverride {} => StatusCode::Cancelled,
 
             IncompatibleWalProviderChange { .. } => StatusCode::InvalidArguments,
-            Error::ConvertDataType { .. } => StatusCode::Internal,
+            ConvertDataType { .. } => StatusCode::Internal,
         }
     }
 

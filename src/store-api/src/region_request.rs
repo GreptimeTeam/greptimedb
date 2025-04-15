@@ -44,9 +44,9 @@ use strum::{AsRefStr, IntoStaticStr};
 
 use crate::logstore::entry;
 use crate::metadata::{
-    ColumnMetadata, DecodeProtoSnafu, InvalidRawRegionRequestSnafu, InvalidRegionRequestSnafu,
-    InvalidSetRegionOptionRequestSnafu, InvalidUnsetRegionOptionRequestSnafu, MetadataError,
-    RegionMetadata, Result,
+    ColumnMetadata, DecodeArrowIpcSnafu, DecodeProtoSnafu, InvalidRawRegionRequestSnafu,
+    InvalidRegionRequestSnafu, InvalidSetRegionOptionRequestSnafu,
+    InvalidUnsetRegionOptionRequestSnafu, MetadataError, RegionMetadata, Result,
 };
 use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use crate::mito_engine_options::{
@@ -334,11 +334,12 @@ fn make_region_bulk_inserts(
         match req.r#type() {
             api::v1::region::BulkInsertType::ArrowIpc => {
                 // todo(hl): use StreamReader instead
-                let reader = FileReader::try_new(Cursor::new(req.body), None).unwrap();
+                let reader = FileReader::try_new(Cursor::new(req.body), None)
+                    .context(DecodeArrowIpcSnafu)?;
                 let record_batches = reader
                     .map(|b| b.map(BulkInsertPayload::ArrowIpc))
                     .try_collect::<Vec<_>>()
-                    .unwrap();
+                    .context(DecodeArrowIpcSnafu)?;
                 match region_requests.entry(region_id) {
                     Entry::Occupied(mut e) => {
                         e.get_mut().extend(record_batches);

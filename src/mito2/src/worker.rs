@@ -54,6 +54,7 @@ use crate::cache::write_cache::{WriteCache, WriteCacheRef};
 use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::CompactionScheduler;
 use crate::config::MitoConfig;
+use crate::error;
 use crate::error::{CreateDirSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::memtable::MemtableBuilderProvider;
@@ -837,7 +838,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         self.handle_bulk_inserts(request, region_metadata, write_requests, sender)
                             .await;
                     } else {
-                        // todo(hl): region metadata not found while receiving request.
+                        error!("Cannot find region metadata for {}", request.region_id);
+                        sender.send(
+                            error::RegionNotFoundSnafu {
+                                region_id: request.region_id,
+                            }
+                            .fail(),
+                        );
                     }
                 }
             }

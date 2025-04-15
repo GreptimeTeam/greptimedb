@@ -27,6 +27,7 @@ use api::v1::SemanticType;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use datatypes::arrow;
 use datatypes::arrow::datatypes::FieldRef;
 use datatypes::schema::{ColumnSchema, FulltextOptions, Schema, SchemaRef, SkippingIndexOptions};
 use serde::de::Error;
@@ -954,6 +955,14 @@ pub enum MetadataError {
     UnsetSkippingIndexOptions {
         column_name: String,
         source: datatypes::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to decode arrow ipc record batches"))]
+    DecodeArrowIpc {
+        #[snafu(source)]
+        error: arrow::error::ArrowError,
         #[snafu(implicit)]
         location: Location,
     },
