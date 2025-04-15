@@ -1,0 +1,201 @@
+-- Test basic term matching
+-- Expect: true
+SELECT 'cat!' @@ 'cat' as result;
+
+Error: 3001(EngineExecuteQuery), This feature is not implemented: Binary operator 'AtAt' is not supported in the physical expr
+
+-- Test phrase matching with spaces
+-- Expect: true
+SELECT 'warning:hello world!' @@ 'hello world' as result;
+
+Error: 3001(EngineExecuteQuery), This feature is not implemented: Binary operator 'AtAt' is not supported in the physical expr
+
+-- Test numbers in term
+SELECT 'v1.0!' @@ 'v1.0' as result;
+
+Error: 3001(EngineExecuteQuery), This feature is not implemented: Binary operator 'AtAt' is not supported in the physical expr
+
+-- Test case sensitivity
+-- Expect: true
+SELECT 'Cat' @@ 'Cat' as result;
+
+Error: 3001(EngineExecuteQuery), This feature is not implemented: Binary operator 'AtAt' is not supported in the physical expr
+
+-- Expect: false
+SELECT 'cat' @@ 'Cat' as result;
+
+Error: 3001(EngineExecuteQuery), This feature is not implemented: Binary operator 'AtAt' is not supported in the physical expr
+
+-- Test empty string handling
+-- Expect: true
+SELECT '' @@ '' as result;
+
+Error: 3001(EngineExecuteQuery), This feature is not implemented: Binary operator 'AtAt' is not supported in the physical expr
+
+-- Expect: false
+SELECT 'any' @@ '' as result;
+
+Error: 3001(EngineExecuteQuery), This feature is not implemented: Binary operator 'AtAt' is not supported in the physical expr
+
+-- Expect: false
+SELECT '' @@ 'any' as result;
+
+Error: 3001(EngineExecuteQuery), This feature is not implemented: Binary operator 'AtAt' is not supported in the physical expr
+
+-- Test partial matches (should fail)
+-- Expect: false
+SELECT 'category' @@ 'cat' as result;
+
+Error: 3001(EngineExecuteQuery), This feature is not implemented: Binary operator 'AtAt' is not supported in the physical expr
+
+-- Expect: false
+SELECT 'rebooted' @@ 'boot' as result;
+
+Error: 3001(EngineExecuteQuery), This feature is not implemented: Binary operator 'AtAt' is not supported in the physical expr
+
+-- Test adjacent alphanumeric characters
+SELECT 'cat5' @@ 'cat' as result;
+
+Error: 3001(EngineExecuteQuery), This feature is not implemented: Binary operator 'AtAt' is not supported in the physical expr
+
+SELECT 'dogcat' @@ 'dog' as result;
+
+Error: 3001(EngineExecuteQuery), This feature is not implemented: Binary operator 'AtAt' is not supported in the physical expr
+
+-- Test leading non-alphanumeric
+-- Expect: true
+SELECT 'dog/cat' @@ '/cat' as result;
+
+Error: 3001(EngineExecuteQuery), This feature is not implemented: Binary operator 'AtAt' is not supported in the physical expr
+
+-- Expect: true
+SELECT 'dog/cat' @@ 'dog/' as result;
+
+Error: 3001(EngineExecuteQuery), This feature is not implemented: Binary operator 'AtAt' is not supported in the physical expr
+
+-- Expect: true
+SELECT 'dog/cat' @@ 'dog/cat' as result;
+
+Error: 3001(EngineExecuteQuery), This feature is not implemented: Binary operator 'AtAt' is not supported in the physical expr
+
+-- Test unicode characters
+-- Expect: true
+SELECT 'café>' @@ 'café' as result;
+
+Error: 3001(EngineExecuteQuery), This feature is not implemented: Binary operator 'AtAt' is not supported in the physical expr
+
+-- Expect: true
+SELECT 'русский!' @@ 'русский' as result;
+
+Error: 3001(EngineExecuteQuery), This feature is not implemented: Binary operator 'AtAt' is not supported in the physical expr
+
+-- Test complete word matching
+CREATE TABLE logs (
+    `id` TIMESTAMP TIME INDEX,
+    `log_message` STRING
+);
+
+Affected Rows: 0
+
+INSERT INTO logs VALUES
+    (1, 'An error occurred!'),
+    (2, 'Critical error: system failure'),
+    (3, 'error-prone'),
+    (4, 'errors'),
+    (5, 'error123'),
+    (6, 'errorLogs'),
+    (7, 'Version v1.0 released'),
+    (8, 'v1.0!'),
+    (9, 'v1.0a'),
+    (10, 'v1.0beta'),
+    (11, 'GET /app/start'),
+    (12, 'Command: /start-prosess'),
+    (13, 'Command: /start'),
+    (14, 'start'),
+    (15, 'start/stop'),
+    (16, 'Alert: system failure detected'),
+    (17, 'system failure!'),
+    (18, 'system-failure'),
+    (19, 'system failure2023'),
+    (20, 'critical error: system failure'),
+    (21, 'critical failure detected'),
+    (22, 'critical issue'),
+    (23, 'failure imminent'),
+    (24, 'Warning: high temperature'),
+    (25, 'WARNING: system overload'),
+    (26, 'warned'),
+    (27, 'warnings');
+
+Affected Rows: 27
+
+-- Test complete word matching for 'error'
+-- Expect:
+-- 1|An error occurred!|true
+-- 2|Critical error: system failure|true
+-- 3|error-prone|true
+-- 4|errors|false
+-- 5|error123|false
+-- 6|errorLogs|false
+SELECT `id`, `log_message`, `log_message` @@ 'error' as `matches_error` FROM logs WHERE `id` <= 6 ORDER BY `id`;
+
+Error: 3001(EngineExecuteQuery), Failed to decode DataFusion plan: This feature is not implemented: Unsupported function name: "at_at"
+
+-- Test complete word matching for 'v1.0'
+-- Expect:
+-- 7|Version v1.0 released|true
+-- 8|v1.0!|true
+-- 9|v1.0a|false
+-- 10|v1.0beta|false
+SELECT `id`, `log_message`, `log_message` @@ 'v1.0' as `matches_version` FROM logs WHERE `id` BETWEEN 7 AND 10 ORDER BY `id`;
+
+Error: 3001(EngineExecuteQuery), Failed to decode DataFusion plan: This feature is not implemented: Unsupported function name: "at_at"
+
+-- Test complete word matching for '/start'
+-- Expect:
+-- 11|GET /app/start|true
+-- 12|Command: /start-prosess|true
+-- 13|Command: /start|true
+-- 14|start|false
+-- 15|start/stop|false
+SELECT `id`, `log_message`, `log_message` @@ '/start' as `matches_start` FROM logs WHERE `id` BETWEEN 11 AND 15 ORDER BY `id`;
+
+Error: 3001(EngineExecuteQuery), Failed to decode DataFusion plan: This feature is not implemented: Unsupported function name: "at_at"
+
+-- Test phrase matching for 'system failure'
+-- Expect:
+-- 16|Alert: system failure detected|true
+-- 17|system failure!|true
+-- 18|system-failure|false
+-- 19|system failure2023|false
+SELECT `id`, `log_message`, `log_message` @@ 'system failure' as `matches_phrase` FROM logs WHERE `id` BETWEEN 16 AND 19 ORDER BY `id`;
+
+Error: 3001(EngineExecuteQuery), Failed to decode DataFusion plan: This feature is not implemented: Unsupported function name: "at_at"
+
+-- Test multi-word matching using AND
+-- Expect:
+-- 20|critical error: system failure|true|true|true
+-- 21|critical failure detected|true|true|true
+-- 22|critical issue|true|false|false
+-- 23|failure imminent|false|true|false
+SELECT `id`, `log_message`, 
+       `log_message` @@ 'critical' as `matches_critical`,
+       `log_message` @@ 'failure' as `matches_failure`,
+       `log_message` @@ 'critical' AND `log_message` @@ 'failure' as `matches_both`
+FROM logs WHERE `id` BETWEEN 20 AND 23 ORDER BY `id`;
+
+Error: 3001(EngineExecuteQuery), Failed to decode DataFusion plan: This feature is not implemented: Unsupported function name: "at_at"
+
+-- Test case-insensitive matching using lower()
+-- Expect:
+-- 24|Warning: high temperature|true
+-- 25|WARNING: system overload|true
+-- 26|warned|false
+-- 27|warnings|false
+SELECT `id`, `log_message`, lower(`log_message`) @@ 'warning' as `matches_warning` FROM logs WHERE `id` >= 24 ORDER BY `id`;
+
+Error: 3001(EngineExecuteQuery), Failed to decode DataFusion plan: This feature is not implemented: Unsupported function name: "at_at"
+
+DROP TABLE logs;
+
+Affected Rows: 0
+
