@@ -221,6 +221,10 @@ impl RegionEngine for MetricEngine {
                 }
             }
             RegionRequest::Catchup(req) => self.inner.catchup_region(region_id, req).await,
+            RegionRequest::BulkInserts(_) => {
+                // todo(hl): find a way to support bulk inserts in metric engine.
+                UnsupportedRegionRequestSnafu { request }.fail()
+            }
         };
 
         result.map_err(BoxedError::new).map(|rows| RegionResponse {

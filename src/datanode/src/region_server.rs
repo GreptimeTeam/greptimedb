@@ -902,7 +902,9 @@ impl RegionServerInner {
                 RegionChange::Register(attribute)
             }
             RegionRequest::Close(_) | RegionRequest::Drop(_) => RegionChange::Deregisters,
-            RegionRequest::Put(_) | RegionRequest::Delete(_) => RegionChange::Ingest,
+            RegionRequest::Put(_) | RegionRequest::Delete(_) | RegionRequest::BulkInserts(_) => {
+                RegionChange::Ingest
+            }
             RegionRequest::Alter(_)
             | RegionRequest::Flush(_)
             | RegionRequest::Compact(_)
