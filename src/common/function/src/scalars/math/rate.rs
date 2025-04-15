@@ -37,7 +37,7 @@ impl fmt::Display for RateFunction {
 
 impl Function for RateFunction {
     fn name(&self) -> &str {
-        "prom_rate"
+        "rate"
     }
 
     fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
