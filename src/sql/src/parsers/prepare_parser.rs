@@ -26,7 +26,7 @@ impl ParserContext<'_> {
         self.parser
             .expect_keyword(Keyword::PREPARE)
             .context(SyntaxSnafu)?;
-        let stmt_name = self.parser.parse_identifier(false).context(SyntaxSnafu)?;
+        let stmt_name = self.parser.parse_identifier().context(SyntaxSnafu)?;
         self.parser
             .expect_keyword(Keyword::FROM)
             .context(SyntaxSnafu)?;

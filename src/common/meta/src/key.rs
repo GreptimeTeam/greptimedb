@@ -57,7 +57,10 @@
 //!     - This key is mainly used in constructing the view in Datanode and Frontend.
 //!
 //! 12. Kafka topic key: `__topic_name/kafka/{topic_name}`
-//!     - The key is used to mark existing topics in kafka for WAL.
+//!     - The key is used to track existing topics in Kafka.
+//!     - The value is a [TopicNameValue](crate::key::topic_name::TopicNameValue) struct; it contains the `pruned_entry_id` which represents
+//!       the highest entry id that has been pruned from the remote WAL.
+//!     - When a region uses this topic, it should start replaying entries from `pruned_entry_id + 1` (minimum available entry id).
 //!
 //! 13. Topic name to region map key `__topic_region/{topic_name}/{region_id}`
 //!     - Mapping {topic_name} to {region_id}
@@ -137,6 +140,7 @@ use table::metadata::{RawTableInfo, TableId};
 use table::table_name::TableName;
 use table_info::{TableInfoKey, TableInfoManager, TableInfoValue};
 use table_name::{TableNameKey, TableNameManager, TableNameValue};
+use topic_name::TopicNameManager;
 use topic_region::{TopicRegionKey, TopicRegionManager};
 use view_info::{ViewInfoKey, ViewInfoManager, ViewInfoValue};
 
@@ -156,6 +160,7 @@ use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::router::{region_distribution, LeaderState, RegionRoute};
 use crate::rpc::store::BatchDeleteRequest;
+use crate::state_store::PoisonValue;
 use crate::DatanodeId;
 
 pub const NAME_PATTERN: &str = r"[a-zA-Z_:-][a-zA-Z0-9_:\-\.@#]*";
@@ -308,6 +313,7 @@ pub struct TableMetadataManager {
     schema_manager: SchemaManager,
     table_route_manager: TableRouteManager,
     tombstone_manager: TombstoneManager,
+    topic_name_manager: TopicNameManager,
     topic_region_manager: TopicRegionManager,
     kv_backend: KvBackendRef,
 }
@@ -459,6 +465,7 @@ impl TableMetadataManager {
             schema_manager: SchemaManager::new(kv_backend.clone()),
             table_route_manager: TableRouteManager::new(kv_backend.clone()),
             tombstone_manager: TombstoneManager::new(kv_backend.clone()),
+            topic_name_manager: TopicNameManager::new(kv_backend.clone()),
             topic_region_manager: TopicRegionManager::new(kv_backend.clone()),
             kv_backend,
         }
@@ -510,6 +517,14 @@ impl TableMetadataManager {
 
     pub fn table_route_manager(&self) -> &TableRouteManager {
         &self.table_route_manager
+    }
+
+    pub fn topic_name_manager(&self) -> &TopicNameManager {
+        &self.topic_name_manager
+    }
+
+    pub fn topic_region_manager(&self) -> &TopicRegionManager {
+        &self.topic_region_manager
     }
 
     #[cfg(feature = "testing")]
@@ -1320,7 +1335,8 @@ impl_metadata_value! {
     TableFlowValue,
     NodeAddressValue,
     SchemaNameValue,
-    FlowStateValue
+    FlowStateValue,
+    PoisonValue
 }
 
 impl_optional_metadata_value! {

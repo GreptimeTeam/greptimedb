@@ -6,7 +6,7 @@
   </picture>
 </p>
 
-<h2 align="center">Unified & Cost-Effective Observerability Database for Metrics, Logs, and Events</h2>
+<h2 align="center">Unified & Cost-Effective Observability  Database for Metrics, Logs, and Events</h2>
 
 <div align="center">
 <h3 align="center">
@@ -62,35 +62,35 @@
 
 ## Introduction
 
-**GreptimeDB** is an open-source unified & cost-effective observerability database for **Metrics**, **Logs**, and **Events** (also **Traces** in plan). You can gain real-time insights from Edge to Cloud at Any Scale.
+**GreptimeDB** is an open-source, cloud-native, unified & cost-effective observability database for **Metrics**, **Logs**, and **Traces**. You can gain real-time insights from Edge to Cloud at Any Scale.
 
 ## News
 
-**[GreptimeDB archives 1 billion cold run #1 in JSONBench!](https://greptime.com/blogs/2025-03-18-jsonbench-greptimedb-performance)**
+**[GreptimeDB tops JSONBench's billion-record cold run test!](https://greptime.com/blogs/2025-03-18-jsonbench-greptimedb-performance)**
 
 ## Why GreptimeDB
 
-Our core developers have been building observerability data platforms for years. Based on our best practices, GreptimeDB was born to give you:
+Our core developers have been building observability data platforms for years. Based on our best practices, GreptimeDB was born to give you:
 
-* **Unified Processing of Metrics, Logs, and Events**
+* **Unified Processing of Observability Data**
 
-  GreptimeDB unifies observerability data processing by treating all data - whether metrics, logs, or events - as timestamped events with context. Users can analyze this data using either [SQL](https://docs.greptime.com/user-guide/query-data/sql) or [PromQL](https://docs.greptime.com/user-guide/query-data/promql) and leverage stream processing ([Flow](https://docs.greptime.com/user-guide/flow-computation/overview)) to enable continuous aggregation. [Read more](https://docs.greptime.com/user-guide/concepts/data-model).
+  A unified database that treats metrics, logs, and traces as timestamped wide events with context, supporting [SQL](https://docs.greptime.com/user-guide/query-data/sql)/[PromQL](https://docs.greptime.com/user-guide/query-data/promql) queries and [stream processing](https://docs.greptime.com/user-guide/flow-computation/overview) to simplify complex data stacks.
+
+* **High Performance and Cost-effective**
+
+   Written in Rust, combines a distributed query engine with [rich indexing](https://docs.greptime.com/user-guide/manage-data/data-index) (inverted, fulltext, skip data, and vector) and optimized columnar storage to deliver sub-second responses on petabyte-scale data and high-cost efficiency.
 
 * **Cloud-native Distributed Database**
 
   Built for [Kubernetes](https://docs.greptime.com/user-guide/deployments/deploy-on-kubernetes/greptimedb-operator-management). GreptimeDB achieves seamless scalability with its [cloud-native architecture](https://docs.greptime.com/user-guide/concepts/architecture) of separated compute and storage, built on object storage (AWS S3, Azure Blob Storage, etc.) while enabling cross-cloud deployment through a unified data access layer.
 
-* **Performance and Cost-effective**
+* **Developer-Friendly**
 
-  Written in pure Rust for superior performance and reliability. GreptimeDB features a distributed query engine with intelligent indexing to handle high cardinality data efficiently. Its optimized columnar storage achieves 50x cost efficiency on cloud object storage through advanced compression. [Benchmark reports](https://www.greptime.com/blogs/2024-09-09-report-summary).
+  Access standardized SQL/PromQL interfaces through built-in web dashboard, REST API, and MySQL/PostgreSQL protocols. Supports widely adopted data ingestion [protocols](https://docs.greptime.com/user-guide/protocols/overview) for seamless migration and integration.
 
-* **Cloud-Edge Collaboration**
+* **Flexible Deployment Options**
 
-  GreptimeDB seamlessly operates across cloud and edge (ARM/Android/Linux), providing consistent APIs and control plane for unified data management and efficient synchronization. [Learn how to run on Android](https://docs.greptime.com/user-guide/deployments/run-on-android/).
-
-* **Multi-protocol Ingestion, SQL & PromQL Ready**
-
-  Widely adopted database protocols and APIs, including MySQL, PostgreSQL, InfluxDB, OpenTelemetry, Loki and Prometheus, etc.  Effortless Adoption & Seamless Migration. [Supported Protocols Overview](https://docs.greptime.com/user-guide/protocols/overview).
+  Deploy GreptimeDB anywhere from ARM-based edge devices to cloud environments with unified APIs and bandwidth-efficient data synchronization. Query edge and cloud data seamlessly through identical APIs. [Learn how to run on Android](https://docs.greptime.com/user-guide/deployments/run-on-android/).
 
 For more detailed info please read  [Why GreptimeDB](https://docs.greptime.com/user-guide/concepts/why-greptimedb).
 
@@ -233,3 +233,5 @@ Special thanks to all the contributors who have propelled GreptimeDB forward. Fo
 - GreptimeDB's query engine is powered by [Apache Arrow DataFusion™](https://arrow.apache.org/datafusion/).
 - [Apache OpenDAL™](https://opendal.apache.org) gives GreptimeDB a very general and elegant data access abstraction layer.
 - GreptimeDB's meta service is based on [etcd](https://etcd.io/).
+
+<img alt="Known Users" src="https://greptime.com/logo/img/users.png"/>

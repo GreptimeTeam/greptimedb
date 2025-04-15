@@ -145,7 +145,7 @@ impl MetricEngineInner {
             let _write_guard = self
                 .metadata_region
                 .write_lock_logical_region(*region_id)
-                .await;
+                .await?;
             write_guards.insert(*region_id, _write_guard);
         }
 
@@ -234,7 +234,6 @@ mod test {
         // alter physical region
         let physical_region_id = env.default_physical_region_id();
         let request = RegionAlterRequest {
-            schema_version: 0,
             kind: AlterKind::AddColumns {
                 columns: vec![AddColumn {
                     column_metadata: ColumnMetadata {
@@ -262,7 +261,6 @@ mod test {
 
         // alter physical region's option should work
         let alter_region_option_request = RegionAlterRequest {
-            schema_version: 0,
             kind: AlterKind::SetRegionOptions {
                 options: vec![SetRegionOption::Ttl(Some(Duration::from_secs(500).into()))],
             },

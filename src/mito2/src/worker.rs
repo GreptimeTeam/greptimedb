@@ -41,7 +41,9 @@ use prometheus::IntGauge;
 use rand::{rng, Rng};
 use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
-use store_api::region_engine::{SetRegionRoleStateResponse, SettableRegionRoleState};
+use store_api::region_engine::{
+    SetRegionRoleStateResponse, SetRegionRoleStateSuccess, SettableRegionRoleState,
+};
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
@@ -824,6 +826,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 WorkerRequest::Stop => {
                     debug_assert!(!self.running.load(Ordering::Relaxed));
                 }
+
+                WorkerRequest::SyncRegion(req) => {
+                    self.handle_region_sync(req).await;
+                }
             }
         }
 
@@ -927,7 +933,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 region.set_role_state_gracefully(region_role_state).await;
 
                 let last_entry_id = region.version_control.current().last_entry_id;
-                let _ = sender.send(SetRegionRoleStateResponse::success(Some(last_entry_id)));
+                let _ = sender.send(SetRegionRoleStateResponse::success(
+                    SetRegionRoleStateSuccess::mito(last_entry_id),
+                ));
             });
         } else {
             let _ = sender.send(SetRegionRoleStateResponse::NotFound);

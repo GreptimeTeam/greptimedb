@@ -19,7 +19,9 @@ use common_error::define_into_tonic_status;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use session::ReadPreference;
 use snafu::{Location, Snafu};
+use store_api::storage::RegionId;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -126,13 +128,6 @@ pub enum Error {
         source: catalog::error::Error,
     },
 
-    #[snafu(display("Failed to start Meta client"))]
-    StartMetaClient {
-        #[snafu(implicit)]
-        location: Location,
-        source: meta_client::error::Error,
-    },
-
     #[snafu(display("Failed to create heartbeat stream to Metasrv"))]
     CreateMetaHeartbeatStream {
         source: meta_client::error::Error,
@@ -140,9 +135,14 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to find table route for table id {}", table_id))]
-    FindTableRoute {
-        table_id: u32,
+    #[snafu(display(
+        "Failed to find region peer for region id {}, read preference: {}",
+        region_id,
+        read_preference
+    ))]
+    FindRegionPeer {
+        region_id: RegionId,
+        read_preference: ReadPreference,
         #[snafu(implicit)]
         location: Location,
         source: partition::error::Error,
@@ -340,6 +340,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to decode logical plan from substrait"))]
+    SubstraitDecodeLogicalPlan {
+        #[snafu(implicit)]
+        location: Location,
+        source: substrait::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -373,6 +380,8 @@ impl ErrorExt for Error {
             | Error::PrometheusMetricNamesQueryPlan { source, .. }
             | Error::ExecutePromql { source, .. } => source.status_code(),
 
+            Error::SubstraitDecodeLogicalPlan { source, .. } => source.status_code(),
+
             Error::PrometheusLabelValuesQueryPlan { source, .. } => source.status_code(),
 
             Error::CollectRecordbatch { .. } => StatusCode::EngineExecuteQuery,
@@ -399,8 +408,7 @@ impl ErrorExt for Error {
 
             Error::Catalog { source, .. } => source.status_code(),
 
-            Error::StartMetaClient { source, .. }
-            | Error::CreateMetaHeartbeatStream { source, .. } => source.status_code(),
+            Error::CreateMetaHeartbeatStream { source, .. } => source.status_code(),
 
             Error::PlanStatement { source, .. }
             | Error::ReadTable { source, .. }
@@ -410,7 +418,7 @@ impl ErrorExt for Error {
             Error::External { source, .. } | Error::InitPlugin { source, .. } => {
                 source.status_code()
             }
-            Error::FindTableRoute { source, .. } => source.status_code(),
+            Error::FindRegionPeer { source, .. } => source.status_code(),
 
             Error::TableOperation { source, .. } => source.status_code(),
 

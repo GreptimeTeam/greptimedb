@@ -46,6 +46,8 @@ pub(crate) const TYPE_INVERTED_INDEX: &str = "inverted_index";
 pub(crate) const TYPE_FULLTEXT_INDEX: &str = "fulltext_index";
 pub(crate) const TYPE_BLOOM_FILTER_INDEX: &str = "bloom_filter_index";
 
+const DEFAULT_FULLTEXT_BLOOM_ROW_GRANULARITY: usize = 8096;
+
 /// Output of the index creation.
 #[derive(Debug, Clone, Default)]
 pub struct IndexOutput {
@@ -292,6 +294,7 @@ impl IndexerBuilderImpl {
             &self.intermediate_manager,
             &self.metadata,
             self.fulltext_index_config.compress,
+            DEFAULT_FULLTEXT_BLOOM_ROW_GRANULARITY,
             mem_limit,
         )
         .await;

@@ -20,6 +20,7 @@ pub(crate) mod producer;
 pub(crate) mod util;
 pub(crate) mod worker;
 
+pub use client_manager::DEFAULT_PARTITION;
 pub use index::{default_index_file, GlobalIndexCollector};
 use serde::{Deserialize, Serialize};
 use store_api::logstore::entry::Id as EntryId;

@@ -28,6 +28,7 @@ use collect_cluster_info_handler::{
     CollectDatanodeClusterInfoHandler, CollectFlownodeClusterInfoHandler,
     CollectFrontendClusterInfoHandler,
 };
+use collect_leader_region_handler::CollectLeaderRegionHandler;
 use collect_stats_handler::CollectStatsHandler;
 use common_base::Plugins;
 use common_meta::datanode::Stat;
@@ -62,6 +63,7 @@ use crate::service::mailbox::{
 
 pub mod check_leader_handler;
 pub mod collect_cluster_info_handler;
+pub mod collect_leader_region_handler;
 pub mod collect_stats_handler;
 pub mod extract_stat_handler;
 pub mod failure_handler;
@@ -96,7 +98,7 @@ pub trait HeartbeatHandler: Send + Sync {
 /// HandleControl
 ///
 /// Controls process of handling heartbeat request.
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 pub enum HandleControl {
     Continue,
     Done,
@@ -331,7 +333,7 @@ pub struct HeartbeatMailbox {
 }
 
 impl HeartbeatMailbox {
-    pub(crate) fn json_reply(msg: &MailboxMessage) -> Result<InstructionReply> {
+    pub fn json_reply(msg: &MailboxMessage) -> Result<InstructionReply> {
         let Payload::Json(payload) =
             msg.payload
                 .as_ref()
@@ -442,12 +444,24 @@ impl Mailbox for HeartbeatMailbox {
         let (tx, rx) = oneshot::channel();
         let _ = self.senders.insert(message_id, tx);
         let deadline = Instant::now() + timeout;
-        let _ = self.timeouts.insert(message_id, deadline);
+        self.timeouts.insert(message_id, deadline);
         self.timeout_notify.notify_one();
 
         self.pushers.push(pusher_id, msg).await?;
 
         Ok(MailboxReceiver::new(message_id, rx, *ch))
+    }
+
+    async fn send_oneway(&self, ch: &Channel, mut msg: MailboxMessage) -> Result<()> {
+        let message_id = 0; // one-way message, same as `broadcast`
+        msg.id = message_id;
+
+        let pusher_id = ch.pusher_id();
+        debug!("Sending mailbox message {msg:?} to {pusher_id}");
+
+        self.pushers.push(pusher_id, msg).await?;
+
+        Ok(())
     }
 
     async fn broadcast(&self, ch: &BroadcastChannel, msg: &MailboxMessage) -> Result<()> {
@@ -570,6 +584,7 @@ impl HeartbeatHandlerGroupBuilder {
         if let Some(publish_heartbeat_handler) = publish_heartbeat_handler {
             self.add_handler_last(publish_heartbeat_handler);
         }
+        self.add_handler_last(CollectLeaderRegionHandler);
         self.add_handler_last(CollectStatsHandler::new(self.flush_stats_factor));
         self.add_handler_last(RemapFlowPeerHandler::default());
 
@@ -848,7 +863,7 @@ mod tests {
             .unwrap();
 
         let handlers = group.handlers;
-        assert_eq!(13, handlers.len());
+        assert_eq!(14, handlers.len());
 
         let names = [
             "ResponseHeaderHandler",
@@ -862,6 +877,7 @@ mod tests {
             "CollectFlownodeClusterInfoHandler",
             "MailboxHandler",
             "FilterInactiveRegionStatsHandler",
+            "CollectLeaderRegionHandler",
             "CollectStatsHandler",
             "RemapFlowPeerHandler",
         ];
@@ -884,7 +900,7 @@ mod tests {
 
         let group = builder.build().unwrap();
         let handlers = group.handlers;
-        assert_eq!(14, handlers.len());
+        assert_eq!(15, handlers.len());
 
         let names = [
             "ResponseHeaderHandler",
@@ -899,6 +915,7 @@ mod tests {
             "MailboxHandler",
             "CollectStatsHandler",
             "FilterInactiveRegionStatsHandler",
+            "CollectLeaderRegionHandler",
             "CollectStatsHandler",
             "RemapFlowPeerHandler",
         ];
@@ -918,7 +935,7 @@ mod tests {
 
         let group = builder.build().unwrap();
         let handlers = group.handlers;
-        assert_eq!(14, handlers.len());
+        assert_eq!(15, handlers.len());
 
         let names = [
             "CollectStatsHandler",
@@ -933,6 +950,7 @@ mod tests {
             "CollectFlownodeClusterInfoHandler",
             "MailboxHandler",
             "FilterInactiveRegionStatsHandler",
+            "CollectLeaderRegionHandler",
             "CollectStatsHandler",
             "RemapFlowPeerHandler",
         ];
@@ -952,7 +970,7 @@ mod tests {
 
         let group = builder.build().unwrap();
         let handlers = group.handlers;
-        assert_eq!(14, handlers.len());
+        assert_eq!(15, handlers.len());
 
         let names = [
             "ResponseHeaderHandler",
@@ -967,6 +985,7 @@ mod tests {
             "MailboxHandler",
             "CollectStatsHandler",
             "FilterInactiveRegionStatsHandler",
+            "CollectLeaderRegionHandler",
             "CollectStatsHandler",
             "RemapFlowPeerHandler",
         ];
@@ -986,7 +1005,7 @@ mod tests {
 
         let group = builder.build().unwrap();
         let handlers = group.handlers;
-        assert_eq!(14, handlers.len());
+        assert_eq!(15, handlers.len());
 
         let names = [
             "ResponseHeaderHandler",
@@ -1000,6 +1019,7 @@ mod tests {
             "CollectFlownodeClusterInfoHandler",
             "MailboxHandler",
             "FilterInactiveRegionStatsHandler",
+            "CollectLeaderRegionHandler",
             "CollectStatsHandler",
             "ResponseHeaderHandler",
             "RemapFlowPeerHandler",
@@ -1020,7 +1040,7 @@ mod tests {
 
         let group = builder.build().unwrap();
         let handlers = group.handlers;
-        assert_eq!(13, handlers.len());
+        assert_eq!(14, handlers.len());
 
         let names = [
             "ResponseHeaderHandler",
@@ -1034,6 +1054,7 @@ mod tests {
             "CollectFlownodeClusterInfoHandler",
             "CollectStatsHandler",
             "FilterInactiveRegionStatsHandler",
+            "CollectLeaderRegionHandler",
             "CollectStatsHandler",
             "RemapFlowPeerHandler",
         ];
@@ -1053,7 +1074,7 @@ mod tests {
 
         let group = builder.build().unwrap();
         let handlers = group.handlers;
-        assert_eq!(13, handlers.len());
+        assert_eq!(14, handlers.len());
 
         let names = [
             "ResponseHeaderHandler",
@@ -1067,6 +1088,7 @@ mod tests {
             "CollectFlownodeClusterInfoHandler",
             "MailboxHandler",
             "FilterInactiveRegionStatsHandler",
+            "CollectLeaderRegionHandler",
             "ResponseHeaderHandler",
             "RemapFlowPeerHandler",
         ];
@@ -1086,7 +1108,7 @@ mod tests {
 
         let group = builder.build().unwrap();
         let handlers = group.handlers;
-        assert_eq!(13, handlers.len());
+        assert_eq!(14, handlers.len());
 
         let names = [
             "CollectStatsHandler",
@@ -1100,6 +1122,7 @@ mod tests {
             "CollectFlownodeClusterInfoHandler",
             "MailboxHandler",
             "FilterInactiveRegionStatsHandler",
+            "CollectLeaderRegionHandler",
             "CollectStatsHandler",
             "RemapFlowPeerHandler",
         ];

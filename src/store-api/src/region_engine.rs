@@ -26,6 +26,7 @@ use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
 use common_recordbatch::SendableRecordBatchStream;
 use common_time::Timestamp;
+use datafusion_physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion_physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::schema::SchemaRef;
 use futures::future::join_all;
@@ -46,6 +47,15 @@ pub enum SettableRegionRoleState {
     DowngradingLeader,
 }
 
+impl Display for SettableRegionRoleState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SettableRegionRoleState::Follower => write!(f, "Follower"),
+            SettableRegionRoleState::DowngradingLeader => write!(f, "Leader(Downgrading)"),
+        }
+    }
+}
+
 impl From<SettableRegionRoleState> for RegionRole {
     fn from(value: SettableRegionRoleState) -> Self {
         match value {
@@ -62,27 +72,86 @@ pub struct SetRegionRoleStateRequest {
     region_role_state: SettableRegionRoleState,
 }
 
+/// The success response of setting region role state.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SetRegionRoleStateSuccess {
+    File,
+    Mito {
+        last_entry_id: entry::Id,
+    },
+    Metric {
+        last_entry_id: entry::Id,
+        metadata_last_entry_id: entry::Id,
+    },
+}
+
+impl SetRegionRoleStateSuccess {
+    /// Returns a [SetRegionRoleStateSuccess::File].
+    pub fn file() -> Self {
+        Self::File
+    }
+
+    /// Returns a [SetRegionRoleStateSuccess::Mito] with the `last_entry_id`.
+    pub fn mito(last_entry_id: entry::Id) -> Self {
+        SetRegionRoleStateSuccess::Mito { last_entry_id }
+    }
+
+    /// Returns a [SetRegionRoleStateSuccess::Metric] with the `last_entry_id` and `metadata_last_entry_id`.
+    pub fn metric(last_entry_id: entry::Id, metadata_last_entry_id: entry::Id) -> Self {
+        SetRegionRoleStateSuccess::Metric {
+            last_entry_id,
+            metadata_last_entry_id,
+        }
+    }
+}
+
+impl SetRegionRoleStateSuccess {
+    /// Returns the last entry id of the region.
+    pub fn last_entry_id(&self) -> Option<entry::Id> {
+        match self {
+            SetRegionRoleStateSuccess::File => None,
+            SetRegionRoleStateSuccess::Mito { last_entry_id } => Some(*last_entry_id),
+            SetRegionRoleStateSuccess::Metric { last_entry_id, .. } => Some(*last_entry_id),
+        }
+    }
+
+    /// Returns the last entry id of the metadata of the region.
+    pub fn metadata_last_entry_id(&self) -> Option<entry::Id> {
+        match self {
+            SetRegionRoleStateSuccess::File => None,
+            SetRegionRoleStateSuccess::Mito { .. } => None,
+            SetRegionRoleStateSuccess::Metric {
+                metadata_last_entry_id,
+                ..
+            } => Some(*metadata_last_entry_id),
+        }
+    }
+}
+
 /// The response of setting region role state.
 #[derive(Debug, PartialEq, Eq)]
 pub enum SetRegionRoleStateResponse {
-    Success {
-        /// Returns `last_entry_id` of the region if available(e.g., It's not available in file engine).
-        last_entry_id: Option<entry::Id>,
-    },
+    Success(SetRegionRoleStateSuccess),
     NotFound,
 }
 
 impl SetRegionRoleStateResponse {
-    /// Returns a [SetRegionRoleStateResponse::Success] with the `last_entry_id`.
-    pub fn success(last_entry_id: Option<entry::Id>) -> Self {
-        Self::Success { last_entry_id }
+    /// Returns a [SetRegionRoleStateResponse::Success] with the `File` success.
+    pub fn success(success: SetRegionRoleStateSuccess) -> Self {
+        Self::Success(success)
+    }
+
+    /// Returns true if the response is a [SetRegionRoleStateResponse::NotFound].
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, SetRegionRoleStateResponse::NotFound)
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrantedRegion {
     pub region_id: RegionId,
     pub region_role: RegionRole,
+    pub extensions: HashMap<String, Vec<u8>>,
 }
 
 impl GrantedRegion {
@@ -90,6 +159,7 @@ impl GrantedRegion {
         Self {
             region_id,
             region_role,
+            extensions: HashMap::new(),
         }
     }
 }
@@ -99,6 +169,7 @@ impl From<GrantedRegion> for PbGrantedRegion {
         PbGrantedRegion {
             region_id: value.region_id.as_u64(),
             role: PbRegionRole::from(value.region_role).into(),
+            extensions: value.extensions,
         }
     }
 }
@@ -108,6 +179,7 @@ impl From<PbGrantedRegion> for GrantedRegion {
         GrantedRegion {
             region_id: RegionId::from_u64(value.region_id),
             region_role: value.role().into(),
+            extensions: value.extensions,
         }
     }
 }
@@ -342,7 +414,11 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
     ///
     /// # Panics
     /// Panics if the `partition` is out of bound.
-    fn scan_partition(&self, partition: usize) -> Result<SendableRecordBatchStream, BoxedError>;
+    fn scan_partition(
+        &self,
+        metrics_set: &ExecutionPlanMetricsSet,
+        partition: usize,
+    ) -> Result<SendableRecordBatchStream, BoxedError>;
 
     /// Check if there is any predicate that may be executed in this scanner.
     fn has_predicate(&self) -> bool;
@@ -372,6 +448,116 @@ pub struct RegionStatistic {
     /// The size of SST index files in bytes.
     #[serde(default)]
     pub index_size: u64,
+    /// The details of the region.
+    #[serde(default)]
+    pub manifest: RegionManifestInfo,
+}
+
+/// The manifest info of a region.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RegionManifestInfo {
+    Mito {
+        manifest_version: u64,
+        flushed_entry_id: u64,
+    },
+    Metric {
+        data_manifest_version: u64,
+        data_flushed_entry_id: u64,
+        metadata_manifest_version: u64,
+        metadata_flushed_entry_id: u64,
+    },
+}
+
+impl RegionManifestInfo {
+    /// Creates a new [RegionManifestInfo] for mito2 engine.
+    pub fn mito(manifest_version: u64, flushed_entry_id: u64) -> Self {
+        Self::Mito {
+            manifest_version,
+            flushed_entry_id,
+        }
+    }
+
+    /// Creates a new [RegionManifestInfo] for metric engine.
+    pub fn metric(
+        data_manifest_version: u64,
+        data_flushed_entry_id: u64,
+        metadata_manifest_version: u64,
+        metadata_flushed_entry_id: u64,
+    ) -> Self {
+        Self::Metric {
+            data_manifest_version,
+            data_flushed_entry_id,
+            metadata_manifest_version,
+            metadata_flushed_entry_id,
+        }
+    }
+
+    /// Returns true if the region is a mito2 region.
+    pub fn is_mito(&self) -> bool {
+        matches!(self, RegionManifestInfo::Mito { .. })
+    }
+
+    /// Returns true if the region is a metric region.
+    pub fn is_metric(&self) -> bool {
+        matches!(self, RegionManifestInfo::Metric { .. })
+    }
+
+    /// Returns the flushed entry id of the data region.
+    pub fn data_flushed_entry_id(&self) -> u64 {
+        match self {
+            RegionManifestInfo::Mito {
+                flushed_entry_id, ..
+            } => *flushed_entry_id,
+            RegionManifestInfo::Metric {
+                data_flushed_entry_id,
+                ..
+            } => *data_flushed_entry_id,
+        }
+    }
+
+    /// Returns the manifest version of the data region.
+    pub fn data_manifest_version(&self) -> u64 {
+        match self {
+            RegionManifestInfo::Mito {
+                manifest_version, ..
+            } => *manifest_version,
+            RegionManifestInfo::Metric {
+                data_manifest_version,
+                ..
+            } => *data_manifest_version,
+        }
+    }
+
+    /// Returns the manifest version of the metadata region.
+    pub fn metadata_manifest_version(&self) -> Option<u64> {
+        match self {
+            RegionManifestInfo::Mito { .. } => None,
+            RegionManifestInfo::Metric {
+                metadata_manifest_version,
+                ..
+            } => Some(*metadata_manifest_version),
+        }
+    }
+
+    /// Returns the flushed entry id of the metadata region.
+    pub fn metadata_flushed_entry_id(&self) -> Option<u64> {
+        match self {
+            RegionManifestInfo::Mito { .. } => None,
+            RegionManifestInfo::Metric {
+                metadata_flushed_entry_id,
+                ..
+            } => Some(*metadata_flushed_entry_id),
+        }
+    }
+}
+
+impl Default for RegionManifestInfo {
+    fn default() -> Self {
+        Self::Mito {
+            manifest_version: 0,
+            flushed_entry_id: 0,
+        }
+    }
 }
 
 impl RegionStatistic {
@@ -394,6 +580,62 @@ impl RegionStatistic {
     /// Returns the estimated disk size of the region.
     pub fn estimated_disk_size(&self) -> u64 {
         self.wal_size + self.sst_size + self.manifest_size + self.index_size
+    }
+}
+
+/// The response of syncing the manifest.
+#[derive(Debug)]
+pub enum SyncManifestResponse {
+    NotSupported,
+    Mito {
+        /// Indicates if the data region was synced.
+        synced: bool,
+    },
+    Metric {
+        /// Indicates if the metadata region was synced.
+        metadata_synced: bool,
+        /// Indicates if the data region was synced.
+        data_synced: bool,
+        /// The logical regions that were newly opened during the sync operation.
+        /// This only occurs after the metadata region has been successfully synced.
+        new_opened_logical_region_ids: Vec<RegionId>,
+    },
+}
+
+impl SyncManifestResponse {
+    /// Returns true if data region is synced.
+    pub fn is_data_synced(&self) -> bool {
+        match self {
+            SyncManifestResponse::NotSupported => false,
+            SyncManifestResponse::Mito { synced } => *synced,
+            SyncManifestResponse::Metric { data_synced, .. } => *data_synced,
+        }
+    }
+
+    /// Returns true if the engine is supported the sync operation.
+    pub fn is_supported(&self) -> bool {
+        matches!(self, SyncManifestResponse::NotSupported)
+    }
+
+    /// Returns true if the engine is a mito2 engine.
+    pub fn is_mito(&self) -> bool {
+        matches!(self, SyncManifestResponse::Mito { .. })
+    }
+
+    /// Returns true if the engine is a metric engine.
+    pub fn is_metric(&self) -> bool {
+        matches!(self, SyncManifestResponse::Metric { .. })
+    }
+
+    /// Returns the new opened logical region ids.
+    pub fn new_opened_logical_region_ids(self) -> Option<Vec<RegionId>> {
+        match self {
+            SyncManifestResponse::Metric {
+                new_opened_logical_region_ids,
+                ..
+            } => Some(new_opened_logical_region_ids),
+            _ => None,
+        }
     }
 }
 
@@ -498,6 +740,13 @@ pub trait RegionEngine: Send + Sync {
     /// take effect.
     fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<(), BoxedError>;
 
+    /// Syncs the region manifest to the given manifest version.
+    async fn sync_region(
+        &self,
+        region_id: RegionId,
+        manifest_info: RegionManifestInfo,
+    ) -> Result<SyncManifestResponse, BoxedError>;
+
     /// Sets region role state gracefully.
     ///
     /// After the call returns, the engine ensures no more write operations will succeed in the region.
@@ -562,7 +811,11 @@ impl RegionScanner for SinglePartitionScanner {
         Ok(())
     }
 
-    fn scan_partition(&self, _partition: usize) -> Result<SendableRecordBatchStream, BoxedError> {
+    fn scan_partition(
+        &self,
+        _metrics_set: &ExecutionPlanMetricsSet,
+        _partition: usize,
+    ) -> Result<SendableRecordBatchStream, BoxedError> {
         let mut stream = self.stream.lock().unwrap();
         stream.take().ok_or_else(|| {
             BoxedError::new(PlainError::new(

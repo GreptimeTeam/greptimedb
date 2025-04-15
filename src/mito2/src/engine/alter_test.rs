@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::assert_matches::assert_matches;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,10 +20,9 @@ use std::time::Duration;
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, Row, Rows, SemanticType};
 use common_error::ext::ErrorExt;
-use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, FulltextAnalyzer, FulltextOptions};
+use datatypes::schema::{ColumnSchema, FulltextAnalyzer, FulltextBackend, FulltextOptions};
 use store_api::metadata::ColumnMetadata;
 use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{
@@ -34,6 +34,7 @@ use store_api::storage::{RegionId, ScanRequest};
 use crate::config::MitoConfig;
 use crate::engine::listener::{AlterFlushListener, NotifyRegionChangeResultListener};
 use crate::engine::MitoEngine;
+use crate::error;
 use crate::test_util::{
     build_rows, build_rows_for_key, flush_region, put_rows, rows_schema, CreateRequestBuilder,
     TestEnv,
@@ -51,7 +52,6 @@ async fn scan_check_after_alter(engine: &MitoEngine, region_id: RegionId, expect
 
 fn add_tag1() -> RegionAlterRequest {
     RegionAlterRequest {
-        schema_version: 0,
         kind: AlterKind::AddColumns {
             columns: vec![AddColumn {
                 column_metadata: ColumnMetadata {
@@ -71,7 +71,6 @@ fn add_tag1() -> RegionAlterRequest {
 
 fn alter_column_inverted_index() -> RegionAlterRequest {
     RegionAlterRequest {
-        schema_version: 0,
         kind: AlterKind::SetIndex {
             options: ApiSetIndexOptions::Inverted {
                 column_name: "tag_0".to_string(),
@@ -82,7 +81,6 @@ fn alter_column_inverted_index() -> RegionAlterRequest {
 
 fn alter_column_fulltext_options() -> RegionAlterRequest {
     RegionAlterRequest {
-        schema_version: 0,
         kind: AlterKind::SetIndex {
             options: ApiSetIndexOptions::Fulltext {
                 column_name: "tag_0".to_string(),
@@ -90,6 +88,7 @@ fn alter_column_fulltext_options() -> RegionAlterRequest {
                     enable: true,
                     analyzer: FulltextAnalyzer::English,
                     case_sensitive: false,
+                    backend: FulltextBackend::Bloom,
                 },
             },
         },
@@ -357,7 +356,8 @@ async fn test_alter_region_retry() {
         .handle_request(region_id, RegionRequest::Alter(request))
         .await
         .unwrap_err();
-    assert_eq!(err.status_code(), StatusCode::RequestOutdated);
+    let err = err.as_any().downcast_ref::<error::Error>().unwrap();
+    assert_matches!(err, &error::Error::InvalidRegionRequest { .. });
 
     let expected = "\
 +-------+-------+---------+---------------------+
@@ -557,6 +557,7 @@ async fn test_alter_column_fulltext_options() {
         enable: true,
         analyzer: FulltextAnalyzer::English,
         case_sensitive: false,
+        backend: FulltextBackend::Bloom,
     };
     let check_fulltext_options = |engine: &MitoEngine, expected: &FulltextOptions| {
         let current_fulltext_options = engine
@@ -731,7 +732,6 @@ async fn test_alter_region_ttl_options() {
         .unwrap();
     let engine_cloned = engine.clone();
     let alter_ttl_request = RegionAlterRequest {
-        schema_version: 0,
         kind: AlterKind::SetRegionOptions {
             options: vec![SetRegionOption::Ttl(Some(Duration::from_secs(500).into()))],
         },

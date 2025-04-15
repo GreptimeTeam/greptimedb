@@ -69,6 +69,41 @@ SELECT DISTINCT CASE WHEN a > 11 THEN 11 ELSE a END FROM test;
 | 11                                                          |
 +-------------------------------------------------------------+
 
+SELECT DISTINCT ON (a) * FROM test ORDER BY a, t DESC;
+
++----+----+-------------------------+
+| a  | b  | t                       |
++----+----+-------------------------+
+| 11 | 22 | 1970-01-01T00:00:00.004 |
+| 13 | 22 | 1970-01-01T00:00:00.002 |
++----+----+-------------------------+
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE SELECT DISTINCT a FROM test ORDER BY a;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_SortPreservingMergeExec: [a@0 ASC NULLS LAST] REDACTED
+|_|_|_SortExec: expr=[a@0 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a], aggr=[] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[a@0 as a], aggr=[] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges) REDACTED
+|_|_|_|
+|_|_| Total rows: 2_|
++-+-+-+
+
 DROP TABLE test;
 
 Affected Rows: 0

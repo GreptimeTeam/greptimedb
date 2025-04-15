@@ -139,7 +139,7 @@ fn build_struct(
                     Self::name(),
                     Self::input_type(),
                     Self::return_type(),
-                    Volatility::Immutable,
+                    Volatility::Volatile,
                     Arc::new(Self::calc) as _,
                 )
             }

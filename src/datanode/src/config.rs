@@ -26,12 +26,12 @@ use file_engine::config::EngineConfig as FileEngineConfig;
 use meta_client::MetaClientOptions;
 use metric_engine::config::EngineConfig as MetricEngineConfig;
 use mito2::config::MitoConfig;
+use query::options::QueryOptions;
 use serde::{Deserialize, Serialize};
 use servers::export_metrics::ExportMetricsOption;
 use servers::grpc::GrpcOptions;
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
-use servers::Mode;
 
 pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize::gb(5);
 
@@ -359,7 +359,6 @@ impl Default for ObjectStoreConfig {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct DatanodeOptions {
-    pub mode: Mode,
     pub node_id: Option<u64>,
     pub require_lease_before_startup: bool,
     pub init_regions_in_background: bool,
@@ -377,6 +376,7 @@ pub struct DatanodeOptions {
     pub enable_telemetry: bool,
     pub export_metrics: ExportMetricsOption,
     pub tracing: TracingOptions,
+    pub query: QueryOptions,
 
     /// Deprecated options, please use the new options instead.
     #[deprecated(note = "Please use `grpc.addr` instead.")]
@@ -395,7 +395,6 @@ impl Default for DatanodeOptions {
     #[allow(deprecated)]
     fn default() -> Self {
         Self {
-            mode: Mode::Standalone,
             node_id: None,
             require_lease_before_startup: false,
             init_regions_in_background: false,
@@ -415,6 +414,7 @@ impl Default for DatanodeOptions {
             enable_telemetry: true,
             export_metrics: ExportMetricsOption::default(),
             tracing: TracingOptions::default(),
+            query: QueryOptions::default(),
 
             // Deprecated options
             rpc_addr: None,

@@ -118,6 +118,7 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
     #[snafu(display("Mito delete operation fails"))]
     MitoDeleteOperation {
         source: BoxedError,
@@ -127,6 +128,13 @@ pub enum Error {
 
     #[snafu(display("Mito catchup operation fails"))]
     MitoCatchupOperation {
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Mito sync operation fails"))]
+    MitoSyncOperation {
         source: BoxedError,
         #[snafu(implicit)]
         location: Location,
@@ -259,6 +267,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Expected metric manifest info, region: {}", region_id))]
+    MetricManifestInfo {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -304,11 +319,14 @@ impl ErrorExt for Error {
             | MitoWriteOperation { source, .. }
             | MitoCatchupOperation { source, .. }
             | MitoFlushOperation { source, .. }
-            | MitoDeleteOperation { source, .. } => source.status_code(),
+            | MitoDeleteOperation { source, .. }
+            | MitoSyncOperation { source, .. } => source.status_code(),
 
             EncodePrimaryKey { source, .. } => source.status_code(),
 
             CollectRecordBatchStream { source, .. } => source.status_code(),
+
+            MetricManifestInfo { .. } => StatusCode::Internal,
         }
     }
 

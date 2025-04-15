@@ -191,6 +191,7 @@ impl GreptimeDbClusterBuilder {
                 max_retry_times: 5,
                 retry_delay: Duration::from_secs(1),
                 max_metadata_value_size: None,
+                max_running_procedures: 128,
             },
             wal: self.metasrv_wal_config.clone(),
             server_addr: "127.0.0.1:3002".to_string(),
@@ -250,7 +251,6 @@ impl GreptimeDbClusterBuilder {
 
         for i in 0..datanodes {
             let datanode_id = i as u64 + 1;
-            let mode = Mode::Distributed;
             let mut opts = if let Some(store_config) = &self.store_config {
                 let home_dir = if let Some(home_dir) = &self.shared_home_dir {
                     home_dir.path().to_str().unwrap().to_string()
@@ -263,7 +263,6 @@ impl GreptimeDbClusterBuilder {
                 };
 
                 create_datanode_opts(
-                    mode,
                     store_config.clone(),
                     vec![],
                     home_dir,
@@ -271,7 +270,6 @@ impl GreptimeDbClusterBuilder {
                 )
             } else {
                 let (opts, guard) = create_tmp_dir_and_datanode_opts(
-                    mode,
                     StorageType::File,
                     self.store_providers.clone().unwrap_or_default(),
                     &format!("{}-dn-{}", self.cluster_name, datanode_id),
@@ -344,7 +342,7 @@ impl GreptimeDbClusterBuilder {
                 .build(),
         );
 
-        let mut datanode = DatanodeBuilder::new(opts, Plugins::default())
+        let mut datanode = DatanodeBuilder::new(opts, Plugins::default(), Mode::Distributed)
             .with_kv_backend(meta_backend)
             .with_cache_registry(layered_cache_registry)
             .with_meta_client(meta_client)

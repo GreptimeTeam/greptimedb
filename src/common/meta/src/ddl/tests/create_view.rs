@@ -153,7 +153,13 @@ async fn test_on_prepare_without_create_if_table_exists() {
     task.create_view.create_if_not_exists = true;
     let mut procedure = CreateViewProcedure::new(task, ddl_context);
     let status = procedure.on_prepare().await.unwrap();
-    assert_matches!(status, Status::Executing { persist: true });
+    assert_matches!(
+        status,
+        Status::Executing {
+            persist: true,
+            clean_poisons: false
+        }
+    );
     assert_eq!(procedure.view_id(), 1024);
 }
 

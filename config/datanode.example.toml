@@ -1,6 +1,3 @@
-## The running mode of the datanode. It can be `standalone` or `distributed`.
-mode = "standalone"
-
 ## The datanode identifier and should be unique in the cluster.
 ## @toml2docs:none-default
 node_id = 42
@@ -169,22 +166,6 @@ max_batch_bytes = "1MB"
 ## **It's only used when the provider is `kafka`**.
 consumer_wait_timeout = "100ms"
 
-## The initial backoff delay.
-## **It's only used when the provider is `kafka`**.
-backoff_init = "500ms"
-
-## The maximum backoff delay.
-## **It's only used when the provider is `kafka`**.
-backoff_max = "10s"
-
-## The exponential backoff rate, i.e. next backoff = base * current backoff.
-## **It's only used when the provider is `kafka`**.
-backoff_base = 2
-
-## The deadline of retries.
-## **It's only used when the provider is `kafka`**.
-backoff_deadline = "5mins"
-
 ## Whether to enable WAL index creation.
 ## **It's only used when the provider is `kafka`**.
 create_index = true
@@ -261,6 +242,12 @@ overwrite_entry_start_id = false
 # credential_path = "123456"
 # credential = "base64-credential"
 # endpoint = "https://storage.googleapis.com"
+
+## The query engine options.
+[query]
+## Parallelism of the query engine.
+## Default to 0, which means the number of CPU cores.
+parallelism = 0
 
 ## The data storage options.
 [storage]

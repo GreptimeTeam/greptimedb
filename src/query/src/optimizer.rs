@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod constant_term;
 pub mod count_wildcard;
 pub mod parallelize_scan;
+pub mod pass_distribution;
 pub mod remove_duplicate;
 pub mod scan_hint;
 pub mod string_normalization;

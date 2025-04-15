@@ -16,6 +16,7 @@
 
 use std::any::Any;
 
+use arrow_schema::ArrowError;
 use common_error::ext::BoxedError;
 use common_error::{define_into_tonic_status, from_err_code_msg_to_header};
 use common_macro::stack_trace_debug;
@@ -49,6 +50,13 @@ pub enum Error {
     CreateFlow {
         sql: String,
         source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Time error"))]
+    Time {
+        source: common_time::error::Error,
         #[snafu(implicit)]
         location: Location,
     },
@@ -156,6 +164,15 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Arrow error: {raw:?} in context: {context}"))]
+    Arrow {
+        #[snafu(source)]
+        raw: ArrowError,
+        context: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Datafusion error: {raw:?} in context: {context}"))]
     Datafusion {
         #[snafu(source)]
@@ -206,6 +223,28 @@ pub enum Error {
         location: Location,
         name: String,
     },
+
+    #[snafu(display("Invalid request: {context}"))]
+    InvalidRequest {
+        context: String,
+        source: client::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to encode logical plan in substrait"))]
+    SubstraitEncodeLogicalPlan {
+        #[snafu(implicit)]
+        location: Location,
+        source: substrait::error::Error,
+    },
+
+    #[snafu(display("Failed to convert column schema to proto column def"))]
+    ConvertColumnSchema {
+        #[snafu(implicit)]
+        location: Location,
+        source: operator::error::Error,
+    },
 }
 
 /// the outer message is the full error stack, and inner message in header is the last error message that can be show directly to user
@@ -238,7 +277,9 @@ impl ErrorExt for Error {
             | Self::FlowNotFound { .. }
             | Self::ListFlows { .. } => StatusCode::TableNotFound,
             Self::Plan { .. } | Self::Datatypes { .. } => StatusCode::PlanQuery,
-            Self::InvalidQuery { .. } | Self::CreateFlow { .. } => StatusCode::EngineExecuteQuery,
+            Self::CreateFlow { .. } | Self::Arrow { .. } | Self::Time { .. } => {
+                StatusCode::EngineExecuteQuery
+            }
             Self::Unexpected { .. } => StatusCode::Unexpected,
             Self::NotImplemented { .. } | Self::UnsupportedTemporalFilter { .. } => {
                 StatusCode::Unsupported
@@ -249,7 +290,14 @@ impl ErrorExt for Error {
                 source.status_code()
             }
             Self::MetaClientInit { source, .. } => source.status_code(),
-            Self::ParseAddr { .. } => StatusCode::InvalidArguments,
+
+            Self::InvalidQuery { .. } | Self::InvalidRequest { .. } | Self::ParseAddr { .. } => {
+                StatusCode::InvalidArguments
+            }
+
+            Error::SubstraitEncodeLogicalPlan { source, .. } => source.status_code(),
+
+            Error::ConvertColumnSchema { source, .. } => source.status_code(),
         }
     }
 

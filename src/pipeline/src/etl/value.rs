@@ -28,12 +28,12 @@ use regex::Regex;
 use snafu::{OptionExt, ResultExt};
 pub use time::Timestamp;
 
-use super::PipelineMap;
 use crate::error::{
     Error, Result, ValueDefaultValueUnsupportedSnafu, ValueInvalidResolutionSnafu,
     ValueParseBooleanSnafu, ValueParseFloatSnafu, ValueParseIntSnafu, ValueParseTypeSnafu,
     ValueUnsupportedNumberTypeSnafu, ValueUnsupportedYamlTypeSnafu, ValueYamlKeyMustBeStringSnafu,
 };
+use crate::etl::PipelineMap;
 
 /// Value can be used as type
 /// acts as value: the enclosed value is the actual value
@@ -364,6 +364,37 @@ impl std::fmt::Display for Value {
         };
 
         write!(f, "{}", str)
+    }
+}
+
+impl TryFrom<simd_json::value::OwnedValue> for Value {
+    type Error = Error;
+
+    fn try_from(v: simd_json::value::OwnedValue) -> Result<Self> {
+        match v {
+            simd_json::value::OwnedValue::Static(v) => match v {
+                simd_json::value::StaticNode::Null => Ok(Value::Null),
+                simd_json::value::StaticNode::Bool(v) => Ok(Value::Boolean(v)),
+                simd_json::value::StaticNode::I64(v) => Ok(Value::Int64(v)),
+                simd_json::value::StaticNode::U64(v) => Ok(Value::Uint64(v)),
+                simd_json::value::StaticNode::F64(v) => Ok(Value::Float64(v)),
+            },
+            simd_json::OwnedValue::String(s) => Ok(Value::String(s)),
+            simd_json::OwnedValue::Array(values) => {
+                let mut re = Vec::with_capacity(values.len());
+                for v in values.into_iter() {
+                    re.push(Value::try_from(v)?);
+                }
+                Ok(Value::Array(Array { values: re }))
+            }
+            simd_json::OwnedValue::Object(map) => {
+                let mut values = PipelineMap::new();
+                for (k, v) in map.into_iter() {
+                    values.insert(k, Value::try_from(v)?);
+                }
+                Ok(Value::Map(Map { values }))
+            }
+        }
     }
 }
 

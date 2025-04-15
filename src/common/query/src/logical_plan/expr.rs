@@ -54,10 +54,7 @@ pub fn build_filter_from_timestamp(
     time_range: Option<&TimestampRange>,
 ) -> Option<Expr> {
     let time_range = time_range?;
-    let ts_col_expr = Expr::Column(Column {
-        relation: None,
-        name: ts_col_name.to_string(),
-    });
+    let ts_col_expr = Expr::Column(Column::from_name(ts_col_name));
 
     match (time_range.start(), time_range.end()) {
         (None, None) => None,

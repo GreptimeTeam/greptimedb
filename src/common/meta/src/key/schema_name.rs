@@ -22,11 +22,12 @@ use humantime_serde::re::humantime;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 
-use super::txn_helper::TxnOpGetResponseSet;
-use super::DeserializedValueWithBytes;
 use crate::ensure_values;
 use crate::error::{self, Error, InvalidMetadataSnafu, ParseOptionSnafu, Result};
-use crate::key::{MetadataKey, SCHEMA_NAME_KEY_PATTERN, SCHEMA_NAME_KEY_PREFIX};
+use crate::key::txn_helper::TxnOpGetResponseSet;
+use crate::key::{
+    DeserializedValueWithBytes, MetadataKey, SCHEMA_NAME_KEY_PATTERN, SCHEMA_NAME_KEY_PREFIX,
+};
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};

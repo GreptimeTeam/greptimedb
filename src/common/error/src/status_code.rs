@@ -34,12 +34,14 @@ pub enum StatusCode {
     Internal = 1003,
     /// Invalid arguments.
     InvalidArguments = 1004,
-    /// The task is cancelled.
+    /// The task is cancelled (typically caller-side).
     Cancelled = 1005,
     /// Illegal state, can be exposed to users.
     IllegalState = 1006,
     /// Caused by some error originated from external system.
     External = 1007,
+    /// The request is deadline exceeded (typically server-side).
+    DeadlineExceeded = 1008,
     // ====== End of common status code ================
 
     // ====== Begin of SQL related status code =========
@@ -142,6 +144,7 @@ impl StatusCode {
             | StatusCode::Unexpected
             | StatusCode::InvalidArguments
             | StatusCode::Cancelled
+            | StatusCode::DeadlineExceeded
             | StatusCode::InvalidSyntax
             | StatusCode::DatabaseAlreadyExists
             | StatusCode::PlanQuery
@@ -177,6 +180,7 @@ impl StatusCode {
             | StatusCode::Unexpected
             | StatusCode::Internal
             | StatusCode::Cancelled
+            | StatusCode::DeadlineExceeded
             | StatusCode::IllegalState
             | StatusCode::EngineExecuteQuery
             | StatusCode::StorageUnavailable
@@ -272,6 +276,7 @@ pub fn status_to_tonic_code(status_code: StatusCode) -> Code {
             Code::InvalidArgument
         }
         StatusCode::Cancelled => Code::Cancelled,
+        StatusCode::DeadlineExceeded => Code::DeadlineExceeded,
         StatusCode::TableAlreadyExists
         | StatusCode::TableColumnExists
         | StatusCode::RegionAlreadyExists
@@ -296,6 +301,15 @@ pub fn status_to_tonic_code(status_code: StatusCode) -> Code {
         StatusCode::AccessDenied | StatusCode::PermissionDenied | StatusCode::RegionReadonly => {
             Code::PermissionDenied
         }
+    }
+}
+
+/// Converts tonic [Code] to [StatusCode].
+pub fn convert_tonic_code_to_status_code(code: Code) -> StatusCode {
+    match code {
+        Code::Cancelled => StatusCode::Cancelled,
+        Code::DeadlineExceeded => StatusCode::DeadlineExceeded,
+        _ => StatusCode::Internal,
     }
 }
 

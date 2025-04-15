@@ -180,7 +180,13 @@ async fn test_on_prepare() {
 
     let mut procedure = AlterLogicalTablesProcedure::new(tasks, phy_id, ddl_context);
     let result = procedure.on_prepare().await;
-    assert_matches!(result, Ok(Status::Executing { persist: true }));
+    assert_matches!(
+        result,
+        Ok(Status::Executing {
+            persist: true,
+            clean_poisons: false
+        })
+    );
 }
 
 #[tokio::test]
@@ -205,7 +211,13 @@ async fn test_on_update_metadata() {
 
     let mut procedure = AlterLogicalTablesProcedure::new(tasks, phy_id, ddl_context);
     let mut status = procedure.on_prepare().await.unwrap();
-    assert_matches!(status, Status::Executing { persist: true });
+    assert_matches!(
+        status,
+        Status::Executing {
+            persist: true,
+            clean_poisons: false
+        }
+    );
 
     let ctx = common_procedure::Context {
         procedure_id: ProcedureId::random(),
@@ -213,10 +225,22 @@ async fn test_on_update_metadata() {
     };
     // on_submit_alter_region_requests
     status = procedure.execute(&ctx).await.unwrap();
-    assert_matches!(status, Status::Executing { persist: true });
+    assert_matches!(
+        status,
+        Status::Executing {
+            persist: true,
+            clean_poisons: false
+        }
+    );
     // on_update_metadata
     status = procedure.execute(&ctx).await.unwrap();
-    assert_matches!(status, Status::Executing { persist: true });
+    assert_matches!(
+        status,
+        Status::Executing {
+            persist: true,
+            clean_poisons: false
+        }
+    );
 }
 
 #[tokio::test]
@@ -237,7 +261,13 @@ async fn test_on_part_duplicate_alter_request() {
 
     let mut procedure = AlterLogicalTablesProcedure::new(tasks, phy_id, ddl_context.clone());
     let mut status = procedure.on_prepare().await.unwrap();
-    assert_matches!(status, Status::Executing { persist: true });
+    assert_matches!(
+        status,
+        Status::Executing {
+            persist: true,
+            clean_poisons: false
+        }
+    );
 
     let ctx = common_procedure::Context {
         procedure_id: ProcedureId::random(),
@@ -245,10 +275,22 @@ async fn test_on_part_duplicate_alter_request() {
     };
     // on_submit_alter_region_requests
     status = procedure.execute(&ctx).await.unwrap();
-    assert_matches!(status, Status::Executing { persist: true });
+    assert_matches!(
+        status,
+        Status::Executing {
+            persist: true,
+            clean_poisons: false
+        }
+    );
     // on_update_metadata
     status = procedure.execute(&ctx).await.unwrap();
-    assert_matches!(status, Status::Executing { persist: true });
+    assert_matches!(
+        status,
+        Status::Executing {
+            persist: true,
+            clean_poisons: false
+        }
+    );
 
     // re-alter
     let tasks = vec![
@@ -270,7 +312,13 @@ async fn test_on_part_duplicate_alter_request() {
 
     let mut procedure = AlterLogicalTablesProcedure::new(tasks, phy_id, ddl_context.clone());
     let mut status = procedure.on_prepare().await.unwrap();
-    assert_matches!(status, Status::Executing { persist: true });
+    assert_matches!(
+        status,
+        Status::Executing {
+            persist: true,
+            clean_poisons: false
+        }
+    );
 
     let ctx = common_procedure::Context {
         procedure_id: ProcedureId::random(),
@@ -278,10 +326,22 @@ async fn test_on_part_duplicate_alter_request() {
     };
     // on_submit_alter_region_requests
     status = procedure.execute(&ctx).await.unwrap();
-    assert_matches!(status, Status::Executing { persist: true });
+    assert_matches!(
+        status,
+        Status::Executing {
+            persist: true,
+            clean_poisons: false
+        }
+    );
     // on_update_metadata
     status = procedure.execute(&ctx).await.unwrap();
-    assert_matches!(status, Status::Executing { persist: true });
+    assert_matches!(
+        status,
+        Status::Executing {
+            persist: true,
+            clean_poisons: false
+        }
+    );
 
     let table_name_keys = vec![
         TableNameKey::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "table1"),

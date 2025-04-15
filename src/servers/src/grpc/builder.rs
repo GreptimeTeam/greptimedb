@@ -24,12 +24,12 @@ use tokio::sync::Mutex;
 use tonic::service::RoutesBuilder;
 use tonic::transport::{Identity, ServerTlsConfig};
 
-use super::flight::{FlightCraftRef, FlightCraftWrapper};
-use super::region_server::{RegionServerHandlerRef, RegionServerRequestHandler};
-use super::{GrpcServer, GrpcServerConfig};
 use crate::grpc::database::DatabaseService;
+use crate::grpc::flight::{FlightCraftRef, FlightCraftWrapper};
 use crate::grpc::greptime_handler::GreptimeRequestHandler;
 use crate::grpc::prom_query_gateway::PrometheusGatewayService;
+use crate::grpc::region_server::{RegionServerHandlerRef, RegionServerRequestHandler};
+use crate::grpc::{GrpcServer, GrpcServerConfig};
 use crate::prometheus_handler::PrometheusHandlerRef;
 use crate::tls::TlsOption;
 

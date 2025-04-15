@@ -1149,6 +1149,14 @@ impl TryFrom<RawTableInfo> for TableInfo {
     }
 }
 
+/// Set column fulltext options if it passed the validation.
+///
+/// Options allowed to modify:
+/// * backend
+///
+/// Options not allowed to modify:
+/// * analyzer
+/// * case_sensitive
 fn set_column_fulltext_options(
     column_schema: &mut ColumnSchema,
     column_name: &str,
@@ -1156,14 +1164,6 @@ fn set_column_fulltext_options(
     current_options: Option<FulltextOptions>,
 ) -> Result<()> {
     if let Some(current_options) = current_options {
-        ensure!(
-            !current_options.enable,
-            error::InvalidColumnOptionSnafu {
-                column_name,
-                msg: "FULLTEXT index already enabled",
-            }
-        );
-
         ensure!(
             current_options.analyzer == options.analyzer
                 && current_options.case_sensitive == options.case_sensitive,
@@ -1233,7 +1233,9 @@ mod tests {
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
     use datatypes::data_type::ConcreteDataType;
-    use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder};
+    use datatypes::schema::{
+        ColumnSchema, FulltextAnalyzer, FulltextBackend, Schema, SchemaBuilder,
+    };
 
     use super::*;
 
@@ -1806,8 +1808,9 @@ mod tests {
                 column_name: "my_tag_first".to_string(),
                 options: FulltextOptions {
                     enable: true,
-                    analyzer: datatypes::schema::FulltextAnalyzer::Chinese,
+                    analyzer: FulltextAnalyzer::Chinese,
                     case_sensitive: true,
+                    backend: FulltextBackend::Bloom,
                 },
             },
         };

@@ -55,7 +55,7 @@ use store_api::metric_engine_consts::{
     FILE_ENGINE_NAME, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME,
 };
 use store_api::region_engine::{
-    RegionEngineRef, RegionRole, RegionStatistic, SetRegionRoleStateResponse,
+    RegionEngineRef, RegionManifestInfo, RegionRole, RegionStatistic, SetRegionRoleStateResponse,
     SettableRegionRoleState,
 };
 use store_api::region_request::{
@@ -308,6 +308,38 @@ impl RegionServer {
             .with_context(|_| HandleRegionRequestSnafu { region_id })
     }
 
+    /// Sync region manifest and registers new opened logical regions.
+    pub async fn sync_region_manifest(
+        &self,
+        region_id: RegionId,
+        manifest_info: RegionManifestInfo,
+    ) -> Result<()> {
+        let engine_with_status = self
+            .inner
+            .region_map
+            .get(&region_id)
+            .with_context(|| RegionNotFoundSnafu { region_id })?;
+
+        let Some(new_opened_regions) = engine_with_status
+            .sync_region(region_id, manifest_info)
+            .await
+            .with_context(|_| HandleRegionRequestSnafu { region_id })?
+            .new_opened_logical_region_ids()
+        else {
+            return Ok(());
+        };
+
+        for region in new_opened_regions {
+            self.inner.region_map.insert(
+                region,
+                RegionEngineWithStatus::Ready(engine_with_status.engine().clone()),
+            );
+            info!("Logical region {} is registered!", region);
+        }
+
+        Ok(())
+    }
+
     /// Set region role state gracefully.
     ///
     /// For [SettableRegionRoleState::Follower]:
@@ -510,6 +542,15 @@ impl RegionEngineWithStatus {
             RegionEngineWithStatus::Ready(engine) => engine,
         }
     }
+
+    /// Returns [RegionEngineRef] reference.
+    pub fn engine(&self) -> &RegionEngineRef {
+        match self {
+            RegionEngineWithStatus::Registering(engine) => engine,
+            RegionEngineWithStatus::Deregistering(engine) => engine,
+            RegionEngineWithStatus::Ready(engine) => engine,
+        }
+    }
 }
 
 impl Deref for RegionEngineWithStatus {
@@ -649,18 +690,20 @@ impl RegionServerInner {
                 },
                 None => return Ok(CurrentEngine::EarlyReturn(0)),
             },
-            RegionChange::None | RegionChange::Catchup => match current_region_status {
-                Some(status) => match status.clone() {
-                    RegionEngineWithStatus::Registering(_) => {
-                        return error::RegionNotReadySnafu { region_id }.fail()
-                    }
-                    RegionEngineWithStatus::Deregistering(_) => {
-                        return error::RegionNotFoundSnafu { region_id }.fail()
-                    }
-                    RegionEngineWithStatus::Ready(engine) => engine,
-                },
-                None => return error::RegionNotFoundSnafu { region_id }.fail(),
-            },
+            RegionChange::None | RegionChange::Catchup | RegionChange::Ingest => {
+                match current_region_status {
+                    Some(status) => match status.clone() {
+                        RegionEngineWithStatus::Registering(_) => {
+                            return error::RegionNotReadySnafu { region_id }.fail()
+                        }
+                        RegionEngineWithStatus::Deregistering(_) => {
+                            return error::RegionNotFoundSnafu { region_id }.fail()
+                        }
+                        RegionEngineWithStatus::Ready(engine) => engine,
+                    },
+                    None => return error::RegionNotFoundSnafu { region_id }.fail(),
+                }
+            }
         };
 
         Ok(CurrentEngine::Engine(engine))
@@ -844,8 +887,9 @@ impl RegionServerInner {
         request: RegionRequest,
     ) -> Result<RegionResponse> {
         let request_type = request.request_type();
+        let region_id_str = region_id.to_string();
         let _timer = crate::metrics::HANDLE_REGION_REQUEST_ELAPSED
-            .with_label_values(&[request_type])
+            .with_label_values(&[&region_id_str, request_type])
             .start_timer();
 
         let region_change = match &request {
@@ -858,9 +902,8 @@ impl RegionServerInner {
                 RegionChange::Register(attribute)
             }
             RegionRequest::Close(_) | RegionRequest::Drop(_) => RegionChange::Deregisters,
-            RegionRequest::Put(_)
-            | RegionRequest::Delete(_)
-            | RegionRequest::Alter(_)
+            RegionRequest::Put(_) | RegionRequest::Delete(_) => RegionChange::Ingest,
+            RegionRequest::Alter(_)
             | RegionRequest::Flush(_)
             | RegionRequest::Compact(_)
             | RegionRequest::Truncate(_) => RegionChange::None,
@@ -881,6 +924,12 @@ impl RegionServerInner {
             .with_context(|_| HandleRegionRequestSnafu { region_id })
         {
             Ok(result) => {
+                // Update metrics
+                if matches!(region_change, RegionChange::Ingest) {
+                    crate::metrics::REGION_CHANGED_ROW_COUNT
+                        .with_label_values(&[&region_id_str, request_type])
+                        .inc_by(result.affected_rows as u64);
+                }
                 // Sets corresponding region status to ready.
                 self.set_region_status_ready(region_id, engine, region_change)
                     .await?;
@@ -927,7 +976,7 @@ impl RegionServerInner {
         region_change: RegionChange,
     ) {
         match region_change {
-            RegionChange::None => {}
+            RegionChange::None | RegionChange::Ingest => {}
             RegionChange::Register(_) => {
                 self.region_map.remove(&region_id);
             }
@@ -947,7 +996,7 @@ impl RegionServerInner {
     ) -> Result<()> {
         let engine_type = engine.name();
         match region_change {
-            RegionChange::None => {}
+            RegionChange::None | RegionChange::Ingest => {}
             RegionChange::Register(attribute) => {
                 info!(
                     "Region {region_id} is registered to engine {}",
@@ -1013,7 +1062,7 @@ impl RegionServerInner {
         for region in logical_regions {
             self.region_map
                 .insert(region, RegionEngineWithStatus::Ready(engine.clone()));
-            debug!("Logical region {} is registered!", region);
+            info!("Logical region {} is registered!", region);
         }
         Ok(())
     }
@@ -1088,6 +1137,7 @@ enum RegionChange {
     Register(RegionAttribute),
     Deregisters,
     Catchup,
+    Ingest,
 }
 
 fn is_metric_engine(engine: &str) -> bool {

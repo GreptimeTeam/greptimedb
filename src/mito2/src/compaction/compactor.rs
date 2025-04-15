@@ -157,12 +157,16 @@ pub async fn open_compaction_region(
             checkpoint_distance: mito_config.manifest_checkpoint_distance,
         };
 
-        RegionManifestManager::open(region_manifest_options, Default::default())
-            .await?
-            .context(EmptyRegionDirSnafu {
-                region_id: req.region_id,
-                region_dir: req.region_dir.as_str(),
-            })?
+        RegionManifestManager::open(
+            region_manifest_options,
+            Default::default(),
+            Default::default(),
+        )
+        .await?
+        .context(EmptyRegionDirSnafu {
+            region_id: req.region_id,
+            region_dir: req.region_dir.as_str(),
+        })?
     };
 
     let manifest = manifest_manager.manifest();

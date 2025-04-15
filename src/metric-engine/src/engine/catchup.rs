@@ -56,7 +56,8 @@ impl MetricEngineInner {
                 metadata_region_id,
                 RegionRequest::Catchup(RegionCatchupRequest {
                     set_writable: req.set_writable,
-                    entry_id: None,
+                    entry_id: req.metadata_entry_id,
+                    metadata_entry_id: None,
                     location_id: req.location_id,
                 }),
             )
@@ -70,6 +71,7 @@ impl MetricEngineInner {
                 RegionRequest::Catchup(RegionCatchupRequest {
                     set_writable: req.set_writable,
                     entry_id: req.entry_id,
+                    metadata_entry_id: None,
                     location_id: req.location_id,
                 }),
             )

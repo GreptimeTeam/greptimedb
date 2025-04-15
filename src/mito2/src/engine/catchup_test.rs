@@ -35,8 +35,8 @@ use crate::test_util::{
 use crate::wal::EntryId;
 
 fn get_last_entry_id(resp: SetRegionRoleStateResponse) -> Option<EntryId> {
-    if let SetRegionRoleStateResponse::Success { last_entry_id } = resp {
-        last_entry_id
+    if let SetRegionRoleStateResponse::Success(success) = resp {
+        success.last_entry_id()
     } else {
         unreachable!();
     }
@@ -118,6 +118,7 @@ async fn test_catchup_with_last_entry_id(factory: Option<LogStoreFactory>) {
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: false,
                 entry_id: last_entry_id,
+                metadata_entry_id: None,
                 location_id: None,
             }),
         )
@@ -150,6 +151,7 @@ async fn test_catchup_with_last_entry_id(factory: Option<LogStoreFactory>) {
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: true,
                 entry_id: last_entry_id,
+                metadata_entry_id: None,
                 location_id: None,
             }),
         )
@@ -237,6 +239,7 @@ async fn test_catchup_with_incorrect_last_entry_id(factory: Option<LogStoreFacto
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: false,
                 entry_id: incorrect_last_entry_id,
+                metadata_entry_id: None,
                 location_id: None,
             }),
         )
@@ -254,6 +257,7 @@ async fn test_catchup_with_incorrect_last_entry_id(factory: Option<LogStoreFacto
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: false,
                 entry_id: incorrect_last_entry_id,
+                metadata_entry_id: None,
                 location_id: None,
             }),
         )
@@ -322,6 +326,7 @@ async fn test_catchup_without_last_entry_id(factory: Option<LogStoreFactory>) {
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: false,
                 entry_id: None,
+                metadata_entry_id: None,
                 location_id: None,
             }),
         )
@@ -353,6 +358,7 @@ async fn test_catchup_without_last_entry_id(factory: Option<LogStoreFactory>) {
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: true,
                 entry_id: None,
+                metadata_entry_id: None,
                 location_id: None,
             }),
         )
@@ -442,6 +448,7 @@ async fn test_catchup_with_manifest_update(factory: Option<LogStoreFactory>) {
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: false,
                 entry_id: None,
+                metadata_entry_id: None,
                 location_id: None,
             }),
         )
@@ -479,6 +486,7 @@ async fn test_catchup_with_manifest_update(factory: Option<LogStoreFactory>) {
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: true,
                 entry_id: None,
+                metadata_entry_id: None,
                 location_id: None,
             }),
         )
@@ -501,6 +509,7 @@ async fn test_catchup_not_exist() {
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: true,
                 entry_id: None,
+                metadata_entry_id: None,
                 location_id: None,
             }),
         )

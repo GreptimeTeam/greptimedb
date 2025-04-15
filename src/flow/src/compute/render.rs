@@ -24,8 +24,7 @@ use hydroflow::scheduled::port::{PortCtx, SEND};
 use itertools::Itertools;
 use snafu::OptionExt;
 
-use super::state::Scheduler;
-use crate::compute::state::DataflowState;
+use crate::compute::state::{DataflowState, Scheduler};
 use crate::compute::types::{Collection, CollectionBundle, ErrCollector, Toff};
 use crate::error::{Error, InvalidQuerySnafu, NotImplementedSnafu};
 use crate::expr::{self, Batch, GlobalId, LocalId};

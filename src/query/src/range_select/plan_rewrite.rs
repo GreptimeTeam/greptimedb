@@ -32,8 +32,8 @@ use datafusion_expr::execution_props::ExecutionProps;
 use datafusion_expr::expr::WildcardOptions;
 use datafusion_expr::simplify::SimplifyContext;
 use datafusion_expr::{
-    Aggregate, Analyze, Explain, Expr, ExprSchemable, Extension, LogicalPlan, LogicalPlanBuilder,
-    Projection,
+    Aggregate, Analyze, Cast, Distinct, DistinctOn, Explain, Expr, ExprSchemable, Extension,
+    LogicalPlan, LogicalPlanBuilder, Projection,
 };
 use datafusion_optimizer::simplify_expressions::ExprSimplifier;
 use datatypes::prelude::ConcreteDataType;
@@ -42,13 +42,11 @@ use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use table::table::adapter::DfTableProviderAdapter;
 
-use super::plan::Fill;
 use crate::error::{
-    CatalogSnafu, DataFusionSnafu, RangeQuerySnafu, Result, TimeIndexNotFoundSnafu,
-    UnknownTableSnafu,
+    CatalogSnafu, RangeQuerySnafu, Result, TimeIndexNotFoundSnafu, UnknownTableSnafu,
 };
 use crate::plan::ExtractExpr;
-use crate::range_select::plan::{RangeFn, RangeSelect};
+use crate::range_select::plan::{Fill, RangeFn, RangeSelect};
 
 /// `RangeExprRewriter` will recursively search certain `Expr`, find all `range_fn` scalar udf contained in `Expr`,
 /// and collect the information required by the RangeSelect query,
@@ -386,8 +384,7 @@ impl RangePlanRewriter {
                 let new_expr = expr
                     .iter()
                     .map(|expr| expr.clone().rewrite(&mut range_rewriter).map(|x| x.data))
-                    .collect::<DFResult<Vec<_>>>()
-                    .context(DataFusionSnafu)?;
+                    .collect::<DFResult<Vec<_>>>()?;
                 if range_rewriter.by.is_empty() {
                     range_rewriter.by = default_by;
                 }
@@ -409,9 +406,7 @@ impl RangePlanRewriter {
                 } else {
                     let project_plan = LogicalPlanBuilder::from(range_plan)
                         .project(new_expr)
-                        .context(DataFusionSnafu)?
-                        .build()
-                        .context(DataFusionSnafu)?;
+                        .and_then(|x| x.build())?;
                     Ok(Some(project_plan))
                 }
             }
@@ -437,8 +432,7 @@ impl RangePlanRewriter {
                                 }
                             );
                             LogicalPlanBuilder::from(inputs[0].clone())
-                                .explain(*verbose, true)
-                                .context(DataFusionSnafu)?
+                                .explain(*verbose, true)?
                                 .build()
                         }
                         LogicalPlan::Explain(Explain { verbose, .. }) => {
@@ -449,13 +443,32 @@ impl RangePlanRewriter {
                                 }
                             );
                             LogicalPlanBuilder::from(inputs[0].clone())
-                                .explain(*verbose, false)
-                                .context(DataFusionSnafu)?
+                                .explain(*verbose, false)?
+                                .build()
+                        }
+                        LogicalPlan::Distinct(Distinct::On(DistinctOn {
+                            on_expr,
+                            select_expr,
+                            sort_expr,
+                            ..
+                        })) => {
+                            ensure!(
+                                inputs.len() == 1,
+                                RangeQuerySnafu {
+                                    msg:
+                                        "Illegal subplan nums when rewrite DistinctOn logical plan",
+                                }
+                            );
+                            LogicalPlanBuilder::from(inputs[0].clone())
+                                .distinct_on(
+                                    on_expr.clone(),
+                                    select_expr.clone(),
+                                    sort_expr.clone(),
+                                )?
                                 .build()
                         }
                         _ => plan.with_new_exprs(plan.expressions_consider_join(), inputs),
-                    }
-                    .context(DataFusionSnafu)?;
+                    }?;
                     Ok(Some(plan))
                 } else {
                     Ok(None)
@@ -471,7 +484,7 @@ impl RangePlanRewriter {
     async fn get_index_by(&mut self, schema: &Arc<DFSchema>) -> Result<(Expr, Vec<Expr>)> {
         let mut time_index_expr = Expr::Wildcard {
             qualifier: None,
-            options: WildcardOptions::default(),
+            options: Box::new(WildcardOptions::default()),
         };
         let mut default_by = vec![];
         for i in 0..schema.fields().len() {
@@ -548,12 +561,29 @@ fn have_range_in_exprs(exprs: &[Expr]) -> bool {
 fn interval_only_in_expr(expr: &Expr) -> bool {
     let mut all_interval = true;
     let _ = expr.apply(|expr| {
+        // A cast expression for an interval.
+        if matches!(
+            expr,
+            Expr::Cast(Cast{
+                expr,
+                data_type: DataType::Interval(_)
+            }) if matches!(&**expr, Expr::Literal(ScalarValue::Utf8(_)))
+        ) {
+            // Stop checking the sub `expr`,
+            // which is a `Utf8` type and has already been tested above.
+            return Ok(TreeNodeRecursion::Stop);
+        }
+
         if !matches!(
             expr,
             Expr::Literal(ScalarValue::IntervalDayTime(_))
                 | Expr::Literal(ScalarValue::IntervalMonthDayNano(_))
                 | Expr::Literal(ScalarValue::IntervalYearMonth(_))
                 | Expr::BinaryExpr(_)
+                | Expr::Cast(Cast {
+                    data_type: DataType::Interval(_),
+                    ..
+                })
         ) {
             all_interval = false;
             Ok(TreeNodeRecursion::Stop)
@@ -561,14 +591,14 @@ fn interval_only_in_expr(expr: &Expr) -> bool {
             Ok(TreeNodeRecursion::Continue)
         }
     });
+
     all_interval
 }
 
 #[cfg(test)]
 mod test {
 
-    use std::error::Error;
-
+    use arrow::datatypes::IntervalUnit;
     use catalog::memory::MemoryCatalogManager;
     use catalog::RegisterTableRequest;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -581,6 +611,7 @@ mod test {
     use table::test_util::EmptyTable;
 
     use super::*;
+    use crate::options::QueryOptions;
     use crate::parser::QueryLanguageParser;
     use crate::{QueryEngineFactory, QueryEngineRef};
 
@@ -633,7 +664,16 @@ mod test {
                 table,
             })
             .is_ok());
-        QueryEngineFactory::new(catalog_list, None, None, None, None, false).query_engine()
+        QueryEngineFactory::new(
+            catalog_list,
+            None,
+            None,
+            None,
+            None,
+            false,
+            QueryOptions::default(),
+        )
+        .query_engine()
     }
 
     async fn do_query(sql: &str) -> Result<LogicalPlan> {
@@ -785,12 +825,7 @@ mod test {
     /// the right argument is `range_fn(avg(field_0), '5m', 'NULL', '0', '1h')`
     async fn range_argument_err_1() {
         let query = r#"SELECT range_fn('5m', avg(field_0), 'NULL', '1', tag_0, '1h') FROM test group by tag_0;"#;
-        let error = do_query(query)
-            .await
-            .unwrap_err()
-            .source()
-            .unwrap()
-            .to_string();
+        let error = do_query(query).await.unwrap_err().to_string();
         assert_eq!(
             error,
             "Error during planning: Illegal argument `Utf8(\"5m\")` in range select query"
@@ -800,12 +835,7 @@ mod test {
     #[tokio::test]
     async fn range_argument_err_2() {
         let query = r#"SELECT range_fn(avg(field_0), 5, 'NULL', '1', tag_0, '1h') FROM test group by tag_0;"#;
-        let error = do_query(query)
-            .await
-            .unwrap_err()
-            .source()
-            .unwrap()
-            .to_string();
+        let error = do_query(query).await.unwrap_err().to_string();
         assert_eq!(
             error,
             "Error during planning: Illegal argument `Int64(5)` in range select query"
@@ -843,6 +873,15 @@ mod test {
         assert_eq!(
             parse_duration_expr(&args, 0).unwrap(),
             parse_duration("1y4w").unwrap()
+        );
+        // test cast expression
+        let args = vec![Expr::Cast(Cast {
+            expr: Box::new(Expr::Literal(ScalarValue::Utf8(Some("15 minutes".into())))),
+            data_type: DataType::Interval(IntervalUnit::MonthDayNano),
+        })];
+        assert_eq!(
+            parse_duration_expr(&args, 0).unwrap(),
+            parse_duration("15m").unwrap()
         );
         // test index err
         assert!(parse_duration_expr(&args, 10).is_err());
@@ -957,6 +996,38 @@ mod test {
                 IntervalDayTime::new(10, 0).into(),
             )))),
         });
+        assert!(interval_only_in_expr(&expr));
+
+        let expr = Expr::BinaryExpr(BinaryExpr {
+            left: Box::new(Expr::Cast(Cast {
+                expr: Box::new(Expr::Literal(ScalarValue::Utf8(Some(
+                    "15 minute".to_string(),
+                )))),
+                data_type: DataType::Interval(IntervalUnit::MonthDayNano),
+            })),
+            op: Operator::Minus,
+            right: Box::new(Expr::Literal(ScalarValue::IntervalDayTime(Some(
+                IntervalDayTime::new(10, 0).into(),
+            )))),
+        });
+        assert!(interval_only_in_expr(&expr));
+
+        let expr = Expr::Cast(Cast {
+            expr: Box::new(Expr::BinaryExpr(BinaryExpr {
+                left: Box::new(Expr::Cast(Cast {
+                    expr: Box::new(Expr::Literal(ScalarValue::Utf8(Some(
+                        "15 minute".to_string(),
+                    )))),
+                    data_type: DataType::Interval(IntervalUnit::MonthDayNano),
+                })),
+                op: Operator::Minus,
+                right: Box::new(Expr::Literal(ScalarValue::IntervalDayTime(Some(
+                    IntervalDayTime::new(10, 0).into(),
+                )))),
+            })),
+            data_type: DataType::Interval(IntervalUnit::MonthDayNano),
+        });
+
         assert!(interval_only_in_expr(&expr));
     }
 }

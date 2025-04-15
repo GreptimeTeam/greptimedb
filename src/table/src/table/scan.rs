@@ -25,9 +25,10 @@ use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::warn;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::TaskContext;
+use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, PlanProperties,
+    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
     RecordBatchStream as DfRecordBatchStream,
 };
 use datafusion_common::stats::Precision;
@@ -73,12 +74,19 @@ impl RegionScanExec {
         }
 
         let metadata = scanner.metadata();
-        let mut pk_columns: Vec<PhysicalSortExpr> = metadata
+        let mut pk_names = metadata
             .primary_key_columns()
+            .map(|col| col.column_schema.name.clone())
+            .collect::<Vec<_>>();
+        // workaround for logical table
+        if scanner.properties().is_logical_region() {
+            pk_names.sort_unstable();
+        }
+        let mut pk_columns: Vec<PhysicalSortExpr> = pk_names
+            .into_iter()
             .filter_map(|col| {
                 Some(PhysicalSortExpr::new(
-                    Arc::new(Column::new_with_schema(&col.column_schema.name, &arrow_schema).ok()?)
-                        as _,
+                    Arc::new(Column::new_with_schema(&col, &arrow_schema).ok()?) as _,
                     SortOptions {
                         descending: false,
                         nulls_first: true,
@@ -127,7 +135,8 @@ impl RegionScanExec {
         let properties = PlanProperties::new(
             eq_props,
             Partitioning::UnknownPartitioning(num_output_partition),
-            ExecutionMode::Bounded,
+            EmissionType::Incremental,
+            Boundedness::Bounded,
         );
         let append_mode = scanner_props.append_mode();
         let total_rows = scanner_props.total_rows();
@@ -276,7 +285,7 @@ impl ExecutionPlan for RegionScanExec {
             .scanner
             .lock()
             .unwrap()
-            .scan_partition(partition)
+            .scan_partition(&self.metric, partition)
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
         let stream_metrics = StreamMetrics::new(&self.metric, partition);
         Ok(Box::pin(StreamWithMetricWrapper {

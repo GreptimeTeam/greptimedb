@@ -30,7 +30,7 @@ use common_meta::rpc::store::{
     BatchPutResponse, DeleteRangeRequest, DeleteRangeResponse, PutRequest, PutResponse,
     RangeRequest, RangeResponse,
 };
-use common_telemetry::{info, warn};
+use common_telemetry::{error, info, warn};
 use snafu::{ensure, ResultExt};
 use tokio::sync::RwLock;
 use tonic::codec::CompressionEncoding;
@@ -237,6 +237,7 @@ impl Inner {
                             times += 1;
                             continue;
                         } else {
+                            error!("An error occurred in gRPC, status: {status}");
                             return Err(Error::from(status));
                         }
                     }

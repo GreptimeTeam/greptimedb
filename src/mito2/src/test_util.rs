@@ -625,11 +625,16 @@ impl TestEnv {
         };
 
         if let Some(metadata) = initial_metadata {
-            RegionManifestManager::new(metadata, manifest_opts, Default::default())
-                .await
-                .map(Some)
+            RegionManifestManager::new(
+                metadata,
+                manifest_opts,
+                Default::default(),
+                Default::default(),
+            )
+            .await
+            .map(Some)
         } else {
-            RegionManifestManager::open(manifest_opts, Default::default()).await
+            RegionManifestManager::open(manifest_opts, Default::default(), Default::default()).await
         }
     }
 

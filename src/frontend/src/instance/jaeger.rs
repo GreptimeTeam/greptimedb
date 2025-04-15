@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
+use common_catalog::consts::{trace_services_table_name, TRACE_TABLE_NAME};
 use common_function::function::{Function, FunctionRef};
 use common_function::scalars::json::json_get::{
     JsonGetBool, JsonGetFloat, JsonGetInt, JsonGetString,
@@ -28,7 +29,7 @@ use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use datafusion::dataframe::DataFrame;
 use datafusion::execution::context::SessionContext;
 use datafusion::execution::SessionStateBuilder;
-use datafusion_expr::{col, lit, lit_timestamp_nano, wildcard, Expr};
+use datafusion_expr::{col, lit, lit_timestamp_nano, wildcard, Expr, SortExpr};
 use query::QueryEngineRef;
 use serde_json::Value as JsonValue;
 use servers::error::{
@@ -38,7 +39,7 @@ use servers::error::{
 use servers::http::jaeger::{QueryTraceParams, JAEGER_QUERY_TABLE_NAME_KEY};
 use servers::otlp::trace::{
     DURATION_NANO_COLUMN, SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN, SPAN_KIND_COLUMN,
-    SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, TIMESTAMP_COLUMN, TRACE_ID_COLUMN, TRACE_TABLE_NAME,
+    SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, TIMESTAMP_COLUMN, TRACE_ID_COLUMN,
 };
 use servers::query_handler::JaegerQueryHandler;
 use session::context::QueryContextRef;
@@ -46,9 +47,9 @@ use snafu::{OptionExt, ResultExt};
 use table::requests::{TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1};
 use table::table::adapter::DfTableProviderAdapter;
 
-use super::Instance;
+use crate::instance::Instance;
 
-const DEFAULT_LIMIT: usize = 100;
+const DEFAULT_LIMIT: usize = 2000;
 
 #[async_trait]
 impl JaegerQueryHandler for Instance {
@@ -60,9 +61,10 @@ impl JaegerQueryHandler for Instance {
             self.query_engine(),
             vec![col(SERVICE_NAME_COLUMN)],
             vec![],
-            Some(DEFAULT_LIMIT),
+            vec![],
             None,
-            true,
+            None,
+            vec![col(SERVICE_NAME_COLUMN)],
         )
         .await?)
     }
@@ -72,6 +74,8 @@ impl JaegerQueryHandler for Instance {
         ctx: QueryContextRef,
         service_name: &str,
         span_kind: Option<&str>,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
     ) -> ServerResult<Output> {
         let mut filters = vec![col(SERVICE_NAME_COLUMN).eq(lit(service_name))];
 
@@ -83,18 +87,29 @@ impl JaegerQueryHandler for Instance {
             ))));
         }
 
+        if let Some(start_time) = start_time {
+            // Microseconds to nanoseconds.
+            filters.push(col(TIMESTAMP_COLUMN).gt_eq(lit_timestamp_nano(start_time * 1_000)));
+        }
+
+        if let Some(end_time) = end_time {
+            // Microseconds to nanoseconds.
+            filters.push(col(TIMESTAMP_COLUMN).lt_eq(lit_timestamp_nano(end_time * 1_000)));
+        }
+
         // It's equivalent to
         //
         // ```
-        // SELECT
-        //   span_name,
-        //   span_kind
+        // SELECT DISTINCT span_name, span_kind
         // FROM
         //   {db}.{trace_table}
         // WHERE
-        //   service_name = '{service_name}'
+        //   service_name = '{service_name}' AND
+        //   timestamp >= {start_time} AND
+        //   timestamp <= {end_time} AND
+        //   span_kind = '{span_kind}'
         // ORDER BY
-        //   timestamp
+        //   span_name ASC
         // ```.
         Ok(query_trace_table(
             ctx,
@@ -104,11 +119,13 @@ impl JaegerQueryHandler for Instance {
                 col(SPAN_NAME_COLUMN),
                 col(SPAN_KIND_COLUMN),
                 col(SERVICE_NAME_COLUMN),
+                col(TIMESTAMP_COLUMN),
             ],
             filters,
+            vec![col(SPAN_NAME_COLUMN).sort(true, false)], // Sort by span_name in ascending order.
             Some(DEFAULT_LIMIT),
             None,
-            false,
+            vec![col(SPAN_NAME_COLUMN), col(SPAN_KIND_COLUMN)],
         )
         .await?)
     }
@@ -124,7 +141,7 @@ impl JaegerQueryHandler for Instance {
         // WHERE
         //   trace_id = '{trace_id}'
         // ORDER BY
-        //   timestamp
+        //   timestamp DESC
         // ```.
         let selects = vec![wildcard()];
 
@@ -136,9 +153,10 @@ impl JaegerQueryHandler for Instance {
             self.query_engine(),
             selects,
             filters,
+            vec![col(TIMESTAMP_COLUMN).sort(false, false)], // Sort by timestamp in descending order.
             Some(DEFAULT_LIMIT),
             None,
-            false,
+            vec![],
         )
         .await?)
     }
@@ -178,9 +196,10 @@ impl JaegerQueryHandler for Instance {
             self.query_engine(),
             selects,
             filters,
+            vec![col(TIMESTAMP_COLUMN).sort(false, false)], // Sort by timestamp in descending order.
             Some(DEFAULT_LIMIT),
             query_params.tags,
-            false,
+            vec![],
         )
         .await?)
     }
@@ -193,13 +212,23 @@ async fn query_trace_table(
     query_engine: &QueryEngineRef,
     selects: Vec<Expr>,
     filters: Vec<Expr>,
+    sorts: Vec<SortExpr>,
     limit: Option<usize>,
     tags: Option<HashMap<String, JsonValue>>,
-    distinct: bool,
+    distincts: Vec<Expr>,
 ) -> ServerResult<Output> {
-    let table_name = ctx
+    let trace_table_name = ctx
         .extension(JAEGER_QUERY_TABLE_NAME_KEY)
         .unwrap_or(TRACE_TABLE_NAME);
+
+    // If only select services, use the trace services table.
+    let table_name = {
+        if selects.len() == 1 && selects[0] == col(SERVICE_NAME_COLUMN) {
+            &trace_services_table_name(trace_table_name)
+        } else {
+            trace_table_name
+        }
+    };
 
     let table = catalog_manager
         .table(
@@ -244,13 +273,19 @@ async fn query_trace_table(
         })?;
 
     // Apply the distinct if needed.
-    let dataframe = if distinct {
-        dataframe.distinct().context(DataFusionSnafu)?
-    } else {
-        // for non distinct query, sort by timestamp to make results stable
+    let dataframe = if !distincts.is_empty() {
         dataframe
-            .sort_by(vec![col(TIMESTAMP_COLUMN)])
+            .distinct_on(distincts.clone(), distincts, None)
             .context(DataFusionSnafu)?
+    } else {
+        dataframe
+    };
+
+    // Apply the sorts if needed.
+    let dataframe = if !sorts.is_empty() {
+        dataframe.sort(sorts).context(DataFusionSnafu)?
+    } else {
+        dataframe
     };
 
     // Apply the limit if needed.

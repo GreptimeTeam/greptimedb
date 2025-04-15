@@ -21,6 +21,7 @@ use common_telemetry::debug;
 use datafusion::execution::SessionStateBuilder;
 use datafusion::functions::all_default_functions;
 use datafusion_physical_expr::PhysicalExpr;
+use datafusion_substrait::logical_plan::consumer::DefaultSubstraitConsumer;
 use datatypes::data_type::ConcreteDataType as CDT;
 use snafu::{ensure, OptionExt, ResultExt};
 use substrait_proto::proto::expression::field_reference::ReferenceType::DirectReference;
@@ -88,15 +89,13 @@ pub(crate) async fn from_scalar_fn_to_df_fn_impl(
     };
     let schema = input_schema.to_df_schema()?;
 
-    let df_expr = substrait::df_logical_plan::consumer::from_substrait_rex(
-        &SessionStateBuilder::new()
-            .with_scalar_functions(all_default_functions())
-            .build(),
-        &e,
-        &schema,
-        &extensions.to_extensions(),
-    )
-    .await;
+    let extensions = extensions.to_extensions();
+    let session_state = SessionStateBuilder::new()
+        .with_scalar_functions(all_default_functions())
+        .build();
+    let consumer = DefaultSubstraitConsumer::new(&extensions, &session_state);
+    let df_expr =
+        substrait::df_logical_plan::consumer::from_substrait_rex(&consumer, &e, &schema).await;
     let expr = df_expr.context({
         DatafusionSnafu {
             context: "Failed to convert substrait scalar function to datafusion scalar function",

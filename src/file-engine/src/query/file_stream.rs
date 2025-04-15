@@ -14,17 +14,19 @@
 
 use std::sync::Arc;
 
-use common_datasource::file_format::csv::{CsvConfigBuilder, CsvFormat, CsvOpener};
-use common_datasource::file_format::json::{JsonFormat, JsonOpener};
+use common_datasource::file_format::csv::CsvFormat;
+use common_datasource::file_format::json::JsonFormat;
 use common_datasource::file_format::orc::{OrcFormat, OrcOpener};
 use common_datasource::file_format::parquet::{DefaultParquetFileReaderFactory, ParquetFormat};
 use common_datasource::file_format::Format;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::SendableRecordBatchStream;
-use datafusion::common::{Statistics, ToDFSchema};
+use datafusion::common::{Constraints, Statistics, ToDFSchema};
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::object_store::ObjectStoreUrl;
-use datafusion::datasource::physical_plan::{FileOpener, FileScanConfig, FileStream, ParquetExec};
+use datafusion::datasource::physical_plan::{
+    CsvConfig, CsvOpener, FileOpener, FileScanConfig, FileStream, JsonOpener, ParquetExec,
+};
 use datafusion::physical_expr::create_physical_expr;
 use datafusion::physical_expr::execution_props::ExecutionProps;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
@@ -48,20 +50,21 @@ fn build_csv_opener(
     file_schema: Arc<ArrowSchema>,
     config: &ScanPlanConfig,
     format: &CsvFormat,
-) -> Result<CsvOpener> {
-    let csv_config = CsvConfigBuilder::default()
-        .batch_size(DEFAULT_BATCH_SIZE)
-        .file_schema(file_schema)
-        .file_projection(config.projection.cloned())
-        .delimiter(format.delimiter)
-        .has_header(format.has_header)
-        .build()
-        .context(error::BuildCsvConfigSnafu)?;
-    Ok(CsvOpener::new(
-        csv_config,
-        config.store.clone(),
-        format.compression_type,
-    ))
+) -> CsvOpener {
+    let csv_config = Arc::new(CsvConfig::new(
+        DEFAULT_BATCH_SIZE,
+        file_schema,
+        config.projection.cloned(),
+        format.has_header,
+        format.delimiter,
+        b'"',
+        None,
+        Arc::new(object_store_opendal::OpendalStore::new(
+            config.store.clone(),
+        )),
+        None,
+    ));
+    CsvOpener::new(csv_config, format.compression_type.into())
 }
 
 fn build_json_opener(
@@ -78,11 +81,12 @@ fn build_json_opener(
     } else {
         file_schema
     };
+    let store = object_store_opendal::OpendalStore::new(config.store.clone());
     Ok(JsonOpener::new(
         DEFAULT_BATCH_SIZE,
         projected_schema,
-        config.store.clone(),
-        format.compression_type,
+        format.compression_type.into(),
+        Arc::new(store),
     ))
 }
 
@@ -115,6 +119,7 @@ fn build_record_batch_stream<T: FileOpener + Send + 'static>(
             limit,
             table_partition_cols: vec![],
             output_ordering: vec![],
+            constraints: Constraints::empty(),
         },
         0, // partition: hard-code
         opener,
@@ -132,7 +137,7 @@ fn new_csv_stream(
     format: &CsvFormat,
 ) -> Result<SendableRecordBatchStream> {
     let file_schema = config.file_schema.arrow_schema().clone();
-    let opener = build_csv_opener(file_schema.clone(), config, format)?;
+    let opener = build_csv_opener(file_schema.clone(), config, format);
     // push down limit only if there is no filter
     let limit = config.filters.is_empty().then_some(config.limit).flatten();
     build_record_batch_stream(opener, file_schema, config.files, config.projection, limit)
@@ -173,6 +178,7 @@ fn new_parquet_stream_with_exec_plan(
             .iter()
             .map(|filename| PartitionedFile::new(filename.to_string(), 0))
             .collect::<Vec<_>>()],
+        constraints: Constraints::empty(),
         statistics: Statistics::new_unknown(file_schema.as_ref()),
         projection: projection.cloned(),
         limit: *limit,

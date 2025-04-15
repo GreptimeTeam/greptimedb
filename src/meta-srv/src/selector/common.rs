@@ -15,10 +15,10 @@
 use common_meta::peer::Peer;
 use snafu::ensure;
 
-use super::weighted_choose::WeightedChoose;
 use crate::error;
 use crate::error::Result;
 use crate::metasrv::SelectTarget;
+use crate::selector::weighted_choose::WeightedChoose;
 use crate::selector::SelectorOptions;
 
 /// According to the `opts`, choose peers from the `weight_array` through `weighted_choose`.

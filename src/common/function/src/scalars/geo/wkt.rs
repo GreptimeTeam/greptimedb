@@ -26,8 +26,8 @@ use once_cell::sync::Lazy;
 use snafu::ResultExt;
 use wkt::{ToWkt, TryFromWkt};
 
-use super::helpers::{ensure_columns_len, ensure_columns_n};
 use crate::function::{Function, FunctionContext};
+use crate::scalars::geo::helpers::{ensure_columns_len, ensure_columns_n};
 
 static COORDINATE_TYPES: Lazy<Vec<ConcreteDataType>> = Lazy::new(|| {
     vec![

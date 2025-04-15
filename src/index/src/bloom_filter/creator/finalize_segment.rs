@@ -22,7 +22,7 @@ use futures::stream::StreamExt;
 use futures::{stream, AsyncWriteExt, Stream};
 use snafu::ResultExt;
 
-use super::intermediate_codec::IntermediateBloomFilterCodecV1;
+use crate::bloom_filter::creator::intermediate_codec::IntermediateBloomFilterCodecV1;
 use crate::bloom_filter::creator::{FALSE_POSITIVE_RATE, SEED};
 use crate::bloom_filter::error::{IntermediateSnafu, IoSnafu, Result};
 use crate::external_provider::ExternalTempFileProvider;

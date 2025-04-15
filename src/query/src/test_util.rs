@@ -24,9 +24,8 @@ use arrow::array::{
 use arrow_schema::{SchemaRef, TimeUnit};
 use common_recordbatch::{DfRecordBatch, DfSendableRecordBatchStream};
 use datafusion::execution::{RecordBatchStream, TaskContext};
-use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, PlanProperties,
-};
+use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use datafusion_physical_expr::{EquivalenceProperties, Partitioning};
 use futures::Stream;
 
@@ -58,7 +57,8 @@ impl MockInputExec {
             properties: PlanProperties::new(
                 EquivalenceProperties::new(schema.clone()),
                 Partitioning::UnknownPartitioning(1),
-                ExecutionMode::Bounded,
+                EmissionType::Incremental,
+                Boundedness::Bounded,
             ),
             input,
             schema,

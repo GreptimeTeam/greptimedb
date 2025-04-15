@@ -23,7 +23,7 @@ use crate::blob_metadata::CompressionCodec;
 use crate::puffin_manager::file_accessor::MockFileAccessor;
 use crate::puffin_manager::fs_puffin_manager::FsPuffinManager;
 use crate::puffin_manager::stager::BoundedStager;
-use crate::puffin_manager::{DirGuard, PuffinManager, PuffinReader, PuffinWriter, PutOptions};
+use crate::puffin_manager::{PuffinManager, PuffinReader, PuffinWriter, PutOptions};
 
 async fn new_bounded_stager(prefix: &str, capacity: u64) -> (TempDir, Arc<BoundedStager<String>>) {
     let staging_dir = create_temp_dir(prefix);
@@ -343,6 +343,7 @@ async fn put_dir(
             PutOptions {
                 compression: compression_codec,
             },
+            HashMap::from_iter([("test_key".to_string(), "test_value".to_string())]),
         )
         .await
         .unwrap();
@@ -356,6 +357,11 @@ async fn check_dir(
     puffin_reader: &impl PuffinReader,
 ) {
     let res_dir = puffin_reader.dir(key).await.unwrap();
+    let metadata = res_dir.metadata();
+    assert_eq!(
+        metadata.properties,
+        HashMap::from_iter([("test_key".to_string(), "test_value".to_string())])
+    );
     for (file_name, raw_data) in files_in_dir {
         let file_path = if cfg!(windows) {
             res_dir.path().join(file_name.replace('/', "\\"))

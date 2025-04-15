@@ -29,9 +29,10 @@ use datafusion::common::{Result as DataFusionResult, Statistics};
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::SessionState;
 use datafusion::execution::TaskContext;
+use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, PlanProperties, RecordBatchStream,
+    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream,
 };
 use datafusion::physical_planner::create_physical_sort_expr;
@@ -54,9 +55,9 @@ use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::arrow::row::{OwnedRow, RowConverter, SortField};
 use futures::{ready, Stream};
 use futures_util::StreamExt;
-use snafu::{ensure, ResultExt};
+use snafu::ensure;
 
-use crate::error::{DataFusionSnafu, RangeQuerySnafu, Result};
+use crate::error::{RangeQuerySnafu, Result};
 
 type Millisecond = <TimestampMillisecondType as ArrowPrimitiveType>::Native;
 
@@ -372,25 +373,22 @@ impl RangeSelect {
                     Ok((None, Arc::new(field)))
                 },
             )
-            .collect::<DfResult<Vec<_>>>()
-            .context(DataFusionSnafu)?;
+            .collect::<DfResult<Vec<_>>>()?;
         // add align_ts
-        let ts_field = time_index
-            .to_field(input.schema().as_ref())
-            .context(DataFusionSnafu)?;
+        let ts_field = time_index.to_field(input.schema().as_ref())?;
         let time_index_name = ts_field.1.name().clone();
         fields.push(ts_field);
         // add by
-        let by_fields = exprlist_to_fields(&by, &input).context(DataFusionSnafu)?;
+        let by_fields = exprlist_to_fields(&by, &input)?;
         fields.extend(by_fields.clone());
-        let schema_before_project = Arc::new(
-            DFSchema::new_with_metadata(fields, input.schema().metadata().clone())
-                .context(DataFusionSnafu)?,
-        );
-        let by_schema = Arc::new(
-            DFSchema::new_with_metadata(by_fields, input.schema().metadata().clone())
-                .context(DataFusionSnafu)?,
-        );
+        let schema_before_project = Arc::new(DFSchema::new_with_metadata(
+            fields,
+            input.schema().metadata().clone(),
+        )?);
+        let by_schema = Arc::new(DFSchema::new_with_metadata(
+            by_fields,
+            input.schema().metadata().clone(),
+        )?);
         // If the results of project plan can be obtained directly from range plan without any additional
         // calculations, no project plan is required. We can simply project the final output of the range
         // plan to produce the final result.
@@ -420,10 +418,10 @@ impl RangeSelect {
                     (f.0.cloned(), Arc::new(f.1.clone()))
                 })
                 .collect();
-            Arc::new(
-                DFSchema::new_with_metadata(project_field, input.schema().metadata().clone())
-                    .context(DataFusionSnafu)?,
-            )
+            Arc::new(DFSchema::new_with_metadata(
+                project_field,
+                input.schema().metadata().clone(),
+            )?)
         } else {
             schema_before_project.clone()
         };
@@ -691,7 +689,8 @@ impl RangeSelect {
         let cache = PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
             Partitioning::UnknownPartitioning(1),
-            ExecutionMode::Bounded,
+            EmissionType::Incremental,
+            Boundedness::Bounded,
         );
         Ok(Arc::new(RangeSelectExec {
             input: exec_input,
@@ -1341,7 +1340,8 @@ mod test {
         let cache = PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
             Partitioning::UnknownPartitioning(1),
-            ExecutionMode::Bounded,
+            EmissionType::Incremental,
+            Boundedness::Bounded,
         );
         let input_schema = memory_exec.schema().clone();
         let range_select_exec = Arc::new(RangeSelectExec {

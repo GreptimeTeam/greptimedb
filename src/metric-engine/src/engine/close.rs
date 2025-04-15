@@ -20,7 +20,7 @@ use store_api::region_engine::RegionEngine;
 use store_api::region_request::{AffectedRows, RegionCloseRequest, RegionRequest};
 use store_api::storage::RegionId;
 
-use super::MetricEngineInner;
+use crate::engine::MetricEngineInner;
 use crate::error::{CloseMitoRegionSnafu, Result};
 use crate::metrics::PHYSICAL_REGION_COUNT;
 use crate::utils;

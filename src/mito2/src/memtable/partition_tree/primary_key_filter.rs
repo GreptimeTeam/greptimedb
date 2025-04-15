@@ -220,10 +220,7 @@ mod tests {
 
     fn create_filter(column_name: &str, value: &str) -> SimpleFilterEvaluator {
         let expr = Expr::BinaryExpr(BinaryExpr {
-            left: Box::new(Expr::Column(Column {
-                relation: None,
-                name: column_name.to_string(),
-            })),
+            left: Box::new(Expr::Column(Column::from_name(column_name))),
             op: Operator::Eq,
             right: Box::new(Expr::Literal(ScalarValue::Utf8(Some(value.to_string())))),
         });

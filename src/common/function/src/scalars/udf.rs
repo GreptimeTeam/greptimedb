@@ -163,7 +163,7 @@ mod tests {
         ];
 
         let args = ScalarFunctionArgs {
-            args: &args,
+            args,
             number_rows: 4,
             return_type: &ConcreteDataType::boolean_datatype().as_arrow_type(),
         };

@@ -36,6 +36,7 @@ use common_meta::leadership_notifier::{
 use common_meta::node_expiry_listener::NodeExpiryListener;
 use common_meta::peer::Peer;
 use common_meta::region_keeper::MemoryRegionKeeperRef;
+use common_meta::region_registry::LeaderRegionRegistryRef;
 use common_meta::wal_options_allocator::WalOptionsAllocatorRef;
 use common_options::datanode::DatanodeClientOptions;
 use common_procedure::options::ProcedureConfig;
@@ -182,6 +183,7 @@ impl Default for MetasrvOptions {
                 // The etcd the maximum size of any request is 1.5 MiB
                 // 1500KiB = 1536KiB (1.5MiB) - 36KiB (reserved size of key)
                 max_metadata_value_size: Some(ReadableSize::kb(1500)),
+                max_running_procedures: 128,
             },
             failure_detector: PhiAccrualFailureDetectorOptions::default(),
             datanode: DatanodeClientOptions::default(),
@@ -257,11 +259,13 @@ pub struct Context {
     pub is_infancy: bool,
     pub table_metadata_manager: TableMetadataManagerRef,
     pub cache_invalidator: CacheInvalidatorRef,
+    pub leader_region_registry: LeaderRegionRegistryRef,
 }
 
 impl Context {
     pub fn reset_in_memory(&self) {
         self.in_memory.reset();
+        self.leader_region_registry.reset();
     }
 }
 
@@ -402,6 +406,7 @@ pub struct Metasrv {
     region_migration_manager: RegionMigrationManagerRef,
     region_supervisor_ticker: Option<RegionSupervisorTickerRef>,
     cache_invalidator: CacheInvalidatorRef,
+    leader_region_registry: LeaderRegionRegistryRef,
 
     plugins: Plugins,
 }
@@ -667,6 +672,7 @@ impl Metasrv {
         let election = self.election.clone();
         let table_metadata_manager = self.table_metadata_manager.clone();
         let cache_invalidator = self.cache_invalidator.clone();
+        let leader_region_registry = self.leader_region_registry.clone();
 
         Context {
             server_addr,
@@ -679,6 +685,7 @@ impl Metasrv {
             is_infancy: false,
             table_metadata_manager,
             cache_invalidator,
+            leader_region_registry,
         }
     }
 }

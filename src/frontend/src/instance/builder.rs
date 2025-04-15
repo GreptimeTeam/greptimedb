@@ -33,6 +33,7 @@ use operator::statement::{StatementExecutor, StatementExecutorRef};
 use operator::table::TableMutationOperator;
 use partition::manager::PartitionRuleManager;
 use pipeline::pipeline_operator::PipelineOperator;
+use query::region_query::RegionQueryHandlerFactoryRef;
 use query::stats::StatementStatistics;
 use query::QueryEngineFactory;
 use snafu::OptionExt;
@@ -114,7 +115,11 @@ impl FrontendBuilder {
             .unwrap_or_else(|| Arc::new(DummyCacheInvalidator));
 
         let region_query_handler =
-            FrontendRegionQueryHandler::arc(partition_manager.clone(), node_manager.clone());
+            if let Some(factory) = plugins.get::<RegionQueryHandlerFactoryRef>() {
+                factory.build(partition_manager.clone(), node_manager.clone())
+            } else {
+                FrontendRegionQueryHandler::arc(partition_manager.clone(), node_manager.clone())
+            };
 
         let table_flownode_cache =
             self.layered_cache_registry
@@ -147,6 +152,7 @@ impl FrontendBuilder {
 
         let procedure_service_handler = Arc::new(ProcedureServiceOperator::new(
             self.procedure_executor.clone(),
+            self.catalog_manager.clone(),
         ));
 
         let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
@@ -160,6 +166,7 @@ impl FrontendBuilder {
             Some(Arc::new(flow_service)),
             true,
             plugins.clone(),
+            self.options.query.clone(),
         )
         .query_engine();
 

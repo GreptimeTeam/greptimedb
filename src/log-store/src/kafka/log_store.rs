@@ -29,11 +29,12 @@ use store_api::logstore::provider::{KafkaProvider, Provider};
 use store_api::logstore::{AppendBatchResponse, LogStore, SendableEntryStream, WalIndex};
 use store_api::storage::RegionId;
 
-use super::index::build_region_wal_index_iterator;
 use crate::error::{self, ConsumeRecordSnafu, Error, GetOffsetSnafu, InvalidProviderSnafu, Result};
 use crate::kafka::client_manager::{ClientManager, ClientManagerRef};
 use crate::kafka::consumer::{ConsumerBuilder, RecordsBuffer};
-use crate::kafka::index::{GlobalIndexCollector, MIN_BATCH_WINDOW_SIZE};
+use crate::kafka::index::{
+    build_region_wal_index_iterator, GlobalIndexCollector, MIN_BATCH_WINDOW_SIZE,
+};
 use crate::kafka::producer::OrderedBatchProducerRef;
 use crate::kafka::util::record::{
     convert_to_kafka_records, maybe_emit_entry, remaining_entries, Record, ESTIMATED_META_SIZE,

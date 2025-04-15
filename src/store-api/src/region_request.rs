@@ -17,15 +17,17 @@ use std::fmt::{self, Display};
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::add_column_location::LocationType;
-use api::v1::column_def::{as_fulltext_option, as_skipping_index_type};
+use api::v1::column_def::{
+    as_fulltext_option_analyzer, as_fulltext_option_backend, as_skipping_index_type,
+};
 use api::v1::region::{
     alter_request, compact_request, region_request, AlterRequest, AlterRequests, CloseRequest,
     CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest, DropRequests,
     FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
 };
 use api::v1::{
-    self, set_index, Analyzer, Option as PbOption, Rows, SemanticType,
-    SkippingIndexType as PbSkippingIndexType, WriteHint,
+    self, set_index, Analyzer, FulltextBackend as PbFulltextBackend, Option as PbOption, Rows,
+    SemanticType, SkippingIndexType as PbSkippingIndexType, WriteHint,
 };
 pub use common_base::AffectedRows;
 use common_time::TimeToLive;
@@ -434,8 +436,6 @@ pub struct RegionCloseRequest {}
 /// Alter metadata of a region.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct RegionAlterRequest {
-    /// The version of the schema before applying the alteration.
-    pub schema_version: u64,
     /// Kind of alteration to do.
     pub kind: AlterKind,
 }
@@ -443,17 +443,6 @@ pub struct RegionAlterRequest {
 impl RegionAlterRequest {
     /// Checks whether the request is valid, returns an error if it is invalid.
     pub fn validate(&self, metadata: &RegionMetadata) -> Result<()> {
-        ensure!(
-            metadata.schema_version == self.schema_version,
-            InvalidRegionRequestSnafu {
-                region_id: metadata.region_id,
-                err: format!(
-                    "region schema version {} is not equal to request schema version {}",
-                    metadata.schema_version, self.schema_version
-                ),
-            }
-        );
-
         self.kind.validate(metadata)?;
 
         Ok(())
@@ -477,10 +466,7 @@ impl TryFrom<AlterRequest> for RegionAlterRequest {
         })?;
 
         let kind = AlterKind::try_from(kind)?;
-        Ok(RegionAlterRequest {
-            schema_version: value.schema_version,
-            kind,
-        })
+        Ok(RegionAlterRequest { kind })
     }
 }
 
@@ -729,10 +715,13 @@ impl TryFrom<alter_request::Kind> for AlterKind {
                         column_name: x.column_name.clone(),
                         options: FulltextOptions {
                             enable: x.enable,
-                            analyzer: as_fulltext_option(
+                            analyzer: as_fulltext_option_analyzer(
                                 Analyzer::try_from(x.analyzer).context(DecodeProtoSnafu)?,
                             ),
                             case_sensitive: x.case_sensitive,
+                            backend: as_fulltext_option_backend(
+                                PbFulltextBackend::try_from(x.backend).context(DecodeProtoSnafu)?,
+                            ),
                         },
                     },
                 },
@@ -1116,6 +1105,10 @@ pub struct RegionCatchupRequest {
     /// The `entry_id` that was expected to reply to.
     /// `None` stands replaying to latest.
     pub entry_id: Option<entry::Id>,
+    /// Used for metrics metadata region.
+    /// The `entry_id` that was expected to reply to.
+    /// `None` stands replaying to latest.
+    pub metadata_entry_id: Option<entry::Id>,
     /// The hint for replaying memtable.
     pub location_id: Option<u64>,
 }
@@ -1149,7 +1142,7 @@ mod tests {
     use api::v1::region::RegionColumnDef;
     use api::v1::{ColumnDataType, ColumnDef};
     use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::{ColumnSchema, FulltextAnalyzer};
+    use datatypes::schema::{ColumnSchema, FulltextAnalyzer, FulltextBackend};
 
     use super::*;
     use crate::metadata::RegionMetadataBuilder;
@@ -1229,7 +1222,6 @@ mod tests {
         assert_eq!(
             request,
             RegionAlterRequest {
-                schema_version: 1,
                 kind: AlterKind::AddColumns {
                     columns: vec![AddColumn {
                         column_metadata: ColumnMetadata {
@@ -1527,21 +1519,6 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_schema_version() {
-        let mut metadata = new_metadata();
-        metadata.schema_version = 2;
-
-        RegionAlterRequest {
-            schema_version: 1,
-            kind: AlterKind::DropColumns {
-                names: vec!["field_0".to_string()],
-            },
-        }
-        .validate(&metadata)
-        .unwrap_err();
-    }
-
-    #[test]
     fn test_validate_add_columns() {
         let kind = AlterKind::AddColumns {
             columns: vec![
@@ -1571,10 +1548,7 @@ mod tests {
                 },
             ],
         };
-        let request = RegionAlterRequest {
-            schema_version: 1,
-            kind,
-        };
+        let request = RegionAlterRequest { kind };
         let mut metadata = new_metadata();
         metadata.schema_version = 1;
         request.validate(&metadata).unwrap();
@@ -1631,13 +1605,11 @@ mod tests {
                     enable: true,
                     analyzer: FulltextAnalyzer::Chinese,
                     case_sensitive: false,
+                    backend: FulltextBackend::Bloom,
                 },
             },
         };
-        let request = RegionAlterRequest {
-            schema_version: 1,
-            kind,
-        };
+        let request = RegionAlterRequest { kind };
         let mut metadata = new_metadata();
         metadata.schema_version = 1;
         request.validate(&metadata).unwrap();
@@ -1647,10 +1619,7 @@ mod tests {
                 column_name: "tag_0".to_string(),
             },
         };
-        let request = RegionAlterRequest {
-            schema_version: 1,
-            kind,
-        };
+        let request = RegionAlterRequest { kind };
         let mut metadata = new_metadata();
         metadata.schema_version = 1;
         request.validate(&metadata).unwrap();

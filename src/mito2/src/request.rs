@@ -31,6 +31,7 @@ use prost::Message;
 use smallvec::SmallVec;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::codec::{infer_primary_key_encoding_from_hint, PrimaryKeyEncoding};
+use store_api::manifest::ManifestVersion;
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{SetRegionRoleStateResponse, SettableRegionRoleState};
 use store_api::region_request::{
@@ -565,6 +566,9 @@ pub(crate) enum WorkerRequest {
 
     /// Use [RegionEdit] to edit a region directly.
     EditRegion(RegionEditRequest),
+
+    /// Keep the manifest of a region up to date.
+    SyncRegion(RegionSyncRequest),
 }
 
 impl WorkerRequest {
@@ -681,6 +685,21 @@ impl WorkerRequest {
                 region_role_state,
                 sender,
             },
+            receiver,
+        )
+    }
+
+    pub(crate) fn new_sync_region_request(
+        region_id: RegionId,
+        manifest_version: ManifestVersion,
+    ) -> (WorkerRequest, Receiver<Result<(ManifestVersion, bool)>>) {
+        let (sender, receiver) = oneshot::channel();
+        (
+            WorkerRequest::SyncRegion(RegionSyncRequest {
+                region_id,
+                manifest_version,
+                sender,
+            }),
             receiver,
         )
     }
@@ -867,6 +886,14 @@ pub(crate) struct RegionEditResult {
     pub(crate) edit: RegionEdit,
     /// Result from the manifest manager.
     pub(crate) result: Result<()>,
+}
+
+#[derive(Debug)]
+pub(crate) struct RegionSyncRequest {
+    pub(crate) region_id: RegionId,
+    pub(crate) manifest_version: ManifestVersion,
+    /// Returns the latest manifest version and a boolean indicating whether new maniefst is installed.
+    pub(crate) sender: Sender<Result<(ManifestVersion, bool)>>,
 }
 
 #[cfg(test)]

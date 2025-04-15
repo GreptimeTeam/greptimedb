@@ -28,7 +28,8 @@ use api::v1::{
 use catalog::CatalogManagerRef;
 use client::{OutputData, OutputMeta};
 use common_catalog::consts::{
-    default_engine, PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN, TRACE_ID_COLUMN,
+    default_engine, trace_services_table_name, PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN,
+    TRACE_ID_COLUMN, TRACE_TABLE_NAME, TRACE_TABLE_NAME_SESSION_KEY,
 };
 use common_grpc_expr::util::ColumnExpr;
 use common_meta::cache::TableFlownodeSetCacheRef;
@@ -62,8 +63,8 @@ use table::table_reference::TableReference;
 use table::TableRef;
 
 use crate::error::{
-    CatalogSnafu, ColumnOptionsSnafu, FindRegionLeaderSnafu, InvalidInsertRequestSnafu,
-    JoinTaskSnafu, RequestInsertsSnafu, Result, TableNotFoundSnafu,
+    CatalogSnafu, ColumnOptionsSnafu, CreatePartitionRulesSnafu, FindRegionLeaderSnafu,
+    InvalidInsertRequestSnafu, JoinTaskSnafu, RequestInsertsSnafu, Result, TableNotFoundSnafu,
 };
 use crate::expr_helper;
 use crate::region_req_factory::RegionRequestFactory;
@@ -571,53 +572,70 @@ impl Inserter {
             }
 
             AutoCreateTableType::Trace => {
+                let trace_table_name = ctx
+                    .extension(TRACE_TABLE_NAME_SESSION_KEY)
+                    .unwrap_or(TRACE_TABLE_NAME);
+
                 // note that auto create table shouldn't be ttl instant table
                 // for it's a very unexpected behavior and should be set by user explicitly
                 for mut create_table in create_tables {
-                    // prebuilt partition rules for uuid data: see the function
-                    // for more information
-                    let partitions = partition_rule_for_hexstring(TRACE_ID_COLUMN);
-                    // add skip index to
-                    // - trace_id: when searching by trace id
-                    // - parent_span_id: when searching root span
-                    // - span_name: when searching certain types of span
-                    let index_columns =
-                        [TRACE_ID_COLUMN, PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN];
-                    for index_column in index_columns {
-                        if let Some(col) = create_table
-                            .column_defs
-                            .iter_mut()
-                            .find(|c| c.name == index_column)
-                        {
-                            col.options = options_from_skipping(&SkippingIndexOptions::default())
-                                .context(ColumnOptionsSnafu)?;
-                        } else {
-                            warn!(
-                                "Column {} not found when creating index for trace table: {}.",
-                                index_column, create_table.table_name
-                            );
+                    if create_table.table_name == trace_services_table_name(trace_table_name) {
+                        let table = self
+                            .create_physical_table(create_table, None, ctx, statement_executor)
+                            .await?;
+                        let table_info = table.table_info();
+                        if table_info.is_ttl_instant_table() {
+                            instant_table_ids.insert(table_info.table_id());
                         }
-                    }
+                        table_infos.insert(table_info.table_id(), table.table_info());
+                    } else {
+                        // prebuilt partition rules for uuid data: see the function
+                        // for more information
+                        let partitions = partition_rule_for_hexstring(TRACE_ID_COLUMN)
+                            .context(CreatePartitionRulesSnafu)?;
+                        // add skip index to
+                        // - trace_id: when searching by trace id
+                        // - parent_span_id: when searching root span
+                        // - span_name: when searching certain types of span
+                        let index_columns =
+                            [TRACE_ID_COLUMN, PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN];
+                        for index_column in index_columns {
+                            if let Some(col) = create_table
+                                .column_defs
+                                .iter_mut()
+                                .find(|c| c.name == index_column)
+                            {
+                                col.options =
+                                    options_from_skipping(&SkippingIndexOptions::default())
+                                        .context(ColumnOptionsSnafu)?;
+                            } else {
+                                warn!(
+                                    "Column {} not found when creating index for trace table: {}.",
+                                    index_column, create_table.table_name
+                                );
+                            }
+                        }
 
-                    // use table_options to mark table model version
-                    create_table.table_options.insert(
-                        TABLE_DATA_MODEL.to_string(),
-                        TABLE_DATA_MODEL_TRACE_V1.to_string(),
-                    );
+                        // use table_options to mark table model version
+                        create_table.table_options.insert(
+                            TABLE_DATA_MODEL.to_string(),
+                            TABLE_DATA_MODEL_TRACE_V1.to_string(),
+                        );
 
-                    let table = self
-                        .create_physical_table(
-                            create_table,
-                            Some(partitions),
-                            ctx,
-                            statement_executor,
-                        )
-                        .await?;
-                    let table_info = table.table_info();
-                    if table_info.is_ttl_instant_table() {
-                        instant_table_ids.insert(table_info.table_id());
+                        let table = self
+                            .create_physical_table(
+                                create_table,
+                                Some(partitions),
+                                ctx,
+                                statement_executor,
+                            )
+                            .await?;
+                        let table_info = table.table_info();
+                        if table_info.is_ttl_instant_table() {
+                            instant_table_ids.insert(table_info.table_id());
+                        }
+                        table_infos.insert(table_info.table_id(), table.table_info());
                     }
-                    table_infos.insert(table_info.table_id(), table.table_info());
                 }
                 for alter_expr in alter_tables.into_iter() {
                     statement_executor

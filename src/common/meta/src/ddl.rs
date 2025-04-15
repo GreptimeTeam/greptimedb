@@ -28,6 +28,7 @@ use crate::key::table_route::PhysicalTableRouteValue;
 use crate::key::TableMetadataManagerRef;
 use crate::node_manager::NodeManagerRef;
 use crate::region_keeper::MemoryRegionKeeperRef;
+use crate::region_registry::LeaderRegionRegistryRef;
 use crate::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use crate::rpc::procedure::{
     AddRegionFollowerRequest, MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
@@ -164,6 +165,8 @@ pub struct DdlContext {
     pub cache_invalidator: CacheInvalidatorRef,
     /// Keep tracking operating regions.
     pub memory_region_keeper: MemoryRegionKeeperRef,
+    /// The leader region registry.
+    pub leader_region_registry: LeaderRegionRegistryRef,
     /// Table metadata manager.
     pub table_metadata_manager: TableMetadataManagerRef,
     /// Allocator for table metadata.

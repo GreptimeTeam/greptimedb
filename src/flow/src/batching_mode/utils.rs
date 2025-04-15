@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! some utils for helping with recording rule
+//! some utils for helping with batching mode
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -160,7 +160,10 @@ impl TreeNodeVisitor<'_> for FindGroupByFinalName {
     }
 }
 
-/// Add to the final select columns like `update_at`(which doesn't necessary need to have exact name just need to be a extra timestamp column) and `__ts_placeholder`(this column need to have exact this name and be a timestamp) with values like `now()` and `0`
+/// Add to the final select columns like `update_at`
+/// (which doesn't necessary need to have exact name just need to be a extra timestamp column)
+/// and `__ts_placeholder`(this column need to have exact this name and be a timestamp)
+/// with values like `now()` and `0`
 #[derive(Debug)]
 pub struct AddAutoColumnRewriter {
     pub schema: RawSchema,
@@ -264,7 +267,7 @@ pub struct AddFilterRewriter {
 }
 
 impl AddFilterRewriter {
-    fn new(filter: Expr) -> Self {
+    pub fn new(filter: Expr) -> Self {
         Self {
             extra_filter: filter,
             is_rewritten: false,

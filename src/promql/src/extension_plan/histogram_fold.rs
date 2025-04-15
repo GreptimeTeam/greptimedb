@@ -30,6 +30,7 @@ use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::TaskContext;
 use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{EquivalenceProperties, LexRequirement, PhysicalSortRequirement};
+use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::expressions::{CastExpr as PhyCast, Column as PhyColumn};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
@@ -182,7 +183,8 @@ impl HistogramFold {
         let properties = PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),
             Partitioning::UnknownPartitioning(1),
-            exec_input.properties().execution_mode(),
+            EmissionType::Incremental,
+            Boundedness::Bounded,
         );
         Arc::new(HistogramFoldExec {
             le_column_index,
@@ -301,7 +303,7 @@ impl ExecutionPlan for HistogramFoldExec {
     }
 
     fn required_input_distribution(&self) -> Vec<Distribution> {
-        vec![Distribution::SinglePartition; self.children().len()]
+        self.input.required_input_distribution()
     }
 
     fn maintains_input_order(&self) -> Vec<bool> {
@@ -728,7 +730,6 @@ mod test {
     use datafusion::arrow::datatypes::{Field, Schema};
     use datafusion::common::ToDFSchema;
     use datafusion::physical_plan::memory::MemoryExec;
-    use datafusion::physical_plan::ExecutionMode;
     use datafusion::prelude::SessionContext;
     use datatypes::arrow_array::StringArray;
 
@@ -806,7 +807,8 @@ mod test {
         let properties = PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),
             Partitioning::UnknownPartitioning(1),
-            ExecutionMode::Bounded,
+            EmissionType::Incremental,
+            Boundedness::Bounded,
         );
         let fold_exec = Arc::new(HistogramFoldExec {
             le_column_index: 1,

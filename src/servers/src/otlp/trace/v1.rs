@@ -12,22 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
+
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, RowInsertRequests, Value};
+use common_catalog::consts::trace_services_table_name;
 use common_grpc::precision::Precision;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::tonic::common::v1::any_value::Value as OtlpValue;
 use pipeline::{GreptimePipelineParams, PipelineWay};
 use session::context::QueryContextRef;
 
-use super::attributes::Attributes;
-use super::span::{parse, TraceSpan};
-use super::{
-    DURATION_NANO_COLUMN, PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN, SPAN_ID_COLUMN,
-    SPAN_KIND_COLUMN, SPAN_NAME_COLUMN, TIMESTAMP_COLUMN, TRACE_ID_COLUMN,
-};
 use crate::error::Result;
-use crate::otlp::trace::{KEY_SERVICE_NAME, SPAN_EVENTS_COLUMN};
+use crate::otlp::trace::attributes::Attributes;
+use crate::otlp::trace::span::{parse, TraceSpan};
+use crate::otlp::trace::{
+    DURATION_NANO_COLUMN, KEY_SERVICE_NAME, PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN,
+    SPAN_EVENTS_COLUMN, SPAN_ID_COLUMN, SPAN_KIND_COLUMN, SPAN_NAME_COLUMN, TIMESTAMP_COLUMN,
+    TRACE_ID_COLUMN,
+};
 use crate::otlp::utils::{any_value_to_jsonb, make_column_data, make_string_column_data};
 use crate::query_handler::PipelineHandlerRef;
 use crate::row_writer::{self, MultiTableData, TableData};
@@ -55,16 +58,26 @@ pub fn v1_to_grpc_insert_requests(
 ) -> Result<(RowInsertRequests, usize)> {
     let spans = parse(request);
     let mut multi_table_writer = MultiTableData::default();
+    let mut trace_writer = TableData::new(APPROXIMATE_COLUMN_COUNT, spans.len());
+    let mut trace_services_writer = TableData::new(APPROXIMATE_COLUMN_COUNT, 1);
 
-    let one_table_writer = multi_table_writer.get_or_default_table_data(
-        table_name,
-        APPROXIMATE_COLUMN_COUNT,
-        spans.len(),
-    );
-
+    let mut services = HashSet::new();
     for span in spans {
-        write_span_to_row(one_table_writer, span)?;
+        if let Some(service_name) = &span.service_name {
+            // Only insert the service name if it's not already in the set.
+            if !services.contains(service_name) {
+                services.insert(service_name.clone());
+            }
+        }
+        write_span_to_row(&mut trace_writer, span)?;
     }
+    write_trace_services_to_row(&mut trace_services_writer, services)?;
+
+    multi_table_writer.add_table_data(
+        trace_services_table_name(&table_name),
+        trace_services_writer,
+    );
+    multi_table_writer.add_table_data(table_name, trace_writer);
 
     Ok(multi_table_writer.into_row_insert_requests())
 }
@@ -146,6 +159,30 @@ pub fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> 
     row_writer::write_json(writer, "span_links", span.span_links.into(), &mut row)?;
 
     writer.add_row(row);
+
+    Ok(())
+}
+
+fn write_trace_services_to_row(writer: &mut TableData, services: HashSet<String>) -> Result<()> {
+    for service_name in services {
+        let mut row = writer.alloc_one_row();
+        // Write the timestamp as 0.
+        row_writer::write_ts_to_nanos(
+            writer,
+            TIMESTAMP_COLUMN,
+            Some(4102444800000000000), // Use a timestamp(2100-01-01 00:00:00) as large as possible.
+            Precision::Nanosecond,
+            &mut row,
+        )?;
+
+        // Write the `service_name` column.
+        row_writer::write_fields(
+            writer,
+            std::iter::once(make_string_column_data(SERVICE_NAME_COLUMN, service_name)),
+            &mut row,
+        )?;
+        writer.add_row(row);
+    }
 
     Ok(())
 }

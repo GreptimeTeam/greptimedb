@@ -179,6 +179,12 @@ metadata_cache_ttl = "10m"
 # TTI of the metadata cache.
 metadata_cache_tti = "5m"
 
+## The query engine options.
+[query]
+## Parallelism of the query engine.
+## Default to 0, which means the number of CPU cores.
+parallelism = 0
+
 ## Datanode options.
 [datanode]
 ## Datanode client options.

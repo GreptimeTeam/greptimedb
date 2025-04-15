@@ -33,7 +33,7 @@ use store_api::storage::RegionId;
 use tokio::time::error::Elapsed;
 
 use crate::cache::file_cache::FileType;
-use crate::region::{RegionLeaderState, RegionRoleState};
+use crate::region::RegionRoleState;
 use crate::schedule::remote_job_scheduler::JobId;
 use crate::sst::file::FileId;
 use crate::worker::WorkerId;
@@ -490,14 +490,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Schema version doesn't match. Expect {} but gives {}", expect, actual))]
-    InvalidRegionRequestSchemaVersion {
-        expect: u64,
-        actual: u64,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display(
         "Region {} is in {:?} state, which does not permit manifest updates.",
         region_id,
@@ -511,10 +503,10 @@ pub enum Error {
     },
 
     #[snafu(display("Region {} is in {:?} state, expect: {:?}", region_id, state, expect))]
-    RegionLeaderState {
+    RegionState {
         region_id: RegionId,
         state: RegionRoleState,
-        expect: RegionLeaderState,
+        expect: RegionRoleState,
         #[snafu(implicit)]
         location: Location,
     },
@@ -812,8 +804,8 @@ pub enum Error {
     #[snafu(display(
         "Failed to install manifest to {}, region: {}, available manifest version: {}, last version: {}",
         target_version,
-        available_version,
         region_id,
+        available_version,
         last_version
     ))]
     InstallManifestTo {
@@ -1023,6 +1015,12 @@ pub enum Error {
 
     #[snafu(display("Incompatible WAL provider change. This is typically caused by changing WAL provider in database config file without completely cleaning existing files. Global provider: {}, region provider: {}", global, region))]
     IncompatibleWalProviderChange { global: String, region: String },
+
+    #[snafu(display("Expected mito manifest info"))]
+    MitoManifestInfo {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -1047,11 +1045,10 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            OpenDal { .. }
-            | ReadParquet { .. }
-            | WriteWal { .. }
-            | ReadWal { .. }
-            | DeleteWal { .. } => StatusCode::StorageUnavailable,
+            OpenDal { .. } | ReadParquet { .. } => StatusCode::StorageUnavailable,
+            WriteWal { source, .. } | ReadWal { source, .. } | DeleteWal { source, .. } => {
+                source.status_code()
+            }
             CompressObject { .. }
             | DecompressObject { .. }
             | SerdeJson { .. }
@@ -1081,8 +1078,6 @@ impl ErrorExt for Error {
             | PartitionOutOfRange { .. }
             | ParseJobId { .. } => StatusCode::InvalidArguments,
 
-            InvalidRegionRequestSchemaVersion { .. } => StatusCode::RequestOutdated,
-
             RegionMetadataNotFound { .. }
             | Join { .. }
             | WorkerStopped { .. }
@@ -1100,7 +1095,8 @@ impl ErrorExt for Error {
             | ReadDataPart { .. }
             | CorruptedEntry { .. }
             | BuildEntry { .. }
-            | Metadata { .. } => StatusCode::Internal,
+            | Metadata { .. }
+            | MitoManifestInfo { .. } => StatusCode::Internal,
 
             OpenRegion { source, .. } => source.status_code(),
 
@@ -1125,8 +1121,8 @@ impl ErrorExt for Error {
             CompactRegion { source, .. } => source.status_code(),
             CompatReader { .. } => StatusCode::Unexpected,
             InvalidRegionRequest { source, .. } => source.status_code(),
-            RegionLeaderState { .. } | UpdateManifest { .. } => StatusCode::RegionNotReady,
-            &FlushableRegionState { .. } => StatusCode::RegionNotReady,
+            RegionState { .. } | UpdateManifest { .. } => StatusCode::RegionNotReady,
+            FlushableRegionState { .. } => StatusCode::RegionNotReady,
             JsonOptions { .. } => StatusCode::InvalidArguments,
             EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,
             ArrowReader { .. } => StatusCode::StorageUnavailable,

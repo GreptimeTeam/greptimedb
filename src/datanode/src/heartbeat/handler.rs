@@ -26,10 +26,11 @@ use store_api::storage::RegionId;
 
 mod close_region;
 mod downgrade_region;
+mod flush_region;
 mod open_region;
 mod upgrade_region;
 
-use super::task_tracker::TaskTracker;
+use crate::heartbeat::task_tracker::TaskTracker;
 use crate::region_server::RegionServer;
 
 /// Handler for [Instruction::OpenRegion] and [Instruction::CloseRegion].
@@ -42,7 +43,7 @@ pub struct RegionHeartbeatResponseHandler {
 
 /// Handler of the instruction.
 pub type InstructionHandler =
-    Box<dyn FnOnce(HandlerContext) -> BoxFuture<'static, InstructionReply> + Send>;
+    Box<dyn FnOnce(HandlerContext) -> BoxFuture<'static, Option<InstructionReply>> + Send>;
 
 #[derive(Clone)]
 pub struct HandlerContext {
@@ -94,6 +95,9 @@ impl RegionHeartbeatResponseHandler {
                 handler_context.handle_upgrade_region_instruction(upgrade_region)
             })),
             Instruction::InvalidateCaches(_) => InvalidHeartbeatResponseSnafu.fail(),
+            Instruction::FlushRegion(flush_regions) => Ok(Box::new(move |handler_context| {
+                handler_context.handle_flush_region_instruction(flush_regions)
+            })),
         }
     }
 }
@@ -129,8 +133,10 @@ impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
             })
             .await;
 
-            if let Err(e) = mailbox.send((meta, reply)).await {
-                error!(e; "Failed to send reply to mailbox");
+            if let Some(reply) = reply {
+                if let Err(e) = mailbox.send((meta, reply)).await {
+                    error!(e; "Failed to send reply to mailbox");
+                }
             }
         });
 
@@ -214,7 +220,6 @@ mod tests {
         let instruction = Instruction::DowngradeRegion(DowngradeRegion {
             region_id: RegionId::new(2048, 1),
             flush_timeout: Some(Duration::from_secs(1)),
-            reject_write: false,
         });
         assert!(heartbeat_handler
             .is_acceptable(&heartbeat_env.create_handler_ctx((meta.clone(), instruction))));
@@ -223,6 +228,7 @@ mod tests {
         let instruction = Instruction::UpgradeRegion(UpgradeRegion {
             region_id,
             last_entry_id: None,
+            metadata_last_entry_id: None,
             replay_timeout: None,
             location_id: None,
         });
@@ -413,7 +419,6 @@ mod tests {
             let instruction = Instruction::DowngradeRegion(DowngradeRegion {
                 region_id,
                 flush_timeout: Some(Duration::from_secs(1)),
-                reject_write: false,
             });
 
             let mut ctx = heartbeat_env.create_handler_ctx((meta, instruction));
@@ -436,7 +441,6 @@ mod tests {
         let instruction = Instruction::DowngradeRegion(DowngradeRegion {
             region_id: RegionId::new(2048, 1),
             flush_timeout: Some(Duration::from_secs(1)),
-            reject_write: false,
         });
         let mut ctx = heartbeat_env.create_handler_ctx((meta, instruction));
         let control = heartbeat_handler.handle(&mut ctx).await.unwrap();
