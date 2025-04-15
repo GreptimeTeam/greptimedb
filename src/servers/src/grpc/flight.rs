@@ -31,17 +31,21 @@ use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use futures::{future, Stream};
 use futures_util::{StreamExt, TryStreamExt};
 use prost::Message;
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use table::table_name::TableName;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::error;
-use crate::error::InvalidParameterSnafu;
+use crate::error::{
+    InvalidAuthHeaderInvalidUtf8ValueSnafu, InvalidParameterSnafu, NotFoundAuthHeaderSnafu,
+};
 pub use crate::grpc::flight::stream::FlightRecordBatchStream;
 use crate::grpc::greptime_handler::{get_request_type, GreptimeRequestHandler};
 use crate::grpc::TonicResult;
+use crate::http::header::constants::GREPTIME_DB_HEADER_NAME;
+use crate::http::AUTHORIZATION_HEADER;
 use crate::query_handler::grpc::RawRecordBatch;
 
 pub type TonicStream<T> = Pin<Box<dyn Stream<Item = TonicResult<T>> + Send + 'static>>;
@@ -200,10 +204,23 @@ impl FlightCraft for GreptimeRequestHandler {
         &self,
         request: Request<Streaming<FlightData>>,
     ) -> TonicResult<Response<TonicStream<PutResult>>> {
+        let (headers, _, stream) = request.into_parts();
+
+        let header = |key: &str| -> TonicResult<String> {
+            let v = headers.get(key).context(NotFoundAuthHeaderSnafu)?;
+            Ok(String::from_utf8(v.as_bytes().to_vec())
+                .context(InvalidAuthHeaderInvalidUtf8ValueSnafu)?)
+        };
+
+        let username_and_password = header(AUTHORIZATION_HEADER)?;
+        let schema = header(GREPTIME_DB_HEADER_NAME)?;
+        if !self.validate_auth(username_and_password, schema).await? {
+            return Err(Status::unauthenticated("auth failed"));
+        }
+
         const MAX_PENDING_RESPONSES: usize = 32;
         let (tx, rx) = mpsc::channel::<TonicResult<GreptimeResponse>>(MAX_PENDING_RESPONSES);
 
-        let stream = request.into_inner();
         let stream: PutRecordBatchRequestStream = stream
             .and_then(|x| future::ready(PutRecordBatchRequest::try_from(x).map_err(Into::into)))
             .boxed();

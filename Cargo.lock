@@ -1718,6 +1718,7 @@ dependencies = [
  "arrow-flight",
  "async-stream",
  "async-trait",
+ "base64 0.22.1",
  "common-catalog",
  "common-error",
  "common-grpc",

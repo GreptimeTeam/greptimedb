@@ -18,8 +18,10 @@ mod test {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use api::v1::auth_header::AuthScheme;
     use api::v1::greptime_response::Response;
-    use api::v1::{ColumnDataType, ColumnDef, CreateTableExpr, SemanticType};
+    use api::v1::{Basic, ColumnDataType, ColumnDef, CreateTableExpr, SemanticType};
+    use auth::user_provider_from_option;
     use client::{Client, Database};
     use common_query::OutputData;
     use common_recordbatch::RecordBatch;
@@ -36,18 +38,29 @@ mod test {
 
     use crate::cluster::GreptimeDbClusterBuilder;
     use crate::grpc::query_and_expect;
-    use crate::test_util::{setup_grpc_server, StorageType};
+    use crate::test_util::{setup_grpc_server_with_user_provider, StorageType};
     use crate::tests::test_util::MockInstance;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_standalone_flight_do_put() {
         common_telemetry::init_default_ut_logging();
 
-        let (addr, db, _server) =
-            setup_grpc_server(StorageType::File, "test_standalone_flight_do_put").await;
+        let (addr, db, _server) = setup_grpc_server_with_user_provider(
+            StorageType::File,
+            "test_standalone_flight_do_put",
+            user_provider_from_option(
+                &"static_user_provider:cmd:greptime_user=greptime_pwd".to_string(),
+            )
+            .ok(),
+        )
+        .await;
 
         let client = Client::with_urls(vec![addr]);
-        let client = Database::new_with_dbname("public", client);
+        let mut client = Database::new_with_dbname("public", client);
+        client.set_auth(AuthScheme::Basic(Basic {
+            username: "greptime_user".to_string(),
+            password: "greptime_pwd".to_string(),
+        }));
 
         create_table(&client).await;
 
@@ -73,7 +86,10 @@ mod test {
         let runtime = common_runtime::global_runtime().clone();
         let greptime_request_handler = GreptimeRequestHandler::new(
             ServerGrpcQueryHandlerAdapter::arc(db.frontend.instance.clone()),
-            None,
+            user_provider_from_option(
+                &"static_user_provider:cmd:greptime_user=greptime_pwd".to_string(),
+            )
+            .ok(),
             Some(runtime.clone()),
         );
         let grpc_server = GrpcServerBuilder::new(GrpcServerConfig::default(), runtime)
@@ -89,7 +105,11 @@ mod test {
         tokio::time::sleep(Duration::from_secs(1)).await;
 
         let client = Client::with_urls(vec![addr]);
-        let client = Database::new_with_dbname("public", client);
+        let mut client = Database::new_with_dbname("public", client);
+        client.set_auth(AuthScheme::Basic(Basic {
+            username: "greptime_user".to_string(),
+            password: "greptime_pwd".to_string(),
+        }));
 
         create_table(&client).await;
 

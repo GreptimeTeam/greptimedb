@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::pin::Pin;
+use std::str::FromStr;
 
 use api::v1::auth_header::AuthScheme;
 use api::v1::ddl_request::Expr as DdlExpr;
@@ -20,11 +21,13 @@ use api::v1::greptime_database_client::GreptimeDatabaseClient;
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use api::v1::{
-    AlterTableExpr, AuthHeader, CreateTableExpr, DdlRequest, GreptimeRequest, GreptimeResponse,
-    InsertRequests, QueryRequest, RequestHeader, ResponseHeader, Status,
+    AlterTableExpr, AuthHeader, Basic, CreateTableExpr, DdlRequest, GreptimeRequest,
+    GreptimeResponse, InsertRequests, QueryRequest, RequestHeader, ResponseHeader, Status,
 };
 use arrow_flight::{FlightDescriptor, Ticket};
 use async_stream::stream;
+use base64::prelude::BASE64_STANDARD;
+use base64::Engine;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
@@ -36,12 +39,12 @@ use common_telemetry::tracing_context::W3cTrace;
 use futures_util::{Stream, StreamExt};
 use prost::Message;
 use snafu::{ensure, ResultExt};
-use tonic::metadata::AsciiMetadataKey;
+use tonic::metadata::{AsciiMetadataKey, MetadataValue};
 use tonic::transport::Channel;
 
 use crate::error::{
     ConvertFlightDataSnafu, Error, FlightGetSnafu, IllegalFlightMessagesSnafu, InvalidAsciiSnafu,
-    ServerSnafu,
+    InvalidTonicMetadataValueSnafu, ServerSnafu,
 };
 use crate::{from_grpc_response, Client, Result};
 
@@ -349,11 +352,23 @@ impl Database {
             })
             .boxed();
 
+        let mut request = tonic::Request::new(record_batches);
+        if let Some(AuthHeader {
+            auth_scheme: Some(AuthScheme::Basic(Basic { username, password })),
+        }) = &self.ctx.auth_header
+        {
+            let encoded = BASE64_STANDARD.encode(format!("{username}:{password}"));
+            let value =
+                MetadataValue::from_str(&encoded).context(InvalidTonicMetadataValueSnafu)?;
+            request.metadata_mut().insert("x-greptime-auth", value);
+        }
+        request.metadata_mut().insert(
+            "x-greptime-db-name",
+            MetadataValue::from_str(&self.schema).context(InvalidTonicMetadataValueSnafu)?,
+        );
+
         let mut client = self.client.make_flight_client()?;
-        let response = client
-            .mut_inner()
-            .do_put(tonic::Request::new(record_batches))
-            .await?;
+        let response = client.mut_inner().do_put(request).await?;
 
         let response = response.into_inner().map(|x| match x {
             Ok(result) => {
