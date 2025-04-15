@@ -342,7 +342,7 @@
 | `wal.auto_prune_topic_records` | Bool | `false` | Enable automatically WAL pruning.<br/>Set to `true` to enable automatically WAL pruning to delete unused remote WAL entries periodically. |
 | `wal.auto_prune_interval` | String | `300s` | Interval of automatically WAL pruning. |
 | `wal.trigger_flush_threshold` | Integer | `0` | The threshold to trigger a flush operation of a region.<br/>Metasrv will send a flush request to flush the region when:<br/>`trigger_flush_threshold` + `prunable_entry_id` < `max_prunable_entry_id`<br/>where:<br/>- `prunable_entry_id` is the maximum entry id that can be pruned of the region.<br/>- `max_prunable_entry_id` is the maximum prunable entry id among all regions in the same topic.<br/>Set to `0` to disable the flush operation. |
-| `wal.auto_prune_task_limit` | Integer | `10` | Concurrent task limit for automatically WAL pruning. |
+| `wal.auto_prune_parallelism` | Integer | `10` | Concurrent task limit for automatically WAL pruning. |
 | `wal.num_topics` | Integer | `64` | Number of topics. |
 | `wal.selector_type` | String | `round_robin` | Topic selector type.<br/>Available selector types:<br/>- `round_robin` (default) |
 | `wal.topic_name_prefix` | String | `greptimedb_wal_topic` | A Kafka topic is constructed by concatenating `topic_name_prefix` and `topic_id`.<br/>Only accepts strings that match the following regular expression pattern:<br/>[a-zA-Z_:-][a-zA-Z0-9_:\-\.@#]*<br/>i.g., greptimedb_wal_topic_0, greptimedb_wal_topic_1. |

@@ -56,7 +56,7 @@ impl From<DatanodeWalConfig> for MetasrvWalConfig {
                 auto_prune_topic_records: config.auto_prune_topic_records,
                 auto_prune_interval: config.auto_prune_interval,
                 trigger_flush_threshold: config.trigger_flush_threshold,
-                auto_prune_task_limit: config.auto_prune_task_limit,
+                auto_prune_parallelism: config.auto_prune_parallelism,
             }),
         }
     }
@@ -204,9 +204,9 @@ mod tests {
             },
             auto_create_topics: true,
             auto_prune_topic_records: false,
-            auto_prune_interval: Duration::from_secs(60),
+            auto_prune_interval: Duration::from_secs(5 * 60),
             trigger_flush_threshold: 0,
-            auto_prune_task_limit: 10,
+            auto_prune_parallelism: 10,
         };
         assert_eq!(metasrv_wal_config, MetasrvWalConfig::Kafka(expected));
 

@@ -365,7 +365,7 @@ impl MetasrvBuilder {
             };
             let wal_prune_manager = WalPruneManager::new(
                 table_metadata_manager.clone(),
-                remote_wal_options.auto_prune_task_limit,
+                remote_wal_options.auto_prune_parallelism,
                 rx,
                 procedure_manager.clone(),
                 wal_prune_context,

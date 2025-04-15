@@ -147,7 +147,7 @@ auto_prune_interval = "300s"
 trigger_flush_threshold = 0
 
 ## Concurrent task limit for automatically WAL pruning.
-auto_prune_task_limit = 10
+auto_prune_parallelism = 10
 
 ## Number of topics.
 num_topics = 64

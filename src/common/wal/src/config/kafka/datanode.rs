@@ -55,7 +55,7 @@ pub struct DatanodeKafkaConfig {
     // `None` stands for never sending flush request.
     pub trigger_flush_threshold: u64,
     // Limit of concurrent active pruning procedures.
-    pub auto_prune_task_limit: usize,
+    pub auto_prune_parallelism: usize,
 }
 
 impl Default for DatanodeKafkaConfig {
@@ -73,7 +73,7 @@ impl Default for DatanodeKafkaConfig {
             auto_prune_topic_records: false,
             auto_prune_interval: DEFAULT_ACTIVE_PRUNE_INTERVAL,
             trigger_flush_threshold: DEFAULT_TRIGGER_FLUSH_THRESHOLD,
-            auto_prune_task_limit: DEFAULT_ACTIVE_PRUNE_TASK_LIMIT,
+            auto_prune_parallelism: DEFAULT_ACTIVE_PRUNE_TASK_LIMIT,
         }
     }
 }
