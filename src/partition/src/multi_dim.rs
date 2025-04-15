@@ -71,7 +71,11 @@ impl MultiDimPartitionRule {
         ensure!(
             exprs.len() == regions.len(),
             error::UnexpectedSnafu {
-                err_msg: "Expr and region length mismatch."
+                err_msg: format!(
+                    "Expr {} and region {} length mismatch.",
+                    exprs.len(),
+                    regions.len()
+                )
             }
         );
         let name_to_index = partition_columns
