@@ -142,18 +142,17 @@ fn record_batch_to_rows(
         })
         .collect::<error::Result<_>>()?;
 
-    let mut current_row = Vec::with_capacity(region_metadata.column_metadatas.len());
     for row_idx in 0..num_rows {
-        row_at(&vectors, row_idx, &mut current_row);
         let row = Row {
-            values: std::mem::take(&mut current_row),
+            values: row_at(&vectors, row_idx),
         };
         rows.push(row);
     }
     Ok(rows)
 }
 
-fn row_at(vectors: &[Option<VectorRef>], row_idx: usize, row: &mut Vec<api::v1::Value>) {
+fn row_at(vectors: &[Option<VectorRef>], row_idx: usize) -> Vec<api::v1::Value> {
+    let mut row = Vec::with_capacity(vectors.len());
     for a in vectors {
         let value = if let Some(a) = a {
             value_to_grpc_value(a.get(row_idx))
@@ -162,6 +161,7 @@ fn row_at(vectors: &[Option<VectorRef>], row_idx: usize, row: &mut Vec<api::v1::
         };
         row.push(value)
     }
+    row
 }
 
 #[cfg(test)]
