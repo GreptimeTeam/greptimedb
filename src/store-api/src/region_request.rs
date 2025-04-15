@@ -331,10 +331,10 @@ fn make_region_bulk_inserts(
 
     for req in requests.requests {
         let region_id = req.region_id;
-        match req.r#type() {
+        match req.payload_type() {
             api::v1::region::BulkInsertType::ArrowIpc => {
                 // todo(hl): use StreamReader instead
-                let reader = FileReader::try_new(Cursor::new(req.body), None)
+                let reader = FileReader::try_new(Cursor::new(req.payload), None)
                     .context(DecodeArrowIpcSnafu)?;
                 let record_batches = reader
                     .map(|b| b.map(BulkInsertPayload::ArrowIpc))
