@@ -1371,7 +1371,7 @@ transform:
     assert_eq!(res.status(), StatusCode::OK);
 
     // 3. check schema
-    let expected_schema = "[[\"logs1\",\"CREATE TABLE IF NOT EXISTS \\\"logs1\\\" (\\n  \\\"id1\\\" INT NULL INVERTED INDEX,\\n  \\\"id2\\\" INT NULL INVERTED INDEX,\\n  \\\"logger\\\" STRING NULL,\\n  \\\"type\\\" STRING NULL SKIPPING INDEX WITH(granularity = '10240', type = 'BLOOM'),\\n  \\\"log\\\" STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', case_sensitive = 'false'),\\n  \\\"time\\\" TIMESTAMP(9) NOT NULL,\\n  TIME INDEX (\\\"time\\\"),\\n  PRIMARY KEY (\\\"type\\\", \\\"log\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
+    let expected_schema = "[[\"logs1\",\"CREATE TABLE IF NOT EXISTS \\\"logs1\\\" (\\n  \\\"id1\\\" INT NULL INVERTED INDEX,\\n  \\\"id2\\\" INT NULL INVERTED INDEX,\\n  \\\"logger\\\" STRING NULL,\\n  \\\"type\\\" STRING NULL SKIPPING INDEX WITH(granularity = '10240', type = 'BLOOM'),\\n  \\\"log\\\" STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', backend = 'bloom', case_sensitive = 'false'),\\n  \\\"time\\\" TIMESTAMP(9) NOT NULL,\\n  TIME INDEX (\\\"time\\\"),\\n  PRIMARY KEY (\\\"type\\\", \\\"log\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
     validate_data(
         "pipeline_schema",
         &client,
