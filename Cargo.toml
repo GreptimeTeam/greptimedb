@@ -147,7 +147,7 @@ moka = "0.12"
 nalgebra = "0.33"
 notify = "8.0"
 num_cpus = "1.16"
-object_store_opendal = "0.49.0"
+object_store_opendal = "0.50"
 once_cell = "1.18"
 opentelemetry-proto = { version = "0.27", features = [
     "gen-tonic",

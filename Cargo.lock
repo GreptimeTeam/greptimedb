@@ -1691,7 +1691,7 @@ dependencies = [
  "humantime",
  "meta-client",
  "nu-ansi-term",
- "opendal",
+ "opendal 0.51.2",
  "query",
  "rand 0.9.0",
  "reqwest",
@@ -7588,7 +7588,7 @@ dependencies = [
  "lazy_static",
  "md5",
  "moka",
- "opendal",
+ "opendal 0.52.0",
  "prometheus",
  "tokio",
  "uuid",
@@ -7617,9 +7617,9 @@ dependencies = [
 
 [[package]]
 name = "object_store_opendal"
-version = "0.49.1"
+version = "0.50.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b18eb960885330175ec89daa991b0bc9050dc7f259b31a887fbfbb297312f83"
+checksum = "59db4de9230e630346e3fd821e2b8d1fd03ddd509c32c964836588e82241762a"
 dependencies = [
  "async-trait",
  "bytes",
@@ -7627,7 +7627,7 @@ dependencies = [
  "futures",
  "futures-util",
  "object_store",
- "opendal",
+ "opendal 0.52.0",
  "pin-project",
  "tokio",
 ]
@@ -7658,6 +7658,35 @@ name = "opendal"
 version = "0.51.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b1063ea459fa9e94584115743b06330f437902dd1d9f692b863ef1875a20548"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "backon",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "crc32c",
+ "futures",
+ "getrandom 0.2.15",
+ "http 1.1.0",
+ "log",
+ "md-5",
+ "once_cell",
+ "percent-encoding",
+ "quick-xml 0.36.2",
+ "reqsign",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "opendal"
+version = "0.52.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a55c840b5a6ad96106d6c0612fabb8f35a5ace826e0474fc55ebda33042b8d33"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8934,7 +8963,7 @@ dependencies = [
  "log",
  "multimap",
  "once_cell",
- "petgraph 0.6.5",
+ "petgraph 0.7.1",
  "prettyplease",
  "prost 0.13.5",
  "prost-types 0.13.5",
