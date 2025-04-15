@@ -105,3 +105,126 @@ impl TreeNodeRewriter for TranscribeAtatRewriter {
         }
     }
 }
+#[cfg(test)]
+mod tests {
+
+    use arrow_schema::SchemaRef;
+    use datafusion::datasource::{provider_as_source, MemTable};
+    use datafusion::logical_expr::{col, lit, LogicalPlan, LogicalPlanBuilder};
+    use datafusion_expr::{BinaryExpr, Operator};
+    use datatypes::arrow::datatypes::{DataType, Field, Schema};
+
+    use super::*;
+
+    fn optimize(plan: LogicalPlan) -> Result<LogicalPlan> {
+        TranscribeAtatRule.analyze(plan, &ConfigOptions::default())
+    }
+
+    fn prepare_test_plan_builder() -> LogicalPlanBuilder {
+        let schema = Schema::new(vec![
+            Field::new("a", DataType::Utf8, false),
+            Field::new("b", DataType::Utf8, false),
+        ]);
+        let table = MemTable::try_new(SchemaRef::from(schema), vec![]).unwrap();
+        LogicalPlanBuilder::scan("t", provider_as_source(Arc::new(table)), None).unwrap()
+    }
+
+    #[test]
+    fn test_multiple_atat() {
+        let plan = prepare_test_plan_builder()
+            .filter(
+                Expr::BinaryExpr(BinaryExpr {
+                    left: Box::new(col("a")),
+                    op: Operator::AtAt,
+                    right: Box::new(lit("foo")),
+                })
+                .and(Expr::BinaryExpr(BinaryExpr {
+                    left: Box::new(col("b")),
+                    op: Operator::AtAt,
+                    right: Box::new(lit("bar")),
+                })),
+            )
+            .unwrap()
+            .project(vec![
+                Expr::BinaryExpr(BinaryExpr {
+                    left: Box::new(col("a")),
+                    op: Operator::AtAt,
+                    right: Box::new(col("b")),
+                }),
+                col("b"),
+            ])
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let expected = r#"Projection: matches_term(t.a, t.b), t.b
+  Filter: matches_term(t.a, Utf8("foo")) AND matches_term(t.b, Utf8("bar"))
+    TableScan: t"#;
+
+        let optimized_plan = optimize(plan).unwrap();
+        let formatted = optimized_plan.to_string();
+
+        assert_eq!(formatted, expected);
+    }
+
+    #[test]
+    fn test_nested_atat() {
+        let plan = prepare_test_plan_builder()
+            .filter(
+                Expr::BinaryExpr(BinaryExpr {
+                    left: Box::new(col("a")),
+                    op: Operator::AtAt,
+                    right: Box::new(lit("foo")),
+                })
+                .and(
+                    Expr::BinaryExpr(BinaryExpr {
+                        left: Box::new(col("b")),
+                        op: Operator::AtAt,
+                        right: Box::new(lit("bar")),
+                    })
+                    .or(Expr::BinaryExpr(BinaryExpr {
+                        left: Box::new(
+                            // Nested case in function argument
+                            Expr::BinaryExpr(BinaryExpr {
+                                left: Box::new(col("a")),
+                                op: Operator::AtAt,
+                                right: Box::new(lit("nested")),
+                            }),
+                        ),
+                        op: Operator::Eq,
+                        right: Box::new(lit(true)),
+                    })),
+                ),
+            )
+            .unwrap()
+            .project(vec![
+                col("a"),
+                // Complex nested expression with multiple @@ operators
+                Expr::BinaryExpr(BinaryExpr {
+                    left: Box::new(Expr::BinaryExpr(BinaryExpr {
+                        left: Box::new(col("a")),
+                        op: Operator::AtAt,
+                        right: Box::new(lit("foo")),
+                    })),
+                    op: Operator::And,
+                    right: Box::new(Expr::BinaryExpr(BinaryExpr {
+                        left: Box::new(col("b")),
+                        op: Operator::AtAt,
+                        right: Box::new(lit("bar")),
+                    })),
+                }),
+            ])
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let expected = r#"Projection: t.a, matches_term(t.a, Utf8("foo")) AND matches_term(t.b, Utf8("bar"))
+  Filter: matches_term(t.a, Utf8("foo")) AND (matches_term(t.b, Utf8("bar")) OR matches_term(t.a, Utf8("nested")) = Boolean(true))
+    TableScan: t"#;
+
+        let optimized_plan = optimize(plan).unwrap();
+        let formatted = optimized_plan.to_string();
+
+        assert_eq!(formatted, expected);
+    }
+}
