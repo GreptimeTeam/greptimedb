@@ -29,7 +29,7 @@ use store_api::metadata::{
 };
 use store_api::region_engine::{
     RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef, RegionStatistic,
-    SetRegionRoleStateResponse, SettableRegionRoleState,
+    SetRegionRoleStateResponse, SettableRegionRoleState, SyncManifestResponse,
 };
 use store_api::region_request::RegionRequest;
 use store_api::storage::{ConcreteDataType, RegionId, ScanRequest, SequenceNumber};
@@ -113,7 +113,7 @@ impl RegionEngine for MetaRegionEngine {
         &self,
         _region_id: RegionId,
         _manifest_info: RegionManifestInfo,
-    ) -> Result<(), BoxedError> {
+    ) -> Result<SyncManifestResponse, BoxedError> {
         unimplemented!()
     }
 

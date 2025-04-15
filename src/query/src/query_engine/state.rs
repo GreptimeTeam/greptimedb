@@ -55,6 +55,7 @@ use crate::optimizer::string_normalization::StringNormalizationRule;
 use crate::optimizer::type_conversion::TypeConversionRule;
 use crate::optimizer::windowed_sort::WindowedSortPhysicalRule;
 use crate::optimizer::ExtensionAnalyzerRule;
+use crate::options::QueryOptions as QueryOptionsNew;
 use crate::query_engine::options::QueryOptions;
 use crate::query_engine::DefaultSerializer;
 use crate::range_select::planner::RangeSelectPlanner;
@@ -82,6 +83,7 @@ impl fmt::Debug for QueryEngineState {
 }
 
 impl QueryEngineState {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         catalog_list: CatalogManagerRef,
         region_query_handler: Option<RegionQueryHandlerRef>,
@@ -90,9 +92,13 @@ impl QueryEngineState {
         flow_service_handler: Option<FlowServiceHandlerRef>,
         with_dist_planner: bool,
         plugins: Plugins,
+        options: QueryOptionsNew,
     ) -> Self {
         let runtime_env = Arc::new(RuntimeEnv::default());
         let mut session_config = SessionConfig::new().with_create_default_catalog_and_schema(false);
+        if options.parallelism > 0 {
+            session_config = session_config.with_target_partitions(options.parallelism);
+        }
 
         // todo(hl): This serves as a workaround for https://github.com/GreptimeTeam/greptimedb/issues/5659
         // and we can add that check back once we upgrade datafusion.

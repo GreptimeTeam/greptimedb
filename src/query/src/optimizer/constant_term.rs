@@ -289,7 +289,16 @@ mod tests {
                 table,
             })
             .is_ok());
-        QueryEngineFactory::new(catalog_list, None, None, None, None, false).query_engine()
+        QueryEngineFactory::new(
+            catalog_list,
+            None,
+            None,
+            None,
+            None,
+            false,
+            Default::default(),
+        )
+        .query_engine()
     }
 
     fn matches_term_udf() -> Arc<ScalarUDF> {

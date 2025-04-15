@@ -19,6 +19,7 @@ use common_config::config::Configurable;
 use common_options::datanode::DatanodeClientOptions;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use meta_client::MetaClientOptions;
+use query::options::QueryOptions;
 use serde::{Deserialize, Serialize};
 use servers::export_metrics::{ExportMetricsOption, ExportMetricsTask};
 use servers::grpc::GrpcOptions;
@@ -58,6 +59,7 @@ pub struct FrontendOptions {
     pub user_provider: Option<String>,
     pub export_metrics: ExportMetricsOption,
     pub tracing: TracingOptions,
+    pub query: QueryOptions,
     pub max_in_flight_write_bytes: Option<ReadableSize>,
 }
 
@@ -82,6 +84,7 @@ impl Default for FrontendOptions {
             user_provider: None,
             export_metrics: ExportMetricsOption::default(),
             tracing: TracingOptions::default(),
+            query: QueryOptions::default(),
             max_in_flight_write_bytes: None,
         }
     }

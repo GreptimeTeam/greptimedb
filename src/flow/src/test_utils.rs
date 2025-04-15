@@ -23,6 +23,7 @@ use datatypes::timestamp::TimestampMillisecond;
 use datatypes::vectors::{TimestampMillisecondVectorBuilder, VectorRef};
 use itertools::Itertools;
 use prost::Message;
+use query::options::QueryOptions;
 use query::parser::QueryLanguageParser;
 use query::query_engine::DefaultSerializer;
 use query::QueryEngine;
@@ -146,7 +147,15 @@ pub fn create_test_query_engine() -> Arc<dyn QueryEngine> {
     };
     catalog_list.register_table_sync(req_with_ts).unwrap();
 
-    let factory = query::QueryEngineFactory::new(catalog_list, None, None, None, None, false);
+    let factory = query::QueryEngineFactory::new(
+        catalog_list,
+        None,
+        None,
+        None,
+        None,
+        false,
+        QueryOptions::default(),
+    );
 
     let engine = factory.query_engine();
     register_function_to_query_engine(&engine);

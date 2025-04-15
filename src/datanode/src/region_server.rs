@@ -308,20 +308,36 @@ impl RegionServer {
             .with_context(|_| HandleRegionRequestSnafu { region_id })
     }
 
+    /// Sync region manifest and registers new opened logical regions.
     pub async fn sync_region_manifest(
         &self,
         region_id: RegionId,
         manifest_info: RegionManifestInfo,
     ) -> Result<()> {
-        let engine = self
+        let engine_with_status = self
             .inner
             .region_map
             .get(&region_id)
             .with_context(|| RegionNotFoundSnafu { region_id })?;
-        engine
+
+        let Some(new_opened_regions) = engine_with_status
             .sync_region(region_id, manifest_info)
             .await
-            .with_context(|_| HandleRegionRequestSnafu { region_id })
+            .with_context(|_| HandleRegionRequestSnafu { region_id })?
+            .new_opened_logical_region_ids()
+        else {
+            return Ok(());
+        };
+
+        for region in new_opened_regions {
+            self.inner.region_map.insert(
+                region,
+                RegionEngineWithStatus::Ready(engine_with_status.engine().clone()),
+            );
+            info!("Logical region {} is registered!", region);
+        }
+
+        Ok(())
     }
 
     /// Set region role state gracefully.
@@ -520,6 +536,15 @@ enum RegionEngineWithStatus {
 impl RegionEngineWithStatus {
     /// Returns [RegionEngineRef].
     pub fn into_engine(self) -> RegionEngineRef {
+        match self {
+            RegionEngineWithStatus::Registering(engine) => engine,
+            RegionEngineWithStatus::Deregistering(engine) => engine,
+            RegionEngineWithStatus::Ready(engine) => engine,
+        }
+    }
+
+    /// Returns [RegionEngineRef] reference.
+    pub fn engine(&self) -> &RegionEngineRef {
         match self {
             RegionEngineWithStatus::Registering(engine) => engine,
             RegionEngineWithStatus::Deregistering(engine) => engine,
@@ -1029,7 +1054,7 @@ impl RegionServerInner {
         for region in logical_regions {
             self.region_map
                 .insert(region, RegionEngineWithStatus::Ready(engine.clone()));
-            debug!("Logical region {} is registered!", region);
+            info!("Logical region {} is registered!", region);
         }
         Ok(())
     }

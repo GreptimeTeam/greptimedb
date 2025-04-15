@@ -359,6 +359,7 @@ impl DatanodeBuilder {
             None,
             false,
             self.plugins.clone(),
+            opts.query.clone(),
         );
         let query_engine = query_engine_factory.query_engine();
 
