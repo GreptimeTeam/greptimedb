@@ -395,6 +395,7 @@ impl SeriesDistributor {
 
         metrics.scan_cost += fetch_start.elapsed();
         part_metrics.merge_metrics(&metrics);
+        part_metrics.set_num_series_send_timeout(self.senders.num_timeout);
 
         part_metrics.on_finish();
 
@@ -437,6 +438,8 @@ struct SenderList {
     num_nones: usize,
     /// Index of the current partition to send.
     sender_idx: usize,
+    /// Number of timeout.
+    num_timeout: usize,
 }
 
 impl SenderList {
@@ -446,6 +449,7 @@ impl SenderList {
             senders,
             num_nones,
             sender_idx: 0,
+            num_timeout: 0,
         }
     }
 
@@ -505,6 +509,7 @@ impl SenderList {
             match sender.send_timeout(Ok(batch), SEND_TIMEOUT).await {
                 Ok(()) => break,
                 Err(SendTimeoutError::Timeout(res)) => {
+                    self.num_timeout += 1;
                     // Safety: we send Ok.
                     batch = res.unwrap();
                 }

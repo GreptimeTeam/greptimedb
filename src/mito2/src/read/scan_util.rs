@@ -92,6 +92,8 @@ struct ScanMetricsSet {
 
     /// Elapsed time before the first poll operation.
     first_poll: Duration,
+    /// Number of send timeout in SeriesScan.
+    num_series_send_timeout: usize,
 }
 
 impl fmt::Debug for ScanMetricsSet {
@@ -122,6 +124,7 @@ impl fmt::Debug for ScanMetricsSet {
             num_sst_batches,
             num_sst_rows,
             first_poll,
+            num_series_send_timeout,
         } = self;
 
         write!(
@@ -150,7 +153,8 @@ impl fmt::Debug for ScanMetricsSet {
             num_sst_record_batches={num_sst_record_batches}, \
             num_sst_batches={num_sst_batches}, \
             num_sst_rows={num_sst_rows}, \
-            first_poll={first_poll:?}}}"
+            first_poll={first_poll:?}, \
+            num_series_send_timeout={num_series_send_timeout}}}"
         )
     }
 }
@@ -438,6 +442,12 @@ impl PartitionMetrics {
     /// Finishes the query.
     pub(crate) fn on_finish(&self) {
         self.0.on_finish();
+    }
+
+    /// Sets the `num_series_send_timeout`.
+    pub(crate) fn set_num_series_send_timeout(&self, num_timeout: usize) {
+        let mut metrics = self.0.metrics.lock().unwrap();
+        metrics.num_series_send_timeout = num_timeout;
     }
 }
 
