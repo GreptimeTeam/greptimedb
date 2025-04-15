@@ -68,16 +68,6 @@ impl MultiDimPartitionRule {
         regions: Vec<RegionNumber>,
         exprs: Vec<PartitionExpr>,
     ) -> Result<Self> {
-        ensure!(
-            exprs.len() == regions.len(),
-            error::UnexpectedSnafu {
-                err_msg: format!(
-                    "Expr {} and region {} length mismatch.",
-                    exprs.len(),
-                    regions.len()
-                )
-            }
-        );
         let name_to_index = partition_columns
             .iter()
             .enumerate()
