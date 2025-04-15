@@ -80,6 +80,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 |_|_TableScan: test_|
 | logical_plan after count_wildcard_to_time_index_rule_| SAME TEXT AS ABOVE_|
 | logical_plan after StringNormalizationRule_| SAME TEXT AS ABOVE_|
+| logical_plan after TranscribeAtatRule_| SAME TEXT AS ABOVE_|
 | logical_plan after inline_table_scan_| SAME TEXT AS ABOVE_|
 | logical_plan after expand_wildcard_rule_| SAME TEXT AS ABOVE_|
 | logical_plan after resolve_grouping_function_| SAME TEXT AS ABOVE_|
