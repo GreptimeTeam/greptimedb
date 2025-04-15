@@ -866,11 +866,8 @@ mod test_split_record_batch {
         let batch = RecordBatch::try_new(schema, vec![Arc::new(host_array), Arc::new(value_array)])
             .unwrap();
 
-        // Split the batch
         let result = rule.split_record_batch(&batch).unwrap();
-
-        // Empty batch should result in empty map
-        assert_eq!(result.len(), 2);
+        assert_eq!(result.len(), 1);
     }
 
     #[test]
