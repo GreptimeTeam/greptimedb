@@ -421,7 +421,12 @@ pub(super) fn encode_value(
         Value::IntervalDayTime(v) => builder.encode_field(&PgInterval::from(*v)),
         Value::IntervalMonthDayNano(v) => builder.encode_field(&PgInterval::from(*v)),
         Value::Decimal128(v) => builder.encode_field(&v.to_string()),
-        Value::Duration(d) => builder.encode_field(&PgInterval::from(*d)),
+        Value::Duration(d) => match PgInterval::try_from(*d) {
+            Ok(i) => builder.encode_field(&i),
+            Err(e) => Err(PgWireError::ApiError(Box::new(Error::Internal {
+                err_msg: e.to_string(),
+            }))),
+        },
         Value::List(values) => encode_array(query_ctx, values, builder),
     }
 }
