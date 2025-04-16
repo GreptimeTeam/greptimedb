@@ -34,7 +34,7 @@ use parquet::arrow::{parquet_to_arrow_field_levels, FieldLevels, ProjectionMask}
 use parquet::file::metadata::ParquetMetaData;
 use parquet::format::KeyValue;
 use snafu::{OptionExt, ResultExt};
-use store_api::metadata::{RegionMetadata, RegionMetadataRef};
+use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 
@@ -1016,10 +1016,20 @@ impl ReaderState {
     }
 }
 
-/// Context to evaluate the column filter.
+/// The filter to evaluate or the prune result of the default value.
+pub(crate) enum MaybeFilter {
+    /// The filter to evaluate.
+    Filter(SimpleFilterEvaluator),
+    /// The filter matches the default value.
+    Matched,
+    /// The filter is pruned.
+    Pruned,
+}
+
+/// Context to evaluate the column filter for a parquet file.
 pub(crate) struct SimpleFilterContext {
     /// Filter to evaluate.
-    filter: SimpleFilterEvaluator,
+    filter: MaybeFilter,
     /// Id of the column to evaluate.
     column_id: ColumnId,
     /// Semantic type of the column.
@@ -1039,22 +1049,38 @@ impl SimpleFilterContext {
         expr: &Expr,
     ) -> Option<Self> {
         let filter = SimpleFilterEvaluator::try_new(expr)?;
-        let column_metadata = match expected_meta {
+        let (column_metadata, maybe_filter) = match expected_meta {
             Some(meta) => {
                 // Gets the column metadata from the expected metadata.
                 let column = meta.column_by_name(filter.column_name())?;
                 // Checks if the column is present in the SST metadata. We still uses the
                 // column from the expected metadata.
-                let sst_column = sst_meta.column_by_id(column.column_id)?;
-                debug_assert_eq!(column.semantic_type, sst_column.semantic_type);
+                match sst_meta.column_by_id(column.column_id) {
+                    Some(sst_column) => {
+                        debug_assert_eq!(column.semantic_type, sst_column.semantic_type);
 
-                column
+                        (column, MaybeFilter::Filter(filter))
+                    }
+                    None => {
+                        // If the column is not present in the SST metadata, we evaluate the filter
+                        // against the default value of the column.
+                        // If we can't evaluate the filter, we return None.
+                        if pruned_by_default(&filter, column)? {
+                            (column, MaybeFilter::Pruned)
+                        } else {
+                            (column, MaybeFilter::Matched)
+                        }
+                    }
+                }
             }
-            None => sst_meta.column_by_name(filter.column_name())?,
+            None => {
+                let column = sst_meta.column_by_name(filter.column_name())?;
+                (column, MaybeFilter::Filter(filter))
+            }
         };
 
         Some(Self {
-            filter,
+            filter: maybe_filter,
             column_id: column_metadata.column_id,
             semantic_type: column_metadata.semantic_type,
             data_type: column_metadata.column_schema.data_type.clone(),
@@ -1062,7 +1088,7 @@ impl SimpleFilterContext {
     }
 
     /// Returns the filter to evaluate.
-    pub(crate) fn filter(&self) -> &SimpleFilterEvaluator {
+    pub(crate) fn filter(&self) -> &MaybeFilter {
         &self.filter
     }
 
@@ -1080,6 +1106,17 @@ impl SimpleFilterContext {
     pub(crate) fn data_type(&self) -> &ConcreteDataType {
         &self.data_type
     }
+}
+
+/// Prune a column by its default value.
+/// Returns false if we can't create the default value or evaluate the filter.
+fn pruned_by_default(filter: &SimpleFilterEvaluator, column: &ColumnMetadata) -> Option<bool> {
+    let value = column.column_schema.create_default().ok().flatten()?;
+    let scalar_value = value
+        .try_to_scalar_value(&column.column_schema.data_type)
+        .ok()?;
+    let matches = filter.evaluate_scalar(&scalar_value).ok()?;
+    Some(!matches)
 }
 
 type RowGroupMap = BTreeMap<usize, Option<RowSelection>>;
