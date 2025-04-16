@@ -18,10 +18,7 @@ use std::time::Instant;
 
 use api::helper::request_type;
 use api::v1::auth_header::AuthScheme;
-use api::v1::{
-    greptime_response, AffectedRows, AuthHeader, Basic, GreptimeRequest, GreptimeResponse,
-    RequestHeader, ResponseHeader, Status,
-};
+use api::v1::{AuthHeader, Basic, GreptimeRequest, RequestHeader};
 use auth::{Identity, Password, UserInfoRef, UserProviderRef};
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
@@ -29,6 +26,7 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_grpc::flight::do_put::DoPutResponse;
 use common_query::Output;
 use common_runtime::runtime::RuntimeTrait;
 use common_runtime::Runtime;
@@ -38,7 +36,6 @@ use common_time::timezone::parse_timezone;
 use futures_util::StreamExt;
 use session::context::{QueryContext, QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
-use table::table_name::TableName;
 use tokio::sync::mpsc;
 
 use crate::error::Error::UnsupportedAuthScheme;
@@ -135,7 +132,7 @@ impl GreptimeRequestHandler {
     pub(crate) async fn put_record_batches(
         &self,
         mut stream: PutRecordBatchRequestStream,
-        result_sender: mpsc::Sender<TonicResult<GreptimeResponse>>,
+        result_sender: mpsc::Sender<TonicResult<DoPutResponse>>,
     ) {
         let handler = self.handler.clone();
         let runtime = self
@@ -143,8 +140,6 @@ impl GreptimeRequestHandler {
             .clone()
             .unwrap_or_else(common_runtime::global_runtime);
         runtime.spawn(async move {
-            let mut table_to_put: Option<TableName> = None;
-
             while let Some(request) = stream.next().await {
                 let request = match request {
                     Ok(request) => request,
@@ -154,37 +149,14 @@ impl GreptimeRequestHandler {
                     }
                 };
 
-                let (table, record_batch) = match request {
-                    PutRecordBatchRequest::First((table, record_batch)) => {
-                        let table = table_to_put.insert(table);
-                        debug!(r#"start putting record batches for "{}""#, table);
-                        (&*table, record_batch)
-                    }
-                    PutRecordBatchRequest::Rest(record_batch) => {
-                        let Some(table) = table_to_put.as_ref() else {
-                            let _ = result_sender.try_send(Ok(GreptimeResponse {
-                                header: Some(ResponseHeader {
-                                    status: Some(Status {
-                                        status_code: StatusCode::InvalidArguments as u32,
-                                        err_msg: "must specify a table to put first".to_string(),
-                                    }),
-                                }),
-                                ..Default::default()
-                            }));
-                            break;
-                        };
-                        (table, record_batch)
-                    }
-                };
-
-                let result = handler.put_record_batch(table, record_batch).await;
+                let PutRecordBatchRequest {
+                    table_name,
+                    request_id,
+                    record_batch,
+                } = request;
+                let result = handler.put_record_batch(&table_name, record_batch).await;
                 let result = result
-                    .map(|x| GreptimeResponse {
-                        response: Some(greptime_response::Response::AffectedRows(AffectedRows {
-                            value: x as u32,
-                        })),
-                        ..Default::default()
-                    })
+                    .map(|x| DoPutResponse::new(request_id, x))
                     .map_err(Into::into);
                 if result_sender.try_send(result).is_err() {
                     warn!(r#""DoPut" client maybe unreachable, abort handling its message"#);
@@ -196,9 +168,14 @@ impl GreptimeRequestHandler {
 
     pub(crate) async fn validate_auth(
         &self,
-        username_and_password: String,
-        schema: String,
+        username_and_password: Option<&str>,
+        schema: &str,
     ) -> Result<bool> {
+        if self.user_provider.is_none() {
+            return Ok(true);
+        }
+
+        let username_and_password = username_and_password.context(NotFoundAuthHeaderSnafu)?;
         let username_and_password = BASE64_STANDARD
             .decode(username_and_password)
             .context(InvalidBase64ValueSnafu)
@@ -222,6 +199,7 @@ impl GreptimeRequestHandler {
             schema: schema.to_string(),
             ..Default::default()
         };
+
         Ok(auth(
             self.user_provider.clone(),
             Some(&header),

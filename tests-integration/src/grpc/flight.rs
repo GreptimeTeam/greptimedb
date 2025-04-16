@@ -19,10 +19,13 @@ mod test {
     use std::time::Duration;
 
     use api::v1::auth_header::AuthScheme;
-    use api::v1::greptime_response::Response;
     use api::v1::{Basic, ColumnDataType, ColumnDef, CreateTableExpr, SemanticType};
+    use arrow_flight::FlightDescriptor;
     use auth::user_provider_from_option;
     use client::{Client, Database};
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_grpc::flight::do_put::DoPutMetadata;
+    use common_grpc::flight::{FlightEncoder, FlightMessage};
     use common_query::OutputData;
     use common_recordbatch::RecordBatch;
     use datatypes::prelude::{ConcreteDataType, ScalarVector, VectorRef};
@@ -38,29 +41,18 @@ mod test {
 
     use crate::cluster::GreptimeDbClusterBuilder;
     use crate::grpc::query_and_expect;
-    use crate::test_util::{setup_grpc_server_with_user_provider, StorageType};
+    use crate::test_util::{setup_grpc_server, StorageType};
     use crate::tests::test_util::MockInstance;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_standalone_flight_do_put() {
         common_telemetry::init_default_ut_logging();
 
-        let (addr, db, _server) = setup_grpc_server_with_user_provider(
-            StorageType::File,
-            "test_standalone_flight_do_put",
-            user_provider_from_option(
-                &"static_user_provider:cmd:greptime_user=greptime_pwd".to_string(),
-            )
-            .ok(),
-        )
-        .await;
+        let (addr, db, _server) =
+            setup_grpc_server(StorageType::File, "test_standalone_flight_do_put").await;
 
         let client = Client::with_urls(vec![addr]);
-        let mut client = Database::new_with_dbname("public", client);
-        client.set_auth(AuthScheme::Basic(Basic {
-            username: "greptime_user".to_string(),
-            password: "greptime_pwd".to_string(),
-        }));
+        let client = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
 
         create_table(&client).await;
 
@@ -105,7 +97,7 @@ mod test {
         tokio::time::sleep(Duration::from_secs(1)).await;
 
         let client = Client::with_urls(vec![addr]);
-        let mut client = Database::new_with_dbname("public", client);
+        let mut client = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
         client.set_auth(AuthScheme::Basic(Basic {
             username: "greptime_user".to_string(),
             password: "greptime_pwd".to_string(),
@@ -124,16 +116,36 @@ mod test {
     }
 
     async fn test_put_record_batches(client: &Database, record_batches: Vec<RecordBatch>) {
-        let request_stream = tokio_stream::iter(record_batches).boxed();
-        let response_stream = client
-            .do_put("foo".to_string(), request_stream)
-            .await
-            .unwrap();
+        let stream = tokio_stream::iter(record_batches)
+            .enumerate()
+            .map(|(i, x)| {
+                let mut encoder = FlightEncoder::default();
+                let message = FlightMessage::Recordbatch(x);
+                let mut data = encoder.encode(message);
+
+                let metadata = DoPutMetadata::new(i as i64);
+                data.app_metadata = serde_json::to_vec(&metadata).unwrap().into();
+
+                // first message in "DoPut" stream should carry table name in flight descriptor
+                if i == 0 {
+                    data.flight_descriptor = Some(FlightDescriptor {
+                        r#type: arrow_flight::flight_descriptor::DescriptorType::Path as i32,
+                        path: vec!["foo".to_string()],
+                        ..Default::default()
+                    });
+                }
+                data
+            })
+            .boxed();
+
+        let response_stream = client.do_put(stream).await.unwrap();
+
         let responses = response_stream.collect::<Vec<_>>().await;
         assert_eq!(responses.len(), 3);
-        for response in responses {
-            let Response::AffectedRows(affected_rows) = response.response.unwrap();
-            assert_eq!(affected_rows.value, 448);
+        for (i, response) in responses.into_iter().enumerate() {
+            let response = response.unwrap();
+            assert_eq!(response.request_id(), i as i64);
+            assert_eq!(response.affected_rows(), 448);
         }
     }
 

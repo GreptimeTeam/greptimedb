@@ -16,31 +16,33 @@ mod stream;
 
 use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
-use api::v1::{GreptimeRequest, GreptimeResponse};
+use api::v1::GreptimeRequest;
 use arrow_flight::flight_service_server::FlightService;
 use arrow_flight::{
     Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightInfo,
     HandshakeRequest, HandshakeResponse, PollInfo, PutResult, SchemaResult, Ticket,
 };
 use async_trait::async_trait;
+use bytes::Bytes;
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_grpc::flight::do_put::{DoPutMetadata, DoPutResponse};
 use common_grpc::flight::{FlightEncoder, FlightMessage};
 use common_query::{Output, OutputData};
 use common_telemetry::tracing::info_span;
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
-use futures::{future, Stream};
+use futures::{future, ready, Stream};
 use futures_util::{StreamExt, TryStreamExt};
 use prost::Message;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{ensure, ResultExt};
 use table::table_name::TableName;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::error;
-use crate::error::{
-    InvalidAuthHeaderInvalidUtf8ValueSnafu, InvalidParameterSnafu, NotFoundAuthHeaderSnafu,
-};
+use crate::error::{InvalidParameterSnafu, ParseJsonSnafu, Result, ToJsonSnafu};
 pub use crate::grpc::flight::stream::FlightRecordBatchStream;
 use crate::grpc::greptime_handler::{get_request_type, GreptimeRequestHandler};
 use crate::grpc::TonicResult;
@@ -206,69 +208,141 @@ impl FlightCraft for GreptimeRequestHandler {
     ) -> TonicResult<Response<TonicStream<PutResult>>> {
         let (headers, _, stream) = request.into_parts();
 
-        let header = |key: &str| -> TonicResult<String> {
-            let v = headers.get(key).context(NotFoundAuthHeaderSnafu)?;
-            Ok(String::from_utf8(v.as_bytes().to_vec())
-                .context(InvalidAuthHeaderInvalidUtf8ValueSnafu)?)
+        let header = |key: &str| -> TonicResult<Option<&str>> {
+            let Some(v) = headers.get(key) else {
+                return Ok(None);
+            };
+            let Ok(v) = std::str::from_utf8(v.as_bytes()) else {
+                return Err(InvalidParameterSnafu {
+                    reason: "expect valid UTF-8 value",
+                }
+                .build()
+                .into());
+            };
+            Ok(Some(v))
         };
 
         let username_and_password = header(AUTHORIZATION_HEADER)?;
-        let schema = header(GREPTIME_DB_HEADER_NAME)?;
+        let schema = header(GREPTIME_DB_HEADER_NAME)?.unwrap_or(DEFAULT_SCHEMA_NAME);
         if !self.validate_auth(username_and_password, schema).await? {
             return Err(Status::unauthenticated("auth failed"));
         }
 
         const MAX_PENDING_RESPONSES: usize = 32;
-        let (tx, rx) = mpsc::channel::<TonicResult<GreptimeResponse>>(MAX_PENDING_RESPONSES);
+        let (tx, rx) = mpsc::channel::<TonicResult<DoPutResponse>>(MAX_PENDING_RESPONSES);
 
-        let stream: PutRecordBatchRequestStream = stream
-            .and_then(|x| future::ready(PutRecordBatchRequest::try_from(x).map_err(Into::into)))
-            .boxed();
+        let stream = PutRecordBatchRequestStream {
+            flight_data_stream: stream,
+            state: PutRecordBatchRequestStreamState::Init(schema.to_string()),
+        };
         self.put_record_batches(stream, tx).await;
 
         let response = ReceiverStream::new(rx)
-            .map_ok(|x| PutResult {
-                app_metadata: bytes::Bytes::from(x.encode_to_vec()),
+            .and_then(|response| {
+                future::ready({
+                    serde_json::to_vec(&response)
+                        .context(ToJsonSnafu)
+                        .map(|x| PutResult {
+                            app_metadata: Bytes::from(x),
+                        })
+                        .map_err(Into::into)
+                })
             })
             .boxed();
         Ok(Response::new(response))
     }
 }
 
-pub(crate) type PutRecordBatchRequestStream =
-    Pin<Box<dyn Stream<Item = TonicResult<PutRecordBatchRequest>> + Send>>;
-
-pub(crate) enum PutRecordBatchRequest {
-    First((TableName, RawRecordBatch)),
-    Rest(RawRecordBatch),
+pub(crate) struct PutRecordBatchRequest {
+    pub(crate) table_name: TableName,
+    pub(crate) request_id: i64,
+    pub(crate) record_batch: RawRecordBatch,
 }
 
-impl TryFrom<FlightData> for PutRecordBatchRequest {
-    type Error = error::Error;
+impl PutRecordBatchRequest {
+    fn try_new(table_name: TableName, flight_data: FlightData) -> Result<Self> {
+        let metadata: DoPutMetadata =
+            serde_json::from_slice(&flight_data.app_metadata).context(ParseJsonSnafu)?;
+        Ok(Self {
+            table_name,
+            request_id: metadata.request_id(),
+            record_batch: flight_data.data_body,
+        })
+    }
+}
 
-    fn try_from(value: FlightData) -> Result<Self, Self::Error> {
-        let FlightData {
-            flight_descriptor,
-            data_body,
-            ..
-        } = value;
-        if let Some(descriptor) = flight_descriptor {
+pub(crate) struct PutRecordBatchRequestStream {
+    flight_data_stream: Streaming<FlightData>,
+    state: PutRecordBatchRequestStreamState,
+}
+
+enum PutRecordBatchRequestStreamState {
+    Init(String),
+    Started(TableName),
+}
+
+impl Stream for PutRecordBatchRequestStream {
+    type Item = TonicResult<PutRecordBatchRequest>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        fn extract_table_name(mut descriptor: FlightDescriptor) -> Result<String> {
             ensure!(
                 descriptor.r#type == arrow_flight::flight_descriptor::DescriptorType::Path as i32,
                 InvalidParameterSnafu {
                     reason: "expect FlightDescriptor::type == 'Path' only",
                 }
             );
-            let table_name: TableName = descriptor.path.try_into().map_err(|e| {
+            ensure!(
+                descriptor.path.len() == 1,
                 InvalidParameterSnafu {
-                    reason: format!("{e}"),
+                    reason: "expect FlightDescriptor::path has only one table name",
                 }
-                .build()
-            })?;
-            Ok(Self::First((table_name, data_body)))
-        } else {
-            Ok(Self::Rest(data_body))
+            );
+            Ok(descriptor.path.remove(0))
         }
+
+        let poll = ready!(self.flight_data_stream.poll_next_unpin(cx));
+
+        let result = match &mut self.state {
+            PutRecordBatchRequestStreamState::Init(schema) => match poll {
+                Some(Ok(mut flight_data)) => {
+                    let flight_descriptor = flight_data.flight_descriptor.take();
+                    let result = if let Some(descriptor) = flight_descriptor {
+                        let table_name = extract_table_name(descriptor)
+                            .map(|x| TableName::new(DEFAULT_CATALOG_NAME, schema.clone(), x));
+                        let table_name = match table_name {
+                            Ok(table_name) => table_name,
+                            Err(e) => return Poll::Ready(Some(Err(e.into()))),
+                        };
+
+                        let request =
+                            PutRecordBatchRequest::try_new(table_name.clone(), flight_data);
+                        let request = match request {
+                            Ok(request) => request,
+                            Err(e) => return Poll::Ready(Some(Err(e.into()))),
+                        };
+
+                        self.state = PutRecordBatchRequestStreamState::Started(table_name);
+
+                        Ok(request)
+                    } else {
+                        Err(Status::failed_precondition(
+                            "table to put is not found in flight descriptor",
+                        ))
+                    };
+                    Some(result)
+                }
+                Some(Err(e)) => Some(Err(e)),
+                None => None,
+            },
+            PutRecordBatchRequestStreamState::Started(table_name) => poll.map(|x| {
+                x.and_then(|flight_data| {
+                    PutRecordBatchRequest::try_new(table_name.clone(), flight_data)
+                        .map_err(Into::into)
+                })
+            }),
+        };
+        Poll::Ready(result)
     }
 }
 

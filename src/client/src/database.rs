@@ -22,21 +22,22 @@ use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use api::v1::{
     AlterTableExpr, AuthHeader, Basic, CreateTableExpr, DdlRequest, GreptimeRequest,
-    GreptimeResponse, InsertRequests, QueryRequest, RequestHeader, ResponseHeader, Status,
+    InsertRequests, QueryRequest, RequestHeader,
 };
-use arrow_flight::{FlightDescriptor, Ticket};
+use arrow_flight::{FlightData, Ticket};
 use async_stream::stream;
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
 use common_error::ext::{BoxedError, ErrorExt};
-use common_error::status_code::StatusCode;
-use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
+use common_grpc::flight::do_put::DoPutResponse;
+use common_grpc::flight::{FlightDecoder, FlightMessage};
 use common_query::Output;
 use common_recordbatch::error::ExternalSnafu;
-use common_recordbatch::{RecordBatch, RecordBatchStreamWrapper};
+use common_recordbatch::RecordBatchStreamWrapper;
 use common_telemetry::error;
 use common_telemetry::tracing_context::W3cTrace;
-use futures_util::{Stream, StreamExt};
+use futures::future;
+use futures_util::{Stream, StreamExt, TryStreamExt};
 use prost::Message;
 use snafu::{ensure, ResultExt};
 use tonic::metadata::{AsciiMetadataKey, MetadataValue};
@@ -48,9 +49,9 @@ use crate::error::{
 };
 use crate::{from_grpc_response, Client, Result};
 
-pub type RecordBatchStream = Pin<Box<dyn Stream<Item = RecordBatch> + Send>>;
+type FlightDataStream = Pin<Box<dyn Stream<Item = FlightData> + Send>>;
 
-type GreptimeResponseStream = Pin<Box<dyn Stream<Item = GreptimeResponse>>>;
+type DoPutResponseStream = Pin<Box<dyn Stream<Item = Result<DoPutResponse>>>>;
 
 #[derive(Clone, Debug, Default)]
 pub struct Database {
@@ -322,37 +323,10 @@ impl Database {
     }
 
     /// Ingest a stream of [RecordBatch]es that belong to a table, using Arrow Flight's "`DoPut`"
-    /// method. The return value is also a stream, produces [GreptimeResponse]s.
-    pub async fn do_put(
-        &self,
-        table: String,
-        record_batches: RecordBatchStream,
-    ) -> Result<GreptimeResponseStream> {
-        let mut encoder = FlightEncoder::default();
-        let record_batches = record_batches
-            .enumerate()
-            .map(move |(i, x)| {
-                let message = FlightMessage::Recordbatch(x);
-                let mut data = encoder.encode(message);
+    /// method. The return value is also a stream, produces [DoPutResponse]s.
+    pub async fn do_put(&self, stream: FlightDataStream) -> Result<DoPutResponseStream> {
+        let mut request = tonic::Request::new(stream);
 
-                // first message in "DoPut" stream should carry table name in flight descriptor
-                if i == 0 {
-                    let table = table
-                        .splitn(3, '.')
-                        .map(|x| x.to_string())
-                        .collect::<Vec<_>>();
-
-                    data.flight_descriptor = Some(FlightDescriptor {
-                        r#type: arrow_flight::flight_descriptor::DescriptorType::Path as i32,
-                        path: table,
-                        ..Default::default()
-                    });
-                }
-                data
-            })
-            .boxed();
-
-        let mut request = tonic::Request::new(record_batches);
         if let Some(AuthHeader {
             auth_scheme: Some(AuthScheme::Basic(Basic { username, password })),
         }) = &self.ctx.auth_header
@@ -362,6 +336,7 @@ impl Database {
                 MetadataValue::from_str(&encoded).context(InvalidTonicMetadataValueSnafu)?;
             request.metadata_mut().insert("x-greptime-auth", value);
         }
+
         request.metadata_mut().insert(
             "x-greptime-db-name",
             MetadataValue::from_str(&self.schema).context(InvalidTonicMetadataValueSnafu)?,
@@ -369,33 +344,12 @@ impl Database {
 
         let mut client = self.client.make_flight_client()?;
         let response = client.mut_inner().do_put(request).await?;
-
-        let response = response.into_inner().map(|x| match x {
-            Ok(result) => {
-                GreptimeResponse::decode(result.app_metadata).unwrap_or_else(|e| GreptimeResponse {
-                    header: Some(ResponseHeader {
-                        status: Some(Status {
-                            status_code: StatusCode::Internal as u32,
-                            err_msg: e.to_string(),
-                        }),
-                    }),
-                    ..Default::default()
-                })
-            }
-            Err(error) => {
-                let error: Error = error.into();
-                GreptimeResponse {
-                    header: Some(ResponseHeader {
-                        status: Some(Status {
-                            status_code: error.status_code() as u32,
-                            err_msg: error.output_msg(),
-                        }),
-                    }),
-                    ..Default::default()
-                }
-            }
-        });
-        Ok(Box::pin(response))
+        let response = response
+            .into_inner()
+            .map_err(Into::into)
+            .and_then(|x| future::ready(DoPutResponse::try_from(x).context(ConvertFlightDataSnafu)))
+            .boxed();
+        Ok(response)
     }
 }
 
