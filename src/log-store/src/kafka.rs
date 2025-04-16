@@ -18,6 +18,8 @@ mod high_watermark_manager;
 pub(crate) mod index;
 pub mod log_store;
 pub(crate) mod producer;
+#[cfg(test)]
+pub(crate) mod test_util;
 pub(crate) mod util;
 pub(crate) mod worker;
 

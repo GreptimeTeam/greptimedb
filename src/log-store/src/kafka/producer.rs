@@ -153,7 +153,6 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use chrono::{TimeZone, Utc};
     use common_base::readable_size::ReadableSize;
     use common_telemetry::debug;
     use futures::stream::FuturesUnordered;
@@ -167,6 +166,7 @@ mod tests {
     use super::*;
     use crate::kafka::index::NoopCollector;
     use crate::kafka::producer::OrderedBatchProducer;
+    use crate::kafka::test_util::record;
 
     #[derive(Debug)]
     struct MockClient {
@@ -211,15 +211,6 @@ mod tests {
 
         async fn get_offset(&self, _at: OffsetAt) -> rskafka::client::error::Result<i64> {
             todo!()
-        }
-    }
-
-    fn record() -> Record {
-        Record {
-            key: Some(vec![0; 4]),
-            value: Some(vec![0; 6]),
-            headers: Default::default(),
-            timestamp: Utc.timestamp_millis_opt(320).unwrap(),
         }
     }
 
