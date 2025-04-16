@@ -554,7 +554,9 @@ mod tests {
         run_test_with_kafka_wal(|broker_endpoints| {
             Box::pin(async {
                 common_telemetry::init_default_ut_logging();
-                let topic_name = uuid::Uuid::new_v4().to_string();
+                let mut topic_name = uuid::Uuid::new_v4().to_string();
+                // Topic should start with a letter.
+                topic_name = format!("test_procedure_execution-{}", topic_name);
                 let mut env = TestEnv::new();
                 let context = env.build_wal_prune_context(broker_endpoints).await;
                 let mut procedure = WalPruneProcedure::new(topic_name.clone(), context, 10, None);
