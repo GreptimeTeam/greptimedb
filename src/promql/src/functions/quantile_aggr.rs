@@ -18,8 +18,10 @@ use datafusion::arrow::array::{ArrayRef, AsArray};
 use datafusion::common::cast::{as_list_array, as_primitive_array, as_struct_array};
 use datafusion::error::Result as DfResult;
 use datafusion::logical_expr::{Accumulator as DfAccumulator, AggregateUDF, Volatility};
+use datafusion::physical_plan::expressions::Literal;
 use datafusion::prelude::create_udaf;
 use datafusion_common::ScalarValue;
+use datafusion_expr::function::AccumulatorArgs;
 use datatypes::arrow::array::{ListArray, StructArray};
 use datatypes::arrow::datatypes::{DataType, Field, Float64Type};
 
@@ -38,16 +40,16 @@ pub struct QuantileAccumulator {
 
 /// Create a quantile `AggregateUDF` for PromQL quantile operator,
 /// which calculates φ-quantile (0 ≤ φ ≤ 1) over dimensions
-pub fn quantile_udaf(q: f64) -> Arc<AggregateUDF> {
+pub fn quantile_udaf() -> Arc<AggregateUDF> {
     Arc::new(create_udaf(
         QUANTILE_NAME,
-        // Input type: (values)
-        vec![DataType::Float64],
+        // Input type: (φ, values)
+        vec![DataType::Float64, DataType::Float64],
         // Output type: the φ-quantile
         Arc::new(DataType::Float64),
         Volatility::Volatile,
         // Create the accumulator
-        Arc::new(move |_| Ok(Box::new(QuantileAccumulator::new(q)))),
+        Arc::new(move |args| QuantileAccumulator::from_args(args)),
         // Intermediate state types
         Arc::new(vec![DataType::Struct(
             vec![Field::new(
@@ -65,11 +67,28 @@ pub fn quantile_udaf(q: f64) -> Arc<AggregateUDF> {
 }
 
 impl QuantileAccumulator {
-    pub fn new(q: f64) -> Self {
+    fn new(q: f64) -> Self {
         Self {
             q,
             ..Default::default()
         }
+    }
+
+    pub fn from_args(args: AccumulatorArgs) -> DfResult<Box<dyn DfAccumulator>> {
+        let q = match &args.exprs[0]
+            .as_any()
+            .downcast_ref::<Literal>()
+            .map(|lit| lit.value())
+        {
+            Some(ScalarValue::Float64(Some(q))) => *q,
+            _ => {
+                return Err(datafusion::error::DataFusionError::Internal(
+                    "Invalid quantile value".to_string(),
+                ))
+            }
+        };
+
+        Ok(Box::new(Self::new(q)))
     }
 }
 
@@ -288,8 +307,7 @@ mod tests {
 
     #[test]
     fn test_quantile_udaf_creation() {
-        let q = 0.5;
-        let udaf = quantile_udaf(q);
+        let udaf = quantile_udaf();
 
         assert_eq!(udaf.name(), QUANTILE_NAME);
         assert_eq!(udaf.return_type(&[]).unwrap(), DataType::Float64);
