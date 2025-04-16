@@ -40,6 +40,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let Some(region) = self.regions.flushable_region_or(region_id, &mut sender) else {
             return;
         };
+        self.update_high_watermark(&region);
+        info!(
+            "Region {} flush request, high watermark: {}",
+            region_id,
+            region.high_watermark_since_flush.load(Ordering::Relaxed)
+        );
 
         let reason = if region.is_downgrading() {
             FlushReason::Downgrading
