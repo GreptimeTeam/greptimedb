@@ -191,6 +191,7 @@ impl ParquetReaderBuilder {
 
         let file_path = self.file_handle.file_path(&self.file_dir);
         let file_size = self.file_handle.meta_ref().file_size;
+
         // Loads parquet metadata of the file.
         let parquet_meta = self.read_parquet_metadata(&file_path, file_size).await?;
         // Decodes region metadata.
@@ -550,11 +551,17 @@ impl ParquetReaderBuilder {
         let row_groups = parquet_meta.row_groups();
         let stats =
             RowGroupPruningStats::new(row_groups, read_format, self.expected_metadata.clone());
+        let prune_schema = self
+            .expected_metadata
+            .as_ref()
+            .map(|meta| meta.schema.arrow_schema())
+            .unwrap_or_else(|| region_meta.schema.arrow_schema());
+
         // Here we use the schema of the SST to build the physical expression. If the column
         // in the SST doesn't have the same column id as the column in the expected metadata,
         // we will get a None statistics for that column.
         let res = predicate
-            .prune_with_stats(&stats, region_meta.schema.arrow_schema())
+            .prune_with_stats(&stats, prune_schema)
             .iter()
             .zip(0..parquet_meta.num_row_groups())
             .filter_map(|(mask, row_group)| {
