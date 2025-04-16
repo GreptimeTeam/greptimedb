@@ -19,10 +19,18 @@ use std::borrow::Cow;
 use api::v1::value::ValueData;
 use api::v1::ColumnDataType;
 
-const INPUT_VALUE_STR: &str = r#"
+const INPUT_VALUE_OBJ: &str = r#"
 [
   {
     "commit": "{\"commitTime\": \"1573840000.000\", \"commitAuthor\": \"test\"}"
+  }
+]
+"#;
+
+const INPUT_VALUE_ARR: &str = r#"
+[
+  {
+    "commit": "[\"test1\", \"test2\"]"
   }
 ]
 "#;
@@ -40,7 +48,7 @@ transform:
     type: json
 "#;
 
-    let output = common::parse_and_exec(INPUT_VALUE_STR, pipeline_yaml);
+    let output = common::parse_and_exec(INPUT_VALUE_OBJ, pipeline_yaml);
 
     // check schema
     assert_eq!(output.schema[0].column_name, "commit");
@@ -79,7 +87,7 @@ transform:
     type: json
 "#;
 
-    let output = common::parse_and_exec(INPUT_VALUE_STR, pipeline_yaml);
+    let output = common::parse_and_exec(INPUT_VALUE_OBJ, pipeline_yaml);
 
     // check schema
     assert_eq!(output.schema[0].column_name, "commit_json");
@@ -122,7 +130,7 @@ transform:
     type: string
 "#;
 
-    let output = common::parse_and_exec(INPUT_VALUE_STR, pipeline_yaml);
+    let output = common::parse_and_exec(INPUT_VALUE_OBJ, pipeline_yaml);
 
     // check schema
     assert_eq!(output.schema[0].column_name, "commit_author");
@@ -133,4 +141,38 @@ transform:
         output.rows[0].values[0].value_data,
         Some(ValueData::StringValue("test".to_string()))
     );
+}
+
+#[test]
+fn test_json_parse_array() {
+    let pipeline_yaml = r#"
+---
+processors:
+  - json_parse:
+      field: commit
+
+transform:
+  - field: commit
+    type: json
+"#;
+
+    let output = common::parse_and_exec(INPUT_VALUE_ARR, pipeline_yaml);
+
+    // check schema
+    assert_eq!(output.schema[0].column_name, "commit");
+    let type_id: i32 = ColumnDataType::Binary.into();
+    assert_eq!(output.schema[0].datatype, type_id);
+
+    // check value
+    let ValueData::BinaryValue(json_value) = output.rows[0].values[0].value_data.clone().unwrap()
+    else {
+        panic!("expect binary value");
+    };
+    let v = jsonb::from_slice(&json_value).unwrap();
+
+    let expected = jsonb::Value::Array(vec![
+        jsonb::Value::String(Cow::Borrowed("test1")),
+        jsonb::Value::String(Cow::Borrowed("test2")),
+    ]);
+    assert_eq!(v, expected);
 }

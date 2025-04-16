@@ -16,7 +16,7 @@ use snafu::{OptionExt as _, ResultExt};
 
 use crate::error::{
     Error, FieldMustBeTypeSnafu, JsonParseSnafu, KeyMustBeStringSnafu, ProcessorMissingFieldSnafu,
-    Result,
+    ProcessorUnsupportedValueSnafu, Result,
 };
 use crate::etl::field::Fields;
 use crate::etl::processor::{
@@ -76,7 +76,15 @@ impl JsonParseProcessor {
             .fail();
         };
         let parsed: serde_json::Value = serde_json::from_str(json_str).context(JsonParseSnafu)?;
-        Ok(Value::Map(json_to_map(parsed)?.into()))
+        match parsed {
+            serde_json::Value::Object(_) => Ok(Value::Map(json_to_map(parsed)?.into())),
+            serde_json::Value::Array(arr) => Ok(Value::Array(arr.try_into()?)),
+            _ => ProcessorUnsupportedValueSnafu {
+                processor: self.kind(),
+                val: val.to_str_type(),
+            }
+            .fail(),
+        }
     }
 }
 
