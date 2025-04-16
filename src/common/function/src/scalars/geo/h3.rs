@@ -31,8 +31,8 @@ use h3o::{CellIndex, LatLng, Resolution};
 use once_cell::sync::Lazy;
 use snafu::ResultExt;
 
-use super::helpers::{ensure_and_coerce, ensure_columns_len, ensure_columns_n};
 use crate::function::{Function, FunctionContext};
+use crate::scalars::geo::helpers::{ensure_and_coerce, ensure_columns_len, ensure_columns_n};
 
 static CELL_TYPES: Lazy<Vec<ConcreteDataType>> = Lazy::new(|| {
     vec![

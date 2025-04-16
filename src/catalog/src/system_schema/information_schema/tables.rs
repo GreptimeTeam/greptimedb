@@ -38,11 +38,10 @@ use snafu::{OptionExt, ResultExt};
 use store_api::storage::{RegionId, ScanRequest, TableId};
 use table::metadata::{TableInfo, TableType};
 
-use super::TABLES;
 use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
-use crate::system_schema::information_schema::{InformationTable, Predicates};
+use crate::system_schema::information_schema::{InformationTable, Predicates, TABLES};
 use crate::system_schema::utils;
 use crate::CatalogManager;
 

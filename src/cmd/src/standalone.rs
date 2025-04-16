@@ -55,7 +55,10 @@ use datanode::config::{DatanodeOptions, ProcedureConfig, RegionEngineConfig, Sto
 use datanode::datanode::{Datanode, DatanodeBuilder};
 use datanode::region_server::RegionServer;
 use file_engine::config::EngineConfig as FileEngineConfig;
-use flow::{FlowConfig, FlowWorkerManager, FlownodeBuilder, FlownodeOptions, FrontendInvoker};
+use flow::{
+    FlowConfig, FlowWorkerManager, FlownodeBuilder, FlownodeInstance, FlownodeOptions,
+    FrontendClient, FrontendInvoker,
+};
 use frontend::frontend::{Frontend, FrontendOptions};
 use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{Instance as FeInstance, StandaloneDatanodeManager};
@@ -74,10 +77,10 @@ use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
 use snafu::ResultExt;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::RwLock;
 use tracing_appender::non_blocking::WorkerGuard;
 
-use crate::error::Result;
+use crate::error::{Result, StartFlownodeSnafu};
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{error, log_versions, App};
 
@@ -244,9 +247,7 @@ impl StandaloneOptions {
 pub struct Instance {
     datanode: Datanode,
     frontend: Frontend,
-    // TODO(discord9): wrapped it in flownode instance instead
-    flow_worker_manager: Arc<FlowWorkerManager>,
-    flow_shutdown: broadcast::Sender<()>,
+    flownode: FlownodeInstance,
     procedure_manager: ProcedureManagerRef,
     wal_options_allocator: WalOptionsAllocatorRef,
     // Keep the logging guard to prevent the worker from being dropped.
@@ -288,9 +289,7 @@ impl App for Instance {
             .await
             .context(error::StartFrontendSnafu)?;
 
-        self.flow_worker_manager
-            .clone()
-            .run_background(Some(self.flow_shutdown.subscribe()));
+        self.flownode.start().await.context(StartFlownodeSnafu)?;
 
         Ok(())
     }
@@ -311,14 +310,9 @@ impl App for Instance {
             .await
             .context(error::ShutdownDatanodeSnafu)?;
 
-        self.flow_shutdown
-            .send(())
-            .map_err(|_e| {
-                flow::error::InternalSnafu {
-                    reason: "Failed to send shutdown signal to flow worker manager, all receiver end already closed".to_string(),
-                }
-                .build()
-            })
+        self.flownode
+            .shutdown()
+            .await
             .context(error::ShutdownFlownodeSnafu)?;
 
         info!("Datanode instance stopped.");
@@ -529,20 +523,24 @@ impl StartCommand {
             flow: opts.flow.clone(),
             ..Default::default()
         };
+
+        // TODO(discord9): for standalone not use grpc, but just somehow get a handler to frontend grpc client without
+        // actually make a connection
+        let fe_server_addr = fe_opts.grpc.bind_addr.clone();
+        let frontend_client = FrontendClient::from_static_grpc_addr(fe_server_addr);
         let flow_builder = FlownodeBuilder::new(
             flownode_options,
             plugins.clone(),
             table_metadata_manager.clone(),
             catalog_manager.clone(),
             flow_metadata_manager.clone(),
+            Arc::new(frontend_client),
         );
-        let flownode = Arc::new(
-            flow_builder
-                .build()
-                .await
-                .map_err(BoxedError::new)
-                .context(error::OtherSnafu)?,
-        );
+        let flownode = flow_builder
+            .build()
+            .await
+            .map_err(BoxedError::new)
+            .context(error::OtherSnafu)?;
 
         // set the ref to query for the local flow state
         {
@@ -622,8 +620,6 @@ impl StartCommand {
         .context(error::StartFlownodeSnafu)?;
         flow_worker_manager.set_frontend_invoker(invoker).await;
 
-        let (tx, _rx) = broadcast::channel(1);
-
         let export_metrics_task = ExportMetricsTask::try_new(&opts.export_metrics, Some(&plugins))
             .context(error::ServersSnafu)?;
 
@@ -642,8 +638,7 @@ impl StartCommand {
         Ok(Instance {
             datanode,
             frontend,
-            flow_worker_manager,
-            flow_shutdown: tx,
+            flownode,
             procedure_manager,
             wal_options_allocator,
             _guard: guard,

@@ -38,19 +38,19 @@ use operator::insert::Inserter;
 use operator::statement::StatementExecutor;
 use partition::manager::PartitionRuleManager;
 use query::{QueryEngine, QueryEngineFactory};
-use servers::error::{AlreadyStartedSnafu, StartGrpcSnafu, TcpBindSnafu, TcpIncomingSnafu};
-use servers::http::{HttpServer, HttpServerBuilder};
+use servers::error::{StartGrpcSnafu, TcpBindSnafu, TcpIncomingSnafu};
+use servers::http::HttpServerBuilder;
 use servers::metrics_handler::MetricsHandler;
-use servers::server::Server;
+use servers::server::{ServerHandler, ServerHandlers};
 use session::context::{QueryContextBuilder, QueryContextRef};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, oneshot, Mutex};
 use tonic::codec::CompressionEncoding;
 use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
 
-use crate::adapter::{create_worker, CreateFlowArgs, FlowWorkerManagerRef};
+use crate::adapter::{create_worker, FlowWorkerManagerRef};
 use crate::error::{
     to_status_with_last_err, CacheRequiredSnafu, CreateFlowSnafu, ExternalSnafu, FlowNotFoundSnafu,
     ListFlowsSnafu, ParseAddrSnafu, ShutdownServerSnafu, StartServerSnafu, UnexpectedSnafu,
@@ -59,12 +59,13 @@ use crate::heartbeat::HeartbeatTask;
 use crate::metrics::{METRIC_FLOW_PROCESSING_TIME, METRIC_FLOW_ROWS};
 use crate::transform::register_function_to_query_engine;
 use crate::utils::{SizeReportSender, StateReportHandler};
-use crate::{Error, FlowWorkerManager, FlownodeOptions};
+use crate::{CreateFlowArgs, Error, FlowWorkerManager, FlownodeOptions, FrontendClient};
 
 pub const FLOW_NODE_SERVER_NAME: &str = "FLOW_NODE_SERVER";
 /// wrapping flow node manager to avoid orphan rule with Arc<...>
 #[derive(Clone)]
 pub struct FlowService {
+    /// TODO(discord9): replace with dual engine
     pub manager: FlowWorkerManagerRef,
 }
 
@@ -133,23 +134,55 @@ impl flow_server::Flow for FlowService {
     }
 }
 
+#[derive(Clone)]
 pub struct FlownodeServer {
-    shutdown_tx: Mutex<Option<broadcast::Sender<()>>>,
+    inner: Arc<FlownodeServerInner>,
+}
+
+struct FlownodeServerInner {
+    /// worker shutdown signal, not to be confused with server_shutdown_tx
+    worker_shutdown_tx: Mutex<broadcast::Sender<()>>,
+    /// server shutdown signal for shutdown grpc server
+    server_shutdown_tx: Mutex<broadcast::Sender<()>>,
     flow_service: FlowService,
 }
 
 impl FlownodeServer {
     pub fn new(flow_service: FlowService) -> Self {
+        let (tx, _rx) = broadcast::channel::<()>(1);
+        let (server_tx, _server_rx) = broadcast::channel::<()>(1);
         Self {
-            flow_service,
-            shutdown_tx: Mutex::new(None),
+            inner: Arc::new(FlownodeServerInner {
+                flow_service,
+                worker_shutdown_tx: Mutex::new(tx),
+                server_shutdown_tx: Mutex::new(server_tx),
+            }),
         }
+    }
+
+    /// Start the background task for streaming computation.
+    async fn start_workers(&self) -> Result<(), Error> {
+        let manager_ref = self.inner.flow_service.manager.clone();
+        let _handle = manager_ref
+            .clone()
+            .run_background(Some(self.inner.worker_shutdown_tx.lock().await.subscribe()));
+
+        Ok(())
+    }
+
+    /// Stop the background task for streaming computation.
+    async fn stop_workers(&self) -> Result<(), Error> {
+        let tx = self.inner.worker_shutdown_tx.lock().await;
+        if tx.send(()).is_err() {
+            info!("Receiver dropped, the flow node server has already shutdown");
+        }
+        Ok(())
     }
 }
 
 impl FlownodeServer {
     pub fn create_flow_service(&self) -> flow_server::FlowServer<impl flow_server::Flow> {
-        flow_server::FlowServer::new(self.flow_service.clone())
+        flow_server::FlowServer::new(self.inner.flow_service.clone())
             .accept_compressed(CompressionEncoding::Gzip)
             .send_compressed(CompressionEncoding::Gzip)
             .accept_compressed(CompressionEncoding::Zstd)
@@ -160,25 +193,19 @@ impl FlownodeServer {
 #[async_trait::async_trait]
 impl servers::server::Server for FlownodeServer {
     async fn shutdown(&self) -> Result<(), servers::error::Error> {
-        let mut shutdown_tx = self.shutdown_tx.lock().await;
-        if let Some(tx) = shutdown_tx.take() {
-            if tx.send(()).is_err() {
-                info!("Receiver dropped, the flow node server has already shutdown");
-            }
+        let tx = self.inner.server_shutdown_tx.lock().await;
+        if tx.send(()).is_err() {
+            info!("Receiver dropped, the flow node server has already shutdown");
         }
         info!("Shutdown flow node server");
 
         Ok(())
     }
+
     async fn start(&self, addr: SocketAddr) -> Result<SocketAddr, servers::error::Error> {
-        let (tx, rx) = broadcast::channel::<()>(1);
-        let mut rx_server = tx.subscribe();
+        let mut rx_server = self.inner.server_shutdown_tx.lock().await.subscribe();
+
         let (incoming, addr) = {
-            let mut shutdown_tx = self.shutdown_tx.lock().await;
-            ensure!(
-                shutdown_tx.is_none(),
-                AlreadyStartedSnafu { server: "flow" }
-            );
             let listener = TcpListener::bind(addr)
                 .await
                 .context(TcpBindSnafu { addr })?;
@@ -186,8 +213,6 @@ impl servers::server::Server for FlownodeServer {
             let incoming =
                 TcpIncoming::from_listener(listener, true, None).context(TcpIncomingSnafu)?;
             info!("flow server is bound to {}", addr);
-
-            *shutdown_tx = Some(tx);
 
             (incoming, addr)
         };
@@ -201,9 +226,6 @@ impl servers::server::Server for FlownodeServer {
                 .context(StartGrpcSnafu);
         });
 
-        let manager_ref = self.flow_service.manager.clone();
-        let _handle = manager_ref.clone().run_background(Some(rx));
-
         Ok(addr)
     }
 
@@ -214,11 +236,8 @@ impl servers::server::Server for FlownodeServer {
 
 /// The flownode server instance.
 pub struct FlownodeInstance {
-    server: FlownodeServer,
-    addr: SocketAddr,
-    /// only used for health check
-    http_server: HttpServer,
-    http_addr: SocketAddr,
+    flownode_server: FlownodeServer,
+    services: ServerHandlers,
     heartbeat_task: Option<HeartbeatTask>,
 }
 
@@ -228,36 +247,37 @@ impl FlownodeInstance {
             task.start().await?;
         }
 
-        self.addr = self
-            .server
-            .start(self.addr)
-            .await
-            .context(StartServerSnafu)?;
+        self.flownode_server.start_workers().await?;
 
-        self.http_server
-            .start(self.http_addr)
-            .await
-            .context(StartServerSnafu)?;
+        self.services.start_all().await.context(StartServerSnafu)?;
 
         Ok(())
     }
     pub async fn shutdown(&self) -> Result<(), crate::Error> {
-        self.server.shutdown().await.context(ShutdownServerSnafu)?;
+        self.services
+            .shutdown_all()
+            .await
+            .context(ShutdownServerSnafu)?;
+
+        self.flownode_server.stop_workers().await?;
 
         if let Some(task) = &self.heartbeat_task {
             task.shutdown();
         }
 
-        self.http_server
-            .shutdown()
-            .await
-            .context(ShutdownServerSnafu)?;
-
         Ok(())
     }
 
+    pub fn flownode_server(&self) -> &FlownodeServer {
+        &self.flownode_server
+    }
+
     pub fn flow_worker_manager(&self) -> FlowWorkerManagerRef {
-        self.server.flow_service.manager.clone()
+        self.flownode_server.inner.flow_service.manager.clone()
+    }
+
+    pub fn setup_services(&mut self, services: ServerHandlers) {
+        self.services = services;
     }
 }
 
@@ -271,6 +291,7 @@ pub struct FlownodeBuilder {
     heartbeat_task: Option<HeartbeatTask>,
     /// receive a oneshot sender to send state size report
     state_report_handler: Option<StateReportHandler>,
+    frontend_client: Arc<FrontendClient>,
 }
 
 impl FlownodeBuilder {
@@ -281,6 +302,7 @@ impl FlownodeBuilder {
         table_meta: TableMetadataManagerRef,
         catalog_manager: CatalogManagerRef,
         flow_metadata_manager: FlowMetadataManagerRef,
+        frontend_client: Arc<FrontendClient>,
     ) -> Self {
         Self {
             opts,
@@ -290,6 +312,7 @@ impl FlownodeBuilder {
             flow_metadata_manager,
             heartbeat_task: None,
             state_report_handler: None,
+            frontend_client,
         }
     }
 
@@ -313,6 +336,7 @@ impl FlownodeBuilder {
             None,
             false,
             Default::default(),
+            self.opts.query.clone(),
         );
         let manager = Arc::new(
             self.build_manager(query_engine_factory.query_engine())
@@ -325,21 +349,11 @@ impl FlownodeBuilder {
 
         let server = FlownodeServer::new(FlowService::new(manager.clone()));
 
-        let http_addr = self.opts.http.addr.parse().context(ParseAddrSnafu {
-            addr: self.opts.http.addr.clone(),
-        })?;
-        let http_server = HttpServerBuilder::new(self.opts.http)
-            .with_metrics_handler(MetricsHandler)
-            .build();
-
         let heartbeat_task = self.heartbeat_task;
 
-        let addr = self.opts.grpc.bind_addr;
         let instance = FlownodeInstance {
-            server,
-            addr: addr.parse().context(ParseAddrSnafu { addr })?,
-            http_server,
-            http_addr,
+            flownode_server: server,
+            services: ServerHandlers::new(),
             heartbeat_task,
         };
         Ok(instance)
@@ -422,7 +436,7 @@ impl FlownodeBuilder {
                 ),
             };
             manager
-                .create_flow(args)
+                .create_flow_inner(args)
                 .await
                 .map_err(BoxedError::new)
                 .with_context(|_| CreateFlowSnafu {
@@ -472,6 +486,60 @@ impl FlownodeBuilder {
         }
         info!("Flow Node Manager started");
         Ok(man)
+    }
+}
+
+/// Useful in distributed mode
+pub struct FlownodeServiceBuilder<'a> {
+    opts: &'a FlownodeOptions,
+    grpc_server: Option<FlownodeServer>,
+    enable_http_service: bool,
+}
+
+impl<'a> FlownodeServiceBuilder<'a> {
+    pub fn new(opts: &'a FlownodeOptions) -> Self {
+        Self {
+            opts,
+            grpc_server: None,
+            enable_http_service: false,
+        }
+    }
+
+    pub fn enable_http_service(self) -> Self {
+        Self {
+            enable_http_service: true,
+            ..self
+        }
+    }
+
+    pub fn with_grpc_server(self, grpc_server: FlownodeServer) -> Self {
+        Self {
+            grpc_server: Some(grpc_server),
+            ..self
+        }
+    }
+
+    pub async fn build(mut self) -> Result<ServerHandlers, Error> {
+        let handlers = ServerHandlers::default();
+        if let Some(grpc_server) = self.grpc_server.take() {
+            let addr: SocketAddr = self.opts.grpc.bind_addr.parse().context(ParseAddrSnafu {
+                addr: &self.opts.grpc.bind_addr,
+            })?;
+            let handler: ServerHandler = (Box::new(grpc_server), addr);
+            handlers.insert(handler).await;
+        }
+
+        if self.enable_http_service {
+            let http_server = HttpServerBuilder::new(self.opts.http.clone())
+                .with_metrics_handler(MetricsHandler)
+                .build();
+            let addr: SocketAddr = self.opts.http.addr.parse().context(ParseAddrSnafu {
+                addr: &self.opts.http.addr,
+            })?;
+            let handler: ServerHandler = (Box::new(http_server), addr);
+            handlers.insert(handler).await;
+        }
+        Ok(handlers)
     }
 }
 

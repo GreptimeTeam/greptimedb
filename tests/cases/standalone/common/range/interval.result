@@ -20,7 +20,7 @@ Affected Rows: 8
 
 SELECT ts, host, min(val) RANGE (INTERVAL '1 year') FROM host ALIGN (INTERVAL '1 year') ORDER BY host, ts;
 
-Error: 3000(PlanQuery), DataFusion error: Error during planning: Year or month interval is not allowed in range query: IntervalMonthDayNano("IntervalMonthDayNano { months: 12, days: 0, nanoseconds: 0 }")
+Error: 3000(PlanQuery), Error during planning: Year or month interval is not allowed in range query: IntervalMonthDayNano("IntervalMonthDayNano { months: 12, days: 0, nanoseconds: 0 }")
 
 SELECT ts, host, min(val) RANGE (INTERVAL '1' day) FROM host ALIGN (INTERVAL '1' day) ORDER BY host, ts;
 
@@ -32,6 +32,63 @@ SELECT ts, host, min(val) RANGE (INTERVAL '1' day) FROM host ALIGN (INTERVAL '1'
 | 1970-01-01T00:00:00 | host2 | 4                                                                                                       |
 | 1971-01-02T00:00:00 | host2 | 6                                                                                                       |
 +---------------------+-------+---------------------------------------------------------------------------------------------------------+
+
+SELECT ts, host, min(val) RANGE ('1 day'::INTERVAL) FROM host ALIGN ('1 day'::INTERVAL) ORDER BY host, ts;
+
++---------------------+-------+-----------------------------------+
+| ts                  | host  | min(host.val) RANGE Utf8("1 day") |
++---------------------+-------+-----------------------------------+
+| 1970-01-01T00:00:00 | host1 | 0                                 |
+| 1971-01-02T00:00:00 | host1 | 2                                 |
+| 1970-01-01T00:00:00 | host2 | 4                                 |
+| 1971-01-02T00:00:00 | host2 | 6                                 |
++---------------------+-------+-----------------------------------+
+
+SELECT ts, host, min(val) RANGE ('1 hour'::INTERVAL) FROM host ALIGN ('1 hour'::INTERVAL) ORDER BY host, ts;
+
++---------------------+-------+------------------------------------+
+| ts                  | host  | min(host.val) RANGE Utf8("1 hour") |
++---------------------+-------+------------------------------------+
+| 1970-01-01T01:00:00 | host1 | 0                                  |
+| 1970-01-01T02:00:00 | host1 | 1                                  |
+| 1971-01-02T03:00:00 | host1 | 2                                  |
+| 1971-01-02T04:00:00 | host1 | 3                                  |
+| 1970-01-01T01:00:00 | host2 | 4                                  |
+| 1970-01-01T02:00:00 | host2 | 5                                  |
+| 1971-01-02T03:00:00 | host2 | 6                                  |
+| 1971-01-02T04:00:00 | host2 | 7                                  |
++---------------------+-------+------------------------------------+
+
+SELECT ts, host, min(val) RANGE ('30 minute'::INTERVAL + '30 minute'::INTERVAL) FROM host ALIGN ('30 minute'::INTERVAL + '30 minute'::INTERVAL) ORDER BY host, ts;
+
++---------------------+-------+-----------------------------------------------------------+
+| ts                  | host  | min(host.val) RANGE Utf8("30 minute") + Utf8("30 minute") |
++---------------------+-------+-----------------------------------------------------------+
+| 1970-01-01T01:00:00 | host1 | 0                                                         |
+| 1970-01-01T02:00:00 | host1 | 1                                                         |
+| 1971-01-02T03:00:00 | host1 | 2                                                         |
+| 1971-01-02T04:00:00 | host1 | 3                                                         |
+| 1970-01-01T01:00:00 | host2 | 4                                                         |
+| 1970-01-01T02:00:00 | host2 | 5                                                         |
+| 1971-01-02T03:00:00 | host2 | 6                                                         |
+| 1971-01-02T04:00:00 | host2 | 7                                                         |
++---------------------+-------+-----------------------------------------------------------+
+
+--- Test nested cast, even though it is meaningless ----
+SELECT ts, host, min(val) RANGE ((INTERVAL '1' hour)::INTERVAL) FROM host ALIGN ('1 hour'::INTERVAL::INTERVAL) ORDER BY host, ts;
+
++---------------------+-------+---------------------------------------------------------------------------------------------------------------------+
+| ts                  | host  | min(host.val) RANGE IntervalMonthDayNano("IntervalMonthDayNano { months: 0, days: 0, nanoseconds: 3600000000000 }") |
++---------------------+-------+---------------------------------------------------------------------------------------------------------------------+
+| 1970-01-01T01:00:00 | host1 | 0                                                                                                                   |
+| 1970-01-01T02:00:00 | host1 | 1                                                                                                                   |
+| 1971-01-02T03:00:00 | host1 | 2                                                                                                                   |
+| 1971-01-02T04:00:00 | host1 | 3                                                                                                                   |
+| 1970-01-01T01:00:00 | host2 | 4                                                                                                                   |
+| 1970-01-01T02:00:00 | host2 | 5                                                                                                                   |
+| 1971-01-02T03:00:00 | host2 | 6                                                                                                                   |
+| 1971-01-02T04:00:00 | host2 | 7                                                                                                                   |
++---------------------+-------+---------------------------------------------------------------------------------------------------------------------+
 
 DROP TABLE host;
 

@@ -113,7 +113,7 @@ impl Instance {
             .context(error::OpenRaftEngineBackendSnafu)?;
 
         let kv_backend = Arc::new(kv_backend);
-        let state_store = Arc::new(KvStateStore::new(kv_backend.clone()));
+        let kv_state_store = Arc::new(KvStateStore::new(kv_backend.clone()));
 
         let manager_config = ManagerConfig {
             max_retry_times: procedure_config.max_retry_times,
@@ -121,7 +121,11 @@ impl Instance {
             max_running_procedures: procedure_config.max_running_procedures,
             ..Default::default()
         };
-        let procedure_manager = Arc::new(LocalManager::new(manager_config, state_store));
+        let procedure_manager = Arc::new(LocalManager::new(
+            manager_config,
+            kv_state_store.clone(),
+            kv_state_store,
+        ));
 
         Ok((kv_backend, procedure_manager))
     }
@@ -496,7 +500,8 @@ pub fn check_permission(
         Statement::ShowCharset(_) | Statement::ShowCollation(_) => {}
 
         Statement::Insert(insert) => {
-            validate_param(insert.table_name(), query_ctx)?;
+            let name = insert.table_name().context(ParseSqlSnafu)?;
+            validate_param(name, query_ctx)?;
         }
         Statement::CreateTable(stmt) => {
             validate_param(&stmt.name, query_ctx)?;

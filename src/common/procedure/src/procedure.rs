@@ -14,6 +14,7 @@
 
 use std::any::Any;
 use std::fmt;
+use std::fmt::Display;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -35,6 +36,8 @@ pub enum Status {
     Executing {
         /// Whether the framework needs to persist the procedure.
         persist: bool,
+        /// Whether the framework needs to clean the poisons.
+        clean_poisons: bool,
     },
     /// The procedure has suspended itself and is waiting for subprocedures.
     Suspended {
@@ -42,14 +45,40 @@ pub enum Status {
         /// Whether the framework needs to persist the procedure.
         persist: bool,
     },
+    /// The procedure is poisoned.
+    Poisoned {
+        /// The keys that cause the procedure to be poisoned.
+        keys: PoisonKeys,
+        /// The error that cause the procedure to be poisoned.
+        error: Error,
+    },
     /// the procedure is done.
     Done { output: Option<Output> },
 }
 
 impl Status {
+    /// Returns a [Status::Poisoned] with given `keys` and `error`.
+    pub fn poisoned(keys: impl IntoIterator<Item = PoisonKey>, error: Error) -> Status {
+        Status::Poisoned {
+            keys: PoisonKeys::new(keys),
+            error,
+        }
+    }
+
     /// Returns a [Status::Executing] with given `persist` flag.
     pub fn executing(persist: bool) -> Status {
-        Status::Executing { persist }
+        Status::Executing {
+            persist,
+            clean_poisons: false,
+        }
+    }
+
+    /// Returns a [Status::Executing] with given `persist` flag and clean poisons.
+    pub fn executing_with_clean_poisons(persist: bool) -> Status {
+        Status::Executing {
+            persist,
+            clean_poisons: true,
+        }
     }
 
     /// Returns a [Status::Done] without output.
@@ -86,11 +115,20 @@ impl Status {
 
     /// Returns `true` if the procedure needs the framework to persist its intermediate state.
     pub fn need_persist(&self) -> bool {
-        // If the procedure is done, the framework doesn't need to persist the procedure
-        // anymore. It only needs to mark the procedure as committed.
         match self {
-            Status::Executing { persist } | Status::Suspended { persist, .. } => *persist,
-            Status::Done { .. } => false,
+            // If the procedure is done/poisoned, the framework doesn't need to persist the procedure
+            // anymore. It only needs to mark the procedure as committed.
+            Status::Executing { persist, .. } | Status::Suspended { persist, .. } => *persist,
+            Status::Done { .. } | Status::Poisoned { .. } => false,
+        }
+    }
+
+    /// Returns `true` if the framework needs to clean the poisons.
+    pub fn need_clean_poisons(&self) -> bool {
+        match self {
+            Status::Executing { clean_poisons, .. } => *clean_poisons,
+            Status::Done { .. } => true,
+            _ => false,
         }
     }
 }
@@ -100,6 +138,12 @@ impl Status {
 pub trait ContextProvider: Send + Sync {
     /// Query the procedure state.
     async fn procedure_state(&self, procedure_id: ProcedureId) -> Result<Option<ProcedureState>>;
+
+    /// Try to put a poison key for a procedure.
+    ///
+    /// This method is used to mark a resource as being operated on by a procedure.
+    /// If the poison key already exists with a different value, the operation will fail.
+    async fn try_put_poison(&self, key: &PoisonKey, procedure_id: ProcedureId) -> Result<()>;
 }
 
 /// Reference-counted pointer to [ContextProvider].
@@ -147,6 +191,11 @@ pub trait Procedure: Send {
 
     /// Returns the [LockKey] that this procedure needs to acquire.
     fn lock_key(&self) -> LockKey;
+
+    /// Returns the [PoisonKeys] that may cause this procedure to become poisoned during execution.
+    fn poison_keys(&self) -> PoisonKeys {
+        PoisonKeys::default()
+    }
 }
 
 #[async_trait]
@@ -173,6 +222,54 @@ impl<T: Procedure + ?Sized> Procedure for Box<T> {
 
     fn lock_key(&self) -> LockKey {
         (**self).lock_key()
+    }
+
+    fn poison_keys(&self) -> PoisonKeys {
+        (**self).poison_keys()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PoisonKey(String);
+
+impl Display for PoisonKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl PoisonKey {
+    /// Creates a new [PoisonKey] from a [String].
+    pub fn new(key: impl Into<String>) -> Self {
+        Self(key.into())
+    }
+}
+
+/// A collection of [PoisonKey]s.
+///
+/// This type is used to represent the keys that may cause the procedure to become poisoned during execution.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+pub struct PoisonKeys(SmallVec<[PoisonKey; 2]>);
+
+impl PoisonKeys {
+    /// Creates a new [PoisonKeys] from a [String].
+    pub fn single(key: impl Into<String>) -> Self {
+        Self(smallvec![PoisonKey::new(key)])
+    }
+
+    /// Creates a new [PoisonKeys] from a [PoisonKey].
+    pub fn new(keys: impl IntoIterator<Item = PoisonKey>) -> Self {
+        Self(keys.into_iter().collect())
+    }
+
+    /// Returns `true` if the [PoisonKeys] contains the given [PoisonKey].
+    pub fn contains(&self, key: &PoisonKey) -> bool {
+        self.0.contains(key)
+    }
+
+    /// Returns an iterator over the [PoisonKey]s.
+    pub fn iter(&self) -> impl Iterator<Item = &PoisonKey> {
+        self.0.iter()
     }
 }
 
@@ -325,6 +422,8 @@ pub enum ProcedureState {
     RollingBack { error: Arc<Error> },
     /// The procedure is failed and cannot proceed anymore.
     Failed { error: Arc<Error> },
+    /// The procedure is poisoned.
+    Poisoned { keys: PoisonKeys, error: Arc<Error> },
 }
 
 impl ProcedureState {
@@ -348,6 +447,11 @@ impl ProcedureState {
         ProcedureState::Retrying { error }
     }
 
+    /// Returns a [ProcedureState] with poisoned state.
+    pub fn poisoned(keys: PoisonKeys, error: Arc<Error>) -> ProcedureState {
+        ProcedureState::Poisoned { keys, error }
+    }
+
     /// Returns true if the procedure state is running.
     pub fn is_running(&self) -> bool {
         matches!(self, ProcedureState::Running)
@@ -356,6 +460,11 @@ impl ProcedureState {
     /// Returns true if the procedure state is done.
     pub fn is_done(&self) -> bool {
         matches!(self, ProcedureState::Done { .. })
+    }
+
+    /// Returns true if the procedure state is poisoned.
+    pub fn is_poisoned(&self) -> bool {
+        matches!(self, ProcedureState::Poisoned { .. })
     }
 
     /// Returns true if the procedure state failed.
@@ -384,6 +493,7 @@ impl ProcedureState {
             ProcedureState::Failed { error } => Some(error),
             ProcedureState::Retrying { error } => Some(error),
             ProcedureState::RollingBack { error } => Some(error),
+            ProcedureState::Poisoned { error, .. } => Some(error),
             _ => None,
         }
     }
@@ -397,6 +507,7 @@ impl ProcedureState {
             ProcedureState::Failed { .. } => "Failed",
             ProcedureState::PrepareRollback { .. } => "PrepareRollback",
             ProcedureState::RollingBack { .. } => "RollingBack",
+            ProcedureState::Poisoned { .. } => "Poisoned",
         }
     }
 }
@@ -470,11 +581,17 @@ mod tests {
 
     #[test]
     fn test_status() {
-        let status = Status::Executing { persist: false };
+        let status = Status::executing(false);
         assert!(!status.need_persist());
 
-        let status = Status::Executing { persist: true };
+        let status = Status::executing(true);
         assert!(status.need_persist());
+
+        let status = Status::executing_with_clean_poisons(false);
+        assert!(status.need_clean_poisons());
+
+        let status = Status::executing_with_clean_poisons(true);
+        assert!(status.need_clean_poisons());
 
         let status = Status::Suspended {
             subprocedures: Vec::new(),
@@ -490,6 +607,7 @@ mod tests {
 
         let status = Status::done();
         assert!(!status.need_persist());
+        assert!(status.need_clean_poisons());
     }
 
     #[test]

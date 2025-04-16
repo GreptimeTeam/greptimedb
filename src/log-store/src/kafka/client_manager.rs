@@ -15,10 +15,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use common_wal::config::kafka::common::DEFAULT_BACKOFF_CONFIG;
 use common_wal::config::kafka::DatanodeKafkaConfig;
 use rskafka::client::partition::{Compression, PartitionClient, UnknownTopicHandling};
 use rskafka::client::ClientBuilder;
-use rskafka::BackoffConfig;
 use snafu::ResultExt;
 use store_api::logstore::provider::KafkaProvider;
 use tokio::sync::{Mutex, RwLock};
@@ -31,7 +31,7 @@ use crate::kafka::producer::{OrderedBatchProducer, OrderedBatchProducerRef};
 
 // Each topic only has one partition for now.
 // The `DEFAULT_PARTITION` refers to the index of the partition.
-const DEFAULT_PARTITION: i32 = 0;
+pub const DEFAULT_PARTITION: i32 = 0;
 
 /// Arc wrapper of ClientManager.
 pub(crate) type ClientManagerRef = Arc<ClientManager>;
@@ -73,16 +73,11 @@ impl ClientManager {
         global_index_collector: Option<GlobalIndexCollector>,
     ) -> Result<Self> {
         // Sets backoff config for the top-level kafka client and all clients constructed by it.
-        let backoff_config = BackoffConfig {
-            init_backoff: config.backoff.init,
-            max_backoff: config.backoff.max,
-            base: config.backoff.base as f64,
-            deadline: config.backoff.deadline,
-        };
         let broker_endpoints = common_wal::resolve_to_ipv4(&config.connection.broker_endpoints)
             .await
             .context(ResolveKafkaEndpointSnafu)?;
-        let mut builder = ClientBuilder::new(broker_endpoints).backoff_config(backoff_config);
+        let mut builder =
+            ClientBuilder::new(broker_endpoints).backoff_config(DEFAULT_BACKOFF_CONFIG);
         if let Some(sasl) = &config.connection.sasl {
             builder = builder.sasl_config(sasl.config.clone().into_sasl_config());
         };

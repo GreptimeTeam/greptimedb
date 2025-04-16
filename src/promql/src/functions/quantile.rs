@@ -51,7 +51,7 @@ impl QuantileOverTime {
             Self::name(),
             input_types,
             DataType::Float64,
-            Volatility::Immutable,
+            Volatility::Volatile,
             Arc::new(move |input: &_| Self::new(quantile).quantile_over_time(input)) as _,
         )
     }

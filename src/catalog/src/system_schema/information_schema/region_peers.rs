@@ -35,13 +35,12 @@ use snafu::{OptionExt, ResultExt};
 use store_api::storage::{RegionId, ScanRequest, TableId};
 use table::metadata::TableType;
 
-use super::REGION_PEERS;
 use crate::error::{
     CreateRecordBatchSnafu, FindRegionRoutesSnafu, InternalSnafu, Result,
     UpgradeWeakCatalogManagerRefSnafu,
 };
 use crate::kvbackend::KvBackendCatalogManager;
-use crate::system_schema::information_schema::{InformationTable, Predicates};
+use crate::system_schema::information_schema::{InformationTable, Predicates, REGION_PEERS};
 use crate::CatalogManager;
 
 pub const TABLE_CATALOG: &str = "table_catalog";

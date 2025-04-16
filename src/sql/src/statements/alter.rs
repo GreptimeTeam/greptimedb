@@ -181,7 +181,7 @@ impl Display for AlterTableOperation {
                     column_name,
                     options,
                 } => {
-                    write!(f, "MODIFY COLUMN {column_name} SET FULLTEXT INDEX WITH(analyzer={0}, case_sensitive={1})", options.analyzer, options.case_sensitive)
+                    write!(f, "MODIFY COLUMN {column_name} SET FULLTEXT INDEX WITH(analyzer={0}, case_sensitive={1}, backend={2})", options.analyzer, options.case_sensitive, options.backend)
                 }
                 SetIndexOperation::Inverted { column_name } => {
                     write!(f, "MODIFY COLUMN {column_name} SET INVERTED INDEX")
@@ -425,7 +425,7 @@ ALTER TABLE monitor RENAME monitor_new"#,
             }
         }
 
-        let sql = "ALTER TABLE monitor MODIFY COLUMN a SET FULLTEXT INDEX WITH(analyzer='English',case_sensitive='false')";
+        let sql = "ALTER TABLE monitor MODIFY COLUMN a SET FULLTEXT INDEX WITH(analyzer='English',case_sensitive='false',backend='bloom')";
         let stmts =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
@@ -437,7 +437,7 @@ ALTER TABLE monitor RENAME monitor_new"#,
                 let new_sql = format!("\n{}", set);
                 assert_eq!(
                     r#"
-ALTER TABLE monitor MODIFY COLUMN a SET FULLTEXT INDEX WITH(analyzer=English, case_sensitive=false)"#,
+ALTER TABLE monitor MODIFY COLUMN a SET FULLTEXT INDEX WITH(analyzer=English, case_sensitive=false, backend=bloom)"#,
                     &new_sql
                 );
             }

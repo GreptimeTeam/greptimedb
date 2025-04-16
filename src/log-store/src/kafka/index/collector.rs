@@ -29,10 +29,9 @@ use tokio::select;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex as TokioMutex;
 
-use super::default_index_file;
 use crate::error::{self, Result};
 use crate::kafka::index::encoder::{DatanodeWalIndexes, IndexEncoder};
-use crate::kafka::index::JsonIndexEncoder;
+use crate::kafka::index::{default_index_file, JsonIndexEncoder};
 use crate::kafka::worker::{DumpIndexRequest, TruncateIndexRequest, WorkerRequest};
 
 /// The [`IndexCollector`] trait defines the operations for managing and collecting index entries.

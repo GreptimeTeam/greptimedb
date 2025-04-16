@@ -21,7 +21,7 @@ use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNode};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner};
 
-use super::plan::RangeSelect;
+use crate::range_select::plan::RangeSelect;
 
 pub struct RangeSelectPlanner;
 

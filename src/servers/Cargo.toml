@@ -66,7 +66,7 @@ http-body = "1"
 humantime.workspace = true
 humantime-serde.workspace = true
 hyper = { workspace = true, features = ["full"] }
-indexmap = "2.7"
+indexmap = "2.8"
 influxdb_line_protocol = { git = "https://github.com/evenyag/influxdb_iox", branch = "feat/line-protocol" }
 itertools.workspace = true
 jsonb.workspace = true
@@ -80,9 +80,10 @@ once_cell.workspace = true
 openmetrics-parser = "0.4"
 simd-json.workspace = true
 socket2 = "0.5"
-# use crates.io version after current revision is merged in next release
-# opensrv-mysql = "0.7.0"
-opensrv-mysql = { git = "https://github.com/datafuselabs/opensrv", rev = "6bbc3b65e6b19212c4f7fc4f40c20daf6f452deb" }
+# use crates.io version once the following PRs is merged into the nextest release
+# 1. fix: Use After Free in PacketReader in https://github.com/databendlabs/opensrv/pull/67
+# 2. Use ring, instead of aws-lc-rs in https://github.com/databendlabs/opensrv/pull/72
+opensrv-mysql = { git = "https://github.com/datafuselabs/opensrv", rev = "a1fb4da215c8693c7e4f62be249a01b7fec52997" }
 opentelemetry-proto.workspace = true
 parking_lot.workspace = true
 pgwire = { version = "0.28.0", default-features = false, features = ["server-api-ring"] }
@@ -133,8 +134,8 @@ common-base.workspace = true
 common-test-util.workspace = true
 criterion = "0.5"
 json5 = "0.4"
-mysql_async = { version = "0.33", default-features = false, features = [
-    "default-rustls",
+mysql_async = { version = "0.35", default-features = false, features = [
+    "default-rustls-ring",
 ] }
 permutation = "0.4"
 rand.workspace = true

@@ -42,7 +42,6 @@ use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::ProcedureManagerRef;
 use snafu::ResultExt;
 
-use super::{SelectTarget, FLOW_ID_SEQ};
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 use crate::error::{self, BuildWalOptionsAllocatorSnafu, Result};
@@ -54,7 +53,8 @@ use crate::handler::region_lease_handler::{CustomizedRegionLeaseRenewerRef, Regi
 use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatMailbox, Pushers};
 use crate::lease::MetaPeerLookupService;
 use crate::metasrv::{
-    ElectionRef, Metasrv, MetasrvInfo, MetasrvOptions, SelectorContext, SelectorRef, TABLE_ID_SEQ,
+    ElectionRef, Metasrv, MetasrvInfo, MetasrvOptions, SelectTarget, SelectorContext, SelectorRef,
+    FLOW_ID_SEQ, TABLE_ID_SEQ,
 };
 use crate::procedure::region_migration::manager::RegionMigrationManager;
 use crate::procedure::region_migration::DefaultContextFactory;
@@ -442,13 +442,20 @@ fn build_procedure_manager(
         max_running_procedures: options.procedure.max_running_procedures,
         ..Default::default()
     };
-    let state_store = KvStateStore::new(kv_backend.clone()).with_max_value_size(
-        options
-            .procedure
-            .max_metadata_value_size
-            .map(|v| v.as_bytes() as usize),
+    let kv_state_store = Arc::new(
+        KvStateStore::new(kv_backend.clone()).with_max_value_size(
+            options
+                .procedure
+                .max_metadata_value_size
+                .map(|v| v.as_bytes() as usize),
+        ),
     );
-    Arc::new(LocalManager::new(manager_config, Arc::new(state_store)))
+
+    Arc::new(LocalManager::new(
+        manager_config,
+        kv_state_store.clone(),
+        kv_state_store,
+    ))
 }
 
 impl Default for MetasrvBuilder {

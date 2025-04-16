@@ -265,6 +265,7 @@ impl DatanodeBuilder {
                     region_server.clone(),
                     meta_client,
                     cache_registry,
+                    self.plugins.clone(),
                 )
                 .await?,
             )
@@ -358,6 +359,7 @@ impl DatanodeBuilder {
             None,
             false,
             self.plugins.clone(),
+            opts.query.clone(),
         );
         let query_engine = query_engine_factory.query_engine();
 

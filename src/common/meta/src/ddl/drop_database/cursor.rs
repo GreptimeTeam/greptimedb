@@ -22,11 +22,10 @@ use snafu::OptionExt;
 use table::metadata::{TableId, TableType};
 use table::table_name::TableName;
 
-use super::executor::DropDatabaseExecutor;
-use super::metadata::DropDatabaseRemoveMetadata;
-use super::DropTableTarget;
 use crate::cache_invalidator::Context;
-use crate::ddl::drop_database::{DropDatabaseContext, State};
+use crate::ddl::drop_database::executor::DropDatabaseExecutor;
+use crate::ddl::drop_database::metadata::DropDatabaseRemoveMetadata;
+use crate::ddl::drop_database::{DropDatabaseContext, DropTableTarget, State};
 use crate::ddl::DdlContext;
 use crate::error::{Result, TableInfoNotFoundSnafu};
 use crate::instruction::CacheIdent;

@@ -30,7 +30,7 @@ impl HandlerContext {
             region_wal_options,
             skip_wal_replay,
         }: OpenRegion,
-    ) -> BoxFuture<'static, InstructionReply> {
+    ) -> BoxFuture<'static, Option<InstructionReply>> {
         Box::pin(async move {
             let region_id = Self::region_ident_to_region_id(&region_ident);
             prepare_wal_options(&mut region_options, region_id, &region_wal_options);
@@ -43,10 +43,10 @@ impl HandlerContext {
             let result = self.region_server.handle_request(region_id, request).await;
             let success = result.is_ok();
             let error = result.as_ref().map_err(|e| format!("{e:?}")).err();
-            InstructionReply::OpenRegion(SimpleReply {
+            Some(InstructionReply::OpenRegion(SimpleReply {
                 result: success,
                 error,
-            })
+            }))
         })
     }
 }

@@ -46,7 +46,6 @@ impl AnalyzerRule for StringNormalizationRule {
             | LogicalPlan::Values(_)
             | LogicalPlan::Analyze(_)
             | LogicalPlan::Extension(_)
-            | LogicalPlan::Distinct(_)
             | LogicalPlan::Dml(_)
             | LogicalPlan::Copy(_)
             | LogicalPlan::RecursiveQuery(_) => {
@@ -63,7 +62,8 @@ impl AnalyzerRule for StringNormalizationRule {
                     Ok(Transformed::no(plan))
                 }
             }
-            LogicalPlan::Limit(_)
+            LogicalPlan::Distinct(_)
+            | LogicalPlan::Limit(_)
             | LogicalPlan::Explain(_)
             | LogicalPlan::Unnest(_)
             | LogicalPlan::Ddl(_)

@@ -128,13 +128,6 @@ pub enum Error {
         source: catalog::error::Error,
     },
 
-    #[snafu(display("Failed to start Meta client"))]
-    StartMetaClient {
-        #[snafu(implicit)]
-        location: Location,
-        source: meta_client::error::Error,
-    },
-
     #[snafu(display("Failed to create heartbeat stream to Metasrv"))]
     CreateMetaHeartbeatStream {
         source: meta_client::error::Error,
@@ -347,6 +340,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to decode logical plan from substrait"))]
+    SubstraitDecodeLogicalPlan {
+        #[snafu(implicit)]
+        location: Location,
+        source: substrait::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -380,6 +380,8 @@ impl ErrorExt for Error {
             | Error::PrometheusMetricNamesQueryPlan { source, .. }
             | Error::ExecutePromql { source, .. } => source.status_code(),
 
+            Error::SubstraitDecodeLogicalPlan { source, .. } => source.status_code(),
+
             Error::PrometheusLabelValuesQueryPlan { source, .. } => source.status_code(),
 
             Error::CollectRecordbatch { .. } => StatusCode::EngineExecuteQuery,
@@ -406,8 +408,7 @@ impl ErrorExt for Error {
 
             Error::Catalog { source, .. } => source.status_code(),
 
-            Error::StartMetaClient { source, .. }
-            | Error::CreateMetaHeartbeatStream { source, .. } => source.status_code(),
+            Error::CreateMetaHeartbeatStream { source, .. } => source.status_code(),
 
             Error::PlanStatement { source, .. }
             | Error::ReadTable { source, .. }

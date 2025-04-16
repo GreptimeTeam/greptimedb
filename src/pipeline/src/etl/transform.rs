@@ -17,16 +17,14 @@ pub mod transformer;
 
 use snafu::OptionExt;
 
-use super::field::Fields;
-use super::processor::{yaml_new_field, yaml_new_fields, yaml_string};
-use super::value::Timestamp;
 use crate::error::{
     Error, KeyMustBeStringSnafu, Result, TransformElementMustBeMapSnafu,
     TransformOnFailureInvalidValueSnafu, TransformTypeMustBeSetSnafu,
 };
-use crate::etl::processor::yaml_bool;
+use crate::etl::field::Fields;
+use crate::etl::processor::{yaml_bool, yaml_new_field, yaml_new_fields, yaml_string};
 use crate::etl::transform::index::Index;
-use crate::etl::value::Value;
+use crate::etl::value::{Timestamp, Value};
 
 const TRANSFORM_FIELD: &str = "field";
 const TRANSFORM_FIELDS: &str = "fields";

@@ -32,8 +32,8 @@ use query::{QueryEngine, QueryEngineContext};
 use session::context::QueryContextRef;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
-    RegionEngine, RegionRole, RegionScannerRef, RegionStatistic, SetRegionRoleStateResponse,
-    SettableRegionRoleState,
+    RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef, RegionStatistic,
+    SetRegionRoleStateResponse, SettableRegionRoleState, SyncManifestResponse,
 };
 use store_api::region_request::{AffectedRows, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
@@ -246,7 +246,11 @@ impl RegionEngine for MockRegionEngine {
         Some(RegionRole::Leader)
     }
 
-    async fn sync_region(&self, _region_id: RegionId, _version: u64) -> Result<(), BoxedError> {
+    async fn sync_region(
+        &self,
+        _region_id: RegionId,
+        _manifest_info: RegionManifestInfo,
+    ) -> Result<SyncManifestResponse, BoxedError> {
         unimplemented!()
     }
 

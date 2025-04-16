@@ -35,8 +35,8 @@ use sql::dialect::GreptimeDbDialect;
 use sql::parser::{ParseOptions, ParserContext};
 use sql::statements::statement::Statement;
 
-use super::header::collect_plan_metrics;
 use crate::error::{FailedToParseQuerySnafu, InvalidQuerySnafu, Result};
+use crate::http::header::collect_plan_metrics;
 use crate::http::result::arrow_result::ArrowResponse;
 use crate::http::result::csv_result::CsvResponse;
 use crate::http::result::error_result::ErrorResponse;

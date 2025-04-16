@@ -13,11 +13,13 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
 
 use common_meta::rpc::router::Partition as MetaPartition;
 use datafusion_expr::Operator;
+use datatypes::arrow::array::{BooleanArray, RecordBatch};
 use datatypes::prelude::Value;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
@@ -37,6 +39,13 @@ pub trait PartitionRule: Sync + Send {
     ///
     /// Note that the `values` should have the same length as the `partition_columns`.
     fn find_region(&self, values: &[Value]) -> Result<RegionNumber>;
+
+    /// Split the record batch into multiple regions by the partition values.
+    /// The result is a map from region number to a boolean array, where the boolean array is true for the rows that match the partition values.
+    fn split_record_batch(
+        &self,
+        record_batch: &RecordBatch,
+    ) -> Result<HashMap<RegionNumber, BooleanArray>>;
 }
 
 /// The right bound(exclusive) of partition range.

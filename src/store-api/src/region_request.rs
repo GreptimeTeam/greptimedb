@@ -12,23 +12,30 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::fmt::{self, Display};
+use std::io::Cursor;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::add_column_location::LocationType;
-use api::v1::column_def::{as_fulltext_option, as_skipping_index_type};
+use api::v1::column_def::{
+    as_fulltext_option_analyzer, as_fulltext_option_backend, as_skipping_index_type,
+};
 use api::v1::region::{
-    alter_request, compact_request, region_request, AlterRequest, AlterRequests, CloseRequest,
-    CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest, DropRequests,
-    FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
+    alter_request, compact_request, region_request, AlterRequest, AlterRequests,
+    BulkInsertRequests, CloseRequest, CompactRequest, CreateRequest, CreateRequests,
+    DeleteRequests, DropRequest, DropRequests, FlushRequest, InsertRequests, OpenRequest,
+    TruncateRequest,
 };
 use api::v1::{
-    self, set_index, Analyzer, Option as PbOption, Rows, SemanticType,
-    SkippingIndexType as PbSkippingIndexType, WriteHint,
+    self, set_index, Analyzer, FulltextBackend as PbFulltextBackend, Option as PbOption, Rows,
+    SemanticType, SkippingIndexType as PbSkippingIndexType, WriteHint,
 };
 pub use common_base::AffectedRows;
+use common_recordbatch::DfRecordBatch;
 use common_time::TimeToLive;
+use datatypes::arrow::ipc::reader::FileReader;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
 use serde::{Deserialize, Serialize};
@@ -37,9 +44,9 @@ use strum::{AsRefStr, IntoStaticStr};
 
 use crate::logstore::entry;
 use crate::metadata::{
-    ColumnMetadata, DecodeProtoSnafu, InvalidRawRegionRequestSnafu, InvalidRegionRequestSnafu,
-    InvalidSetRegionOptionRequestSnafu, InvalidUnsetRegionOptionRequestSnafu, MetadataError,
-    RegionMetadata, Result,
+    ColumnMetadata, DecodeArrowIpcSnafu, DecodeProtoSnafu, InvalidRawRegionRequestSnafu,
+    InvalidRegionRequestSnafu, InvalidSetRegionOptionRequestSnafu,
+    InvalidUnsetRegionOptionRequestSnafu, MetadataError, RegionMetadata, Result,
 };
 use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use crate::mito_engine_options::{
@@ -124,6 +131,7 @@ pub enum RegionRequest {
     Compact(RegionCompactRequest),
     Truncate(RegionTruncateRequest),
     Catchup(RegionCatchupRequest),
+    BulkInserts(RegionBulkInsertsRequest),
 }
 
 impl RegionRequest {
@@ -144,6 +152,7 @@ impl RegionRequest {
             region_request::Body::Creates(creates) => make_region_creates(creates),
             region_request::Body::Drops(drops) => make_region_drops(drops),
             region_request::Body::Alters(alters) => make_region_alters(alters),
+            region_request::Body::BulkInserts(bulk) => make_region_bulk_inserts(bulk),
         }
     }
 
@@ -313,6 +322,51 @@ fn make_region_truncate(truncate: TruncateRequest) -> Result<Vec<(RegionId, Regi
     )])
 }
 
+/// Convert [BulkInsertRequests] to [RegionRequest] and group by [RegionId].
+fn make_region_bulk_inserts(
+    requests: BulkInsertRequests,
+) -> Result<Vec<(RegionId, RegionRequest)>> {
+    let mut region_requests: HashMap<u64, Vec<BulkInsertPayload>> =
+        HashMap::with_capacity(requests.requests.len());
+
+    for req in requests.requests {
+        let region_id = req.region_id;
+        match req.payload_type() {
+            api::v1::region::BulkInsertType::ArrowIpc => {
+                // todo(hl): use StreamReader instead
+                let reader = FileReader::try_new(Cursor::new(req.payload), None)
+                    .context(DecodeArrowIpcSnafu)?;
+                let record_batches = reader
+                    .map(|b| b.map(BulkInsertPayload::ArrowIpc))
+                    .try_collect::<Vec<_>>()
+                    .context(DecodeArrowIpcSnafu)?;
+                match region_requests.entry(region_id) {
+                    Entry::Occupied(mut e) => {
+                        e.get_mut().extend(record_batches);
+                    }
+                    Entry::Vacant(e) => {
+                        e.insert(record_batches);
+                    }
+                }
+            }
+        }
+    }
+
+    let result = region_requests
+        .into_iter()
+        .map(|(region_id, payloads)| {
+            (
+                region_id.into(),
+                RegionRequest::BulkInserts(RegionBulkInsertsRequest {
+                    region_id: region_id.into(),
+                    payloads,
+                }),
+            )
+        })
+        .collect::<Vec<_>>();
+    Ok(result)
+}
+
 /// Request to put data into a region.
 #[derive(Debug)]
 pub struct RegionPutRequest {
@@ -434,8 +488,6 @@ pub struct RegionCloseRequest {}
 /// Alter metadata of a region.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct RegionAlterRequest {
-    /// The version of the schema before applying the alteration.
-    pub schema_version: u64,
     /// Kind of alteration to do.
     pub kind: AlterKind,
 }
@@ -443,17 +495,6 @@ pub struct RegionAlterRequest {
 impl RegionAlterRequest {
     /// Checks whether the request is valid, returns an error if it is invalid.
     pub fn validate(&self, metadata: &RegionMetadata) -> Result<()> {
-        ensure!(
-            metadata.schema_version == self.schema_version,
-            InvalidRegionRequestSnafu {
-                region_id: metadata.region_id,
-                err: format!(
-                    "region schema version {} is not equal to request schema version {}",
-                    metadata.schema_version, self.schema_version
-                ),
-            }
-        );
-
         self.kind.validate(metadata)?;
 
         Ok(())
@@ -477,10 +518,7 @@ impl TryFrom<AlterRequest> for RegionAlterRequest {
         })?;
 
         let kind = AlterKind::try_from(kind)?;
-        Ok(RegionAlterRequest {
-            schema_version: value.schema_version,
-            kind,
-        })
+        Ok(RegionAlterRequest { kind })
     }
 }
 
@@ -729,10 +767,13 @@ impl TryFrom<alter_request::Kind> for AlterKind {
                         column_name: x.column_name.clone(),
                         options: FulltextOptions {
                             enable: x.enable,
-                            analyzer: as_fulltext_option(
+                            analyzer: as_fulltext_option_analyzer(
                                 Analyzer::try_from(x.analyzer).context(DecodeProtoSnafu)?,
                             ),
                             case_sensitive: x.case_sensitive,
+                            backend: as_fulltext_option_backend(
+                                PbFulltextBackend::try_from(x.backend).context(DecodeProtoSnafu)?,
+                            ),
                         },
                     },
                 },
@@ -1116,6 +1157,10 @@ pub struct RegionCatchupRequest {
     /// The `entry_id` that was expected to reply to.
     /// `None` stands replaying to latest.
     pub entry_id: Option<entry::Id>,
+    /// Used for metrics metadata region.
+    /// The `entry_id` that was expected to reply to.
+    /// `None` stands replaying to latest.
+    pub metadata_entry_id: Option<entry::Id>,
     /// The hint for replaying memtable.
     pub location_id: Option<u64>,
 }
@@ -1124,6 +1169,17 @@ pub struct RegionCatchupRequest {
 #[derive(Debug, Clone)]
 pub struct RegionSequencesRequest {
     pub region_ids: Vec<RegionId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RegionBulkInsertsRequest {
+    pub region_id: RegionId,
+    pub payloads: Vec<BulkInsertPayload>,
+}
+
+#[derive(Debug, Clone)]
+pub enum BulkInsertPayload {
+    ArrowIpc(DfRecordBatch),
 }
 
 impl fmt::Display for RegionRequest {
@@ -1140,6 +1196,7 @@ impl fmt::Display for RegionRequest {
             RegionRequest::Compact(_) => write!(f, "Compact"),
             RegionRequest::Truncate(_) => write!(f, "Truncate"),
             RegionRequest::Catchup(_) => write!(f, "Catchup"),
+            RegionRequest::BulkInserts(_) => write!(f, "BulkInserts"),
         }
     }
 }
@@ -1149,7 +1206,7 @@ mod tests {
     use api::v1::region::RegionColumnDef;
     use api::v1::{ColumnDataType, ColumnDef};
     use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::{ColumnSchema, FulltextAnalyzer};
+    use datatypes::schema::{ColumnSchema, FulltextAnalyzer, FulltextBackend};
 
     use super::*;
     use crate::metadata::RegionMetadataBuilder;
@@ -1229,7 +1286,6 @@ mod tests {
         assert_eq!(
             request,
             RegionAlterRequest {
-                schema_version: 1,
                 kind: AlterKind::AddColumns {
                     columns: vec![AddColumn {
                         column_metadata: ColumnMetadata {
@@ -1527,21 +1583,6 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_schema_version() {
-        let mut metadata = new_metadata();
-        metadata.schema_version = 2;
-
-        RegionAlterRequest {
-            schema_version: 1,
-            kind: AlterKind::DropColumns {
-                names: vec!["field_0".to_string()],
-            },
-        }
-        .validate(&metadata)
-        .unwrap_err();
-    }
-
-    #[test]
     fn test_validate_add_columns() {
         let kind = AlterKind::AddColumns {
             columns: vec![
@@ -1571,10 +1612,7 @@ mod tests {
                 },
             ],
         };
-        let request = RegionAlterRequest {
-            schema_version: 1,
-            kind,
-        };
+        let request = RegionAlterRequest { kind };
         let mut metadata = new_metadata();
         metadata.schema_version = 1;
         request.validate(&metadata).unwrap();
@@ -1631,13 +1669,11 @@ mod tests {
                     enable: true,
                     analyzer: FulltextAnalyzer::Chinese,
                     case_sensitive: false,
+                    backend: FulltextBackend::Bloom,
                 },
             },
         };
-        let request = RegionAlterRequest {
-            schema_version: 1,
-            kind,
-        };
+        let request = RegionAlterRequest { kind };
         let mut metadata = new_metadata();
         metadata.schema_version = 1;
         request.validate(&metadata).unwrap();
@@ -1647,10 +1683,7 @@ mod tests {
                 column_name: "tag_0".to_string(),
             },
         };
-        let request = RegionAlterRequest {
-            schema_version: 1,
-            kind,
-        };
+        let request = RegionAlterRequest { kind };
         let mut metadata = new_metadata();
         metadata.schema_version = 1;
         request.validate(&metadata).unwrap();

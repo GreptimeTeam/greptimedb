@@ -17,8 +17,7 @@ use std::time::Duration;
 use common_base::readable_size::ReadableSize;
 use serde::{Deserialize, Serialize};
 
-use super::common::KafkaConnectionConfig;
-use crate::config::kafka::common::{backoff_prefix, BackoffConfig, KafkaTopicConfig};
+use crate::config::kafka::common::{KafkaConnectionConfig, KafkaTopicConfig};
 
 /// Kafka wal configurations for datanode.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -34,9 +33,6 @@ pub struct DatanodeKafkaConfig {
     /// The consumer wait timeout.
     #[serde(with = "humantime_serde")]
     pub consumer_wait_timeout: Duration,
-    /// The backoff config.
-    #[serde(flatten, with = "backoff_prefix")]
-    pub backoff: BackoffConfig,
     /// The kafka topic config.
     #[serde(flatten)]
     pub kafka_topic: KafkaTopicConfig,
@@ -57,7 +53,6 @@ impl Default for DatanodeKafkaConfig {
             // Warning: Kafka has a default limit of 1MB per message in a topic.
             max_batch_bytes: ReadableSize::mb(1),
             consumer_wait_timeout: Duration::from_millis(100),
-            backoff: BackoffConfig::default(),
             kafka_topic: KafkaTopicConfig::default(),
             auto_create_topics: true,
             create_index: true,

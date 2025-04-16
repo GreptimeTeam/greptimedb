@@ -17,7 +17,7 @@ use sqlparser::ast::{Ident, Query};
 use sqlparser::dialect::Dialect;
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::{Parser, ParserError, ParserOptions};
-use sqlparser::tokenizer::{Token, TokenWithLocation};
+use sqlparser::tokenizer::{Token, TokenWithSpan};
 
 use crate::ast::{Expr, ObjectName};
 use crate::error::{self, Result, SyntaxSnafu};
@@ -112,7 +112,7 @@ impl ParserContext<'_> {
             .try_with_sql(sql)
             .context(SyntaxSnafu)?;
 
-        let function_name = parser.parse_identifier(false).context(SyntaxSnafu)?;
+        let function_name = parser.parse_identifier().context(SyntaxSnafu)?;
         parser
             .parse_function(ObjectName(vec![function_name]))
             .context(SyntaxSnafu)
@@ -147,6 +147,8 @@ impl ParserContext<'_> {
 
                     Keyword::INSERT => self.parse_insert(),
 
+                    Keyword::REPLACE => self.parse_replace(),
+
                     Keyword::SELECT | Keyword::WITH | Keyword::VALUES => self.parse_query(),
 
                     Keyword::ALTER => self.parse_alter(),
@@ -176,12 +178,12 @@ impl ParserContext<'_> {
                     Keyword::USE => {
                         let _ = self.parser.next_token();
 
-                        let database_name = self.parser.parse_identifier(false).context(
+                        let database_name = self.parser.parse_identifier().with_context(|_| {
                             error::UnexpectedSnafu {
                                 expected: "a database name",
                                 actual: self.peek_token_as_string(),
-                            },
-                        )?;
+                            }
+                        })?;
                         Ok(Statement::Use(
                             Self::canonicalize_identifier(database_name).value,
                         ))
@@ -220,7 +222,7 @@ impl ParserContext<'_> {
     }
 
     // Report unexpected token
-    pub(crate) fn expected<T>(&self, expected: &str, found: TokenWithLocation) -> Result<T> {
+    pub(crate) fn expected<T>(&self, expected: &str, found: TokenWithSpan) -> Result<T> {
         Err(ParserError::ParserError(format!(
             "Expected {expected}, found: {found}",
         )))
@@ -253,10 +255,7 @@ impl ParserContext<'_> {
         if ident.quote_style.is_some() {
             ident
         } else {
-            Ident {
-                value: ident.value.to_lowercase(),
-                quote_style: None,
-            }
+            Ident::new(ident.value.to_lowercase())
         }
     }
 
@@ -277,14 +276,6 @@ impl ParserContext<'_> {
     /// we don't want to write it again and again.
     pub(crate) fn parse_object_name(&mut self) -> std::result::Result<ObjectName, ParserError> {
         self.parser.parse_object_name(false)
-    }
-
-    /// Simply a shortcut for sqlparser's same name method `parse_identifier`,
-    /// but with constant argument "false".
-    /// Because the argument is always "false" for us (it's introduced by BigQuery),
-    /// we don't want to write it again and again.
-    pub(crate) fn parse_identifier(parser: &mut Parser) -> std::result::Result<Ident, ParserError> {
-        parser.parse_identifier(false)
     }
 }
 

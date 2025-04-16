@@ -198,6 +198,8 @@ pub trait JaegerQueryHandler {
         ctx: QueryContextRef,
         service_name: &str,
         span_kind: Option<&str>,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
     ) -> Result<Output>;
 
     /// Get trace by trace id. It's used for `/api/traces/{trace_id}` API.

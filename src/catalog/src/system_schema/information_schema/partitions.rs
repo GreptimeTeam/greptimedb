@@ -39,13 +39,12 @@ use snafu::{OptionExt, ResultExt};
 use store_api::storage::{ScanRequest, TableId};
 use table::metadata::{TableInfo, TableType};
 
-use super::PARTITIONS;
 use crate::error::{
     CreateRecordBatchSnafu, FindPartitionsSnafu, InternalSnafu, PartitionManagerNotFoundSnafu,
     Result, UpgradeWeakCatalogManagerRefSnafu,
 };
 use crate::kvbackend::KvBackendCatalogManager;
-use crate::system_schema::information_schema::{InformationTable, Predicates};
+use crate::system_schema::information_schema::{InformationTable, Predicates, PARTITIONS};
 use crate::CatalogManager;
 
 const TABLE_CATALOG: &str = "table_catalog";

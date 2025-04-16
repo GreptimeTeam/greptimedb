@@ -21,6 +21,7 @@ use catalog::memory::MemoryCatalogManager;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use datafusion_expr::LogicalPlan;
+use query::options::QueryOptions;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::query_engine::DescribeResult;
 use query::{QueryEngineFactory, QueryEngineRef};
@@ -158,8 +159,16 @@ impl GrpcQueryHandler for DummyInstance {
 
 fn create_testing_instance(table: TableRef) -> DummyInstance {
     let catalog_manager = MemoryCatalogManager::new_with_table(table);
-    let query_engine =
-        QueryEngineFactory::new(catalog_manager, None, None, None, None, false).query_engine();
+    let query_engine = QueryEngineFactory::new(
+        catalog_manager,
+        None,
+        None,
+        None,
+        None,
+        false,
+        QueryOptions::default(),
+    )
+    .query_engine();
     DummyInstance::new(query_engine)
 }
 

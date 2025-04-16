@@ -437,10 +437,7 @@ mod tests {
     }
 
     fn column(name: &str) -> Expr {
-        Expr::Column(Column {
-            relation: None,
-            name: name.to_string(),
-        })
+        Expr::Column(Column::from_name(name))
     }
 
     fn string_literal(v: &str) -> Expr {

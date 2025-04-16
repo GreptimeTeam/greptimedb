@@ -51,7 +51,6 @@ impl From<DatanodeWalConfig> for MetasrvWalConfig {
             DatanodeWalConfig::RaftEngine(_) => Self::RaftEngine,
             DatanodeWalConfig::Kafka(config) => Self::Kafka(MetasrvKafkaConfig {
                 connection: config.connection,
-                backoff: config.backoff,
                 kafka_topic: config.kafka_topic,
                 auto_create_topics: config.auto_create_topics,
             }),
@@ -65,7 +64,6 @@ impl From<MetasrvWalConfig> for DatanodeWalConfig {
             MetasrvWalConfig::RaftEngine => Self::RaftEngine(RaftEngineConfig::default()),
             MetasrvWalConfig::Kafka(config) => Self::Kafka(DatanodeKafkaConfig {
                 connection: config.connection,
-                backoff: config.backoff,
                 kafka_topic: config.kafka_topic,
                 ..Default::default()
             }),
@@ -84,7 +82,6 @@ mod tests {
     use tests::kafka::common::KafkaTopicConfig;
 
     use super::*;
-    use crate::config::kafka::common::BackoffConfig;
     use crate::config::{DatanodeKafkaConfig, MetasrvKafkaConfig};
     use crate::TopicSelectorType;
 
@@ -175,12 +172,6 @@ mod tests {
                     client_key_path: None,
                 }),
             },
-            backoff: BackoffConfig {
-                init: Duration::from_millis(500),
-                max: Duration::from_secs(10),
-                base: 2,
-                deadline: Some(Duration::from_secs(60 * 5)),
-            },
             kafka_topic: KafkaTopicConfig {
                 num_topics: 32,
                 selector_type: TopicSelectorType::RoundRobin,
@@ -212,12 +203,6 @@ mod tests {
             },
             max_batch_bytes: ReadableSize::mb(1),
             consumer_wait_timeout: Duration::from_millis(100),
-            backoff: BackoffConfig {
-                init: Duration::from_millis(500),
-                max: Duration::from_secs(10),
-                base: 2,
-                deadline: Some(Duration::from_secs(60 * 5)),
-            },
             kafka_topic: KafkaTopicConfig {
                 num_topics: 32,
                 selector_type: TopicSelectorType::RoundRobin,

@@ -24,6 +24,7 @@ mod put;
 mod read;
 mod region_metadata;
 mod state;
+mod sync;
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -36,12 +37,12 @@ use common_error::status_code::StatusCode;
 use mito2::engine::MitoEngine;
 pub(crate) use options::IndexOptions;
 use snafu::ResultExt;
-use store_api::manifest::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
 use store_api::region_engine::{
     RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef, RegionStatistic,
-    SetRegionRoleStateResponse, SettableRegionRoleState,
+    SetRegionRoleStateResponse, SetRegionRoleStateSuccess, SettableRegionRoleState,
+    SyncManifestResponse,
 };
 use store_api::region_request::{BatchRegionDdlRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
@@ -49,7 +50,7 @@ use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 use self::state::MetricEngineState;
 use crate::config::EngineConfig;
 use crate::data_region::DataRegion;
-use crate::error::{self, Result, UnsupportedRegionRequestSnafu, UnsupportedSyncRegionSnafu};
+use crate::error::{self, Result, UnsupportedRegionRequestSnafu};
 use crate::metadata_region::MetadataRegion;
 use crate::row_modifier::RowModifier;
 use crate::utils;
@@ -220,6 +221,10 @@ impl RegionEngine for MetricEngine {
                 }
             }
             RegionRequest::Catchup(req) => self.inner.catchup_region(region_id, req).await,
+            RegionRequest::BulkInserts(_) => {
+                // todo(hl): find a way to support bulk inserts in metric engine.
+                UnsupportedRegionRequestSnafu { request }.fail()
+            }
         };
 
         result.map_err(BoxedError::new).map(|rows| RegionResponse {
@@ -274,10 +279,10 @@ impl RegionEngine for MetricEngine {
                     sst_size: metadata_stat.sst_size + data_stat.sst_size,
                     index_size: metadata_stat.index_size + data_stat.index_size,
                     manifest: RegionManifestInfo::Metric {
-                        data_flushed_entry_id: data_stat.manifest.flushed_entry_id(),
-                        data_manifest_version: data_stat.manifest.manifest_version(),
-                        metadata_flushed_entry_id: metadata_stat.manifest.flushed_entry_id(),
-                        metadata_manifest_version: metadata_stat.manifest.manifest_version(),
+                        data_flushed_entry_id: data_stat.manifest.data_flushed_entry_id(),
+                        data_manifest_version: data_stat.manifest.data_manifest_version(),
+                        metadata_flushed_entry_id: metadata_stat.manifest.data_flushed_entry_id(),
+                        metadata_manifest_version: metadata_stat.manifest.data_manifest_version(),
                     },
                 }),
                 _ => None,
@@ -310,11 +315,13 @@ impl RegionEngine for MetricEngine {
 
     async fn sync_region(
         &self,
-        _region_id: RegionId,
-        _manifest_version: ManifestVersion,
-    ) -> Result<(), BoxedError> {
-        // TODO(weny): implement it later.
-        Err(BoxedError::new(UnsupportedSyncRegionSnafu {}.build()))
+        region_id: RegionId,
+        manifest_info: RegionManifestInfo,
+    ) -> Result<SyncManifestResponse, BoxedError> {
+        self.inner
+            .sync_region(region_id, manifest_info)
+            .await
+            .map_err(BoxedError::new)
     }
 
     async fn set_region_role_state_gracefully(
@@ -322,17 +329,39 @@ impl RegionEngine for MetricEngine {
         region_id: RegionId,
         region_role_state: SettableRegionRoleState,
     ) -> std::result::Result<SetRegionRoleStateResponse, BoxedError> {
-        self.inner
+        let metadata_result = match self
+            .inner
             .mito
             .set_region_role_state_gracefully(
                 utils::to_metadata_region_id(region_id),
                 region_role_state,
             )
-            .await?;
-        self.inner
+            .await?
+        {
+            SetRegionRoleStateResponse::Success(success) => success,
+            SetRegionRoleStateResponse::NotFound => {
+                return Ok(SetRegionRoleStateResponse::NotFound)
+            }
+        };
+
+        let data_result = match self
+            .inner
             .mito
             .set_region_role_state_gracefully(region_id, region_role_state)
-            .await
+            .await?
+        {
+            SetRegionRoleStateResponse::Success(success) => success,
+            SetRegionRoleStateResponse::NotFound => {
+                return Ok(SetRegionRoleStateResponse::NotFound)
+            }
+        };
+
+        Ok(SetRegionRoleStateResponse::success(
+            SetRegionRoleStateSuccess::metric(
+                data_result.last_entry_id().unwrap_or_default(),
+                metadata_result.last_entry_id().unwrap_or_default(),
+            ),
+        ))
     }
 
     /// Returns the physical region role.
@@ -371,6 +400,7 @@ impl MetricEngine {
         self.inner.mito.clone()
     }
 
+    /// Returns all logical regions associated with the physical region.
     pub async fn logical_regions(&self, physical_region_id: RegionId) -> Result<Vec<RegionId>> {
         self.inner
             .metadata_region

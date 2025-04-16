@@ -67,7 +67,7 @@ use crate::Error;
 #[derive(Debug, Clone)]
 pub struct TimeWindowExpr {
     phy_expr: PhysicalExprRef,
-    column_name: String,
+    pub column_name: String,
     logical_expr: Expr,
     df_schema: DFSchema,
 }
@@ -262,7 +262,7 @@ fn columnar_to_ts_vector(columnar: &ColumnarValue) -> Result<Vec<Option<Timestam
 /// to be monotonic increasing and appears in the innermost GROUP BY clause
 ///
 /// note this plan should only contain one TableScan
-async fn find_time_window_expr(
+pub async fn find_time_window_expr(
     plan: &LogicalPlan,
     catalog_man: CatalogManagerRef,
     query_ctx: QueryContextRef,
@@ -661,7 +661,7 @@ mod test {
     use session::context::QueryContext;
 
     use super::*;
-    use crate::recording_rules::utils::{df_plan_to_sql, sql_to_df_plan, AddFilterRewriter};
+    use crate::batching_mode::utils::{df_plan_to_sql, sql_to_df_plan, AddFilterRewriter};
     use crate::test_utils::create_test_query_engine;
 
     #[tokio::test]

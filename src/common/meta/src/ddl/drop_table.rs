@@ -200,7 +200,9 @@ impl Procedure for DropTableProcedure {
         if register_operating_regions {
             self.register_dropping_regions()
                 .map_err(BoxedError::new)
-                .context(ExternalSnafu)?;
+                .context(ExternalSnafu {
+                    clean_poisons: false,
+                })?;
         }
 
         Ok(())

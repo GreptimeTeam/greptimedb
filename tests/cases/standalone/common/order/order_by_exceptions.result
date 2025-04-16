@@ -64,28 +64,25 @@ Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Order by colu
 -- SQLNESS REPLACE (partitioning.*) REDACTED
 EXPLAIN SELECT a % 2, b FROM test UNION SELECT a % 2 AS k, b FROM test ORDER BY -1;
 
-+---------------+-----------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                      |
-+---------------+-----------------------------------------------------------------------------------------------------------+
-| logical_plan  | Sort: Int64(-1) ASC NULLS LAST                                                                            |
-|               |   Aggregate: groupBy=[[test.a % Int64(2), test.b]], aggr=[[]]                                             |
-|               |     Union                                                                                                 |
-|               |       MergeScan [is_placeholder=false]                                                                    |
-|               |       MergeScan [is_placeholder=false]                                                                    |
-| physical_plan | CoalescePartitionsExec                                                                                    |
-|               |   AggregateExec: mode=FinalPartitioned, gby=[test.a % Int64(2)@0 as test.a % Int64(2), b@1 as b], aggr=[] |
-|               |     CoalesceBatchesExec: target_batch_size=8192                                                           |
-|               |       RepartitionExec: REDACTED
-|               |         AggregateExec: mode=Partial, gby=[test.a % Int64(2)@0 as test.a % Int64(2), b@1 as b], aggr=[]    |
-|               |           UnionExec                                                                                       |
-|               |             MergeScanExec: REDACTED
-|               |             MergeScanExec: REDACTED
-|               |                                                                                                           |
-+---------------+-----------------------------------------------------------------------------------------------------------+
++---------------+------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                       |
++---------------+------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Sort: Int64(-1) ASC NULLS LAST                                                                             |
+|               |   Aggregate: groupBy=[[test.a % Int64(2), test.b]], aggr=[[]]                                              |
+|               |     Union                                                                                                  |
+|               |       MergeScan [is_placeholder=false]                                                                     |
+|               |       MergeScan [is_placeholder=false]                                                                     |
+| physical_plan | CoalescePartitionsExec                                                                                     |
+|               |   AggregateExec: mode=SinglePartitioned, gby=[test.a % Int64(2)@0 as test.a % Int64(2), b@1 as b], aggr=[] |
+|               |     InterleaveExec                                                                                         |
+|               |       MergeScanExec: REDACTED
+|               |       MergeScanExec: REDACTED
+|               |                                                                                                            |
++---------------+------------------------------------------------------------------------------------------------------------+
 
 SELECT a % 2, b FROM test UNION SELECT a % 2 AS k FROM test ORDER BY -1;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: UNION queries have different number of columns: left has 2 columns whereas right has 1 columns
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: UNION queries have different number of columns
 
 DROP TABLE test;
 

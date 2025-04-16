@@ -19,7 +19,7 @@ pub mod create_expr;
 
 pub fn sql_data_type_to_postgres_data_type(data_type: SqlDataType) -> String {
     match data_type {
-        SqlDataType::Double => "DOUBLE PRECISION".to_string(),
+        SqlDataType::Double(_) => "DOUBLE PRECISION".to_string(),
         _ => data_type.to_string(),
     }
 }

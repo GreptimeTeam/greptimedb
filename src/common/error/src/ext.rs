@@ -42,7 +42,7 @@ pub trait ErrorExt: StackError {
                 if let Some(external_error) = error.source() {
                     let external_root = external_error.sources().last().unwrap();
 
-                    if error.to_string().is_empty() {
+                    if error.transparent() {
                         format!("{external_root}")
                     } else {
                         format!("{error}: {external_root}")
@@ -85,6 +85,14 @@ pub trait StackError: std::error::Error {
             result = err;
         }
         result
+    }
+
+    /// Indicates whether this error is "transparent", that it delegates its "display" and "source"
+    /// to the underlying error. Could be useful when you are just wrapping some external error,
+    /// **AND** can not or would not provide meaningful contextual info. For example, the
+    /// `DataFusionError`.
+    fn transparent(&self) -> bool {
+        false
     }
 }
 

@@ -16,9 +16,8 @@ use common_telemetry::error;
 use rskafka::client::partition::OffsetAt;
 use snafu::ResultExt;
 
-use super::DumpIndexRequest;
 use crate::error;
-use crate::kafka::worker::BackgroundProducerWorker;
+use crate::kafka::worker::{BackgroundProducerWorker, DumpIndexRequest};
 
 impl BackgroundProducerWorker {
     pub(crate) async fn dump_index(&mut self, req: DumpIndexRequest) {
