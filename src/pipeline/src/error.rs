@@ -517,12 +517,7 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("Unsupported number type: {value}"))]
-    ValueUnsupportedNumberType {
-        value: serde_json::Number,
-        #[snafu(implicit)]
-        location: Location,
-    },
+
     #[snafu(display("Unsupported yaml type: {value:?}"))]
     ValueUnsupportedYamlType {
         value: yaml_rust::Yaml,
@@ -571,6 +566,13 @@ pub enum Error {
     #[snafu(display("Unsupported number type: {value:?}"))]
     UnsupportedNumberType {
         value: serde_json::Number,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Failed to parse json"))]
+    JsonParse {
+        #[snafu(source)]
+        error: serde_json::Error,
         #[snafu(implicit)]
         location: Location,
     },
@@ -808,7 +810,6 @@ impl ErrorExt for Error {
             | ValueParseFloat { .. }
             | ValueParseBoolean { .. }
             | ValueDefaultValueUnsupported { .. }
-            | ValueUnsupportedNumberType { .. }
             | ValueUnsupportedYamlType { .. }
             | ValueYamlKeyMustBeString { .. }
             | YamlLoad { .. }
@@ -818,6 +819,7 @@ impl ErrorExt for Error {
             | UnsupportedIndexType { .. }
             | UnsupportedNumberType { .. }
             | IdentifyPipelineColumnTypeMismatch { .. }
+            | JsonParse { .. }
             | JsonPathParse { .. }
             | JsonPathParseResultIndex { .. }
             | FieldRequiredForDispatcher
