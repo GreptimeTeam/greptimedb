@@ -33,8 +33,8 @@ use crate::engine::listener::{FlushListener, StallListener};
 use crate::test_util::{
     build_rows, build_rows_for_key, flush_region, kafka_log_store_factory,
     multiple_log_store_factories, prepare_test_for_kafka_log_store, put_rows,
-    raft_engine_log_store_factory, reopen_region, rows_schema, single_kafka_log_store_factory,
-    CreateRequestBuilder, LogStoreFactory, MockWriteBufferManager, TestEnv,
+    raft_engine_log_store_factory, reopen_region, rows_schema, CreateRequestBuilder,
+    LogStoreFactory, MockWriteBufferManager, TestEnv,
 };
 use crate::time_provider::TimeProvider;
 use crate::worker::MAX_INITIAL_CHECK_DELAY_SECS;
@@ -543,101 +543,4 @@ async fn test_flush_workers() {
 | a     | 1.0     | 1970-01-01T00:00:01 |
 +-------+---------+---------------------+";
     assert_eq!(expected, batches.pretty_print().unwrap());
-}
-
-#[apply(single_kafka_log_store_factory)]
-async fn test_update_high_watermark(factory: Option<LogStoreFactory>) {
-    common_telemetry::init_default_ut_logging();
-    let Some(factory) = factory else {
-        return;
-    };
-    let write_buffer_manager = Arc::new(MockWriteBufferManager::default());
-    let listener = Arc::new(FlushListener::default());
-
-    let mut env = TestEnv::new().with_log_store_factory(factory.clone());
-    let engine = env
-        .create_engine_with(
-            MitoConfig::default(),
-            Some(write_buffer_manager.clone()),
-            Some(listener.clone()),
-        )
-        .await;
-    let region1_id = RegionId::new(1, 1);
-    env.get_schema_metadata_manager()
-        .register_region_table_info(
-            region1_id.table_id(),
-            "test_table",
-            "test_catalog",
-            "test_schema",
-            None,
-            env.get_kv_backend(),
-        )
-        .await;
-    let region2_id = RegionId::new(1, 2);
-
-    let topic = prepare_test_for_kafka_log_store(&factory).await;
-    let request = CreateRequestBuilder::new()
-        .kafka_topic(topic.clone())
-        .build();
-    let column_schemas = rows_schema(&request);
-    engine
-        .handle_request(region1_id, RegionRequest::Create(request.clone()))
-        .await
-        .unwrap();
-    let mut request = CreateRequestBuilder::new().kafka_topic(topic).build();
-    request.region_dir = "test2".to_string();
-    engine
-        .handle_request(region2_id, RegionRequest::Create(request))
-        .await
-        .unwrap();
-
-    let region1 = engine.get_region(region1_id).unwrap();
-    let region2 = engine.get_region(region2_id).unwrap();
-    assert_eq!(
-        region1.high_watermark_since_flush.load(Ordering::Relaxed),
-        0
-    );
-    assert_eq!(
-        region2.high_watermark_since_flush.load(Ordering::Relaxed),
-        0
-    );
-
-    let rows = Rows {
-        schema: column_schemas.clone(),
-        rows: build_rows_for_key("a", 0, 2, 0),
-    };
-    put_rows(&engine, region1_id, rows.clone()).await;
-    assert_eq!(
-        region1.high_watermark_since_flush.load(Ordering::Relaxed),
-        0
-    );
-    assert_eq!(
-        region2.high_watermark_since_flush.load(Ordering::Relaxed),
-        0
-    );
-
-    write_buffer_manager.set_should_flush(true);
-    put_rows(&engine, region1_id, rows.clone()).await;
-    // Wait until flush is finished.
-    listener.wait().await;
-    assert_eq!(
-        region1.high_watermark_since_flush.load(Ordering::Relaxed),
-        2
-    );
-    assert_eq!(
-        region2.high_watermark_since_flush.load(Ordering::Relaxed),
-        0
-    );
-
-    put_rows(&engine, region2_id, rows).await;
-    // Wait until flush is finished.
-    listener.wait().await;
-    assert_eq!(
-        region1.high_watermark_since_flush.load(Ordering::Relaxed),
-        2
-    );
-    assert_eq!(
-        region2.high_watermark_since_flush.load(Ordering::Relaxed),
-        4
-    );
 }

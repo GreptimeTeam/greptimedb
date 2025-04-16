@@ -484,7 +484,7 @@ impl LogStore for RaftEngineLogStore {
         Ok(())
     }
 
-    async fn high_watermark(&self, _provider: &Provider) -> Result<EntryId> {
+    fn high_watermark(&self, _provider: &Provider) -> Result<EntryId> {
         unreachable!()
     }
 }

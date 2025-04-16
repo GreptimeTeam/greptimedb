@@ -41,9 +41,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         };
 
-        // Update high watermark for remote WAL if memtables are empty.
-        self.update_high_watermark(&region).await;
-
         let reason = if region.is_downgrading() {
             FlushReason::Downgrading
         } else {
@@ -144,6 +141,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 // Already flushing or not writable.
                 continue;
             }
+            self.update_high_watermark(region);
 
             if region.last_flush_millis() < min_last_flush_time {
                 // If flush time of this region is earlier than `min_last_flush_time`, we can flush this region.
@@ -253,19 +251,22 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     }
 
     /// Updates high watermark of the region when a flush request is scheduled but the memtable is empty.
-    pub(crate) async fn update_high_watermark(&mut self, region: &MitoRegionRef) {
+    pub(crate) fn update_high_watermark(&mut self, region: &MitoRegionRef) {
         if region.provider.is_remote_wal() && region.version().memtables.is_empty() {
             let high_watermark = self
                 .wal
                 .store()
                 .high_watermark(&region.provider)
-                .await
                 .unwrap_or(0);
             if high_watermark != 0 {
                 region
                     .high_watermark_since_flush
                     .store(high_watermark, Ordering::Relaxed);
             }
+            info!(
+                "Region {} high watermark updated to {}",
+                region.region_id, high_watermark
+            );
         }
     }
 }

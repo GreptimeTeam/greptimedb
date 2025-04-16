@@ -408,7 +408,7 @@ impl LogStore for KafkaLogStore {
     }
 
     /// Returns the highest entry id of the specified topic in remote WAL.
-    async fn high_watermark(&self, provider: &Provider) -> Result<EntryId> {
+    fn high_watermark(&self, provider: &Provider) -> Result<EntryId> {
         let provider = provider
             .as_kafka_provider()
             .with_context(|| InvalidProviderSnafu {
@@ -610,7 +610,7 @@ mod tests {
                 .for_each(|entry| entry.set_entry_id(0));
             assert_eq!(expected_entries, actual_entries);
         }
-        let high_wathermark = logstore.high_watermark(&provider).await.unwrap();
+        let high_wathermark = logstore.high_watermark(&provider).unwrap();
         assert_eq!(high_wathermark, 99);
     }
 
@@ -685,7 +685,7 @@ mod tests {
                 .for_each(|entry| entry.set_entry_id(0));
             assert_eq!(expected_entries, actual_entries);
         }
-        let high_wathermark = logstore.high_watermark(&provider).await.unwrap();
+        let high_wathermark = logstore.high_watermark(&provider).unwrap();
         assert_eq!(high_wathermark, (data_size_kb as u64 / 8 + 1) * 20 * 5 - 1);
     }
 }

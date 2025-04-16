@@ -96,7 +96,7 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     ) -> Result<Entry, Self::Error>;
 
     /// Returns the highest entry id of the specified topic in remote WAL.
-    async fn high_watermark(&self, provider: &Provider) -> Result<EntryId, Self::Error>;
+    fn high_watermark(&self, provider: &Provider) -> Result<EntryId, Self::Error>;
 }
 
 /// The response of an `append` operation.
