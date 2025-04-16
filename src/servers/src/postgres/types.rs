@@ -421,13 +421,8 @@ pub(super) fn encode_value(
         Value::IntervalDayTime(v) => builder.encode_field(&PgInterval::from(*v)),
         Value::IntervalMonthDayNano(v) => builder.encode_field(&PgInterval::from(*v)),
         Value::Decimal128(v) => builder.encode_field(&v.to_string()),
+        Value::Duration(d) => builder.encode_field(&PgInterval::from(*d)),
         Value::List(values) => encode_array(query_ctx, values, builder),
-        Value::Duration(_) => Err(PgWireError::ApiError(Box::new(Error::Internal {
-            err_msg: format!(
-                "cannot write value {:?} in postgres protocol: unimplemented",
-                &value
-            ),
-        }))),
     }
 }
 
@@ -466,8 +461,8 @@ pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
             &ConcreteDataType::Interval(_) => Ok(Type::INTERVAL_ARRAY),
             &ConcreteDataType::Decimal128(_) => Ok(Type::NUMERIC_ARRAY),
             &ConcreteDataType::Json(_) => Ok(Type::JSON_ARRAY),
-            &ConcreteDataType::Duration(_)
-            | &ConcreteDataType::Dictionary(_)
+            &ConcreteDataType::Duration(_) => Ok(Type::INTERVAL_ARRAY),
+            &ConcreteDataType::Dictionary(_)
             | &ConcreteDataType::Vector(_)
             | &ConcreteDataType::List(_) => server_error::UnsupportedDataTypeSnafu {
                 data_type: origin,
@@ -475,13 +470,12 @@ pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
             }
             .fail(),
         },
-        &ConcreteDataType::Duration(_) | &ConcreteDataType::Dictionary(_) => {
-            server_error::UnsupportedDataTypeSnafu {
-                data_type: origin,
-                reason: "not implemented",
-            }
-            .fail()
+        &ConcreteDataType::Dictionary(_) => server_error::UnsupportedDataTypeSnafu {
+            data_type: origin,
+            reason: "not implemented",
         }
+        .fail(),
+        &ConcreteDataType::Duration(_) => Ok(Type::INTERVAL),
     }
 }
 
