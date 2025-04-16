@@ -10,7 +10,7 @@ INSERT INTO test VALUES (3, 3), (4, 4);
 
 ALTER TABLE test ADD COLUMN k INTEGER DEFAULT 3;
 
-SELECT * FROM test;
+SELECT * FROM test order by j;
 
 SELECT * FROM test where k != 3;
 

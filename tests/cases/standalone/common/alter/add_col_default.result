@@ -26,7 +26,7 @@ ALTER TABLE test ADD COLUMN k INTEGER DEFAULT 3;
 
 Affected Rows: 0
 
-SELECT * FROM test;
+SELECT * FROM test order by j;
 
 +---+-------------------------+---+
 | i | j                       | k |
