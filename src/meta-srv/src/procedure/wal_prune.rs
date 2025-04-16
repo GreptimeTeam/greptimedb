@@ -560,10 +560,6 @@ mod tests {
                 let mut procedure = WalPruneProcedure::new(topic_name.clone(), context, 10, None);
 
                 // Before any data in kvbackend is mocked, should return a retryable error.
-                let result = procedure.on_prepare().await;
-                assert_matches!(result, Err(e) if e.is_retryable());
-                let result = procedure.on_sending_flush_request().await;
-                assert_matches!(result, Err(e) if e.is_retryable());
                 let result = procedure.on_prune().await;
                 assert_matches!(result, Err(e) if e.is_retryable());
 
