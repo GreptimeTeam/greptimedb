@@ -27,6 +27,18 @@ Copy with_pattern FROM '${SQLNESS_HOME}/demo/export/csv/' WITH (pattern = 'demo.
 
 select * from with_pattern order by ts;
 
+CREATE TABLE demo_with_external_column(host string, cpu double, memory double, ts timestamp time index, external_column string default 'default_value');
+
+Copy demo_with_external_column FROM '${SQLNESS_HOME}/demo/export/csv/demo.csv' WITH (format='csv');
+
+select * from demo_with_external_column order by ts;
+
+CREATE TABLE demo_with_less_columns(host string, memory double, ts timestamp time index);
+
+Copy demo_with_less_columns FROM '${SQLNESS_HOME}/demo/export/csv/demo.csv' WITH (format='csv');
+
+select * from demo_with_less_columns order by ts;
+
 drop table demo;
 
 drop table with_filename;
@@ -34,3 +46,7 @@ drop table with_filename;
 drop table with_path;
 
 drop table with_pattern;
+
+drop table demo_with_external_column;
+
+drop table demo_with_less_columns;
