@@ -765,6 +765,13 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     assert!(prom_resp.error.is_none());
     assert!(prom_resp.error_type.is_none());
 
+    // query non-string value
+    let res = client
+        .get("/v1/prometheus/api/v1/label/host/values?match[]=mito")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
     // query `__name__` without match[]
     // create a physical table and a logical table
     let res = client
@@ -794,6 +801,7 @@ pub async fn test_prom_http_api(store_type: StorageType) {
             "demo_metrics".to_string(),
             "demo_metrics_with_nanos".to_string(),
             "logic_table".to_string(),
+            "mito".to_string(),
             "numbers".to_string()
         ])
     );
