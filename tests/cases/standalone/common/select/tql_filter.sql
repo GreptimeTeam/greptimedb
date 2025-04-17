@@ -45,4 +45,3 @@ tql eval (0, 0, '1s') t2{a=~"10.*"};
 
 -- SQLNESS SORT_RESULT 3 1
 tql eval (0, 0, '1s') t2{a=~".*10.*"};
-    
