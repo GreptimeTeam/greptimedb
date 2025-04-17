@@ -4,7 +4,7 @@
 # First argument: Path to the binary executable
 # Second argument: Path to directory containing gprof files
 # Requires `jeprof` and `flamegraph.pl` in current directory
-# Usage for single file:
+# What this script essentially does is:
 # ./jeprof <binary> <gprof> --collapse | ./flamegraph.pl > <output>
 # For differential analysis between consecutive profiles:
 # ./jeprof <binary> --base <gprof1> <gprof2> --collapse | ./flamegraph.pl > <output_diff>
