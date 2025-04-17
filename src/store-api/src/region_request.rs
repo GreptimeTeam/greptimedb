@@ -47,9 +47,9 @@ use strum::{AsRefStr, IntoStaticStr};
 
 use crate::logstore::entry;
 use crate::metadata::{
-    ColumnMetadata, DecodeProtoSnafu, InvalidRawRegionRequestSnafu,
-    InvalidRegionRequestSnafu, InvalidSetRegionOptionRequestSnafu,
-    InvalidUnsetRegionOptionRequestSnafu, MetadataError, RegionMetadata, Result, UnexpectedSnafu,
+    ColumnMetadata, DecodeProtoSnafu, InvalidRawRegionRequestSnafu, InvalidRegionRequestSnafu,
+    InvalidSetRegionOptionRequestSnafu, InvalidUnsetRegionOptionRequestSnafu, MetadataError,
+    RegionMetadata, Result, UnexpectedSnafu,
 };
 use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use crate::mito_engine_options::{
@@ -331,9 +331,7 @@ fn make_region_truncate(truncate: TruncateRequest) -> Result<Vec<(RegionId, Regi
 
 /// Convert [BulkInsertRequests] to [RegionRequest] and group by [RegionId].
 fn make_region_bulk_inserts(request: BulkInsertRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
-    let request = match request.body.unwrap() {
-        Body::ArrowIpc(arrow_ipc) => arrow_ipc,
-    };
+    let Body::ArrowIpc(request) = request.body.unwrap();
 
     let mut region_requests: HashMap<u64, BulkInsertPayload> =
         HashMap::with_capacity(request.region_selection.len());
@@ -353,7 +351,8 @@ fn make_region_bulk_inserts(request: BulkInsertRequest) -> Result<Vec<(RegionId,
             None,
         );
 
-        let region_batch = arrow::compute::filter_record_batch(rb.df_record_batch(), &region_mask).unwrap();
+        let region_batch =
+            arrow::compute::filter_record_batch(rb.df_record_batch(), &region_mask).unwrap();
         region_requests.insert(region_id, BulkInsertPayload::ArrowIpc(region_batch));
     }
 

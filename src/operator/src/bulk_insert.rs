@@ -59,7 +59,7 @@ impl Inserter {
 
         let mut handles = Vec::new();
         // find partitions for each row in the record batch
-        let region_masks = partition_rule.split_record_batch(&record_batch).unwrap();
+        let region_masks = partition_rule.split_record_batch(record_batch).unwrap();
 
         let mut mask_per_datanode = HashMap::with_capacity(region_masks.len());
         for (region_number, mask) in region_masks {
