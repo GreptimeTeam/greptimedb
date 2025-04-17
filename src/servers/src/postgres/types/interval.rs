@@ -23,6 +23,7 @@ use postgres_types::{to_sql_checked, FromSql, IsNull, ToSql, Type};
 
 use crate::error;
 
+/// On average one month has 30.44 day, which is a common approximation.
 const SECONDS_PER_MONTH: i64 = 24 * 6 * 6 * 3044;
 const SECONDS_PER_DAY: i64 = 24 * 60 * 60;
 const MILLISECONDS_PER_MONTH: i64 = SECONDS_PER_MONTH * 1000;
