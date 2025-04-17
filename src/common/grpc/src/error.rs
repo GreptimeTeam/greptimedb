@@ -97,6 +97,14 @@ pub enum Error {
 
     #[snafu(display("Not supported: {}", feat))]
     NotSupported { feat: String },
+
+    #[snafu(display("Failed to serde Json"))]
+    SerdeJson {
+        #[snafu(source)]
+        error: serde_json::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -110,7 +118,8 @@ impl ErrorExt for Error {
 
             Error::CreateChannel { .. }
             | Error::Conversion { .. }
-            | Error::DecodeFlightData { .. } => StatusCode::Internal,
+            | Error::DecodeFlightData { .. }
+            | Error::SerdeJson { .. } => StatusCode::Internal,
 
             Error::CreateRecordBatch { source, .. } => source.status_code(),
             Error::ConvertArrowSchema { source, .. } => source.status_code(),

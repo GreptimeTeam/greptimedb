@@ -1169,7 +1169,6 @@ mod test {
     use std::io::Cursor;
     use std::sync::Arc;
 
-    use api::v1::greptime_request::Request;
     use arrow_ipc::reader::FileReader;
     use arrow_schema::DataType;
     use axum::handler::Handler;
@@ -1191,24 +1190,10 @@ mod test {
     use super::*;
     use crate::error::Error;
     use crate::http::test_helpers::TestClient;
-    use crate::query_handler::grpc::GrpcQueryHandler;
     use crate::query_handler::sql::{ServerSqlQueryHandlerAdapter, SqlQueryHandler};
 
     struct DummyInstance {
         _tx: mpsc::Sender<(String, Vec<u8>)>,
-    }
-
-    #[async_trait]
-    impl GrpcQueryHandler for DummyInstance {
-        type Error = Error;
-
-        async fn do_query(
-            &self,
-            _query: Request,
-            _ctx: QueryContextRef,
-        ) -> std::result::Result<Output, Self::Error> {
-            unimplemented!()
-        }
     }
 
     #[async_trait]

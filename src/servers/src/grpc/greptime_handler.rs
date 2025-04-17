@@ -18,23 +18,33 @@ use std::time::Instant;
 
 use api::helper::request_type;
 use api::v1::auth_header::AuthScheme;
-use api::v1::{Basic, GreptimeRequest, RequestHeader};
+use api::v1::{AuthHeader, Basic, GreptimeRequest, RequestHeader};
 use auth::{Identity, Password, UserInfoRef, UserProviderRef};
+use base64::prelude::BASE64_STANDARD;
+use base64::Engine;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_grpc::flight::do_put::DoPutResponse;
 use common_query::Output;
 use common_runtime::runtime::RuntimeTrait;
 use common_runtime::Runtime;
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
-use common_telemetry::{debug, error, tracing};
+use common_telemetry::{debug, error, tracing, warn};
 use common_time::timezone::parse_timezone;
-use session::context::{QueryContextBuilder, QueryContextRef};
+use futures_util::StreamExt;
+use session::context::{QueryContext, QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
+use tokio::sync::mpsc;
 
 use crate::error::Error::UnsupportedAuthScheme;
-use crate::error::{AuthSnafu, InvalidQuerySnafu, JoinTaskSnafu, NotFoundAuthHeaderSnafu, Result};
+use crate::error::{
+    AuthSnafu, InvalidAuthHeaderInvalidUtf8ValueSnafu, InvalidBase64ValueSnafu, InvalidQuerySnafu,
+    JoinTaskSnafu, NotFoundAuthHeaderSnafu, Result,
+};
+use crate::grpc::flight::{PutRecordBatchRequest, PutRecordBatchRequestStream};
+use crate::grpc::TonicResult;
 use crate::metrics::{METRIC_AUTH_FAILURE, METRIC_SERVER_GRPC_DB_REQUEST_TIMER};
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 
@@ -117,6 +127,95 @@ impl GreptimeRequestHandler {
             }
             None => result_future.await,
         }
+    }
+
+    pub(crate) async fn put_record_batches(
+        &self,
+        mut stream: PutRecordBatchRequestStream,
+        result_sender: mpsc::Sender<TonicResult<DoPutResponse>>,
+    ) {
+        let handler = self.handler.clone();
+        let runtime = self
+            .runtime
+            .clone()
+            .unwrap_or_else(common_runtime::global_runtime);
+        runtime.spawn(async move {
+            while let Some(request) = stream.next().await {
+                let request = match request {
+                    Ok(request) => request,
+                    Err(e) => {
+                        let _ = result_sender.try_send(Err(e));
+                        break;
+                    }
+                };
+
+                let PutRecordBatchRequest {
+                    table_name,
+                    request_id,
+                    record_batch,
+                } = request;
+                let result = handler.put_record_batch(&table_name, record_batch).await;
+                let result = result
+                    .map(|x| DoPutResponse::new(request_id, x))
+                    .map_err(Into::into);
+                if result_sender.try_send(result).is_err() {
+                    warn!(r#""DoPut" client maybe unreachable, abort handling its message"#);
+                    break;
+                }
+            }
+        });
+    }
+
+    pub(crate) async fn validate_auth(
+        &self,
+        username_and_password: Option<&str>,
+        db: Option<&str>,
+    ) -> Result<bool> {
+        if self.user_provider.is_none() {
+            return Ok(true);
+        }
+
+        let username_and_password = username_and_password.context(NotFoundAuthHeaderSnafu)?;
+        let username_and_password = BASE64_STANDARD
+            .decode(username_and_password)
+            .context(InvalidBase64ValueSnafu)
+            .and_then(|x| String::from_utf8(x).context(InvalidAuthHeaderInvalidUtf8ValueSnafu))?;
+
+        let mut split = username_and_password.splitn(2, ':');
+        let (username, password) = match (split.next(), split.next()) {
+            (Some(username), Some(password)) => (username, password),
+            (Some(username), None) => (username, ""),
+            (None, None) => return Ok(false),
+            _ => unreachable!(), // because this iterator won't yield Some after None
+        };
+
+        let (catalog, schema) = if let Some(db) = db {
+            parse_catalog_and_schema_from_db_string(db)
+        } else {
+            (
+                DEFAULT_CATALOG_NAME.to_string(),
+                DEFAULT_SCHEMA_NAME.to_string(),
+            )
+        };
+        let header = RequestHeader {
+            authorization: Some(AuthHeader {
+                auth_scheme: Some(AuthScheme::Basic(Basic {
+                    username: username.to_string(),
+                    password: password.to_string(),
+                })),
+            }),
+            catalog,
+            schema,
+            ..Default::default()
+        };
+
+        Ok(auth(
+            self.user_provider.clone(),
+            Some(&header),
+            &QueryContext::arc(),
+        )
+        .await
+        .is_ok())
     }
 }
 
