@@ -52,7 +52,7 @@ mod test {
             setup_grpc_server(StorageType::File, "test_standalone_flight_do_put").await;
 
         let client = Client::with_urls(vec![addr]);
-        let client = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
+        let client = Database::new_with_dbname("greptime-public", client);
 
         create_table(&client).await;
 
@@ -116,6 +116,8 @@ mod test {
     }
 
     async fn test_put_record_batches(client: &Database, record_batches: Vec<RecordBatch>) {
+        let requests_count = record_batches.len();
+
         let stream = tokio_stream::iter(record_batches)
             .enumerate()
             .map(|(i, x)| {
@@ -141,12 +143,14 @@ mod test {
         let response_stream = client.do_put(stream).await.unwrap();
 
         let responses = response_stream.collect::<Vec<_>>().await;
-        assert_eq!(responses.len(), 3);
+        let responses_count = responses.len();
         for (i, response) in responses.into_iter().enumerate() {
+            assert!(response.is_ok(), "{}", response.err().unwrap());
             let response = response.unwrap();
             assert_eq!(response.request_id(), i as i64);
             assert_eq!(response.affected_rows(), 448);
         }
+        assert_eq!(requests_count, responses_count);
     }
 
     fn create_record_batches(start: i64) -> Vec<RecordBatch> {

@@ -28,6 +28,8 @@ use arrow_flight::{FlightData, Ticket};
 use async_stream::stream;
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
+use common_catalog::build_db_string;
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::{BoxedError, ErrorExt};
 use common_grpc::flight::do_put::DoPutResponse;
 use common_grpc::flight::{FlightDecoder, FlightMessage};
@@ -119,16 +121,24 @@ impl Database {
         self.catalog = catalog.into();
     }
 
-    pub fn catalog(&self) -> &String {
-        &self.catalog
+    fn catalog_or_default(&self) -> &str {
+        if self.catalog.is_empty() {
+            DEFAULT_CATALOG_NAME
+        } else {
+            &self.catalog
+        }
     }
 
     pub fn set_schema(&mut self, schema: impl Into<String>) {
         self.schema = schema.into();
     }
 
-    pub fn schema(&self) -> &String {
-        &self.schema
+    fn schema_or_default(&self) -> &str {
+        if self.schema.is_empty() {
+            DEFAULT_SCHEMA_NAME
+        } else {
+            &self.schema
+        }
     }
 
     pub fn set_timezone(&mut self, timezone: impl Into<String>) {
@@ -337,9 +347,14 @@ impl Database {
             request.metadata_mut().insert("x-greptime-auth", value);
         }
 
+        let db_to_put = if !self.dbname.is_empty() {
+            &self.dbname
+        } else {
+            &build_db_string(self.catalog_or_default(), self.schema_or_default())
+        };
         request.metadata_mut().insert(
             "x-greptime-db-name",
-            MetadataValue::from_str(&self.schema).context(InvalidTonicMetadataValueSnafu)?,
+            MetadataValue::from_str(db_to_put).context(InvalidTonicMetadataValueSnafu)?,
         );
 
         let mut client = self.client.make_flight_client()?;

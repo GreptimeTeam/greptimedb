@@ -169,7 +169,7 @@ impl GreptimeRequestHandler {
     pub(crate) async fn validate_auth(
         &self,
         username_and_password: Option<&str>,
-        schema: &str,
+        db: Option<&str>,
     ) -> Result<bool> {
         if self.user_provider.is_none() {
             return Ok(true);
@@ -189,6 +189,14 @@ impl GreptimeRequestHandler {
             _ => unreachable!(), // because this iterator won't yield Some after None
         };
 
+        let (catalog, schema) = if let Some(db) = db {
+            parse_catalog_and_schema_from_db_string(db)
+        } else {
+            (
+                DEFAULT_CATALOG_NAME.to_string(),
+                DEFAULT_SCHEMA_NAME.to_string(),
+            )
+        };
         let header = RequestHeader {
             authorization: Some(AuthHeader {
                 auth_scheme: Some(AuthScheme::Basic(Basic {
@@ -196,7 +204,8 @@ impl GreptimeRequestHandler {
                     password: password.to_string(),
                 })),
             }),
-            schema: schema.to_string(),
+            catalog,
+            schema,
             ..Default::default()
         };
 

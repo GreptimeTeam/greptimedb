@@ -27,6 +27,7 @@ use arrow_flight::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_grpc::flight::do_put::{DoPutMetadata, DoPutResponse};
 use common_grpc::flight::{FlightEncoder, FlightMessage};
 use common_query::{Output, OutputData};
@@ -223,8 +224,8 @@ impl FlightCraft for GreptimeRequestHandler {
         };
 
         let username_and_password = header(AUTHORIZATION_HEADER)?;
-        let schema = header(GREPTIME_DB_HEADER_NAME)?.unwrap_or(DEFAULT_SCHEMA_NAME);
-        if !self.validate_auth(username_and_password, schema).await? {
+        let db = header(GREPTIME_DB_HEADER_NAME)?;
+        if !self.validate_auth(username_and_password, db).await? {
             return Err(Status::unauthenticated("auth failed"));
         }
 
@@ -233,7 +234,7 @@ impl FlightCraft for GreptimeRequestHandler {
 
         let stream = PutRecordBatchRequestStream {
             flight_data_stream: stream,
-            state: PutRecordBatchRequestStreamState::Init(schema.to_string()),
+            state: PutRecordBatchRequestStreamState::Init(db.map(ToString::to_string)),
         };
         self.put_record_batches(stream, tx).await;
 
@@ -277,7 +278,7 @@ pub(crate) struct PutRecordBatchRequestStream {
 }
 
 enum PutRecordBatchRequestStreamState {
-    Init(String),
+    Init(Option<String>),
     Started(TableName),
 }
 
@@ -304,12 +305,21 @@ impl Stream for PutRecordBatchRequestStream {
         let poll = ready!(self.flight_data_stream.poll_next_unpin(cx));
 
         let result = match &mut self.state {
-            PutRecordBatchRequestStreamState::Init(schema) => match poll {
+            PutRecordBatchRequestStreamState::Init(db) => match poll {
                 Some(Ok(mut flight_data)) => {
                     let flight_descriptor = flight_data.flight_descriptor.take();
                     let result = if let Some(descriptor) = flight_descriptor {
-                        let table_name = extract_table_name(descriptor)
-                            .map(|x| TableName::new(DEFAULT_CATALOG_NAME, schema.clone(), x));
+                        let table_name = extract_table_name(descriptor).map(|x| {
+                            let (catalog, schema) = if let Some(db) = db {
+                                parse_catalog_and_schema_from_db_string(db)
+                            } else {
+                                (
+                                    DEFAULT_CATALOG_NAME.to_string(),
+                                    DEFAULT_SCHEMA_NAME.to_string(),
+                                )
+                            };
+                            TableName::new(catalog, schema, x)
+                        });
                         let table_name = match table_name {
                             Ok(table_name) => table_name,
                             Err(e) => return Poll::Ready(Some(Err(e.into()))),
