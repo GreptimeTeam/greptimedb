@@ -20,7 +20,7 @@ This section will guide you through the process of analyzing memory usage for gr
 
 
 ## Getting the `jeprof` tool
-there are three ways to get `jeprof`, list in here from simple to complex, using any one of those methods is ok, as long as it's the same environment as the `greptimedb` will be runnning on:
+there are three ways to get `jeprof`, list in here from simple to complex, using any one of those methods is ok, as long as it's the same environment as the `greptimedb` will be running on:
 1. If you are compiling greptimedb from source, then `jeprof` is already produced during compilation. After running `cargo build`, execute `find_compiled_jeprof.sh`. This will copy `jeprof` to the current directory.
 2. Or if you have rust toolchain locally, simply following this commands:
 ```bash
