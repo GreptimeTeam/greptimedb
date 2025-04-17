@@ -161,15 +161,11 @@ impl Instance {
 
         let mut results = Vec::with_capacity(batches.iter().map(|b| b.num_rows()).sum());
         for batch in batches {
-            // Only one column the results, ensured by `prometheus::label_values_matchers_to_plan`.
+            // Only one column in results, ensured by `prometheus::label_values_matchers_to_plan`.
             let names = batch.column(0);
 
             for i in 0..names.len() {
-                let Value::String(name) = names.get(i) else {
-                    unreachable!();
-                };
-
-                results.push(name.into_string());
+                results.push(names.get(i).to_string());
             }
         }
 
