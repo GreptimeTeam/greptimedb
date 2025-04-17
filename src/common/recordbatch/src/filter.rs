@@ -31,7 +31,6 @@ use datatypes::arrow::array::{
 use datatypes::arrow::compute::filter_record_batch;
 use datatypes::arrow::datatypes::DataType;
 use datatypes::arrow::error::ArrowError;
-use datatypes::compute::kernels::regexp;
 use datatypes::compute::or_kleene;
 use datatypes::vectors::VectorRef;
 use regex::Regex;
@@ -192,10 +191,10 @@ impl SimpleFilterEvaluator {
             Operator::LtEq => cmp::lt_eq(input, &self.literal),
             Operator::Gt => cmp::gt(input, &self.literal),
             Operator::GtEq => cmp::gt_eq(input, &self.literal),
-            Operator::RegexMatch => self.regex_match(input, false, false),
-            Operator::RegexIMatch => self.regex_match(input, true, false),
-            Operator::RegexNotMatch => self.regex_match(input, false, true),
-            Operator::RegexNotIMatch => self.regex_match(input, true, true),
+            Operator::RegexMatch => self.regex_match(input, false),
+            Operator::RegexIMatch => self.regex_match(input, false),
+            Operator::RegexNotMatch => self.regex_match(input, true),
+            Operator::RegexNotIMatch => self.regex_match(input, true),
             Operator::Or => {
                 // OR operator stands for OR-chained EQs (or INLIST in other words)
                 let mut result: BooleanArray = vec![false; input_len].into();
@@ -246,19 +245,12 @@ impl SimpleFilterEvaluator {
     fn regex_match(
         &self,
         input: &impl Datum,
-        ignore_case: bool,
         negative: bool,
     ) -> std::result::Result<BooleanArray, ArrowError> {
-        // let flag = if ignore_case { Some("i") } else { None };
         let array = input.get().0;
         let string_array = as_string_array(array).map_err(|_| {
             ArrowError::CastError(format!("Cannot cast {:?} to StringArray", array))
         })?;
-        // let literal_array = self.literal.clone().into_inner();
-        // let regex_array = as_string_array(&literal_array).map_err(|_| {
-        //     ArrowError::CastError(format!("Cannot cast {:?} to StringArray", literal_array))
-        // })?;
-        // let mut result = regexp::regexp_is_match_scalar(string_array, regex_array.value(0), flag)?;
         let mut result = regexp_is_match_scalar(string_array, self.regex.as_ref())?;
         if negative {
             result = datatypes::compute::not(&result)?;
@@ -294,7 +286,7 @@ pub fn batch_filter(
         })
 }
 
-/// This is the same as arrow [regexp_is_match_scalar()](regexp::regexp_is_match_scalar())
+/// The same as arrow [regexp_is_match_scalar()](datatypes::compute::kernels::regexp::regexp_is_match_scalar())
 /// with pre-compiled regex.
 pub fn regexp_is_match_scalar<'a, S>(
     array: &'a S,
