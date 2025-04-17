@@ -12,39 +12,42 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::fmt::{self, Display};
-use std::io::Cursor;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::add_column_location::LocationType;
 use api::v1::column_def::{
     as_fulltext_option_analyzer, as_fulltext_option_backend, as_skipping_index_type,
 };
+use api::v1::region::bulk_insert_request::Body;
 use api::v1::region::{
-    alter_request, compact_request, region_request, AlterRequest, AlterRequests,
-    BulkInsertRequests, CloseRequest, CompactRequest, CreateRequest, CreateRequests,
-    DeleteRequests, DropRequest, DropRequests, FlushRequest, InsertRequests, OpenRequest,
-    TruncateRequest,
+    alter_request, compact_request, region_request, AlterRequest, AlterRequests, BulkInsertRequest,
+    CloseRequest, CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest,
+    DropRequests, FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
 };
 use api::v1::{
     self, set_index, Analyzer, FulltextBackend as PbFulltextBackend, Option as PbOption, Rows,
     SemanticType, SkippingIndexType as PbSkippingIndexType, WriteHint,
 };
 pub use common_base::AffectedRows;
+use common_grpc::flight::{FlightDecoder, FlightMessage};
+use common_grpc::FlightData;
 use common_recordbatch::DfRecordBatch;
 use common_time::TimeToLive;
-use datatypes::arrow::ipc::reader::FileReader;
+use datatypes::arrow;
+use datatypes::arrow::array::BooleanArray;
+use datatypes::arrow::buffer::{BooleanBuffer, Buffer};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
+use prost::Message;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use strum::{AsRefStr, IntoStaticStr};
 
 use crate::logstore::entry;
 use crate::metadata::{
-    ColumnMetadata, DecodeArrowIpcSnafu, DecodeProtoSnafu, InvalidRawRegionRequestSnafu,
+    ColumnMetadata, DecodeProtoSnafu, InvalidRawRegionRequestSnafu,
     InvalidRegionRequestSnafu, InvalidSetRegionOptionRequestSnafu,
     InvalidUnsetRegionOptionRequestSnafu, MetadataError, RegionMetadata, Result, UnexpectedSnafu,
 };
@@ -152,7 +155,7 @@ impl RegionRequest {
             region_request::Body::Creates(creates) => make_region_creates(creates),
             region_request::Body::Drops(drops) => make_region_drops(drops),
             region_request::Body::Alters(alters) => make_region_alters(alters),
-            region_request::Body::BulkInserts(bulk) => make_region_bulk_inserts(bulk),
+            region_request::Body::BulkInsert(bulk) => make_region_bulk_inserts(bulk),
             region_request::Body::Sync(_) => UnexpectedSnafu {
                 reason: "Sync request should be handled separately by RegionServer",
             }
@@ -327,45 +330,41 @@ fn make_region_truncate(truncate: TruncateRequest) -> Result<Vec<(RegionId, Regi
 }
 
 /// Convert [BulkInsertRequests] to [RegionRequest] and group by [RegionId].
-fn make_region_bulk_inserts(
-    requests: BulkInsertRequests,
-) -> Result<Vec<(RegionId, RegionRequest)>> {
-    let mut region_requests: HashMap<u64, Vec<BulkInsertPayload>> =
-        HashMap::with_capacity(requests.requests.len());
+fn make_region_bulk_inserts(request: BulkInsertRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
+    let request = match request.body.unwrap() {
+        Body::ArrowIpc(arrow_ipc) => arrow_ipc,
+    };
 
-    for req in requests.requests {
-        let region_id = req.region_id;
+    let mut region_requests: HashMap<u64, BulkInsertPayload> =
+        HashMap::with_capacity(request.region_selection.len());
 
-        match req.payload_type() {
-            api::v1::region::BulkInsertType::ArrowIpc => {
-                // todo(hl): use StreamReader instead
-                let reader = FileReader::try_new(Cursor::new(req.payload), None)
-                    .context(DecodeArrowIpcSnafu)?;
-                let record_batches = reader
-                    .map(|b| b.map(BulkInsertPayload::ArrowIpc))
-                    .try_collect::<Vec<_>>()
-                    .context(DecodeArrowIpcSnafu)?;
+    let schema_data = FlightData::decode(request.schema.as_slice()).unwrap();
+    let payload_data = FlightData::decode(request.payload.as_slice()).unwrap();
+    let mut decoder = FlightDecoder::default();
+    let _schema_message = decoder.try_decode(schema_data).unwrap();
+    let FlightMessage::Recordbatch(rb) = decoder.try_decode(payload_data).unwrap() else {
+        unreachable!("Always expect record batch message after schema");
+    };
 
-                match region_requests.entry(region_id) {
-                    Entry::Occupied(mut e) => {
-                        e.get_mut().extend(record_batches);
-                    }
-                    Entry::Vacant(e) => {
-                        e.insert(record_batches);
-                    }
-                }
-            }
-        }
+    for region_selection in request.region_selection {
+        let region_id = region_selection.region_id;
+        let region_mask = BooleanArray::new(
+            BooleanBuffer::new(Buffer::from(region_selection.selection), 0, rb.num_rows()),
+            None,
+        );
+
+        let region_batch = arrow::compute::filter_record_batch(rb.df_record_batch(), &region_mask).unwrap();
+        region_requests.insert(region_id, BulkInsertPayload::ArrowIpc(region_batch));
     }
 
     let result = region_requests
         .into_iter()
-        .map(|(region_id, payloads)| {
+        .map(|(region_id, payload)| {
             (
                 region_id.into(),
                 RegionRequest::BulkInserts(RegionBulkInsertsRequest {
                     region_id: region_id.into(),
-                    payloads,
+                    payloads: vec![payload],
                 }),
             )
         })

@@ -29,7 +29,7 @@ use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::query_engine::DescribeResult;
 use query::{QueryEngineFactory, QueryEngineRef};
 use servers::error::{Error, NotSupportedSnafu, Result};
-use servers::query_handler::grpc::{GrpcQueryHandler, RawRecordBatch, ServerGrpcQueryHandlerRef};
+use servers::query_handler::grpc::{GrpcQueryHandler, ServerGrpcQueryHandlerRef};
 use servers::query_handler::sql::{ServerSqlQueryHandlerRef, SqlQueryHandler};
 use session::context::QueryContextRef;
 use snafu::ensure;
@@ -171,6 +171,7 @@ impl GrpcQueryHandler for DummyInstance {
         let _ = table;
         let _ = data;
         let _ = table_id;
+        let _ = decoder;
         unimplemented!()
     }
 }

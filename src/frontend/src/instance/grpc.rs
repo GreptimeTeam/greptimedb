@@ -26,7 +26,7 @@ use common_telemetry::tracing::{self};
 use datafusion::execution::SessionStateBuilder;
 use query::parser::PromQuery;
 use servers::interceptor::{GrpcQueryInterceptor, GrpcQueryInterceptorRef};
-use servers::query_handler::grpc::{GrpcQueryHandler, RawRecordBatch};
+use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};

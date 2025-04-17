@@ -12,16 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::io::Cursor;
-
-use api::v1::region::region_request::Body;
-use api::v1::region::{BulkInsertRequest, BulkInsertRequests, BulkInsertType, RegionRequest};
-use arrow_ipc::reader::FileReader;
-use bytes::Bytes;
+use ahash::{HashMap, HashMapExt};
+use api::v1::region::{
+    bulk_insert_request, region_request, ArrowIpc, BulkInsertRequest, RegionRequest,
+    RegionSelection,
+};
 use common_base::AffectedRows;
 use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
 use common_grpc::FlightData;
-use common_recordbatch::DfRecordBatch;
 use prost::Message;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
@@ -62,33 +60,43 @@ impl Inserter {
         let mut handles = Vec::new();
         // find partitions for each row in the record batch
         let region_masks = partition_rule.split_record_batch(&record_batch).unwrap();
-        for (region_number, selection) in region_masks {
+
+        let mut mask_per_datanode = HashMap::with_capacity(region_masks.len());
+        for (region_number, mask) in region_masks {
             let region_id = RegionId::new(table_id, region_number);
+            let datanode = self
+                .partition_manager
+                .find_region_leader(region_id)
+                .await
+                .unwrap();
+            let selection = RegionSelection {
+                region_id: region_id.as_u64(),
+                selection: mask.values().inner().as_slice().to_vec(),
+            };
+            mask_per_datanode
+                .entry(datanode)
+                .or_insert_with(Vec::new)
+                .push(selection);
+        }
+
+        for (peer, masks) in mask_per_datanode {
             let node_manager = self.node_manager.clone();
-            let partition_manager = self.partition_manager.clone();
             let schema = schema_data.clone();
             let payload = flight_data.clone();
-            let selection = selection.values().inner().as_slice().to_vec();
 
             let handle: common_runtime::JoinHandle<error::Result<api::region::RegionResponse>> =
                 common_runtime::spawn_global(async move {
                     let request = RegionRequest {
                         header: Default::default(),
-                        body: Some(Body::BulkInserts(BulkInsertRequests {
-                            requests: vec![BulkInsertRequest {
-                                region_id: region_id.as_u64(),
-                                payload_type: BulkInsertType::ArrowIpc as i32,
+                        body: Some(region_request::Body::BulkInsert(BulkInsertRequest {
+                            body: Some(bulk_insert_request::Body::ArrowIpc(ArrowIpc {
                                 schema,
                                 payload,
-                                selection,
-                            }],
+                                region_selection: masks,
+                            })),
                         })),
                     };
 
-                    let peer = partition_manager
-                        .find_region_leader(region_id)
-                        .await
-                        .context(error::FindRegionLeaderSnafu)?;
                     let datanode = node_manager.datanode(&peer).await;
                     datanode
                         .handle(request)

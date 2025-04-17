@@ -49,7 +49,6 @@ use crate::grpc::greptime_handler::{get_request_type, GreptimeRequestHandler};
 use crate::grpc::TonicResult;
 use crate::http::header::constants::GREPTIME_DB_HEADER_NAME;
 use crate::http::AUTHORIZATION_HEADER;
-use crate::query_handler::grpc::RawRecordBatch;
 
 pub type TonicStream<T> = Pin<Box<dyn Stream<Item = TonicResult<T>> + Send + 'static>>;
 
