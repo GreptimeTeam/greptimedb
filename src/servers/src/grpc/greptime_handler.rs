@@ -22,7 +22,6 @@ use api::v1::{AuthHeader, Basic, GreptimeRequest, RequestHeader};
 use auth::{Identity, Password, UserInfoRef, UserProviderRef};
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
-use bytes::{Bytes, BytesMut};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
@@ -145,7 +144,6 @@ impl GreptimeRequestHandler {
         runtime.spawn(async move {
             // Cached table id
             let mut table_id: Option<TableId> = None;
-            let mut encoded_schema: Option<Bytes> = None;
 
             let mut decoder = FlightDecoder::default();
             while let Some(request) = stream.next().await {

@@ -4726,7 +4726,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=ec8fae162ede548d6bd8cc633626d59db8e13db5#ec8fae162ede548d6bd8cc633626d59db8e13db5"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=c1af9b76422d9ceebeace969bd8435d06f13439b#c1af9b76422d9ceebeace969bd8435d06f13439b"
 dependencies = [
  "prost 0.13.5",
  "serde",
@@ -11402,6 +11402,7 @@ dependencies = [
  "async-trait",
  "common-base",
  "common-error",
+ "common-grpc",
  "common-macro",
  "common-meta",
  "common-recordbatch",
