@@ -257,7 +257,7 @@ impl FlightCraft for GreptimeRequestHandler {
 pub(crate) struct PutRecordBatchRequest {
     pub(crate) table_name: TableName,
     pub(crate) request_id: i64,
-    pub(crate) record_batch: RawRecordBatch,
+    pub(crate) data: FlightData,
 }
 
 impl PutRecordBatchRequest {
@@ -267,7 +267,7 @@ impl PutRecordBatchRequest {
         Ok(Self {
             table_name,
             request_id: metadata.request_id(),
-            record_batch: flight_data.data_body,
+            data: flight_data,
         })
     }
 }

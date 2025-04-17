@@ -22,11 +22,13 @@ use api::v1::{AuthHeader, Basic, GreptimeRequest, RequestHeader};
 use auth::{Identity, Password, UserInfoRef, UserProviderRef};
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
+use bytes::{Bytes, BytesMut};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_grpc::flight::do_put::DoPutResponse;
+use common_grpc::flight::FlightDecoder;
 use common_query::Output;
 use common_runtime::runtime::RuntimeTrait;
 use common_runtime::Runtime;
@@ -36,6 +38,7 @@ use common_time::timezone::parse_timezone;
 use futures_util::StreamExt;
 use session::context::{QueryContext, QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
+use table::metadata::TableId;
 use tokio::sync::mpsc;
 
 use crate::error::Error::UnsupportedAuthScheme;
@@ -140,6 +143,11 @@ impl GreptimeRequestHandler {
             .clone()
             .unwrap_or_else(common_runtime::global_runtime);
         runtime.spawn(async move {
+            // Cached table id
+            let mut table_id: Option<TableId> = None;
+            let mut encoded_schema: Option<Bytes> = None;
+
+            let mut decoder = FlightDecoder::default();
             while let Some(request) = stream.next().await {
                 let request = match request {
                     Ok(request) => request,
@@ -148,13 +156,15 @@ impl GreptimeRequestHandler {
                         break;
                     }
                 };
-
                 let PutRecordBatchRequest {
                     table_name,
                     request_id,
-                    record_batch,
+                    data,
                 } = request;
-                let result = handler.put_record_batch(&table_name, record_batch).await;
+
+                let result = handler
+                    .put_record_batch(&table_name, &mut table_id, &mut decoder, data)
+                    .await;
                 let result = result
                     .map(|x| DoPutResponse::new(request_id, x))
                     .map_err(Into::into);

@@ -335,6 +335,7 @@ fn make_region_bulk_inserts(
 
     for req in requests.requests {
         let region_id = req.region_id;
+
         match req.payload_type() {
             api::v1::region::BulkInsertType::ArrowIpc => {
                 // todo(hl): use StreamReader instead
@@ -344,6 +345,7 @@ fn make_region_bulk_inserts(
                     .map(|b| b.map(BulkInsertPayload::ArrowIpc))
                     .try_collect::<Vec<_>>()
                     .context(DecodeArrowIpcSnafu)?;
+
                 match region_requests.entry(region_id) {
                     Entry::Occupied(mut e) => {
                         e.get_mut().extend(record_batches);
