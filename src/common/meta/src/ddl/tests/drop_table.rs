@@ -100,7 +100,7 @@ async fn test_on_prepare_table() {
 #[tokio::test]
 async fn test_on_datanode_drop_regions() {
     let (tx, mut rx) = mpsc::channel(8);
-    let datanode_handler = DatanodeWatcher(tx);
+    let datanode_handler = DatanodeWatcher::new(tx);
     let node_manager = Arc::new(MockDatanodeManager::new(datanode_handler));
     let ddl_context = new_ddl_context(node_manager);
     let table_id = 1024;

@@ -315,6 +315,9 @@ pub async fn sync_regions(
     let is_mito_engine = engine == MITO_ENGINE;
 
     let followers = find_followers(region_routes);
+    if followers.is_empty() {
+        return Ok(());
+    }
     let mut sync_region_tasks = Vec::with_capacity(followers.len());
     for datanode in followers {
         let requester = context.node_manager.datanode(&datanode).await;
