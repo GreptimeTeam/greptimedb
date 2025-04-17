@@ -288,6 +288,7 @@ pub fn batch_filter(
 
 /// The same as arrow [regexp_is_match_scalar()](datatypes::compute::kernels::regexp::regexp_is_match_scalar())
 /// with pre-compiled regex.
+/// See <https://github.com/apache/arrow-rs/blob/54.2.0/arrow-string/src/regexp.rs#L204-L246> for the implementation details.
 pub fn regexp_is_match_scalar<'a, S>(
     array: &'a S,
     regex: Option<&Regex>,
