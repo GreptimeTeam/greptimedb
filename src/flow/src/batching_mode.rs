@@ -16,8 +16,8 @@
 
 use std::time::Duration;
 
-mod engine;
-mod frontend_client;
+pub(crate) mod engine;
+pub(crate) mod frontend_client;
 mod state;
 mod task;
 mod time_window;

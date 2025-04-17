@@ -12,35 +12,48 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::pin::Pin;
+use std::str::FromStr;
+
 use api::v1::auth_header::AuthScheme;
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_database_client::GreptimeDatabaseClient;
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use api::v1::{
-    AlterTableExpr, AuthHeader, CreateTableExpr, DdlRequest, GreptimeRequest, InsertRequests,
-    QueryRequest, RequestHeader,
+    AlterTableExpr, AuthHeader, Basic, CreateTableExpr, DdlRequest, GreptimeRequest,
+    InsertRequests, QueryRequest, RequestHeader,
 };
-use arrow_flight::Ticket;
+use arrow_flight::{FlightData, Ticket};
 use async_stream::stream;
+use base64::prelude::BASE64_STANDARD;
+use base64::Engine;
+use common_catalog::build_db_string;
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::{BoxedError, ErrorExt};
+use common_grpc::flight::do_put::DoPutResponse;
 use common_grpc::flight::{FlightDecoder, FlightMessage};
 use common_query::Output;
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::RecordBatchStreamWrapper;
 use common_telemetry::error;
 use common_telemetry::tracing_context::W3cTrace;
-use futures_util::StreamExt;
+use futures::future;
+use futures_util::{Stream, StreamExt, TryStreamExt};
 use prost::Message;
 use snafu::{ensure, ResultExt};
-use tonic::metadata::AsciiMetadataKey;
+use tonic::metadata::{AsciiMetadataKey, MetadataValue};
 use tonic::transport::Channel;
 
 use crate::error::{
     ConvertFlightDataSnafu, Error, FlightGetSnafu, IllegalFlightMessagesSnafu, InvalidAsciiSnafu,
-    ServerSnafu,
+    InvalidTonicMetadataValueSnafu, ServerSnafu,
 };
 use crate::{from_grpc_response, Client, Result};
+
+type FlightDataStream = Pin<Box<dyn Stream<Item = FlightData> + Send>>;
+
+type DoPutResponseStream = Pin<Box<dyn Stream<Item = Result<DoPutResponse>>>>;
 
 #[derive(Clone, Debug, Default)]
 pub struct Database {
@@ -108,16 +121,24 @@ impl Database {
         self.catalog = catalog.into();
     }
 
-    pub fn catalog(&self) -> &String {
-        &self.catalog
+    fn catalog_or_default(&self) -> &str {
+        if self.catalog.is_empty() {
+            DEFAULT_CATALOG_NAME
+        } else {
+            &self.catalog
+        }
     }
 
     pub fn set_schema(&mut self, schema: impl Into<String>) {
         self.schema = schema.into();
     }
 
-    pub fn schema(&self) -> &String {
-        &self.schema
+    fn schema_or_default(&self) -> &str {
+        if self.schema.is_empty() {
+            DEFAULT_SCHEMA_NAME
+        } else {
+            &self.schema
+        }
     }
 
     pub fn set_timezone(&mut self, timezone: impl Into<String>) {
@@ -309,6 +330,41 @@ impl Database {
                 Ok(Output::new_with_stream(Box::pin(record_batch_stream)))
             }
         }
+    }
+
+    /// Ingest a stream of [RecordBatch]es that belong to a table, using Arrow Flight's "`DoPut`"
+    /// method. The return value is also a stream, produces [DoPutResponse]s.
+    pub async fn do_put(&self, stream: FlightDataStream) -> Result<DoPutResponseStream> {
+        let mut request = tonic::Request::new(stream);
+
+        if let Some(AuthHeader {
+            auth_scheme: Some(AuthScheme::Basic(Basic { username, password })),
+        }) = &self.ctx.auth_header
+        {
+            let encoded = BASE64_STANDARD.encode(format!("{username}:{password}"));
+            let value =
+                MetadataValue::from_str(&encoded).context(InvalidTonicMetadataValueSnafu)?;
+            request.metadata_mut().insert("x-greptime-auth", value);
+        }
+
+        let db_to_put = if !self.dbname.is_empty() {
+            &self.dbname
+        } else {
+            &build_db_string(self.catalog_or_default(), self.schema_or_default())
+        };
+        request.metadata_mut().insert(
+            "x-greptime-db-name",
+            MetadataValue::from_str(db_to_put).context(InvalidTonicMetadataValueSnafu)?,
+        );
+
+        let mut client = self.client.make_flight_client()?;
+        let response = client.mut_inner().do_put(request).await?;
+        let response = response
+            .into_inner()
+            .map_err(Into::into)
+            .and_then(|x| future::ready(DoPutResponse::try_from(x).context(ConvertFlightDataSnafu)))
+            .boxed();
+        Ok(response)
     }
 }
 

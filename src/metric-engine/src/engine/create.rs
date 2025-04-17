@@ -279,9 +279,16 @@ impl MetricEngineInner {
             .add_logical_regions(physical_region_id, true, logical_region_columns)
             .await?;
 
-        let mut state = self.state.write().unwrap();
-        state.add_physical_columns(data_region_id, new_add_columns);
-        state.add_logical_regions(physical_region_id, logical_regions);
+        {
+            let mut state = self.state.write().unwrap();
+            state.add_physical_columns(data_region_id, new_add_columns);
+            state.add_logical_regions(physical_region_id, logical_regions.clone());
+        }
+        for logical_region_id in logical_regions {
+            self.metadata_region
+                .open_logical_region(logical_region_id)
+                .await;
+        }
 
         Ok(())
     }

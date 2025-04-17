@@ -583,6 +583,62 @@ impl RegionStatistic {
     }
 }
 
+/// The response of syncing the manifest.
+#[derive(Debug)]
+pub enum SyncManifestResponse {
+    NotSupported,
+    Mito {
+        /// Indicates if the data region was synced.
+        synced: bool,
+    },
+    Metric {
+        /// Indicates if the metadata region was synced.
+        metadata_synced: bool,
+        /// Indicates if the data region was synced.
+        data_synced: bool,
+        /// The logical regions that were newly opened during the sync operation.
+        /// This only occurs after the metadata region has been successfully synced.
+        new_opened_logical_region_ids: Vec<RegionId>,
+    },
+}
+
+impl SyncManifestResponse {
+    /// Returns true if data region is synced.
+    pub fn is_data_synced(&self) -> bool {
+        match self {
+            SyncManifestResponse::NotSupported => false,
+            SyncManifestResponse::Mito { synced } => *synced,
+            SyncManifestResponse::Metric { data_synced, .. } => *data_synced,
+        }
+    }
+
+    /// Returns true if the engine is supported the sync operation.
+    pub fn is_supported(&self) -> bool {
+        matches!(self, SyncManifestResponse::NotSupported)
+    }
+
+    /// Returns true if the engine is a mito2 engine.
+    pub fn is_mito(&self) -> bool {
+        matches!(self, SyncManifestResponse::Mito { .. })
+    }
+
+    /// Returns true if the engine is a metric engine.
+    pub fn is_metric(&self) -> bool {
+        matches!(self, SyncManifestResponse::Metric { .. })
+    }
+
+    /// Returns the new opened logical region ids.
+    pub fn new_opened_logical_region_ids(self) -> Option<Vec<RegionId>> {
+        match self {
+            SyncManifestResponse::Metric {
+                new_opened_logical_region_ids,
+                ..
+            } => Some(new_opened_logical_region_ids),
+            _ => None,
+        }
+    }
+}
+
 #[async_trait]
 pub trait RegionEngine: Send + Sync {
     /// Name of this engine
@@ -689,7 +745,7 @@ pub trait RegionEngine: Send + Sync {
         &self,
         region_id: RegionId,
         manifest_info: RegionManifestInfo,
-    ) -> Result<(), BoxedError>;
+    ) -> Result<SyncManifestResponse, BoxedError>;
 
     /// Sets region role state gracefully.
     ///

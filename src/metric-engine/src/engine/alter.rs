@@ -145,7 +145,7 @@ impl MetricEngineInner {
             let _write_guard = self
                 .metadata_region
                 .write_lock_logical_region(*region_id)
-                .await;
+                .await?;
             write_guards.insert(*region_id, _write_guard);
         }
 

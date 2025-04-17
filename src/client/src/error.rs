@@ -19,6 +19,7 @@ use common_error::status_code::{convert_tonic_code_to_status_code, StatusCode};
 use common_error::{GREPTIME_DB_HEADER_ERROR_CODE, GREPTIME_DB_HEADER_ERROR_MSG};
 use common_macro::stack_trace_debug;
 use snafu::{location, Location, Snafu};
+use tonic::metadata::errors::InvalidMetadataValue;
 use tonic::{Code, Status};
 
 #[derive(Snafu)]
@@ -115,6 +116,14 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Invalid Tonic metadata value"))]
+    InvalidTonicMetadataValue {
+        #[snafu(source)]
+        error: InvalidMetadataValue,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -135,7 +144,9 @@ impl ErrorExt for Error {
             | Error::CreateTlsChannel { source, .. } => source.status_code(),
             Error::IllegalGrpcClientState { .. } => StatusCode::Unexpected,
 
-            Error::InvalidAscii { .. } => StatusCode::InvalidArguments,
+            Error::InvalidAscii { .. } | Error::InvalidTonicMetadataValue { .. } => {
+                StatusCode::InvalidArguments
+            }
         }
     }
 

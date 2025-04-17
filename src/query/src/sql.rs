@@ -40,7 +40,7 @@ use common_recordbatch::RecordBatches;
 use common_time::timezone::get_timezone;
 use common_time::Timestamp;
 use datafusion::common::ScalarValue;
-use datafusion::prelude::{concat_ws, SessionContext};
+use datafusion::prelude::SessionContext;
 use datafusion_expr::expr::WildcardOptions;
 use datafusion_expr::{case, col, lit, Expr, SortExpr};
 use datatypes::prelude::*;
@@ -399,23 +399,6 @@ pub async fn show_index(
         query_ctx.current_schema()
     };
 
-    let primary_key_expr = case(col("constraint_name").like(lit("%PRIMARY%")))
-        .when(lit(true), lit("greptime-primary-key-v1"))
-        .otherwise(null())
-        .context(error::PlanSqlSnafu)?;
-    let inverted_index_expr = case(col("constraint_name").like(lit("%INVERTED INDEX%")))
-        .when(lit(true), lit("greptime-inverted-index-v1"))
-        .otherwise(null())
-        .context(error::PlanSqlSnafu)?;
-    let fulltext_index_expr = case(col("constraint_name").like(lit("%FULLTEXT INDEX%")))
-        .when(lit(true), lit("greptime-fulltext-index-v1"))
-        .otherwise(null())
-        .context(error::PlanSqlSnafu)?;
-    let skipping_index_expr = case(col("constraint_name").like(lit("%SKIPPING INDEX%")))
-        .when(lit(true), lit("greptime-bloom-filter-v1"))
-        .otherwise(null())
-        .context(error::PlanSqlSnafu)?;
-
     let select = vec![
         // 1 as `Non_unique`: contain duplicates
         lit(1).alias(INDEX_NONT_UNIQUE_COLUMN),
@@ -433,16 +416,6 @@ pub async fn show_index(
             .otherwise(lit(YES_STR))
             .context(error::PlanSqlSnafu)?
             .alias(COLUMN_NULLABLE_COLUMN),
-        concat_ws(
-            lit(", "),
-            vec![
-                primary_key_expr,
-                inverted_index_expr,
-                fulltext_index_expr,
-                skipping_index_expr,
-            ],
-        )
-        .alias(INDEX_INDEX_TYPE_COLUMN),
         lit("").alias(COLUMN_COMMENT_COLUMN),
         lit("").alias(INDEX_COMMENT_COLUMN),
         lit(YES_STR).alias(INDEX_VISIBLE_COLUMN),
@@ -467,7 +440,10 @@ pub async fn show_index(
         (INDEX_SUB_PART_COLUMN, INDEX_SUB_PART_COLUMN),
         (INDEX_PACKED_COLUMN, INDEX_PACKED_COLUMN),
         (COLUMN_NULLABLE_COLUMN, COLUMN_NULLABLE_COLUMN),
-        (INDEX_INDEX_TYPE_COLUMN, INDEX_INDEX_TYPE_COLUMN),
+        (
+            key_column_usage::GREPTIME_INDEX_TYPE,
+            INDEX_INDEX_TYPE_COLUMN,
+        ),
         (COLUMN_COMMENT_COLUMN, COLUMN_COMMENT_COLUMN),
         (INDEX_COMMENT_COLUMN, INDEX_COMMENT_COLUMN),
         (INDEX_VISIBLE_COLUMN, INDEX_VISIBLE_COLUMN),

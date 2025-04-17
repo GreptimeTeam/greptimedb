@@ -23,6 +23,7 @@ use store_api::metadata::RegionMetadata;
 use store_api::storage::{ColumnId, ConcreteDataType, RegionId};
 
 use crate::cache::file_cache::FileCacheRef;
+use crate::cache::index::bloom_filter_index::BloomFilterIndexCacheRef;
 use crate::error::Result;
 use crate::sst::index::fulltext_index::applier::FulltextIndexApplier;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
@@ -86,6 +87,7 @@ pub struct FulltextIndexApplierBuilder<'a> {
     metadata: &'a RegionMetadata,
     file_cache: Option<FileCacheRef>,
     puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
+    bloom_filter_cache: Option<BloomFilterIndexCacheRef>,
 }
 
 impl<'a> FulltextIndexApplierBuilder<'a> {
@@ -105,6 +107,7 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
             metadata,
             file_cache: None,
             puffin_metadata_cache: None,
+            bloom_filter_cache: None,
         }
     }
 
@@ -120,6 +123,15 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
         puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
     ) -> Self {
         self.puffin_metadata_cache = puffin_metadata_cache;
+        self
+    }
+
+    /// Sets the bloom filter cache to be used by the `FulltextIndexApplier`.
+    pub fn with_bloom_filter_cache(
+        mut self,
+        bloom_filter_cache: Option<BloomFilterIndexCacheRef>,
+    ) -> Self {
+        self.bloom_filter_cache = bloom_filter_cache;
         self
     }
 
@@ -145,6 +157,7 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
             )
             .with_file_cache(self.file_cache)
             .with_puffin_metadata_cache(self.puffin_metadata_cache)
+            .with_bloom_filter_cache(self.bloom_filter_cache)
         }))
     }
 

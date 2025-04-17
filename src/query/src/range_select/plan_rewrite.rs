@@ -611,6 +611,7 @@ mod test {
     use table::test_util::EmptyTable;
 
     use super::*;
+    use crate::options::QueryOptions;
     use crate::parser::QueryLanguageParser;
     use crate::{QueryEngineFactory, QueryEngineRef};
 
@@ -663,7 +664,16 @@ mod test {
                 table,
             })
             .is_ok());
-        QueryEngineFactory::new(catalog_list, None, None, None, None, false).query_engine()
+        QueryEngineFactory::new(
+            catalog_list,
+            None,
+            None,
+            None,
+            None,
+            false,
+            QueryOptions::default(),
+        )
+        .query_engine()
     }
 
     async fn do_query(sql: &str) -> Result<LogicalPlan> {

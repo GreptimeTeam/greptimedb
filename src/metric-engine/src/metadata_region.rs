@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -76,11 +77,22 @@ impl MetadataRegion {
         }
     }
 
-    pub async fn open_logical_region(&self, logical_region_id: RegionId) {
-        self.logical_region_lock
+    /// Open a logical region.
+    ///
+    /// Returns true if the logical region is opened for the first time.
+    pub async fn open_logical_region(&self, logical_region_id: RegionId) -> bool {
+        match self
+            .logical_region_lock
             .write()
             .await
-            .insert(logical_region_id, Arc::new(RwLock::new(())));
+            .entry(logical_region_id)
+        {
+            Entry::Occupied(_) => false,
+            Entry::Vacant(vacant_entry) => {
+                vacant_entry.insert(Arc::new(RwLock::new(())));
+                true
+            }
+        }
     }
 
     /// Retrieve a read lock guard of given logical region id.
@@ -178,6 +190,7 @@ impl MetadataRegion {
         Ok(columns)
     }
 
+    /// Return all logical regions associated with the physical region.
     pub async fn logical_regions(&self, physical_region_id: RegionId) -> Result<Vec<RegionId>> {
         let metadata_region_id = utils::to_metadata_region_id(physical_region_id);
 
