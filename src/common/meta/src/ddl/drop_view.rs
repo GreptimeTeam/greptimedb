@@ -24,8 +24,8 @@ use strum::AsRefStr;
 use table::metadata::{RawTableInfo, TableId, TableType};
 use table::table_reference::TableReference;
 
-use super::utils::handle_retry_error;
 use crate::cache_invalidator::Context;
+use crate::ddl::utils::handle_retry_error;
 use crate::ddl::DdlContext;
 use crate::error::{self, Result};
 use crate::instruction::CacheIdent;

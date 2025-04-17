@@ -25,8 +25,8 @@ use common_telemetry::common_error::status_code::StatusCode;
 use snafu::{Location, ResultExt, Snafu};
 use tonic::metadata::MetadataMap;
 
-use crate::adapter::FlowId;
 use crate::expr::EvalError;
+use crate::FlowId;
 
 /// This error is used to represent all possible errors that can occur in the flow module.
 #[derive(Snafu)]
@@ -50,6 +50,13 @@ pub enum Error {
     CreateFlow {
         sql: String,
         source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Time error"))]
+    Time {
+        source: common_time::error::Error,
         #[snafu(implicit)]
         location: Location,
     },
@@ -216,6 +223,28 @@ pub enum Error {
         location: Location,
         name: String,
     },
+
+    #[snafu(display("Invalid request: {context}"))]
+    InvalidRequest {
+        context: String,
+        source: client::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to encode logical plan in substrait"))]
+    SubstraitEncodeLogicalPlan {
+        #[snafu(implicit)]
+        location: Location,
+        source: substrait::error::Error,
+    },
+
+    #[snafu(display("Failed to convert column schema to proto column def"))]
+    ConvertColumnSchema {
+        #[snafu(implicit)]
+        location: Location,
+        source: operator::error::Error,
+    },
 }
 
 /// the outer message is the full error stack, and inner message in header is the last error message that can be show directly to user
@@ -248,7 +277,7 @@ impl ErrorExt for Error {
             | Self::FlowNotFound { .. }
             | Self::ListFlows { .. } => StatusCode::TableNotFound,
             Self::Plan { .. } | Self::Datatypes { .. } => StatusCode::PlanQuery,
-            Self::InvalidQuery { .. } | Self::CreateFlow { .. } | Self::Arrow { .. } => {
+            Self::CreateFlow { .. } | Self::Arrow { .. } | Self::Time { .. } => {
                 StatusCode::EngineExecuteQuery
             }
             Self::Unexpected { .. } => StatusCode::Unexpected,
@@ -261,7 +290,14 @@ impl ErrorExt for Error {
                 source.status_code()
             }
             Self::MetaClientInit { source, .. } => source.status_code(),
-            Self::ParseAddr { .. } => StatusCode::InvalidArguments,
+
+            Self::InvalidQuery { .. } | Self::InvalidRequest { .. } | Self::ParseAddr { .. } => {
+                StatusCode::InvalidArguments
+            }
+
+            Error::SubstraitEncodeLogicalPlan { source, .. } => source.status_code(),
+
+            Error::ConvertColumnSchema { source, .. } => source.status_code(),
         }
     }
 

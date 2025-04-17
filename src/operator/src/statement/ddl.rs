@@ -68,7 +68,6 @@ use table::requests::{AlterKind, AlterTableRequest, TableOptions, COMMENT_KEY};
 use table::table_name::TableName;
 use table::TableRef;
 
-use super::StatementExecutor;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogSnafu, ColumnDataTypeSnafu, ColumnNotFoundSnafu,
     ConvertSchemaSnafu, CreateLogicalTablesSnafu, CreateTableInfoSnafu, DeserializePartitionSnafu,
@@ -80,6 +79,7 @@ use crate::error::{
 };
 use crate::expr_helper;
 use crate::statement::show::create_partitions_stmt;
+use crate::statement::StatementExecutor;
 
 lazy_static! {
     static ref NAME_PATTERN_REG: Regex = Regex::new(&format!("^{NAME_PATTERN}$")).unwrap();

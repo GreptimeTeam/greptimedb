@@ -40,8 +40,8 @@ use greptime_proto::substrait_extension as pb;
 use prost::Message;
 use snafu::ResultExt;
 
-use super::Millisecond;
 use crate::error::{ColumnNotFoundSnafu, DataFusionPlanningSnafu, DeserializeSnafu, Result};
+use crate::extension_plan::Millisecond;
 
 /// `ScalarCalculate` is the custom logical plan to calculate
 /// [`scalar`](https://prometheus.io/docs/prometheus/latest/querying/functions/#scalar)
@@ -128,10 +128,12 @@ impl ScalarCalculate {
             .index_of(&self.field_column)
             .map_err(|e| DataFusionError::ArrowError(e, None))?;
         let schema = Arc::new(Schema::new(fields));
+        let properties = exec_input.properties();
         let properties = PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
             Partitioning::UnknownPartitioning(1),
-            exec_input.properties().execution_mode,
+            properties.emission_type,
+            properties.boundedness,
         );
         Ok(Arc::new(ScalarCalculateExec {
             start: self.start,
@@ -533,8 +535,8 @@ impl Stream for ScalarCalculateStream {
 #[cfg(test)]
 mod test {
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
     use datafusion::physical_plan::memory::MemoryExec;
-    use datafusion::physical_plan::ExecutionMode;
     use datafusion::prelude::SessionContext;
     use datatypes::arrow::array::{Float64Array, TimestampMillisecondArray};
     use datatypes::arrow::datatypes::TimeUnit;
@@ -560,7 +562,8 @@ mod test {
         let properties = PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
             Partitioning::UnknownPartitioning(1),
-            ExecutionMode::Bounded,
+            EmissionType::Incremental,
+            Boundedness::Bounded,
         );
         let scalar_exec = Arc::new(ScalarCalculateExec {
             start: 0,

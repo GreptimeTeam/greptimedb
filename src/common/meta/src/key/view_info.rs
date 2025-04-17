@@ -21,10 +21,12 @@ use snafu::OptionExt;
 use table::metadata::TableId;
 use table::table_name::TableName;
 
-use super::VIEW_INFO_KEY_PATTERN;
 use crate::error::{InvalidViewInfoSnafu, Result};
 use crate::key::txn_helper::TxnOpGetResponseSet;
-use crate::key::{DeserializedValueWithBytes, MetadataKey, MetadataValue, VIEW_INFO_KEY_PREFIX};
+use crate::key::{
+    DeserializedValueWithBytes, MetadataKey, MetadataValue, VIEW_INFO_KEY_PATTERN,
+    VIEW_INFO_KEY_PREFIX,
+};
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::BatchGetRequest;

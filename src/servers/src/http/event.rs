@@ -148,6 +148,41 @@ where
 }
 
 #[axum_macros::debug_handler]
+pub async fn query_pipeline(
+    State(state): State<LogState>,
+    Extension(mut query_ctx): Extension<QueryContext>,
+    Query(query_params): Query<LogIngesterQueryParams>,
+    Path(pipeline_name): Path<String>,
+) -> Result<GreptimedbManageResponse> {
+    let start = Instant::now();
+    let handler = state.log_handler;
+    ensure!(
+        !pipeline_name.is_empty(),
+        InvalidParameterSnafu {
+            reason: "pipeline_name is required in path",
+        }
+    );
+
+    let version = to_pipeline_version(query_params.version.as_deref()).context(PipelineSnafu)?;
+
+    query_ctx.set_channel(Channel::Http);
+    let query_ctx = Arc::new(query_ctx);
+
+    let (pipeline, pipeline_version) = handler
+        .get_pipeline_str(&pipeline_name, version, query_ctx)
+        .await?;
+
+    Ok(GreptimedbManageResponse::from_pipeline(
+        pipeline_name,
+        query_params
+            .version
+            .unwrap_or(pipeline_version.0.to_iso8601_string()),
+        start.elapsed().as_millis() as u64,
+        Some(pipeline),
+    ))
+}
+
+#[axum_macros::debug_handler]
 pub async fn add_pipeline(
     State(state): State<LogState>,
     Path(pipeline_name): Path<String>,
@@ -189,6 +224,7 @@ pub async fn add_pipeline(
                 pipeline_name,
                 pipeline.0.to_timezone_aware_string(None),
                 start.elapsed().as_millis() as u64,
+                None,
             )
         })
         .map_err(|e| {
@@ -231,6 +267,7 @@ pub async fn delete_pipeline(
                     pipeline_name,
                     version_str,
                     start.elapsed().as_millis() as u64,
+                    None,
                 )
             } else {
                 GreptimedbManageResponse::from_pipelines(vec![], start.elapsed().as_millis() as u64)

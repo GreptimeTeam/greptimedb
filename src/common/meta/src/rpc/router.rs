@@ -32,10 +32,18 @@ use crate::key::RegionDistribution;
 use crate::peer::Peer;
 use crate::DatanodeId;
 
+/// Returns the distribution of regions to datanodes.
+///
+/// The distribution is a map of datanode id to a list of region ids.
+/// The list of region ids is sorted in ascending order.
 pub fn region_distribution(region_routes: &[RegionRoute]) -> RegionDistribution {
     let mut regions_id_map = RegionDistribution::new();
     for route in region_routes.iter() {
         if let Some(peer) = route.leader_peer.as_ref() {
+            let region_id = route.region.id.region_number();
+            regions_id_map.entry(peer.id).or_default().push(region_id);
+        }
+        for peer in route.follower_peers.iter() {
             let region_id = route.region.id.region_number();
             regions_id_map.entry(peer.id).or_default().push(region_id);
         }
@@ -546,5 +554,41 @@ mod tests {
         let got: Partition = serde_json::from_str(&output).unwrap();
 
         assert_eq!(got, p);
+    }
+
+    #[test]
+    fn test_region_distribution() {
+        let region_routes = vec![
+            RegionRoute {
+                region: Region {
+                    id: RegionId::new(1, 1),
+                    name: "r1".to_string(),
+                    partition: None,
+                    attrs: BTreeMap::new(),
+                },
+                leader_peer: Some(Peer::new(1, "a1")),
+                follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],
+                leader_state: None,
+                leader_down_since: None,
+            },
+            RegionRoute {
+                region: Region {
+                    id: RegionId::new(1, 2),
+                    name: "r2".to_string(),
+                    partition: None,
+                    attrs: BTreeMap::new(),
+                },
+                leader_peer: Some(Peer::new(2, "a2")),
+                follower_peers: vec![Peer::new(1, "a1"), Peer::new(3, "a3")],
+                leader_state: None,
+                leader_down_since: None,
+            },
+        ];
+
+        let distribution = region_distribution(&region_routes);
+        assert_eq!(distribution.len(), 3);
+        assert_eq!(distribution[&1], vec![1, 2]);
+        assert_eq!(distribution[&2], vec![1, 2]);
+        assert_eq!(distribution[&3], vec![1, 2]);
     }
 }

@@ -17,9 +17,9 @@ use std::sync::Arc;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::{Int16Vector, StringVector, UInt32Vector, VectorRef};
 
-use super::oid_column;
-use super::table_names::PG_TYPE;
 use crate::memory_table_cols;
+use crate::system_schema::pg_catalog::oid_column;
+use crate::system_schema::pg_catalog::table_names::PG_TYPE;
 use crate::system_schema::utils::tables::{i16_column, string_column};
 
 fn pg_type_schema_columns() -> (Vec<ColumnSchema>, Vec<VectorRef>) {

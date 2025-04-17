@@ -35,9 +35,9 @@ use prost::Message;
 use session::context::{Channel, QueryContext};
 use snafu::prelude::*;
 
-use super::header::{write_cost_header_map, CONTENT_TYPE_PROTOBUF};
 use crate::error::{self, PipelineSnafu, Result};
 use crate::http::extractor::{LogTableName, PipelineInfo, SelectInfoWrapper, TraceTableName};
+use crate::http::header::{write_cost_header_map, CONTENT_TYPE_PROTOBUF};
 use crate::metrics::METRIC_HTTP_OPENTELEMETRY_LOGS_ELAPSED;
 use crate::query_handler::{OpenTelemetryProtocolHandlerRef, PipelineHandler};
 

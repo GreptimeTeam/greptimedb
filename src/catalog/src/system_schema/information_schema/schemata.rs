@@ -31,12 +31,11 @@ use datatypes::vectors::StringVectorBuilder;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{ScanRequest, TableId};
 
-use super::SCHEMATA;
 use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, TableMetadataManagerSnafu,
     UpgradeWeakCatalogManagerRefSnafu,
 };
-use crate::system_schema::information_schema::{InformationTable, Predicates};
+use crate::system_schema::information_schema::{InformationTable, Predicates, SCHEMATA};
 use crate::system_schema::utils;
 use crate::CatalogManager;
 

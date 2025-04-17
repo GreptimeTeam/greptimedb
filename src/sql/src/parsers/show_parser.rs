@@ -295,7 +295,7 @@ impl ParserContext<'_> {
                 Keyword::LIKE => {
                     self.parser.next_token();
                     Ok(ShowKind::Like(
-                        Self::parse_identifier(&mut self.parser).with_context(|_| {
+                        self.parser.parse_identifier().with_context(|_| {
                             error::UnexpectedSnafu {
                                 expected: "LIKE",
                                 actual: self.peek_token_as_string(),
@@ -498,12 +498,12 @@ impl ParserContext<'_> {
             ))),
             Token::Word(w) => match w.keyword {
                 Keyword::LIKE => Ok(Statement::ShowDatabases(ShowDatabases::new(
-                    ShowKind::Like(Self::parse_identifier(&mut self.parser).with_context(
-                        |_| error::UnexpectedSnafu {
+                    ShowKind::Like(self.parser.parse_identifier().with_context(|_| {
+                        error::UnexpectedSnafu {
                             expected: "LIKE",
                             actual: tok.to_string(),
-                        },
-                    )?),
+                        }
+                    })?),
                     full,
                 ))),
                 Keyword::WHERE => Ok(Statement::ShowDatabases(ShowDatabases::new(
@@ -639,6 +639,7 @@ mod tests {
                 kind: ShowKind::Like(sqlparser::ast::Ident {
                     value: _,
                     quote_style: None,
+                    span: _,
                 }),
                 ..
             })
@@ -698,6 +699,7 @@ mod tests {
                 kind: ShowKind::Like(sqlparser::ast::Ident {
                     value: _,
                     quote_style: None,
+                    span: _,
                 }),
                 database: None,
                 full: false
@@ -716,6 +718,7 @@ mod tests {
                 kind: ShowKind::Like(sqlparser::ast::Ident {
                     value: _,
                     quote_style: None,
+                    span: _,
                 }),
                 database: Some(_),
                 full: false
@@ -806,6 +809,7 @@ mod tests {
                 kind: ShowKind::Like(sqlparser::ast::Ident {
                     value: _,
                     quote_style: None,
+                    span: _,
                 }),
                 database: None,
                 full: true
@@ -824,6 +828,7 @@ mod tests {
                 kind: ShowKind::Like(sqlparser::ast::Ident {
                     value: _,
                     quote_style: None,
+                    span: _,
                 }),
                 database: Some(_),
                 full: true

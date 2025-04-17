@@ -26,9 +26,9 @@ use geo::{Area, Distance, Haversine};
 use geo_types::Geometry;
 use snafu::ResultExt;
 
-use super::helpers::{ensure_columns_len, ensure_columns_n};
-use super::wkt::parse_wkt;
 use crate::function::{Function, FunctionContext};
+use crate::scalars::geo::helpers::{ensure_columns_len, ensure_columns_n};
+use crate::scalars::geo::wkt::parse_wkt;
 
 /// Return WGS84(SRID: 4326) euclidean distance between two geometry object, in degree
 #[derive(Clone, Debug, Default, Display)]

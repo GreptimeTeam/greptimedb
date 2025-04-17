@@ -68,10 +68,12 @@ impl PartSortExec {
         input: Arc<dyn ExecutionPlan>,
     ) -> Self {
         let metrics = ExecutionPlanMetricsSet::new();
+        let properties = input.properties();
         let properties = PlanProperties::new(
             input.equivalence_properties().clone(),
             input.output_partitioning().clone(),
-            input.execution_mode(),
+            properties.emission_type,
+            properties.boundedness,
         );
 
         Self {

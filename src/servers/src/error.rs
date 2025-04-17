@@ -25,6 +25,7 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_telemetry::{error, warn};
+use common_time::Duration;
 use datafusion::error::DataFusionError;
 use datatypes::prelude::ConcreteDataType;
 use headers::ContentType;
@@ -615,6 +616,9 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Overflow while casting `{:?}` to Interval", val))]
+    DurationOverflow { val: Duration },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -734,6 +738,7 @@ impl ErrorExt for Error {
             ConvertSqlValue { source, .. } => source.status_code(),
 
             InFlightWriteBytesExceeded { .. } => StatusCode::RateLimited,
+            DurationOverflow { .. } => StatusCode::InvalidArguments,
         }
     }
 
@@ -772,9 +777,14 @@ impl IntoResponse for Error {
     }
 }
 
+/// Converts [StatusCode] to [HttpStatusCode].
 pub fn status_code_to_http_status(status_code: &StatusCode) -> HttpStatusCode {
     match status_code {
-        StatusCode::Success | StatusCode::Cancelled => HttpStatusCode::OK,
+        StatusCode::Success => HttpStatusCode::OK,
+
+        // When a request is cancelled by the client (e.g., by a client side timeout),
+        // we should return a gateway timeout status code to the external client.
+        StatusCode::Cancelled | StatusCode::DeadlineExceeded => HttpStatusCode::GATEWAY_TIMEOUT,
 
         StatusCode::Unsupported
         | StatusCode::InvalidArguments

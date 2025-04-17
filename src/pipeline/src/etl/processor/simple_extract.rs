@@ -126,7 +126,7 @@ impl Processor for SimpleExtractProcessor {
 mod test {
 
     #[test]
-    fn test_json_path() {
+    fn test_simple_extract() {
         use super::*;
         use crate::{Map, Value};
 

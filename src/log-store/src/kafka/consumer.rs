@@ -26,7 +26,7 @@ use pin_project::pin_project;
 use rskafka::client::partition::PartitionClient;
 use rskafka::record::RecordAndOffset;
 
-use super::index::{NextBatchHint, RegionWalIndexIterator};
+use crate::kafka::index::{NextBatchHint, RegionWalIndexIterator};
 
 #[async_trait::async_trait]
 pub trait FetchClient: std::fmt::Debug + Send + Sync {

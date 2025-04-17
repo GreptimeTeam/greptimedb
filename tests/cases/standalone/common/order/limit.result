@@ -45,11 +45,11 @@ Error: 3000(PlanQuery), Failed to plan SQL: No field named a.
 
 SELECT a FROM test LIMIT SUM(42);
 
-Error: 3001(EngineExecuteQuery), DataFusion error: This feature is not implemented: Unsupported LIMIT expression: Some(AggregateFunction(AggregateFunction { func: AggregateUDF { inner: Sum { signature: Signature { type_signature: UserDefined, volatility: Immutable } } }, args: [Literal(Int64(42))], distinct: false, filter: None, order_by: None, null_treatment: None }))
+Error: 1001(Unsupported), This feature is not implemented: Unsupported LIMIT expression: Some(AggregateFunction(AggregateFunction { func: AggregateUDF { inner: Sum { signature: Signature { type_signature: UserDefined, volatility: Immutable } } }, args: [Literal(Int64(42))], distinct: false, filter: None, order_by: None, null_treatment: None }))
 
 SELECT a FROM test LIMIT row_number() OVER ();
 
-Error: 3001(EngineExecuteQuery), DataFusion error: This feature is not implemented: Unsupported LIMIT expression: Some(Cast(Cast { expr: WindowFunction(WindowFunction { fun: WindowUDF(WindowUDF { inner: RowNumber { signature: Signature { type_signature: NullAry, volatility: Immutable } } }), args: [], partition_by: [], order_by: [], window_frame: WindowFrame { units: Rows, start_bound: Preceding(UInt64(NULL)), end_bound: Following(UInt64(NULL)), is_causal: false }, null_treatment: None }), data_type: Int64 }))
+Error: 3001(EngineExecuteQuery), This feature is not implemented: Unsupported LIMIT expression: Some(Cast(Cast { expr: WindowFunction(WindowFunction { fun: WindowUDF(WindowUDF { inner: RowNumber { signature: Signature { type_signature: Nullary, volatility: Immutable } } }), args: [], partition_by: [], order_by: [], window_frame: WindowFrame { units: Rows, start_bound: Preceding(UInt64(NULL)), end_bound: Following(UInt64(NULL)), is_causal: false }, null_treatment: None }), data_type: Int64 }))
 
 CREATE TABLE test2 (a STRING, ts TIMESTAMP TIME INDEX);
 
@@ -122,11 +122,11 @@ Error: 3001(EngineExecuteQuery), DataFusion error: Error during planning: Cannot
 
 SELECT * FROM integers as int LIMIT (SELECT NULL);
 
-Error: 3001(EngineExecuteQuery), DataFusion error: This feature is not implemented: Unsupported LIMIT expression: Some(ScalarSubquery(<subquery>))
+Error: 1001(Unsupported), This feature is not implemented: Unsupported LIMIT expression: Some(ScalarSubquery(<subquery>))
 
 SELECT * FROM integers as int LIMIT (SELECT -1);
 
-Error: 3001(EngineExecuteQuery), DataFusion error: This feature is not implemented: Unsupported LIMIT expression: Some(ScalarSubquery(<subquery>))
+Error: 1001(Unsupported), This feature is not implemented: Unsupported LIMIT expression: Some(ScalarSubquery(<subquery>))
 
 SELECT * FROM integers as int LIMIT (SELECT 'ab');
 

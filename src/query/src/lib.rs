@@ -28,6 +28,7 @@ pub mod executor;
 pub mod log_query;
 pub mod metrics;
 mod optimizer;
+pub mod options;
 pub mod parser;
 mod part_sort;
 pub mod physical_wrapper;

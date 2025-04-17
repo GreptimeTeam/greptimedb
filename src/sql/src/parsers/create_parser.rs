@@ -25,10 +25,9 @@ use sqlparser::dialect::keywords::Keyword;
 use sqlparser::keywords::ALL_KEYWORDS;
 use sqlparser::parser::IsOptional::Mandatory;
 use sqlparser::parser::{Parser, ParserError};
-use sqlparser::tokenizer::{Token, TokenWithLocation, Word};
+use sqlparser::tokenizer::{Token, TokenWithSpan, Word};
 use table::requests::validate_table_option;
 
-use super::utils;
 use crate::ast::{ColumnDef, Ident};
 use crate::error::{
     self, InvalidColumnOptionSnafu, InvalidDatabaseOptionSnafu, InvalidIntervalSnafu,
@@ -37,7 +36,7 @@ use crate::error::{
 };
 use crate::parser::{ParserContext, FLOW};
 use crate::parsers::utils::{
-    validate_column_fulltext_create_option, validate_column_skipping_index_create_option,
+    self, validate_column_fulltext_create_option, validate_column_skipping_index_create_option,
 };
 use crate::statements::create::{
     Column, ColumnExtensions, CreateDatabase, CreateExternalTable, CreateFlow, CreateTable,
@@ -300,7 +299,7 @@ impl<'a> ParserContext<'a> {
 
         let comment = if self.parser.parse_keyword(Keyword::COMMENT) {
             match self.parser.next_token() {
-                TokenWithLocation {
+                TokenWithSpan {
                     token: Token::SingleQuotedString(value, ..),
                     ..
                 } => Some(value),
@@ -497,10 +496,7 @@ impl<'a> ParserContext<'a> {
                     time_index_opt_idx = Some(index);
 
                     let constraint = TableConstraint::TimeIndex {
-                        column: Ident {
-                            value: column.name().value.clone(),
-                            quote_style: None,
-                        },
+                        column: Ident::new(column.name().value.clone()),
                     };
                     constraints.push(constraint);
                 }
@@ -548,7 +544,7 @@ impl<'a> ParserContext<'a> {
 
     /// Parse the column name and check if it's valid.
     fn parse_column_name(&mut self) -> std::result::Result<Ident, ParserError> {
-        let name = self.parser.parse_identifier(false)?;
+        let name = self.parser.parse_identifier()?;
         if name.quote_style.is_none() &&
         // "ALL_KEYWORDS" are sorted.
             ALL_KEYWORDS.binary_search(&name.value.to_uppercase().as_str()).is_ok()
@@ -588,7 +584,7 @@ impl<'a> ParserContext<'a> {
         let mut extensions = ColumnExtensions::default();
         loop {
             if parser.parse_keyword(Keyword::CONSTRAINT) {
-                let name = Some(parser.parse_identifier(false).context(SyntaxSnafu)?);
+                let name = Some(parser.parse_identifier().context(SyntaxSnafu)?);
                 if let Some(option) = Self::parse_optional_column_option(parser)? {
                     options.push(ColumnOptionDef { name, option });
                 } else {
@@ -626,7 +622,7 @@ impl<'a> ParserContext<'a> {
             Ok(Some(ColumnOption::NotNull))
         } else if parser.parse_keywords(&[Keyword::COMMENT]) {
             match parser.next_token() {
-                TokenWithLocation {
+                TokenWithSpan {
                     token: Token::SingleQuotedString(value, ..),
                     ..
                 } => Ok(Some(ColumnOption::Comment(value))),
@@ -845,7 +841,7 @@ impl<'a> ParserContext<'a> {
 
     fn parse_optional_table_constraint(&mut self) -> Result<Option<TableConstraint>> {
         match self.parser.next_token() {
-            TokenWithLocation {
+            TokenWithSpan {
                 token: Token::Word(w),
                 ..
             } if w.keyword == Keyword::PRIMARY => {
@@ -865,7 +861,7 @@ impl<'a> ParserContext<'a> {
                     .collect();
                 Ok(Some(TableConstraint::PrimaryKey { columns }))
             }
-            TokenWithLocation {
+            TokenWithSpan {
                 token: Token::Word(w),
                 ..
             } if w.keyword == Keyword::TIME => {
@@ -1314,20 +1310,8 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
         };
 
         let expected = CreateFlow {
-            flow_name: ObjectName(vec![Ident {
-                value: "task_1".to_string(),
-                quote_style: None,
-            }]),
-            sink_table_name: ObjectName(vec![
-                Ident {
-                    value: "schema_1".to_string(),
-                    quote_style: None,
-                },
-                Ident {
-                    value: "table_1".to_string(),
-                    quote_style: None,
-                },
-            ]),
+            flow_name: ObjectName(vec![Ident::new("task_1")]),
+            sink_table_name: ObjectName(vec![Ident::new("schema_1"), Ident::new("table_1")]),
             or_replace: true,
             if_not_exists: true,
             expire_after: Some(300),
@@ -1826,7 +1810,7 @@ ENGINE=mito";
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         assert_eq!(
             result.unwrap_err().output_msg(),
-            "Invalid SQL, error: Partition rule expr Identifier(Ident { value: \"b\", quote_style: None }) is not a binary expr"
+            r#"Invalid SQL, error: Partition rule expr Identifier(Ident { value: "b", quote_style: None, span: Span(Location(4,5)..Location(4,6)) }) is not a binary expr"#
         );
     }
 

@@ -33,8 +33,8 @@ use serde::{Deserialize, Serialize};
 use session::context::{Channel, QueryContext};
 use snafu::prelude::*;
 
-use super::header::{write_cost_header_map, GREPTIME_DB_HEADER_METRICS};
 use crate::error::{self, Result};
+use crate::http::header::{write_cost_header_map, GREPTIME_DB_HEADER_METRICS};
 use crate::prom_store::{snappy_decompress, zstd_decompress};
 use crate::proto::PromWriteRequest;
 use crate::query_handler::{PromStoreProtocolHandlerRef, PromStoreResponse};

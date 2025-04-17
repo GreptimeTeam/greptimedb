@@ -24,8 +24,8 @@ use common_grpc::precision::Precision;
 use common_telemetry::tracing;
 use session::context::{Channel, QueryContext, QueryContextRef};
 
-use super::header::write_cost_header_map;
 use crate::error::{Result, TimePrecisionSnafu};
+use crate::http::header::write_cost_header_map;
 use crate::influxdb::InfluxdbRequest;
 use crate::query_handler::InfluxdbLineProtocolHandlerRef;
 

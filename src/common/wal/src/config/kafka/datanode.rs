@@ -17,8 +17,7 @@ use std::time::Duration;
 use common_base::readable_size::ReadableSize;
 use serde::{Deserialize, Serialize};
 
-use super::common::KafkaConnectionConfig;
-use crate::config::kafka::common::KafkaTopicConfig;
+use crate::config::kafka::common::{KafkaConnectionConfig, KafkaTopicConfig};
 
 /// Kafka wal configurations for datanode.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -271,10 +271,7 @@ mod test {
     fn unsupported_filter_op() {
         // `+` is not supported
         let expr = Expr::BinaryExpr(BinaryExpr {
-            left: Box::new(Expr::Column(Column {
-                relation: None,
-                name: "foo".to_string(),
-            })),
+            left: Box::new(Expr::Column(Column::from_name("foo"))),
             op: Operator::Plus,
             right: Box::new(Expr::Literal(ScalarValue::Int64(Some(1)))),
         });
@@ -290,25 +287,16 @@ mod test {
 
         // two column is not supported
         let expr = Expr::BinaryExpr(BinaryExpr {
-            left: Box::new(Expr::Column(Column {
-                relation: None,
-                name: "foo".to_string(),
-            })),
+            left: Box::new(Expr::Column(Column::from_name("foo"))),
             op: Operator::Eq,
-            right: Box::new(Expr::Column(Column {
-                relation: None,
-                name: "bar".to_string(),
-            })),
+            right: Box::new(Expr::Column(Column::from_name("bar"))),
         });
         assert!(SimpleFilterEvaluator::try_new(&expr).is_none());
 
         // compound expr is not supported
         let expr = Expr::BinaryExpr(BinaryExpr {
             left: Box::new(Expr::BinaryExpr(BinaryExpr {
-                left: Box::new(Expr::Column(Column {
-                    relation: None,
-                    name: "foo".to_string(),
-                })),
+                left: Box::new(Expr::Column(Column::from_name("foo"))),
                 op: Operator::Eq,
                 right: Box::new(Expr::Literal(ScalarValue::Int64(Some(1)))),
             })),
@@ -322,10 +310,7 @@ mod test {
     fn supported_filter_op() {
         // equal
         let expr = Expr::BinaryExpr(BinaryExpr {
-            left: Box::new(Expr::Column(Column {
-                relation: None,
-                name: "foo".to_string(),
-            })),
+            left: Box::new(Expr::Column(Column::from_name("foo"))),
             op: Operator::Eq,
             right: Box::new(Expr::Literal(ScalarValue::Int64(Some(1)))),
         });
@@ -335,10 +320,7 @@ mod test {
         let expr = Expr::BinaryExpr(BinaryExpr {
             left: Box::new(Expr::Literal(ScalarValue::Int64(Some(1)))),
             op: Operator::Lt,
-            right: Box::new(Expr::Column(Column {
-                relation: None,
-                name: "foo".to_string(),
-            })),
+            right: Box::new(Expr::Column(Column::from_name("foo"))),
         });
         let evaluator = SimpleFilterEvaluator::try_new(&expr).unwrap();
         assert_eq!(evaluator.op, Operator::Gt);
@@ -348,10 +330,7 @@ mod test {
     #[test]
     fn run_on_array() {
         let expr = Expr::BinaryExpr(BinaryExpr {
-            left: Box::new(Expr::Column(Column {
-                relation: None,
-                name: "foo".to_string(),
-            })),
+            left: Box::new(Expr::Column(Column::from_name("foo"))),
             op: Operator::Eq,
             right: Box::new(Expr::Literal(ScalarValue::Int64(Some(1)))),
         });
@@ -373,10 +352,7 @@ mod test {
     #[test]
     fn run_on_scalar() {
         let expr = Expr::BinaryExpr(BinaryExpr {
-            left: Box::new(Expr::Column(Column {
-                relation: None,
-                name: "foo".to_string(),
-            })),
+            left: Box::new(Expr::Column(Column::from_name("foo"))),
             op: Operator::Lt,
             right: Box::new(Expr::Literal(ScalarValue::Int64(Some(1)))),
         });

@@ -74,7 +74,7 @@ impl HoltWinters {
             Self::name(),
             Self::input_type(),
             Self::return_type(),
-            Volatility::Immutable,
+            Volatility::Volatile,
             Arc::new(move |input: &_| Self::new(level, trend).calc(input)) as _,
         )
     }

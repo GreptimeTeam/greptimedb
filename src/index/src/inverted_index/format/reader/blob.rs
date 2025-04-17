@@ -21,9 +21,10 @@ use common_base::range_read::RangeReader;
 use greptime_proto::v1::index::InvertedIndexMetas;
 use snafu::{ensure, ResultExt};
 
-use super::footer::DEFAULT_PREFETCH_SIZE;
 use crate::inverted_index::error::{CommonIoSnafu, Result, UnexpectedBlobSizeSnafu};
-use crate::inverted_index::format::reader::footer::InvertedIndexFooterReader;
+use crate::inverted_index::format::reader::footer::{
+    InvertedIndexFooterReader, DEFAULT_PREFETCH_SIZE,
+};
 use crate::inverted_index::format::reader::InvertedIndexReader;
 use crate::inverted_index::format::MIN_BLOB_SIZE;
 

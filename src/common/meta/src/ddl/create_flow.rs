@@ -35,9 +35,8 @@ use snafu::{ensure, ResultExt};
 use strum::AsRefStr;
 use table::metadata::TableId;
 
-use super::utils::add_peer_context_if_needed;
 use crate::cache_invalidator::Context;
-use crate::ddl::utils::handle_retry_error;
+use crate::ddl::utils::{add_peer_context_if_needed, handle_retry_error};
 use crate::ddl::DdlContext;
 use crate::error::{self, Result};
 use crate::instruction::{CacheIdent, CreateFlow};
@@ -308,8 +307,7 @@ impl Procedure for CreateFlowProcedure {
 }
 
 pub fn determine_flow_type(_flow_task: &CreateFlowTask) -> FlowType {
-    // TODO(discord9): determine flow type
-    FlowType::RecordingRule
+    FlowType::Batching
 }
 
 /// The state of [CreateFlowProcedure].
@@ -326,29 +324,30 @@ pub enum CreateFlowState {
 }
 
 /// The type of flow.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FlowType {
-    /// The flow is a recording rule task.
-    RecordingRule,
+    /// The flow is a batching task.
+    Batching,
     /// The flow is a streaming task.
     Streaming,
 }
 
 impl FlowType {
-    pub const RECORDING_RULE: &str = "recording_rule";
+    pub const BATCHING: &str = "batching";
     pub const STREAMING: &str = "streaming";
+    pub const FLOW_TYPE_KEY: &str = "flow_type";
 }
 
 impl Default for FlowType {
     fn default() -> Self {
-        Self::RecordingRule
+        Self::Batching
     }
 }
 
 impl fmt::Display for FlowType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            FlowType::RecordingRule => write!(f, "{}", FlowType::RECORDING_RULE),
+            FlowType::Batching => write!(f, "{}", FlowType::BATCHING),
             FlowType::Streaming => write!(f, "{}", FlowType::STREAMING),
         }
     }
@@ -391,7 +390,8 @@ impl From<&CreateFlowData> for CreateRequest {
         };
 
         let flow_type = value.flow_type.unwrap_or_default().to_string();
-        req.flow_options.insert("flow_type".to_string(), flow_type);
+        req.flow_options
+            .insert(FlowType::FLOW_TYPE_KEY.to_string(), flow_type);
         req
     }
 }

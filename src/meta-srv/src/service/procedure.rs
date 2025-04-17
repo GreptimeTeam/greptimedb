@@ -28,10 +28,10 @@ use common_telemetry::warn;
 use snafu::{OptionExt, ResultExt};
 use tonic::{Request, Response};
 
-use super::GrpcResult;
 use crate::error;
 use crate::metasrv::Metasrv;
 use crate::procedure::region_migration::manager::RegionMigrationProcedureTask;
+use crate::service::GrpcResult;
 
 #[async_trait::async_trait]
 impl procedure_service_server::ProcedureService for Metasrv {

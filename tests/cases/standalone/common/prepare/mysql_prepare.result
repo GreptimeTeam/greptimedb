@@ -3,7 +3,7 @@
 -- SQLNESS PROTOCOL MYSQL
 SELECT ?;
 
-Failed to execute query, err: MySqlError { ERROR 1815 (HY000): (EngineExecuteQuery): DataFusion error: Execution error: Placeholder '?' was not provided a value for execution. }
+Failed to execute query, err: MySqlError { ERROR 1815 (HY000): (EngineExecuteQuery): Execution error: Placeholder '?' was not provided a value for execution. }
 
 -- SQLNESS PROTOCOL MYSQL
 PREPARE stmt FROM 'SELECT ?::int;';

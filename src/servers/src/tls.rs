@@ -22,7 +22,7 @@ use std::sync::{Arc, RwLock};
 use common_telemetry::{error, info};
 use notify::{EventKind, RecursiveMode, Watcher};
 use rustls::ServerConfig;
-use rustls_pemfile::{certs, pkcs8_private_keys, rsa_private_keys};
+use rustls_pemfile::{certs, read_one, Item};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
@@ -94,29 +94,14 @@ impl TlsOption {
         .collect::<std::result::Result<Vec<CertificateDer>, IoError>>()
         .context(InternalIoSnafu)?;
 
-        let key = {
-            let mut pkcs8 = pkcs8_private_keys(&mut BufReader::new(
-                File::open(&self.key_path).context(InternalIoSnafu)?,
-            ))
-            .map(|key| key.map(PrivateKeyDer::from))
-            .collect::<std::result::Result<Vec<PrivateKeyDer>, IoError>>()
-            .context(InternalIoSnafu)?;
-
-            if !pkcs8.is_empty() {
-                pkcs8.remove(0)
-            } else {
-                let mut rsa = rsa_private_keys(&mut BufReader::new(
-                    File::open(&self.key_path).context(InternalIoSnafu)?,
-                ))
-                .map(|key| key.map(PrivateKeyDer::from))
-                .collect::<std::result::Result<Vec<PrivateKeyDer>, IoError>>()
-                .context(InternalIoSnafu)?;
-                if !rsa.is_empty() {
-                    rsa.remove(0)
-                } else {
-                    return Err(IoError::new(ErrorKind::InvalidInput, "invalid key"))
-                        .context(InternalIoSnafu);
-                }
+        let mut key_reader = BufReader::new(File::open(&self.key_path).context(InternalIoSnafu)?);
+        let key = match read_one(&mut key_reader).context(InternalIoSnafu)? {
+            Some(Item::Pkcs1Key(key)) => PrivateKeyDer::from(key),
+            Some(Item::Pkcs8Key(key)) => PrivateKeyDer::from(key),
+            Some(Item::Sec1Key(key)) => PrivateKeyDer::from(key),
+            _ => {
+                return Err(IoError::new(ErrorKind::InvalidInput, "invalid key"))
+                    .context(InternalIoSnafu);
             }
         };
 

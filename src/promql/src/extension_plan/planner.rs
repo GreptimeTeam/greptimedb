@@ -21,9 +21,9 @@ use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNode};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner};
 
-use super::{HistogramFold, ScalarCalculate, UnionDistinctOn};
 use crate::extension_plan::{
-    EmptyMetric, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
+    EmptyMetric, HistogramFold, InstantManipulate, RangeManipulate, ScalarCalculate, SeriesDivide,
+    SeriesNormalize, UnionDistinctOn,
 };
 
 pub struct PromExtensionPlanner;

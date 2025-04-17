@@ -29,12 +29,12 @@ use serde_json::{Map, Value};
 use session::context::QueryContextRef;
 use snafu::{ensure, ResultExt};
 
-use super::trace::attributes::OtlpAnyValue;
-use super::utils::{bytes_to_hex_string, key_value_to_jsonb};
 use crate::error::{
     IncompatibleSchemaSnafu, NotSupportedSnafu, PipelineSnafu, Result,
     UnsupportedJsonDataTypeForTagSnafu,
 };
+use crate::otlp::trace::attributes::OtlpAnyValue;
+use crate::otlp::utils::{bytes_to_hex_string, key_value_to_jsonb};
 use crate::pipeline::run_pipeline;
 use crate::query_handler::PipelineHandlerRef;
 

@@ -54,7 +54,7 @@ show create table t3;
 
 create table t4 (ts timestamp time index default now);
 
-Error: 1001(Unsupported), Unsupported expr in default constraint: Identifier(Ident { value: "now", quote_style: None }) for column: ts
+Error: 1001(Unsupported), Unsupported expr in default constraint: Identifier(Ident { value: "now", quote_style: None, span: Span(Location(1,50)..Location(1,53)) }) for column: ts
 
 drop table t1;
 

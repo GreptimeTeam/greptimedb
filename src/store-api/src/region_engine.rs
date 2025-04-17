@@ -47,6 +47,15 @@ pub enum SettableRegionRoleState {
     DowngradingLeader,
 }
 
+impl Display for SettableRegionRoleState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SettableRegionRoleState::Follower => write!(f, "Follower"),
+            SettableRegionRoleState::DowngradingLeader => write!(f, "Leader(Downgrading)"),
+        }
+    }
+}
+
 impl From<SettableRegionRoleState> for RegionRole {
     fn from(value: SettableRegionRoleState) -> Self {
         match value {
@@ -63,20 +72,78 @@ pub struct SetRegionRoleStateRequest {
     region_role_state: SettableRegionRoleState,
 }
 
+/// The success response of setting region role state.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SetRegionRoleStateSuccess {
+    File,
+    Mito {
+        last_entry_id: entry::Id,
+    },
+    Metric {
+        last_entry_id: entry::Id,
+        metadata_last_entry_id: entry::Id,
+    },
+}
+
+impl SetRegionRoleStateSuccess {
+    /// Returns a [SetRegionRoleStateSuccess::File].
+    pub fn file() -> Self {
+        Self::File
+    }
+
+    /// Returns a [SetRegionRoleStateSuccess::Mito] with the `last_entry_id`.
+    pub fn mito(last_entry_id: entry::Id) -> Self {
+        SetRegionRoleStateSuccess::Mito { last_entry_id }
+    }
+
+    /// Returns a [SetRegionRoleStateSuccess::Metric] with the `last_entry_id` and `metadata_last_entry_id`.
+    pub fn metric(last_entry_id: entry::Id, metadata_last_entry_id: entry::Id) -> Self {
+        SetRegionRoleStateSuccess::Metric {
+            last_entry_id,
+            metadata_last_entry_id,
+        }
+    }
+}
+
+impl SetRegionRoleStateSuccess {
+    /// Returns the last entry id of the region.
+    pub fn last_entry_id(&self) -> Option<entry::Id> {
+        match self {
+            SetRegionRoleStateSuccess::File => None,
+            SetRegionRoleStateSuccess::Mito { last_entry_id } => Some(*last_entry_id),
+            SetRegionRoleStateSuccess::Metric { last_entry_id, .. } => Some(*last_entry_id),
+        }
+    }
+
+    /// Returns the last entry id of the metadata of the region.
+    pub fn metadata_last_entry_id(&self) -> Option<entry::Id> {
+        match self {
+            SetRegionRoleStateSuccess::File => None,
+            SetRegionRoleStateSuccess::Mito { .. } => None,
+            SetRegionRoleStateSuccess::Metric {
+                metadata_last_entry_id,
+                ..
+            } => Some(*metadata_last_entry_id),
+        }
+    }
+}
+
 /// The response of setting region role state.
 #[derive(Debug, PartialEq, Eq)]
 pub enum SetRegionRoleStateResponse {
-    Success {
-        /// Returns `last_entry_id` of the region if available(e.g., It's not available in file engine).
-        last_entry_id: Option<entry::Id>,
-    },
+    Success(SetRegionRoleStateSuccess),
     NotFound,
 }
 
 impl SetRegionRoleStateResponse {
-    /// Returns a [SetRegionRoleStateResponse::Success] with the `last_entry_id`.
-    pub fn success(last_entry_id: Option<entry::Id>) -> Self {
-        Self::Success { last_entry_id }
+    /// Returns a [SetRegionRoleStateResponse::Success] with the `File` success.
+    pub fn success(success: SetRegionRoleStateSuccess) -> Self {
+        Self::Success(success)
+    }
+
+    /// Returns true if the response is a [SetRegionRoleStateResponse::NotFound].
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, SetRegionRoleStateResponse::NotFound)
     }
 }
 
@@ -516,6 +583,62 @@ impl RegionStatistic {
     }
 }
 
+/// The response of syncing the manifest.
+#[derive(Debug)]
+pub enum SyncManifestResponse {
+    NotSupported,
+    Mito {
+        /// Indicates if the data region was synced.
+        synced: bool,
+    },
+    Metric {
+        /// Indicates if the metadata region was synced.
+        metadata_synced: bool,
+        /// Indicates if the data region was synced.
+        data_synced: bool,
+        /// The logical regions that were newly opened during the sync operation.
+        /// This only occurs after the metadata region has been successfully synced.
+        new_opened_logical_region_ids: Vec<RegionId>,
+    },
+}
+
+impl SyncManifestResponse {
+    /// Returns true if data region is synced.
+    pub fn is_data_synced(&self) -> bool {
+        match self {
+            SyncManifestResponse::NotSupported => false,
+            SyncManifestResponse::Mito { synced } => *synced,
+            SyncManifestResponse::Metric { data_synced, .. } => *data_synced,
+        }
+    }
+
+    /// Returns true if the engine is supported the sync operation.
+    pub fn is_supported(&self) -> bool {
+        matches!(self, SyncManifestResponse::NotSupported)
+    }
+
+    /// Returns true if the engine is a mito2 engine.
+    pub fn is_mito(&self) -> bool {
+        matches!(self, SyncManifestResponse::Mito { .. })
+    }
+
+    /// Returns true if the engine is a metric engine.
+    pub fn is_metric(&self) -> bool {
+        matches!(self, SyncManifestResponse::Metric { .. })
+    }
+
+    /// Returns the new opened logical region ids.
+    pub fn new_opened_logical_region_ids(self) -> Option<Vec<RegionId>> {
+        match self {
+            SyncManifestResponse::Metric {
+                new_opened_logical_region_ids,
+                ..
+            } => Some(new_opened_logical_region_ids),
+            _ => None,
+        }
+    }
+}
+
 #[async_trait]
 pub trait RegionEngine: Send + Sync {
     /// Name of this engine
@@ -622,7 +745,7 @@ pub trait RegionEngine: Send + Sync {
         &self,
         region_id: RegionId,
         manifest_info: RegionManifestInfo,
-    ) -> Result<(), BoxedError>;
+    ) -> Result<SyncManifestResponse, BoxedError>;
 
     /// Sets region role state gracefully.
     ///

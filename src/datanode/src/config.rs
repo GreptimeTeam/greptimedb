@@ -26,6 +26,7 @@ use file_engine::config::EngineConfig as FileEngineConfig;
 use meta_client::MetaClientOptions;
 use metric_engine::config::EngineConfig as MetricEngineConfig;
 use mito2::config::MitoConfig;
+use query::options::QueryOptions;
 use serde::{Deserialize, Serialize};
 use servers::export_metrics::ExportMetricsOption;
 use servers::grpc::GrpcOptions;
@@ -375,6 +376,7 @@ pub struct DatanodeOptions {
     pub enable_telemetry: bool,
     pub export_metrics: ExportMetricsOption,
     pub tracing: TracingOptions,
+    pub query: QueryOptions,
 
     /// Deprecated options, please use the new options instead.
     #[deprecated(note = "Please use `grpc.addr` instead.")]
@@ -412,6 +414,7 @@ impl Default for DatanodeOptions {
             enable_telemetry: true,
             export_metrics: ExportMetricsOption::default(),
             tracing: TracingOptions::default(),
+            query: QueryOptions::default(),
 
             // Deprecated options
             rpc_addr: None,

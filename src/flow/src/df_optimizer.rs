@@ -39,7 +39,8 @@ use datafusion_common::tree_node::{
 use datafusion_common::{Column, DFSchema, ScalarValue};
 use datafusion_expr::utils::merge_schema;
 use datafusion_expr::{
-    BinaryExpr, Expr, Operator, Projection, ScalarUDFImpl, Signature, TypeSignature, Volatility,
+    BinaryExpr, ColumnarValue, Expr, Operator, Projection, ScalarFunctionArgs, ScalarUDFImpl,
+    Signature, TypeSignature, Volatility,
 };
 use query::parser::QueryLanguageParser;
 use query::query_engine::DefaultSerializer;
@@ -518,10 +519,10 @@ impl ScalarUDFImpl for TumbleExpand {
         })
     }
 
-    fn invoke(
+    fn invoke_with_args(
         &self,
-        _args: &[datafusion_expr::ColumnarValue],
-    ) -> Result<datafusion_expr::ColumnarValue, DataFusionError> {
+        _args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
         Err(DataFusionError::Plan(
             "This function should not be executed by datafusion".to_string(),
         ))
