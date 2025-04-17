@@ -275,6 +275,22 @@ impl RegionMigrationManager {
         Ok(())
     }
 
+    /// Throws an error if `to_peer` is already has a region follower.
+    fn verify_region_follower_peers(
+        &self,
+        region_route: &RegionRoute,
+        task: &RegionMigrationProcedureTask,
+    ) -> Result<()> {
+        ensure!(
+            !region_route.follower_peers.contains(&task.to_peer),
+            error::InvalidArgumentsSnafu {
+                err_msg: "`to_peer` is already has a region follower",
+            },
+        );
+
+        Ok(())
+    }
+
     /// Submits a new region migration procedure.
     pub async fn submit_procedure(
         &self,
@@ -308,7 +324,7 @@ impl RegionMigrationManager {
         }
 
         self.verify_region_leader_peer(&region_route, &task)?;
-
+        self.verify_region_follower_peers(&region_route, &task)?;
         let table_info = self.retrieve_table_info(region_id).await?;
         let TableName {
             catalog_name,
@@ -489,6 +505,37 @@ mod test {
         assert!(err
             .to_string()
             .contains("Invalid region migration `from_peer` argument"));
+    }
+
+    #[tokio::test]
+    async fn test_submit_procedure_region_follower_on_to_peer() {
+        let env = TestingEnv::new();
+        let context_factory = env.context_factory();
+        let manager = RegionMigrationManager::new(env.procedure_manager().clone(), context_factory);
+        let region_id = RegionId::new(1024, 1);
+        let task = RegionMigrationProcedureTask {
+            region_id,
+            from_peer: Peer::empty(3),
+            to_peer: Peer::empty(2),
+            timeout: Duration::from_millis(1000),
+        };
+
+        let table_info = new_test_table_info(1024, vec![1]).into();
+        let region_routes = vec![RegionRoute {
+            region: Region::new_test(region_id),
+            leader_peer: Some(Peer::empty(3)),
+            follower_peers: vec![Peer::empty(2)],
+            ..Default::default()
+        }];
+
+        env.create_physical_table_metadata(table_info, region_routes)
+            .await;
+
+        let err = manager.submit_procedure(task).await.unwrap_err();
+        assert_matches!(err, error::Error::InvalidArguments { .. });
+        assert!(err
+            .to_string()
+            .contains("`to_peer` is already has a region follower"));
     }
 
     #[tokio::test]
