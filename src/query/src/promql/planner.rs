@@ -1165,13 +1165,17 @@ impl PromPlanner {
                     DfExpr::BinaryExpr(BinaryExpr {
                         left: Box::new(col),
                         op: Operator::RegexMatch,
-                        right: Box::new(lit),
+                        right: Box::new(DfExpr::Literal(ScalarValue::Utf8(Some(
+                            re.as_str().to_string(),
+                        )))),
                     })
                 }
-                MatchOp::NotRe(_) => DfExpr::BinaryExpr(BinaryExpr {
+                MatchOp::NotRe(re) => DfExpr::BinaryExpr(BinaryExpr {
                     left: Box::new(col),
                     op: Operator::RegexNotMatch,
-                    right: Box::new(lit),
+                    right: Box::new(DfExpr::Literal(ScalarValue::Utf8(Some(
+                        re.as_str().to_string(),
+                    )))),
                 }),
             };
             exprs.push(expr);
