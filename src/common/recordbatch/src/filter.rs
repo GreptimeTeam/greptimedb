@@ -24,12 +24,17 @@ use datafusion_common::arrow::buffer::BooleanBuffer;
 use datafusion_common::arrow::compute::kernels::cmp;
 use datafusion_common::cast::{as_boolean_array, as_null_array, as_string_array};
 use datafusion_common::{internal_err, DataFusionError, ScalarValue};
-use datatypes::arrow::array::{Array, BooleanArray, RecordBatch};
+use datatypes::arrow::array::{
+    Array, ArrayAccessor, ArrayData, BooleanArray, BooleanBufferBuilder, RecordBatch,
+    StringArrayType,
+};
 use datatypes::arrow::compute::filter_record_batch;
+use datatypes::arrow::datatypes::DataType;
 use datatypes::arrow::error::ArrowError;
 use datatypes::compute::kernels::regexp;
 use datatypes::compute::or_kleene;
 use datatypes::vectors::VectorRef;
+use regex::Regex;
 use snafu::ResultExt;
 
 use crate::error::{ArrowComputeSnafu, Result, ToArrowScalarSnafu, UnsupportedOperationSnafu};
@@ -53,6 +58,10 @@ pub struct SimpleFilterEvaluator {
     op: Operator,
     /// Only used when the operator is `Or`-chain.
     literal_list: Vec<Scalar<ArrayRef>>,
+    /// Pre-compiled regex.
+    /// Only used when the operator is regex operators.
+    /// If the regex is empty, it is also `None`.
+    regex: Option<Regex>,
 }
 
 impl SimpleFilterEvaluator {
@@ -76,6 +85,7 @@ impl SimpleFilterEvaluator {
             literal: val.to_scalar().ok()?,
             op,
             literal_list: vec![],
+            regex: None,
         })
     }
 
@@ -121,6 +131,7 @@ impl SimpleFilterEvaluator {
                             literal: placeholder_literal,
                             op: Operator::Or,
                             literal_list: list,
+                            regex: None,
                         });
                     }
                     _ => return None,
@@ -138,12 +149,14 @@ impl SimpleFilterEvaluator {
                     _ => return None,
                 };
 
+                let regex = Self::maybe_build_regex(op, rhs);
                 let literal = rhs.to_scalar().ok()?;
                 Some(Self {
                     column_name: lhs.name.clone(),
                     literal,
                     op,
                     literal_list: vec![],
+                    regex,
                 })
             }
             _ => None,
@@ -204,22 +217,49 @@ impl SimpleFilterEvaluator {
             .map(|array| array.values().clone())
     }
 
+    /// Builds a regex pattern from a scalar value and operator.
+    /// Returns `None` if
+    /// - the operator is not a regex operator
+    /// - the value is not a string
+    /// - the regex pattern is invalid
+    fn maybe_build_regex(operator: Operator, value: &ScalarValue) -> Option<Regex> {
+        let ignore_case = match operator {
+            Operator::RegexMatch => false,
+            Operator::RegexIMatch => true,
+            Operator::RegexNotMatch => false,
+            Operator::RegexNotIMatch => true,
+            _ => return None,
+        };
+        let flag = if ignore_case { Some("i") } else { None };
+        let regex = value.try_as_str()??;
+        let pattern = match flag {
+            Some(flag) => format!("(?{flag}){regex}"),
+            None => regex.to_string(),
+        };
+        if pattern.is_empty() {
+            None
+        } else {
+            Regex::new(pattern.as_str()).ok()
+        }
+    }
+
     fn regex_match(
         &self,
         input: &impl Datum,
         ignore_case: bool,
         negative: bool,
     ) -> std::result::Result<BooleanArray, ArrowError> {
-        let flag = if ignore_case { Some("i") } else { None };
+        // let flag = if ignore_case { Some("i") } else { None };
         let array = input.get().0;
         let string_array = as_string_array(array).map_err(|_| {
             ArrowError::CastError(format!("Cannot cast {:?} to StringArray", array))
         })?;
-        let literal_array = self.literal.clone().into_inner();
-        let regex_array = as_string_array(&literal_array).map_err(|_| {
-            ArrowError::CastError(format!("Cannot cast {:?} to StringArray", literal_array))
-        })?;
-        let mut result = regexp::regexp_is_match_scalar(string_array, regex_array.value(0), flag)?;
+        // let literal_array = self.literal.clone().into_inner();
+        // let regex_array = as_string_array(&literal_array).map_err(|_| {
+        //     ArrowError::CastError(format!("Cannot cast {:?} to StringArray", literal_array))
+        // })?;
+        // let mut result = regexp::regexp_is_match_scalar(string_array, regex_array.value(0), flag)?;
+        let mut result = regexp_is_match_scalar(string_array, self.regex.as_ref())?;
         if negative {
             result = datatypes::compute::not(&result)?;
         }
@@ -252,6 +292,43 @@ pub fn batch_filter(
             }?;
             Ok(filter_record_batch(batch, &filter_array)?)
         })
+}
+
+/// This is the same as arrow [regexp_is_match_scalar()](regexp::regexp_is_match_scalar())
+/// with pre-compiled regex.
+pub fn regexp_is_match_scalar<'a, S>(
+    array: &'a S,
+    regex: Option<&Regex>,
+) -> Result<BooleanArray, ArrowError>
+where
+    &'a S: StringArrayType<'a>,
+{
+    let null_bit_buffer = array.nulls().map(|x| x.inner().sliced());
+    let mut result = BooleanBufferBuilder::new(array.len());
+
+    if let Some(re) = regex {
+        for i in 0..array.len() {
+            let value = array.value(i);
+            result.append(re.is_match(value));
+        }
+    } else {
+        result.append_n(array.len(), true);
+    }
+
+    let buffer = result.into();
+    let data = unsafe {
+        ArrayData::new_unchecked(
+            DataType::Boolean,
+            array.len(),
+            None,
+            null_bit_buffer,
+            0,
+            vec![buffer],
+            vec![],
+        )
+    };
+
+    Ok(BooleanArray::from(data))
 }
 
 #[cfg(test)]
