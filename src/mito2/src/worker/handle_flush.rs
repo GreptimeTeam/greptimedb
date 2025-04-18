@@ -29,43 +29,7 @@ use crate::region::MitoRegionRef;
 use crate::request::{FlushFailed, FlushFinished, OnFailure, OptionOutputTx};
 use crate::worker::RegionWorkerLoop;
 
-impl<S: LogStore> RegionWorkerLoop<S> {
-    /// Handles manual flush request.
-    pub(crate) async fn handle_flush_request(
-        &mut self,
-        region_id: RegionId,
-        request: RegionFlushRequest,
-        mut sender: OptionOutputTx,
-    ) {
-        let Some(region) = self.regions.flushable_region_or(region_id, &mut sender) else {
-            return;
-        };
-        // If a region is empty, the flush is skipped.
-        // Thus shuold update the high watermark when handling flush request instead of flush finished.
-        self.update_topic_latest_entry_id(&region);
-        info!(
-            "Region {} flush request, high watermark: {}",
-            region_id,
-            region.topic_latest_entry_id.load(Ordering::Relaxed)
-        );
-
-        let reason = if region.is_downgrading() {
-            FlushReason::Downgrading
-        } else {
-            FlushReason::Manual
-        };
-
-        let mut task =
-            self.new_flush_task(&region, reason, request.row_group_size, self.config.clone());
-        task.push_sender(sender);
-        if let Err(e) =
-            self.flush_scheduler
-                .schedule_flush(region.region_id, &region.version_control, task)
-        {
-            error!(e; "Failed to schedule flush task for region {}", region.region_id);
-        }
-    }
-
+impl<S> RegionWorkerLoop<S> {
     /// On region flush job failed.
     pub(crate) async fn handle_flush_failed(&mut self, region_id: RegionId, request: FlushFailed) {
         self.flush_scheduler.on_flush_failed(region_id, request.err);
@@ -138,6 +102,68 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         Ok(())
     }
 
+    /// Creates a flush task with specific `reason` for the `region`.
+    pub(crate) fn new_flush_task(
+        &self,
+        region: &MitoRegionRef,
+        reason: FlushReason,
+        row_group_size: Option<usize>,
+        engine_config: Arc<MitoConfig>,
+    ) -> RegionFlushTask {
+        RegionFlushTask {
+            region_id: region.region_id,
+            reason,
+            senders: Vec::new(),
+            request_sender: self.sender.clone(),
+            access_layer: region.access_layer.clone(),
+            listener: self.listener.clone(),
+            engine_config,
+            row_group_size,
+            cache_manager: self.cache_manager.clone(),
+            manifest_ctx: region.manifest_ctx.clone(),
+            index_options: region.version().options.index_options.clone(),
+        }
+    }
+}
+
+impl<S: LogStore> RegionWorkerLoop<S> {
+    /// Handles manual flush request.
+    pub(crate) async fn handle_flush_request(
+        &mut self,
+        region_id: RegionId,
+        request: RegionFlushRequest,
+        mut sender: OptionOutputTx,
+    ) {
+        let Some(region) = self.regions.flushable_region_or(region_id, &mut sender) else {
+            return;
+        };
+        // `update_topic_latest_entry_id` updates `topic_latest_entry_id` when memtables are empty.
+        // But the flush is skipped if memtables are empty. Thus should update the `topic_latest_entry_id`
+        // when handling flush request instead of in `schedule_flush` or `flush_finished`.
+        self.update_topic_latest_entry_id(&region);
+        info!(
+            "Region {} flush request, high watermark: {}",
+            region_id,
+            region.topic_latest_entry_id.load(Ordering::Relaxed)
+        );
+
+        let reason = if region.is_downgrading() {
+            FlushReason::Downgrading
+        } else {
+            FlushReason::Manual
+        };
+
+        let mut task =
+            self.new_flush_task(&region, reason, request.row_group_size, self.config.clone());
+        task.push_sender(sender);
+        if let Err(e) =
+            self.flush_scheduler
+                .schedule_flush(region.region_id, &region.version_control, task)
+        {
+            error!(e; "Failed to schedule flush task for region {}", region.region_id);
+        }
+    }
+
     /// Flushes regions periodically.
     pub(crate) fn flush_periodically(&mut self) -> Result<()> {
         let regions = self.regions.list_regions();
@@ -170,31 +196,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         Ok(())
     }
 
-    /// Creates a flush task with specific `reason` for the `region`.
-    pub(crate) fn new_flush_task(
-        &self,
-        region: &MitoRegionRef,
-        reason: FlushReason,
-        row_group_size: Option<usize>,
-        engine_config: Arc<MitoConfig>,
-    ) -> RegionFlushTask {
-        RegionFlushTask {
-            region_id: region.region_id,
-            reason,
-            senders: Vec::new(),
-            request_sender: self.sender.clone(),
-            access_layer: region.access_layer.clone(),
-            listener: self.listener.clone(),
-            engine_config,
-            row_group_size,
-            cache_manager: self.cache_manager.clone(),
-            manifest_ctx: region.manifest_ctx.clone(),
-            index_options: region.version().options.index_options.clone(),
-        }
-    }
-}
-
-impl<S: LogStore> RegionWorkerLoop<S> {
     /// On region flush job finished.
     pub(crate) async fn handle_flush_finished(
         &mut self,
