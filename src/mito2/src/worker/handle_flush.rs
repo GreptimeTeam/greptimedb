@@ -40,11 +40,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let Some(region) = self.regions.flushable_region_or(region_id, &mut sender) else {
             return;
         };
-        self.update_high_watermark(&region);
+        // If a region is empty, the flush is skipped.
+        // Thus shuold update the high watermark when handling flush request instead of flush finished.
+        self.update_topic_latest_entry_id(&region);
         info!(
             "Region {} flush request, high watermark: {}",
             region_id,
-            region.high_watermark_since_flush.load(Ordering::Relaxed)
+            region.topic_latest_entry_id.load(Ordering::Relaxed)
         );
 
         let reason = if region.is_downgrading() {
@@ -147,7 +149,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 // Already flushing or not writable.
                 continue;
             }
-            self.update_high_watermark(region);
+            self.update_topic_latest_entry_id(region);
 
             if region.last_flush_millis() < min_last_flush_time {
                 // If flush time of this region is earlier than `min_last_flush_time`, we can flush this region.
@@ -256,8 +258,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         self.listener.on_flush_success(region_id);
     }
 
-    /// Updates high watermark of the region when a flush request is scheduled but the memtable is empty.
-    pub(crate) fn update_high_watermark(&mut self, region: &MitoRegionRef) {
+    /// Updates the latest entry id since flush of the region.
+    /// **This is only used for remote WAL pruning.**
+    pub(crate) fn update_topic_latest_entry_id(&mut self, region: &MitoRegionRef) {
         if region.provider.is_remote_wal() && region.version().memtables.is_empty() {
             let high_watermark = self
                 .wal
@@ -266,7 +269,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 .unwrap_or(0);
             if high_watermark != 0 {
                 region
-                    .high_watermark_since_flush
+                    .topic_latest_entry_id
                     .store(high_watermark, Ordering::Relaxed);
             }
             info!(

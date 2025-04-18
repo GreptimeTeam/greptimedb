@@ -546,7 +546,7 @@ async fn test_flush_workers() {
 }
 
 #[apply(single_kafka_log_store_factory)]
-async fn test_update_high_watermark(factory: Option<LogStoreFactory>) {
+async fn test_update_topic_latest_entry_id(factory: Option<LogStoreFactory>) {
     common_telemetry::init_default_ut_logging();
     let Some(factory) = factory else {
         return;
@@ -585,7 +585,7 @@ async fn test_update_high_watermark(factory: Option<LogStoreFactory>) {
         .unwrap();
 
     let region = engine.get_region(region_id).unwrap();
-    assert_eq!(region.high_watermark_since_flush.load(Ordering::Relaxed), 0);
+    assert_eq!(region.topic_latest_entry_id.load(Ordering::Relaxed), 0);
 
     let rows = Rows {
         schema: column_schemas.clone(),
@@ -600,11 +600,11 @@ async fn test_update_high_watermark(factory: Option<LogStoreFactory>) {
         .unwrap();
     // Wait until flush is finished.
     listener.wait().await;
-    assert_eq!(region.high_watermark_since_flush.load(Ordering::Relaxed), 0);
+    assert_eq!(region.topic_latest_entry_id.load(Ordering::Relaxed), 0);
 
     engine
         .handle_request(region_id, RegionRequest::Flush(request.clone()))
         .await
         .unwrap();
-    assert_eq!(region.high_watermark_since_flush.load(Ordering::Relaxed), 1);
+    assert_eq!(region.topic_latest_entry_id.load(Ordering::Relaxed), 1);
 }

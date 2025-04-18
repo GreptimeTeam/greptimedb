@@ -57,7 +57,7 @@ pub struct KafkaLogStore {
     /// Ignore missing entries during read WAL.
     overwrite_entry_start_id: bool,
     /// High watermark for all topics.
-    /// 
+    ///
     /// Represents the offset of the last record in each topic. This is used to track
     /// the latest available data in Kafka topics.
     ///

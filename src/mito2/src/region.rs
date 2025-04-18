@@ -119,9 +119,16 @@ pub(crate) struct MitoRegion {
     last_compaction_millis: AtomicI64,
     /// Provider to get current time.
     time_provider: TimeProviderRef,
-    /// The highest watermark of remote WAL since last flushing.
-    /// Sends this to meta-srv for active remote WAL pruning.
-    pub(crate) high_watermark_since_flush: AtomicU64,
+    /// The topic's latest entry id since the region's last flushing.
+    /// **Only used for remote WAL pruning.**
+    ///
+    /// The value will be updated to the high watermark of the topic
+    /// if region receives a flush request or schedules a periodic flush task
+    /// and the region's memtable is empty.    
+    ///
+    /// There are no WAL entries in range [flushed_entry_id, topic_latest_entry_id_since_flush] for current region,
+    /// which means these WAL entries maybe able to be pruned up to `topic_latest_entry_id_since_flush`.
+    pub(crate) topic_latest_entry_id: AtomicU64,
     /// Memtable builder for the region.
     pub(crate) memtable_builder: MemtableBuilderRef,
     /// manifest stats
@@ -290,14 +297,14 @@ impl MitoRegion {
 
         let sst_usage = version.ssts.sst_usage();
         let index_usage = version.ssts.index_usage();
+        let flushed_entry_id = version.flushed_entry_id;
 
         let wal_usage = self.estimated_wal_usage(memtable_usage);
         let manifest_usage = self.stats.total_manifest_size();
         let num_rows = version.ssts.num_rows() + version.memtables.num_rows();
         let manifest_version = self.stats.manifest_version();
-        let flushed_entry_id = version
-            .flushed_entry_id
-            .max(self.high_watermark_since_flush.load(Ordering::Relaxed));
+
+        let topic_latest_entry_id_since_flush = self.topic_latest_entry_id.load(Ordering::Relaxed);
 
         RegionStatistic {
             num_rows,
@@ -310,6 +317,7 @@ impl MitoRegion {
                 manifest_version,
                 flushed_entry_id,
             },
+            topic_latest_entry_id: topic_latest_entry_id_since_flush,
         }
     }
 

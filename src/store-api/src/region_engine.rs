@@ -384,6 +384,9 @@ pub struct RegionStatistic {
     /// The details of the region.
     #[serde(default)]
     pub manifest: RegionManifestInfo,
+    /// The latest entry id of the region's remote WAL since last flush.
+    #[serde(default)]
+    pub topic_latest_entry_id: u64,
 }
 
 /// The manifest info of a region.
