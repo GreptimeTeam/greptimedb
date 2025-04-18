@@ -36,6 +36,7 @@ impl Inserter {
         decoder: &mut FlightDecoder,
         data: FlightData,
     ) -> error::Result<AffectedRows> {
+        let raw_flight_data = data.encode_to_vec();
         // Build region server requests
         let message = decoder
             .try_decode(data)
@@ -44,13 +45,13 @@ impl Inserter {
             return Ok(0);
         };
 
-        let data = FlightEncoder::default()
-            .encode(FlightMessage::Schema(decoder.schema().unwrap().clone()));
         // todo(hl): find a way to embed raw FlightData messages in greptimedb proto files so we don't have to encode here.
-        let schema_data = data.encode_to_vec();
-        let flight_data = data.encode_to_vec();
-        let record_batch = rb.df_record_batch();
+        // safety: when reach here schema must be present.
+        let schema_message = FlightEncoder::default()
+            .encode(FlightMessage::Schema(decoder.schema().unwrap().clone()));
+        let schema_data = schema_message.encode_to_vec();
 
+        let record_batch = rb.df_record_batch();
         let partition_rule = self
             .partition_manager
             .find_table_partition_rule(table_id)
@@ -68,7 +69,7 @@ impl Inserter {
                 .partition_manager
                 .find_region_leader(region_id)
                 .await
-                .unwrap();
+                .context(error::FindRegionLeaderSnafu)?;
             let selection = RegionSelection {
                 region_id: region_id.as_u64(),
                 selection: mask.values().inner().as_slice().to_vec(),
@@ -82,7 +83,7 @@ impl Inserter {
         for (peer, masks) in mask_per_datanode {
             let node_manager = self.node_manager.clone();
             let schema = schema_data.clone();
-            let payload = flight_data.clone();
+            let payload = raw_flight_data.clone();
 
             let handle: common_runtime::JoinHandle<error::Result<api::region::RegionResponse>> =
                 common_runtime::spawn_global(async move {
