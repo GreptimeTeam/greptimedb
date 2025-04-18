@@ -238,7 +238,7 @@ impl GrpcQueryHandler for Instance {
         };
 
         self.inserter
-            .handle_bulk_inserts(table_id, decoder, data)
+            .handle_bulk_insert(table_id, decoder, data)
             .await
             .context(TableOperationSnafu)
     }

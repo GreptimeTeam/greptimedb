@@ -329,7 +329,7 @@ fn make_region_truncate(truncate: TruncateRequest) -> Result<Vec<(RegionId, Regi
     )])
 }
 
-/// Convert [BulkInsertRequests] to [RegionRequest] and group by [RegionId].
+/// Convert [BulkInsertRequest] to [RegionRequest] and group by [RegionId].
 fn make_region_bulk_inserts(request: BulkInsertRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
     let Some(Body::ArrowIpc(request)) = request.body else {
         return Ok(vec![]);
