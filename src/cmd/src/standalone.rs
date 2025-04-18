@@ -524,9 +524,8 @@ impl StartCommand {
             ..Default::default()
         };
 
-        // TODO(discord9): for standalone not use grpc, but just somehow get a handler to frontend grpc client without
+        // for standalone not use grpc, but get a handler to frontend grpc client without
         // actually make a connection
-        let fe_server_addr = fe_opts.grpc.bind_addr.clone();
         let (frontend_client, frontend_instance_handler) =
             FrontendClient::from_empty_grpc_handler();
         let flow_builder = FlownodeBuilder::new(

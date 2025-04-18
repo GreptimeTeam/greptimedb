@@ -256,7 +256,6 @@ impl TreeNodeRewriter for AddAutoColumnRewriter {
             node = projection;
         }
 
-        // FIXME(discord9): just read plan.expr and do stuffs
         let mut exprs = node.expressions();
         let all_names = self
             .schema
