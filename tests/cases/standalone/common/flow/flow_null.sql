@@ -6,6 +6,8 @@ CREATE TABLE requests (
     service_ip STRING,
     val INT,
     ts TIMESTAMP TIME INDEX
+)WITH(
+    append_mode = 'true'
 );
 
 CREATE TABLE sum_val_in_reqs (
@@ -59,6 +61,8 @@ CREATE TABLE ngx_access_log (
     client STRING,
     country STRING,
     access_time TIMESTAMP TIME INDEX
+)WITH(
+    append_mode = 'true'
 );
 
 CREATE FLOW calc_ngx_country SINK TO ngx_country AS

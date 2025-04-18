@@ -8,6 +8,20 @@ CREATE TABLE distinct_basic (
 
 Affected Rows: 0
 
+-- should fail
+-- SQLNESS REPLACE id=\d+ id=REDACTED
+CREATE FLOW test_distinct_basic SINK TO out_distinct_basic AS
+SELECT
+    DISTINCT number as dis
+FROM
+    distinct_basic;
+
+Error: 3001(EngineExecuteQuery), Invalid query: Source table `greptime.public.distinct_basic`(id=REDACTED) has instant TTL, flow will only evaluate to empty results with such table, use a small ttl instead of instant
+
+ALTER TABLE distinct_basic SET 'ttl' = '5s';
+
+Affected Rows: 0
+
 CREATE FLOW test_distinct_basic SINK TO out_distinct_basic AS
 SELECT
     DISTINCT number as dis
@@ -24,7 +38,7 @@ VALUES
     (20, "2021-07-01 00:00:00.200"),
     (22, "2021-07-01 00:00:00.600");
 
-Affected Rows: 0
+Affected Rows: 3
 
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_distinct_basic');
@@ -49,7 +63,7 @@ SHOW CREATE TABLE distinct_basic;
 |                |                                                           |
 |                | ENGINE=mito                                               |
 |                | WITH(                                                     |
-|                |   ttl = 'instant'                                         |
+|                |   ttl = '5s'                                              |
 |                | )                                                         |
 +----------------+-----------------------------------------------------------+
 
@@ -84,8 +98,93 @@ FROM
 
 SELECT number FROM distinct_basic;
 
-++
-++
++--------+
+| number |
++--------+
+| 20     |
+| 22     |
++--------+
+
+-- SQLNESS SLEEP 6s
+ADMIN FLUSH_TABLE('distinct_basic');
+
++-------------------------------------+
+| ADMIN FLUSH_TABLE('distinct_basic') |
++-------------------------------------+
+| 0                                   |
++-------------------------------------+
+
+INSERT INTO
+    distinct_basic
+VALUES
+    (23, "2021-07-01 00:00:01.600");
+
+Affected Rows: 1
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('test_distinct_basic');
+
++-----------------------------------------+
+| ADMIN FLUSH_FLOW('test_distinct_basic') |
++-----------------------------------------+
+|  FLOW_FLUSHED  |
++-----------------------------------------+
+
+SHOW CREATE TABLE distinct_basic;
+
++----------------+-----------------------------------------------------------+
+| Table          | Create Table                                              |
++----------------+-----------------------------------------------------------+
+| distinct_basic | CREATE TABLE IF NOT EXISTS "distinct_basic" (             |
+|                |   "number" INT NULL,                                      |
+|                |   "ts" TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(), |
+|                |   TIME INDEX ("ts"),                                      |
+|                |   PRIMARY KEY ("number")                                  |
+|                | )                                                         |
+|                |                                                           |
+|                | ENGINE=mito                                               |
+|                | WITH(                                                     |
+|                |   ttl = '5s'                                              |
+|                | )                                                         |
++----------------+-----------------------------------------------------------+
+
+SHOW CREATE TABLE out_distinct_basic;
+
++--------------------+---------------------------------------------------+
+| Table              | Create Table                                      |
++--------------------+---------------------------------------------------+
+| out_distinct_basic | CREATE TABLE IF NOT EXISTS "out_distinct_basic" ( |
+|                    |   "dis" INT NULL,                                 |
+|                    |   "update_at" TIMESTAMP(3) NULL,                  |
+|                    |   "__ts_placeholder" TIMESTAMP(3) NOT NULL,       |
+|                    |   TIME INDEX ("__ts_placeholder"),                |
+|                    |   PRIMARY KEY ("dis")                             |
+|                    | )                                                 |
+|                    |                                                   |
+|                    | ENGINE=mito                                       |
+|                    |                                                   |
++--------------------+---------------------------------------------------+
+
+SELECT
+    dis
+FROM
+    out_distinct_basic;
+
++-----+
+| dis |
++-----+
+| 20  |
+| 22  |
+| 23  |
++-----+
+
+SELECT number FROM distinct_basic;
+
++--------+
+| number |
++--------+
+| 23     |
++--------+
 
 DROP FLOW test_distinct_basic;
 

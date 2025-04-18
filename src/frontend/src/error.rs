@@ -345,7 +345,7 @@ pub enum Error {
     SubstraitDecodeLogicalPlan {
         #[snafu(implicit)]
         location: Location,
-        source: substrait::error::Error,
+        source: common_query::error::Error,
     },
 }
 
