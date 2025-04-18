@@ -19,6 +19,7 @@ use common_telemetry::{info, warn};
 use crate::error::Result;
 use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
+use crate::metrics::{METRIC_META_HEARTBEAT_RATE, METRIC_META_HEARTBEAT_STAT_MEMORY_SIZE};
 
 pub struct ExtractStatHandler;
 
@@ -42,6 +43,8 @@ impl HeartbeatHandler for ExtractStatHandler {
 
         match Stat::try_from(req) {
             Ok(stat) => {
+                METRIC_META_HEARTBEAT_RATE.inc();
+                METRIC_META_HEARTBEAT_STAT_MEMORY_SIZE.observe(stat.memory_size() as f64);
                 let _ = acc.stat.insert(stat);
             }
             Err(Some(header)) => {

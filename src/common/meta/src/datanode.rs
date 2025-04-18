@@ -142,6 +142,43 @@ impl Stat {
         self.wcus = self.region_stats.iter().map(|s| s.wcus).sum();
         self.region_num = self.region_stats.len() as u64;
     }
+
+    pub fn memory_size(&self) -> usize {
+        // timestamp_millis, rcus, wcus
+        std::mem::size_of::<i64>() * 3 +
+        // id, region_num, node_epoch
+        std::mem::size_of::<u64>() * 3 +
+        // addr
+        std::mem::size_of::<String>() + self.addr.capacity() +
+        // region_stats
+        self.region_stats.iter().map(|s| s.memory_size()).sum::<usize>()
+    }
+}
+
+impl RegionStat {
+    pub fn memory_size(&self) -> usize {
+        // role
+        std::mem::size_of::<RegionRole>() +
+        // id
+        std::mem::size_of::<RegionId>() +
+        // rcus, wcus, approximate_bytes, num_rows
+        std::mem::size_of::<i64>() * 4 +
+        // memtable_size, manifest_size, sst_size, index_size
+        std::mem::size_of::<u64>() * 4 +
+        // engine
+        std::mem::size_of::<String>() + self.engine.capacity() +
+        // region_manifest
+        self.region_manifest.memory_size()
+    }
+}
+
+impl RegionManifestInfo {
+    pub fn memory_size(&self) -> usize {
+        match self {
+            RegionManifestInfo::Mito { .. } => std::mem::size_of::<u64>() * 2,
+            RegionManifestInfo::Metric { .. } => std::mem::size_of::<u64>() * 4,
+        }
+    }
 }
 
 impl TryFrom<&HeartbeatRequest> for Stat {
