@@ -385,8 +385,12 @@ pub struct RegionStatistic {
     #[serde(default)]
     pub manifest: RegionManifestInfo,
     /// The latest entry id of the region's remote WAL since last flush.
+    /// For metric engine, there're two latest entry ids, one for data and one for metadata.
+    /// TODO(weny): remove this two fields and use single instead.
     #[serde(default)]
-    pub topic_latest_entry_id: u64,
+    pub data_topic_latest_entry_id: u64,
+    #[serde(default)]
+    pub metadata_topic_latest_entry_id: u64,
 }
 
 /// The manifest info of a region.

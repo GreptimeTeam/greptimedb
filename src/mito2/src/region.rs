@@ -317,7 +317,8 @@ impl MitoRegion {
                 manifest_version,
                 flushed_entry_id,
             },
-            topic_latest_entry_id,
+            data_topic_latest_entry_id: topic_latest_entry_id,
+            metadata_topic_latest_entry_id: topic_latest_entry_id,
         }
     }
 
