@@ -15,11 +15,12 @@
 use ahash::{HashMap, HashMapExt};
 use api::v1::region::{
     bulk_insert_request, region_request, ArrowIpc, BulkInsertRequest, RegionRequest,
-    RegionSelection,
+    RegionRequestHeader, RegionSelection,
 };
 use common_base::AffectedRows;
 use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
 use common_grpc::FlightData;
+use common_telemetry::tracing_context::TracingContext;
 use prost::Message;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
@@ -88,7 +89,10 @@ impl Inserter {
             let handle: common_runtime::JoinHandle<error::Result<api::region::RegionResponse>> =
                 common_runtime::spawn_global(async move {
                     let request = RegionRequest {
-                        header: Default::default(),
+                        header: Some(RegionRequestHeader {
+                            tracing_context: TracingContext::from_current_span().to_w3c(),
+                            ..Default::default()
+                        }),
                         body: Some(region_request::Body::BulkInsert(BulkInsertRequest {
                             body: Some(bulk_insert_request::Body::ArrowIpc(ArrowIpc {
                                 schema,
