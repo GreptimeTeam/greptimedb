@@ -289,7 +289,8 @@ pub fn parse_manifest_infos_from_extensions(
     Ok(data_manifest_version)
 }
 
-pub async fn sync_regions(
+/// Sync follower regions on datanodes.
+pub async fn sync_follower_regions(
     context: &DdlContext,
     table_id: TableId,
     results: Vec<RegionResponse>,

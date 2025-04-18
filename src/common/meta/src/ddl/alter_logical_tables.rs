@@ -32,7 +32,7 @@ use store_api::metric_engine_consts::ALTER_PHYSICAL_EXTENSION_KEY;
 use strum::AsRefStr;
 use table::metadata::TableId;
 
-use crate::ddl::utils::{add_peer_context_if_needed, sync_regions};
+use crate::ddl::utils::{add_peer_context_if_needed, sync_follower_regions};
 use crate::ddl::DdlContext;
 use crate::error::{DecodeJsonSnafu, Error, MetadataCorruptionSnafu, Result};
 use crate::key::table_info::TableInfoValue;
@@ -175,7 +175,7 @@ impl AlterLogicalTablesProcedure {
         region_routes: &[RegionRoute],
     ) {
         let table_info = &self.data.physical_table_info.as_ref().unwrap().table_info;
-        if let Err(err) = sync_regions(
+        if let Err(err) = sync_follower_regions(
             &self.context,
             self.data.physical_table_id,
             results,

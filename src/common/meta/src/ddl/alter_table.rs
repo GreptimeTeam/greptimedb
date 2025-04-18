@@ -40,7 +40,7 @@ use table::table_reference::TableReference;
 
 use crate::cache_invalidator::Context;
 use crate::ddl::utils::{
-    add_peer_context_if_needed, handle_multiple_results, sync_regions, MultipleResults,
+    add_peer_context_if_needed, handle_multiple_results, sync_follower_regions, MultipleResults,
 };
 use crate::ddl::DdlContext;
 use crate::error::{AbortProcedureSnafu, Error, NoLeaderSnafu, PutPoisonSnafu, Result};
@@ -223,7 +223,7 @@ impl AlterTableProcedure {
     ) {
         // Safety: filled in `prepare` step.
         let table_info = self.data.table_info().unwrap();
-        if let Err(err) = sync_regions(
+        if let Err(err) = sync_follower_regions(
             &self.context,
             self.data.table_id(),
             results,
