@@ -47,9 +47,9 @@ use strum::{AsRefStr, IntoStaticStr};
 
 use crate::logstore::entry;
 use crate::metadata::{
-    ColumnMetadata, DecodeProtoSnafu, InvalidRawRegionRequestSnafu, InvalidRegionRequestSnafu,
-    InvalidSetRegionOptionRequestSnafu, InvalidUnsetRegionOptionRequestSnafu, MetadataError,
-    RegionMetadata, Result, UnexpectedSnafu,
+    ColumnMetadata, DecodeArrowIpcSnafu, DecodeProtoSnafu, FlightCodecSnafu,
+    InvalidRawRegionRequestSnafu, InvalidRegionRequestSnafu, InvalidSetRegionOptionRequestSnafu,
+    InvalidUnsetRegionOptionRequestSnafu, MetadataError, ProstSnafu, RegionMetadata, Result, UnexpectedSnafu,
 };
 use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use crate::mito_engine_options::{
@@ -331,16 +331,20 @@ fn make_region_truncate(truncate: TruncateRequest) -> Result<Vec<(RegionId, Regi
 
 /// Convert [BulkInsertRequests] to [RegionRequest] and group by [RegionId].
 fn make_region_bulk_inserts(request: BulkInsertRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
-    let Body::ArrowIpc(request) = request.body.unwrap();
+    let Some(Body::ArrowIpc(request)) = request.body else {
+        return Ok(vec![]);
+    };
 
     let mut region_requests: HashMap<u64, BulkInsertPayload> =
         HashMap::with_capacity(request.region_selection.len());
 
-    let schema_data = FlightData::decode(request.schema.as_slice()).unwrap();
-    let payload_data = FlightData::decode(request.payload.as_slice()).unwrap();
+    let schema_data = FlightData::decode(request.schema.as_slice()).context(ProstSnafu)?;
+    let payload_data = FlightData::decode(request.payload.as_slice()).context(ProstSnafu)?;
     let mut decoder = FlightDecoder::default();
-    let _schema_message = decoder.try_decode(schema_data).unwrap();
-    let FlightMessage::Recordbatch(rb) = decoder.try_decode(payload_data).unwrap() else {
+    let _schema_message = decoder.try_decode(schema_data).context(FlightCodecSnafu)?;
+    let FlightMessage::Recordbatch(rb) =
+        decoder.try_decode(payload_data).context(FlightCodecSnafu)?
+    else {
         unreachable!("Always expect record batch message after schema");
     };
 
@@ -351,8 +355,8 @@ fn make_region_bulk_inserts(request: BulkInsertRequest) -> Result<Vec<(RegionId,
             None,
         );
 
-        let region_batch =
-            arrow::compute::filter_record_batch(rb.df_record_batch(), &region_mask).unwrap();
+        let region_batch = arrow::compute::filter_record_batch(rb.df_record_batch(), &region_mask)
+            .context(DecodeArrowIpcSnafu)?;
         region_requests.insert(region_id, BulkInsertPayload::ArrowIpc(region_batch));
     }
 

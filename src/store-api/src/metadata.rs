@@ -973,6 +973,21 @@ pub enum MetadataError {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to encode/decode flight message"))]
+    FlightCodec {
+        source: common_grpc::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to decode prost message"))]
+    Prost {
+        #[snafu(source)]
+        error: prost::DecodeError,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for MetadataError {
