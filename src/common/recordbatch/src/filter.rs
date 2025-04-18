@@ -532,4 +532,84 @@ mod test {
             .unwrap();
         assert_eq!(col_filtered, &expected);
     }
+
+    #[test]
+    fn test_maybe_build_regex() {
+        // Test case for RegexMatch (case sensitive, non-negative)
+        let (regex, negative) = SimpleFilterEvaluator::maybe_build_regex(
+            Operator::RegexMatch,
+            &ScalarValue::Utf8(Some("a.*b".to_string())),
+        )
+        .unwrap();
+        assert!(regex.is_some());
+        assert!(!negative);
+        assert!(regex.unwrap().is_match("axxb"));
+
+        // Test case for RegexIMatch (case insensitive, non-negative)
+        let (regex, negative) = SimpleFilterEvaluator::maybe_build_regex(
+            Operator::RegexIMatch,
+            &ScalarValue::Utf8(Some("a.*b".to_string())),
+        )
+        .unwrap();
+        assert!(regex.is_some());
+        assert!(!negative);
+        assert!(regex.unwrap().is_match("AxxB"));
+
+        // Test case for RegexNotMatch (case sensitive, negative)
+        let (regex, negative) = SimpleFilterEvaluator::maybe_build_regex(
+            Operator::RegexNotMatch,
+            &ScalarValue::Utf8(Some("a.*b".to_string())),
+        )
+        .unwrap();
+        assert!(regex.is_some());
+        assert!(negative);
+
+        // Test case for RegexNotIMatch (case insensitive, negative)
+        let (regex, negative) = SimpleFilterEvaluator::maybe_build_regex(
+            Operator::RegexNotIMatch,
+            &ScalarValue::Utf8(Some("a.*b".to_string())),
+        )
+        .unwrap();
+        assert!(regex.is_some());
+        assert!(negative);
+
+        // Test with empty regex pattern
+        let (regex, negative) = SimpleFilterEvaluator::maybe_build_regex(
+            Operator::RegexMatch,
+            &ScalarValue::Utf8(Some("".to_string())),
+        )
+        .unwrap();
+        assert!(regex.is_none());
+        assert!(!negative);
+
+        // Test with non-regex operator
+        let (regex, negative) = SimpleFilterEvaluator::maybe_build_regex(
+            Operator::Eq,
+            &ScalarValue::Utf8(Some("a.*b".to_string())),
+        )
+        .unwrap();
+        assert!(regex.is_none());
+        assert!(!negative);
+
+        // Test with invalid regex pattern
+        let result = SimpleFilterEvaluator::maybe_build_regex(
+            Operator::RegexMatch,
+            &ScalarValue::Utf8(Some("a(b".to_string())),
+        );
+        assert!(result.is_err());
+
+        // Test with non-string value
+        let result = SimpleFilterEvaluator::maybe_build_regex(
+            Operator::RegexMatch,
+            &ScalarValue::Int64(Some(123)),
+        );
+        assert!(result.is_err());
+
+        // Test with null value
+        let result = SimpleFilterEvaluator::maybe_build_regex(
+            Operator::RegexMatch,
+            &ScalarValue::Utf8(None),
+        );
+        assert!(result.is_err());
+    }
 }
