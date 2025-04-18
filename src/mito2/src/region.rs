@@ -126,8 +126,8 @@ pub(crate) struct MitoRegion {
     /// if region receives a flush request or schedules a periodic flush task
     /// and the region's memtable is empty.    
     ///
-    /// There are no WAL entries in range [flushed_entry_id, topic_latest_entry_id_since_flush] for current region,
-    /// which means these WAL entries maybe able to be pruned up to `topic_latest_entry_id_since_flush`.
+    /// There are no WAL entries in range [flushed_entry_id, topic_latest_entry_id] for current region,
+    /// which means these WAL entries maybe able to be pruned up to `topic_latest_entry_id`.
     pub(crate) topic_latest_entry_id: AtomicU64,
     /// Memtable builder for the region.
     pub(crate) memtable_builder: MemtableBuilderRef,
@@ -304,7 +304,7 @@ impl MitoRegion {
         let num_rows = version.ssts.num_rows() + version.memtables.num_rows();
         let manifest_version = self.stats.manifest_version();
 
-        let topic_latest_entry_id_since_flush = self.topic_latest_entry_id.load(Ordering::Relaxed);
+        let topic_latest_entry_id = self.topic_latest_entry_id.load(Ordering::Relaxed);
 
         RegionStatistic {
             num_rows,
@@ -317,7 +317,7 @@ impl MitoRegion {
                 manifest_version,
                 flushed_entry_id,
             },
-            topic_latest_entry_id: topic_latest_entry_id_since_flush,
+            topic_latest_entry_id,
         }
     }
 
