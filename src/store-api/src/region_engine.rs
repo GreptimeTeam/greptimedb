@@ -549,6 +549,16 @@ impl RegionManifestInfo {
             } => Some(*metadata_flushed_entry_id),
         }
     }
+
+    /// Encodes a list of ([RegionId], [RegionManifestInfo]) to a byte array.
+    pub fn encode_list(manifest_infos: &[(RegionId, Self)]) -> serde_json::Result<Vec<u8>> {
+        serde_json::to_vec(manifest_infos)
+    }
+
+    /// Decodes a list of ([RegionId], [RegionManifestInfo]) from a byte array.
+    pub fn decode_list(value: &[u8]) -> serde_json::Result<Vec<(RegionId, Self)>> {
+        serde_json::from_slice(value)
+    }
 }
 
 impl Default for RegionManifestInfo {

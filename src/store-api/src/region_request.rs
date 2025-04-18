@@ -46,7 +46,7 @@ use crate::logstore::entry;
 use crate::metadata::{
     ColumnMetadata, DecodeArrowIpcSnafu, DecodeProtoSnafu, InvalidRawRegionRequestSnafu,
     InvalidRegionRequestSnafu, InvalidSetRegionOptionRequestSnafu,
-    InvalidUnsetRegionOptionRequestSnafu, MetadataError, RegionMetadata, Result,
+    InvalidUnsetRegionOptionRequestSnafu, MetadataError, RegionMetadata, Result, UnexpectedSnafu,
 };
 use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use crate::mito_engine_options::{
@@ -153,6 +153,10 @@ impl RegionRequest {
             region_request::Body::Drops(drops) => make_region_drops(drops),
             region_request::Body::Alters(alters) => make_region_alters(alters),
             region_request::Body::BulkInserts(bulk) => make_region_bulk_inserts(bulk),
+            region_request::Body::Sync(_) => UnexpectedSnafu {
+                reason: "Sync request should be handled separately by RegionServer",
+            }
+            .fail(),
         }
     }
 

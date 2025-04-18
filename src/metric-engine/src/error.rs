@@ -67,6 +67,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to serialize region manifest info"))]
+    SerializeRegionManifestInfo {
+        #[snafu(source)]
+        error: serde_json::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to decode base64 column value"))]
     DecodeColumnValue {
         #[snafu(source)]
@@ -304,7 +312,8 @@ impl ErrorExt for Error {
             | DecodeColumnValue { .. }
             | ParseRegionId { .. }
             | InvalidMetadata { .. }
-            | SetSkippingIndexOption { .. } => StatusCode::Unexpected,
+            | SetSkippingIndexOption { .. }
+            | SerializeRegionManifestInfo { .. } => StatusCode::Unexpected,
 
             PhysicalRegionNotFound { .. } | LogicalRegionNotFound { .. } => {
                 StatusCode::RegionNotFound

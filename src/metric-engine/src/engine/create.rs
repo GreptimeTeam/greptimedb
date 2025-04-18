@@ -51,7 +51,10 @@ use crate::error::{
     Result, SerializeColumnMetadataSnafu, UnexpectedRequestSnafu,
 };
 use crate::metrics::PHYSICAL_REGION_COUNT;
-use crate::utils::{self, to_data_region_id, to_metadata_region_id};
+use crate::utils::{
+    self, append_manifest_info, encode_manifest_info_to_extensions, to_data_region_id,
+    to_metadata_region_id,
+};
 
 const DEFAULT_TABLE_ID_SKIPPING_INDEX_GRANULARITY: u32 = 1024;
 
@@ -88,11 +91,15 @@ impl MetricEngineInner {
             if requests.len() == 1 {
                 let request = &requests.first().unwrap().1;
                 let physical_region_id = parse_physical_region_id(request)?;
+                let mut manifest_infos = Vec::with_capacity(1);
                 self.create_logical_regions(physical_region_id, requests, extension_return_value)
                     .await?;
+                append_manifest_info(&self.mito, physical_region_id, &mut manifest_infos);
+                encode_manifest_info_to_extensions(&manifest_infos, extension_return_value)?;
             } else {
                 let grouped_requests =
                     group_create_logical_region_requests_by_physical_region_id(requests)?;
+                let mut manifest_infos = Vec::with_capacity(grouped_requests.len());
                 for (physical_region_id, requests) in grouped_requests {
                     self.create_logical_regions(
                         physical_region_id,
@@ -100,7 +107,9 @@ impl MetricEngineInner {
                         extension_return_value,
                     )
                     .await?;
+                    append_manifest_info(&self.mito, physical_region_id, &mut manifest_infos);
                 }
+                encode_manifest_info_to_extensions(&manifest_infos, extension_return_value)?;
             }
         } else {
             return MissingRegionOptionSnafu {}.fail();

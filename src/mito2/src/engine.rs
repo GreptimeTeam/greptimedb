@@ -70,7 +70,7 @@ use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_recordbatch::SendableRecordBatchStream;
-use common_telemetry::tracing;
+use common_telemetry::{info, tracing};
 use common_wal::options::{WalOptions, WAL_OPTIONS_KEY};
 use futures::future::{join_all, try_join_all};
 use object_store::manager::ObjectStoreManagerRef;
@@ -80,6 +80,7 @@ use store_api::logstore::provider::Provider;
 use store_api::logstore::LogStore;
 use store_api::manifest::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
+use store_api::metric_engine_consts::MANIFEST_INFO_EXTENSION_KEY;
 use store_api::region_engine::{
     BatchResponses, RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef,
     RegionStatistic, SetRegionRoleStateResponse, SettableRegionRoleState, SyncManifestResponse,
@@ -223,6 +224,24 @@ impl MitoEngine {
     #[cfg(test)]
     pub(crate) fn get_region(&self, id: RegionId) -> Option<crate::region::MitoRegionRef> {
         self.inner.workers.get_region(id)
+    }
+
+    fn encode_manifest_info_to_extensions(
+        region_id: &RegionId,
+        manifest_info: RegionManifestInfo,
+        extensions: &mut HashMap<String, Vec<u8>>,
+    ) -> Result<()> {
+        let region_manifest_info = vec![(*region_id, manifest_info)];
+
+        extensions.insert(
+            MANIFEST_INFO_EXTENSION_KEY.to_string(),
+            RegionManifestInfo::encode_list(&region_manifest_info).context(SerdeJsonSnafu)?,
+        );
+        info!(
+            "Added manifest info: {:?} to extensions, region_id: {:?}",
+            region_manifest_info, region_id
+        );
+        Ok(())
     }
 }
 
@@ -557,11 +576,26 @@ impl RegionEngine for MitoEngine {
             .with_label_values(&[request.request_type()])
             .start_timer();
 
-        self.inner
+        let is_alter = matches!(request, RegionRequest::Alter(_));
+        let mut response = self
+            .inner
             .handle_request(region_id, request)
             .await
             .map(RegionResponse::new)
-            .map_err(BoxedError::new)
+            .map_err(BoxedError::new)?;
+
+        if is_alter {
+            if let Some(statistic) = self.region_statistic(region_id) {
+                Self::encode_manifest_info_to_extensions(
+                    &region_id,
+                    statistic.manifest,
+                    &mut response.extensions,
+                )
+                .map_err(BoxedError::new)?;
+            }
+        }
+
+        Ok(response)
     }
 
     #[tracing::instrument(skip_all)]
