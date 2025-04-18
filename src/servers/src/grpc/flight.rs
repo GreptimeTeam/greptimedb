@@ -261,11 +261,16 @@ pub(crate) struct PutRecordBatchRequest {
 
 impl PutRecordBatchRequest {
     fn try_new(table_name: TableName, flight_data: FlightData) -> Result<Self> {
-        let metadata: DoPutMetadata =
-            serde_json::from_slice(&flight_data.app_metadata).context(ParseJsonSnafu)?;
+        let request_id = if !flight_data.app_metadata.is_empty() {
+            let metadata: DoPutMetadata =
+                serde_json::from_slice(&flight_data.app_metadata).context(ParseJsonSnafu)?;
+            metadata.request_id()
+        } else {
+            0
+        };
         Ok(Self {
             table_name,
-            request_id: metadata.request_id(),
+            request_id,
             data: flight_data,
         })
     }
