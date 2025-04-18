@@ -126,7 +126,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(""))]
+    #[snafu(transparent)]
     DataFusion {
         #[snafu(source)]
         error: DataFusionError,

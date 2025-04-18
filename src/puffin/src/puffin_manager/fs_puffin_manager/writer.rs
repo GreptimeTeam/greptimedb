@@ -88,7 +88,13 @@ where
         Ok(written_bytes)
     }
 
-    async fn put_dir(&mut self, key: &str, dir_path: PathBuf, options: PutOptions) -> Result<u64> {
+    async fn put_dir(
+        &mut self,
+        key: &str,
+        dir_path: PathBuf,
+        options: PutOptions,
+        properties: HashMap<String, String>,
+    ) -> Result<u64> {
         ensure!(
             !self.blob_keys.contains(key),
             DuplicateBlobSnafu { blob: key }
@@ -150,7 +156,7 @@ where
             blob_type: key.to_string(),
             compressed_data: encoded.as_slice(),
             compression_codec: None,
-            properties: Default::default(),
+            properties,
         };
 
         written_bytes += self.puffin_file_writer.add_blob(dir_meta_blob).await?;

@@ -30,11 +30,9 @@ use crate::fulltext_index::error::{
     SerializeToJsonSnafu,
 };
 use crate::fulltext_index::tokenizer::{Analyzer, ChineseTokenizer, EnglishTokenizer};
-use crate::fulltext_index::Config;
+use crate::fulltext_index::{Config, KEY_FULLTEXT_CONFIG};
 
 const PIPE_BUFFER_SIZE_FOR_SENDING_BLOB: usize = 8192;
-
-pub const KEY_FULLTEXT_CONFIG: &str = "fulltext_config";
 
 /// `BloomFilterFulltextIndexCreator` is for creating a fulltext index using a bloom filter.
 pub struct BloomFilterFulltextIndexCreator {

@@ -135,6 +135,7 @@ pub fn new_downgrade_region_reply(
         payload: Some(Payload::Json(
             serde_json::to_string(&InstructionReply::DowngradeRegion(DowngradeRegionReply {
                 last_entry_id,
+                metadata_last_entry_id: None,
                 exists: exist,
                 error,
             }))

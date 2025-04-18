@@ -119,6 +119,16 @@ pub(crate) struct MitoRegion {
     last_compaction_millis: AtomicI64,
     /// Provider to get current time.
     time_provider: TimeProviderRef,
+    /// The topic's latest entry id since the region's last flushing.
+    /// **Only used for remote WAL pruning.**
+    ///
+    /// The value will be updated to the high watermark of the topic
+    /// if region receives a flush request or schedules a periodic flush task
+    /// and the region's memtable is empty.    
+    ///
+    /// There are no WAL entries in range [flushed_entry_id, topic_latest_entry_id] for current region,
+    /// which means these WAL entries maybe able to be pruned up to `topic_latest_entry_id`.
+    pub(crate) topic_latest_entry_id: AtomicU64,
     /// Memtable builder for the region.
     pub(crate) memtable_builder: MemtableBuilderRef,
     /// manifest stats
@@ -287,12 +297,14 @@ impl MitoRegion {
 
         let sst_usage = version.ssts.sst_usage();
         let index_usage = version.ssts.index_usage();
+        let flushed_entry_id = version.flushed_entry_id;
 
         let wal_usage = self.estimated_wal_usage(memtable_usage);
         let manifest_usage = self.stats.total_manifest_size();
         let num_rows = version.ssts.num_rows() + version.memtables.num_rows();
         let manifest_version = self.stats.manifest_version();
-        let flushed_entry_id = version.flushed_entry_id;
+
+        let topic_latest_entry_id = self.topic_latest_entry_id.load(Ordering::Relaxed);
 
         RegionStatistic {
             num_rows,
@@ -305,6 +317,8 @@ impl MitoRegion {
                 manifest_version,
                 flushed_entry_id,
             },
+            data_topic_latest_entry_id: topic_latest_entry_id,
+            metadata_topic_latest_entry_id: topic_latest_entry_id,
         }
     }
 

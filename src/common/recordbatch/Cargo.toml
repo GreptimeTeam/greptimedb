@@ -17,6 +17,7 @@ datafusion-common.workspace = true
 datatypes.workspace = true
 futures.workspace = true
 pin-project.workspace = true
+regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true

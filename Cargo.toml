@@ -77,7 +77,6 @@ clippy.print_stdout = "warn"
 clippy.print_stderr = "warn"
 clippy.dbg_macro = "warn"
 clippy.implicit_clone = "warn"
-clippy.readonly_write_lock = "allow"
 rust.unknown_lints = "deny"
 rust.unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
 
@@ -113,15 +112,15 @@ clap = { version = "4.4", features = ["derive"] }
 config = "0.13.0"
 crossbeam-utils = "0.8"
 dashmap = "6.1"
-datafusion = { git = "https://github.com/apache/datafusion.git", rev = "8ebed674dd71f8a466f658626877944cd16a4375" }
-datafusion-common = { git = "https://github.com/apache/datafusion.git", rev = "8ebed674dd71f8a466f658626877944cd16a4375" }
-datafusion-expr = { git = "https://github.com/apache/datafusion.git", rev = "8ebed674dd71f8a466f658626877944cd16a4375" }
-datafusion-functions = { git = "https://github.com/apache/datafusion.git", rev = "8ebed674dd71f8a466f658626877944cd16a4375" }
-datafusion-optimizer = { git = "https://github.com/apache/datafusion.git", rev = "8ebed674dd71f8a466f658626877944cd16a4375" }
-datafusion-physical-expr = { git = "https://github.com/apache/datafusion.git", rev = "8ebed674dd71f8a466f658626877944cd16a4375" }
-datafusion-physical-plan = { git = "https://github.com/apache/datafusion.git", rev = "8ebed674dd71f8a466f658626877944cd16a4375" }
-datafusion-sql = { git = "https://github.com/apache/datafusion.git", rev = "8ebed674dd71f8a466f658626877944cd16a4375" }
-datafusion-substrait = { git = "https://github.com/apache/datafusion.git", rev = "8ebed674dd71f8a466f658626877944cd16a4375" }
+datafusion = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "5bbedc6704162afb03478f56ffb629405a4e1220" }
+datafusion-common = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "5bbedc6704162afb03478f56ffb629405a4e1220" }
+datafusion-expr = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "5bbedc6704162afb03478f56ffb629405a4e1220" }
+datafusion-functions = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "5bbedc6704162afb03478f56ffb629405a4e1220" }
+datafusion-optimizer = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "5bbedc6704162afb03478f56ffb629405a4e1220" }
+datafusion-physical-expr = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "5bbedc6704162afb03478f56ffb629405a4e1220" }
+datafusion-physical-plan = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "5bbedc6704162afb03478f56ffb629405a4e1220" }
+datafusion-sql = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "5bbedc6704162afb03478f56ffb629405a4e1220" }
+datafusion-substrait = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "5bbedc6704162afb03478f56ffb629405a4e1220" }
 deadpool = "0.12"
 deadpool-postgres = "0.14"
 derive_builder = "0.20"
@@ -130,7 +129,7 @@ etcd-client = "0.14"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "dd4a1996982534636734674db66e44464b0c0d83" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "b6d9cffd43c4e6358805a798f17e03e232994b82" }
 hex = "0.4"
 http = "1"
 humantime = "2.1"
@@ -148,7 +147,7 @@ moka = "0.12"
 nalgebra = "0.33"
 notify = "8.0"
 num_cpus = "1.16"
-object_store_opendal = "0.49.0"
+object_store_opendal = "0.50"
 once_cell = "1.18"
 opentelemetry-proto = { version = "0.27", features = [
     "gen-tonic",
@@ -162,7 +161,7 @@ parquet = { version = "54.2", default-features = false, features = ["arrow", "as
 paste = "1.0"
 pin-project = "1.0"
 prometheus = { version = "0.13.3", features = ["process"] }
-promql-parser = { version = "0.5", features = ["ser"] }
+promql-parser = { version = "0.5.1", features = ["ser"] }
 prost = "0.13"
 raft-engine = { version = "0.4.1", default-features = false }
 rand = "0.9"

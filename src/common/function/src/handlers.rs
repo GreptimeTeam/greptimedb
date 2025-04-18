@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use catalog::CatalogManagerRef;
 use common_base::AffectedRows;
 use common_meta::rpc::procedure::{
     AddRegionFollowerRequest, MigrateRegionRequest, ProcedureStateResponse,
@@ -72,6 +73,9 @@ pub trait ProcedureServiceHandler: Send + Sync {
 
     /// Remove a region follower from a region.
     async fn remove_region_follower(&self, request: RemoveRegionFollowerRequest) -> Result<()>;
+
+    /// Get the catalog manager
+    fn catalog_manager(&self) -> &CatalogManagerRef;
 }
 
 /// This flow service handler is only use for flush flow for now.

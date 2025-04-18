@@ -483,6 +483,18 @@ impl LogStore for RaftEngineLogStore {
         );
         Ok(())
     }
+
+    fn high_watermark(&self, provider: &Provider) -> Result<EntryId> {
+        let ns = provider
+            .as_raft_engine_provider()
+            .with_context(|| InvalidProviderSnafu {
+                expected: RaftEngineProvider::type_name(),
+                actual: provider.type_name(),
+            })?;
+        let namespace_id = ns.id;
+        let last_index = self.engine.last_index(namespace_id).unwrap_or(0);
+        Ok(last_index)
+    }
 }
 
 #[derive(Debug, Clone)]

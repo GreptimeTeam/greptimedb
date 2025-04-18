@@ -43,8 +43,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::error::{
-    CatalogSnafu, DataFusionSnafu, RangeQuerySnafu, Result, TimeIndexNotFoundSnafu,
-    UnknownTableSnafu,
+    CatalogSnafu, RangeQuerySnafu, Result, TimeIndexNotFoundSnafu, UnknownTableSnafu,
 };
 use crate::plan::ExtractExpr;
 use crate::range_select::plan::{Fill, RangeFn, RangeSelect};
@@ -385,8 +384,7 @@ impl RangePlanRewriter {
                 let new_expr = expr
                     .iter()
                     .map(|expr| expr.clone().rewrite(&mut range_rewriter).map(|x| x.data))
-                    .collect::<DFResult<Vec<_>>>()
-                    .context(DataFusionSnafu)?;
+                    .collect::<DFResult<Vec<_>>>()?;
                 if range_rewriter.by.is_empty() {
                     range_rewriter.by = default_by;
                 }
@@ -408,9 +406,7 @@ impl RangePlanRewriter {
                 } else {
                     let project_plan = LogicalPlanBuilder::from(range_plan)
                         .project(new_expr)
-                        .context(DataFusionSnafu)?
-                        .build()
-                        .context(DataFusionSnafu)?;
+                        .and_then(|x| x.build())?;
                     Ok(Some(project_plan))
                 }
             }
@@ -436,8 +432,7 @@ impl RangePlanRewriter {
                                 }
                             );
                             LogicalPlanBuilder::from(inputs[0].clone())
-                                .explain(*verbose, true)
-                                .context(DataFusionSnafu)?
+                                .explain(*verbose, true)?
                                 .build()
                         }
                         LogicalPlan::Explain(Explain { verbose, .. }) => {
@@ -448,8 +443,7 @@ impl RangePlanRewriter {
                                 }
                             );
                             LogicalPlanBuilder::from(inputs[0].clone())
-                                .explain(*verbose, false)
-                                .context(DataFusionSnafu)?
+                                .explain(*verbose, false)?
                                 .build()
                         }
                         LogicalPlan::Distinct(Distinct::On(DistinctOn {
@@ -470,13 +464,11 @@ impl RangePlanRewriter {
                                     on_expr.clone(),
                                     select_expr.clone(),
                                     sort_expr.clone(),
-                                )
-                                .context(DataFusionSnafu)?
+                                )?
                                 .build()
                         }
                         _ => plan.with_new_exprs(plan.expressions_consider_join(), inputs),
-                    }
-                    .context(DataFusionSnafu)?;
+                    }?;
                     Ok(Some(plan))
                 } else {
                     Ok(None)
@@ -606,8 +598,6 @@ fn interval_only_in_expr(expr: &Expr) -> bool {
 #[cfg(test)]
 mod test {
 
-    use std::error::Error;
-
     use arrow::datatypes::IntervalUnit;
     use catalog::memory::MemoryCatalogManager;
     use catalog::RegisterTableRequest;
@@ -621,6 +611,7 @@ mod test {
     use table::test_util::EmptyTable;
 
     use super::*;
+    use crate::options::QueryOptions;
     use crate::parser::QueryLanguageParser;
     use crate::{QueryEngineFactory, QueryEngineRef};
 
@@ -673,7 +664,16 @@ mod test {
                 table,
             })
             .is_ok());
-        QueryEngineFactory::new(catalog_list, None, None, None, None, false).query_engine()
+        QueryEngineFactory::new(
+            catalog_list,
+            None,
+            None,
+            None,
+            None,
+            false,
+            QueryOptions::default(),
+        )
+        .query_engine()
     }
 
     async fn do_query(sql: &str) -> Result<LogicalPlan> {
@@ -825,12 +825,7 @@ mod test {
     /// the right argument is `range_fn(avg(field_0), '5m', 'NULL', '0', '1h')`
     async fn range_argument_err_1() {
         let query = r#"SELECT range_fn('5m', avg(field_0), 'NULL', '1', tag_0, '1h') FROM test group by tag_0;"#;
-        let error = do_query(query)
-            .await
-            .unwrap_err()
-            .source()
-            .unwrap()
-            .to_string();
+        let error = do_query(query).await.unwrap_err().to_string();
         assert_eq!(
             error,
             "Error during planning: Illegal argument `Utf8(\"5m\")` in range select query"
@@ -840,12 +835,7 @@ mod test {
     #[tokio::test]
     async fn range_argument_err_2() {
         let query = r#"SELECT range_fn(avg(field_0), 5, 'NULL', '1', tag_0, '1h') FROM test group by tag_0;"#;
-        let error = do_query(query)
-            .await
-            .unwrap_err()
-            .source()
-            .unwrap()
-            .to_string();
+        let error = do_query(query).await.unwrap_err().to_string();
         assert_eq!(
             error,
             "Error during planning: Illegal argument `Int64(5)` in range select query"

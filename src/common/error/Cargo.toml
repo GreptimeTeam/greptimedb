@@ -12,3 +12,6 @@ http.workspace = true
 snafu.workspace = true
 strum.workspace = true
 tonic.workspace = true
+
+[dev-dependencies]
+common-macro.workspace = true

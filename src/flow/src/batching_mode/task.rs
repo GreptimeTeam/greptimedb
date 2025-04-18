@@ -43,7 +43,7 @@ use tokio::sync::oneshot;
 use tokio::sync::oneshot::error::TryRecvError;
 use tokio::time::Instant;
 
-use crate::adapter::{FlowId, AUTO_CREATED_PLACEHOLDER_TS_COL, AUTO_CREATED_UPDATE_AT_TS_COL};
+use crate::adapter::{AUTO_CREATED_PLACEHOLDER_TS_COL, AUTO_CREATED_UPDATE_AT_TS_COL};
 use crate::batching_mode::frontend_client::FrontendClient;
 use crate::batching_mode::state::TaskState;
 use crate::batching_mode::time_window::TimeWindowExpr;
@@ -60,7 +60,7 @@ use crate::error::{
 use crate::metrics::{
     METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME, METRIC_FLOW_BATCHING_ENGINE_SLOW_QUERY,
 };
-use crate::Error;
+use crate::{Error, FlowId};
 
 /// The task's config, immutable once created
 #[derive(Clone)]

@@ -1691,7 +1691,7 @@ dependencies = [
  "humantime",
  "meta-client",
  "nu-ansi-term",
- "opendal",
+ "opendal 0.51.2",
  "query",
  "rand 0.9.0",
  "reqwest",
@@ -1718,6 +1718,7 @@ dependencies = [
  "arrow-flight",
  "async-stream",
  "async-trait",
+ "base64 0.22.1",
  "common-catalog",
  "common-error",
  "common-grpc",
@@ -1728,6 +1729,7 @@ dependencies = [
  "common-recordbatch",
  "common-telemetry",
  "enum_dispatch",
+ "futures",
  "futures-util",
  "lazy_static",
  "moka",
@@ -1832,7 +1834,6 @@ dependencies = [
  "regex",
  "reqwest",
  "rexpect",
- "rustyline",
  "serde",
  "serde_json",
  "servers",
@@ -1989,6 +1990,7 @@ dependencies = [
 name = "common-error"
 version = "0.14.0"
 dependencies = [
+ "common-macro",
  "http 1.1.0",
  "snafu 0.8.5",
  "strum 0.27.1",
@@ -2015,6 +2017,7 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "bincode",
+ "catalog",
  "chrono",
  "common-base",
  "common-catalog",
@@ -2096,8 +2099,11 @@ dependencies = [
  "lazy_static",
  "prost 0.13.5",
  "rand 0.9.0",
+ "serde",
+ "serde_json",
  "snafu 0.8.5",
  "tokio",
+ "tokio-util",
  "tonic 0.12.3",
  "tower 0.5.2",
 ]
@@ -2309,6 +2315,7 @@ dependencies = [
  "datatypes",
  "futures",
  "pin-project",
+ "regex",
  "serde",
  "serde_json",
  "snafu 0.8.5",
@@ -2895,7 +2902,7 @@ checksum = "e8566979429cf69b49a5c740c60791108e86440e8be149bbea4fe54d2c32d6e2"
 [[package]]
 name = "datafusion"
 version = "45.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=8ebed674dd71f8a466f658626877944cd16a4375#8ebed674dd71f8a466f658626877944cd16a4375"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=5bbedc6704162afb03478f56ffb629405a4e1220#5bbedc6704162afb03478f56ffb629405a4e1220"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -2946,7 +2953,7 @@ dependencies = [
 [[package]]
 name = "datafusion-catalog"
 version = "45.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=8ebed674dd71f8a466f658626877944cd16a4375#8ebed674dd71f8a466f658626877944cd16a4375"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=5bbedc6704162afb03478f56ffb629405a4e1220#5bbedc6704162afb03478f56ffb629405a4e1220"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2966,7 +2973,7 @@ dependencies = [
 [[package]]
 name = "datafusion-catalog-listing"
 version = "45.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=8ebed674dd71f8a466f658626877944cd16a4375#8ebed674dd71f8a466f658626877944cd16a4375"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=5bbedc6704162afb03478f56ffb629405a4e1220#5bbedc6704162afb03478f56ffb629405a4e1220"
 dependencies = [
  "arrow",
  "arrow-schema",
@@ -2989,7 +2996,7 @@ dependencies = [
 [[package]]
 name = "datafusion-common"
 version = "45.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=8ebed674dd71f8a466f658626877944cd16a4375#8ebed674dd71f8a466f658626877944cd16a4375"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=5bbedc6704162afb03478f56ffb629405a4e1220#5bbedc6704162afb03478f56ffb629405a4e1220"
 dependencies = [
  "ahash 0.8.11",
  "arrow",
@@ -3014,7 +3021,7 @@ dependencies = [
 [[package]]
 name = "datafusion-common-runtime"
 version = "45.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=8ebed674dd71f8a466f658626877944cd16a4375#8ebed674dd71f8a466f658626877944cd16a4375"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=5bbedc6704162afb03478f56ffb629405a4e1220#5bbedc6704162afb03478f56ffb629405a4e1220"
 dependencies = [
  "log",
  "tokio",
@@ -3023,12 +3030,12 @@ dependencies = [
 [[package]]
 name = "datafusion-doc"
 version = "45.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=8ebed674dd71f8a466f658626877944cd16a4375#8ebed674dd71f8a466f658626877944cd16a4375"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=5bbedc6704162afb03478f56ffb629405a4e1220#5bbedc6704162afb03478f56ffb629405a4e1220"
 
 [[package]]
 name = "datafusion-execution"
 version = "45.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=8ebed674dd71f8a466f658626877944cd16a4375#8ebed674dd71f8a466f658626877944cd16a4375"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=5bbedc6704162afb03478f56ffb629405a4e1220#5bbedc6704162afb03478f56ffb629405a4e1220"
 dependencies = [
  "arrow",
  "dashmap",
@@ -3046,7 +3053,7 @@ dependencies = [
 [[package]]
 name = "datafusion-expr"
 version = "45.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=8ebed674dd71f8a466f658626877944cd16a4375#8ebed674dd71f8a466f658626877944cd16a4375"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=5bbedc6704162afb03478f56ffb629405a4e1220#5bbedc6704162afb03478f56ffb629405a4e1220"
 dependencies = [
  "arrow",
  "chrono",
@@ -3066,7 +3073,7 @@ dependencies = [
 [[package]]
 name = "datafusion-expr-common"
 version = "45.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=8ebed674dd71f8a466f658626877944cd16a4375#8ebed674dd71f8a466f658626877944cd16a4375"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=5bbedc6704162afb03478f56ffb629405a4e1220#5bbedc6704162afb03478f56ffb629405a4e1220"
 dependencies = [
  "arrow",
  "datafusion-common",
@@ -3077,7 +3084,7 @@ dependencies = [
 [[package]]
 name = "datafusion-functions"
 version = "45.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=8ebed674dd71f8a466f658626877944cd16a4375#8ebed674dd71f8a466f658626877944cd16a4375"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=5bbedc6704162afb03478f56ffb629405a4e1220#5bbedc6704162afb03478f56ffb629405a4e1220"
 dependencies = [
  "arrow",
  "arrow-buffer",
@@ -3106,7 +3113,7 @@ dependencies = [
 [[package]]
 name = "datafusion-functions-aggregate"
 version = "45.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=8ebed674dd71f8a466f658626877944cd16a4375#8ebed674dd71f8a466f658626877944cd16a4375"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=5bbedc6704162afb03478f56ffb629405a4e1220#5bbedc6704162afb03478f56ffb629405a4e1220"
 dependencies = [
  "ahash 0.8.11",
  "arrow",
@@ -3127,7 +3134,7 @@ dependencies = [
 [[package]]
 name = "datafusion-functions-aggregate-common"
 version = "45.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=8ebed674dd71f8a466f658626877944cd16a4375#8ebed674dd71f8a466f658626877944cd16a4375"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=5bbedc6704162afb03478f56ffb629405a4e1220#5bbedc6704162afb03478f56ffb629405a4e1220"
 dependencies = [
  "ahash 0.8.11",
  "arrow",
@@ -3139,7 +3146,7 @@ dependencies = [
 [[package]]
 name = "datafusion-functions-nested"
 version = "45.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=8ebed674dd71f8a466f658626877944cd16a4375#8ebed674dd71f8a466f658626877944cd16a4375"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=5bbedc6704162afb03478f56ffb629405a4e1220#5bbedc6704162afb03478f56ffb629405a4e1220"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -3161,7 +3168,7 @@ dependencies = [
 [[package]]
 name = "datafusion-functions-table"
 version = "45.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=8ebed674dd71f8a466f658626877944cd16a4375#8ebed674dd71f8a466f658626877944cd16a4375"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=5bbedc6704162afb03478f56ffb629405a4e1220#5bbedc6704162afb03478f56ffb629405a4e1220"
 dependencies = [
  "arrow",
  "async-trait",
@@ -3176,7 +3183,7 @@ dependencies = [
 [[package]]
 name = "datafusion-functions-window"
 version = "45.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=8ebed674dd71f8a466f658626877944cd16a4375#8ebed674dd71f8a466f658626877944cd16a4375"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=5bbedc6704162afb03478f56ffb629405a4e1220#5bbedc6704162afb03478f56ffb629405a4e1220"
 dependencies = [
  "datafusion-common",
  "datafusion-doc",
@@ -3192,7 +3199,7 @@ dependencies = [
 [[package]]
 name = "datafusion-functions-window-common"
 version = "45.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=8ebed674dd71f8a466f658626877944cd16a4375#8ebed674dd71f8a466f658626877944cd16a4375"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=5bbedc6704162afb03478f56ffb629405a4e1220#5bbedc6704162afb03478f56ffb629405a4e1220"
 dependencies = [
  "datafusion-common",
  "datafusion-physical-expr-common",
@@ -3201,7 +3208,7 @@ dependencies = [
 [[package]]
 name = "datafusion-macros"
 version = "45.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=8ebed674dd71f8a466f658626877944cd16a4375#8ebed674dd71f8a466f658626877944cd16a4375"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=5bbedc6704162afb03478f56ffb629405a4e1220#5bbedc6704162afb03478f56ffb629405a4e1220"
 dependencies = [
  "datafusion-expr",
  "quote",
@@ -3211,7 +3218,7 @@ dependencies = [
 [[package]]
 name = "datafusion-optimizer"
 version = "45.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=8ebed674dd71f8a466f658626877944cd16a4375#8ebed674dd71f8a466f658626877944cd16a4375"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=5bbedc6704162afb03478f56ffb629405a4e1220#5bbedc6704162afb03478f56ffb629405a4e1220"
 dependencies = [
  "arrow",
  "chrono",
@@ -3229,7 +3236,7 @@ dependencies = [
 [[package]]
 name = "datafusion-physical-expr"
 version = "45.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=8ebed674dd71f8a466f658626877944cd16a4375#8ebed674dd71f8a466f658626877944cd16a4375"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=5bbedc6704162afb03478f56ffb629405a4e1220#5bbedc6704162afb03478f56ffb629405a4e1220"
 dependencies = [
  "ahash 0.8.11",
  "arrow",
@@ -3252,7 +3259,7 @@ dependencies = [
 [[package]]
 name = "datafusion-physical-expr-common"
 version = "45.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=8ebed674dd71f8a466f658626877944cd16a4375#8ebed674dd71f8a466f658626877944cd16a4375"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=5bbedc6704162afb03478f56ffb629405a4e1220#5bbedc6704162afb03478f56ffb629405a4e1220"
 dependencies = [
  "ahash 0.8.11",
  "arrow",
@@ -3265,7 +3272,7 @@ dependencies = [
 [[package]]
 name = "datafusion-physical-optimizer"
 version = "45.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=8ebed674dd71f8a466f658626877944cd16a4375#8ebed674dd71f8a466f658626877944cd16a4375"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=5bbedc6704162afb03478f56ffb629405a4e1220#5bbedc6704162afb03478f56ffb629405a4e1220"
 dependencies = [
  "arrow",
  "arrow-schema",
@@ -3286,7 +3293,7 @@ dependencies = [
 [[package]]
 name = "datafusion-physical-plan"
 version = "45.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=8ebed674dd71f8a466f658626877944cd16a4375#8ebed674dd71f8a466f658626877944cd16a4375"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=5bbedc6704162afb03478f56ffb629405a4e1220#5bbedc6704162afb03478f56ffb629405a4e1220"
 dependencies = [
  "ahash 0.8.11",
  "arrow",
@@ -3316,7 +3323,7 @@ dependencies = [
 [[package]]
 name = "datafusion-sql"
 version = "45.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=8ebed674dd71f8a466f658626877944cd16a4375#8ebed674dd71f8a466f658626877944cd16a4375"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=5bbedc6704162afb03478f56ffb629405a4e1220#5bbedc6704162afb03478f56ffb629405a4e1220"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -3334,7 +3341,7 @@ dependencies = [
 [[package]]
 name = "datafusion-substrait"
 version = "45.0.0"
-source = "git+https://github.com/apache/datafusion.git?rev=8ebed674dd71f8a466f658626877944cd16a4375#8ebed674dd71f8a466f658626877944cd16a4375"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=5bbedc6704162afb03478f56ffb629405a4e1220#5bbedc6704162afb03478f56ffb629405a4e1220"
 dependencies = [
  "async-recursion",
  "async-trait",
@@ -4720,7 +4727,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=dd4a1996982534636734674db66e44464b0c0d83#dd4a1996982534636734674db66e44464b0c0d83"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=b6d9cffd43c4e6358805a798f17e03e232994b82#b6d9cffd43c4e6358805a798f17e03e232994b82"
 dependencies = [
  "prost 0.13.5",
  "serde",
@@ -5589,6 +5596,7 @@ dependencies = [
  "greptime-proto",
  "itertools 0.14.0",
  "jieba-rs",
+ "lazy_static",
  "mockall",
  "pin-project",
  "prost 0.13.5",
@@ -6408,6 +6416,7 @@ dependencies = [
  "common-test-util",
  "common-time",
  "common-wal",
+ "dashmap",
  "delta-encoding",
  "derive_builder 0.20.1",
  "futures",
@@ -7585,7 +7594,7 @@ dependencies = [
  "lazy_static",
  "md5",
  "moka",
- "opendal",
+ "opendal 0.52.0",
  "prometheus",
  "tokio",
  "uuid",
@@ -7614,9 +7623,9 @@ dependencies = [
 
 [[package]]
 name = "object_store_opendal"
-version = "0.49.1"
+version = "0.50.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b18eb960885330175ec89daa991b0bc9050dc7f259b31a887fbfbb297312f83"
+checksum = "59db4de9230e630346e3fd821e2b8d1fd03ddd509c32c964836588e82241762a"
 dependencies = [
  "async-trait",
  "bytes",
@@ -7624,7 +7633,7 @@ dependencies = [
  "futures",
  "futures-util",
  "object_store",
- "opendal",
+ "opendal 0.52.0",
  "pin-project",
  "tokio",
 ]
@@ -7655,6 +7664,35 @@ name = "opendal"
 version = "0.51.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b1063ea459fa9e94584115743b06330f437902dd1d9f692b863ef1875a20548"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "backon",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "crc32c",
+ "futures",
+ "getrandom 0.2.15",
+ "http 1.1.0",
+ "log",
+ "md-5",
+ "once_cell",
+ "percent-encoding",
+ "quick-xml 0.36.2",
+ "reqsign",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "opendal"
+version = "0.52.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a55c840b5a6ad96106d6c0612fabb8f35a5ace826e0474fc55ebda33042b8d33"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8135,10 +8173,13 @@ dependencies = [
  "common-macro",
  "common-meta",
  "common-query",
+ "criterion 0.5.1",
  "datafusion-common",
  "datafusion-expr",
+ "datafusion-physical-expr",
  "datatypes",
  "itertools 0.14.0",
+ "rand 0.8.5",
  "serde",
  "serde_json",
  "session",
@@ -8852,9 +8893,9 @@ dependencies = [
 
 [[package]]
 name = "promql-parser"
-version = "0.5.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c6b1429bdd199d53bd58b745075c1652efedbe2746e5d4f0d56d3184dda48ec"
+checksum = "60d851f6523a8215e2fbf86b6cef4548433f8b76092e9ffb607105de52ae63fd"
 dependencies = [
  "cfgrammar",
  "chrono",
@@ -8928,7 +8969,7 @@ dependencies = [
  "log",
  "multimap",
  "once_cell",
- "petgraph 0.6.5",
+ "petgraph 0.7.1",
  "prettyplease",
  "prost 0.13.5",
  "prost-types 0.13.5",
@@ -11008,6 +11049,7 @@ dependencies = [
  "sqlparser_derive 0.1.1",
  "store-api",
  "table",
+ "uuid",
 ]
 
 [[package]]
@@ -12051,6 +12093,7 @@ dependencies = [
  "tower 0.5.2",
  "url",
  "uuid",
+ "yaml-rust",
  "zstd 0.13.2",
 ]
 

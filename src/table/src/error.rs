@@ -172,6 +172,9 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Invalid table name: '{s}'"))]
+    InvalidTableName { s: String },
 }
 
 impl ErrorExt for Error {
@@ -197,7 +200,8 @@ impl ErrorExt for Error {
             Error::MissingTimeIndexColumn { .. } => StatusCode::IllegalState,
             Error::InvalidTableOptionValue { .. }
             | Error::SetSkippingOptions { .. }
-            | Error::UnsetSkippingOptions { .. } => StatusCode::InvalidArguments,
+            | Error::UnsetSkippingOptions { .. }
+            | Error::InvalidTableName { .. } => StatusCode::InvalidArguments,
         }
     }
 

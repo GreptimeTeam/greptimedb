@@ -14,6 +14,7 @@
 
 //! Handling flush related requests.
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use common_telemetry::{error, info};
@@ -29,34 +30,6 @@ use crate::request::{FlushFailed, FlushFinished, OnFailure, OptionOutputTx};
 use crate::worker::RegionWorkerLoop;
 
 impl<S> RegionWorkerLoop<S> {
-    /// Handles manual flush request.
-    pub(crate) async fn handle_flush_request(
-        &mut self,
-        region_id: RegionId,
-        request: RegionFlushRequest,
-        mut sender: OptionOutputTx,
-    ) {
-        let Some(region) = self.regions.flushable_region_or(region_id, &mut sender) else {
-            return;
-        };
-
-        let reason = if region.is_downgrading() {
-            FlushReason::Downgrading
-        } else {
-            FlushReason::Manual
-        };
-
-        let mut task =
-            self.new_flush_task(&region, reason, request.row_group_size, self.config.clone());
-        task.push_sender(sender);
-        if let Err(e) =
-            self.flush_scheduler
-                .schedule_flush(region.region_id, &region.version_control, task)
-        {
-            error!(e; "Failed to schedule flush task for region {}", region.region_id);
-        }
-    }
-
     /// On region flush job failed.
     pub(crate) async fn handle_flush_failed(&mut self, region_id: RegionId, request: FlushFailed) {
         self.flush_scheduler.on_flush_failed(region_id, request.err);
@@ -129,37 +102,6 @@ impl<S> RegionWorkerLoop<S> {
         Ok(())
     }
 
-    /// Flushes regions periodically.
-    pub(crate) fn flush_periodically(&mut self) -> Result<()> {
-        let regions = self.regions.list_regions();
-        let now = self.time_provider.current_time_millis();
-        let min_last_flush_time = now - self.config.auto_flush_interval.as_millis() as i64;
-
-        for region in &regions {
-            if self.flush_scheduler.is_flush_requested(region.region_id) || !region.is_writable() {
-                // Already flushing or not writable.
-                continue;
-            }
-
-            if region.last_flush_millis() < min_last_flush_time {
-                // If flush time of this region is earlier than `min_last_flush_time`, we can flush this region.
-                let task = self.new_flush_task(
-                    region,
-                    FlushReason::Periodically,
-                    None,
-                    self.config.clone(),
-                );
-                self.flush_scheduler.schedule_flush(
-                    region.region_id,
-                    &region.version_control,
-                    task,
-                )?;
-            }
-        }
-
-        Ok(())
-    }
-
     /// Creates a flush task with specific `reason` for the `region`.
     pub(crate) fn new_flush_task(
         &self,
@@ -185,6 +127,75 @@ impl<S> RegionWorkerLoop<S> {
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
+    /// Handles manual flush request.
+    pub(crate) async fn handle_flush_request(
+        &mut self,
+        region_id: RegionId,
+        request: RegionFlushRequest,
+        mut sender: OptionOutputTx,
+    ) {
+        let Some(region) = self.regions.flushable_region_or(region_id, &mut sender) else {
+            return;
+        };
+        // `update_topic_latest_entry_id` updates `topic_latest_entry_id` when memtables are empty.
+        // But the flush is skipped if memtables are empty. Thus should update the `topic_latest_entry_id`
+        // when handling flush request instead of in `schedule_flush` or `flush_finished`.
+        self.update_topic_latest_entry_id(&region);
+        info!(
+            "Region {} flush request, high watermark: {}",
+            region_id,
+            region.topic_latest_entry_id.load(Ordering::Relaxed)
+        );
+
+        let reason = if region.is_downgrading() {
+            FlushReason::Downgrading
+        } else {
+            FlushReason::Manual
+        };
+
+        let mut task =
+            self.new_flush_task(&region, reason, request.row_group_size, self.config.clone());
+        task.push_sender(sender);
+        if let Err(e) =
+            self.flush_scheduler
+                .schedule_flush(region.region_id, &region.version_control, task)
+        {
+            error!(e; "Failed to schedule flush task for region {}", region.region_id);
+        }
+    }
+
+    /// Flushes regions periodically.
+    pub(crate) fn flush_periodically(&mut self) -> Result<()> {
+        let regions = self.regions.list_regions();
+        let now = self.time_provider.current_time_millis();
+        let min_last_flush_time = now - self.config.auto_flush_interval.as_millis() as i64;
+
+        for region in &regions {
+            if self.flush_scheduler.is_flush_requested(region.region_id) || !region.is_writable() {
+                // Already flushing or not writable.
+                continue;
+            }
+            self.update_topic_latest_entry_id(region);
+
+            if region.last_flush_millis() < min_last_flush_time {
+                // If flush time of this region is earlier than `min_last_flush_time`, we can flush this region.
+                let task = self.new_flush_task(
+                    region,
+                    FlushReason::Periodically,
+                    None,
+                    self.config.clone(),
+                );
+                self.flush_scheduler.schedule_flush(
+                    region.region_id,
+                    &region.version_control,
+                    task,
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
     /// On region flush job finished.
     pub(crate) async fn handle_flush_finished(
         &mut self,
@@ -246,5 +257,26 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         self.schedule_compaction(&region).await;
 
         self.listener.on_flush_success(region_id);
+    }
+
+    /// Updates the latest entry id since flush of the region.
+    /// **This is only used for remote WAL pruning.**
+    pub(crate) fn update_topic_latest_entry_id(&mut self, region: &MitoRegionRef) {
+        if region.provider.is_remote_wal() && region.version().memtables.is_empty() {
+            let high_watermark = self
+                .wal
+                .store()
+                .high_watermark(&region.provider)
+                .unwrap_or(0);
+            if high_watermark != 0 {
+                region
+                    .topic_latest_entry_id
+                    .store(high_watermark, Ordering::Relaxed);
+            }
+            info!(
+                "Region {} high watermark updated to {}",
+                region.region_id, high_watermark
+            );
+        }
     }
 }

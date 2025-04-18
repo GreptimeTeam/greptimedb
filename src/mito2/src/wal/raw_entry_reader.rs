@@ -196,6 +196,10 @@ mod tests {
         ) -> Result<Entry, Self::Error> {
             unreachable!()
         }
+
+        fn high_watermark(&self, _provider: &Provider) -> Result<EntryId, Self::Error> {
+            unreachable!()
+        }
     }
 
     #[tokio::test]

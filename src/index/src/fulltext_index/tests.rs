@@ -19,7 +19,7 @@ use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use puffin::puffin_manager::file_accessor::MockFileAccessor;
 use puffin::puffin_manager::fs_puffin_manager::FsPuffinManager;
 use puffin::puffin_manager::stager::BoundedStager;
-use puffin::puffin_manager::{DirGuard, PuffinManager, PuffinReader, PuffinWriter, PutOptions};
+use puffin::puffin_manager::{PuffinManager, PuffinReader, PuffinWriter, PutOptions};
 
 use crate::fulltext_index::create::{FulltextIndexCreator, TantivyFulltextIndexCreator};
 use crate::fulltext_index::search::{FulltextIndexSearcher, RowId, TantivyFulltextIndexSearcher};
@@ -61,8 +61,7 @@ async fn test_search(
     prefix: &str,
     config: Config,
     texts: Vec<&str>,
-    query: &str,
-    expected: impl IntoIterator<Item = RowId>,
+    query_expected: Vec<(&str, impl IntoIterator<Item = RowId>)>,
 ) {
     let (_staging_dir, stager) = new_bounded_stager(prefix).await;
     let file_accessor = Arc::new(MockFileAccessor::new(prefix));
@@ -72,14 +71,16 @@ async fn test_search(
     let blob_key = "fulltext_index".to_string();
     let mut writer = puffin_manager.writer(&file_name).await.unwrap();
     create_index(prefix, &mut writer, &blob_key, texts, config).await;
+    writer.finish().await.unwrap();
 
     let reader = puffin_manager.reader(&file_name).await.unwrap();
     let index_dir = reader.dir(&blob_key).await.unwrap();
-    let searcher = TantivyFulltextIndexSearcher::new(index_dir.path()).unwrap();
-    let results = searcher.search(query).await.unwrap();
-
-    let expected = expected.into_iter().collect::<BTreeSet<_>>();
-    assert_eq!(results, expected);
+    let searcher = TantivyFulltextIndexSearcher::new(index_dir.path(), config).unwrap();
+    for (query, expected) in query_expected {
+        let results = searcher.search(query).await.unwrap();
+        let expected = expected.into_iter().collect::<BTreeSet<_>>();
+        assert_eq!(results, expected);
+    }
 }
 
 #[tokio::test]
@@ -91,8 +92,7 @@ async fn test_simple_term() {
             "This is a sample text containing Barack Obama",
             "Another document mentioning Barack",
         ],
-        "Barack Obama",
-        [0, 1],
+        vec![("Barack Obama", [0, 1])],
     )
     .await;
 }
@@ -103,8 +103,7 @@ async fn test_negative_term() {
         "test_negative_term_",
         Config::default(),
         vec!["apple is a fruit", "I like apple", "fruit is healthy"],
-        "apple -fruit",
-        [1],
+        vec![("apple -fruit", [1])],
     )
     .await;
 }
@@ -119,8 +118,7 @@ async fn test_must_term() {
             "I love apples and fruits",
             "apple and fruit are good",
         ],
-        "+apple +fruit",
-        [2],
+        vec![("+apple +fruit", [2])],
     )
     .await;
 }
@@ -131,8 +129,7 @@ async fn test_boolean_operators() {
         "test_boolean_operators_",
         Config::default(),
         vec!["a b c", "a b", "b c", "c"],
-        "a AND b OR c",
-        [0, 1, 2, 3],
+        vec![("a AND b OR c", [0, 1, 2, 3])],
     )
     .await;
 }
@@ -146,8 +143,7 @@ async fn test_phrase_term() {
             "This is a sample text containing Barack Obama",
             "Another document mentioning Barack",
         ],
-        "\"Barack Obama\"",
-        [0],
+        vec![("\"Barack Obama\"", [0])],
     )
     .await;
 }
@@ -161,8 +157,7 @@ async fn test_config_english_analyzer_case_insensitive() {
             ..Config::default()
         },
         vec!["Banana is a fruit", "I like apple", "Fruit is healthy"],
-        "banana",
-        [0],
+        vec![("banana", [0]), ("Banana", [0]), ("BANANA", [0])],
     )
     .await;
 }
@@ -175,9 +170,8 @@ async fn test_config_english_analyzer_case_sensitive() {
             case_sensitive: true,
             ..Config::default()
         },
-        vec!["Banana is a fruit", "I like apple", "Fruit is healthy"],
-        "banana",
-        [],
+        vec!["Banana is a fruit", "I like banana", "Fruit is healthy"],
+        vec![("banana", [1]), ("Banana", [0])],
     )
     .await;
 }
@@ -191,8 +185,7 @@ async fn test_config_chinese_analyzer() {
             ..Default::default()
         },
         vec!["苹果是一种水果", "我喜欢苹果", "水果很健康"],
-        "苹果",
-        [0, 1],
+        vec![("苹果", [0, 1])],
     )
     .await;
 }
