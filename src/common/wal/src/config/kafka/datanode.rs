@@ -17,7 +17,10 @@ use std::time::Duration;
 use common_base::readable_size::ReadableSize;
 use serde::{Deserialize, Serialize};
 
-use crate::config::kafka::common::{KafkaConnectionConfig, KafkaTopicConfig};
+use crate::config::kafka::common::{
+    KafkaConnectionConfig, KafkaTopicConfig, DEFAULT_ACTIVE_PRUNE_INTERVAL,
+    DEFAULT_ACTIVE_PRUNE_TASK_LIMIT, DEFAULT_TRIGGER_FLUSH_THRESHOLD,
+};
 
 /// Kafka wal configurations for datanode.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -44,6 +47,15 @@ pub struct DatanodeKafkaConfig {
     pub dump_index_interval: Duration,
     /// Ignore missing entries during read WAL.
     pub overwrite_entry_start_id: bool,
+    // Active WAL pruning.
+    pub auto_prune_topic_records: bool,
+    // Interval of WAL pruning.
+    pub auto_prune_interval: Duration,
+    // Threshold for sending flush request when pruning remote WAL.
+    // `None` stands for never sending flush request.
+    pub trigger_flush_threshold: u64,
+    // Limit of concurrent active pruning procedures.
+    pub auto_prune_parallelism: usize,
 }
 
 impl Default for DatanodeKafkaConfig {
@@ -58,6 +70,10 @@ impl Default for DatanodeKafkaConfig {
             create_index: true,
             dump_index_interval: Duration::from_secs(60),
             overwrite_entry_start_id: false,
+            auto_prune_topic_records: false,
+            auto_prune_interval: DEFAULT_ACTIVE_PRUNE_INTERVAL,
+            trigger_flush_threshold: DEFAULT_TRIGGER_FLUSH_THRESHOLD,
+            auto_prune_parallelism: DEFAULT_ACTIVE_PRUNE_TASK_LIMIT,
         }
     }
 }

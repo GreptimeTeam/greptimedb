@@ -61,6 +61,7 @@ use crate::failure_detector::PhiAccrualFailureDetectorOptions;
 use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatHandlerGroupRef};
 use crate::lease::lookup_datanode_peer;
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
+use crate::procedure::wal_prune::manager::WalPruneTickerRef;
 use crate::procedure::ProcedureManagerListenerAdapter;
 use crate::pubsub::{PublisherRef, SubscriptionManagerRef};
 use crate::region::supervisor::RegionSupervisorTickerRef;
@@ -407,6 +408,7 @@ pub struct Metasrv {
     region_supervisor_ticker: Option<RegionSupervisorTickerRef>,
     cache_invalidator: CacheInvalidatorRef,
     leader_region_registry: LeaderRegionRegistryRef,
+    wal_prune_ticker: Option<WalPruneTickerRef>,
 
     plugins: Plugins,
 }
@@ -460,6 +462,9 @@ impl Metasrv {
             )));
             if let Some(region_supervisor_ticker) = &self.region_supervisor_ticker {
                 leadership_change_notifier.add_listener(region_supervisor_ticker.clone() as _);
+            }
+            if let Some(wal_prune_ticker) = &self.wal_prune_ticker {
+                leadership_change_notifier.add_listener(wal_prune_ticker.clone() as _);
             }
             if let Some(customizer) = self.plugins.get::<LeadershipChangeNotifierCustomizerRef>() {
                 customizer.customize(&mut leadership_change_notifier);

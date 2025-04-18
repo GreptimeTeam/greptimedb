@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use common_telemetry::{error, info};
 use common_wal::config::kafka::common::DEFAULT_BACKOFF_CONFIG;
 use common_wal::config::kafka::MetasrvKafkaConfig;
@@ -34,11 +32,9 @@ use crate::error::{
 // The `DEFAULT_PARTITION` refers to the index of the partition.
 const DEFAULT_PARTITION: i32 = 0;
 
-type KafkaClientRef = Arc<Client>;
-
 /// Creates topics in kafka.
 pub struct KafkaTopicCreator {
-    client: KafkaClientRef,
+    client: Client,
     /// The number of partitions per topic.
     num_partitions: i32,
     /// The replication factor of each topic.
@@ -48,7 +44,7 @@ pub struct KafkaTopicCreator {
 }
 
 impl KafkaTopicCreator {
-    pub fn client(&self) -> &KafkaClientRef {
+    pub fn client(&self) -> &Client {
         &self.client
     }
 
@@ -133,7 +129,8 @@ impl KafkaTopicCreator {
     }
 }
 
-pub async fn build_kafka_topic_creator(config: &MetasrvKafkaConfig) -> Result<KafkaTopicCreator> {
+/// Builds a kafka [Client](rskafka::client::Client).
+pub async fn build_kafka_client(config: &MetasrvKafkaConfig) -> Result<Client> {
     // Builds an kafka controller client for creating topics.
     let broker_endpoints = common_wal::resolve_to_ipv4(&config.connection.broker_endpoints)
         .await
@@ -145,15 +142,19 @@ pub async fn build_kafka_topic_creator(config: &MetasrvKafkaConfig) -> Result<Ka
     if let Some(tls) = &config.connection.tls {
         builder = builder.tls_config(tls.to_tls_config().await.context(TlsConfigSnafu)?)
     };
-    let client = builder
+    builder
         .build()
         .await
         .with_context(|_| BuildKafkaClientSnafu {
             broker_endpoints: config.connection.broker_endpoints.clone(),
-        })?;
+        })
+}
 
+/// Builds a [KafkaTopicCreator].
+pub async fn build_kafka_topic_creator(config: &MetasrvKafkaConfig) -> Result<KafkaTopicCreator> {
+    let client = build_kafka_client(config).await?;
     Ok(KafkaTopicCreator {
-        client: Arc::new(client),
+        client,
         num_partitions: config.kafka_topic.num_partitions,
         replication_factor: config.kafka_topic.replication_factor,
         create_topic_timeout: config.kafka_topic.create_topic_timeout.as_millis() as i32,

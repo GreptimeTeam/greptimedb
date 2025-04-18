@@ -130,6 +130,22 @@ broker_endpoints = ["127.0.0.1:9092"]
 ## Otherwise, use topics named `topic_name_prefix_[0..num_topics)`
 auto_create_topics = true
 
+## Interval of automatically WAL pruning.
+## Set to `0s` to disable automatically WAL pruning which delete unused remote WAL entries periodically.
+auto_prune_interval = "0s"
+
+## The threshold to trigger a flush operation of a region in automatically WAL pruning.
+## Metasrv will send a flush request to flush the region when:
+## `trigger_flush_threshold` + `prunable_entry_id` < `max_prunable_entry_id`
+## where:
+## - `prunable_entry_id` is the maximum entry id that can be pruned of the region.
+## - `max_prunable_entry_id` is the maximum prunable entry id among all regions in the same topic.
+## Set to `0` to disable the flush operation.
+trigger_flush_threshold = 0
+
+## Concurrent task limit for automatically WAL pruning.
+auto_prune_parallelism = 10
+
 ## Number of topics.
 num_topics = 64
 

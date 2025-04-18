@@ -12,9 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 
-use crate::config::kafka::common::{KafkaConnectionConfig, KafkaTopicConfig};
+use crate::config::kafka::common::{
+    KafkaConnectionConfig, KafkaTopicConfig, DEFAULT_ACTIVE_PRUNE_INTERVAL,
+    DEFAULT_ACTIVE_PRUNE_TASK_LIMIT, DEFAULT_TRIGGER_FLUSH_THRESHOLD,
+};
 
 /// Kafka wal configurations for metasrv.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -28,6 +33,13 @@ pub struct MetasrvKafkaConfig {
     pub kafka_topic: KafkaTopicConfig,
     // Automatically create topics for WAL.
     pub auto_create_topics: bool,
+    // Interval of WAL pruning.
+    pub auto_prune_interval: Duration,
+    // Threshold for sending flush request when pruning remote WAL.
+    // `None` stands for never sending flush request.
+    pub trigger_flush_threshold: u64,
+    // Limit of concurrent active pruning procedures.
+    pub auto_prune_parallelism: usize,
 }
 
 impl Default for MetasrvKafkaConfig {
@@ -36,6 +48,9 @@ impl Default for MetasrvKafkaConfig {
             connection: Default::default(),
             kafka_topic: Default::default(),
             auto_create_topics: true,
+            auto_prune_interval: DEFAULT_ACTIVE_PRUNE_INTERVAL,
+            trigger_flush_threshold: DEFAULT_TRIGGER_FLUSH_THRESHOLD,
+            auto_prune_parallelism: DEFAULT_ACTIVE_PRUNE_TASK_LIMIT,
         }
     }
 }

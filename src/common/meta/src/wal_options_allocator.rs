@@ -30,7 +30,9 @@ use crate::error::{EncodeWalOptionsSnafu, InvalidTopicNamePrefixSnafu, Result};
 use crate::key::NAME_PATTERN_REGEX;
 use crate::kv_backend::KvBackendRef;
 use crate::leadership_notifier::LeadershipChangeListener;
-pub use crate::wal_options_allocator::topic_creator::build_kafka_topic_creator;
+pub use crate::wal_options_allocator::topic_creator::{
+    build_kafka_client, build_kafka_topic_creator,
+};
 use crate::wal_options_allocator::topic_pool::KafkaTopicPool;
 
 /// Allocates wal options in region granularity.

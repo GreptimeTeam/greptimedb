@@ -66,4 +66,7 @@ lazy_static! {
     // The heartbeat rate counter.
     pub static ref METRIC_META_HEARTBEAT_RATE: IntCounter =
         register_int_counter!("greptime_meta_heartbeat_rate", "meta heartbeat arrival rate").unwrap();
+    /// The remote WAL prune execute counter.
+    pub static ref METRIC_META_REMOTE_WAL_PRUNE_EXECUTE: IntCounterVec =
+        register_int_counter_vec!("greptime_meta_remote_wal_prune_execute", "meta remote wal prune execute", &["topic_name"]).unwrap();
 }

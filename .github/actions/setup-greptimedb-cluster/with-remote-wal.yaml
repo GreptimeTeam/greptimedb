@@ -2,13 +2,13 @@ meta:
   configData: |-
     [runtime]
     global_rt_size = 4
-    
+
     [wal]
     provider = "kafka"
     broker_endpoints = ["kafka.kafka-cluster.svc.cluster.local:9092"]
     num_topics = 3
+    auto_prune_topic_records = true
 
-        
     [datanode]
     [datanode.client]
     timeout = "120s"

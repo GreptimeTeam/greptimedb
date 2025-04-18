@@ -19,7 +19,7 @@ use std::sync::{Arc, RwLock};
 use common_telemetry::warn;
 use store_api::storage::RegionId;
 
-use crate::datanode::RegionManifestInfo;
+use crate::datanode::{RegionManifestInfo, RegionStat};
 
 /// Represents information about a leader region in the cluster.
 /// Contains the datanode id where the leader is located,
@@ -35,25 +35,22 @@ pub enum LeaderRegionManifestInfo {
     Mito {
         manifest_version: u64,
         flushed_entry_id: u64,
+        topic_latest_entry_id: u64,
     },
     Metric {
         data_manifest_version: u64,
         data_flushed_entry_id: u64,
+        data_topic_latest_entry_id: u64,
         metadata_manifest_version: u64,
         metadata_flushed_entry_id: u64,
+        metadata_topic_latest_entry_id: u64,
     },
 }
 
-impl From<RegionManifestInfo> for LeaderRegionManifestInfo {
-    fn from(value: RegionManifestInfo) -> Self {
-        match value {
-            RegionManifestInfo::Mito {
-                manifest_version,
-                flushed_entry_id,
-            } => LeaderRegionManifestInfo::Mito {
-                manifest_version,
-                flushed_entry_id,
-            },
+impl LeaderRegionManifestInfo {
+    /// Generate a [LeaderRegionManifestInfo] from [RegionStat].
+    pub fn from_region_stat(region_stat: &RegionStat) -> LeaderRegionManifestInfo {
+        match region_stat.region_manifest {
             RegionManifestInfo::Metric {
                 data_manifest_version,
                 data_flushed_entry_id,
@@ -62,14 +59,22 @@ impl From<RegionManifestInfo> for LeaderRegionManifestInfo {
             } => LeaderRegionManifestInfo::Metric {
                 data_manifest_version,
                 data_flushed_entry_id,
+                data_topic_latest_entry_id: region_stat.data_topic_latest_entry_id,
                 metadata_manifest_version,
                 metadata_flushed_entry_id,
+                metadata_topic_latest_entry_id: region_stat.metadata_topic_latest_entry_id,
+            },
+            RegionManifestInfo::Mito {
+                manifest_version,
+                flushed_entry_id,
+            } => LeaderRegionManifestInfo::Mito {
+                manifest_version,
+                flushed_entry_id,
+                topic_latest_entry_id: region_stat.data_topic_latest_entry_id,
             },
         }
     }
-}
 
-impl LeaderRegionManifestInfo {
     /// Returns the manifest version of the leader region.
     pub fn manifest_version(&self) -> u64 {
         match self {
@@ -96,17 +101,33 @@ impl LeaderRegionManifestInfo {
         }
     }
 
-    /// Returns the minimum flushed entry id of the leader region.
-    pub fn min_flushed_entry_id(&self) -> u64 {
+    /// Returns prunable entry id of the leader region.
+    /// It is used to determine the entry id that can be pruned in remote wal.
+    ///
+    /// For a mito region, the prunable entry id should max(flushed_entry_id, latest_entry_id_since_flush).
+    ///
+    /// For a metric region, the prunable entry id should min(
+    ///     max(data_flushed_entry_id, data_latest_entry_id_since_flush),
+    ///     max(metadata_flushed_entry_id, metadata_latest_entry_id_since_flush)
+    /// ).
+    pub fn prunable_entry_id(&self) -> u64 {
         match self {
             LeaderRegionManifestInfo::Mito {
                 flushed_entry_id, ..
             } => *flushed_entry_id,
             LeaderRegionManifestInfo::Metric {
                 data_flushed_entry_id,
+                data_topic_latest_entry_id,
                 metadata_flushed_entry_id,
+                metadata_topic_latest_entry_id,
                 ..
-            } => (*data_flushed_entry_id).min(*metadata_flushed_entry_id),
+            } => {
+                let data_prunable_entry_id =
+                    (*data_flushed_entry_id).max(*data_topic_latest_entry_id);
+                let metadata_prunable_entry_id =
+                    (*metadata_flushed_entry_id).max(*metadata_topic_latest_entry_id);
+                data_prunable_entry_id.min(metadata_prunable_entry_id)
+            }
         }
     }
 }
