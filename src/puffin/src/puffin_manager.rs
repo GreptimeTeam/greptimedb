@@ -65,7 +65,13 @@ pub trait PuffinWriter {
     /// Returns the number of bytes written.
     ///
     /// The specified `dir` should be accessible from the filesystem.
-    async fn put_dir(&mut self, key: &str, dir: PathBuf, options: PutOptions) -> Result<u64>;
+    async fn put_dir(
+        &mut self,
+        key: &str,
+        dir: PathBuf,
+        options: PutOptions,
+        properties: HashMap<String, String>,
+    ) -> Result<u64>;
 
     /// Sets whether the footer should be LZ4 compressed.
     fn set_footer_lz4_compressed(&mut self, lz4_compressed: bool);
@@ -94,15 +100,15 @@ pub trait PuffinReader {
 
     /// Reads a blob from the Puffin file.
     ///
-    /// The returned `BlobWithMetadata` is used to access the blob data and its metadata.
-    /// Users should hold the `BlobWithMetadata` until they are done with the blob data.
-    async fn blob(&self, key: &str) -> Result<BlobWithMetadata<Self::Blob>>;
+    /// The returned `GuardWithMetadata` is used to access the blob data and its metadata.
+    /// Users should hold the `GuardWithMetadata` until they are done with the blob data.
+    async fn blob(&self, key: &str) -> Result<GuardWithMetadata<Self::Blob>>;
 
     /// Reads a directory from the Puffin file.
     ///
-    /// The returned `DirGuard` is used to access the directory in the filesystem.
-    /// The caller is responsible for holding the `DirGuard` until they are done with the directory.
-    async fn dir(&self, key: &str) -> Result<Self::Dir>;
+    /// The returned `GuardWithMetadata` is used to access the directory data and its metadata.
+    /// Users should hold the `GuardWithMetadata` until they are done with the directory data.
+    async fn dir(&self, key: &str) -> Result<GuardWithMetadata<Self::Dir>>;
 }
 
 /// `BlobGuard` is provided by the `PuffinReader` to access the blob data.
@@ -114,32 +120,41 @@ pub trait BlobGuard {
     async fn reader(&self) -> Result<Self::Reader>;
 }
 
-/// `BlobWithMetadata` provides access to the blob data and its metadata.
-pub struct BlobWithMetadata<B> {
-    blob: B,
-    metadata: BlobMetadata,
-}
-
-impl<B: BlobGuard> BlobWithMetadata<B> {
-    /// Creates a new `BlobWithMetadata` instance.
-    pub fn new(blob: B, metadata: BlobMetadata) -> Self {
-        Self { blob, metadata }
-    }
-
-    /// Returns the reader for the blob data.
-    pub async fn reader(&self) -> Result<B::Reader> {
-        self.blob.reader().await
-    }
-
-    /// Returns the metadata of the blob.
-    pub fn metadata(&self) -> &BlobMetadata {
-        &self.metadata
-    }
-}
-
 /// `DirGuard` is provided by the `PuffinReader` to access the directory in the filesystem.
 /// Users should hold the `DirGuard` until they are done with the directory.
 #[auto_impl::auto_impl(Arc)]
 pub trait DirGuard {
     fn path(&self) -> &PathBuf;
+}
+
+/// `GuardWithMetadata` provides access to the blob or directory data and its metadata.
+pub struct GuardWithMetadata<G> {
+    guard: G,
+    metadata: BlobMetadata,
+}
+
+impl<G> GuardWithMetadata<G> {
+    /// Creates a new `GuardWithMetadata` instance.
+    pub fn new(guard: G, metadata: BlobMetadata) -> Self {
+        Self { guard, metadata }
+    }
+
+    /// Returns the metadata of the directory.
+    pub fn metadata(&self) -> &BlobMetadata {
+        &self.metadata
+    }
+}
+
+impl<G: BlobGuard> GuardWithMetadata<G> {
+    /// Returns the reader for the blob data.
+    pub async fn reader(&self) -> Result<G::Reader> {
+        self.guard.reader().await
+    }
+}
+
+impl<G: DirGuard> GuardWithMetadata<G> {
+    /// Returns the path of the directory.
+    pub fn path(&self) -> &PathBuf {
+        self.guard.path()
+    }
 }

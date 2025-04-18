@@ -34,7 +34,7 @@ lazy_static! {
 }
 
 #[test]
-fn test_gsub() {
+fn test_simple_extract() {
     let input_value_str = r#"
     [
       {

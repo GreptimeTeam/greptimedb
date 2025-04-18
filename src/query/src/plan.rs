@@ -19,12 +19,11 @@ use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_common::TableReference;
 use datafusion_expr::{BinaryExpr, Expr, Join, LogicalPlan, Operator};
 use session::context::QueryContextRef;
-use snafu::ResultExt;
 pub use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
 use table::table_name::TableName;
 
-use crate::error::{DataFusionSnafu, Result};
+use crate::error::Result;
 
 struct TableNamesExtractAndRewriter {
     pub(crate) table_names: HashSet<TableName>,
@@ -119,7 +118,7 @@ pub fn extract_and_rewrite_full_table_names(
     query_ctx: QueryContextRef,
 ) -> Result<(HashSet<TableName>, LogicalPlan)> {
     let mut extractor = TableNamesExtractAndRewriter::new(query_ctx);
-    let plan = plan.rewrite(&mut extractor).context(DataFusionSnafu)?;
+    let plan = plan.rewrite(&mut extractor)?;
     Ok((extractor.table_names, plan.data))
 }
 

@@ -15,10 +15,18 @@
 use std::any::Any;
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
+use datafusion_expr::ColumnarValue;
+use datafusion_physical_expr::PhysicalExpr;
+use datatypes::arrow;
+use datatypes::arrow::array::{BooleanArray, BooleanBufferBuilder, RecordBatch};
+use datatypes::arrow::buffer::BooleanBuffer;
+use datatypes::arrow::datatypes::Schema;
 use datatypes::prelude::Value;
+use datatypes::vectors::{Helper, VectorRef};
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::RegionNumber;
 
 use crate::error::{
@@ -27,6 +35,11 @@ use crate::error::{
 };
 use crate::expr::{Operand, PartitionExpr, RestrictedOp};
 use crate::PartitionRule;
+
+/// The default region number when no partition exprs are matched.
+const DEFAULT_REGION: RegionNumber = 0;
+
+type PhysicalExprCache = Option<(Vec<Arc<dyn PhysicalExpr>>, Arc<Schema>)>;
 
 /// Multi-Dimiension partition rule. RFC [here](https://github.com/GreptimeTeam/greptimedb/blob/main/docs/rfcs/2024-02-21-multi-dimension-partition-rule/rfc.md)
 ///
@@ -44,6 +57,9 @@ pub struct MultiDimPartitionRule {
     regions: Vec<RegionNumber>,
     /// Partition expressions.
     exprs: Vec<PartitionExpr>,
+    /// Cache of physical expressions.
+    #[serde(skip)]
+    physical_expr_cache: RwLock<PhysicalExprCache>,
 }
 
 impl MultiDimPartitionRule {
@@ -63,6 +79,7 @@ impl MultiDimPartitionRule {
             name_to_index,
             regions,
             exprs,
+            physical_expr_cache: RwLock::new(None),
         };
 
         let mut checker = RuleChecker::new(&rule);
@@ -87,7 +104,7 @@ impl MultiDimPartitionRule {
         }
 
         // return the default region number
-        Ok(0)
+        Ok(DEFAULT_REGION)
     }
 
     fn evaluate_expr(&self, expr: &PartitionExpr, values: &[Value]) -> Result<bool> {
@@ -134,6 +151,133 @@ impl MultiDimPartitionRule {
 
         Ok(result)
     }
+
+    pub fn row_at(&self, cols: &[VectorRef], index: usize, row: &mut [Value]) -> Result<()> {
+        for (col_idx, col) in cols.iter().enumerate() {
+            row[col_idx] = col.get(index);
+        }
+        Ok(())
+    }
+
+    pub fn record_batch_to_cols(&self, record_batch: &RecordBatch) -> Result<Vec<VectorRef>> {
+        self.partition_columns
+            .iter()
+            .map(|col_name| {
+                record_batch
+                    .column_by_name(col_name)
+                    .context(error::UndefinedColumnSnafu { column: col_name })
+                    .and_then(|array| {
+                        Helper::try_into_vector(array).context(error::ConvertToVectorSnafu)
+                    })
+            })
+            .collect::<Result<Vec<_>>>()
+    }
+
+    pub fn split_record_batch_naive(
+        &self,
+        record_batch: &RecordBatch,
+    ) -> Result<HashMap<RegionNumber, BooleanArray>> {
+        let num_rows = record_batch.num_rows();
+
+        let mut result = self
+            .regions
+            .iter()
+            .map(|region| {
+                let mut builder = BooleanBufferBuilder::new(num_rows);
+                builder.append_n(num_rows, false);
+                (*region, builder)
+            })
+            .collect::<HashMap<_, _>>();
+
+        let cols = self.record_batch_to_cols(record_batch)?;
+        let mut current_row = vec![Value::Null; self.partition_columns.len()];
+        for row_idx in 0..num_rows {
+            self.row_at(&cols, row_idx, &mut current_row)?;
+            let current_region = self.find_region(&current_row)?;
+            let region_mask = result
+                .get_mut(&current_region)
+                .unwrap_or_else(|| panic!("Region {} must be initialized", current_region));
+            region_mask.set_bit(row_idx, true);
+        }
+
+        Ok(result
+            .into_iter()
+            .map(|(region, mut mask)| (region, BooleanArray::new(mask.finish(), None)))
+            .collect())
+    }
+
+    pub fn split_record_batch(
+        &self,
+        record_batch: &RecordBatch,
+    ) -> Result<HashMap<RegionNumber, BooleanArray>> {
+        let num_rows = record_batch.num_rows();
+        let physical_exprs = {
+            let cache_read_guard = self.physical_expr_cache.read().unwrap();
+            if let Some((cached_exprs, schema)) = cache_read_guard.as_ref()
+                && schema == record_batch.schema_ref()
+            {
+                cached_exprs.clone()
+            } else {
+                drop(cache_read_guard); // Release the read lock before acquiring write lock
+
+                let schema = record_batch.schema();
+                let new_cache = self
+                    .exprs
+                    .iter()
+                    .map(|e| e.try_as_physical_expr(&schema))
+                    .collect::<Result<Vec<_>>>()?;
+
+                let mut cache_write_guard = self.physical_expr_cache.write().unwrap();
+                cache_write_guard.replace((new_cache.clone(), schema));
+                new_cache
+            }
+        };
+
+        let mut result: HashMap<u32, BooleanArray> = physical_exprs
+            .iter()
+            .zip(self.regions.iter())
+            .map(|(expr, region_num)| {
+                let ColumnarValue::Array(column) = expr
+                    .evaluate(record_batch)
+                    .context(error::EvaluateRecordBatchSnafu)?
+                else {
+                    unreachable!("Expected an array")
+                };
+                Ok((
+                    *region_num,
+                    column
+                        .as_any()
+                        .downcast_ref::<BooleanArray>()
+                        .with_context(|| error::UnexpectedColumnTypeSnafu {
+                            data_type: column.data_type().clone(),
+                        })?
+                        .clone(),
+                ))
+            })
+            .collect::<error::Result<_>>()?;
+
+        let mut selected = BooleanArray::new(BooleanBuffer::new_unset(num_rows), None);
+        for region_selection in result.values() {
+            selected = arrow::compute::kernels::boolean::or(&selected, region_selection)
+                .context(error::ComputeArrowKernelSnafu)?;
+        }
+
+        // fast path: all rows are selected
+        if selected.true_count() == num_rows {
+            return Ok(result);
+        }
+
+        // find unselected rows and assign to default region
+        let unselected = arrow::compute::kernels::boolean::not(&selected)
+            .context(error::ComputeArrowKernelSnafu)?;
+        let default_region_selection = result
+            .entry(DEFAULT_REGION)
+            .or_insert_with(|| unselected.clone());
+        *default_region_selection =
+            arrow::compute::kernels::boolean::or(default_region_selection, &unselected)
+                .context(error::ComputeArrowKernelSnafu)?;
+        Ok(result)
+    }
 }
 
 impl PartitionRule for MultiDimPartitionRule {
@@ -147,6 +291,13 @@ impl PartitionRule for MultiDimPartitionRule {
 
     fn find_region(&self, values: &[Value]) -> Result<RegionNumber> {
         self.find_region(values)
+    }
+
+    fn split_record_batch(
+        &self,
+        record_batch: &RecordBatch,
+    ) -> Result<HashMap<RegionNumber, BooleanArray>> {
+        self.split_record_batch(record_batch)
     }
 }
 
@@ -631,5 +782,157 @@ mod tests {
 
         // check rule
         assert!(rule.is_err());
+    }
+}
+
+#[cfg(test)]
+mod test_split_record_batch {
+    use std::sync::Arc;
+
+    use datatypes::arrow::array::{Int64Array, StringArray};
+    use datatypes::arrow::datatypes::{DataType, Field, Schema};
+    use datatypes::arrow::record_batch::RecordBatch;
+    use rand::Rng;
+
+    use super::*;
+    use crate::expr::col;
+
+    fn test_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![
+            Field::new("host", DataType::Utf8, false),
+            Field::new("value", DataType::Int64, false),
+        ]))
+    }
+
+    fn generate_random_record_batch(num_rows: usize) -> RecordBatch {
+        let schema = test_schema();
+        let mut rng = rand::thread_rng();
+        let mut host_array = Vec::with_capacity(num_rows);
+        let mut value_array = Vec::with_capacity(num_rows);
+        for _ in 0..num_rows {
+            host_array.push(format!("server{}", rng.gen_range(0..20)));
+            value_array.push(rng.gen_range(0..20));
+        }
+        let host_array = StringArray::from(host_array);
+        let value_array = Int64Array::from(value_array);
+        RecordBatch::try_new(schema, vec![Arc::new(host_array), Arc::new(value_array)]).unwrap()
+    }
+
+    #[test]
+    fn test_split_record_batch_by_one_column() {
+        // Create a simple MultiDimPartitionRule
+        let rule = MultiDimPartitionRule::try_new(
+            vec!["host".to_string(), "value".to_string()],
+            vec![0, 1],
+            vec![
+                col("host").lt(Value::String("server1".into())),
+                col("host").gt_eq(Value::String("server1".into())),
+            ],
+        )
+        .unwrap();
+
+        let batch = generate_random_record_batch(1000);
+        // Split the batch
+        let result = rule.split_record_batch(&batch).unwrap();
+        let expected = rule.split_record_batch_naive(&batch).unwrap();
+        assert_eq!(result.len(), expected.len());
+        for (region, value) in &result {
+            assert_eq!(
+                value,
+                expected.get(region).unwrap(),
+                "failed on region: {}",
+                region
+            );
+        }
+    }
+
+    #[test]
+    fn test_split_record_batch_empty() {
+        // Create a simple MultiDimPartitionRule
+        let rule = MultiDimPartitionRule::try_new(
+            vec!["host".to_string()],
+            vec![1],
+            vec![PartitionExpr::new(
+                Operand::Column("host".to_string()),
+                RestrictedOp::Eq,
+                Operand::Value(Value::String("server1".into())),
+            )],
+        )
+        .unwrap();
+
+        let schema = test_schema();
+        let host_array = StringArray::from(Vec::<&str>::new());
+        let value_array = Int64Array::from(Vec::<i64>::new());
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(host_array), Arc::new(value_array)])
+            .unwrap();
+
+        let result = rule.split_record_batch(&batch).unwrap();
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_split_record_batch_by_two_columns() {
+        let rule = MultiDimPartitionRule::try_new(
+            vec!["host".to_string(), "value".to_string()],
+            vec![0, 1, 2, 3],
+            vec![
+                col("host")
+                    .lt(Value::String("server10".into()))
+                    .and(col("value").lt(Value::Int64(10))),
+                col("host")
+                    .lt(Value::String("server10".into()))
+                    .and(col("value").gt_eq(Value::Int64(10))),
+                col("host")
+                    .gt_eq(Value::String("server10".into()))
+                    .and(col("value").lt(Value::Int64(10))),
+                col("host")
+                    .gt_eq(Value::String("server10".into()))
+                    .and(col("value").gt_eq(Value::Int64(10))),
+            ],
+        )
+        .unwrap();
+
+        let batch = generate_random_record_batch(1000);
+        let result = rule.split_record_batch(&batch).unwrap();
+        let expected = rule.split_record_batch_naive(&batch).unwrap();
+        assert_eq!(result.len(), expected.len());
+        for (region, value) in &result {
+            assert_eq!(value, expected.get(region).unwrap());
+        }
+    }
+
+    #[test]
+    fn test_default_region() {
+        let rule = MultiDimPartitionRule::try_new(
+            vec!["host".to_string(), "value".to_string()],
+            vec![0, 1, 2, 3],
+            vec![
+                col("host")
+                    .lt(Value::String("server10".into()))
+                    .and(col("value").eq(Value::Int64(10))),
+                col("host")
+                    .lt(Value::String("server10".into()))
+                    .and(col("value").eq(Value::Int64(20))),
+                col("host")
+                    .gt_eq(Value::String("server10".into()))
+                    .and(col("value").eq(Value::Int64(10))),
+                col("host")
+                    .gt_eq(Value::String("server10".into()))
+                    .and(col("value").eq(Value::Int64(20))),
+            ],
+        )
+        .unwrap();
+
+        let schema = test_schema();
+        let host_array = StringArray::from(vec!["server1", "server1", "server1", "server100"]);
+        let value_array = Int64Array::from(vec![10, 20, 30, 10]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(host_array), Arc::new(value_array)])
+            .unwrap();
+        let result = rule.split_record_batch(&batch).unwrap();
+        let expected = rule.split_record_batch_naive(&batch).unwrap();
+        assert_eq!(result.len(), expected.len());
+        for (region, value) in &result {
+            assert_eq!(value, expected.get(region).unwrap());
+        }
     }
 }

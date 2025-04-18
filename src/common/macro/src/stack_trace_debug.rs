@@ -14,7 +14,7 @@
 
 //! implement `::common_error::ext::StackError`
 
-use proc_macro2::{Span, TokenStream as TokenStream2};
+use proc_macro2::{Literal, Span, TokenStream as TokenStream2, TokenTree};
 use quote::{quote, quote_spanned};
 use syn::spanned::Spanned;
 use syn::{parenthesized, Attribute, Ident, ItemEnum, Variant};
@@ -32,6 +32,7 @@ pub fn stack_trace_style_impl(args: TokenStream2, input: TokenStream2) -> TokenS
         variants.push(variant);
     }
 
+    let transparent_fn = build_transparent_fn(enum_name.clone(), &variants);
     let debug_fmt_fn = build_debug_fmt_impl(enum_name.clone(), variants.clone());
     let next_fn = build_next_impl(enum_name.clone(), variants);
     let debug_impl = build_debug_impl(enum_name.clone());
@@ -43,6 +44,7 @@ pub fn stack_trace_style_impl(args: TokenStream2, input: TokenStream2) -> TokenS
         impl ::common_error::ext::StackError for #enum_name {
             #debug_fmt_fn
             #next_fn
+            #transparent_fn
         }
 
         #debug_impl
@@ -115,6 +117,7 @@ struct ErrorVariant {
     has_source: bool,
     has_external_cause: bool,
     display: TokenStream2,
+    transparent: bool,
     span: Span,
     cfg_attr: Option<Attribute>,
 }
@@ -140,6 +143,7 @@ impl ErrorVariant {
         }
 
         let mut display = None;
+        let mut transparent = false;
         let mut cfg_attr = None;
         for attr in variant.attrs {
             if attr.path().is_ident("snafu") {
@@ -150,17 +154,29 @@ impl ErrorVariant {
                         let display_ts: TokenStream2 = content.parse()?;
                         display = Some(display_ts);
                         Ok(())
+                    } else if meta.path.is_ident("transparent") {
+                        display = Some(TokenStream2::from(TokenTree::Literal(Literal::string(
+                            "<transparent>",
+                        ))));
+                        transparent = true;
+                        Ok(())
                     } else {
                         Err(meta.error("unrecognized repr"))
                     }
                 })
-                .expect("Each error should contains a display attribute");
+                .unwrap_or_else(|e| panic!("{e}"));
             }
 
             if attr.path().is_ident("cfg") {
                 cfg_attr = Some(attr);
             }
         }
+        let display = display.unwrap_or_else(|| {
+            panic!(
+                r#"Error "{}" must be annotated with attribute "display" or "transparent"."#,
+                variant.ident,
+            )
+        });
 
         let field_ident = variant
             .fields
@@ -174,7 +190,8 @@ impl ErrorVariant {
             has_location,
             has_source,
             has_external_cause,
-            display: display.unwrap(),
+            display,
+            transparent,
             span,
             cfg_attr,
         }
@@ -272,6 +289,46 @@ impl ErrorVariant {
                 self.span => #cfg #[allow(unused_variables)] #name { #(#fields),* } =>{
                     None
                 }
+            }
+        }
+    }
+
+    fn build_transparent_match_arm(&self) -> TokenStream2 {
+        let cfg = if let Some(cfg) = &self.cfg_attr {
+            quote_spanned!(cfg.span() => #cfg)
+        } else {
+            quote! {}
+        };
+        let name = &self.name;
+        let fields = &self.fields;
+
+        if self.transparent {
+            quote_spanned! {
+                self.span => #cfg #[allow(unused_variables)] #name { #(#fields),* } => {
+                    true
+                },
+            }
+        } else {
+            quote_spanned! {
+                self.span => #cfg #[allow(unused_variables)] #name { #(#fields),* } =>{
+                    false
+                }
+            }
+        }
+    }
+}
+
+fn build_transparent_fn(enum_name: Ident, variants: &[ErrorVariant]) -> TokenStream2 {
+    let match_arms = variants
+        .iter()
+        .map(|v| v.build_transparent_match_arm())
+        .collect::<Vec<_>>();
+
+    quote! {
+        fn transparent(&self) -> bool {
+            use #enum_name::*;
+            match self {
+                #(#match_arms)*
             }
         }
     }

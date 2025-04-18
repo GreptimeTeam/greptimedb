@@ -50,7 +50,7 @@ use tonic::codec::CompressionEncoding;
 use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
 
-use crate::adapter::{create_worker, CreateFlowArgs, FlowWorkerManagerRef};
+use crate::adapter::{create_worker, FlowWorkerManagerRef};
 use crate::error::{
     to_status_with_last_err, CacheRequiredSnafu, CreateFlowSnafu, ExternalSnafu, FlowNotFoundSnafu,
     ListFlowsSnafu, ParseAddrSnafu, ShutdownServerSnafu, StartServerSnafu, UnexpectedSnafu,
@@ -59,12 +59,13 @@ use crate::heartbeat::HeartbeatTask;
 use crate::metrics::{METRIC_FLOW_PROCESSING_TIME, METRIC_FLOW_ROWS};
 use crate::transform::register_function_to_query_engine;
 use crate::utils::{SizeReportSender, StateReportHandler};
-use crate::{Error, FlowWorkerManager, FlownodeOptions};
+use crate::{CreateFlowArgs, Error, FlowWorkerManager, FlownodeOptions, FrontendClient};
 
 pub const FLOW_NODE_SERVER_NAME: &str = "FLOW_NODE_SERVER";
 /// wrapping flow node manager to avoid orphan rule with Arc<...>
 #[derive(Clone)]
 pub struct FlowService {
+    /// TODO(discord9): replace with dual engine
     pub manager: FlowWorkerManagerRef,
 }
 
@@ -290,6 +291,7 @@ pub struct FlownodeBuilder {
     heartbeat_task: Option<HeartbeatTask>,
     /// receive a oneshot sender to send state size report
     state_report_handler: Option<StateReportHandler>,
+    frontend_client: Arc<FrontendClient>,
 }
 
 impl FlownodeBuilder {
@@ -300,6 +302,7 @@ impl FlownodeBuilder {
         table_meta: TableMetadataManagerRef,
         catalog_manager: CatalogManagerRef,
         flow_metadata_manager: FlowMetadataManagerRef,
+        frontend_client: Arc<FrontendClient>,
     ) -> Self {
         Self {
             opts,
@@ -309,6 +312,7 @@ impl FlownodeBuilder {
             flow_metadata_manager,
             heartbeat_task: None,
             state_report_handler: None,
+            frontend_client,
         }
     }
 
@@ -332,6 +336,7 @@ impl FlownodeBuilder {
             None,
             false,
             Default::default(),
+            self.opts.query.clone(),
         );
         let manager = Arc::new(
             self.build_manager(query_engine_factory.query_engine())
@@ -431,7 +436,7 @@ impl FlownodeBuilder {
                 ),
             };
             manager
-                .create_flow(args)
+                .create_flow_inner(args)
                 .await
                 .map_err(BoxedError::new)
                 .with_context(|_| CreateFlowSnafu {

@@ -137,6 +137,7 @@ impl StateStore for ObjectStateStore {
                 ))
             })
             .context(PutStateSnafu { key })
+            .map(|_| ())
     }
 
     async fn walk_top_down(&self, path: &str) -> Result<KeyValueStream> {

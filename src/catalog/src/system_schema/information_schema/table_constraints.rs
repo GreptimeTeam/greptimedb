@@ -36,7 +36,7 @@ use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
 use crate::information_schema::key_column_usage::{
-    PRI_CONSTRAINT_NAME, TIME_INDEX_CONSTRAINT_NAME,
+    CONSTRAINT_NAME_PRI, CONSTRAINT_NAME_TIME_INDEX,
 };
 use crate::information_schema::Predicates;
 use crate::system_schema::information_schema::{InformationTable, TABLE_CONSTRAINTS};
@@ -188,7 +188,7 @@ impl InformationSchemaTableConstraintsBuilder {
                     self.add_table_constraint(
                         &predicates,
                         &schema_name,
-                        TIME_INDEX_CONSTRAINT_NAME,
+                        CONSTRAINT_NAME_TIME_INDEX,
                         &schema_name,
                         &table.table_info().name,
                         TIME_INDEX_CONSTRAINT_TYPE,
@@ -199,7 +199,7 @@ impl InformationSchemaTableConstraintsBuilder {
                     self.add_table_constraint(
                         &predicates,
                         &schema_name,
-                        PRI_CONSTRAINT_NAME,
+                        CONSTRAINT_NAME_PRI,
                         &schema_name,
                         &table.table_info().name,
                         PRI_KEY_CONSTRAINT_TYPE,

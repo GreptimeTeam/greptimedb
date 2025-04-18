@@ -32,6 +32,10 @@ ifneq ($(strip $(BUILD_JOBS)),)
 	NEXTEST_OPTS += --build-jobs=${BUILD_JOBS}
 endif
 
+ifneq ($(strip $(BUILD_JOBS)),)
+	SQLNESS_OPTS += --jobs ${BUILD_JOBS}
+endif
+
 ifneq ($(strip $(CARGO_PROFILE)),)
 	CARGO_BUILD_OPTS += --profile ${CARGO_PROFILE}
 endif

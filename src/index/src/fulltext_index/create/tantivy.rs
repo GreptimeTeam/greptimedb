@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
@@ -21,15 +22,13 @@ use snafu::{OptionExt, ResultExt};
 use tantivy::indexer::NoMergePolicy;
 use tantivy::schema::{Schema, STORED, TEXT};
 use tantivy::store::{Compressor, ZstdCompressor};
-use tantivy::tokenizer::{LowerCaser, SimpleTokenizer, TextAnalyzer, TokenizerManager};
 use tantivy::{doc, Index, IndexWriter};
-use tantivy_jieba::JiebaTokenizer;
 
 use crate::fulltext_index::create::FulltextIndexCreator;
 use crate::fulltext_index::error::{
-    ExternalSnafu, FinishedSnafu, IoSnafu, JoinSnafu, Result, TantivySnafu,
+    ExternalSnafu, FinishedSnafu, IoSnafu, JoinSnafu, Result, SerializeToJsonSnafu, TantivySnafu,
 };
-use crate::fulltext_index::{Analyzer, Config};
+use crate::fulltext_index::{Config, KEY_FULLTEXT_CONFIG};
 
 pub const TEXT_FIELD_NAME: &str = "greptime_fulltext_text";
 pub const ROWID_FIELD_NAME: &str = "greptime_fulltext_rowid";
@@ -50,6 +49,9 @@ pub struct TantivyFulltextIndexCreator {
 
     /// The directory path in filesystem to store the index.
     path: PathBuf,
+
+    /// The configuration of the fulltext index.
+    config: Config,
 }
 
 impl TantivyFulltextIndexCreator {
@@ -68,7 +70,7 @@ impl TantivyFulltextIndexCreator {
 
         let mut index = Index::create_in_dir(&path, schema).context(TantivySnafu)?;
         index.settings_mut().docstore_compression = Compressor::Zstd(ZstdCompressor::default());
-        index.set_tokenizers(Self::build_tokenizer(&config));
+        index.set_tokenizers(config.build_tantivy_tokenizer());
 
         let memory_limit = Self::sanitize_memory_limit(memory_limit);
 
@@ -84,23 +86,8 @@ impl TantivyFulltextIndexCreator {
             rowid_field,
             max_rowid: 0,
             path: path.as_ref().to_path_buf(),
+            config,
         })
-    }
-
-    fn build_tokenizer(config: &Config) -> TokenizerManager {
-        let mut builder = match config.analyzer {
-            Analyzer::English => TextAnalyzer::builder(SimpleTokenizer::default()).dynamic(),
-            Analyzer::Chinese => TextAnalyzer::builder(JiebaTokenizer {}).dynamic(),
-        };
-
-        if !config.case_sensitive {
-            builder = builder.filter_dynamic(LowerCaser);
-        }
-
-        let tokenizer = builder.build();
-        let tokenizer_manager = TokenizerManager::new();
-        tokenizer_manager.register("default", tokenizer);
-        tokenizer_manager
     }
 
     fn sanitize_memory_limit(memory_limit: usize) -> usize {
@@ -137,8 +124,16 @@ impl FulltextIndexCreator for TantivyFulltextIndexCreator {
         .await
         .context(JoinSnafu)??;
 
+        let property_key = KEY_FULLTEXT_CONFIG.to_string();
+        let property_value = serde_json::to_string(&self.config).context(SerializeToJsonSnafu)?;
+
         puffin_writer
-            .put_dir(blob_key, self.path.clone(), put_options)
+            .put_dir(
+                blob_key,
+                self.path.clone(),
+                put_options,
+                HashMap::from([(property_key, property_value)]),
+            )
             .await
             .map_err(BoxedError::new)
             .context(ExternalSnafu)
@@ -174,6 +169,7 @@ mod tests {
     use tantivy::TantivyDocument;
 
     use super::*;
+    use crate::fulltext_index::Analyzer;
 
     struct MockPuffinWriter;
 
@@ -197,6 +193,7 @@ mod tests {
             _key: &str,
             _dir: PathBuf,
             _options: PutOptions,
+            _properties: HashMap<String, String>,
         ) -> puffin::error::Result<u64> {
             Ok(0)
         }
@@ -226,7 +223,7 @@ mod tests {
                 ("foo", vec![3]),
                 ("bar", vec![4]),
             ];
-            query_and_check(temp_dir.path(), &cases).await;
+            query_and_check(temp_dir.path(), config, &cases).await;
         }
     }
 
@@ -248,9 +245,13 @@ mod tests {
                 ("hello", vec![0u32, 2]),
                 ("world", vec![1, 2]),
                 ("foo", vec![3]),
+                ("Foo", vec![]),
+                ("FOO", vec![]),
                 ("bar", vec![]),
+                ("Bar", vec![4]),
+                ("BAR", vec![]),
             ];
-            query_and_check(temp_dir.path(), &cases).await;
+            query_and_check(temp_dir.path(), config, &cases).await;
         }
     }
 
@@ -274,7 +275,7 @@ mod tests {
                 ("foo", vec![4]),
                 ("bar", vec![5]),
             ];
-            query_and_check(temp_dir.path(), &cases).await;
+            query_and_check(temp_dir.path(), config, &cases).await;
         }
     }
 
@@ -297,8 +298,12 @@ mod tests {
                 ("世界", vec![1, 2, 3]),
                 ("foo", vec![4]),
                 ("bar", vec![]),
+                ("Foo", vec![]),
+                ("FOO", vec![]),
+                ("Bar", vec![5]),
+                ("BAR", vec![]),
             ];
-            query_and_check(temp_dir.path(), &cases).await;
+            query_and_check(temp_dir.path(), config, &cases).await;
         }
     }
 
@@ -315,8 +320,9 @@ mod tests {
             .unwrap();
     }
 
-    async fn query_and_check(path: &Path, cases: &[(&str, Vec<u32>)]) {
-        let index = Index::open_in_dir(path).unwrap();
+    async fn query_and_check(path: &Path, config: Config, cases: &[(&str, Vec<u32>)]) {
+        let mut index = Index::open_in_dir(path).unwrap();
+        index.set_tokenizers(config.build_tantivy_tokenizer());
         let reader = index.reader().unwrap();
         let searcher = reader.searcher();
         for (query, expected) in cases {

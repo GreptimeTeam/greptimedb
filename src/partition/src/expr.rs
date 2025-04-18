@@ -13,11 +13,22 @@
 // limitations under the License.
 
 use std::fmt::{Debug, Display, Formatter};
+use std::sync::Arc;
 
-use datatypes::value::Value;
+use datafusion_common::{ScalarValue, ToDFSchema};
+use datafusion_expr::execution_props::ExecutionProps;
+use datafusion_expr::Expr;
+use datafusion_physical_expr::{create_physical_expr, PhysicalExpr};
+use datatypes::arrow;
+use datatypes::value::{
+    duration_to_scalar_value, time_to_scalar_value, timestamp_to_scalar_value, Value,
+};
 use serde::{Deserialize, Serialize};
+use snafu::ResultExt;
 use sql::statements::value_to_sql_value;
 use sqlparser::ast::{BinaryOperator as ParserBinaryOperator, Expr as ParserExpr, Ident};
+
+use crate::error;
 
 /// Struct for partition expression. This can be converted back to sqlparser's [Expr].
 /// by [`Self::to_parser_expr`].
@@ -35,6 +46,75 @@ pub enum Operand {
     Column(String),
     Value(Value),
     Expr(PartitionExpr),
+}
+
+pub fn col(column_name: impl Into<String>) -> Operand {
+    Operand::Column(column_name.into())
+}
+
+impl From<Value> for Operand {
+    fn from(value: Value) -> Self {
+        Operand::Value(value)
+    }
+}
+
+impl Operand {
+    pub fn try_as_logical_expr(&self) -> error::Result<Expr> {
+        match self {
+            Self::Column(c) => Ok(datafusion_expr::col(c)),
+            Self::Value(v) => {
+                let scalar_value = match v {
+                    Value::Boolean(v) => ScalarValue::Boolean(Some(*v)),
+                    Value::UInt8(v) => ScalarValue::UInt8(Some(*v)),
+                    Value::UInt16(v) => ScalarValue::UInt16(Some(*v)),
+                    Value::UInt32(v) => ScalarValue::UInt32(Some(*v)),
+                    Value::UInt64(v) => ScalarValue::UInt64(Some(*v)),
+                    Value::Int8(v) => ScalarValue::Int8(Some(*v)),
+                    Value::Int16(v) => ScalarValue::Int16(Some(*v)),
+                    Value::Int32(v) => ScalarValue::Int32(Some(*v)),
+                    Value::Int64(v) => ScalarValue::Int64(Some(*v)),
+                    Value::Float32(v) => ScalarValue::Float32(Some(v.0)),
+                    Value::Float64(v) => ScalarValue::Float64(Some(v.0)),
+                    Value::String(v) => ScalarValue::Utf8(Some(v.as_utf8().to_string())),
+                    Value::Binary(v) => ScalarValue::Binary(Some(v.to_vec())),
+                    Value::Date(v) => ScalarValue::Date32(Some(v.val())),
+                    Value::Null => ScalarValue::Null,
+                    Value::Timestamp(t) => timestamp_to_scalar_value(t.unit(), Some(t.value())),
+                    Value::Time(t) => time_to_scalar_value(*t.unit(), Some(t.value())).unwrap(),
+                    Value::IntervalYearMonth(v) => ScalarValue::IntervalYearMonth(Some(v.to_i32())),
+                    Value::IntervalDayTime(v) => ScalarValue::IntervalDayTime(Some((*v).into())),
+                    Value::IntervalMonthDayNano(v) => {
+                        ScalarValue::IntervalMonthDayNano(Some((*v).into()))
+                    }
+                    Value::Duration(d) => duration_to_scalar_value(d.unit(), Some(d.value())),
+                    Value::Decimal128(d) => {
+                        let (v, p, s) = d.to_scalar_value();
+                        ScalarValue::Decimal128(v, p, s)
+                    }
+                    other => {
+                        return error::UnsupportedPartitionExprValueSnafu {
+                            value: other.clone(),
+                        }
+                        .fail()
+                    }
+                };
+                Ok(datafusion_expr::lit(scalar_value))
+            }
+            Self::Expr(e) => e.try_as_logical_expr(),
+        }
+    }
+
+    pub fn lt(self, rhs: impl Into<Self>) -> PartitionExpr {
+        PartitionExpr::new(self, RestrictedOp::Lt, rhs.into())
+    }
+
+    pub fn gt_eq(self, rhs: impl Into<Self>) -> PartitionExpr {
+        PartitionExpr::new(self, RestrictedOp::GtEq, rhs.into())
+    }
+
+    pub fn eq(self, rhs: impl Into<Self>) -> PartitionExpr {
+        PartitionExpr::new(self, RestrictedOp::Eq, rhs.into())
+    }
 }
 
 impl Display for Operand {
@@ -139,6 +219,41 @@ impl PartitionExpr {
             op: self.op.to_parser_op(),
             right: Box::new(rhs),
         }
+    }
+
+    pub fn try_as_logical_expr(&self) -> error::Result<Expr> {
+        let lhs = self.lhs.try_as_logical_expr()?;
+        let rhs = self.rhs.try_as_logical_expr()?;
+
+        let expr = match &self.op {
+            RestrictedOp::And => datafusion_expr::and(lhs, rhs),
+            RestrictedOp::Or => datafusion_expr::or(lhs, rhs),
+            RestrictedOp::Gt => lhs.gt(rhs),
+            RestrictedOp::GtEq => lhs.gt_eq(rhs),
+            RestrictedOp::Lt => lhs.lt(rhs),
+            RestrictedOp::LtEq => lhs.lt_eq(rhs),
+            RestrictedOp::Eq => lhs.eq(rhs),
+            RestrictedOp::NotEq => lhs.not_eq(rhs),
+        };
+        Ok(expr)
+    }
+
+    pub fn try_as_physical_expr(
+        &self,
+        schema: &arrow::datatypes::SchemaRef,
+    ) -> error::Result<Arc<dyn PhysicalExpr>> {
+        let df_schema = schema
+            .clone()
+            .to_dfschema_ref()
+            .context(error::ToDFSchemaSnafu)?;
+        let execution_props = &ExecutionProps::default();
+        let expr = self.try_as_logical_expr()?;
+        create_physical_expr(&expr, &df_schema, execution_props)
+            .context(error::CreatePhysicalExprSnafu)
+    }
+
+    pub fn and(self, rhs: PartitionExpr) -> PartitionExpr {
+        PartitionExpr::new(Operand::Expr(self), RestrictedOp::And, Operand::Expr(rhs))
     }
 }
 

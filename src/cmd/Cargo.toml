@@ -68,7 +68,6 @@ query.workspace = true
 rand.workspace = true
 regex.workspace = true
 reqwest.workspace = true
-rustyline = "10.1"
 serde.workspace = true
 serde_json.workspace = true
 servers.workspace = true

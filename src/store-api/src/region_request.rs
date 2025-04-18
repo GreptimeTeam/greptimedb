@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::fmt::{self, Display};
+use std::io::Cursor;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::add_column_location::LocationType;
@@ -21,16 +23,19 @@ use api::v1::column_def::{
     as_fulltext_option_analyzer, as_fulltext_option_backend, as_skipping_index_type,
 };
 use api::v1::region::{
-    alter_request, compact_request, region_request, AlterRequest, AlterRequests, CloseRequest,
-    CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest, DropRequests,
-    FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
+    alter_request, compact_request, region_request, AlterRequest, AlterRequests,
+    BulkInsertRequests, CloseRequest, CompactRequest, CreateRequest, CreateRequests,
+    DeleteRequests, DropRequest, DropRequests, FlushRequest, InsertRequests, OpenRequest,
+    TruncateRequest,
 };
 use api::v1::{
     self, set_index, Analyzer, FulltextBackend as PbFulltextBackend, Option as PbOption, Rows,
     SemanticType, SkippingIndexType as PbSkippingIndexType, WriteHint,
 };
 pub use common_base::AffectedRows;
+use common_recordbatch::DfRecordBatch;
 use common_time::TimeToLive;
+use datatypes::arrow::ipc::reader::FileReader;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
 use serde::{Deserialize, Serialize};
@@ -39,9 +44,9 @@ use strum::{AsRefStr, IntoStaticStr};
 
 use crate::logstore::entry;
 use crate::metadata::{
-    ColumnMetadata, DecodeProtoSnafu, InvalidRawRegionRequestSnafu, InvalidRegionRequestSnafu,
-    InvalidSetRegionOptionRequestSnafu, InvalidUnsetRegionOptionRequestSnafu, MetadataError,
-    RegionMetadata, Result,
+    ColumnMetadata, DecodeArrowIpcSnafu, DecodeProtoSnafu, InvalidRawRegionRequestSnafu,
+    InvalidRegionRequestSnafu, InvalidSetRegionOptionRequestSnafu,
+    InvalidUnsetRegionOptionRequestSnafu, MetadataError, RegionMetadata, Result, UnexpectedSnafu,
 };
 use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use crate::mito_engine_options::{
@@ -126,6 +131,7 @@ pub enum RegionRequest {
     Compact(RegionCompactRequest),
     Truncate(RegionTruncateRequest),
     Catchup(RegionCatchupRequest),
+    BulkInserts(RegionBulkInsertsRequest),
 }
 
 impl RegionRequest {
@@ -146,6 +152,11 @@ impl RegionRequest {
             region_request::Body::Creates(creates) => make_region_creates(creates),
             region_request::Body::Drops(drops) => make_region_drops(drops),
             region_request::Body::Alters(alters) => make_region_alters(alters),
+            region_request::Body::BulkInserts(bulk) => make_region_bulk_inserts(bulk),
+            region_request::Body::Sync(_) => UnexpectedSnafu {
+                reason: "Sync request should be handled separately by RegionServer",
+            }
+            .fail(),
         }
     }
 
@@ -313,6 +324,51 @@ fn make_region_truncate(truncate: TruncateRequest) -> Result<Vec<(RegionId, Regi
         region_id,
         RegionRequest::Truncate(RegionTruncateRequest {}),
     )])
+}
+
+/// Convert [BulkInsertRequests] to [RegionRequest] and group by [RegionId].
+fn make_region_bulk_inserts(
+    requests: BulkInsertRequests,
+) -> Result<Vec<(RegionId, RegionRequest)>> {
+    let mut region_requests: HashMap<u64, Vec<BulkInsertPayload>> =
+        HashMap::with_capacity(requests.requests.len());
+
+    for req in requests.requests {
+        let region_id = req.region_id;
+        match req.payload_type() {
+            api::v1::region::BulkInsertType::ArrowIpc => {
+                // todo(hl): use StreamReader instead
+                let reader = FileReader::try_new(Cursor::new(req.payload), None)
+                    .context(DecodeArrowIpcSnafu)?;
+                let record_batches = reader
+                    .map(|b| b.map(BulkInsertPayload::ArrowIpc))
+                    .try_collect::<Vec<_>>()
+                    .context(DecodeArrowIpcSnafu)?;
+                match region_requests.entry(region_id) {
+                    Entry::Occupied(mut e) => {
+                        e.get_mut().extend(record_batches);
+                    }
+                    Entry::Vacant(e) => {
+                        e.insert(record_batches);
+                    }
+                }
+            }
+        }
+    }
+
+    let result = region_requests
+        .into_iter()
+        .map(|(region_id, payloads)| {
+            (
+                region_id.into(),
+                RegionRequest::BulkInserts(RegionBulkInsertsRequest {
+                    region_id: region_id.into(),
+                    payloads,
+                }),
+            )
+        })
+        .collect::<Vec<_>>();
+    Ok(result)
 }
 
 /// Request to put data into a region.
@@ -1105,6 +1161,10 @@ pub struct RegionCatchupRequest {
     /// The `entry_id` that was expected to reply to.
     /// `None` stands replaying to latest.
     pub entry_id: Option<entry::Id>,
+    /// Used for metrics metadata region.
+    /// The `entry_id` that was expected to reply to.
+    /// `None` stands replaying to latest.
+    pub metadata_entry_id: Option<entry::Id>,
     /// The hint for replaying memtable.
     pub location_id: Option<u64>,
 }
@@ -1113,6 +1173,17 @@ pub struct RegionCatchupRequest {
 #[derive(Debug, Clone)]
 pub struct RegionSequencesRequest {
     pub region_ids: Vec<RegionId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RegionBulkInsertsRequest {
+    pub region_id: RegionId,
+    pub payloads: Vec<BulkInsertPayload>,
+}
+
+#[derive(Debug, Clone)]
+pub enum BulkInsertPayload {
+    ArrowIpc(DfRecordBatch),
 }
 
 impl fmt::Display for RegionRequest {
@@ -1129,6 +1200,7 @@ impl fmt::Display for RegionRequest {
             RegionRequest::Compact(_) => write!(f, "Compact"),
             RegionRequest::Truncate(_) => write!(f, "Truncate"),
             RegionRequest::Catchup(_) => write!(f, "Catchup"),
+            RegionRequest::BulkInserts(_) => write!(f, "BulkInserts"),
         }
     }
 }

@@ -75,6 +75,7 @@ impl QueryEngineContext {
         use common_base::Plugins;
         use session::context::QueryContext;
 
+        use crate::options::QueryOptions;
         use crate::query_engine::QueryEngineState;
 
         let state = Arc::new(QueryEngineState::new(
@@ -85,6 +86,7 @@ impl QueryEngineContext {
             None,
             false,
             Plugins::default(),
+            QueryOptions::default(),
         ));
 
         QueryEngineContext::new(state.session_state(), QueryContext::arc())

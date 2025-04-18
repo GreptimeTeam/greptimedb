@@ -60,10 +60,10 @@ lazy_static! {
     /// The migration fail counter.
     pub static ref METRIC_META_REGION_MIGRATION_FAIL: IntCounter =
         register_int_counter!("greptime_meta_region_migration_fail", "meta region migration fail").unwrap();
-    /// The add region follower execute histogram.
-    pub static ref METRIC_META_ADD_REGION_FOLLOWER_EXECUTE: HistogramVec =
-        register_histogram_vec!("greptime_meta_add_region_follower_execute", "meta add region follower execute", &["state"]).unwrap();
-    /// The remove region follower execute histogram.
-    pub static ref METRIC_META_REMOVE_REGION_FOLLOWER_EXECUTE: HistogramVec =
-        register_histogram_vec!("greptime_meta_remove_region_follower_execute", "meta remove region follower execute", &["state"]).unwrap();
+    // The heartbeat stat memory size histogram.
+    pub static ref METRIC_META_HEARTBEAT_STAT_MEMORY_SIZE: Histogram =
+        register_histogram!("greptime_meta_heartbeat_stat_memory_size", "meta heartbeat stat memory size").unwrap();
+    // The heartbeat rate counter.
+    pub static ref METRIC_META_HEARTBEAT_RATE: IntCounter =
+        register_int_counter!("greptime_meta_heartbeat_rate", "meta heartbeat arrival rate").unwrap();
 }

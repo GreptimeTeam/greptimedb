@@ -27,7 +27,8 @@ use snafu::{ensure, OptionExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
     RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef, RegionStatistic,
-    SetRegionRoleStateResponse, SettableRegionRoleState, SinglePartitionScanner,
+    SetRegionRoleStateResponse, SetRegionRoleStateSuccess, SettableRegionRoleState,
+    SinglePartitionScanner, SyncManifestResponse,
 };
 use store_api::region_request::{
     AffectedRows, RegionCloseRequest, RegionCreateRequest, RegionDropRequest, RegionOpenRequest,
@@ -132,7 +133,9 @@ impl RegionEngine for FileRegionEngine {
         let exists = self.inner.get_region(region_id).await.is_some();
 
         if exists {
-            Ok(SetRegionRoleStateResponse::success(None))
+            Ok(SetRegionRoleStateResponse::success(
+                SetRegionRoleStateSuccess::file(),
+            ))
         } else {
             Ok(SetRegionRoleStateResponse::NotFound)
         }
@@ -142,9 +145,9 @@ impl RegionEngine for FileRegionEngine {
         &self,
         _region_id: RegionId,
         _manifest_info: RegionManifestInfo,
-    ) -> Result<(), BoxedError> {
+    ) -> Result<SyncManifestResponse, BoxedError> {
         // File engine doesn't need to sync region manifest.
-        Ok(())
+        Ok(SyncManifestResponse::NotSupported)
     }
 
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {

@@ -298,7 +298,7 @@ impl Stream for RecordBatchStreamAdapter {
         match Pin::new(&mut self.stream).poll_next(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Some(df_record_batch)) => {
-                let df_record_batch = df_record_batch.context(error::PollStreamSnafu)?;
+                let df_record_batch = df_record_batch?;
                 Poll::Ready(Some(RecordBatch::try_from_df_record_batch(
                     self.schema(),
                     df_record_batch,

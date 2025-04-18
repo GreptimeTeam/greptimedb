@@ -76,10 +76,12 @@ impl UpgradeCandidateRegion {
         let pc = &ctx.persistent_ctx;
         let region_id = pc.region_id;
         let last_entry_id = ctx.volatile_ctx.leader_region_last_entry_id;
+        let metadata_last_entry_id = ctx.volatile_ctx.leader_region_metadata_last_entry_id;
 
         Instruction::UpgradeRegion(UpgradeRegion {
             region_id,
             last_entry_id,
+            metadata_last_entry_id,
             replay_timeout: Some(replay_timeout),
             location_id: Some(ctx.persistent_ctx.from_peer.id),
         })

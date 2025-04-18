@@ -47,7 +47,7 @@ impl<const IS_RATE: bool> IDelta<IS_RATE> {
             Self::name(),
             Self::input_type(),
             Self::return_type(),
-            Volatility::Immutable,
+            Volatility::Volatile,
             Arc::new(Self::calc) as _,
         )
     }
@@ -138,9 +138,7 @@ impl<const IS_RATE: bool> IDelta<IS_RATE> {
             }
 
             // else is rate
-            // TODO(ruihang): "divide 1000" converts the timestamp from millisecond to second.
-            //     it should consider other percisions.
-            let sampled_interval = (timestamps[len - 1] - timestamps[len - 2]) / 1000;
+            let sampled_interval = (timestamps[len - 1] - timestamps[len - 2]) as f64 / 1000.0;
             let last_value = values[len - 1];
             let prev_value = values[len - 2];
             let result_value = if last_value < prev_value {

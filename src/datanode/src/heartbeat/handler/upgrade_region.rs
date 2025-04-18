@@ -26,6 +26,7 @@ impl HandlerContext {
         UpgradeRegion {
             region_id,
             last_entry_id,
+            metadata_last_entry_id,
             replay_timeout,
             location_id,
         }: UpgradeRegion,
@@ -63,6 +64,7 @@ impl HandlerContext {
                                 RegionRequest::Catchup(RegionCatchupRequest {
                                     set_writable: true,
                                     entry_id: last_entry_id,
+                                    metadata_entry_id: metadata_last_entry_id,
                                     location_id,
                                 }),
                             )
@@ -147,6 +149,7 @@ mod tests {
                 .handle_upgrade_region_instruction(UpgradeRegion {
                     region_id,
                     last_entry_id: None,
+                    metadata_last_entry_id: None,
                     replay_timeout,
                     location_id: None,
                 })
@@ -185,6 +188,7 @@ mod tests {
                 .handle_upgrade_region_instruction(UpgradeRegion {
                     region_id,
                     last_entry_id: None,
+                    metadata_last_entry_id: None,
                     replay_timeout,
                     location_id: None,
                 })
@@ -224,6 +228,7 @@ mod tests {
                 .handle_upgrade_region_instruction(UpgradeRegion {
                     region_id,
                     last_entry_id: None,
+                    metadata_last_entry_id: None,
                     replay_timeout,
                     location_id: None,
                 })
@@ -267,6 +272,7 @@ mod tests {
                     region_id,
                     replay_timeout,
                     last_entry_id: None,
+                    metadata_last_entry_id: None,
                     location_id: None,
                 })
                 .await;
@@ -284,6 +290,7 @@ mod tests {
             .handle_upgrade_region_instruction(UpgradeRegion {
                 region_id,
                 last_entry_id: None,
+                metadata_last_entry_id: None,
                 replay_timeout: Some(Duration::from_millis(500)),
                 location_id: None,
             })
@@ -326,6 +333,7 @@ mod tests {
             .handle_upgrade_region_instruction(UpgradeRegion {
                 region_id,
                 last_entry_id: None,
+                metadata_last_entry_id: None,
                 replay_timeout: None,
                 location_id: None,
             })
@@ -344,6 +352,7 @@ mod tests {
             .handle_upgrade_region_instruction(UpgradeRegion {
                 region_id,
                 last_entry_id: None,
+                metadata_last_entry_id: None,
                 replay_timeout: Some(Duration::from_millis(200)),
                 location_id: None,
             })

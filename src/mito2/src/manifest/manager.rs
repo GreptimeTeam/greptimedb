@@ -313,11 +313,12 @@ impl RegionManifestManager {
             }
         );
 
+        let region_id = self.manifest.metadata.region_id;
         // Fetches manifests from the last version strictly.
         let mut manifests = self
             .store
             // Invariant: last_version < target_version.
-            .fetch_manifests_strict_from(last_version + 1, target_version + 1)
+            .fetch_manifests_strict_from(last_version + 1, target_version + 1, region_id)
             .await?;
 
         // Case 2: No manifests in range: [current_version+1, target_version+1)
@@ -327,7 +328,7 @@ impl RegionManifestManager {
         // [Current Version]......[Target Version]
         // [Follower region]
         if manifests.is_empty() {
-            debug!(
+            info!(
                 "Manifests are not strict from {}, region: {}, tries to install the last checkpoint",
                 last_version, self.manifest.metadata.region_id
             );
@@ -341,7 +342,7 @@ impl RegionManifestManager {
             manifests = self
                 .store
                 // Invariant: last_version < target_version.
-                .fetch_manifests_strict_from(last_version + 1, target_version + 1)
+                .fetch_manifests_strict_from(last_version + 1, target_version + 1, region_id)
                 .await?;
         }
 
