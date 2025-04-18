@@ -268,7 +268,10 @@ impl RegionMigrationManager {
         ensure!(
             leader_peer.id == task.from_peer.id,
             error::InvalidArgumentsSnafu {
-                err_msg: "Invalid region migration `from_peer` argument"
+                err_msg: format!(
+                    "Region's leader peer({}) is not the `from_peer`({}), region: {}",
+                    leader_peer.id, task.from_peer.id, task.region_id
+                ),
             }
         );
 
@@ -284,7 +287,10 @@ impl RegionMigrationManager {
         ensure!(
             !region_route.follower_peers.contains(&task.to_peer),
             error::InvalidArgumentsSnafu {
-                err_msg: "`to_peer` is already has a region follower",
+                err_msg: format!(
+                    "The `to_peer`({}) is already has a region follower, region: {}",
+                    task.to_peer.id, task.region_id
+                ),
             },
         );
 
@@ -502,9 +508,7 @@ mod test {
 
         let err = manager.submit_procedure(task).await.unwrap_err();
         assert_matches!(err, error::Error::InvalidArguments { .. });
-        assert!(err
-            .to_string()
-            .contains("Invalid region migration `from_peer` argument"));
+        assert_eq!(err.to_string(), "Invalid arguments: Region's leader peer(3) is not the `from_peer`(1), region: 4398046511105(1024, 1)");
     }
 
     #[tokio::test]
@@ -533,9 +537,10 @@ mod test {
 
         let err = manager.submit_procedure(task).await.unwrap_err();
         assert_matches!(err, error::Error::InvalidArguments { .. });
-        assert!(err
-            .to_string()
-            .contains("`to_peer` is already has a region follower"));
+        assert_eq!(
+            err.to_string(),
+            "Invalid arguments: The `to_peer`(2) is already has a region follower, region: 4398046511105(1024, 1)"
+        );
     }
 
     #[tokio::test]
