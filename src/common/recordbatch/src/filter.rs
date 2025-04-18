@@ -61,6 +61,8 @@ pub struct SimpleFilterEvaluator {
     /// Only used when the operator is regex operators.
     /// If the regex is empty, it is also `None`.
     regex: Option<Regex>,
+    /// Whether the regex is negative.
+    regex_negative: bool,
 }
 
 impl SimpleFilterEvaluator {
@@ -85,6 +87,7 @@ impl SimpleFilterEvaluator {
             op,
             literal_list: vec![],
             regex: None,
+            regex_negative: false,
         })
     }
 
@@ -131,6 +134,7 @@ impl SimpleFilterEvaluator {
                             op: Operator::Or,
                             literal_list: list,
                             regex: None,
+                            regex_negative: false,
                         });
                     }
                     _ => return None,
@@ -148,7 +152,7 @@ impl SimpleFilterEvaluator {
                     _ => return None,
                 };
 
-                let regex = Self::maybe_build_regex(op, rhs);
+                let (regex, regex_negative) = Self::maybe_build_regex(op, rhs).ok()?;
                 let literal = rhs.to_scalar().ok()?;
                 Some(Self {
                     column_name: lhs.name.clone(),
@@ -156,6 +160,7 @@ impl SimpleFilterEvaluator {
                     op,
                     literal_list: vec![],
                     regex,
+                    regex_negative,
                 })
             }
             _ => None,
@@ -191,10 +196,10 @@ impl SimpleFilterEvaluator {
             Operator::LtEq => cmp::lt_eq(input, &self.literal),
             Operator::Gt => cmp::gt(input, &self.literal),
             Operator::GtEq => cmp::gt_eq(input, &self.literal),
-            Operator::RegexMatch => self.regex_match(input, false),
-            Operator::RegexIMatch => self.regex_match(input, false),
-            Operator::RegexNotMatch => self.regex_match(input, true),
-            Operator::RegexNotIMatch => self.regex_match(input, true),
+            Operator::RegexMatch => self.regex_match(input),
+            Operator::RegexIMatch => self.regex_match(input),
+            Operator::RegexNotMatch => self.regex_match(input),
+            Operator::RegexNotIMatch => self.regex_match(input),
             Operator::Or => {
                 // OR operator stands for OR-chained EQs (or INLIST in other words)
                 let mut result: BooleanArray = vec![false; input_len].into();
@@ -217,42 +222,53 @@ impl SimpleFilterEvaluator {
     }
 
     /// Builds a regex pattern from a scalar value and operator.
-    /// Returns `None` if
-    /// - the operator is not a regex operator
+    /// Returns the `(regex, negative)` and if successful.
+    ///
+    /// Returns `Err` if
     /// - the value is not a string
     /// - the regex pattern is invalid
-    fn maybe_build_regex(operator: Operator, value: &ScalarValue) -> Option<Regex> {
-        let ignore_case = match operator {
-            Operator::RegexMatch => false,
-            Operator::RegexIMatch => true,
-            Operator::RegexNotMatch => false,
-            Operator::RegexNotIMatch => true,
-            _ => return None,
+    ///
+    /// The regex is `None` if
+    /// - the operator is not a regex operator
+    /// - the pattern is empty
+    fn maybe_build_regex(
+        operator: Operator,
+        value: &ScalarValue,
+    ) -> Result<(Option<Regex>, bool), ArrowError> {
+        let (ignore_case, negative) = match operator {
+            Operator::RegexMatch => (false, false),
+            Operator::RegexIMatch => (true, false),
+            Operator::RegexNotMatch => (false, true),
+            Operator::RegexNotIMatch => (true, true),
+            _ => return Ok((None, false)),
         };
         let flag = if ignore_case { Some("i") } else { None };
-        let regex = value.try_as_str()??;
+        let regex = value
+            .try_as_str()
+            .ok_or_else(|| ArrowError::CastError(format!("Cannot cast {:?} to str", value)))?
+            .ok_or_else(|| ArrowError::CastError("Regex should not be null".to_string()))?;
         let pattern = match flag {
             Some(flag) => format!("(?{flag}){regex}"),
             None => regex.to_string(),
         };
         if pattern.is_empty() {
-            None
+            Ok((None, negative))
         } else {
-            Regex::new(pattern.as_str()).ok()
+            Regex::new(pattern.as_str())
+                .map_err(|e| {
+                    ArrowError::ComputeError(format!("Regular expression did not compile: {e:?}"))
+                })
+                .map(|regex| (Some(regex), negative))
         }
     }
 
-    fn regex_match(
-        &self,
-        input: &impl Datum,
-        negative: bool,
-    ) -> std::result::Result<BooleanArray, ArrowError> {
+    fn regex_match(&self, input: &impl Datum) -> std::result::Result<BooleanArray, ArrowError> {
         let array = input.get().0;
         let string_array = as_string_array(array).map_err(|_| {
             ArrowError::CastError(format!("Cannot cast {:?} to StringArray", array))
         })?;
         let mut result = regexp_is_match_scalar(string_array, self.regex.as_ref())?;
-        if negative {
+        if self.regex_negative {
             result = datatypes::compute::not(&result)?;
         }
         Ok(result)
