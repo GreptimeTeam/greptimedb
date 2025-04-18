@@ -30,8 +30,8 @@ use crate::error;
 use crate::insert::Inserter;
 
 impl Inserter {
-    /// Handle bulk insert requests.
-    pub async fn handle_bulk_inserts(
+    /// Handle bulk insert request.
+    pub async fn handle_bulk_insert(
         &self,
         table_id: TableId,
         decoder: &mut FlightDecoder,

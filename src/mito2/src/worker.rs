@@ -835,7 +835,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     sender,
                 } => {
                     if let Some(region_metadata) = metadata {
-                        self.handle_bulk_inserts(request, region_metadata, write_requests, sender)
+                        self.handle_bulk_insert(request, region_metadata, write_requests, sender)
                             .await;
                     } else {
                         error!("Cannot find region metadata for {}", request.region_id);

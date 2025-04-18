@@ -29,7 +29,7 @@ use crate::request::{OptionOutputTx, SenderWriteRequest, WriteRequest};
 use crate::worker::RegionWorkerLoop;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
-    pub(crate) async fn handle_bulk_inserts(
+    pub(crate) async fn handle_bulk_insert(
         &mut self,
         request: RegionBulkInsertsRequest,
         region_metadata: RegionMetadataRef,
