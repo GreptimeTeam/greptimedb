@@ -363,10 +363,13 @@ impl BatchingEngine {
     }
 
     pub async fn flush_flow_inner(&self, flow_id: FlowId) -> Result<usize, Error> {
+        info!("Try flush flow {flow_id}");
         let task = self.tasks.read().await.get(&flow_id).cloned();
         let task = task.with_context(|| UnexpectedSnafu {
             reason: format!("Can't found task for flow {flow_id}"),
         })?;
+
+        task.mark_all_windows_as_dirty()?;
 
         let res = task
             .gen_exec_once(&self.query_engine, &self.frontend_client)

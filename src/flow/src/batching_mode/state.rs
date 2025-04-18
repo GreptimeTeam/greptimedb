@@ -22,13 +22,13 @@ use common_telemetry::tracing::warn;
 use common_time::Timestamp;
 use datatypes::value::Value;
 use session::context::QueryContextRef;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 
 use crate::batching_mode::task::BatchingTask;
 use crate::batching_mode::MIN_REFRESH_DURATION;
-use crate::error::{DatatypesSnafu, InternalSnafu, TimeSnafu};
+use crate::error::{DatatypesSnafu, InternalSnafu, TimeSnafu, UnexpectedSnafu};
 use crate::{Error, FlowId};
 
 /// The state of the [`BatchingTask`].
@@ -118,6 +118,10 @@ impl DirtyTimeWindows {
         }
     }
 
+    pub fn add_window(&mut self, start: Timestamp, end: Option<Timestamp>) {
+        self.windows.insert(start, end);
+    }
+
     /// Generate all filter expressions consuming all time windows
     pub fn gen_filter_exprs(
         &mut self,
@@ -180,6 +184,27 @@ impl DirtyTimeWindows {
 
         let mut expr_lst = vec![];
         for (start, end) in first_nth.into_iter() {
+            // align using time window exprs
+            let (start, end) = if let Some(ctx) = task_ctx {
+                let Some(time_window_expr) = &ctx.config.time_window_expr else {
+                    UnexpectedSnafu {
+                        reason: "time_window_expr is not set",
+                    }
+                    .fail()?
+                };
+                let align_start = time_window_expr.eval(start)?.0.context(UnexpectedSnafu {
+                    reason: format!(
+                        "Failed to align start time {:?} with time window expr {:?}",
+                        start, time_window_expr
+                    ),
+                })?;
+                let align_end = end
+                    .and_then(|end| time_window_expr.eval(end).map(|r| r.1).transpose())
+                    .transpose()?;
+                (align_start, align_end)
+            } else {
+                (start, end)
+            };
             debug!(
                 "Time window start: {:?}, end: {:?}",
                 start.to_iso8601_string(),
