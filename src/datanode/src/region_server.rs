@@ -400,7 +400,6 @@ impl RegionServer {
         let mut extensions = HashMap::new();
         for result in results {
             affected_rows += result.affected_rows;
-            common_telemetry::info!("Region server affected rows: {}", affected_rows);
             extensions.extend(result.extensions);
         }
 
