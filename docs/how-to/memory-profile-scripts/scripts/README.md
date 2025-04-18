@@ -14,15 +14,14 @@ This section will guide you through the process of analyzing memory usage for gr
     where `<binary_path>` is the path to the greptimedb binary, `<gprof_directory>` is the directory containing the gprof files(the directory `dump.sh` is dumping profiles to).
     Example call: `./gen_flamegraph.sh ./greptime .`
 
-    Generating the flame graph might take a few minutes. The generated flame graphs are located in the `<gprof_directory>/flamegraphs` directory. Or if no `flamegraph.pl` is found, it will only contains `.collapse` files which is also fine.
-
+    Generating the flame graph might take a few minutes. The generated flame graphs are located in the `<gprof_directory>/flamegraphs` directory. Or if no `flamegraph.pl` is found, it will only contain `.collapse` files which is also fine.
 5.  You can send the generated flame graphs(the entire folder of `<gprof_directory>/flamegraphs`) to developers for further analysis.
 
 
 ## Getting the `jeprof` tool
 there are three ways to get `jeprof`, list in here from simple to complex, using any one of those methods is ok, as long as it's the same environment as the `greptimedb` will be running on:
 1. If you are compiling greptimedb from source, then `jeprof` is already produced during compilation. After running `cargo build`, execute `find_compiled_jeprof.sh`. This will copy `jeprof` to the current directory.
-2. Or if you have rust toolchain locally, simply following this commands:
+2. Or, if you have the Rust toolchain installed locally, simply follow these commands:
 ```bash
 cargo new get_jeprof
 cd get_jeprof
