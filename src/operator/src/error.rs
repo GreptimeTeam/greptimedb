@@ -808,14 +808,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Arrow operation failed"))]
-    Arrow {
-        #[snafu(source)]
-        error: ArrowError,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to decode arrow flight data"))]
     DecodeFlightData {
         source: common_grpc::error::Error,
@@ -943,7 +935,6 @@ impl ErrorExt for Error {
             Error::UpgradeCatalogManagerRef { .. } => StatusCode::Internal,
             Error::StatementTimeout { .. } => StatusCode::Cancelled,
             Error::ColumnOptions { source, .. } => source.status_code(),
-            Error::Arrow { .. } => StatusCode::InvalidArguments,
             Error::DecodeFlightData { source, .. } => source.status_code(),
         }
     }

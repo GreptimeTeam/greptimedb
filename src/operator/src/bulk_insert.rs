@@ -59,9 +59,10 @@ impl Inserter {
             .await
             .context(error::InvalidPartitionSnafu)?;
 
-        let mut handles = Vec::new();
         // find partitions for each row in the record batch
-        let region_masks = partition_rule.split_record_batch(record_batch).unwrap();
+        let region_masks = partition_rule
+            .split_record_batch(record_batch)
+            .context(error::SplitInsertSnafu)?;
 
         let mut mask_per_datanode = HashMap::with_capacity(region_masks.len());
         for (region_number, mask) in region_masks {
@@ -81,6 +82,31 @@ impl Inserter {
                 .push(selection);
         }
 
+        // fast path: only one datanode
+        if mask_per_datanode.len() == 1 {
+            let (peer, requests) = mask_per_datanode.into_iter().next().unwrap();
+            let datanode = self.node_manager.datanode(&peer).await;
+            let request = RegionRequest {
+                header: Some(RegionRequestHeader {
+                    tracing_context: TracingContext::from_current_span().to_w3c(),
+                    ..Default::default()
+                }),
+                body: Some(region_request::Body::BulkInsert(BulkInsertRequest {
+                    body: Some(bulk_insert_request::Body::ArrowIpc(ArrowIpc {
+                        schema: schema_data,
+                        payload: raw_flight_data,
+                        region_selection: requests,
+                    })),
+                })),
+            };
+            let response = datanode
+                .handle(request)
+                .await
+                .context(error::RequestRegionSnafu)?;
+            return Ok(response.affected_rows);
+        }
+
+        let mut handles = Vec::with_capacity(mask_per_datanode.len());
         for (peer, masks) in mask_per_datanode {
             let node_manager = self.node_manager.clone();
             let schema = schema_data.clone();
