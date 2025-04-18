@@ -299,6 +299,34 @@ impl TestGuard {
     }
 }
 
+impl Drop for TestGuard {
+    fn drop(&mut self) {
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        let guards = std::mem::take(&mut self.storage_guards);
+        common_runtime::spawn_global(async move {
+            let mut errors = vec![];
+            for guard in guards {
+                if let TempDirGuard::S3(guard)
+                | TempDirGuard::Oss(guard)
+                | TempDirGuard::Azblob(guard)
+                | TempDirGuard::Gcs(guard) = guard.0
+                {
+                    if let Err(e) = guard.remove_all().await {
+                        errors.push(e);
+                    }
+                }
+            }
+            if errors.is_empty() {
+                tx.send(Ok(())).unwrap();
+            } else {
+                tx.send(Err(errors)).unwrap();
+            }
+        });
+        rx.recv().unwrap().unwrap_or_else(|e| panic!("{:?}", e));
+    }
+}
+
 pub fn create_tmp_dir_and_datanode_opts(
     default_store_type: StorageType,
     store_provider_types: Vec<StorageType>,
@@ -475,6 +503,9 @@ pub async fn setup_test_prom_app_with_frontend(
     let sql =
         "INSERT INTO demo_metrics(idc, val, ts) VALUES ('idc1', 1.1, 0), ('idc2', 2.1, 600000)";
     run_sql(sql, &instance).await;
+    // insert a row with empty label
+    let sql = "INSERT INTO demo_metrics(val, ts) VALUES (1.1, 0)";
+    run_sql(sql, &instance).await;
 
     // build physical table
     let sql = "CREATE TABLE phy2 (ts timestamp(9) time index, val double, host string primary key) engine=metric with ('physical_metric_table' = '')";
@@ -482,6 +513,12 @@ pub async fn setup_test_prom_app_with_frontend(
     let sql = "CREATE TABLE demo_metrics_with_nanos(ts timestamp(9) time index, val double, idc string primary key) engine=metric with ('on_physical_table' = 'phy2')";
     run_sql(sql, &instance).await;
     let sql = "INSERT INTO demo_metrics_with_nanos(idc, val, ts) VALUES ('idc1', 1.1, 0)";
+    run_sql(sql, &instance).await;
+
+    // a mito table with non-prometheus compatible values
+    let sql = "CREATE TABLE mito (ts timestamp(9) time index, val double, host bigint primary key) engine=mito";
+    run_sql(sql, &instance).await;
+    let sql = "INSERT INTO mito(host, val, ts) VALUES (1, 1.1, 0)";
     run_sql(sql, &instance).await;
 
     let http_opts = HttpOptions {
@@ -504,7 +541,7 @@ pub async fn setup_test_prom_app_with_frontend(
 pub async fn setup_grpc_server(
     store_type: StorageType,
     name: &str,
-) -> (String, TestGuard, Arc<GrpcServer>) {
+) -> (String, GreptimeDbStandalone, Arc<GrpcServer>) {
     setup_grpc_server_with(store_type, name, None, None).await
 }
 
@@ -512,7 +549,7 @@ pub async fn setup_grpc_server_with_user_provider(
     store_type: StorageType,
     name: &str,
     user_provider: Option<UserProviderRef>,
-) -> (String, TestGuard, Arc<GrpcServer>) {
+) -> (String, GreptimeDbStandalone, Arc<GrpcServer>) {
     setup_grpc_server_with(store_type, name, user_provider, None).await
 }
 
@@ -521,7 +558,7 @@ pub async fn setup_grpc_server_with(
     name: &str,
     user_provider: Option<UserProviderRef>,
     grpc_config: Option<GrpcServerConfig>,
-) -> (String, TestGuard, Arc<GrpcServer>) {
+) -> (String, GreptimeDbStandalone, Arc<GrpcServer>) {
     let instance = setup_standalone_instance(name, store_type).await;
 
     let runtime: Runtime = RuntimeBuilder::default()
@@ -560,7 +597,7 @@ pub async fn setup_grpc_server_with(
     // wait for GRPC server to start
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    (fe_grpc_addr, instance.guard, fe_grpc_server)
+    (fe_grpc_addr, instance, fe_grpc_server)
 }
 
 pub async fn setup_mysql_server(

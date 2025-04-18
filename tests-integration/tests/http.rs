@@ -50,6 +50,7 @@ use tests_integration::test_util::{
     setup_test_http_app_with_frontend_and_user_provider, setup_test_prom_app_with_frontend,
     StorageType,
 };
+use yaml_rust::YamlLoader;
 
 #[macro_export]
 macro_rules! http_test {
@@ -764,6 +765,13 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     assert!(prom_resp.error.is_none());
     assert!(prom_resp.error_type.is_none());
 
+    // query non-string value
+    let res = client
+        .get("/v1/prometheus/api/v1/label/host/values?match[]=mito")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
     // query `__name__` without match[]
     // create a physical table and a logical table
     let res = client
@@ -793,6 +801,7 @@ pub async fn test_prom_http_api(store_type: StorageType) {
             "demo_metrics".to_string(),
             "demo_metrics_with_nanos".to_string(),
             "logic_table".to_string(),
+            "mito".to_string(),
             "numbers".to_string()
         ])
     );
@@ -1348,6 +1357,55 @@ transform:
         .as_str()
         .unwrap()
         .to_string();
+    let encoded_ver_str: String =
+        url::form_urlencoded::byte_serialize(version_str.as_bytes()).collect();
+
+    // get pipeline
+    let res = client
+        .get(format!("/v1/pipelines/test?version={}", encoded_ver_str).as_str())
+        .send()
+        .await;
+
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let content = res.text().await;
+    let content = serde_json::from_str(&content);
+    let content: Value = content.unwrap();
+    let pipeline_yaml = content
+        .get("pipelines")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .first()
+        .unwrap()
+        .get("pipeline")
+        .unwrap()
+        .as_str()
+        .unwrap();
+    let docs = YamlLoader::load_from_str(pipeline_yaml).unwrap();
+    let body_yaml = YamlLoader::load_from_str(body).unwrap();
+    assert_eq!(docs, body_yaml);
+
+    // Do not specify version, get the latest version
+    let res = client.get("/v1/pipelines/test").send().await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let content = res.text().await;
+    let content = serde_json::from_str(&content);
+    let content: Value = content.unwrap();
+    let pipeline_yaml = content
+        .get("pipelines")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .first()
+        .unwrap()
+        .get("pipeline")
+        .unwrap()
+        .as_str()
+        .unwrap();
+    let docs = YamlLoader::load_from_str(pipeline_yaml).unwrap();
+    assert_eq!(docs, body_yaml);
 
     // 2. write data
     let data_body = r#"

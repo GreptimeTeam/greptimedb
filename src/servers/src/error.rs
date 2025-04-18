@@ -25,6 +25,7 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_telemetry::{error, warn};
+use common_time::Duration;
 use datafusion::error::DataFusionError;
 use datatypes::prelude::ConcreteDataType;
 use headers::ContentType;
@@ -615,6 +616,9 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Overflow while casting `{:?}` to Interval", val))]
+    DurationOverflow { val: Duration },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -734,6 +738,7 @@ impl ErrorExt for Error {
             ConvertSqlValue { source, .. } => source.status_code(),
 
             InFlightWriteBytesExceeded { .. } => StatusCode::RateLimited,
+            DurationOverflow { .. } => StatusCode::InvalidArguments,
         }
     }
 

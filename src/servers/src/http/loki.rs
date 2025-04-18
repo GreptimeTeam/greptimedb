@@ -345,7 +345,7 @@ pub fn parse_loki_labels(labels: &str) -> Result<BTreeMap<String, String>> {
 
     while !labels.is_empty() {
         // parse key
-        let first_index = labels.find("=").context(InvalidLokiLabelsSnafu {
+        let first_index = labels.find("=").with_context(|| InvalidLokiLabelsSnafu {
             msg: format!("missing `=` near: {}", labels),
         })?;
         let key = &labels[..first_index];

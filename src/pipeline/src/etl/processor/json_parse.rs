@@ -12,34 +12,32 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use snafu::OptionExt as _;
+use snafu::{OptionExt as _, ResultExt};
 
-use crate::error::{Error, KeyMustBeStringSnafu, ProcessorMissingFieldSnafu, Result};
+use crate::error::{
+    Error, FieldMustBeTypeSnafu, JsonParseSnafu, KeyMustBeStringSnafu, ProcessorMissingFieldSnafu,
+    ProcessorUnsupportedValueSnafu, Result,
+};
 use crate::etl::field::Fields;
 use crate::etl::processor::{
-    yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, FIELDS_NAME, FIELD_NAME,
-    IGNORE_MISSING_NAME, SIMPLE_EXTRACT_KEY_NAME,
+    yaml_bool, yaml_new_field, yaml_new_fields, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
 };
-use crate::{PipelineMap, Processor, Value};
+use crate::{json_to_map, PipelineMap, Processor, Value};
 
-pub(crate) const PROCESSOR_SIMPLE_EXTRACT: &str = "simple_extract";
+pub(crate) const PROCESSOR_JSON_PARSE: &str = "json_parse";
 
 #[derive(Debug, Default)]
-pub struct SimpleExtractProcessor {
+pub struct JsonParseProcessor {
     fields: Fields,
-    /// simple keys to extract nested JSON field
-    /// key `a.b` is saved as  ['a', 'b'], each key represents a level of the JSON tree
-    key: Vec<String>,
     ignore_missing: bool,
 }
 
-impl TryFrom<&yaml_rust::yaml::Hash> for SimpleExtractProcessor {
+impl TryFrom<&yaml_rust::yaml::Hash> for JsonParseProcessor {
     type Error = Error;
 
     fn try_from(value: &yaml_rust::yaml::Hash) -> std::result::Result<Self, Self::Error> {
         let mut fields = Fields::default();
         let mut ignore_missing = false;
-        let mut keys = vec![];
 
         for (k, v) in value.iter() {
             let key = k
@@ -55,17 +53,12 @@ impl TryFrom<&yaml_rust::yaml::Hash> for SimpleExtractProcessor {
                 IGNORE_MISSING_NAME => {
                     ignore_missing = yaml_bool(v, IGNORE_MISSING_NAME)?;
                 }
-                SIMPLE_EXTRACT_KEY_NAME => {
-                    let key_str = yaml_string(v, SIMPLE_EXTRACT_KEY_NAME)?;
-                    keys.extend(key_str.split(".").map(|s| s.to_string()));
-                }
                 _ => {}
             }
         }
 
-        let processor = SimpleExtractProcessor {
+        let processor = JsonParseProcessor {
             fields,
-            key: keys,
             ignore_missing,
         };
 
@@ -73,25 +66,31 @@ impl TryFrom<&yaml_rust::yaml::Hash> for SimpleExtractProcessor {
     }
 }
 
-impl SimpleExtractProcessor {
+impl JsonParseProcessor {
     fn process_field(&self, val: &Value) -> Result<Value> {
-        let mut current = val;
-        for key in self.key.iter() {
-            let Value::Map(map) = current else {
-                return Ok(Value::Null);
-            };
-            let Some(v) = map.get(key) else {
-                return Ok(Value::Null);
-            };
-            current = v;
+        let Some(json_str) = val.as_str() else {
+            return FieldMustBeTypeSnafu {
+                field: val.to_str_type(),
+                ty: "string",
+            }
+            .fail();
+        };
+        let parsed: serde_json::Value = serde_json::from_str(json_str).context(JsonParseSnafu)?;
+        match parsed {
+            serde_json::Value::Object(_) => Ok(Value::Map(json_to_map(parsed)?.into())),
+            serde_json::Value::Array(arr) => Ok(Value::Array(arr.try_into()?)),
+            _ => ProcessorUnsupportedValueSnafu {
+                processor: self.kind(),
+                val: val.to_str_type(),
+            }
+            .fail(),
         }
-        Ok(current.clone())
     }
 }
 
-impl Processor for SimpleExtractProcessor {
+impl Processor for JsonParseProcessor {
     fn kind(&self) -> &str {
-        PROCESSOR_SIMPLE_EXTRACT
+        PROCESSOR_JSON_PARSE
     }
 
     fn ignore_missing(&self) -> bool {
@@ -126,22 +125,23 @@ impl Processor for SimpleExtractProcessor {
 mod test {
 
     #[test]
-    fn test_simple_extract() {
+    fn test_json_parse() {
         use super::*;
-        use crate::{Map, Value};
+        use crate::Value;
 
-        let processor = SimpleExtractProcessor {
-            key: vec!["hello".to_string()],
+        let processor = JsonParseProcessor {
             ..Default::default()
         };
 
         let result = processor
-            .process_field(&Value::Map(Map::one(
-                "hello",
-                Value::String("world".to_string()),
-            )))
+            .process_field(&Value::String(r#"{"hello": "world"}"#.to_string()))
             .unwrap();
 
-        assert_eq!(result, Value::String("world".to_string()));
+        let expected = Value::Map(crate::Map::one(
+            "hello".to_string(),
+            Value::String("world".to_string()),
+        ));
+
+        assert_eq!(result, expected);
     }
 }

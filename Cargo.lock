@@ -1718,6 +1718,7 @@ dependencies = [
  "arrow-flight",
  "async-stream",
  "async-trait",
+ "base64 0.22.1",
  "common-catalog",
  "common-error",
  "common-grpc",
@@ -1728,6 +1729,7 @@ dependencies = [
  "common-recordbatch",
  "common-telemetry",
  "enum_dispatch",
+ "futures",
  "futures-util",
  "lazy_static",
  "moka",
@@ -2097,6 +2099,8 @@ dependencies = [
  "lazy_static",
  "prost 0.13.5",
  "rand 0.9.0",
+ "serde",
+ "serde_json",
  "snafu 0.8.5",
  "tokio",
  "tokio-util",
@@ -12087,6 +12091,7 @@ dependencies = [
  "tower 0.5.2",
  "url",
  "uuid",
+ "yaml-rust",
  "zstd 0.13.2",
 ]
 
