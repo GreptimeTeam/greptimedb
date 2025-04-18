@@ -15,12 +15,15 @@
 use std::sync::Arc;
 
 use api::v1::greptime_request::Request;
+use arrow_flight::FlightData;
 use async_trait::async_trait;
 use common_base::AffectedRows;
 use common_error::ext::{BoxedError, ErrorExt};
+use common_grpc::flight::FlightDecoder;
 use common_query::Output;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
+use table::metadata::TableId;
 use table::table_name::TableName;
 
 use crate::error::{self, Result};
@@ -43,7 +46,9 @@ pub trait GrpcQueryHandler {
     async fn put_record_batch(
         &self,
         table: &TableName,
-        record_batch: RawRecordBatch,
+        table_id: &mut Option<TableId>,
+        decoder: &mut FlightDecoder,
+        flight_data: FlightData,
     ) -> std::result::Result<AffectedRows, Self::Error>;
 }
 
@@ -73,10 +78,12 @@ where
     async fn put_record_batch(
         &self,
         table: &TableName,
-        record_batch: RawRecordBatch,
+        table_id: &mut Option<TableId>,
+        decoder: &mut FlightDecoder,
+        data: FlightData,
     ) -> Result<AffectedRows> {
         self.0
-            .put_record_batch(table, record_batch)
+            .put_record_batch(table, table_id, decoder, data)
             .await
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcRequestSnafu)
