@@ -111,6 +111,36 @@ impl BatchingTask {
         }
     }
 
+    /// mark time window range (now - expire_after, now) as dirty (or (0, now) if expire_after not set)
+    ///
+    /// useful for flush_flow to flush dirty time windows range
+    pub fn mark_all_windows_as_dirty(&self) -> Result<(), Error> {
+        let now = SystemTime::now();
+        let now = Timestamp::new_second(
+            now.duration_since(UNIX_EPOCH)
+                .expect("Time went backwards")
+                .as_secs() as _,
+        );
+        let lower_bound = self
+            .config
+            .expire_after
+            .map(|e| now.sub_duration(Duration::from_secs(e as _)))
+            .transpose()
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?
+            .unwrap_or(Timestamp::new_second(0));
+        debug!(
+            "Flow {} mark range ({:?}, {:?}) as dirty",
+            self.config.flow_id, lower_bound, now
+        );
+        self.state
+            .write()
+            .unwrap()
+            .dirty_time_windows
+            .add_window(lower_bound, Some(now));
+        Ok(())
+    }
+
     /// Test execute, for check syntax or such
     pub async fn check_execute(
         &self,
