@@ -779,6 +779,8 @@ impl InformationExtension for StandaloneInformationExtension {
                     sst_size: region_stat.sst_size,
                     index_size: region_stat.index_size,
                     region_manifest: region_stat.manifest.into(),
+                    data_topic_latest_entry_id: region_stat.data_topic_latest_entry_id,
+                    metadata_topic_latest_entry_id: region_stat.metadata_topic_latest_entry_id,
                 }
             })
             .collect::<Vec<_>>();

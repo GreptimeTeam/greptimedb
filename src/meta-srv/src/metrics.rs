@@ -69,7 +69,4 @@ lazy_static! {
     /// The remote WAL prune execute counter.
     pub static ref METRIC_META_REMOTE_WAL_PRUNE_EXECUTE: IntCounterVec =
         register_int_counter_vec!("greptime_meta_remote_wal_prune_execute", "meta remote wal prune execute", &["topic_name"]).unwrap();
-    /// The remote WAL prune offset gauge.
-    pub static ref METRIC_META_REMOTE_WAL_PRUNE_OFFSET: IntGaugeVec =
-        register_int_gauge_vec!("greptime_meta_remote_wal_prune_offset", "meta remote wal prune offset", &["topic_name"]).unwrap();
 }

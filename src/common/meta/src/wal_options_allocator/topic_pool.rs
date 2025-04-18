@@ -35,7 +35,7 @@ pub struct KafkaTopicPool {
     // Manages topics in kvbackend.
     topic_manager: KafkaTopicManager,
     // Creates topics in kafka.
-    pub topic_creator: KafkaTopicCreator,
+    topic_creator: KafkaTopicCreator,
     pub(crate) selector: TopicSelectorRef,
     auto_create_topics: bool,
 }

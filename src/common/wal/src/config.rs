@@ -15,6 +15,8 @@
 pub mod kafka;
 pub mod raft_engine;
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 
 use crate::config::kafka::{DatanodeKafkaConfig, MetasrvKafkaConfig};
@@ -53,7 +55,6 @@ impl From<DatanodeWalConfig> for MetasrvWalConfig {
                 connection: config.connection,
                 kafka_topic: config.kafka_topic,
                 auto_create_topics: config.auto_create_topics,
-                auto_prune_topic_records: config.auto_prune_topic_records,
                 auto_prune_interval: config.auto_prune_interval,
                 trigger_flush_threshold: config.trigger_flush_threshold,
                 auto_prune_parallelism: config.auto_prune_parallelism,
@@ -67,7 +68,7 @@ impl MetasrvWalConfig {
     pub fn enable_active_wal_pruning(&self) -> bool {
         match self {
             MetasrvWalConfig::RaftEngine => false,
-            MetasrvWalConfig::Kafka(config) => config.auto_prune_topic_records,
+            MetasrvWalConfig::Kafka(config) => config.auto_prune_interval > Duration::ZERO,
         }
     }
 
@@ -203,8 +204,7 @@ mod tests {
                 create_topic_timeout: Duration::from_secs(30),
             },
             auto_create_topics: true,
-            auto_prune_topic_records: false,
-            auto_prune_interval: Duration::from_secs(5 * 60),
+            auto_prune_interval: Duration::from_secs(0),
             trigger_flush_threshold: 0,
             auto_prune_parallelism: 10,
         };

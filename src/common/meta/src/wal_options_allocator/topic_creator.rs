@@ -129,6 +129,7 @@ impl KafkaTopicCreator {
     }
 }
 
+/// Builds a kafka [Client](rskafka::client::Client).
 pub async fn build_kafka_client(config: &MetasrvKafkaConfig) -> Result<Client> {
     // Builds an kafka controller client for creating topics.
     let broker_endpoints = common_wal::resolve_to_ipv4(&config.connection.broker_endpoints)
@@ -149,6 +150,7 @@ pub async fn build_kafka_client(config: &MetasrvKafkaConfig) -> Result<Client> {
         })
 }
 
+/// Builds a [KafkaTopicCreator].
 pub async fn build_kafka_topic_creator(config: &MetasrvKafkaConfig) -> Result<KafkaTopicCreator> {
     let client = build_kafka_client(config).await?;
     Ok(KafkaTopicCreator {

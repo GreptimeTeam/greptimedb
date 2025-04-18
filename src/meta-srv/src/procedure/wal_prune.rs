@@ -32,7 +32,7 @@ use common_procedure::{
     Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
     Result as ProcedureResult, Status, StringKey,
 };
-use common_telemetry::warn;
+use common_telemetry::{info, warn};
 use itertools::{Itertools, MinMaxResult};
 use log_store::kafka::DEFAULT_PARTITION;
 use manager::{WalPruneProcedureGuard, WalPruneProcedureTracker};
@@ -47,7 +47,6 @@ use crate::error::{
     self, BuildPartitionClientSnafu, DeleteRecordsSnafu, TableMetadataManagerSnafu,
     UpdateTopicNameValueSnafu,
 };
-use crate::metrics::METRIC_META_REMOTE_WAL_PRUNE_OFFSET;
 use crate::service::mailbox::{Channel, MailboxRef};
 use crate::Result;
 
@@ -354,9 +353,10 @@ impl WalPruneProcedure {
                     self.data.prunable_entry_id + 1
                 ),
             })?;
-        METRIC_META_REMOTE_WAL_PRUNE_OFFSET
-            .with_label_values(&[&self.data.topic])
-            .set(self.data.prunable_entry_id as i64);
+        info!(
+            "Successfully pruned WAL for topic: {}, entry id: {}",
+            self.data.topic, self.data.prunable_entry_id
+        );
         Ok(Status::done())
     }
 }

@@ -266,9 +266,7 @@ impl WalPruneManager {
         let guard = self
             .tracker
             .insert_running_procedure(topic_name.to_string())
-            .context(error::PruneTaskAlreadyRunningSnafu {
-                topic: topic_name.to_string(),
-            })?;
+            .with_context(|| error::PruneTaskAlreadyRunningSnafu { topic: topic_name })?;
 
         let procedure = WalPruneProcedure::new(
             topic_name.to_string(),

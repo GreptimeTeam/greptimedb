@@ -31,7 +31,7 @@ pub const DEFAULT_BACKOFF_CONFIG: BackoffConfig = BackoffConfig {
 };
 
 /// Default interval for active WAL pruning.
-pub const DEFAULT_ACTIVE_PRUNE_INTERVAL: Duration = Duration::from_secs(60 * 5);
+pub const DEFAULT_ACTIVE_PRUNE_INTERVAL: Duration = Duration::ZERO;
 /// Default limit for concurrent active pruning tasks.
 pub const DEFAULT_ACTIVE_PRUNE_TASK_LIMIT: usize = 10;
 /// Default interval for sending flush request to regions when pruning remote WAL.

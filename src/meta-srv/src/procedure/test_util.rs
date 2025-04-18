@@ -257,6 +257,7 @@ pub async fn update_in_memory_region_flushed_entry_id(
             manifest: LeaderRegionManifestInfo::Mito {
                 manifest_version: 0,
                 flushed_entry_id,
+                topic_latest_entry_id: 0,
             },
         };
         key_values.push((region_id, value));
