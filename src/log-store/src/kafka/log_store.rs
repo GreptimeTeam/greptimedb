@@ -56,7 +56,17 @@ pub struct KafkaLogStore {
     consumer_wait_timeout: Duration,
     /// Ignore missing entries during read WAL.
     overwrite_entry_start_id: bool,
-    /// High watermark offset of the last record for all topics.
+    /// High watermark for all topics.
+    /// 
+    /// Represents the offset of the last record in each topic. This is used to track
+    /// the latest available data in Kafka topics.
+    ///
+    /// The high watermark is updated in two ways:
+    /// - Automatically when the producer successfully commits data to Kafka
+    /// - Periodically by the [HighWatermarkManager](crate::kafka::high_watermark_manager::HighWatermarkManager).
+    ///
+    /// This shared map allows multiple components to access the latest high watermark
+    /// information without needing to query Kafka directly.
     high_watermark: Arc<DashMap<Arc<KafkaProvider>, u64>>,
 }
 

@@ -94,7 +94,7 @@ impl OrderedBatchProducer {
         Ok(handle)
     }
 
-    /// Send an [WorkerRequest::UpdateHighWatermark] request to the producer.
+    /// Sends an [WorkerRequest::UpdateHighWatermark] request to the producer.
     /// This is used to update the high watermark for the topic.
     pub(crate) async fn update_high_watermark(&self) -> Result<()> {
         if self

@@ -23,7 +23,8 @@ use tokio::time::{interval, MissedTickBehavior};
 use crate::error::Result;
 use crate::kafka::client_manager::ClientManagerRef;
 
-/// Running background task to update high watermark for each topic.
+/// HighWatermarkManager is responsible for periodically updating the high watermark
+/// (latest existing record offset) for each Kafka topic.
 pub(crate) struct HighWatermarkManager {
     /// Interval to update high watermark.
     update_interval: Duration,
@@ -46,6 +47,10 @@ impl HighWatermarkManager {
         }
     }
 
+    /// Starts the high watermark manager as a background task
+    ///
+    /// This spawns a task that periodically queries Kafka for the latest
+    /// high watermark values for all registered topics and updates the shared map.
     pub(crate) async fn run(self) {
         common_runtime::spawn_global(async move {
             let mut interval = interval(self.update_interval);
@@ -59,6 +64,10 @@ impl HighWatermarkManager {
         });
     }
 
+    /// Attempts to update the high watermark for all registered topics
+    ///
+    /// Iterates through all topics in the high watermark map, obtains a producer
+    /// for each topic, and requests an update of the high watermark value.
     pub(crate) async fn try_update(&self) -> Result<()> {
         for iterator_element in self.high_watermark.iter() {
             let producer = self

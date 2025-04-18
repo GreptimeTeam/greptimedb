@@ -95,7 +95,7 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
         provider: &Provider,
     ) -> Result<Entry, Self::Error>;
 
-    /// Returns the highest entry id of the specified topic in remote WAL.
+    /// Returns the highest existing entry id in the log store.
     fn high_watermark(&self, provider: &Provider) -> Result<EntryId, Self::Error>;
 }
 
