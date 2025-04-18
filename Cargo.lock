@@ -2315,6 +2315,7 @@ dependencies = [
  "datatypes",
  "futures",
  "pin-project",
+ "regex",
  "serde",
  "serde_json",
  "snafu 0.8.5",
