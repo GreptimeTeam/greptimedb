@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["AVG_RECORD_SIZE","MAX_BATCH_SIZE"],"enum":["ConsumerBuilderError"],"struct":["Consumer","ConsumerBuilder","FetchResult","RecordsBuffer"],"trait":["FetchClient"]};

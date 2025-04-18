@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DELETE_RECORDS_TIMEOUT"],"enum":["WalPruneState"],"fn":["check_heartbeat_collected_region_ids"],"mod":["manager"],"struct":["Context","WalPruneData","WalPruneProcedure"],"type":["KafkaClientRef"]};

@@ -1,0 +1,9 @@
+(function() {
+    var implementors = Object.fromEntries([["common_base",[]],["mito2",[["impl <a class=\"trait\" href=\"common_base/range_read/trait.RangeReader.html\" title=\"trait common_base::range_read::RangeReader\">RangeReader</a> for <a class=\"struct\" href=\"mito2/sst/index/store/struct.InstrumentedRangeReader.html\" title=\"struct mito2::sst::index::store::InstrumentedRangeReader\">InstrumentedRangeReader</a>&lt;'_&gt;"]]],["puffin",[["impl&lt;A, B&gt; <a class=\"trait\" href=\"common_base/range_read/trait.RangeReader.html\" title=\"trait common_base::range_read::RangeReader\">RangeReader</a> for <a class=\"enum\" href=\"puffin/puffin_manager/fs_puffin_manager/reader/enum.Either.html\" title=\"enum puffin::puffin_manager::fs_puffin_manager::reader::Either\">Either</a>&lt;A, B&gt;<div class=\"where\">where\n    A: <a class=\"trait\" href=\"common_base/range_read/trait.RangeReader.html\" title=\"trait common_base::range_read::RangeReader\">RangeReader</a>,\n    B: <a class=\"trait\" href=\"common_base/range_read/trait.RangeReader.html\" title=\"trait common_base::range_read::RangeReader\">RangeReader</a>,</div>"],["impl&lt;R: <a class=\"trait\" href=\"common_base/range_read/trait.RangeReader.html\" title=\"trait common_base::range_read::RangeReader\">RangeReader</a>&gt; <a class=\"trait\" href=\"common_base/range_read/trait.RangeReader.html\" title=\"trait common_base::range_read::RangeReader\">RangeReader</a> for <a class=\"struct\" href=\"puffin/partial_reader/struct.PartialReader.html\" title=\"struct puffin::partial_reader::PartialReader\">PartialReader</a>&lt;R&gt;"]]]]);
+    if (window.register_implementors) {
+        window.register_implementors(implementors);
+    } else {
+        window.pending_implementors = implementors;
+    }
+})()
+//{"start":57,"fragment_lengths":[18,360,1172]}

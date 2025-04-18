@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["FrontendClient"],"fn":["client_from_urls","default_channel_mgr"],"struct":["DatabaseWithPeer"]};

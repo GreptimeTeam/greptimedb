@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["ENGINE","MAXVALUE","TQL"],"mod":["ast","dialect","error","parser","parsers","partition","statements","util"]};
