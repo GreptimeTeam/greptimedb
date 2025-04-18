@@ -230,17 +230,18 @@ impl MitoEngine {
         region_id: &RegionId,
         manifest_info: RegionManifestInfo,
         extensions: &mut HashMap<String, Vec<u8>>,
-    ) {
+    ) -> Result<()> {
         let region_manifest_info = vec![(*region_id, manifest_info)];
 
         extensions.insert(
             MANIFEST_INFO_EXTENSION_KEY.to_string(),
-            RegionManifestInfo::encode_list(&region_manifest_info).unwrap(),
+            RegionManifestInfo::encode_list(&region_manifest_info).context(SerdeJsonSnafu)?,
         );
         info!(
             "Added manifest info: {:?} to extensions, region_id: {:?}",
             region_manifest_info, region_id
         );
+        Ok(())
     }
 }
 
@@ -589,7 +590,8 @@ impl RegionEngine for MitoEngine {
                     &region_id,
                     statistic.manifest,
                     &mut response.extensions,
-                );
+                )
+                .map_err(BoxedError::new)?;
             }
         }
 

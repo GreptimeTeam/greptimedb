@@ -216,10 +216,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             "Region {} flush finished, tries to bump wal to {}",
             region_id, request.flushed_entry_id
         );
-        // We use update_high_watermark here instead of schedule_flush because:
-        // 1. The flush operation has already completed successfully, so we just need to mark the WAL entries as flushed
-        // 2. schedule_flush would trigger a new flush operation, which is unnecessary since we just finished one
-        // 3. update_high_watermark is the correct operation to update the system's state about what data is safely persisted
         if let Err(e) = self
             .wal
             .obsolete(region_id, request.flushed_entry_id, &region.provider)

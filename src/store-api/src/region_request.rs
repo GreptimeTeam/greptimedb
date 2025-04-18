@@ -154,7 +154,7 @@ impl RegionRequest {
             region_request::Body::Alters(alters) => make_region_alters(alters),
             region_request::Body::BulkInserts(bulk) => make_region_bulk_inserts(bulk),
             region_request::Body::Sync(_) => UnexpectedSnafu {
-                reason: "Sync request should be handled separately by RegionServer::handle_sync_region_request",
+                reason: "Sync request should be handled separately by RegionServer",
             }
             .fail(),
         }
