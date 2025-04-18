@@ -85,6 +85,7 @@ pub enum FrontendClient {
 }
 
 impl FrontendClient {
+    /// Create a new empty frontend client, with a `HandlerMutable` to set the grpc handler later
     pub fn from_empty_grpc_handler() -> (Self, HandlerMutable) {
         let handler = Arc::new(std::sync::Mutex::new(None));
         (
