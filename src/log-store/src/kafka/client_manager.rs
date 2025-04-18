@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use common_wal::config::kafka::common::DEFAULT_BACKOFF_CONFIG;
 use common_wal::config::kafka::DatanodeKafkaConfig;
+use dashmap::DashMap;
 use rskafka::client::partition::{Compression, PartitionClient, UnknownTopicHandling};
 use rskafka::client::ClientBuilder;
 use snafu::ResultExt;
@@ -64,6 +65,9 @@ pub(crate) struct ClientManager {
 
     flush_batch_size: usize,
     compression: Compression,
+
+    /// High watermark for each topic.
+    high_watermark: Arc<DashMap<Arc<KafkaProvider>, u64>>,
 }
 
 impl ClientManager {
@@ -71,6 +75,7 @@ impl ClientManager {
     pub(crate) async fn try_new(
         config: &DatanodeKafkaConfig,
         global_index_collector: Option<GlobalIndexCollector>,
+        high_watermark: Arc<DashMap<Arc<KafkaProvider>, u64>>,
     ) -> Result<Self> {
         // Sets backoff config for the top-level kafka client and all clients constructed by it.
         let broker_endpoints = common_wal::resolve_to_ipv4(&config.connection.broker_endpoints)
@@ -96,6 +101,7 @@ impl ClientManager {
             flush_batch_size: config.max_batch_bytes.as_bytes() as usize,
             compression: Compression::Lz4,
             global_index_collector,
+            high_watermark,
         })
     }
 
@@ -111,6 +117,7 @@ impl ClientManager {
                     .write()
                     .await
                     .insert(provider.clone(), client.clone());
+                self.high_watermark.insert(provider.clone(), 0);
                 Ok(client)
             }
         }
@@ -159,6 +166,7 @@ impl ClientManager {
             self.compression,
             self.flush_batch_size,
             index_collector,
+            self.high_watermark.clone(),
         ));
 
         Ok(Client { client, producer })
@@ -167,66 +175,20 @@ impl ClientManager {
     pub(crate) fn global_index_collector(&self) -> Option<&GlobalIndexCollector> {
         self.global_index_collector.as_ref()
     }
+
+    #[cfg(test)]
+    pub(crate) fn high_watermark(&self) -> &Arc<DashMap<Arc<KafkaProvider>, u64>> {
+        &self.high_watermark
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use common_wal::config::kafka::common::KafkaConnectionConfig;
     use common_wal::test_util::run_test_with_kafka_wal;
     use tokio::sync::Barrier;
 
     use super::*;
-
-    /// Creates `num_topics` number of topics each will be decorated by the given decorator.
-    pub async fn create_topics<F>(
-        num_topics: usize,
-        decorator: F,
-        broker_endpoints: &[String],
-    ) -> Vec<String>
-    where
-        F: Fn(usize) -> String,
-    {
-        assert!(!broker_endpoints.is_empty());
-        let client = ClientBuilder::new(broker_endpoints.to_vec())
-            .build()
-            .await
-            .unwrap();
-        let ctrl_client = client.controller_client().unwrap();
-        let (topics, tasks): (Vec<_>, Vec<_>) = (0..num_topics)
-            .map(|i| {
-                let topic = decorator(i);
-                let task = ctrl_client.create_topic(topic.clone(), 1, 1, 500);
-                (topic, task)
-            })
-            .unzip();
-        futures::future::try_join_all(tasks).await.unwrap();
-        topics
-    }
-
-    /// Prepares for a test in that a collection of topics and a client manager are created.
-    async fn prepare(
-        test_name: &str,
-        num_topics: usize,
-        broker_endpoints: Vec<String>,
-    ) -> (ClientManager, Vec<String>) {
-        let topics = create_topics(
-            num_topics,
-            |i| format!("{test_name}_{}_{}", i, uuid::Uuid::new_v4()),
-            &broker_endpoints,
-        )
-        .await;
-
-        let config = DatanodeKafkaConfig {
-            connection: KafkaConnectionConfig {
-                broker_endpoints,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let manager = ClientManager::try_new(&config, None).await.unwrap();
-
-        (manager, topics)
-    }
+    use crate::kafka::test_util::prepare;
 
     /// Sends `get_or_insert` requests sequentially to the client manager, and checks if it could handle them correctly.
     #[tokio::test]
