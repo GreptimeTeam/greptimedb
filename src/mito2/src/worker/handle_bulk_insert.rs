@@ -51,27 +51,27 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         // fast path: only one payload.
         if request.payloads.len() == 1 {
-            let task_future = match Self::handle_record_batch(
+            match Self::handle_payload(
                 &region_metadata,
                 request.payloads.swap_remove(0),
                 pending_write_requests,
-                column_schemas.clone(),
-                name_to_index.clone(),
+                column_schemas,
+                name_to_index,
             ) {
-                Ok(task_future) => task_future,
+                Ok(task_future) => common_runtime::spawn_global(async move {
+                    sender.send(task_future.await.context(error::RecvSnafu).flatten());
+                }),
                 Err(e) => {
                     let _ = sender.send(Err(e));
                     return;
                 }
             };
-
-            sender.send(task_future.await.context(error::RecvSnafu).flatten());
             return;
         }
 
         let mut pending_tasks = Vec::with_capacity(request.payloads.len());
         for req in request.payloads {
-            match Self::handle_record_batch(
+            match Self::handle_payload(
                 &region_metadata,
                 req,
                 pending_write_requests,
@@ -105,7 +105,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         });
     }
 
-    fn handle_record_batch(
+    fn handle_payload(
         region_metadata: &RegionMetadataRef,
         payload: BulkInsertPayload,
         pending_write_requests: &mut Vec<SenderWriteRequest>,
