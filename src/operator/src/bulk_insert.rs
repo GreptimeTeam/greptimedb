@@ -17,6 +17,7 @@ use api::v1::region::{
     bulk_insert_request, region_request, ArrowIpc, BulkInsertRequest, RegionRequest,
     RegionRequestHeader, RegionSelection,
 };
+use bytes::Bytes;
 use common_base::AffectedRows;
 use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
 use common_grpc::FlightData;
@@ -37,7 +38,7 @@ impl Inserter {
         decoder: &mut FlightDecoder,
         data: FlightData,
     ) -> error::Result<AffectedRows> {
-        let raw_flight_data = data.encode_to_vec();
+        let raw_flight_data = Bytes::from(data.encode_to_vec());
         // Build region server requests
         let message = decoder
             .try_decode(data)
@@ -50,7 +51,7 @@ impl Inserter {
         // safety: when reach here schema must be present.
         let schema_message = FlightEncoder::default()
             .encode(FlightMessage::Schema(decoder.schema().unwrap().clone()));
-        let schema_data = schema_message.encode_to_vec();
+        let schema_data = Bytes::from(schema_message.encode_to_vec());
 
         let record_batch = rb.df_record_batch();
         let partition_rule = self

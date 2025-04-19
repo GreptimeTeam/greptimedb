@@ -338,8 +338,8 @@ fn make_region_bulk_inserts(request: BulkInsertRequest) -> Result<Vec<(RegionId,
     let mut region_requests: HashMap<u64, BulkInsertPayload> =
         HashMap::with_capacity(request.region_selection.len());
 
-    let schema_data = FlightData::decode(request.schema.as_slice()).context(ProstSnafu)?;
-    let payload_data = FlightData::decode(request.payload.as_slice()).context(ProstSnafu)?;
+    let schema_data = FlightData::decode(request.schema.clone()).context(ProstSnafu)?;
+    let payload_data = FlightData::decode(request.payload.clone()).context(ProstSnafu)?;
     let mut decoder = FlightDecoder::default();
     let _schema_message = decoder.try_decode(schema_data).context(FlightCodecSnafu)?;
     let FlightMessage::Recordbatch(rb) =
@@ -355,8 +355,13 @@ fn make_region_bulk_inserts(request: BulkInsertRequest) -> Result<Vec<(RegionId,
             None,
         );
 
-        let region_batch = arrow::compute::filter_record_batch(rb.df_record_batch(), &region_mask)
-            .context(DecodeArrowIpcSnafu)?;
+        let region_batch = if region_mask.true_count() == rb.num_rows() {
+            rb.df_record_batch().clone()
+        } else {
+            arrow::compute::filter_record_batch(rb.df_record_batch(), &region_mask)
+                .context(DecodeArrowIpcSnafu)?
+        };
+
         region_requests.insert(region_id, BulkInsertPayload::ArrowIpc(region_batch));
     }
 
