@@ -25,7 +25,8 @@ use common_base::Plugins;
 use common_function::function::FunctionRef;
 use common_function::function_registry::FUNCTION_REGISTRY;
 use common_function::handlers::{
-    FlowServiceHandlerRef, ProcedureServiceHandlerRef, TableMutationHandlerRef,
+    FlowServiceHandlerRef, MetadataSnapshotHandlerRef, ProcedureServiceHandlerRef,
+    TableMutationHandlerRef,
 };
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_query::Output;
@@ -100,12 +101,14 @@ pub struct QueryEngineFactory {
 }
 
 impl QueryEngineFactory {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         catalog_manager: CatalogManagerRef,
         region_query_handler: Option<RegionQueryHandlerRef>,
         table_mutation_handler: Option<TableMutationHandlerRef>,
         procedure_service_handler: Option<ProcedureServiceHandlerRef>,
         flow_service_handler: Option<FlowServiceHandlerRef>,
+        metadata_snapshot_handler: Option<MetadataSnapshotHandlerRef>,
         with_dist_planner: bool,
         options: QueryOptions,
     ) -> Self {
@@ -115,6 +118,7 @@ impl QueryEngineFactory {
             table_mutation_handler,
             procedure_service_handler,
             flow_service_handler,
+            metadata_snapshot_handler,
             with_dist_planner,
             Default::default(),
             options,
@@ -128,6 +132,7 @@ impl QueryEngineFactory {
         table_mutation_handler: Option<TableMutationHandlerRef>,
         procedure_service_handler: Option<ProcedureServiceHandlerRef>,
         flow_service_handler: Option<FlowServiceHandlerRef>,
+        metadata_snapshot_handler: Option<MetadataSnapshotHandlerRef>,
         with_dist_planner: bool,
         plugins: Plugins,
         options: QueryOptions,
@@ -138,6 +143,7 @@ impl QueryEngineFactory {
             table_mutation_handler,
             procedure_service_handler,
             flow_service_handler,
+            metadata_snapshot_handler,
             with_dist_planner,
             plugins.clone(),
             options,
@@ -174,6 +180,7 @@ mod tests {
         let catalog_list = catalog::memory::new_memory_catalog_manager().unwrap();
         let factory = QueryEngineFactory::new(
             catalog_list,
+            None,
             None,
             None,
             None,

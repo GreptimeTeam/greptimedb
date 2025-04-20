@@ -53,6 +53,7 @@ pub fn new_query_engine_with_table(table: TableRef) -> QueryEngineRef {
         None,
         None,
         None,
+        None,
         false,
         QueryOptions::default(),
     )

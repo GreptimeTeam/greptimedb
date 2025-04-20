@@ -179,6 +179,10 @@ fn build_struct(
             Ident::new("flow_service_handler", handler_type.span()),
             Ident::new("MissingFlowServiceHandlerSnafu", handler_type.span()),
         ),
+        "MetadataSnapshotHandlerRef" => (
+            Ident::new("metadata_snapshot_handler", handler_type.span()),
+            Ident::new("MissingMetadataSnapshotHandlerSnafu", handler_type.span()),
+        ),
         handler => ok!(error!(
             handler_type.span(),
             format!("Unknown handler type: {handler}")

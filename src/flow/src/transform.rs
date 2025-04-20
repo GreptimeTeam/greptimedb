@@ -270,6 +270,7 @@ mod test {
             None,
             None,
             None,
+            None,
             false,
             QueryOptions::default(),
         );

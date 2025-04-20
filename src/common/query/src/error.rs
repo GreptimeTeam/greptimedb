@@ -162,6 +162,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to do metadata snapshot"))]
+    MetadataSnapshot {
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to do procedure task"))]
     ProcedureService {
         source: BoxedError,
@@ -183,6 +190,12 @@ pub enum Error {
 
     #[snafu(display("Missing FlowServiceHandler, not expected"))]
     MissingFlowServiceHandler {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Missing MetadataSnapshotHandler, not expected"))]
+    MissingMetadataSnapshotHandler {
         #[snafu(implicit)]
         location: Location,
     },
@@ -251,6 +264,7 @@ impl ErrorExt for Error {
             Error::MissingTableMutationHandler { .. }
             | Error::MissingProcedureServiceHandler { .. }
             | Error::MissingFlowServiceHandler { .. }
+            | Error::MissingMetadataSnapshotHandler { .. }
             | Error::RegisterUdf { .. } => StatusCode::Unexpected,
 
             Error::UnsupportedInputDataType { .. }
@@ -262,7 +276,8 @@ impl ErrorExt for Error {
             Error::DecodePlan { source, .. }
             | Error::Execute { source, .. }
             | Error::ProcedureService { source, .. }
-            | Error::TableMutation { source, .. } => source.status_code(),
+            | Error::TableMutation { source, .. }
+            | Error::MetadataSnapshot { source, .. } => source.status_code(),
 
             Error::PermissionDenied { .. } => StatusCode::PermissionDenied,
         }

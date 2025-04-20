@@ -15,6 +15,7 @@
 mod add_region_follower;
 mod flush_compact_region;
 mod flush_compact_table;
+mod metadata_snaphost;
 mod migrate_region;
 mod remove_region_follower;
 
@@ -23,6 +24,7 @@ use std::sync::Arc;
 use add_region_follower::AddRegionFollowerFunction;
 use flush_compact_region::{CompactRegionFunction, FlushRegionFunction};
 use flush_compact_table::{CompactTableFunction, FlushTableFunction};
+use metadata_snaphost::{DumpMetadataFunction, RestoreMetadataFunction};
 use migrate_region::MigrateRegionFunction;
 use remove_region_follower::RemoveRegionFollowerFunction;
 
@@ -43,5 +45,7 @@ impl AdminFunction {
         registry.register_async(Arc::new(FlushTableFunction));
         registry.register_async(Arc::new(CompactTableFunction));
         registry.register_async(Arc::new(FlushFlowFunction));
+        registry.register_async(Arc::new(DumpMetadataFunction));
+        registry.register_async(Arc::new(RestoreMetadataFunction));
     }
 }

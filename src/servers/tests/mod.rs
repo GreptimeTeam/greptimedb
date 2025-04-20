@@ -177,6 +177,7 @@ fn create_testing_instance(table: TableRef) -> DummyInstance {
         None,
         None,
         None,
+        None,
         false,
         QueryOptions::default(),
     )

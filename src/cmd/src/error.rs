@@ -78,6 +78,13 @@ pub enum Error {
         source: datanode::error::Error,
     },
 
+    #[snafu(display("Failed to build object storage manager"))]
+    BuildObjectStorageManager {
+        #[snafu(implicit)]
+        location: Location,
+        source: datanode::error::Error,
+    },
+
     #[snafu(display("Failed to shutdown datanode"))]
     ShutdownDatanode {
         #[snafu(implicit)]
@@ -327,6 +334,8 @@ impl ErrorExt for Error {
             Error::InitMetadata { source, .. } | Error::InitDdlManager { source, .. } => {
                 source.status_code()
             }
+
+            Error::BuildObjectStorageManager { source, .. } => source.status_code(),
 
             Error::MissingConfig { .. }
             | Error::LoadLayeredConfig { .. }

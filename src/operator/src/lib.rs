@@ -20,6 +20,7 @@ pub mod error;
 pub mod expr_helper;
 pub mod flow;
 pub mod insert;
+pub mod metadata;
 pub mod metrics;
 pub mod procedure;
 pub mod region_req_factory;

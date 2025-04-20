@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::handlers::{FlowServiceHandlerRef, ProcedureServiceHandlerRef, TableMutationHandlerRef};
+use crate::handlers::{
+    FlowServiceHandlerRef, MetadataSnapshotHandlerRef, ProcedureServiceHandlerRef,
+    TableMutationHandlerRef,
+};
 
 /// Shared state for SQL functions.
 /// The handlers in state may be `None` in cli command-line or test cases.
@@ -24,6 +27,8 @@ pub struct FunctionState {
     pub procedure_service_handler: Option<ProcedureServiceHandlerRef>,
     // The flownode handler
     pub flow_service_handler: Option<FlowServiceHandlerRef>,
+    // The metadata snapshot handler
+    pub metadata_snapshot_handler: Option<MetadataSnapshotHandlerRef>,
 }
 
 impl FunctionState {
@@ -48,10 +53,14 @@ impl FunctionState {
             CompactTableRequest, DeleteRequest, FlushTableRequest, InsertRequest,
         };
 
-        use crate::handlers::{FlowServiceHandler, ProcedureServiceHandler, TableMutationHandler};
+        use crate::handlers::{
+            FlowServiceHandler, MetadataSnapshotHandler, ProcedureServiceHandler,
+            TableMutationHandler,
+        };
         struct MockProcedureServiceHandler;
         struct MockTableMutationHandler;
         struct MockFlowServiceHandler;
+        struct MockMetadataServiceHandler;
         const ROWS: usize = 42;
 
         #[async_trait]
@@ -150,10 +159,22 @@ impl FunctionState {
             }
         }
 
+        #[async_trait]
+        impl MetadataSnapshotHandler for MockMetadataServiceHandler {
+            async fn dump(&self, _path: &str, _filename: &str) -> Result<String> {
+                Ok("test_filename".to_string())
+            }
+
+            async fn restore(&self, _path: &str, _filename: &str) -> Result<u64> {
+                Ok(100)
+            }
+        }
+
         Self {
             table_mutation_handler: Some(Arc::new(MockTableMutationHandler)),
             procedure_service_handler: Some(Arc::new(MockProcedureServiceHandler)),
             flow_service_handler: Some(Arc::new(MockFlowServiceHandler)),
+            metadata_snapshot_handler: Some(Arc::new(MockMetadataServiceHandler)),
         }
     }
 }

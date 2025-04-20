@@ -44,6 +44,7 @@ use common_meta::peer::Peer;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::region_registry::LeaderRegionRegistry;
 use common_meta::sequence::SequenceBuilder;
+use common_meta::snapshot::MetadataSnapshotManager;
 use common_meta::wal_options_allocator::{build_wal_options_allocator, WalOptionsAllocatorRef};
 use common_procedure::{ProcedureInfo, ProcedureManagerRef};
 use common_telemetry::info;
@@ -497,6 +498,10 @@ impl StartCommand {
             .build(),
         );
 
+        let object_store_manager = DatanodeBuilder::build_object_store_manager(&dn_opts.storage)
+            .await
+            .context(error::BuildObjectStorageManagerSnafu)?;
+
         let datanode = DatanodeBuilder::new(dn_opts, plugins.clone(), Mode::Standalone)
             .with_kv_backend(kv_backend.clone())
             .with_cache_registry(layered_cache_registry.clone())
@@ -591,6 +596,11 @@ impl StartCommand {
         )
         .await?;
 
+        let metadata_snapshot_manager = MetadataSnapshotManager::new(
+            kv_backend.clone(),
+            object_store_manager.default_object_store().clone(),
+        );
+
         let fe_instance = FrontendBuilder::new(
             fe_opts.clone(),
             kv_backend.clone(),
@@ -601,6 +611,7 @@ impl StartCommand {
             StatementStatistics::new(opts.logging.slow_query.clone()),
         )
         .with_plugin(plugins.clone())
+        .with_metadata_snapshot_manager(metadata_snapshot_manager)
         .try_build()
         .await
         .context(error::StartFrontendSnafu)?;

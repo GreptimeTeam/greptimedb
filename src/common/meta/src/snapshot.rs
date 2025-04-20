@@ -36,7 +36,7 @@ use crate::snapshot::file::{Document, KeyValue as FileKeyValue};
 
 /// The format of the backup file.
 #[derive(Debug, PartialEq, Eq, Display, Clone, Copy)]
-pub(crate) enum FileFormat {
+pub enum FileFormat {
     #[strum(serialize = "fb")]
     FlexBuffers,
 }
@@ -54,7 +54,7 @@ impl TryFrom<&str> for FileFormat {
 
 #[derive(Debug, PartialEq, Eq, Display)]
 #[strum(serialize_all = "lowercase")]
-pub(crate) enum DataType {
+pub enum DataType {
     Metadata,
 }
 
@@ -70,9 +70,15 @@ impl TryFrom<&str> for DataType {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct FileExtension {
+pub struct FileExtension {
     format: FileFormat,
     data_type: DataType,
+}
+
+impl FileExtension {
+    pub fn new(format: FileFormat, data_type: DataType) -> Self {
+        Self { format, data_type }
+    }
 }
 
 impl Display for FileExtension {
@@ -105,7 +111,7 @@ impl TryFrom<&str> for FileExtension {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct FileName {
+pub struct FileName {
     name: String,
     extension: FileExtension,
 }
@@ -207,7 +213,7 @@ impl MetadataSnapshotManager {
     }
 
     /// Dumps the metadata to the backup file.
-    pub async fn dump(&self, path: &str, filename: &str) -> Result<u64> {
+    pub async fn dump(&self, path: &str, filename: &str) -> Result<(String, u64)> {
         let format = FileFormat::FlexBuffers;
         let filename = FileName::new(
             filename.to_string(),
@@ -248,7 +254,7 @@ impl MetadataSnapshotManager {
             now.elapsed()
         );
 
-        Ok(num_keyvalues as u64)
+        Ok((filename.to_string(), num_keyvalues as u64))
     }
 }
 

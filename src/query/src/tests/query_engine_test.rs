@@ -50,6 +50,7 @@ async fn test_datafusion_query_engine() -> Result<()> {
         None,
         None,
         None,
+        None,
         false,
         QueryOptionsNew::default(),
     );
@@ -133,6 +134,7 @@ async fn test_query_validate() -> Result<()> {
 
     let factory = QueryEngineFactory::new_with_plugins(
         catalog_list,
+        None,
         None,
         None,
         None,

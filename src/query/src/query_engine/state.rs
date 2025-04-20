@@ -21,7 +21,8 @@ use catalog::CatalogManagerRef;
 use common_base::Plugins;
 use common_function::function::FunctionRef;
 use common_function::handlers::{
-    FlowServiceHandlerRef, ProcedureServiceHandlerRef, TableMutationHandlerRef,
+    FlowServiceHandlerRef, MetadataSnapshotHandlerRef, ProcedureServiceHandlerRef,
+    TableMutationHandlerRef,
 };
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::state::FunctionState;
@@ -91,6 +92,7 @@ impl QueryEngineState {
         table_mutation_handler: Option<TableMutationHandlerRef>,
         procedure_service_handler: Option<ProcedureServiceHandlerRef>,
         flow_service_handler: Option<FlowServiceHandlerRef>,
+        metadata_snapshot_handler: Option<MetadataSnapshotHandlerRef>,
         with_dist_planner: bool,
         plugins: Plugins,
         options: QueryOptionsNew,
@@ -181,6 +183,7 @@ impl QueryEngineState {
                 table_mutation_handler,
                 procedure_service_handler,
                 flow_service_handler,
+                metadata_snapshot_handler,
             }),
             aggregate_functions: Arc::new(RwLock::new(HashMap::new())),
             extension_rules,

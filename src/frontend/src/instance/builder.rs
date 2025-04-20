@@ -24,9 +24,11 @@ use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::NodeManagerRef;
+use common_meta::snapshot::MetadataSnapshotManager;
 use operator::delete::Deleter;
 use operator::flow::FlowServiceOperator;
 use operator::insert::Inserter;
+use operator::metadata::MetadataSnapshotOperator;
 use operator::procedure::ProcedureServiceOperator;
 use operator::request::Requester;
 use operator::statement::{StatementExecutor, StatementExecutorRef};
@@ -55,6 +57,7 @@ pub struct FrontendBuilder {
     plugins: Option<Plugins>,
     procedure_executor: ProcedureExecutorRef,
     stats: StatementStatistics,
+    metadata_snapshot_manager: Option<MetadataSnapshotManager>,
 }
 
 impl FrontendBuilder {
@@ -77,6 +80,17 @@ impl FrontendBuilder {
             plugins: None,
             procedure_executor,
             stats,
+            metadata_snapshot_manager: None,
+        }
+    }
+
+    pub fn with_metadata_snapshot_manager(
+        self,
+        metadata_snapshot_manager: MetadataSnapshotManager,
+    ) -> Self {
+        Self {
+            metadata_snapshot_manager: Some(metadata_snapshot_manager),
+            ..self
         }
     }
 
@@ -158,12 +172,17 @@ impl FrontendBuilder {
         let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
         let flow_service = FlowServiceOperator::new(flow_metadata_manager, node_manager.clone());
 
+        let metadata_snapshot_operator = self
+            .metadata_snapshot_manager
+            .map(|manager| Arc::new(MetadataSnapshotOperator::new(manager)) as _);
+
         let query_engine = QueryEngineFactory::new_with_plugins(
             self.catalog_manager.clone(),
             Some(region_query_handler.clone()),
             Some(table_mutation_handler),
             Some(procedure_service_handler),
             Some(Arc::new(flow_service)),
+            metadata_snapshot_operator,
             true,
             plugins.clone(),
             self.options.query.clone(),

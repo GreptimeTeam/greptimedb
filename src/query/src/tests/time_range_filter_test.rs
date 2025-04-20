@@ -109,6 +109,7 @@ fn create_test_engine() -> TimeRangeTester {
         None,
         None,
         None,
+        None,
         false,
         QueryOptions::default(),
     )

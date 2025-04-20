@@ -89,8 +89,18 @@ pub trait FlowServiceHandler: Send + Sync {
     ) -> Result<api::v1::flow::FlowResponse>;
 }
 
+/// This metadata snapshot handler is only use for dump and restore metadata for now.
+#[async_trait]
+pub trait MetadataSnapshotHandler: Send + Sync {
+    async fn dump(&self, path: &str, filename: &str) -> Result<String>;
+
+    async fn restore(&self, path: &str, filename: &str) -> Result<u64>;
+}
+
 pub type TableMutationHandlerRef = Arc<dyn TableMutationHandler>;
 
 pub type ProcedureServiceHandlerRef = Arc<dyn ProcedureServiceHandler>;
 
 pub type FlowServiceHandlerRef = Arc<dyn FlowServiceHandler>;
+
+pub type MetadataSnapshotHandlerRef = Arc<dyn MetadataSnapshotHandler>;

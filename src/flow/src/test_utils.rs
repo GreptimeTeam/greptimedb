@@ -153,6 +153,7 @@ pub fn create_test_query_engine() -> Arc<dyn QueryEngine> {
         None,
         None,
         None,
+        None,
         false,
         QueryOptions::default(),
     );
