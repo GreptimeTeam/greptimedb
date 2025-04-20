@@ -43,6 +43,7 @@ pub mod region_keeper;
 pub mod region_registry;
 pub mod rpc;
 pub mod sequence;
+pub mod snapshot;
 pub mod state_store;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_util;

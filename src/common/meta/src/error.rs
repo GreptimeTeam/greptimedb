@@ -783,6 +783,76 @@ pub enum Error {
         #[snafu(source)]
         source: common_procedure::error::Error,
     },
+
+    #[snafu(display("Invalid file path: {}", file_path))]
+    InvalidFilePath {
+        #[snafu(implicit)]
+        location: Location,
+        file_path: String,
+    },
+
+    #[snafu(display("Failed to serialize flexbuffers"))]
+    SerializeFlexbuffers {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: flexbuffers::SerializationError,
+    },
+
+    #[snafu(display("Failed to deserialize flexbuffers"))]
+    DeserializeFlexbuffers {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: flexbuffers::DeserializationError,
+    },
+
+    #[snafu(display("Failed to read flexbuffers"))]
+    ReadFlexbuffers {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: flexbuffers::ReaderError,
+    },
+
+    #[snafu(display("Invalid file name: {}", reason))]
+    InvalidFileName {
+        #[snafu(implicit)]
+        location: Location,
+        reason: String,
+    },
+
+    #[snafu(display("Invalid file extension: {}", reason))]
+    InvalidFileExtension {
+        #[snafu(implicit)]
+        location: Location,
+        reason: String,
+    },
+
+    #[snafu(display("Invalid file context: {}", reason))]
+    InvalidFileContext {
+        #[snafu(implicit)]
+        location: Location,
+        reason: String,
+    },
+
+    #[snafu(display("Failed to write object, file path: {}", file_path))]
+    WriteObject {
+        #[snafu(implicit)]
+        location: Location,
+        file_path: String,
+        #[snafu(source)]
+        error: object_store::Error,
+    },
+
+    #[snafu(display("Failed to read object, file path: {}", file_path))]
+    ReadObject {
+        #[snafu(implicit)]
+        location: Location,
+        file_path: String,
+        #[snafu(source)]
+        error: object_store::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -800,6 +870,8 @@ impl ErrorExt for Error {
             | GetCache { .. }
             | SerializeToJson { .. }
             | DeserializeFromJson { .. } => StatusCode::Internal,
+
+            WriteObject { .. } | ReadObject { .. } => StatusCode::StorageUnavailable,
 
             NoLeader { .. } => StatusCode::TableUnavailable,
             ValueNotExist { .. } | ProcedurePoisonConflict { .. } => StatusCode::Unexpected,
@@ -837,7 +909,11 @@ impl ErrorExt for Error {
             | ProcedureOutput { .. }
             | FromUtf8 { .. }
             | MetadataCorruption { .. }
-            | ParseWalOptions { .. } => StatusCode::Unexpected,
+            | ParseWalOptions { .. }
+            | ReadFlexbuffers { .. }
+            | SerializeFlexbuffers { .. }
+            | DeserializeFlexbuffers { .. }
+            | InvalidFileContext { .. } => StatusCode::Unexpected,
 
             SendMessage { .. } | GetKvCache { .. } | CacheNotGet { .. } => StatusCode::Internal,
 
@@ -853,7 +929,10 @@ impl ErrorExt for Error {
             | TlsConfig { .. }
             | InvalidSetDatabaseOption { .. }
             | InvalidUnsetDatabaseOption { .. }
-            | InvalidTopicNamePrefix { .. } => StatusCode::InvalidArguments,
+            | InvalidTopicNamePrefix { .. }
+            | InvalidFileExtension { .. }
+            | InvalidFileName { .. }
+            | InvalidFilePath { .. } => StatusCode::InvalidArguments,
 
             FlowNotFound { .. } => StatusCode::FlowNotFound,
             FlowRouteNotFound { .. } => StatusCode::Unexpected,
