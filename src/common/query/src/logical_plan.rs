@@ -92,8 +92,8 @@ pub fn rename_logical_plan_columns(
 /// if table scan in logical plan have full table name, will **NOT** override it.
 pub fn breakup_insert_plan(
     plan: &LogicalPlan,
-    catalog: &str,
-    schema: &str,
+    default_catalog: &str,
+    default_schema: &str,
 ) -> Option<(TableName, Arc<LogicalPlan>)> {
     if let LogicalPlan::Dml(dml) = plan {
         if dml.op != WriteOp::Insert(InsertOp::Append) {
@@ -102,12 +102,12 @@ pub fn breakup_insert_plan(
         let table_name = &dml.table_name;
         let table_name = match table_name {
             TableReference::Bare { table } => TableName {
-                catalog_name: catalog.to_string(),
-                schema_name: schema.to_string(),
+                catalog_name: default_catalog.to_string(),
+                schema_name: default_schema.to_string(),
                 table_name: table.to_string(),
             },
             TableReference::Partial { schema, table } => TableName {
-                catalog_name: catalog.to_string(),
+                catalog_name: default_catalog.to_string(),
                 schema_name: schema.to_string(),
                 table_name: table.to_string(),
             },
