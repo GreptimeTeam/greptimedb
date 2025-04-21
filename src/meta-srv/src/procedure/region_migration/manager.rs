@@ -508,7 +508,7 @@ mod test {
 
         let err = manager.submit_procedure(task).await.unwrap_err();
         assert_matches!(err, error::Error::LeaderPeerChanged { .. });
-        assert_eq!(err.to_string(), "Region leader changed: Region's leader peer(3) is not the `from_peer`(1), region: 4398046511105(1024, 1)");
+        assert_eq!(err.to_string(), "Region's leader peer changed: Region's leader peer(3) is not the `from_peer`(1), region: 4398046511105(1024, 1)");
     }
 
     #[tokio::test]
