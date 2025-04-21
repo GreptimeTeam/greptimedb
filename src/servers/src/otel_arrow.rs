@@ -79,9 +79,8 @@ impl ArrowMetricsService for OtelArrowServiceHandler<OpenTelemetryProtocolHandle
                                 e.to_string(),
                             )))
                             .await;
-                        error!(
-                            "Failed to consume batch from otel-arrow client, error: {}",
-                            e
+                        error!(e;
+                            "Failed to consume batch from otel-arrow client"
                         );
                         return;
                     }
@@ -93,7 +92,7 @@ impl ArrowMetricsService for OtelArrowServiceHandler<OpenTelemetryProtocolHandle
                             e.to_string(),
                         )))
                         .await;
-                    error!("Failed to ingest metrics from otel-arrow, error: {}", e);
+                    error!(e; "Failed to ingest metrics from otel-arrow");
                     return;
                 }
                 let _ = sender.send(Ok(batch_status)).await;
