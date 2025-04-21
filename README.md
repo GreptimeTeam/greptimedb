@@ -6,7 +6,7 @@
   </picture>
 </p>
 
-<h2 align="center">Unified & Cost-Effective Observability  Database for Metrics, Logs, and Events</h2>
+<h2 align="center">Real-Time & Cloud-Native Observability  Database<br/>for metrics, logs, and traces</h2>
 
 <div align="center">
 <h3 align="center">
