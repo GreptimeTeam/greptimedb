@@ -158,6 +158,7 @@ pub struct FlowWorkerManager {
     flow_err_collectors: RwLock<BTreeMap<FlowId, ErrCollector>>,
     src_send_buf_lens: RwLock<BTreeMap<TableId, watch::Receiver<usize>>>,
     tick_manager: FlowTickManager,
+    /// This node id is only available in distributed mode, on standalone mode this is guaranteed to be `None`
     pub node_id: Option<u32>,
     /// Lock for flushing, will be `read` by `handle_inserts` and `write` by `flush_flow`
     ///

@@ -126,8 +126,11 @@ impl FlowDualEngine {
         allow_create: bool,
         allow_drop: bool,
     ) -> Result<(), Error> {
+        // use nodeid to determine if this is standalone/distributed mode, and retrieve all flows in this node(in distributed mode)/or all flows(in standalone mode)
         let nodeid = self.streaming_engine.node_id;
         let should_exists: Vec<_> = if let Some(nodeid) = nodeid {
+            // nodeid is available, so we only need to check flows on this node
+            // which also means we are in distributed mode
             let to_be_recover = self
                 .flow_metadata_manager
                 .flownode_flow_manager()
@@ -139,6 +142,8 @@ impl FlowDualEngine {
                 })?;
             to_be_recover.into_iter().map(|(id, _)| id).collect()
         } else {
+            // nodeid is not available, so we need to check all flows
+            // which also means we are in standalone mode
             let all_catalogs = self
                 .catalog_manager
                 .catalog_names()
