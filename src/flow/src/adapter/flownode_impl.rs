@@ -39,8 +39,8 @@ use crate::adapter::{CreateFlowArgs, FlowWorkerManager};
 use crate::batching_mode::engine::BatchingEngine;
 use crate::engine::FlowEngine;
 use crate::error::{
-    CreateFlowSnafu, ExternalSnafu, FlowNotFoundSnafu, InsertIntoFlowSnafu, InternalSnafu,
-    ListFlowsSnafu, SyncCheckTaskSnafu, UnexpectedSnafu,
+    CreateFlowSnafu, ExternalSnafu, FlowNotFoundSnafu, IllegalCheckTaskStateSnafu,
+    InsertIntoFlowSnafu, InternalSnafu, ListFlowsSnafu, SyncCheckTaskSnafu, UnexpectedSnafu,
 };
 use crate::metrics::METRIC_FLOW_TASK_COUNT;
 use crate::repr::{self, DiffRow};
@@ -278,7 +278,7 @@ impl FlowDualEngine {
         let mut check_task = self.check_task.lock().await;
         ensure!(
             check_task.is_none(),
-            UnexpectedSnafu {
+            IllegalCheckTaskStateSnafu {
                 reason: "Flow consistent check task already exists",
             }
         );
@@ -293,7 +293,7 @@ impl FlowDualEngine {
 
         ensure!(
             check_task.is_some(),
-            UnexpectedSnafu {
+            IllegalCheckTaskStateSnafu {
                 reason: "Flow consistent check task does not exist",
             }
         );
@@ -670,10 +670,7 @@ impl common_meta::node_manager::Flownode for FlowDualEngine {
                     ..Default::default()
                 })
             }
-            other => common_meta::error::UnexpectedSnafu {
-                err_msg: format!("Invalid request body: {other:?}"),
-            }
-            .fail(),
+            other => common_meta::error::InvalidFlowRequestBodySnafu { body: other }.fail(),
         }
     }
 
@@ -772,14 +769,7 @@ impl common_meta::node_manager::Flownode for FlowWorkerManager {
                     ..Default::default()
                 })
             }
-            None => common_meta::error::UnexpectedSnafu {
-                err_msg: "Missing request body",
-            }
-            .fail(),
-            _ => common_meta::error::UnexpectedSnafu {
-                err_msg: "Invalid request body.",
-            }
-            .fail(),
+            other => common_meta::error::InvalidFlowRequestBodySnafu { body: other }.fail(),
         }
     }
 

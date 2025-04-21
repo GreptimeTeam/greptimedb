@@ -401,6 +401,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid flow request body: {:?}", body))]
+    InvalidFlowRequestBody {
+        body: Box<Option<api::v1::flow::flow_request::Body>>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to get kv cache, err: {}", err_msg))]
     GetKvCache { err_msg: String },
 
@@ -853,7 +860,8 @@ impl ErrorExt for Error {
             | TlsConfig { .. }
             | InvalidSetDatabaseOption { .. }
             | InvalidUnsetDatabaseOption { .. }
-            | InvalidTopicNamePrefix { .. } => StatusCode::InvalidArguments,
+            | InvalidTopicNamePrefix { .. }
+            | InvalidFlowRequestBody { .. } => StatusCode::InvalidArguments,
 
             FlowNotFound { .. } => StatusCode::FlowNotFound,
             FlowRouteNotFound { .. } => StatusCode::Unexpected,
