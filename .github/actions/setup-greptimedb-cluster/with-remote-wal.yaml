@@ -7,7 +7,8 @@ meta:
     provider = "kafka"
     broker_endpoints = ["kafka.kafka-cluster.svc.cluster.local:9092"]
     num_topics = 3
-    auto_prune_topic_records = true
+    auto_prune_interval = "30s"
+    trigger_flush_threshold = 100
 
     [datanode]
     [datanode.client]
