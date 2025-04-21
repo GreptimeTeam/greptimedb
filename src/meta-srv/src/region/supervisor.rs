@@ -26,7 +26,7 @@ use common_meta::DatanodeId;
 use common_runtime::JoinHandle;
 use common_telemetry::{error, info, warn};
 use common_time::util::current_time_millis;
-use error::Error::{MigrationRunning, RegionLeaderChanged, TableRouteNotFound};
+use error::Error::{LeaderPeerChanged, MigrationRunning, TableRouteNotFound};
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -432,11 +432,11 @@ impl RegionSupervisor {
                     );
                     Ok(())
                 }
-                RegionLeaderChanged { .. } => {
+                LeaderPeerChanged { .. } => {
                     self.deregister_failure_detectors(vec![(datanode_id, region_id)])
                         .await;
                     info!(
-                        "Region leader changed, removed failover detector for region: {}, datanode: {}",
+                        "Region's leader peer changed, removed failover detector for region: {}, datanode: {}",
                         region_id, from_peer_id
                     );
                     Ok(())

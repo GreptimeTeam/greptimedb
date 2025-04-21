@@ -267,7 +267,7 @@ impl RegionMigrationManager {
 
         ensure!(
             leader_peer.id == task.from_peer.id,
-            error::RegionLeaderChangedSnafu {
+            error::LeaderPeerChangedSnafu {
                 msg: format!(
                     "Region's leader peer({}) is not the `from_peer`({}), region: {}",
                     leader_peer.id, task.from_peer.id, task.region_id
@@ -507,7 +507,7 @@ mod test {
             .await;
 
         let err = manager.submit_procedure(task).await.unwrap_err();
-        assert_matches!(err, error::Error::RegionLeaderChanged { .. });
+        assert_matches!(err, error::Error::LeaderPeerChanged { .. });
         assert_eq!(err.to_string(), "Region leader changed: Region's leader peer(3) is not the `from_peer`(1), region: 4398046511105(1024, 1)");
     }
 
