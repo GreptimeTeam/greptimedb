@@ -48,6 +48,7 @@ pub struct DatanodeKafkaConfig {
     /// Ignore missing entries during read WAL.
     pub overwrite_entry_start_id: bool,
     // Interval of WAL pruning.
+    #[serde(with = "humantime_serde")]
     pub auto_prune_interval: Duration,
     // Threshold for sending flush request when pruning remote WAL.
     // `None` stands for never sending flush request.

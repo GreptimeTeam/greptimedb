@@ -34,6 +34,7 @@ pub struct MetasrvKafkaConfig {
     // Automatically create topics for WAL.
     pub auto_create_topics: bool,
     // Interval of WAL pruning.
+    #[serde(with = "humantime_serde")]
     pub auto_prune_interval: Duration,
     // Threshold for sending flush request when pruning remote WAL.
     // `None` stands for never sending flush request.
