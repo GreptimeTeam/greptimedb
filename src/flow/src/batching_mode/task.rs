@@ -284,7 +284,7 @@ impl BatchingTask {
         // fix all table ref by make it fully qualified, i.e. "table_name" => "catalog_name.schema_name.table_name"
         let fixed_plan = plan
             .clone()
-            .transform(|p| {
+            .transform_down_with_subqueries(|p| {
                 if let LogicalPlan::TableScan(mut table_scan) = p {
                     let resolved = table_scan.table_name.resolve(catalog, schema);
                     table_scan.table_name = resolved.into();
@@ -609,11 +609,7 @@ fn create_table_with_expr(
         AUTO_CREATED_UPDATE_AT_TS_COL,
         ConcreteDataType::timestamp_millisecond_datatype(),
         true,
-    )
-    /* .with_default_constraint(Some(ColumnDefaultConstraint::Function(NOW_FN.to_string())))
-    .context(DatatypesSnafu {
-        extra: "Failed to build column `update_at TimestampMillisecond default now()`",
-    })?*/ ;
+    );
     column_schemas.push(update_at_schema);
 
     let time_index = if let Some(time_index) = first_time_stamp {
@@ -625,15 +621,7 @@ fn create_table_with_expr(
                 ConcreteDataType::timestamp_millisecond_datatype(),
                 false,
             )
-            .with_time_index(true), /* .with_default_constraint(Some(ColumnDefaultConstraint::Value(Value::Timestamp(
-                                        Timestamp::new_millisecond(0),
-                                    ))))
-                                    .context(DatatypesSnafu {
-                                        extra: format!(
-                                            "Failed to build column `{} TimestampMillisecond TIME INDEX default 0`",
-                                            AUTO_CREATED_PLACEHOLDER_TS_COL
-                                        ),
-                                    })?*/
+            .with_time_index(true),
         );
         AUTO_CREATED_PLACEHOLDER_TS_COL.to_string()
     };
@@ -726,7 +714,6 @@ mod test {
             ConcreteDataType::timestamp_millisecond_datatype(),
             true,
         );
-        // .with_default_constraint(Some(ColumnDefaultConstraint::Function(NOW_FN.to_string())))
 
         let ts_placeholder_schema = ColumnSchema::new(
             AUTO_CREATED_PLACEHOLDER_TS_COL,
@@ -734,8 +721,6 @@ mod test {
             false,
         )
         .with_time_index(true);
-        // .with_default_constraint(Some(ColumnDefaultConstraint::Value(Value::Timestamp(
-        //    Timestamp::new_millisecond(0), ))))
 
         let testcases = vec![
             TestCase {

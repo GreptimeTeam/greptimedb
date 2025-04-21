@@ -26,7 +26,7 @@ use datafusion::sql::unparser::Unparser;
 use datafusion_common::tree_node::{
     Transformed, TreeNodeRecursion, TreeNodeRewriter, TreeNodeVisitor,
 };
-use datafusion_common::{DFSchema, DataFusionError};
+use datafusion_common::{DFSchema, DataFusionError, ScalarValue};
 use datafusion_expr::{Distinct, LogicalPlan, Projection};
 use datatypes::schema::SchemaRef;
 use query::parser::QueryLanguageParser;
@@ -278,6 +278,9 @@ impl TreeNodeRewriter for AddAutoColumnRewriter {
                     .get(idx)
                     .map(|c| c.name.clone())
                 {
+                    // if the data type mismatched, later check_execute will error out
+                    // hence no need to check it here, beside, optimize pass might be able to cast it
+                    // so checking here is not necessary
                     *expr = expr.clone().alias(col_name);
                 }
             }
@@ -289,7 +292,8 @@ impl TreeNodeRewriter for AddAutoColumnRewriter {
         debug!("query_col_cnt={query_col_cnt}, table_col_cnt={table_col_cnt}");
 
         let placeholder_ts_expr =
-            datafusion::logical_expr::lit(0).alias(AUTO_CREATED_PLACEHOLDER_TS_COL);
+            datafusion::logical_expr::lit(ScalarValue::TimestampMillisecond(Some(0), None))
+                .alias(AUTO_CREATED_PLACEHOLDER_TS_COL);
 
         if query_col_cnt == table_col_cnt {
             // still need to add alias, see below
@@ -499,7 +503,7 @@ mod test {
             // add ts placeholder
             (
                 "SELECT number FROM numbers_with_ts",
-                Ok("SELECT numbers_with_ts.number, 0 AS __ts_placeholder FROM numbers_with_ts"),
+                Ok("SELECT numbers_with_ts.number, CAST('1970-01-01 00:00:00' AS TIMESTAMP) AS __ts_placeholder FROM numbers_with_ts"),
                 vec![
                     ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
                     ColumnSchema::new(
@@ -527,7 +531,7 @@ mod test {
             // add update_at and ts placeholder
             (
                 "SELECT number FROM numbers_with_ts",
-                Ok("SELECT numbers_with_ts.number, now() AS update_at, 0 AS __ts_placeholder FROM numbers_with_ts"),
+                Ok("SELECT numbers_with_ts.number, now() AS update_at, CAST('1970-01-01 00:00:00' AS TIMESTAMP) AS __ts_placeholder FROM numbers_with_ts"),
                 vec![
                     ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
                     ColumnSchema::new(
@@ -546,7 +550,7 @@ mod test {
             // add ts placeholder
             (
                 "SELECT number, ts FROM numbers_with_ts",
-                Ok("SELECT numbers_with_ts.number, numbers_with_ts.ts AS update_at, 0 AS __ts_placeholder FROM numbers_with_ts"),
+                Ok("SELECT numbers_with_ts.number, numbers_with_ts.ts AS update_at, CAST('1970-01-01 00:00:00' AS TIMESTAMP) AS __ts_placeholder FROM numbers_with_ts"),
                 vec![
                     ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
                     ColumnSchema::new(

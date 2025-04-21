@@ -241,7 +241,12 @@ impl FrontendClient {
                     let database_client = {
                         database_client
                             .lock()
-                            .unwrap()
+                            .map_err(|e| {
+                                UnexpectedSnafu {
+                                    reason: format!("Failed to lock database client: {e}"),
+                                }
+                                .build()
+                            })?
                             .as_ref()
                             .context(UnexpectedSnafu {
                                 reason: "Standalone's frontend instance is not set",

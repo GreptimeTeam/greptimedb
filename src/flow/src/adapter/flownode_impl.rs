@@ -57,7 +57,6 @@ pub struct FlowDualEngine {
     streaming_engine: Arc<FlowWorkerManager>,
     batching_engine: Arc<BatchingEngine>,
     /// helper struct for faster query flow by table id or vice versa
-    /// need to also use as a lock so use tokio RwLock
     src_table2flow: RwLock<SrcTableToFlow>,
     flow_metadata_manager: Arc<FlowMetadataManager>,
     catalog_manager: Arc<dyn CatalogManager>,
@@ -112,7 +111,13 @@ impl FlowDualEngine {
         }
 
         if retry == max_retry {
-            return FlowNotFoundSnafu { id: flow_id }.fail();
+            return crate::error::UnexpectedSnafu {
+                reason: format!(
+                    "Can't sync with check task for flow {} with allow_drop={}",
+                    flow_id, allow_drop
+                ),
+            }
+            .fail();
         }
         info!("Successfully sync with check task for flow {}", flow_id);
 
@@ -170,12 +175,12 @@ impl FlowDualEngine {
             .into_iter()
             .map(|i| i as FlowId)
             .collect::<HashSet<_>>();
-        let actual_exist = self.list_flows().await?.into_iter().collect::<HashSet<_>>();
+        let actual_exists = self.list_flows().await?.into_iter().collect::<HashSet<_>>();
         let to_be_created = should_exists
             .iter()
-            .filter(|id| !actual_exist.contains(id))
+            .filter(|id| !actual_exists.contains(id))
             .collect::<Vec<_>>();
-        let to_be_dropped = actual_exist
+        let to_be_dropped = actual_exists
             .iter()
             .filter(|id| !should_exists.contains(id))
             .collect::<Vec<_>>();
@@ -463,20 +468,21 @@ impl FlowEngine for FlowDualEngine {
         let flow_id = args.flow_id;
         let src_table_ids = args.source_table_ids.clone();
 
-        let mut src_table2flow = self.src_table2flow.write().await;
         let res = match flow_type {
             FlowType::Batching => self.batching_engine.create_flow(args).await,
             FlowType::Streaming => self.streaming_engine.create_flow(args).await,
         }?;
 
-        src_table2flow.add_flow(flow_id, flow_type, src_table_ids);
+        self.src_table2flow
+            .write()
+            .await
+            .add_flow(flow_id, flow_type, src_table_ids);
 
         Ok(res)
     }
 
     async fn remove_flow(&self, flow_id: FlowId) -> Result<(), Error> {
-        let mut src_table2flow = self.src_table2flow.write().await;
-        let flow_type = src_table2flow.get_flow_type(flow_id);
+        let flow_type = self.src_table2flow.read().await.get_flow_type(flow_id);
 
         match flow_type {
             Some(FlowType::Batching) => self.batching_engine.remove_flow(flow_id).await,
@@ -495,7 +501,7 @@ impl FlowEngine for FlowDualEngine {
             }
         }?;
         // remove mapping
-        src_table2flow.remove_flow(flow_id);
+        self.src_table2flow.write().await.remove_flow(flow_id);
         Ok(())
     }
 
