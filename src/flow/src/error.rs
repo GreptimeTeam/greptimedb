@@ -196,6 +196,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Illegal check task state: {reason}"))]
+    IllegalCheckTaskState {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
         "Failed to sync with check task for flow {} with allow_drop={}",
         flow_id,
@@ -299,7 +306,9 @@ impl ErrorExt for Error {
             Self::CreateFlow { .. } | Self::Arrow { .. } | Self::Time { .. } => {
                 StatusCode::EngineExecuteQuery
             }
-            Self::Unexpected { .. } | Self::SyncCheckTask { .. } => StatusCode::Unexpected,
+            Self::Unexpected { .. }
+            | Self::SyncCheckTask { .. }
+            | Self::IllegalCheckTaskState { .. } => StatusCode::Unexpected,
             Self::NotImplemented { .. }
             | Self::UnsupportedTemporalFilter { .. }
             | Self::Unsupported { .. } => StatusCode::Unsupported,

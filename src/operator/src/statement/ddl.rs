@@ -52,7 +52,6 @@ use query::parser::{QueryLanguageParser, QueryStatement};
 use query::plan::extract_and_rewrite_full_table_names;
 use query::query_engine::DefaultSerializer;
 use query::sql::create_table_stmt;
-use query::QueryEngineRef;
 use regex::Regex;
 use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
@@ -369,62 +368,11 @@ impl StatementExecutor {
         expr: CreateFlowExpr,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
-        async fn sql_to_df_plan(
-            query_ctx: QueryContextRef,
-            engine: QueryEngineRef,
-            sql: &str,
-        ) -> Result<LogicalPlan> {
-            let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx)
-                .map_err(BoxedError::new)
-                .context(ExternalSnafu)?;
-            let plan = engine
-                .planner()
-                .plan(&stmt, query_ctx)
-                .await
-                .map_err(BoxedError::new)
-                .context(ExternalSnafu)?;
-            Ok(plan)
-        }
-
-        async fn determine_flow_type(plan: &LogicalPlan) -> Result<FlowType> {
-            pub struct FindAggr {
-                is_aggr: bool,
-            }
-
-            impl TreeNodeVisitor<'_> for FindAggr {
-                type Node = LogicalPlan;
-                fn f_down(
-                    &mut self,
-                    node: &Self::Node,
-                ) -> datafusion_common::Result<datafusion_common::tree_node::TreeNodeRecursion>
-                {
-                    match node {
-                        LogicalPlan::Aggregate(_) | LogicalPlan::Distinct(_) => {
-                            self.is_aggr = true;
-                            return Ok(datafusion_common::tree_node::TreeNodeRecursion::Stop);
-                        }
-                        _ => (),
-                    }
-                    Ok(datafusion_common::tree_node::TreeNodeRecursion::Continue)
-                }
-            }
-
-            let mut find_aggr = FindAggr { is_aggr: false };
-
-            plan.visit_with_subqueries(&mut find_aggr)
-                .context(BuildDfLogicalPlanSnafu)?;
-            if find_aggr.is_aggr {
-                Ok(FlowType::Batching)
-            } else {
-                Ok(FlowType::Streaming)
-            }
-        }
-
-        let plan =
-            sql_to_df_plan(query_context.clone(), self.query_engine.clone(), &expr.sql).await?;
-
-        let flow_type = determine_flow_type(&plan).await?;
+        let flow_type = self
+            .determine_flow_type(&expr.sql, query_context.clone())
+            .await?;
         info!("determined flow={} type: {:#?}", expr.flow_name, flow_type);
+
         let expr = {
             let mut expr = expr;
             expr.flow_options
@@ -445,6 +393,55 @@ impl StatementExecutor {
             .submit_ddl_task(&ExecutorContext::default(), request)
             .await
             .context(error::ExecuteDdlSnafu)
+    }
+
+    /// Determine the flow type based on the SQL query
+    ///
+    /// If it contains aggregation or distinct, then it is a batch flow, otherwise it is a streaming flow
+    async fn determine_flow_type(&self, sql: &str, query_ctx: QueryContextRef) -> Result<FlowType> {
+        let engine = &self.query_engine;
+        let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx)
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+        let plan = engine
+            .planner()
+            .plan(&stmt, query_ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+
+        /// Visitor to find aggregation or distinct
+        struct FindAggr {
+            is_aggr: bool,
+        }
+
+        impl TreeNodeVisitor<'_> for FindAggr {
+            type Node = LogicalPlan;
+            fn f_down(
+                &mut self,
+                node: &Self::Node,
+            ) -> datafusion_common::Result<datafusion_common::tree_node::TreeNodeRecursion>
+            {
+                match node {
+                    LogicalPlan::Aggregate(_) | LogicalPlan::Distinct(_) => {
+                        self.is_aggr = true;
+                        return Ok(datafusion_common::tree_node::TreeNodeRecursion::Stop);
+                    }
+                    _ => (),
+                }
+                Ok(datafusion_common::tree_node::TreeNodeRecursion::Continue)
+            }
+        }
+
+        let mut find_aggr = FindAggr { is_aggr: false };
+
+        plan.visit_with_subqueries(&mut find_aggr)
+            .context(BuildDfLogicalPlanSnafu)?;
+        if find_aggr.is_aggr {
+            Ok(FlowType::Batching)
+        } else {
+            Ok(FlowType::Streaming)
+        }
     }
 
     #[tracing::instrument(skip_all)]
