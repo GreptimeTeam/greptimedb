@@ -17,8 +17,8 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use common_telemetry::debug;
 use common_telemetry::tracing::warn;
+use common_telemetry::{debug, info};
 use common_time::Timestamp;
 use datatypes::value::Value;
 use session::context::QueryContextRef;
@@ -74,7 +74,11 @@ impl TaskState {
     /// wait for at least `last_query_duration`, at most `max_timeout` to start next query
     ///
     /// if have more dirty time window, exec next query immediately
-    pub fn get_next_start_query_time(&self, max_timeout: Option<Duration>) -> Instant {
+    pub fn get_next_start_query_time(
+        &self,
+        flow_id: FlowId,
+        max_timeout: Option<Duration>,
+    ) -> Instant {
         let next_duration = max_timeout
             .unwrap_or(self.last_query_duration)
             .min(self.last_query_duration);
@@ -84,6 +88,10 @@ impl TaskState {
         if self.dirty_time_windows.windows.is_empty() {
             self.last_update_time + next_duration
         } else {
+            info!(
+                "Flow id = {}, still have {:?} dirty time window, execute immediately",
+                flow_id, self.dirty_time_windows.windows
+            );
             Instant::now()
         }
     }
@@ -121,6 +129,11 @@ impl DirtyTimeWindows {
 
     pub fn add_window(&mut self, start: Timestamp, end: Option<Timestamp>) {
         self.windows.insert(start, end);
+    }
+
+    /// Clean all dirty time windows, useful when can't found time window expr
+    pub fn clean(&mut self) {
+        self.windows.clear();
     }
 
     /// Generate all filter expressions consuming all time windows
