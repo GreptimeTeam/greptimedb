@@ -19,7 +19,7 @@ use store_api::region_engine::RegionEngine;
 use store_api::region_request::{AffectedRows, RegionDropRequest, RegionRequest};
 use store_api::storage::RegionId;
 
-use super::MetricEngineInner;
+use crate::engine::MetricEngineInner;
 use crate::error::{
     CloseMitoRegionSnafu, LogicalRegionNotFoundSnafu, PhysicalRegionBusySnafu, Result,
 };

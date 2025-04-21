@@ -55,4 +55,12 @@ CREATE TABLE test(i DOUBLE, j TIMESTAMP TIME INDEX, k STRING, l STRING, PRIMARY 
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 TQL ANALYZE (0, 10, '5s') test;
 
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+TQL ANALYZE (0, 10, '5s') rate(test[10s]);
+
 drop table test;

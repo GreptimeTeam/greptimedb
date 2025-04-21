@@ -16,15 +16,19 @@ use std::sync::Arc;
 
 use api::v1::greptime_request::Request;
 use async_trait::async_trait;
+use common_base::AffectedRows;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_query::Output;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
+use table::table_name::TableName;
 
 use crate::error::{self, Result};
 
 pub type GrpcQueryHandlerRef<E> = Arc<dyn GrpcQueryHandler<Error = E> + Send + Sync>;
 pub type ServerGrpcQueryHandlerRef = GrpcQueryHandlerRef<error::Error>;
+
+pub type RawRecordBatch = bytes::Bytes;
 
 #[async_trait]
 pub trait GrpcQueryHandler {
@@ -35,6 +39,12 @@ pub trait GrpcQueryHandler {
         query: Request,
         ctx: QueryContextRef,
     ) -> std::result::Result<Output, Self::Error>;
+
+    async fn put_record_batch(
+        &self,
+        table: &TableName,
+        record_batch: RawRecordBatch,
+    ) -> std::result::Result<AffectedRows, Self::Error>;
 }
 
 pub struct ServerGrpcQueryHandlerAdapter<E>(GrpcQueryHandlerRef<E>);
@@ -58,5 +68,17 @@ where
             .await
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcQuerySnafu)
+    }
+
+    async fn put_record_batch(
+        &self,
+        table: &TableName,
+        record_batch: RawRecordBatch,
+    ) -> Result<AffectedRows> {
+        self.0
+            .put_record_batch(table, record_batch)
+            .await
+            .map_err(BoxedError::new)
+            .context(error::ExecuteGrpcRequestSnafu)
     }
 }

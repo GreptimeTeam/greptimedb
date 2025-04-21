@@ -12,6 +12,33 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod flight;
+
+use api::v1::greptime_request::Request;
+use api::v1::query_request::Query;
+use api::v1::QueryRequest;
+use common_query::OutputData;
+use common_recordbatch::RecordBatches;
+use frontend::instance::Instance;
+use servers::query_handler::grpc::GrpcQueryHandler;
+use session::context::QueryContext;
+
+#[allow(unused)]
+async fn query_and_expect(instance: &Instance, sql: &str, expected: &str) {
+    let request = Request::Query(QueryRequest {
+        query: Some(Query::Sql(sql.to_string())),
+    });
+    let output = GrpcQueryHandler::do_query(instance, request, QueryContext::arc())
+        .await
+        .unwrap();
+    let OutputData::Stream(stream) = output.data else {
+        unreachable!()
+    };
+    let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
+    let actual = recordbatches.pretty_print().unwrap();
+    assert_eq!(actual, expected, "actual: {}", actual);
+}
+
 #[cfg(test)]
 mod test {
     use std::collections::HashMap;
@@ -41,6 +68,7 @@ mod test {
     use store_api::storage::RegionId;
     use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 
+    use super::*;
     use crate::standalone::GreptimeDbStandaloneBuilder;
     use crate::tests;
     use crate::tests::MockDistributedInstance;
@@ -219,24 +247,14 @@ mod test {
         let output = query(instance, request).await;
         assert!(matches!(output.data, OutputData::AffectedRows(1)));
 
-        let request = Request::Query(QueryRequest {
-            query: Some(Query::Sql(
-                "SELECT ts, a, b FROM database_created_through_grpc.table_created_through_grpc"
-                    .to_string(),
-            )),
-        });
-        let output = query(instance, request).await;
-        let OutputData::Stream(stream) = output.data else {
-            unreachable!()
-        };
-        let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
+        let sql = "SELECT ts, a, b FROM database_created_through_grpc.table_created_through_grpc";
         let expected = "\
 +---------------------+---+---+
 | ts                  | a | b |
 +---------------------+---+---+
 | 2023-01-04T07:14:26 | s | 1 |
 +---------------------+---+---+";
-        assert_eq!(recordbatches.pretty_print().unwrap(), expected);
+        query_and_expect(instance, sql, expected).await;
 
         let request = Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::DropTable(DropTableExpr {
@@ -323,24 +341,14 @@ mod test {
         let output = query(instance, request).await;
         assert!(matches!(output.data, OutputData::AffectedRows(1)));
 
-        let request = Request::Query(QueryRequest {
-            query: Some(Query::Sql(
-                "SELECT ts, a, b FROM database_created_through_grpc.table_created_through_grpc"
-                    .to_string(),
-            )),
-        });
-        let output = query(instance, request).await;
-        let OutputData::Stream(stream) = output.data else {
-            unreachable!()
-        };
-        let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
+        let sql = "SELECT ts, a, b FROM database_created_through_grpc.table_created_through_grpc";
         let expected = "\
 +---------------------+---+---+
 | ts                  | a | b |
 +---------------------+---+---+
 | 2023-01-04T07:14:26 | s | 1 |
 +---------------------+---+---+";
-        assert_eq!(recordbatches.pretty_print().unwrap(), expected);
+        query_and_expect(instance, sql, expected).await;
 
         let request = Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::DropTable(DropTableExpr {

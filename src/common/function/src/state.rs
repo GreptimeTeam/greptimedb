@@ -28,12 +28,13 @@ pub struct FunctionState {
 
 impl FunctionState {
     /// Create a mock [`FunctionState`] for test.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     pub fn mock() -> Self {
         use std::sync::Arc;
 
         use api::v1::meta::ProcedureStatus;
         use async_trait::async_trait;
+        use catalog::CatalogManagerRef;
         use common_base::AffectedRows;
         use common_meta::rpc::procedure::{
             AddRegionFollowerRequest, MigrateRegionRequest, ProcedureStateResponse,
@@ -79,6 +80,10 @@ impl FunctionState {
                 _request: RemoveRegionFollowerRequest,
             ) -> Result<()> {
                 Ok(())
+            }
+
+            fn catalog_manager(&self) -> &CatalogManagerRef {
+                unimplemented!()
             }
         }
 

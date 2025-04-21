@@ -295,6 +295,7 @@ pub fn datafusion_status_code<T: ErrorExt + 'static>(
                 default_status.unwrap_or(StatusCode::EngineExecuteQuery)
             }
         }
+        DataFusionError::Diagnostic(_, e) => datafusion_status_code::<T>(e, default_status),
         _ => default_status.unwrap_or(StatusCode::EngineExecuteQuery),
     }
 }

@@ -29,10 +29,10 @@ use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
 use session::Session;
 use snafu::IntoError;
 
-use super::PostgresServerHandlerInner;
 use crate::error::{AuthSnafu, Result};
 use crate::metrics::METRIC_AUTH_FAILURE;
 use crate::postgres::types::PgErrorCode;
+use crate::postgres::PostgresServerHandlerInner;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
 pub(crate) struct PgLoginVerifier {

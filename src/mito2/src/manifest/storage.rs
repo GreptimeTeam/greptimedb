@@ -29,6 +29,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
 use store_api::manifest::ManifestVersion;
+use store_api::storage::RegionId;
 use tokio::sync::Semaphore;
 
 use crate::error::{
@@ -243,12 +244,17 @@ impl ManifestObjectStore {
         &self,
         start_version: ManifestVersion,
         end_version: ManifestVersion,
+        region_id: RegionId,
     ) -> Result<Vec<(ManifestVersion, Vec<u8>)>> {
         let mut manifests = self.fetch_manifests(start_version, end_version).await?;
         let start_index = manifests.iter().position(|(v, _)| *v == start_version);
         debug!(
-            "fetches manifests in range [{},{}), start_index: {:?}",
-            start_version, end_version, start_index
+            "Fetches manifests in range [{},{}), start_index: {:?}, region_id: {}, manifests: {:?}",
+            start_version,
+            end_version,
+            start_index,
+            region_id,
+            manifests.iter().map(|(v, _)| *v).collect::<Vec<_>>()
         );
         if let Some(start_index) = start_index {
             Ok(manifests.split_off(start_index))

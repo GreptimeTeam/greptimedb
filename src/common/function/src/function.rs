@@ -32,7 +32,7 @@ pub struct FunctionContext {
 
 impl FunctionContext {
     /// Create a mock [`FunctionContext`] for test.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     pub fn mock() -> Self {
         Self {
             query_ctx: QueryContextBuilder::default().build().into(),

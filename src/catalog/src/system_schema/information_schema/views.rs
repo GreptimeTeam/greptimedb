@@ -32,13 +32,12 @@ use snafu::{OptionExt, ResultExt};
 use store_api::storage::{ScanRequest, TableId};
 use table::metadata::TableType;
 
-use super::VIEWS;
 use crate::error::{
     CastManagerSnafu, CreateRecordBatchSnafu, GetViewCacheSnafu, InternalSnafu, Result,
     UpgradeWeakCatalogManagerRefSnafu, ViewInfoNotFoundSnafu,
 };
 use crate::kvbackend::KvBackendCatalogManager;
-use crate::system_schema::information_schema::{InformationTable, Predicates};
+use crate::system_schema::information_schema::{InformationTable, Predicates, VIEWS};
 use crate::CatalogManager;
 const INIT_CAPACITY: usize = 42;
 

@@ -28,12 +28,12 @@ use regex::Regex;
 use snafu::{OptionExt, ResultExt};
 pub use time::Timestamp;
 
-use super::PipelineMap;
 use crate::error::{
-    Error, Result, ValueDefaultValueUnsupportedSnafu, ValueInvalidResolutionSnafu,
-    ValueParseBooleanSnafu, ValueParseFloatSnafu, ValueParseIntSnafu, ValueParseTypeSnafu,
-    ValueUnsupportedNumberTypeSnafu, ValueUnsupportedYamlTypeSnafu, ValueYamlKeyMustBeStringSnafu,
+    Error, Result, UnsupportedNumberTypeSnafu, ValueDefaultValueUnsupportedSnafu,
+    ValueInvalidResolutionSnafu, ValueParseBooleanSnafu, ValueParseFloatSnafu, ValueParseIntSnafu,
+    ValueParseTypeSnafu, ValueUnsupportedYamlTypeSnafu, ValueYamlKeyMustBeStringSnafu,
 };
+use crate::etl::PipelineMap;
 
 /// Value can be used as type
 /// acts as value: the enclosed value is the actual value
@@ -413,7 +413,7 @@ impl TryFrom<serde_json::Value> for Value {
                 } else if let Some(v) = v.as_f64() {
                     Ok(Value::Float64(v))
                 } else {
-                    ValueUnsupportedNumberTypeSnafu { value: v }.fail()
+                    UnsupportedNumberTypeSnafu { value: v }.fail()
                 }
             }
             serde_json::Value::String(v) => Ok(Value::String(v)),

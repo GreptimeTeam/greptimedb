@@ -20,9 +20,8 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 
-use super::{KvBackendRef, ResettableKvBackend};
 use crate::kv_backend::txn::{Txn, TxnOp, TxnOpResponse, TxnRequest, TxnResponse};
-use crate::kv_backend::{KvBackend, TxnService};
+use crate::kv_backend::{KvBackend, KvBackendRef, ResettableKvBackend, TxnService};
 use crate::metrics::METRIC_META_TXN_REQUEST;
 use crate::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,

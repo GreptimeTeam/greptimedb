@@ -19,10 +19,10 @@ pub mod fs;
 mod gcs;
 mod oss;
 mod s3;
+use std::path;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use std::{env, path};
 
 use common_telemetry::{info, warn};
 use object_store::layers::{LruCacheLayer, RetryInterceptor, RetryLayer};
@@ -202,39 +202,13 @@ pub(crate) fn clean_temp_dir(dir: &str) -> Result<()> {
 }
 
 pub(crate) fn build_http_client(config: &HttpClientConfig) -> Result<HttpClient> {
-    let http_builder = {
-        let mut builder = reqwest::ClientBuilder::new();
-
-        // Pool max idle per host controls connection pool size.
-        // Default to no limit, set to `0` for disable it.
-        let pool_max_idle_per_host = env::var("_GREPTIMEDB_HTTP_POOL_MAX_IDLE_PER_HOST")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .inspect(|_| warn!("'_GREPTIMEDB_HTTP_POOL_MAX_IDLE_PER_HOST' might be deprecated in the future. Please set it in the config file instead."))
-            .unwrap_or(config.pool_max_idle_per_host as usize);
-        builder = builder.pool_max_idle_per_host(pool_max_idle_per_host);
-
-        // Connect timeout default to 30s.
-        let connect_timeout = env::var("_GREPTIMEDB_HTTP_CONNECT_TIMEOUT")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok().map(Duration::from_secs))
-            .inspect(|_| warn!("'_GREPTIMEDB_HTTP_CONNECT_TIMEOUT' might be deprecated in the future. Please set it in the config file instead."))
-            .unwrap_or(config.connect_timeout);
-        builder = builder.connect_timeout(connect_timeout);
-
-        // Pool connection idle timeout default to 90s.
-        let idle_timeout = env::var("_GREPTIMEDB_HTTP_POOL_IDLE_TIMEOUT")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok().map(Duration::from_secs))
-            .inspect(|_| warn!("'_GREPTIMEDB_HTTP_POOL_IDLE_TIMEOUT' might be deprecated in the future. Please set it in the config file instead."))
-            .unwrap_or(config.pool_idle_timeout);
-
-        builder = builder.pool_idle_timeout(idle_timeout);
-
-        builder.timeout(config.timeout)
-    };
-
-    let client = http_builder.build().context(BuildHttpClientSnafu)?;
+    let client = reqwest::ClientBuilder::new()
+        .pool_max_idle_per_host(config.pool_max_idle_per_host as usize)
+        .connect_timeout(config.connect_timeout)
+        .pool_idle_timeout(config.pool_idle_timeout)
+        .timeout(config.timeout)
+        .build()
+        .context(BuildHttpClientSnafu)?;
     Ok(HttpClient::with(client))
 }
 struct PrintDetailedError;

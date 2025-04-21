@@ -26,14 +26,15 @@
 
 // allow unused for now because it should be use later
 mod adapter;
+pub(crate) mod batching_mode;
 mod compute;
 mod df_optimizer;
+pub(crate) mod engine;
 pub mod error;
 mod expr;
 pub mod heartbeat;
 mod metrics;
 mod plan;
-mod recording_rules;
 mod repr;
 mod server;
 mod transform;
@@ -43,5 +44,9 @@ mod utils;
 mod test_utils;
 
 pub use adapter::{FlowConfig, FlowWorkerManager, FlowWorkerManagerRef, FlownodeOptions};
+pub use batching_mode::frontend_client::FrontendClient;
+pub(crate) use engine::{CreateFlowArgs, FlowId, TableName};
 pub use error::{Error, Result};
-pub use server::{FlownodeBuilder, FlownodeInstance, FlownodeServer, FrontendInvoker};
+pub use server::{
+    FlownodeBuilder, FlownodeInstance, FlownodeServer, FlownodeServiceBuilder, FrontendInvoker,
+};

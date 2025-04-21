@@ -77,7 +77,7 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
             name,
             input_types,
             DataType::Float64,
-            Volatility::Immutable,
+            Volatility::Volatile,
             Arc::new(move |input: &_| Self::new(range_length).calc(input)) as _,
         )
     }

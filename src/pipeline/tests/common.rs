@@ -56,6 +56,7 @@ pub fn parse_and_exec(input_str: &str, pipeline_yaml: &str) -> Rows {
 }
 
 /// test util function to create column schema
+#[allow(dead_code)]
 pub fn make_column_schema(
     column_name: String,
     datatype: ColumnDataType,

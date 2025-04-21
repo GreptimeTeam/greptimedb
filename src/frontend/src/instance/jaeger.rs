@@ -47,7 +47,7 @@ use snafu::{OptionExt, ResultExt};
 use table::requests::{TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1};
 use table::table::adapter::DfTableProviderAdapter;
 
-use super::Instance;
+use crate::instance::Instance;
 
 const DEFAULT_LIMIT: usize = 2000;
 

@@ -32,6 +32,10 @@ ifneq ($(strip $(BUILD_JOBS)),)
 	NEXTEST_OPTS += --build-jobs=${BUILD_JOBS}
 endif
 
+ifneq ($(strip $(BUILD_JOBS)),)
+	SQLNESS_OPTS += --jobs ${BUILD_JOBS}
+endif
+
 ifneq ($(strip $(CARGO_PROFILE)),)
 	CARGO_BUILD_OPTS += --profile ${CARGO_PROFILE}
 endif
@@ -193,6 +197,7 @@ fix-clippy: ## Fix clippy violations.
 fmt-check: ## Check code format.
 	cargo fmt --all -- --check
 	python3 scripts/check-snafu.py
+	python3 scripts/check-super-imports.py
 
 .PHONY: start-etcd
 start-etcd: ## Start single node etcd for testing purpose.

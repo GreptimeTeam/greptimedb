@@ -19,7 +19,10 @@ use std::vec;
 
 use common_test_util::find_workspace_path;
 use datafusion::assert_batches_eq;
-use datafusion::datasource::physical_plan::{FileOpener, FileScanConfig, FileStream, ParquetExec};
+use datafusion::datasource::file_format::file_compression_type::FileCompressionType;
+use datafusion::datasource::physical_plan::{
+    CsvConfig, CsvOpener, FileOpener, FileScanConfig, FileStream, JsonOpener, ParquetExec,
+};
 use datafusion::execution::context::TaskContext;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::ExecutionPlan;
@@ -27,14 +30,11 @@ use datafusion::prelude::SessionContext;
 use futures::StreamExt;
 
 use super::FORMAT_TYPE;
-use crate::compression::CompressionType;
-use crate::error;
-use crate::file_format::csv::{CsvConfigBuilder, CsvOpener};
-use crate::file_format::json::JsonOpener;
 use crate::file_format::orc::{OrcFormat, OrcOpener};
 use crate::file_format::parquet::DefaultParquetFileReaderFactory;
 use crate::file_format::{FileFormat, Format};
-use crate::test_util::{self, scan_config, test_basic_schema, test_store};
+use crate::test_util::{scan_config, test_basic_schema, test_store};
+use crate::{error, test_util};
 
 struct Test<'a, T: FileOpener> {
     config: FileScanConfig,
@@ -62,15 +62,18 @@ impl<T: FileOpener> Test<'_, T> {
 #[tokio::test]
 async fn test_json_opener() {
     let store = test_store("/");
+    let store = Arc::new(object_store_opendal::OpendalStore::new(store));
 
     let schema = test_basic_schema();
 
-    let json_opener = JsonOpener::new(
-        100,
-        schema.clone(),
-        store.clone(),
-        CompressionType::Uncompressed,
-    );
+    let json_opener = || {
+        JsonOpener::new(
+            test_util::TEST_BATCH_SIZE,
+            schema.clone(),
+            FileCompressionType::UNCOMPRESSED,
+            store.clone(),
+        )
+    };
 
     let path = &find_workspace_path("/src/common/datasource/tests/json/basic.json")
         .display()
@@ -78,7 +81,7 @@ async fn test_json_opener() {
     let tests = [
         Test {
             config: scan_config(schema.clone(), None, path),
-            opener: json_opener.clone(),
+            opener: json_opener(),
             expected: vec![
                 "+-----+-------+",
                 "| num | str   |",
@@ -91,7 +94,7 @@ async fn test_json_opener() {
         },
         Test {
             config: scan_config(schema.clone(), Some(1), path),
-            opener: json_opener.clone(),
+            opener: json_opener(),
             expected: vec![
                 "+-----+------+",
                 "| num | str  |",
@@ -110,23 +113,30 @@ async fn test_json_opener() {
 #[tokio::test]
 async fn test_csv_opener() {
     let store = test_store("/");
+    let store = Arc::new(object_store_opendal::OpendalStore::new(store));
 
     let schema = test_basic_schema();
     let path = &find_workspace_path("/src/common/datasource/tests/csv/basic.csv")
         .display()
         .to_string();
-    let csv_conf = CsvConfigBuilder::default()
-        .batch_size(test_util::TEST_BATCH_SIZE)
-        .file_schema(schema.clone())
-        .build()
-        .unwrap();
+    let csv_config = Arc::new(CsvConfig::new(
+        test_util::TEST_BATCH_SIZE,
+        schema.clone(),
+        None,
+        true,
+        b',',
+        b'"',
+        None,
+        store,
+        None,
+    ));
 
-    let csv_opener = CsvOpener::new(csv_conf, store, CompressionType::Uncompressed);
+    let csv_opener = || CsvOpener::new(csv_config.clone(), FileCompressionType::UNCOMPRESSED);
 
     let tests = [
         Test {
             config: scan_config(schema.clone(), None, path),
-            opener: csv_opener.clone(),
+            opener: csv_opener(),
             expected: vec![
                 "+-----+-------+",
                 "| num | str   |",
@@ -139,7 +149,7 @@ async fn test_csv_opener() {
         },
         Test {
             config: scan_config(schema.clone(), Some(1), path),
-            opener: csv_opener.clone(),
+            opener: csv_opener(),
             expected: vec![
                 "+-----+------+",
                 "| num | str  |",

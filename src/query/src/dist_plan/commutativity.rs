@@ -96,7 +96,13 @@ impl Categorizer {
             LogicalPlan::Extension(extension) => {
                 Self::check_extension_plan(extension.node.as_ref() as _)
             }
-            LogicalPlan::Distinct(_) => Commutativity::Unimplemented,
+            LogicalPlan::Distinct(_) => {
+                if partition_cols.is_empty() {
+                    Commutativity::Commutative
+                } else {
+                    Commutativity::Unimplemented
+                }
+            }
             LogicalPlan::Unnest(_) => Commutativity::Commutative,
             LogicalPlan::Statement(_) => Commutativity::Unsupported,
             LogicalPlan::Values(_) => Commutativity::Unsupported,

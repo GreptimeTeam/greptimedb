@@ -514,14 +514,6 @@ pub enum Error {
         source: common_datasource::error::Error,
     },
 
-    #[snafu(display("Failed to build csv config"))]
-    BuildCsvConfig {
-        #[snafu(source)]
-        error: common_datasource::file_format::csv::CsvConfigBuilderError,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to write stream to path: {}", path))]
     WriteStreamToFile {
         path: String,
@@ -807,6 +799,14 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to create partition rules"))]
+    CreatePartitionRules {
+        #[snafu(source)]
+        source: sql::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -825,7 +825,6 @@ impl ErrorExt for Error {
             | Error::ColumnNotFound { .. }
             | Error::BuildRegex { .. }
             | Error::InvalidSchema { .. }
-            | Error::BuildCsvConfig { .. }
             | Error::ProjectSchema { .. }
             | Error::UnsupportedFormat { .. }
             | Error::ColumnNoneDefaultValue { .. }
@@ -849,7 +848,8 @@ impl ErrorExt for Error {
             | Error::PhysicalExpr { .. }
             | Error::InvalidJsonFormat { .. }
             | Error::CursorNotFound { .. }
-            | Error::CursorExists { .. } => StatusCode::InvalidArguments,
+            | Error::CursorExists { .. }
+            | Error::CreatePartitionRules { .. } => StatusCode::InvalidArguments,
 
             Error::TableAlreadyExists { .. } | Error::ViewAlreadyExists { .. } => {
                 StatusCode::TableAlreadyExists

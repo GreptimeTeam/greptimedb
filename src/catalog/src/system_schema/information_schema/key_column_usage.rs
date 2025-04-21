@@ -24,18 +24,17 @@ use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatch
 use datafusion::physical_plan::streaming::PartitionStream as DfPartitionStream;
 use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
 use datatypes::prelude::{ConcreteDataType, MutableVector, ScalarVectorBuilder, VectorRef};
-use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+use datatypes::schema::{ColumnSchema, FulltextBackend, Schema, SchemaRef};
 use datatypes::value::Value;
 use datatypes::vectors::{ConstantVector, StringVector, StringVectorBuilder, UInt32VectorBuilder};
 use futures_util::TryStreamExt;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{ScanRequest, TableId};
 
-use super::KEY_COLUMN_USAGE;
 use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
-use crate::system_schema::information_schema::{InformationTable, Predicates};
+use crate::system_schema::information_schema::{InformationTable, Predicates, KEY_COLUMN_USAGE};
 use crate::CatalogManager;
 
 pub const CONSTRAINT_SCHEMA: &str = "constraint_schema";
@@ -48,20 +47,38 @@ pub const TABLE_SCHEMA: &str = "table_schema";
 pub const TABLE_NAME: &str = "table_name";
 pub const COLUMN_NAME: &str = "column_name";
 pub const ORDINAL_POSITION: &str = "ordinal_position";
+/// The type of the index.
+pub const GREPTIME_INDEX_TYPE: &str = "greptime_index_type";
 const INIT_CAPACITY: usize = 42;
 
-/// Primary key constraint name
-pub(crate) const PRI_CONSTRAINT_NAME: &str = "PRIMARY";
 /// Time index constraint name
-pub(crate) const TIME_INDEX_CONSTRAINT_NAME: &str = "TIME INDEX";
+pub(crate) const CONSTRAINT_NAME_TIME_INDEX: &str = "TIME INDEX";
+
+/// Primary key constraint name
+pub(crate) const CONSTRAINT_NAME_PRI: &str = "PRIMARY";
+/// Primary key index type
+pub(crate) const INDEX_TYPE_PRI: &str = "greptime-primary-key-v1";
+
 /// Inverted index constraint name
-pub(crate) const INVERTED_INDEX_CONSTRAINT_NAME: &str = "INVERTED INDEX";
+pub(crate) const CONSTRAINT_NAME_INVERTED_INDEX: &str = "INVERTED INDEX";
+/// Inverted index type
+pub(crate) const INDEX_TYPE_INVERTED_INDEX: &str = "greptime-inverted-index-v1";
+
 /// Fulltext index constraint name
-pub(crate) const FULLTEXT_INDEX_CONSTRAINT_NAME: &str = "FULLTEXT INDEX";
+pub(crate) const CONSTRAINT_NAME_FULLTEXT_INDEX: &str = "FULLTEXT INDEX";
+/// Fulltext index v1 type
+pub(crate) const INDEX_TYPE_FULLTEXT_TANTIVY: &str = "greptime-fulltext-index-v1";
+/// Fulltext index bloom type
+pub(crate) const INDEX_TYPE_FULLTEXT_BLOOM: &str = "greptime-fulltext-index-bloom";
+
 /// Skipping index constraint name
-pub(crate) const SKIPPING_INDEX_CONSTRAINT_NAME: &str = "SKIPPING INDEX";
+pub(crate) const CONSTRAINT_NAME_SKIPPING_INDEX: &str = "SKIPPING INDEX";
+/// Skipping index type
+pub(crate) const INDEX_TYPE_SKIPPING_INDEX: &str = "greptime-bloom-filter-v1";
 
 /// The virtual table implementation for `information_schema.KEY_COLUMN_USAGE`.
+///
+/// Provides an extra column `greptime_index_type` for the index type of the key column.
 #[derive(Debug)]
 pub(super) struct InformationSchemaKeyColumnUsage {
     schema: SchemaRef,
@@ -118,6 +135,11 @@ impl InformationSchemaKeyColumnUsage {
             ),
             ColumnSchema::new(
                 "referenced_column_name",
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
+            ColumnSchema::new(
+                GREPTIME_INDEX_TYPE,
                 ConcreteDataType::string_datatype(),
                 true,
             ),
@@ -185,6 +207,7 @@ struct InformationSchemaKeyColumnUsageBuilder {
     column_name: StringVectorBuilder,
     ordinal_position: UInt32VectorBuilder,
     position_in_unique_constraint: UInt32VectorBuilder,
+    greptime_index_type: StringVectorBuilder,
 }
 
 impl InformationSchemaKeyColumnUsageBuilder {
@@ -207,6 +230,7 @@ impl InformationSchemaKeyColumnUsageBuilder {
             column_name: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             ordinal_position: UInt32VectorBuilder::with_capacity(INIT_CAPACITY),
             position_in_unique_constraint: UInt32VectorBuilder::with_capacity(INIT_CAPACITY),
+            greptime_index_type: StringVectorBuilder::with_capacity(INIT_CAPACITY),
         }
     }
 
@@ -230,34 +254,47 @@ impl InformationSchemaKeyColumnUsageBuilder {
 
                 for (idx, column) in schema.column_schemas().iter().enumerate() {
                     let mut constraints = vec![];
+                    let mut greptime_index_type = vec![];
                     if column.is_time_index() {
                         self.add_key_column_usage(
                             &predicates,
                             &schema_name,
-                            TIME_INDEX_CONSTRAINT_NAME,
+                            CONSTRAINT_NAME_TIME_INDEX,
                             &catalog_name,
                             &schema_name,
                             table_name,
                             &column.name,
                             1, //always 1 for time index
+                            "",
                         );
                     }
                     // TODO(dimbtp): foreign key constraint not supported yet
                     if keys.contains(&idx) {
-                        constraints.push(PRI_CONSTRAINT_NAME);
+                        constraints.push(CONSTRAINT_NAME_PRI);
+                        greptime_index_type.push(INDEX_TYPE_PRI);
                     }
                     if column.is_inverted_indexed() {
-                        constraints.push(INVERTED_INDEX_CONSTRAINT_NAME);
+                        constraints.push(CONSTRAINT_NAME_INVERTED_INDEX);
+                        greptime_index_type.push(INDEX_TYPE_INVERTED_INDEX);
                     }
-                    if column.is_fulltext_indexed() {
-                        constraints.push(FULLTEXT_INDEX_CONSTRAINT_NAME);
+                    if let Ok(Some(options)) = column.fulltext_options() {
+                        if options.enable {
+                            constraints.push(CONSTRAINT_NAME_FULLTEXT_INDEX);
+                            let index_type = match options.backend {
+                                FulltextBackend::Bloom => INDEX_TYPE_FULLTEXT_BLOOM,
+                                FulltextBackend::Tantivy => INDEX_TYPE_FULLTEXT_TANTIVY,
+                            };
+                            greptime_index_type.push(index_type);
+                        }
                     }
                     if column.is_skipping_indexed() {
-                        constraints.push(SKIPPING_INDEX_CONSTRAINT_NAME);
+                        constraints.push(CONSTRAINT_NAME_SKIPPING_INDEX);
+                        greptime_index_type.push(INDEX_TYPE_SKIPPING_INDEX);
                     }
 
                     if !constraints.is_empty() {
                         let aggregated_constraints = constraints.join(", ");
+                        let aggregated_index_types = greptime_index_type.join(", ");
                         self.add_key_column_usage(
                             &predicates,
                             &schema_name,
@@ -267,6 +304,7 @@ impl InformationSchemaKeyColumnUsageBuilder {
                             table_name,
                             &column.name,
                             idx as u32 + 1,
+                            &aggregated_index_types,
                         );
                     }
                 }
@@ -289,6 +327,7 @@ impl InformationSchemaKeyColumnUsageBuilder {
         table_name: &str,
         column_name: &str,
         ordinal_position: u32,
+        index_types: &str,
     ) {
         let row = [
             (CONSTRAINT_SCHEMA, &Value::from(constraint_schema)),
@@ -298,6 +337,7 @@ impl InformationSchemaKeyColumnUsageBuilder {
             (TABLE_NAME, &Value::from(table_name)),
             (COLUMN_NAME, &Value::from(column_name)),
             (ORDINAL_POSITION, &Value::from(ordinal_position)),
+            (GREPTIME_INDEX_TYPE, &Value::from(index_types)),
         ];
 
         if !predicates.eval(&row) {
@@ -314,6 +354,7 @@ impl InformationSchemaKeyColumnUsageBuilder {
         self.column_name.push(Some(column_name));
         self.ordinal_position.push(Some(ordinal_position));
         self.position_in_unique_constraint.push(None);
+        self.greptime_index_type.push(Some(index_types));
     }
 
     fn finish(&mut self) -> Result<RecordBatch> {
@@ -337,6 +378,7 @@ impl InformationSchemaKeyColumnUsageBuilder {
             null_string_vector.clone(),
             null_string_vector.clone(),
             null_string_vector,
+            Arc::new(self.greptime_index_type.finish()),
         ];
         RecordBatch::new(self.schema.clone(), columns).context(CreateRecordBatchSnafu)
     }

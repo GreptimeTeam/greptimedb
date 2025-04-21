@@ -18,8 +18,8 @@ use std::sync::Arc;
 
 use client::{Output, OutputData, OutputMeta};
 use common_base::readable_size::ReadableSize;
-use common_datasource::file_format::csv::{CsvConfigBuilder, CsvFormat, CsvOpener};
-use common_datasource::file_format::json::{JsonFormat, JsonOpener};
+use common_datasource::file_format::csv::CsvFormat;
+use common_datasource::file_format::json::JsonFormat;
 use common_datasource::file_format::orc::{infer_orc_schema, new_orc_stream_reader, ReaderAdapter};
 use common_datasource::file_format::{FileFormat, Format};
 use common_datasource::lister::{Lister, Source};
@@ -31,11 +31,13 @@ use common_recordbatch::DfSendableRecordBatchStream;
 use common_telemetry::{debug, tracing};
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::object_store::ObjectStoreUrl;
-use datafusion::datasource::physical_plan::{FileOpener, FileScanConfig, FileStream};
+use datafusion::datasource::physical_plan::{
+    CsvConfig, CsvOpener, FileOpener, FileScanConfig, FileStream, JsonOpener,
+};
 use datafusion::parquet::arrow::arrow_reader::ArrowReaderMetadata;
 use datafusion::parquet::arrow::ParquetRecordBatchStreamBuilder;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
-use datafusion_common::Statistics;
+use datafusion_common::{Constraints, Statistics};
 use datafusion_expr::Expr;
 use datatypes::arrow::compute::can_cast_types;
 use datatypes::arrow::datatypes::{Schema, SchemaRef};
@@ -210,6 +212,7 @@ impl StatementExecutor {
                 limit: None,
                 table_partition_cols: vec![],
                 output_ordering: vec![],
+                constraints: Constraints::empty(),
             },
             0,
             opener,
@@ -234,28 +237,41 @@ impl StatementExecutor {
                 path,
                 schema,
             } => {
-                let projected_schema = Arc::new(
+                let output_schema = Arc::new(
                     compat_schema
                         .project(&projection)
                         .context(error::ProjectSchemaSnafu)?,
                 );
-                let csv_conf = CsvConfigBuilder::default()
-                    .batch_size(DEFAULT_BATCH_SIZE)
-                    .file_schema(schema.clone())
-                    .file_projection(Some(projection.clone()))
-                    .build()
-                    .context(error::BuildCsvConfigSnafu)?;
-
+                let csv_config = Arc::new(CsvConfig::new(
+                    DEFAULT_BATCH_SIZE,
+                    schema.clone(),
+                    Some(projection.clone()),
+                    format.has_header,
+                    format.delimiter,
+                    b'"',
+                    None,
+                    Arc::new(object_store_opendal::OpendalStore::new(
+                        object_store.clone(),
+                    )),
+                    None,
+                ));
+                let projected_file_schema = Arc::new(
+                    schema
+                        .project(&projection)
+                        .context(error::ProjectSchemaSnafu)?,
+                );
                 let stream = self
                     .build_file_stream(
-                        CsvOpener::new(csv_conf, object_store.clone(), format.compression_type),
+                        CsvOpener::new(csv_config, format.compression_type.into()),
                         path,
-                        schema.clone(),
+                        projected_file_schema,
                     )
                     .await?;
 
                 Ok(Box::pin(
-                    RecordBatchStreamTypeAdapter::new(projected_schema, stream, Some(projection))
+                    // The projection is already applied in the CSV reader when we created the stream,
+                    // so we pass None here to avoid double projection which would cause schema mismatch errors.
+                    RecordBatchStreamTypeAdapter::new(output_schema, stream, None)
                         .with_filter(filters)
                         .context(error::PhysicalExprSnafu)?,
                 ))
@@ -270,26 +286,29 @@ impl StatementExecutor {
                         .project(&projection)
                         .context(error::ProjectSchemaSnafu)?,
                 );
-                let projected_schema = Arc::new(
+                let output_schema = Arc::new(
                     compat_schema
                         .project(&projection)
                         .context(error::ProjectSchemaSnafu)?,
                 );
+                let store = object_store_opendal::OpendalStore::new(object_store.clone());
                 let stream = self
                     .build_file_stream(
                         JsonOpener::new(
                             DEFAULT_BATCH_SIZE,
-                            projected_file_schema,
-                            object_store.clone(),
-                            format.compression_type,
+                            projected_file_schema.clone(),
+                            format.compression_type.into(),
+                            Arc::new(store),
                         ),
                         path,
-                        schema.clone(),
+                        projected_file_schema,
                     )
                     .await?;
 
                 Ok(Box::pin(
-                    RecordBatchStreamTypeAdapter::new(projected_schema, stream, Some(projection))
+                    // The projection is already applied in the JSON reader when we created the stream,
+                    // so we pass None here to avoid double projection which would cause schema mismatch errors.
+                    RecordBatchStreamTypeAdapter::new(output_schema, stream, None)
                         .with_filter(filters)
                         .context(error::PhysicalExprSnafu)?,
                 ))
@@ -314,13 +333,13 @@ impl StatementExecutor {
                     .build()
                     .context(error::BuildParquetRecordBatchStreamSnafu)?;
 
-                let projected_schema = Arc::new(
+                let output_schema = Arc::new(
                     compat_schema
                         .project(&projection)
                         .context(error::ProjectSchemaSnafu)?,
                 );
                 Ok(Box::pin(
-                    RecordBatchStreamTypeAdapter::new(projected_schema, stream, Some(projection))
+                    RecordBatchStreamTypeAdapter::new(output_schema, stream, Some(projection))
                         .with_filter(filters)
                         .context(error::PhysicalExprSnafu)?,
                 ))
@@ -341,14 +360,14 @@ impl StatementExecutor {
                         .await
                         .context(error::ReadOrcSnafu)?;
 
-                let projected_schema = Arc::new(
+                let output_schema = Arc::new(
                     compat_schema
                         .project(&projection)
                         .context(error::ProjectSchemaSnafu)?,
                 );
 
                 Ok(Box::pin(
-                    RecordBatchStreamTypeAdapter::new(projected_schema, stream, Some(projection))
+                    RecordBatchStreamTypeAdapter::new(output_schema, stream, Some(projection))
                         .with_filter(filters)
                         .context(error::PhysicalExprSnafu)?,
                 ))

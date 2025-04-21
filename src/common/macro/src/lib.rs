@@ -91,8 +91,8 @@ pub fn range_fn(args: TokenStream, input: TokenStream) -> TokenStream {
 /// - `ret`: The return type of the generated SQL function, it will be transformed into `ConcreteDataType::{ret}_datatype()` result.
 /// - `display_name`: The display name of the generated SQL function.
 /// - `sig_fn`: the function to returns `Signature` of generated `Function`.
-///
-/// Note that this macro should only be used in `common-function` crate for now
+/// - `user_path`: Optional path to the trait and context (e.g., `crate`);
+///   defaults to `crate` if not provided.
 #[proc_macro_attribute]
 pub fn admin_fn(args: TokenStream, input: TokenStream) -> TokenStream {
     process_admin_fn(args, input)

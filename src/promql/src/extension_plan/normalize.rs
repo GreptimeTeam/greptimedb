@@ -23,6 +23,7 @@ use datafusion::common::{DFSchema, DFSchemaRef, Result as DataFusionResult, Stat
 use datafusion::error::DataFusionError;
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogicalNodeCore};
+use datafusion::physical_plan::expressions::Column as ColumnExpr;
 use datafusion::physical_plan::metrics::{
     BaselineMetrics, Count, ExecutionPlanMetricsSet, MetricBuilder, MetricValue, MetricsSet,
 };
@@ -32,7 +33,6 @@ use datafusion::physical_plan::{
 };
 use datatypes::arrow::array::TimestampMillisecondArray;
 use datatypes::arrow::datatypes::SchemaRef;
-use datatypes::arrow::error::Result as ArrowResult;
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::{ready, Stream, StreamExt};
 use greptime_proto::substrait_extension as pb;
@@ -55,6 +55,7 @@ pub struct SeriesNormalize {
     offset: Millisecond,
     time_index_column_name: String,
     need_filter_out_nan: bool,
+    tag_columns: Vec<String>,
 
     input: LogicalPlan,
 }
@@ -100,6 +101,7 @@ impl UserDefinedLogicalNodeCore for SeriesNormalize {
             time_index_column_name: self.time_index_column_name.clone(),
             need_filter_out_nan: self.need_filter_out_nan,
             input: inputs.into_iter().next().unwrap(),
+            tag_columns: self.tag_columns.clone(),
         })
     }
 }
@@ -109,12 +111,14 @@ impl SeriesNormalize {
         offset: Millisecond,
         time_index_column_name: N,
         need_filter_out_nan: bool,
+        tag_columns: Vec<String>,
         input: LogicalPlan,
     ) -> Self {
         Self {
             offset,
             time_index_column_name: time_index_column_name.as_ref().to_string(),
             need_filter_out_nan,
+            tag_columns,
             input,
         }
     }
@@ -129,6 +133,7 @@ impl SeriesNormalize {
             time_index_column_name: self.time_index_column_name.clone(),
             need_filter_out_nan: self.need_filter_out_nan,
             input: exec_input,
+            tag_columns: self.tag_columns.clone(),
             metric: ExecutionPlanMetricsSet::new(),
         })
     }
@@ -138,6 +143,7 @@ impl SeriesNormalize {
             offset: self.offset,
             time_index: self.time_index_column_name.clone(),
             filter_nan: self.need_filter_out_nan,
+            tag_columns: self.tag_columns.clone(),
         }
         .encode_to_vec()
     }
@@ -152,6 +158,7 @@ impl SeriesNormalize {
             pb_normalize.offset,
             pb_normalize.time_index,
             pb_normalize.filter_nan,
+            pb_normalize.tag_columns,
             placeholder_plan,
         ))
     }
@@ -162,6 +169,7 @@ pub struct SeriesNormalizeExec {
     offset: Millisecond,
     time_index_column_name: String,
     need_filter_out_nan: bool,
+    tag_columns: Vec<String>,
 
     input: Arc<dyn ExecutionPlan>,
     metric: ExecutionPlanMetricsSet,
@@ -177,7 +185,14 @@ impl ExecutionPlan for SeriesNormalizeExec {
     }
 
     fn required_input_distribution(&self) -> Vec<Distribution> {
-        vec![Distribution::SinglePartition]
+        let schema = self.input.schema();
+        vec![Distribution::HashPartitioned(
+            self.tag_columns
+                .iter()
+                // Safety: the tag column names is verified in the planning phase
+                .map(|tag| Arc::new(ColumnExpr::new_with_schema(tag, &schema).unwrap()) as _)
+                .collect(),
+        )]
     }
 
     fn properties(&self) -> &PlanProperties {
@@ -198,6 +213,7 @@ impl ExecutionPlan for SeriesNormalizeExec {
             time_index_column_name: self.time_index_column_name.clone(),
             need_filter_out_nan: self.need_filter_out_nan,
             input: children[0].clone(),
+            tag_columns: self.tag_columns.clone(),
             metric: self.metric.clone(),
         }))
     }
@@ -288,31 +304,24 @@ impl SeriesNormalizeStream {
 
         // bias the timestamp column by offset
         let ts_column_biased = if self.offset == 0 {
-            ts_column.clone()
+            Arc::new(ts_column.clone()) as _
         } else {
-            TimestampMillisecondArray::from_iter(
+            Arc::new(TimestampMillisecondArray::from_iter(
                 ts_column.iter().map(|ts| ts.map(|ts| ts + self.offset)),
-            )
+            ))
         };
         let mut columns = input.columns().to_vec();
-        columns[self.time_index] = Arc::new(ts_column_biased);
+        columns[self.time_index] = ts_column_biased;
 
-        // sort the record batch
-        let ordered_indices = compute::sort_to_indices(&columns[self.time_index], None, None)?;
-        let ordered_columns = columns
-            .iter()
-            .map(|array| compute::take(array, &ordered_indices, None))
-            .collect::<ArrowResult<Vec<_>>>()?;
-        let ordered_batch = RecordBatch::try_new(input.schema(), ordered_columns)?;
-
+        let result_batch = RecordBatch::try_new(input.schema(), columns)?;
         if !self.need_filter_out_nan {
-            return Ok(ordered_batch);
+            return Ok(result_batch);
         }
 
         // TODO(ruihang): consider the "special NaN"
         // filter out NaN
         let mut filter = vec![true; input.num_rows()];
-        for column in ordered_batch.columns() {
+        for column in result_batch.columns() {
             if let Some(float_column) = column.as_any().downcast_ref::<Float64Array>() {
                 for (i, flag) in filter.iter_mut().enumerate() {
                     if float_column.value(i).is_nan() {
@@ -322,7 +331,7 @@ impl SeriesNormalizeStream {
             }
         }
 
-        let result = compute::filter_record_batch(&ordered_batch, &BooleanArray::from(filter))
+        let result = compute::filter_record_batch(&result_batch, &BooleanArray::from(filter))
             .map_err(|e| DataFusionError::ArrowError(e, None))?;
         Ok(result)
     }
@@ -338,10 +347,10 @@ impl Stream for SeriesNormalizeStream {
     type Item = DataFusionResult<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let timer = std::time::Instant::now();
         let poll = match ready!(self.input.poll_next_unpin(cx)) {
             Some(Ok(batch)) => {
                 self.num_series.add(1);
+                let timer = std::time::Instant::now();
                 let result = Ok(batch).and_then(|batch| self.normalize(batch));
                 self.metric.elapsed_compute().add_elapsed(timer);
                 Poll::Ready(Some(result))
@@ -399,6 +408,7 @@ mod test {
             time_index_column_name: TIME_INDEX_COLUMN.to_string(),
             need_filter_out_nan: true,
             input: memory_exec,
+            tag_columns: vec!["path".to_string()],
             metric: ExecutionPlanMetricsSet::new(),
         });
         let session_context = SessionContext::default();
@@ -413,11 +423,11 @@ mod test {
             "+---------------------+--------+------+\
             \n| timestamp           | value  | path |\
             \n+---------------------+--------+------+\
+            \n| 1970-01-01T00:01:00 | 0.0    | foo  |\
+            \n| 1970-01-01T00:02:00 | 1.0    | foo  |\
             \n| 1970-01-01T00:00:00 | 10.0   | foo  |\
             \n| 1970-01-01T00:00:30 | 100.0  | foo  |\
-            \n| 1970-01-01T00:01:00 | 0.0    | foo  |\
             \n| 1970-01-01T00:01:30 | 1000.0 | foo  |\
-            \n| 1970-01-01T00:02:00 | 1.0    | foo  |\
             \n+---------------------+--------+------+",
         );
 
@@ -428,11 +438,12 @@ mod test {
     async fn test_offset_record_batch() {
         let memory_exec = Arc::new(prepare_test_data());
         let normalize_exec = Arc::new(SeriesNormalizeExec {
-            offset: 1_000, // offset 1s
+            offset: 1_000,
             time_index_column_name: TIME_INDEX_COLUMN.to_string(),
             need_filter_out_nan: true,
             input: memory_exec,
             metric: ExecutionPlanMetricsSet::new(),
+            tag_columns: vec!["path".to_string()],
         });
         let session_context = SessionContext::default();
         let result = datafusion::physical_plan::collect(normalize_exec, session_context.task_ctx())
@@ -446,11 +457,11 @@ mod test {
             "+---------------------+--------+------+\
             \n| timestamp           | value  | path |\
             \n+---------------------+--------+------+\
+            \n| 1970-01-01T00:01:01 | 0.0    | foo  |\
+            \n| 1970-01-01T00:02:01 | 1.0    | foo  |\
             \n| 1970-01-01T00:00:01 | 10.0   | foo  |\
             \n| 1970-01-01T00:00:31 | 100.0  | foo  |\
-            \n| 1970-01-01T00:01:01 | 0.0    | foo  |\
             \n| 1970-01-01T00:01:31 | 1000.0 | foo  |\
-            \n| 1970-01-01T00:02:01 | 1.0    | foo  |\
             \n+---------------------+--------+------+",
         );
 

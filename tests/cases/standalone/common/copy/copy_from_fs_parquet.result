@@ -123,6 +123,42 @@ Copy with_limit_rows_segment FROM '${SQLNESS_HOME}/demo/export/parquet_files/' L
 
 Error: 2000(InvalidSyntax), Unexpected token while parsing SQL statement, expected: 'the number of maximum rows', found: ;: sql parser error: Expected: literal int, found: hello at Line: 1, Column: 86
 
+CREATE TABLE demo_with_external_column(host string, cpu double, memory double, ts timestamp time index, external_column string default 'default_value');
+
+Affected Rows: 0
+
+Copy demo_with_external_column FROM '${SQLNESS_HOME}/demo/export/parquet_files/demo.parquet';
+
+Affected Rows: 3
+
+select * from demo_with_external_column order by ts;
+
++-------+-------+--------+---------------------+-----------------+
+| host  | cpu   | memory | ts                  | external_column |
++-------+-------+--------+---------------------+-----------------+
+| host1 | 66.6  | 1024.0 | 2022-06-15T07:02:37 | default_value   |
+| host2 | 88.8  | 333.3  | 2022-06-15T07:02:38 | default_value   |
+| host3 | 111.1 | 444.4  | 2024-07-27T10:47:43 | default_value   |
++-------+-------+--------+---------------------+-----------------+
+
+CREATE TABLE demo_with_less_columns(host string, memory double, ts timestamp time index);
+
+Affected Rows: 0
+
+Copy demo_with_less_columns FROM '${SQLNESS_HOME}/demo/export/parquet_files/demo.parquet';
+
+Affected Rows: 3
+
+select * from demo_with_less_columns order by ts;
+
++-------+--------+---------------------+
+| host  | memory | ts                  |
++-------+--------+---------------------+
+| host1 | 1024.0 | 2022-06-15T07:02:37 |
+| host2 | 333.3  | 2022-06-15T07:02:38 |
+| host3 | 444.4  | 2024-07-27T10:47:43 |
++-------+--------+---------------------+
+
 drop table demo;
 
 Affected Rows: 0
@@ -148,6 +184,14 @@ drop table without_limit_rows;
 Affected Rows: 0
 
 drop table with_limit_rows_segment;
+
+Affected Rows: 0
+
+drop table demo_with_external_column;
+
+Affected Rows: 0
+
+drop table demo_with_less_columns;
 
 Affected Rows: 0
 

@@ -15,27 +15,37 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
 
-use common_catalog::consts::METRIC_ENGINE;
+use api::region::RegionResponse;
+use api::v1::region::sync_request::ManifestInfo;
+use api::v1::region::{
+    region_request, MetricManifestInfo, MitoManifestInfo, RegionRequest, RegionRequestHeader,
+    SyncRequest,
+};
+use common_catalog::consts::{METRIC_ENGINE, MITO_ENGINE};
 use common_error::ext::BoxedError;
 use common_procedure::error::Error as ProcedureError;
-use common_telemetry::{error, warn};
+use common_telemetry::tracing_context::TracingContext;
+use common_telemetry::{error, info, warn};
 use common_wal::options::WalOptions;
+use futures::future::join_all;
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::metric_engine_consts::LOGICAL_TABLE_METADATA_KEY;
-use store_api::storage::RegionNumber;
+use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, MANIFEST_INFO_EXTENSION_KEY};
+use store_api::region_engine::RegionManifestInfo;
+use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 use table::table_reference::TableReference;
 
-use crate::ddl::DetectingRegion;
+use crate::ddl::{DdlContext, DetectingRegion};
 use crate::error::{
-    Error, OperateDatanodeSnafu, ParseWalOptionsSnafu, Result, TableNotFoundSnafu, UnsupportedSnafu,
+    self, Error, OperateDatanodeSnafu, ParseWalOptionsSnafu, Result, TableNotFoundSnafu,
+    UnsupportedSnafu,
 };
 use crate::key::datanode_table::DatanodeTableValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::TableMetadataManagerRef;
 use crate::peer::Peer;
 use crate::rpc::ddl::CreateTableTask;
-use crate::rpc::router::RegionRoute;
+use crate::rpc::router::{find_follower_regions, find_followers, RegionRoute};
 
 /// Adds [Peer] context if the error is unretryable.
 pub fn add_peer_context_if_needed(datanode: Peer) -> impl FnOnce(Error) -> Error {
@@ -192,8 +202,8 @@ pub fn extract_region_wal_options(
 /// - PartialNonRetryable: if any operation is non retryable, the result is non retryable.
 /// - AllRetryable: all operations are retryable.
 /// - AllNonRetryable: all operations are not retryable.
-pub enum MultipleResults {
-    Ok,
+pub enum MultipleResults<T> {
+    Ok(Vec<T>),
     PartialRetryable(Error),
     PartialNonRetryable(Error),
     AllRetryable(Error),
@@ -205,9 +215,9 @@ pub enum MultipleResults {
 /// For partial success, we need to check if the errors are retryable.
 /// If all the errors are retryable, we return a retryable error.
 /// Otherwise, we return the first error.
-pub fn handle_multiple_results<T: Debug>(results: Vec<Result<T>>) -> MultipleResults {
+pub fn handle_multiple_results<T: Debug>(results: Vec<Result<T>>) -> MultipleResults<T> {
     if results.is_empty() {
-        return MultipleResults::Ok;
+        return MultipleResults::Ok(Vec::new());
     }
     let num_results = results.len();
     let mut retryable_results = Vec::new();
@@ -216,7 +226,7 @@ pub fn handle_multiple_results<T: Debug>(results: Vec<Result<T>>) -> MultipleRes
 
     for result in results {
         match result {
-            Ok(_) => ok_results.push(result),
+            Ok(value) => ok_results.push(value),
             Err(err) => {
                 if err.is_retry_later() {
                     retryable_results.push(err);
@@ -243,7 +253,7 @@ pub fn handle_multiple_results<T: Debug>(results: Vec<Result<T>>) -> MultipleRes
         }
         return MultipleResults::AllNonRetryable(non_retryable_results.into_iter().next().unwrap());
     } else if ok_results.len() == num_results {
-        return MultipleResults::Ok;
+        return MultipleResults::Ok(ok_results);
     } else if !retryable_results.is_empty()
         && !ok_results.is_empty()
         && non_retryable_results.is_empty()
@@ -262,6 +272,125 @@ pub fn handle_multiple_results<T: Debug>(results: Vec<Result<T>>) -> MultipleRes
     }
     // non_retryable_results.len() > 0
     MultipleResults::PartialNonRetryable(non_retryable_results.into_iter().next().unwrap())
+}
+
+/// Parses manifest infos from extensions.
+pub fn parse_manifest_infos_from_extensions(
+    extensions: &HashMap<String, Vec<u8>>,
+) -> Result<Vec<(RegionId, RegionManifestInfo)>> {
+    let data_manifest_version =
+        extensions
+            .get(MANIFEST_INFO_EXTENSION_KEY)
+            .context(error::UnexpectedSnafu {
+                err_msg: "manifest info extension not found",
+            })?;
+    let data_manifest_version =
+        RegionManifestInfo::decode_list(data_manifest_version).context(error::SerdeJsonSnafu {})?;
+    Ok(data_manifest_version)
+}
+
+/// Sync follower regions on datanodes.
+pub async fn sync_follower_regions(
+    context: &DdlContext,
+    table_id: TableId,
+    results: Vec<RegionResponse>,
+    region_routes: &[RegionRoute],
+    engine: &str,
+) -> Result<()> {
+    if engine != MITO_ENGINE && engine != METRIC_ENGINE {
+        info!(
+            "Skip submitting sync region requests for table_id: {}, engine: {}",
+            table_id, engine
+        );
+        return Ok(());
+    }
+
+    let results = results
+        .into_iter()
+        .map(|response| parse_manifest_infos_from_extensions(&response.extensions))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<HashMap<_, _>>();
+
+    let is_mito_engine = engine == MITO_ENGINE;
+
+    let followers = find_followers(region_routes);
+    if followers.is_empty() {
+        return Ok(());
+    }
+    let mut sync_region_tasks = Vec::with_capacity(followers.len());
+    for datanode in followers {
+        let requester = context.node_manager.datanode(&datanode).await;
+        let regions = find_follower_regions(region_routes, &datanode);
+        for region in regions {
+            let region_id = RegionId::new(table_id, region);
+            let manifest_info = if is_mito_engine {
+                let region_manifest_info =
+                    results.get(&region_id).context(error::UnexpectedSnafu {
+                        err_msg: format!("No manifest info found for region {}", region_id),
+                    })?;
+                ensure!(
+                    region_manifest_info.is_mito(),
+                    error::UnexpectedSnafu {
+                        err_msg: format!("Region {} is not a mito region", region_id)
+                    }
+                );
+                ManifestInfo::MitoManifestInfo(MitoManifestInfo {
+                    data_manifest_version: region_manifest_info.data_manifest_version(),
+                })
+            } else {
+                let region_manifest_info =
+                    results.get(&region_id).context(error::UnexpectedSnafu {
+                        err_msg: format!("No manifest info found for region {}", region_id),
+                    })?;
+                ensure!(
+                    region_manifest_info.is_metric(),
+                    error::UnexpectedSnafu {
+                        err_msg: format!("Region {} is not a metric region", region_id)
+                    }
+                );
+                ManifestInfo::MetricManifestInfo(MetricManifestInfo {
+                    data_manifest_version: region_manifest_info.data_manifest_version(),
+                    metadata_manifest_version: region_manifest_info
+                        .metadata_manifest_version()
+                        .unwrap_or_default(),
+                })
+            };
+            let request = RegionRequest {
+                header: Some(RegionRequestHeader {
+                    tracing_context: TracingContext::from_current_span().to_w3c(),
+                    ..Default::default()
+                }),
+                body: Some(region_request::Body::Sync(SyncRequest {
+                    region_id: region_id.as_u64(),
+                    manifest_info: Some(manifest_info),
+                })),
+            };
+
+            let datanode = datanode.clone();
+            let requester = requester.clone();
+            sync_region_tasks.push(async move {
+                requester
+                    .handle(request)
+                    .await
+                    .map_err(add_peer_context_if_needed(datanode))
+            });
+        }
+    }
+
+    // Failure to sync region is not critical.
+    // We try our best to sync the regions.
+    if let Err(err) = join_all(sync_region_tasks)
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>>>()
+    {
+        error!(err; "Failed to sync follower regions on datanodes, table_id: {}", table_id);
+    }
+    info!("Sync follower regions on datanodes, table_id: {}", table_id);
+
+    Ok(())
 }
 
 #[cfg(test)]

@@ -16,7 +16,8 @@ use api::v1::Rows;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use store_api::region_engine::{
-    RegionEngine, RegionRole, SetRegionRoleStateResponse, SettableRegionRoleState,
+    RegionEngine, RegionRole, SetRegionRoleStateResponse, SetRegionRoleStateSuccess,
+    SettableRegionRoleState,
 };
 use store_api::region_request::{RegionPutRequest, RegionRequest};
 use store_api::storage::RegionId;
@@ -48,9 +49,7 @@ async fn test_set_role_state_gracefully() {
             .await
             .unwrap();
         assert_eq!(
-            SetRegionRoleStateResponse::Success {
-                last_entry_id: Some(0)
-            },
+            SetRegionRoleStateResponse::success(SetRegionRoleStateSuccess::mito(0)),
             result
         );
 
@@ -60,9 +59,7 @@ async fn test_set_role_state_gracefully() {
             .await
             .unwrap();
         assert_eq!(
-            SetRegionRoleStateResponse::Success {
-                last_entry_id: Some(0)
-            },
+            SetRegionRoleStateResponse::success(SetRegionRoleStateSuccess::mito(0)),
             result
         );
 
@@ -96,9 +93,7 @@ async fn test_set_role_state_gracefully() {
             .unwrap();
 
         assert_eq!(
-            SetRegionRoleStateResponse::Success {
-                last_entry_id: Some(1)
-            },
+            SetRegionRoleStateResponse::success(SetRegionRoleStateSuccess::mito(1)),
             result
         );
     }
@@ -144,9 +139,7 @@ async fn test_write_downgrading_region() {
         .await
         .unwrap();
     assert_eq!(
-        SetRegionRoleStateResponse::Success {
-            last_entry_id: Some(1)
-        },
+        SetRegionRoleStateResponse::success(SetRegionRoleStateSuccess::mito(1)),
         result
     );
 

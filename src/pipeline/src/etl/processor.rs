@@ -21,6 +21,7 @@ pub mod dissect;
 pub mod epoch;
 pub mod gsub;
 pub mod join;
+pub mod json_parse;
 pub mod json_path;
 pub mod letter;
 pub mod regex;
@@ -45,13 +46,14 @@ use snafu::{OptionExt, ResultExt};
 use timestamp::TimestampProcessor;
 use urlencoding::UrlEncodingProcessor;
 
-use super::field::{Field, Fields};
-use super::PipelineMap;
 use crate::error::{
     Error, FailedParseFieldFromStringSnafu, FieldMustBeTypeSnafu, ProcessorKeyMustBeStringSnafu,
     ProcessorMustBeMapSnafu, ProcessorMustHaveStringKeySnafu, Result, UnsupportedProcessorSnafu,
 };
+use crate::etl::field::{Field, Fields};
+use crate::etl::processor::json_parse::JsonParseProcessor;
 use crate::etl::processor::simple_extract::SimpleExtractProcessor;
+use crate::etl::PipelineMap;
 
 const FIELD_NAME: &str = "field";
 const FIELDS_NAME: &str = "fields";
@@ -98,6 +100,7 @@ pub enum ProcessorKind {
     Epoch(EpochProcessor),
     Date(DateProcessor),
     JsonPath(JsonPathProcessor),
+    JsonParse(JsonParseProcessor),
     SimpleJsonPath(SimpleExtractProcessor),
     Decolorize(DecolorizeProcessor),
     Digest(DigestProcessor),
@@ -178,6 +181,9 @@ fn parse_processor(doc: &yaml_rust::Yaml) -> Result<ProcessorKind> {
         digest::PROCESSOR_DIGEST => ProcessorKind::Digest(DigestProcessor::try_from(value)?),
         simple_extract::PROCESSOR_SIMPLE_EXTRACT => {
             ProcessorKind::SimpleJsonPath(SimpleExtractProcessor::try_from(value)?)
+        }
+        json_parse::PROCESSOR_JSON_PARSE => {
+            ProcessorKind::JsonParse(JsonParseProcessor::try_from(value)?)
         }
         _ => return UnsupportedProcessorSnafu { processor: str_key }.fail(),
     };

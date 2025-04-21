@@ -52,6 +52,18 @@ select count(*) from with_limit_rows_segment;
 
 Copy with_limit_rows_segment FROM '${SQLNESS_HOME}/demo/export/parquet_files/' LIMIT hello;
 
+CREATE TABLE demo_with_external_column(host string, cpu double, memory double, ts timestamp time index, external_column string default 'default_value');
+
+Copy demo_with_external_column FROM '${SQLNESS_HOME}/demo/export/parquet_files/demo.parquet';
+
+select * from demo_with_external_column order by ts;
+
+CREATE TABLE demo_with_less_columns(host string, memory double, ts timestamp time index);
+
+Copy demo_with_less_columns FROM '${SQLNESS_HOME}/demo/export/parquet_files/demo.parquet';
+
+select * from demo_with_less_columns order by ts;
+
 drop table demo;
 
 drop table demo_2;
@@ -65,3 +77,7 @@ drop table with_pattern;
 drop table without_limit_rows;
 
 drop table with_limit_rows_segment;
+
+drop table demo_with_external_column;
+
+drop table demo_with_less_columns;

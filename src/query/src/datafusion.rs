@@ -308,10 +308,7 @@ impl DatafusionQueryEngine {
         let physical_plan = state
             .query_planner()
             .create_physical_plan(&optimized_plan, state)
-            .await
-            .context(error::DatafusionSnafu)
-            .map_err(BoxedError::new)
-            .context(QueryExecutionSnafu)?;
+            .await?;
 
         Ok(physical_plan)
     }
@@ -570,6 +567,7 @@ mod tests {
     use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 
     use super::*;
+    use crate::options::QueryOptions;
     use crate::parser::QueryLanguageParser;
     use crate::query_engine::{QueryEngineFactory, QueryEngineRef};
 
@@ -584,7 +582,16 @@ mod tests {
         };
         catalog_manager.register_table_sync(req).unwrap();
 
-        QueryEngineFactory::new(catalog_manager, None, None, None, None, false).query_engine()
+        QueryEngineFactory::new(
+            catalog_manager,
+            None,
+            None,
+            None,
+            None,
+            false,
+            QueryOptions::default(),
+        )
+        .query_engine()
     }
 
     #[tokio::test]

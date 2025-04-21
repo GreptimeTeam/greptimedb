@@ -30,7 +30,7 @@ mod flush_region;
 mod open_region;
 mod upgrade_region;
 
-use super::task_tracker::TaskTracker;
+use crate::heartbeat::task_tracker::TaskTracker;
 use crate::region_server::RegionServer;
 
 /// Handler for [Instruction::OpenRegion] and [Instruction::CloseRegion].
@@ -220,7 +220,6 @@ mod tests {
         let instruction = Instruction::DowngradeRegion(DowngradeRegion {
             region_id: RegionId::new(2048, 1),
             flush_timeout: Some(Duration::from_secs(1)),
-            reject_write: false,
         });
         assert!(heartbeat_handler
             .is_acceptable(&heartbeat_env.create_handler_ctx((meta.clone(), instruction))));
@@ -229,6 +228,7 @@ mod tests {
         let instruction = Instruction::UpgradeRegion(UpgradeRegion {
             region_id,
             last_entry_id: None,
+            metadata_last_entry_id: None,
             replay_timeout: None,
             location_id: None,
         });
@@ -419,7 +419,6 @@ mod tests {
             let instruction = Instruction::DowngradeRegion(DowngradeRegion {
                 region_id,
                 flush_timeout: Some(Duration::from_secs(1)),
-                reject_write: false,
             });
 
             let mut ctx = heartbeat_env.create_handler_ctx((meta, instruction));
@@ -442,7 +441,6 @@ mod tests {
         let instruction = Instruction::DowngradeRegion(DowngradeRegion {
             region_id: RegionId::new(2048, 1),
             flush_timeout: Some(Duration::from_secs(1)),
-            reject_write: false,
         });
         let mut ctx = heartbeat_env.create_handler_ctx((meta, instruction));
         let control = heartbeat_handler.handle(&mut ctx).await.unwrap();

@@ -16,7 +16,9 @@ use std::assert_matches::assert_matches;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use api::region::RegionResponse;
 use api::v1::alter_table_expr::Kind;
+use api::v1::region::sync_request::ManifestInfo;
 use api::v1::region::{region_request, RegionRequest};
 use api::v1::{
     AddColumn, AddColumns, AlterTableExpr, ColumnDataType, ColumnDef as PbColumnDef, DropColumn,
@@ -28,6 +30,8 @@ use common_error::status_code::StatusCode;
 use common_procedure::store::poison_store::PoisonStore;
 use common_procedure::{ProcedureId, Status};
 use common_procedure_test::MockContextProvider;
+use store_api::metric_engine_consts::MANIFEST_INFO_EXTENSION_KEY;
+use store_api::region_engine::RegionManifestInfo;
 use store_api::storage::RegionId;
 use table::requests::TTL_KEY;
 use tokio::sync::mpsc::{self};
@@ -39,7 +43,7 @@ use crate::ddl::test_util::datanode_handler::{
     AllFailureDatanodeHandler, DatanodeWatcher, PartialSuccessDatanodeHandler,
     RequestOutdatedErrorDatanodeHandler,
 };
-use crate::error::Error;
+use crate::error::{Error, Result};
 use crate::key::datanode_table::DatanodeTableKey;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
@@ -120,10 +124,71 @@ async fn test_on_prepare_table_not_exists_err() {
     assert_matches!(err.status_code(), StatusCode::TableNotFound);
 }
 
+fn test_alter_table_task(table_name: &str) -> AlterTableTask {
+    AlterTableTask {
+        alter_table: AlterTableExpr {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: table_name.to_string(),
+            kind: Some(Kind::DropColumns(DropColumns {
+                drop_columns: vec![DropColumn {
+                    name: "cpu".to_string(),
+                }],
+            })),
+        },
+    }
+}
+
+fn assert_alter_request(
+    peer: Peer,
+    request: RegionRequest,
+    expected_peer_id: u64,
+    expected_region_id: RegionId,
+) {
+    assert_eq!(peer.id, expected_peer_id);
+    let Some(region_request::Body::Alter(req)) = request.body else {
+        unreachable!();
+    };
+    assert_eq!(req.region_id, expected_region_id);
+}
+
+fn assert_sync_request(
+    peer: Peer,
+    request: RegionRequest,
+    expected_peer_id: u64,
+    expected_region_id: RegionId,
+    expected_manifest_version: u64,
+) {
+    assert_eq!(peer.id, expected_peer_id);
+    let Some(region_request::Body::Sync(req)) = request.body else {
+        unreachable!();
+    };
+    let Some(ManifestInfo::MitoManifestInfo(info)) = req.manifest_info else {
+        unreachable!();
+    };
+    assert_eq!(info.data_manifest_version, expected_manifest_version);
+    assert_eq!(req.region_id, expected_region_id);
+}
+
+fn alter_request_handler(_peer: Peer, request: RegionRequest) -> Result<RegionResponse> {
+    if let region_request::Body::Alter(req) = request.body.unwrap() {
+        let mut response = RegionResponse::new(0);
+        let region_id = RegionId::from(req.region_id);
+        response.extensions.insert(
+            MANIFEST_INFO_EXTENSION_KEY.to_string(),
+            RegionManifestInfo::encode_list(&[(region_id, RegionManifestInfo::mito(1, 1))])
+                .unwrap(),
+        );
+        return Ok(response);
+    }
+
+    Ok(RegionResponse::new(0))
+}
+
 #[tokio::test]
 async fn test_on_submit_alter_request() {
     let (tx, mut rx) = mpsc::channel(8);
-    let datanode_handler = DatanodeWatcher(tx);
+    let datanode_handler = DatanodeWatcher::new(tx).with_handler(alter_request_handler);
     let node_manager = Arc::new(MockDatanodeManager::new(datanode_handler));
     let ddl_context = new_ddl_context(node_manager);
     let table_id = 1024;
@@ -140,18 +205,7 @@ async fn test_on_submit_alter_request() {
         .await
         .unwrap();
 
-    let alter_table_task = AlterTableTask {
-        alter_table: AlterTableExpr {
-            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-            table_name: table_name.to_string(),
-            kind: Some(Kind::DropColumns(DropColumns {
-                drop_columns: vec![DropColumn {
-                    name: "cpu".to_string(),
-                }],
-            })),
-        },
-    };
+    let alter_table_task = test_alter_table_task(table_name);
     let procedure_id = ProcedureId::random();
     let provider = Arc::new(MockContextProvider::default());
     let mut procedure =
@@ -162,30 +216,72 @@ async fn test_on_submit_alter_request() {
         .await
         .unwrap();
 
-    let check = |peer: Peer,
-                 request: RegionRequest,
-                 expected_peer_id: u64,
-                 expected_region_id: RegionId| {
-        assert_eq!(peer.id, expected_peer_id);
-        let Some(region_request::Body::Alter(req)) = request.body else {
-            unreachable!();
-        };
-        assert_eq!(req.region_id, expected_region_id);
-    };
+    let mut results = Vec::new();
+    for _ in 0..5 {
+        let result = rx.try_recv().unwrap();
+        results.push(result);
+    }
+    rx.try_recv().unwrap_err();
+    results.sort_unstable_by(|(a, _), (b, _)| a.id.cmp(&b.id));
+
+    let (peer, request) = results.remove(0);
+    assert_alter_request(peer, request, 1, RegionId::new(table_id, 1));
+    let (peer, request) = results.remove(0);
+    assert_alter_request(peer, request, 2, RegionId::new(table_id, 2));
+    let (peer, request) = results.remove(0);
+    assert_alter_request(peer, request, 3, RegionId::new(table_id, 3));
+    let (peer, request) = results.remove(0);
+    assert_sync_request(peer, request, 4, RegionId::new(table_id, 2), 1);
+    let (peer, request) = results.remove(0);
+    assert_sync_request(peer, request, 5, RegionId::new(table_id, 1), 1);
+}
+
+#[tokio::test]
+async fn test_on_submit_alter_request_without_sync_request() {
+    let (tx, mut rx) = mpsc::channel(8);
+    // without use `alter_request_handler`, so no sync request will be sent.
+    let datanode_handler = DatanodeWatcher::new(tx);
+    let node_manager = Arc::new(MockDatanodeManager::new(datanode_handler));
+    let ddl_context = new_ddl_context(node_manager);
+    let table_id = 1024;
+    let table_name = "foo";
+    let task = test_create_table_task(table_name, table_id);
+    // Puts a value to table name key.
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info.clone(),
+            prepare_table_route(table_id),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let alter_table_task = test_alter_table_task(table_name);
+    let procedure_id = ProcedureId::random();
+    let provider = Arc::new(MockContextProvider::default());
+    let mut procedure =
+        AlterTableProcedure::new(table_id, alter_table_task, ddl_context.clone()).unwrap();
+    procedure.on_prepare().await.unwrap();
+    procedure
+        .submit_alter_region_requests(procedure_id, provider.as_ref())
+        .await
+        .unwrap();
 
     let mut results = Vec::new();
     for _ in 0..3 {
         let result = rx.try_recv().unwrap();
         results.push(result);
     }
+    rx.try_recv().unwrap_err();
     results.sort_unstable_by(|(a, _), (b, _)| a.id.cmp(&b.id));
 
     let (peer, request) = results.remove(0);
-    check(peer, request, 1, RegionId::new(table_id, 1));
+    assert_alter_request(peer, request, 1, RegionId::new(table_id, 1));
     let (peer, request) = results.remove(0);
-    check(peer, request, 2, RegionId::new(table_id, 2));
+    assert_alter_request(peer, request, 2, RegionId::new(table_id, 2));
     let (peer, request) = results.remove(0);
-    check(peer, request, 3, RegionId::new(table_id, 3));
+    assert_alter_request(peer, request, 3, RegionId::new(table_id, 3));
 }
 
 #[tokio::test]

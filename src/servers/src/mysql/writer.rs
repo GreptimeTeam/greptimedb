@@ -334,7 +334,7 @@ fn mysql_error_kind(status_code: &StatusCode) -> ErrorKind {
         StatusCode::Success => ErrorKind::ER_YES,
         StatusCode::Unknown | StatusCode::External => ErrorKind::ER_UNKNOWN_ERROR,
         StatusCode::Unsupported => ErrorKind::ER_NOT_SUPPORTED_YET,
-        StatusCode::Cancelled => ErrorKind::ER_QUERY_INTERRUPTED,
+        StatusCode::Cancelled | StatusCode::DeadlineExceeded => ErrorKind::ER_QUERY_INTERRUPTED,
         StatusCode::RuntimeResourcesExhausted => ErrorKind::ER_OUT_OF_RESOURCES,
         StatusCode::InvalidSyntax => ErrorKind::ER_SYNTAX_ERROR,
         StatusCode::RegionAlreadyExists | StatusCode::TableAlreadyExists => {

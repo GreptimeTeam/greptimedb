@@ -334,13 +334,7 @@ mod tests {
         assert_eq!("", format!("{}", ShowKind::All));
         assert_eq!(
             "LIKE test",
-            format!(
-                "{}",
-                ShowKind::Like(Ident {
-                    value: "test".to_string(),
-                    quote_style: None,
-                })
-            )
+            format!("{}", ShowKind::Like(Ident::new("test")),)
         );
         assert_eq!(
             "WHERE NOT a",
@@ -348,10 +342,7 @@ mod tests {
                 "{}",
                 ShowKind::Where(Expr::UnaryOp {
                     op: UnaryOperator::Not,
-                    expr: Box::new(Expr::Identifier(Ident {
-                        value: "a".to_string(),
-                        quote_style: None,
-                    })),
+                    expr: Box::new(Expr::Identifier(Ident::new("a"))),
                 })
             )
         );

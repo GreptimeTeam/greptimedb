@@ -128,14 +128,6 @@ pub enum Error {
         source: common_datasource::error::Error,
     },
 
-    #[snafu(display("Failed to build csv config"))]
-    BuildCsvConfig {
-        #[snafu(source)]
-        error: common_datasource::file_format::csv::CsvConfigBuilderError,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to build stream"))]
     BuildStream {
         #[snafu(source)]
@@ -224,8 +216,7 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            BuildCsvConfig { .. }
-            | ProjectArrowSchema { .. }
+            ProjectArrowSchema { .. }
             | ProjectSchema { .. }
             | MissingRequiredField { .. }
             | Unsupported { .. }

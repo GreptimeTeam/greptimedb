@@ -22,9 +22,8 @@ use snafu::OptionExt;
 use table::metadata::TableId;
 use table::table_name::TableName;
 
-use super::cursor::DropDatabaseCursor;
-use super::{DropDatabaseContext, DropTableTarget};
-use crate::ddl::drop_database::State;
+use crate::ddl::drop_database::cursor::DropDatabaseCursor;
+use crate::ddl::drop_database::{DropDatabaseContext, DropTableTarget, State};
 use crate::ddl::drop_table::executor::DropTableExecutor;
 use crate::ddl::utils::extract_region_wal_options;
 use crate::ddl::DdlContext;
