@@ -22,12 +22,11 @@ check_dashboard_description() {
   done
 }
 
-check_standalone_dashboards() {
-  # Execute the gen-standalone.sh script
-  ./grafana/scripts/gen-standalone.sh
+check_dashboards_generation() {
+  ./grafana/scripts/gen-dashboards.sh
 
-  if [[ -n "$(git diff --name-only grafana/dashboards/standalone)" ]]; then
-    echo "Error: The standalone dashboards are not generated correctly. You should execute the `make dashboards` command."
+  if [[ -n "$(git diff --name-only grafana/dashboards)" ]]; then
+    echo "Error: The dashboards are not generated correctly. You should execute the `make dashboards` command."
     exit 1
   fi
 }
@@ -50,6 +49,6 @@ check_datasource() {
   done
 }
 
-check_standalone_dashboards
+check_dashboards_generation
 check_dashboard_description
 check_datasource

@@ -9,6 +9,11 @@ This repository maintains the Grafana dashboards for GreptimeDB. It has two type
 
 As the rapid development of GreptimeDB, the metrics may be changed, and please feel free to submit your feedback and/or contribution to this dashboard 🤗
 
+To maintain the dashboards, we use the [`dac`](https://github.com/zyy17/dac) tool to generate the intermediate dashboards:
+
+- `cluster/dashboard.yaml`: The intermediate dashboard for the GreptimeDB cluster.
+- `standalone/dashboard.yaml`: The intermediatedashboard for the standalone GreptimeDB instance.
+
 ## Data Sources
 
 There are two data sources for the dashboards to fetch the metrics:

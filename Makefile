@@ -229,12 +229,8 @@ check-dashboards: ## Check the Grafana dashboards.
 	@./grafana/scripts/check.sh
 
 .PHONY: dashboards
-dashboards: ## Generate the Grafana dashboards for standalone mode.
-	@./grafana/scripts/gen-standalone.sh
-
-.PHONY: dashboards-summary
-dashboards-summary: ## Generate the summary of the Grafana dashboards.
-	@./grafana/scripts/summary.sh
+dashboards: ## Generate the Grafana dashboards for standalone mode and intermediate dashboards.
+	@./grafana/scripts/gen-dashboards.sh
 
 ##@ Docs
 config-docs: ## Generate configuration documentation from toml files.

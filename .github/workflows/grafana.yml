@@ -24,21 +24,3 @@ jobs:
       - name: Check grafana dashboards
         run: |
           make check-dashboards
-
-      # Only run summary.sh for pull_request events (not for merge queues or final pushes)
-      - name: Check if this is a pull request
-        id: check-pr
-        run: |
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            echo "is_pull_request=true" >> $GITHUB_OUTPUT
-          else
-            echo "is_pull_request=false" >> $GITHUB_OUTPUT
-          fi
-
-      # Run the summary.sh script and add its output to the GitHub Job Summary
-      - name: Run summary.sh and add to Job Summary
-        if: steps.check-pr.outputs.is_pull_request == 'true'
-        run: |
-          SUMMARY=$(make dashboards-summary)
-          echo "### Summary of Grafana Panels" >> $GITHUB_STEP_SUMMARY
-          echo "$SUMMARY" >> $GITHUB_STEP_SUMMARY

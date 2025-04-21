@@ -1,0 +1,707 @@
+groups:
+    - title: Overview
+      panels:
+        - title: Uptime
+          type: stat
+          description: The start time of GreptimeDB.
+          unit: s
+          queries:
+            - expr: time() - process_start_time_seconds
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: __auto
+        - title: Version
+          type: stat
+          description: GreptimeDB version.
+          queries:
+            - expr: SELECT pkg_version FROM information_schema.build_info
+              datasource:
+                type: mysql
+                uid: ${information_schema}
+        - title: Total Ingestion Rate
+          type: stat
+          description: Total ingestion rate.
+          unit: rowsps
+          queries:
+            - expr: sum(rate(greptime_table_operator_ingest_rows[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: __auto
+        - title: Total Storage Size
+          type: stat
+          description: Total number of data file size.
+          unit: decbytes
+          queries:
+            - expr: select SUM(disk_size) from information_schema.region_statistics;
+              datasource:
+                type: mysql
+                uid: ${information_schema}
+        - title: Total Rows
+          type: stat
+          description: Total number of data rows in the cluster. Calculated by sum of rows from each region.
+          unit: sishort
+          queries:
+            - expr: select SUM(region_rows) from information_schema.region_statistics;
+              datasource:
+                type: mysql
+                uid: ${information_schema}
+        - title: Deployment
+          type: stat
+          description: The deployment topology of GreptimeDB.
+          queries:
+            - expr: SELECT count(*) as datanode FROM information_schema.cluster_info WHERE peer_type = 'DATANODE';
+              datasource:
+                type: mysql
+                uid: ${information_schema}
+            - expr: SELECT count(*) as frontend FROM information_schema.cluster_info WHERE peer_type = 'FRONTEND';
+              datasource:
+                type: mysql
+                uid: ${information_schema}
+            - expr: SELECT count(*) as metasrv FROM information_schema.cluster_info WHERE peer_type = 'METASRV';
+              datasource:
+                type: mysql
+                uid: ${information_schema}
+            - expr: SELECT count(*) as flownode FROM information_schema.cluster_info WHERE peer_type = 'FLOWNODE';
+              datasource:
+                type: mysql
+                uid: ${information_schema}
+        - title: Database Resources
+          type: stat
+          description: The number of the key resources in GreptimeDB.
+          queries:
+            - expr: SELECT COUNT(*) as databases FROM information_schema.schemata WHERE schema_name NOT IN ('greptime_private', 'information_schema')
+              datasource:
+                type: mysql
+                uid: ${information_schema}
+            - expr: SELECT COUNT(*) as tables FROM information_schema.tables WHERE table_schema != 'information_schema'
+              datasource:
+                type: mysql
+                uid: ${information_schema}
+            - expr: SELECT COUNT(region_id) as regions FROM information_schema.region_peers
+              datasource:
+                type: mysql
+                uid: ${information_schema}
+            - expr: SELECT COUNT(*) as flows FROM information_schema.flows
+              datasource:
+                type: mysql
+                uid: ${information_schema}
+        - title: Data Size
+          type: stat
+          description: The data size of wal/index/manifest in the GreptimeDB.
+          unit: decbytes
+          queries:
+            - expr: |
+                SELECT SUM(memtable_size) * 0.42825 as WAL FROM information_schema.region_statistics;
+              datasource:
+                type: mysql
+                uid: ${information_schema}
+            - expr: |
+                SELECT SUM(index_size) as index FROM information_schema.region_statistics;
+              datasource:
+                type: mysql
+                uid: ${information_schema}
+            - expr: |
+                SELECT SUM(manifest_size) as manifest FROM information_schema.region_statistics;
+              datasource:
+                type: mysql
+                uid: ${information_schema}
+    - title: Ingestion
+      panels:
+        - title: Total Ingestion Rate
+          type: timeseries
+          description: |
+            Total ingestion rate.
+
+            Here we listed 3 primary protocols:
+
+            - Prometheus remote write
+            - Greptime's gRPC API (when using our ingest SDK)
+            - Log ingestion http API
+          unit: rowsps
+          queries:
+            - expr: sum(rate(greptime_table_operator_ingest_rows{}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: ingestion
+        - title: Ingestion Rate by Type
+          type: timeseries
+          description: |
+            Total ingestion rate.
+
+            Here we listed 3 primary protocols:
+
+            - Prometheus remote write
+            - Greptime's gRPC API (when using our ingest SDK)
+            - Log ingestion http API
+          unit: rowsps
+          queries:
+            - expr: sum(rate(greptime_servers_http_logs_ingestion_counter[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: http-logs
+            - expr: sum(rate(greptime_servers_prometheus_remote_write_samples[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: prometheus-remote-write
+    - title: Queries
+      panels:
+        - title: Total Query Rate
+          type: timeseries
+          description: |-
+            Total rate of query API calls by protocol. This metric is collected from frontends.
+
+            Here we listed 3 main protocols:
+            - MySQL
+            - Postgres
+            - Prometheus API
+
+            Note that there are some other minor query APIs like /sql are not included
+          unit: reqps
+          queries:
+            - expr: sum (rate(greptime_servers_mysql_query_elapsed_count{}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: mysql
+            - expr: sum (rate(greptime_servers_postgres_query_elapsed_count{}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: pg
+            - expr: sum (rate(greptime_servers_http_promql_elapsed_counte{}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: promql
+    - title: Resources
+      panels:
+        - title: Datanode Memory per Instance
+          type: timeseries
+          description: Current memory usage by instance
+          unit: decbytes
+          queries:
+            - expr: sum(process_resident_memory_bytes{}) by (instance, pod)
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{ pod }}]'
+        - title: Datanode CPU Usage per Instance
+          type: timeseries
+          description: Current cpu usage by instance
+          unit: none
+          queries:
+            - expr: sum(rate(process_cpu_seconds_total{}[$__rate_interval]) * 1000) by (instance, pod)
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{ instance }}]-[{{ pod }}]'
+        - title: Frontend Memory per Instance
+          type: timeseries
+          description: Current memory usage by instance
+          unit: decbytes
+          queries:
+            - expr: sum(process_resident_memory_bytes{}) by (instance, pod)
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{ instance }}]-[{{ pod }}]'
+        - title: Frontend CPU Usage per Instance
+          type: timeseries
+          description: Current cpu usage by instance
+          unit: none
+          queries:
+            - expr: sum(rate(process_cpu_seconds_total{}[$__rate_interval]) * 1000) by (instance, pod)
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{ instance }}]-[{{ pod }}]-cpu'
+        - title: Metasrv Memory per Instance
+          type: timeseries
+          description: Current memory usage by instance
+          unit: decbytes
+          queries:
+            - expr: sum(process_resident_memory_bytes{}) by (instance, pod)
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{ instance }}]-[{{ pod }}]-resident'
+        - title: Metasrv CPU Usage per Instance
+          type: timeseries
+          description: Current cpu usage by instance
+          unit: none
+          queries:
+            - expr: sum(rate(process_cpu_seconds_total{}[$__rate_interval]) * 1000) by (instance, pod)
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{ instance }}]-[{{ pod }}]'
+        - title: Flownode Memory per Instance
+          type: timeseries
+          description: Current memory usage by instance
+          unit: decbytes
+          queries:
+            - expr: sum(process_resident_memory_bytes{}) by (instance, pod)
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{ instance }}]-[{{ pod }}]'
+        - title: Flownode CPU Usage per Instance
+          type: timeseries
+          description: Current cpu usage by instance
+          unit: none
+          queries:
+            - expr: sum(rate(process_cpu_seconds_total{}[$__rate_interval]) * 1000) by (instance, pod)
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{ instance }}]-[{{ pod }}]'
+    - title: Frontend Requests
+      panels:
+        - title: HTTP QPS per Instance
+          type: timeseries
+          description: HTTP QPS per Instance.
+          unit: reqps
+          queries:
+            - expr: sum by(instance, pod, path, method, code) (rate(greptime_servers_http_requests_elapsed_count{path!~"/health|/metrics"}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{path}}]-[{{method}}]-[{{code}}]'
+        - title: HTTP P99 per Instance
+          type: timeseries
+          description: HTTP P99 per Instance.
+          unit: s
+          queries:
+            - expr: histogram_quantile(0.99, sum by(instance, pod, le, path, method, code) (rate(greptime_servers_http_requests_elapsed_bucket{path!~"/health|/metrics"}[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{path}}]-[{{method}}]-[{{code}}]-p99'
+        - title: gRPC QPS per Instance
+          type: timeseries
+          description: gRPC QPS per Instance.
+          unit: reqps
+          queries:
+            - expr: sum by(instance, pod, path, code) (rate(greptime_servers_grpc_requests_elapsed_count{}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{path}}]-[{{code}}]'
+        - title: gRPC P99 per Instance
+          type: timeseries
+          description: gRPC P99 per Instance.
+          unit: s
+          queries:
+            - expr: histogram_quantile(0.99, sum by(instance, pod, le, path, code) (rate(greptime_servers_grpc_requests_elapsed_bucket{}[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{path}}]-[{{method}}]-[{{code}}]-p99'
+        - title: MySQL QPS per Instance
+          type: timeseries
+          description: MySQL QPS per Instance.
+          unit: reqps
+          queries:
+            - expr: sum by(pod, instance)(rate(greptime_servers_mysql_query_elapsed_count{}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]'
+        - title: MySQL P99 per Instance
+          type: timeseries
+          description: MySQL P99 per Instance.
+          unit: s
+          queries:
+            - expr: histogram_quantile(0.99, sum by(pod, instance, le) (rate(greptime_servers_mysql_query_elapsed_bucket{}[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{ instance }}]-[{{ pod }}]-p99'
+        - title: PostgreSQL QPS per Instance
+          type: timeseries
+          description: PostgreSQL QPS per Instance.
+          unit: reqps
+          queries:
+            - expr: sum by(pod, instance)(rate(greptime_servers_postgres_query_elapsed_count{}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]'
+        - title: PostgreSQL P99 per Instance
+          type: timeseries
+          description: PostgreSQL P99 per Instance.
+          unit: s
+          queries:
+            - expr: histogram_quantile(0.99, sum by(pod,instance,le) (rate(greptime_servers_postgres_query_elapsed_bucket{}[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-p99'
+    - title: Frontend to Datanode
+      panels:
+        - title: Ingest Rows per Instance
+          type: timeseries
+          description: Ingestion rate by row as in each frontend
+          unit: rowsps
+          queries:
+            - expr: sum by(instance, pod)(rate(greptime_table_operator_ingest_rows{}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]'
+        - title: Region Call QPS per Instance
+          type: timeseries
+          description: Region Call QPS per Instance.
+          unit: ops
+          queries:
+            - expr: sum by(instance, pod, request_type) (rate(greptime_grpc_region_request_count{}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{request_type}}]'
+        - title: Region Call P99 per Instance
+          type: timeseries
+          description: Region Call P99 per Instance.
+          unit: s
+          queries:
+            - expr: histogram_quantile(0.99, sum by(instance, pod, le, request_type) (rate(greptime_grpc_region_request_bucket{}[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{request_type}}]'
+    - title: Mito Engine
+      panels:
+        - title: Request OPS per Instance
+          type: timeseries
+          description: Request QPS per Instance.
+          unit: ops
+          queries:
+            - expr: sum by(instance, pod, type) (rate(greptime_mito_handle_request_elapsed_count{}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{type}}]'
+        - title: Request P99 per Instance
+          type: timeseries
+          description: Request P99 per Instance.
+          unit: s
+          queries:
+            - expr: histogram_quantile(0.99, sum by(instance, pod, le, type) (rate(greptime_mito_handle_request_elapsed_bucket{}[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{type}}]'
+        - title: Write Buffer per Instance
+          type: timeseries
+          description: Write Buffer per Instance.
+          unit: decbytes
+          queries:
+            - expr: greptime_mito_write_buffer_bytes{}
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]'
+        - title: Write Rows per Instance
+          type: timeseries
+          description: Ingestion size by row counts.
+          unit: rowsps
+          queries:
+            - expr: sum by (instance, pod) (rate(greptime_mito_write_rows_total{}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]'
+        - title: Flush OPS per Instance
+          type: timeseries
+          description: Flush QPS per Instance.
+          unit: ops
+          queries:
+            - expr: sum by(instance, pod, reason) (rate(greptime_mito_flush_requests_total{}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{reason}}]'
+        - title: Write Stall per Instance
+          type: timeseries
+          description: Write Stall per Instance.
+          unit: decbytes
+          queries:
+            - expr: sum by(instance, pod) (greptime_mito_write_stall_total{})
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]'
+        - title: Read Stage OPS per Instance
+          type: timeseries
+          description: Read Stage OPS per Instance.
+          unit: ops
+          queries:
+            - expr: sum by(instance, pod) (rate(greptime_mito_read_stage_elapsed_count{ stage="total"}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]'
+        - title: Read Stage P99 per Instance
+          type: timeseries
+          description: Read Stage P99 per Instance.
+          unit: s
+          queries:
+            - expr: histogram_quantile(0.99, sum by(instance, pod, le, stage) (rate(greptime_mito_read_stage_elapsed_bucket{}[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{stage}}]'
+        - title: Write Stage P99 per Instance
+          type: timeseries
+          description: Write Stage P99 per Instance.
+          unit: s
+          queries:
+            - expr: histogram_quantile(0.99, sum by(instance, pod, le, stage) (rate(greptime_mito_write_stage_elapsed_bucket{}[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{stage}}]'
+        - title: Compaction OPS per Instance
+          type: timeseries
+          description: Compaction OPS per Instance.
+          unit: ops
+          queries:
+            - expr: sum by(instance, pod) (rate(greptime_mito_compaction_total_elapsed_count{}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{ instance }}]-[{{pod}}]'
+        - title: Compaction P99 per Instance by Stage
+          type: timeseries
+          description: Compaction latency by stage
+          unit: s
+          queries:
+            - expr: histogram_quantile(0.99, sum by(instance, pod, le, stage) (rate(greptime_mito_compaction_stage_elapsed_bucket{}[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{stage}}]-p99'
+        - title: Compaction P99 per Instance
+          type: timeseries
+          description: Compaction P99 per Instance.
+          unit: s
+          queries:
+            - expr: histogram_quantile(0.99, sum by(instance, pod, le,stage) (rate(greptime_mito_compaction_total_elapsed_bucket{}[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{stage}}]-compaction'
+        - title: WAL write size
+          type: timeseries
+          description: Write-ahead logs write size as bytes. This chart includes stats of p95 and p99 size by instance, total WAL write rate.
+          unit: bytes
+          queries:
+            - expr: histogram_quantile(0.95, sum by(le,instance, pod) (rate(raft_engine_write_size_bucket[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-req-size-p95'
+            - expr: histogram_quantile(0.99, sum by(le,instance,pod) (rate(raft_engine_write_size_bucket[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-req-size-p99'
+            - expr: sum by (instance, pod)(rate(raft_engine_write_size_sum[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-throughput'
+        - title: Cached Bytes per Instance
+          type: timeseries
+          description: Cached Bytes per Instance.
+          unit: decbytes
+          queries:
+            - expr: greptime_mito_cache_bytes{}
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{type}}]'
+        - title: Inflight Compaction
+          type: timeseries
+          description: Ongoing compaction task count
+          unit: none
+          queries:
+            - expr: greptime_mito_inflight_compaction_count
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]'
+        - title: WAL sync duration seconds
+          type: timeseries
+          description: Raft engine (local disk) log store sync latency, p99
+          unit: s
+          queries:
+            - expr: histogram_quantile(0.99, sum by(le, type, node, instance, pod) (rate(raft_engine_sync_log_duration_seconds_bucket[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-p99'
+        - title: Log Store op duration seconds
+          type: timeseries
+          description: Write-ahead log operations latency at p99
+          unit: s
+          queries:
+            - expr: histogram_quantile(0.99, sum by(le,logstore,optype,instance, pod) (rate(greptime_logstore_op_elapsed_bucket[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{logstore}}]-[{{optype}}]-p99'
+        - title: Inflight Flush
+          type: timeseries
+          description: Ongoing flush task count
+          unit: none
+          queries:
+            - expr: greptime_mito_inflight_flush_count
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]'
+    - title: OpenDAL
+      panels:
+        - title: QPS per Instance
+          type: timeseries
+          description: QPS per Instance.
+          unit: ops
+          queries:
+            - expr: sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]'
+        - title: Read QPS per Instance
+          type: timeseries
+          description: Read QPS per Instance.
+          unit: ops
+          queries:
+            - expr: sum by(instance, pod, scheme) (rate(opendal_operation_duration_seconds_count{ operation="read"}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{scheme}}]'
+        - title: Read P99 per Instance
+          type: timeseries
+          description: Read P99 per Instance.
+          unit: s
+          queries:
+            - expr: histogram_quantile(0.99, sum by(instance, pod, le, scheme) (rate(opendal_operation_duration_seconds_bucket{operation="read"}[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-{{scheme}}'
+        - title: Write QPS per Instance
+          type: timeseries
+          description: Write QPS per Instance.
+          unit: ops
+          queries:
+            - expr: sum by(instance, pod, scheme) (rate(opendal_operation_duration_seconds_count{ operation="write"}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-{{scheme}}'
+        - title: Write P99 per Instance
+          type: timeseries
+          description: Write P99 per Instance.
+          unit: s
+          queries:
+            - expr: histogram_quantile(0.99, sum by(instance, pod, le, scheme) (rate(opendal_operation_duration_seconds_bucket{ operation="write"}[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{scheme}}]'
+        - title: List QPS per Instance
+          type: timeseries
+          description: List QPS per Instance.
+          unit: ops
+          queries:
+            - expr: sum by(instance, pod, scheme) (rate(opendal_operation_duration_seconds_count{ operation="list"}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{scheme}}]'
+        - title: List P99 per Instance
+          type: timeseries
+          description: List P99 per Instance.
+          unit: s
+          queries:
+            - expr: histogram_quantile(0.99, sum by(instance, pod, le, scheme) (rate(opendal_operation_duration_seconds_bucket{ operation="list"}[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{scheme}}]'
+        - title: Other Requests per Instance
+          type: timeseries
+          description: Other Requests per Instance.
+          unit: ops
+          queries:
+            - expr: sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{operation!~"read|write|list|stat"}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]'
+        - title: Other Request P99 per Instance
+          type: timeseries
+          description: Other Request P99 per Instance.
+          unit: s
+          queries:
+            - expr: histogram_quantile(0.99, sum by(instance, pod, le, scheme, operation) (rate(opendal_operation_duration_seconds_bucket{ operation!~"read|write|list"}[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]'
+        - title: Opendal traffic
+          type: timeseries
+          description: Total traffic as in bytes by instance and operation
+          unit: ops
+          queries:
+            - expr: sum by(instance, pod, scheme, operation) (rate(opendal_operation_bytes_sum{}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]'
+    - title: Metasrv
+      panels:
+        - title: Region migration datanode
+          type: state-timeline
+          description: Counter of region migration by source and destination
+          unit: none
+          queries:
+            - expr: greptime_meta_region_migration_stat{datanode_type="src"}
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: from-datanode-{{datanode_id}}
+            - expr: greptime_meta_region_migration_stat{datanode_type="desc"}
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: to-datanode-{{datanode_id}}
+        - title: Region migration error
+          type: timeseries
+          description: Counter of region migration error
+          unit: none
+          queries:
+            - expr: greptime_meta_region_migration_error
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: __auto
+        - title: Datanode load
+          type: timeseries
+          description: Gauge of load information of each datanode, collected via heartbeat between datanode and metasrv. This information is for metasrv to schedule workloads.
+          unit: none
+          queries:
+            - expr: greptime_datanode_load
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: __auto
