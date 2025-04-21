@@ -17,8 +17,8 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use common_telemetry::debug;
 use common_telemetry::tracing::warn;
-use common_telemetry::{debug, info};
 use common_time::Timestamp;
 use datatypes::value::Value;
 use session::context::QueryContextRef;
@@ -88,9 +88,11 @@ impl TaskState {
         if self.dirty_time_windows.windows.is_empty() {
             self.last_update_time + next_duration
         } else {
-            info!(
-                "Flow id = {}, still have {:?} dirty time window, execute immediately",
-                flow_id, self.dirty_time_windows.windows
+            debug!(
+                "Flow id = {}, still have {} dirty time window({:?}), execute immediately",
+                flow_id,
+                self.dirty_time_windows.windows.len(),
+                self.dirty_time_windows.windows
             );
             Instant::now()
         }
