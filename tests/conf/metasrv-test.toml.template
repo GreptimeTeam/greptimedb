@@ -20,4 +20,5 @@ selector_type = "round_robin"
 topic_name_prefix = "distributed_test_greptimedb_wal_topic"
 auto_prune_interval = "30s"
 trigger_flush_threshold = 100
+overwrite_entry_start_id = true
 {{ endif }}
