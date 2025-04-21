@@ -112,8 +112,34 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         column_schemas: Vec<ColumnSchema>,
         name_to_index: HashMap<String, usize>,
     ) -> error::Result<Receiver<error::Result<AffectedRows>>> {
-        let BulkInsertPayload::ArrowIpc(df_record_batch) = payload;
+        let rx = match payload {
+            BulkInsertPayload::ArrowIpc(rb) => Self::handle_arrow_ipc(
+                region_metadata,
+                rb,
+                pending_write_requests,
+                column_schemas,
+                name_to_index,
+            ),
+            BulkInsertPayload::Rows { data, has_null } => Self::handle_rows(
+                region_metadata,
+                data,
+                column_schemas,
+                has_null,
+                pending_write_requests,
+                name_to_index,
+            ),
+        }?;
 
+        Ok(rx)
+    }
+
+    fn handle_arrow_ipc(
+        region_metadata: &RegionMetadataRef,
+        df_record_batch: DfRecordBatch,
+        pending_write_requests: &mut Vec<SenderWriteRequest>,
+        column_schemas: Vec<ColumnSchema>,
+        name_to_index: HashMap<String, usize>,
+    ) -> error::Result<Receiver<error::Result<AffectedRows>>> {
         let has_null: Vec<_> = df_record_batch
             .columns()
             .iter()
@@ -122,6 +148,37 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         let rows = record_batch_to_rows(&region_metadata, &df_record_batch)?;
 
+        let write_request = WriteRequest {
+            region_id: region_metadata.region_id,
+            op_type: OpType::Put,
+            rows: Rows {
+                schema: column_schemas,
+                rows,
+            },
+            name_to_index,
+            has_null,
+            hint: None,
+            region_metadata: Some(region_metadata.clone()),
+        };
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let sender = OptionOutputTx::from(tx);
+        let req = SenderWriteRequest {
+            sender,
+            request: write_request,
+        };
+        pending_write_requests.push(req);
+        Ok(rx)
+    }
+
+    fn handle_rows(
+        region_metadata: &RegionMetadataRef,
+        rows: Vec<Row>,
+        column_schemas: Vec<ColumnSchema>,
+        has_null: Vec<bool>,
+        pending_write_requests: &mut Vec<SenderWriteRequest>,
+        name_to_index: HashMap<String, usize>,
+    ) -> error::Result<Receiver<error::Result<AffectedRows>>> {
         let write_request = WriteRequest {
             region_id: region_metadata.region_id,
             op_type: OpType::Put,
