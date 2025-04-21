@@ -56,7 +56,8 @@ pub struct GreptimeTransformer {
 #[derive(Debug, Clone, Default)]
 pub struct GreptimePipelineParams {
     /// The original options for configuring the greptime pipelines.
-    pub options: HashMap<String, String>,
+    /// This should not be used directly, instead, use the parsed shortcut option values.
+    options: HashMap<String, String>,
 
     /// Parsed shortcut option values
     pub flatten_json_object: OnceCell<bool>,
