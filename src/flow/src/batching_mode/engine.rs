@@ -24,8 +24,8 @@ use common_meta::key::flow::FlowMetadataManagerRef;
 use common_meta::key::table_info::{TableInfoManager, TableInfoValue};
 use common_meta::key::TableMetadataManagerRef;
 use common_runtime::JoinHandle;
-use common_telemetry::info;
 use common_telemetry::tracing::warn;
+use common_telemetry::{debug, info};
 use common_time::TimeToLive;
 use query::QueryEngineRef;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -39,8 +39,7 @@ use crate::batching_mode::time_window::{find_time_window_expr, TimeWindowExpr};
 use crate::batching_mode::utils::sql_to_df_plan;
 use crate::engine::FlowEngine;
 use crate::error::{
-    ExternalSnafu, FlowAlreadyExistSnafu, InvalidQuerySnafu, TableNotFoundMetaSnafu,
-    UnexpectedSnafu,
+    ExternalSnafu, FlowAlreadyExistSnafu, TableNotFoundMetaSnafu, UnexpectedSnafu, UnsupportedSnafu,
 };
 use crate::{CreateFlowArgs, Error, FlowId, TableName};
 
@@ -187,10 +186,10 @@ async fn get_table_name(
     table_info: &TableInfoManager,
     table_id: &TableId,
 ) -> Result<TableName, Error> {
-    get_table_info(table_info, table_id)
-        .await
-        .map(|info| info.table_name())
-        .map(|name| [name.catalog_name, name.schema_name, name.table_name])
+    get_table_info(table_info, table_id).await.map(|info| {
+        let name = info.table_name();
+        [name.catalog_name, name.schema_name, name.table_name]
+    })
 }
 
 async fn get_table_info(
@@ -269,9 +268,9 @@ impl BatchingEngine {
             let table_name = get_table_name(self.table_meta.table_info_manager(), &src_id).await?;
             let table_info = get_table_info(self.table_meta.table_info_manager(), &src_id).await?;
             if table_info.table_info.meta.options.ttl == Some(TimeToLive::Instant) {
-                InvalidQuerySnafu {
+                UnsupportedSnafu {
                     reason: format!(
-                        "Source table `{}`(id={}) has instant TTL, flow will only evaluate to empty results with such table, use a small ttl instead of instant",
+                        "Source table `{}`(id={}) has instant TTL, Instant TTL is not supported under batching mode. Consider using a TTL longer than flush interval",
                         table_name.join("."),
                         src_id
                     ),
@@ -363,7 +362,7 @@ impl BatchingEngine {
     }
 
     pub async fn flush_flow_inner(&self, flow_id: FlowId) -> Result<usize, Error> {
-        info!("Try flush flow {flow_id}");
+        debug!("Try flush flow {flow_id}");
         let task = self.tasks.read().await.get(&flow_id).cloned();
         let task = task.with_context(|| UnexpectedSnafu {
             reason: format!("Can't found task for flow {flow_id}"),
@@ -376,7 +375,7 @@ impl BatchingEngine {
             .await?;
 
         let affected_rows = res.map(|(r, _)| r).unwrap_or_default() as usize;
-        info!(
+        debug!(
             "Successfully flush flow {flow_id}, affected rows={}",
             affected_rows
         );
@@ -402,8 +401,8 @@ impl FlowEngine for BatchingEngine {
     async fn flow_exist(&self, flow_id: FlowId) -> Result<bool, Error> {
         Ok(self.flow_exist_inner(flow_id).await)
     }
-    async fn list_flows(&self) -> Result<Vec<FlowId>, Error> {
-        Ok(self.tasks.read().await.keys().cloned().collect())
+    async fn list_flows(&self) -> Result<impl IntoIterator<Item = FlowId>, Error> {
+        Ok(self.tasks.read().await.keys().cloned().collect::<Vec<_>>())
     }
     async fn handle_flow_inserts(
         &self,

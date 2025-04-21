@@ -16,7 +16,7 @@ SELECT
 FROM
     distinct_basic;
 
-Error: 3001(EngineExecuteQuery), Invalid query: Source table `greptime.public.distinct_basic`(id=REDACTED) has instant TTL, flow will only evaluate to empty results with such table, use a small ttl instead of instant
+Error: 3001(EngineExecuteQuery), Unsupported: Source table `greptime.public.distinct_basic`(id=REDACTED) has instant TTL, Instant TTL is not supported under batching mode. Consider using a TTL longer than flush interval
 
 ALTER TABLE distinct_basic SET 'ttl' = '5s';
 
