@@ -9,13 +9,6 @@ This repository maintains the Grafana dashboards for GreptimeDB. It has two type
 
 As the rapid development of GreptimeDB, the metrics may be changed, and please feel free to submit your feedback and/or contribution to this dashboard 🤗
 
-To simplify operations, the dashboards are currently divided by component granularity:
-
-- `overview.json`: This dashboard summarizes the basic metrics of the current GreptimeDB, serving as an excellent entry point for understanding its overall operational status.
-- `frontend.json`: This dashboard displays various metrics of the frontend component in the GreptimeDB, including request count, response time, error rate, etc..
-- `datanode.json`: This dashboard displays various metrics of the datanode component in the GreptimeDB, including metrics from Mito Engine and OpenDAL;
-- `flownode.json`: This dashboard displays various metrics of the flownode component in the GreptimeDB.
-
 ## Data Sources
 
 There are two data sources for the dashboards to fetch the metrics:
@@ -77,7 +70,7 @@ The standalone GreptimeDB instance will collect metrics from your cluster, and t
    You need to add two data sources in Grafana:
 
    - Prometheus: It is the Prometheus instance that scrapes the GreptimeDB metrics.
-   - Information Schema: It is the MySQL port of the current monitored instance. The `overview` dashboard will use this datasource to show the information schema of the current instance.
+   - Information Schema: It is the MySQL port of the current monitored instance. The dashboard will use this datasource to show the information schema of the current instance.
 
 3. **Import the dashboards based on your deployment scenario**
 
