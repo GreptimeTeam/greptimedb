@@ -18,8 +18,8 @@ use common_base::readable_size::ReadableSize;
 use serde::{Deserialize, Serialize};
 
 use crate::config::kafka::common::{
-    KafkaConnectionConfig, KafkaTopicConfig, DEFAULT_ACTIVE_PRUNE_INTERVAL,
-    DEFAULT_ACTIVE_PRUNE_TASK_LIMIT, DEFAULT_TRIGGER_FLUSH_THRESHOLD,
+    KafkaConnectionConfig, KafkaTopicConfig, DEFAULT_AUTO_PRUNE_INTERVAL,
+    DEFAULT_AUTO_PRUNE_PARALLELISM, DEFAULT_TRIGGER_FLUSH_THRESHOLD,
 };
 
 /// Kafka wal configurations for datanode.
@@ -69,9 +69,9 @@ impl Default for DatanodeKafkaConfig {
             create_index: true,
             dump_index_interval: Duration::from_secs(60),
             overwrite_entry_start_id: false,
-            auto_prune_interval: DEFAULT_ACTIVE_PRUNE_INTERVAL,
+            auto_prune_interval: DEFAULT_AUTO_PRUNE_INTERVAL,
             trigger_flush_threshold: DEFAULT_TRIGGER_FLUSH_THRESHOLD,
-            auto_prune_parallelism: DEFAULT_ACTIVE_PRUNE_TASK_LIMIT,
+            auto_prune_parallelism: DEFAULT_AUTO_PRUNE_PARALLELISM,
         }
     }
 }
