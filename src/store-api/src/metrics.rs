@@ -12,20 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Storage related APIs
+use lazy_static::lazy_static;
+use prometheus::{register_histogram_vec, HistogramVec};
 
-#![feature(let_chains)]
-#![feature(iterator_try_collect)]
-
-pub mod codec;
-pub mod data_source;
-pub mod logstore;
-pub mod manifest;
-pub mod metadata;
-pub mod metric_engine_consts;
-mod metrics;
-pub mod mito_engine_options;
-pub mod path_utils;
-pub mod region_engine;
-pub mod region_request;
-pub mod storage;
+lazy_static! {
+    pub static ref CONVERT_REGION_BULK_REQUEST: HistogramVec = register_histogram_vec!(
+        "greptime_datanode_convert_region_request",
+        "datanode duration to convert region request",
+        &["stage"],
+        vec![
+            0.001, 0.005, 0.01, 0.02, 0.03, 0.04, 0.05, 0.10, 0.15, 0.2, 0.3, 0.4, 0.5, 1.0, 1.5,
+            2.0, 2.5, 3.0, 4.0, 5.0
+        ]
+    )
+    .unwrap();
+}

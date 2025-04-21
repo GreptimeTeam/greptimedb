@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::fmt::{self, Display};
+use std::time::{Duration, Instant};
 
 use api::helper::{value_to_grpc_value, ColumnDataTypeWrapper};
 use api::v1::add_column_location::LocationType;
@@ -53,6 +54,7 @@ use crate::metadata::{
     InvalidUnsetRegionOptionRequestSnafu, MetadataError, ProstSnafu, RegionMetadata, Result, UnexpectedSnafu,
 };
 use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
+use crate::metrics;
 use crate::mito_engine_options::{
     TTL_KEY, TWCS_MAX_ACTIVE_WINDOW_FILES, TWCS_MAX_ACTIVE_WINDOW_RUNS,
     TWCS_MAX_INACTIVE_WINDOW_FILES, TWCS_MAX_INACTIVE_WINDOW_RUNS, TWCS_MAX_OUTPUT_FILE_SIZE,
@@ -393,6 +395,9 @@ fn make_region_rows_bulk_inserts(
     let mut region_requests: HashMap<u64, BulkInsertPayload> =
         HashMap::with_capacity(request.region_selection.len());
 
+    let decode_timer = metrics::CONVERT_REGION_BULK_REQUEST
+        .with_label_values(&["decode"])
+        .start_timer();
     let schema_data = FlightData::decode(request.schema.clone()).context(ProstSnafu)?;
     let payload_data = FlightData::decode(request.payload.clone()).context(ProstSnafu)?;
     let mut decoder = FlightDecoder::default();
@@ -402,9 +407,17 @@ fn make_region_rows_bulk_inserts(
     else {
         unreachable!("Always expect record batch message after schema");
     };
+    decode_timer.observe_duration();
 
+    let filter_timer = metrics::CONVERT_REGION_BULK_REQUEST.with_label_values(&["filter_batch"]);
+    let convert_to_rows_timer =
+        metrics::CONVERT_REGION_BULK_REQUEST.with_label_values(&["convert_to_rows"]);
+
+    let mut filter_time = Duration::default();
+    let mut convert_to_rows_time = Duration::default();
     for region_selection in request.region_selection {
         let region_id = region_selection.region_id;
+        let start = Instant::now();
         let region_mask = BooleanArray::new(
             BooleanBuffer::new(Buffer::from(region_selection.selection), 0, rb.num_rows()),
             None,
@@ -416,8 +429,11 @@ fn make_region_rows_bulk_inserts(
             arrow::compute::filter_record_batch(rb.df_record_batch(), &region_mask)
                 .context(DecodeArrowIpcSnafu)?
         };
+        filter_time += start.elapsed();
 
+        let start = Instant::now();
         let (rows, has_null) = record_batch_to_rows(&region_batch);
+        convert_to_rows_time += start.elapsed();
 
         region_requests.insert(
             region_id,
@@ -427,6 +443,8 @@ fn make_region_rows_bulk_inserts(
             },
         );
     }
+    filter_timer.observe(filter_time.as_secs_f64());
+    convert_to_rows_timer.observe(convert_to_rows_time.as_secs_f64());
 
     let result = region_requests
         .into_iter()
@@ -440,6 +458,7 @@ fn make_region_rows_bulk_inserts(
             )
         })
         .collect::<Vec<_>>();
+
     Ok(result)
 }
 

@@ -23,8 +23,8 @@ use axum::middleware::Next;
 use axum::response::IntoResponse;
 use lazy_static::lazy_static;
 use prometheus::{
-    register_histogram_vec, register_int_counter, register_int_counter_vec, register_int_gauge,
-    Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    register_histogram, register_histogram_vec, register_int_counter, register_int_counter_vec,
+    register_int_gauge, Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge,
 };
 use tonic::body::BoxBody;
 use tower::{Layer, Service};
@@ -276,8 +276,12 @@ lazy_static! {
         "greptime_servers_jaeger_query_elapsed",
         "servers jaeger query elapsed",
         &[METRIC_DB_LABEL, METRIC_PATH_LABEL]
-    )
-.unwrap();
+    ).unwrap();
+
+    pub static ref GRPC_BULK_INSERT_ELAPSED: Histogram = register_histogram!(
+        "greptime_servers_bulk_insert_elapsed",
+        "servers handle bulk insert elapsed",
+    ).unwrap();
 }
 
 // Based on https://github.com/hyperium/tonic/blob/master/examples/src/tower/server.rs

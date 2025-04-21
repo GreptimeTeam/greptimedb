@@ -62,7 +62,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     sender.send(task_future.await.context(error::RecvSnafu).flatten());
                 }),
                 Err(e) => {
-                    let _ = sender.send(Err(e));
+                    sender.send(Err(e));
                     return;
                 }
             };
@@ -82,7 +82,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     pending_tasks.push(task_future);
                 }
                 Err(e) => {
-                    let _ = sender.send(Err(e));
+                    sender.send(Err(e));
                     return;
                 }
             }
@@ -146,7 +146,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             .map(|c| c.null_count() > 0)
             .collect();
 
-        let rows = record_batch_to_rows(&region_metadata, &df_record_batch)?;
+        let rows = record_batch_to_rows(region_metadata, &df_record_batch)?;
 
         let write_request = WriteRequest {
             region_id: region_metadata.region_id,

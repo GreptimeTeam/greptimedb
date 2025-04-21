@@ -27,8 +27,8 @@ use snafu::ResultExt;
 use store_api::storage::RegionId;
 use table::metadata::TableId;
 
-use crate::error;
 use crate::insert::Inserter;
+use crate::{error, metrics};
 
 impl Inserter {
     /// Handle bulk insert request.
@@ -38,7 +38,11 @@ impl Inserter {
         decoder: &mut FlightDecoder,
         data: FlightData,
     ) -> error::Result<AffectedRows> {
+        let decode_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
+            .with_label_values(&["decode_request"])
+            .start_timer();
         let raw_flight_data = Bytes::from(data.encode_to_vec());
+        let body_size = data.data_body.len();
         // Build region server requests
         let message = decoder
             .try_decode(data)
@@ -46,6 +50,8 @@ impl Inserter {
         let FlightMessage::Recordbatch(rb) = message else {
             return Ok(0);
         };
+        metrics::BULK_REQUEST_MESSAGE_SIZE.observe(body_size as f64);
+        decode_timer.observe_duration();
 
         // todo(hl): find a way to embed raw FlightData messages in greptimedb proto files so we don't have to encode here.
         // safety: when reach here schema must be present.
@@ -54,6 +60,10 @@ impl Inserter {
         let schema_data = Bytes::from(schema_message.encode_to_vec());
 
         let record_batch = rb.df_record_batch();
+
+        let partition_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
+            .with_label_values(&["partition"])
+            .start_timer();
         let partition_rule = self
             .partition_manager
             .find_table_partition_rule(table_id)
@@ -64,6 +74,11 @@ impl Inserter {
         let region_masks = partition_rule
             .split_record_batch(record_batch)
             .context(error::SplitInsertSnafu)?;
+        partition_timer.observe_duration();
+
+        let group_request_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
+            .with_label_values(&["group_request"])
+            .start_timer();
 
         let mut mask_per_datanode = HashMap::with_capacity(region_masks.len());
         for (region_number, mask) in region_masks {
@@ -82,7 +97,11 @@ impl Inserter {
                 .or_insert_with(Vec::new)
                 .push(selection);
         }
+        group_request_timer.observe_duration();
 
+        let datanode_handle_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
+            .with_label_values(&["datanode_handle"])
+            .start_timer();
         // fast path: only one datanode
         if mask_per_datanode.len() == 1 {
             let (peer, requests) = mask_per_datanode.into_iter().next().unwrap();
@@ -141,6 +160,7 @@ impl Inserter {
         let region_responses = futures::future::try_join_all(handles)
             .await
             .context(error::JoinTaskSnafu)?;
+        datanode_handle_timer.observe_duration();
         let mut rows_inserted: usize = 0;
         for res in region_responses {
             rows_inserted += res?.affected_rows;

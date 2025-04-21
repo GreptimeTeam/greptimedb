@@ -47,6 +47,7 @@ use crate::error::{
 };
 use crate::grpc::flight::{PutRecordBatchRequest, PutRecordBatchRequestStream};
 use crate::grpc::TonicResult;
+use crate::metrics;
 use crate::metrics::{METRIC_AUTH_FAILURE, METRIC_SERVER_GRPC_DB_REQUEST_TIMER};
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 
@@ -160,9 +161,11 @@ impl GreptimeRequestHandler {
                     data,
                 } = request;
 
+                let timer = metrics::GRPC_BULK_INSERT_ELAPSED.start_timer();
                 let result = handler
                     .put_record_batch(&table_name, &mut table_id, &mut decoder, data)
                     .await;
+                timer.observe_duration();
                 let result = result
                     .map(|x| DoPutResponse::new(request_id, x))
                     .map_err(Into::into);
