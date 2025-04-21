@@ -357,6 +357,7 @@ impl StartCommand {
         flownode
             .flow_engine()
             .streaming_engine()
+            // TODO(discord9): refactor and avoid circular reference
             .set_frontend_invoker(invoker)
             .await;
 

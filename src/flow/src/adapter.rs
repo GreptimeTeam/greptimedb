@@ -140,6 +140,8 @@ pub type FlowWorkerManagerRef = Arc<FlowWorkerManager>;
 /// FlowNodeManager manages the state of all tasks in the flow node, which should be run on the same thread
 ///
 /// The choice of timestamp is just using current system timestamp for now
+///
+/// TODO(discord9): rename to FlowStreamingEngine
 pub struct FlowWorkerManager {
     /// The handler to the worker that will run the dataflow
     /// which is `!Send` so a handle is used
