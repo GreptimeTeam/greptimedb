@@ -17,8 +17,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::config::kafka::common::{
-    KafkaConnectionConfig, KafkaTopicConfig, DEFAULT_ACTIVE_PRUNE_INTERVAL,
-    DEFAULT_ACTIVE_PRUNE_TASK_LIMIT, DEFAULT_TRIGGER_FLUSH_THRESHOLD,
+    KafkaConnectionConfig, KafkaTopicConfig, DEFAULT_AUTO_PRUNE_INTERVAL,
+    DEFAULT_AUTO_PRUNE_PARALLELISM, DEFAULT_TRIGGER_FLUSH_THRESHOLD,
 };
 
 /// Kafka wal configurations for metasrv.
@@ -34,6 +34,7 @@ pub struct MetasrvKafkaConfig {
     // Automatically create topics for WAL.
     pub auto_create_topics: bool,
     // Interval of WAL pruning.
+    #[serde(with = "humantime_serde")]
     pub auto_prune_interval: Duration,
     // Threshold for sending flush request when pruning remote WAL.
     // `None` stands for never sending flush request.
@@ -48,9 +49,9 @@ impl Default for MetasrvKafkaConfig {
             connection: Default::default(),
             kafka_topic: Default::default(),
             auto_create_topics: true,
-            auto_prune_interval: DEFAULT_ACTIVE_PRUNE_INTERVAL,
+            auto_prune_interval: DEFAULT_AUTO_PRUNE_INTERVAL,
             trigger_flush_threshold: DEFAULT_TRIGGER_FLUSH_THRESHOLD,
-            auto_prune_parallelism: DEFAULT_ACTIVE_PRUNE_TASK_LIMIT,
+            auto_prune_parallelism: DEFAULT_AUTO_PRUNE_PARALLELISM,
         }
     }
 }
