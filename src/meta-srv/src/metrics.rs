@@ -62,7 +62,9 @@ lazy_static! {
         register_int_counter!("greptime_meta_region_migration_fail", "meta region migration fail").unwrap();
     // The heartbeat stat memory size histogram.
     pub static ref METRIC_META_HEARTBEAT_STAT_MEMORY_SIZE: Histogram =
-        register_histogram!("greptime_meta_heartbeat_stat_memory_size", "meta heartbeat stat memory size").unwrap();
+        register_histogram!("greptime_meta_heartbeat_stat_memory_size", "meta heartbeat stat memory size", vec![
+            100.0, 500.0, 1000.0, 1500.0, 2000.0, 3000.0, 5000.0, 10000.0, 20000.0
+        ]).unwrap();
     // The heartbeat rate counter.
     pub static ref METRIC_META_HEARTBEAT_RATE: IntCounter =
         register_int_counter!("greptime_meta_heartbeat_rate", "meta heartbeat arrival rate").unwrap();
