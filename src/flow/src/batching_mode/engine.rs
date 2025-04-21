@@ -374,7 +374,12 @@ impl BatchingEngine {
         let res = task
             .gen_exec_once(&self.query_engine, &self.frontend_client)
             .await?;
+
         let affected_rows = res.map(|(r, _)| r).unwrap_or_default() as usize;
+        info!(
+            "Successfully flush flow {flow_id}, affected rows={}",
+            affected_rows
+        );
         Ok(affected_rows)
     }
 

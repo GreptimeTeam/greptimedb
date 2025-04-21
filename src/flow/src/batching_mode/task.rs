@@ -417,7 +417,10 @@ impl BatchingTask {
                             }
                             Err(TryRecvError::Empty) => (),
                         }
-                        state.get_next_start_query_time(Some(DEFAULT_BATCHING_ENGINE_QUERY_TIMEOUT))
+                        state.get_next_start_query_time(
+                            self.config.flow_id,
+                            Some(DEFAULT_BATCHING_ENGINE_QUERY_TIMEOUT),
+                        )
                     };
                     tokio::time::sleep_until(sleep_until).await;
                 }
@@ -526,6 +529,8 @@ impl BatchingTask {
                         debug!(
                             "Flow id = {:?}, can't get window size: precise_lower_bound={expire_time_window_bound:?}, using the same query", self.config.flow_id
                         );
+                        // clean dirty time window too, this could be from create flow's check_execute
+                        self.state.write().unwrap().dirty_time_windows.clean();
 
                         let mut add_auto_column =
                             AddAutoColumnRewriter::new(sink_table_schema.clone());
