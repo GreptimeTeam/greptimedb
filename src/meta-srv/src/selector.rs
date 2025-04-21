@@ -12,15 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod common;
+pub mod common;
 pub mod lease_based;
 pub mod load_based;
 pub mod round_robin;
 #[cfg(test)]
 pub(crate) mod test_utils;
 mod weight_compute;
-mod weighted_choose;
+pub mod weighted_choose;
 use serde::{Deserialize, Serialize};
+use strum::AsRefStr;
 
 use crate::error;
 use crate::error::Result;
@@ -51,7 +52,7 @@ impl Default for SelectorOptions {
 }
 
 /// [`SelectorType`] refers to the load balancer used when creating tables.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default, AsRefStr)]
 #[serde(try_from = "String")]
 pub enum SelectorType {
     /// The current load balancing is based on the number of regions on each datanode node;

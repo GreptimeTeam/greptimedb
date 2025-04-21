@@ -92,35 +92,35 @@ mod tests {
                     id: 1,
                     addr: "127.0.0.1:3001".to_string(),
                 },
-                weight: 1,
+                weight: 1.0,
             },
             WeightedItem {
                 item: Peer {
                     id: 2,
                     addr: "127.0.0.1:3001".to_string(),
                 },
-                weight: 1,
+                weight: 1.0,
             },
             WeightedItem {
                 item: Peer {
                     id: 3,
                     addr: "127.0.0.1:3001".to_string(),
                 },
-                weight: 1,
+                weight: 1.0,
             },
             WeightedItem {
                 item: Peer {
                     id: 4,
                     addr: "127.0.0.1:3001".to_string(),
                 },
-                weight: 1,
+                weight: 1.0,
             },
             WeightedItem {
                 item: Peer {
                     id: 5,
                     addr: "127.0.0.1:3001".to_string(),
                 },
-                weight: 1,
+                weight: 1.0,
             },
         ];
 

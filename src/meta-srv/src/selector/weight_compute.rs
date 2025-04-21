@@ -84,7 +84,7 @@ impl WeightCompute for RegionNumsBasedWeightCompute {
             .zip(region_nums)
             .map(|(peer, region_num)| WeightedItem {
                 item: peer,
-                weight: (max_weight - region_num + base_weight) as usize,
+                weight: (max_weight - region_num + base_weight) as f64,
             })
             .collect()
     }
@@ -148,7 +148,7 @@ mod tests {
             2,
         );
         for weight in weight_array.iter() {
-            assert_eq!(*expected.get(&weight.item).unwrap(), weight.weight,);
+            assert_eq!(*expected.get(&weight.item).unwrap(), weight.weight as usize);
         }
 
         let mut expected = HashMap::new();

@@ -294,10 +294,20 @@ pub async fn metasrv_builder(
 
     let in_memory = Arc::new(MemoryKvBackend::new()) as ResettableKvBackendRef;
 
-    let selector = match opts.selector {
-        SelectorType::LoadBased => Arc::new(LoadBasedSelector::default()) as SelectorRef,
-        SelectorType::LeaseBased => Arc::new(LeaseBasedSelector) as SelectorRef,
-        SelectorType::RoundRobin => Arc::new(RoundRobinSelector::default()) as SelectorRef,
+    let selector = if let Some(selector) = plugins.get::<SelectorRef>() {
+        info!("Using selector from plugins");
+        selector
+    } else {
+        let selector = match opts.selector {
+            SelectorType::LoadBased => Arc::new(LoadBasedSelector::default()) as SelectorRef,
+            SelectorType::LeaseBased => Arc::new(LeaseBasedSelector) as SelectorRef,
+            SelectorType::RoundRobin => Arc::new(RoundRobinSelector::default()) as SelectorRef,
+        };
+        info!(
+            "Using selector from options, selector type: {}",
+            opts.selector.as_ref()
+        );
+        selector
     };
 
     Ok(MetasrvBuilder::new()

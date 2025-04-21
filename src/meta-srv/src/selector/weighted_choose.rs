@@ -42,10 +42,10 @@ pub trait WeightedChoose<Item>: Send + Sync {
 }
 
 /// The struct represents a weighted item.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WeightedItem<Item> {
     pub item: Item,
-    pub weight: usize,
+    pub weight: f64,
 }
 
 /// A implementation of weighted balance: random weighted choose.
@@ -87,7 +87,7 @@ where
         // unwrap safety: whether weighted_index is none has been checked before.
         let item = self
             .items
-            .choose_weighted(&mut rng(), |item| item.weight as f64)
+            .choose_weighted(&mut rng(), |item| item.weight)
             .context(error::ChooseItemsSnafu)?
             .item
             .clone();
@@ -95,11 +95,11 @@ where
     }
 
     fn choose_multiple(&mut self, amount: usize) -> Result<Vec<Item>> {
-        let amount = amount.min(self.items.iter().filter(|item| item.weight > 0).count());
+        let amount = amount.min(self.items.iter().filter(|item| item.weight > 0.0).count());
 
         Ok(self
             .items
-            .choose_multiple_weighted(&mut rng(), amount, |item| item.weight as f64)
+            .choose_multiple_weighted(&mut rng(), amount, |item| item.weight)
             .context(error::ChooseItemsSnafu)?
             .cloned()
             .map(|item| item.item)
@@ -120,9 +120,12 @@ mod tests {
         let mut choose = RandomWeightedChoose::new(vec![
             WeightedItem {
                 item: 1,
-                weight: 100,
+                weight: 100.0,
             },
-            WeightedItem { item: 2, weight: 0 },
+            WeightedItem {
+                item: 2,
+                weight: 0.0,
+            },
         ]);
 
         for _ in 0..100 {
