@@ -540,12 +540,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Missing query context"))]
-    MissingQueryContext {
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Invalid table name"))]
     InvalidTableName {
         #[snafu(source)]
@@ -619,6 +613,13 @@ pub enum Error {
 
     #[snafu(display("Overflow while casting `{:?}` to Interval", val))]
     DurationOverflow { val: Duration },
+
+    #[snafu(display("Failed to handle otel-arrow request, error message: {}", err_msg))]
+    HandleOtelArrowRequest {
+        err_msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -677,7 +678,6 @@ impl ErrorExt for Error {
             | TimePrecision { .. }
             | UrlDecode { .. }
             | IncompatibleSchema { .. }
-            | MissingQueryContext { .. }
             | MysqlValueConversion { .. }
             | ParseJson { .. }
             | InvalidLokiLabels { .. }
@@ -738,7 +738,10 @@ impl ErrorExt for Error {
             ConvertSqlValue { source, .. } => source.status_code(),
 
             InFlightWriteBytesExceeded { .. } => StatusCode::RateLimited,
+
             DurationOverflow { .. } => StatusCode::InvalidArguments,
+
+            HandleOtelArrowRequest { .. } => StatusCode::Internal,
         }
     }
 
