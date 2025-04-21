@@ -6,7 +6,8 @@
   </picture>
 </p>
 
-<h2 align="center">Real-Time & Cloud-Native Observability  Database for Metrics, Logs, and Traces</h2>
+<h2 align="center">Real-Time & Cloud-Native Observability  Database</h2>
+<h2 align="center">for Metrics, Logs, and Traces</h2>
 
 <div align="center">
 <h3 align="center">
