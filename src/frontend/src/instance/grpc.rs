@@ -36,8 +36,8 @@ use snafu::{ensure, OptionExt, ResultExt};
 use table::table_name::TableName;
 
 use crate::error::{
-    CatalogSnafu, Error, InFlightWriteBytesExceededSnafu, IncompleteGrpcRequestSnafu,
-    NotSupportedSnafu, PermissionSnafu, PlanStatementSnafu, Result,
+    CatalogSnafu, DataFusionSnafu, Error, InFlightWriteBytesExceededSnafu,
+    IncompleteGrpcRequestSnafu, NotSupportedSnafu, PermissionSnafu, PlanStatementSnafu, Result,
     SubstraitDecodeLogicalPlanSnafu, TableNotFoundSnafu, TableOperationSnafu,
 };
 use crate::instance::{attach_timer, Instance};
@@ -365,7 +365,7 @@ impl Instance {
                 .arrow_schema()
                 .clone()
                 .try_into()
-                .unwrap(),
+                .context(DataFusionSnafu)?,
         );
 
         let insert_into = add_insert_to_logical_plan(table_name, df_schema, logical_plan)

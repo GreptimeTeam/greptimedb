@@ -256,7 +256,13 @@ impl TreeNodeRewriter for AddAutoColumnRewriter {
             node = projection;
         }
 
-        let mut exprs = node.expressions();
+        // only do rewrite if found the outermost projection
+        let mut exprs = if let LogicalPlan::Projection(project) = &node {
+            project.expr.clone()
+        } else {
+            return Ok(Transformed::no(node));
+        };
+
         let all_names = self
             .schema
             .column_schemas()
@@ -333,7 +339,7 @@ impl TreeNodeRewriter for AddAutoColumnRewriter {
         } else {
             return Err(DataFusionError::Plan(format!(
                     "Expect table have 0,1 or 2 columns more than query columns, found {} query columns {:?}, {} table columns {:?} at node {:?}",
-                    query_col_cnt, node.expressions(), table_col_cnt, self.schema.column_schemas(), node
+                    query_col_cnt, exprs, table_col_cnt, self.schema.column_schemas(), node
                 )));
         }
 

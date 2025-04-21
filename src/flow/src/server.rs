@@ -29,6 +29,7 @@ use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::{Flownode, NodeManagerRef};
 use common_query::Output;
+use common_runtime::JoinHandle;
 use common_telemetry::tracing::info;
 use futures::{FutureExt, TryStreamExt};
 use greptime_proto::v1::flow::{flow_server, FlowRequest, FlowResponse, InsertRequests};
@@ -144,11 +145,16 @@ pub struct FlownodeServer {
     inner: Arc<FlownodeServerInner>,
 }
 
+/// FlownodeServerInner is the inner state of FlownodeServer,
+/// this struct mostly useful for construct/start and stop the
+/// flow node server
 struct FlownodeServerInner {
     /// worker shutdown signal, not to be confused with server_shutdown_tx
     worker_shutdown_tx: Mutex<broadcast::Sender<()>>,
     /// server shutdown signal for shutdown grpc server
     server_shutdown_tx: Mutex<broadcast::Sender<()>>,
+    /// streaming task handler
+    streaming_task_handler: Mutex<Option<JoinHandle<()>>>,
     flow_service: FlowService,
 }
 
@@ -161,6 +167,7 @@ impl FlownodeServer {
                 flow_service,
                 worker_shutdown_tx: Mutex::new(tx),
                 server_shutdown_tx: Mutex::new(server_tx),
+                streaming_task_handler: Mutex::new(None),
             }),
         }
     }
@@ -168,9 +175,15 @@ impl FlownodeServer {
     /// Start the background task for streaming computation.
     async fn start_workers(&self) -> Result<(), Error> {
         let manager_ref = self.inner.flow_service.dual_engine.clone();
-        let _handle = manager_ref
+        let handle = manager_ref
             .streaming_engine()
             .run_background(Some(self.inner.worker_shutdown_tx.lock().await.subscribe()));
+        self.inner
+            .streaming_task_handler
+            .lock()
+            .await
+            .replace(handle);
+
         self.inner
             .flow_service
             .dual_engine
