@@ -267,7 +267,7 @@ fn columnar_to_ts_vector(columnar: &ColumnarValue) -> Result<Vec<Option<Timestam
     Ok(val)
 }
 
-/// Return (the column name of time index column, the time window expr, the expected time unit of time index column, the expr's schema for evaluating the time window)
+/// Return (`the column name of time index column`, `the time window expr`, `the expected time unit of time index column`, `the expr's schema for evaluating the time window`)
 ///
 /// The time window expr is expected to have one input column with Timestamp type, and also return Timestamp type, the time window expr is expected
 /// to be monotonic increasing and appears in the innermost GROUP BY clause
