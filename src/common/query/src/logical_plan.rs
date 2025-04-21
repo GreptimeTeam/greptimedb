@@ -87,6 +87,8 @@ pub fn rename_logical_plan_columns(
 /// logical_plan is the plan to be executed.
 ///
 /// if input logical plan is not `insert into table_name <input>`, return None
+///
+/// Returned TableName will use provided catalog and schema if not specified in the logical plan
 pub fn breakup_insert_plan(
     plan: &LogicalPlan,
     catalog: &str,
