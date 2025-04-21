@@ -6,18 +6,55 @@ INSERT INTO test VALUES (1, 1), (2, 2);
 
 Affected Rows: 2
 
+ADMIN FLUSH_TABLE('test');
+
++---------------------------+
+| ADMIN FLUSH_TABLE('test') |
++---------------------------+
+| 0                         |
++---------------------------+
+
+ALTER TABLE test MODIFY COLUMN i SET INVERTED INDEX;
+
+Affected Rows: 0
+
+INSERT INTO test VALUES (3, 3), (4, 4);
+
+Affected Rows: 2
+
 ALTER TABLE test ADD COLUMN k INTEGER DEFAULT 3;
 
 Affected Rows: 0
 
-SELECT * FROM test;
+SELECT * FROM test order by j;
 
 +---+-------------------------+---+
 | i | j                       | k |
 +---+-------------------------+---+
 | 1 | 1970-01-01T00:00:00.001 | 3 |
 | 2 | 1970-01-01T00:00:00.002 | 3 |
+| 3 | 1970-01-01T00:00:00.003 | 3 |
+| 4 | 1970-01-01T00:00:00.004 | 3 |
 +---+-------------------------+---+
+
+SELECT * FROM test where k != 3;
+
+++
+++
+
+ALTER TABLE test ADD COLUMN host STRING DEFAULT '' PRIMARY KEY;
+
+Affected Rows: 0
+
+SELECT * FROM test where host != '';
+
+++
+++
+
+SELECT * FROM test where host != '' AND i = 3;
+
+++
+++
 
 DROP TABLE test;
 
