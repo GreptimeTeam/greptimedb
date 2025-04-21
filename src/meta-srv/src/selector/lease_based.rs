@@ -42,7 +42,7 @@ impl Selector for LeaseBasedSelector {
                     id: k.node_id,
                     addr: v.node_addr.clone(),
                 },
-                weight: 1,
+                weight: 1.0,
             })
             .collect();
 
