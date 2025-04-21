@@ -50,7 +50,7 @@ pub trait FlowEngine {
     /// Check if the flow exists
     async fn flow_exist(&self, flow_id: FlowId) -> Result<bool, Error>;
     /// List all flows
-    async fn list_flows(&self) -> Result<Vec<FlowId>, Error>;
+    async fn list_flows(&self) -> Result<impl IntoIterator<Item = FlowId>, Error>;
     /// Handle the insert requests for the flow
     async fn handle_flow_inserts(
         &self,

@@ -31,7 +31,7 @@ use datatypes::value::Value;
 use futures::TryStreamExt;
 use itertools::Itertools;
 use session::context::QueryContextBuilder;
-use snafu::{IntoError, OptionExt, ResultExt};
+use snafu::{ensure, IntoError, OptionExt, ResultExt};
 use store_api::storage::{RegionId, TableId};
 use tokio::sync::{Mutex, RwLock};
 
@@ -40,7 +40,7 @@ use crate::batching_mode::engine::BatchingEngine;
 use crate::engine::FlowEngine;
 use crate::error::{
     CreateFlowSnafu, ExternalSnafu, FlowNotFoundSnafu, InsertIntoFlowSnafu, InternalSnafu,
-    ListFlowsSnafu,
+    ListFlowsSnafu, SyncCheckTaskSnafu,
 };
 use crate::metrics::METRIC_FLOW_TASK_COUNT;
 use crate::repr::{self, DiffRow};
@@ -111,11 +111,13 @@ impl FlowDualEngine {
         }
 
         if retry == max_retry {
-            return crate::error::UnexpectedSnafu {
-                reason: format!(
-                    "Can't sync with check task for flow {} with allow_drop={}",
-                    flow_id, allow_drop
-                ),
+            error!(
+                "Can't sync with check task for flow {} with allow_drop={}",
+                flow_id, allow_drop
+            );
+            return SyncCheckTaskSnafu {
+                flow_id,
+                allow_drop,
             }
             .fail();
         }
@@ -273,27 +275,30 @@ impl FlowDualEngine {
     }
 
     pub async fn start_flow_consistent_check_task(self: &Arc<Self>) -> Result<(), Error> {
-        if self.check_task.lock().await.is_some() {
+        let mut check_task = self.check_task.lock().await;
+        ensure!(
+            check_task.is_none(),
             crate::error::UnexpectedSnafu {
                 reason: "Flow consistent check task already exists",
             }
-            .fail()?;
-        }
+        );
         let task = ConsistentCheckTask::start_check_task(self).await?;
-        self.check_task.lock().await.replace(task);
+        *check_task = Some(task);
         Ok(())
     }
 
     pub async fn stop_flow_consistent_check_task(&self) -> Result<(), Error> {
         info!("Stopping flow consistent check task");
-        if let Some(task) = self.check_task.lock().await.take() {
-            task.stop().await?;
-        } else {
+        let mut check_task = self.check_task.lock().await;
+
+        ensure!(
+            check_task.is_some(),
             crate::error::UnexpectedSnafu {
                 reason: "Flow consistent check task does not exist",
             }
-            .fail()?;
-        }
+        );
+
+        check_task.take().expect("Already checked").stop().await?;
         info!("Stopped flow consistent check task");
         Ok(())
     }
@@ -526,11 +531,11 @@ impl FlowEngine for FlowDualEngine {
         }
     }
 
-    async fn list_flows(&self) -> Result<Vec<FlowId>, Error> {
-        let mut stream_flows = self.streaming_engine.list_flows().await?;
+    async fn list_flows(&self) -> Result<impl IntoIterator<Item = FlowId>, Error> {
+        let stream_flows = self.streaming_engine.list_flows().await?;
         let batch_flows = self.batching_engine.list_flows().await?;
-        stream_flows.extend(batch_flows);
-        Ok(stream_flows)
+
+        Ok(stream_flows.into_iter().chain(batch_flows))
     }
 
     async fn handle_flow_inserts(
@@ -807,14 +812,14 @@ impl FlowEngine for FlowWorkerManager {
         self.flow_exist_inner(flow_id).await
     }
 
-    async fn list_flows(&self) -> Result<Vec<FlowId>, Error> {
+    async fn list_flows(&self) -> Result<impl IntoIterator<Item = FlowId>, Error> {
         Ok(self
             .flow_err_collectors
             .read()
             .await
             .keys()
             .cloned()
-            .collect())
+            .collect::<Vec<_>>())
     }
 
     async fn handle_flow_inserts(

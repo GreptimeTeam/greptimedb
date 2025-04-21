@@ -149,6 +149,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Unsupported: {reason}"))]
+    Unsupported {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Unsupported temporal filter: {reason}"))]
     UnsupportedTemporalFilter {
         reason: String,
@@ -185,6 +192,18 @@ pub enum Error {
     #[snafu(display("Unexpected: {reason}"))]
     Unexpected {
         reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Failed to sync with check task for flow {} with allow_drop={}",
+        flow_id,
+        allow_drop
+    ))]
+    SyncCheckTask {
+        flow_id: FlowId,
+        allow_drop: bool,
         #[snafu(implicit)]
         location: Location,
     },
@@ -280,10 +299,10 @@ impl ErrorExt for Error {
             Self::CreateFlow { .. } | Self::Arrow { .. } | Self::Time { .. } => {
                 StatusCode::EngineExecuteQuery
             }
-            Self::Unexpected { .. } => StatusCode::Unexpected,
-            Self::NotImplemented { .. } | Self::UnsupportedTemporalFilter { .. } => {
-                StatusCode::Unsupported
-            }
+            Self::Unexpected { .. } | Self::SyncCheckTask { .. } => StatusCode::Unexpected,
+            Self::NotImplemented { .. }
+            | Self::UnsupportedTemporalFilter { .. }
+            | Self::Unsupported { .. } => StatusCode::Unsupported,
             Self::External { source, .. } => source.status_code(),
             Self::Internal { .. } | Self::CacheRequired { .. } => StatusCode::Internal,
             Self::StartServer { source, .. } | Self::ShutdownServer { source, .. } => {
