@@ -26,7 +26,7 @@ use common_meta::DatanodeId;
 use common_runtime::JoinHandle;
 use common_telemetry::{error, info, warn};
 use common_time::util::current_time_millis;
-use error::Error::{MigrationRunning, TableRouteNotFound};
+use error::Error::{MigrationRunning, RegionLeaderChanged, TableRouteNotFound};
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -411,6 +411,7 @@ impl RegionSupervisor {
             );
             return Ok(());
         }
+        let from_peer_id = from_peer.id;
         let task = RegionMigrationProcedureTask {
             region_id,
             from_peer,
@@ -421,7 +422,25 @@ impl RegionSupervisor {
         if let Err(err) = self.region_migration_manager.submit_procedure(task).await {
             return match err {
                 // Returns Ok if it's running or table is dropped.
-                MigrationRunning { .. } | TableRouteNotFound { .. } => Ok(()),
+                MigrationRunning { .. } => Ok(()),
+                TableRouteNotFound { .. } => {
+                    self.deregister_failure_detectors(vec![(datanode_id, region_id)])
+                        .await;
+                    info!(
+                        "Table route is not found, the table is dropped, removed failover detector for region: {}, datanode: {}",
+                        region_id, from_peer_id
+                    );
+                    Ok(())
+                }
+                RegionLeaderChanged { .. } => {
+                    self.deregister_failure_detectors(vec![(datanode_id, region_id)])
+                        .await;
+                    info!(
+                        "Region leader changed, removed failover detector for region: {}, datanode: {}",
+                        region_id, from_peer_id
+                    );
+                    Ok(())
+                }
                 err => Err(err),
             };
         };
