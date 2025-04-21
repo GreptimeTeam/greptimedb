@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod common;
+pub mod common;
 pub mod lease_based;
 pub mod load_based;
 pub mod round_robin;
