@@ -9,7 +9,6 @@ meta:
     num_topics = 3
     auto_prune_interval = "30s"
     trigger_flush_threshold = 100
-    overwrite_entry_start_id = true
 
     [datanode]
     [datanode.client]
@@ -24,6 +23,7 @@ datanode:
     provider = "kafka"
     broker_endpoints = ["kafka.kafka-cluster.svc.cluster.local:9092"]
     linger = "2ms"
+    overwrite_entry_start_id = true
 frontend:
   configData: |-
     [runtime]
