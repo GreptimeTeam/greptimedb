@@ -58,6 +58,9 @@ use crate::error::{self, Result};
 use crate::metrics::{METRIC_META_REGION_MIGRATION_ERROR, METRIC_META_REGION_MIGRATION_EXECUTE};
 use crate::service::mailbox::MailboxRef;
 
+/// The default timeout for region migration.
+pub const DEFAULT_REGION_MIGRATION_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// It's shared in each step and available even after recovering.
 ///
 /// It will only be updated/stored after the Red node has succeeded.

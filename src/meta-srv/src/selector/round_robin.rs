@@ -120,6 +120,8 @@ impl Selector for RoundRobinSelector {
 
 #[cfg(test)]
 mod test {
+    use std::collections::HashSet;
+
     use super::*;
     use crate::test_util::{create_selector_context, put_datanodes};
 
@@ -149,6 +151,7 @@ mod test {
                 SelectorOptions {
                     min_required_items: 4,
                     allow_duplication: true,
+                    exclude_peer_ids: HashSet::new(),
                 },
             )
             .await
@@ -165,6 +168,7 @@ mod test {
                 SelectorOptions {
                     min_required_items: 2,
                     allow_duplication: true,
+                    exclude_peer_ids: HashSet::new(),
                 },
             )
             .await

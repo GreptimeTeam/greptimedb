@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
 use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -36,7 +37,9 @@ use crate::error::{self, Result};
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
 use crate::metasrv::{SelectorContext, SelectorRef};
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
-use crate::procedure::region_migration::RegionMigrationProcedureTask;
+use crate::procedure::region_migration::{
+    RegionMigrationProcedureTask, DEFAULT_REGION_MIGRATION_TIMEOUT,
+};
 use crate::region::failure_detector::RegionFailureDetector;
 use crate::selector::SelectorOptions;
 
@@ -401,6 +404,7 @@ impl RegionSupervisor {
                 SelectorOptions {
                     min_required_items: 1,
                     allow_duplication: false,
+                    exclude_peer_ids: HashSet::from([from_peer.id]),
                 },
             )
             .await?;
@@ -415,7 +419,7 @@ impl RegionSupervisor {
             region_id,
             from_peer,
             to_peer,
-            timeout: Duration::from_secs(60),
+            timeout: DEFAULT_REGION_MIGRATION_TIMEOUT,
         };
 
         if let Err(err) = self.region_migration_manager.submit_procedure(task).await {
