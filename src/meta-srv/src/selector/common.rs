@@ -15,7 +15,6 @@
 use std::collections::HashSet;
 
 use common_meta::peer::Peer;
-use common_meta::DatanodeId;
 use snafu::ensure;
 
 use crate::error;
@@ -27,7 +26,7 @@ use crate::selector::SelectorOptions;
 /// Filter out the excluded peers from the `weight_array`.
 pub fn filter_out_excluded_peers(
     weight_array: &mut Vec<WeightedItem<Peer>>,
-    exclude_peer_ids: &HashSet<DatanodeId>,
+    exclude_peer_ids: &HashSet<u64>,
 ) {
     weight_array.retain(|peer| !exclude_peer_ids.contains(&peer.item.id));
 }

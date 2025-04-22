@@ -44,7 +44,7 @@ pub struct SelectorOptions {
     /// Whether duplicates are allowed in the selected result, default false.
     pub allow_duplication: bool,
     /// The peers to exclude from the selection.
-    pub exclude_peer_ids: HashSet<DatanodeId>,
+    pub exclude_peer_ids: HashSet<u64>,
 }
 
 impl Default for SelectorOptions {
