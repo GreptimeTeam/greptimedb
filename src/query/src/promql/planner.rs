@@ -1448,50 +1448,9 @@ impl PromPlanner {
             "present_over_time" => ScalarFunc::Udf(Arc::new(PresentOverTime::scalar_udf())),
             "stddev_over_time" => ScalarFunc::Udf(Arc::new(StddevOverTime::scalar_udf())),
             "stdvar_over_time" => ScalarFunc::Udf(Arc::new(StdvarOverTime::scalar_udf())),
-            "quantile_over_time" => {
-                let quantile_expr = match other_input_exprs.pop_front() {
-                    Some(DfExpr::Literal(ScalarValue::Float64(Some(quantile)))) => quantile,
-                    other => UnexpectedPlanExprSnafu {
-                        desc: format!("expected f64 literal as quantile, but found {:?}", other),
-                    }
-                    .fail()?,
-                };
-                ScalarFunc::Udf(Arc::new(QuantileOverTime::scalar_udf(quantile_expr)))
-            }
-            "predict_linear" => {
-                let t_expr = match other_input_exprs.pop_front() {
-                    Some(DfExpr::Literal(ScalarValue::Float64(Some(t)))) => t as i64,
-                    Some(DfExpr::Literal(ScalarValue::Int64(Some(t)))) => t,
-                    other => UnexpectedPlanExprSnafu {
-                        desc: format!("expected i64 literal as t, but found {:?}", other),
-                    }
-                    .fail()?,
-                };
-                ScalarFunc::Udf(Arc::new(PredictLinear::scalar_udf(t_expr)))
-            }
-            "holt_winters" => {
-                let sf_exp = match other_input_exprs.pop_front() {
-                    Some(DfExpr::Literal(ScalarValue::Float64(Some(sf)))) => sf,
-                    other => UnexpectedPlanExprSnafu {
-                        desc: format!(
-                            "expected f64 literal as smoothing factor, but found {:?}",
-                            other
-                        ),
-                    }
-                    .fail()?,
-                };
-                let tf_exp = match other_input_exprs.pop_front() {
-                    Some(DfExpr::Literal(ScalarValue::Float64(Some(tf)))) => tf,
-                    other => UnexpectedPlanExprSnafu {
-                        desc: format!(
-                            "expected f64 literal as trend factor, but found {:?}",
-                            other
-                        ),
-                    }
-                    .fail()?,
-                };
-                ScalarFunc::Udf(Arc::new(HoltWinters::scalar_udf(sf_exp, tf_exp)))
-            }
+            "quantile_over_time" => ScalarFunc::Udf(Arc::new(QuantileOverTime::scalar_udf())),
+            "predict_linear" => ScalarFunc::Udf(Arc::new(PredictLinear::scalar_udf())),
+            "holt_winters" => ScalarFunc::Udf(Arc::new(HoltWinters::scalar_udf())),
             "time" => {
                 exprs.push(build_special_time_expr(
                     self.ctx.time_index_column.as_ref().unwrap(),
@@ -1626,17 +1585,10 @@ impl PromPlanner {
                 ScalarFunc::GeneratedExpr
             }
             "round" => {
-                let nearest = match other_input_exprs.pop_front() {
-                    Some(DfExpr::Literal(ScalarValue::Float64(Some(t)))) => t,
-                    Some(DfExpr::Literal(ScalarValue::Int64(Some(t)))) => t as f64,
-                    None => 0.0,
-                    other => UnexpectedPlanExprSnafu {
-                        desc: format!("expected f64 literal as t, but found {:?}", other),
-                    }
-                    .fail()?,
-                };
-
-                ScalarFunc::DataFusionUdf(Arc::new(Round::scalar_udf(nearest)))
+                if other_input_exprs.is_empty() {
+                    other_input_exprs.push_front(DfExpr::Literal(ScalarValue::Float64(Some(0.0))));
+                }
+                ScalarFunc::DataFusionUdf(Arc::new(Round::scalar_udf()))
             }
 
             _ => {
