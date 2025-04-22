@@ -122,6 +122,9 @@ impl GrpcQueryHandler for Instance {
                         let output = result.remove(0)?;
                         attach_timer(output, timer)
                     }
+                    Query::InsertIntoPlan(_) => {
+                        todo!("wait for #5903 to be merged")
+                    }
                 }
             }
             Request::Ddl(request) => {

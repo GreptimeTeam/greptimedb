@@ -4943,7 +4943,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=f29bff0bfbc779d3e3e1231a85b9696e1323b8d9#f29bff0bfbc779d3e3e1231a85b9696e1323b8d9"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=ce65659d95a4a11c5d668d27edb4f1c1eed36824#ce65659d95a4a11c5d668d27edb4f1c1eed36824"
 dependencies = [
  "prost 0.13.5",
  "serde",
@@ -8120,8 +8120,11 @@ version = "0.14.0"
 dependencies = [
  "ahash 0.8.11",
  "api",
+ "arrow 54.2.1",
+ "arrow-ipc 54.2.1",
  "async-stream",
  "async-trait",
+ "bytes",
  "catalog",
  "chrono",
  "client",
@@ -8130,6 +8133,7 @@ dependencies = [
  "common-datasource",
  "common-error",
  "common-function",
+ "common-grpc",
  "common-grpc-expr",
  "common-macro",
  "common-meta",
@@ -8157,6 +8161,7 @@ dependencies = [
  "partition",
  "path-slash",
  "prometheus",
+ "prost 0.13.5",
  "query",
  "regex",
  "serde_json",

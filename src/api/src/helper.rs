@@ -515,6 +515,9 @@ fn query_request_type(request: &QueryRequest) -> &'static str {
         Some(Query::LogicalPlan(_)) => "query.logical_plan",
         Some(Query::PromRangeQuery(_)) => "query.prom_range",
         None => "query.empty",
+        Some(Query::InsertIntoPlan(_)) => {
+            todo!("wait for #5903 to be merged")
+        }
     }
 }
 

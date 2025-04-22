@@ -51,7 +51,8 @@ use crate::logstore::entry;
 use crate::metadata::{
     ColumnMetadata, DecodeArrowIpcSnafu, DecodeProtoSnafu, FlightCodecSnafu,
     InvalidRawRegionRequestSnafu, InvalidRegionRequestSnafu, InvalidSetRegionOptionRequestSnafu,
-    InvalidUnsetRegionOptionRequestSnafu, MetadataError, ProstSnafu, RegionMetadata, Result, UnexpectedSnafu,
+    InvalidUnsetRegionOptionRequestSnafu, MetadataError, ProstSnafu, RegionMetadata, Result,
+    UnexpectedSnafu,
 };
 use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use crate::metrics;
