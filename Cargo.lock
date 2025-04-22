@@ -7047,6 +7047,7 @@ dependencies = [
  "datafusion",
  "datatypes",
  "futures-util",
+ "humantime-serde",
  "itertools 0.14.0",
  "lazy_static",
  "mito2",

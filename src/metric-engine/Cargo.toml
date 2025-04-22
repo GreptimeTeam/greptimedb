@@ -24,6 +24,7 @@ common-time.workspace = true
 datafusion.workspace = true
 datatypes.workspace = true
 futures-util.workspace = true
+humantime-serde.workspace = true
 itertools.workspace = true
 lazy_static = "1.4"
 mito2.workspace = true

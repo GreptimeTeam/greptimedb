@@ -25,6 +25,7 @@ pub struct EngineConfig {
     /// Experimental feature to use sparse primary key encoding.
     pub experimental_sparse_primary_key_encoding: bool,
     /// The flush interval of the metadata region.
+    #[serde(with = "humantime_serde")]
     pub flush_metadata_region_interval: Duration,
 }
 
