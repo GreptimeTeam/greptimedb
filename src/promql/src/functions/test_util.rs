@@ -38,7 +38,7 @@ pub fn simple_range_udf_runner(
         ColumnarValue::Array(Arc::new(input_value.into_dict())),
     ]
     .into_iter()
-    .chain(other_args.into_iter().map(|v| ColumnarValue::Scalar(v)))
+    .chain(other_args.into_iter().map(ColumnarValue::Scalar))
     .collect::<Vec<_>>();
     let args = ScalarFunctionArgs {
         args: input,
