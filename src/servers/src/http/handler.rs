@@ -251,6 +251,23 @@ pub struct PromqlQuery {
     pub step: String,
     pub lookback: Option<String>,
     pub db: Option<String>,
+    // (Optional) result format: [`greptimedb_v1`, `influxdb_v1`, `csv`,
+    // `arrow`],
+    // the default value is `greptimedb_v1`
+    pub format: Option<String>,
+    // For arrow output
+    pub compression: Option<String>,
+    // Returns epoch timestamps with the specified precision.
+    // Both u and µ indicate microseconds.
+    // epoch = [ns,u,µ,ms,s],
+    //
+    // For influx output only
+    //
+    // TODO(jeremy): currently, only InfluxDB result format is supported,
+    // and all columns of the `Timestamp` type will be converted to their
+    // specified time precision. Maybe greptimedb format can support this
+    // param too.
+    pub epoch: Option<String>,
 }
 
 impl From<PromqlQuery> for PromQuery {
@@ -292,9 +309,30 @@ pub async fn promql(
         let resp = ErrorResponse::from_error_message(status, msg);
         HttpResponse::Error(resp)
     } else {
+        let format = params
+            .format
+            .as_ref()
+            .map(|s| s.to_lowercase())
+            .map(|s| ResponseFormat::parse(s.as_str()).unwrap_or(ResponseFormat::GreptimedbV1))
+            .unwrap_or(ResponseFormat::GreptimedbV1);
+        let epoch = params
+            .epoch
+            .as_ref()
+            .map(|s| s.to_lowercase())
+            .map(|s| Epoch::parse(s.as_str()).unwrap_or(Epoch::Millisecond));
+        let compression = params.compression.clone();
+
         let prom_query = params.into();
         let outputs = sql_handler.do_promql_query(&prom_query, query_ctx).await;
-        GreptimedbV1Response::from_output(outputs).await
+
+        match format {
+            ResponseFormat::Arrow => ArrowResponse::from_output(outputs, compression).await,
+            ResponseFormat::Csv => CsvResponse::from_output(outputs).await,
+            ResponseFormat::Table => TableResponse::from_output(outputs).await,
+            ResponseFormat::GreptimedbV1 => GreptimedbV1Response::from_output(outputs).await,
+            ResponseFormat::InfluxdbV1 => InfluxdbV1Response::from_output(outputs, epoch).await,
+            ResponseFormat::Json => JsonResponse::from_output(outputs).await,
+        }
     };
 
     resp.with_execution_time(exec_start.elapsed().as_millis() as u64)
