@@ -282,6 +282,14 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to start repeated task: {}", name))]
+    StartRepeatedTask {
+        name: String,
+        source: common_runtime::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -334,6 +342,8 @@ impl ErrorExt for Error {
             EncodePrimaryKey { source, .. } => source.status_code(),
 
             CollectRecordBatchStream { source, .. } => source.status_code(),
+
+            StartRepeatedTask { source, .. } => source.status_code(),
 
             MetricManifestInfo { .. } => StatusCode::Internal,
         }

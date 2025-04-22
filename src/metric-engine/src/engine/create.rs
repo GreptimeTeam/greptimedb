@@ -737,7 +737,7 @@ mod test {
 
         // set up
         let env = TestEnv::new().await;
-        let engine = MetricEngine::new(env.mito(), EngineConfig::default());
+        let engine = MetricEngine::try_new(env.mito(), EngineConfig::default()).unwrap();
         let engine_inner = engine.inner;
 
         // check create data region request
