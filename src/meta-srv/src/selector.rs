@@ -22,7 +22,6 @@ mod weight_compute;
 pub mod weighted_choose;
 use std::collections::HashSet;
 
-use common_meta::DatanodeId;
 use serde::{Deserialize, Serialize};
 use strum::AsRefStr;
 
