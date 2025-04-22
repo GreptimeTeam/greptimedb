@@ -4,12 +4,12 @@
 
 This repository maintains the Grafana dashboards for GreptimeDB. It has two types of dashboards:
 
-- `cluster/`: The dashboard for the GreptimeDB cluster.
-- `standalone/`: The dashboard for the standalone GreptimeDB instance. It's generated from the `cluster` dashboard by removing the `instance` labels and executing the `make dashboards` command in the root directory.
+- `cluster/`: The dashboard for the GreptimeDB cluster. Read the [dashboard.md](./dashboards/cluster/dashboard.md) for more details.
+- `standalone/`: The dashboard for the standalone GreptimeDB instance. Read the [dashboard.md](./dashboards/standalone/dashboard.md) for more details.
 
 As the rapid development of GreptimeDB, the metrics may be changed, and please feel free to submit your feedback and/or contribution to this dashboard 🤗
 
-To maintain the dashboards, we use the [`dac`](https://github.com/zyy17/dac) tool to generate the intermediate dashboards:
+To maintain the dashboards, we use the [`dac`](https://github.com/zyy17/dac) tool to generate the intermediate dashboards and markdown documents:
 
 - `cluster/dashboard.yaml`: The intermediate dashboard for the GreptimeDB cluster.
 - `standalone/dashboard.yaml`: The intermediatedashboard for the standalone GreptimeDB instance.
@@ -79,5 +79,5 @@ The standalone GreptimeDB instance will collect metrics from your cluster, and t
 
 3. **Import the dashboards based on your deployment scenario**
 
-   - **Cluster**: Import the `cluster/` dashboard.
-   - **Standalone**: Import the `standalone/` dashboard.
+   - **Cluster**: Import the `cluster/dashboard.json` dashboard.
+   - **Standalone**: Import the `standalone/dashboard.json` dashboard.

@@ -92,18 +92,15 @@ groups:
           description: The data size of wal/index/manifest in the GreptimeDB.
           unit: decbytes
           queries:
-            - expr: |
-                SELECT SUM(memtable_size) * 0.42825 as WAL FROM information_schema.region_statistics;
+            - expr: SELECT SUM(memtable_size) * 0.42825 as WAL FROM information_schema.region_statistics;
               datasource:
                 type: mysql
                 uid: ${information_schema}
-            - expr: |
-                SELECT SUM(index_size) as index FROM information_schema.region_statistics;
+            - expr: SELECT SUM(index_size) as index FROM information_schema.region_statistics;
               datasource:
                 type: mysql
                 uid: ${information_schema}
-            - expr: |
-                SELECT SUM(manifest_size) as manifest FROM information_schema.region_statistics;
+            - expr: SELECT SUM(manifest_size) as manifest FROM information_schema.region_statistics;
               datasource:
                 type: mysql
                 uid: ${information_schema}
@@ -705,3 +702,60 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: __auto
+    - title: Flownode
+      panels:
+        - title: Flow Ingest / Output Rate
+          type: timeseries
+          description: Flow Ingest / Output Rate.
+          queries:
+            - expr: sum by(instance, pod, direction) (rate(greptime_flow_processed_rows[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{pod}}]-[{{instance}}]-[{{direction}}]'
+        - title: Flow Ingest Latency
+          type: timeseries
+          description: Flow Ingest Latency.
+          queries:
+            - expr: histogram_quantile(0.95, sum(rate(greptime_flow_insert_elapsed_bucket[$__rate_interval])) by (le, instance, pod))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-p95'
+            - expr: histogram_quantile(0.99, sum(rate(greptime_flow_insert_elapsed_bucket[$__rate_interval])) by (le, instance, pod))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-p99'
+        - title: Flow Operation Latency
+          type: timeseries
+          description: Flow Operation Latency.
+          queries:
+            - expr: histogram_quantile(0.95, sum(rate(greptime_flow_processing_time_bucket[$__rate_interval])) by (le,instance,pod,type))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{type}}]-p95'
+            - expr: histogram_quantile(0.99, sum(rate(greptime_flow_processing_time_bucket[$__rate_interval])) by (le,instance,pod,type))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{type}}]-p99'
+        - title: Flow Buffer Size per Instance
+          type: timeseries
+          description: Flow Buffer Size per Instance.
+          queries:
+            - expr: greptime_flow_input_buf_size
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}]'
+        - title: Flow Processing Error per Instance
+          type: timeseries
+          description: Flow Processing Error per Instance.
+          queries:
+            - expr: sum by(instance,pod,code) (rate(greptime_flow_errors[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{code}}]'
