@@ -1421,15 +1421,18 @@ impl PromPlanner {
         let field_column_pos = 0;
         let mut exprs = Vec::with_capacity(self.ctx.field_columns.len());
         let scalar_func = match func.name {
-            "increase" => ScalarFunc::ExtrapolateUdf(Arc::new(Increase::scalar_udf(
+            "increase" => ScalarFunc::ExtrapolateUdf(
+                Arc::new(Increase::scalar_udf()),
                 self.ctx.range.context(ExpectRangeSelectorSnafu)?,
-            ))),
-            "rate" => ScalarFunc::ExtrapolateUdf(Arc::new(Rate::scalar_udf(
+            ),
+            "rate" => ScalarFunc::ExtrapolateUdf(
+                Arc::new(Rate::scalar_udf()),
                 self.ctx.range.context(ExpectRangeSelectorSnafu)?,
-            ))),
-            "delta" => ScalarFunc::ExtrapolateUdf(Arc::new(Delta::scalar_udf(
+            ),
+            "delta" => ScalarFunc::ExtrapolateUdf(
+                Arc::new(Delta::scalar_udf()),
                 self.ctx.range.context(ExpectRangeSelectorSnafu)?,
-            ))),
+            ),
             "idelta" => ScalarFunc::Udf(Arc::new(IDelta::<false>::scalar_udf())),
             "irate" => ScalarFunc::Udf(Arc::new(IDelta::<true>::scalar_udf())),
             "resets" => ScalarFunc::Udf(Arc::new(Resets::scalar_udf())),
@@ -1691,7 +1694,7 @@ impl PromPlanner {
                     let _ = other_input_exprs.remove(field_column_pos + 1);
                     let _ = other_input_exprs.remove(field_column_pos);
                 }
-                ScalarFunc::ExtrapolateUdf(func) => {
+                ScalarFunc::ExtrapolateUdf(func, range_length) => {
                     let ts_range_expr = DfExpr::Column(Column::from_name(
                         RangeManipulate::build_timestamp_range_name(
                             self.ctx.time_index_column.as_ref().unwrap(),
@@ -1701,11 +1704,13 @@ impl PromPlanner {
                     other_input_exprs.insert(field_column_pos + 1, col_expr);
                     other_input_exprs
                         .insert(field_column_pos + 2, self.create_time_index_column_expr()?);
+                    other_input_exprs.push_back(lit(range_length));
                     let fn_expr = DfExpr::ScalarFunction(ScalarFunction {
                         func,
                         args: other_input_exprs.clone().into(),
                     });
                     exprs.push(fn_expr);
+                    let _ = other_input_exprs.pop_back();
                     let _ = other_input_exprs.remove(field_column_pos + 2);
                     let _ = other_input_exprs.remove(field_column_pos + 1);
                     let _ = other_input_exprs.remove(field_column_pos);
@@ -2935,7 +2940,8 @@ enum ScalarFunc {
     Udf(Arc<ScalarUdfDef>),
     // todo(ruihang): maybe merge with Udf later
     /// UDF that require extra information like range length to be evaluated.
-    ExtrapolateUdf(Arc<ScalarUdfDef>),
+    /// The second argument is range length.
+    ExtrapolateUdf(Arc<ScalarUdfDef>, i64),
     /// Func that doesn't require input, like `time()`.
     GeneratedExpr,
 }
@@ -3589,8 +3595,8 @@ mod test {
     async fn increase_aggr() {
         let query = "increase(some_metric[5m])";
         let expected = String::from(
-            "Filter: prom_increase(timestamp_range,field_0,timestamp) IS NOT NULL [timestamp:Timestamp(Millisecond, None), prom_increase(timestamp_range,field_0,timestamp):Float64;N, tag_0:Utf8]\
-            \n  Projection: some_metric.timestamp, prom_increase(timestamp_range, field_0, some_metric.timestamp) AS prom_increase(timestamp_range,field_0,timestamp), some_metric.tag_0 [timestamp:Timestamp(Millisecond, None), prom_increase(timestamp_range,field_0,timestamp):Float64;N, tag_0:Utf8]\
+            "Filter: prom_increase(timestamp_range,field_0,timestamp,Int64(300000)) IS NOT NULL [timestamp:Timestamp(Millisecond, None), prom_increase(timestamp_range,field_0,timestamp,Int64(300000)):Float64;N, tag_0:Utf8]\
+            \n  Projection: some_metric.timestamp, prom_increase(timestamp_range, field_0, some_metric.timestamp, Int64(300000)) AS prom_increase(timestamp_range,field_0,timestamp,Int64(300000)), some_metric.tag_0 [timestamp:Timestamp(Millisecond, None), prom_increase(timestamp_range,field_0,timestamp,Int64(300000)):Float64;N, tag_0:Utf8]\
             \n    PromRangeManipulate: req range=[0..100000000], interval=[5000], eval range=[300000], time index=[timestamp], values=[\"field_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Dictionary(Int64, Float64);N, timestamp_range:Dictionary(Int64, Timestamp(Millisecond, None))]\
             \n      PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [true] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n        PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\

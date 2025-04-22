@@ -49,7 +49,7 @@ pub fn quantile_udaf() -> Arc<AggregateUDF> {
         Arc::new(DataType::Float64),
         Volatility::Volatile,
         // Create the accumulator
-        Arc::new(move |args| QuantileAccumulator::from_args(args)),
+        Arc::new(QuantileAccumulator::from_args),
         // Intermediate state types
         Arc::new(vec![DataType::Struct(
             vec![Field::new(
