@@ -37,7 +37,7 @@ use crate::error::{self, Result};
 use crate::http::header::{write_cost_header_map, GREPTIME_DB_HEADER_METRICS};
 use crate::prom_store::{snappy_decompress, zstd_decompress};
 use crate::proto::PromWriteRequest;
-use crate::query_handler::{PromStoreProtocolHandlerRef, PromStoreResponse};
+use crate::query_handler::{PipelineHandlerRef, PromStoreProtocolHandlerRef, PromStoreResponse};
 
 pub const PHYSICAL_TABLE_PARAM: &str = "physical_table";
 lazy_static! {
@@ -52,6 +52,7 @@ pub const VM_PROTO_VERSION: &str = "1";
 #[derive(Clone)]
 pub struct PromStoreState {
     pub prom_store_handler: PromStoreProtocolHandlerRef,
+    pub pipeline_handler: Option<PipelineHandlerRef>,
     pub prom_store_with_metric_engine: bool,
     pub is_strict_mode: bool,
 }
@@ -90,6 +91,7 @@ pub async fn remote_write(
 ) -> Result<impl IntoResponse> {
     let PromStoreState {
         prom_store_handler,
+        pipeline_handler: _pipeline_handler,
         prom_store_with_metric_engine,
         is_strict_mode,
     } = state;

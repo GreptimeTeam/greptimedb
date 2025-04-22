@@ -530,7 +530,12 @@ pub async fn setup_test_prom_app_with_frontend(
     let http_server = HttpServerBuilder::new(http_opts)
         .with_sql_handler(ServerSqlQueryHandlerAdapter::arc(frontend_ref.clone()))
         .with_logs_handler(instance.fe_instance().clone())
-        .with_prom_handler(frontend_ref.clone(), true, is_strict_mode)
+        .with_prom_handler(
+            frontend_ref.clone(),
+            Some(frontend_ref.clone()),
+            true,
+            is_strict_mode,
+        )
         .with_prometheus_handler(frontend_ref)
         .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
         .build();

@@ -553,11 +553,13 @@ impl HttpServerBuilder {
     pub fn with_prom_handler(
         self,
         handler: PromStoreProtocolHandlerRef,
+        pipeline_handler: Option<PipelineHandlerRef>,
         prom_store_with_metric_engine: bool,
         is_strict_mode: bool,
     ) -> Self {
         let state = PromStoreState {
             prom_store_handler: handler,
+            pipeline_handler,
             prom_store_with_metric_engine,
             is_strict_mode,
         };
