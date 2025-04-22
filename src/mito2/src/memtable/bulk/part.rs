@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use api::v1::Mutation;
 use bytes::Bytes;
+use common_recordbatch::DfRecordBatch;
 use common_time::timestamp::TimeUnit;
 use datafusion::arrow::array::{TimestampNanosecondArray, UInt64Builder};
 use datatypes::arrow;
@@ -53,13 +54,18 @@ use crate::sst::parquet::format::{PrimaryKeyArray, ReadFormat};
 use crate::sst::parquet::helper::parse_parquet_metadata;
 use crate::sst::to_sst_arrow_schema;
 
+pub enum BulkPart {
+    RecordBatch(DfRecordBatch),
+    Binary(EncodedBulkPart),
+}
+
 #[derive(Debug)]
-pub struct BulkPart {
+pub struct EncodedBulkPart {
     data: Bytes,
     metadata: BulkPartMeta,
 }
 
-impl BulkPart {
+impl EncodedBulkPart {
     pub fn new(data: Bytes, metadata: BulkPartMeta) -> Self {
         Self { data, metadata }
     }
@@ -138,8 +144,8 @@ impl BulkPartEncoder {
 }
 
 impl BulkPartEncoder {
-    /// Encodes mutations to a [BulkPart], returns true if encoded data has been written to `dest`.
-    fn encode_mutations(&self, mutations: &[Mutation]) -> Result<Option<BulkPart>> {
+    /// Encodes mutations to a [EncodedBulkPart], returns true if encoded data has been written to `dest`.
+    fn encode_mutations(&self, mutations: &[Mutation]) -> Result<Option<EncodedBulkPart>> {
         let Some((arrow_record_batch, min_ts, max_ts)) =
             mutations_to_record_batch(mutations, &self.metadata, &self.pk_encoder, self.dedup)?
         else {
@@ -162,7 +168,7 @@ impl BulkPartEncoder {
         let buf = Bytes::from(buf);
         let parquet_metadata = Arc::new(parse_parquet_metadata(file_metadata)?);
 
-        Ok(Some(BulkPart {
+        Ok(Some(EncodedBulkPart {
             data: buf,
             metadata: BulkPartMeta {
                 num_rows: arrow_record_batch.num_rows(),
@@ -742,7 +748,7 @@ mod tests {
         );
     }
 
-    fn encode(input: &[MutationInput]) -> BulkPart {
+    fn encode(input: &[MutationInput]) -> EncodedBulkPart {
         let metadata = metadata_for_test();
         let mutations = input
             .iter()
@@ -823,7 +829,7 @@ mod tests {
         assert_eq!(vec![0.1, 0.2, 0.0], field);
     }
 
-    fn prepare(key_values: Vec<(&str, u32, (i64, i64), u64)>) -> BulkPart {
+    fn prepare(key_values: Vec<(&str, u32, (i64, i64), u64)>) -> EncodedBulkPart {
         let metadata = metadata_for_test();
         let mutations = key_values
             .into_iter()
@@ -838,7 +844,11 @@ mod tests {
         encoder.encode_mutations(&mutations).unwrap().unwrap()
     }
 
-    fn check_prune_row_group(part: &BulkPart, predicate: Option<Predicate>, expected_rows: usize) {
+    fn check_prune_row_group(
+        part: &EncodedBulkPart,
+        predicate: Option<Predicate>,
+        expected_rows: usize,
+    ) {
         let context = Arc::new(BulkIterContext::new(
             part.metadata.region_metadata.clone(),
             &None,

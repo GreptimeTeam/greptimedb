@@ -30,11 +30,12 @@ use store_api::storage::{ColumnId, RegionId, SequenceNumber};
 use table::predicate::Predicate;
 
 use crate::error::Result;
+use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::partition_tree::data::{timestamp_array_to_i64_slice, DataBatch, DataBuffer};
 use crate::memtable::{
-    BoxedBatchIterator, BulkPart, KeyValues, Memtable, MemtableBuilder, MemtableId, MemtableRanges,
-    MemtableRef, MemtableStats,
+    BoxedBatchIterator, EncodedBulkPart, KeyValues, Memtable, MemtableBuilder, MemtableId,
+    MemtableRanges, MemtableRef, MemtableStats,
 };
 use crate::read::scan_region::PredicateGroup;
 use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt, SortField};

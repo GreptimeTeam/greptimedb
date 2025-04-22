@@ -19,7 +19,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-pub use bulk::part::BulkPart;
+pub use bulk::part::EncodedBulkPart;
 use common_time::Timestamp;
 use serde::{Deserialize, Serialize};
 use store_api::metadata::RegionMetadataRef;
@@ -29,6 +29,7 @@ use table::predicate::Predicate;
 use crate::config::MitoConfig;
 use crate::error::Result;
 use crate::flush::WriteBufferManagerRef;
+use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::key_values::KeyValue;
 pub use crate::memtable::key_values::KeyValues;
 use crate::memtable::partition_tree::{PartitionTreeConfig, PartitionTreeMemtableBuilder};

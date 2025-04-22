@@ -17,18 +17,21 @@ use std::fmt::{Debug, Formatter};
 use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
+use api::v1::OpType;
+use datatypes::vectors::{Helper, UInt64Vector, UInt8Vector};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, SequenceNumber};
 use table::predicate::Predicate;
 
 use crate::error;
 use crate::flush::WriteBufferManagerRef;
+use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::stats::WriteMetrics;
 use crate::memtable::time_series::{Series, Values};
 use crate::memtable::{
-    AllocTracker, BoxedBatchIterator, BulkPart, IterBuilder, KeyValues, Memtable, MemtableId,
-    MemtableRange, MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats,
+    AllocTracker, BoxedBatchIterator, IterBuilder, KeyValues, Memtable, MemtableId, MemtableRange,
+    MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats,
 };
 use crate::read::dedup::LastNonNullIter;
 use crate::read::scan_region::PredicateGroup;
@@ -163,8 +166,35 @@ impl Memtable for SimpleBulkMemtable {
         Ok(())
     }
 
-    fn write_bulk(&self, _part: BulkPart) -> error::Result<()> {
-        todo!()
+    fn write_bulk(&self, part: BulkPart) -> error::Result<()> {
+        let BulkPart::RecordBatch(rb) = part else {
+            return error::UnsupportedOperationSnafu {
+                err_msg: "Writing binary bulk parts is not supported yet",
+            }
+            .fail();
+        };
+
+        let rows_to_write = rb.num_rows();
+        let ts = Helper::try_into_vector(
+            rb.column_by_name(&self.region_metadata.time_index_column().column_schema.name)
+                .unwrap(),
+        )
+        .unwrap();
+        let sequence = UInt64Vector::from_vec(vec![0; rows_to_write]);
+        let op_type = UInt8Vector::from_vec(vec![OpType::Put as u8; rows_to_write]);
+
+        let fields: Vec<_> = self
+            .region_metadata
+            .field_columns()
+            .map(|f| {
+                Helper::try_into_vector(rb.column_by_name(&f.column_schema.name).unwrap()).unwrap()
+            })
+            .collect();
+        let mut series = self.series.write().unwrap();
+        series
+            .extend(ts, op_type, sequence, fields.into_iter())
+            .unwrap();
+        Ok(())
     }
 
     fn iter(

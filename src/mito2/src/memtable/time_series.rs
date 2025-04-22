@@ -26,28 +26,30 @@ use common_time::Timestamp;
 use datatypes::arrow;
 use datatypes::arrow::array::ArrayRef;
 use datatypes::data_type::{ConcreteDataType, DataType};
-use datatypes::prelude::{MutableVector, Vector, VectorRef};
+use datatypes::prelude::{MutableVector, ScalarVector, ScalarVectorBuilder, Vector, VectorRef};
 use datatypes::types::TimestampType;
 use datatypes::value::{Value, ValueRef};
 use datatypes::vectors::{
     Helper, TimestampMicrosecondVector, TimestampMillisecondVector, TimestampNanosecondVector,
-    TimestampSecondVector, UInt64Vector, UInt8Vector,
+    TimestampSecondVector, UInt64Vector, UInt64VectorBuilder, UInt8Vector, UInt8VectorBuilder,
 };
 use snafu::{ensure, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, SequenceNumber};
 use table::predicate::Predicate;
 
+use crate::error;
 use crate::error::{
     ComputeArrowSnafu, ConvertVectorSnafu, PrimaryKeyLengthMismatchSnafu, Result,
     UnsupportedOperationSnafu,
 };
 use crate::flush::WriteBufferManagerRef;
+use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::simple_bulk_memtable::SimpleBulkMemtable;
 use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{
-    AllocTracker, BoxedBatchIterator, BulkPart, IterBuilder, KeyValues, Memtable, MemtableBuilder,
+    AllocTracker, BoxedBatchIterator, IterBuilder, KeyValues, Memtable, MemtableBuilder,
     MemtableId, MemtableRange, MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats,
     PredicateGroup,
 };
@@ -698,6 +700,16 @@ impl Series {
         }
     }
 
+    pub(crate) fn extend(
+        &mut self,
+        ts_v: VectorRef,
+        op_type_v: UInt8Vector,
+        sequence_v: UInt64Vector,
+        fields: impl Iterator<Item = VectorRef>,
+    ) -> error::Result<()> {
+        self.active.extend(ts_v, op_type_v, sequence_v, fields)
+    }
+
     /// Freezes active part to frozen part and compact frozen part to reduce memory fragmentation.
     /// Returns the frozen and compacted values.
     pub(crate) fn compact(&mut self, region_metadata: &RegionMetadataRef) -> Result<&Values> {
@@ -742,8 +754,8 @@ impl Series {
 struct ValueBuilder {
     timestamp: Vec<i64>,
     timestamp_type: ConcreteDataType,
-    sequence: Vec<u64>,
-    op_type: Vec<u8>,
+    sequence: UInt64VectorBuilder,
+    op_type: UInt8VectorBuilder,
     fields: Vec<Option<Box<dyn MutableVector>>>,
     field_types: Vec<ConcreteDataType>,
 }
@@ -755,8 +767,8 @@ impl ValueBuilder {
             .column_schema
             .data_type
             .clone();
-        let sequence = Vec::with_capacity(capacity);
-        let op_type = Vec::with_capacity(capacity);
+        let sequence = UInt64VectorBuilder::with_capacity(capacity);
+        let op_type = UInt8VectorBuilder::with_capacity(capacity);
 
         let field_types = region_metadata
             .field_columns()
@@ -795,8 +807,8 @@ impl ValueBuilder {
 
         self.timestamp
             .push(ts.as_timestamp().unwrap().unwrap().value());
-        self.sequence.push(sequence);
-        self.op_type.push(op_type);
+        self.sequence.push(Some(sequence));
+        self.op_type.push(Some(op_type));
         let num_rows = self.timestamp.len();
         let mut size = 0;
         for (idx, field_value) in fields.enumerate() {
@@ -815,6 +827,76 @@ impl ValueBuilder {
         }
 
         size
+    }
+
+    pub(crate) fn extend(
+        &mut self,
+        ts_v: VectorRef,
+        op_type_v: UInt8Vector,
+        sequence_v: UInt64Vector,
+        fields: impl Iterator<Item = VectorRef>,
+    ) -> error::Result<()> {
+        let num_rows_before = self.timestamp.len();
+        match self.timestamp_type {
+            ConcreteDataType::Timestamp(TimestampType::Second(_)) => {
+                self.timestamp.extend(
+                    ts_v.as_any()
+                        .downcast_ref::<TimestampSecondVector>()
+                        .unwrap()
+                        .iter_data()
+                        .map(|v| v.unwrap().0.value()),
+                );
+            }
+            ConcreteDataType::Timestamp(TimestampType::Millisecond(_)) => {
+                self.timestamp.extend(
+                    ts_v.as_any()
+                        .downcast_ref::<TimestampMillisecondVector>()
+                        .unwrap()
+                        .iter_data()
+                        .map(|v| v.unwrap().0.value()),
+                );
+            }
+            ConcreteDataType::Timestamp(TimestampType::Microsecond(_)) => {
+                self.timestamp.extend(
+                    ts_v.as_any()
+                        .downcast_ref::<TimestampMicrosecondVector>()
+                        .unwrap()
+                        .iter_data()
+                        .map(|v| v.unwrap().0.value()),
+                );
+            }
+            ConcreteDataType::Timestamp(TimestampType::Nanosecond(_)) => {
+                self.timestamp.extend(
+                    ts_v.as_any()
+                        .downcast_ref::<TimestampNanosecondVector>()
+                        .unwrap()
+                        .iter_data()
+                        .map(|v| v.unwrap().0.value()),
+                );
+            }
+            _ => unreachable!(),
+        };
+
+        let num_rows_to_write = ts_v.len();
+        self.op_type
+            .extend_slice_of(&op_type_v, 0, op_type_v.len())
+            .unwrap();
+        self.sequence
+            .extend_slice_of(&sequence_v, 0, op_type_v.len())
+            .unwrap();
+        for (field_idx, (field_src, field_dest)) in fields.zip(self.fields.iter_mut()).enumerate() {
+            field_dest
+                .get_or_insert_with(|| {
+                    let mut mutable_vector = self.field_types[field_idx]
+                        .create_mutable_vector(num_rows_before + num_rows_to_write);
+                    mutable_vector.push_nulls(num_rows_before);
+                    mutable_vector
+                })
+                .extend_slice_of(&*field_src, 0, field_src.len())
+                .unwrap();
+        }
+
+        Ok(())
     }
 
     /// Returns the length of [ValueBuilder]
@@ -914,8 +996,8 @@ impl From<ValueBuilder> for Values {
                 }
             })
             .collect::<Vec<_>>();
-        let sequence = Arc::new(UInt64Vector::from_vec(value.sequence));
-        let op_type = Arc::new(UInt8Vector::from_vec(value.op_type));
+        let sequence = Arc::new(value.sequence.finish());
+        let op_type = Arc::new(value.op_type.finish());
         let timestamp: VectorRef = match value.timestamp_type {
             ConcreteDataType::Timestamp(TimestampType::Second(_)) => {
                 Arc::new(TimestampSecondVector::from_vec(value.timestamp))
