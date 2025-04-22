@@ -3156,7 +3156,8 @@ mod test {
         let fetch_bound = 100;
 
         let mut rng = fastrand::Rng::new();
-        rng.seed(1337);
+        let rng_seed = rng.u64(..);
+        rng.seed(rng_seed);
         let mut bound_val = None;
         // construct testcases
         type CmpFn<T> = Box<dyn FnMut(&T, &T) -> std::cmp::Ordering>;
@@ -3299,8 +3300,8 @@ mod test {
             }
             assert_eq!(
                 res_concat, expected_concat,
-                "case failed, case id: {}",
-                case_id
+                "case failed, case id: {}, rng seed: {}",
+                case_id, rng_seed
             );
         }
     }
