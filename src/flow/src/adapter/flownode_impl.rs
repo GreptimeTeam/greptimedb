@@ -364,13 +364,13 @@ impl ConsistentCheckTask {
             .send((allow_create, allow_drop, tx))
             .await
             .map_err(|_| {
-                UnexpectedSnafu {
+                IllegalCheckTaskStateSnafu {
                     reason: "Failed to send trigger signal",
                 }
                 .build()
             })?;
         rx.await.map_err(|_| {
-            UnexpectedSnafu {
+            IllegalCheckTaskStateSnafu {
                 reason: "Failed to receive trigger signal",
             }
             .build()
@@ -380,7 +380,7 @@ impl ConsistentCheckTask {
 
     async fn stop(self) -> Result<(), Error> {
         self.shutdown_tx.send(()).await.map_err(|_| {
-            UnexpectedSnafu {
+            IllegalCheckTaskStateSnafu {
                 reason: "Failed to send shutdown signal",
             }
             .build()
