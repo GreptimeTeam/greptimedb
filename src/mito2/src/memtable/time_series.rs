@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use api::v1::OpType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
-use common_telemetry::{debug, error};
+use common_telemetry::{debug, error, info};
 use common_time::Timestamp;
 use datatypes::arrow;
 use datatypes::arrow::array::ArrayRef;
@@ -44,6 +44,7 @@ use crate::error::{
 };
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::key_values::KeyValue;
+use crate::memtable::simple_bulk_memtable::SimpleBulkMemtable;
 use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{
     AllocTracker, BoxedBatchIterator, BulkPart, IterBuilder, KeyValues, Memtable, MemtableBuilder,
@@ -87,13 +88,24 @@ impl TimeSeriesMemtableBuilder {
 
 impl MemtableBuilder for TimeSeriesMemtableBuilder {
     fn build(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef {
-        Arc::new(TimeSeriesMemtable::new(
-            metadata.clone(),
-            id,
-            self.write_buffer_manager.clone(),
-            self.dedup,
-            self.merge_mode,
-        ))
+        if metadata.primary_key.is_empty() {
+            info!("No primary key provided, use SimpleBulkMemtable");
+            Arc::new(SimpleBulkMemtable::new(
+                id,
+                metadata.clone(),
+                self.write_buffer_manager.clone(),
+                self.dedup,
+                self.merge_mode,
+            ))
+        } else {
+            Arc::new(TimeSeriesMemtable::new(
+                metadata.clone(),
+                id,
+                self.write_buffer_manager.clone(),
+                self.dedup,
+                self.merge_mode,
+            ))
+        }
     }
 }
 
@@ -348,10 +360,10 @@ impl Memtable for TimeSeriesMemtable {
 type SeriesRwLockMap = RwLock<BTreeMap<Vec<u8>, Arc<RwLock<Series>>>>;
 
 #[derive(Clone)]
-struct SeriesSet {
-    region_metadata: RegionMetadataRef,
-    series: Arc<SeriesRwLockMap>,
-    codec: Arc<DensePrimaryKeyCodec>,
+pub(crate) struct SeriesSet {
+    pub(crate) region_metadata: RegionMetadataRef,
+    pub(crate) series: Arc<SeriesRwLockMap>,
+    pub(crate) codec: Arc<DensePrimaryKeyCodec>,
 }
 
 impl SeriesSet {
@@ -636,7 +648,7 @@ fn prune_primary_key(
 }
 
 /// A `Series` holds a list of field values of some given primary key.
-struct Series {
+pub(crate) struct Series {
     pk_cache: Option<Vec<Value>>,
     active: ValueBuilder,
     frozen: Vec<Values>,
@@ -644,7 +656,7 @@ struct Series {
 }
 
 impl Series {
-    fn new(region_metadata: &RegionMetadataRef) -> Self {
+    pub(crate) fn new(region_metadata: &RegionMetadataRef) -> Self {
         Self {
             pk_cache: None,
             active: ValueBuilder::new(region_metadata, INITIAL_BUILDER_CAPACITY),
@@ -653,8 +665,12 @@ impl Series {
         }
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.active.len() == 0 && self.frozen.is_empty()
+    }
+
     /// Pushes a row of values into Series. Return the size of values.
-    fn push<'a>(
+    pub(crate) fn push<'a>(
         &mut self,
         ts: ValueRef<'a>,
         sequence: u64,
@@ -674,7 +690,7 @@ impl Series {
     }
 
     /// Freezes the active part and push it to `frozen`.
-    fn freeze(&mut self, region_metadata: &RegionMetadataRef) {
+    pub(crate) fn freeze(&mut self, region_metadata: &RegionMetadataRef) {
         if self.active.len() != 0 {
             let mut builder = ValueBuilder::new(region_metadata, INITIAL_BUILDER_CAPACITY);
             std::mem::swap(&mut self.active, &mut builder);
@@ -684,7 +700,7 @@ impl Series {
 
     /// Freezes active part to frozen part and compact frozen part to reduce memory fragmentation.
     /// Returns the frozen and compacted values.
-    fn compact(&mut self, region_metadata: &RegionMetadataRef) -> Result<&Values> {
+    pub(crate) fn compact(&mut self, region_metadata: &RegionMetadataRef) -> Result<&Values> {
         self.freeze(region_metadata);
 
         let frozen = &self.frozen;
@@ -733,7 +749,7 @@ struct ValueBuilder {
 }
 
 impl ValueBuilder {
-    fn new(region_metadata: &RegionMetadataRef, capacity: usize) -> Self {
+    pub(crate) fn new(region_metadata: &RegionMetadataRef, capacity: usize) -> Self {
         let timestamp_type = region_metadata
             .time_index_column()
             .column_schema
@@ -812,7 +828,7 @@ impl ValueBuilder {
 
 /// [Values] holds an immutable vectors of field columns, including `sequence` and `op_type`.
 #[derive(Clone)]
-struct Values {
+pub(crate) struct Values {
     timestamp: VectorRef,
     sequence: Arc<UInt64Vector>,
     op_type: Arc<UInt8Vector>,
