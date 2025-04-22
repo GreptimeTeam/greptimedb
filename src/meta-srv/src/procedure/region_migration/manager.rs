@@ -267,8 +267,8 @@ impl RegionMigrationManager {
 
         ensure!(
             leader_peer.id == task.from_peer.id,
-            error::InvalidArgumentsSnafu {
-                err_msg: format!(
+            error::LeaderPeerChangedSnafu {
+                msg: format!(
                     "Region's leader peer({}) is not the `from_peer`({}), region: {}",
                     leader_peer.id, task.from_peer.id, task.region_id
                 ),
@@ -507,8 +507,8 @@ mod test {
             .await;
 
         let err = manager.submit_procedure(task).await.unwrap_err();
-        assert_matches!(err, error::Error::InvalidArguments { .. });
-        assert_eq!(err.to_string(), "Invalid arguments: Region's leader peer(3) is not the `from_peer`(1), region: 4398046511105(1024, 1)");
+        assert_matches!(err, error::Error::LeaderPeerChanged { .. });
+        assert_eq!(err.to_string(), "Region's leader peer changed: Region's leader peer(3) is not the `from_peer`(1), region: 4398046511105(1024, 1)");
     }
 
     #[tokio::test]

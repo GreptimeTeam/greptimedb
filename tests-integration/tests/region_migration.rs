@@ -847,7 +847,7 @@ pub async fn test_region_migration_incorrect_from_peer(
 
     assert!(matches!(
         err,
-        meta_srv::error::Error::InvalidArguments { .. }
+        meta_srv::error::Error::LeaderPeerChanged { .. }
     ));
 }
 

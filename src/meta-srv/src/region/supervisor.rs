@@ -26,7 +26,7 @@ use common_meta::DatanodeId;
 use common_runtime::JoinHandle;
 use common_telemetry::{error, info, warn};
 use common_time::util::current_time_millis;
-use error::Error::{MigrationRunning, TableRouteNotFound};
+use error::Error::{LeaderPeerChanged, MigrationRunning, TableRouteNotFound};
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -363,15 +363,15 @@ impl RegionSupervisor {
 
         for (datanode_id, region_id) in migrating_regions {
             self.failure_detector.remove(&(datanode_id, region_id));
+            warn!(
+                "Removed region failover for region: {region_id}, datanode: {datanode_id} because it's migrating"
+            );
         }
 
         warn!("Detects region failures: {:?}", regions);
         for (datanode_id, region_id) in regions {
-            match self.do_failover(datanode_id, region_id).await {
-                Ok(_) => self.failure_detector.remove(&(datanode_id, region_id)),
-                Err(err) => {
-                    error!(err; "Failed to execute region failover for region: {region_id}, datanode: {datanode_id}");
-                }
+            if let Err(err) = self.do_failover(datanode_id, region_id).await {
+                error!(err; "Failed to execute region failover for region: {region_id}, datanode: {datanode_id}");
             }
         }
     }
@@ -421,7 +421,29 @@ impl RegionSupervisor {
         if let Err(err) = self.region_migration_manager.submit_procedure(task).await {
             return match err {
                 // Returns Ok if it's running or table is dropped.
-                MigrationRunning { .. } | TableRouteNotFound { .. } => Ok(()),
+                MigrationRunning { .. } => {
+                    info!(
+                        "Another region migration is running, skip failover for region: {}, datanode: {}",
+                        region_id, datanode_id
+                    );
+                    Ok(())
+                }
+                TableRouteNotFound { .. } => {
+                    self.failure_detector.remove(&(datanode_id, region_id));
+                    info!(
+                        "Table route is not found, the table is dropped, removed failover detector for region: {}, datanode: {}",
+                        region_id, datanode_id
+                    );
+                    Ok(())
+                }
+                LeaderPeerChanged { .. } => {
+                    self.failure_detector.remove(&(datanode_id, region_id));
+                    info!(
+                        "Region's leader peer changed, removed failover detector for region: {}, datanode: {}",
+                        region_id, datanode_id
+                    );
+                    Ok(())
+                }
                 err => Err(err),
             };
         };

@@ -336,6 +336,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Region's leader peer changed: {}", msg))]
+    LeaderPeerChanged {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid arguments: {}", err_msg))]
     InvalidArguments {
         err_msg: String,
@@ -914,7 +921,8 @@ impl ErrorExt for Error {
             | Error::ProcedureNotFound { .. }
             | Error::TooManyPartitions { .. }
             | Error::TomlFormat { .. }
-            | Error::HandlerNotFound { .. } => StatusCode::InvalidArguments,
+            | Error::HandlerNotFound { .. }
+            | Error::LeaderPeerChanged { .. } => StatusCode::InvalidArguments,
             Error::LeaseKeyFromUtf8 { .. }
             | Error::LeaseValueFromUtf8 { .. }
             | Error::InvalidRegionKeyFromUtf8 { .. }
