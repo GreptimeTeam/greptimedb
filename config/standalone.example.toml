@@ -693,6 +693,9 @@ fork_dictionary_bytes = "1GiB"
 ## Whether to enable the experimental sparse primary key encoding.
 experimental_sparse_primary_key_encoding = false
 
+## The interval to flush the metadata region.
+flush_metadata_region_interval = "30s"
+
 ## The logging options.
 [logging]
 ## The directory to store the log files. If set to empty, logs will not be written to files.
