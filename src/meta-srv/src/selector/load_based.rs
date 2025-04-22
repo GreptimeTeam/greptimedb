@@ -26,7 +26,7 @@ use crate::error::{self, Result};
 use crate::key::{DatanodeLeaseKey, LeaseValue};
 use crate::lease;
 use crate::metasrv::SelectorContext;
-use crate::selector::common::choose_items;
+use crate::selector::common::{choose_items, filter_out_excluded_peers};
 use crate::selector::weight_compute::{RegionNumsBasedWeightCompute, WeightCompute};
 use crate::selector::weighted_choose::RandomWeightedChoose;
 use crate::selector::{Selector, SelectorOptions};
@@ -85,9 +85,10 @@ where
         };
 
         // 4. compute weight array.
-        let weight_array = self.weight_compute.compute(&stat_kvs);
+        let mut weight_array = self.weight_compute.compute(&stat_kvs);
 
         // 5. choose peers by weight_array.
+        filter_out_excluded_peers(&mut weight_array, &opts.exclude_peer_ids);
         let mut weighted_choose = RandomWeightedChoose::new(weight_array);
         let selected = choose_items(&opts, &mut weighted_choose)?;
 

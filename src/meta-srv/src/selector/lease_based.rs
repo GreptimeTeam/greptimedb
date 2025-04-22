@@ -17,7 +17,7 @@ use common_meta::peer::Peer;
 use crate::error::Result;
 use crate::lease;
 use crate::metasrv::SelectorContext;
-use crate::selector::common::choose_items;
+use crate::selector::common::{choose_items, filter_out_excluded_peers};
 use crate::selector::weighted_choose::{RandomWeightedChoose, WeightedItem};
 use crate::selector::{Selector, SelectorOptions};
 
@@ -35,7 +35,7 @@ impl Selector for LeaseBasedSelector {
             lease::alive_datanodes(&ctx.meta_peer_client, ctx.datanode_lease_secs).await?;
 
         // 2. compute weight array, but the weight of each item is the same.
-        let weight_array = lease_kvs
+        let mut weight_array = lease_kvs
             .into_iter()
             .map(|(k, v)| WeightedItem {
                 item: Peer {
@@ -47,6 +47,7 @@ impl Selector for LeaseBasedSelector {
             .collect();
 
         // 3. choose peers by weight_array.
+        filter_out_excluded_peers(&mut weight_array, &opts.exclude_peer_ids);
         let mut weighted_choose = RandomWeightedChoose::new(weight_array);
         let selected = choose_items(&opts, &mut weighted_choose)?;
 

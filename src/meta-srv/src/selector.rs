@@ -20,6 +20,9 @@ pub mod round_robin;
 pub(crate) mod test_utils;
 mod weight_compute;
 pub mod weighted_choose;
+use std::collections::HashSet;
+
+use common_meta::DatanodeId;
 use serde::{Deserialize, Serialize};
 use strum::AsRefStr;
 
@@ -40,6 +43,8 @@ pub struct SelectorOptions {
     pub min_required_items: usize,
     /// Whether duplicates are allowed in the selected result, default false.
     pub allow_duplication: bool,
+    /// The peers to exclude from the selection.
+    pub exclude_peer_ids: HashSet<DatanodeId>,
 }
 
 impl Default for SelectorOptions {
@@ -47,6 +52,7 @@ impl Default for SelectorOptions {
         Self {
             min_required_items: 1,
             allow_duplication: false,
+            exclude_peer_ids: HashSet::new(),
         }
     }
 }
