@@ -274,6 +274,7 @@ impl FlowDualEngine {
         Ok(())
     }
 
+    // TODO(discord9): consider sync this with heartbeat(might become necessary in the future)
     pub async fn start_flow_consistent_check_task(self: &Arc<Self>) -> Result<(), Error> {
         let mut check_task = self.check_task.lock().await;
         ensure!(
