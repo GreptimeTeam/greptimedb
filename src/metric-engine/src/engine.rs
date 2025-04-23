@@ -35,7 +35,6 @@ use async_trait::async_trait;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_runtime::RepeatedTask;
-use common_telemetry::warn;
 use mito2::engine::MitoEngine;
 pub(crate) use options::IndexOptions;
 use snafu::ResultExt;
@@ -50,7 +49,7 @@ use store_api::region_engine::{
 use store_api::region_request::{BatchRegionDdlRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 
-use crate::config::{EngineConfig, DEFAULT_FLUSH_METADATA_REGION_INTERVAL};
+use crate::config::EngineConfig;
 use crate::data_region::DataRegion;
 use crate::error::{self, Error, Result, StartRepeatedTaskSnafu, UnsupportedRegionRequestSnafu};
 use crate::metadata_region::MetadataRegion;
@@ -362,19 +361,12 @@ impl RegionEngine for MetricEngine {
 }
 
 impl MetricEngine {
-    pub fn try_new(mito: MitoEngine, config: EngineConfig) -> Result<Self> {
+    pub fn try_new(mito: MitoEngine, mut config: EngineConfig) -> Result<Self> {
         let metadata_region = MetadataRegion::new(mito.clone());
         let data_region = DataRegion::new(mito.clone());
         let state = Arc::new(RwLock::default());
-        let flush_interval = if config.flush_metadata_region_interval.is_zero() {
-            warn!(
-                "Flush metadata region interval is zero, override with default value: {:?}. Disable metadata region flush is forbidden.",
-                DEFAULT_FLUSH_METADATA_REGION_INTERVAL
-            );
-            DEFAULT_FLUSH_METADATA_REGION_INTERVAL
-        } else {
-            config.flush_metadata_region_interval
-        };
+        config.sanitize();
+        let flush_interval = config.flush_metadata_region_interval;
         let inner = Arc::new(MetricEngineInner {
             mito: mito.clone(),
             metadata_region,
@@ -448,6 +440,11 @@ impl MetricEngine {
         request: ScanRequest,
     ) -> Result<common_recordbatch::SendableRecordBatchStream, BoxedError> {
         self.inner.scan_to_stream(region_id, request).await
+    }
+
+    /// Returns the configuration of the engine.
+    pub fn config(&self) -> &EngineConfig {
+        &self.inner.config
     }
 }
 

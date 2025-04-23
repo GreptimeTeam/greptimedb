@@ -14,6 +14,7 @@
 
 use std::time::Duration;
 
+use common_telemetry::warn;
 use serde::{Deserialize, Serialize};
 
 /// The default flush interval of the metadata region.  
@@ -34,6 +35,19 @@ impl Default for EngineConfig {
         Self {
             flush_metadata_region_interval: DEFAULT_FLUSH_METADATA_REGION_INTERVAL,
             experimental_sparse_primary_key_encoding: false,
+        }
+    }
+}
+
+impl EngineConfig {
+    /// Sanitizes the configuration.
+    pub fn sanitize(&mut self) {
+        if self.flush_metadata_region_interval.is_zero() {
+            warn!(
+                "Flush metadata region interval is zero, override with default value: {:?}. Disable metadata region flush is forbidden.",
+                DEFAULT_FLUSH_METADATA_REGION_INTERVAL
+            );
+            self.flush_metadata_region_interval = DEFAULT_FLUSH_METADATA_REGION_INTERVAL;
         }
     }
 }

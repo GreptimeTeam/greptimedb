@@ -18,7 +18,7 @@ use std::time::Instant;
 use common_runtime::TaskFunction;
 use common_telemetry::{debug, error};
 use mito2::engine::MitoEngine;
-use store_api::region_engine::RegionEngine;
+use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{RegionFlushRequest, RegionRequest};
 
 use crate::engine::MetricEngineState;
@@ -53,6 +53,12 @@ impl TaskFunction<Error> for FlushMetadataRegionTask {
         let num_region = region_ids.len();
         let now = Instant::now();
         for region_id in region_ids {
+            let Some(role) = self.mito.role(region_id) else {
+                continue;
+            };
+            if role == RegionRole::Follower {
+                continue;
+            }
             let metadata_region_id = utils::to_metadata_region_id(region_id);
             if let Err(e) = self
                 .mito
@@ -84,7 +90,7 @@ mod tests {
 
     use store_api::region_engine::{RegionEngine, RegionManifestInfo};
 
-    use crate::config::EngineConfig;
+    use crate::config::{EngineConfig, DEFAULT_FLUSH_METADATA_REGION_INTERVAL};
     use crate::test_util::TestEnv;
 
     #[tokio::test]
@@ -117,7 +123,7 @@ mod tests {
     #[tokio::test]
     async fn test_flush_metadata_region_task_with_long_interval() {
         let env = TestEnv::with_prefix_and_config(
-            "test_flush_metadata_region_task",
+            "test_flush_metadata_region_task_with_long_interval",
             EngineConfig {
                 flush_metadata_region_interval: Duration::from_secs(60),
                 ..Default::default()
@@ -139,5 +145,23 @@ mod tests {
                 ..
             }
         )
+    }
+
+    #[tokio::test]
+    async fn test_flush_metadata_region_sanitize() {
+        let env = TestEnv::with_prefix_and_config(
+            "test_flush_metadata_region_sanitize",
+            EngineConfig {
+                flush_metadata_region_interval: Duration::from_secs(0),
+                ..Default::default()
+            },
+        )
+        .await;
+        let metric = env.metric();
+        let config = metric.config();
+        assert_eq!(
+            config.flush_metadata_region_interval,
+            DEFAULT_FLUSH_METADATA_REGION_INTERVAL
+        );
     }
 }
