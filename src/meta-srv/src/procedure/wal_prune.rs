@@ -335,6 +335,7 @@ impl WalPruneProcedure {
             })?;
         partition_client
             .delete_records(
+                // notice here no "+1" is needed because the offset arg is exclusive, and it's defensive programming just in case somewhere else have a off by one error, see https://kafka.apache.org/36/javadoc/org/apache/kafka/clients/consumer/KafkaConsumer.html#endOffsets(java.util.Collection) which we use to get the end offset from high watermark
                 self.data.prunable_entry_id as i64,
                 DELETE_RECORDS_TIMEOUT.as_millis() as i32,
             )
