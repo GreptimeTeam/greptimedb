@@ -335,7 +335,7 @@ impl WalPruneProcedure {
             })?;
         partition_client
             .delete_records(
-                (self.data.prunable_entry_id) as i64,
+                self.data.prunable_entry_id as i64,
                 DELETE_RECORDS_TIMEOUT.as_millis() as i32,
             )
             .await
