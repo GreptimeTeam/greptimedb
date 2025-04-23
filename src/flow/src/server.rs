@@ -401,6 +401,7 @@ impl FlownodeBuilder {
         let cnt = to_be_recovered.len();
 
         // TODO(discord9): recover in parallel
+        info!("Recovering {} flows: {:?}", cnt, to_be_recovered);
         for flow_id in to_be_recovered {
             let info = self
                 .flow_metadata_manager
@@ -416,6 +417,7 @@ impl FlownodeBuilder {
                 info.sink_table_name().schema_name.clone(),
                 info.sink_table_name().table_name.clone(),
             ];
+
             let args = CreateFlowArgs {
                 flow_id: flow_id as _,
                 sink_table_name,
@@ -429,11 +431,24 @@ impl FlownodeBuilder {
                 comment: Some(info.comment().clone()),
                 sql: info.raw_sql().clone(),
                 flow_options: info.options().clone(),
-                query_ctx: Some(
-                    QueryContextBuilder::default()
-                        .current_catalog(info.catalog_name().clone())
-                        .build(),
-                ),
+                query_ctx: info
+                    .query_context()
+                    .clone()
+                    .map(|ctx| {
+                        ctx.try_into()
+                            .map_err(BoxedError::new)
+                            .context(ExternalSnafu)
+                    })
+                    .transpose()?
+                    // or use default QueryContext with catalog_name from info
+                    // to keep compatibility with old version
+                    .or_else(|| {
+                        Some(
+                            QueryContextBuilder::default()
+                                .current_catalog(info.catalog_name().to_string())
+                                .build(),
+                        )
+                    }),
             };
             manager
                 .create_flow_inner(args)

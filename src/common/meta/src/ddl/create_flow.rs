@@ -437,6 +437,7 @@ impl From<&CreateFlowData> for (FlowInfoValue, Vec<(FlowPartitionId, FlowRouteVa
             sink_table_name,
             flownode_ids,
             catalog_name,
+            query_context: Some(value.query_context.clone()),
             flow_name,
             raw_sql: sql,
             expire_after,
