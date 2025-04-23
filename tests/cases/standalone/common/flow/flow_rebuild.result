@@ -631,12 +631,12 @@ INSERT INTO `api_log` (`time`, `key`, `status_code`, `method`, `path`, `raw_quer
 Affected Rows: 1
 
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
-admin flush_flow('api_stats_flow');
+ADMIN FLUSH_FLOW('api_stats_flow');
 
 +------------------------------------+
-| ADMIN flush_flow('api_stats_flow') |
+| ADMIN FLUSH_FLOW('api_stats_flow') |
 +------------------------------------+
-| 1                                  |
+|  FLOW_FLUSHED  |
 +------------------------------------+
 
 SELECT key FROM api_stats;
@@ -653,12 +653,12 @@ INSERT INTO `api_log` (`time`, `key`, `status_code`, `method`, `path`, `raw_quer
 Affected Rows: 1
 
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
-admin flush_flow('api_stats_flow');
+ADMIN FLUSH_FLOW('api_stats_flow');
 
 +------------------------------------+
-| ADMIN flush_flow('api_stats_flow') |
+| ADMIN FLUSH_FLOW('api_stats_flow') |
 +------------------------------------+
-| 1                                  |
+|  FLOW_FLUSHED  |
 +------------------------------------+
 
 SELECT key FROM api_stats;
