@@ -20,6 +20,7 @@ use std::sync::Arc;
 use api::v1::{RowDeleteRequests, RowInsertRequests};
 use cache::{TABLE_FLOWNODE_SET_CACHE_NAME, TABLE_ROUTE_CACHE_NAME};
 use catalog::CatalogManagerRef;
+use client::DEFAULT_SCHEMA_NAME;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_meta::cache::{LayeredCacheRegistryRef, TableFlownodeSetCacheRef, TableRouteCacheRef};
@@ -401,6 +402,7 @@ impl FlownodeBuilder {
         let cnt = to_be_recovered.len();
 
         // TODO(discord9): recover in parallel
+        info!("Recovering {} flows: {:?}", cnt, to_be_recovered);
         for flow_id in to_be_recovered {
             let info = self
                 .flow_metadata_manager
@@ -432,6 +434,11 @@ impl FlownodeBuilder {
                 query_ctx: Some(
                     QueryContextBuilder::default()
                         .current_catalog(info.catalog_name().clone())
+                        .current_schema(
+                            info.schema_name()
+                                .clone()
+                                .unwrap_or(DEFAULT_SCHEMA_NAME.to_string()),
+                        )
                         .build(),
                 ),
             };

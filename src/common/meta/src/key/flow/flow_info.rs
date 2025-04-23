@@ -121,6 +121,11 @@ pub struct FlowInfoValue {
     pub(crate) flownode_ids: BTreeMap<FlowPartitionId, FlownodeId>,
     /// The catalog name.
     pub(crate) catalog_name: String,
+    /// The schema name. Although flow doesn't belong to any schema, this schema_name is needed to record
+    /// the database when `create_flow` is executed for recovering flow after db restart.
+    /// if none, should use `PUBLIC` by default.
+    #[serde(default)]
+    pub(crate) schema_name: Option<String>,
     /// The flow name.
     pub(crate) flow_name: String,
     /// The raw sql.
@@ -153,6 +158,10 @@ impl FlowInfoValue {
 
     pub fn catalog_name(&self) -> &String {
         &self.catalog_name
+    }
+
+    pub fn schema_name(&self) -> &Option<String> {
+        &self.schema_name
     }
 
     pub fn flow_name(&self) -> &String {

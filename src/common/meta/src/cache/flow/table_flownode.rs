@@ -187,6 +187,7 @@ mod tests {
                     },
                     flownode_ids: BTreeMap::from([(0, 1), (1, 2), (2, 3)]),
                     catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                    schema_name: Some(DEFAULT_SCHEMA_NAME.to_string()),
                     flow_name: "my_flow".to_string(),
                     raw_sql: "sql".to_string(),
                     expire_after: Some(300),

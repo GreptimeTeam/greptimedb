@@ -1204,8 +1204,8 @@ impl From<DropFlowTask> for PbDropFlowTask {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryContext {
-    current_catalog: String,
-    current_schema: String,
+    pub current_catalog: String,
+    pub current_schema: String,
     timezone: String,
     extensions: HashMap<String, String>,
     channel: u8,
