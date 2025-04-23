@@ -544,9 +544,9 @@ impl StartCommand {
 
         // set the ref to query for the local flow state
         {
-            let flow_worker_manager = flownode.flow_engine().streaming_engine();
+            let flow_streaming_engine = flownode.flow_engine().streaming_engine();
             information_extension
-                .set_flow_worker_manager(flow_worker_manager)
+                .set_flow_streaming_engine(flow_streaming_engine)
                 .await;
         }
 
@@ -615,10 +615,10 @@ impl StartCommand {
             .replace(weak_grpc_handler);
 
         // set the frontend invoker for flownode
-        let flow_worker_manager = flownode.flow_engine().streaming_engine();
+        let flow_streaming_engine = flownode.flow_engine().streaming_engine();
         // flow server need to be able to use frontend to write insert requests back
         let invoker = FrontendInvoker::build_from(
-            flow_worker_manager.clone(),
+            flow_streaming_engine.clone(),
             catalog_manager.clone(),
             kv_backend.clone(),
             layered_cache_registry.clone(),
@@ -627,7 +627,7 @@ impl StartCommand {
         )
         .await
         .context(error::StartFlownodeSnafu)?;
-        flow_worker_manager.set_frontend_invoker(invoker).await;
+        flow_streaming_engine.set_frontend_invoker(invoker).await;
 
         let export_metrics_task = ExportMetricsTask::try_new(&opts.export_metrics, Some(&plugins))
             .context(error::ServersSnafu)?;
@@ -703,7 +703,7 @@ pub struct StandaloneInformationExtension {
     region_server: RegionServer,
     procedure_manager: ProcedureManagerRef,
     start_time_ms: u64,
-    flow_worker_manager: RwLock<Option<Arc<StreamingEngine>>>,
+    flow_streaming_engine: RwLock<Option<Arc<StreamingEngine>>>,
 }
 
 impl StandaloneInformationExtension {
@@ -712,14 +712,14 @@ impl StandaloneInformationExtension {
             region_server,
             procedure_manager,
             start_time_ms: common_time::util::current_time_millis() as u64,
-            flow_worker_manager: RwLock::new(None),
+            flow_streaming_engine: RwLock::new(None),
         }
     }
 
-    /// Set the flow worker manager for the standalone instance.
-    pub async fn set_flow_worker_manager(&self, flow_worker_manager: Arc<StreamingEngine>) {
-        let mut guard = self.flow_worker_manager.write().await;
-        *guard = Some(flow_worker_manager);
+    /// Set the flow streaming engine for the standalone instance.
+    pub async fn set_flow_streaming_engine(&self, flow_streaming_engine: Arc<StreamingEngine>) {
+        let mut guard = self.flow_streaming_engine.write().await;
+        *guard = Some(flow_streaming_engine);
     }
 }
 
@@ -798,7 +798,7 @@ impl InformationExtension for StandaloneInformationExtension {
 
     async fn flow_stats(&self) -> std::result::Result<Option<FlowStat>, Self::Error> {
         Ok(Some(
-            self.flow_worker_manager
+            self.flow_streaming_engine
                 .read()
                 .await
                 .as_ref()

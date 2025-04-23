@@ -43,7 +43,7 @@ mod utils;
 #[cfg(test)]
 mod test_utils;
 
-pub use adapter::{FlowConfig, FlowWorkerManagerRef, FlownodeOptions, StreamingEngine};
+pub use adapter::{FlowConfig, FlowStreamingEngineRef, FlownodeOptions, StreamingEngine};
 pub use batching_mode::frontend_client::{FrontendClient, GrpcQueryHandlerWithBoxedError};
 pub(crate) use engine::{CreateFlowArgs, FlowId, TableName};
 pub use error::{Error, Result};

@@ -258,9 +258,9 @@ impl GreptimeDbStandaloneBuilder {
             .unwrap()
             .replace(weak_grpc_handler);
 
-        let flow_worker_manager = flownode.flow_engine().streaming_engine();
+        let flow_streaming_engine = flownode.flow_engine().streaming_engine();
         let invoker = flow::FrontendInvoker::build_from(
-            flow_worker_manager.clone(),
+            flow_streaming_engine.clone(),
             catalog_manager.clone(),
             kv_backend.clone(),
             cache_registry.clone(),
@@ -271,7 +271,7 @@ impl GreptimeDbStandaloneBuilder {
         .context(StartFlownodeSnafu)
         .unwrap();
 
-        flow_worker_manager.set_frontend_invoker(invoker).await;
+        flow_streaming_engine.set_frontend_invoker(invoker).await;
 
         procedure_manager.start().await.unwrap();
         wal_options_allocator.start().await.unwrap();

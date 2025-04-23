@@ -135,7 +135,7 @@ impl Configurable for FlownodeOptions {
 }
 
 /// Arc-ed FlowNodeManager, cheaper to clone
-pub type FlowWorkerManagerRef = Arc<StreamingEngine>;
+pub type FlowStreamingEngineRef = Arc<StreamingEngine>;
 
 /// FlowNodeManager manages the state of all tasks in the flow node, which should be run on the same thread
 ///
@@ -662,7 +662,7 @@ impl StreamingEngine {
         }
         // flow is now shutdown, drop frontend_invoker early so a ref cycle(in standalone mode) can be prevent:
         // FlowWorkerManager.frontend_invoker -> FrontendInvoker.inserter
-        // -> Inserter.node_manager -> NodeManager.flownode -> Flownode.flow_worker_manager.frontend_invoker
+        // -> Inserter.node_manager -> NodeManager.flownode -> Flownode.flow_streaming_engine.frontend_invoker
         self.frontend_invoker.write().await.take();
     }
 

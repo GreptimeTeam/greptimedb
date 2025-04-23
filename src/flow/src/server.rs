@@ -52,7 +52,7 @@ use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
 
 use crate::adapter::flownode_impl::{FlowDualEngine, FlowDualEngineRef};
-use crate::adapter::{create_worker, FlowWorkerManagerRef};
+use crate::adapter::{create_worker, FlowStreamingEngineRef};
 use crate::batching_mode::engine::BatchingEngine;
 use crate::engine::FlowEngine;
 use crate::error::{
@@ -620,7 +620,7 @@ impl FrontendInvoker {
     }
 
     pub async fn build_from(
-        flow_worker_manager: FlowWorkerManagerRef,
+        flow_streaming_engine: FlowStreamingEngineRef,
         catalog_manager: CatalogManagerRef,
         kv_backend: KvBackendRef,
         layered_cache_registry: LayeredCacheRegistryRef,
@@ -655,7 +655,7 @@ impl FrontendInvoker {
             node_manager.clone(),
         ));
 
-        let query_engine = flow_worker_manager.query_engine.clone();
+        let query_engine = flow_streaming_engine.query_engine.clone();
 
         let statement_executor = Arc::new(StatementExecutor::new(
             catalog_manager.clone(),
