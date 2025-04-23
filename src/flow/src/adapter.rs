@@ -141,7 +141,6 @@ pub type FlowStreamingEngineRef = Arc<StreamingEngine>;
 ///
 /// The choice of timestamp is just using current system timestamp for now
 ///
-/// TODO(discord9): rename to FlowStreamingEngine
 pub struct StreamingEngine {
     /// The handler to the worker that will run the dataflow
     /// which is `!Send` so a handle is used

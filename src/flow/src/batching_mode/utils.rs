@@ -358,8 +358,6 @@ impl TreeNodeRewriter for AddAutoColumnRewriter {
     }
 }
 
-// TODO(discord9): a method to found out the precise time window
-
 /// Find out the `Filter` Node corresponding to innermost(deepest) `WHERE` and add a new filter expr to it
 #[derive(Debug)]
 pub struct AddFilterRewriter {

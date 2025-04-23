@@ -79,7 +79,6 @@ pub enum FrontendClient {
     Standalone {
         /// for the sake of simplicity still use grpc even in standalone mode
         /// notice the client here should all be lazy, so that can wait after frontend is booted then make conn
-        /// TODO(discord9): not use grpc under standalone mode
         database_client: HandlerMutable,
     },
 }
