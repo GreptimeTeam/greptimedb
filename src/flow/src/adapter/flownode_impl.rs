@@ -35,7 +35,7 @@ use snafu::{ensure, IntoError, OptionExt, ResultExt};
 use store_api::storage::{RegionId, TableId};
 use tokio::sync::{Mutex, RwLock};
 
-use crate::adapter::{CreateFlowArgs, FlowWorkerManager};
+use crate::adapter::{CreateFlowArgs, FlowStreamingEngine};
 use crate::batching_mode::engine::BatchingEngine;
 use crate::engine::FlowEngine;
 use crate::error::{
@@ -55,7 +55,7 @@ pub type FlowDualEngineRef = Arc<FlowDualEngine>;
 /// including create/drop/flush flow
 /// and redirect insert requests to the appropriate engine
 pub struct FlowDualEngine {
-    streaming_engine: Arc<FlowWorkerManager>,
+    streaming_engine: Arc<FlowStreamingEngine>,
     batching_engine: Arc<BatchingEngine>,
     /// helper struct for faster query flow by table id or vice versa
     src_table2flow: RwLock<SrcTableToFlow>,
@@ -66,7 +66,7 @@ pub struct FlowDualEngine {
 
 impl FlowDualEngine {
     pub fn new(
-        streaming_engine: Arc<FlowWorkerManager>,
+        streaming_engine: Arc<FlowStreamingEngine>,
         batching_engine: Arc<BatchingEngine>,
         flow_metadata_manager: Arc<FlowMetadataManager>,
         catalog_manager: Arc<dyn CatalogManager>,
@@ -81,7 +81,7 @@ impl FlowDualEngine {
         }
     }
 
-    pub fn streaming_engine(&self) -> Arc<FlowWorkerManager> {
+    pub fn streaming_engine(&self) -> Arc<FlowStreamingEngine> {
         self.streaming_engine.clone()
     }
 
@@ -692,7 +692,7 @@ fn to_meta_err(
 }
 
 #[async_trait::async_trait]
-impl common_meta::node_manager::Flownode for FlowWorkerManager {
+impl common_meta::node_manager::Flownode for FlowStreamingEngine {
     async fn handle(&self, request: FlowRequest) -> MetaResult<FlowResponse> {
         let query_ctx = request
             .header
@@ -778,7 +778,7 @@ impl common_meta::node_manager::Flownode for FlowWorkerManager {
     }
 }
 
-impl FlowEngine for FlowWorkerManager {
+impl FlowEngine for FlowStreamingEngine {
     async fn create_flow(&self, args: CreateFlowArgs) -> Result<Option<FlowId>, Error> {
         self.create_flow_inner(args).await
     }
@@ -830,7 +830,7 @@ impl FetchFromRow {
     }
 }
 
-impl FlowWorkerManager {
+impl FlowStreamingEngine {
     async fn handle_inserts_inner(
         &self,
         request: InsertRequests,
