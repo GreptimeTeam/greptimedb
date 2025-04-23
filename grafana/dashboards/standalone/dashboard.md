@@ -54,7 +54,7 @@
 | Write Buffer per Instance | `greptime_mito_write_buffer_bytes{}` | `timeseries` | Write Buffer per Instance. | `prometheus` | `decbytes` | `[{{instance}}]-[{{pod}}]` |
 | Write Rows per Instance | `sum by (instance, pod) (rate(greptime_mito_write_rows_total{}[$__rate_interval]))` | `timeseries` | Ingestion size by row counts. | `prometheus` | `rowsps` | `[{{instance}}]-[{{pod}}]` |
 | Flush OPS per Instance | `sum by(instance, pod, reason) (rate(greptime_mito_flush_requests_total{}[$__rate_interval]))` | `timeseries` | Flush QPS per Instance. | `prometheus` | `ops` | `[{{instance}}]-[{{pod}}]-[{{reason}}]` |
-| Write Stall per Instance | `sum by(instance, pod) (greptime_mito_write_stall_total{})` | `timeseries` | Write Stall per Instance. | `prometheus` | `decbytes` | `[{{instance}}]-[{{pod}}]` |
+| Write Stall per Instance | `sum by(instance, pod) (greptime_mito_write_stall_total{})` | `timeseries` | Write Stall per Instance. | `prometheus` | -- | `[{{instance}}]-[{{pod}}]` |
 | Read Stage OPS per Instance | `sum by(instance, pod) (rate(greptime_mito_read_stage_elapsed_count{ stage="total"}[$__rate_interval]))` | `timeseries` | Read Stage OPS per Instance. | `prometheus` | `ops` | `[{{instance}}]-[{{pod}}]` |
 | Read Stage P99 per Instance | `histogram_quantile(0.99, sum by(instance, pod, le, stage) (rate(greptime_mito_read_stage_elapsed_bucket{}[$__rate_interval])))` | `timeseries` | Read Stage P99 per Instance. | `prometheus` | `s` | `[{{instance}}]-[{{pod}}]-[{{stage}}]` |
 | Write Stage P99 per Instance | `histogram_quantile(0.99, sum by(instance, pod, le, stage) (rate(greptime_mito_write_stage_elapsed_bucket{}[$__rate_interval])))` | `timeseries` | Write Stage P99 per Instance. | `prometheus` | `s` | `[{{instance}}]-[{{pod}}]-[{{stage}}]` |
@@ -79,7 +79,8 @@
 | List P99 per Instance | `histogram_quantile(0.99, sum by(instance, pod, le, scheme) (rate(opendal_operation_duration_seconds_bucket{ operation="list"}[$__rate_interval])))` | `timeseries` | List P99 per Instance. | `prometheus` | `s` | `[{{instance}}]-[{{pod}}]-[{{scheme}}]` |
 | Other Requests per Instance | `sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{operation!~"read\|write\|list\|stat"}[$__rate_interval]))` | `timeseries` | Other Requests per Instance. | `prometheus` | `ops` | `[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]` |
 | Other Request P99 per Instance | `histogram_quantile(0.99, sum by(instance, pod, le, scheme, operation) (rate(opendal_operation_duration_seconds_bucket{ operation!~"read\|write\|list"}[$__rate_interval])))` | `timeseries` | Other Request P99 per Instance. | `prometheus` | `s` | `[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]` |
-| Opendal traffic | `sum by(instance, pod, scheme, operation) (rate(opendal_operation_bytes_sum{}[$__rate_interval]))` | `timeseries` | Total traffic as in bytes by instance and operation | `prometheus` | `ops` | `[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]` |
+| Opendal traffic | `sum by(instance, pod, scheme, operation) (rate(opendal_operation_bytes_sum{}[$__rate_interval]))` | `timeseries` | Total traffic as in bytes by instance and operation | `prometheus` | `decbytes` | `[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]` |
+| OpenDAL errors per Instance | `sum by(instance, pod, scheme, operation, error) (rate(opendal_operation_errors_total{ error!="NotFound"}[$__rate_interval]))` | `timeseries` | OpenDAL error counts per Instance. | `prometheus` | -- | `[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]-[{{error}}]` |
 # Metasrv
 | Title | Query | Type | Description | Datasource | Unit | Legend Format |
 | --- | --- | --- | --- | --- | --- | --- |
