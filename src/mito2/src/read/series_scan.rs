@@ -341,7 +341,7 @@ impl SeriesDistributor {
             for part_range in partition {
                 build_sources(
                     &self.stream_ctx,
-                    &part_range,
+                    part_range,
                     false,
                     &part_metrics,
                     range_builder_list.clone(),
@@ -386,7 +386,6 @@ impl SeriesDistributor {
             metrics.yield_cost += yield_start.elapsed();
         }
 
-        // todo: if not empty
         if !current_series.is_empty() {
             let yield_start = Instant::now();
             self.senders.send_batch(current_series).await?;
@@ -527,11 +526,9 @@ impl SenderList {
 
     async fn send_error(&self, error: Error) {
         let error = Arc::new(error);
-        for sender in &self.senders {
-            if let Some(sender) = sender {
-                let result = Err(error.clone()).context(ScanSeriesSnafu);
-                let _ = sender.send(result).await;
-            }
+        for sender in self.senders.iter().flatten() {
+            let result = Err(error.clone()).context(ScanSeriesSnafu);
+            let _ = sender.send(result).await;
         }
     }
 
