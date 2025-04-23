@@ -452,7 +452,7 @@ mod tests {
         };
         FlowInfoValue {
             catalog_name: catalog_name.to_string(),
-            schema_name: Some("my_schema".to_string()),
+            query_context: None,
             flow_name: flow_name.to_string(),
             source_table_ids,
             sink_table_name,
@@ -626,7 +626,7 @@ mod tests {
         };
         let flow_value = FlowInfoValue {
             catalog_name: "greptime".to_string(),
-            schema_name: Some("my_schema".to_string()),
+            query_context: None,
             flow_name: "flow".to_string(),
             source_table_ids: vec![1024, 1025, 1026],
             sink_table_name: another_sink_table_name,
@@ -866,7 +866,7 @@ mod tests {
         };
         let flow_value = FlowInfoValue {
             catalog_name: "greptime".to_string(),
-            schema_name: Some("my_schema".to_string()),
+            query_context: None,
             flow_name: "flow".to_string(),
             source_table_ids: vec![1024, 1025, 1026],
             sink_table_name: another_sink_table_name,

@@ -121,11 +121,13 @@ pub struct FlowInfoValue {
     pub(crate) flownode_ids: BTreeMap<FlowPartitionId, FlownodeId>,
     /// The catalog name.
     pub(crate) catalog_name: String,
-    /// The schema name. Although flow doesn't belong to any schema, this schema_name is needed to record
-    /// the database when `create_flow` is executed for recovering flow after db restart.
-    /// if none, should use `PUBLIC` by default.
+    /// The query context used when create flow.
+    /// Although flow doesn't belong to any schema, this query_context is needed to remember
+    /// the query context when `create_flow` is executed
+    /// for recovering flow using the same sql&query_context after db restart.
+    /// if none, should use default query context
     #[serde(default)]
-    pub(crate) schema_name: Option<String>,
+    pub(crate) query_context: Option<crate::rpc::ddl::QueryContext>,
     /// The flow name.
     pub(crate) flow_name: String,
     /// The raw sql.
@@ -160,8 +162,8 @@ impl FlowInfoValue {
         &self.catalog_name
     }
 
-    pub fn schema_name(&self) -> &Option<String> {
-        &self.schema_name
+    pub fn query_context(&self) -> &Option<crate::rpc::ddl::QueryContext> {
+        &self.query_context
     }
 
     pub fn flow_name(&self) -> &String {

@@ -783,6 +783,14 @@ pub enum Error {
         #[snafu(source)]
         source: common_procedure::error::Error,
     },
+
+    #[snafu(display("Failed to parse timezone"))]
+    InvalidTimeZone {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: common_time::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -853,7 +861,8 @@ impl ErrorExt for Error {
             | TlsConfig { .. }
             | InvalidSetDatabaseOption { .. }
             | InvalidUnsetDatabaseOption { .. }
-            | InvalidTopicNamePrefix { .. } => StatusCode::InvalidArguments,
+            | InvalidTopicNamePrefix { .. }
+            | InvalidTimeZone { .. } => StatusCode::InvalidArguments,
 
             FlowNotFound { .. } => StatusCode::FlowNotFound,
             FlowRouteNotFound { .. } => StatusCode::Unexpected,

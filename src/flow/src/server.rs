@@ -20,7 +20,6 @@ use std::sync::Arc;
 use api::v1::{RowDeleteRequests, RowInsertRequests};
 use cache::{TABLE_FLOWNODE_SET_CACHE_NAME, TABLE_ROUTE_CACHE_NAME};
 use catalog::CatalogManagerRef;
-use client::DEFAULT_SCHEMA_NAME;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_meta::cache::{LayeredCacheRegistryRef, TableFlownodeSetCacheRef, TableRouteCacheRef};
@@ -43,7 +42,7 @@ use servers::error::{StartGrpcSnafu, TcpBindSnafu, TcpIncomingSnafu};
 use servers::http::HttpServerBuilder;
 use servers::metrics_handler::MetricsHandler;
 use servers::server::{ServerHandler, ServerHandlers};
-use session::context::{QueryContextBuilder, QueryContextRef};
+use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, oneshot, Mutex};
@@ -418,6 +417,7 @@ impl FlownodeBuilder {
                 info.sink_table_name().schema_name.clone(),
                 info.sink_table_name().table_name.clone(),
             ];
+
             let args = CreateFlowArgs {
                 flow_id: flow_id as _,
                 sink_table_name,
@@ -431,16 +431,17 @@ impl FlownodeBuilder {
                 comment: Some(info.comment().clone()),
                 sql: info.raw_sql().clone(),
                 flow_options: info.options().clone(),
-                query_ctx: Some(
-                    QueryContextBuilder::default()
-                        .current_catalog(info.catalog_name().clone())
-                        .current_schema(
-                            info.schema_name()
-                                .clone()
-                                .unwrap_or(DEFAULT_SCHEMA_NAME.to_string()),
-                        )
-                        .build(),
-                ),
+                query_ctx: info
+                    .query_context()
+                    .clone()
+                    .map(|ctx| {
+                        ctx.try_into()
+                            .map_err(BoxedError::new)
+                            .context(ExternalSnafu)
+                    })
+                    .transpose()?
+                    // or use default QueryContext
+                    .or_else(Default::default),
             };
             manager
                 .create_flow_inner(args)
