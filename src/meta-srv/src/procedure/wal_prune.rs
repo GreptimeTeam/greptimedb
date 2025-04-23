@@ -342,7 +342,7 @@ impl WalPruneProcedure {
             .context(DeleteRecordsSnafu {
                 topic: &self.data.topic,
                 partition: DEFAULT_PARTITION,
-                offset: (self.data.prunable_entry_id + 1),
+                offset: (self.data.prunable_entry_id),
             })
             .map_err(BoxedError::new)
             .with_context(|_| error::RetryLaterWithSourceSnafu {
@@ -607,7 +607,7 @@ mod tests {
                 check_entry_id_existence(
                     procedure.context.client.clone(),
                     &topic_name,
-                    procedure.data.prunable_entry_id as i64 + 1,
+                    procedure.data.prunable_entry_id as i64,
                     true,
                 )
                 .await;
