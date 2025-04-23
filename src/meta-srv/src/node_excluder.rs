@@ -24,3 +24,9 @@ pub trait NodeExcluder: Send + Sync {
     /// Returns the excluded datanode ids.
     fn excluded_datanode_ids(&self) -> &Vec<DatanodeId>;
 }
+
+impl NodeExcluder for Vec<DatanodeId> {
+    fn excluded_datanode_ids(&self) -> &Vec<DatanodeId> {
+        self
+    }
+}

@@ -18,7 +18,7 @@ pub mod load_based;
 pub mod round_robin;
 #[cfg(test)]
 pub(crate) mod test_utils;
-mod weight_compute;
+pub mod weight_compute;
 pub mod weighted_choose;
 use std::collections::HashSet;
 
