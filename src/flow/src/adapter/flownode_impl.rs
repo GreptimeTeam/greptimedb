@@ -225,11 +225,24 @@ impl FlowDualEngine {
                         comment: Some(info.comment().clone()),
                         sql: info.raw_sql().clone(),
                         flow_options: info.options().clone(),
-                        query_ctx: Some(
-                            QueryContextBuilder::default()
-                                .current_catalog(info.catalog_name().clone())
-                                .build(),
-                        ),
+                        query_ctx: info
+                            .query_context()
+                            .clone()
+                            .map(|ctx| {
+                                ctx.try_into()
+                                    .map_err(BoxedError::new)
+                                    .context(ExternalSnafu)
+                            })
+                            .transpose()?
+                            // or use default QueryContext with catalog_name from info
+                            // to keep compatibility with old version
+                            .or_else(|| {
+                                Some(
+                                    QueryContextBuilder::default()
+                                        .current_catalog(info.catalog_name().to_string())
+                                        .build(),
+                                )
+                            }),
                     };
                     if let Err(err) = self
                         .create_flow(args)

@@ -870,7 +870,7 @@ impl ErrorExt for Error {
             | InvalidUnsetDatabaseOption { .. }
             | InvalidTopicNamePrefix { .. }
             | InvalidTimeZone { .. } => StatusCode::InvalidArguments,
-            | InvalidFlowRequestBody { .. } => StatusCode::InvalidArguments,
+            InvalidFlowRequestBody { .. } => StatusCode::InvalidArguments,
 
             FlowNotFound { .. } => StatusCode::FlowNotFound,
             FlowRouteNotFound { .. } => StatusCode::Unexpected,
