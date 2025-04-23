@@ -746,7 +746,6 @@ impl FlowWorkerManager {
     /// steps to create task:
     /// 1. parse query into typed plan(and optional parse expire_after expr)
     /// 2. render source/sink with output table id and used input table id
-    #[allow(clippy::too_many_arguments)]
     pub async fn create_flow_inner(&self, args: CreateFlowArgs) -> Result<Option<FlowId>, Error> {
         let CreateFlowArgs {
             flow_id,
