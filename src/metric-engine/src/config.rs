@@ -26,7 +26,10 @@ pub struct EngineConfig {
     /// Experimental feature to use sparse primary key encoding.
     pub experimental_sparse_primary_key_encoding: bool,
     /// The flush interval of the metadata region.
-    #[serde(with = "humantime_serde")]
+    #[serde(
+        with = "humantime_serde",
+        default = "EngineConfig::default_flush_metadata_region_interval"
+    )]
     pub flush_metadata_region_interval: Duration,
 }
 
@@ -40,6 +43,10 @@ impl Default for EngineConfig {
 }
 
 impl EngineConfig {
+    fn default_flush_metadata_region_interval() -> Duration {
+        DEFAULT_FLUSH_METADATA_REGION_INTERVAL
+    }
+
     /// Sanitizes the configuration.
     pub fn sanitize(&mut self) {
         if self.flush_metadata_region_interval.is_zero() {
