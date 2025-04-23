@@ -535,7 +535,7 @@ jobs:
           GT_MYSQL_ADDR: 127.0.0.1:4002
         with:
           target: ${{ matrix.target }}
-          max-total-time: 120
+          max-total-time: 360
       - name: Describe Nodes
         if: failure()
         shell: bash
