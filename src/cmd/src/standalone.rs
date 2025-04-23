@@ -56,7 +56,7 @@ use datanode::datanode::{Datanode, DatanodeBuilder};
 use datanode::region_server::RegionServer;
 use file_engine::config::EngineConfig as FileEngineConfig;
 use flow::{
-    FlowConfig, FlowWorkerManager, FlownodeBuilder, FlownodeInstance, FlownodeOptions,
+    FlowConfig, FlowStreamingEngine, FlownodeBuilder, FlownodeInstance, FlownodeOptions,
     FrontendClient, FrontendInvoker, GrpcQueryHandlerWithBoxedError,
 };
 use frontend::frontend::{Frontend, FrontendOptions};
@@ -703,7 +703,7 @@ pub struct StandaloneInformationExtension {
     region_server: RegionServer,
     procedure_manager: ProcedureManagerRef,
     start_time_ms: u64,
-    flow_worker_manager: RwLock<Option<Arc<FlowWorkerManager>>>,
+    flow_worker_manager: RwLock<Option<Arc<FlowStreamingEngine>>>,
 }
 
 impl StandaloneInformationExtension {
@@ -717,7 +717,7 @@ impl StandaloneInformationExtension {
     }
 
     /// Set the flow worker manager for the standalone instance.
-    pub async fn set_flow_worker_manager(&self, flow_worker_manager: Arc<FlowWorkerManager>) {
+    pub async fn set_flow_worker_manager(&self, flow_worker_manager: Arc<FlowStreamingEngine>) {
         let mut guard = self.flow_worker_manager.write().await;
         *guard = Some(flow_worker_manager);
     }

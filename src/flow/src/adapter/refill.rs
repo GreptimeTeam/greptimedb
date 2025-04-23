@@ -31,7 +31,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::TableId;
 
 use crate::adapter::table_source::ManagedTableSource;
-use crate::adapter::{FlowId, FlowWorkerManager, FlowWorkerManagerRef};
+use crate::adapter::{FlowId, FlowStreamingEngine, FlowWorkerManagerRef};
 use crate::error::{FlowNotFoundSnafu, JoinTaskSnafu, UnexpectedSnafu};
 use crate::expr::error::ExternalSnafu;
 use crate::expr::utils::find_plan_time_window_expr_lower_bound;
@@ -39,7 +39,7 @@ use crate::repr::RelationDesc;
 use crate::server::get_all_flow_ids;
 use crate::{Error, FrontendInvoker};
 
-impl FlowWorkerManager {
+impl FlowStreamingEngine {
     /// Create and start refill flow tasks in background
     pub async fn create_and_start_refill_flow_tasks(
         self: &FlowWorkerManagerRef,

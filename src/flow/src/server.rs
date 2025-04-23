@@ -63,7 +63,7 @@ use crate::heartbeat::HeartbeatTask;
 use crate::metrics::{METRIC_FLOW_PROCESSING_TIME, METRIC_FLOW_ROWS};
 use crate::transform::register_function_to_query_engine;
 use crate::utils::{SizeReportSender, StateReportHandler};
-use crate::{CreateFlowArgs, Error, FlowWorkerManager, FlownodeOptions, FrontendClient};
+use crate::{CreateFlowArgs, Error, FlowStreamingEngine, FlownodeOptions, FrontendClient};
 
 pub const FLOW_NODE_SERVER_NAME: &str = "FLOW_NODE_SERVER";
 /// wrapping flow node manager to avoid orphan rule with Arc<...>
@@ -489,7 +489,7 @@ impl FlownodeBuilder {
     async fn build_manager(
         &mut self,
         query_engine: Arc<dyn QueryEngine>,
-    ) -> Result<FlowWorkerManager, Error> {
+    ) -> Result<FlowStreamingEngine, Error> {
         let table_meta = self.table_meta.clone();
 
         register_function_to_query_engine(&query_engine);
@@ -498,7 +498,7 @@ impl FlownodeBuilder {
 
         let node_id = self.opts.node_id.map(|id| id as u32);
 
-        let mut man = FlowWorkerManager::new(node_id, query_engine, table_meta);
+        let mut man = FlowStreamingEngine::new(node_id, query_engine, table_meta);
         for worker_id in 0..num_workers {
             let (tx, rx) = oneshot::channel();
 
