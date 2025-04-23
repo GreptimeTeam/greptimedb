@@ -604,7 +604,7 @@ mod tests {
                 // Step 3: Test `on_prune`.
                 let status = procedure.on_prune().await.unwrap();
                 assert_matches!(status, Status::Done { output: None });
-                // Check if the entry ids after `prunable_entry_id` still exist.
+                // Check if the entry ids after(include) `prunable_entry_id` still exist.
                 check_entry_id_existence(
                     procedure.context.client.clone(),
                     &topic_name,
@@ -612,11 +612,11 @@ mod tests {
                     true,
                 )
                 .await;
-                // Check if the entry s before `prunable_entry_id` are deleted.
+                // Check if the entry ids before `prunable_entry_id` are deleted.
                 check_entry_id_existence(
                     procedure.context.client.clone(),
                     &topic_name,
-                    procedure.data.prunable_entry_id as i64,
+                    procedure.data.prunable_entry_id as i64 - 1,
                     false,
                 )
                 .await;
