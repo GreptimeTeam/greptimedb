@@ -54,6 +54,7 @@ impl Default for DowngradeLeaderRegion {
 #[typetag::serde]
 impl State for DowngradeLeaderRegion {
     async fn next(&mut self, ctx: &mut Context) -> Result<(Box<dyn State>, Status)> {
+        let now = Instant::now();
         // Ensures the `leader_region_lease_deadline` must exist after recovering.
         ctx.volatile_ctx
             .set_leader_region_lease_deadline(Duration::from_secs(REGION_LEASE_SECS));
@@ -77,6 +78,7 @@ impl State for DowngradeLeaderRegion {
                 }
             }
         }
+        ctx.volatile_ctx.downgrade_leader_region_elapsed += now.elapsed();
 
         Ok((
             Box::new(UpgradeCandidateRegion::default()),

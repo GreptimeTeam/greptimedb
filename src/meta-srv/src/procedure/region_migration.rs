@@ -43,7 +43,7 @@ use common_procedure::error::{
     Error as ProcedureError, FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu,
 };
 use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status, StringKey};
-use common_telemetry::info;
+use common_telemetry::{error, info};
 use manager::RegionMigrationProcedureGuard;
 pub use manager::{
     RegionMigrationManagerRef, RegionMigrationProcedureTask, RegionMigrationProcedureTracker,
@@ -134,6 +134,12 @@ pub struct VolatileContext {
     leader_region_metadata_last_entry_id: Option<u64>,
     /// Elapsed time of downgrading region and upgrading region.
     operations_elapsed: Duration,
+    /// Elapsed time of downgrading leader region.
+    downgrade_leader_region_elapsed: Duration,
+    /// Elapsed time of open candidate region.
+    open_candidate_region_elapsed: Duration,
+    /// Elapsed time of upgrade candidate region.
+    upgrade_candidate_region_elapsed: Duration,
 }
 
 impl VolatileContext {
@@ -550,6 +556,19 @@ impl Procedure for RegionMigrationProcedure {
                     .inc();
                 ProcedureError::retry_later(e)
             } else {
+                error!(
+                    e;
+                    "Region migration procedure failed, region_id: {}, from_peer: {}, to_peer: {}, 
+                    elapsed: {:?}, downgrade_leader_region_elapsed: {:?}, open_candidate_region_elapsed: {:?}, 
+                    upgrade_candidate_region_elapsed: {:?}",
+                    self.context.region_id(),
+                    self.context.persistent_ctx.from_peer,
+                    self.context.persistent_ctx.to_peer,
+                    self.context.volatile_ctx.operations_elapsed,
+                    self.context.volatile_ctx.downgrade_leader_region_elapsed,
+                    self.context.volatile_ctx.open_candidate_region_elapsed,
+                    self.context.volatile_ctx.upgrade_candidate_region_elapsed
+                );
                 METRIC_META_REGION_MIGRATION_ERROR
                     .with_label_values(&[name, "external"])
                     .inc();

@@ -42,7 +42,9 @@ pub struct OpenCandidateRegion;
 impl State for OpenCandidateRegion {
     async fn next(&mut self, ctx: &mut Context) -> Result<(Box<dyn State>, Status)> {
         let instruction = self.build_open_region_instruction(ctx).await?;
+        let now = Instant::now();
         self.open_candidate_region(ctx, instruction).await?;
+        ctx.volatile_ctx.open_candidate_region_elapsed += now.elapsed();
 
         Ok((
             Box::new(UpdateMetadata::Downgrade),

@@ -15,6 +15,7 @@
 use std::any::Any;
 
 use common_procedure::Status;
+use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;

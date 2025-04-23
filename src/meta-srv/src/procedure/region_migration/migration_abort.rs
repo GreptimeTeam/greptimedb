@@ -15,6 +15,7 @@
 use std::any::Any;
 
 use common_procedure::Status;
+use common_telemetry::warn;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{self, Result};
@@ -37,7 +38,18 @@ impl RegionMigrationAbort {
 #[async_trait::async_trait]
 #[typetag::serde]
 impl State for RegionMigrationAbort {
-    async fn next(&mut self, _: &mut Context) -> Result<(Box<dyn State>, Status)> {
+    async fn next(&mut self, ctx: &mut Context) -> Result<(Box<dyn State>, Status)> {
+        warn!(
+            "Region migration is aborted: {}, region_id: {}, from_peer: {}, to_peer: {}, elapsed: {:?}, downgrade_leader_region_elapsed: {:?}, open_candidate_region_elapsed: {:?}, upgrade_candidate_region_elapsed: {:?}",
+            self.reason,
+            ctx.region_id(),
+            ctx.persistent_ctx.from_peer,
+            ctx.persistent_ctx.to_peer,
+            ctx.volatile_ctx.operations_elapsed,
+            ctx.volatile_ctx.downgrade_leader_region_elapsed,
+            ctx.volatile_ctx.open_candidate_region_elapsed,
+            ctx.volatile_ctx.upgrade_candidate_region_elapsed,
+        );
         error::MigrationAbortSnafu {
             reason: &self.reason,
         }

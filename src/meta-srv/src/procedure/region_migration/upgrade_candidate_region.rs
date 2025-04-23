@@ -54,9 +54,12 @@ impl Default for UpgradeCandidateRegion {
 #[typetag::serde]
 impl State for UpgradeCandidateRegion {
     async fn next(&mut self, ctx: &mut Context) -> Result<(Box<dyn State>, Status)> {
+        let now = Instant::now();
         if self.upgrade_region_with_retry(ctx).await {
+            ctx.volatile_ctx.upgrade_candidate_region_elapsed += now.elapsed();
             Ok((Box::new(UpdateMetadata::Upgrade), Status::executing(false)))
         } else {
+            ctx.volatile_ctx.upgrade_candidate_region_elapsed += now.elapsed();
             Ok((Box::new(UpdateMetadata::Rollback), Status::executing(false)))
         }
     }
