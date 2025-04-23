@@ -657,7 +657,7 @@ groups:
         - title: Opendal traffic
           type: timeseries
           description: Total traffic as in bytes by instance and operation
-          unit: bytes
+          unit: decbytes
           queries:
             - expr: sum by(instance, pod, scheme, operation) (rate(opendal_operation_bytes_sum{instance=~"$datanode"}[$__rate_interval]))
               datasource:
