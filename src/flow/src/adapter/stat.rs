@@ -16,9 +16,9 @@ use std::collections::BTreeMap;
 
 use common_meta::key::flow::flow_state::FlowStat;
 
-use crate::FlowStreamingEngine;
+use crate::StreamingEngine;
 
-impl FlowStreamingEngine {
+impl StreamingEngine {
     pub async fn gen_state_report(&self) -> FlowStat {
         let mut full_report = BTreeMap::new();
         let mut last_exec_time_map = BTreeMap::new();

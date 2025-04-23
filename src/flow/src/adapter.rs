@@ -135,14 +135,14 @@ impl Configurable for FlownodeOptions {
 }
 
 /// Arc-ed FlowNodeManager, cheaper to clone
-pub type FlowWorkerManagerRef = Arc<FlowStreamingEngine>;
+pub type FlowWorkerManagerRef = Arc<StreamingEngine>;
 
 /// FlowNodeManager manages the state of all tasks in the flow node, which should be run on the same thread
 ///
 /// The choice of timestamp is just using current system timestamp for now
 ///
 /// TODO(discord9): rename to FlowStreamingEngine
-pub struct FlowStreamingEngine {
+pub struct StreamingEngine {
     /// The handler to the worker that will run the dataflow
     /// which is `!Send` so a handle is used
     pub worker_handles: Vec<WorkerHandle>,
@@ -171,7 +171,7 @@ pub struct FlowStreamingEngine {
 }
 
 /// Building FlownodeManager
-impl FlowStreamingEngine {
+impl StreamingEngine {
     /// set frontend invoker
     pub async fn set_frontend_invoker(&self, frontend: FrontendInvoker) {
         *self.frontend_invoker.write().await = Some(frontend);
@@ -190,7 +190,7 @@ impl FlowStreamingEngine {
         let node_context = FlownodeContext::new(Box::new(srv_map.clone()) as _);
         let tick_manager = FlowTickManager::new();
         let worker_handles = Vec::new();
-        FlowStreamingEngine {
+        StreamingEngine {
             worker_handles,
             worker_selector: Mutex::new(0),
             query_engine,
@@ -266,7 +266,7 @@ pub fn batches_to_rows_req(batches: Vec<Batch>) -> Result<Vec<DiffRequest>, Erro
 }
 
 /// This impl block contains methods to send writeback requests to frontend
-impl FlowStreamingEngine {
+impl StreamingEngine {
     /// Return the number of requests it made
     pub async fn send_writeback_requests(&self) -> Result<usize, Error> {
         let all_reqs = self.generate_writeback_request().await?;
@@ -537,7 +537,7 @@ impl FlowStreamingEngine {
 }
 
 /// Flow Runtime related methods
-impl FlowStreamingEngine {
+impl StreamingEngine {
     /// Start state report handler, which will receive a sender from HeartbeatTask to send state size report back
     ///
     /// if heartbeat task is shutdown, this future will exit too
@@ -731,7 +731,7 @@ impl FlowStreamingEngine {
 }
 
 /// Create&Remove flow
-impl FlowStreamingEngine {
+impl StreamingEngine {
     /// remove a flow by it's id
     pub async fn remove_flow_inner(&self, flow_id: FlowId) -> Result<(), Error> {
         for handle in self.worker_handles.iter() {
