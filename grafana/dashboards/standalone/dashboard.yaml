@@ -426,7 +426,7 @@ groups:
         - title: Write Stall per Instance
           type: timeseries
           description: Write Stall per Instance.
-          unit: decbytes
+          unit: none
           queries:
             - expr: sum by(instance, pod) (greptime_mito_write_stall_total{})
               datasource:
@@ -658,7 +658,7 @@ groups:
         - title: Opendal traffic
           type: timeseries
           description: Total traffic as in bytes by instance and operation
-          unit: ops
+          unit: decbytes
           queries:
             - expr: sum by(instance, pod, scheme, operation) (rate(opendal_operation_bytes_sum{}[$__rate_interval]))
               datasource:
