@@ -426,7 +426,6 @@ groups:
         - title: Write Stall per Instance
           type: timeseries
           description: Write Stall per Instance.
-          unit: none
           queries:
             - expr: sum by(instance, pod) (greptime_mito_write_stall_total{})
               datasource:
@@ -658,13 +657,22 @@ groups:
         - title: Opendal traffic
           type: timeseries
           description: Total traffic as in bytes by instance and operation
-          unit: decbytes
+          unit: bytes
           queries:
             - expr: sum by(instance, pod, scheme, operation) (rate(opendal_operation_bytes_sum{}[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]'
+        - title: OpenDAL errors per Instance
+          type: timeseries
+          description: OpenDAL error counts per Instance.
+          queries:
+            - expr: sum by(instance, pod, scheme, operation, error) (rate(opendal_operation_errors_total{ error!="NotFound"}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]-[{{error}}]'
     - title: Metasrv
       panels:
         - title: Region migration datanode
