@@ -6,6 +6,7 @@ ot = "ot"
 typ = "typ"
 typs = "typs"
 unqualifed = "unqualifed"
+excluder = "excluder"
 
 [files]
 extend-exclude = [
@@ -14,6 +15,5 @@ extend-exclude = [
     "*.sql",
     "*.result",
     "src/pipeline/benches/data.log",
-    "cyborg/pnpm-lock.yaml",
-    "excluder"
+    "cyborg/pnpm-lock.yaml"
 ]
