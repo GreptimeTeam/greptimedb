@@ -300,11 +300,12 @@ impl FlowDualEngine {
             }
         );
 
-        check_task.take().expect("Already checked").stop().await?;
+        check_task.take().unwrap().stop().await?;
         info!("Stopped flow consistent check task");
         Ok(())
     }
 
+    /// TODO(discord9): also add a `exists` api using flow metadata manager's `exists` method
     async fn flow_exist_in_metadata(&self, flow_id: FlowId) -> Result<bool, Error> {
         self.flow_metadata_manager
             .flow_info_manager()
@@ -332,23 +333,24 @@ impl ConsistentCheckTask {
         let (trigger_tx, mut trigger_rx) =
             tokio::sync::mpsc::channel::<(bool, bool, tokio::sync::oneshot::Sender<()>)>(10);
         let handle = common_runtime::spawn_global(async move {
-            let mut args = (false, false);
+            let (mut allow_create, mut allow_drop) = (false, false);
             let mut ret_signal: Option<tokio::sync::oneshot::Sender<()>> = None;
             loop {
-                if let Err(err) = inner.check_flow_consistent(args.0, args.1).await {
+                if let Err(err) = inner.check_flow_consistent(allow_create, allow_drop).await {
                     error!(err; "Failed to check flow consistent");
                 }
                 if let Some(done) = ret_signal.take() {
                     let _ = done.send(());
                 }
-
                 tokio::select! {
                     _ = rx.recv() => break,
                     incoming = trigger_rx.recv() => if let Some(incoming) = incoming {
-                        args = (incoming.0, incoming.1);
+                        (allow_create, allow_drop) = (incoming.0, incoming.1);
                         ret_signal = Some(incoming.2);
                     },
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => args=(false,false),
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
+                        (allow_create, allow_drop) = (false, false);
+                    },
                 }
             }
         });

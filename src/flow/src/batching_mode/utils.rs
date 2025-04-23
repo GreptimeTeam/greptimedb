@@ -50,8 +50,8 @@ pub async fn get_table_info_df_schema(
         .await
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?
-        .with_context(|| TableNotFoundSnafu {
-            name: full_table_name.clone(),
+        .context(TableNotFoundSnafu {
+            name: &full_table_name,
         })?;
     let table_info = table.table_info().clone();
 

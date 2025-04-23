@@ -267,7 +267,8 @@ impl BatchingEngine {
             // also check table option to see if ttl!=instant
             let table_name = get_table_name(self.table_meta.table_info_manager(), &src_id).await?;
             let table_info = get_table_info(self.table_meta.table_info_manager(), &src_id).await?;
-            if table_info.table_info.meta.options.ttl == Some(TimeToLive::Instant) {
+            ensure!(
+                table_info.table_info.meta.options.ttl != Some(TimeToLive::Instant),
                 UnsupportedSnafu {
                     reason: format!(
                         "Source table `{}`(id={}) has instant TTL, Instant TTL is not supported under batching mode. Consider using a TTL longer than flush interval",
@@ -275,8 +276,8 @@ impl BatchingEngine {
                         src_id
                     ),
                 }
-                .fail()?;
-            }
+            );
+
             source_table_names.push(table_name);
         }
 

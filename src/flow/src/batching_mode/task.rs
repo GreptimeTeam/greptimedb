@@ -36,7 +36,7 @@ use operator::expr_helper::column_schemas_to_defs;
 use query::query_engine::DefaultSerializer;
 use query::QueryEngineRef;
 use session::context::QueryContextRef;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use tokio::sync::oneshot;
 use tokio::sync::oneshot::error::TryRecvError;
@@ -222,15 +222,15 @@ impl BatchingTask {
                 .map(|c| c.name)
                 .collect::<BTreeSet<_>>();
             for column in new_query.schema().columns() {
-                if !table_columns.contains(column.name()) {
-                    return InvalidQuerySnafu {
+                ensure!(
+                    table_columns.contains(column.name()),
+                    InvalidQuerySnafu {
                         reason: format!(
                             "Column {} not found in sink table with columns {:?}",
                             column, table_columns
                         ),
                     }
-                    .fail();
-                }
+                );
             }
             // update_at& time index placeholder (if exists) should have default value
             LogicalPlan::Dml(DmlStatement::new(
