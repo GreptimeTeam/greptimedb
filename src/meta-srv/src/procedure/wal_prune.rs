@@ -335,7 +335,7 @@ impl WalPruneProcedure {
             })?;
         partition_client
             .delete_records(
-                (self.data.prunable_entry_id + 1) as i64,
+                (self.data.prunable_entry_id) as i64,
                 DELETE_RECORDS_TIMEOUT.as_millis() as i32,
             )
             .await
@@ -348,9 +348,7 @@ impl WalPruneProcedure {
             .with_context(|_| error::RetryLaterWithSourceSnafu {
                 reason: format!(
                     "Failed to delete records for topic: {}, partition: {}, offset: {}",
-                    self.data.topic,
-                    DEFAULT_PARTITION,
-                    self.data.prunable_entry_id + 1
+                    self.data.topic, DEFAULT_PARTITION, self.data.prunable_entry_id
                 ),
             })?;
         info!(
