@@ -42,7 +42,7 @@ use servers::error::{StartGrpcSnafu, TcpBindSnafu, TcpIncomingSnafu};
 use servers::http::HttpServerBuilder;
 use servers::metrics_handler::MetricsHandler;
 use servers::server::{ServerHandler, ServerHandlers};
-use session::context::QueryContextRef;
+use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, oneshot, Mutex};
@@ -440,8 +440,15 @@ impl FlownodeBuilder {
                             .context(ExternalSnafu)
                     })
                     .transpose()?
-                    // or use default QueryContext
-                    .or_else(Default::default),
+                    // or use default QueryContext with catalog_name from info
+                    // to keep compatibility with old version
+                    .or_else(|| {
+                        Some(
+                            QueryContextBuilder::default()
+                                .current_catalog(info.catalog_name().to_string())
+                                .build(),
+                        )
+                    }),
             };
             manager
                 .create_flow_inner(args)
