@@ -190,7 +190,7 @@ impl MetasrvBuilder {
 
         let meta_peer_client = meta_peer_client
             .unwrap_or_else(|| build_default_meta_peer_client(&election, &in_memory));
-        let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector));
+        let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector::default()));
         let pushers = Pushers::default();
         let mailbox = build_mailbox(&kv_backend, &pushers);
         let procedure_manager = build_procedure_manager(&options, &kv_backend);
@@ -234,13 +234,17 @@ impl MetasrvBuilder {
             ))
         });
 
+        let flow_selector = Arc::new(RoundRobinSelector::new(
+            SelectTarget::Flownode,
+            Arc::new(Vec::new()),
+        )) as SelectorRef;
+
         let flow_metadata_allocator = {
             // for now flownode just use round-robin selector
-            let flow_selector = RoundRobinSelector::new(SelectTarget::Flownode);
             let flow_selector_ctx = selector_ctx.clone();
             let peer_allocator = Arc::new(FlowPeerAllocator::new(
                 flow_selector_ctx,
-                Arc::new(flow_selector),
+                flow_selector.clone(),
             ));
             let seq = Arc::new(
                 SequenceBuilder::new(FLOW_ID_SEQ, kv_backend.clone())
@@ -420,7 +424,7 @@ impl MetasrvBuilder {
             meta_peer_client: meta_peer_client.clone(),
             selector,
             // TODO(jeremy): We do not allow configuring the flow selector.
-            flow_selector: Arc::new(RoundRobinSelector::new(SelectTarget::Flownode)),
+            flow_selector,
             handler_group: RwLock::new(None),
             handler_group_builder: Mutex::new(Some(handler_group_builder)),
             election,

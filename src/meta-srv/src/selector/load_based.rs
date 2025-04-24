@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue};
 use common_meta::key::TableMetadataManager;
@@ -26,6 +27,7 @@ use crate::error::{self, Result};
 use crate::key::{DatanodeLeaseKey, LeaseValue};
 use crate::lease;
 use crate::metasrv::SelectorContext;
+use crate::node_excluder::NodeExcluderRef;
 use crate::selector::common::{choose_items, filter_out_excluded_peers};
 use crate::selector::weight_compute::{RegionNumsBasedWeightCompute, WeightCompute};
 use crate::selector::weighted_choose::RandomWeightedChoose;
@@ -33,11 +35,15 @@ use crate::selector::{Selector, SelectorOptions};
 
 pub struct LoadBasedSelector<C> {
     weight_compute: C,
+    node_excluder: NodeExcluderRef,
 }
 
 impl<C> LoadBasedSelector<C> {
-    pub fn new(weight_compute: C) -> Self {
-        Self { weight_compute }
+    pub fn new(weight_compute: C, node_excluder: NodeExcluderRef) -> Self {
+        Self {
+            weight_compute,
+            node_excluder,
+        }
     }
 }
 
@@ -45,6 +51,7 @@ impl Default for LoadBasedSelector<RegionNumsBasedWeightCompute> {
     fn default() -> Self {
         Self {
             weight_compute: RegionNumsBasedWeightCompute,
+            node_excluder: Arc::new(Vec::new()),
         }
     }
 }
@@ -88,7 +95,14 @@ where
         let mut weight_array = self.weight_compute.compute(&stat_kvs);
 
         // 5. choose peers by weight_array.
-        filter_out_excluded_peers(&mut weight_array, &opts.exclude_peer_ids);
+        let mut exclude_peer_ids = self
+            .node_excluder
+            .excluded_datanode_ids()
+            .iter()
+            .cloned()
+            .collect::<HashSet<_>>();
+        exclude_peer_ids.extend(opts.exclude_peer_ids.iter());
+        filter_out_excluded_peers(&mut weight_array, &exclude_peer_ids);
         let mut weighted_choose = RandomWeightedChoose::new(weight_array);
         let selected = choose_items(&opts, &mut weighted_choose)?;
 
