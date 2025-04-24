@@ -56,10 +56,10 @@ impl State for UpgradeCandidateRegion {
     async fn next(&mut self, ctx: &mut Context) -> Result<(Box<dyn State>, Status)> {
         let now = Instant::now();
         if self.upgrade_region_with_retry(ctx).await {
-            ctx.volatile_ctx.upgrade_candidate_region_elapsed += now.elapsed();
+            ctx.update_upgrade_candidate_region_elapsed(now);
             Ok((Box::new(UpdateMetadata::Upgrade), Status::executing(false)))
         } else {
-            ctx.volatile_ctx.upgrade_candidate_region_elapsed += now.elapsed();
+            ctx.update_upgrade_candidate_region_elapsed(now);
             Ok((Box::new(UpdateMetadata::Rollback), Status::executing(false)))
         }
     }
@@ -291,7 +291,8 @@ mod tests {
         let persistent_context = new_persistent_context();
         let env = TestingEnv::new();
         let mut ctx = env.context_factory().new_context(persistent_context);
-        ctx.volatile_ctx.operations_elapsed = ctx.persistent_ctx.timeout + Duration::from_secs(1);
+        ctx.volatile_ctx.metrics.operations_elapsed =
+            ctx.persistent_ctx.timeout + Duration::from_secs(1);
 
         let err = state.upgrade_region(&ctx).await.unwrap_err();
 
@@ -561,7 +562,8 @@ mod tests {
         let mut ctx = env.context_factory().new_context(persistent_context);
         let mailbox_ctx = env.mailbox_context();
         let mailbox = mailbox_ctx.mailbox().clone();
-        ctx.volatile_ctx.operations_elapsed = ctx.persistent_ctx.timeout + Duration::from_secs(1);
+        ctx.volatile_ctx.metrics.operations_elapsed =
+            ctx.persistent_ctx.timeout + Duration::from_secs(1);
 
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         mailbox_ctx

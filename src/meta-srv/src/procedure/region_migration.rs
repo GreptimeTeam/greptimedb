@@ -25,7 +25,7 @@ pub(crate) mod update_metadata;
 pub(crate) mod upgrade_candidate_region;
 
 use std::any::Any;
-use std::fmt::Debug;
+use std::fmt::{Debug, Display};
 use std::time::Duration;
 
 use common_error::ext::BoxedError;
@@ -55,7 +55,10 @@ use tokio::time::Instant;
 
 use self::migration_start::RegionMigrationStart;
 use crate::error::{self, Result};
-use crate::metrics::{METRIC_META_REGION_MIGRATION_ERROR, METRIC_META_REGION_MIGRATION_EXECUTE};
+use crate::metrics::{
+    METRIC_META_REGION_MIGRATION_ERROR, METRIC_META_REGION_MIGRATION_EXECUTE,
+    METRIC_META_REGION_MIGRATION_STAGE_ELAPSED,
+};
 use crate::service::mailbox::MailboxRef;
 
 /// The default timeout for region migration.
@@ -103,6 +106,71 @@ impl PersistentContext {
     }
 }
 
+/// Metrics of region migration.
+#[derive(Debug, Clone, Default)]
+pub struct Metrics {
+    /// Elapsed time of downgrading region and upgrading region.
+    operations_elapsed: Duration,
+    /// Elapsed time of downgrading leader region.
+    downgrade_leader_region_elapsed: Duration,
+    /// Elapsed time of open candidate region.
+    open_candidate_region_elapsed: Duration,
+    /// Elapsed time of upgrade candidate region.
+    upgrade_candidate_region_elapsed: Duration,
+}
+
+impl Display for Metrics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "operations_elapsed: {:?}, downgrade_leader_region_elapsed: {:?}, open_candidate_region_elapsed: {:?}, upgrade_candidate_region_elapsed: {:?}",
+            self.operations_elapsed,
+            self.downgrade_leader_region_elapsed,
+            self.open_candidate_region_elapsed,
+            self.upgrade_candidate_region_elapsed
+        )
+    }
+}
+
+impl Metrics {
+    /// Updates the elapsed time of downgrading region and upgrading region.
+    pub fn update_operations_elapsed(&mut self, elapsed: Duration) {
+        self.operations_elapsed += elapsed;
+    }
+
+    /// Updates the elapsed time of downgrading leader region.
+    pub fn update_downgrade_leader_region_elapsed(&mut self, elapsed: Duration) {
+        self.downgrade_leader_region_elapsed += elapsed;
+    }
+
+    /// Updates the elapsed time of open candidate region.
+    pub fn update_open_candidate_region_elapsed(&mut self, elapsed: Duration) {
+        self.open_candidate_region_elapsed += elapsed;
+    }
+
+    /// Updates the elapsed time of upgrade candidate region.
+    pub fn update_upgrade_candidate_region_elapsed(&mut self, elapsed: Duration) {
+        self.upgrade_candidate_region_elapsed += elapsed;
+    }
+}
+
+impl Drop for Metrics {
+    fn drop(&mut self) {
+        METRIC_META_REGION_MIGRATION_STAGE_ELAPSED
+            .with_label_values(&["operations"])
+            .observe(self.operations_elapsed.as_secs_f64());
+        METRIC_META_REGION_MIGRATION_STAGE_ELAPSED
+            .with_label_values(&["downgrade_leader_region"])
+            .observe(self.downgrade_leader_region_elapsed.as_secs_f64());
+        METRIC_META_REGION_MIGRATION_STAGE_ELAPSED
+            .with_label_values(&["open_candidate_region"])
+            .observe(self.open_candidate_region_elapsed.as_secs_f64());
+        METRIC_META_REGION_MIGRATION_STAGE_ELAPSED
+            .with_label_values(&["upgrade_candidate_region"])
+            .observe(self.upgrade_candidate_region_elapsed.as_secs_f64());
+    }
+}
+
 /// It's shared in each step and available in executing (including retrying).
 ///
 /// It will be dropped if the procedure runner crashes.
@@ -132,14 +200,8 @@ pub struct VolatileContext {
     leader_region_last_entry_id: Option<u64>,
     /// The last_entry_id of leader metadata region (Only used for metric engine).
     leader_region_metadata_last_entry_id: Option<u64>,
-    /// Elapsed time of downgrading region and upgrading region.
-    operations_elapsed: Duration,
-    /// Elapsed time of downgrading leader region.
-    downgrade_leader_region_elapsed: Duration,
-    /// Elapsed time of open candidate region.
-    open_candidate_region_elapsed: Duration,
-    /// Elapsed time of upgrade candidate region.
-    upgrade_candidate_region_elapsed: Duration,
+    /// Metrics of region migration.
+    metrics: Metrics,
 }
 
 impl VolatileContext {
@@ -237,12 +299,35 @@ impl Context {
     pub fn next_operation_timeout(&self) -> Option<Duration> {
         self.persistent_ctx
             .timeout
-            .checked_sub(self.volatile_ctx.operations_elapsed)
+            .checked_sub(self.volatile_ctx.metrics.operations_elapsed)
     }
 
     /// Updates operations elapsed.
     pub fn update_operations_elapsed(&mut self, instant: Instant) {
-        self.volatile_ctx.operations_elapsed += instant.elapsed();
+        self.volatile_ctx
+            .metrics
+            .update_operations_elapsed(instant.elapsed());
+    }
+
+    /// Updates the elapsed time of downgrading leader region.
+    pub fn update_downgrade_leader_region_elapsed(&mut self, instant: Instant) {
+        self.volatile_ctx
+            .metrics
+            .update_downgrade_leader_region_elapsed(instant.elapsed());
+    }
+
+    /// Updates the elapsed time of open candidate region.
+    pub fn update_open_candidate_region_elapsed(&mut self, instant: Instant) {
+        self.volatile_ctx
+            .metrics
+            .update_open_candidate_region_elapsed(instant.elapsed());
+    }
+
+    /// Updates the elapsed time of upgrade candidate region.
+    pub fn update_upgrade_candidate_region_elapsed(&mut self, instant: Instant) {
+        self.volatile_ctx
+            .metrics
+            .update_upgrade_candidate_region_elapsed(instant.elapsed());
     }
 
     /// Returns address of meta server.
@@ -558,16 +643,11 @@ impl Procedure for RegionMigrationProcedure {
             } else {
                 error!(
                     e;
-                    "Region migration procedure failed, region_id: {}, from_peer: {}, to_peer: {}, 
-                    elapsed: {:?}, downgrade_leader_region_elapsed: {:?}, open_candidate_region_elapsed: {:?}, 
-                    upgrade_candidate_region_elapsed: {:?}",
+                    "Region migration procedure failed, region_id: {}, from_peer: {}, to_peer: {}, {}",
                     self.context.region_id(),
                     self.context.persistent_ctx.from_peer,
                     self.context.persistent_ctx.to_peer,
-                    self.context.volatile_ctx.operations_elapsed,
-                    self.context.volatile_ctx.downgrade_leader_region_elapsed,
-                    self.context.volatile_ctx.open_candidate_region_elapsed,
-                    self.context.volatile_ctx.upgrade_candidate_region_elapsed
+                    self.context.volatile_ctx.metrics,
                 );
                 METRIC_META_REGION_MIGRATION_ERROR
                     .with_label_values(&[name, "external"])

@@ -78,7 +78,7 @@ impl State for DowngradeLeaderRegion {
                 }
             }
         }
-        ctx.volatile_ctx.downgrade_leader_region_elapsed += now.elapsed();
+        ctx.update_downgrade_leader_region_elapsed(now);
 
         Ok((
             Box::new(UpgradeCandidateRegion::default()),
@@ -350,7 +350,8 @@ mod tests {
         let env = TestingEnv::new();
         let mut ctx = env.context_factory().new_context(persistent_context);
         prepare_table_metadata(&ctx, HashMap::default()).await;
-        ctx.volatile_ctx.operations_elapsed = ctx.persistent_ctx.timeout + Duration::from_secs(1);
+        ctx.volatile_ctx.metrics.operations_elapsed =
+            ctx.persistent_ctx.timeout + Duration::from_secs(1);
 
         let err = state.downgrade_region(&mut ctx).await.unwrap_err();
 
@@ -593,7 +594,8 @@ mod tests {
         let mut ctx = env.context_factory().new_context(persistent_context);
         let mailbox_ctx = env.mailbox_context();
         let mailbox = mailbox_ctx.mailbox().clone();
-        ctx.volatile_ctx.operations_elapsed = ctx.persistent_ctx.timeout + Duration::from_secs(1);
+        ctx.volatile_ctx.metrics.operations_elapsed =
+            ctx.persistent_ctx.timeout + Duration::from_secs(1);
 
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         mailbox_ctx
