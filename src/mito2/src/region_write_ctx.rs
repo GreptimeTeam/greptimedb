@@ -23,6 +23,7 @@ use store_api::logstore::LogStore;
 use store_api::storage::{RegionId, SequenceNumber};
 
 use crate::error::{Error, Result, WriteGroupSnafu};
+use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::KeyValues;
 use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
 use crate::request::OptionOutputTx;
@@ -92,6 +93,10 @@ pub(crate) struct RegionWriteCtx {
     ///
     /// The i-th notify is for i-th mutation.
     notifiers: Vec<WriteNotify>,
+    /// Notifiers for bulk requests.
+    bulk_notifiers: Vec<WriteNotify>,
+    /// Pending bulk write requests
+    pub(crate) bulk_parts: Vec<BulkPart>,
     /// The write operation is failed and we should not write to the mutable memtable.
     failed: bool,
 
@@ -125,9 +130,11 @@ impl RegionWriteCtx {
             wal_entry: WalEntry::default(),
             provider,
             notifiers: Vec::new(),
+            bulk_notifiers: vec![],
             failed: false,
             put_num: 0,
             delete_num: 0,
+            bulk_parts: vec![],
         }
     }
 
@@ -240,6 +247,49 @@ impl RegionWriteCtx {
 
         // Updates region sequence and entry id. Since we stores last sequence and entry id in region, we need
         // to decrease `next_sequence` and `next_entry_id` by 1.
+        self.version_control
+            .set_sequence_and_entry_id(self.next_sequence - 1, self.next_entry_id - 1);
+    }
+
+    pub(crate) fn push_bulk(&mut self, sender: OptionOutputTx, req: BulkPart) {
+        self.put_num += req.num_rows;
+        self.bulk_notifiers
+            .push(WriteNotify::new(sender, req.num_rows));
+        self.bulk_parts.push(req);
+    }
+
+    pub(crate) async fn write_bulk(&mut self) {
+        if self.failed || self.bulk_parts.is_empty() {
+            return;
+        }
+
+        if self.bulk_parts.len() == 1 {
+            if let Err(e) = self
+                .version
+                .memtables
+                .mutable
+                .write_bulk(self.bulk_parts.swap_remove(0))
+            {
+                self.bulk_notifiers[0].err = Some(Arc::new(e));
+            }
+            return;
+        }
+
+        let mut tasks = FuturesUnordered::new();
+        for (i, part) in self.bulk_parts.drain(..).enumerate() {
+            let mutable = self.version.memtables.mutable.clone();
+            tasks.push(common_runtime::spawn_blocking_global(move || {
+                (i, mutable.write_bulk(part))
+            }));
+        }
+        while let Some(result) = tasks.next().await {
+            // first unwrap the result from `spawn` above
+            let (i, result) = result.unwrap();
+            if let Err(err) = result {
+                self.bulk_notifiers[i].err = Some(Arc::new(err));
+            }
+        }
+
         self.version_control
             .set_sequence_and_entry_id(self.next_sequence - 1, self.next_entry_id - 1);
     }

@@ -26,7 +26,9 @@ use smallvec::{smallvec, SmallVec};
 use snafu::OptionExt;
 use store_api::metadata::RegionMetadataRef;
 
+use crate::error;
 use crate::error::{InvalidRequestSnafu, Result};
+use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::version::SmallMemtableVec;
 use crate::memtable::{KeyValues, MemtableBuilderRef, MemtableId, MemtableRef};
@@ -54,6 +56,11 @@ impl TimePartition {
     /// Write rows to the part.
     fn write(&self, kvs: &KeyValues) -> Result<()> {
         self.memtable.write(kvs)
+    }
+
+    /// Writes a record batch to memtable.
+    fn write_record_batch(&self, rb: BulkPart) -> error::Result<()> {
+        self.memtable.write_bulk(rb)
     }
 }
 
@@ -139,6 +146,12 @@ impl TimePartitions {
 
         // Slow path: We have to split kvs by partitions.
         self.write_multi_parts(kvs, &parts)
+    }
+
+    pub fn write_bulk(&self, rb: BulkPart) -> Result<()> {
+        // Get all parts.
+        let parts = self.list_partitions();
+        parts[0].write_record_batch(rb)
     }
 
     /// Append memtables in partitions to `memtables`.

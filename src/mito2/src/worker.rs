@@ -61,7 +61,8 @@ use crate::memtable::MemtableBuilderProvider;
 use crate::metrics::{REGION_COUNT, WRITE_STALL_TOTAL};
 use crate::region::{MitoRegionRef, OpeningRegions, OpeningRegionsRef, RegionMap, RegionMapRef};
 use crate::request::{
-    BackgroundNotify, DdlRequest, SenderDdlRequest, SenderWriteRequest, WorkerRequest,
+    BackgroundNotify, DdlRequest, SenderBulkRequest, SenderDdlRequest, SenderWriteRequest,
+    WorkerRequest,
 };
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
 use crate::sst::file::FileId;
@@ -593,22 +594,39 @@ pub(crate) struct StalledRequests {
     ///
     /// Key: RegionId
     /// Value: (estimated size, stalled requests)
-    pub(crate) requests: HashMap<RegionId, (usize, Vec<SenderWriteRequest>)>,
+    pub(crate) requests:
+        HashMap<RegionId, (usize, Vec<SenderWriteRequest>, Vec<SenderBulkRequest>)>,
     /// Estimated size of all stalled requests.
     pub(crate) estimated_size: usize,
 }
 
 impl StalledRequests {
     /// Appends stalled requests.
-    pub(crate) fn append(&mut self, requests: &mut Vec<SenderWriteRequest>) {
+    pub(crate) fn append(
+        &mut self,
+        requests: &mut Vec<SenderWriteRequest>,
+        bulk_requests: &mut Vec<SenderBulkRequest>,
+    ) {
         for req in requests.drain(..) {
             self.push(req);
+        }
+        for req in bulk_requests.drain(..) {
+            self.push_bulk(req);
         }
     }
 
     /// Pushes a stalled request to the buffer.
     pub(crate) fn push(&mut self, req: SenderWriteRequest) {
-        let (size, requests) = self.requests.entry(req.request.region_id).or_default();
+        let (size, requests, _) = self.requests.entry(req.request.region_id).or_default();
+        let req_size = req.request.estimated_size();
+        *size += req_size;
+        self.estimated_size += req_size;
+        requests.push(req);
+    }
+
+    pub(crate) fn push_bulk(&mut self, req: SenderBulkRequest) {
+        let region_id = req.region_id;
+        let (size, _, requests) = self.requests.entry(region_id).or_default();
         let req_size = req.request.estimated_size();
         *size += req_size;
         self.estimated_size += req_size;
@@ -616,12 +634,15 @@ impl StalledRequests {
     }
 
     /// Removes stalled requests of specific region.
-    pub(crate) fn remove(&mut self, region_id: &RegionId) -> Vec<SenderWriteRequest> {
-        if let Some((size, requests)) = self.requests.remove(region_id) {
+    pub(crate) fn remove(
+        &mut self,
+        region_id: &RegionId,
+    ) -> (Vec<SenderWriteRequest>, Vec<SenderBulkRequest>) {
+        if let Some((size, write_reqs, bulk_reqs)) = self.requests.remove(region_id) {
             self.estimated_size -= size;
-            requests
+            (write_reqs, bulk_reqs)
         } else {
-            vec![]
+            (vec![], vec![])
         }
     }
 
@@ -704,6 +725,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Buffer to retrieve requests from receiver.
         let mut write_req_buffer: Vec<SenderWriteRequest> =
             Vec::with_capacity(self.config.worker_request_batch_size);
+        let mut bulk_req_buffer: Vec<SenderBulkRequest> =
+            Vec::with_capacity(self.config.worker_request_batch_size);
         let mut ddl_req_buffer: Vec<SenderDdlRequest> =
             Vec::with_capacity(self.config.worker_request_batch_size);
         let mut general_req_buffer: Vec<WorkerRequest> =
@@ -782,6 +805,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 &mut write_req_buffer,
                 &mut ddl_req_buffer,
                 &mut general_req_buffer,
+                &mut bulk_req_buffer,
             )
             .await;
 
@@ -801,6 +825,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         write_requests: &mut Vec<SenderWriteRequest>,
         ddl_requests: &mut Vec<SenderDdlRequest>,
         general_requests: &mut Vec<WorkerRequest>,
+        bulk_requests: &mut Vec<SenderBulkRequest>,
     ) {
         for worker_req in general_requests.drain(..) {
             match worker_req {
@@ -835,8 +860,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     sender,
                 } => {
                     if let Some(region_metadata) = metadata {
-                        self.handle_bulk_insert(request, region_metadata, write_requests, sender)
-                            .await;
+                        self.handle_bulk_insert_batch(
+                            region_metadata,
+                            request,
+                            bulk_requests,
+                            sender,
+                        )
+                        .await;
                     } else {
                         error!("Cannot find region metadata for {}", request.region_id);
                         sender.send(
@@ -852,7 +882,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         // Handles all write requests first. So we can alter regions without
         // considering existing write requests.
-        self.handle_write_requests(write_requests, true).await;
+        self.handle_write_requests(write_requests, bulk_requests, true)
+            .await;
 
         self.handle_ddl_requests(ddl_requests).await;
     }

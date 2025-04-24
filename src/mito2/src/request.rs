@@ -47,6 +47,7 @@ use crate::error::{
     FlushRegionSnafu, InvalidRequestSnafu, Result, UnexpectedImpureDefaultSnafu,
 };
 use crate::manifest::action::RegionEdit;
+use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::MemtableId;
 use crate::metrics::COMPACTION_ELAPSED_TOTAL;
 use crate::wal::entry_distributor::WalEntryReceiver;
@@ -532,6 +533,13 @@ pub(crate) struct SenderWriteRequest {
     /// Result sender.
     pub(crate) sender: OptionOutputTx,
     pub(crate) request: WriteRequest,
+}
+
+pub(crate) struct SenderBulkRequest {
+    pub(crate) sender: OptionOutputTx,
+    pub(crate) region_id: RegionId,
+    pub(crate) request: BulkPart,
+    pub(crate) region_metadata: RegionMetadataRef,
 }
 
 /// Request sent to a worker

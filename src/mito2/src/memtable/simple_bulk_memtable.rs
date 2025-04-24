@@ -167,12 +167,7 @@ impl Memtable for SimpleBulkMemtable {
     }
 
     fn write_bulk(&self, part: BulkPart) -> error::Result<()> {
-        let BulkPart::RecordBatch(rb) = part else {
-            return error::UnsupportedOperationSnafu {
-                err_msg: "Writing binary bulk parts is not supported yet",
-            }
-            .fail();
-        };
+        let rb = &part.batch;
 
         let rows_to_write = rb.num_rows();
         let ts = Helper::try_into_vector(
@@ -194,6 +189,8 @@ impl Memtable for SimpleBulkMemtable {
         series
             .extend(ts, op_type, sequence, fields.into_iter())
             .unwrap();
+
+        self.alloc_tracker.on_allocation(part.estimated_size());
         Ok(())
     }
 

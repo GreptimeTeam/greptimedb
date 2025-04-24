@@ -15,6 +15,7 @@
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, Bound, HashSet};
 use std::fmt::{Debug, Formatter};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -90,8 +91,13 @@ impl TimeSeriesMemtableBuilder {
 
 impl MemtableBuilder for TimeSeriesMemtableBuilder {
     fn build(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef {
-        if metadata.primary_key.is_empty() {
-            info!("No primary key provided, use SimpleBulkMemtable");
+        if std::env::var("enable_experimental_bulk_memtable")
+            .ok()
+            .and_then(|v| bool::from_str(&v).ok())
+            .unwrap_or(false)
+            && metadata.primary_key.is_empty()
+        {
+            info!("Using SimpleBulkMemtable");
             Arc::new(SimpleBulkMemtable::new(
                 id,
                 metadata.clone(),
@@ -706,7 +712,7 @@ impl Series {
         op_type_v: UInt8Vector,
         sequence_v: UInt64Vector,
         fields: impl Iterator<Item = VectorRef>,
-    ) -> error::Result<()> {
+    ) -> Result<()> {
         self.active.extend(ts_v, op_type_v, sequence_v, fields)
     }
 

@@ -33,17 +33,15 @@ use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow_array::BinaryArray;
 use datatypes::data_type::DataType;
 use datatypes::prelude::{MutableVector, ScalarVectorBuilder, Vector};
-use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions};
 use parquet::arrow::ArrowWriter;
 use parquet::data_type::AsBytes;
 use parquet::file::metadata::ParquetMetaData;
 use parquet::file::properties::WriterProperties;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, SequenceNumber};
+use store_api::storage::SequenceNumber;
 use table::predicate::Predicate;
 
-use crate::error;
 use crate::error::{ComputeArrowSnafu, EncodeMemtableSnafu, NewRecordBatchSnafu, Result};
 use crate::memtable::bulk::context::BulkIterContextRef;
 use crate::memtable::bulk::part_reader::BulkPartIter;
@@ -54,9 +52,17 @@ use crate::sst::parquet::format::{PrimaryKeyArray, ReadFormat};
 use crate::sst::parquet::helper::parse_parquet_metadata;
 use crate::sst::to_sst_arrow_schema;
 
-pub enum BulkPart {
-    RecordBatch(DfRecordBatch),
-    Binary(EncodedBulkPart),
+pub struct BulkPart {
+    pub(crate) batch: DfRecordBatch,
+    pub(crate) num_rows: usize,
+    pub(crate) max_ts: i64,
+    pub(crate) min_ts: i64,
+}
+
+impl BulkPart {
+    pub(crate) fn estimated_size(&self) -> usize {
+        self.batch.get_array_memory_size()
+    }
 }
 
 #[derive(Debug)]
