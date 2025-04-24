@@ -505,11 +505,7 @@ fn resolve_value(
                 ColumnSchema {
                     column_name,
                     datatype: ColumnDataType::Binary as i32,
-                    semantic_type: if is_prometheus {
-                        SemanticType::Field
-                    } else {
-                        SemanticType::Tag
-                    } as i32,
+                    semantic_type: SemanticType::Field as i32,
                     datatype_extension: Some(ColumnDataTypeExtension {
                         type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
                     }),

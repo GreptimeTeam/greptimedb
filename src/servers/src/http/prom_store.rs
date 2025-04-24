@@ -28,12 +28,15 @@ use common_telemetry::tracing;
 use hyper::HeaderMap;
 use lazy_static::lazy_static;
 use object_pool::Pool;
+use pipeline::util::to_pipeline_version;
+use pipeline::PipelineDefinition;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use session::context::{Channel, QueryContext};
 use snafu::prelude::*;
 
-use crate::error::{self, Result};
+use crate::error::{self, InternalSnafu, PipelineSnafu, Result};
+use crate::http::extractor::PipelineInfo;
 use crate::http::header::{write_cost_header_map, GREPTIME_DB_HEADER_METRICS};
 use crate::prom_store::{snappy_decompress, zstd_decompress};
 use crate::proto::{PromSeriesProcessor, PromWriteRequest};
@@ -86,12 +89,13 @@ pub async fn remote_write(
     State(state): State<PromStoreState>,
     Query(params): Query<RemoteWriteQuery>,
     Extension(mut query_ctx): Extension<QueryContext>,
+    pipeline_info: PipelineInfo,
     content_encoding: TypedHeader<headers::ContentEncoding>,
     body: Bytes,
 ) -> Result<impl IntoResponse> {
     let PromStoreState {
         prom_store_handler,
-        pipeline_handler: _pipeline_handler,
+        pipeline_handler,
         prom_store_with_metric_engine,
         is_strict_mode,
     } = state;
@@ -102,17 +106,39 @@ pub async fn remote_write(
 
     let db = params.db.clone().unwrap_or_default();
     query_ctx.set_channel(Channel::Prometheus);
+    if let Some(physical_table) = params.physical_table {
+        query_ctx.set_extension(PHYSICAL_TABLE_PARAM, physical_table);
+    }
+    let query_ctx = Arc::new(query_ctx);
     let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_WRITE_ELAPSED
         .with_label_values(&[db.as_str()])
         .start_timer();
 
     let is_zstd = content_encoding.contains(VM_ENCODING);
-    let (request, samples) = decode_remote_write_request(is_zstd, body, is_strict_mode).await?;
 
-    if let Some(physical_table) = params.physical_table {
-        query_ctx.set_extension(PHYSICAL_TABLE_PARAM, physical_table);
-    }
-    let query_ctx = Arc::new(query_ctx);
+    let mut processor = if let Some(pipeline_name) = pipeline_info.pipeline_name {
+        let pipeline_def = PipelineDefinition::from_name(
+            &pipeline_name,
+            to_pipeline_version(pipeline_info.pipeline_version.as_deref())
+                .context(PipelineSnafu)?,
+            None,
+        )
+        .context(PipelineSnafu)?;
+        let pipeline_handler = pipeline_handler.context(InternalSnafu {
+            err_msg: "pipeline handler is not set".to_string(),
+        })?;
+
+        let mut p = PromSeriesProcessor::new(true);
+        p.set_pipeline_def(pipeline_def);
+        p.set_pipeline_handler(pipeline_handler);
+        p.set_query_ctx(query_ctx.clone());
+        p
+    } else {
+        PromSeriesProcessor::new(false)
+    };
+
+    let (request, samples) =
+        decode_remote_write_request(is_zstd, body, is_strict_mode, &mut processor).await?;
 
     let output = prom_store_handler
         .write(request, query_ctx, prom_store_with_metric_engine)
@@ -179,6 +205,7 @@ async fn decode_remote_write_request(
     is_zstd: bool,
     body: Bytes,
     is_strict_mode: bool,
+    processor: &mut PromSeriesProcessor,
 ) -> Result<(RowInsertRequests, usize)> {
     let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_DECODE_ELAPSED.start_timer();
 
@@ -196,14 +223,13 @@ async fn decode_remote_write_request(
     };
 
     let mut request = PROM_WRITE_REQUEST_POOL.pull(PromWriteRequest::default);
-    //[DEBUG] for now
-    let mut p = PromSeriesProcessor::new(false);
+
     request
-        .merge(buf, is_strict_mode, &mut p)
+        .merge(buf, is_strict_mode, processor)
         .context(error::DecodePromRemoteRequestSnafu)?;
 
-    if p.go_pipeline {
-        p.exec_pipeline().await
+    if processor.go_pipeline {
+        processor.exec_pipeline().await
     } else {
         Ok(request.as_row_insert_requests())
     }
