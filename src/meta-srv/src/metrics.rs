@@ -71,4 +71,13 @@ lazy_static! {
     /// The remote WAL prune execute counter.
     pub static ref METRIC_META_REMOTE_WAL_PRUNE_EXECUTE: IntCounterVec =
         register_int_counter_vec!("greptime_meta_remote_wal_prune_execute", "meta remote wal prune execute", &["topic_name"]).unwrap();
+    /// The migration stage elapsed histogram.
+    pub static ref METRIC_META_REGION_MIGRATION_STAGE_ELAPSED: HistogramVec = register_histogram_vec!(
+        "greptime_meta_region_migration_stage_elapsed",
+        "meta region migration stage elapsed",
+        &["stage"],
+        // 0.01 ~ 1000
+        exponential_buckets(0.01, 10.0, 7).unwrap(),
+    )
+    .unwrap();
 }

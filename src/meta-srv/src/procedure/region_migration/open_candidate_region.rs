@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
 use common_meta::distributed_time_constants::REGION_LEASE_SECS;
@@ -24,6 +24,7 @@ use common_procedure::Status;
 use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
+use tokio::time::Instant;
 
 use crate::error::{self, Result};
 use crate::handler::HeartbeatMailbox;
@@ -42,7 +43,9 @@ pub struct OpenCandidateRegion;
 impl State for OpenCandidateRegion {
     async fn next(&mut self, ctx: &mut Context) -> Result<(Box<dyn State>, Status)> {
         let instruction = self.build_open_region_instruction(ctx).await?;
+        let now = Instant::now();
         self.open_candidate_region(ctx, instruction).await?;
+        ctx.update_open_candidate_region_elapsed(now);
 
         Ok((
             Box::new(UpdateMetadata::Downgrade),
