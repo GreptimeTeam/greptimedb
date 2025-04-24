@@ -40,6 +40,7 @@ use common_meta::state_store::KvStateStore;
 use common_meta::wal_options_allocator::{build_kafka_client, build_wal_options_allocator};
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::ProcedureManagerRef;
+use common_telemetry::warn;
 use snafu::ResultExt;
 
 use crate::cache_invalidator::MetasrvCacheInvalidator;
@@ -272,18 +273,24 @@ impl MetasrvBuilder {
             },
         ));
         let peer_lookup_service = Arc::new(MetaPeerLookupService::new(meta_peer_client.clone()));
+
         if !is_remote_wal && options.enable_region_failover {
-            return error::UnexpectedSnafu {
-                violated: "Region failover is not supported in the local WAL implementation!",
+            if !options.allow_region_failover_on_local_wal {
+                return error::UnexpectedSnafu {
+                    violated: "Region failover is not supported in the local WAL implementation! 
+                    If you want to enable region failover for local WAL, please set `allow_region_failover_on_local_wal` to true.",
+                }
+                .fail();
+            } else {
+                warn!("Region failover is force enabled in the local WAL implementation! This may lead to data loss during failover!");
             }
-            .fail();
         }
 
         let (tx, rx) = RegionSupervisor::channel();
         let (region_failure_detector_controller, region_supervisor_ticker): (
             RegionFailureDetectorControllerRef,
             Option<std::sync::Arc<RegionSupervisorTicker>>,
-        ) = if options.enable_region_failover && is_remote_wal {
+        ) = if options.enable_region_failover {
             (
                 Arc::new(RegionFailureDetectorControl::new(tx.clone())) as _,
                 Some(Arc::new(RegionSupervisorTicker::new(
@@ -309,7 +316,7 @@ impl MetasrvBuilder {
         ));
         region_migration_manager.try_start()?;
 
-        let region_failover_handler = if options.enable_region_failover && is_remote_wal {
+        let region_failover_handler = if options.enable_region_failover {
             let region_supervisor = RegionSupervisor::new(
                 rx,
                 options.failure_detector,
