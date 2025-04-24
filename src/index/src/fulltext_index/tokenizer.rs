@@ -46,7 +46,11 @@ pub struct ChineseTokenizer;
 
 impl Tokenizer for ChineseTokenizer {
     fn tokenize<'a>(&self, text: &'a str) -> Vec<&'a str> {
-        JIEBA.cut(text, false)
+        if text.is_ascii() {
+            EnglishTokenizer {}.tokenize(text)
+        } else {
+            JIEBA.cut(text, false)
+        }
     }
 }
 
