@@ -196,10 +196,17 @@ async fn decode_remote_write_request(
     };
 
     let mut request = PROM_WRITE_REQUEST_POOL.pull(PromWriteRequest::default);
+    //[DEBUG] for now
     let mut p = PromSeriesProcessor::new(false);
     request
         .merge(buf, is_strict_mode, &mut p)
-        .context(error::DecodePromRemoteRequestSnafu)
+        .context(error::DecodePromRemoteRequestSnafu)?;
+
+    if p.go_pipeline {
+        p.exec_pipeline().await
+    } else {
+        Ok(request.as_row_insert_requests())
+    }
 }
 
 async fn decode_remote_read_request(body: Bytes) -> Result<ReadRequest> {

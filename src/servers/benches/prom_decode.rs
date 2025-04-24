@@ -46,7 +46,8 @@ fn bench_decode_prom_request_without_strict_mode(c: &mut Criterion) {
         .bench_function("prom_write_request", |b| {
             b.iter(|| {
                 let data = data.clone();
-                let _ = prom_request.merge(data, is_strict_mode, &mut p).unwrap();
+                prom_request.merge(data, is_strict_mode, &mut p).unwrap();
+                prom_request.as_row_insert_requests();
             });
         });
 }
@@ -76,7 +77,8 @@ fn bench_decode_prom_request_with_strict_mode(c: &mut Criterion) {
         .bench_function("prom_write_request", |b| {
             b.iter(|| {
                 let data = data.clone();
-                let _ = prom_request.merge(data, is_strict_mode, &mut p).unwrap();
+                prom_request.merge(data, is_strict_mode, &mut p).unwrap();
+                prom_request.as_row_insert_requests();
             });
         });
 }

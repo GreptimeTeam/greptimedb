@@ -21,13 +21,19 @@ use api::prom_store::remote::Sample;
 use api::v1::RowInsertRequests;
 use bytes::{Buf, Bytes};
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
-use pipeline::{PipelineMap, Value};
+use pipeline::{GreptimePipelineParams, PipelineContext, PipelineDefinition, PipelineMap, Value};
 use prost::encoding::message::merge;
 use prost::encoding::{decode_key, decode_varint, WireType};
 use prost::DecodeError;
+use session::context::QueryContextRef;
+use snafu::OptionExt;
 
+use crate::error::InternalSnafu;
+use crate::http::event::PipelineIngestRequest;
+use crate::pipeline::run_pipeline;
 use crate::prom_row_builder::TablesBuilder;
 use crate::prom_store::METRIC_NAME_LABEL_BYTES;
+use crate::query_handler::PipelineHandlerRef;
 use crate::repeated_field::{Clear, RepeatedField};
 
 impl Clear for Sample {
@@ -246,9 +252,9 @@ impl Clear for PromWriteRequest {
 }
 
 impl PromWriteRequest {
-    // pub fn as_row_insert_requests(&mut self) -> (RowInsertRequests, usize) {
-    //     self.table_data.as_insert_requests()
-    // }
+    pub fn as_row_insert_requests(&mut self) -> (RowInsertRequests, usize) {
+        self.table_data.as_insert_requests()
+    }
 
     // todo(hl): maybe use &[u8] can reduce the overhead introduced with Bytes.
     pub fn merge(
@@ -256,7 +262,7 @@ impl PromWriteRequest {
         mut buf: Bytes,
         is_strict_mode: bool,
         processor: &mut PromSeriesProcessor,
-    ) -> Result<(RowInsertRequests, usize), DecodeError> {
+    ) -> Result<(), DecodeError> {
         const STRUCT_NAME: &str = "PromWriteRequest";
         while buf.has_remaining() {
             let (tag, wire_type) = decode_key(&mut buf)?;
@@ -301,13 +307,18 @@ impl PromWriteRequest {
             }
         }
 
-        Ok(processor.prom_req_to_grpc_req(&mut self.table_data))
+        Ok(())
     }
 }
 
 pub struct PromSeriesProcessor {
     pub(crate) go_pipeline: bool,
     pub(crate) table_values: BTreeMap<String, Vec<PipelineMap>>,
+
+    // optional fields for pipeline
+    pub pipeline_handler: Option<PipelineHandlerRef>,
+    pub query_ctx: Option<QueryContextRef>,
+    pub pipeline_def: Option<PipelineDefinition>,
 }
 
 impl PromSeriesProcessor {
@@ -315,7 +326,22 @@ impl PromSeriesProcessor {
         Self {
             go_pipeline,
             table_values: BTreeMap::new(),
+            pipeline_handler: None,
+            query_ctx: None,
+            pipeline_def: None,
         }
+    }
+
+    pub fn set_pipeline_handler(&mut self, handler: PipelineHandlerRef) {
+        self.pipeline_handler = Some(handler);
+    }
+
+    pub fn set_query_ctx(&mut self, query_ctx: QueryContextRef) {
+        self.query_ctx = Some(query_ctx);
+    }
+
+    pub fn set_pipeline_def(&mut self, pipeline_def: PipelineDefinition) {
+        self.pipeline_def = Some(pipeline_def);
     }
 
     pub(crate) fn consume_series(
@@ -397,18 +423,43 @@ impl PromSeriesProcessor {
         Ok(())
     }
 
-    pub(crate) fn prom_req_to_grpc_req(
-        &self,
-        tables_builder: &mut TablesBuilder,
-    ) -> (RowInsertRequests, usize) {
-        tables_builder.as_insert_requests()
-    }
+    pub(crate) async fn exec_pipeline(
+        &mut self,
+    ) -> crate::error::Result<(RowInsertRequests, usize)> {
+        // prepare params
+        let handler = self.pipeline_handler.as_ref().context(InternalSnafu {
+            err_msg: "pipeline handler is not set",
+        })?;
+        let pipeline_def = self.pipeline_def.as_ref().context(InternalSnafu {
+            err_msg: "pipeline definition is not set",
+        })?;
+        let pipeline_param = GreptimePipelineParams::default();
+        let query_ctx = self.query_ctx.as_ref().context(InternalSnafu {
+            err_msg: "query context is not set",
+        })?;
 
-    // pub(crate) fn pipeline_map_to_grpc_req(
-    //     &self,
-    //     tables_builder: &mut TablesBuilder,
-    // ) -> (RowInsertRequests, usize) {
-    // }
+        let pipeline_ctx = PipelineContext::new(pipeline_def, &pipeline_param);
+        let mut size = 0;
+
+        let mut inserts = Vec::with_capacity(self.table_values.len());
+        for (table_name, pipeline_maps) in self.table_values.iter_mut() {
+            let pipeline_req = PipelineIngestRequest {
+                table: table_name.clone(),
+                values: pipeline_maps.clone(),
+            };
+            let row_req =
+                run_pipeline(handler, &pipeline_ctx, pipeline_req, query_ctx, true).await?;
+            size += row_req
+                .iter()
+                .map(|rq| rq.rows.as_ref().map(|r| r.rows.len()).unwrap_or(0))
+                .sum::<usize>();
+            inserts.extend(row_req);
+        }
+
+        let row_insert_requests = RowInsertRequests { inserts };
+
+        Ok((row_insert_requests, size))
+    }
 }
 
 #[cfg(test)]
@@ -447,9 +498,10 @@ mod tests {
     ) {
         let mut p = PromSeriesProcessor::new(false);
         prom_write_request.clear();
-        let (prom_rows, samples) = prom_write_request
+        prom_write_request
             .merge(data.clone(), true, &mut p)
             .unwrap();
+        let (prom_rows, samples) = prom_write_request.as_row_insert_requests();
 
         assert_eq!(expected_samples, samples);
         assert_eq!(expected_rows.inserts.len(), prom_rows.inserts.len());
