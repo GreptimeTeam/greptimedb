@@ -41,7 +41,7 @@ use common_meta::wal_options_allocator::{build_kafka_client, build_wal_options_a
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::warn;
-use snafu::ResultExt;
+use snafu::{ensure, ResultExt};
 
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
@@ -275,13 +275,14 @@ impl MetasrvBuilder {
         let peer_lookup_service = Arc::new(MetaPeerLookupService::new(meta_peer_client.clone()));
 
         if !is_remote_wal && options.enable_region_failover {
-            if !options.allow_region_failover_on_local_wal {
-                return error::UnexpectedSnafu {
+            ensure!(
+                options.allow_region_failover_on_local_wal,
+                error::UnexpectedSnafu {
                     violated: "Region failover is not supported in the local WAL implementation! 
                     If you want to enable region failover for local WAL, please set `allow_region_failover_on_local_wal` to true.",
                 }
-                .fail();
-            } else {
+            );
+            if options.allow_region_failover_on_local_wal {
                 warn!("Region failover is force enabled in the local WAL implementation! This may lead to data loss during failover!");
             }
         }
