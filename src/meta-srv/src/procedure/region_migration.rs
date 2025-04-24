@@ -156,18 +156,29 @@ impl Metrics {
 
 impl Drop for Metrics {
     fn drop(&mut self) {
-        METRIC_META_REGION_MIGRATION_STAGE_ELAPSED
-            .with_label_values(&["operations"])
-            .observe(self.operations_elapsed.as_secs_f64());
-        METRIC_META_REGION_MIGRATION_STAGE_ELAPSED
-            .with_label_values(&["downgrade_leader_region"])
-            .observe(self.downgrade_leader_region_elapsed.as_secs_f64());
-        METRIC_META_REGION_MIGRATION_STAGE_ELAPSED
-            .with_label_values(&["open_candidate_region"])
-            .observe(self.open_candidate_region_elapsed.as_secs_f64());
-        METRIC_META_REGION_MIGRATION_STAGE_ELAPSED
-            .with_label_values(&["upgrade_candidate_region"])
-            .observe(self.upgrade_candidate_region_elapsed.as_secs_f64());
+        if !self.operations_elapsed.is_zero() {
+            METRIC_META_REGION_MIGRATION_STAGE_ELAPSED
+                .with_label_values(&["operations"])
+                .observe(self.operations_elapsed.as_secs_f64());
+        }
+
+        if !self.downgrade_leader_region_elapsed.is_zero() {
+            METRIC_META_REGION_MIGRATION_STAGE_ELAPSED
+                .with_label_values(&["downgrade_leader_region"])
+                .observe(self.downgrade_leader_region_elapsed.as_secs_f64());
+        }
+
+        if !self.open_candidate_region_elapsed.is_zero() {
+            METRIC_META_REGION_MIGRATION_STAGE_ELAPSED
+                .with_label_values(&["open_candidate_region"])
+                .observe(self.open_candidate_region_elapsed.as_secs_f64());
+        }
+
+        if !self.upgrade_candidate_region_elapsed.is_zero() {
+            METRIC_META_REGION_MIGRATION_STAGE_ELAPSED
+                .with_label_values(&["upgrade_candidate_region"])
+                .observe(self.upgrade_candidate_region_elapsed.as_secs_f64());
+        }
     }
 }
 
