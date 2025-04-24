@@ -438,9 +438,10 @@ impl PromSeriesProcessor {
             err_msg: "query context is not set",
         })?;
 
-        let pipeline_ctx = PipelineContext::new(pipeline_def, &pipeline_param);
+        let pipeline_ctx = PipelineContext::new(pipeline_def, &pipeline_param, query_ctx.channel());
         let mut size = 0;
 
+        // run pipeline
         let mut inserts = Vec::with_capacity(self.table_values.len());
         for (table_name, pipeline_maps) in self.table_values.iter_mut() {
             let pipeline_req = PipelineIngestRequest {

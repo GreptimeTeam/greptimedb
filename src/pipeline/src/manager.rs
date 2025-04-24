@@ -20,6 +20,7 @@ use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datatypes::timestamp::TimestampNanosecond;
 use itertools::Itertools;
+use session::context::Channel;
 use snafu::ensure;
 use util::to_pipeline_version;
 
@@ -107,16 +108,19 @@ impl PipelineDefinition {
 pub struct PipelineContext<'a> {
     pub pipeline_definition: &'a PipelineDefinition,
     pub pipeline_param: &'a GreptimePipelineParams,
+    pub channel: Channel,
 }
 
 impl<'a> PipelineContext<'a> {
     pub fn new(
         pipeline_definition: &'a PipelineDefinition,
         pipeline_param: &'a GreptimePipelineParams,
+        channel: Channel,
     ) -> Self {
         Self {
             pipeline_definition,
             pipeline_param,
+            channel,
         }
     }
 }
