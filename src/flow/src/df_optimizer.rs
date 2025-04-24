@@ -62,9 +62,8 @@ pub async fn apply_df_optimizer(
     let cfg = ConfigOptions::new();
     let analyzer = Analyzer::with_rules(vec![
         Arc::new(CountWildcardToTimeIndexRule),
-        // unused for now since batch mode
-        // Arc::new(AvgExpandRule::new()),
-        // Arc::new(TumbleExpandRule::new()),
+        Arc::new(AvgExpandRule),
+        Arc::new(TumbleExpandRule),
         Arc::new(CheckGroupByRule::new()),
         Arc::new(TypeCoercion::new()),
     ]);
@@ -128,7 +127,6 @@ pub async fn sql_to_flow_plan(
     Ok(flow_plan)
 }
 
-#[allow(unused)]
 #[derive(Debug)]
 struct AvgExpandRule;
 
@@ -326,7 +324,6 @@ impl TreeNodeRewriter for ExpandAvgRewriter<'_> {
 }
 
 /// expand tumble in aggr expr to tumble_start and tumble_end with column name like `window_start`
-#[allow(unused)]
 #[derive(Debug)]
 struct TumbleExpandRule;
 
