@@ -30,7 +30,7 @@ use servers::query_handler::grpc::GrpcQueryHandler;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
 
-use crate::batching_mode::DEFAULT_BATCHING_ENGINE_QUERY_TIMEOUT;
+use crate::batching_mode::{DEFAULT_BATCHING_ENGINE_QUERY_TIMEOUT, MIN_REFRESH_DURATION};
 use crate::error::{ExternalSnafu, InvalidRequestSnafu, UnexpectedSnafu};
 use crate::Error;
 
@@ -99,7 +99,9 @@ impl FrontendClient {
         Self::Distributed {
             meta_client,
             chnl_mgr: {
-                let cfg = ChannelConfig::new().timeout(DEFAULT_BATCHING_ENGINE_QUERY_TIMEOUT);
+                let cfg = ChannelConfig::new()
+                    .connect_timeout(MIN_REFRESH_DURATION)
+                    .timeout(DEFAULT_BATCHING_ENGINE_QUERY_TIMEOUT);
                 ChannelManager::with_config(cfg)
             },
         }

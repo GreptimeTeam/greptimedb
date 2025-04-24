@@ -25,7 +25,6 @@ use datafusion::config::ConfigOptions;
 use datafusion::error::DataFusionError;
 use datafusion::functions_aggregate::count::count_udaf;
 use datafusion::functions_aggregate::sum::sum_udaf;
-use datafusion::optimizer::analyzer::count_wildcard_rule::CountWildcardRule;
 use datafusion::optimizer::analyzer::type_coercion::TypeCoercion;
 use datafusion::optimizer::common_subexpr_eliminate::CommonSubexprEliminate;
 use datafusion::optimizer::optimize_projections::OptimizeProjections;
@@ -42,6 +41,7 @@ use datafusion_expr::{
     BinaryExpr, ColumnarValue, Expr, Operator, Projection, ScalarFunctionArgs, ScalarUDFImpl,
     Signature, TypeSignature, Volatility,
 };
+use query::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
 use query::parser::QueryLanguageParser;
 use query::query_engine::DefaultSerializer;
 use query::QueryEngine;
@@ -61,9 +61,10 @@ pub async fn apply_df_optimizer(
 ) -> Result<datafusion_expr::LogicalPlan, Error> {
     let cfg = ConfigOptions::new();
     let analyzer = Analyzer::with_rules(vec![
-        Arc::new(CountWildcardRule::new()),
-        Arc::new(AvgExpandRule::new()),
-        Arc::new(TumbleExpandRule::new()),
+        Arc::new(CountWildcardToTimeIndexRule),
+        // unused for now since batch mode
+        // Arc::new(AvgExpandRule::new()),
+        // Arc::new(TumbleExpandRule::new()),
         Arc::new(CheckGroupByRule::new()),
         Arc::new(TypeCoercion::new()),
     ]);
@@ -127,14 +128,9 @@ pub async fn sql_to_flow_plan(
     Ok(flow_plan)
 }
 
+#[allow(unused)]
 #[derive(Debug)]
-struct AvgExpandRule {}
-
-impl AvgExpandRule {
-    pub fn new() -> Self {
-        Self {}
-    }
-}
+struct AvgExpandRule;
 
 impl AnalyzerRule for AvgExpandRule {
     fn analyze(
@@ -330,14 +326,9 @@ impl TreeNodeRewriter for ExpandAvgRewriter<'_> {
 }
 
 /// expand tumble in aggr expr to tumble_start and tumble_end with column name like `window_start`
+#[allow(unused)]
 #[derive(Debug)]
-struct TumbleExpandRule {}
-
-impl TumbleExpandRule {
-    pub fn new() -> Self {
-        Self {}
-    }
-}
+struct TumbleExpandRule;
 
 impl AnalyzerRule for TumbleExpandRule {
     fn analyze(

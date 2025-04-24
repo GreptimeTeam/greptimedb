@@ -342,8 +342,8 @@ impl TreeNodeRewriter for AddAutoColumnRewriter {
             }
         } else {
             return Err(DataFusionError::Plan(format!(
-                    "Expect table have 0,1 or 2 columns more than query columns, found {} query columns {:?}, {} table columns {:?} at node {:?}",
-                    query_col_cnt, exprs, table_col_cnt, self.schema.column_schemas(), node
+                    "Expect table have 0,1 or 2 columns more than query columns, found {} query columns {:?}, {} table columns {:?}",
+                    query_col_cnt, exprs, table_col_cnt, self.schema.column_schemas()
                 )));
         }
 

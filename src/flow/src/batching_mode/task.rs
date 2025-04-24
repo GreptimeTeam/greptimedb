@@ -541,7 +541,10 @@ impl BatchingTask {
                             .clone()
                             .rewrite(&mut add_auto_column)
                             .with_context(|_| DatafusionSnafu {
-                                context: format!("Failed to rewrite plan {:?}", self.config.plan),
+                                context: format!(
+                                    "Failed to rewrite plan:\n {}\n",
+                                    self.config.plan.to_string()
+                                ),
                             })?
                             .data;
                         let schema_len = plan.schema().fields().len();
@@ -580,7 +583,7 @@ impl BatchingTask {
                 .rewrite(&mut add_filter)
                 .and_then(|p| p.data.rewrite(&mut add_auto_column))
                 .with_context(|_| DatafusionSnafu {
-                    context: format!("Failed to rewrite plan {plan:?}"),
+                    context: format!("Failed to rewrite plan:\n {}\n", plan.to_string()),
                 })?
                 .data
         };
