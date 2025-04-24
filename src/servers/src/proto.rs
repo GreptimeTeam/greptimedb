@@ -12,12 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::btree_map::Entry;
+use std::collections::BTreeMap;
 use std::ops::Deref;
 use std::slice;
 
 use api::prom_store::remote::Sample;
 use api::v1::RowInsertRequests;
 use bytes::{Buf, Bytes};
+use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
+use pipeline::{PipelineMap, Value};
 use prost::encoding::message::merge;
 use prost::encoding::{decode_key, decode_varint, WireType};
 use prost::DecodeError;
@@ -205,28 +209,28 @@ impl PromTimeSeries {
         }
     }
 
-    fn add_to_table_data(
-        &mut self,
-        table_builders: &mut TablesBuilder,
-        is_strict_mode: bool,
-    ) -> Result<(), DecodeError> {
-        let label_num = self.labels.len();
-        let row_num = self.samples.len();
-        let table_data = table_builders.get_or_create_table_builder(
-            std::mem::take(&mut self.table_name),
-            label_num,
-            row_num,
-        );
-        table_data.add_labels_and_samples(
-            self.labels.as_slice(),
-            self.samples.as_slice(),
-            is_strict_mode,
-        )?;
-        self.labels.clear();
-        self.samples.clear();
+    // fn add_to_table_data(
+    //     &mut self,
+    //     table_builders: &mut TablesBuilder,
+    //     is_strict_mode: bool,
+    // ) -> Result<(), DecodeError> {
+    //     let label_num = self.labels.len();
+    //     let row_num = self.samples.len();
+    //     let table_data = table_builders.get_or_create_table_builder(
+    //         std::mem::take(&mut self.table_name),
+    //         label_num,
+    //         row_num,
+    //     );
+    //     table_data.add_labels_and_samples(
+    //         self.labels.as_slice(),
+    //         self.samples.as_slice(),
+    //         is_strict_mode,
+    //     )?;
+    //     self.labels.clear();
+    //     self.samples.clear();
 
-        Ok(())
-    }
+    //     Ok(())
+    // }
 }
 
 #[derive(Default, Debug)]
@@ -242,12 +246,17 @@ impl Clear for PromWriteRequest {
 }
 
 impl PromWriteRequest {
-    pub fn as_row_insert_requests(&mut self) -> (RowInsertRequests, usize) {
-        self.table_data.as_insert_requests()
-    }
+    // pub fn as_row_insert_requests(&mut self) -> (RowInsertRequests, usize) {
+    //     self.table_data.as_insert_requests()
+    // }
 
     // todo(hl): maybe use &[u8] can reduce the overhead introduced with Bytes.
-    pub fn merge(&mut self, mut buf: Bytes, is_strict_mode: bool) -> Result<(), DecodeError> {
+    pub fn merge(
+        &mut self,
+        mut buf: Bytes,
+        is_strict_mode: bool,
+        processor: &mut PromSeriesProcessor,
+    ) -> Result<(RowInsertRequests, usize), DecodeError> {
         const STRUCT_NAME: &str = "PromWriteRequest";
         while buf.has_remaining() {
             let (tag, wire_type) = decode_key(&mut buf)?;
@@ -273,8 +282,16 @@ impl PromWriteRequest {
                     if buf.remaining() != limit {
                         return Err(DecodeError::new("delimited length exceeded"));
                     }
-                    self.series
-                        .add_to_table_data(&mut self.table_data, is_strict_mode)?;
+
+                    processor.consume_series(
+                        &mut self.series,
+                        &mut self.table_data,
+                        is_strict_mode,
+                    )?;
+
+                    // clear state
+                    self.series.labels.clear();
+                    self.series.samples.clear();
                 }
                 3u32 => {
                     // todo(hl): metadata are skipped.
@@ -283,8 +300,115 @@ impl PromWriteRequest {
                 _ => prost::encoding::skip_field(wire_type, tag, &mut buf, Default::default())?,
             }
         }
+
+        Ok(processor.prom_req_to_grpc_req(&mut self.table_data))
+    }
+}
+
+pub struct PromSeriesProcessor {
+    pub(crate) go_pipeline: bool,
+    pub(crate) table_values: BTreeMap<String, Vec<PipelineMap>>,
+}
+
+impl PromSeriesProcessor {
+    pub fn new(go_pipeline: bool) -> Self {
+        Self {
+            go_pipeline,
+            table_values: BTreeMap::new(),
+        }
+    }
+
+    pub(crate) fn consume_series(
+        &mut self,
+        series: &mut PromTimeSeries,
+        tables_builder: &mut TablesBuilder,
+        is_strict_mode: bool,
+    ) -> Result<(), DecodeError> {
+        if self.go_pipeline {
+            self.consume_series_to_pipeline_map(series)?;
+        } else {
+            self.consume_series_to_prom(series, tables_builder, is_strict_mode)?;
+        }
         Ok(())
     }
+
+    // convert one series to prom req table
+    pub(crate) fn consume_series_to_prom(
+        &self,
+        series: &mut PromTimeSeries,
+        tables_builder: &mut TablesBuilder,
+        is_strict_mode: bool,
+    ) -> Result<(), DecodeError> {
+        let label_num = series.labels.len();
+        let row_num = series.samples.len();
+        let table_data = tables_builder.get_or_create_table_builder(
+            std::mem::take(&mut series.table_name),
+            label_num,
+            row_num,
+        );
+        table_data.add_labels_and_samples(
+            series.labels.as_slice(),
+            series.samples.as_slice(),
+            is_strict_mode,
+        )?;
+
+        Ok(())
+    }
+
+    // convert one series to pipeline map
+    pub(crate) fn consume_series_to_pipeline_map(
+        &mut self,
+        series: &mut PromTimeSeries,
+    ) -> Result<(), DecodeError> {
+        let mut vec_pipeline_map: Vec<PipelineMap> = Vec::new();
+        let mut pipeline_map = PipelineMap::new();
+        for l in series.labels.iter() {
+            let name = String::from_utf8(l.name.to_vec())
+                .map_err(|_| DecodeError::new("invalid utf-8"))?;
+            let value = String::from_utf8(l.value.to_vec())
+                .map_err(|_| DecodeError::new("invalid utf-8"))?;
+            pipeline_map.insert(name, Value::String(value));
+        }
+
+        let one_sample = series.samples.len() == 1;
+
+        for s in series.samples.iter() {
+            let timestamp = s.timestamp;
+            pipeline_map.insert(GREPTIME_TIMESTAMP.to_string(), Value::Int64(timestamp));
+            pipeline_map.insert(GREPTIME_VALUE.to_string(), Value::Float64(s.value));
+            if one_sample {
+                vec_pipeline_map.push(pipeline_map);
+                break;
+            } else {
+                vec_pipeline_map.push(pipeline_map.clone());
+            }
+        }
+
+        let table_name = std::mem::take(&mut series.table_name);
+        match self.table_values.entry(table_name) {
+            Entry::Occupied(mut occupied_entry) => {
+                occupied_entry.get_mut().append(&mut vec_pipeline_map);
+            }
+            Entry::Vacant(vacant_entry) => {
+                vacant_entry.insert(vec_pipeline_map);
+            }
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn prom_req_to_grpc_req(
+        &self,
+        tables_builder: &mut TablesBuilder,
+    ) -> (RowInsertRequests, usize) {
+        tables_builder.as_insert_requests()
+    }
+
+    // pub(crate) fn pipeline_map_to_grpc_req(
+    //     &self,
+    //     tables_builder: &mut TablesBuilder,
+    // ) -> (RowInsertRequests, usize) {
+    // }
 }
 
 #[cfg(test)]
@@ -297,7 +421,7 @@ mod tests {
     use prost::Message;
 
     use crate::prom_store::to_grpc_row_insert_requests;
-    use crate::proto::PromWriteRequest;
+    use crate::proto::{PromSeriesProcessor, PromWriteRequest};
     use crate::repeated_field::Clear;
 
     fn sort_rows(rows: Rows) -> Rows {
@@ -321,9 +445,11 @@ mod tests {
         expected_samples: usize,
         expected_rows: &RowInsertRequests,
     ) {
+        let mut p = PromSeriesProcessor::new(false);
         prom_write_request.clear();
-        prom_write_request.merge(data.clone(), true).unwrap();
-        let (prom_rows, samples) = prom_write_request.as_row_insert_requests();
+        let (prom_rows, samples) = prom_write_request
+            .merge(data.clone(), true, &mut p)
+            .unwrap();
 
         assert_eq!(expected_samples, samples);
         assert_eq!(expected_rows.inserts.len(), prom_rows.inserts.len());

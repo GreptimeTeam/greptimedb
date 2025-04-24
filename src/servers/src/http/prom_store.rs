@@ -36,7 +36,7 @@ use snafu::prelude::*;
 use crate::error::{self, Result};
 use crate::http::header::{write_cost_header_map, GREPTIME_DB_HEADER_METRICS};
 use crate::prom_store::{snappy_decompress, zstd_decompress};
-use crate::proto::PromWriteRequest;
+use crate::proto::{PromSeriesProcessor, PromWriteRequest};
 use crate::query_handler::{PipelineHandlerRef, PromStoreProtocolHandlerRef, PromStoreResponse};
 
 pub const PHYSICAL_TABLE_PARAM: &str = "physical_table";
@@ -196,10 +196,10 @@ async fn decode_remote_write_request(
     };
 
     let mut request = PROM_WRITE_REQUEST_POOL.pull(PromWriteRequest::default);
+    let mut p = PromSeriesProcessor::new(false);
     request
-        .merge(buf, is_strict_mode)
-        .context(error::DecodePromRemoteRequestSnafu)?;
-    Ok(request.as_row_insert_requests())
+        .merge(buf, is_strict_mode, &mut p)
+        .context(error::DecodePromRemoteRequestSnafu)
 }
 
 async fn decode_remote_read_request(body: Bytes) -> Result<ReadRequest> {

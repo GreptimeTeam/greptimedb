@@ -19,7 +19,7 @@ use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, Criterion};
 use prost::Message;
 use servers::prom_store::to_grpc_row_insert_requests;
-use servers::proto::PromWriteRequest;
+use servers::proto::{PromSeriesProcessor, PromWriteRequest};
 
 fn bench_decode_prom_request_without_strict_mode(c: &mut Criterion) {
     let mut d = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -31,6 +31,8 @@ fn bench_decode_prom_request_without_strict_mode(c: &mut Criterion) {
     let mut request = WriteRequest::default();
     let mut prom_request = PromWriteRequest::default();
     let is_strict_mode = false;
+    let mut p = PromSeriesProcessor::new(false);
+
     c.benchmark_group("decode")
         .measurement_time(Duration::from_secs(3))
         .bench_function("write_request", |b| {
@@ -44,8 +46,7 @@ fn bench_decode_prom_request_without_strict_mode(c: &mut Criterion) {
         .bench_function("prom_write_request", |b| {
             b.iter(|| {
                 let data = data.clone();
-                prom_request.merge(data, is_strict_mode).unwrap();
-                prom_request.as_row_insert_requests();
+                let _ = prom_request.merge(data, is_strict_mode, &mut p).unwrap();
             });
         });
 }
@@ -60,6 +61,8 @@ fn bench_decode_prom_request_with_strict_mode(c: &mut Criterion) {
     let mut request = WriteRequest::default();
     let mut prom_request = PromWriteRequest::default();
     let is_strict_mode = true;
+    let mut p = PromSeriesProcessor::new(false);
+
     c.benchmark_group("decode")
         .measurement_time(Duration::from_secs(3))
         .bench_function("write_request", |b| {
@@ -73,8 +76,7 @@ fn bench_decode_prom_request_with_strict_mode(c: &mut Criterion) {
         .bench_function("prom_write_request", |b| {
             b.iter(|| {
                 let data = data.clone();
-                prom_request.merge(data, is_strict_mode).unwrap();
-                prom_request.as_row_insert_requests();
+                let _ = prom_request.merge(data, is_strict_mode, &mut p).unwrap();
             });
         });
 }
