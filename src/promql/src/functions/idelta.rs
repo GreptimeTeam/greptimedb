@@ -190,6 +190,7 @@ mod test {
             IDelta::<false>::scalar_udf(),
             ts_range_array,
             value_range_array,
+            vec![],
             vec![Some(1.0), Some(-5.0), None, Some(6.0), None, None],
         );
 
@@ -200,6 +201,7 @@ mod test {
             IDelta::<true>::scalar_udf(),
             ts_range_array,
             value_range_array,
+            vec![],
             // the second point represent counter reset
             vec![Some(0.5), Some(0.0), None, Some(3.0), None, None],
         );
