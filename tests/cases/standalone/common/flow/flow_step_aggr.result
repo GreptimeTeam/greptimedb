@@ -80,7 +80,9 @@ FROM
     access_log_10s
 GROUP BY
     "url",
-    time_window_1m;
+    time_window_1m
+ORDER BY
+    time_window_1m;;
 
 +------------+---------------------+------------+
 | url        | time_window_1m      | uv_per_min |
@@ -157,7 +159,9 @@ SELECT
     time_window,
     uddsketch_calc(0.99, `percentile_state`) AS p99
 FROM
-    percentile_5s;
+    percentile_5s
+ORDER BY
+    time_window;
 
 +---------------------+-------------------+
 | time_window         | p99               |

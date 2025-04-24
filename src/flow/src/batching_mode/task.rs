@@ -543,7 +543,7 @@ impl BatchingTask {
                             .with_context(|_| DatafusionSnafu {
                                 context: format!(
                                     "Failed to rewrite plan:\n {}\n",
-                                    self.config.plan.to_string()
+                                    self.config.plan
                                 ),
                             })?
                             .data;
@@ -583,7 +583,7 @@ impl BatchingTask {
                 .rewrite(&mut add_filter)
                 .and_then(|p| p.data.rewrite(&mut add_auto_column))
                 .with_context(|_| DatafusionSnafu {
-                    context: format!("Failed to rewrite plan:\n {}\n", plan.to_string()),
+                    context: format!("Failed to rewrite plan:\n {}\n", plan),
                 })?
                 .data
         };

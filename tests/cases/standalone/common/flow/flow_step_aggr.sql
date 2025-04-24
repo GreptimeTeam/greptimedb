@@ -50,7 +50,9 @@ FROM
     access_log_10s
 GROUP BY
     "url",
-    time_window_1m;
+    time_window_1m
+ORDER BY
+    time_window_1m;;
 
 DROP FLOW calc_access_log_10s;
 DROP TABLE access_log_10s;
@@ -98,7 +100,9 @@ SELECT
     time_window,
     uddsketch_calc(0.99, `percentile_state`) AS p99
 FROM
-    percentile_5s;
+    percentile_5s
+ORDER BY
+    time_window;
 
 DROP FLOW calc_percentile_5s;
 DROP TABLE percentile_5s;
