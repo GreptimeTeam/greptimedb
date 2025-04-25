@@ -2510,7 +2510,7 @@ dependencies = [
  "futures-util",
  "serde",
  "snafu 0.8.5",
- "sqlparser 0.54.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=b5feba13bb941579e8e9c6d349eb11dee10defcb)",
+ "sqlparser 0.54.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=0cf6c04490d59435ee965edd2078e8855bd8471e)",
  "sqlparser_derive 0.1.1",
  "statrs",
  "store-api",
@@ -3656,7 +3656,7 @@ dependencies = [
  "serde",
  "serde_json",
  "snafu 0.8.5",
- "sqlparser 0.54.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=b5feba13bb941579e8e9c6d349eb11dee10defcb)",
+ "sqlparser 0.54.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=0cf6c04490d59435ee965edd2078e8855bd8471e)",
  "sqlparser_derive 0.1.1",
 ]
 
@@ -4552,7 +4552,7 @@ dependencies = [
  "session",
  "snafu 0.8.5",
  "sql",
- "sqlparser 0.54.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=b5feba13bb941579e8e9c6d349eb11dee10defcb)",
+ "sqlparser 0.54.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=0cf6c04490d59435ee965edd2078e8855bd8471e)",
  "store-api",
  "strfmt",
  "substrait 0.14.0",
@@ -8163,7 +8163,7 @@ dependencies = [
  "session",
  "snafu 0.8.5",
  "sql",
- "sqlparser 0.54.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=b5feba13bb941579e8e9c6d349eb11dee10defcb)",
+ "sqlparser 0.54.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=0cf6c04490d59435ee965edd2078e8855bd8471e)",
  "store-api",
  "substrait 0.14.0",
  "table",
@@ -8440,7 +8440,7 @@ dependencies = [
  "session",
  "snafu 0.8.5",
  "sql",
- "sqlparser 0.54.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=b5feba13bb941579e8e9c6d349eb11dee10defcb)",
+ "sqlparser 0.54.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=0cf6c04490d59435ee965edd2078e8855bd8471e)",
  "store-api",
  "table",
 ]
@@ -9474,7 +9474,7 @@ dependencies = [
  "session",
  "snafu 0.8.5",
  "sql",
- "sqlparser 0.54.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=b5feba13bb941579e8e9c6d349eb11dee10defcb)",
+ "sqlparser 0.54.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=0cf6c04490d59435ee965edd2078e8855bd8471e)",
  "statrs",
  "store-api",
  "substrait 0.14.0",
@@ -11301,7 +11301,7 @@ dependencies = [
  "serde",
  "serde_json",
  "snafu 0.8.5",
- "sqlparser 0.54.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=b5feba13bb941579e8e9c6d349eb11dee10defcb)",
+ "sqlparser 0.54.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=0cf6c04490d59435ee965edd2078e8855bd8471e)",
  "sqlparser_derive 0.1.1",
  "store-api",
  "table",
@@ -11370,7 +11370,7 @@ dependencies = [
 [[package]]
 name = "sqlparser"
 version = "0.54.0"
-source = "git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=b5feba13bb941579e8e9c6d349eb11dee10defcb#b5feba13bb941579e8e9c6d349eb11dee10defcb"
+source = "git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=0cf6c04490d59435ee965edd2078e8855bd8471e#0cf6c04490d59435ee965edd2078e8855bd8471e"
 dependencies = [
  "lazy_static",
  "log",
@@ -11378,7 +11378,7 @@ dependencies = [
  "regex",
  "serde",
  "sqlparser 0.54.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "sqlparser_derive 0.3.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=b5feba13bb941579e8e9c6d349eb11dee10defcb)",
+ "sqlparser_derive 0.3.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=0cf6c04490d59435ee965edd2078e8855bd8471e)",
 ]
 
 [[package]]
@@ -11406,7 +11406,7 @@ dependencies = [
 [[package]]
 name = "sqlparser_derive"
 version = "0.3.0"
-source = "git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=b5feba13bb941579e8e9c6d349eb11dee10defcb#b5feba13bb941579e8e9c6d349eb11dee10defcb"
+source = "git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=0cf6c04490d59435ee965edd2078e8855bd8471e#0cf6c04490d59435ee965edd2078e8855bd8471e"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -12261,7 +12261,7 @@ dependencies = [
  "serde_yaml",
  "snafu 0.8.5",
  "sql",
- "sqlparser 0.54.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=b5feba13bb941579e8e9c6d349eb11dee10defcb)",
+ "sqlparser 0.54.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=0cf6c04490d59435ee965edd2078e8855bd8471e)",
  "sqlx",
  "store-api",
  "strum 0.27.1",
