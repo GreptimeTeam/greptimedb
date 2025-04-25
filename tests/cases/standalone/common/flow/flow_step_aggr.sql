@@ -77,7 +77,55 @@ SELECT
 FROM
     percentile_base
 WHERE
-    value > 0 AND value < 100
+    "value" > 0 AND "value" < 70
+GROUP BY
+    time_window;
+
+INSERT INTO percentile_base ("id", "value", ts) VALUES
+    (1, 10.0, 1),
+    (2, 20.0, 2),
+    (3, 30.0, 3),
+    (4, 40.0, 4),
+    (5, 50.0, 5),
+    (6, 60.0, 6),
+    (7, 70.0, 7),
+    (8, 80.0, 8),
+    (9, 90.0, 9),
+    (10, 100.0, 10);
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('calc_percentile_5s');
+
+SELECT
+    time_window,
+    uddsketch_calc(0.99, `percentile_state`) AS p99
+FROM
+    percentile_5s
+ORDER BY
+    time_window;
+
+DROP FLOW calc_percentile_5s;
+DROP TABLE percentile_5s;
+DROP TABLE percentile_base;
+
+CREATE TABLE percentile_base (
+    "id" INT PRIMARY KEY,
+    "value" DOUBLE,
+    ts timestamp(0) time index
+);
+
+CREATE TABLE percentile_5s (
+    "percentile_state" BINARY,
+    time_window timestamp(0) time index
+);
+
+CREATE FLOW calc_percentile_5s SINK TO percentile_5s
+AS
+SELECT
+    uddsketch_state(128, 0.01, CASE WHEN "value" > 0 AND "value" < 70 THEN "value" ELSE NULL::DOUBLE END) AS "value",
+    date_bin('5 seconds'::INTERVAL, ts) AS time_window
+FROM
+    percentile_base
 GROUP BY
     time_window;
 
