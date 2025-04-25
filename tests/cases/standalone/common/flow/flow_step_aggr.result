@@ -50,7 +50,9 @@ ADMIN FLUSH_FLOW('calc_access_log_10s');
 +-----------------------------------------+
 
 -- query should return 3 rows
-SELECT "url", time_window FROM access_log_10s;
+SELECT "url", time_window FROM access_log_10s
+ORDER BY
+    time_window;
 
 +------------+---------------------+
 | url        | time_window         |
@@ -61,7 +63,9 @@ SELECT "url", time_window FROM access_log_10s;
 +------------+---------------------+
 
 -- use hll_count to query the approximate data in access_log_10s
-SELECT "url", time_window, hll_count(state) FROM access_log_10s;
+SELECT "url", time_window, hll_count(state) FROM access_log_10s
+ORDER BY
+    time_window;
 
 +------------+---------------------+---------------------------------+
 | url        | time_window         | hll_count(access_log_10s.state) |
@@ -82,7 +86,7 @@ GROUP BY
     "url",
     time_window_1m
 ORDER BY
-    time_window_1m;;
+    time_window_1m;
 
 +------------+---------------------+------------+
 | url        | time_window_1m      | uv_per_min |
@@ -126,7 +130,7 @@ SELECT
 FROM
     percentile_base
 WHERE
-    value > 0 AND value < 100
+    "value" > 0 AND "value" < 70
 GROUP BY
     time_window;
 
@@ -163,12 +167,90 @@ FROM
 ORDER BY
     time_window;
 
-+---------------------+-------------------+
-| time_window         | p99               |
-+---------------------+-------------------+
-| 1970-01-01T00:00:00 | 40.04777053326359 |
-| 1970-01-01T00:00:05 | 89.13032933635911 |
-+---------------------+-------------------+
++---------------------+--------------------+
+| time_window         | p99                |
++---------------------+--------------------+
+| 1970-01-01T00:00:00 | 40.04777053326359  |
+| 1970-01-01T00:00:05 | 59.745049810145126 |
++---------------------+--------------------+
+
+DROP FLOW calc_percentile_5s;
+
+Affected Rows: 0
+
+DROP TABLE percentile_5s;
+
+Affected Rows: 0
+
+DROP TABLE percentile_base;
+
+Affected Rows: 0
+
+CREATE TABLE percentile_base (
+    "id" INT PRIMARY KEY,
+    "value" DOUBLE,
+    ts timestamp(0) time index
+);
+
+Affected Rows: 0
+
+CREATE TABLE percentile_5s (
+    "percentile_state" BINARY,
+    time_window timestamp(0) time index
+);
+
+Affected Rows: 0
+
+CREATE FLOW calc_percentile_5s SINK TO percentile_5s
+AS
+SELECT
+    uddsketch_state(128, 0.01, CASE WHEN "value" > 0 AND "value" < 70 THEN "value" ELSE NULL END) AS "value",
+    date_bin('5 seconds'::INTERVAL, ts) AS time_window
+FROM
+    percentile_base
+GROUP BY
+    time_window;
+
+Affected Rows: 0
+
+INSERT INTO percentile_base ("id", "value", ts) VALUES
+    (1, 10.0, 1),
+    (2, 20.0, 2),
+    (3, 30.0, 3),
+    (4, 40.0, 4),
+    (5, 50.0, 5),
+    (6, 60.0, 6),
+    (7, 70.0, 7),
+    (8, 80.0, 8),
+    (9, 90.0, 9),
+    (10, 100.0, 10);
+
+Affected Rows: 10
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('calc_percentile_5s');
+
++----------------------------------------+
+| ADMIN FLUSH_FLOW('calc_percentile_5s') |
++----------------------------------------+
+|  FLOW_FLUSHED  |
++----------------------------------------+
+
+SELECT
+    time_window,
+    uddsketch_calc(0.99, percentile_state) AS p99
+FROM
+    percentile_5s
+ORDER BY
+    time_window;
+
++---------------------+--------------------+
+| time_window         | p99                |
++---------------------+--------------------+
+| 1970-01-01T00:00:00 | 40.04777053326359  |
+| 1970-01-01T00:00:05 | 59.745049810145126 |
+| 1970-01-01T00:00:10 |                    |
++---------------------+--------------------+
 
 DROP FLOW calc_percentile_5s;
 

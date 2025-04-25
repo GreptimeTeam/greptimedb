@@ -36,10 +36,14 @@ INSERT INTO access_log VALUES
 ADMIN FLUSH_FLOW('calc_access_log_10s');
 
 -- query should return 3 rows
-SELECT "url", time_window FROM access_log_10s;
+SELECT "url", time_window FROM access_log_10s
+ORDER BY
+    time_window;
 
 -- use hll_count to query the approximate data in access_log_10s
-SELECT "url", time_window, hll_count(state) FROM access_log_10s;
+SELECT "url", time_window, hll_count(state) FROM access_log_10s
+ORDER BY
+    time_window;
 
 -- further, we can aggregate 10 seconds of data to every minute, by using hll_merge to merge 10 seconds of hyperloglog state
 SELECT
@@ -52,7 +56,7 @@ GROUP BY
     "url",
     time_window_1m
 ORDER BY
-    time_window_1m;;
+    time_window_1m;
 
 DROP FLOW calc_access_log_10s;
 DROP TABLE access_log_10s;
@@ -122,7 +126,7 @@ CREATE TABLE percentile_5s (
 CREATE FLOW calc_percentile_5s SINK TO percentile_5s
 AS
 SELECT
-    uddsketch_state(128, 0.01, CASE WHEN "value" > 0 AND "value" < 70 THEN "value" ELSE NULL::DOUBLE END) AS "value",
+    uddsketch_state(128, 0.01, CASE WHEN "value" > 0 AND "value" < 70 THEN "value" ELSE NULL END) AS "value",
     date_bin('5 seconds'::INTERVAL, ts) AS time_window
 FROM
     percentile_base
@@ -146,7 +150,7 @@ ADMIN FLUSH_FLOW('calc_percentile_5s');
 
 SELECT
     time_window,
-    uddsketch_calc(0.99, `percentile_state`) AS p99
+    uddsketch_calc(0.99, percentile_state) AS p99
 FROM
     percentile_5s
 ORDER BY

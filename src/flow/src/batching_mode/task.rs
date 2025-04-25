@@ -53,6 +53,7 @@ use crate::batching_mode::utils::{
 use crate::batching_mode::{
     DEFAULT_BATCHING_ENGINE_QUERY_TIMEOUT, MIN_REFRESH_DURATION, SLOW_QUERY_THRESHOLD,
 };
+use crate::df_optimizer::apply_df_optimizer;
 use crate::error::{
     ConvertColumnSchemaSnafu, DatafusionSnafu, ExternalSnafu, InvalidQuerySnafu,
     SubstraitEncodeLogicalPlanSnafu, UnexpectedSnafu,
@@ -576,16 +577,19 @@ impl BatchingTask {
 
             let mut add_filter = AddFilterRewriter::new(expr);
             let mut add_auto_column = AddAutoColumnRewriter::new(sink_table_schema.clone());
-            // make a not optimized plan for clearer unparse
+
             let plan = sql_to_df_plan(query_ctx.clone(), engine.clone(), &self.config.query, false)
                 .await?;
-            plan.clone()
+            let rewrite = plan
+                .clone()
                 .rewrite(&mut add_filter)
                 .and_then(|p| p.data.rewrite(&mut add_auto_column))
                 .with_context(|_| DatafusionSnafu {
                     context: format!("Failed to rewrite plan:\n {}\n", plan),
                 })?
-                .data
+                .data;
+            // only apply optimize after complex rewrite is done
+            apply_df_optimizer(rewrite).await?
         };
 
         Ok(Some((new_plan, schema_len)))

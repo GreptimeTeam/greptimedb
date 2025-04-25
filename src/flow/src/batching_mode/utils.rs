@@ -406,7 +406,9 @@ mod test {
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
     use pretty_assertions::assert_eq;
+    use query::query_engine::DefaultSerializer;
     use session::context::QueryContext;
+    use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 
     use super::*;
     use crate::test_utils::create_test_query_engine;
@@ -700,5 +702,19 @@ mod test {
                 group_by_exprs.get_group_expr_names().unwrap_or_default()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_null_cast() {
+        let query_engine = create_test_query_engine();
+        let ctx = QueryContext::arc();
+        let sql = "SELECT NULL::DOUBLE FROM numbers_with_ts";
+        let plan = sql_to_df_plan(ctx, query_engine.clone(), sql, false)
+            .await
+            .unwrap();
+
+        let _sub_plan = DFLogicalSubstraitConvertor {}
+            .encode(&plan, DefaultSerializer)
+            .unwrap();
     }
 }
