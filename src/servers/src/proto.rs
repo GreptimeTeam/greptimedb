@@ -232,8 +232,6 @@ impl PromTimeSeries {
             self.samples.as_slice(),
             is_strict_mode,
         )?;
-        // self.labels.clear();
-        // self.samples.clear();
 
         Ok(())
     }
