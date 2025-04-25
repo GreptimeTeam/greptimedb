@@ -48,6 +48,7 @@ use serde::{Deserialize, Serialize};
 use servers::export_metrics::ExportMetricsOption;
 use servers::http::HttpOptions;
 use snafu::{OptionExt, ResultExt};
+use store_api::storage::RegionId;
 use table::metadata::TableId;
 use tokio::sync::broadcast::error::RecvError;
 
@@ -65,7 +66,7 @@ use crate::procedure::wal_prune::manager::WalPruneTickerRef;
 use crate::procedure::ProcedureManagerListenerAdapter;
 use crate::pubsub::{PublisherRef, SubscriptionManagerRef};
 use crate::region::supervisor::RegionSupervisorTickerRef;
-use crate::selector::{Selector, SelectorType};
+use crate::selector::{RegionStatAwareSelector, Selector, SelectorType};
 use crate::service::mailbox::MailboxRef;
 use crate::service::store::cached_kv::LeaderCachedKvBackend;
 use crate::state::{become_follower, become_leader, StateRef};
@@ -338,6 +339,8 @@ pub struct SelectorContext {
 }
 
 pub type SelectorRef = Arc<dyn Selector<Context = SelectorContext, Output = Vec<Peer>>>;
+pub type RegionStatAwareSelectorRef =
+    Arc<dyn RegionStatAwareSelector<Context = SelectorContext, Output = Vec<(RegionId, Peer)>>>;
 pub type ElectionRef = Arc<dyn Election<Leader = LeaderValue>>;
 
 pub struct MetaStateHandler {

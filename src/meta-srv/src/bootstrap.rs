@@ -299,28 +299,16 @@ pub async fn metasrv_builder(
     let node_excluder = plugins
         .get::<NodeExcluderRef>()
         .unwrap_or_else(|| Arc::new(Vec::new()) as NodeExcluderRef);
-    let selector = if let Some(selector) = plugins.get::<SelectorRef>() {
-        info!("Using selector from plugins");
-        selector
-    } else {
-        let selector = match opts.selector {
-            SelectorType::LoadBased => Arc::new(LoadBasedSelector::new(
-                RegionNumsBasedWeightCompute,
-                node_excluder,
-            )) as SelectorRef,
-            SelectorType::LeaseBased => {
-                Arc::new(LeaseBasedSelector::new(node_excluder)) as SelectorRef
-            }
-            SelectorType::RoundRobin => Arc::new(RoundRobinSelector::new(
-                SelectTarget::Datanode,
-                node_excluder,
-            )) as SelectorRef,
-        };
-        info!(
-            "Using selector from options, selector type: {}",
-            opts.selector.as_ref()
-        );
-        selector
+    let selector = match opts.selector {
+        SelectorType::LoadBased => Arc::new(LoadBasedSelector::new(
+            RegionNumsBasedWeightCompute,
+            node_excluder,
+        )) as SelectorRef,
+        SelectorType::LeaseBased => Arc::new(LeaseBasedSelector::new(node_excluder)) as SelectorRef,
+        SelectorType::RoundRobin => Arc::new(RoundRobinSelector::new(
+            SelectTarget::Datanode,
+            node_excluder,
+        )) as SelectorRef,
     };
 
     Ok(MetasrvBuilder::new()
