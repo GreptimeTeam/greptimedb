@@ -24,7 +24,7 @@ GROUP BY
     "url",
     time_window;
 
--- 插入 4 条数据
+-- insert 4 rows of data
 INSERT INTO access_log VALUES
         ("/dashboard", 1, "2025-03-04 00:00:00"),
         ("/dashboard", 1, "2025-03-04 00:00:01"),
@@ -35,13 +35,13 @@ INSERT INTO access_log VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_access_log_10s');
 
--- 此时查询 access_log_10s 应该有 3 条数据Í
+-- query should return 3 rows
 SELECT "url", time_window FROM access_log_10s;
 
--- 可以通过 hll_count 查询 access_log_10s 中的近似数据
+-- use hll_count to query the approximate data in access_log_10s
 SELECT "url", time_window, hll_count(state) FROM access_log_10s;
 
--- 进一步的，可以把 10 秒级别的数据聚合到每分钟，通过 hll_merge 来合并 10 秒的 hyperloglog 状态
+-- further, we can aggregate 10 seconds of data to every minute, by using hll_merge to merge 10 seconds of hyperloglog state
 SELECT
     "url",
     date_bin('1 minute'::INTERVAL, time_window) AS time_window_1m,
