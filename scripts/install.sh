@@ -81,11 +81,20 @@ download_artifact() {
       mv "${PACKAGE_NAME%.tar.gz}/${BIN}" "${PWD}" && \
       rm -r "${PACKAGE_NAME}" && \
       rm -r "${PACKAGE_NAME%.tar.gz}" && \
-      echo "Run './${BIN} --help' to get started"
+      echo "Run './${BIN} --help' to print the help message"
     fi
+  fi
+}
+
+run_standalone() {
+  if [ -e ./${BIN} ]; then
+    echo "Starting GreptimeDB standalone via './${BIN} standalone start'"
+    echo "The data home is: ./greptimedb_data"
+    ./${BIN} standalone start
   fi
 }
 
 get_os_type
 get_arch_type
 download_artifact
+run_standalone
