@@ -310,6 +310,13 @@ impl PromWriteRequest {
     }
 }
 
+/// A hook to be injected into the PromWriteRequest decoding process.
+/// It was originally designed with two usage:
+/// 1. consume one series to desired type, in this case, the pipeline map
+/// 2. convert itself to RowInsertRequests
+///
+/// Since the origin conversion is coupled with PromWriteRequest,
+/// let's keep it that way for now.
 pub struct PromSeriesProcessor {
     pub(crate) use_pipeline: bool,
     pub(crate) table_values: BTreeMap<String, Vec<PipelineMap>>,
