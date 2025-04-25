@@ -26,6 +26,7 @@ use common_catalog::consts::{is_readonly_schema, DEFAULT_CATALOG_NAME, DEFAULT_S
 use common_catalog::{format_full_flow_name, format_full_table_name};
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::Context;
+use common_meta::ddl::create_flow::FlowType;
 use common_meta::ddl::ExecutorContext;
 use common_meta::instruction::CacheIdent;
 use common_meta::key::schema_name::{SchemaName, SchemaNameKey};
@@ -38,6 +39,8 @@ use common_meta::rpc::router::{Partition, Partition as MetaPartition};
 use common_query::Output;
 use common_telemetry::{debug, info, tracing};
 use common_time::Timezone;
+use datafusion_common::tree_node::TreeNodeVisitor;
+use datafusion_expr::LogicalPlan;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{RawSchema, Schema};
 use datatypes::value::Value;
@@ -45,7 +48,7 @@ use lazy_static::lazy_static;
 use partition::expr::{Operand, PartitionExpr, RestrictedOp};
 use partition::multi_dim::MultiDimPartitionRule;
 use partition::partition::{PartitionBound, PartitionDef};
-use query::parser::QueryStatement;
+use query::parser::{QueryLanguageParser, QueryStatement};
 use query::plan::extract_and_rewrite_full_table_names;
 use query::query_engine::DefaultSerializer;
 use query::sql::create_table_stmt;
@@ -69,13 +72,14 @@ use table::table_name::TableName;
 use table::TableRef;
 
 use crate::error::{
-    self, AlterExprToRequestSnafu, CatalogSnafu, ColumnDataTypeSnafu, ColumnNotFoundSnafu,
-    ConvertSchemaSnafu, CreateLogicalTablesSnafu, CreateTableInfoSnafu, DeserializePartitionSnafu,
-    EmptyDdlExprSnafu, ExtractTableNamesSnafu, FlowNotFoundSnafu, InvalidPartitionRuleSnafu,
-    InvalidPartitionSnafu, InvalidSqlSnafu, InvalidTableNameSnafu, InvalidViewNameSnafu,
-    InvalidViewStmtSnafu, ParseSqlValueSnafu, Result, SchemaInUseSnafu, SchemaNotFoundSnafu,
-    SchemaReadOnlySnafu, SubstraitCodecSnafu, TableAlreadyExistsSnafu, TableMetadataManagerSnafu,
-    TableNotFoundSnafu, UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
+    self, AlterExprToRequestSnafu, BuildDfLogicalPlanSnafu, CatalogSnafu, ColumnDataTypeSnafu,
+    ColumnNotFoundSnafu, ConvertSchemaSnafu, CreateLogicalTablesSnafu, CreateTableInfoSnafu,
+    DeserializePartitionSnafu, EmptyDdlExprSnafu, ExternalSnafu, ExtractTableNamesSnafu,
+    FlowNotFoundSnafu, InvalidPartitionRuleSnafu, InvalidPartitionSnafu, InvalidSqlSnafu,
+    InvalidTableNameSnafu, InvalidViewNameSnafu, InvalidViewStmtSnafu, ParseSqlValueSnafu, Result,
+    SchemaInUseSnafu, SchemaNotFoundSnafu, SchemaReadOnlySnafu, SubstraitCodecSnafu,
+    TableAlreadyExistsSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
+    UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
 };
 use crate::expr_helper;
 use crate::statement::show::create_partitions_stmt;
@@ -364,6 +368,18 @@ impl StatementExecutor {
         expr: CreateFlowExpr,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
+        let flow_type = self
+            .determine_flow_type(&expr.sql, query_context.clone())
+            .await?;
+        info!("determined flow={} type: {:#?}", expr.flow_name, flow_type);
+
+        let expr = {
+            let mut expr = expr;
+            expr.flow_options
+                .insert(FlowType::FLOW_TYPE_KEY.to_string(), flow_type.to_string());
+            expr
+        };
+
         let task = CreateFlowTask::try_from(PbCreateFlowTask {
             create_flow: Some(expr),
         })
@@ -377,6 +393,55 @@ impl StatementExecutor {
             .submit_ddl_task(&ExecutorContext::default(), request)
             .await
             .context(error::ExecuteDdlSnafu)
+    }
+
+    /// Determine the flow type based on the SQL query
+    ///
+    /// If it contains aggregation or distinct, then it is a batch flow, otherwise it is a streaming flow
+    async fn determine_flow_type(&self, sql: &str, query_ctx: QueryContextRef) -> Result<FlowType> {
+        let engine = &self.query_engine;
+        let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx)
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+        let plan = engine
+            .planner()
+            .plan(&stmt, query_ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+
+        /// Visitor to find aggregation or distinct
+        struct FindAggr {
+            is_aggr: bool,
+        }
+
+        impl TreeNodeVisitor<'_> for FindAggr {
+            type Node = LogicalPlan;
+            fn f_down(
+                &mut self,
+                node: &Self::Node,
+            ) -> datafusion_common::Result<datafusion_common::tree_node::TreeNodeRecursion>
+            {
+                match node {
+                    LogicalPlan::Aggregate(_) | LogicalPlan::Distinct(_) => {
+                        self.is_aggr = true;
+                        return Ok(datafusion_common::tree_node::TreeNodeRecursion::Stop);
+                    }
+                    _ => (),
+                }
+                Ok(datafusion_common::tree_node::TreeNodeRecursion::Continue)
+            }
+        }
+
+        let mut find_aggr = FindAggr { is_aggr: false };
+
+        plan.visit_with_subqueries(&mut find_aggr)
+            .context(BuildDfLogicalPlanSnafu)?;
+        if find_aggr.is_aggr {
+            Ok(FlowType::Batching)
+        } else {
+            Ok(FlowType::Streaming)
+        }
     }
 
     #[tracing::instrument(skip_all)]

@@ -113,8 +113,10 @@ impl LeaderRegionManifestInfo {
     pub fn prunable_entry_id(&self) -> u64 {
         match self {
             LeaderRegionManifestInfo::Mito {
-                flushed_entry_id, ..
-            } => *flushed_entry_id,
+                flushed_entry_id,
+                topic_latest_entry_id,
+                ..
+            } => (*flushed_entry_id).max(*topic_latest_entry_id),
             LeaderRegionManifestInfo::Metric {
                 data_flushed_entry_id,
                 data_topic_latest_entry_id,

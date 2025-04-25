@@ -4505,6 +4505,7 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "auth",
+ "bytes",
  "cache",
  "catalog",
  "client",
@@ -4943,7 +4944,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=b6d9cffd43c4e6358805a798f17e03e232994b82#b6d9cffd43c4e6358805a798f17e03e232994b82"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=e82b0158cd38d4021edb4e4c0ae77f999051e62f#e82b0158cd38d4021edb4e4c0ae77f999051e62f"
 dependencies = [
  "prost 0.13.5",
  "serde",
@@ -7040,12 +7041,14 @@ dependencies = [
  "common-macro",
  "common-query",
  "common-recordbatch",
+ "common-runtime",
  "common-telemetry",
  "common-test-util",
  "common-time",
  "datafusion",
  "datatypes",
  "futures-util",
+ "humantime-serde",
  "itertools 0.14.0",
  "lazy_static",
  "mito2",

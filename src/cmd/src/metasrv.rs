@@ -132,7 +132,7 @@ impl SubCommand {
 }
 
 #[derive(Debug, Default, Parser)]
-struct StartCommand {
+pub struct StartCommand {
     /// The address to bind the gRPC server.
     #[clap(long, alias = "bind-addr")]
     rpc_bind_addr: Option<String>,
@@ -172,7 +172,7 @@ struct StartCommand {
 }
 
 impl StartCommand {
-    fn load_options(&self, global_options: &GlobalOptions) -> Result<MetasrvOptions> {
+    pub fn load_options(&self, global_options: &GlobalOptions) -> Result<MetasrvOptions> {
         let mut opts = MetasrvOptions::load_layered_options(
             self.config_file.as_deref(),
             self.env_prefix.as_ref(),
@@ -261,7 +261,7 @@ impl StartCommand {
         Ok(())
     }
 
-    async fn build(&self, opts: MetasrvOptions) -> Result<Instance> {
+    pub async fn build(&self, opts: MetasrvOptions) -> Result<Instance> {
         common_runtime::init_global_runtimes(&opts.runtime);
 
         let guard = common_telemetry::init_global_logging(

@@ -4,15 +4,21 @@
 
 This repository maintains the Grafana dashboards for GreptimeDB. It has two types of dashboards:
 
-- `cluster/`: The dashboard for the GreptimeDB cluster. Read the [dashboard.md](./dashboards/cluster/dashboard.md) for more details.
-- `standalone/`: The dashboard for the standalone GreptimeDB instance. Read the [dashboard.md](./dashboards/standalone/dashboard.md) for more details.
+- `cluster/dashboard.json`: The Grafana dashboard for the GreptimeDB cluster. Read the [dashboard.md](./dashboards/cluster/dashboard.md) for more details.
+- `standalone/dashboard.json`: The Grafana dashboard for the standalone GreptimeDB instance. **It's generated from the `cluster/dashboard.json` by removing the instance filter through the `make dashboards` command**. Read the [dashboard.md](./dashboards/standalone/dashboard.md) for more details.
 
 As the rapid development of GreptimeDB, the metrics may be changed, and please feel free to submit your feedback and/or contribution to this dashboard 🤗
 
-To maintain the dashboards, we use the [`dac`](https://github.com/zyy17/dac) tool to generate the intermediate dashboards and markdown documents:
+**NOTE**: 
+
+- The Grafana version should be greater than 9.0.
+
+- If you want to modify the dashboards, you only need to modify the `cluster/dashboard.json` and run the `make dashboards` command to generate the `standalone/dashboard.json` and other related files.
+
+To maintain the dashboards easily, we use the [`dac`](https://github.com/zyy17/dac) tool to generate the intermediate dashboards and markdown documents:
 
 - `cluster/dashboard.yaml`: The intermediate dashboard for the GreptimeDB cluster.
-- `standalone/dashboard.yaml`: The intermediatedashboard for the standalone GreptimeDB instance.
+- `standalone/dashboard.yaml`: The intermediate dashboard for the standalone GreptimeDB instance.
 
 ## Data Sources
 

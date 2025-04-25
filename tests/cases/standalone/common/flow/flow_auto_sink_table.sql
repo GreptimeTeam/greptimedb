@@ -7,11 +7,12 @@ CREATE TABLE numbers_input_basic (
 
 CREATE FLOW test_numbers_basic SINK TO out_num_cnt_basic AS
 SELECT
-    sum(number)
+    sum(number),
+    date_bin(INTERVAL '1 second', ts, '2021-07-01 00:00:00') as time_window
 FROM
     numbers_input_basic
 GROUP BY
-    tumble(ts, '1 second', '2021-07-01 00:00:00');
+    time_window;
 
 SHOW CREATE TABLE out_num_cnt_basic;
 

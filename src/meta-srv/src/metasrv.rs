@@ -111,6 +111,11 @@ pub struct MetasrvOptions {
     pub use_memory_store: bool,
     /// Whether to enable region failover.
     pub enable_region_failover: bool,
+    /// Whether to allow region failover on local WAL.
+    ///
+    /// If it's true, the region failover will be allowed even if the local WAL is used.
+    /// Note that this option is not recommended to be set to true, because it may lead to data loss during failover.
+    pub allow_region_failover_on_local_wal: bool,
     /// The HTTP server options.
     pub http: HttpOptions,
     /// The logging options.
@@ -173,6 +178,7 @@ impl Default for MetasrvOptions {
             selector: SelectorType::default(),
             use_memory_store: false,
             enable_region_failover: false,
+            allow_region_failover_on_local_wal: false,
             http: HttpOptions::default(),
             logging: LoggingOptions {
                 dir: format!("{METASRV_HOME}/logs"),

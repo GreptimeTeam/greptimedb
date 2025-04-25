@@ -72,6 +72,17 @@ pub struct TimeWindowExpr {
     df_schema: DFSchema,
 }
 
+impl std::fmt::Display for TimeWindowExpr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TimeWindowExpr")
+            .field("phy_expr", &self.phy_expr.to_string())
+            .field("column_name", &self.column_name)
+            .field("logical_expr", &self.logical_expr.to_string())
+            .field("df_schema", &self.df_schema)
+            .finish()
+    }
+}
+
 impl TimeWindowExpr {
     pub fn from_expr(
         expr: &Expr,
@@ -256,7 +267,7 @@ fn columnar_to_ts_vector(columnar: &ColumnarValue) -> Result<Vec<Option<Timestam
     Ok(val)
 }
 
-/// Return (the column name of time index column, the time window expr, the expected time unit of time index column, the expr's schema for evaluating the time window)
+/// Return (`the column name of time index column`, `the time window expr`, `the expected time unit of time index column`, `the expr's schema for evaluating the time window`)
 ///
 /// The time window expr is expected to have one input column with Timestamp type, and also return Timestamp type, the time window expr is expected
 /// to be monotonic increasing and appears in the innermost GROUP BY clause

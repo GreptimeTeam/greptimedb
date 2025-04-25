@@ -46,7 +46,13 @@ impl State for CloseDowngradedRegion {
             let region_id = ctx.region_id();
             warn!(err; "Failed to close downgraded leader region: {region_id} on datanode {:?}", downgrade_leader_datanode);
         }
-
+        info!(
+            "Region migration is finished: region_id: {}, from_peer: {}, to_peer: {}, {}",
+            ctx.region_id(),
+            ctx.persistent_ctx.from_peer,
+            ctx.persistent_ctx.to_peer,
+            ctx.volatile_ctx.metrics,
+        );
         Ok((Box::new(RegionMigrationEnd), Status::done()))
     }
 

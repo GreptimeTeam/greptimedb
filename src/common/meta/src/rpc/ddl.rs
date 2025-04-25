@@ -35,17 +35,20 @@ use api::v1::{
 };
 use base64::engine::general_purpose;
 use base64::Engine as _;
-use common_time::DatabaseTimeToLive;
+use common_time::{DatabaseTimeToLive, Timezone};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DefaultOnNull};
-use session::context::QueryContextRef;
+use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
 use table::metadata::{RawTableInfo, TableId};
 use table::table_name::TableName;
 use table::table_reference::TableReference;
 
-use crate::error::{self, InvalidSetDatabaseOptionSnafu, InvalidUnsetDatabaseOptionSnafu, Result};
+use crate::error::{
+    self, InvalidSetDatabaseOptionSnafu, InvalidTimeZoneSnafu, InvalidUnsetDatabaseOptionSnafu,
+    Result,
+};
 use crate::key::FlowId;
 
 /// DDL tasks
@@ -1202,7 +1205,7 @@ impl From<DropFlowTask> for PbDropFlowTask {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct QueryContext {
     current_catalog: String,
     current_schema: String,
@@ -1220,6 +1223,19 @@ impl From<QueryContextRef> for QueryContext {
             extensions: query_context.extensions(),
             channel: query_context.channel() as u8,
         }
+    }
+}
+
+impl TryFrom<QueryContext> for session::context::QueryContext {
+    type Error = error::Error;
+    fn try_from(value: QueryContext) -> std::result::Result<Self, Self::Error> {
+        Ok(QueryContextBuilder::default()
+            .current_catalog(value.current_catalog)
+            .current_schema(value.current_schema)
+            .timezone(Timezone::from_tz_string(&value.timezone).context(InvalidTimeZoneSnafu)?)
+            .extensions(value.extensions)
+            .channel((value.channel as u32).into())
+            .build())
     }
 }
 
