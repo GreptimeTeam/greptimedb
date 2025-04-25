@@ -91,6 +91,7 @@ macro_rules! http_tests {
                 test_config_api,
                 test_dashboard_path,
                 test_prometheus_remote_write,
+                test_prometheus_remote_write_with_pipeline,
                 test_vm_proto_remote_write,
 
                 test_pipeline_api,
@@ -1222,6 +1223,64 @@ pub async fn test_prometheus_remote_write(store_type: StorageType) {
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    let expected = "[[\"demo\"],[\"demo_metrics\"],[\"demo_metrics_with_nanos\"],[\"greptime_physical_table\"],[\"metric1\"],[\"metric2\"],[\"metric3\"],[\"mito\"],[\"numbers\"],[\"phy\"],[\"phy2\"]]";
+    validate_data("prometheus_remote_write", &client, "show tables;", expected).await;
+
+    let table_val = "[[1000,3.0,\"z001\",\"test_host1\"],[2000,4.0,\"z001\",\"test_host1\"]]";
+    validate_data(
+        "prometheus_remote_write",
+        &client,
+        "select * from metric2",
+        table_val,
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
+pub async fn test_prometheus_remote_write_with_pipeline(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_prom_app_with_frontend(store_type, "prometheus_remote_write_with_pipeline")
+            .await;
+    let client = TestClient::new(app).await;
+
+    // write snappy encoded data
+    let write_request = WriteRequest {
+        timeseries: prom_store::mock_timeseries(),
+        ..Default::default()
+    };
+    let serialized_request = write_request.encode_to_vec();
+    let compressed_request =
+        prom_store::snappy_compress(&serialized_request).expect("failed to encode snappy");
+
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .header("x-greptime-log-pipeline-name", "greptime_identity")
+        .body(compressed_request)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    let expected = "[[\"demo\"],[\"demo_metrics\"],[\"demo_metrics_with_nanos\"],[\"greptime_physical_table\"],[\"metric1\"],[\"metric2\"],[\"metric3\"],[\"mito\"],[\"numbers\"],[\"phy\"],[\"phy2\"]]";
+    validate_data(
+        "prometheus_remote_write_pipeline",
+        &client,
+        "show tables;",
+        expected,
+    )
+    .await;
+
+    let table_val = "[[1000,3.0,\"z001\",\"test_host1\"],[2000,4.0,\"z001\",\"test_host1\"]]";
+    validate_data(
+        "prometheus_remote_write_pipeline",
+        &client,
+        "select * from metric2",
+        table_val,
+    )
+    .await;
 
     guard.remove_all().await;
 }

@@ -346,6 +346,7 @@ fn values_to_row(
 ) -> Result<Row> {
     let mut row: Vec<GreptimeValue> = Vec::with_capacity(schema_info.schema.len());
 
+    // TODO(shuiyisong): we should use match later for more channels
     let is_prometheus = pipeline_ctx.channel == Channel::Prometheus;
 
     // set time index value
