@@ -33,6 +33,8 @@ pub const SLOW_QUERY_THRESHOLD: Duration = Duration::from_secs(60);
 /// The minimum duration between two queries execution by batching mode task
 const MIN_REFRESH_DURATION: Duration = Duration::new(5, 0);
 
+/// Grpc connection timeout
 const GRPC_CONN_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// Grpc max retry number
 const GRPC_MAX_RETRIES: u32 = 3;
