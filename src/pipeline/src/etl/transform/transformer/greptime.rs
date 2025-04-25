@@ -349,28 +349,26 @@ fn values_to_row(
     let is_prometheus = pipeline_ctx.channel == Channel::Prometheus;
 
     // set time index value
-    let value_data = match custom_ts {
-        Some(ts) => {
-            let ts_field = values.get(ts.get_column_name());
-            Some(ts.get_timestamp(ts_field)?)
-        }
-        None => {
-            if is_prometheus {
-                Some(ValueData::TimestampMillisecondValue(
-                    values
-                        .get(GREPTIME_TIMESTAMP)
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or_default(),
-                ))
-            } else {
-                Some(ValueData::TimestampNanosecondValue(
-                    chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default(),
-                ))
+    let ts = if is_prometheus {
+        Some(ValueData::TimestampMillisecondValue(
+            values
+                .get(GREPTIME_TIMESTAMP)
+                .and_then(|v| v.as_i64())
+                .unwrap_or_default(),
+        ))
+    } else {
+        match custom_ts {
+            Some(ts) => {
+                let ts_field = values.get(ts.get_column_name());
+                Some(ts.get_timestamp(ts_field)?)
             }
+            None => Some(ValueData::TimestampNanosecondValue(
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default(),
+            )),
         }
     };
 
-    row.push(GreptimeValue { value_data });
+    row.push(GreptimeValue { value_data: ts });
 
     for _ in 1..schema_info.schema.len() {
         row.push(GreptimeValue { value_data: None });

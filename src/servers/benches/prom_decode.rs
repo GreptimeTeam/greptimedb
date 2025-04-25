@@ -31,7 +31,7 @@ fn bench_decode_prom_request_without_strict_mode(c: &mut Criterion) {
     let mut request = WriteRequest::default();
     let mut prom_request = PromWriteRequest::default();
     let is_strict_mode = false;
-    let mut p = PromSeriesProcessor::new(false);
+    let mut p = PromSeriesProcessor::default_processor();
 
     c.benchmark_group("decode")
         .measurement_time(Duration::from_secs(3))
@@ -62,7 +62,7 @@ fn bench_decode_prom_request_with_strict_mode(c: &mut Criterion) {
     let mut request = WriteRequest::default();
     let mut prom_request = PromWriteRequest::default();
     let is_strict_mode = true;
-    let mut p = PromSeriesProcessor::new(false);
+    let mut p = PromSeriesProcessor::default_processor();
 
     c.benchmark_group("decode")
         .measurement_time(Duration::from_secs(3))

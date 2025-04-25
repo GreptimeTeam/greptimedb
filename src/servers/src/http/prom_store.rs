@@ -116,7 +116,8 @@ pub async fn remote_write(
 
     let is_zstd = content_encoding.contains(VM_ENCODING);
 
-    let mut processor = if let Some(pipeline_name) = pipeline_info.pipeline_name {
+    let mut processor = PromSeriesProcessor::default_processor();
+    if let Some(pipeline_name) = pipeline_info.pipeline_name {
         let pipeline_def = PipelineDefinition::from_name(
             &pipeline_name,
             to_pipeline_version(pipeline_info.pipeline_version.as_deref())
@@ -128,14 +129,8 @@ pub async fn remote_write(
             err_msg: "pipeline handler is not set".to_string(),
         })?;
 
-        let mut p = PromSeriesProcessor::new(true);
-        p.set_pipeline_def(pipeline_def);
-        p.set_pipeline_handler(pipeline_handler);
-        p.set_query_ctx(query_ctx.clone());
-        p
-    } else {
-        PromSeriesProcessor::new(false)
-    };
+        processor.set_pipeline(pipeline_handler, query_ctx.clone(), pipeline_def);
+    }
 
     let (request, samples) =
         decode_remote_write_request(is_zstd, body, is_strict_mode, &mut processor).await?;
@@ -228,7 +223,7 @@ async fn decode_remote_write_request(
         .merge(buf, is_strict_mode, processor)
         .context(error::DecodePromRemoteRequestSnafu)?;
 
-    if processor.go_pipeline {
+    if processor.use_pipeline {
         processor.exec_pipeline().await
     } else {
         Ok(request.as_row_insert_requests())

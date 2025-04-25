@@ -215,28 +215,28 @@ impl PromTimeSeries {
         }
     }
 
-    // fn add_to_table_data(
-    //     &mut self,
-    //     table_builders: &mut TablesBuilder,
-    //     is_strict_mode: bool,
-    // ) -> Result<(), DecodeError> {
-    //     let label_num = self.labels.len();
-    //     let row_num = self.samples.len();
-    //     let table_data = table_builders.get_or_create_table_builder(
-    //         std::mem::take(&mut self.table_name),
-    //         label_num,
-    //         row_num,
-    //     );
-    //     table_data.add_labels_and_samples(
-    //         self.labels.as_slice(),
-    //         self.samples.as_slice(),
-    //         is_strict_mode,
-    //     )?;
-    //     self.labels.clear();
-    //     self.samples.clear();
+    fn add_to_table_data(
+        &mut self,
+        table_builders: &mut TablesBuilder,
+        is_strict_mode: bool,
+    ) -> Result<(), DecodeError> {
+        let label_num = self.labels.len();
+        let row_num = self.samples.len();
+        let table_data = table_builders.get_or_create_table_builder(
+            std::mem::take(&mut self.table_name),
+            label_num,
+            row_num,
+        );
+        table_data.add_labels_and_samples(
+            self.labels.as_slice(),
+            self.samples.as_slice(),
+            is_strict_mode,
+        )?;
+        // self.labels.clear();
+        // self.samples.clear();
 
-    //     Ok(())
-    // }
+        Ok(())
+    }
 }
 
 #[derive(Default, Debug)]
@@ -289,11 +289,12 @@ impl PromWriteRequest {
                         return Err(DecodeError::new("delimited length exceeded"));
                     }
 
-                    processor.consume_series(
-                        &mut self.series,
-                        &mut self.table_data,
-                        is_strict_mode,
-                    )?;
+                    if processor.use_pipeline {
+                        processor.consume_series_to_pipeline_map(&mut self.series)?;
+                    } else {
+                        self.series
+                            .add_to_table_data(&mut self.table_data, is_strict_mode)?;
+                    }
 
                     // clear state
                     self.series.labels.clear();
@@ -312,19 +313,19 @@ impl PromWriteRequest {
 }
 
 pub struct PromSeriesProcessor {
-    pub(crate) go_pipeline: bool,
+    pub(crate) use_pipeline: bool,
     pub(crate) table_values: BTreeMap<String, Vec<PipelineMap>>,
 
     // optional fields for pipeline
-    pub pipeline_handler: Option<PipelineHandlerRef>,
-    pub query_ctx: Option<QueryContextRef>,
-    pub pipeline_def: Option<PipelineDefinition>,
+    pub(crate) pipeline_handler: Option<PipelineHandlerRef>,
+    pub(crate) query_ctx: Option<QueryContextRef>,
+    pub(crate) pipeline_def: Option<PipelineDefinition>,
 }
 
 impl PromSeriesProcessor {
-    pub fn new(go_pipeline: bool) -> Self {
+    pub fn default_processor() -> Self {
         Self {
-            go_pipeline,
+            use_pipeline: false,
             table_values: BTreeMap::new(),
             pipeline_handler: None,
             query_ctx: None,
@@ -332,53 +333,16 @@ impl PromSeriesProcessor {
         }
     }
 
-    pub fn set_pipeline_handler(&mut self, handler: PipelineHandlerRef) {
-        self.pipeline_handler = Some(handler);
-    }
-
-    pub fn set_query_ctx(&mut self, query_ctx: QueryContextRef) {
-        self.query_ctx = Some(query_ctx);
-    }
-
-    pub fn set_pipeline_def(&mut self, pipeline_def: PipelineDefinition) {
-        self.pipeline_def = Some(pipeline_def);
-    }
-
-    pub(crate) fn consume_series(
+    pub fn set_pipeline(
         &mut self,
-        series: &mut PromTimeSeries,
-        tables_builder: &mut TablesBuilder,
-        is_strict_mode: bool,
-    ) -> Result<(), DecodeError> {
-        if self.go_pipeline {
-            self.consume_series_to_pipeline_map(series)?;
-        } else {
-            self.consume_series_to_prom(series, tables_builder, is_strict_mode)?;
-        }
-        Ok(())
-    }
-
-    // convert one series to prom req table
-    pub(crate) fn consume_series_to_prom(
-        &self,
-        series: &mut PromTimeSeries,
-        tables_builder: &mut TablesBuilder,
-        is_strict_mode: bool,
-    ) -> Result<(), DecodeError> {
-        let label_num = series.labels.len();
-        let row_num = series.samples.len();
-        let table_data = tables_builder.get_or_create_table_builder(
-            std::mem::take(&mut series.table_name),
-            label_num,
-            row_num,
-        );
-        table_data.add_labels_and_samples(
-            series.labels.as_slice(),
-            series.samples.as_slice(),
-            is_strict_mode,
-        )?;
-
-        Ok(())
+        handler: PipelineHandlerRef,
+        query_ctx: QueryContextRef,
+        pipeline_def: PipelineDefinition,
+    ) {
+        self.use_pipeline = true;
+        self.pipeline_handler = Some(handler);
+        self.query_ctx = Some(query_ctx);
+        self.pipeline_def = Some(pipeline_def);
     }
 
     // convert one series to pipeline map
@@ -497,7 +461,7 @@ mod tests {
         expected_samples: usize,
         expected_rows: &RowInsertRequests,
     ) {
-        let mut p = PromSeriesProcessor::new(false);
+        let mut p = PromSeriesProcessor::default_processor();
         prom_write_request.clear();
         prom_write_request
             .merge(data.clone(), true, &mut p)
