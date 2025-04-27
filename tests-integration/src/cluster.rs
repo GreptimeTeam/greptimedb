@@ -67,13 +67,12 @@ use tower::service_fn;
 use uuid::Uuid;
 
 use crate::test_util::{
-    self, create_datanode_opts, create_tmp_dir_and_datanode_opts, FileDirGuard, StorageGuard,
-    StorageType, PEER_PLACEHOLDER_ADDR,
+    self, create_datanode_opts, create_tmp_dir_and_datanode_opts, FileDirGuard, StorageType,
+    TestGuard, PEER_PLACEHOLDER_ADDR,
 };
 
 pub struct GreptimeDbCluster {
-    pub storage_guards: Vec<StorageGuard>,
-    pub dir_guards: Vec<FileDirGuard>,
+    pub guards: Vec<TestGuard>,
     pub datanode_options: Vec<DatanodeOptions>,
 
     pub datanode_instances: HashMap<DatanodeId, Datanode>,
@@ -177,8 +176,7 @@ impl GreptimeDbClusterBuilder {
     pub async fn build_with(
         &self,
         datanode_options: Vec<DatanodeOptions>,
-        storage_guards: Vec<StorageGuard>,
-        dir_guards: Vec<FileDirGuard>,
+        guards: Vec<TestGuard>,
     ) -> GreptimeDbCluster {
         let datanodes = datanode_options.len();
         let channel_config = ChannelConfig::new().timeout(Duration::from_secs(20));
@@ -224,8 +222,7 @@ impl GreptimeDbClusterBuilder {
 
         GreptimeDbCluster {
             datanode_options,
-            storage_guards,
-            dir_guards,
+            guards,
             datanode_instances,
             kv_backend: self.kv_backend.clone(),
             metasrv: metasrv.metasrv,
@@ -235,19 +232,16 @@ impl GreptimeDbClusterBuilder {
 
     pub async fn build(&self) -> GreptimeDbCluster {
         let datanodes = self.datanodes.unwrap_or(4);
-        let (datanode_options, storage_guards, dir_guards) =
-            self.build_datanode_options_and_guards(datanodes).await;
-        self.build_with(datanode_options, storage_guards, dir_guards)
-            .await
+        let (datanode_options, guards) = self.build_datanode_options_and_guards(datanodes).await;
+        self.build_with(datanode_options, guards).await
     }
 
     async fn build_datanode_options_and_guards(
         &self,
         datanodes: u32,
-    ) -> (Vec<DatanodeOptions>, Vec<StorageGuard>, Vec<FileDirGuard>) {
+    ) -> (Vec<DatanodeOptions>, Vec<TestGuard>) {
         let mut options = Vec::with_capacity(datanodes as usize);
-        let mut storage_guards = Vec::with_capacity(datanodes as usize);
-        let mut dir_guards = Vec::with_capacity(datanodes as usize);
+        let mut guards = Vec::with_capacity(datanodes as usize);
 
         for i in 0..datanodes {
             let datanode_id = i as u64 + 1;
@@ -257,7 +251,10 @@ impl GreptimeDbClusterBuilder {
                 } else {
                     let home_tmp_dir = create_temp_dir(&format!("gt_home_{}", &self.cluster_name));
                     let home_dir = home_tmp_dir.path().to_str().unwrap().to_string();
-                    dir_guards.push(FileDirGuard::new(home_tmp_dir));
+                    guards.push(TestGuard {
+                        home_guard: FileDirGuard::new(home_tmp_dir),
+                        storage_guards: Vec::new(),
+                    });
 
                     home_dir
                 };
@@ -275,9 +272,7 @@ impl GreptimeDbClusterBuilder {
                     &format!("{}-dn-{}", self.cluster_name, datanode_id),
                     self.datanode_wal_config.clone(),
                 );
-
-                storage_guards.push(guard.storage_guards);
-                dir_guards.push(guard.home_guard);
+                guards.push(guard);
 
                 opts
             };
@@ -285,11 +280,7 @@ impl GreptimeDbClusterBuilder {
 
             options.push(opts);
         }
-        (
-            options,
-            storage_guards.into_iter().flatten().collect(),
-            dir_guards,
-        )
+        (options, guards)
     }
 
     async fn build_datanodes_with_options(
@@ -498,10 +489,7 @@ async fn create_datanode_client(datanode: &Datanode) -> (String, Client) {
                     if let Some(client) = client {
                         Ok(TokioIo::new(client))
                     } else {
-                        Err(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            "Client already taken",
-                        ))
+                        Err(std::io::Error::other("Client already taken"))
                     }
                 }
             }),

@@ -68,16 +68,16 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.14.0"
+version = "0.15.0"
 edition = "2021"
 license = "Apache-2.0"
 
 [workspace.lints]
-clippy.print_stdout = "warn"
-clippy.print_stderr = "warn"
 clippy.dbg_macro = "warn"
 clippy.implicit_clone = "warn"
-clippy.readonly_write_lock = "allow"
+clippy.result_large_err = "allow"
+clippy.large_enum_variant = "allow"
+clippy.doc_overindented_list_items = "allow"
 rust.unknown_lints = "deny"
 rust.unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
 
@@ -113,15 +113,15 @@ clap = { version = "4.4", features = ["derive"] }
 config = "0.13.0"
 crossbeam-utils = "0.8"
 dashmap = "6.1"
-datafusion = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "07dd0bee9e524d83228847c15af6c12f438349ab" }
-datafusion-common = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "07dd0bee9e524d83228847c15af6c12f438349ab" }
-datafusion-expr = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "07dd0bee9e524d83228847c15af6c12f438349ab" }
-datafusion-functions = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "07dd0bee9e524d83228847c15af6c12f438349ab" }
-datafusion-optimizer = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "07dd0bee9e524d83228847c15af6c12f438349ab" }
-datafusion-physical-expr = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "07dd0bee9e524d83228847c15af6c12f438349ab" }
-datafusion-physical-plan = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "07dd0bee9e524d83228847c15af6c12f438349ab" }
-datafusion-sql = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "07dd0bee9e524d83228847c15af6c12f438349ab" }
-datafusion-substrait = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "07dd0bee9e524d83228847c15af6c12f438349ab" }
+datafusion = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "e104c7cf62b11dd5fe41461b82514978234326b4" }
+datafusion-common = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "e104c7cf62b11dd5fe41461b82514978234326b4" }
+datafusion-expr = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "e104c7cf62b11dd5fe41461b82514978234326b4" }
+datafusion-functions = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "e104c7cf62b11dd5fe41461b82514978234326b4" }
+datafusion-optimizer = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "e104c7cf62b11dd5fe41461b82514978234326b4" }
+datafusion-physical-expr = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "e104c7cf62b11dd5fe41461b82514978234326b4" }
+datafusion-physical-plan = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "e104c7cf62b11dd5fe41461b82514978234326b4" }
+datafusion-sql = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "e104c7cf62b11dd5fe41461b82514978234326b4" }
+datafusion-substrait = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "e104c7cf62b11dd5fe41461b82514978234326b4" }
 deadpool = "0.12"
 deadpool-postgres = "0.14"
 derive_builder = "0.20"
@@ -130,7 +130,7 @@ etcd-client = "0.14"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "dd4a1996982534636734674db66e44464b0c0d83" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "e82b0158cd38d4021edb4e4c0ae77f999051e62f" }
 hex = "0.4"
 http = "1"
 humantime = "2.1"
@@ -148,7 +148,7 @@ moka = "0.12"
 nalgebra = "0.33"
 notify = "8.0"
 num_cpus = "1.16"
-object_store_opendal = "0.49.0"
+object_store_opendal = "0.50"
 once_cell = "1.18"
 opentelemetry-proto = { version = "0.27", features = [
     "gen-tonic",
@@ -162,7 +162,7 @@ parquet = { version = "54.2", default-features = false, features = ["arrow", "as
 paste = "1.0"
 pin-project = "1.0"
 prometheus = { version = "0.13.3", features = ["process"] }
-promql-parser = { version = "0.5", features = ["ser"] }
+promql-parser = { version = "0.5.1", features = ["ser"] }
 prost = "0.13"
 raft-engine = { version = "0.4.1", default-features = false }
 rand = "0.9"
@@ -192,7 +192,7 @@ simd-json = "0.15"
 similar-asserts = "1.6.0"
 smallvec = { version = "1", features = ["serde"] }
 snafu = "0.8"
-sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "e98e6b322426a9d397a71efef17075966223c089", features = [
+sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "0cf6c04490d59435ee965edd2078e8855bd8471e", features = [
     "visitor",
     "serde",
 ] } # branch = "v0.54.x"
@@ -270,6 +270,9 @@ metric-engine = { path = "src/metric-engine" }
 mito2 = { path = "src/mito2" }
 object-store = { path = "src/object-store" }
 operator = { path = "src/operator" }
+otel-arrow-rust = { git = "https://github.com/open-telemetry/otel-arrow", rev = "5d551412d2a12e689cde4d84c14ef29e36784e51", features = [
+    "server",
+] }
 partition = { path = "src/partition" }
 pipeline = { path = "src/pipeline" }
 plugins = { path = "src/plugins" }

@@ -12,15 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod common;
+pub mod common;
 pub mod lease_based;
 pub mod load_based;
 pub mod round_robin;
 #[cfg(test)]
 pub(crate) mod test_utils;
-mod weight_compute;
-mod weighted_choose;
+pub mod weight_compute;
+pub mod weighted_choose;
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
+use strum::AsRefStr;
 
 use crate::error;
 use crate::error::Result;
@@ -39,6 +42,8 @@ pub struct SelectorOptions {
     pub min_required_items: usize,
     /// Whether duplicates are allowed in the selected result, default false.
     pub allow_duplication: bool,
+    /// The peers to exclude from the selection.
+    pub exclude_peer_ids: HashSet<u64>,
 }
 
 impl Default for SelectorOptions {
@@ -46,12 +51,13 @@ impl Default for SelectorOptions {
         Self {
             min_required_items: 1,
             allow_duplication: false,
+            exclude_peer_ids: HashSet::new(),
         }
     }
 }
 
 /// [`SelectorType`] refers to the load balancer used when creating tables.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default, AsRefStr)]
 #[serde(try_from = "String")]
 pub enum SelectorType {
     /// The current load balancing is based on the number of regions on each datanode node;

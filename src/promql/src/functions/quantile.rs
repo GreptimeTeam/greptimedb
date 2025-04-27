@@ -19,6 +19,7 @@ use datafusion::arrow::datatypes::TimeUnit;
 use datafusion::common::DataFusionError;
 use datafusion::logical_expr::{ScalarUDF, Volatility};
 use datafusion::physical_plan::ColumnarValue;
+use datafusion_common::ScalarValue;
 use datafusion_expr::create_udf;
 use datatypes::arrow::array::Array;
 use datatypes::arrow::datatypes::DataType;
@@ -40,20 +41,36 @@ impl QuantileOverTime {
         "prom_quantile_over_time"
     }
 
-    pub fn scalar_udf(quantile: f64) -> ScalarUDF {
+    pub fn scalar_udf() -> ScalarUDF {
         let input_types = vec![
             // time index column
             RangeArray::convert_data_type(DataType::Timestamp(TimeUnit::Millisecond, None)),
             // value column
             RangeArray::convert_data_type(DataType::Float64),
+            // quantile
+            DataType::Float64,
         ];
         create_udf(
             Self::name(),
             input_types,
             DataType::Float64,
             Volatility::Volatile,
-            Arc::new(move |input: &_| Self::new(quantile).quantile_over_time(input)) as _,
+            Arc::new(move |input: &_| Self::create_function(input)?.quantile_over_time(input)) as _,
         )
+    }
+
+    fn create_function(inputs: &[ColumnarValue]) -> Result<Self, DataFusionError> {
+        if inputs.len() != 3 {
+            return Err(DataFusionError::Plan(
+                "QuantileOverTime function should have 3 inputs".to_string(),
+            ));
+        }
+        let ColumnarValue::Scalar(ScalarValue::Float64(Some(quantile))) = inputs[2] else {
+            return Err(DataFusionError::Plan(
+                "QuantileOverTime function's third input should be a scalar float64".to_string(),
+            ));
+        };
+        Ok(Self::new(quantile))
     }
 
     fn quantile_over_time(

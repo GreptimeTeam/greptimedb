@@ -22,10 +22,8 @@ use common_meta::instruction::{
 };
 use common_procedure::Status;
 use common_telemetry::{error, info, warn};
-use common_wal::options::WalOptions;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
-use store_api::storage::RegionId;
 use tokio::time::{sleep, Instant};
 
 use crate::error::{self, Result};
@@ -56,6 +54,7 @@ impl Default for DowngradeLeaderRegion {
 #[typetag::serde]
 impl State for DowngradeLeaderRegion {
     async fn next(&mut self, ctx: &mut Context) -> Result<(Box<dyn State>, Status)> {
+        let now = Instant::now();
         // Ensures the `leader_region_lease_deadline` must exist after recovering.
         ctx.volatile_ctx
             .set_leader_region_lease_deadline(Duration::from_secs(REGION_LEASE_SECS));
@@ -79,6 +78,7 @@ impl State for DowngradeLeaderRegion {
                 }
             }
         }
+        ctx.update_downgrade_leader_region_elapsed(now);
 
         Ok((
             Box::new(UpgradeCandidateRegion::default()),
@@ -97,30 +97,13 @@ impl DowngradeLeaderRegion {
         &self,
         ctx: &Context,
         flush_timeout: Duration,
-        reject_write: bool,
     ) -> Instruction {
         let pc = &ctx.persistent_ctx;
         let region_id = pc.region_id;
         Instruction::DowngradeRegion(DowngradeRegion {
             region_id,
             flush_timeout: Some(flush_timeout),
-            reject_write,
         })
-    }
-
-    async fn should_reject_write(ctx: &mut Context, region_id: RegionId) -> Result<bool> {
-        let datanode_table_value = ctx.get_from_peer_datanode_table_value().await?;
-        if let Some(wal_option) = datanode_table_value
-            .region_info
-            .region_wal_options
-            .get(&region_id.region_number())
-        {
-            let options: WalOptions = serde_json::from_str(wal_option)
-                .with_context(|_| error::DeserializeFromJsonSnafu { input: wal_option })?;
-            return Ok(matches!(options, WalOptions::RaftEngine));
-        }
-
-        Ok(true)
     }
 
     /// Tries to downgrade a leader region.
@@ -143,9 +126,7 @@ impl DowngradeLeaderRegion {
                 .context(error::ExceededDeadlineSnafu {
                     operation: "Downgrade region",
                 })?;
-        let reject_write = Self::should_reject_write(ctx, region_id).await?;
-        let downgrade_instruction =
-            self.build_downgrade_region_instruction(ctx, operation_timeout, reject_write);
+        let downgrade_instruction = self.build_downgrade_region_instruction(ctx, operation_timeout);
 
         let leader = &ctx.persistent_ctx.from_peer;
         let msg = MailboxMessage::json_message(
@@ -174,6 +155,7 @@ impl DowngradeLeaderRegion {
                 );
                 let InstructionReply::DowngradeRegion(DowngradeRegionReply {
                     last_entry_id,
+                    metadata_last_entry_id,
                     exists,
                     error,
                 }) = reply
@@ -202,15 +184,21 @@ impl DowngradeLeaderRegion {
                     );
                 } else {
                     info!(
-                        "Region {} leader is downgraded, last_entry_id: {:?}, elapsed: {:?}",
+                        "Region {} leader is downgraded, last_entry_id: {:?}, metadata_last_entry_id: {:?}, elapsed: {:?}",
                         region_id,
                         last_entry_id,
+                        metadata_last_entry_id,
                         now.elapsed()
                     );
                 }
 
                 if let Some(last_entry_id) = last_entry_id {
                     ctx.volatile_ctx.set_last_entry_id(last_entry_id);
+                }
+
+                if let Some(metadata_last_entry_id) = metadata_last_entry_id {
+                    ctx.volatile_ctx
+                        .set_metadata_last_entry_id(metadata_last_entry_id);
                 }
 
                 Ok(())
@@ -276,7 +264,6 @@ mod tests {
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::peer::Peer;
     use common_meta::rpc::router::{Region, RegionRoute};
-    use common_wal::options::KafkaWalOptions;
     use store_api::storage::RegionId;
     use tokio::time::Instant;
 
@@ -332,41 +319,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_should_reject_writes() {
-        let persistent_context = new_persistent_context();
-        let region_id = persistent_context.region_id;
-        let env = TestingEnv::new();
-        let mut ctx = env.context_factory().new_context(persistent_context);
-        let wal_options =
-            HashMap::from([(1, serde_json::to_string(&WalOptions::RaftEngine).unwrap())]);
-        prepare_table_metadata(&ctx, wal_options).await;
-
-        let reject_write = DowngradeLeaderRegion::should_reject_write(&mut ctx, region_id)
-            .await
-            .unwrap();
-        assert!(reject_write);
-
-        // Remote WAL
-        let persistent_context = new_persistent_context();
-        let region_id = persistent_context.region_id;
-        let env = TestingEnv::new();
-        let mut ctx = env.context_factory().new_context(persistent_context);
-        let wal_options = HashMap::from([(
-            1,
-            serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
-                topic: "my_topic".to_string(),
-            }))
-            .unwrap(),
-        )]);
-        prepare_table_metadata(&ctx, wal_options).await;
-
-        let reject_write = DowngradeLeaderRegion::should_reject_write(&mut ctx, region_id)
-            .await
-            .unwrap();
-        assert!(!reject_write);
-    }
-
-    #[tokio::test]
     async fn test_pusher_dropped() {
         let state = DowngradeLeaderRegion::default();
         let persistent_context = new_persistent_context();
@@ -398,7 +350,8 @@ mod tests {
         let env = TestingEnv::new();
         let mut ctx = env.context_factory().new_context(persistent_context);
         prepare_table_metadata(&ctx, HashMap::default()).await;
-        ctx.volatile_ctx.operations_elapsed = ctx.persistent_ctx.timeout + Duration::from_secs(1);
+        ctx.volatile_ctx.metrics.operations_elapsed =
+            ctx.persistent_ctx.timeout + Duration::from_secs(1);
 
         let err = state.downgrade_region(&mut ctx).await.unwrap_err();
 
@@ -641,7 +594,8 @@ mod tests {
         let mut ctx = env.context_factory().new_context(persistent_context);
         let mailbox_ctx = env.mailbox_context();
         let mailbox = mailbox_ctx.mailbox().clone();
-        ctx.volatile_ctx.operations_elapsed = ctx.persistent_ctx.timeout + Duration::from_secs(1);
+        ctx.volatile_ctx.metrics.operations_elapsed =
+            ctx.persistent_ctx.timeout + Duration::from_secs(1);
 
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         mailbox_ctx

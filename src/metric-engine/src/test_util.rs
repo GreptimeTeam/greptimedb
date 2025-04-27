@@ -16,6 +16,7 @@
 
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema as PbColumnSchema, Row, SemanticType, Value};
+use common_telemetry::debug;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use mito2::config::MitoConfig;
@@ -28,7 +29,7 @@ use store_api::metric_engine_consts::{
 };
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
-    AddColumn, AlterKind, RegionAlterRequest, RegionCreateRequest, RegionRequest,
+    AddColumn, AlterKind, RegionAlterRequest, RegionCreateRequest, RegionOpenRequest, RegionRequest,
 };
 use store_api::storage::{ColumnId, RegionId};
 
@@ -53,9 +54,14 @@ impl TestEnv {
 
     /// Returns a new env with specific `prefix` for test.
     pub async fn with_prefix(prefix: &str) -> Self {
+        Self::with_prefix_and_config(prefix, EngineConfig::default()).await
+    }
+
+    /// Returns a new env with specific `prefix` and `config` for test.
+    pub async fn with_prefix_and_config(prefix: &str, config: EngineConfig) -> Self {
         let mut mito_env = MitoTestEnv::with_prefix(prefix);
         let mito = mito_env.create_engine(MitoConfig::default()).await;
-        let metric = MetricEngine::new(mito.clone(), EngineConfig::default());
+        let metric = MetricEngine::try_new(mito.clone(), config).unwrap();
         Self {
             mito_env,
             mito,
@@ -75,6 +81,34 @@ impl TestEnv {
 
     pub fn metric(&self) -> MetricEngine {
         self.metric.clone()
+    }
+
+    /// Creates a new follower engine with the same config as the leader engine.
+    pub async fn create_follower_engine(&mut self) -> (MitoEngine, MetricEngine) {
+        let mito = self
+            .mito_env
+            .create_follower_engine(MitoConfig::default())
+            .await;
+        let metric = MetricEngine::try_new(mito.clone(), EngineConfig::default()).unwrap();
+
+        let region_id = self.default_physical_region_id();
+        debug!("opening default physical region: {region_id}");
+        let physical_region_option = [(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new())]
+            .into_iter()
+            .collect();
+        metric
+            .handle_request(
+                region_id,
+                RegionRequest::Open(RegionOpenRequest {
+                    engine: METRIC_ENGINE_NAME.to_string(),
+                    region_dir: self.default_region_dir(),
+                    options: physical_region_option,
+                    skip_wal_replay: true,
+                }),
+            )
+            .await
+            .unwrap();
+        (mito, metric)
     }
 
     /// Create regions in [MetricEngine] under [`default_region_id`]

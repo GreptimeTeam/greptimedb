@@ -37,10 +37,11 @@ use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::region_registry::LeaderRegionRegistry;
 use common_meta::sequence::SequenceBuilder;
 use common_meta::state_store::KvStateStore;
-use common_meta::wal_options_allocator::build_wal_options_allocator;
+use common_meta::wal_options_allocator::{build_kafka_client, build_wal_options_allocator};
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::ProcedureManagerRef;
-use snafu::ResultExt;
+use common_telemetry::warn;
+use snafu::{ensure, ResultExt};
 
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
@@ -58,6 +59,8 @@ use crate::metasrv::{
 };
 use crate::procedure::region_migration::manager::RegionMigrationManager;
 use crate::procedure::region_migration::DefaultContextFactory;
+use crate::procedure::wal_prune::manager::{WalPruneManager, WalPruneTicker};
+use crate::procedure::wal_prune::Context as WalPruneContext;
 use crate::region::supervisor::{
     HeartbeatAcceptor, RegionFailureDetectorControl, RegionSupervisor, RegionSupervisorTicker,
     DEFAULT_TICK_INTERVAL,
@@ -188,7 +191,7 @@ impl MetasrvBuilder {
 
         let meta_peer_client = meta_peer_client
             .unwrap_or_else(|| build_default_meta_peer_client(&election, &in_memory));
-        let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector));
+        let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector::default()));
         let pushers = Pushers::default();
         let mailbox = build_mailbox(&kv_backend, &pushers);
         let procedure_manager = build_procedure_manager(&options, &kv_backend);
@@ -232,13 +235,17 @@ impl MetasrvBuilder {
             ))
         });
 
+        let flow_selector = Arc::new(RoundRobinSelector::new(
+            SelectTarget::Flownode,
+            Arc::new(Vec::new()),
+        )) as SelectorRef;
+
         let flow_metadata_allocator = {
             // for now flownode just use round-robin selector
-            let flow_selector = RoundRobinSelector::new(SelectTarget::Flownode);
             let flow_selector_ctx = selector_ctx.clone();
             let peer_allocator = Arc::new(FlowPeerAllocator::new(
                 flow_selector_ctx,
-                Arc::new(flow_selector),
+                flow_selector.clone(),
             ));
             let seq = Arc::new(
                 SequenceBuilder::new(FLOW_ID_SEQ, kv_backend.clone())
@@ -270,18 +277,25 @@ impl MetasrvBuilder {
             },
         ));
         let peer_lookup_service = Arc::new(MetaPeerLookupService::new(meta_peer_client.clone()));
+
         if !is_remote_wal && options.enable_region_failover {
-            return error::UnexpectedSnafu {
-                violated: "Region failover is not supported in the local WAL implementation!",
+            ensure!(
+                options.allow_region_failover_on_local_wal,
+                error::UnexpectedSnafu {
+                    violated: "Region failover is not supported in the local WAL implementation! 
+                    If you want to enable region failover for local WAL, please set `allow_region_failover_on_local_wal` to true.",
+                }
+            );
+            if options.allow_region_failover_on_local_wal {
+                warn!("Region failover is force enabled in the local WAL implementation! This may lead to data loss during failover!");
             }
-            .fail();
         }
 
         let (tx, rx) = RegionSupervisor::channel();
         let (region_failure_detector_controller, region_supervisor_ticker): (
             RegionFailureDetectorControllerRef,
             Option<std::sync::Arc<RegionSupervisorTicker>>,
-        ) = if options.enable_region_failover && is_remote_wal {
+        ) = if options.enable_region_failover {
             (
                 Arc::new(RegionFailureDetectorControl::new(tx.clone())) as _,
                 Some(Arc::new(RegionSupervisorTicker::new(
@@ -307,7 +321,7 @@ impl MetasrvBuilder {
         ));
         region_migration_manager.try_start()?;
 
-        let region_failover_handler = if options.enable_region_failover && is_remote_wal {
+        let region_failover_handler = if options.enable_region_failover {
             let region_supervisor = RegionSupervisor::new(
                 rx,
                 options.failure_detector,
@@ -345,6 +359,40 @@ impl MetasrvBuilder {
             )
             .context(error::InitDdlManagerSnafu)?,
         );
+
+        // remote WAL prune ticker and manager
+        let wal_prune_ticker = if is_remote_wal && options.wal.enable_active_wal_pruning() {
+            let (tx, rx) = WalPruneManager::channel();
+            // Safety: Must be remote WAL.
+            let remote_wal_options = options.wal.remote_wal_options().unwrap();
+            let kafka_client = build_kafka_client(remote_wal_options)
+                .await
+                .context(error::BuildKafkaClientSnafu)?;
+            let wal_prune_context = WalPruneContext {
+                client: Arc::new(kafka_client),
+                table_metadata_manager: table_metadata_manager.clone(),
+                leader_region_registry: leader_region_registry.clone(),
+                server_addr: options.server_addr.clone(),
+                mailbox: mailbox.clone(),
+            };
+            let wal_prune_manager = WalPruneManager::new(
+                table_metadata_manager.clone(),
+                remote_wal_options.auto_prune_parallelism,
+                rx,
+                procedure_manager.clone(),
+                wal_prune_context,
+                remote_wal_options.trigger_flush_threshold,
+            );
+            // Start manager in background. Ticker will be started in the main thread to send ticks.
+            wal_prune_manager.try_start().await?;
+            let wal_prune_ticker = Arc::new(WalPruneTicker::new(
+                remote_wal_options.auto_prune_interval,
+                tx.clone(),
+            ));
+            Some(wal_prune_ticker)
+        } else {
+            None
+        };
 
         let customized_region_lease_renewer = plugins
             .as_ref()
@@ -384,7 +432,7 @@ impl MetasrvBuilder {
             meta_peer_client: meta_peer_client.clone(),
             selector,
             // TODO(jeremy): We do not allow configuring the flow selector.
-            flow_selector: Arc::new(RoundRobinSelector::new(SelectTarget::Flownode)),
+            flow_selector,
             handler_group: RwLock::new(None),
             handler_group_builder: Mutex::new(Some(handler_group_builder)),
             election,
@@ -406,6 +454,7 @@ impl MetasrvBuilder {
             region_supervisor_ticker,
             cache_invalidator,
             leader_region_registry,
+            wal_prune_ticker,
         })
     }
 }

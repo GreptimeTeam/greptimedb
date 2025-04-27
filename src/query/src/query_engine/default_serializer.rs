@@ -181,6 +181,7 @@ mod tests {
     use super::*;
     use crate::dummy_catalog::DummyCatalogList;
     use crate::optimizer::test_util::mock_table_provider;
+    use crate::options::QueryOptions;
     use crate::QueryEngineFactory;
 
     fn mock_plan(schema: SchemaRef) -> LogicalPlan {
@@ -199,7 +200,15 @@ mod tests {
     #[tokio::test]
     async fn test_serializer_decode_plan() {
         let catalog_list = catalog::memory::new_memory_catalog_manager().unwrap();
-        let factory = QueryEngineFactory::new(catalog_list, None, None, None, None, false);
+        let factory = QueryEngineFactory::new(
+            catalog_list,
+            None,
+            None,
+            None,
+            None,
+            false,
+            QueryOptions::default(),
+        );
 
         let engine = factory.query_engine();
 

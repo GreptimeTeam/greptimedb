@@ -34,7 +34,7 @@ use store_api::metric_engine_consts::{
     METADATA_SCHEMA_VALUE_COLUMN_INDEX, METADATA_SCHEMA_VALUE_COLUMN_NAME,
 };
 use store_api::mito_engine_options::{
-    APPEND_MODE_KEY, MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING, TTL_KEY,
+    APPEND_MODE_KEY, MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING, SKIP_WAL_KEY, TTL_KEY,
 };
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{AffectedRows, RegionCreateRequest, RegionRequest};
@@ -51,7 +51,10 @@ use crate::error::{
     Result, SerializeColumnMetadataSnafu, UnexpectedRequestSnafu,
 };
 use crate::metrics::PHYSICAL_REGION_COUNT;
-use crate::utils::{self, to_data_region_id, to_metadata_region_id};
+use crate::utils::{
+    self, append_manifest_info, encode_manifest_info_to_extensions, to_data_region_id,
+    to_metadata_region_id,
+};
 
 const DEFAULT_TABLE_ID_SKIPPING_INDEX_GRANULARITY: u32 = 1024;
 
@@ -88,11 +91,15 @@ impl MetricEngineInner {
             if requests.len() == 1 {
                 let request = &requests.first().unwrap().1;
                 let physical_region_id = parse_physical_region_id(request)?;
+                let mut manifest_infos = Vec::with_capacity(1);
                 self.create_logical_regions(physical_region_id, requests, extension_return_value)
                     .await?;
+                append_manifest_info(&self.mito, physical_region_id, &mut manifest_infos);
+                encode_manifest_info_to_extensions(&manifest_infos, extension_return_value)?;
             } else {
                 let grouped_requests =
                     group_create_logical_region_requests_by_physical_region_id(requests)?;
+                let mut manifest_infos = Vec::with_capacity(grouped_requests.len());
                 for (physical_region_id, requests) in grouped_requests {
                     self.create_logical_regions(
                         physical_region_id,
@@ -100,7 +107,9 @@ impl MetricEngineInner {
                         extension_return_value,
                     )
                     .await?;
+                    append_manifest_info(&self.mito, physical_region_id, &mut manifest_infos);
                 }
+                encode_manifest_info_to_extensions(&manifest_infos, extension_return_value)?;
             }
         } else {
             return MissingRegionOptionSnafu {}.fail();
@@ -279,9 +288,16 @@ impl MetricEngineInner {
             .add_logical_regions(physical_region_id, true, logical_region_columns)
             .await?;
 
-        let mut state = self.state.write().unwrap();
-        state.add_physical_columns(data_region_id, new_add_columns);
-        state.add_logical_regions(physical_region_id, logical_regions);
+        {
+            let mut state = self.state.write().unwrap();
+            state.add_physical_columns(data_region_id, new_add_columns);
+            state.add_logical_regions(physical_region_id, logical_regions.clone());
+        }
+        for logical_region_id in logical_regions {
+            self.metadata_region
+                .open_logical_region(logical_region_id)
+                .await;
+        }
 
         Ok(())
     }
@@ -549,6 +565,7 @@ pub(crate) fn region_options_for_metadata_region(
     // Don't allow to set primary key encoding for metadata region.
     original.remove(MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING);
     original.insert(TTL_KEY.to_string(), FOREVER.to_string());
+    original.remove(SKIP_WAL_KEY);
     original
 }
 
@@ -685,8 +702,12 @@ mod test {
     #[tokio::test]
     async fn test_create_request_for_physical_regions() {
         // original request
-        let mut ttl_options = HashMap::new();
-        ttl_options.insert("ttl".to_string(), "60m".to_string());
+        let options: HashMap<_, _> = [
+            ("ttl".to_string(), "60m".to_string()),
+            ("skip_wal".to_string(), "true".to_string()),
+        ]
+        .into_iter()
+        .collect();
         let request = RegionCreateRequest {
             engine: METRIC_ENGINE_NAME.to_string(),
             column_metadatas: vec![
@@ -710,13 +731,13 @@ mod test {
                 },
             ],
             primary_key: vec![0],
-            options: ttl_options,
+            options,
             region_dir: "/test_dir".to_string(),
         };
 
         // set up
         let env = TestEnv::new().await;
-        let engine = MetricEngine::new(env.mito(), EngineConfig::default());
+        let engine = MetricEngine::try_new(env.mito(), EngineConfig::default()).unwrap();
         let engine_inner = engine.inner;
 
         // check create data region request
@@ -742,5 +763,6 @@ mod test {
             metadata_region_request.options.get("ttl").unwrap(),
             "forever"
         );
+        assert!(!metadata_region_request.options.contains_key("skip_wal"));
     }
 }

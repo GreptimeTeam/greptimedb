@@ -26,9 +26,10 @@
 
 // allow unused for now because it should be use later
 mod adapter;
-mod batching_mode;
+pub(crate) mod batching_mode;
 mod compute;
 mod df_optimizer;
+pub(crate) mod engine;
 pub mod error;
 mod expr;
 pub mod heartbeat;
@@ -42,7 +43,9 @@ mod utils;
 #[cfg(test)]
 mod test_utils;
 
-pub use adapter::{FlowConfig, FlowWorkerManager, FlowWorkerManagerRef, FlownodeOptions};
+pub use adapter::{FlowConfig, FlowStreamingEngineRef, FlownodeOptions, StreamingEngine};
+pub use batching_mode::frontend_client::{FrontendClient, GrpcQueryHandlerWithBoxedError};
+pub(crate) use engine::{CreateFlowArgs, FlowId, TableName};
 pub use error::{Error, Result};
 pub use server::{
     FlownodeBuilder, FlownodeInstance, FlownodeServer, FlownodeServiceBuilder, FrontendInvoker,

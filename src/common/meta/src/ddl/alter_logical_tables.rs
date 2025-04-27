@@ -18,10 +18,12 @@ mod region_request;
 mod table_cache_keys;
 mod update_metadata;
 
+use api::region::RegionResponse;
 use async_trait::async_trait;
+use common_catalog::format_full_table_name;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{Context, LockKey, Procedure, Status};
-use common_telemetry::{info, warn};
+use common_telemetry::{error, info, warn};
 use futures_util::future;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
@@ -30,7 +32,7 @@ use store_api::metric_engine_consts::ALTER_PHYSICAL_EXTENSION_KEY;
 use strum::AsRefStr;
 use table::metadata::TableId;
 
-use crate::ddl::utils::add_peer_context_if_needed;
+use crate::ddl::utils::{add_peer_context_if_needed, sync_follower_regions};
 use crate::ddl::DdlContext;
 use crate::error::{DecodeJsonSnafu, Error, MetadataCorruptionSnafu, Result};
 use crate::key::table_info::TableInfoValue;
@@ -39,7 +41,7 @@ use crate::key::DeserializedValueWithBytes;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock};
 use crate::metrics;
 use crate::rpc::ddl::AlterTableTask;
-use crate::rpc::router::find_leaders;
+use crate::rpc::router::{find_leaders, RegionRoute};
 
 pub struct AlterLogicalTablesProcedure {
     pub context: DdlContext,
@@ -125,14 +127,20 @@ impl AlterLogicalTablesProcedure {
             });
         }
 
-        // Collects responses from datanodes.
-        let phy_raw_schemas = future::join_all(alter_region_tasks)
+        let mut results = future::join_all(alter_region_tasks)
             .await
             .into_iter()
-            .map(|res| res.map(|mut res| res.extensions.remove(ALTER_PHYSICAL_EXTENSION_KEY)))
             .collect::<Result<Vec<_>>>()?;
 
+        // Collects responses from datanodes.
+        let phy_raw_schemas = results
+            .iter_mut()
+            .map(|res| res.extensions.remove(ALTER_PHYSICAL_EXTENSION_KEY))
+            .collect::<Vec<_>>();
+
         if phy_raw_schemas.is_empty() {
+            self.submit_sync_region_requests(results, &physical_table_route.region_routes)
+                .await;
             self.data.state = AlterTablesState::UpdateMetadata;
             return Ok(Status::executing(true));
         }
@@ -155,8 +163,32 @@ impl AlterLogicalTablesProcedure {
             warn!("altering logical table result doesn't contains extension key `{ALTER_PHYSICAL_EXTENSION_KEY}`,leaving the physical table's schema unchanged");
         }
 
+        self.submit_sync_region_requests(results, &physical_table_route.region_routes)
+            .await;
         self.data.state = AlterTablesState::UpdateMetadata;
         Ok(Status::executing(true))
+    }
+
+    async fn submit_sync_region_requests(
+        &self,
+        results: Vec<RegionResponse>,
+        region_routes: &[RegionRoute],
+    ) {
+        let table_info = &self.data.physical_table_info.as_ref().unwrap().table_info;
+        if let Err(err) = sync_follower_regions(
+            &self.context,
+            self.data.physical_table_id,
+            results,
+            region_routes,
+            table_info.meta.engine.as_str(),
+        )
+        .await
+        {
+            error!(err; "Failed to sync regions for table {}, table_id: {}",
+                        format_full_table_name(&table_info.catalog_name, &table_info.schema_name, &table_info.name),
+                        self.data.physical_table_id
+            );
+        }
     }
 
     pub(crate) async fn on_update_metadata(&mut self) -> Result<Status> {

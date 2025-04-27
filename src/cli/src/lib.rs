@@ -23,15 +23,12 @@ mod helper;
 // Wait for https://github.com/GreptimeTeam/greptimedb/issues/2373
 mod database;
 mod import;
-#[allow(unused)]
-mod repl;
 
 use async_trait::async_trait;
 use clap::Parser;
 use common_error::ext::BoxedError;
 pub use database::DatabaseClient;
 use error::Result;
-pub use repl::Repl;
 
 pub use crate::bench::BenchTableMetadataCommand;
 pub use crate::export::ExportCommand;

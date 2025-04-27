@@ -66,6 +66,42 @@ select * from with_pattern order by ts;
 | host3 | 99.9 | 444.4  | 2024-07-27T10:47:43 |
 +-------+------+--------+---------------------+
 
+CREATE TABLE demo_with_external_column(host string, cpu double, memory double, ts timestamp time index, external_column string default 'default_value');
+
+Affected Rows: 0
+
+Copy demo_with_external_column FROM '${SQLNESS_HOME}/demo/export/csv/demo.csv' WITH (format='csv');
+
+Affected Rows: 3
+
+select * from demo_with_external_column order by ts;
+
++-------+------+--------+---------------------+-----------------+
+| host  | cpu  | memory | ts                  | external_column |
++-------+------+--------+---------------------+-----------------+
+| host1 | 66.6 | 1024.0 | 2022-06-15T07:02:37 | default_value   |
+| host2 | 88.8 | 333.3  | 2022-06-15T07:02:38 | default_value   |
+| host3 | 99.9 | 444.4  | 2024-07-27T10:47:43 | default_value   |
++-------+------+--------+---------------------+-----------------+
+
+CREATE TABLE demo_with_less_columns(host string, memory double, ts timestamp time index);
+
+Affected Rows: 0
+
+Copy demo_with_less_columns FROM '${SQLNESS_HOME}/demo/export/csv/demo.csv' WITH (format='csv');
+
+Affected Rows: 3
+
+select * from demo_with_less_columns order by ts;
+
++-------+--------+---------------------+
+| host  | memory | ts                  |
++-------+--------+---------------------+
+| host1 | 1024.0 | 2022-06-15T07:02:37 |
+| host2 | 333.3  | 2022-06-15T07:02:38 |
+| host3 | 444.4  | 2024-07-27T10:47:43 |
++-------+--------+---------------------+
+
 drop table demo;
 
 Affected Rows: 0
@@ -79,6 +115,14 @@ drop table with_path;
 Affected Rows: 0
 
 drop table with_pattern;
+
+Affected Rows: 0
+
+drop table demo_with_external_column;
+
+Affected Rows: 0
+
+drop table demo_with_less_columns;
 
 Affected Rows: 0
 

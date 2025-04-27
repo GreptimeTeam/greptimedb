@@ -90,8 +90,6 @@ env:
 
   # The scheduled version is '${{ env.NEXT_RELEASE_VERSION }}-nightly-YYYYMMDD', like v0.2.0-nigthly-20230313;
   NIGHTLY_RELEASE_PREFIX: nightly
-  # Note: The NEXT_RELEASE_VERSION should be modified manually by every formal release.
-  NEXT_RELEASE_VERSION: v0.14.0
 
 jobs:
   allocate-runners:
@@ -135,7 +133,6 @@ jobs:
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           GITHUB_REF_NAME: ${{ github.ref_name }}
-          NEXT_RELEASE_VERSION: ${{ env.NEXT_RELEASE_VERSION }}
           NIGHTLY_RELEASE_PREFIX: ${{ env.NIGHTLY_RELEASE_PREFIX }}
 
       - name: Allocate linux-amd64 runner
@@ -317,7 +314,7 @@ jobs:
           image-registry-username: ${{ secrets.DOCKERHUB_USERNAME }}
           image-registry-password: ${{ secrets.DOCKERHUB_TOKEN }}
           version: ${{ needs.allocate-runners.outputs.version }}
-          push-latest-tag: true
+          push-latest-tag: ${{ github.ref_type == 'tag' && !contains(github.ref_name, 'nightly') && github.event_name != 'schedule' }}
 
       - name: Set build image result
         id: set-build-image-result
@@ -364,7 +361,7 @@ jobs:
           dev-mode: false
           upload-to-s3: true
           update-version-info: true
-          push-latest-tag: true
+          push-latest-tag: ${{ github.ref_type == 'tag' && !contains(github.ref_name, 'nightly') && github.event_name != 'schedule' }}
 
   publish-github-release:
     name: Create GitHub release and upload artifacts

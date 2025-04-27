@@ -32,7 +32,9 @@ use common_meta::key::TableMetadataManager;
 use common_telemetry::info;
 use common_telemetry::logging::TracingOptions;
 use common_version::{short_version, version};
-use flow::{FlownodeBuilder, FlownodeInstance, FlownodeServiceBuilder, FrontendInvoker};
+use flow::{
+    FlownodeBuilder, FlownodeInstance, FlownodeServiceBuilder, FrontendClient, FrontendInvoker,
+};
 use meta_client::{MetaClientOptions, MetaClientType};
 use snafu::{ensure, OptionExt, ResultExt};
 use tracing_appender::non_blocking::WorkerGuard;
@@ -313,12 +315,14 @@ impl StartCommand {
         );
 
         let flow_metadata_manager = Arc::new(FlowMetadataManager::new(cached_meta_backend.clone()));
+        let frontend_client = FrontendClient::from_meta_client(meta_client.clone());
         let flownode_builder = FlownodeBuilder::new(
             opts.clone(),
             Plugins::new(),
             table_metadata_manager,
             catalog_manager.clone(),
             flow_metadata_manager,
+            Arc::new(frontend_client),
         )
         .with_heartbeat_task(heartbeat_task);
 
@@ -341,7 +345,7 @@ impl StartCommand {
         let client = Arc::new(NodeClients::new(channel_config));
 
         let invoker = FrontendInvoker::build_from(
-            flownode.flow_worker_manager().clone(),
+            flownode.flow_engine().streaming_engine(),
             catalog_manager.clone(),
             cached_meta_backend.clone(),
             layered_cache_registry.clone(),
@@ -351,7 +355,9 @@ impl StartCommand {
         .await
         .context(StartFlownodeSnafu)?;
         flownode
-            .flow_worker_manager()
+            .flow_engine()
+            .streaming_engine()
+            // TODO(discord9): refactor and avoid circular reference
             .set_frontend_invoker(invoker)
             .await;
 

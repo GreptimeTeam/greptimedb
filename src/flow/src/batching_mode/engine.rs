@@ -12,31 +12,36 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Batching mode engine
+
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use api::v1::flow::FlowResponse;
+use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
 use common_meta::ddl::create_flow::FlowType;
 use common_meta::key::flow::FlowMetadataManagerRef;
-use common_meta::key::table_info::TableInfoManager;
+use common_meta::key::table_info::{TableInfoManager, TableInfoValue};
 use common_meta::key::TableMetadataManagerRef;
 use common_runtime::JoinHandle;
-use common_telemetry::info;
 use common_telemetry::tracing::warn;
+use common_telemetry::{debug, info};
+use common_time::TimeToLive;
 use query::QueryEngineRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use table::metadata::TableId;
 use tokio::sync::{oneshot, RwLock};
 
-use crate::adapter::{CreateFlowArgs, FlowId, TableName};
 use crate::batching_mode::frontend_client::FrontendClient;
 use crate::batching_mode::task::BatchingTask;
 use crate::batching_mode::time_window::{find_time_window_expr, TimeWindowExpr};
 use crate::batching_mode::utils::sql_to_df_plan;
-use crate::error::{ExternalSnafu, FlowAlreadyExistSnafu, TableNotFoundMetaSnafu, UnexpectedSnafu};
-use crate::Error;
+use crate::engine::FlowEngine;
+use crate::error::{
+    ExternalSnafu, FlowAlreadyExistSnafu, TableNotFoundMetaSnafu, UnexpectedSnafu, UnsupportedSnafu,
+};
+use crate::{CreateFlowArgs, Error, FlowId, TableName};
 
 /// Batching mode Engine, responsible for driving all the batching mode tasks
 ///
@@ -47,6 +52,7 @@ pub struct BatchingEngine {
     frontend_client: Arc<FrontendClient>,
     flow_metadata_manager: FlowMetadataManagerRef,
     table_meta: TableMetadataManagerRef,
+    catalog_manager: CatalogManagerRef,
     query_engine: QueryEngineRef,
 }
 
@@ -56,6 +62,7 @@ impl BatchingEngine {
         query_engine: QueryEngineRef,
         flow_metadata_manager: FlowMetadataManagerRef,
         table_meta: TableMetadataManagerRef,
+        catalog_manager: CatalogManagerRef,
     ) -> Self {
         Self {
             tasks: Default::default(),
@@ -63,14 +70,15 @@ impl BatchingEngine {
             frontend_client,
             flow_metadata_manager,
             table_meta,
+            catalog_manager,
             query_engine,
         }
     }
 
-    pub async fn handle_inserts(
+    pub async fn handle_inserts_inner(
         &self,
         request: api::v1::region::InsertRequests,
-    ) -> Result<FlowResponse, Error> {
+    ) -> Result<(), Error> {
         let table_info_mgr = self.table_meta.table_info_manager();
         let mut group_by_table_id: HashMap<TableId, Vec<api::v1::Rows>> = HashMap::new();
 
@@ -170,7 +178,7 @@ impl BatchingEngine {
         }
         drop(tasks);
 
-        Ok(Default::default())
+        Ok(())
     }
 }
 
@@ -178,6 +186,16 @@ async fn get_table_name(
     table_info: &TableInfoManager,
     table_id: &TableId,
 ) -> Result<TableName, Error> {
+    get_table_info(table_info, table_id).await.map(|info| {
+        let name = info.table_name();
+        [name.catalog_name, name.schema_name, name.table_name]
+    })
+}
+
+async fn get_table_info(
+    table_info: &TableInfoManager,
+    table_id: &TableId,
+) -> Result<TableInfoValue, Error> {
     table_info
         .get(*table_id)
         .await
@@ -186,12 +204,11 @@ async fn get_table_name(
         .with_context(|| UnexpectedSnafu {
             reason: format!("Table id = {:?}, couldn't found table name", table_id),
         })
-        .map(|name| name.table_name())
-        .map(|name| [name.catalog_name, name.schema_name, name.table_name])
+        .map(|info| info.into_inner())
 }
 
 impl BatchingEngine {
-    pub async fn create_flow(&self, args: CreateFlowArgs) -> Result<Option<FlowId>, Error> {
+    pub async fn create_flow_inner(&self, args: CreateFlowArgs) -> Result<Option<FlowId>, Error> {
         let CreateFlowArgs {
             flow_id,
             sink_table_name,
@@ -247,7 +264,20 @@ impl BatchingEngine {
         let query_ctx = Arc::new(query_ctx);
         let mut source_table_names = Vec::with_capacity(2);
         for src_id in source_table_ids {
+            // also check table option to see if ttl!=instant
             let table_name = get_table_name(self.table_meta.table_info_manager(), &src_id).await?;
+            let table_info = get_table_info(self.table_meta.table_info_manager(), &src_id).await?;
+            ensure!(
+                table_info.table_info.meta.options.ttl != Some(TimeToLive::Instant),
+                UnsupportedSnafu {
+                    reason: format!(
+                        "Source table `{}`(id={}) has instant TTL, Instant TTL is not supported under batching mode. Consider using a TTL longer than flush interval",
+                        table_name.join("."),
+                        src_id
+                    ),
+                }
+            );
+
             source_table_names.push(table_name);
         }
 
@@ -272,7 +302,14 @@ impl BatchingEngine {
             })
             .transpose()?;
 
-        info!("Flow id={}, found time window expr={:?}", flow_id, phy_expr);
+        info!(
+            "Flow id={}, found time window expr={}",
+            flow_id,
+            phy_expr
+                .as_ref()
+                .map(|phy_expr| phy_expr.to_string())
+                .unwrap_or("None".to_string())
+        );
 
         let task = BatchingTask::new(
             flow_id,
@@ -283,7 +320,7 @@ impl BatchingEngine {
             sink_table_name,
             source_table_names,
             query_ctx,
-            self.table_meta.clone(),
+            self.catalog_manager.clone(),
             rx,
         );
 
@@ -294,10 +331,11 @@ impl BatchingEngine {
         // check execute once first to detect any error early
         task.check_execute(&engine, &frontend).await?;
 
-        // TODO(discord9): also save handle & use time wheel or what for better
-        let _handle = common_runtime::spawn_global(async move {
+        // TODO(discord9): use time wheel or what for better
+        let handle = common_runtime::spawn_global(async move {
             task_inner.start_executing_loop(engine, frontend).await;
         });
+        task.state.write().unwrap().task_handle = Some(handle);
 
         // only replace here not earlier because we want the old one intact if something went wrong before this line
         let replaced_old_task_opt = self.tasks.write().await.insert(flow_id, task);
@@ -308,7 +346,7 @@ impl BatchingEngine {
         Ok(Some(flow_id))
     }
 
-    pub async fn remove_flow(&self, flow_id: FlowId) -> Result<(), Error> {
+    pub async fn remove_flow_inner(&self, flow_id: FlowId) -> Result<(), Error> {
         if self.tasks.write().await.remove(&flow_id).is_none() {
             warn!("Flow {flow_id} not found in tasks")
         }
@@ -324,19 +362,53 @@ impl BatchingEngine {
         Ok(())
     }
 
-    pub async fn flush_flow(&self, flow_id: FlowId) -> Result<(), Error> {
+    pub async fn flush_flow_inner(&self, flow_id: FlowId) -> Result<usize, Error> {
+        debug!("Try flush flow {flow_id}");
         let task = self.tasks.read().await.get(&flow_id).cloned();
         let task = task.with_context(|| UnexpectedSnafu {
             reason: format!("Can't found task for flow {flow_id}"),
         })?;
 
-        task.gen_exec_once(&self.query_engine, &self.frontend_client)
+        task.mark_all_windows_as_dirty()?;
+
+        let res = task
+            .gen_exec_once(&self.query_engine, &self.frontend_client)
             .await?;
-        Ok(())
+
+        let affected_rows = res.map(|(r, _)| r).unwrap_or_default() as usize;
+        debug!(
+            "Successfully flush flow {flow_id}, affected rows={}",
+            affected_rows
+        );
+        Ok(affected_rows)
     }
 
     /// Determine if the batching mode flow task exists with given flow id
-    pub async fn flow_exist(&self, flow_id: FlowId) -> bool {
+    pub async fn flow_exist_inner(&self, flow_id: FlowId) -> bool {
         self.tasks.read().await.contains_key(&flow_id)
+    }
+}
+
+impl FlowEngine for BatchingEngine {
+    async fn create_flow(&self, args: CreateFlowArgs) -> Result<Option<FlowId>, Error> {
+        self.create_flow_inner(args).await
+    }
+    async fn remove_flow(&self, flow_id: FlowId) -> Result<(), Error> {
+        self.remove_flow_inner(flow_id).await
+    }
+    async fn flush_flow(&self, flow_id: FlowId) -> Result<usize, Error> {
+        self.flush_flow_inner(flow_id).await
+    }
+    async fn flow_exist(&self, flow_id: FlowId) -> Result<bool, Error> {
+        Ok(self.flow_exist_inner(flow_id).await)
+    }
+    async fn list_flows(&self) -> Result<impl IntoIterator<Item = FlowId>, Error> {
+        Ok(self.tasks.read().await.keys().cloned().collect::<Vec<_>>())
+    }
+    async fn handle_flow_inserts(
+        &self,
+        request: api::v1::region::InsertRequests,
+    ) -> Result<(), Error> {
+        self.handle_inserts_inner(request).await
     }
 }

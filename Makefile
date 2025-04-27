@@ -32,6 +32,10 @@ ifneq ($(strip $(BUILD_JOBS)),)
 	NEXTEST_OPTS += --build-jobs=${BUILD_JOBS}
 endif
 
+ifneq ($(strip $(BUILD_JOBS)),)
+	SQLNESS_OPTS += --jobs ${BUILD_JOBS}
+endif
+
 ifneq ($(strip $(CARGO_PROFILE)),)
 	CARGO_BUILD_OPTS += --profile ${CARGO_PROFILE}
 endif
@@ -217,6 +221,16 @@ start-cluster: ## Start the greptimedb cluster with etcd by using docker compose
 .PHONY: stop-cluster
 stop-cluster: ## Stop the greptimedb cluster that created by docker compose.
 	docker compose -f ./docker/docker-compose/cluster-with-etcd.yaml stop
+
+##@ Grafana
+
+.PHONY: check-dashboards
+check-dashboards: ## Check the Grafana dashboards.
+	@./grafana/scripts/check.sh
+
+.PHONY: dashboards
+dashboards: ## Generate the Grafana dashboards for standalone mode and intermediate dashboards.
+	@./grafana/scripts/gen-dashboards.sh
 
 ##@ Docs
 config-docs: ## Generate configuration documentation from toml files.

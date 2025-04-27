@@ -33,7 +33,7 @@ use datatypes::value::column_data_to_json;
 use headers::ContentType;
 use lazy_static::lazy_static;
 use pipeline::util::to_pipeline_version;
-use pipeline::{GreptimePipelineParams, PipelineDefinition, PipelineMap};
+use pipeline::{GreptimePipelineParams, PipelineContext, PipelineDefinition, PipelineMap};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Deserializer, Map, Value};
 use session::context::{Channel, QueryContext, QueryContextRef};
@@ -100,7 +100,7 @@ pub struct LogIngesterQueryParams {
 /// LogIngestRequest is the internal request for log ingestion. The raw log input can be transformed into multiple LogIngestRequests.
 /// Multiple LogIngestRequests will be ingested into the same database with the same pipeline.
 #[derive(Debug, PartialEq)]
-pub(crate) struct LogIngestRequest {
+pub(crate) struct PipelineIngestRequest {
     /// The table where the log data will be written to.
     pub table: String,
     /// The log data to be ingested.
@@ -148,6 +148,41 @@ where
 }
 
 #[axum_macros::debug_handler]
+pub async fn query_pipeline(
+    State(state): State<LogState>,
+    Extension(mut query_ctx): Extension<QueryContext>,
+    Query(query_params): Query<LogIngesterQueryParams>,
+    Path(pipeline_name): Path<String>,
+) -> Result<GreptimedbManageResponse> {
+    let start = Instant::now();
+    let handler = state.log_handler;
+    ensure!(
+        !pipeline_name.is_empty(),
+        InvalidParameterSnafu {
+            reason: "pipeline_name is required in path",
+        }
+    );
+
+    let version = to_pipeline_version(query_params.version.as_deref()).context(PipelineSnafu)?;
+
+    query_ctx.set_channel(Channel::Http);
+    let query_ctx = Arc::new(query_ctx);
+
+    let (pipeline, pipeline_version) = handler
+        .get_pipeline_str(&pipeline_name, version, query_ctx)
+        .await?;
+
+    Ok(GreptimedbManageResponse::from_pipeline(
+        pipeline_name,
+        query_params
+            .version
+            .unwrap_or(pipeline_version.0.to_iso8601_string()),
+        start.elapsed().as_millis() as u64,
+        Some(pipeline),
+    ))
+}
+
+#[axum_macros::debug_handler]
 pub async fn add_pipeline(
     State(state): State<LogState>,
     Path(pipeline_name): Path<String>,
@@ -189,6 +224,7 @@ pub async fn add_pipeline(
                 pipeline_name,
                 pipeline.0.to_timezone_aware_string(None),
                 start.elapsed().as_millis() as u64,
+                None,
             )
         })
         .map_err(|e| {
@@ -231,6 +267,7 @@ pub async fn delete_pipeline(
                     pipeline_name,
                     version_str,
                     start.elapsed().as_millis() as u64,
+                    None,
                 )
             } else {
                 GreptimedbManageResponse::from_pipelines(vec![], start.elapsed().as_millis() as u64)
@@ -288,12 +325,15 @@ async fn dryrun_pipeline_inner(
 ) -> Result<Response> {
     let params = GreptimePipelineParams::default();
 
+    let pipeline_def = PipelineDefinition::Resolved(pipeline);
+    let pipeline_ctx = PipelineContext::new(&pipeline_def, &params);
     let results = run_pipeline(
         &pipeline_handler,
-        &PipelineDefinition::Resolved(pipeline),
-        &params,
-        value,
-        "dry_run".to_owned(),
+        &pipeline_ctx,
+        PipelineIngestRequest {
+            table: "dry_run".to_owned(),
+            values: value,
+        },
         query_ctx,
         true,
     )
@@ -566,7 +606,7 @@ pub async fn log_ingester(
     ingest_logs_inner(
         handler,
         pipeline,
-        vec![LogIngestRequest {
+        vec![PipelineIngestRequest {
             table: table_name,
             values: value,
         }],
@@ -636,9 +676,9 @@ fn extract_pipeline_value_by_content_type(
 }
 
 pub(crate) async fn ingest_logs_inner(
-    state: PipelineHandlerRef,
+    handler: PipelineHandlerRef,
     pipeline: PipelineDefinition,
-    log_ingest_requests: Vec<LogIngestRequest>,
+    log_ingest_requests: Vec<PipelineIngestRequest>,
     query_ctx: QueryContextRef,
     headers: HeaderMap,
 ) -> Result<HttpResponse> {
@@ -653,22 +693,15 @@ pub(crate) async fn ingest_logs_inner(
             .and_then(|v| v.to_str().ok()),
     );
 
-    for request in log_ingest_requests {
-        let requests = run_pipeline(
-            &state,
-            &pipeline,
-            &pipeline_params,
-            request.values,
-            request.table,
-            &query_ctx,
-            true,
-        )
-        .await?;
+    let pipeline_ctx = PipelineContext::new(&pipeline, &pipeline_params);
+    for pipeline_req in log_ingest_requests {
+        let requests =
+            run_pipeline(&handler, &pipeline_ctx, pipeline_req, &query_ctx, true).await?;
 
         insert_requests.extend(requests);
     }
 
-    let output = state
+    let output = handler
         .insert(
             RowInsertRequests {
                 inserts: insert_requests,

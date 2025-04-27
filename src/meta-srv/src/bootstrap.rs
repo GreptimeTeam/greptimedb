@@ -66,10 +66,12 @@ use crate::election::postgres::PgElection;
 #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
 use crate::election::CANDIDATE_LEASE_SECS;
 use crate::metasrv::builder::MetasrvBuilder;
-use crate::metasrv::{BackendImpl, Metasrv, MetasrvOptions, SelectorRef};
+use crate::metasrv::{BackendImpl, Metasrv, MetasrvOptions, SelectTarget, SelectorRef};
+use crate::node_excluder::NodeExcluderRef;
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::selector::load_based::LoadBasedSelector;
 use crate::selector::round_robin::RoundRobinSelector;
+use crate::selector::weight_compute::RegionNumsBasedWeightCompute;
 use crate::selector::SelectorType;
 use crate::service::admin;
 use crate::{error, Result};
@@ -294,10 +296,31 @@ pub async fn metasrv_builder(
 
     let in_memory = Arc::new(MemoryKvBackend::new()) as ResettableKvBackendRef;
 
-    let selector = match opts.selector {
-        SelectorType::LoadBased => Arc::new(LoadBasedSelector::default()) as SelectorRef,
-        SelectorType::LeaseBased => Arc::new(LeaseBasedSelector) as SelectorRef,
-        SelectorType::RoundRobin => Arc::new(RoundRobinSelector::default()) as SelectorRef,
+    let node_excluder = plugins
+        .get::<NodeExcluderRef>()
+        .unwrap_or_else(|| Arc::new(Vec::new()) as NodeExcluderRef);
+    let selector = if let Some(selector) = plugins.get::<SelectorRef>() {
+        info!("Using selector from plugins");
+        selector
+    } else {
+        let selector = match opts.selector {
+            SelectorType::LoadBased => Arc::new(LoadBasedSelector::new(
+                RegionNumsBasedWeightCompute,
+                node_excluder,
+            )) as SelectorRef,
+            SelectorType::LeaseBased => {
+                Arc::new(LeaseBasedSelector::new(node_excluder)) as SelectorRef
+            }
+            SelectorType::RoundRobin => Arc::new(RoundRobinSelector::new(
+                SelectTarget::Datanode,
+                node_excluder,
+            )) as SelectorRef,
+        };
+        info!(
+            "Using selector from options, selector type: {}",
+            opts.selector.as_ref()
+        );
+        selector
     };
 
     Ok(MetasrvBuilder::new()

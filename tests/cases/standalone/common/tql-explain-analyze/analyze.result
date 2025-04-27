@@ -159,11 +159,11 @@ TQL ANALYZE (0, 10, '5s') rate(test[10s]);
 | stage | node | plan_|
 +-+-+-+
 | 0_| 0_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_FilterExec: prom_rate(j_range,i,j)@1 IS NOT NULL REDACTED
-|_|_|_ProjectionExec: expr=[j@1 as j, prom_rate(j_range@4, i@0, j@1) as prom_rate(j_range,i,j), k@2 as k, l@3 as l] REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_SortPreservingMergeExec: [k@2 ASC, l@3 ASC, j@1 ASC] REDACTED
-|_|_|_SortExec: expr=[k@2 ASC, l@3 ASC, j@1 ASC], preserve_partitioning=[true] REDACTED
+|_|_|_FilterExec: prom_rate(j_range,i,j,Int64(10000))@1 IS NOT NULL REDACTED
+|_|_|_ProjectionExec: expr=[j@1 as j, prom_rate(j_range@4, i@0, j@1, 10000) as prom_rate(j_range,i,j,Int64(10000)), k@2 as k, l@3 as l] REDACTED
+|_|_|_PromRangeManipulateExec: req range=[0..10000], interval=[5000], eval range=[10000], time index=[j] REDACTED
+|_|_|_PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [true] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["k", "l"] REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_PromRangeManipulateExec: req range=[0..10000], interval=[5000], eval range=[10000], time index=[j] REDACTED

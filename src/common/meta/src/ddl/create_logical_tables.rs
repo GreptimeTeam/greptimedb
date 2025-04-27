@@ -17,12 +17,14 @@ mod metadata;
 mod region_request;
 mod update_metadata;
 
+use api::region::RegionResponse;
 use api::v1::CreateTableExpr;
 use async_trait::async_trait;
+use common_catalog::consts::METRIC_ENGINE;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
-use common_telemetry::{debug, warn};
-use futures_util::future::join_all;
+use common_telemetry::{debug, error, warn};
+use futures::future;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
 use store_api::metadata::ColumnMetadata;
@@ -31,7 +33,7 @@ use store_api::storage::{RegionId, RegionNumber};
 use strum::AsRefStr;
 use table::metadata::{RawTableInfo, TableId};
 
-use crate::ddl::utils::{add_peer_context_if_needed, handle_retry_error};
+use crate::ddl::utils::{add_peer_context_if_needed, handle_retry_error, sync_follower_regions};
 use crate::ddl::DdlContext;
 use crate::error::{DecodeJsonSnafu, MetadataCorruptionSnafu, Result};
 use crate::key::table_route::TableRouteValue;
@@ -156,14 +158,20 @@ impl CreateLogicalTablesProcedure {
             });
         }
 
-        // Collects response from datanodes.
-        let phy_raw_schemas = join_all(create_region_tasks)
+        let mut results = future::join_all(create_region_tasks)
             .await
             .into_iter()
-            .map(|res| res.map(|mut res| res.extensions.remove(ALTER_PHYSICAL_EXTENSION_KEY)))
             .collect::<Result<Vec<_>>>()?;
 
+        // Collects response from datanodes.
+        let phy_raw_schemas = results
+            .iter_mut()
+            .map(|res| res.extensions.remove(ALTER_PHYSICAL_EXTENSION_KEY))
+            .collect::<Vec<_>>();
+
         if phy_raw_schemas.is_empty() {
+            self.submit_sync_region_requests(results, region_routes)
+                .await;
             self.data.state = CreateTablesState::CreateMetadata;
             return Ok(Status::executing(false));
         }
@@ -186,9 +194,29 @@ impl CreateLogicalTablesProcedure {
             warn!("creating logical table result doesn't contains extension key `{ALTER_PHYSICAL_EXTENSION_KEY}`,leaving the physical table's schema unchanged");
         }
 
+        self.submit_sync_region_requests(results, region_routes)
+            .await;
         self.data.state = CreateTablesState::CreateMetadata;
 
         Ok(Status::executing(true))
+    }
+
+    async fn submit_sync_region_requests(
+        &self,
+        results: Vec<RegionResponse>,
+        region_routes: &[RegionRoute],
+    ) {
+        if let Err(err) = sync_follower_regions(
+            &self.context,
+            self.data.physical_table_id,
+            results,
+            region_routes,
+            METRIC_ENGINE,
+        )
+        .await
+        {
+            error!(err; "Failed to sync regions for physical table_id: {}",self.data.physical_table_id);
+        }
     }
 }
 

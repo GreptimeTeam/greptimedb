@@ -65,6 +65,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 |_|_TableScan: test_|
 | logical_plan after count_wildcard_to_time_index_rule_| SAME TEXT AS ABOVE_|
 | logical_plan after StringNormalizationRule_| SAME TEXT AS ABOVE_|
+| logical_plan after TranscribeAtatRule_| SAME TEXT AS ABOVE_|
 | logical_plan after inline_table_scan_| SAME TEXT AS ABOVE_|
 | logical_plan after expand_wildcard_rule_| SAME TEXT AS ABOVE_|
 | logical_plan after resolve_grouping_function_| SAME TEXT AS ABOVE_|
@@ -152,6 +153,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 | physical_plan after ProjectionPushdown_| SAME TEXT AS ABOVE_|
 | physical_plan after LimitPushdown_| SAME TEXT AS ABOVE_|
 | physical_plan after WindowedSortRule_| SAME TEXT AS ABOVE_|
+| physical_plan after MatchesConstantTerm_| SAME TEXT AS ABOVE_|
 | physical_plan after RemoveDuplicateRule_| SAME TEXT AS ABOVE_|
 | physical_plan after SanityCheckPlan_| SAME TEXT AS ABOVE_|
 | physical_plan_| MergeScanExec: REDACTED

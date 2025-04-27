@@ -23,7 +23,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::SchemaRef;
 use snafu::{Location, Snafu};
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -65,7 +65,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(""))]
+    #[snafu(transparent)]
     PollStream {
         #[snafu(source)]
         error: datafusion::error::DataFusionError,

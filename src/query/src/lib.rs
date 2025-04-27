@@ -14,7 +14,6 @@
 
 #![feature(let_chains)]
 #![feature(int_roundings)]
-#![feature(trait_upcasting)]
 #![feature(try_blocks)]
 #![feature(stmt_expr_attributes)]
 #![feature(iterator_try_collect)]
@@ -28,7 +27,8 @@ pub mod error;
 pub mod executor;
 pub mod log_query;
 pub mod metrics;
-mod optimizer;
+pub mod optimizer;
+pub mod options;
 pub mod parser;
 mod part_sort;
 pub mod physical_wrapper;

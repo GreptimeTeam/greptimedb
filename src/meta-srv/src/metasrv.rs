@@ -61,6 +61,7 @@ use crate::failure_detector::PhiAccrualFailureDetectorOptions;
 use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatHandlerGroupRef};
 use crate::lease::lookup_datanode_peer;
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
+use crate::procedure::wal_prune::manager::WalPruneTickerRef;
 use crate::procedure::ProcedureManagerListenerAdapter;
 use crate::pubsub::{PublisherRef, SubscriptionManagerRef};
 use crate::region::supervisor::RegionSupervisorTickerRef;
@@ -110,6 +111,11 @@ pub struct MetasrvOptions {
     pub use_memory_store: bool,
     /// Whether to enable region failover.
     pub enable_region_failover: bool,
+    /// Whether to allow region failover on local WAL.
+    ///
+    /// If it's true, the region failover will be allowed even if the local WAL is used.
+    /// Note that this option is not recommended to be set to true, because it may lead to data loss during failover.
+    pub allow_region_failover_on_local_wal: bool,
     /// The HTTP server options.
     pub http: HttpOptions,
     /// The logging options.
@@ -172,6 +178,7 @@ impl Default for MetasrvOptions {
             selector: SelectorType::default(),
             use_memory_store: false,
             enable_region_failover: false,
+            allow_region_failover_on_local_wal: false,
             http: HttpOptions::default(),
             logging: LoggingOptions {
                 dir: format!("{METASRV_HOME}/logs"),
@@ -407,6 +414,7 @@ pub struct Metasrv {
     region_supervisor_ticker: Option<RegionSupervisorTickerRef>,
     cache_invalidator: CacheInvalidatorRef,
     leader_region_registry: LeaderRegionRegistryRef,
+    wal_prune_ticker: Option<WalPruneTickerRef>,
 
     plugins: Plugins,
 }
@@ -460,6 +468,9 @@ impl Metasrv {
             )));
             if let Some(region_supervisor_ticker) = &self.region_supervisor_ticker {
                 leadership_change_notifier.add_listener(region_supervisor_ticker.clone() as _);
+            }
+            if let Some(wal_prune_ticker) = &self.wal_prune_ticker {
+                leadership_change_notifier.add_listener(wal_prune_ticker.clone() as _);
             }
             if let Some(customizer) = self.plugins.get::<LeadershipChangeNotifierCustomizerRef>() {
                 customizer.customize(&mut leadership_change_notifier);

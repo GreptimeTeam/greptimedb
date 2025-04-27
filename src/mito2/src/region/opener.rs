@@ -274,6 +274,7 @@ impl RegionOpener {
             last_flush_millis: AtomicI64::new(now),
             last_compaction_millis: AtomicI64::new(now),
             time_provider: self.time_provider.clone(),
+            topic_latest_entry_id: AtomicU64::new(0),
             memtable_builder,
             stats: self.stats,
         })
@@ -452,6 +453,7 @@ impl RegionOpener {
             last_flush_millis: AtomicI64::new(now),
             last_compaction_millis: AtomicI64::new(now),
             time_provider: self.time_provider.clone(),
+            topic_latest_entry_id: AtomicU64::new(0),
             memtable_builder,
             stats: self.stats.clone(),
         };

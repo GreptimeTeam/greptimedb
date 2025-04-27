@@ -126,17 +126,12 @@ impl MockInstanceBuilder {
                     unreachable!()
                 };
                 let GreptimeDbCluster {
-                    storage_guards,
-                    dir_guards,
+                    guards,
                     datanode_options,
                     ..
                 } = instance;
 
-                MockInstanceImpl::Distributed(
-                    builder
-                        .build_with(datanode_options, storage_guards, dir_guards)
-                        .await,
-                )
+                MockInstanceImpl::Distributed(builder.build_with(datanode_options, guards).await)
             }
         }
     }

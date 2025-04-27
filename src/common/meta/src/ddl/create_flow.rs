@@ -38,7 +38,7 @@ use table::metadata::TableId;
 use crate::cache_invalidator::Context;
 use crate::ddl::utils::{add_peer_context_if_needed, handle_retry_error};
 use crate::ddl::DdlContext;
-use crate::error::{self, Result};
+use crate::error::{self, Result, UnexpectedSnafu};
 use crate::instruction::{CacheIdent, CreateFlow};
 use crate::key::flow::flow_info::FlowInfoValue;
 use crate::key::flow::flow_route::FlowRouteValue;
@@ -171,7 +171,7 @@ impl CreateFlowProcedure {
         }
         self.data.state = CreateFlowState::CreateFlows;
         // determine flow type
-        self.data.flow_type = Some(determine_flow_type(&self.data.task));
+        self.data.flow_type = Some(get_flow_type_from_options(&self.data.task)?);
 
         Ok(Status::executing(true))
     }
@@ -196,8 +196,8 @@ impl CreateFlowProcedure {
             });
         }
         info!(
-            "Creating flow({:?}) on flownodes with peers={:?}",
-            self.data.flow_id, self.data.peers
+            "Creating flow({:?}, type={:?}) on flownodes with peers={:?}",
+            self.data.flow_id, self.data.flow_type, self.data.peers
         );
         join_all(create_flow)
             .await
@@ -306,8 +306,20 @@ impl Procedure for CreateFlowProcedure {
     }
 }
 
-pub fn determine_flow_type(_flow_task: &CreateFlowTask) -> FlowType {
-    FlowType::Batching
+pub fn get_flow_type_from_options(flow_task: &CreateFlowTask) -> Result<FlowType> {
+    let flow_type = flow_task
+        .flow_options
+        .get(FlowType::FLOW_TYPE_KEY)
+        .map(|s| s.as_str());
+    match flow_type {
+        Some(FlowType::BATCHING) => Ok(FlowType::Batching),
+        Some(FlowType::STREAMING) => Ok(FlowType::Streaming),
+        Some(unknown) => UnexpectedSnafu {
+            err_msg: format!("Unknown flow type: {}", unknown),
+        }
+        .fail(),
+        None => Ok(FlowType::Batching),
+    }
 }
 
 /// The state of [CreateFlowProcedure].
@@ -324,7 +336,7 @@ pub enum CreateFlowState {
 }
 
 /// The type of flow.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FlowType {
     /// The flow is a batching task.
     Batching,
@@ -437,6 +449,7 @@ impl From<&CreateFlowData> for (FlowInfoValue, Vec<(FlowPartitionId, FlowRouteVa
             sink_table_name,
             flownode_ids,
             catalog_name,
+            query_context: Some(value.query_context.clone()),
             flow_name,
             raw_sql: sql,
             expire_after,

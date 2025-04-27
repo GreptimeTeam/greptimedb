@@ -57,9 +57,9 @@ use tokio::sync::Notify;
 
 use crate::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
 use crate::error::{
-    self, BuildMitoEngineSnafu, CreateDirSnafu, GetMetadataSnafu, MissingCacheSnafu,
-    MissingKvBackendSnafu, MissingNodeIdSnafu, OpenLogStoreSnafu, Result, ShutdownInstanceSnafu,
-    ShutdownServerSnafu, StartServerSnafu,
+    self, BuildMetricEngineSnafu, BuildMitoEngineSnafu, CreateDirSnafu, GetMetadataSnafu,
+    MissingCacheSnafu, MissingKvBackendSnafu, MissingNodeIdSnafu, OpenLogStoreSnafu, Result,
+    ShutdownInstanceSnafu, ShutdownServerSnafu, StartServerSnafu,
 };
 use crate::event_listener::{
     new_region_server_event_channel, NoopRegionServerEventListener, RegionServerEventListenerRef,
@@ -359,6 +359,7 @@ impl DatanodeBuilder {
             None,
             false,
             self.plugins.clone(),
+            opts.query.clone(),
         );
         let query_engine = query_engine_factory.query_engine();
 
@@ -415,10 +416,11 @@ impl DatanodeBuilder {
                     )
                     .await?;
 
-                    let metric_engine = MetricEngine::new(
+                    let metric_engine = MetricEngine::try_new(
                         mito_engine.clone(),
                         metric_engine_config.take().unwrap_or_default(),
-                    );
+                    )
+                    .context(BuildMetricEngineSnafu)?;
                     engines.push(Arc::new(mito_engine) as _);
                     engines.push(Arc::new(metric_engine) as _);
                 }

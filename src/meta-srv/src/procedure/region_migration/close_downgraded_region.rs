@@ -16,7 +16,7 @@ use std::any::Any;
 use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
-use common_meta::distributed_time_constants::MAILBOX_RTT_SECS;
+use common_meta::distributed_time_constants::REGION_LEASE_SECS;
 use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
 use common_meta::key::datanode_table::RegionInfo;
 use common_meta::RegionIdent;
@@ -31,7 +31,8 @@ use crate::procedure::region_migration::migration_end::RegionMigrationEnd;
 use crate::procedure::region_migration::{Context, State};
 use crate::service::mailbox::Channel;
 
-const CLOSE_DOWNGRADED_REGION_TIMEOUT: Duration = Duration::from_secs(MAILBOX_RTT_SECS);
+/// Uses lease time of a region as the timeout of closing a downgraded region.
+const CLOSE_DOWNGRADED_REGION_TIMEOUT: Duration = Duration::from_secs(REGION_LEASE_SECS);
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CloseDowngradedRegion;
@@ -45,7 +46,13 @@ impl State for CloseDowngradedRegion {
             let region_id = ctx.region_id();
             warn!(err; "Failed to close downgraded leader region: {region_id} on datanode {:?}", downgrade_leader_datanode);
         }
-
+        info!(
+            "Region migration is finished: region_id: {}, from_peer: {}, to_peer: {}, {}",
+            ctx.region_id(),
+            ctx.persistent_ctx.from_peer,
+            ctx.persistent_ctx.to_peer,
+            ctx.volatile_ctx.metrics,
+        );
         Ok((Box::new(RegionMigrationEnd), Status::done()))
     }
 

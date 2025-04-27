@@ -18,18 +18,21 @@ use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use async_trait::async_trait;
 use catalog::memory::MemoryCatalogManager;
+use common_base::AffectedRows;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use datafusion_expr::LogicalPlan;
+use query::options::QueryOptions;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::query_engine::DescribeResult;
 use query::{QueryEngineFactory, QueryEngineRef};
 use servers::error::{Error, NotSupportedSnafu, Result};
-use servers::query_handler::grpc::{GrpcQueryHandler, ServerGrpcQueryHandlerRef};
+use servers::query_handler::grpc::{GrpcQueryHandler, RawRecordBatch, ServerGrpcQueryHandlerRef};
 use servers::query_handler::sql::{ServerSqlQueryHandlerRef, SqlQueryHandler};
 use session::context::QueryContextRef;
 use snafu::ensure;
 use sql::statements::statement::Statement;
+use table::table_name::TableName;
 use table::TableRef;
 
 mod grpc;
@@ -129,7 +132,7 @@ impl GrpcQueryHandler for DummyInstance {
                         );
                         result.remove(0)?
                     }
-                    Query::LogicalPlan(_) => unimplemented!(),
+                    Query::LogicalPlan(_) | Query::InsertIntoPlan(_) => unimplemented!(),
                     Query::PromRangeQuery(promql) => {
                         let prom_query = PromQuery {
                             query: promql.query,
@@ -154,12 +157,30 @@ impl GrpcQueryHandler for DummyInstance {
         };
         Ok(output)
     }
+
+    async fn put_record_batch(
+        &self,
+        table: &TableName,
+        record_batch: RawRecordBatch,
+    ) -> std::result::Result<AffectedRows, Self::Error> {
+        let _ = table;
+        let _ = record_batch;
+        unimplemented!()
+    }
 }
 
 fn create_testing_instance(table: TableRef) -> DummyInstance {
     let catalog_manager = MemoryCatalogManager::new_with_table(table);
-    let query_engine =
-        QueryEngineFactory::new(catalog_manager, None, None, None, None, false).query_engine();
+    let query_engine = QueryEngineFactory::new(
+        catalog_manager,
+        None,
+        None,
+        None,
+        None,
+        false,
+        QueryOptions::default(),
+    )
+    .query_engine();
     DummyInstance::new(query_engine)
 }
 

@@ -2,8 +2,22 @@ CREATE TABLE test(i INTEGER, j TIMESTAMP TIME INDEX);
 
 INSERT INTO test VALUES (1, 1), (2, 2);
 
+ADMIN FLUSH_TABLE('test');
+
+ALTER TABLE test MODIFY COLUMN i SET INVERTED INDEX;
+
+INSERT INTO test VALUES (3, 3), (4, 4);
+
 ALTER TABLE test ADD COLUMN k INTEGER DEFAULT 3;
 
-SELECT * FROM test;
+SELECT * FROM test order by j;
+
+SELECT * FROM test where k != 3;
+
+ALTER TABLE test ADD COLUMN host STRING DEFAULT '' PRIMARY KEY;
+
+SELECT * FROM test where host != '';
+
+SELECT * FROM test where host != '' AND i = 3;
 
 DROP TABLE test;

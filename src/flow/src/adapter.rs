@@ -16,7 +16,7 @@
 //! and communicating with other parts of the database
 #![warn(unused_imports)]
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -32,6 +32,7 @@ use datatypes::value::Value;
 use greptime_proto::v1;
 use itertools::{EitherOrBoth, Itertools};
 use meta_client::MetaClientOptions;
+use query::options::QueryOptions;
 use query::QueryEngine;
 use serde::{Deserialize, Serialize};
 use servers::grpc::GrpcOptions;
@@ -55,8 +56,9 @@ use crate::error::{EvalSnafu, ExternalSnafu, InternalSnafu, InvalidQuerySnafu, U
 use crate::expr::Batch;
 use crate::metrics::{METRIC_FLOW_INSERT_ELAPSED, METRIC_FLOW_ROWS, METRIC_FLOW_RUN_INTERVAL_MS};
 use crate::repr::{self, DiffRow, RelationDesc, Row, BATCH_SIZE};
+use crate::{CreateFlowArgs, FlowId, TableName};
 
-mod flownode_impl;
+pub(crate) mod flownode_impl;
 mod parse_expr;
 pub(crate) mod refill;
 mod stat;
@@ -76,11 +78,6 @@ use crate::FrontendInvoker;
 pub const AUTO_CREATED_PLACEHOLDER_TS_COL: &str = "__ts_placeholder";
 
 pub const AUTO_CREATED_UPDATE_AT_TS_COL: &str = "update_at";
-
-// TODO(discord9): refactor common types for flow to a separate module
-/// FlowId is a unique identifier for a flow task
-pub type FlowId = u64;
-pub type TableName = [String; 3];
 
 /// Flow config that exists both in standalone&distributed mode
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -109,6 +106,7 @@ pub struct FlownodeOptions {
     pub logging: LoggingOptions,
     pub tracing: TracingOptions,
     pub heartbeat: HeartbeatOptions,
+    pub query: QueryOptions,
 }
 
 impl Default for FlownodeOptions {
@@ -122,6 +120,7 @@ impl Default for FlownodeOptions {
             logging: LoggingOptions::default(),
             tracing: TracingOptions::default(),
             heartbeat: HeartbeatOptions::default(),
+            query: QueryOptions::default(),
         }
     }
 }
@@ -136,12 +135,13 @@ impl Configurable for FlownodeOptions {
 }
 
 /// Arc-ed FlowNodeManager, cheaper to clone
-pub type FlowWorkerManagerRef = Arc<FlowWorkerManager>;
+pub type FlowStreamingEngineRef = Arc<StreamingEngine>;
 
 /// FlowNodeManager manages the state of all tasks in the flow node, which should be run on the same thread
 ///
 /// The choice of timestamp is just using current system timestamp for now
-pub struct FlowWorkerManager {
+///
+pub struct StreamingEngine {
     /// The handler to the worker that will run the dataflow
     /// which is `!Send` so a handle is used
     pub worker_handles: Vec<WorkerHandle>,
@@ -159,7 +159,8 @@ pub struct FlowWorkerManager {
     flow_err_collectors: RwLock<BTreeMap<FlowId, ErrCollector>>,
     src_send_buf_lens: RwLock<BTreeMap<TableId, watch::Receiver<usize>>>,
     tick_manager: FlowTickManager,
-    node_id: Option<u32>,
+    /// This node id is only available in distributed mode, on standalone mode this is guaranteed to be `None`
+    pub node_id: Option<u32>,
     /// Lock for flushing, will be `read` by `handle_inserts` and `write` by `flush_flow`
     ///
     /// So that a series of event like `inserts -> flush` can be handled correctly
@@ -169,7 +170,7 @@ pub struct FlowWorkerManager {
 }
 
 /// Building FlownodeManager
-impl FlowWorkerManager {
+impl StreamingEngine {
     /// set frontend invoker
     pub async fn set_frontend_invoker(&self, frontend: FrontendInvoker) {
         *self.frontend_invoker.write().await = Some(frontend);
@@ -188,7 +189,7 @@ impl FlowWorkerManager {
         let node_context = FlownodeContext::new(Box::new(srv_map.clone()) as _);
         let tick_manager = FlowTickManager::new();
         let worker_handles = Vec::new();
-        FlowWorkerManager {
+        StreamingEngine {
             worker_handles,
             worker_selector: Mutex::new(0),
             query_engine,
@@ -264,7 +265,7 @@ pub fn batches_to_rows_req(batches: Vec<Batch>) -> Result<Vec<DiffRequest>, Erro
 }
 
 /// This impl block contains methods to send writeback requests to frontend
-impl FlowWorkerManager {
+impl StreamingEngine {
     /// Return the number of requests it made
     pub async fn send_writeback_requests(&self) -> Result<usize, Error> {
         let all_reqs = self.generate_writeback_request().await?;
@@ -535,7 +536,7 @@ impl FlowWorkerManager {
 }
 
 /// Flow Runtime related methods
-impl FlowWorkerManager {
+impl StreamingEngine {
     /// Start state report handler, which will receive a sender from HeartbeatTask to send state size report back
     ///
     /// if heartbeat task is shutdown, this future will exit too
@@ -660,7 +661,7 @@ impl FlowWorkerManager {
         }
         // flow is now shutdown, drop frontend_invoker early so a ref cycle(in standalone mode) can be prevent:
         // FlowWorkerManager.frontend_invoker -> FrontendInvoker.inserter
-        // -> Inserter.node_manager -> NodeManager.flownode -> Flownode.flow_worker_manager.frontend_invoker
+        // -> Inserter.node_manager -> NodeManager.flownode -> Flownode.flow_streaming_engine.frontend_invoker
         self.frontend_invoker.write().await.take();
     }
 
@@ -728,25 +729,10 @@ impl FlowWorkerManager {
     }
 }
 
-/// The arguments to create a flow in [`FlowWorkerManager`].
-#[derive(Debug, Clone)]
-pub struct CreateFlowArgs {
-    pub flow_id: FlowId,
-    pub sink_table_name: TableName,
-    pub source_table_ids: Vec<TableId>,
-    pub create_if_not_exists: bool,
-    pub or_replace: bool,
-    pub expire_after: Option<i64>,
-    pub comment: Option<String>,
-    pub sql: String,
-    pub flow_options: HashMap<String, String>,
-    pub query_ctx: Option<QueryContext>,
-}
-
 /// Create&Remove flow
-impl FlowWorkerManager {
+impl StreamingEngine {
     /// remove a flow by it's id
-    pub async fn remove_flow(&self, flow_id: FlowId) -> Result<(), Error> {
+    pub async fn remove_flow_inner(&self, flow_id: FlowId) -> Result<(), Error> {
         for handle in self.worker_handles.iter() {
             if handle.contains_flow(flow_id).await? {
                 handle.remove_flow(flow_id).await?;
@@ -762,8 +748,7 @@ impl FlowWorkerManager {
     /// steps to create task:
     /// 1. parse query into typed plan(and optional parse expire_after expr)
     /// 2. render source/sink with output table id and used input table id
-    #[allow(clippy::too_many_arguments)]
-    pub async fn create_flow(&self, args: CreateFlowArgs) -> Result<Option<FlowId>, Error> {
+    pub async fn create_flow_inner(&self, args: CreateFlowArgs) -> Result<Option<FlowId>, Error> {
         let CreateFlowArgs {
             flow_id,
             sink_table_name,
@@ -901,6 +886,32 @@ impl FlowWorkerManager {
         handle.create_flow(create_request).await?;
         info!("Successfully create flow with id={}", flow_id);
         Ok(Some(flow_id))
+    }
+
+    pub async fn flush_flow_inner(&self, flow_id: FlowId) -> Result<usize, Error> {
+        debug!("Starting to flush flow_id={:?}", flow_id);
+        // lock to make sure writes before flush are written to flow
+        // and immediately drop to prevent following writes to be blocked
+        drop(self.flush_lock.write().await);
+        let flushed_input_rows = self.node_context.read().await.flush_all_sender().await?;
+        let rows_send = self.run_available(true).await?;
+        let row = self.send_writeback_requests().await?;
+        debug!(
+            "Done to flush flow_id={:?} with {} input rows flushed, {} rows sended and {} output rows flushed",
+            flow_id, flushed_input_rows, rows_send, row
+        );
+        Ok(row)
+    }
+
+    pub async fn flow_exist_inner(&self, flow_id: FlowId) -> Result<bool, Error> {
+        let mut exist = false;
+        for handle in self.worker_handles.iter() {
+            if handle.contains_flow(flow_id).await? {
+                exist = true;
+                break;
+            }
+        }
+        Ok(exist)
     }
 }
 

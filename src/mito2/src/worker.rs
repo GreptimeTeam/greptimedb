@@ -15,6 +15,7 @@
 //! Structs and utilities for writing regions.
 
 mod handle_alter;
+mod handle_bulk_insert;
 mod handle_catchup;
 mod handle_close;
 mod handle_compaction;
@@ -25,6 +26,7 @@ mod handle_manifest;
 mod handle_open;
 mod handle_truncate;
 mod handle_write;
+
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -41,7 +43,9 @@ use prometheus::IntGauge;
 use rand::{rng, Rng};
 use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
-use store_api::region_engine::{SetRegionRoleStateResponse, SettableRegionRoleState};
+use store_api::region_engine::{
+    SetRegionRoleStateResponse, SetRegionRoleStateSuccess, SettableRegionRoleState,
+};
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
@@ -50,6 +54,7 @@ use crate::cache::write_cache::{WriteCache, WriteCacheRef};
 use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::CompactionScheduler;
 use crate::config::MitoConfig;
+use crate::error;
 use crate::error::{CreateDirSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::memtable::MemtableBuilderProvider;
@@ -818,15 +823,29 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 WorkerRequest::EditRegion(request) => {
                     self.handle_region_edit(request).await;
                 }
-                // We receive a stop signal, but we still want to process remaining
-                // requests. The worker thread will then check the running flag and
-                // then exit.
                 WorkerRequest::Stop => {
                     debug_assert!(!self.running.load(Ordering::Relaxed));
                 }
-
                 WorkerRequest::SyncRegion(req) => {
                     self.handle_region_sync(req).await;
+                }
+                WorkerRequest::BulkInserts {
+                    metadata,
+                    request,
+                    sender,
+                } => {
+                    if let Some(region_metadata) = metadata {
+                        self.handle_bulk_inserts(request, region_metadata, write_requests, sender)
+                            .await;
+                    } else {
+                        error!("Cannot find region metadata for {}", request.region_id);
+                        sender.send(
+                            error::RegionNotFoundSnafu {
+                                region_id: request.region_id,
+                            }
+                            .fail(),
+                        );
+                    }
                 }
             }
         }
@@ -931,7 +950,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 region.set_role_state_gracefully(region_role_state).await;
 
                 let last_entry_id = region.version_control.current().last_entry_id;
-                let _ = sender.send(SetRegionRoleStateResponse::success(Some(last_entry_id)));
+                let _ = sender.send(SetRegionRoleStateResponse::success(
+                    SetRegionRoleStateSuccess::mito(last_entry_id),
+                ));
             });
         } else {
             let _ = sender.send(SetRegionRoleStateResponse::NotFound);

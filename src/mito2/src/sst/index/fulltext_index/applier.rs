@@ -12,24 +12,36 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::iter;
+use std::ops::Range;
 use std::sync::Arc;
 
+use common_base::range_read::RangeReader;
 use common_telemetry::warn;
+use index::bloom_filter::applier::{BloomFilterApplier, InListPredicate};
+use index::bloom_filter::reader::BloomFilterReaderImpl;
 use index::fulltext_index::search::{FulltextIndexSearcher, RowId, TantivyFulltextIndexSearcher};
+use index::fulltext_index::Config;
 use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
-use puffin::puffin_manager::{BlobWithMetadata, DirGuard, PuffinManager, PuffinReader};
+use puffin::puffin_manager::{GuardWithMetadata, PuffinManager, PuffinReader};
 use snafu::ResultExt;
 use store_api::storage::{ColumnId, RegionId};
 
 use crate::access_layer::{RegionFilePathFactory, WriteCachePathProvider};
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
-use crate::error::{ApplyFulltextIndexSnafu, PuffinBuildReaderSnafu, PuffinReadBlobSnafu, Result};
+use crate::cache::index::bloom_filter_index::{
+    BloomFilterIndexCacheRef, CachedBloomFilterIndexBlobReader, Tag,
+};
+use crate::error::{
+    ApplyBloomFilterIndexSnafu, ApplyFulltextIndexSnafu, MetadataSnafu, PuffinBuildReaderSnafu,
+    PuffinReadBlobSnafu, Result,
+};
 use crate::metrics::INDEX_APPLY_ELAPSED;
 use crate::sst::file::FileId;
-use crate::sst::index::fulltext_index::applier::builder::FulltextRequest;
-use crate::sst::index::fulltext_index::INDEX_BLOB_TYPE_TANTIVY;
+use crate::sst::index::fulltext_index::applier::builder::{FulltextRequest, FulltextTerm};
+use crate::sst::index::fulltext_index::{INDEX_BLOB_TYPE_BLOOM, INDEX_BLOB_TYPE_TANTIVY};
 use crate::sst::index::puffin_manager::{
     PuffinManagerFactory, SstPuffinBlob, SstPuffinDir, SstPuffinReader,
 };
@@ -44,6 +56,9 @@ pub struct FulltextIndexApplier {
 
     /// The source of the index.
     index_source: IndexSource,
+
+    /// Cache for bloom filter index.
+    bloom_filter_index_cache: Option<BloomFilterIndexCacheRef>,
 }
 
 pub type FulltextIndexApplierRef = Arc<FulltextIndexApplier>;
@@ -62,6 +77,7 @@ impl FulltextIndexApplier {
         Self {
             requests,
             index_source,
+            bloom_filter_index_cache: None,
         }
     }
 
@@ -81,24 +97,36 @@ impl FulltextIndexApplier {
         self
     }
 
-    /// Applies the queries to the fulltext index of the specified SST file.
-    pub async fn apply(
+    /// Sets the bloom filter cache.
+    pub fn with_bloom_filter_cache(
+        mut self,
+        bloom_filter_index_cache: Option<BloomFilterIndexCacheRef>,
+    ) -> Self {
+        self.bloom_filter_index_cache = bloom_filter_index_cache;
+        self
+    }
+}
+
+impl FulltextIndexApplier {
+    /// Applies fine-grained fulltext index to the specified SST file.
+    /// Returns the row ids that match the queries.
+    pub async fn apply_fine(
         &self,
         file_id: FileId,
         file_size_hint: Option<u64>,
     ) -> Result<Option<BTreeSet<RowId>>> {
-        let _timer = INDEX_APPLY_ELAPSED
+        let timer = INDEX_APPLY_ELAPSED
             .with_label_values(&[TYPE_FULLTEXT_INDEX])
             .start_timer();
 
         let mut row_ids: Option<BTreeSet<RowId>> = None;
         for (column_id, request) in &self.requests {
-            if request.queries.is_empty() {
+            if request.queries.is_empty() && request.terms.is_empty() {
                 continue;
             }
 
             let Some(result) = self
-                .apply_one_column(file_size_hint, file_id, *column_id, request)
+                .apply_fine_one_column(file_size_hint, file_id, *column_id, request)
                 .await?
             else {
                 continue;
@@ -117,10 +145,13 @@ impl FulltextIndexApplier {
             }
         }
 
+        if row_ids.is_none() {
+            timer.stop_and_discard();
+        }
         Ok(row_ids)
     }
 
-    async fn apply_one_column(
+    async fn apply_fine_one_column(
         &self,
         file_size_hint: Option<u64>,
         file_id: FileId,
@@ -133,15 +164,21 @@ impl FulltextIndexApplier {
             .dir(file_id, &blob_key, file_size_hint)
             .await?;
 
-        let path = match &dir {
-            Some(dir) => dir.path(),
+        let dir = match &dir {
+            Some(dir) => dir,
             None => {
                 return Ok(None);
             }
         };
 
-        let searcher = TantivyFulltextIndexSearcher::new(path).context(ApplyFulltextIndexSnafu)?;
+        let config = Config::from_blob_metadata(dir.metadata()).context(ApplyFulltextIndexSnafu)?;
+        let path = dir.path();
+
+        let searcher =
+            TantivyFulltextIndexSearcher::new(path, config).context(ApplyFulltextIndexSnafu)?;
         let mut row_ids: Option<BTreeSet<RowId>> = None;
+
+        // 1. Apply queries
         for query in &request.queries {
             let result = searcher
                 .search(&query.0)
@@ -161,7 +198,211 @@ impl FulltextIndexApplier {
             }
         }
 
+        // 2. Apply terms
+        let query = request.terms_as_query(config.case_sensitive);
+        if !query.0.is_empty() {
+            let result = searcher
+                .search(&query.0)
+                .await
+                .context(ApplyFulltextIndexSnafu)?;
+
+            if let Some(ids) = row_ids.as_mut() {
+                ids.retain(|id| result.contains(id));
+            } else {
+                row_ids = Some(result);
+            }
+        }
+
         Ok(row_ids)
+    }
+}
+
+impl FulltextIndexApplier {
+    /// Applies coarse-grained fulltext index to the specified SST file.
+    /// Returns (row group id -> ranges) that match the queries.
+    pub async fn apply_coarse(
+        &self,
+        file_id: FileId,
+        file_size_hint: Option<u64>,
+        row_groups: impl Iterator<Item = (usize, bool)>,
+    ) -> Result<Option<Vec<(usize, Vec<Range<usize>>)>>> {
+        let timer = INDEX_APPLY_ELAPSED
+            .with_label_values(&[TYPE_FULLTEXT_INDEX])
+            .start_timer();
+
+        let (input, mut output) = Self::init_coarse_output(row_groups);
+        let mut applied = false;
+
+        for (column_id, request) in &self.requests {
+            if request.terms.is_empty() {
+                // only apply terms
+                continue;
+            }
+
+            applied |= self
+                .apply_coarse_one_column(
+                    file_id,
+                    file_size_hint,
+                    *column_id,
+                    &request.terms,
+                    &mut output,
+                )
+                .await?;
+        }
+
+        if !applied {
+            timer.stop_and_discard();
+            return Ok(None);
+        }
+
+        Self::adjust_coarse_output(input, &mut output);
+        Ok(Some(output))
+    }
+
+    async fn apply_coarse_one_column(
+        &self,
+        file_id: FileId,
+        file_size_hint: Option<u64>,
+        column_id: ColumnId,
+        terms: &[FulltextTerm],
+        output: &mut [(usize, Vec<Range<usize>>)],
+    ) -> Result<bool> {
+        let blob_key = format!("{INDEX_BLOB_TYPE_BLOOM}-{column_id}");
+        let Some(reader) = self
+            .index_source
+            .blob(file_id, &blob_key, file_size_hint)
+            .await?
+        else {
+            return Ok(false);
+        };
+        let config =
+            Config::from_blob_metadata(reader.metadata()).context(ApplyFulltextIndexSnafu)?;
+
+        let predicates = Self::terms_to_predicates(terms, &config);
+        if predicates.is_empty() {
+            return Ok(false);
+        }
+
+        let range_reader = reader.reader().await.context(PuffinBuildReaderSnafu)?;
+        let reader = if let Some(bloom_filter_cache) = &self.bloom_filter_index_cache {
+            let blob_size = range_reader
+                .metadata()
+                .await
+                .context(MetadataSnafu)?
+                .content_length;
+            let reader = CachedBloomFilterIndexBlobReader::new(
+                file_id,
+                column_id,
+                Tag::Fulltext,
+                blob_size,
+                BloomFilterReaderImpl::new(range_reader),
+                bloom_filter_cache.clone(),
+            );
+            Box::new(reader) as _
+        } else {
+            Box::new(BloomFilterReaderImpl::new(range_reader)) as _
+        };
+
+        let mut applier = BloomFilterApplier::new(reader)
+            .await
+            .context(ApplyBloomFilterIndexSnafu)?;
+        for (_, row_group_output) in output.iter_mut() {
+            // All rows are filtered out, skip the search
+            if row_group_output.is_empty() {
+                continue;
+            }
+
+            *row_group_output = applier
+                .search(&predicates, row_group_output)
+                .await
+                .context(ApplyBloomFilterIndexSnafu)?;
+        }
+
+        Ok(true)
+    }
+
+    /// Initializes the coarse output. Must call `adjust_coarse_output` after applying bloom filters.
+    ///
+    /// `row_groups` is a list of (row group length, whether to search).
+    ///
+    /// Returns (`input`, `output`):
+    /// * `input` is a list of (row group index to search, row group range based on start of the file).
+    /// * `output` is a list of (row group index to search, row group ranges based on start of the file).
+    #[allow(clippy::type_complexity)]
+    fn init_coarse_output(
+        row_groups: impl Iterator<Item = (usize, bool)>,
+    ) -> (Vec<(usize, Range<usize>)>, Vec<(usize, Vec<Range<usize>>)>) {
+        // Calculates row groups' ranges based on start of the file.
+        let mut input = Vec::with_capacity(row_groups.size_hint().0);
+        let mut start = 0;
+        for (i, (len, to_search)) in row_groups.enumerate() {
+            let end = start + len;
+            if to_search {
+                input.push((i, start..end));
+            }
+            start = end;
+        }
+
+        // Initializes output with input ranges, but ranges are based on start of the file not the row group,
+        // so we need to adjust them later.
+        let output = input
+            .iter()
+            .map(|(i, range)| (*i, vec![range.clone()]))
+            .collect::<Vec<_>>();
+
+        (input, output)
+    }
+
+    /// Adjusts the coarse output. Makes the output ranges based on row group start.
+    fn adjust_coarse_output(
+        input: Vec<(usize, Range<usize>)>,
+        output: &mut Vec<(usize, Vec<Range<usize>>)>,
+    ) {
+        // adjust ranges to be based on row group
+        for ((_, output), (_, input)) in output.iter_mut().zip(input) {
+            let start = input.start;
+            for range in output.iter_mut() {
+                range.start -= start;
+                range.end -= start;
+            }
+        }
+        output.retain(|(_, ranges)| !ranges.is_empty());
+    }
+
+    /// Converts terms to predicates.
+    ///
+    /// Split terms by non-alphanumeric characters and convert them to lowercase if case-insensitive.
+    /// Multiple terms are combined with AND semantics.
+    fn terms_to_predicates(terms: &[FulltextTerm], config: &Config) -> Vec<InListPredicate> {
+        let mut probes = HashSet::new();
+        for term in terms {
+            if config.case_sensitive && term.col_lowered {
+                // lowercased terms are not indexed
+                continue;
+            }
+
+            let ts = term
+                .term
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|&t| !t.is_empty())
+                .map(|t| {
+                    if !config.case_sensitive {
+                        t.to_lowercase()
+                    } else {
+                        t.to_string()
+                    }
+                    .into_bytes()
+                });
+
+            probes.extend(ts);
+        }
+
+        probes
+            .into_iter()
+            .map(|p| InListPredicate {
+                list: iter::once(p).collect(),
+            })
+            .collect::<Vec<_>>()
     }
 }
 
@@ -217,7 +458,7 @@ impl IndexSource {
         file_id: FileId,
         key: &str,
         file_size_hint: Option<u64>,
-    ) -> Result<Option<BlobWithMetadata<SstPuffinBlob>>> {
+    ) -> Result<Option<GuardWithMetadata<SstPuffinBlob>>> {
         let (reader, fallbacked) = self.ensure_reader(file_id, file_size_hint).await?;
         let res = reader.blob(key).await;
         match res {
@@ -248,7 +489,7 @@ impl IndexSource {
         file_id: FileId,
         key: &str,
         file_size_hint: Option<u64>,
-    ) -> Result<Option<SstPuffinDir>> {
+    ) -> Result<Option<GuardWithMetadata<SstPuffinDir>>> {
         let (reader, fallbacked) = self.ensure_reader(file_id, file_size_hint).await?;
         let res = reader.dir(key).await;
         match res {

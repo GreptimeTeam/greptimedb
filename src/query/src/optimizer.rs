@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod constant_term;
 pub mod count_wildcard;
 pub mod parallelize_scan;
 pub mod pass_distribution;
@@ -20,6 +21,7 @@ pub mod scan_hint;
 pub mod string_normalization;
 #[cfg(test)]
 pub(crate) mod test_util;
+pub mod transcribe_atat;
 pub mod type_conversion;
 pub mod windowed_sort;
 

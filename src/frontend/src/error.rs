@@ -19,6 +19,8 @@ use common_error::define_into_tonic_status;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use common_query::error::datafusion_status_code;
+use datafusion::error::DataFusionError;
 use session::ReadPreference;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
@@ -126,13 +128,6 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         source: catalog::error::Error,
-    },
-
-    #[snafu(display("Failed to start Meta client"))]
-    StartMetaClient {
-        #[snafu(implicit)]
-        location: Location,
-        source: meta_client::error::Error,
     },
 
     #[snafu(display("Failed to create heartbeat stream to Metasrv"))]
@@ -352,7 +347,15 @@ pub enum Error {
     SubstraitDecodeLogicalPlan {
         #[snafu(implicit)]
         location: Location,
-        source: substrait::error::Error,
+        source: common_query::error::Error,
+    },
+
+    #[snafu(display("DataFusionError"))]
+    DataFusion {
+        #[snafu(source)]
+        error: DataFusionError,
+        #[snafu(implicit)]
+        location: Location,
     },
 }
 
@@ -415,8 +418,7 @@ impl ErrorExt for Error {
 
             Error::Catalog { source, .. } => source.status_code(),
 
-            Error::StartMetaClient { source, .. }
-            | Error::CreateMetaHeartbeatStream { source, .. } => source.status_code(),
+            Error::CreateMetaHeartbeatStream { source, .. } => source.status_code(),
 
             Error::PlanStatement { source, .. }
             | Error::ReadTable { source, .. }
@@ -431,6 +433,8 @@ impl ErrorExt for Error {
             Error::TableOperation { source, .. } => source.status_code(),
 
             Error::InFlightWriteBytesExceeded { .. } => StatusCode::RateLimited,
+
+            Error::DataFusion { error, .. } => datafusion_status_code::<Self>(error, None),
         }
     }
 
