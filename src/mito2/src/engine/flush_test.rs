@@ -25,7 +25,7 @@ use common_wal::options::WAL_OPTIONS_KEY;
 use rstest::rstest;
 use rstest_reuse::{self, apply};
 use store_api::region_engine::RegionEngine;
-use store_api::region_request::RegionRequest;
+use store_api::region_request::{RegionFlushRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
@@ -33,8 +33,8 @@ use crate::engine::listener::{FlushListener, StallListener};
 use crate::test_util::{
     build_rows, build_rows_for_key, flush_region, kafka_log_store_factory,
     multiple_log_store_factories, prepare_test_for_kafka_log_store, put_rows,
-    raft_engine_log_store_factory, reopen_region, rows_schema, CreateRequestBuilder,
-    LogStoreFactory, MockWriteBufferManager, TestEnv,
+    raft_engine_log_store_factory, reopen_region, rows_schema, single_kafka_log_store_factory,
+    CreateRequestBuilder, LogStoreFactory, MockWriteBufferManager, TestEnv,
 };
 use crate::time_provider::TimeProvider;
 use crate::worker::MAX_INITIAL_CHECK_DELAY_SECS;
@@ -543,4 +543,68 @@ async fn test_flush_workers() {
 | a     | 1.0     | 1970-01-01T00:00:01 |
 +-------+---------+---------------------+";
     assert_eq!(expected, batches.pretty_print().unwrap());
+}
+
+#[apply(single_kafka_log_store_factory)]
+async fn test_update_topic_latest_entry_id(factory: Option<LogStoreFactory>) {
+    common_telemetry::init_default_ut_logging();
+    let Some(factory) = factory else {
+        return;
+    };
+    let write_buffer_manager = Arc::new(MockWriteBufferManager::default());
+    let listener = Arc::new(FlushListener::default());
+
+    let mut env = TestEnv::new().with_log_store_factory(factory.clone());
+    let engine = env
+        .create_engine_with(
+            MitoConfig::default(),
+            Some(write_buffer_manager.clone()),
+            Some(listener.clone()),
+        )
+        .await;
+    let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let topic = prepare_test_for_kafka_log_store(&factory).await;
+    let request = CreateRequestBuilder::new()
+        .kafka_topic(topic.clone())
+        .build();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    assert_eq!(region.topic_latest_entry_id.load(Ordering::Relaxed), 0);
+
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows_for_key("a", 0, 2, 0),
+    };
+    put_rows(&engine, region_id, rows.clone()).await;
+
+    let request = RegionFlushRequest::default();
+    engine
+        .handle_request(region_id, RegionRequest::Flush(request.clone()))
+        .await
+        .unwrap();
+    // Wait until flush is finished.
+    listener.wait().await;
+    assert_eq!(region.topic_latest_entry_id.load(Ordering::Relaxed), 0);
+
+    engine
+        .handle_request(region_id, RegionRequest::Flush(request.clone()))
+        .await
+        .unwrap();
+    assert_eq!(region.topic_latest_entry_id.load(Ordering::Relaxed), 1);
 }

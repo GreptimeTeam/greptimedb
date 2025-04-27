@@ -31,7 +31,7 @@ use datafusion::functions_aggregate::stddev::stddev_pop_udaf;
 use datafusion::functions_aggregate::sum::sum_udaf;
 use datafusion::functions_aggregate::variance::var_pop_udaf;
 use datafusion::functions_window::row_number::RowNumber;
-use datafusion::logical_expr::expr::{AggregateFunction, Alias, ScalarFunction, WindowFunction};
+use datafusion::logical_expr::expr::{Alias, ScalarFunction, WindowFunction};
 use datafusion::logical_expr::expr_rewriter::normalize_cols;
 use datafusion::logical_expr::{
     BinaryExpr, Cast, Extension, LogicalPlan, LogicalPlanBuilder, Operator,
@@ -1165,13 +1165,17 @@ impl PromPlanner {
                     DfExpr::BinaryExpr(BinaryExpr {
                         left: Box::new(col),
                         op: Operator::RegexMatch,
-                        right: Box::new(lit),
+                        right: Box::new(DfExpr::Literal(ScalarValue::Utf8(Some(
+                            re.as_str().to_string(),
+                        )))),
                     })
                 }
-                MatchOp::NotRe(_) => DfExpr::BinaryExpr(BinaryExpr {
+                MatchOp::NotRe(re) => DfExpr::BinaryExpr(BinaryExpr {
                     left: Box::new(col),
                     op: Operator::RegexNotMatch,
-                    right: Box::new(lit),
+                    right: Box::new(DfExpr::Literal(ScalarValue::Utf8(Some(
+                        re.as_str().to_string(),
+                    )))),
                 }),
             };
             exprs.push(expr);
@@ -1421,15 +1425,18 @@ impl PromPlanner {
         let field_column_pos = 0;
         let mut exprs = Vec::with_capacity(self.ctx.field_columns.len());
         let scalar_func = match func.name {
-            "increase" => ScalarFunc::ExtrapolateUdf(Arc::new(Increase::scalar_udf(
+            "increase" => ScalarFunc::ExtrapolateUdf(
+                Arc::new(Increase::scalar_udf()),
                 self.ctx.range.context(ExpectRangeSelectorSnafu)?,
-            ))),
-            "rate" => ScalarFunc::ExtrapolateUdf(Arc::new(Rate::scalar_udf(
+            ),
+            "rate" => ScalarFunc::ExtrapolateUdf(
+                Arc::new(Rate::scalar_udf()),
                 self.ctx.range.context(ExpectRangeSelectorSnafu)?,
-            ))),
-            "delta" => ScalarFunc::ExtrapolateUdf(Arc::new(Delta::scalar_udf(
+            ),
+            "delta" => ScalarFunc::ExtrapolateUdf(
+                Arc::new(Delta::scalar_udf()),
                 self.ctx.range.context(ExpectRangeSelectorSnafu)?,
-            ))),
+            ),
             "idelta" => ScalarFunc::Udf(Arc::new(IDelta::<false>::scalar_udf())),
             "irate" => ScalarFunc::Udf(Arc::new(IDelta::<true>::scalar_udf())),
             "resets" => ScalarFunc::Udf(Arc::new(Resets::scalar_udf())),
@@ -1445,50 +1452,9 @@ impl PromPlanner {
             "present_over_time" => ScalarFunc::Udf(Arc::new(PresentOverTime::scalar_udf())),
             "stddev_over_time" => ScalarFunc::Udf(Arc::new(StddevOverTime::scalar_udf())),
             "stdvar_over_time" => ScalarFunc::Udf(Arc::new(StdvarOverTime::scalar_udf())),
-            "quantile_over_time" => {
-                let quantile_expr = match other_input_exprs.pop_front() {
-                    Some(DfExpr::Literal(ScalarValue::Float64(Some(quantile)))) => quantile,
-                    other => UnexpectedPlanExprSnafu {
-                        desc: format!("expected f64 literal as quantile, but found {:?}", other),
-                    }
-                    .fail()?,
-                };
-                ScalarFunc::Udf(Arc::new(QuantileOverTime::scalar_udf(quantile_expr)))
-            }
-            "predict_linear" => {
-                let t_expr = match other_input_exprs.pop_front() {
-                    Some(DfExpr::Literal(ScalarValue::Float64(Some(t)))) => t as i64,
-                    Some(DfExpr::Literal(ScalarValue::Int64(Some(t)))) => t,
-                    other => UnexpectedPlanExprSnafu {
-                        desc: format!("expected i64 literal as t, but found {:?}", other),
-                    }
-                    .fail()?,
-                };
-                ScalarFunc::Udf(Arc::new(PredictLinear::scalar_udf(t_expr)))
-            }
-            "holt_winters" => {
-                let sf_exp = match other_input_exprs.pop_front() {
-                    Some(DfExpr::Literal(ScalarValue::Float64(Some(sf)))) => sf,
-                    other => UnexpectedPlanExprSnafu {
-                        desc: format!(
-                            "expected f64 literal as smoothing factor, but found {:?}",
-                            other
-                        ),
-                    }
-                    .fail()?,
-                };
-                let tf_exp = match other_input_exprs.pop_front() {
-                    Some(DfExpr::Literal(ScalarValue::Float64(Some(tf)))) => tf,
-                    other => UnexpectedPlanExprSnafu {
-                        desc: format!(
-                            "expected f64 literal as trend factor, but found {:?}",
-                            other
-                        ),
-                    }
-                    .fail()?,
-                };
-                ScalarFunc::Udf(Arc::new(HoltWinters::scalar_udf(sf_exp, tf_exp)))
-            }
+            "quantile_over_time" => ScalarFunc::Udf(Arc::new(QuantileOverTime::scalar_udf())),
+            "predict_linear" => ScalarFunc::Udf(Arc::new(PredictLinear::scalar_udf())),
+            "holt_winters" => ScalarFunc::Udf(Arc::new(HoltWinters::scalar_udf())),
             "time" => {
                 exprs.push(build_special_time_expr(
                     self.ctx.time_index_column.as_ref().unwrap(),
@@ -1623,17 +1589,10 @@ impl PromPlanner {
                 ScalarFunc::GeneratedExpr
             }
             "round" => {
-                let nearest = match other_input_exprs.pop_front() {
-                    Some(DfExpr::Literal(ScalarValue::Float64(Some(t)))) => t,
-                    Some(DfExpr::Literal(ScalarValue::Int64(Some(t)))) => t as f64,
-                    None => 0.0,
-                    other => UnexpectedPlanExprSnafu {
-                        desc: format!("expected f64 literal as t, but found {:?}", other),
-                    }
-                    .fail()?,
-                };
-
-                ScalarFunc::DataFusionUdf(Arc::new(Round::scalar_udf(nearest)))
+                if other_input_exprs.is_empty() {
+                    other_input_exprs.push_front(DfExpr::Literal(ScalarValue::Float64(Some(0.0))));
+                }
+                ScalarFunc::DataFusionUdf(Arc::new(Round::scalar_udf()))
             }
 
             _ => {
@@ -1691,7 +1650,7 @@ impl PromPlanner {
                     let _ = other_input_exprs.remove(field_column_pos + 1);
                     let _ = other_input_exprs.remove(field_column_pos);
                 }
-                ScalarFunc::ExtrapolateUdf(func) => {
+                ScalarFunc::ExtrapolateUdf(func, range_length) => {
                     let ts_range_expr = DfExpr::Column(Column::from_name(
                         RangeManipulate::build_timestamp_range_name(
                             self.ctx.time_index_column.as_ref().unwrap(),
@@ -1701,11 +1660,13 @@ impl PromPlanner {
                     other_input_exprs.insert(field_column_pos + 1, col_expr);
                     other_input_exprs
                         .insert(field_column_pos + 2, self.create_time_index_column_expr()?);
+                    other_input_exprs.push_back(lit(range_length));
                     let fn_expr = DfExpr::ScalarFunction(ScalarFunction {
                         func,
                         args: other_input_exprs.clone().into(),
                     });
                     exprs.push(fn_expr);
+                    let _ = other_input_exprs.pop_back();
                     let _ = other_input_exprs.remove(field_column_pos + 2);
                     let _ = other_input_exprs.remove(field_column_pos + 1);
                     let _ = other_input_exprs.remove(field_column_pos);
@@ -1968,11 +1929,13 @@ impl PromPlanner {
         param: &Option<Box<PromExpr>>,
         input_plan: &LogicalPlan,
     ) -> Result<(Vec<DfExpr>, Vec<DfExpr>)> {
+        let mut non_col_args = Vec::new();
         let aggr = match op.id() {
             token::T_SUM => sum_udaf(),
             token::T_QUANTILE => {
                 let q = Self::get_param_value_as_f64(op, param)?;
-                quantile_udaf(q)
+                non_col_args.push(lit(q));
+                quantile_udaf()
             }
             token::T_AVG => avg_udaf(),
             token::T_COUNT_VALUES | token::T_COUNT => count_udaf(),
@@ -1994,16 +1957,12 @@ impl PromPlanner {
             .field_columns
             .iter()
             .map(|col| {
-                Ok(DfExpr::AggregateFunction(AggregateFunction {
-                    func: aggr.clone(),
-                    args: vec![DfExpr::Column(Column::from_name(col))],
-                    distinct: false,
-                    filter: None,
-                    order_by: None,
-                    null_treatment: None,
-                }))
+                non_col_args.push(DfExpr::Column(Column::from_name(col)));
+                let expr = aggr.call(non_col_args.clone());
+                non_col_args.pop();
+                expr
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Vec<_>>();
 
         // if the aggregator is `count_values`, it must be grouped by current fields.
         let prev_field_exprs = if op.id() == token::T_COUNT_VALUES {
@@ -2937,7 +2896,8 @@ enum ScalarFunc {
     Udf(Arc<ScalarUdfDef>),
     // todo(ruihang): maybe merge with Udf later
     /// UDF that require extra information like range length to be evaluated.
-    ExtrapolateUdf(Arc<ScalarUdfDef>),
+    /// The second argument is range length.
+    ExtrapolateUdf(Arc<ScalarUdfDef>, i64),
     /// Func that doesn't require input, like `time()`.
     GeneratedExpr,
 }
@@ -3591,8 +3551,8 @@ mod test {
     async fn increase_aggr() {
         let query = "increase(some_metric[5m])";
         let expected = String::from(
-            "Filter: prom_increase(timestamp_range,field_0,timestamp) IS NOT NULL [timestamp:Timestamp(Millisecond, None), prom_increase(timestamp_range,field_0,timestamp):Float64;N, tag_0:Utf8]\
-            \n  Projection: some_metric.timestamp, prom_increase(timestamp_range, field_0, some_metric.timestamp) AS prom_increase(timestamp_range,field_0,timestamp), some_metric.tag_0 [timestamp:Timestamp(Millisecond, None), prom_increase(timestamp_range,field_0,timestamp):Float64;N, tag_0:Utf8]\
+            "Filter: prom_increase(timestamp_range,field_0,timestamp,Int64(300000)) IS NOT NULL [timestamp:Timestamp(Millisecond, None), prom_increase(timestamp_range,field_0,timestamp,Int64(300000)):Float64;N, tag_0:Utf8]\
+            \n  Projection: some_metric.timestamp, prom_increase(timestamp_range, field_0, some_metric.timestamp, Int64(300000)) AS prom_increase(timestamp_range,field_0,timestamp,Int64(300000)), some_metric.tag_0 [timestamp:Timestamp(Millisecond, None), prom_increase(timestamp_range,field_0,timestamp,Int64(300000)):Float64;N, tag_0:Utf8]\
             \n    PromRangeManipulate: req range=[0..100000000], interval=[5000], eval range=[300000], time index=[timestamp], values=[\"field_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Dictionary(Int64, Float64);N, timestamp_range:Dictionary(Int64, Timestamp(Millisecond, None))]\
             \n      PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [true] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n        PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
@@ -4237,7 +4197,8 @@ mod test {
             interval: Duration::from_secs(5),
             lookback_delta: Duration::from_secs(1),
         };
-        let case = r#"sum(prometheus_tsdb_head_series{tag_1=~"(10\\.0\\.160\\.237:8080|10\\.0\\.160\\.237:9090)"})"#;
+        let case =
+            r#"sum(prometheus_tsdb_head_series{tag_1=~"(10.0.160.237:8080|10.0.160.237:9090)"})"#;
 
         let prom_expr = parser::parse(case).unwrap();
         eval_stmt.expr = prom_expr;
@@ -4258,7 +4219,7 @@ mod test {
         \n    PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N]\
         \n      PromSeriesDivide: tags=[\"tag_0\", \"tag_1\", \"tag_2\"] [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N]\
         \n        Sort: prometheus_tsdb_head_series.tag_0 ASC NULLS FIRST, prometheus_tsdb_head_series.tag_1 ASC NULLS FIRST, prometheus_tsdb_head_series.tag_2 ASC NULLS FIRST, prometheus_tsdb_head_series.timestamp ASC NULLS FIRST [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N]\
-        \n          Filter: prometheus_tsdb_head_series.tag_1 ~ Utf8(\"(10\\.0\\.160\\.237:8080|10\\.0\\.160\\.237:9090)\") AND prometheus_tsdb_head_series.timestamp >= TimestampMillisecond(-1000, None) AND prometheus_tsdb_head_series.timestamp <= TimestampMillisecond(100001000, None) [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N]\
+        \n          Filter: prometheus_tsdb_head_series.tag_1 ~ Utf8(\"^(10.0.160.237:8080|10.0.160.237:9090)$\") AND prometheus_tsdb_head_series.timestamp >= TimestampMillisecond(-1000, None) AND prometheus_tsdb_head_series.timestamp <= TimestampMillisecond(100001000, None) [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N]\
         \n            TableScan: prometheus_tsdb_head_series [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N]";
         assert_eq!(plan.display_indent_schema().to_string(), expected);
     }
@@ -4274,7 +4235,7 @@ mod test {
             interval: Duration::from_secs(5),
             lookback_delta: Duration::from_secs(1),
         };
-        let case = r#"topk(10, sum(prometheus_tsdb_head_series{ip=~"(10\\.0\\.160\\.237:8080|10\\.0\\.160\\.237:9090)"}) by (ip))"#;
+        let case = r#"topk(10, sum(prometheus_tsdb_head_series{ip=~"(10.0.160.237:8080|10.0.160.237:9090)"}) by (ip))"#;
 
         let prom_expr = parser::parse(case).unwrap();
         eval_stmt.expr = prom_expr;
@@ -4305,7 +4266,7 @@ mod test {
         \n            PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[greptime_timestamp] [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]\
         \n              PromSeriesDivide: tags=[\"ip\"] [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]\
         \n                Sort: prometheus_tsdb_head_series.ip ASC NULLS FIRST, prometheus_tsdb_head_series.greptime_timestamp ASC NULLS FIRST [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]\
-        \n                  Filter: prometheus_tsdb_head_series.ip ~ Utf8(\"(10\\.0\\.160\\.237:8080|10\\.0\\.160\\.237:9090)\") AND prometheus_tsdb_head_series.greptime_timestamp >= TimestampMillisecond(-1000, None) AND prometheus_tsdb_head_series.greptime_timestamp <= TimestampMillisecond(100001000, None) [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]\
+        \n                  Filter: prometheus_tsdb_head_series.ip ~ Utf8(\"^(10.0.160.237:8080|10.0.160.237:9090)$\") AND prometheus_tsdb_head_series.greptime_timestamp >= TimestampMillisecond(-1000, None) AND prometheus_tsdb_head_series.greptime_timestamp <= TimestampMillisecond(100001000, None) [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]\
         \n                    TableScan: prometheus_tsdb_head_series [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]";
 
         assert_eq!(plan.display_indent_schema().to_string(), expected);
@@ -4322,7 +4283,7 @@ mod test {
             interval: Duration::from_secs(5),
             lookback_delta: Duration::from_secs(1),
         };
-        let case = r#"count_values('series', prometheus_tsdb_head_series{ip=~"(10\\.0\\.160\\.237:8080|10\\.0\\.160\\.237:9090)"}) by (ip)"#;
+        let case = r#"count_values('series', prometheus_tsdb_head_series{ip=~"(10.0.160.237:8080|10.0.160.237:9090)"}) by (ip)"#;
 
         let prom_expr = parser::parse(case).unwrap();
         eval_stmt.expr = prom_expr;
@@ -4351,7 +4312,7 @@ mod test {
         \n        PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[greptime_timestamp] [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]\
         \n          PromSeriesDivide: tags=[\"ip\"] [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]\
         \n            Sort: prometheus_tsdb_head_series.ip ASC NULLS FIRST, prometheus_tsdb_head_series.greptime_timestamp ASC NULLS FIRST [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]\
-        \n              Filter: prometheus_tsdb_head_series.ip ~ Utf8(\"(10\\.0\\.160\\.237:8080|10\\.0\\.160\\.237:9090)\") AND prometheus_tsdb_head_series.greptime_timestamp >= TimestampMillisecond(-1000, None) AND prometheus_tsdb_head_series.greptime_timestamp <= TimestampMillisecond(100001000, None) [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]\
+        \n              Filter: prometheus_tsdb_head_series.ip ~ Utf8(\"^(10.0.160.237:8080|10.0.160.237:9090)$\") AND prometheus_tsdb_head_series.greptime_timestamp >= TimestampMillisecond(-1000, None) AND prometheus_tsdb_head_series.greptime_timestamp <= TimestampMillisecond(100001000, None) [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]\
         \n                TableScan: prometheus_tsdb_head_series [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]";
 
         assert_eq!(plan.display_indent_schema().to_string(), expected);
@@ -4368,7 +4329,7 @@ mod test {
             interval: Duration::from_secs(5),
             lookback_delta: Duration::from_secs(1),
         };
-        let case = r#"quantile(0.3, sum(prometheus_tsdb_head_series{ip=~"(10\\.0\\.160\\.237:8080|10\\.0\\.160\\.237:9090)"}) by (ip))"#;
+        let case = r#"quantile(0.3, sum(prometheus_tsdb_head_series{ip=~"(10.0.160.237:8080|10.0.160.237:9090)"}) by (ip))"#;
 
         let prom_expr = parser::parse(case).unwrap();
         eval_stmt.expr = prom_expr;
@@ -4390,14 +4351,14 @@ mod test {
         let plan = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
             .await
             .unwrap();
-        let expected = "Sort: prometheus_tsdb_head_series.greptime_timestamp ASC NULLS LAST [greptime_timestamp:Timestamp(Millisecond, None), quantile(sum(prometheus_tsdb_head_series.greptime_value)):Float64;N]\
-        \n  Aggregate: groupBy=[[prometheus_tsdb_head_series.greptime_timestamp]], aggr=[[quantile(sum(prometheus_tsdb_head_series.greptime_value))]] [greptime_timestamp:Timestamp(Millisecond, None), quantile(sum(prometheus_tsdb_head_series.greptime_value)):Float64;N]\
+        let expected = "Sort: prometheus_tsdb_head_series.greptime_timestamp ASC NULLS LAST [greptime_timestamp:Timestamp(Millisecond, None), quantile(Float64(0.3),sum(prometheus_tsdb_head_series.greptime_value)):Float64;N]\
+        \n  Aggregate: groupBy=[[prometheus_tsdb_head_series.greptime_timestamp]], aggr=[[quantile(Float64(0.3), sum(prometheus_tsdb_head_series.greptime_value))]] [greptime_timestamp:Timestamp(Millisecond, None), quantile(Float64(0.3),sum(prometheus_tsdb_head_series.greptime_value)):Float64;N]\
         \n    Sort: prometheus_tsdb_head_series.ip ASC NULLS LAST, prometheus_tsdb_head_series.greptime_timestamp ASC NULLS LAST [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), sum(prometheus_tsdb_head_series.greptime_value):Float64;N]\
         \n      Aggregate: groupBy=[[prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp]], aggr=[[sum(prometheus_tsdb_head_series.greptime_value)]] [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), sum(prometheus_tsdb_head_series.greptime_value):Float64;N]\
         \n        PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[greptime_timestamp] [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]\
         \n          PromSeriesDivide: tags=[\"ip\"] [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]\
         \n            Sort: prometheus_tsdb_head_series.ip ASC NULLS FIRST, prometheus_tsdb_head_series.greptime_timestamp ASC NULLS FIRST [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]\
-        \n              Filter: prometheus_tsdb_head_series.ip ~ Utf8(\"(10\\.0\\.160\\.237:8080|10\\.0\\.160\\.237:9090)\") AND prometheus_tsdb_head_series.greptime_timestamp >= TimestampMillisecond(-1000, None) AND prometheus_tsdb_head_series.greptime_timestamp <= TimestampMillisecond(100001000, None) [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]\
+        \n              Filter: prometheus_tsdb_head_series.ip ~ Utf8(\"^(10.0.160.237:8080|10.0.160.237:9090)$\") AND prometheus_tsdb_head_series.greptime_timestamp >= TimestampMillisecond(-1000, None) AND prometheus_tsdb_head_series.greptime_timestamp <= TimestampMillisecond(100001000, None) [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]\
         \n                TableScan: prometheus_tsdb_head_series [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]";
 
         assert_eq!(plan.display_indent_schema().to_string(), expected);

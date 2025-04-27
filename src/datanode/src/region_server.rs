@@ -19,7 +19,8 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use api::region::RegionResponse;
-use api::v1::region::{region_request, RegionResponse as RegionResponseV1};
+use api::v1::region::sync_request::ManifestInfo;
+use api::v1::region::{region_request, RegionResponse as RegionResponseV1, SyncRequest};
 use api::v1::{ResponseHeader, Status};
 use arrow_flight::{FlightData, Ticket};
 use async_trait::async_trait;
@@ -308,38 +309,6 @@ impl RegionServer {
             .with_context(|_| HandleRegionRequestSnafu { region_id })
     }
 
-    /// Sync region manifest and registers new opened logical regions.
-    pub async fn sync_region_manifest(
-        &self,
-        region_id: RegionId,
-        manifest_info: RegionManifestInfo,
-    ) -> Result<()> {
-        let engine_with_status = self
-            .inner
-            .region_map
-            .get(&region_id)
-            .with_context(|| RegionNotFoundSnafu { region_id })?;
-
-        let Some(new_opened_regions) = engine_with_status
-            .sync_region(region_id, manifest_info)
-            .await
-            .with_context(|_| HandleRegionRequestSnafu { region_id })?
-            .new_opened_logical_region_ids()
-        else {
-            return Ok(());
-        };
-
-        for region in new_opened_regions {
-            self.inner.region_map.insert(
-                region,
-                RegionEngineWithStatus::Ready(engine_with_status.engine().clone()),
-            );
-            info!("Logical region {} is registered!", region);
-        }
-
-        Ok(())
-    }
-
     /// Set region role state gracefully.
     ///
     /// For [SettableRegionRoleState::Follower]:
@@ -468,6 +437,52 @@ impl RegionServer {
             extensions,
         })
     }
+
+    async fn handle_sync_region_request(&self, request: &SyncRequest) -> Result<RegionResponse> {
+        let region_id = RegionId::from_u64(request.region_id);
+        let manifest_info = request
+            .manifest_info
+            .context(error::MissingRequiredFieldSnafu {
+                name: "manifest_info",
+            })?;
+
+        let manifest_info = match manifest_info {
+            ManifestInfo::MitoManifestInfo(info) => {
+                RegionManifestInfo::mito(info.data_manifest_version, 0)
+            }
+            ManifestInfo::MetricManifestInfo(info) => RegionManifestInfo::metric(
+                info.data_manifest_version,
+                0,
+                info.metadata_manifest_version,
+                0,
+            ),
+        };
+
+        let tracing_context = TracingContext::from_current_span();
+        let span = tracing_context.attach(info_span!("RegionServer::handle_sync_region_request"));
+
+        self.sync_region(region_id, manifest_info)
+            .trace(span)
+            .await
+            .map(|_| RegionResponse::new(AffectedRows::default()))
+    }
+
+    /// Sync region manifest and registers new opened logical regions.
+    pub async fn sync_region(
+        &self,
+        region_id: RegionId,
+        manifest_info: RegionManifestInfo,
+    ) -> Result<()> {
+        let engine_with_status = self
+            .inner
+            .region_map
+            .get(&region_id)
+            .with_context(|| RegionNotFoundSnafu { region_id })?;
+
+        self.inner
+            .handle_sync_region(engine_with_status.engine(), region_id, manifest_info)
+            .await
+    }
 }
 
 #[async_trait]
@@ -479,6 +494,9 @@ impl RegionServerHandler for RegionServer {
             | region_request::Body::Alters(_) => self.handle_batch_ddl_requests(request).await,
             region_request::Body::Inserts(_) | region_request::Body::Deletes(_) => {
                 self.handle_requests_in_parallel(request).await
+            }
+            region_request::Body::Sync(sync_request) => {
+                self.handle_sync_region_request(sync_request).await
             }
             _ => self.handle_requests_in_serial(request).await,
         }
@@ -861,8 +879,8 @@ impl RegionServerInner {
 
         match result {
             Ok(result) => {
-                for (region_id, region_change) in region_changes {
-                    self.set_region_status_ready(region_id, engine.clone(), region_change)
+                for (region_id, region_change) in &region_changes {
+                    self.set_region_status_ready(*region_id, engine.clone(), *region_change)
                         .await?;
                 }
 
@@ -933,8 +951,9 @@ impl RegionServerInner {
                         .inc_by(result.affected_rows as u64);
                 }
                 // Sets corresponding region status to ready.
-                self.set_region_status_ready(region_id, engine, region_change)
+                self.set_region_status_ready(region_id, engine.clone(), region_change)
                     .await?;
+
                 Ok(RegionResponse {
                     affected_rows: result.affected_rows,
                     extensions: result.extensions,
@@ -946,6 +965,32 @@ impl RegionServerInner {
                 Err(err)
             }
         }
+    }
+
+    /// Handles the sync region request.
+    pub async fn handle_sync_region(
+        &self,
+        engine: &RegionEngineRef,
+        region_id: RegionId,
+        manifest_info: RegionManifestInfo,
+    ) -> Result<()> {
+        let Some(new_opened_regions) = engine
+            .sync_region(region_id, manifest_info)
+            .await
+            .with_context(|_| HandleRegionRequestSnafu { region_id })?
+            .new_opened_logical_region_ids()
+        else {
+            warn!("No new opened logical regions");
+            return Ok(());
+        };
+
+        for region in new_opened_regions {
+            self.region_map
+                .insert(region, RegionEngineWithStatus::Ready(engine.clone()));
+            info!("Logical region {} is registered!", region);
+        }
+
+        Ok(())
     }
 
     fn set_region_status_not_ready(

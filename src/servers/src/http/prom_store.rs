@@ -83,33 +83,17 @@ impl Default for RemoteWriteQuery {
 )]
 pub async fn remote_write(
     State(state): State<PromStoreState>,
-    query: Query<RemoteWriteQuery>,
-    extension: Extension<QueryContext>,
-    content_encoding: TypedHeader<headers::ContentEncoding>,
-    raw_body: Bytes,
-) -> Result<impl IntoResponse> {
-    remote_write_impl(
-        state.prom_store_handler,
-        query,
-        extension,
-        content_encoding,
-        raw_body,
-        state.is_strict_mode,
-        state.prom_store_with_metric_engine,
-    )
-    .await
-}
-
-async fn remote_write_impl(
-    handler: PromStoreProtocolHandlerRef,
     Query(params): Query<RemoteWriteQuery>,
     Extension(mut query_ctx): Extension<QueryContext>,
     content_encoding: TypedHeader<headers::ContentEncoding>,
     body: Bytes,
-    is_strict_mode: bool,
-    is_metric_engine: bool,
 ) -> Result<impl IntoResponse> {
-    // VictoriaMetrics handshake
+    let PromStoreState {
+        prom_store_handler,
+        prom_store_with_metric_engine,
+        is_strict_mode,
+    } = state;
+
     if let Some(_vm_handshake) = params.get_vm_proto_version {
         return Ok(VM_PROTO_VERSION.into_response());
     }
@@ -128,7 +112,9 @@ async fn remote_write_impl(
     }
     let query_ctx = Arc::new(query_ctx);
 
-    let output = handler.write(request, query_ctx, is_metric_engine).await?;
+    let output = prom_store_handler
+        .write(request, query_ctx, prom_store_with_metric_engine)
+        .await?;
     crate::metrics::PROM_STORE_REMOTE_WRITE_SAMPLES.inc_by(samples as u64);
     Ok((
         StatusCode::NO_CONTENT,

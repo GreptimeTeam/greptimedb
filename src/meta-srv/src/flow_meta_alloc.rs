@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
+
 use common_error::ext::BoxedError;
 use common_meta::ddl::flow_meta::PartitionPeerAllocator;
 use common_meta::peer::Peer;
@@ -40,6 +42,7 @@ impl PartitionPeerAllocator for FlowPeerAllocator {
                 SelectorOptions {
                     min_required_items: partitions,
                     allow_duplication: true,
+                    exclude_peer_ids: HashSet::new(),
                 },
             )
             .await

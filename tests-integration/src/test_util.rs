@@ -503,6 +503,9 @@ pub async fn setup_test_prom_app_with_frontend(
     let sql =
         "INSERT INTO demo_metrics(idc, val, ts) VALUES ('idc1', 1.1, 0), ('idc2', 2.1, 600000)";
     run_sql(sql, &instance).await;
+    // insert a row with empty label
+    let sql = "INSERT INTO demo_metrics(val, ts) VALUES (1.1, 0)";
+    run_sql(sql, &instance).await;
 
     // build physical table
     let sql = "CREATE TABLE phy2 (ts timestamp(9) time index, val double, host string primary key) engine=metric with ('physical_metric_table' = '')";
@@ -510,6 +513,12 @@ pub async fn setup_test_prom_app_with_frontend(
     let sql = "CREATE TABLE demo_metrics_with_nanos(ts timestamp(9) time index, val double, idc string primary key) engine=metric with ('on_physical_table' = 'phy2')";
     run_sql(sql, &instance).await;
     let sql = "INSERT INTO demo_metrics_with_nanos(idc, val, ts) VALUES ('idc1', 1.1, 0)";
+    run_sql(sql, &instance).await;
+
+    // a mito table with non-prometheus compatible values
+    let sql = "CREATE TABLE mito (ts timestamp(9) time index, val double, host bigint primary key) engine=mito";
+    run_sql(sql, &instance).await;
+    let sql = "INSERT INTO mito(host, val, ts) VALUES (1, 1.1, 0)";
     run_sql(sql, &instance).await;
 
     let http_opts = HttpOptions {

@@ -483,7 +483,7 @@ pub async fn test_sql_api(store_type: StorageType) {
 }
 
 pub async fn test_prometheus_promql_api(store_type: StorageType) {
-    let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "sql_api").await;
+    let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "promql_api").await;
     let client = TestClient::new(app).await;
 
     let res = client
@@ -492,7 +492,18 @@ pub async fn test_prometheus_promql_api(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
-    let _body = serde_json::from_str::<GreptimedbV1Response>(&res.text().await).unwrap();
+    let json_text = res.text().await;
+    assert!(serde_json::from_str::<GreptimedbV1Response>(&json_text).is_ok());
+
+    let res = client
+        .get("/v1/promql?query=1&start=0&end=100&step=5s&format=csv")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let csv_body = &res.text().await;
+    assert_eq!("0,1.0\n5000,1.0\n10000,1.0\n15000,1.0\n20000,1.0\n25000,1.0\n30000,1.0\n35000,1.0\n40000,1.0\n45000,1.0\n50000,1.0\n55000,1.0\n60000,1.0\n65000,1.0\n70000,1.0\n75000,1.0\n80000,1.0\n85000,1.0\n90000,1.0\n95000,1.0\n100000,1.0\n", csv_body);
+
     guard.remove_all().await;
 }
 
@@ -765,6 +776,13 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     assert!(prom_resp.error.is_none());
     assert!(prom_resp.error_type.is_none());
 
+    // query non-string value
+    let res = client
+        .get("/v1/prometheus/api/v1/label/host/values?match[]=mito")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
     // query `__name__` without match[]
     // create a physical table and a logical table
     let res = client
@@ -794,6 +812,7 @@ pub async fn test_prom_http_api(store_type: StorageType) {
             "demo_metrics".to_string(),
             "demo_metrics_with_nanos".to_string(),
             "logic_table".to_string(),
+            "mito".to_string(),
             "numbers".to_string()
         ])
     );

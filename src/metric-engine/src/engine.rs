@@ -34,9 +34,11 @@ use api::region::RegionResponse;
 use async_trait::async_trait;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
+use common_runtime::RepeatedTask;
 use mito2::engine::MitoEngine;
 pub(crate) use options::IndexOptions;
 use snafu::ResultExt;
+pub(crate) use state::MetricEngineState;
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
 use store_api::region_engine::{
@@ -47,13 +49,13 @@ use store_api::region_engine::{
 use store_api::region_request::{BatchRegionDdlRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 
-use self::state::MetricEngineState;
 use crate::config::EngineConfig;
 use crate::data_region::DataRegion;
-use crate::error::{self, Result, UnsupportedRegionRequestSnafu};
+use crate::error::{self, Error, Result, StartRepeatedTaskSnafu, UnsupportedRegionRequestSnafu};
 use crate::metadata_region::MetadataRegion;
+use crate::repeated_task::FlushMetadataRegionTask;
 use crate::row_modifier::RowModifier;
-use crate::utils;
+use crate::utils::{self, get_region_statistic};
 
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// # Metric Engine
@@ -264,29 +266,7 @@ impl RegionEngine for MetricEngine {
     /// Note: Returns `None` if it's a logical region.
     fn region_statistic(&self, region_id: RegionId) -> Option<RegionStatistic> {
         if self.inner.is_physical_region(region_id) {
-            let metadata_region_id = utils::to_metadata_region_id(region_id);
-            let data_region_id = utils::to_data_region_id(region_id);
-
-            let metadata_stat = self.inner.mito.region_statistic(metadata_region_id);
-            let data_stat = self.inner.mito.region_statistic(data_region_id);
-
-            match (metadata_stat, data_stat) {
-                (Some(metadata_stat), Some(data_stat)) => Some(RegionStatistic {
-                    num_rows: metadata_stat.num_rows + data_stat.num_rows,
-                    memtable_size: metadata_stat.memtable_size + data_stat.memtable_size,
-                    wal_size: metadata_stat.wal_size + data_stat.wal_size,
-                    manifest_size: metadata_stat.manifest_size + data_stat.manifest_size,
-                    sst_size: metadata_stat.sst_size + data_stat.sst_size,
-                    index_size: metadata_stat.index_size + data_stat.index_size,
-                    manifest: RegionManifestInfo::Metric {
-                        data_flushed_entry_id: data_stat.manifest.data_flushed_entry_id(),
-                        data_manifest_version: data_stat.manifest.data_manifest_version(),
-                        metadata_flushed_entry_id: metadata_stat.manifest.data_flushed_entry_id(),
-                        metadata_manifest_version: metadata_stat.manifest.data_manifest_version(),
-                    },
-                }),
-                _ => None,
-            }
+            get_region_statistic(&self.inner.mito, region_id)
         } else {
             None
         }
@@ -381,19 +361,32 @@ impl RegionEngine for MetricEngine {
 }
 
 impl MetricEngine {
-    pub fn new(mito: MitoEngine, config: EngineConfig) -> Self {
+    pub fn try_new(mito: MitoEngine, mut config: EngineConfig) -> Result<Self> {
         let metadata_region = MetadataRegion::new(mito.clone());
         let data_region = DataRegion::new(mito.clone());
-        Self {
-            inner: Arc::new(MetricEngineInner {
-                mito,
-                metadata_region,
-                data_region,
-                state: RwLock::default(),
-                config,
-                row_modifier: RowModifier::new(),
-            }),
-        }
+        let state = Arc::new(RwLock::default());
+        config.sanitize();
+        let flush_interval = config.flush_metadata_region_interval;
+        let inner = Arc::new(MetricEngineInner {
+            mito: mito.clone(),
+            metadata_region,
+            data_region,
+            state: state.clone(),
+            config,
+            row_modifier: RowModifier::new(),
+            flush_task: RepeatedTask::new(
+                flush_interval,
+                Box::new(FlushMetadataRegionTask {
+                    state: state.clone(),
+                    mito: mito.clone(),
+                }),
+            ),
+        });
+        inner
+            .flush_task
+            .start(common_runtime::global_runtime())
+            .context(StartRepeatedTaskSnafu { name: "flush_task" })?;
+        Ok(Self { inner })
     }
 
     pub fn mito(&self) -> MitoEngine {
@@ -448,15 +441,21 @@ impl MetricEngine {
     ) -> Result<common_recordbatch::SendableRecordBatchStream, BoxedError> {
         self.inner.scan_to_stream(region_id, request).await
     }
+
+    /// Returns the configuration of the engine.
+    pub fn config(&self) -> &EngineConfig {
+        &self.inner.config
+    }
 }
 
 struct MetricEngineInner {
     mito: MitoEngine,
     metadata_region: MetadataRegion,
     data_region: DataRegion,
-    state: RwLock<MetricEngineState>,
+    state: Arc<RwLock<MetricEngineState>>,
     config: EngineConfig,
     row_modifier: RowModifier,
+    flush_task: RepeatedTask<Error>,
 }
 
 #[cfg(test)]

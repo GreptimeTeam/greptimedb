@@ -336,6 +336,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Region's leader peer changed: {}", msg))]
+    LeaderPeerChanged {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid arguments: {}", err_msg))]
     InvalidArguments {
         err_msg: String,
@@ -516,6 +523,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         source: common_procedure::Error,
+    },
+
+    #[snafu(display("A prune task for topic {} is already running", topic))]
+    PruneTaskAlreadyRunning {
+        topic: String,
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display("Schema already exists, name: {schema_name}"))]
@@ -788,6 +802,14 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
+    #[snafu(display("Failed to build kafka client."))]
+    BuildKafkaClient {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: common_meta::error::Error,
+    },
+
     #[snafu(display(
         "Failed to build a Kafka partition client, topic: {}, partition: {}",
         topic,
@@ -875,7 +897,9 @@ impl ErrorExt for Error {
             | Error::FlowStateHandler { .. }
             | Error::BuildWalOptionsAllocator { .. }
             | Error::BuildPartitionClient { .. }
-            | Error::DeleteRecords { .. } => StatusCode::Internal,
+            | Error::BuildKafkaClient { .. }
+            | Error::DeleteRecords { .. }
+            | Error::PruneTaskAlreadyRunning { .. } => StatusCode::Internal,
 
             Error::Unsupported { .. } => StatusCode::Unsupported,
 
@@ -897,7 +921,8 @@ impl ErrorExt for Error {
             | Error::ProcedureNotFound { .. }
             | Error::TooManyPartitions { .. }
             | Error::TomlFormat { .. }
-            | Error::HandlerNotFound { .. } => StatusCode::InvalidArguments,
+            | Error::HandlerNotFound { .. }
+            | Error::LeaderPeerChanged { .. } => StatusCode::InvalidArguments,
             Error::LeaseKeyFromUtf8 { .. }
             | Error::LeaseValueFromUtf8 { .. }
             | Error::InvalidRegionKeyFromUtf8 { .. }

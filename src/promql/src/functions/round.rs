@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use datafusion::error::DataFusionError;
+use datafusion_common::ScalarValue;
 use datafusion_expr::{create_udf, ColumnarValue, ScalarUDF, Volatility};
 use datatypes::arrow::array::AsArray;
 use datatypes::arrow::datatypes::{DataType, Float64Type};
@@ -36,25 +37,39 @@ impl Round {
     }
 
     fn input_type() -> Vec<DataType> {
-        vec![DataType::Float64]
+        vec![DataType::Float64, DataType::Float64]
     }
 
     pub fn return_type() -> DataType {
         DataType::Float64
     }
 
-    pub fn scalar_udf(nearest: f64) -> ScalarUDF {
+    pub fn scalar_udf() -> ScalarUDF {
         create_udf(
             Self::name(),
             Self::input_type(),
             Self::return_type(),
             Volatility::Volatile,
-            Arc::new(move |input: &_| Self::new(nearest).calc(input)) as _,
+            Arc::new(move |input: &_| Self::create_function(input)?.calc(input)) as _,
         )
     }
 
+    fn create_function(inputs: &[ColumnarValue]) -> Result<Self, DataFusionError> {
+        if inputs.len() != 2 {
+            return Err(DataFusionError::Plan(
+                "Round function should have 2 inputs".to_string(),
+            ));
+        }
+        let ColumnarValue::Scalar(ScalarValue::Float64(Some(nearest))) = inputs[1] else {
+            return Err(DataFusionError::Plan(
+                "Round function's second input should be a scalar float64".to_string(),
+            ));
+        };
+        Ok(Self::new(nearest))
+    }
+
     fn calc(&self, input: &[ColumnarValue]) -> Result<ColumnarValue, DataFusionError> {
-        assert_eq!(input.len(), 1);
+        assert_eq!(input.len(), 2);
 
         let value_array = extract_array(&input[0])?;
 
@@ -80,8 +95,11 @@ mod tests {
     use super::*;
 
     fn test_round_f64(value: Vec<f64>, nearest: f64, expected: Vec<f64>) {
-        let round_udf = Round::scalar_udf(nearest);
-        let input = vec![ColumnarValue::Array(Arc::new(Float64Array::from(value)))];
+        let round_udf = Round::scalar_udf();
+        let input = vec![
+            ColumnarValue::Array(Arc::new(Float64Array::from(value))),
+            ColumnarValue::Scalar(ScalarValue::Float64(Some(nearest))),
+        ];
         let args = ScalarFunctionArgs {
             args: input,
             number_rows: 1,

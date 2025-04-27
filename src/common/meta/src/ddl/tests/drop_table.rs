@@ -100,7 +100,7 @@ async fn test_on_prepare_table() {
 #[tokio::test]
 async fn test_on_datanode_drop_regions() {
     let (tx, mut rx) = mpsc::channel(8);
-    let datanode_handler = DatanodeWatcher(tx);
+    let datanode_handler = DatanodeWatcher::new(tx);
     let node_manager = Arc::new(MockDatanodeManager::new(datanode_handler));
     let ddl_context = new_ddl_context(node_manager);
     let table_id = 1024;
@@ -148,27 +148,39 @@ async fn test_on_datanode_drop_regions() {
     let check = |peer: Peer,
                  request: RegionRequest,
                  expected_peer_id: u64,
-                 expected_region_id: RegionId| {
+                 expected_region_id: RegionId,
+                 follower: bool| {
         assert_eq!(peer.id, expected_peer_id);
-        let Some(region_request::Body::Drop(req)) = request.body else {
-            unreachable!();
+        if follower {
+            let Some(region_request::Body::Close(req)) = request.body else {
+                unreachable!();
+            };
+            assert_eq!(req.region_id, expected_region_id);
+        } else {
+            let Some(region_request::Body::Drop(req)) = request.body else {
+                unreachable!();
+            };
+            assert_eq!(req.region_id, expected_region_id);
         };
-        assert_eq!(req.region_id, expected_region_id);
     };
 
     let mut results = Vec::new();
-    for _ in 0..3 {
+    for _ in 0..5 {
         let result = rx.try_recv().unwrap();
         results.push(result);
     }
     results.sort_unstable_by(|(a, _), (b, _)| a.id.cmp(&b.id));
 
     let (peer, request) = results.remove(0);
-    check(peer, request, 1, RegionId::new(table_id, 1));
+    check(peer, request, 1, RegionId::new(table_id, 1), false);
     let (peer, request) = results.remove(0);
-    check(peer, request, 2, RegionId::new(table_id, 2));
+    check(peer, request, 2, RegionId::new(table_id, 2), false);
     let (peer, request) = results.remove(0);
-    check(peer, request, 3, RegionId::new(table_id, 3));
+    check(peer, request, 3, RegionId::new(table_id, 3), false);
+    let (peer, request) = results.remove(0);
+    check(peer, request, 4, RegionId::new(table_id, 2), true);
+    let (peer, request) = results.remove(0);
+    check(peer, request, 5, RegionId::new(table_id, 1), true);
 }
 
 #[tokio::test]

@@ -36,6 +36,7 @@ mod metrics;
 pub mod metrics_handler;
 pub mod mysql;
 pub mod opentsdb;
+pub mod otel_arrow;
 pub mod otlp;
 mod pipeline;
 pub mod postgres;

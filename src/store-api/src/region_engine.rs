@@ -451,6 +451,13 @@ pub struct RegionStatistic {
     /// The details of the region.
     #[serde(default)]
     pub manifest: RegionManifestInfo,
+    /// The latest entry id of the region's remote WAL since last flush.
+    /// For metric engine, there're two latest entry ids, one for data and one for metadata.
+    /// TODO(weny): remove this two fields and use single instead.
+    #[serde(default)]
+    pub data_topic_latest_entry_id: u64,
+    #[serde(default)]
+    pub metadata_topic_latest_entry_id: u64,
 }
 
 /// The manifest info of a region.
@@ -548,6 +555,16 @@ impl RegionManifestInfo {
                 ..
             } => Some(*metadata_flushed_entry_id),
         }
+    }
+
+    /// Encodes a list of ([RegionId], [RegionManifestInfo]) to a byte array.
+    pub fn encode_list(manifest_infos: &[(RegionId, Self)]) -> serde_json::Result<Vec<u8>> {
+        serde_json::to_vec(manifest_infos)
+    }
+
+    /// Decodes a list of ([RegionId], [RegionManifestInfo]) from a byte array.
+    pub fn decode_list(value: &[u8]) -> serde_json::Result<Vec<(RegionId, Self)>> {
+        serde_json::from_slice(value)
     }
 }
 

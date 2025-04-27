@@ -29,6 +29,7 @@ use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::{Flownode, NodeManagerRef};
 use common_query::Output;
+use common_runtime::JoinHandle;
 use common_telemetry::tracing::info;
 use futures::{FutureExt, TryStreamExt};
 use greptime_proto::v1::flow::{flow_server, FlowRequest, FlowResponse, InsertRequests};
@@ -50,7 +51,10 @@ use tonic::codec::CompressionEncoding;
 use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
 
-use crate::adapter::{create_worker, FlowWorkerManagerRef};
+use crate::adapter::flownode_impl::{FlowDualEngine, FlowDualEngineRef};
+use crate::adapter::{create_worker, FlowStreamingEngineRef};
+use crate::batching_mode::engine::BatchingEngine;
+use crate::engine::FlowEngine;
 use crate::error::{
     to_status_with_last_err, CacheRequiredSnafu, CreateFlowSnafu, ExternalSnafu, FlowNotFoundSnafu,
     ListFlowsSnafu, ParseAddrSnafu, ShutdownServerSnafu, StartServerSnafu, UnexpectedSnafu,
@@ -59,19 +63,20 @@ use crate::heartbeat::HeartbeatTask;
 use crate::metrics::{METRIC_FLOW_PROCESSING_TIME, METRIC_FLOW_ROWS};
 use crate::transform::register_function_to_query_engine;
 use crate::utils::{SizeReportSender, StateReportHandler};
-use crate::{CreateFlowArgs, Error, FlowWorkerManager, FlownodeOptions, FrontendClient};
+use crate::{CreateFlowArgs, Error, FlownodeOptions, FrontendClient, StreamingEngine};
 
 pub const FLOW_NODE_SERVER_NAME: &str = "FLOW_NODE_SERVER";
 /// wrapping flow node manager to avoid orphan rule with Arc<...>
 #[derive(Clone)]
 pub struct FlowService {
-    /// TODO(discord9): replace with dual engine
-    pub manager: FlowWorkerManagerRef,
+    pub dual_engine: FlowDualEngineRef,
 }
 
 impl FlowService {
-    pub fn new(manager: FlowWorkerManagerRef) -> Self {
-        Self { manager }
+    pub fn new(manager: FlowDualEngineRef) -> Self {
+        Self {
+            dual_engine: manager,
+        }
     }
 }
 
@@ -86,7 +91,7 @@ impl flow_server::Flow for FlowService {
             .start_timer();
 
         let request = request.into_inner();
-        self.manager
+        self.dual_engine
             .handle(request)
             .await
             .map_err(|err| {
@@ -126,7 +131,7 @@ impl flow_server::Flow for FlowService {
             .with_label_values(&["in"])
             .inc_by(row_count as u64);
 
-        self.manager
+        self.dual_engine
             .handle_inserts(request)
             .await
             .map(Response::new)
@@ -139,11 +144,16 @@ pub struct FlownodeServer {
     inner: Arc<FlownodeServerInner>,
 }
 
+/// FlownodeServerInner is the inner state of FlownodeServer,
+/// this struct mostly useful for construct/start and stop the
+/// flow node server
 struct FlownodeServerInner {
     /// worker shutdown signal, not to be confused with server_shutdown_tx
     worker_shutdown_tx: Mutex<broadcast::Sender<()>>,
     /// server shutdown signal for shutdown grpc server
     server_shutdown_tx: Mutex<broadcast::Sender<()>>,
+    /// streaming task handler
+    streaming_task_handler: Mutex<Option<JoinHandle<()>>>,
     flow_service: FlowService,
 }
 
@@ -156,16 +166,28 @@ impl FlownodeServer {
                 flow_service,
                 worker_shutdown_tx: Mutex::new(tx),
                 server_shutdown_tx: Mutex::new(server_tx),
+                streaming_task_handler: Mutex::new(None),
             }),
         }
     }
 
     /// Start the background task for streaming computation.
     async fn start_workers(&self) -> Result<(), Error> {
-        let manager_ref = self.inner.flow_service.manager.clone();
-        let _handle = manager_ref
-            .clone()
+        let manager_ref = self.inner.flow_service.dual_engine.clone();
+        let handle = manager_ref
+            .streaming_engine()
             .run_background(Some(self.inner.worker_shutdown_tx.lock().await.subscribe()));
+        self.inner
+            .streaming_task_handler
+            .lock()
+            .await
+            .replace(handle);
+
+        self.inner
+            .flow_service
+            .dual_engine
+            .start_flow_consistent_check_task()
+            .await?;
 
         Ok(())
     }
@@ -176,6 +198,11 @@ impl FlownodeServer {
         if tx.send(()).is_err() {
             info!("Receiver dropped, the flow node server has already shutdown");
         }
+        self.inner
+            .flow_service
+            .dual_engine
+            .stop_flow_consistent_check_task()
+            .await?;
         Ok(())
     }
 }
@@ -272,8 +299,8 @@ impl FlownodeInstance {
         &self.flownode_server
     }
 
-    pub fn flow_worker_manager(&self) -> FlowWorkerManagerRef {
-        self.flownode_server.inner.flow_service.manager.clone()
+    pub fn flow_engine(&self) -> FlowDualEngineRef {
+        self.flownode_server.inner.flow_service.dual_engine.clone()
     }
 
     pub fn setup_services(&mut self, services: ServerHandlers) {
@@ -342,12 +369,21 @@ impl FlownodeBuilder {
             self.build_manager(query_engine_factory.query_engine())
                 .await?,
         );
+        let batching = Arc::new(BatchingEngine::new(
+            self.frontend_client.clone(),
+            query_engine_factory.query_engine(),
+            self.flow_metadata_manager.clone(),
+            self.table_meta.clone(),
+            self.catalog_manager.clone(),
+        ));
+        let dual = FlowDualEngine::new(
+            manager.clone(),
+            batching,
+            self.flow_metadata_manager.clone(),
+            self.catalog_manager.clone(),
+        );
 
-        if let Err(err) = self.recover_flows(&manager).await {
-            common_telemetry::error!(err; "Failed to recover flows");
-        }
-
-        let server = FlownodeServer::new(FlowService::new(manager.clone()));
+        let server = FlownodeServer::new(FlowService::new(Arc::new(dual)));
 
         let heartbeat_task = self.heartbeat_task;
 
@@ -364,7 +400,7 @@ impl FlownodeBuilder {
     /// or recover all existing flow tasks if in standalone mode(nodeid is None)
     ///
     /// TODO(discord9): persistent flow tasks with internal state
-    async fn recover_flows(&self, manager: &FlowWorkerManagerRef) -> Result<usize, Error> {
+    async fn recover_flows(&self, manager: &FlowDualEngine) -> Result<usize, Error> {
         let nodeid = self.opts.node_id;
         let to_be_recovered: Vec<_> = if let Some(nodeid) = nodeid {
             let to_be_recover = self
@@ -401,6 +437,7 @@ impl FlownodeBuilder {
         let cnt = to_be_recovered.len();
 
         // TODO(discord9): recover in parallel
+        info!("Recovering {} flows: {:?}", cnt, to_be_recovered);
         for flow_id in to_be_recovered {
             let info = self
                 .flow_metadata_manager
@@ -416,6 +453,7 @@ impl FlownodeBuilder {
                 info.sink_table_name().schema_name.clone(),
                 info.sink_table_name().table_name.clone(),
             ];
+
             let args = CreateFlowArgs {
                 flow_id: flow_id as _,
                 sink_table_name,
@@ -429,14 +467,27 @@ impl FlownodeBuilder {
                 comment: Some(info.comment().clone()),
                 sql: info.raw_sql().clone(),
                 flow_options: info.options().clone(),
-                query_ctx: Some(
-                    QueryContextBuilder::default()
-                        .current_catalog(info.catalog_name().clone())
-                        .build(),
-                ),
+                query_ctx: info
+                    .query_context()
+                    .clone()
+                    .map(|ctx| {
+                        ctx.try_into()
+                            .map_err(BoxedError::new)
+                            .context(ExternalSnafu)
+                    })
+                    .transpose()?
+                    // or use default QueryContext with catalog_name from info
+                    // to keep compatibility with old version
+                    .or_else(|| {
+                        Some(
+                            QueryContextBuilder::default()
+                                .current_catalog(info.catalog_name().to_string())
+                                .build(),
+                        )
+                    }),
             };
             manager
-                .create_flow_inner(args)
+                .create_flow(args)
                 .await
                 .map_err(BoxedError::new)
                 .with_context(|_| CreateFlowSnafu {
@@ -452,7 +503,7 @@ impl FlownodeBuilder {
     async fn build_manager(
         &mut self,
         query_engine: Arc<dyn QueryEngine>,
-    ) -> Result<FlowWorkerManager, Error> {
+    ) -> Result<StreamingEngine, Error> {
         let table_meta = self.table_meta.clone();
 
         register_function_to_query_engine(&query_engine);
@@ -461,7 +512,7 @@ impl FlownodeBuilder {
 
         let node_id = self.opts.node_id.map(|id| id as u32);
 
-        let mut man = FlowWorkerManager::new(node_id, query_engine, table_meta);
+        let mut man = StreamingEngine::new(node_id, query_engine, table_meta);
         for worker_id in 0..num_workers {
             let (tx, rx) = oneshot::channel();
 
@@ -543,6 +594,10 @@ impl<'a> FlownodeServiceBuilder<'a> {
     }
 }
 
+/// Basically a tiny frontend that communicates with datanode, different from [`FrontendClient`] which
+/// connect to a real frontend instead, this is used for flow's streaming engine. And is for simple query.
+///
+/// For heavy query use [`FrontendClient`] which offload computation to frontend, lifting the load from flownode
 #[derive(Clone)]
 pub struct FrontendInvoker {
     inserter: Arc<Inserter>,
@@ -564,7 +619,7 @@ impl FrontendInvoker {
     }
 
     pub async fn build_from(
-        flow_worker_manager: FlowWorkerManagerRef,
+        flow_streaming_engine: FlowStreamingEngineRef,
         catalog_manager: CatalogManagerRef,
         kv_backend: KvBackendRef,
         layered_cache_registry: LayeredCacheRegistryRef,
@@ -599,7 +654,7 @@ impl FrontendInvoker {
             node_manager.clone(),
         ));
 
-        let query_engine = flow_worker_manager.query_engine.clone();
+        let query_engine = flow_streaming_engine.query_engine.clone();
 
         let statement_executor = Arc::new(StatementExecutor::new(
             catalog_manager.clone(),

@@ -18,13 +18,14 @@ use std::sync::Arc;
 use api::v1::{RowInsertRequest, Rows};
 use hashbrown::HashMap;
 use pipeline::{
-    DispatchedTo, GreptimePipelineParams, IdentityTimeIndex, Pipeline, PipelineDefinition,
-    PipelineExecOutput, PipelineMap, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
+    DispatchedTo, GreptimePipelineParams, IdentityTimeIndex, Pipeline, PipelineContext,
+    PipelineDefinition, PipelineExecOutput, PipelineMap, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
 };
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 
 use crate::error::{CatalogSnafu, PipelineSnafu, Result};
+use crate::http::event::PipelineIngestRequest;
 use crate::metrics::{
     METRIC_FAILURE_VALUE, METRIC_HTTP_LOGS_TRANSFORM_ELAPSED, METRIC_SUCCESS_VALUE,
 };
@@ -51,36 +52,24 @@ pub async fn get_pipeline(
 
 pub(crate) async fn run_pipeline(
     handler: &PipelineHandlerRef,
-    pipeline_definition: &PipelineDefinition,
-    pipeline_parameters: &GreptimePipelineParams,
-    data_array: Vec<PipelineMap>,
-    table_name: String,
+    pipeline_ctx: &PipelineContext<'_>,
+    pipeline_req: PipelineIngestRequest,
     query_ctx: &QueryContextRef,
     is_top_level: bool,
 ) -> Result<Vec<RowInsertRequest>> {
-    match pipeline_definition {
+    match &pipeline_ctx.pipeline_definition {
         PipelineDefinition::GreptimeIdentityPipeline(custom_ts) => {
             run_identity_pipeline(
                 handler,
                 custom_ts.as_ref(),
-                pipeline_parameters,
-                data_array,
-                table_name,
+                pipeline_ctx.pipeline_param,
+                pipeline_req,
                 query_ctx,
             )
             .await
         }
         _ => {
-            run_custom_pipeline(
-                handler,
-                pipeline_definition,
-                pipeline_parameters,
-                data_array,
-                table_name,
-                query_ctx,
-                is_top_level,
-            )
-            .await
+            run_custom_pipeline(handler, pipeline_ctx, pipeline_req, query_ctx, is_top_level).await
         }
     }
 }
@@ -89,10 +78,13 @@ async fn run_identity_pipeline(
     handler: &PipelineHandlerRef,
     custom_ts: Option<&IdentityTimeIndex>,
     pipeline_parameters: &GreptimePipelineParams,
-    data_array: Vec<PipelineMap>,
-    table_name: String,
+    pipeline_req: PipelineIngestRequest,
     query_ctx: &QueryContextRef,
 ) -> Result<Vec<RowInsertRequest>> {
+    let PipelineIngestRequest {
+        table: table_name,
+        values: data_array,
+    } = pipeline_req;
     let table = handler
         .get_table(&table_name, query_ctx)
         .await
@@ -109,18 +101,20 @@ async fn run_identity_pipeline(
 
 async fn run_custom_pipeline(
     handler: &PipelineHandlerRef,
-    pipeline_definition: &PipelineDefinition,
-    pipeline_parameters: &GreptimePipelineParams,
-    data_array: Vec<PipelineMap>,
-    table_name: String,
+    pipeline_ctx: &PipelineContext<'_>,
+    pipeline_req: PipelineIngestRequest,
     query_ctx: &QueryContextRef,
     is_top_level: bool,
 ) -> Result<Vec<RowInsertRequest>> {
     let db = query_ctx.get_db_string();
-    let pipeline = get_pipeline(pipeline_definition, handler, query_ctx).await?;
+    let pipeline = get_pipeline(pipeline_ctx.pipeline_definition, handler, query_ctx).await?;
 
     let transform_timer = std::time::Instant::now();
 
+    let PipelineIngestRequest {
+        table: table_name,
+        values: data_array,
+    } = pipeline_req;
     let arr_len = data_array.len();
     let mut req_map = HashMap::new();
     let mut dispatched: BTreeMap<DispatchedTo, Vec<PipelineMap>> = BTreeMap::new();
@@ -185,12 +179,15 @@ async fn run_custom_pipeline(
         // run pipeline recursively.
         let next_pipeline_def =
             PipelineDefinition::from_name(next_pipeline_name, None, None).context(PipelineSnafu)?;
+        let next_pipeline_ctx =
+            PipelineContext::new(&next_pipeline_def, pipeline_ctx.pipeline_param);
         let requests = Box::pin(run_pipeline(
             handler,
-            &next_pipeline_def,
-            pipeline_parameters,
-            coll,
-            table_name,
+            &next_pipeline_ctx,
+            PipelineIngestRequest {
+                table: table_name,
+                values: coll,
+            },
             query_ctx,
             false,
         ))

@@ -30,7 +30,7 @@ use crate::error::{
     LogicalRegionNotFoundSnafu, PhysicalRegionNotFoundSnafu, Result, SerializeColumnMetadataSnafu,
     UnexpectedRequestSnafu,
 };
-use crate::utils::to_data_region_id;
+use crate::utils::{append_manifest_info, encode_manifest_info_to_extensions, to_data_region_id};
 
 impl MetricEngineInner {
     pub async fn alter_regions(
@@ -63,11 +63,15 @@ impl MetricEngineInner {
                     .unwrap()
                     .get_physical_region_id(region_id)
                     .with_context(|| LogicalRegionNotFoundSnafu { region_id })?;
+                let mut manifest_infos = Vec::with_capacity(1);
                 self.alter_logical_regions(physical_region_id, requests, extension_return_value)
                     .await?;
+                append_manifest_info(&self.mito, region_id, &mut manifest_infos);
+                encode_manifest_info_to_extensions(&manifest_infos, extension_return_value)?;
             } else {
                 let grouped_requests =
                     self.group_logical_region_requests_by_physical_region_id(requests)?;
+                let mut manifest_infos = Vec::with_capacity(grouped_requests.len());
                 for (physical_region_id, requests) in grouped_requests {
                     self.alter_logical_regions(
                         physical_region_id,
@@ -75,7 +79,9 @@ impl MetricEngineInner {
                         extension_return_value,
                     )
                     .await?;
+                    append_manifest_info(&self.mito, physical_region_id, &mut manifest_infos);
                 }
+                encode_manifest_info_to_extensions(&manifest_infos, extension_return_value)?;
             }
         }
         Ok(0)
