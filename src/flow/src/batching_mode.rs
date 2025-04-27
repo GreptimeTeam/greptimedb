@@ -38,3 +38,5 @@ const GRPC_CONN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Grpc max retry number
 const GRPC_MAX_RETRIES: u32 = 3;
+
+pub const FRONTEND_SCAN_TIMEOUT: Duration = Duration::from_secs(15);

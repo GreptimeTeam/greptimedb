@@ -37,11 +37,12 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::adapter::{CreateFlowArgs, StreamingEngine};
 use crate::batching_mode::engine::BatchingEngine;
+use crate::batching_mode::FRONTEND_SCAN_TIMEOUT;
 use crate::engine::FlowEngine;
 use crate::error::{
     CreateFlowSnafu, ExternalSnafu, FlowNotFoundSnafu, IllegalCheckTaskStateSnafu,
-    InsertIntoFlowSnafu, InternalSnafu, JoinTaskSnafu, ListFlowsSnafu, SyncCheckTaskSnafu,
-    UnexpectedSnafu,
+    InsertIntoFlowSnafu, InternalSnafu, JoinTaskSnafu, ListFlowsSnafu, NoAvailableFrontendSnafu,
+    SyncCheckTaskSnafu, UnexpectedSnafu,
 };
 use crate::metrics::METRIC_FLOW_TASK_COUNT;
 use crate::repr::{self, DiffRow};
@@ -81,12 +82,38 @@ impl FlowDualEngine {
         }
     }
 
+    /// Determine if the engine is in distributed mode
+    pub fn is_distributed(&self) -> bool {
+        self.streaming_engine.node_id.is_some()
+    }
+
     pub fn streaming_engine(&self) -> Arc<StreamingEngine> {
         self.streaming_engine.clone()
     }
 
     pub fn batching_engine(&self) -> Arc<BatchingEngine> {
         self.batching_engine.clone()
+    }
+
+    /// Scan periodically until available frontend is found
+    async fn wait_for_available_frontend(&self, timeout: std::time::Duration) -> Result<(), Error> {
+        if !self.is_distributed() {
+            return Ok(());
+        }
+        let frontend_client = self.batching_engine().frontend_client.clone();
+        let mut elapsed = std::time::Duration::from_millis(0);
+        let sleep_duration = std::time::Duration::from_millis(500);
+        loop {
+            let frontend_list = frontend_client.scan_for_frontend().await?;
+            if !frontend_list.is_empty() {
+                return Ok(());
+            }
+            tokio::time::sleep(sleep_duration).await;
+            elapsed += sleep_duration;
+            if elapsed >= timeout {
+                return NoAvailableFrontendSnafu { timeout }.fail();
+            }
+        }
     }
 
     /// Try to sync with check task, this is only used in drop flow&flush flow, so a flow id is required
@@ -338,6 +365,10 @@ struct ConsistentCheckTask {
 
 impl ConsistentCheckTask {
     async fn start_check_task(engine: &Arc<FlowDualEngine>) -> Result<Self, Error> {
+        // first check if available frontend is found
+        engine
+            .wait_for_available_frontend(FRONTEND_SCAN_TIMEOUT)
+            .await?;
         // first do recover flows
         engine.check_flow_consistent(true, false).await?;
 

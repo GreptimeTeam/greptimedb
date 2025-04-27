@@ -129,7 +129,8 @@ impl DatabaseWithPeer {
 }
 
 impl FrontendClient {
-    async fn scan_for_frontend(&self) -> Result<Vec<(NodeInfoKey, NodeInfo)>, Error> {
+    /// scan for available frontend
+    pub(crate) async fn scan_for_frontend(&self) -> Result<Vec<(NodeInfoKey, NodeInfo)>, Error> {
         let Self::Distributed { meta_client, .. } = self else {
             return Ok(vec![]);
         };
