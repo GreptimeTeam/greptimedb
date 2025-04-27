@@ -201,6 +201,13 @@ CREATE TABLE percentile_5s (
 
 Affected Rows: 0
 
+CREATE TABLE percentile_10s (
+    "percentile_state" BINARY,
+    time_window timestamp(0) time index
+);
+
+Affected Rows: 0
+
 CREATE FLOW calc_percentile_5s SINK TO percentile_5s
 AS
 SELECT
@@ -210,6 +217,18 @@ FROM
     percentile_base
 GROUP BY
     time_window;
+
+Affected Rows: 0
+
+CREATE FLOW calc_percentile_10s SINK TO percentile_10s
+AS
+SELECT
+    uddsketch_merge(128, 0.01, percentile_state),
+    date_bin('10 seconds'::INTERVAL, time_window) AS time_window
+FROM
+    percentile_5s
+GROUP BY
+    date_bin('10 seconds'::INTERVAL, time_window);
 
 Affected Rows: 0
 
@@ -236,6 +255,15 @@ ADMIN FLUSH_FLOW('calc_percentile_5s');
 |  FLOW_FLUSHED  |
 +----------------------------------------+
 
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('calc_percentile_10s');
+
++-----------------------------------------+
+| ADMIN FLUSH_FLOW('calc_percentile_10s') |
++-----------------------------------------+
+|  FLOW_FLUSHED  |
++-----------------------------------------+
+
 SELECT
     time_window,
     uddsketch_calc(0.99, percentile_state) AS p99
@@ -252,11 +280,34 @@ ORDER BY
 | 1970-01-01T00:00:10 |                    |
 +---------------------+--------------------+
 
+SELECT
+    time_window,
+    uddsketch_calc(0.99, percentile_state) AS p99
+FROM
+    percentile_10s
+ORDER BY
+    time_window;
+
++---------------------+--------------------+
+| time_window         | p99                |
++---------------------+--------------------+
+| 1970-01-01T00:00:00 | 59.745049810145126 |
+| 1970-01-01T00:00:10 |                    |
++---------------------+--------------------+
+
 DROP FLOW calc_percentile_5s;
 
 Affected Rows: 0
 
+DROP FLOW calc_percentile_10s;
+
+Affected Rows: 0
+
 DROP TABLE percentile_5s;
+
+Affected Rows: 0
+
+DROP TABLE percentile_10s;
 
 Affected Rows: 0
 

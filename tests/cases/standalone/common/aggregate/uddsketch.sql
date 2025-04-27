@@ -24,4 +24,21 @@ select uddsketch_calc(0.75, uddsketch_state(128, 0.01, `value`)) from test_uddsk
 
 select uddsketch_calc(0.95, uddsketch_state(128, 0.01, `value`)) from test_uddsketch;
 
+CREATE TABLE grouped_uddsketch (
+    `state` BINARY,
+    id_group INT PRIMARY KEY,
+    `ts` timestamp time index default now()
+);
+
+INSERT INTO grouped_uddsketch (`state`, id_group) SELECT uddsketch_state(128, 0.01, `value`), `id`/5*5 as id_group FROM test_uddsketch GROUP BY id_group;
+
+SELECT uddsketch_calc(0.1, uddsketch_merge(128, 0.01, `state`)) FROM grouped_uddsketch;
+
+-- should fail
+SELECT uddsketch_calc(0.1, uddsketch_merge(128, 0.1, `state`)) FROM grouped_uddsketch;
+
+-- should fail
+SELECT uddsketch_calc(0.1, uddsketch_merge(64, 0.01, `state`)) FROM grouped_uddsketch;
+
 drop table test_uddsketch;
+drop table grouped_uddsketch;
