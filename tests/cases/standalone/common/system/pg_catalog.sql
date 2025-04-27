@@ -1,7 +1,7 @@
 -- should not able to create pg_catalog
 create database pg_catalog;
 
--- session_user because session_user is based on the current user so is not null is for test 
+-- session_user because session_user is based on the current user so is not null is for test
 -- SQLNESS PROTOCOL POSTGRES
 SELECT session_user is not null;
 
@@ -34,6 +34,7 @@ select * from pg_catalog.pg_database;
 select * from pg_catalog.pg_type order by oid;
 
 -- SQLNESS PROTOCOL POSTGRES
+-- SQLNESS REPLACE (\d+) OID
 select * from pg_catalog.pg_database where datname = 'public';
 
 -- \d
@@ -68,6 +69,7 @@ ORDER BY 1,2;
 
 -- make sure oid of namespace keep stable
 -- SQLNESS PROTOCOL POSTGRES
+-- SQLNESS REPLACE (\d+) OID
 SELECT * FROM pg_namespace ORDER BY oid;
 
 -- SQLNESS PROTOCOL POSTGRES
@@ -128,6 +130,7 @@ where relnamespace in (
 );
 
 -- SQLNESS PROTOCOL POSTGRES
+-- SQLNESS REPLACE (\d+) OID
 select relnamespace, relname, relkind
 from pg_catalog.pg_class
 where relnamespace in (
