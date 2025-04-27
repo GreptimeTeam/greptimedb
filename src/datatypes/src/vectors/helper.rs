@@ -20,7 +20,7 @@ use std::sync::Arc;
 use arrow::array::{Array, ArrayRef, StringArray};
 use arrow::compute;
 use arrow::compute::kernels::comparison;
-use arrow::datatypes::{DataType as ArrowDataType, Int32Type, Int64Type, TimeUnit};
+use arrow::datatypes::{DataType as ArrowDataType, Int64Type, TimeUnit};
 use arrow_array::DictionaryArray;
 use arrow_schema::IntervalUnit;
 use datafusion_common::ScalarValue;

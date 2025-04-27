@@ -138,8 +138,6 @@ impl RegionScanExec {
             None => EquivalenceProperties::new(arrow_schema.clone()),
         };
 
-        common_telemetry::info!("[DEBUG] RegionScanExec: eq_props: {:?}", eq_props,);
-
         let partitioning = match request.distribution {
             Some(TimeSeriesDistribution::PerSeries) => {
                 Partitioning::Hash(pk_columns.clone(), num_output_partition)
@@ -148,13 +146,6 @@ impl RegionScanExec {
                 Partitioning::UnknownPartitioning(num_output_partition)
             }
         };
-
-        common_telemetry::info!(
-            "[DEBUG] RegionScanExec: num_partitions: {}, pk_columns: {:?}, distrubution: {:?}",
-            num_output_partition,
-            pk_columns,
-            request.distribution,
-        );
 
         let properties = PlanProperties::new(
             eq_props,
@@ -212,7 +203,6 @@ impl RegionScanExec {
             warn!("Setting partition ranges more than once for RegionScanExec");
         }
 
-        let num_partitions = partitions.len();
         let mut properties = self.properties.clone();
         let new_partitioning = match properties.partitioning {
             Partitioning::Hash(ref columns, _) => {
@@ -221,16 +211,6 @@ impl RegionScanExec {
             _ => Partitioning::UnknownPartitioning(target_partitions),
         };
         properties.partitioning = new_partitioning;
-
-        common_telemetry::info!(
-            "[DEBUG] RegionScanExec: set new partitions: {:?}",
-            properties.partitioning
-        );
-        common_telemetry::info!(
-            "[DEBUG] RegionScanExec: prepare with {} partitions, target_partitions: {}",
-            partitions.len(),
-            target_partitions
-        );
 
         {
             let mut scanner = self.scanner.lock().unwrap();

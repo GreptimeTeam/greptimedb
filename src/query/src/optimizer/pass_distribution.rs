@@ -20,8 +20,6 @@ use datafusion::physical_plan::ExecutionPlan;
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::Result as DfResult;
 use datafusion_physical_expr::Distribution;
-use store_api::storage::TimeSeriesDistribution;
-use table::table::scan::RegionScanExec;
 
 use crate::dist_plan::MergeScanExec;
 
@@ -73,17 +71,7 @@ impl PassDistribution {
                 && let Some(new_plan) = merge_scan.try_with_new_distribution(distribution.clone())
             {
                 Ok(Transformed::yes(Arc::new(new_plan) as _))
-            } else if let Some(region_scan) = plan.as_any().downcast_ref::<RegionScanExec>()
-            && let Some(TimeSeriesDistribution::PerSeries) = region_scan.distribution() {
-                common_telemetry::info!(
-                    "[DEBUG] PassDistribution: pass distribution to RegionScanExec, distribution: PerSeries"
-                );
-                common_telemetry::info!(
-                    "[DEBUG] PassDistribution: existing distribution: {:?}",
-                    region_scan.properties().partitioning
-                );
-                Ok(Transformed::no(plan))
-            } else{
+            } else {
                 Ok(Transformed::no(plan))
             }
         })?;

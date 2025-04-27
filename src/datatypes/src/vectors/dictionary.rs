@@ -16,8 +16,8 @@ use std::any::Any;
 use std::sync::Arc;
 
 use arrow::array::Array;
-use arrow::datatypes::{Int32Type, Int64Type};
-use arrow_array::{ArrayRef, DictionaryArray, Int32Array, Int64Array};
+use arrow::datatypes::Int64Type;
+use arrow_array::{ArrayRef, DictionaryArray, Int64Array};
 use serde_json::Value as JsonValue;
 use snafu::ResultExt;
 

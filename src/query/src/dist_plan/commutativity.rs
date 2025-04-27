@@ -19,9 +19,6 @@ use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
 use promql::extension_plan::{
     EmptyMetric, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
 };
-use promql::functions::{
-    Delta, HoltWinters, Increase, PredictLinear, QuantileOverTime, Rate, Round, QUANTILE_NAME,
-};
 
 use crate::dist_plan::merge_sort::{merge_sort_transformer, MergeSortLogicalPlan};
 use crate::dist_plan::MergeScanLogicalPlan;
@@ -130,7 +127,7 @@ impl Categorizer {
         match plan.name() {
             name if name == SeriesDivide::name() => {
                 let series_divide = plan.as_any().downcast_ref::<SeriesDivide>().unwrap();
-                let tags = series_divide.tags().into_iter().collect::<HashSet<_>>();
+                let tags = series_divide.tags().iter().collect::<HashSet<_>>();
                 for partition_col in partition_cols {
                     if !tags.contains(partition_col) {
                         return Commutativity::NonCommutative;
@@ -173,23 +170,8 @@ impl Categorizer {
             | Expr::Between(_)
             | Expr::Exists(_)
             | Expr::InList(_) => Commutativity::Commutative,
-            Expr::ScalarFunction(udf) => match udf.name() {
-                name if name == Delta::name()
-                    || name == Rate::name()
-                    || name == Increase::name()
-                    || name == QuantileOverTime::name()
-                    || name == PredictLinear::name()
-                    || name == HoltWinters::name()
-                    || name == Round::name() =>
-                {
-                    Commutativity::Unimplemented
-                }
-                _ => Commutativity::Commutative,
-            },
-            Expr::AggregateFunction(udaf) => match udaf.func.name() {
-                name if name == QUANTILE_NAME => Commutativity::Unimplemented,
-                _ => Commutativity::Commutative,
-            },
+            Expr::ScalarFunction(_udf) => Commutativity::Commutative,
+            Expr::AggregateFunction(_udaf) => Commutativity::Commutative,
 
             Expr::Like(_)
             | Expr::SimilarTo(_)

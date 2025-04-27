@@ -23,7 +23,6 @@ use datafusion::physical_plan::ExecutionPlan;
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::{DataFusionError, Result};
 use store_api::region_engine::PartitionRange;
-use store_api::storage::TimeSeriesDistribution;
 use table::table::scan::RegionScanExec;
 
 #[derive(Debug)]
@@ -66,27 +65,9 @@ impl ParallelizeScan {
                         return Ok(Transformed::no(plan));
                     }
 
-                    // don't parallelize if we want per series distribution
-                    // if matches!(
-                    //     region_scan_exec.distribution(),
-                    //     Some(TimeSeriesDistribution::PerSeries)
-                    // ) {
-                    //     return Ok(Transformed::no(plan));
-                    // }
-
-                    common_telemetry::info!(
-                        "[DEBUG] ParallelizeScan: parallelize scan, distribution: {:?}",
-                        region_scan_exec.distribution()
-                    );
-
                     let ranges = region_scan_exec.get_partition_ranges();
                     let total_range_num = ranges.len();
                     let expected_partition_num = config.execution.target_partitions;
-
-
-                    common_telemetry::info!(
-                        "[DEBUG] ParallelizeScan: expected partition num: {expected_partition_num}, total range num: {total_range_num}"
-                    );
 
                     // assign ranges to each partition
                     let mut partition_ranges =
@@ -152,18 +133,7 @@ impl ParallelizeScan {
 
         // Sort ranges by number of rows in descending order.
         ranges.sort_by(|a, b| b.num_rows.cmp(&a.num_rows));
-        // Get the max row number of the ranges. Note that the number of rows may be 0 if statistics are not available.
-        let max_rows = ranges[0].num_rows;
-        let total_rows = ranges.iter().map(|range| range.num_rows).sum::<usize>();
-        // Computes the partition num by the max row number. This eliminates the unbalance of the partitions.
-        let balanced_partition_num = if max_rows > 0 {
-            total_rows.div_ceil(max_rows)
-        } else {
-            ranges.len()
-        };
-        // let actual_partition_num = expected_partition_num.min(balanced_partition_num).max(1);
-        let actual_partition_num = expected_partition_num;
-        let mut partition_ranges = vec![vec![]; actual_partition_num];
+        let mut partition_ranges = vec![vec![]; expected_partition_num];
 
         #[derive(Eq, PartialEq)]
         struct HeapNode {
@@ -185,7 +155,7 @@ impl ParallelizeScan {
         }
 
         let mut part_heap =
-            BinaryHeap::from_iter((0..actual_partition_num).map(|partition_idx| HeapNode {
+            BinaryHeap::from_iter((0..expected_partition_num).map(|partition_idx| HeapNode {
                 num_rows: 0,
                 partition_idx,
             }));
