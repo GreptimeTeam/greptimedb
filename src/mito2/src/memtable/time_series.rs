@@ -147,7 +147,8 @@ impl TimeSeriesMemtable {
     fn update_stats(&self, stats: WriteMetrics) {
         self.alloc_tracker
             .on_allocation(stats.key_bytes + stats.value_bytes);
-        stats.update_timestamp_range(&self.max_timestamp, &self.min_timestamp);
+        self.max_timestamp.fetch_max(stats.max_ts, Ordering::SeqCst);
+        self.min_timestamp.fetch_min(stats.min_ts, Ordering::SeqCst);
     }
 
     fn write_key_value(&self, kv: KeyValue, stats: &mut WriteMetrics) -> Result<()> {
