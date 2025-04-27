@@ -14,6 +14,7 @@
 
 pub(crate) mod close_downgraded_region;
 pub(crate) mod downgrade_leader_region;
+pub(crate) mod flush_leader_region;
 pub(crate) mod manager;
 pub(crate) mod migration_abort;
 pub(crate) mod migration_end;
@@ -111,6 +112,8 @@ impl PersistentContext {
 pub struct Metrics {
     /// Elapsed time of downgrading region and upgrading region.
     operations_elapsed: Duration,
+    /// Elapsed time of flushing leader region.
+    flush_leader_region_elapsed: Duration,
     /// Elapsed time of downgrading leader region.
     downgrade_leader_region_elapsed: Duration,
     /// Elapsed time of open candidate region.
@@ -123,8 +126,9 @@ impl Display for Metrics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "operations_elapsed: {:?}, downgrade_leader_region_elapsed: {:?}, open_candidate_region_elapsed: {:?}, upgrade_candidate_region_elapsed: {:?}",
+            "operations_elapsed: {:?}, flush_leader_region_elapsed: {:?}, downgrade_leader_region_elapsed: {:?}, open_candidate_region_elapsed: {:?}, upgrade_candidate_region_elapsed: {:?}",
             self.operations_elapsed,
+            self.flush_leader_region_elapsed,
             self.downgrade_leader_region_elapsed,
             self.open_candidate_region_elapsed,
             self.upgrade_candidate_region_elapsed
@@ -136,6 +140,11 @@ impl Metrics {
     /// Updates the elapsed time of downgrading region and upgrading region.
     pub fn update_operations_elapsed(&mut self, elapsed: Duration) {
         self.operations_elapsed += elapsed;
+    }
+
+    /// Updates the elapsed time of flushing leader region.
+    pub fn update_flush_leader_region_elapsed(&mut self, elapsed: Duration) {
+        self.flush_leader_region_elapsed += elapsed;
     }
 
     /// Updates the elapsed time of downgrading leader region.
@@ -160,6 +169,12 @@ impl Drop for Metrics {
             METRIC_META_REGION_MIGRATION_STAGE_ELAPSED
                 .with_label_values(&["operations"])
                 .observe(self.operations_elapsed.as_secs_f64());
+        }
+
+        if !self.flush_leader_region_elapsed.is_zero() {
+            METRIC_META_REGION_MIGRATION_STAGE_ELAPSED
+                .with_label_values(&["flush_leader_region"])
+                .observe(self.flush_leader_region_elapsed.as_secs_f64());
         }
 
         if !self.downgrade_leader_region_elapsed.is_zero() {
@@ -318,6 +333,13 @@ impl Context {
         self.volatile_ctx
             .metrics
             .update_operations_elapsed(instant.elapsed());
+    }
+
+    /// Updates the elapsed time of flushing leader region.
+    pub fn update_flush_leader_region_elapsed(&mut self, instant: Instant) {
+        self.volatile_ctx
+            .metrics
+            .update_flush_leader_region_elapsed(instant.elapsed());
     }
 
     /// Updates the elapsed time of downgrading leader region.
