@@ -107,13 +107,13 @@ select * from pg_catalog.pg_type order by oid;
 +-----+-----------+--------+
 
 -- SQLNESS PROTOCOL POSTGRES
--- SQLNESS REPLACE (\d+) OID
+-- SQLNESS REPLACE (\d+\s*) OID
 select * from pg_catalog.pg_database where datname = 'public';
 
 +------------+---------+
 | oid        | datname |
 +------------+---------+
-| OID | public  |
+| OID| public  |
 +------------+---------+
 
 -- \d
@@ -160,16 +160,16 @@ ORDER BY 1,2;
 
 -- make sure oid of namespace keep stable
 -- SQLNESS PROTOCOL POSTGRES
--- SQLNESS REPLACE (\d+) OID
+-- SQLNESS REPLACE (\d+\s*) OID
 SELECT * FROM pg_namespace ORDER BY oid;
 
 +------------+--------------------+
 | oid        | nspname            |
 +------------+--------------------+
-| OID | information_schema |
-| OID | public             |
-| OID | greptime_private   |
-| OID | pg_catalog         |
+| OID| information_schema |
+| OID| public             |
+| OID| greptime_private   |
+| OID| pg_catalog         |
 +------------+--------------------+
 
 -- SQLNESS PROTOCOL POSTGRES
@@ -262,7 +262,7 @@ where relnamespace in (
 +---------+
 
 -- SQLNESS PROTOCOL POSTGRES
--- SQLNESS REPLACE (\d+) OID
+-- SQLNESS REPLACE (\d+\s*) OID
 select relnamespace, relname, relkind
 from pg_catalog.pg_class
 where relnamespace in (
@@ -277,7 +277,7 @@ order by relnamespace, relname;
 +--------------+---------+---------+
 | relnamespace | relname | relkind |
 +--------------+---------+---------+
-| OID   | foo     | r       |
+| OID| foo     | r       |
 +--------------+---------+---------+
 
 -- SQLNESS PROTOCOL POSTGRES
