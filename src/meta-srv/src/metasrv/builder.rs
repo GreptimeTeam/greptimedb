@@ -43,7 +43,6 @@ use common_procedure::ProcedureManagerRef;
 use common_telemetry::{info, warn};
 use snafu::{ensure, ResultExt};
 
-use super::RegionStatAwareSelectorRef;
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 use crate::error::{self, BuildWalOptionsAllocatorSnafu, Result};
@@ -55,8 +54,8 @@ use crate::handler::region_lease_handler::{CustomizedRegionLeaseRenewerRef, Regi
 use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatMailbox, Pushers};
 use crate::lease::MetaPeerLookupService;
 use crate::metasrv::{
-    ElectionRef, Metasrv, MetasrvInfo, MetasrvOptions, SelectTarget, SelectorContext, SelectorRef,
-    FLOW_ID_SEQ, TABLE_ID_SEQ,
+    ElectionRef, Metasrv, MetasrvInfo, MetasrvOptions, RegionStatAwareSelectorRef, SelectTarget,
+    SelectorContext, SelectorRef, FLOW_ID_SEQ, TABLE_ID_SEQ,
 };
 use crate::procedure::region_migration::manager::RegionMigrationManager;
 use crate::procedure::region_migration::DefaultContextFactory;
