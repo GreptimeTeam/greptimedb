@@ -138,26 +138,18 @@ impl ParallelizeScan {
     ) -> Vec<Vec<PartitionRange>> {
         if ranges.is_empty() {
             // Returns a single partition with no range.
-            return vec![vec![]];
+            return vec![vec![]; expected_partition_num];
         }
 
         if ranges.len() == 1 {
-            return vec![ranges];
+            let mut vec = vec![vec![]; expected_partition_num];
+            vec[0] = ranges;
+            return vec;
         }
 
         // Sort ranges by number of rows in descending order.
         ranges.sort_by(|a, b| b.num_rows.cmp(&a.num_rows));
-        // Get the max row number of the ranges. Note that the number of rows may be 0 if statistics are not available.
-        let max_rows = ranges[0].num_rows;
-        let total_rows = ranges.iter().map(|range| range.num_rows).sum::<usize>();
-        // Computes the partition num by the max row number. This eliminates the unbalance of the partitions.
-        let balanced_partition_num = if max_rows > 0 {
-            total_rows.div_ceil(max_rows)
-        } else {
-            ranges.len()
-        };
-        let actual_partition_num = expected_partition_num.min(balanced_partition_num).max(1);
-        let mut partition_ranges = vec![vec![]; actual_partition_num];
+        let mut partition_ranges = vec![vec![]; expected_partition_num];
 
         #[derive(Eq, PartialEq)]
         struct HeapNode {
@@ -179,7 +171,7 @@ impl ParallelizeScan {
         }
 
         let mut part_heap =
-            BinaryHeap::from_iter((0..actual_partition_num).map(|partition_idx| HeapNode {
+            BinaryHeap::from_iter((0..expected_partition_num).map(|partition_idx| HeapNode {
                 num_rows: 0,
                 partition_idx,
             }));
@@ -270,7 +262,7 @@ mod test {
         ];
         assert_eq!(result, expected);
 
-        // assign 4 ranges to 5 partitions. Only 4 partitions are returned.
+        // assign 4 ranges to 5 partitions.
         let expected_partition_num = 5;
         let result = ParallelizeScan::assign_partition_range(ranges, expected_partition_num);
         let expected = vec![
@@ -281,31 +273,30 @@ mod test {
                 identifier: 4,
             }],
             vec![PartitionRange {
+                start: Timestamp::new(0, TimeUnit::Second),
+                end: Timestamp::new(10, TimeUnit::Second),
+                num_rows: 100,
+                identifier: 1,
+            }],
+            vec![PartitionRange {
                 start: Timestamp::new(10, TimeUnit::Second),
                 end: Timestamp::new(20, TimeUnit::Second),
                 num_rows: 200,
                 identifier: 2,
             }],
-            vec![
-                PartitionRange {
-                    start: Timestamp::new(20, TimeUnit::Second),
-                    end: Timestamp::new(30, TimeUnit::Second),
-                    num_rows: 150,
-                    identifier: 3,
-                },
-                PartitionRange {
-                    start: Timestamp::new(0, TimeUnit::Second),
-                    end: Timestamp::new(10, TimeUnit::Second),
-                    num_rows: 100,
-                    identifier: 1,
-                },
-            ],
+            vec![],
+            vec![PartitionRange {
+                start: Timestamp::new(20, TimeUnit::Second),
+                end: Timestamp::new(30, TimeUnit::Second),
+                num_rows: 150,
+                identifier: 3,
+            }],
         ];
         assert_eq!(result, expected);
 
-        // assign 0 ranges to 5 partitions. Only 1 partition is returned.
+        // assign 0 ranges to 5 partitions. Should return 5 empty ranges.
         let result = ParallelizeScan::assign_partition_range(vec![], 5);
-        assert_eq!(result.len(), 1);
+        assert_eq!(result.len(), 5);
     }
 
     #[test]

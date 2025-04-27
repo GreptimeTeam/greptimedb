@@ -25,12 +25,15 @@ use common_meta::cluster::{NodeInfo, NodeInfoKey, Role};
 use common_meta::peer::Peer;
 use common_meta::rpc::store::RangeRequest;
 use common_query::Output;
+use common_telemetry::warn;
 use meta_client::client::MetaClient;
 use servers::query_handler::grpc::GrpcQueryHandler;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
 
-use crate::batching_mode::DEFAULT_BATCHING_ENGINE_QUERY_TIMEOUT;
+use crate::batching_mode::{
+    DEFAULT_BATCHING_ENGINE_QUERY_TIMEOUT, GRPC_CONN_TIMEOUT, GRPC_MAX_RETRIES,
+};
 use crate::error::{ExternalSnafu, InvalidRequestSnafu, UnexpectedSnafu};
 use crate::Error;
 
@@ -99,7 +102,9 @@ impl FrontendClient {
         Self::Distributed {
             meta_client,
             chnl_mgr: {
-                let cfg = ChannelConfig::new().timeout(DEFAULT_BATCHING_ENGINE_QUERY_TIMEOUT);
+                let cfg = ChannelConfig::new()
+                    .connect_timeout(GRPC_CONN_TIMEOUT)
+                    .timeout(DEFAULT_BATCHING_ENGINE_QUERY_TIMEOUT);
                 ChannelManager::with_config(cfg)
             },
         }
@@ -223,12 +228,32 @@ impl FrontendClient {
                     peer: db.peer.clone(),
                 });
 
-                db.database
-                    .handle(req.clone())
-                    .await
-                    .with_context(|_| InvalidRequestSnafu {
-                        context: format!("Failed to handle request: {:?}", req),
-                    })
+                let mut retry = 0;
+
+                loop {
+                    let ret = db.database.handle(req.clone()).await.with_context(|_| {
+                        InvalidRequestSnafu {
+                            context: format!("Failed to handle request: {:?}", req),
+                        }
+                    });
+                    if let Err(err) = ret {
+                        if retry < GRPC_MAX_RETRIES {
+                            retry += 1;
+                            warn!(
+                                "Failed to send request to grpc handle at Peer={:?}, retry = {}, error = {:?}",
+                                db.peer, retry, err
+                            );
+                            continue;
+                        } else {
+                            common_telemetry::error!(
+                                "Failed to send request to grpc handle at Peer={:?} after {} retries, error = {:?}",
+                                db.peer, retry, err
+                            );
+                            return Err(err);
+                        }
+                    }
+                    return ret;
+                }
             }
             FrontendClient::Standalone { database_client } => {
                 let ctx = QueryContextBuilder::default()

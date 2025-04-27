@@ -206,6 +206,14 @@ impl SeqScan {
                 .build(),
             ));
         }
+        if self.properties.partitions[partition].is_empty() {
+            return Ok(Box::pin(RecordBatchStreamWrapper::new(
+                self.stream_ctx.input.mapper.output_schema(),
+                common_recordbatch::EmptyRecordBatchStream::new(
+                    self.stream_ctx.input.mapper.output_schema(),
+                ),
+            )));
+        }
 
         let stream_ctx = self.stream_ctx.clone();
         let semaphore = self.new_semaphore();

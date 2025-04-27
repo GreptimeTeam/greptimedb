@@ -91,9 +91,9 @@ impl UserDefinedLogicalNodeCore for InstantManipulate {
         _exprs: Vec<Expr>,
         inputs: Vec<LogicalPlan>,
     ) -> DataFusionResult<Self> {
-        if inputs.is_empty() {
+        if inputs.len() != 1 {
             return Err(DataFusionError::Internal(
-                "InstantManipulate should have at least one input".to_string(),
+                "InstantManipulate should have exact one input".to_string(),
             ));
         }
 
@@ -354,6 +354,9 @@ impl Stream for InstantManipulateStream {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let poll = match ready!(self.input.poll_next_unpin(cx)) {
             Some(Ok(batch)) => {
+                if batch.num_rows() == 0 {
+                    return Poll::Pending;
+                }
                 let timer = std::time::Instant::now();
                 self.num_series.add(1);
                 let result = Ok(batch).and_then(|batch| self.manipulate(batch));

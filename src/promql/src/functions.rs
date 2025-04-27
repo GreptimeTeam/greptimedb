@@ -40,17 +40,17 @@ pub use holt_winters::HoltWinters;
 pub use idelta::IDelta;
 pub use predict_linear::PredictLinear;
 pub use quantile::QuantileOverTime;
-pub use quantile_aggr::quantile_udaf;
+pub use quantile_aggr::{quantile_udaf, QUANTILE_NAME};
 pub use resets::Resets;
 pub use round::Round;
 
+/// Extracts an array from a `ColumnarValue`.
+///
+/// If the `ColumnarValue` is a scalar, it converts it to an array of size 1.
 pub(crate) fn extract_array(columnar_value: &ColumnarValue) -> Result<ArrayRef, DataFusionError> {
-    if let ColumnarValue::Array(array) = columnar_value {
-        Ok(array.clone())
-    } else {
-        Err(DataFusionError::Execution(
-            "expect array as input, found scalar value".to_string(),
-        ))
+    match columnar_value {
+        ColumnarValue::Array(array) => Ok(array.clone()),
+        ColumnarValue::Scalar(scalar) => Ok(scalar.to_array_of_size(1)?),
     }
 }
 

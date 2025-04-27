@@ -278,7 +278,7 @@ impl KvBackend for LeaderCachedKvBackend {
 
         let remote_res = self.store.batch_get(remote_req).await?;
         let put_req = BatchPutRequest {
-            kvs: remote_res.kvs.clone().into_iter().map(Into::into).collect(),
+            kvs: remote_res.kvs.clone().into_iter().collect(),
             ..Default::default()
         };
         let _ = self.cache.batch_put(put_req).await?;

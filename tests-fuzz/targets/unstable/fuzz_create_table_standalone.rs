@@ -157,7 +157,7 @@ async fn execute_unstable_create_table(
             }
             Err(err) => {
                 // FIXME(weny): support to retry it later.
-                if matches!(err, sqlx::Error::PoolTimedOut { .. }) {
+                if matches!(err, sqlx::Error::PoolTimedOut) {
                     warn!("ignore pool timeout, sql: {sql}");
                     continue;
                 }

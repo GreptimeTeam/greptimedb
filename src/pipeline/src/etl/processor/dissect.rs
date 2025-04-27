@@ -325,7 +325,7 @@ impl std::str::FromStr for Pattern {
 
 impl Pattern {
     fn check(&self) -> Result<()> {
-        if self.len() == 0 {
+        if self.is_empty() {
             return DissectEmptyPatternSnafu.fail();
         }
 
