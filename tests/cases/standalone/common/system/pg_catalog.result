@@ -161,15 +161,15 @@ ORDER BY 1,2;
 -- make sure oid of namespace keep stable
 -- SQLNESS PROTOCOL POSTGRES
 -- SQLNESS REPLACE (\d+\s*) OID
-SELECT * FROM pg_namespace ORDER BY oid;
+SELECT * FROM pg_namespace ORDER BY nspname;
 
 +------------+--------------------+
 | oid        | nspname            |
 +------------+--------------------+
-| OID| information_schema |
-| OID| public             |
 | OID| greptime_private   |
+| OID| information_schema |
 | OID| pg_catalog         |
+| OID| public             |
 +------------+--------------------+
 
 -- SQLNESS PROTOCOL POSTGRES

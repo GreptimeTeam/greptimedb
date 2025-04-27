@@ -70,7 +70,7 @@ ORDER BY 1,2;
 -- make sure oid of namespace keep stable
 -- SQLNESS PROTOCOL POSTGRES
 -- SQLNESS REPLACE (\d+\s*) OID
-SELECT * FROM pg_namespace ORDER BY oid;
+SELECT * FROM pg_namespace ORDER BY nspname;
 
 -- SQLNESS PROTOCOL POSTGRES
 create database my_db;
