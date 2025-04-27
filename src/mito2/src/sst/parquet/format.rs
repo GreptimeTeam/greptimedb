@@ -358,17 +358,23 @@ impl ReadFormat {
         &self,
         row_groups: &[impl Borrow<RowGroupMetaData>],
         column_id: ColumnId,
-    ) -> Option<ArrayRef> {
-        let column = self.metadata.column_by_id(column_id)?;
+    ) -> StatValues {
+        let Some(column) = self.metadata.column_by_id(column_id) else {
+            // No such column in the SST.
+            return StatValues::NoColumn;
+        };
         match column.semantic_type {
-            SemanticType::Tag => None,
+            SemanticType::Tag => StatValues::NoStats,
             SemanticType::Field => {
-                let index = self.field_id_to_index.get(&column_id)?;
-                Self::column_null_counts(row_groups, *index)
+                // Safety: `field_id_to_index` is initialized by the semantic type.
+                let index = self.field_id_to_index.get(&column_id).unwrap();
+                let stats = Self::column_null_counts(row_groups, *index);
+                StatValues::from_stats_opt(stats)
             }
             SemanticType::Timestamp => {
                 let index = self.time_index_position();
-                Self::column_null_counts(row_groups, index)
+                let stats = Self::column_null_counts(row_groups, index);
+                StatValues::from_stats_opt(stats)
             }
         }
     }
@@ -404,7 +410,6 @@ impl ReadFormat {
         column: &ColumnMetadata,
         is_min: bool,
     ) -> StatValues {
-        let primary_key_encoding = self.metadata.primary_key_encoding;
         let is_first_tag = self
             .metadata
             .primary_key
