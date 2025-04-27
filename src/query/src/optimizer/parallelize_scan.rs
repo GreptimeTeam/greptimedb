@@ -246,7 +246,7 @@ mod test {
         ];
         assert_eq!(result, expected);
 
-        // assign 4 ranges to 5 partitions. Only 4 partitions are returned.
+        // assign 4 ranges to 5 partitions.
         let expected_partition_num = 5;
         let result = ParallelizeScan::assign_partition_range(ranges, expected_partition_num);
         let expected = vec![
@@ -257,31 +257,30 @@ mod test {
                 identifier: 4,
             }],
             vec![PartitionRange {
+                start: Timestamp::new(0, TimeUnit::Second),
+                end: Timestamp::new(10, TimeUnit::Second),
+                num_rows: 100,
+                identifier: 1,
+            }],
+            vec![PartitionRange {
                 start: Timestamp::new(10, TimeUnit::Second),
                 end: Timestamp::new(20, TimeUnit::Second),
                 num_rows: 200,
                 identifier: 2,
             }],
-            vec![
-                PartitionRange {
-                    start: Timestamp::new(20, TimeUnit::Second),
-                    end: Timestamp::new(30, TimeUnit::Second),
-                    num_rows: 150,
-                    identifier: 3,
-                },
-                PartitionRange {
-                    start: Timestamp::new(0, TimeUnit::Second),
-                    end: Timestamp::new(10, TimeUnit::Second),
-                    num_rows: 100,
-                    identifier: 1,
-                },
-            ],
+            vec![],
+            vec![PartitionRange {
+                start: Timestamp::new(20, TimeUnit::Second),
+                end: Timestamp::new(30, TimeUnit::Second),
+                num_rows: 150,
+                identifier: 3,
+            }],
         ];
         assert_eq!(result, expected);
 
-        // assign 0 ranges to 5 partitions. Only 1 partition is returned.
+        // assign 0 ranges to 5 partitions. Should return 5 empty ranges.
         let result = ParallelizeScan::assign_partition_range(vec![], 5);
-        assert_eq!(result.len(), 1);
+        assert_eq!(result.len(), 5);
     }
 
     #[test]

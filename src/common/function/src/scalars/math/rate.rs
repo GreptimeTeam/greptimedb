@@ -82,7 +82,7 @@ mod tests {
     #[test]
     fn test_rate_function() {
         let rate = RateFunction;
-        assert_eq!("prom_rate", rate.name());
+        assert_eq!("rate", rate.name());
         assert_eq!(
             ConcreteDataType::float64_datatype(),
             rate.return_type(&[]).unwrap()

@@ -319,7 +319,9 @@ impl Stream for SeriesDivideStream {
                     let next_batch = ready!(self.as_mut().fetch_next_batch(cx)).transpose()?;
                     let timer = std::time::Instant::now();
                     if let Some(next_batch) = next_batch {
-                        self.buffer.push(next_batch);
+                        if next_batch.num_rows() != 0 {
+                            self.buffer.push(next_batch);
+                        }
                         continue;
                     } else {
                         // input stream is ended

@@ -404,7 +404,7 @@ mod tests {
         assert_eq!(
             casted.data_type(),
             ConcreteDataType::Dictionary(DictionaryType::new(
-                ConcreteDataType::int32_datatype(),
+                ConcreteDataType::int64_datatype(),
                 ConcreteDataType::string_datatype(),
             ))
         );
