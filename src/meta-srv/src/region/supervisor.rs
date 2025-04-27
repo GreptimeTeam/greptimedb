@@ -406,10 +406,10 @@ impl RegionSupervisor {
                 .await
             {
                 Ok(tasks) => {
-                    for task in tasks {
+                    for (task, count) in tasks {
                         let region_id = task.region_id;
                         let datanode_id = task.from_peer.id;
-                        if let Err(err) = self.do_failover(task).await {
+                        if let Err(err) = self.do_failover(task, count).await {
                             error!(err; "Failed to execute region failover for region: {}, datanode: {}", region_id, datanode_id);
                         }
                     }
@@ -465,7 +465,6 @@ impl RegionSupervisor {
                         exclude_peer_ids,
                     )
                     .await?;
-
                 ensure!(
                     peers.len() == regions.len(),
                     error::PeerCountMismatchSnafu {
@@ -473,6 +472,7 @@ impl RegionSupervisor {
                         actual: peers.len(),
                     }
                 );
+
                 Ok(peers)
             }
         }
@@ -483,7 +483,7 @@ impl RegionSupervisor {
         from_peer_id: DatanodeId,
         regions: &[RegionId],
         failed_datanodes: &[DatanodeId],
-    ) -> Result<Vec<RegionMigrationProcedureTask>> {
+    ) -> Result<Vec<(RegionMigrationProcedureTask, u32)>> {
         let mut tasks = Vec::with_capacity(regions.len());
         let from_peer = self
             .peer_lookup
@@ -511,19 +511,19 @@ impl RegionSupervisor {
                 to_peer: peer,
                 timeout: DEFAULT_REGION_MIGRATION_TIMEOUT * count,
             };
-            tasks.push(task);
+            tasks.push((task, count));
         }
 
         Ok(tasks)
     }
 
-    async fn do_failover(&mut self, task: RegionMigrationProcedureTask) -> Result<()> {
+    async fn do_failover(&mut self, task: RegionMigrationProcedureTask, count: u32) -> Result<()> {
         let from_peer_id = task.from_peer.id;
         let region_id = task.region_id;
 
         info!(
-            "Failover for region: {}, from_peer: {}, to_peer: {}, timeout: {:?}",
-            task.region_id, task.from_peer, task.to_peer, task.timeout
+            "Failover for region: {}, from_peer: {}, to_peer: {}, timeout: {:?}, tries: {}",
+            task.region_id, task.from_peer, task.to_peer, task.timeout, count
         );
 
         if let Err(err) = self.region_migration_manager.submit_procedure(task).await {
