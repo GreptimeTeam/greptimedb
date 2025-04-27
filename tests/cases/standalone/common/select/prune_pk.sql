@@ -47,3 +47,18 @@ SELECT greptime_timestamp, namespace, env, total FROM test_multi_pk_filter WHERE
 SELECT greptime_timestamp, namespace, env, total FROM test_multi_pk_filter WHERE
     greptime_timestamp BETWEEN '2023-05-15 10:00:00' AND '2023-05-15 11:00:00' AND flag = 1 AND namespace = 'thermostat_v2' AND env='dev'
     ORDER BY greptime_timestamp;
+
+DROP TABLE test_multi_pk_filter;
+
+CREATE TABLE IF NOT EXISTS `test_multi_pk_null` ( `namespace` STRING NULL, `env` STRING NULL DEFAULT 'NULL', `total` BIGINT NULL, `greptime_timestamp` TIMESTAMP(9) NOT NULL, TIME INDEX (`greptime_timestamp`), PRIMARY KEY (`namespace`, `env`) ) ENGINE=mito;
+
+INSERT INTO test_multi_pk_null
+    (namespace, env, total, greptime_timestamp)
+    VALUES ('thermostat_v2', 'production', 5289, '2023-05-15 10:00:00');
+INSERT INTO test_multi_pk_null
+    (namespace, env, total, greptime_timestamp)
+    VALUES ('thermostat_v2', 'production', 421, '2023-05-15 10:05:00');
+
+ADMIN FLUSH_TABLE('test_multi_pk_null');
+
+SELECT * FROM test_multi_pk_null WHERE env IS NOT NULL;
