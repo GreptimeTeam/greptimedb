@@ -152,3 +152,7 @@ SELECT * FROM test_multi_pk_null WHERE env IS NOT NULL;
 | thermostat_v2 | production | 421   | 2023-05-15T10:05:00 |
 +---------------+------------+-------+---------------------+
 
+DROP TABLE test_multi_pk_null;
+
+Affected Rows: 0
+

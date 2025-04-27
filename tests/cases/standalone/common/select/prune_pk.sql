@@ -62,3 +62,5 @@ INSERT INTO test_multi_pk_null
 ADMIN FLUSH_TABLE('test_multi_pk_null');
 
 SELECT * FROM test_multi_pk_null WHERE env IS NOT NULL;
+
+DROP TABLE test_multi_pk_null;
