@@ -14,6 +14,7 @@
 
 #![feature(assert_matches)]
 #![feature(try_blocks)]
+#![feature(let_chains)]
 
 pub mod dist_table;
 pub mod error;

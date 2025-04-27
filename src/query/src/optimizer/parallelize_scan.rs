@@ -67,16 +67,26 @@ impl ParallelizeScan {
                     }
 
                     // don't parallelize if we want per series distribution
-                    if matches!(
-                        region_scan_exec.distribution(),
-                        Some(TimeSeriesDistribution::PerSeries)
-                    ) {
-                        return Ok(Transformed::no(plan));
-                    }
+                    // if matches!(
+                    //     region_scan_exec.distribution(),
+                    //     Some(TimeSeriesDistribution::PerSeries)
+                    // ) {
+                    //     return Ok(Transformed::no(plan));
+                    // }
+
+                    common_telemetry::info!(
+                        "[DEBUG] ParallelizeScan: parallelize scan, distribution: {:?}",
+                        region_scan_exec.distribution()
+                    );
 
                     let ranges = region_scan_exec.get_partition_ranges();
                     let total_range_num = ranges.len();
                     let expected_partition_num = config.execution.target_partitions;
+
+
+                    common_telemetry::info!(
+                        "[DEBUG] ParallelizeScan: expected partition num: {expected_partition_num}, total range num: {total_range_num}"
+                    );
 
                     // assign ranges to each partition
                     let mut partition_ranges =
@@ -131,11 +141,13 @@ impl ParallelizeScan {
     ) -> Vec<Vec<PartitionRange>> {
         if ranges.is_empty() {
             // Returns a single partition with no range.
-            return vec![vec![]];
+            return vec![vec![]; expected_partition_num];
         }
 
         if ranges.len() == 1 {
-            return vec![ranges];
+            let mut vec = vec![vec![]; expected_partition_num];
+            vec[0] = ranges;
+            return vec;
         }
 
         // Sort ranges by number of rows in descending order.
@@ -149,7 +161,8 @@ impl ParallelizeScan {
         } else {
             ranges.len()
         };
-        let actual_partition_num = expected_partition_num.min(balanced_partition_num).max(1);
+        // let actual_partition_num = expected_partition_num.min(balanced_partition_num).max(1);
+        let actual_partition_num = expected_partition_num;
         let mut partition_ranges = vec![vec![]; actual_partition_num];
 
         #[derive(Eq, PartialEq)]
