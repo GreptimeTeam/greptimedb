@@ -35,7 +35,7 @@ use tokio::time::{interval, MissedTickBehavior};
 
 use crate::error::{self, Result};
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
-use crate::metasrv::{RegionStatAwareSelectorRef, SelectorContext, SelectorRef};
+use crate::metasrv::{RegionStatAwareSelectorRef, SelectTarget, SelectorContext, SelectorRef};
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
 use crate::procedure::region_migration::{
     RegionMigrationProcedureTask, DEFAULT_REGION_MIGRATION_TIMEOUT,
@@ -443,9 +443,10 @@ impl RegionSupervisor {
                 let peers = selector.select(&self.selector_context, opt).await?;
                 ensure!(
                     peers.len() == regions.len(),
-                    error::PeerCountMismatchSnafu {
-                        expected: regions.len(),
-                        actual: peers.len(),
+                    error::NoEnoughAvailableNodeSnafu {
+                        required: regions.len(),
+                        available: peers.len(),
+                        select_target: SelectTarget::Datanode,
                     }
                 );
                 let region_peers = regions
@@ -467,9 +468,10 @@ impl RegionSupervisor {
                     .await?;
                 ensure!(
                     peers.len() == regions.len(),
-                    error::PeerCountMismatchSnafu {
-                        expected: regions.len(),
-                        actual: peers.len(),
+                    error::NoEnoughAvailableNodeSnafu {
+                        required: regions.len(),
+                        available: peers.len(),
+                        select_target: SelectTarget::Datanode,
                     }
                 );
 

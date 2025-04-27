@@ -710,14 +710,6 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
-    #[snafu(display("Peer count mismatch, expected: {}, actual: {}", expected, actual))]
-    PeerCountMismatch {
-        expected: usize,
-        actual: usize,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to serialize options to TOML"))]
     TomlFormat {
         #[snafu(implicit)]
@@ -943,8 +935,7 @@ impl ErrorExt for Error {
             | Error::RegionOpeningRace { .. }
             | Error::RegionRouteNotFound { .. }
             | Error::MigrationAbort { .. }
-            | Error::MigrationRunning { .. }
-            | Error::PeerCountMismatch { .. } => StatusCode::Unexpected,
+            | Error::MigrationRunning { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::SaveClusterInfo { source, .. }
             | Error::InvalidClusterInfoFormat { source, .. }
