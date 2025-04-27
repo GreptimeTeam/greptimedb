@@ -80,12 +80,23 @@ pub struct SlowQueryOptions {
     /// Whether to enable slow query log.
     pub enable: bool,
 
+    /// The record type of slow queries.
+    pub record_type: SlowQueriesRecordType,
+
     /// The threshold of slow queries.
     #[serde(with = "humantime_serde")]
     pub threshold: Option<Duration>,
 
     /// The sample ratio of slow queries.
     pub sample_ratio: Option<f64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum SlowQueriesRecordType {
+    #[default]
+    SystemTable,
+    Log,
 }
 
 #[derive(Clone, Debug, Copy, PartialEq, Eq, Serialize, Deserialize)]

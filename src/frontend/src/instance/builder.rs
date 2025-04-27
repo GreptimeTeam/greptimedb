@@ -24,6 +24,7 @@ use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::NodeManagerRef;
+use common_slow_query::stats::StatementStatistics;
 use operator::delete::Deleter;
 use operator::flow::FlowServiceOperator;
 use operator::insert::Inserter;
@@ -34,7 +35,6 @@ use operator::table::TableMutationOperator;
 use partition::manager::PartitionRuleManager;
 use pipeline::pipeline_operator::PipelineOperator;
 use query::region_query::RegionQueryHandlerFactoryRef;
-use query::stats::StatementStatistics;
 use query::QueryEngineFactory;
 use snafu::OptionExt;
 
@@ -54,7 +54,6 @@ pub struct FrontendBuilder {
     node_manager: NodeManagerRef,
     plugins: Option<Plugins>,
     procedure_executor: ProcedureExecutorRef,
-    stats: StatementStatistics,
 }
 
 impl FrontendBuilder {
@@ -65,7 +64,6 @@ impl FrontendBuilder {
         catalog_manager: CatalogManagerRef,
         node_manager: NodeManagerRef,
         procedure_executor: ProcedureExecutorRef,
-        stats: StatementStatistics,
     ) -> Self {
         Self {
             options,
@@ -76,7 +74,6 @@ impl FrontendBuilder {
             node_manager,
             plugins: None,
             procedure_executor,
-            stats,
         }
     }
 
@@ -189,6 +186,13 @@ impl FrontendBuilder {
 
         plugins.insert::<StatementExecutorRef>(statement_executor.clone());
 
+        let stats = StatementStatistics::new(
+            self.options.logging.slow_query.clone(),
+            inserter.clone(),
+            statement_executor.clone(),
+            self.catalog_manager.clone(),
+        );
+
         // Create the limiter if the max_in_flight_write_bytes is set.
         let limiter = self
             .options
@@ -206,7 +210,7 @@ impl FrontendBuilder {
             inserter,
             deleter,
             table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend)),
-            stats: self.stats,
+            stats,
             limiter,
         })
     }

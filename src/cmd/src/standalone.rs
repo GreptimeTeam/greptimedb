@@ -69,7 +69,6 @@ use frontend::service_config::{
 };
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
 use mito2::config::MitoConfig;
-use query::stats::StatementStatistics;
 use serde::{Deserialize, Serialize};
 use servers::export_metrics::{ExportMetricsOption, ExportMetricsTask};
 use servers::grpc::GrpcOptions;
@@ -594,7 +593,6 @@ impl StartCommand {
             catalog_manager.clone(),
             node_manager.clone(),
             ddl_task_executor.clone(),
-            StatementStatistics::new(opts.logging.slow_query.clone()),
         )
         .with_plugin(plugins.clone())
         .try_build()
