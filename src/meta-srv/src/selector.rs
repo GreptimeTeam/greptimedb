@@ -51,6 +51,7 @@ pub trait RegionStatAwareSelector: Send + Sync {
         ctx: &Self::Context,
         from_peer_id: u64,
         region_ids: &[RegionId],
+        exclude_peer_ids: HashSet<u64>,
     ) -> Result<Self::Output>;
 }
 

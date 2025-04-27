@@ -395,12 +395,16 @@ impl RegionSupervisor {
                 .push(region_id);
         }
 
+        let failed_datanodes = grouped_regions.keys().cloned().collect::<Vec<_>>();
         for (datanode_id, regions) in grouped_regions {
             warn!(
                 "Detects region failures on datanode: {}, regions: {:?}",
                 datanode_id, regions
             );
-            match self.generate_failover_tasks(datanode_id, &regions).await {
+            match self
+                .generate_failover_tasks(datanode_id, &regions, &failed_datanodes)
+                .await
+            {
                 Ok(tasks) => {
                     for task in tasks {
                         let region_id = task.region_id;
@@ -426,13 +430,15 @@ impl RegionSupervisor {
         &self,
         from_peer_id: DatanodeId,
         regions: &[RegionId],
+        failure_datanodes: &[DatanodeId],
     ) -> Result<Vec<(RegionId, Peer)>> {
+        let exclude_peer_ids = HashSet::from_iter(failure_datanodes.iter().cloned());
         match &self.selector {
             RegionSupervisorSelector::NaiveSelector(selector) => {
                 let opt = SelectorOptions {
                     min_required_items: regions.len(),
                     allow_duplication: true,
-                    exclude_peer_ids: HashSet::from([from_peer_id]),
+                    exclude_peer_ids,
                 };
                 let peers = selector.select(&self.selector_context, opt).await?;
                 ensure!(
@@ -452,7 +458,12 @@ impl RegionSupervisor {
             }
             RegionSupervisorSelector::RegionStatAwareSelector(selector) => {
                 let peers = selector
-                    .select(&self.selector_context, from_peer_id, regions)
+                    .select(
+                        &self.selector_context,
+                        from_peer_id,
+                        regions,
+                        exclude_peer_ids,
+                    )
                     .await?;
 
                 ensure!(
@@ -471,6 +482,7 @@ impl RegionSupervisor {
         &mut self,
         from_peer_id: DatanodeId,
         regions: &[RegionId],
+        failed_datanodes: &[DatanodeId],
     ) -> Result<Vec<RegionMigrationProcedureTask>> {
         let mut tasks = Vec::with_capacity(regions.len());
         let from_peer = self
@@ -483,7 +495,9 @@ impl RegionSupervisor {
             .context(error::PeerUnavailableSnafu {
                 peer_id: from_peer_id,
             })?;
-        let region_peers = self.select_peers(from_peer_id, regions).await?;
+        let region_peers = self
+            .select_peers(from_peer_id, regions, failed_datanodes)
+            .await?;
 
         for (region_id, peer) in region_peers {
             let count = *self
