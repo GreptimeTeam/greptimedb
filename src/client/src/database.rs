@@ -201,9 +201,8 @@ impl Database {
             match (raw_response, retries < max_retries) {
                 (Ok(resp), _) => return from_grpc_response(resp.into_inner()),
                 (Err(err), true) => {
-                    use tonic::Code;
                     // determine if the error is retryable
-                    if matches!(err.code(), Code::Unavailable) {
+                    if is_grpc_retryable(&err) {
                         // retry
                         retries += 1;
                         warn!("Retrying {} times with error = {:?}", retries, err);
@@ -395,6 +394,11 @@ impl Database {
             .boxed();
         Ok(response)
     }
+}
+
+/// by grpc standard, only `Unavailable` is retryable, see: https://github.com/grpc/grpc/blob/master/doc/statuscodes.md#status-codes-and-their-use-in-grpc
+pub fn is_grpc_retryable(err: &tonic::Status) -> bool {
+    matches!(err.code(), tonic::Code::Unavailable)
 }
 
 #[derive(Default, Debug, Clone)]
