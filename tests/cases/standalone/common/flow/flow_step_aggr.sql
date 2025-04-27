@@ -36,16 +36,19 @@ INSERT INTO access_log VALUES
 ADMIN FLUSH_FLOW('calc_access_log_10s');
 
 -- query should return 3 rows
+-- SQLNESS SORT_RESULT 3 1
 SELECT "url", time_window FROM access_log_10s
 ORDER BY
     time_window;
 
 -- use hll_count to query the approximate data in access_log_10s
+-- SQLNESS SORT_RESULT 3 1
 SELECT "url", time_window, hll_count(state) FROM access_log_10s
 ORDER BY
     time_window;
 
 -- further, we can aggregate 10 seconds of data to every minute, by using hll_merge to merge 10 seconds of hyperloglog state
+-- SQLNESS SORT_RESULT 3 1
 SELECT
     "url",
     date_bin('1 minute'::INTERVAL, time_window) AS time_window_1m,
