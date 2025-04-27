@@ -42,6 +42,7 @@ use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_query::Output;
+use common_slow_query::stats::StatementStatistics;
 use common_telemetry::{debug, error, info, tracing};
 use datafusion_expr::LogicalPlan;
 use log_store::raft_engine::RaftEngineBackend;
@@ -55,7 +56,6 @@ use query::metrics::OnDone;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
 use query::query_engine::DescribeResult;
-use query::stats::StatementStatistics;
 use query::QueryEngineRef;
 use servers::error as server_error;
 use servers::error::{AuthSnafu, ExecuteQuerySnafu, ParsePromQLSnafu};
@@ -166,9 +166,9 @@ impl Instance {
         let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor.as_ref();
 
-        let _slow_query_timer = self
+        let slow_query_timer = self
             .stats
-            .start_slow_query_timer(QueryStatement::Sql(stmt.clone()));
+            .start_slow_query_timer(QueryStatement::Sql(stmt.clone()), query_ctx.clone());
 
         let output = match stmt {
             Statement::Query(_) | Statement::Explain(_) | Statement::Delete(_) => {
@@ -212,6 +212,11 @@ impl Instance {
                 self.statement_executor.execute_sql(stmt, query_ctx).await
             }
         };
+
+        if let Some(slow_query_timer) = slow_query_timer {
+            slow_query_timer.stop().await;
+        }
+
         output.context(TableOperationSnafu)
     }
 }
@@ -374,7 +379,9 @@ impl PrometheusHandler for Instance {
             }
         })?;
 
-        let _slow_query_timer = self.stats.start_slow_query_timer(stmt.clone());
+        let slow_query_timer = self
+            .stats
+            .start_slow_query_timer(stmt.clone(), query_ctx.clone());
 
         let plan = self
             .statement_executor
@@ -391,6 +398,10 @@ impl PrometheusHandler for Instance {
             .await
             .map_err(BoxedError::new)
             .context(ExecuteQuerySnafu)?;
+
+        if let Some(slow_query_timer) = slow_query_timer {
+            slow_query_timer.stop().await;
+        }
 
         Ok(interceptor.post_execute(output, query_ctx)?)
     }

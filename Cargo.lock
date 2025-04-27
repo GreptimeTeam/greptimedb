@@ -2019,6 +2019,7 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-runtime",
+ "common-slow-query",
  "common-telemetry",
  "common-test-util",
  "common-time",
@@ -2572,6 +2573,26 @@ name = "common-session"
 version = "0.15.0"
 dependencies = [
  "strum 0.27.1",
+]
+
+[[package]]
+name = "common-slow-query"
+version = "0.15.0"
+dependencies = [
+ "api",
+ "catalog",
+ "common-catalog",
+ "common-error",
+ "common-macro",
+ "common-query",
+ "common-telemetry",
+ "common-time",
+ "operator",
+ "query",
+ "rand 0.9.0",
+ "session",
+ "snafu 0.8.5",
+ "table",
 ]
 
 [[package]]
@@ -4523,6 +4544,7 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-runtime",
+ "common-slow-query",
  "common-telemetry",
  "common-test-util",
  "common-time",
@@ -12297,6 +12319,7 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-runtime",
+ "common-slow-query",
  "common-telemetry",
  "common-test-util",
  "common-time",

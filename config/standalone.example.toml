@@ -728,6 +728,10 @@ default_ratio = 1.0
 ## Whether to enable slow query log.
 enable = false
 
+## The record type of slow queries. It can be `system_table` or `log`.
+## @toml2docs:none-default
+record_type = "system_table"
+
 ## The threshold of slow query.
 ## @toml2docs:none-default
 threshold = "10s"
