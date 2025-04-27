@@ -18,8 +18,8 @@ use std::sync::Arc;
 use api::v1::{RowInsertRequest, Rows};
 use hashbrown::HashMap;
 use pipeline::{
-    DispatchedTo, IdentityTimeIndex, Pipeline, PipelineContext, PipelineDefinition,
-    PipelineExecOutput, PipelineMap, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
+    DispatchedTo, Pipeline, PipelineContext, PipelineDefinition, PipelineExecOutput, PipelineMap,
+    GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
 };
 use session::context::{Channel, QueryContextRef};
 use snafu::ResultExt;
@@ -57,26 +57,15 @@ pub(crate) async fn run_pipeline(
     query_ctx: &QueryContextRef,
     is_top_level: bool,
 ) -> Result<Vec<RowInsertRequest>> {
-    match &pipeline_ctx.pipeline_definition {
-        PipelineDefinition::GreptimeIdentityPipeline(custom_ts) => {
-            run_identity_pipeline(
-                handler,
-                custom_ts.as_ref(),
-                pipeline_ctx,
-                pipeline_req,
-                query_ctx,
-            )
-            .await
-        }
-        _ => {
-            run_custom_pipeline(handler, pipeline_ctx, pipeline_req, query_ctx, is_top_level).await
-        }
+    if pipeline_ctx.pipeline_definition.is_identity() {
+        run_identity_pipeline(handler, pipeline_ctx, pipeline_req, query_ctx).await
+    } else {
+        run_custom_pipeline(handler, pipeline_ctx, pipeline_req, query_ctx, is_top_level).await
     }
 }
 
 async fn run_identity_pipeline(
     handler: &PipelineHandlerRef,
-    custom_ts: Option<&IdentityTimeIndex>,
     pipeline_ctx: &PipelineContext<'_>,
     pipeline_req: PipelineIngestRequest,
     query_ctx: &QueryContextRef,
@@ -93,7 +82,7 @@ async fn run_identity_pipeline(
             .await
             .context(CatalogSnafu)?
     };
-    pipeline::identity_pipeline(data_array, table, pipeline_ctx, custom_ts)
+    pipeline::identity_pipeline(data_array, table, pipeline_ctx)
         .map(|rows| {
             vec![RowInsertRequest {
                 rows: Some(rows),

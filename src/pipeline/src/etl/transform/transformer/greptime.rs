@@ -41,7 +41,7 @@ use crate::etl::transform::index::Index;
 use crate::etl::transform::{Transform, Transforms};
 use crate::etl::value::{Timestamp, Value};
 use crate::etl::PipelineMap;
-use crate::{IdentityTimeIndex, PipelineContext};
+use crate::PipelineContext;
 
 const DEFAULT_GREPTIME_TIMESTAMP_COLUMN: &str = "greptime_timestamp";
 const DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING: usize = 10;
@@ -341,10 +341,10 @@ fn resolve_number_schema(
 fn values_to_row(
     schema_info: &mut SchemaInfo,
     values: PipelineMap,
-    custom_ts: Option<&IdentityTimeIndex>,
     pipeline_ctx: &PipelineContext<'_>,
 ) -> Result<Row> {
     let mut row: Vec<GreptimeValue> = Vec::with_capacity(schema_info.schema.len());
+    let custom_ts = pipeline_ctx.pipeline_definition.get_custom_ts();
 
     // TODO(shuiyisong): we should use match later for more channels
     let is_prometheus = pipeline_ctx.channel == Channel::Prometheus;
@@ -520,11 +520,12 @@ fn resolve_value(
 
 fn identity_pipeline_inner(
     array: Vec<PipelineMap>,
-    custom_ts: Option<&IdentityTimeIndex>,
     pipeline_ctx: &PipelineContext<'_>,
 ) -> Result<(SchemaInfo, Vec<Row>)> {
     let mut rows = Vec::with_capacity(array.len());
     let mut schema_info = SchemaInfo::default();
+
+    let custom_ts = pipeline_ctx.pipeline_definition.get_custom_ts();
 
     // set time index column schema first
     schema_info.schema.push(ColumnSchema {
@@ -544,7 +545,7 @@ fn identity_pipeline_inner(
     });
 
     for values in array {
-        let row = values_to_row(&mut schema_info, values, custom_ts, pipeline_ctx)?;
+        let row = values_to_row(&mut schema_info, values, pipeline_ctx)?;
         rows.push(row);
     }
 
@@ -571,7 +572,6 @@ pub fn identity_pipeline(
     array: Vec<PipelineMap>,
     table: Option<Arc<table::Table>>,
     pipeline_ctx: &PipelineContext<'_>,
-    custom_ts: Option<&IdentityTimeIndex>,
 ) -> Result<Rows> {
     let input = if pipeline_ctx.pipeline_param.flatten_json_object() {
         array
@@ -582,7 +582,7 @@ pub fn identity_pipeline(
         array
     };
 
-    identity_pipeline_inner(input, custom_ts, pipeline_ctx).map(|(mut schema, rows)| {
+    identity_pipeline_inner(input, pipeline_ctx).map(|(mut schema, rows)| {
         if let Some(table) = table {
             let table_info = table.table_info();
             for tag_name in table_info.meta.row_key_column_names() {
@@ -683,7 +683,7 @@ mod tests {
                 }),
             ];
             let array = json_array_to_map(array).unwrap();
-            let rows = identity_pipeline(array, None, &pipeline_ctx, None);
+            let rows = identity_pipeline(array, None, &pipeline_ctx);
             assert!(rows.is_err());
             assert_eq!(
                 rows.err().unwrap().to_string(),
@@ -711,8 +711,7 @@ mod tests {
                     "gaga": "gaga"
                 }),
             ];
-            let rows =
-                identity_pipeline(json_array_to_map(array).unwrap(), None, &pipeline_ctx, None);
+            let rows = identity_pipeline(json_array_to_map(array).unwrap(), None, &pipeline_ctx);
             assert!(rows.is_err());
             assert_eq!(
                 rows.err().unwrap().to_string(),
@@ -740,8 +739,7 @@ mod tests {
                     "gaga": "gaga"
                 }),
             ];
-            let rows =
-                identity_pipeline(json_array_to_map(array).unwrap(), None, &pipeline_ctx, None);
+            let rows = identity_pipeline(json_array_to_map(array).unwrap(), None, &pipeline_ctx);
             assert!(rows.is_ok());
             let rows = rows.unwrap();
             assert_eq!(rows.schema.len(), 8);
@@ -772,19 +770,18 @@ mod tests {
             ];
             let tag_column_names = ["name".to_string(), "address".to_string()];
 
-            let rows =
-                identity_pipeline_inner(json_array_to_map(array).unwrap(), None, &pipeline_ctx)
-                    .map(|(mut schema, rows)| {
-                        for name in tag_column_names {
-                            if let Some(index) = schema.index.get(&name) {
-                                schema.schema[*index].semantic_type = SemanticType::Tag as i32;
-                            }
+            let rows = identity_pipeline_inner(json_array_to_map(array).unwrap(), &pipeline_ctx)
+                .map(|(mut schema, rows)| {
+                    for name in tag_column_names {
+                        if let Some(index) = schema.index.get(&name) {
+                            schema.schema[*index].semantic_type = SemanticType::Tag as i32;
                         }
-                        Rows {
-                            schema: schema.schema,
-                            rows,
-                        }
-                    });
+                    }
+                    Rows {
+                        schema: schema.schema,
+                        rows,
+                    }
+                });
 
             assert!(rows.is_ok());
             let rows = rows.unwrap();
