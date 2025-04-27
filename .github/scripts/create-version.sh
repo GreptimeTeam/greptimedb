@@ -15,8 +15,8 @@ function create_version() {
   fi
 
   if [ -z "$NEXT_RELEASE_VERSION" ]; then
-      echo "NEXT_RELEASE_VERSION is empty"
-      exit 1
+      echo "NEXT_RELEASE_VERSION is empty, use version from Cargo.toml"
+      export NEXT_RELEASE_VERSION=$(grep '^version = ' Cargo.toml | cut -d '"' -f 2)
   fi
 
   if [ -z "$NIGHTLY_RELEASE_PREFIX" ]; then

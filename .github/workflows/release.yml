@@ -90,8 +90,6 @@ env:
 
   # The scheduled version is '${{ env.NEXT_RELEASE_VERSION }}-nightly-YYYYMMDD', like v0.2.0-nigthly-20230313;
   NIGHTLY_RELEASE_PREFIX: nightly
-  # Note: The NEXT_RELEASE_VERSION should be modified manually by every formal release.
-  NEXT_RELEASE_VERSION: v0.15.0
 
 jobs:
   allocate-runners:
@@ -135,7 +133,6 @@ jobs:
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           GITHUB_REF_NAME: ${{ github.ref_name }}
-          NEXT_RELEASE_VERSION: ${{ env.NEXT_RELEASE_VERSION }}
           NIGHTLY_RELEASE_PREFIX: ${{ env.NIGHTLY_RELEASE_PREFIX }}
 
       - name: Allocate linux-amd64 runner
