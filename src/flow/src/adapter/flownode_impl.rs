@@ -95,21 +95,24 @@ impl FlowDualEngine {
         self.batching_engine.clone()
     }
 
-    /// Scan periodically until available frontend is found
+    /// In distributed mode, scan periodically until available frontend is found, or timeout,
+    /// in standalone mode, return immediately
     async fn wait_for_available_frontend(&self, timeout: std::time::Duration) -> Result<(), Error> {
         if !self.is_distributed() {
             return Ok(());
         }
         let frontend_client = self.batching_engine().frontend_client.clone();
         let mut elapsed = std::time::Duration::from_millis(0);
-        let sleep_duration = std::time::Duration::from_millis(500);
+        let sleep_duration = std::time::Duration::from_millis(5_000);
         loop {
             let frontend_list = frontend_client.scan_for_frontend().await?;
             if !frontend_list.is_empty() {
+                info!("Available frontend found");
                 return Ok(());
             }
             tokio::time::sleep(sleep_duration).await;
             elapsed += sleep_duration;
+            info!("Waiting for available frontend, elapsed={:?}", elapsed);
             if elapsed >= timeout {
                 return NoAvailableFrontendSnafu { timeout }.fail();
             }

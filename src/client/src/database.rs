@@ -192,6 +192,8 @@ impl Database {
         from_grpc_response(response)
     }
 
+    /// Retry if connection fails, max_retries is the max number of retries, so the total wait time
+    /// is `max_retries * GRPC_CONN_TIMEOUT`
     pub async fn handle_with_retry(&self, request: Request, max_retries: u32) -> Result<u32> {
         let mut client = make_database_client(&self.client)?.inner;
         let mut retries = 0;
