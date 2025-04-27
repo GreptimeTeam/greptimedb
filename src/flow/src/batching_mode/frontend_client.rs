@@ -25,7 +25,6 @@ use common_meta::cluster::{NodeInfo, NodeInfoKey, Role};
 use common_meta::peer::Peer;
 use common_meta::rpc::store::RangeRequest;
 use common_query::Output;
-use common_telemetry::warn;
 use meta_client::client::MetaClient;
 use servers::query_handler::grpc::GrpcQueryHandler;
 use session::context::{QueryContextBuilder, QueryContextRef};
@@ -228,32 +227,12 @@ impl FrontendClient {
                     peer: db.peer.clone(),
                 });
 
-                let mut retry = 0;
-
-                loop {
-                    let ret = db.database.handle(req.clone()).await.with_context(|_| {
-                        InvalidRequestSnafu {
-                            context: format!("Failed to handle request: {:?}", req),
-                        }
-                    });
-                    if let Err(err) = ret {
-                        if retry < GRPC_MAX_RETRIES {
-                            retry += 1;
-                            warn!(
-                                "Failed to send request to grpc handle at Peer={:?}, retry = {}, error = {:?}",
-                                db.peer, retry, err
-                            );
-                            continue;
-                        } else {
-                            common_telemetry::error!(
-                                "Failed to send request to grpc handle at Peer={:?} after {} retries, error = {:?}",
-                                db.peer, retry, err
-                            );
-                            return Err(err);
-                        }
-                    }
-                    return ret;
-                }
+                db.database
+                    .handle_with_retry(req.clone(), GRPC_MAX_RETRIES)
+                    .await
+                    .with_context(|_| InvalidRequestSnafu {
+                        context: format!("Failed to handle request at {:?}: {:?}", db.peer, req),
+                    })
             }
             FrontendClient::Standalone { database_client } => {
                 let ctx = QueryContextBuilder::default()

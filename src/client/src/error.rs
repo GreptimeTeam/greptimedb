@@ -95,7 +95,7 @@ pub enum Error {
     },
 
     // Server error carried in Tonic Status's metadata.
-    #[snafu(display("{}", msg))]
+    #[snafu(display("code = {}, msg = {}", code, msg))]
     Server {
         code: StatusCode,
         msg: String,
