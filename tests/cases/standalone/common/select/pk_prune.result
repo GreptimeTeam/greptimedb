@@ -1,0 +1,110 @@
+CREATE TABLE IF NOT EXISTS `test_multi_pk_filter` ( `namespace` STRING NULL, `env` STRING NULL DEFAULT 'NULL', `flag` INT NULL, `total` BIGINT NULL, `greptime_timestamp` TIMESTAMP(9) NOT NULL, TIME INDEX (`greptime_timestamp`), PRIMARY KEY (`namespace`, `env`, `flag`) ) ENGINE=mito WITH( ttl = '1month 29days 13h 26m 24s' );
+
+Affected Rows: 0
+
+INSERT INTO test_multi_pk_filter
+    (namespace, env, flag, total, greptime_timestamp)
+    VALUES ('thermostat_v2', 'production', 1, 5289, NOW());
+
+Affected Rows: 1
+
+INSERT INTO test_multi_pk_filter
+    (namespace, env, flag, total, greptime_timestamp)
+    VALUES ('thermostat_v2', 'production', 0, 421, NOW());
+
+Affected Rows: 1
+
+INSERT INTO test_multi_pk_filter
+    (namespace, env, flag, total, greptime_timestamp)
+    VALUES ('thermostat_v2', 'dev', 1, 356, NOW());
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('test_multi_pk_filter');
+
++-------------------------------------------+
+| ADMIN FLUSH_TABLE('test_multi_pk_filter') |
++-------------------------------------------+
+| 0                                         |
++-------------------------------------------+
+
+INSERT INTO test_multi_pk_filter
+    (namespace, env, flag, total, greptime_timestamp)
+    VALUES ('thermostat_v2', 'dev', 1, 412, NOW());
+
+Affected Rows: 1
+
+INSERT INTO test_multi_pk_filter
+    (namespace, env, flag, total, greptime_timestamp)
+    VALUES ('thermostat_v2', 'dev', 1, 298, NOW());
+
+Affected Rows: 1
+
+INSERT INTO test_multi_pk_filter
+    (namespace, env, flag, total, greptime_timestamp)
+    VALUES ('thermostat_v2', 'production', 1, 5289, NOW());
+
+Affected Rows: 1
+
+INSERT INTO test_multi_pk_filter
+    (namespace, env, flag, total, greptime_timestamp)
+    VALUES ('thermostat_v2', 'production', 1, 5874, NOW());
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('test_multi_pk_filter');
+
++-------------------------------------------+
+| ADMIN FLUSH_TABLE('test_multi_pk_filter') |
++-------------------------------------------+
+| 0                                         |
++-------------------------------------------+
+
+INSERT INTO test_multi_pk_filter
+    (namespace, env, flag, total, greptime_timestamp)
+    VALUES ('thermostat_v2', 'production', 1, 6132, NOW());
+
+Affected Rows: 1
+
+INSERT INTO test_multi_pk_filter
+    (namespace, env, flag, total, greptime_timestamp)
+    VALUES ('thermostat_v2', 'testing', 1, 1287, NOW());
+
+Affected Rows: 1
+
+INSERT INTO test_multi_pk_filter
+    (namespace, env, flag, total, greptime_timestamp)
+    VALUES ('thermostat_v2', 'testing', 1, 1432, NOW());
+
+Affected Rows: 1
+
+INSERT INTO test_multi_pk_filter
+    (namespace, env, flag, total, greptime_timestamp)
+    VALUES ('thermostat_v2', 'testing', 1, 1056, NOW());
+
+Affected Rows: 1
+
+SELECT greptime_timestamp,namespace,env,total FROM test_multi_pk_filter WHERE
+    greptime_timestamp BETWEEN NOW() - '1hour'::interval AND NOW() AND flag = 1 AND namespace = 'thermostat_v2';
+
++----------------------------+---------------+------------+-------+
+| greptime_timestamp         | namespace     | env        | total |
++----------------------------+---------------+------------+-------+
+| 2025-04-27T20:25:43.436466 | thermostat_v2 | production | 6132  |
+| 2025-04-27T20:25:43.444513 | thermostat_v2 | testing    | 1287  |
+| 2025-04-27T20:25:43.452511 | thermostat_v2 | testing    | 1432  |
+| 2025-04-27T20:25:43.460136 | thermostat_v2 | testing    | 1056  |
+| 2025-04-27T20:25:43.378693 | thermostat_v2 | dev        | 412   |
+| 2025-04-27T20:25:43.386999 | thermostat_v2 | dev        | 298   |
+| 2025-04-27T20:25:43.349197 | thermostat_v2 | dev        | 356   |
+| 2025-04-27T20:25:43.322775 | thermostat_v2 | production | 5289  |
+| 2025-04-27T20:25:43.394913 | thermostat_v2 | production | 5289  |
+| 2025-04-27T20:25:43.402757 | thermostat_v2 | production | 5874  |
++----------------------------+---------------+------------+-------+
+
+SELECT greptime_timestamp,namespace,env,total FROM test_multi_pk_filter WHERE
+    greptime_timestamp BETWEEN NOW() - '1hour'::interval AND NOW() AND flag = 1 AND namespace = 'thermostat_v2' AND env='dev';
+
+++
+++
+
