@@ -40,16 +40,16 @@ const SLOW_QUERY_TABLE_QUERY_COLUMN_NAME: &str = "query";
 const SLOW_QUERY_TABLE_IS_PROMQL_COLUMN_NAME: &str = "is_promql";
 const SLOW_QUERY_TABLE_TIMESTAMP_COLUMN_NAME: &str = "timestamp";
 
-/// StatementStatistics is used to collect statistics for a statement.
+/// SlowQueryRecorder is reponsible for recording slow queries.
 #[derive(Clone)]
-pub struct StatementStatistics {
+pub struct SlowQueryRecorder {
     slow_query_opts: SlowQueryOptions,
     inserter: InserterRef,
     statement_executor: StatementExecutorRef,
     catalog_manager: CatalogManagerRef,
 }
 
-impl StatementStatistics {
+impl SlowQueryRecorder {
     pub fn new(
         slow_query_opts: SlowQueryOptions,
         inserter: InserterRef,
@@ -64,7 +64,7 @@ impl StatementStatistics {
         }
     }
 
-    pub fn start_slow_query_timer(
+    pub fn start(
         &self,
         stmt: QueryStatement,
         query_ctx: QueryContextRef,

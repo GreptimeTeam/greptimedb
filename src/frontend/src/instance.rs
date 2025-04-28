@@ -42,7 +42,7 @@ use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_query::Output;
-use common_slow_query::stats::StatementStatistics;
+use common_slow_query::SlowQueryRecorder;
 use common_telemetry::{debug, error, info, tracing};
 use datafusion_expr::LogicalPlan;
 use log_store::raft_engine::RaftEngineBackend;
@@ -94,7 +94,7 @@ pub struct Instance {
     inserter: InserterRef,
     deleter: DeleterRef,
     table_metadata_manager: TableMetadataManagerRef,
-    stats: StatementStatistics,
+    slow_query_recorder: SlowQueryRecorder,
     limiter: Option<LimiterRef>,
 }
 
@@ -167,8 +167,8 @@ impl Instance {
         let query_interceptor = query_interceptor.as_ref();
 
         let slow_query_timer = self
-            .stats
-            .start_slow_query_timer(QueryStatement::Sql(stmt.clone()), query_ctx.clone());
+            .slow_query_recorder
+            .start(QueryStatement::Sql(stmt.clone()), query_ctx.clone());
 
         let output = match stmt {
             Statement::Query(_) | Statement::Explain(_) | Statement::Delete(_) => {
@@ -380,8 +380,8 @@ impl PrometheusHandler for Instance {
         })?;
 
         let slow_query_timer = self
-            .stats
-            .start_slow_query_timer(stmt.clone(), query_ctx.clone());
+            .slow_query_recorder
+            .start(stmt.clone(), query_ctx.clone());
 
         let plan = self
             .statement_executor

@@ -13,4 +13,6 @@
 // limitations under the License.
 
 pub mod error;
-pub mod stats;
+pub mod recorder;
+
+pub use recorder::SlowQueryRecorder;
