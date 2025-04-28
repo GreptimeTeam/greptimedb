@@ -41,6 +41,7 @@ use crate::read::Batch;
 use crate::region::options::{MemtableOptions, MergeMode};
 use crate::sst::file::FileTimeRange;
 
+mod builder;
 pub mod bulk;
 pub mod key_values;
 pub mod partition_tree;

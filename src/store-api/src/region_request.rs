@@ -53,6 +53,7 @@ use crate::metadata::{
     UnexpectedSnafu,
 };
 use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
+use crate::metrics;
 use crate::mito_engine_options::{
     TTL_KEY, TWCS_MAX_ACTIVE_WINDOW_FILES, TWCS_MAX_ACTIVE_WINDOW_RUNS,
     TWCS_MAX_INACTIVE_WINDOW_FILES, TWCS_MAX_INACTIVE_WINDOW_RUNS, TWCS_MAX_OUTPUT_FILE_SIZE,
@@ -331,7 +332,6 @@ fn make_region_truncate(truncate: TruncateRequest) -> Result<Vec<(RegionId, Regi
 }
 
 /// Convert [BulkInsertRequest] to [RegionRequest] and group by [RegionId].
-#[allow(unused)]
 fn make_region_bulk_inserts(request: BulkInsertRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
     let Some(Body::ArrowIpc(request)) = request.body else {
         return Ok(vec![]);
@@ -340,6 +340,9 @@ fn make_region_bulk_inserts(request: BulkInsertRequest) -> Result<Vec<(RegionId,
     let mut region_requests: HashMap<u64, DfRecordBatch> =
         HashMap::with_capacity(request.region_selection.len());
 
+    let decoder_timer = metrics::CONVERT_REGION_BULK_REQUEST
+        .with_label_values(&["decode"])
+        .start_timer();
     let schema_data = FlightData::decode(request.schema.clone()).context(ProstSnafu)?;
     let payload_data = FlightData::decode(request.payload.clone()).context(ProstSnafu)?;
     let mut decoder = FlightDecoder::default();
@@ -349,6 +352,11 @@ fn make_region_bulk_inserts(request: BulkInsertRequest) -> Result<Vec<(RegionId,
     else {
         unreachable!("Always expect record batch message after schema");
     };
+    decoder_timer.observe_duration();
+
+    let filter_batch_timer = metrics::CONVERT_REGION_BULK_REQUEST
+        .with_label_values(&["filter_batch"])
+        .start_timer();
 
     for region_selection in request.region_selection {
         let region_id = region_selection.region_id;
@@ -366,6 +374,7 @@ fn make_region_bulk_inserts(request: BulkInsertRequest) -> Result<Vec<(RegionId,
 
         region_requests.insert(region_id, region_batch);
     }
+    filter_batch_timer.observe_duration();
 
     let result = region_requests
         .into_iter()

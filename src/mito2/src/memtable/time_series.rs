@@ -31,8 +31,9 @@ use datatypes::prelude::{MutableVector, ScalarVector, ScalarVectorBuilder, Vecto
 use datatypes::types::TimestampType;
 use datatypes::value::{Value, ValueRef};
 use datatypes::vectors::{
-    Helper, TimestampMicrosecondVector, TimestampMillisecondVector, TimestampNanosecondVector,
-    TimestampSecondVector, UInt64Vector, UInt64VectorBuilder, UInt8Vector, UInt8VectorBuilder,
+    Helper, StringVector, TimestampMicrosecondVector, TimestampMillisecondVector,
+    TimestampNanosecondVector, TimestampSecondVector, UInt64Vector, UInt64VectorBuilder,
+    UInt8Vector, UInt8VectorBuilder,
 };
 use snafu::{ensure, ResultExt};
 use store_api::metadata::RegionMetadataRef;
@@ -45,6 +46,7 @@ use crate::error::{
     UnsupportedOperationSnafu,
 };
 use crate::flush::WriteBufferManagerRef;
+use crate::memtable::builder::{FieldBuilder, StringBuilder};
 use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::simple_bulk_memtable::SimpleBulkMemtable;
@@ -61,7 +63,7 @@ use crate::region::options::MergeMode;
 use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
 
 /// Initial vector builder capacity.
-const INITIAL_BUILDER_CAPACITY: usize = 16;
+const INITIAL_BUILDER_CAPACITY: usize = 1024 * 8;
 
 /// Vector builder capacity.
 const BUILDER_CAPACITY: usize = 512;
@@ -709,8 +711,8 @@ impl Series {
     pub(crate) fn extend(
         &mut self,
         ts_v: VectorRef,
-        op_type_v: UInt8Vector,
-        sequence_v: UInt64Vector,
+        op_type_v: u8,
+        sequence_v: u64,
         fields: impl Iterator<Item = VectorRef>,
     ) -> Result<()> {
         self.active.extend(ts_v, op_type_v, sequence_v, fields)
@@ -762,7 +764,7 @@ struct ValueBuilder {
     timestamp_type: ConcreteDataType,
     sequence: UInt64VectorBuilder,
     op_type: UInt8VectorBuilder,
-    fields: Vec<Option<Box<dyn MutableVector>>>,
+    fields: Vec<Option<FieldBuilder>>,
     field_types: Vec<ConcreteDataType>,
 }
 
@@ -821,12 +823,19 @@ impl ValueBuilder {
             size += field_value.data_size();
             if !field_value.is_null() || self.fields[idx].is_some() {
                 if let Some(field) = self.fields[idx].as_mut() {
-                    let _ = field.try_push_value_ref(field_value);
+                    let _ = field.push(field_value);
                 } else {
-                    let mut mutable_vector = self.field_types[idx]
-                        .create_mutable_vector(num_rows.max(INITIAL_BUILDER_CAPACITY));
+                    let mut mutable_vector =
+                        if let ConcreteDataType::String(_) = &self.field_types[idx] {
+                            FieldBuilder::String(StringBuilder::with_capacity(256, 4096))
+                        } else {
+                            FieldBuilder::Other(
+                                self.field_types[idx]
+                                    .create_mutable_vector(num_rows.max(INITIAL_BUILDER_CAPACITY)),
+                            )
+                        };
                     mutable_vector.push_nulls(num_rows - 1);
-                    let _ = mutable_vector.try_push_value_ref(field_value);
+                    let _ = mutable_vector.push(field_value);
                     self.fields[idx] = Some(mutable_vector);
                 }
             }
@@ -838,11 +847,13 @@ impl ValueBuilder {
     pub(crate) fn extend(
         &mut self,
         ts_v: VectorRef,
-        op_type_v: UInt8Vector,
-        sequence_v: UInt64Vector,
+        op_type: u8,
+        sequence: u64,
         fields: impl Iterator<Item = VectorRef>,
     ) -> error::Result<()> {
         let num_rows_before = self.timestamp.len();
+        let num_rows_to_write = ts_v.len();
+        self.timestamp.reserve(num_rows_to_write);
         match self.timestamp_type {
             ConcreteDataType::Timestamp(TimestampType::Second(_)) => {
                 self.timestamp.extend(
@@ -883,25 +894,31 @@ impl ValueBuilder {
             _ => unreachable!(),
         };
 
-        let num_rows_to_write = ts_v.len();
         self.op_type
-            .extend_slice_of(&op_type_v, 0, op_type_v.len())
-            .unwrap();
+            .mutable_array
+            .append_value_n(op_type, num_rows_to_write);
         self.sequence
-            .extend_slice_of(&sequence_v, 0, op_type_v.len())
-            .unwrap();
-        for (field_idx, (field_src, field_dest)) in fields.zip(self.fields.iter_mut()).enumerate() {
-            field_dest
-                .get_or_insert_with(|| {
-                    let mut mutable_vector = self.field_types[field_idx]
-                        .create_mutable_vector(num_rows_before + num_rows_to_write);
-                    mutable_vector.push_nulls(num_rows_before);
-                    mutable_vector
-                })
-                .extend_slice_of(&*field_src, 0, field_src.len())
-                .unwrap();
-        }
+            .mutable_array
+            .append_value_n(sequence, num_rows_to_write);
 
+        for (field_idx, (field_src, field_dest)) in fields.zip(self.fields.iter_mut()).enumerate() {
+            let builder = field_dest.get_or_insert_with(|| {
+                let mut field_builder =
+                    FieldBuilder::create(&self.field_types[field_idx], INITIAL_BUILDER_CAPACITY);
+                field_builder.push_nulls(num_rows_before);
+                field_builder
+            });
+            match builder {
+                FieldBuilder::String(builder) => {
+                    let string_vector = field_src.as_any().downcast_ref::<StringVector>().unwrap();
+                    builder.append_string_vector(&string_vector.array);
+                }
+                FieldBuilder::Other(builder) => {
+                    let len = field_src.len();
+                    builder.extend_slice_of(&*field_src, 0, len).unwrap();
+                }
+            }
+        }
         Ok(())
     }
 
@@ -994,7 +1011,7 @@ impl From<ValueBuilder> for Values {
             .enumerate()
             .map(|(i, v)| {
                 if let Some(v) = v {
-                    v.to_vector()
+                    v.finish()
                 } else {
                     let mut single_null = value.field_types[i].create_mutable_vector(num_rows);
                     single_null.push_nulls(num_rows);

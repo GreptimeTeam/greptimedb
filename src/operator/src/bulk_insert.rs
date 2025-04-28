@@ -50,8 +50,11 @@ impl Inserter {
         let FlightMessage::Recordbatch(rb) = message else {
             return Ok(0);
         };
-        metrics::BULK_REQUEST_MESSAGE_SIZE.observe(body_size as f64);
         decode_timer.observe_duration();
+        metrics::BULK_REQUEST_MESSAGE_SIZE.observe(body_size as f64);
+        metrics::BULK_REQUEST_ROWS
+            .with_label_values(&["raw"])
+            .observe(rb.num_rows() as f64);
 
         // todo(hl): find a way to embed raw FlightData messages in greptimedb proto files so we don't have to encode here.
         // safety: when reach here schema must be present.
@@ -83,6 +86,9 @@ impl Inserter {
         let mut mask_per_datanode = HashMap::with_capacity(region_masks.len());
         for (region_number, mask) in region_masks {
             let region_id = RegionId::new(table_id, region_number);
+            metrics::BULK_REQUEST_ROWS
+                .with_label_values(&["region"])
+                .observe(mask.true_count() as f64);
             let datanode = self
                 .partition_manager
                 .find_region_leader(region_id)

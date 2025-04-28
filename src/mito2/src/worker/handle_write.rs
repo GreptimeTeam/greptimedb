@@ -25,8 +25,8 @@ use store_api::codec::PrimaryKeyEncoding;
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
-use crate::error;
 use crate::error::{InvalidRequestSnafu, RegionStateSnafu, RejectWriteSnafu, Result};
+use crate::metrics;
 use crate::metrics::{WRITE_REJECT_TOTAL, WRITE_ROWS_TOTAL, WRITE_STAGE_ELAPSED};
 use crate::region::{RegionLeaderState, RegionRoleState};
 use crate::region_write_ctx::RegionWriteCtx;
@@ -319,6 +319,9 @@ impl<S> RegionWorkerLoop<S> {
         region_ctxs: &mut HashMap<RegionId, RegionWriteCtx>,
         requests: &mut Vec<SenderBulkRequest>,
     ) {
+        let _timer = metrics::REGION_WORKER_HANDLE_WRITE_ELAPSED
+            .with_label_values(&["prepare_bulk_request"])
+            .start_timer();
         for mut bulk_req in requests.drain(..) {
             let region_id = bulk_req.region_id;
             // If region is waiting for alteration, add requests to pending writes.
@@ -379,7 +382,7 @@ impl<S> RegionWorkerLoop<S> {
             if need_fill_missing_columns {
                 // todo(hl): support filling default columns
                 bulk_req.sender.send(
-                    error::InvalidRequestSnafu {
+                    InvalidRequestSnafu {
                         region_id,
                         reason: "Schema mismatch",
                     }
