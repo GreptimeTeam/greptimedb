@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::hash_map::Entry;
 use std::string::ToString;
 
+use ahash::HashMap;
 use api::prom_store::remote::Sample;
 use api::v1::value::ValueData;
 use api::v1::{
@@ -21,8 +23,6 @@ use api::v1::{
     Value,
 };
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
-use hashbrown::hash_map::Entry;
-use hashbrown::HashMap;
 use prost::DecodeError;
 
 use crate::proto::PromLabel;

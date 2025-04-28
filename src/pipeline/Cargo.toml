@@ -10,7 +10,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-ahash = "0.8"
+ahash.workspace = true
 api.workspace = true
 arrow.workspace = true
 async-trait.workspace = true
@@ -40,7 +40,6 @@ dyn-fmt = "0.4"
 enum_dispatch = "0.3"
 futures.workspace = true
 greptime-proto.workspace = true
-hashbrown = "0.15"
 itertools.workspace = true
 jsonb.workspace = true
 jsonpath-rust = "0.7.5"
