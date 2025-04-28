@@ -18,9 +18,7 @@ use cmd::options::GreptimeOptions;
 use cmd::standalone::StandaloneOptions;
 use common_config::Configurable;
 use common_options::datanode::{ClientOptions, DatanodeClientOptions};
-use common_telemetry::logging::{
-    LoggingOptions, SlowQueriesRecordType, SlowQueryOptions, DEFAULT_OTLP_ENDPOINT,
-};
+use common_telemetry::logging::{LoggingOptions, DEFAULT_OTLP_ENDPOINT};
 use common_wal::config::raft_engine::RaftEngineConfig;
 use common_wal::config::DatanodeWalConfig;
 use datanode::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
