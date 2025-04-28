@@ -24,6 +24,11 @@ on:
         description: Release dev-builder-android image
         required: false
         default: false
+      update_dev_builder_image_tag:
+        type: boolean
+        description: Update the DEV_BUILDER_IMAGE_TAG in Makefile and create a PR
+        required: false
+        default: false
 
 jobs:
   release-dev-builder-images:
@@ -204,3 +209,24 @@ jobs:
             quay.io/skopeo/stable:latest \
             copy -a docker://docker.io/$IMAGE_NAMESPACE/dev-builder-android:$IMAGE_VERSION \
             docker://$ACR_IMAGE_REGISTRY/$IMAGE_NAMESPACE/dev-builder-android:$IMAGE_VERSION
+  
+  update-dev-builder-image-tag:
+    name: Update dev-builder image tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    if: ${{ github.event_name == 'push' || inputs.update_dev_builder_image_tag }}
+    needs: [
+      release-dev-builder-images
+    ]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Update dev-builder image tag
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ./.github/scripts/update-dev-builder-version.sh ${{ needs.release-dev-builder-images.outputs.version }}
