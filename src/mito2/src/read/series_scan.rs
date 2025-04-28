@@ -41,7 +41,7 @@ use crate::error::{
 };
 use crate::read::range::RangeBuilderList;
 use crate::read::scan_region::{ScanInput, StreamContext};
-use crate::read::scan_util::{PartitionMetrics, PartitionMetricsList};
+use crate::read::scan_util::{PartitionMetrics, PartitionMetricsList, SeriesDistributorMetrics};
 use crate::read::seq_scan::{build_sources, SeqScan};
 use crate::read::{Batch, ScannerMetrics};
 
@@ -343,7 +343,7 @@ impl SeriesDistributor {
         let mut reader =
             SeqScan::build_reader_from_sources(&self.stream_ctx, sources, self.semaphore.clone())
                 .await?;
-        let mut metrics = ScannerMetrics::default();
+        let mut metrics = SeriesDistributorMetrics::default();
         let mut fetch_start = Instant::now();
 
         let mut current_series = SeriesBatch::default();
@@ -382,8 +382,8 @@ impl SeriesDistributor {
         }
 
         metrics.scan_cost += fetch_start.elapsed();
-        part_metrics.merge_metrics(&metrics);
-        part_metrics.set_num_series_send_timeout(self.senders.num_timeout);
+        metrics.num_series_send_timeout = self.senders.num_timeout;
+        part_metrics.set_distributor_metrics(&metrics);
 
         part_metrics.on_finish();
 
