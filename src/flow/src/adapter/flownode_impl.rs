@@ -591,7 +591,12 @@ impl FlowEngine for FlowDualEngine {
         match flow_type {
             Some(FlowType::Batching) => self.batching_engine.flush_flow(flow_id).await,
             Some(FlowType::Streaming) => self.streaming_engine.flush_flow(flow_id).await,
-            None => Ok(0),
+            None => {
+                warn!(
+                    "Currently flow={flow_id} doesn't exist in flownode, ignore flush_flow request"
+                );
+                Ok(0)
+            }
         }
     }
 
