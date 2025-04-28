@@ -164,7 +164,7 @@ impl SlowQueryTimer {
         if let Some(table) = self
             .catalog_manager
             .table(
-                &self.query_ctx.current_catalog(),
+                self.query_ctx.current_catalog(),
                 DEFAULT_PRIVATE_SCHEMA_NAME,
                 SLOW_QUERY_TABLE_NAME,
                 Some(&self.query_ctx),
