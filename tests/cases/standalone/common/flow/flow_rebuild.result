@@ -743,6 +743,8 @@ INSERT INTO `api_log` (`time`, `key`, `status_code`, `method`, `path`, `raw_quer
 
 Affected Rows: 1
 
+-- wait more time so flownode have time to recover flows
+-- SQLNESS SLEEP 5s
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('api_stats_flow');
 
