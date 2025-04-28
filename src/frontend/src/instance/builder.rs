@@ -186,12 +186,20 @@ impl FrontendBuilder {
 
         plugins.insert::<StatementExecutorRef>(statement_executor.clone());
 
-        let slow_query_recorder = SlowQueryRecorder::new(
-            self.options.logging.slow_query.clone(),
-            inserter.clone(),
-            statement_executor.clone(),
-            self.catalog_manager.clone(),
-        );
+        let slow_query_recorder = if let Some(slow_query_opts) = self.options.slow_query {
+            if slow_query_opts.enable {
+                Some(SlowQueryRecorder::new(
+                    slow_query_opts.clone(),
+                    inserter.clone(),
+                    statement_executor.clone(),
+                    self.catalog_manager.clone(),
+                ))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         // Create the limiter if the max_in_flight_write_bytes is set.
         let limiter = self

@@ -76,6 +76,7 @@ impl Command {
             &opts,
             &TracingOptions::default(),
             None,
+            None,
         );
 
         let tool = self.cmd.build().await.context(error::BuildCliSnafu)?;

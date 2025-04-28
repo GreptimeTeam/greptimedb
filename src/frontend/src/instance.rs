@@ -94,7 +94,7 @@ pub struct Instance {
     inserter: InserterRef,
     deleter: DeleterRef,
     table_metadata_manager: TableMetadataManagerRef,
-    slow_query_recorder: SlowQueryRecorder,
+    slow_query_recorder: Option<SlowQueryRecorder>,
     limiter: Option<LimiterRef>,
 }
 
@@ -166,9 +166,11 @@ impl Instance {
         let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor.as_ref();
 
-        let slow_query_timer = self
-            .slow_query_recorder
-            .start(QueryStatement::Sql(stmt.clone()), query_ctx.clone());
+        let slow_query_timer = if let Some(recorder) = &self.slow_query_recorder {
+            recorder.start(QueryStatement::Sql(stmt.clone()), query_ctx.clone())
+        } else {
+            None
+        };
 
         let output = match stmt {
             Statement::Query(_) | Statement::Explain(_) | Statement::Delete(_) => {
@@ -379,9 +381,11 @@ impl PrometheusHandler for Instance {
             }
         })?;
 
-        let slow_query_timer = self
-            .slow_query_recorder
-            .start(stmt.clone(), query_ctx.clone());
+        let slow_query_timer = if let Some(recorder) = &self.slow_query_recorder {
+            recorder.start(stmt.clone(), query_ctx.clone())
+        } else {
+            None
+        };
 
         let plan = self
             .statement_executor

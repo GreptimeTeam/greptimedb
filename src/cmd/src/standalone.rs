@@ -47,7 +47,7 @@ use common_meta::sequence::SequenceBuilder;
 use common_meta::wal_options_allocator::{build_wal_options_allocator, WalOptionsAllocatorRef};
 use common_procedure::{ProcedureInfo, ProcedureManagerRef};
 use common_telemetry::info;
-use common_telemetry::logging::{LoggingOptions, TracingOptions};
+use common_telemetry::logging::{LoggingOptions, SlowQueryOptions, TracingOptions};
 use common_time::timezone::set_default_timezone;
 use common_version::{short_version, version};
 use common_wal::config::DatanodeWalConfig;
@@ -152,6 +152,7 @@ pub struct StandaloneOptions {
     pub init_regions_in_background: bool,
     pub init_regions_parallelism: usize,
     pub max_in_flight_write_bytes: Option<ReadableSize>,
+    pub slow_query: Option<SlowQueryOptions>,
 }
 
 impl Default for StandaloneOptions {
@@ -183,6 +184,7 @@ impl Default for StandaloneOptions {
             init_regions_in_background: false,
             init_regions_parallelism: 16,
             max_in_flight_write_bytes: None,
+            slow_query: None,
         }
     }
 }
@@ -222,6 +224,7 @@ impl StandaloneOptions {
             // Handle the export metrics task run by standalone to frontend for execution
             export_metrics: cloned_opts.export_metrics,
             max_in_flight_write_bytes: cloned_opts.max_in_flight_write_bytes,
+            slow_query: cloned_opts.slow_query,
             ..Default::default()
         }
     }
@@ -446,6 +449,7 @@ impl StartCommand {
             &opts.component.logging,
             &opts.component.tracing,
             None,
+            opts.component.slow_query.as_ref(),
         );
         log_versions(version(), short_version(), APP_NAME);
 
