@@ -225,19 +225,19 @@ default_ratio = 1.0
 ## The slow query log options.
 [slow_query]
 ## Whether to enable slow query log.
-enable = false
+#+ enable = false
 
 ## The record type of slow queries. It can be `system_table` or `log`.
 ## @toml2docs:none-default
-record_type = "system_table"
+#+ record_type = "system_table"
 
 ## The threshold of slow query.
 ## @toml2docs:none-default
-threshold = "10s"
+#+threshold = "10s"
 
 ## The sampling ratio of slow query log. The value should be in the range of (0, 1].
 ## @toml2docs:none-default
-sample_ratio = 1.0
+#+ sample_ratio = 1.0
 
 ## The datanode can export its metrics and send to Prometheus compatible service (e.g. send to `greptimedb` itself) from remote-write API.
 ## This is only used for `greptimedb` to export its own metrics internally. It's different from prometheus scrape.
