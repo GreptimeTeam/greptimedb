@@ -169,12 +169,6 @@ fn test_load_metasrv_example_config() {
                 level: Some("info".to_string()),
                 otlp_endpoint: Some(DEFAULT_OTLP_ENDPOINT.to_string()),
                 tracing_sample_ratio: Some(Default::default()),
-                slow_query: SlowQueryOptions {
-                    enable: false,
-                    threshold: None,
-                    sample_ratio: None,
-                    record_type: SlowQueriesRecordType::default(),
-                },
                 ..Default::default()
             },
             datanode: DatanodeClientOptions {
