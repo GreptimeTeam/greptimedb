@@ -403,7 +403,7 @@ impl RegionSupervisor {
             // We can't use `grouped_regions.keys().cloned().collect::<Vec<_>>()` here
             // because there may be false positives in failure detection on the datanode.
             // So we only consider the datanode that reports the failure.
-            let failed_datanodes = HashSet::from([datanode_id]);
+            let failed_datanodes = [datanode_id];
             match self
                 .generate_failover_tasks(datanode_id, &regions, &failed_datanodes)
                 .await
