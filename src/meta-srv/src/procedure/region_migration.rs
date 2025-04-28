@@ -722,7 +722,8 @@ mod tests {
     use crate::procedure::region_migration::open_candidate_region::OpenCandidateRegion;
     use crate::procedure::region_migration::test_util::*;
     use crate::procedure::test_util::{
-        new_downgrade_region_reply, new_open_region_reply, new_upgrade_region_reply,
+        new_downgrade_region_reply, new_flush_region_reply, new_open_region_reply,
+        new_upgrade_region_reply,
     };
     use crate::service::mailbox::Channel;
 
@@ -1229,6 +1230,15 @@ mod tests {
                 Some(mock_datanode_reply(
                     to_peer_id,
                     Arc::new(|id| Ok(new_open_region_reply(id, true, None))),
+                )),
+                Assertion::simple(assert_flush_leader_region, assert_no_persist),
+            ),
+            // Flush Leader Region
+            Step::next(
+                "Should be the flush leader region",
+                Some(mock_datanode_reply(
+                    from_peer_id,
+                    Arc::new(|id| Ok(new_flush_region_reply(id, true, None))),
                 )),
                 Assertion::simple(assert_update_metadata_downgrade, assert_no_persist),
             ),

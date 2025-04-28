@@ -396,7 +396,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_next_update_metadata_downgrade_state() {
+    async fn test_next_flush_leader_region_state() {
         let mut state = Box::new(OpenCandidateRegion);
         // from_peer: 1
         // to_peer: 2

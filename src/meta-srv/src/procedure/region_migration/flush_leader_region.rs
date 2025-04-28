@@ -38,9 +38,8 @@ impl State for FlushLeaderRegion {
     async fn next(&mut self, ctx: &mut Context) -> Result<(Box<dyn State>, Status)> {
         let timer = Instant::now();
         self.flush_region(ctx).await?;
-        ctx.volatile_ctx
-            .metrics
-            .update_flush_leader_region_elapsed(timer.elapsed());
+        ctx.update_flush_leader_region_elapsed(timer);
+        ctx.update_operations_elapsed(timer);
 
         Ok((
             Box::new(UpdateMetadata::Downgrade),
@@ -150,5 +149,133 @@ impl FlushLeaderRegion {
             }
             Err(err) => Err(err),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::assert_matches::assert_matches;
+
+    use store_api::storage::RegionId;
+
+    use super::*;
+    use crate::procedure::region_migration::test_util::{self, TestingEnv};
+    use crate::procedure::region_migration::{ContextFactory, PersistentContext};
+    use crate::procedure::test_util::{
+        new_close_region_reply, new_flush_region_reply, send_mock_reply,
+    };
+
+    fn new_persistent_context() -> PersistentContext {
+        test_util::new_persistent_context(1, 2, RegionId::new(1024, 1))
+    }
+
+    #[tokio::test]
+    async fn test_datanode_is_unreachable() {
+        let state = FlushLeaderRegion;
+        // from_peer: 1
+        // to_peer: 2
+        let persistent_context = new_persistent_context();
+        let env = TestingEnv::new();
+        let mut ctx = env.context_factory().new_context(persistent_context);
+        // Should be ok, if leader region is unreachable. it will skip flush operation.
+        state.flush_region(&mut ctx).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_unexpected_instruction_reply() {
+        common_telemetry::init_default_ut_logging();
+        let state = FlushLeaderRegion;
+        // from_peer: 1
+        // to_peer: 2
+        let persistent_context = new_persistent_context();
+        let from_peer_id = persistent_context.from_peer.id;
+        let mut env = TestingEnv::new();
+        let mut ctx = env.context_factory().new_context(persistent_context);
+        let mailbox_ctx = env.mailbox_context();
+        let mailbox = mailbox_ctx.mailbox().clone();
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        mailbox_ctx
+            .insert_heartbeat_response_receiver(Channel::Datanode(from_peer_id), tx)
+            .await;
+        // Sends an incorrect reply.
+        send_mock_reply(mailbox, rx, |id| Ok(new_close_region_reply(id)));
+        let err = state.flush_region(&mut ctx).await.unwrap_err();
+        assert_matches!(err, Error::UnexpectedInstructionReply { .. });
+        assert!(!err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn test_instruction_exceeded_deadline() {
+        let state = FlushLeaderRegion;
+        // from_peer: 1
+        // to_peer: 2
+        let persistent_context = new_persistent_context();
+        let from_peer_id = persistent_context.from_peer.id;
+        let mut env = TestingEnv::new();
+        let mut ctx = env.context_factory().new_context(persistent_context);
+        let mailbox_ctx = env.mailbox_context();
+        let mailbox = mailbox_ctx.mailbox().clone();
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        mailbox_ctx
+            .insert_heartbeat_response_receiver(Channel::Datanode(from_peer_id), tx)
+            .await;
+        // Sends an timeout error.
+        send_mock_reply(mailbox, rx, |id| {
+            Err(error::MailboxTimeoutSnafu { id }.build())
+        });
+
+        let err = state.flush_region(&mut ctx).await.unwrap_err();
+        assert_matches!(err, Error::ExceededDeadline { .. });
+        assert!(!err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn test_flush_region_failed() {
+        common_telemetry::init_default_ut_logging();
+        let state = FlushLeaderRegion;
+        // from_peer: 1
+        // to_peer: 2
+        let persistent_context = new_persistent_context();
+        let from_peer_id = persistent_context.from_peer.id;
+        let mut env = TestingEnv::new();
+        let mut ctx = env.context_factory().new_context(persistent_context);
+        let mailbox_ctx = env.mailbox_context();
+        let mailbox = mailbox_ctx.mailbox().clone();
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        mailbox_ctx
+            .insert_heartbeat_response_receiver(Channel::Datanode(from_peer_id), tx)
+            .await;
+        send_mock_reply(mailbox, rx, |id| {
+            Ok(new_flush_region_reply(
+                id,
+                false,
+                Some("test mocked".to_string()),
+            ))
+        });
+        // Should be ok, if flush leader region failed. it will skip flush operation.
+        state.flush_region(&mut ctx).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_next_update_metadata_downgrade_state() {
+        common_telemetry::init_default_ut_logging();
+        let mut state = FlushLeaderRegion;
+        // from_peer: 1
+        // to_peer: 2
+        let persistent_context = new_persistent_context();
+        let from_peer_id = persistent_context.from_peer.id;
+        let mut env = TestingEnv::new();
+        let mut ctx = env.context_factory().new_context(persistent_context);
+        let mailbox_ctx = env.mailbox_context();
+        let mailbox = mailbox_ctx.mailbox().clone();
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        mailbox_ctx
+            .insert_heartbeat_response_receiver(Channel::Datanode(from_peer_id), tx)
+            .await;
+        send_mock_reply(mailbox, rx, |id| Ok(new_flush_region_reply(id, true, None)));
+        let (next, _) = state.next(&mut ctx).await.unwrap();
+
+        let update_metadata = next.as_any().downcast_ref::<UpdateMetadata>().unwrap();
+        assert_matches!(update_metadata, UpdateMetadata::Downgrade);
     }
 }
