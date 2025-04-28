@@ -50,6 +50,7 @@ pub struct SlowQueryRecorder {
 }
 
 impl SlowQueryRecorder {
+    /// Create a new SlowQueryRecorder.
     pub fn new(
         slow_query_opts: SlowQueryOptions,
         inserter: InserterRef,
@@ -64,6 +65,8 @@ impl SlowQueryRecorder {
         }
     }
 
+    /// Start a new SlowQueryTimer. Return `None` if the `slow_query.enable` is false.
+    /// When the query is finished, you need to call `stop()` to record the slow query.
     pub fn start(
         &self,
         stmt: QueryStatement,
@@ -103,9 +106,11 @@ pub struct SlowQueryTimer {
 impl SlowQueryTimer {
     /// Stop the slow query timer and record the slow query.
     pub async fn stop(&self) {
-        if let Err(e) = self.create_system_table().await {
-            error!(e; "Failed to create system table for slow queries");
-            return;
+        if self.record_type == SlowQueriesRecordType::SystemTable {
+            if let Err(e) = self.create_system_table().await {
+                error!(e; "Failed to create system table for slow queries");
+                return;
+            }
         }
 
         if let Some(threshold) = self.threshold {

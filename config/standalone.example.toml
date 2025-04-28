@@ -724,7 +724,7 @@ max_log_files = 720
 default_ratio = 1.0
 
 ## The slow query log options.
-[logging.slow_query]
+[slow_query]
 ## Whether to enable slow query log.
 enable = false
 

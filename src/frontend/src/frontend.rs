@@ -17,7 +17,7 @@ use std::sync::Arc;
 use common_base::readable_size::ReadableSize;
 use common_config::config::Configurable;
 use common_options::datanode::DatanodeClientOptions;
-use common_telemetry::logging::{LoggingOptions, TracingOptions};
+use common_telemetry::logging::{LoggingOptions, SlowQueryOptions, TracingOptions};
 use meta_client::MetaClientOptions;
 use query::options::QueryOptions;
 use serde::{Deserialize, Serialize};
@@ -38,7 +38,7 @@ use crate::service_config::{
     PromStoreOptions,
 };
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct FrontendOptions {
     pub node_id: Option<String>,
@@ -61,6 +61,7 @@ pub struct FrontendOptions {
     pub tracing: TracingOptions,
     pub query: QueryOptions,
     pub max_in_flight_write_bytes: Option<ReadableSize>,
+    pub slow_query: Option<SlowQueryOptions>,
 }
 
 impl Default for FrontendOptions {
@@ -86,6 +87,7 @@ impl Default for FrontendOptions {
             tracing: TracingOptions::default(),
             query: QueryOptions::default(),
             max_in_flight_write_bytes: None,
+            slow_query: None,
         }
     }
 }

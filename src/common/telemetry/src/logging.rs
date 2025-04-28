@@ -68,13 +68,10 @@ pub struct LoggingOptions {
 
     /// The tracing sample ratio.
     pub tracing_sample_ratio: Option<TracingSampleOptions>,
-
-    /// The logging options of slow query.
-    pub slow_query: SlowQueryOptions,
 }
 
 /// The options of slow query.
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
 #[serde(default)]
 pub struct SlowQueryOptions {
     /// Whether to enable slow query log.
@@ -91,7 +88,7 @@ pub struct SlowQueryOptions {
     pub sample_ratio: Option<f64>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Default, Copy)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default, Copy, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum SlowQueriesRecordType {
     #[default]
@@ -129,7 +126,6 @@ impl Default for LoggingOptions {
             otlp_endpoint: None,
             tracing_sample_ratio: None,
             append_stdout: true,
-            slow_query: SlowQueryOptions::default(),
             // Rotation hourly, 24 files per day, keeps info log files of 30 days
             max_log_files: 720,
         }
@@ -169,7 +165,8 @@ pub fn init_default_ut_logging() {
             "unittest",
             &opts,
             &TracingOptions::default(),
-            None
+            None,
+            None,
         ));
 
         crate::info!("logs dir = {}", dir);
@@ -187,6 +184,7 @@ pub fn init_global_logging(
     opts: &LoggingOptions,
     tracing_opts: &TracingOptions,
     node_id: Option<String>,
+    slow_query_opts: Option<&SlowQueryOptions>,
 ) -> Vec<WorkerGuard> {
     static START: Once = Once::new();
     let mut guards = vec![];
@@ -289,46 +287,53 @@ pub fn init_global_logging(
             None
         };
 
-        let slow_query_logging_layer = if !opts.dir.is_empty() && opts.slow_query.enable {
-            let rolling_appender = RollingFileAppender::builder()
-                .rotation(Rotation::HOURLY)
-                .filename_prefix("greptimedb-slow-queries")
-                .max_log_files(opts.max_log_files)
-                .build(&opts.dir)
-                .unwrap_or_else(|e| {
-                    panic!(
-                        "initializing rolling file appender at {} failed: {}",
-                        &opts.dir, e
-                    )
+        let slow_query_logging_layer = if let Some(slow_query_opts) = slow_query_opts {
+            if !opts.dir.is_empty()
+                && slow_query_opts.enable
+                && slow_query_opts.record_type == SlowQueriesRecordType::Log
+            {
+                let rolling_appender = RollingFileAppender::builder()
+                    .rotation(Rotation::HOURLY)
+                    .filename_prefix("greptimedb-slow-queries")
+                    .max_log_files(opts.max_log_files)
+                    .build(&opts.dir)
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "initializing rolling file appender at {} failed: {}",
+                            &opts.dir, e
+                        )
+                    });
+                let (writer, guard) = tracing_appender::non_blocking(rolling_appender);
+                guards.push(guard);
+
+                // Only logs if the field contains "slow".
+                let slow_query_filter = FilterFn::new(|metadata| {
+                    metadata
+                        .fields()
+                        .iter()
+                        .any(|field| field.name().contains("slow"))
                 });
-            let (writer, guard) = tracing_appender::non_blocking(rolling_appender);
-            guards.push(guard);
 
-            // Only logs if the field contains "slow".
-            let slow_query_filter = FilterFn::new(|metadata| {
-                metadata
-                    .fields()
-                    .iter()
-                    .any(|field| field.name().contains("slow"))
-            });
-
-            if opts.log_format == LogFormat::Json {
-                Some(
-                    Layer::new()
-                        .json()
-                        .with_writer(writer)
-                        .with_ansi(false)
-                        .with_filter(slow_query_filter)
-                        .boxed(),
-                )
+                if opts.log_format == LogFormat::Json {
+                    Some(
+                        Layer::new()
+                            .json()
+                            .with_writer(writer)
+                            .with_ansi(false)
+                            .with_filter(slow_query_filter)
+                            .boxed(),
+                    )
+                } else {
+                    Some(
+                        Layer::new()
+                            .with_writer(writer)
+                            .with_ansi(false)
+                            .with_filter(slow_query_filter)
+                            .boxed(),
+                    )
+                }
             } else {
-                Some(
-                    Layer::new()
-                        .with_writer(writer)
-                        .with_ansi(false)
-                        .with_filter(slow_query_filter)
-                        .boxed(),
-                )
+                None
             }
         } else {
             None
