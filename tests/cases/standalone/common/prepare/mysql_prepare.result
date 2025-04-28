@@ -22,7 +22,11 @@ EXECUTE stmt USING 1;
 -- SQLNESS PROTOCOL MYSQL
 EXECUTE stmt USING 'a';
 
-Failed to execute query, err: MySqlError { ERROR 1210 (HY000): (InvalidArguments): Invalid request parameter: Column  expect type: Int32(Int32Type), actual: String(StringType) }
++----+
+| $1 |
++----+
+| 0  |
++----+
 
 -- SQLNESS PROTOCOL MYSQL
 DEALLOCATE stmt;
