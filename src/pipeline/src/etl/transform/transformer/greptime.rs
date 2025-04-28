@@ -30,9 +30,8 @@ use serde_json::Number;
 
 use crate::error::{
     IdentifyPipelineColumnTypeMismatchSnafu, ReachedMaxNestedLevelsSnafu, Result,
-    TransformColumnNameMustBeUniqueSnafu, TransformEmptySnafu,
-    TransformMultipleTimestampIndexSnafu, TransformTimestampIndexCountSnafu,
-    UnsupportedNumberTypeSnafu,
+    TransformColumnNameMustBeUniqueSnafu, TransformMultipleTimestampIndexSnafu,
+    TransformTimestampIndexCountSnafu, UnsupportedNumberTypeSnafu,
 };
 use crate::etl::field::{Field, Fields};
 use crate::etl::transform::index::Index;
@@ -124,10 +123,7 @@ impl GreptimeTransformer {
 
 impl GreptimeTransformer {
     pub fn new(mut transforms: Transforms) -> Result<Self> {
-        if transforms.is_empty() {
-            return TransformEmptySnafu.fail();
-        }
-
+        // empty check is done in the caller
         let mut column_names_set = HashSet::new();
         let mut timestamp_columns = vec![];
 
@@ -491,10 +487,10 @@ fn resolve_value(
 }
 
 fn identity_pipeline_inner(
-    array: Vec<PipelineMap>,
+    pipeline_maps: Vec<PipelineMap>,
     custom_ts: Option<&IdentityTimeIndex>,
 ) -> Result<(SchemaInfo, Vec<Row>)> {
-    let mut rows = Vec::with_capacity(array.len());
+    let mut rows = Vec::with_capacity(pipeline_maps.len());
     let mut schema_info = SchemaInfo::default();
 
     // set time index column schema first
@@ -510,7 +506,7 @@ fn identity_pipeline_inner(
         options: None,
     });
 
-    for values in array {
+    for values in pipeline_maps {
         let row = values_to_row(&mut schema_info, values, custom_ts)?;
         rows.push(row);
     }

@@ -8738,6 +8738,7 @@ dependencies = [
  "enum_dispatch",
  "futures",
  "greptime-proto",
+ "hashbrown 0.15.2",
  "itertools 0.14.0",
  "jsonb",
  "jsonpath-rust 0.7.5",

@@ -17,12 +17,13 @@ use std::sync::Arc;
 
 use api::v1::{RowInsertRequest, Rows};
 use hashbrown::HashMap;
+use pipeline::error::AutoTransformOneTimestampSnafu;
 use pipeline::{
     DispatchedTo, GreptimePipelineParams, IdentityTimeIndex, Pipeline, PipelineContext,
     PipelineDefinition, PipelineExecOutput, PipelineMap, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
 };
 use session::context::QueryContextRef;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
 use crate::error::{CatalogSnafu, PipelineSnafu, Result};
 use crate::http::event::PipelineIngestRequest;
@@ -30,6 +31,14 @@ use crate::metrics::{
     METRIC_FAILURE_VALUE, METRIC_HTTP_LOGS_TRANSFORM_ELAPSED, METRIC_SUCCESS_VALUE,
 };
 use crate::query_handler::PipelineHandlerRef;
+
+macro_rules! push_to_map {
+    ($map:expr, $key:expr, $value:expr, $capacity:expr) => {
+        $map.entry($key)
+            .or_insert_with(|| Vec::with_capacity($capacity))
+            .push($value);
+    };
+}
 
 /// Never call this on `GreptimeIdentityPipeline` because it's a real pipeline
 pub async fn get_pipeline(
@@ -113,15 +122,17 @@ async fn run_custom_pipeline(
 
     let PipelineIngestRequest {
         table: table_name,
-        values: data_array,
+        values: pipeline_maps,
     } = pipeline_req;
-    let arr_len = data_array.len();
-    let mut req_map = HashMap::new();
+    let arr_len = pipeline_maps.len();
+    let mut transformed_map = HashMap::new();
     let mut dispatched: BTreeMap<DispatchedTo, Vec<PipelineMap>> = BTreeMap::new();
+    let mut auto_map = HashMap::new();
+    let mut auto_map_ts_keys = HashMap::new();
 
-    for mut values in data_array {
+    for mut pipeline_map in pipeline_maps {
         let r = pipeline
-            .exec_mut(&mut values)
+            .exec_mut(&mut pipeline_map)
             .inspect_err(|_| {
                 METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
                     .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
@@ -131,38 +142,76 @@ async fn run_custom_pipeline(
 
         match r {
             PipelineExecOutput::Transformed((row, table_suffix)) => {
-                let act_table_name = match table_suffix {
-                    Some(suffix) => format!("{}{}", table_name, suffix),
-                    None => table_name.clone(),
-                };
-
-                req_map
+                let act_table_name = table_suffix_to_table_name(&table_name, table_suffix);
+                push_to_map!(transformed_map, act_table_name, row, arr_len);
+            }
+            PipelineExecOutput::AutoTransform(table_suffix, ts_keys) => {
+                let act_table_name = table_suffix_to_table_name(&table_name, table_suffix);
+                push_to_map!(auto_map, act_table_name.clone(), pipeline_map, arr_len);
+                auto_map_ts_keys
                     .entry(act_table_name)
-                    .or_insert_with(|| Vec::with_capacity(arr_len))
-                    .push(row);
+                    .or_insert_with(HashMap::new)
+                    .extend(ts_keys);
             }
             PipelineExecOutput::DispatchedTo(dispatched_to) => {
-                if let Some(coll) = dispatched.get_mut(&dispatched_to) {
-                    coll.push(values);
-                } else {
-                    dispatched.insert(dispatched_to, vec![values]);
-                }
+                push_to_map!(dispatched, dispatched_to, pipeline_map, arr_len);
             }
         }
     }
 
     let mut results = Vec::new();
-    // if current pipeline generates some transformed results, build it as
-    // `RowInsertRequest` and append to results. If the pipeline doesn't
-    // have dispatch, this will be only output of the pipeline.
-    for (table_name, rows) in req_map {
-        results.push(RowInsertRequest {
-            rows: Some(Rows {
-                rows,
-                schema: pipeline.schemas().clone(),
-            }),
-            table_name,
-        });
+
+    if let Some(s) = pipeline.schemas() {
+        // transformed
+
+        // if current pipeline generates some transformed results, build it as
+        // `RowInsertRequest` and append to results. If the pipeline doesn't
+        // have dispatch, this will be only output of the pipeline.
+        for (table_name, rows) in transformed_map {
+            results.push(RowInsertRequest {
+                rows: Some(Rows {
+                    rows,
+                    schema: s.clone(),
+                }),
+                table_name,
+            });
+        }
+    } else {
+        // auto map
+        for (table_name, pipeline_maps) in auto_map {
+            if pipeline_maps.is_empty() {
+                continue;
+            }
+
+            let ts_vec = auto_map_ts_keys
+                .remove(&table_name)
+                .context(AutoTransformOneTimestampSnafu)
+                .context(PipelineSnafu)?;
+            // only one timestamp key is allowed
+            // which will be converted to ts index
+            if ts_vec.len() != 1 {
+                return AutoTransformOneTimestampSnafu.fail().context(PipelineSnafu);
+            }
+            let (ts_key, unit) = ts_vec.into_iter().next().unwrap();
+
+            let ident_ts_index = IdentityTimeIndex::Epoch(ts_key.to_string(), unit, false);
+            // let def = PipelineDefinition::GreptimeIdentityPipeline(Some(ident_ts_index.clone()));
+            // let next_pipeline_ctx = PipelineContext::new(&def, pipeline_ctx.pipeline_param);
+
+            let reqs = run_identity_pipeline(
+                handler,
+                Some(&ident_ts_index),
+                pipeline_ctx.pipeline_param,
+                PipelineIngestRequest {
+                    table: table_name,
+                    values: pipeline_maps,
+                },
+                query_ctx,
+            )
+            .await?;
+
+            results.extend(reqs);
+        }
     }
 
     // if current pipeline contains dispatcher and has several rules, we may
@@ -203,4 +252,12 @@ async fn run_custom_pipeline(
     }
 
     Ok(results)
+}
+
+#[inline]
+fn table_suffix_to_table_name(table_name: &String, table_suffix: Option<String>) -> String {
+    match table_suffix {
+        Some(suffix) => format!("{}{}", table_name, suffix),
+        None => table_name.clone(),
+    }
 }

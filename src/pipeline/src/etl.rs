@@ -19,6 +19,8 @@ pub mod transform;
 pub mod value;
 
 use api::v1::Row;
+use common_time::timestamp::TimeUnit;
+use hashbrown::HashMap;
 use processor::{Processor, Processors};
 use snafu::{ensure, OptionExt, ResultExt};
 use transform::Transforms;
@@ -27,8 +29,10 @@ use yaml_rust::YamlLoader;
 
 use crate::dispatcher::{Dispatcher, Rule};
 use crate::error::{
-    IntermediateKeyIndexSnafu, PrepareValueMustBeObjectSnafu, Result, YamlLoadSnafu, YamlParseSnafu,
+    IntermediateKeyIndexSnafu, PrepareValueMustBeObjectSnafu, Result,
+    TransformNoTimestampProcessorSnafu, YamlLoadSnafu, YamlParseSnafu,
 };
+use crate::etl::processor::ProcessorKind;
 use crate::tablesuffix::TableSuffixTemplate;
 use crate::GreptimeTransformer;
 
@@ -70,7 +74,25 @@ pub fn parse(input: &Content) -> Result<Pipeline> {
                 Transforms::default()
             };
 
-            let transformer = GreptimeTransformer::new(transformers)?;
+            let transformer = if transformers.is_empty() {
+                // use auto transform
+                // check processors have at least one timestamp-related processor
+                let cnt = processors
+                    .iter()
+                    .filter(|p| {
+                        matches!(
+                            p,
+                            ProcessorKind::Date(_)
+                                | ProcessorKind::Timestamp(_)
+                                | ProcessorKind::Epoch(_)
+                        )
+                    })
+                    .count();
+                ensure!(cnt > 0, TransformNoTimestampProcessorSnafu);
+                None
+            } else {
+                Some(GreptimeTransformer::new(transformers)?)
+            };
 
             let dispatcher = if !doc[DISPATCHER].is_badvalue() {
                 Some(Dispatcher::try_from(&doc[DISPATCHER])?)
@@ -101,7 +123,7 @@ pub struct Pipeline {
     description: Option<String>,
     processors: processor::Processors,
     dispatcher: Option<Dispatcher>,
-    transformer: GreptimeTransformer,
+    transformer: Option<GreptimeTransformer>,
     tablesuffix: Option<TableSuffixTemplate>,
 }
 
@@ -132,6 +154,7 @@ impl DispatchedTo {
 #[derive(Debug)]
 pub enum PipelineExecOutput {
     Transformed((Row, Option<String>)),
+    AutoTransform(Option<String>, HashMap<String, TimeUnit>),
     DispatchedTo(DispatchedTo),
 }
 
@@ -199,25 +222,35 @@ impl Pipeline {
             return Ok(PipelineExecOutput::DispatchedTo(rule.into()));
         }
 
-        // transform
-        let row = self.transformer.transform_mut(val)?;
-
-        // generate table name
-        let table_suffix = self.tablesuffix.as_ref().and_then(|t| t.apply(val));
-
-        Ok(PipelineExecOutput::Transformed((row, table_suffix)))
+        if let Some(transformer) = self.transformer() {
+            let row = transformer.transform_mut(val)?;
+            let table_suffix = self.tablesuffix.as_ref().and_then(|t| t.apply(val));
+            Ok(PipelineExecOutput::Transformed((row, table_suffix)))
+        } else {
+            let table_suffix = self.tablesuffix.as_ref().and_then(|t| t.apply(val));
+            let mut ts_keys = HashMap::with_capacity(4);
+            // get all ts values
+            for (k, v) in val {
+                if let Value::Timestamp(ts) = v {
+                    if !ts_keys.contains_key(k) {
+                        ts_keys.insert(k.clone(), ts.get_unit());
+                    }
+                }
+            }
+            Ok(PipelineExecOutput::AutoTransform(table_suffix, ts_keys))
+        }
     }
 
     pub fn processors(&self) -> &processor::Processors {
         &self.processors
     }
 
-    pub fn transformer(&self) -> &GreptimeTransformer {
-        &self.transformer
+    pub fn transformer(&self) -> Option<&GreptimeTransformer> {
+        self.transformer.as_ref()
     }
 
-    pub fn schemas(&self) -> &Vec<greptime_proto::v1::ColumnSchema> {
-        self.transformer.schemas()
+    pub fn schemas(&self) -> Option<&Vec<greptime_proto::v1::ColumnSchema>> {
+        self.transformer.as_ref().map(|t| t.schemas())
     }
 }
 
@@ -315,7 +348,7 @@ transform:
             .unwrap()
             .into_transformed()
             .unwrap();
-        let sechema = pipeline.schemas();
+        let sechema = pipeline.schemas().unwrap();
 
         assert_eq!(sechema.len(), result.0.values.len());
         let test = vec![
@@ -427,7 +460,7 @@ transform:
     "#;
 
         let pipeline: Pipeline = parse(&Content::Yaml(pipeline_yaml)).unwrap();
-        let schema = pipeline.schemas().clone();
+        let schema = pipeline.schemas().unwrap().clone();
         let mut result = json_to_map(input_value).unwrap();
 
         let row = pipeline
