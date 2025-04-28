@@ -1883,10 +1883,10 @@ mod tests {
         assert_eq!(Value::Boolean(true), v);
 
         // Non-numeric types should still fail with auto_string_to_numeric=true
-        let sql_val = SqlValue::SingleQuotedString("2022-02-22".to_string());
+        let sql_val = SqlValue::SingleQuotedString("hello".to_string());
         let v = sql_value_to_value(
             "a",
-            &ConcreteDataType::timestamp_millisecond_datatype(),
+            &ConcreteDataType::int32_datatype(),
             &sql_val,
             None,
             None,
