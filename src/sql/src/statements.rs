@@ -1773,13 +1773,13 @@ mod tests {
         // Test string to float32
         let result = parse_string_to_value(
             "col",
-            "3.14".to_string(),
+            "3.5".to_string(),
             &ConcreteDataType::float32_datatype(),
             None,
             true,
         )
         .unwrap();
-        assert_eq!(Value::Float32(OrderedF32::from(3.14)), result);
+        assert_eq!(Value::Float32(OrderedF32::from(3.5)), result);
 
         // Test invalid string to float32 with auto cast
         let result = parse_string_to_value(
@@ -1795,13 +1795,13 @@ mod tests {
         // Test string to float64
         let result = parse_string_to_value(
             "col",
-            "3.141592653589793".to_string(),
+            "3.5".to_string(),
             &ConcreteDataType::float64_datatype(),
             None,
             true,
         )
         .unwrap();
-        assert_eq!(Value::Float64(OrderedF64::from(3.141592653589793)), result);
+        assert_eq!(Value::Float64(OrderedF64::from(3.5)), result);
 
         // Test invalid string to float64 with auto cast
         let result = parse_string_to_value(
@@ -1831,7 +1831,7 @@ mod tests {
         assert_eq!(Value::Int32(123), v);
 
         // Test with a float string
-        let sql_val = SqlValue::SingleQuotedString("3.14".to_string());
+        let sql_val = SqlValue::SingleQuotedString("3.5".to_string());
         let v = sql_value_to_value(
             "a",
             &ConcreteDataType::float64_datatype(),
@@ -1841,7 +1841,7 @@ mod tests {
             true,
         )
         .unwrap();
-        assert_eq!(Value::Float64(OrderedFloat(3.14)), v);
+        assert_eq!(Value::Float64(OrderedFloat(3.5)), v);
 
         // Test with auto_string_to_numeric=false
         let sql_val = SqlValue::SingleQuotedString("123".to_string());
