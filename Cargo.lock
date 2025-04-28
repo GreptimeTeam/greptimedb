@@ -185,7 +185,7 @@ checksum = "d301b3b94cb4b2f23d7917810addbbaff90738e0ca2be692bd027e70d7e0330c"
 
 [[package]]
 name = "api"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "common-base",
  "common-decimal",
@@ -915,7 +915,7 @@ dependencies = [
 
 [[package]]
 name = "auth"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "api",
  "async-trait",
@@ -1537,7 +1537,7 @@ dependencies = [
 
 [[package]]
 name = "cache"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "catalog",
  "common-error",
@@ -1561,7 +1561,7 @@ checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
 [[package]]
 name = "catalog"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "api",
  "arrow 54.2.1",
@@ -1874,7 +1874,7 @@ checksum = "1462739cb27611015575c0c11df5df7601141071f07518d56fcc1be504cbec97"
 
 [[package]]
 name = "cli"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "async-trait",
  "auth",
@@ -1917,7 +1917,7 @@ dependencies = [
  "session",
  "snafu 0.8.5",
  "store-api",
- "substrait 0.14.0",
+ "substrait 0.14.1",
  "table",
  "tempfile",
  "tokio",
@@ -1926,7 +1926,7 @@ dependencies = [
 
 [[package]]
 name = "client"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "api",
  "arc-swap",
@@ -1955,7 +1955,7 @@ dependencies = [
  "rand 0.9.0",
  "serde_json",
  "snafu 0.8.5",
- "substrait 0.14.0",
+ "substrait 0.14.1",
  "substrait 0.37.3",
  "tokio",
  "tokio-stream",
@@ -1996,7 +1996,7 @@ dependencies = [
 
 [[package]]
 name = "cmd"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "async-trait",
  "auth",
@@ -2056,7 +2056,7 @@ dependencies = [
  "similar-asserts",
  "snafu 0.8.5",
  "store-api",
- "substrait 0.14.0",
+ "substrait 0.14.1",
  "table",
  "temp-env",
  "tempfile",
@@ -2102,7 +2102,7 @@ checksum = "55b672471b4e9f9e95499ea597ff64941a309b2cdbffcc46f2cc5e2d971fd335"
 
 [[package]]
 name = "common-base"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "anymap2",
  "async-trait",
@@ -2124,11 +2124,11 @@ dependencies = [
 
 [[package]]
 name = "common-catalog"
-version = "0.14.0"
+version = "0.14.1"
 
 [[package]]
 name = "common-config"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "common-base",
  "common-error",
@@ -2153,7 +2153,7 @@ dependencies = [
 
 [[package]]
 name = "common-datasource"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "arrow 54.2.1",
  "arrow-schema 54.3.1",
@@ -2190,7 +2190,7 @@ dependencies = [
 
 [[package]]
 name = "common-decimal"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "bigdecimal 0.4.8",
  "common-error",
@@ -2203,7 +2203,7 @@ dependencies = [
 
 [[package]]
 name = "common-error"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "common-macro",
  "http 1.1.0",
@@ -2214,7 +2214,7 @@ dependencies = [
 
 [[package]]
 name = "common-frontend"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "async-trait",
  "common-error",
@@ -2224,7 +2224,7 @@ dependencies = [
 
 [[package]]
 name = "common-function"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "ahash 0.8.11",
  "api",
@@ -2277,7 +2277,7 @@ dependencies = [
 
 [[package]]
 name = "common-greptimedb-telemetry"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "async-trait",
  "common-runtime",
@@ -2294,7 +2294,7 @@ dependencies = [
 
 [[package]]
 name = "common-grpc"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "api",
  "arrow-flight",
@@ -2325,7 +2325,7 @@ dependencies = [
 
 [[package]]
 name = "common-grpc-expr"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "api",
  "common-base",
@@ -2344,7 +2344,7 @@ dependencies = [
 
 [[package]]
 name = "common-macro"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "arc-swap",
  "common-query",
@@ -2358,7 +2358,7 @@ dependencies = [
 
 [[package]]
 name = "common-mem-prof"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "common-error",
  "common-macro",
@@ -2371,7 +2371,7 @@ dependencies = [
 
 [[package]]
 name = "common-meta"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "anymap2",
  "api",
@@ -2432,7 +2432,7 @@ dependencies = [
 
 [[package]]
 name = "common-options"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "common-grpc",
  "humantime-serde",
@@ -2441,11 +2441,11 @@ dependencies = [
 
 [[package]]
 name = "common-plugins"
-version = "0.14.0"
+version = "0.14.1"
 
 [[package]]
 name = "common-pprof"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "common-error",
  "common-macro",
@@ -2457,7 +2457,7 @@ dependencies = [
 
 [[package]]
 name = "common-procedure"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2484,7 +2484,7 @@ dependencies = [
 
 [[package]]
 name = "common-procedure-test"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "async-trait",
  "common-procedure",
@@ -2493,7 +2493,7 @@ dependencies = [
 
 [[package]]
 name = "common-query"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "api",
  "async-trait",
@@ -2519,7 +2519,7 @@ dependencies = [
 
 [[package]]
 name = "common-recordbatch"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "arc-swap",
  "common-error",
@@ -2539,7 +2539,7 @@ dependencies = [
 
 [[package]]
 name = "common-runtime"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "async-trait",
  "clap 4.5.19",
@@ -2569,14 +2569,14 @@ dependencies = [
 
 [[package]]
 name = "common-session"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "strum 0.27.1",
 ]
 
 [[package]]
 name = "common-telemetry"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "atty",
  "backtrace",
@@ -2604,7 +2604,7 @@ dependencies = [
 
 [[package]]
 name = "common-test-util"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "client",
  "common-query",
@@ -2616,7 +2616,7 @@ dependencies = [
 
 [[package]]
 name = "common-time"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "arrow 54.2.1",
  "chrono",
@@ -2634,7 +2634,7 @@ dependencies = [
 
 [[package]]
 name = "common-version"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "build-data",
  "const_format",
@@ -2644,7 +2644,7 @@ dependencies = [
 
 [[package]]
 name = "common-wal"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "common-base",
  "common-error",
@@ -3572,7 +3572,7 @@ dependencies = [
 
 [[package]]
 name = "datanode"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "api",
  "arrow-flight",
@@ -3624,7 +3624,7 @@ dependencies = [
  "session",
  "snafu 0.8.5",
  "store-api",
- "substrait 0.14.0",
+ "substrait 0.14.1",
  "table",
  "tokio",
  "toml 0.8.19",
@@ -3633,7 +3633,7 @@ dependencies = [
 
 [[package]]
 name = "datatypes"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "arrow 54.2.1",
  "arrow-array 54.2.1",
@@ -4259,7 +4259,7 @@ dependencies = [
 
 [[package]]
 name = "file-engine"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "api",
  "async-trait",
@@ -4382,7 +4382,7 @@ checksum = "8bf7cc16383c4b8d58b9905a8509f02926ce3058053c056376248d958c9df1e8"
 
 [[package]]
 name = "flow"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "api",
  "arrow 54.2.1",
@@ -4444,7 +4444,7 @@ dependencies = [
  "snafu 0.8.5",
  "store-api",
  "strum 0.27.1",
- "substrait 0.14.0",
+ "substrait 0.14.1",
  "table",
  "tokio",
  "tonic 0.12.3",
@@ -4499,7 +4499,7 @@ checksum = "6c2141d6d6c8512188a7891b4b01590a45f6dac67afb4f255c4124dbb86d4eaa"
 
 [[package]]
 name = "frontend"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "api",
  "arc-swap",
@@ -4556,7 +4556,7 @@ dependencies = [
  "sqlparser 0.54.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=0cf6c04490d59435ee965edd2078e8855bd8471e)",
  "store-api",
  "strfmt",
- "substrait 0.14.0",
+ "substrait 0.14.1",
  "table",
  "tokio",
  "toml 0.8.19",
@@ -5795,7 +5795,7 @@ dependencies = [
 
 [[package]]
 name = "index"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "async-trait",
  "asynchronous-codec",
@@ -6605,7 +6605,7 @@ checksum = "a7a70ba024b9dc04c27ea2f0c0548feb474ec5c54bba33a7f72f873a39d07b24"
 
 [[package]]
 name = "log-query"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "chrono",
  "common-error",
@@ -6617,7 +6617,7 @@ dependencies = [
 
 [[package]]
 name = "log-store"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -6911,7 +6911,7 @@ dependencies = [
 
 [[package]]
 name = "meta-client"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "api",
  "async-trait",
@@ -6939,7 +6939,7 @@ dependencies = [
 
 [[package]]
 name = "meta-srv"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "api",
  "async-trait",
@@ -7029,7 +7029,7 @@ dependencies = [
 
 [[package]]
 name = "metric-engine"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "api",
  "aquamarine",
@@ -7118,7 +7118,7 @@ dependencies = [
 
 [[package]]
 name = "mito2"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "api",
  "aquamarine",
@@ -7824,7 +7824,7 @@ dependencies = [
 
 [[package]]
 name = "object-store"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -8119,7 +8119,7 @@ dependencies = [
 
 [[package]]
 name = "operator"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "ahash 0.8.11",
  "api",
@@ -8168,7 +8168,7 @@ dependencies = [
  "sql",
  "sqlparser 0.54.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=0cf6c04490d59435ee965edd2078e8855bd8471e)",
  "store-api",
- "substrait 0.14.0",
+ "substrait 0.14.1",
  "table",
  "tokio",
  "tokio-util",
@@ -8423,7 +8423,7 @@ dependencies = [
 
 [[package]]
 name = "partition"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "api",
  "async-trait",
@@ -8705,7 +8705,7 @@ checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
 
 [[package]]
 name = "pipeline"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "ahash 0.8.11",
  "api",
@@ -8847,7 +8847,7 @@ dependencies = [
 
 [[package]]
 name = "plugins"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "auth",
  "clap 4.5.19",
@@ -9127,7 +9127,7 @@ dependencies = [
 
 [[package]]
 name = "promql"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "ahash 0.8.11",
  "async-trait",
@@ -9373,7 +9373,7 @@ dependencies = [
 
 [[package]]
 name = "puffin"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "async-compression 0.4.13",
  "async-trait",
@@ -9414,7 +9414,7 @@ dependencies = [
 
 [[package]]
 name = "query"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "ahash 0.8.11",
  "api",
@@ -9480,7 +9480,7 @@ dependencies = [
  "sqlparser 0.54.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=0cf6c04490d59435ee965edd2078e8855bd8471e)",
  "statrs",
  "store-api",
- "substrait 0.14.0",
+ "substrait 0.14.1",
  "table",
  "tokio",
  "tokio-stream",
@@ -10830,7 +10830,7 @@ dependencies = [
 
 [[package]]
 name = "servers"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "ahash 0.8.11",
  "api",
@@ -10950,7 +10950,7 @@ dependencies = [
 
 [[package]]
 name = "session"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "api",
  "arc-swap",
@@ -11275,7 +11275,7 @@ dependencies = [
 
 [[package]]
 name = "sql"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "api",
  "chrono",
@@ -11330,7 +11330,7 @@ dependencies = [
 
 [[package]]
 name = "sqlness-runner"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "async-trait",
  "clap 4.5.19",
@@ -11649,7 +11649,7 @@ dependencies = [
 
 [[package]]
 name = "store-api"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "api",
  "aquamarine",
@@ -11798,7 +11798,7 @@ dependencies = [
 
 [[package]]
 name = "substrait"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -11978,7 +11978,7 @@ dependencies = [
 
 [[package]]
 name = "table"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "api",
  "async-trait",
@@ -12229,7 +12229,7 @@ checksum = "3369f5ac52d5eb6ab48c6b4ffdc8efbcad6b89c765749064ba298f2c68a16a76"
 
 [[package]]
 name = "tests-fuzz"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "arbitrary",
  "async-trait",
@@ -12273,7 +12273,7 @@ dependencies = [
 
 [[package]]
 name = "tests-integration"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "api",
  "arrow-flight",
@@ -12340,7 +12340,7 @@ dependencies = [
  "sql",
  "sqlx",
  "store-api",
- "substrait 0.14.0",
+ "substrait 0.14.1",
  "table",
  "tempfile",
  "time",
