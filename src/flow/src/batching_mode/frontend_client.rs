@@ -27,13 +27,15 @@ use common_meta::peer::Peer;
 use common_meta::rpc::store::RangeRequest;
 use common_query::Output;
 use common_telemetry::warn;
+use itertools::Itertools;
 use meta_client::client::MetaClient;
 use servers::query_handler::grpc::GrpcQueryHandler;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
 
 use crate::batching_mode::{
-    DEFAULT_BATCHING_ENGINE_QUERY_TIMEOUT, GRPC_CONN_TIMEOUT, GRPC_MAX_RETRIES,
+    DEFAULT_BATCHING_ENGINE_QUERY_TIMEOUT, FRONTEND_ACTIVITY_TIMEOUT, GRPC_CONN_TIMEOUT,
+    GRPC_MAX_RETRIES,
 };
 use crate::error::{ExternalSnafu, InvalidRequestSnafu, NoAvailableFrontendSnafu, UnexpectedSnafu};
 use crate::Error;
@@ -131,14 +133,13 @@ impl DatabaseWithPeer {
 
     /// Try sending a "SELECT 1" to the database
     async fn try_select_one(&self) -> Result<(), Error> {
-        let req = Request::Query(api::v1::QueryRequest {
-            query: Some(api::v1::query_request::Query::Sql("SELECT 1".to_string())),
-        });
-        self.database
-            .handle(req.clone())
+        // notice here use `sql` for `SELECT 1` return 1 row
+        let _ = self
+            .database
+            .sql("SELECT 1")
             .await
             .with_context(|_| InvalidRequestSnafu {
-                context: format!("Failed to handle request at {:?}: {:?}", self.peer, req),
+                context: format!("Failed to handle `SELECT 1` request at {:?}", self.peer),
             })?;
         Ok(())
     }
@@ -193,40 +194,47 @@ impl FrontendClient {
             .fail();
         };
 
+        let mut interval = tokio::time::interval(GRPC_CONN_TIMEOUT);
         for retry in 0..GRPC_MAX_RETRIES {
             let frontends = self.scan_for_frontend().await?;
             let now_in_ms = SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap()
                 .as_millis() as i64;
+
             // found node with maximum last_activity_ts
-            if let Some((_, node_info)) = frontends
+            for (_, node_info) in frontends
                 .iter()
-                .max_by_key(|(_, node_info)| node_info.last_activity_ts)
+                .sorted_by_key(|(_, node_info)| node_info.last_activity_ts)
+                .rev()
                 // filter out frontend that have been down for more than 1 min
-                .filter(|(_, node_info)| node_info.last_activity_ts + 60_000 > now_in_ms)
+                .filter(|(_, node_info)| {
+                    node_info.last_activity_ts + FRONTEND_ACTIVITY_TIMEOUT.as_millis() as i64
+                        > now_in_ms
+                })
             {
-                let client = Client::with_manager_and_urls(
-                    chnl_mgr.clone(),
-                    vec![node_info.peer.addr.clone()],
-                );
+                let addr = &node_info.peer.addr;
+                let client = Client::with_manager_and_urls(chnl_mgr.clone(), vec![addr.clone()]);
                 let database = Database::new(catalog, schema, client);
                 let db = DatabaseWithPeer::new(database, node_info.peer.clone());
                 match db.try_select_one().await {
                     Ok(_) => return Ok(db),
                     Err(e) => {
-                        warn!("Failed to connect to frontend on retry={}: {e}", retry);
+                        warn!(
+                            "Failed to connect to frontend {} on retry={}: \n{e:?}",
+                            addr, retry
+                        );
                     }
                 }
-            } else {
-                // no available frontend
-                // sleep and retry
-                tokio::time::sleep(GRPC_CONN_TIMEOUT).await;
             }
+            // no available frontend
+            // sleep and retry
+            interval.tick().await;
         }
 
         NoAvailableFrontendSnafu {
             timeout: GRPC_CONN_TIMEOUT,
+            context: "No available frontend found that is able to process query",
         }
         .fail()
     }

@@ -61,9 +61,12 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("No available frontend found after timeout: {timeout:?}"))]
+    #[snafu(display(
+        "No available frontend found after timeout: {timeout:?}, context: {context}"
+    ))]
     NoAvailableFrontend {
         timeout: std::time::Duration,
+        context: String,
         #[snafu(implicit)]
         location: Location,
     },

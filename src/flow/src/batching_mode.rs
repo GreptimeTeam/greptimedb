@@ -43,3 +43,7 @@ const GRPC_MAX_RETRIES: u32 = 3;
 /// if failed to find available frontend after FRONTEND_SCAN_TIMEOUT elapsed, return error
 /// which should prevent flownode from starting
 pub const FRONTEND_SCAN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Frontend activity timeout
+/// if frontend is down(not sending heartbeat) for more than FRONTEND_ACTIVITY_TIMEOUT, it will be removed from the list that flownode use to connect
+pub const FRONTEND_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(60);

@@ -95,26 +95,35 @@ impl FlowDualEngine {
         self.batching_engine.clone()
     }
 
-    /// In distributed mode, scan periodically until available frontend is found, or timeout,
+    /// In distributed mode, scan periodically(1s) until available frontend is found, or timeout,
     /// in standalone mode, return immediately
+    /// notice here if any frontend appear in cluster info this function will return immediately
     async fn wait_for_available_frontend(&self, timeout: std::time::Duration) -> Result<(), Error> {
         if !self.is_distributed() {
             return Ok(());
         }
         let frontend_client = self.batching_engine().frontend_client.clone();
-        let mut elapsed = std::time::Duration::from_millis(0);
-        let sleep_duration = std::time::Duration::from_millis(5_000);
+        let sleep_duration = std::time::Duration::from_millis(1_000);
+        let now = std::time::Instant::now();
         loop {
             let frontend_list = frontend_client.scan_for_frontend().await?;
             if !frontend_list.is_empty() {
-                info!("Available frontend found");
+                let fe_list = frontend_list
+                    .iter()
+                    .map(|(_, info)| &info.peer.addr)
+                    .collect::<Vec<_>>();
+                info!("Available frontend found: {:?}", fe_list);
                 return Ok(());
             }
+            let elapsed = now.elapsed();
             tokio::time::sleep(sleep_duration).await;
-            elapsed += sleep_duration;
             info!("Waiting for available frontend, elapsed={:?}", elapsed);
             if elapsed >= timeout {
-                return NoAvailableFrontendSnafu { timeout }.fail();
+                return NoAvailableFrontendSnafu {
+                    timeout,
+                    context: "No available frontend found in cluster info",
+                }
+                .fail();
             }
         }
     }
