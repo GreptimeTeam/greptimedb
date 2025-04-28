@@ -102,6 +102,18 @@ impl PipelineDefinition {
             Ok(Self::ByNameAndValue((name.to_owned(), version)))
         }
     }
+
+    pub fn is_identity(&self) -> bool {
+        matches!(self, Self::GreptimeIdentityPipeline(_))
+    }
+
+    pub fn get_custom_ts(&self) -> Option<&IdentityTimeIndex> {
+        if let Self::GreptimeIdentityPipeline(custom_ts) = self {
+            custom_ts.as_ref()
+        } else {
+            None
+        }
+    }
 }
 
 pub struct PipelineContext<'a> {
