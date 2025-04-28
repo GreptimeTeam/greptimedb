@@ -19,8 +19,8 @@ use ahash::{HashMap, HashMapExt};
 use api::v1::{RowInsertRequest, Rows};
 use pipeline::error::AutoTransformOneTimestampSnafu;
 use pipeline::{
-    DispatchedTo, GreptimePipelineParams, IdentityTimeIndex, Pipeline, PipelineContext,
-    PipelineDefinition, PipelineExecOutput, PipelineMap, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
+    DispatchedTo, IdentityTimeIndex, Pipeline, PipelineContext, PipelineDefinition,
+    PipelineExecOutput, PipelineMap, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
 };
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
@@ -66,27 +66,16 @@ pub(crate) async fn run_pipeline(
     query_ctx: &QueryContextRef,
     is_top_level: bool,
 ) -> Result<Vec<RowInsertRequest>> {
-    match &pipeline_ctx.pipeline_definition {
-        PipelineDefinition::GreptimeIdentityPipeline(custom_ts) => {
-            run_identity_pipeline(
-                handler,
-                custom_ts.as_ref(),
-                pipeline_ctx.pipeline_param,
-                pipeline_req,
-                query_ctx,
-            )
-            .await
-        }
-        _ => {
-            run_custom_pipeline(handler, pipeline_ctx, pipeline_req, query_ctx, is_top_level).await
-        }
+    if pipeline_ctx.pipeline_definition.is_identity() {
+        run_identity_pipeline(handler, pipeline_ctx, pipeline_req, query_ctx).await
+    } else {
+        run_custom_pipeline(handler, pipeline_ctx, pipeline_req, query_ctx, is_top_level).await
     }
 }
 
 async fn run_identity_pipeline(
     handler: &PipelineHandlerRef,
-    custom_ts: Option<&IdentityTimeIndex>,
-    pipeline_parameters: &GreptimePipelineParams,
+    pipeline_ctx: &PipelineContext<'_>,
     pipeline_req: PipelineIngestRequest,
     query_ctx: &QueryContextRef,
 ) -> Result<Vec<RowInsertRequest>> {
@@ -98,7 +87,7 @@ async fn run_identity_pipeline(
         .get_table(&table_name, query_ctx)
         .await
         .context(CatalogSnafu)?;
-    pipeline::identity_pipeline(data_array, table, pipeline_parameters, custom_ts)
+    pipeline::identity_pipeline(data_array, table, pipeline_ctx)
         .map(|rows| {
             vec![RowInsertRequest {
                 rows: Some(rows),
@@ -195,11 +184,12 @@ async fn run_custom_pipeline(
             let (ts_key, unit) = ts_vec.into_iter().next().unwrap();
 
             let ident_ts_index = IdentityTimeIndex::Epoch(ts_key.to_string(), unit, false);
+            let new_def = PipelineDefinition::GreptimeIdentityPipeline(Some(ident_ts_index));
+            let next_pipeline_ctx = PipelineContext::new(&new_def, pipeline_ctx.pipeline_param);
 
             let reqs = run_identity_pipeline(
                 handler,
-                Some(&ident_ts_index),
-                pipeline_ctx.pipeline_param,
+                &next_pipeline_ctx,
                 PipelineIngestRequest {
                     table: table_name,
                     values: pipeline_maps,
