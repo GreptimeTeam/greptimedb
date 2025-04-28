@@ -395,14 +395,16 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("Transform cannot be empty"))]
-    TransformEmpty {
-        #[snafu(implicit)]
-        location: Location,
-    },
     #[snafu(display("Column name must be unique, but got duplicated: {duplicates}"))]
     TransformColumnNameMustBeUnique {
         duplicates: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display(
+        "At least one timestamp-related processor is required to use auto transform"
+    ))]
+    TransformNoTimestampProcessor {
         #[snafu(implicit)]
         location: Location,
     },
@@ -418,6 +420,11 @@ pub enum Error {
     TransformTimestampIndexCount {
         count: usize,
         columns: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Exactly one timestamp value is required to use auto transform"))]
+    AutoTransformOneTimestamp {
         #[snafu(implicit)]
         location: Location,
     },
@@ -793,10 +800,11 @@ impl ErrorExt for Error {
             | TransformOnFailureInvalidValue { .. }
             | TransformElementMustBeMap { .. }
             | TransformTypeMustBeSet { .. }
-            | TransformEmpty { .. }
             | TransformColumnNameMustBeUnique { .. }
             | TransformMultipleTimestampIndex { .. }
+            | TransformNoTimestampProcessor { .. }
             | TransformTimestampIndexCount { .. }
+            | AutoTransformOneTimestamp { .. }
             | CoerceUnsupportedNullType { .. }
             | CoerceUnsupportedNullTypeTo { .. }
             | CoerceUnsupportedEpochType { .. }
