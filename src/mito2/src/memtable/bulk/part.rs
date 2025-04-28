@@ -57,7 +57,6 @@ pub struct BulkPart {
     pub(crate) num_rows: usize,
     pub(crate) max_ts: i64,
     pub(crate) min_ts: i64,
-
     pub(crate) sequence: u64,
 }
 

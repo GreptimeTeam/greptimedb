@@ -243,8 +243,8 @@ impl Memtable for SimpleBulkMemtable {
 
     fn stats(&self) -> MemtableStats {
         let estimated_bytes = self.alloc_tracker.bytes_allocated();
-
-        if estimated_bytes == 0 {
+        let num_rows = self.num_rows.load(Ordering::Relaxed);
+        if num_rows == 0 {
             // no rows ever written
             return MemtableStats {
                 estimated_bytes,
@@ -267,7 +267,7 @@ impl Memtable for SimpleBulkMemtable {
         MemtableStats {
             estimated_bytes,
             time_range: Some((min_timestamp, max_timestamp)),
-            num_rows: self.num_rows.load(Ordering::Relaxed),
+            num_rows,
             num_ranges: 1,
             max_sequence: self.max_sequence.load(Ordering::Relaxed),
         }

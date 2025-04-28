@@ -24,10 +24,10 @@ use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::RegionBulkInsertsRequest;
 
-use crate::error;
 use crate::memtable::bulk::part::BulkPart;
 use crate::request::{OptionOutputTx, SenderBulkRequest};
 use crate::worker::RegionWorkerLoop;
+use crate::{error, metrics};
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) async fn handle_bulk_insert_batch(
@@ -37,6 +37,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         pending_bulk_request: &mut Vec<SenderBulkRequest>,
         sender: OptionOutputTx,
     ) {
+        let _timer = metrics::REGION_WORKER_HANDLE_WRITE_ELAPSED
+            .with_label_values(&["process_bulk_req"])
+            .start_timer();
         let batch = request.payload;
         let num_rows = batch.num_rows();
 
