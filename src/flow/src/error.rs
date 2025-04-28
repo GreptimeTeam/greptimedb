@@ -61,6 +61,16 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "No available frontend found after timeout: {timeout:?}, context: {context}"
+    ))]
+    NoAvailableFrontend {
+        timeout: std::time::Duration,
+        context: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("External error"))]
     External {
         source: BoxedError,
@@ -296,7 +306,8 @@ impl ErrorExt for Error {
             Self::Eval { .. }
             | Self::JoinTask { .. }
             | Self::Datafusion { .. }
-            | Self::InsertIntoFlow { .. } => StatusCode::Internal,
+            | Self::InsertIntoFlow { .. }
+            | Self::NoAvailableFrontend { .. } => StatusCode::Internal,
             Self::FlowAlreadyExist { .. } => StatusCode::TableAlreadyExists,
             Self::TableNotFound { .. }
             | Self::TableNotFoundMeta { .. }
