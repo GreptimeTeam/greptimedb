@@ -40,7 +40,7 @@ const SLOW_QUERY_TABLE_QUERY_COLUMN_NAME: &str = "query";
 const SLOW_QUERY_TABLE_IS_PROMQL_COLUMN_NAME: &str = "is_promql";
 const SLOW_QUERY_TABLE_TIMESTAMP_COLUMN_NAME: &str = "timestamp";
 
-/// SlowQueryRecorder is reponsible for recording slow queries.
+/// SlowQueryRecorder is responsible for recording slow queries.
 #[derive(Clone)]
 pub struct SlowQueryRecorder {
     slow_query_opts: SlowQueryOptions,
