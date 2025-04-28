@@ -124,10 +124,14 @@ pub struct Metrics {
 
 impl Display for Metrics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let total = self.flush_leader_region_elapsed
+            + self.downgrade_leader_region_elapsed
+            + self.open_candidate_region_elapsed
+            + self.upgrade_candidate_region_elapsed;
         write!(
             f,
-            "operations_elapsed: {:?}, flush_leader_region_elapsed: {:?}, downgrade_leader_region_elapsed: {:?}, open_candidate_region_elapsed: {:?}, upgrade_candidate_region_elapsed: {:?}",
-            self.operations_elapsed,
+            "total: {:?}, flush_leader_region_elapsed: {:?}, downgrade_leader_region_elapsed: {:?}, open_candidate_region_elapsed: {:?}, upgrade_candidate_region_elapsed: {:?}",
+            total,
             self.flush_leader_region_elapsed,
             self.downgrade_leader_region_elapsed,
             self.open_candidate_region_elapsed,
@@ -165,11 +169,13 @@ impl Metrics {
 
 impl Drop for Metrics {
     fn drop(&mut self) {
-        if !self.operations_elapsed.is_zero() {
-            METRIC_META_REGION_MIGRATION_STAGE_ELAPSED
-                .with_label_values(&["operations"])
-                .observe(self.operations_elapsed.as_secs_f64());
-        }
+        let total = self.flush_leader_region_elapsed
+            + self.downgrade_leader_region_elapsed
+            + self.open_candidate_region_elapsed
+            + self.upgrade_candidate_region_elapsed;
+        METRIC_META_REGION_MIGRATION_STAGE_ELAPSED
+            .with_label_values(&["total"])
+            .observe(total.as_secs_f64());
 
         if !self.flush_leader_region_elapsed.is_zero() {
             METRIC_META_REGION_MIGRATION_STAGE_ELAPSED

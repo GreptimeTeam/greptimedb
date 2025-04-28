@@ -28,18 +28,22 @@ use crate::procedure::region_migration::update_metadata::UpdateMetadata;
 use crate::procedure::region_migration::{Context, State};
 use crate::service::mailbox::Channel;
 
-/// Flushes the leader region.
+/// Flushes the leader region before downgrading it.
+///
+/// This can minimize the time window where the region is not writable.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct FlushLeaderRegion;
+pub struct PreFlushRegion;
 
 #[async_trait::async_trait]
 #[typetag::serde]
-impl State for FlushLeaderRegion {
+impl State for PreFlushRegion {
     async fn next(&mut self, ctx: &mut Context) -> Result<(Box<dyn State>, Status)> {
         let timer = Instant::now();
         self.flush_region(ctx).await?;
         ctx.update_flush_leader_region_elapsed(timer);
-        ctx.update_operations_elapsed(timer);
+        // We intentionally don't update `operations_elapsed` here to prevent
+        // the `next_operation_timeout` from being reduced by the flush operation.
+        // This ensures sufficient time for subsequent critical operations.
 
         Ok((
             Box::new(UpdateMetadata::Downgrade),
@@ -52,7 +56,7 @@ impl State for FlushLeaderRegion {
     }
 }
 
-impl FlushLeaderRegion {
+impl PreFlushRegion {
     /// Builds flush leader region instruction.
     fn build_flush_leader_region_instruction(&self, ctx: &Context) -> Instruction {
         let pc = &ctx.persistent_ctx;
@@ -171,7 +175,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_datanode_is_unreachable() {
-        let state = FlushLeaderRegion;
+        let state = PreFlushRegion;
         // from_peer: 1
         // to_peer: 2
         let persistent_context = new_persistent_context();
@@ -184,7 +188,7 @@ mod tests {
     #[tokio::test]
     async fn test_unexpected_instruction_reply() {
         common_telemetry::init_default_ut_logging();
-        let state = FlushLeaderRegion;
+        let state = PreFlushRegion;
         // from_peer: 1
         // to_peer: 2
         let persistent_context = new_persistent_context();
@@ -206,7 +210,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_instruction_exceeded_deadline() {
-        let state = FlushLeaderRegion;
+        let state = PreFlushRegion;
         // from_peer: 1
         // to_peer: 2
         let persistent_context = new_persistent_context();
@@ -232,7 +236,7 @@ mod tests {
     #[tokio::test]
     async fn test_flush_region_failed() {
         common_telemetry::init_default_ut_logging();
-        let state = FlushLeaderRegion;
+        let state = PreFlushRegion;
         // from_peer: 1
         // to_peer: 2
         let persistent_context = new_persistent_context();
@@ -259,7 +263,7 @@ mod tests {
     #[tokio::test]
     async fn test_next_update_metadata_downgrade_state() {
         common_telemetry::init_default_ut_logging();
-        let mut state = FlushLeaderRegion;
+        let mut state = PreFlushRegion;
         // from_peer: 1
         // to_peer: 2
         let persistent_context = new_persistent_context();

@@ -28,7 +28,7 @@ use tokio::time::Instant;
 
 use crate::error::{self, Result};
 use crate::handler::HeartbeatMailbox;
-use crate::procedure::region_migration::flush_leader_region::FlushLeaderRegion;
+use crate::procedure::region_migration::flush_leader_region::PreFlushRegion;
 use crate::procedure::region_migration::{Context, State};
 use crate::service::mailbox::Channel;
 
@@ -47,7 +47,7 @@ impl State for OpenCandidateRegion {
         self.open_candidate_region(ctx, instruction).await?;
         ctx.update_open_candidate_region_elapsed(now);
 
-        Ok((Box::new(FlushLeaderRegion), Status::executing(false)))
+        Ok((Box::new(PreFlushRegion), Status::executing(false)))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -442,7 +442,7 @@ mod tests {
             (to_peer_id, region_id)
         );
 
-        let flush_leader_region = next.as_any().downcast_ref::<FlushLeaderRegion>().unwrap();
-        assert_matches!(flush_leader_region, FlushLeaderRegion);
+        let flush_leader_region = next.as_any().downcast_ref::<PreFlushRegion>().unwrap();
+        assert_matches!(flush_leader_region, PreFlushRegion);
     }
 }

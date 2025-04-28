@@ -44,7 +44,7 @@ use crate::error::{self, Error, Result};
 use crate::metasrv::MetasrvInfo;
 use crate::procedure::region_migration::close_downgraded_region::CloseDowngradedRegion;
 use crate::procedure::region_migration::downgrade_leader_region::DowngradeLeaderRegion;
-use crate::procedure::region_migration::flush_leader_region::FlushLeaderRegion;
+use crate::procedure::region_migration::flush_leader_region::PreFlushRegion;
 use crate::procedure::region_migration::manager::RegionMigrationProcedureTracker;
 use crate::procedure::region_migration::migration_abort::RegionMigrationAbort;
 use crate::procedure::region_migration::migration_end::RegionMigrationEnd;
@@ -418,7 +418,7 @@ pub(crate) fn assert_open_candidate_region(next: &dyn State) {
 
 /// Asserts the [State] should be [FlushLeaderRegion].
 pub(crate) fn assert_flush_leader_region(next: &dyn State) {
-    let _ = next.as_any().downcast_ref::<FlushLeaderRegion>().unwrap();
+    let _ = next.as_any().downcast_ref::<PreFlushRegion>().unwrap();
 }
 
 /// Asserts the [State] should be [UpdateMetadata::Downgrade].
