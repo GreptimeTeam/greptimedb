@@ -24,7 +24,7 @@ use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::NodeManagerRef;
-use common_slow_query::stats::StatementStatistics;
+use common_slow_query::SlowQueryRecorder;
 use operator::delete::Deleter;
 use operator::flow::FlowServiceOperator;
 use operator::insert::Inserter;
@@ -186,7 +186,7 @@ impl FrontendBuilder {
 
         plugins.insert::<StatementExecutorRef>(statement_executor.clone());
 
-        let stats = StatementStatistics::new(
+        let slow_query_recorder = SlowQueryRecorder::new(
             self.options.logging.slow_query.clone(),
             inserter.clone(),
             statement_executor.clone(),
@@ -210,7 +210,7 @@ impl FrontendBuilder {
             inserter,
             deleter,
             table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend)),
-            stats,
+            slow_query_recorder,
             limiter,
         })
     }
