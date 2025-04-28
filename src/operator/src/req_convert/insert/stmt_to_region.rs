@@ -227,14 +227,6 @@ fn sql_value_to_grpc_value(
             column: column.clone(),
         })?
     } else {
-        common_telemetry::info!(
-            "sql_value_to_grpc_value: column={}, type: {:?}, sql_val={:?}, timezone={:?}",
-            column,
-            column_schema.data_type,
-            sql_val,
-            timezone
-        );
-
         statements::sql_value_to_value(
             column,
             &column_schema.data_type,
