@@ -37,7 +37,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::adapter::{CreateFlowArgs, StreamingEngine};
 use crate::batching_mode::engine::BatchingEngine;
-use crate::batching_mode::FRONTEND_SCAN_TIMEOUT;
+use crate::batching_mode::{FRONTEND_SCAN_TIMEOUT, MIN_REFRESH_DURATION};
 use crate::engine::FlowEngine;
 use crate::error::{
     CreateFlowSnafu, ExternalSnafu, FlowNotFoundSnafu, IllegalCheckTaskStateSnafu,
@@ -377,22 +377,36 @@ struct ConsistentCheckTask {
 
 impl ConsistentCheckTask {
     async fn start_check_task(engine: &Arc<FlowDualEngine>) -> Result<Self, Error> {
-        // first check if available frontend is found
-        engine
-            .wait_for_available_frontend(FRONTEND_SCAN_TIMEOUT)
-            .await?;
-        // first do recover flows
-        engine.check_flow_consistent(true, false).await?;
-
-        let inner = engine.clone();
+        let engine = engine.clone();
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let (trigger_tx, mut trigger_rx) =
             tokio::sync::mpsc::channel::<(bool, bool, tokio::sync::oneshot::Sender<()>)>(10);
         let handle = common_runtime::spawn_global(async move {
+            // first check if available frontend is found
+            if let Err(err) = engine
+                .wait_for_available_frontend(FRONTEND_SCAN_TIMEOUT)
+                .await
+            {
+                warn!("No frontend is available yet:\n {err:?}");
+            }
+
+            // then do recover flows, if failed, always retry
+            let mut recover_retry = 0;
+            while let Err(err) = engine.check_flow_consistent(true, false).await {
+                recover_retry += 1;
+                error!(
+                    "Failed to recover flows:\n {err:?}, retry {} in {}s",
+                    recover_retry,
+                    MIN_REFRESH_DURATION.as_secs()
+                );
+                tokio::time::sleep(MIN_REFRESH_DURATION).await;
+            }
+
+            // then do check flows, with configurable allow_create and allow_drop
             let (mut allow_create, mut allow_drop) = (false, false);
             let mut ret_signal: Option<tokio::sync::oneshot::Sender<()>> = None;
             loop {
-                if let Err(err) = inner.check_flow_consistent(allow_create, allow_drop).await {
+                if let Err(err) = engine.check_flow_consistent(allow_create, allow_drop).await {
                     error!(err; "Failed to check flow consistent");
                 }
                 if let Some(done) = ret_signal.take() {

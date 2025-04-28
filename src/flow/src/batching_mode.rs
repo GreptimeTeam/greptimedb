@@ -31,7 +31,7 @@ pub const DEFAULT_BATCHING_ENGINE_QUERY_TIMEOUT: Duration = Duration::from_secs(
 pub const SLOW_QUERY_THRESHOLD: Duration = Duration::from_secs(60);
 
 /// The minimum duration between two queries execution by batching mode task
-const MIN_REFRESH_DURATION: Duration = Duration::new(5, 0);
+pub const MIN_REFRESH_DURATION: Duration = Duration::new(5, 0);
 
 /// Grpc connection timeout
 const GRPC_CONN_TIMEOUT: Duration = Duration::from_secs(5);

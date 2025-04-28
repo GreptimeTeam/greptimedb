@@ -195,6 +195,7 @@ impl FrontendClient {
         };
 
         let mut interval = tokio::time::interval(GRPC_CONN_TIMEOUT);
+        interval.tick().await;
         for retry in 0..GRPC_MAX_RETRIES {
             let frontends = self.scan_for_frontend().await?;
             let now_in_ms = SystemTime::now()
