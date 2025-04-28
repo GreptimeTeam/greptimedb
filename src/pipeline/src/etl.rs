@@ -18,9 +18,9 @@ pub mod processor;
 pub mod transform;
 pub mod value;
 
+use ahash::{HashMap, HashMapExt};
 use api::v1::Row;
 use common_time::timestamp::TimeUnit;
-use hashbrown::HashMap;
 use processor::{Processor, Processors};
 use snafu::{ensure, OptionExt, ResultExt};
 use transform::Transforms;

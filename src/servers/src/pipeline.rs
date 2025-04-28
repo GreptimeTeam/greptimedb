@@ -15,8 +15,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use ahash::{HashMap, HashMapExt};
 use api::v1::{RowInsertRequest, Rows};
-use hashbrown::HashMap;
 use pipeline::error::AutoTransformOneTimestampSnafu;
 use pipeline::{
     DispatchedTo, GreptimePipelineParams, IdentityTimeIndex, Pipeline, PipelineContext,
@@ -195,8 +195,6 @@ async fn run_custom_pipeline(
             let (ts_key, unit) = ts_vec.into_iter().next().unwrap();
 
             let ident_ts_index = IdentityTimeIndex::Epoch(ts_key.to_string(), unit, false);
-            // let def = PipelineDefinition::GreptimeIdentityPipeline(Some(ident_ts_index.clone()));
-            // let next_pipeline_ctx = PipelineContext::new(&def, pipeline_ctx.pipeline_param);
 
             let reqs = run_identity_pipeline(
                 handler,
