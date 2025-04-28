@@ -162,7 +162,7 @@ paste = "1.0"
 pin-project = "1.0"
 prometheus = { version = "0.13.3", features = ["process"] }
 promql-parser = { version = "0.5.1", features = ["ser"] }
-prost = "0.13"
+prost = { version = "0.13", features = ["no-recursion-limit"] }
 raft-engine = { version = "0.4.1", default-features = false }
 rand = "0.9"
 ratelimit = "0.10"
