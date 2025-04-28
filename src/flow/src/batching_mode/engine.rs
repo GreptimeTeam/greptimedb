@@ -49,7 +49,8 @@ use crate::{CreateFlowArgs, Error, FlowId, TableName};
 pub struct BatchingEngine {
     tasks: RwLock<BTreeMap<FlowId, BatchingTask>>,
     shutdown_txs: RwLock<BTreeMap<FlowId, oneshot::Sender<()>>>,
-    frontend_client: Arc<FrontendClient>,
+    /// frontend client for insert request
+    pub(crate) frontend_client: Arc<FrontendClient>,
     flow_metadata_manager: FlowMetadataManagerRef,
     table_meta: TableMetadataManagerRef,
     catalog_manager: CatalogManagerRef,

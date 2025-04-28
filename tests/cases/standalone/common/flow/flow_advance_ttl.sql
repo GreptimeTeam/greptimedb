@@ -23,6 +23,9 @@ FROM
     distinct_basic;
 
 -- SQLNESS ARG restart=true
+SELECT 1;
+
+-- SQLNESS SLEEP 3s
 INSERT INTO
     distinct_basic
 VALUES
