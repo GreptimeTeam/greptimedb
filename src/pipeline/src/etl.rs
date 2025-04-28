@@ -154,6 +154,7 @@ impl DispatchedTo {
 #[derive(Debug)]
 pub enum PipelineExecOutput {
     Transformed((Row, Option<String>)),
+    // table_suffix, ts_key -> unit
     AutoTransform(Option<String>, HashMap<String, TimeUnit>),
     DispatchedTo(DispatchedTo),
 }
@@ -228,16 +229,16 @@ impl Pipeline {
             Ok(PipelineExecOutput::Transformed((row, table_suffix)))
         } else {
             let table_suffix = self.tablesuffix.as_ref().and_then(|t| t.apply(val));
-            let mut ts_keys = HashMap::with_capacity(4);
+            let mut ts_unit_map = HashMap::with_capacity(4);
             // get all ts values
             for (k, v) in val {
                 if let Value::Timestamp(ts) = v {
-                    if !ts_keys.contains_key(k) {
-                        ts_keys.insert(k.clone(), ts.get_unit());
-                    }
+                    ts_unit_map
+                        .entry(k.clone())
+                        .or_insert_with(|| ts.get_unit());
                 }
             }
-            Ok(PipelineExecOutput::AutoTransform(table_suffix, ts_keys))
+            Ok(PipelineExecOutput::AutoTransform(table_suffix, ts_unit_map))
         }
     }
 

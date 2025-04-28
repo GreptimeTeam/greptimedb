@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use ahash::{HashMap, HashMapExt};
 use api::v1::{RowInsertRequest, Rows};
+use itertools::Itertools;
 use pipeline::error::AutoTransformOneTimestampSnafu;
 use pipeline::{
     DispatchedTo, IdentityTimeIndex, Pipeline, PipelineContext, PipelineDefinition,
@@ -172,16 +173,17 @@ async fn run_custom_pipeline(
                 continue;
             }
 
-            let ts_vec = auto_map_ts_keys
+            let ts_unit_map = auto_map_ts_keys
                 .remove(&table_name)
                 .context(AutoTransformOneTimestampSnafu)
                 .context(PipelineSnafu)?;
             // only one timestamp key is allowed
             // which will be converted to ts index
-            if ts_vec.len() != 1 {
-                return AutoTransformOneTimestampSnafu.fail().context(PipelineSnafu);
-            }
-            let (ts_key, unit) = ts_vec.into_iter().next().unwrap();
+            let (ts_key, unit) = ts_unit_map
+                .into_iter()
+                .exactly_one()
+                .map_err(|_| AutoTransformOneTimestampSnafu.build())
+                .context(PipelineSnafu)?;
 
             let ident_ts_index = IdentityTimeIndex::Epoch(ts_key.to_string(), unit, false);
             let new_def = PipelineDefinition::GreptimeIdentityPipeline(Some(ident_ts_index));
