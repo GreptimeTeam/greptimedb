@@ -138,9 +138,12 @@ impl TreeNodeVisitor<'_> for FindGroupByFinalName {
     fn f_down(&mut self, node: &Self::Node) -> datafusion_common::Result<TreeNodeRecursion> {
         if let LogicalPlan::Aggregate(aggregate) = node {
             self.group_exprs = Some(aggregate.group_expr.iter().cloned().collect());
-            debug!("Group by exprs: {:?}", self.group_exprs);
+            debug!(
+                "FindGroupByFinalName: Get Group by exprs from Aggregate: {:?}",
+                self.group_exprs
+            );
         } else if let LogicalPlan::Distinct(distinct) = node {
-            debug!("Distinct: {:#?}", distinct);
+            debug!("FindGroupByFinalName: Distinct: {}", node);
             match distinct {
                 Distinct::All(input) => {
                     if let LogicalPlan::TableScan(table_scan) = &**input {
@@ -162,7 +165,10 @@ impl TreeNodeVisitor<'_> for FindGroupByFinalName {
                     self.group_exprs = Some(distinct_on.on_expr.iter().cloned().collect())
                 }
             }
-            debug!("Group by exprs: {:?}", self.group_exprs);
+            debug!(
+                "FindGroupByFinalName: Get Group by exprs from Distinct: {:?}",
+                self.group_exprs
+            );
         }
 
         Ok(TreeNodeRecursion::Continue)

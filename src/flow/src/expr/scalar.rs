@@ -21,7 +21,7 @@ use common_error::ext::BoxedError;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::value::Value;
 use datatypes::vectors::{BooleanVector, Helper, VectorRef};
-use hydroflow::lattices::cc_traits::Iter;
+use dfir_rs::lattices::cc_traits::Iter;
 use itertools::Itertools;
 use snafu::{ensure, OptionExt, ResultExt};
 
