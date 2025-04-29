@@ -16,6 +16,7 @@ async-trait.workspace = true
 bytes.workspace = true
 cache.workspace = true
 catalog.workspace = true
+chrono.workspace = true
 client.workspace = true
 common-base.workspace = true
 common-config.workspace = true
@@ -39,16 +40,13 @@ datafusion-expr.workspace = true
 datafusion-physical-expr.workspace = true
 datafusion-substrait.workspace = true
 datatypes.workspace = true
+dfir_rs = "0.13.0"
 enum-as-inner = "0.6.0"
 enum_dispatch = "0.3"
 futures.workspace = true
 get-size2 = "0.1.2"
 greptime-proto.workspace = true
-# This fork of hydroflow is simply for keeping our dependency in our org, and pin the version
-# otherwise it is the same with upstream repo
-chrono.workspace = true
 http.workspace = true
-hydroflow = { git = "https://github.com/GreptimeTeam/hydroflow.git", branch = "main" }
 itertools.workspace = true
 lazy_static.workspace = true
 meta-client.workspace = true
