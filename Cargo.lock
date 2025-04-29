@@ -2521,6 +2521,7 @@ dependencies = [
  "session",
  "snafu 0.8.5",
  "table",
+ "tokio",
 ]
 
 [[package]]

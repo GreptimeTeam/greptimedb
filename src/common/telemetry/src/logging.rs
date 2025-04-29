@@ -92,8 +92,8 @@ pub struct SlowQueryOptions {
 #[serde(rename_all = "snake_case")]
 pub enum SlowQueriesRecordType {
     #[default]
-    SystemTable,
     Log,
+    SystemTable,
 }
 
 #[derive(Clone, Debug, Copy, PartialEq, Eq, Serialize, Deserialize)]
