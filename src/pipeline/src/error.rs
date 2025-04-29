@@ -24,6 +24,14 @@ use snafu::{Location, Snafu};
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Invalid input: {input}, reason: {reason}"))]
+    InvalidInput {
+        input: String,
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Empty input field"))]
     EmptyInputField {
         #[snafu(implicit)]
@@ -739,7 +747,8 @@ impl ErrorExt for Error {
             CollectRecords { source, .. } => source.status_code(),
             PipelineNotFound { .. }
             | InvalidPipelineVersion { .. }
-            | InvalidCustomTimeIndex { .. } => StatusCode::InvalidArguments,
+            | InvalidCustomTimeIndex { .. }
+            | InvalidInput { .. } => StatusCode::InvalidArguments,
             BuildDfLogicalPlan { .. } => StatusCode::Internal,
             ExecuteInternalStatement { source, .. } => source.status_code(),
             DataFrame { source, .. } => source.status_code(),
