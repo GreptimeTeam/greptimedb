@@ -273,7 +273,7 @@ where
 
 /// Converts SQL value to value according to the data type.
 /// If `auto_string_to_numeric` is true, tries to cast the string value to numeric values,
-/// and fills the default value if the cast fails.
+/// and returns error if the cast fails.
 pub fn sql_value_to_value(
     column_name: &str,
     data_type: &ConcreteDataType,
