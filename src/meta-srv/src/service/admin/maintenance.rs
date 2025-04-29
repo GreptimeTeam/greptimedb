@@ -78,13 +78,13 @@ impl MaintenanceHandler {
                 .set_maintenance_mode()
                 .await
                 .context(MaintenanceModeManagerSnafu)?;
-            info!("Set maintenance mode to true");
+            info!("Enable the maintenance mode.");
         } else {
             self.manager
                 .unset_maintenance_mode()
                 .await
                 .context(MaintenanceModeManagerSnafu)?;
-            info!("Set maintenance mode to false");
+            info!("Disable the maintenance mode.");
         };
 
         let response = MaintenanceResponse { enabled: enable }.try_into()?;
