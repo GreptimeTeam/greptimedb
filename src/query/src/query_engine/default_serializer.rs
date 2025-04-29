@@ -30,8 +30,9 @@ use datafusion::logical_expr::LogicalPlan;
 use datafusion_expr::UserDefinedLogicalNode;
 use greptime_proto::substrait_extension::MergeScan as PbMergeScan;
 use promql::functions::{
-    AbsentOverTime, AvgOverTime, Changes, CountOverTime, Deriv, IDelta, LastOverTime, MaxOverTime,
-    MinOverTime, PresentOverTime, Resets, StddevOverTime, StdvarOverTime, SumOverTime,
+    AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, IDelta, Increase,
+    LastOverTime, MaxOverTime, MinOverTime, PresentOverTime, Rate, Resets, StddevOverTime,
+    StdvarOverTime, SumOverTime,
 };
 use prost::Message;
 use session::context::QueryContextRef;
@@ -137,9 +138,11 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
             let _ = session_state.register_udaf(Arc::new(HllState::merge_udf_impl()));
             let _ = session_state.register_udaf(Arc::new(GeoPathAccumulator::udf_impl()));
 
-            // TODO(ruihang): add increase, rate, delta
             let _ = session_state.register_udf(Arc::new(IDelta::<false>::scalar_udf()));
             let _ = session_state.register_udf(Arc::new(IDelta::<true>::scalar_udf()));
+            let _ = session_state.register_udf(Arc::new(Rate::scalar_udf()));
+            let _ = session_state.register_udf(Arc::new(Increase::scalar_udf()));
+            let _ = session_state.register_udf(Arc::new(Delta::scalar_udf()));
             let _ = session_state.register_udf(Arc::new(Resets::scalar_udf()));
             let _ = session_state.register_udf(Arc::new(Changes::scalar_udf()));
             let _ = session_state.register_udf(Arc::new(Deriv::scalar_udf()));
