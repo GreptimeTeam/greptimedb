@@ -53,11 +53,11 @@ use crate::ast::{
     Value as SqlValue,
 };
 use crate::error::{
-    self, ColumnTypeMismatchSnafu, ConvertSqlValueSnafu, ConvertToGrpcDataTypeSnafu,
-    ConvertValueSnafu, DatatypeSnafu, InvalidCastSnafu, InvalidSqlValueSnafu, InvalidUnaryOpSnafu,
-    ParseSqlValueSnafu, Result, SerializeColumnDefaultConstraintSnafu, SetFulltextOptionSnafu,
-    SetSkippingIndexOptionSnafu, TimestampOverflowSnafu, UnsupportedDefaultValueSnafu,
-    UnsupportedUnaryOpSnafu,
+    self, ColumnTypeMismatchSnafu, ConvertSqlValueSnafu, ConvertStrSnafu,
+    ConvertToGrpcDataTypeSnafu, ConvertValueSnafu, DatatypeSnafu, InvalidCastSnafu,
+    InvalidSqlValueSnafu, InvalidUnaryOpSnafu, ParseSqlValueSnafu, Result,
+    SerializeColumnDefaultConstraintSnafu, SetFulltextOptionSnafu, SetSkippingIndexOptionSnafu,
+    TimestampOverflowSnafu, UnsupportedDefaultValueSnafu, UnsupportedUnaryOpSnafu,
 };
 use crate::statements::create::Column;
 pub use crate::statements::option_map::OptionMap;
@@ -73,7 +73,7 @@ fn parse_string_to_value(
     auto_string_to_numeric: bool,
 ) -> Result<Value> {
     if auto_string_to_numeric {
-        if let Some(value) = auto_cast_to_numeric(&s, data_type) {
+        if let Some(value) = auto_cast_to_numeric(&s, data_type)? {
             return Ok(value);
         }
     }
@@ -141,29 +141,39 @@ fn parse_string_to_value(
 }
 
 /// Casts string to value of specified numeric data type.
-/// If the string cannot be parsed, returns the default value for the numeric type.
+/// If the string cannot be parsed, returns an error.
 ///
 /// Returns None if the data type doesn't support auto casting.
-fn auto_cast_to_numeric(s: &str, data_type: &ConcreteDataType) -> Option<Value> {
+fn auto_cast_to_numeric(s: &str, data_type: &ConcreteDataType) -> Result<Option<Value>> {
     let value = match data_type {
-        ConcreteDataType::Boolean(_) => Value::Boolean(s.parse::<bool>().unwrap_or_default()),
-        ConcreteDataType::Int8(_) => Value::Int8(s.parse::<i8>().unwrap_or_default()),
-        ConcreteDataType::Int16(_) => Value::Int16(s.parse::<i16>().unwrap_or_default()),
-        ConcreteDataType::Int32(_) => Value::Int32(s.parse::<i32>().unwrap_or_default()),
-        ConcreteDataType::Int64(_) => Value::Int64(s.parse::<i64>().unwrap_or_default()),
-        ConcreteDataType::UInt8(_) => Value::UInt8(s.parse::<u8>().unwrap_or_default()),
-        ConcreteDataType::UInt16(_) => Value::UInt16(s.parse::<u16>().unwrap_or_default()),
-        ConcreteDataType::UInt32(_) => Value::UInt32(s.parse::<u32>().unwrap_or_default()),
-        ConcreteDataType::UInt64(_) => Value::UInt64(s.parse::<u64>().unwrap_or_default()),
-        ConcreteDataType::Float32(_) => {
-            Value::Float32(OrderedF32::from(s.parse::<f32>().unwrap_or_default()))
-        }
-        ConcreteDataType::Float64(_) => {
-            Value::Float64(OrderedF64::from(s.parse::<f64>().unwrap_or_default()))
-        }
-        _ => return None,
+        ConcreteDataType::Boolean(_) => s.parse::<bool>().map(Value::Boolean).ok(),
+        ConcreteDataType::Int8(_) => s.parse::<i8>().map(Value::Int8).ok(),
+        ConcreteDataType::Int16(_) => s.parse::<i16>().map(Value::Int16).ok(),
+        ConcreteDataType::Int32(_) => s.parse::<i32>().map(Value::Int32).ok(),
+        ConcreteDataType::Int64(_) => s.parse::<i64>().map(Value::Int64).ok(),
+        ConcreteDataType::UInt8(_) => s.parse::<u8>().map(Value::UInt8).ok(),
+        ConcreteDataType::UInt16(_) => s.parse::<u16>().map(Value::UInt16).ok(),
+        ConcreteDataType::UInt32(_) => s.parse::<u32>().map(Value::UInt32).ok(),
+        ConcreteDataType::UInt64(_) => s.parse::<u64>().map(Value::UInt64).ok(),
+        ConcreteDataType::Float32(_) => s
+            .parse::<f32>()
+            .map(|v| Value::Float32(OrderedF32::from(v)))
+            .ok(),
+        ConcreteDataType::Float64(_) => s
+            .parse::<f64>()
+            .map(|v| Value::Float64(OrderedF64::from(v)))
+            .ok(),
+        _ => return Ok(None),
     };
-    Some(value)
+
+    match value {
+        Some(value) => Ok(Some(value)),
+        None => ConvertStrSnafu {
+            value: s,
+            datatype: data_type.clone(),
+        }
+        .fail(),
+    }
 }
 
 fn parse_hex_string(s: &str) -> Result<Value> {
@@ -1590,9 +1600,8 @@ mod tests {
             &ConcreteDataType::boolean_datatype(),
             None,
             true,
-        )
-        .unwrap();
-        assert_eq!(Value::Boolean(false), result);
+        );
+        assert!(result.is_err());
 
         // Test string to int8
         let result = parse_string_to_value(
@@ -1612,9 +1621,8 @@ mod tests {
             &ConcreteDataType::int8_datatype(),
             None,
             true,
-        )
-        .unwrap();
-        assert_eq!(Value::Int8(0), result);
+        );
+        assert!(result.is_err());
 
         // Test string to int16
         let result = parse_string_to_value(
@@ -1634,9 +1642,8 @@ mod tests {
             &ConcreteDataType::int16_datatype(),
             None,
             true,
-        )
-        .unwrap();
-        assert_eq!(Value::Int16(0), result);
+        );
+        assert!(result.is_err());
 
         // Test string to int32
         let result = parse_string_to_value(
@@ -1656,9 +1663,8 @@ mod tests {
             &ConcreteDataType::int32_datatype(),
             None,
             true,
-        )
-        .unwrap();
-        assert_eq!(Value::Int32(0), result);
+        );
+        assert!(result.is_err());
 
         // Test string to int64
         let result = parse_string_to_value(
@@ -1678,9 +1684,8 @@ mod tests {
             &ConcreteDataType::int64_datatype(),
             None,
             true,
-        )
-        .unwrap();
-        assert_eq!(Value::Int64(0), result);
+        );
+        assert!(result.is_err());
 
         // Test string to uint8
         let result = parse_string_to_value(
@@ -1700,9 +1705,8 @@ mod tests {
             &ConcreteDataType::uint8_datatype(),
             None,
             true,
-        )
-        .unwrap();
-        assert_eq!(Value::UInt8(0), result);
+        );
+        assert!(result.is_err());
 
         // Test string to uint16
         let result = parse_string_to_value(
@@ -1722,9 +1726,8 @@ mod tests {
             &ConcreteDataType::uint16_datatype(),
             None,
             true,
-        )
-        .unwrap();
-        assert_eq!(Value::UInt16(0), result);
+        );
+        assert!(result.is_err());
 
         // Test string to uint32
         let result = parse_string_to_value(
@@ -1744,9 +1747,8 @@ mod tests {
             &ConcreteDataType::uint32_datatype(),
             None,
             true,
-        )
-        .unwrap();
-        assert_eq!(Value::UInt32(0), result);
+        );
+        assert!(result.is_err());
 
         // Test string to uint64
         let result = parse_string_to_value(
@@ -1766,9 +1768,8 @@ mod tests {
             &ConcreteDataType::uint64_datatype(),
             None,
             true,
-        )
-        .unwrap();
-        assert_eq!(Value::UInt64(0), result);
+        );
+        assert!(result.is_err());
 
         // Test string to float32
         let result = parse_string_to_value(
@@ -1788,9 +1789,8 @@ mod tests {
             &ConcreteDataType::float32_datatype(),
             None,
             true,
-        )
-        .unwrap();
-        assert_eq!(Value::Float32(OrderedF32::from(0.0)), result);
+        );
+        assert!(result.is_err());
 
         // Test string to float64
         let result = parse_string_to_value(
@@ -1810,9 +1810,8 @@ mod tests {
             &ConcreteDataType::float64_datatype(),
             None,
             true,
-        )
-        .unwrap();
-        assert_eq!(Value::Float64(OrderedF64::from(0.0)), result);
+        );
+        assert!(result.is_err());
     }
 
     #[test]
@@ -1856,7 +1855,7 @@ mod tests {
         assert!(v.is_err());
 
         // Test with an invalid numeric string but auto_string_to_numeric=true
-        // Should use the default value (0)
+        // Should return an error now with the new auto_cast_to_numeric behavior
         let sql_val = SqlValue::SingleQuotedString("not_a_number".to_string());
         let v = sql_value_to_value(
             "a",
@@ -1865,9 +1864,8 @@ mod tests {
             None,
             None,
             true,
-        )
-        .unwrap();
-        assert_eq!(Value::Int32(0), v);
+        );
+        assert!(v.is_err());
 
         // Test with boolean type
         let sql_val = SqlValue::SingleQuotedString("true".to_string());
@@ -1882,16 +1880,16 @@ mod tests {
         .unwrap();
         assert_eq!(Value::Boolean(true), v);
 
-        // Non-numeric types should still fail with auto_string_to_numeric=true
+        // Non-numeric types should still be handled normally
         let sql_val = SqlValue::SingleQuotedString("hello".to_string());
         let v = sql_value_to_value(
             "a",
-            &ConcreteDataType::int32_datatype(),
+            &ConcreteDataType::string_datatype(),
             &sql_val,
             None,
             None,
             true,
         );
-        assert!(v.is_ok()); // This is allowed because timestamp is stringifiable
+        assert!(v.is_ok());
     }
 }
