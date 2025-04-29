@@ -181,7 +181,7 @@ impl WalPruneProcedure {
         let peer_and_instructions = peer_region_ids_map
             .into_iter()
             .map(|(peer, region_ids)| {
-                let flush_instruction = Instruction::FlushRegion(FlushRegions { region_ids });
+                let flush_instruction = Instruction::FlushRegions(FlushRegions { region_ids });
                 (peer.clone(), flush_instruction)
             })
             .collect();
@@ -536,7 +536,7 @@ mod tests {
         let msg = resp.mailbox_message.unwrap();
         let flush_instruction = HeartbeatMailbox::json_instruction(&msg).unwrap();
         let mut flush_requested_region_ids = match flush_instruction {
-            Instruction::FlushRegion(FlushRegions { region_ids, .. }) => region_ids,
+            Instruction::FlushRegions(FlushRegions { region_ids, .. }) => region_ids,
             _ => unreachable!(),
         };
         let sorted_region_ids = region_ids

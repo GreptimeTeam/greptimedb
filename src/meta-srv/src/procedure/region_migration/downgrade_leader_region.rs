@@ -170,7 +170,7 @@ impl DowngradeLeaderRegion {
                 if error.is_some() {
                     return error::RetryLaterSnafu {
                         reason: format!(
-                            "Failed to downgrade the region {} on Datanode {:?}, error: {:?}, elapsed: {:?}",
+                            "Failed to downgrade the region {} on datanode {:?}, error: {:?}, elapsed: {:?}",
                             region_id, leader, error, now.elapsed()
                         ),
                     }
@@ -179,13 +179,14 @@ impl DowngradeLeaderRegion {
 
                 if !exists {
                     warn!(
-                        "Trying to downgrade the region {} on Datanode {}, but region doesn't exist!, elapsed: {:?}",
+                        "Trying to downgrade the region {} on datanode {:?}, but region doesn't exist!, elapsed: {:?}",
                         region_id, leader, now.elapsed()
                     );
                 } else {
                     info!(
-                        "Region {} leader is downgraded, last_entry_id: {:?}, metadata_last_entry_id: {:?}, elapsed: {:?}",
+                        "Region {} leader is downgraded on datanode {:?}, last_entry_id: {:?}, metadata_last_entry_id: {:?}, elapsed: {:?}",
                         region_id,
+                        leader,
                         last_entry_id,
                         metadata_last_entry_id,
                         now.elapsed()

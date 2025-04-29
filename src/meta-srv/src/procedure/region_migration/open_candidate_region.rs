@@ -28,7 +28,7 @@ use tokio::time::Instant;
 
 use crate::error::{self, Result};
 use crate::handler::HeartbeatMailbox;
-use crate::procedure::region_migration::update_metadata::UpdateMetadata;
+use crate::procedure::region_migration::flush_leader_region::PreFlushRegion;
 use crate::procedure::region_migration::{Context, State};
 use crate::service::mailbox::Channel;
 
@@ -47,10 +47,7 @@ impl State for OpenCandidateRegion {
         self.open_candidate_region(ctx, instruction).await?;
         ctx.update_open_candidate_region_elapsed(now);
 
-        Ok((
-            Box::new(UpdateMetadata::Downgrade),
-            Status::executing(false),
-        ))
+        Ok((Box::new(PreFlushRegion), Status::executing(false)))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -399,7 +396,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_next_update_metadata_downgrade_state() {
+    async fn test_next_flush_leader_region_state() {
         let mut state = Box::new(OpenCandidateRegion);
         // from_peer: 1
         // to_peer: 2
@@ -445,8 +442,7 @@ mod tests {
             (to_peer_id, region_id)
         );
 
-        let update_metadata = next.as_any().downcast_ref::<UpdateMetadata>().unwrap();
-
-        assert_matches!(update_metadata, UpdateMetadata::Downgrade);
+        let flush_leader_region = next.as_any().downcast_ref::<PreFlushRegion>().unwrap();
+        assert_matches!(flush_leader_region, PreFlushRegion);
     }
 }

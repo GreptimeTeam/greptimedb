@@ -39,6 +39,7 @@ pub struct RegionHeartbeatResponseHandler {
     region_server: RegionServer,
     catchup_tasks: TaskTracker<()>,
     downgrade_tasks: TaskTracker<()>,
+    flush_tasks: TaskTracker<()>,
 }
 
 /// Handler of the instruction.
@@ -50,6 +51,7 @@ pub struct HandlerContext {
     region_server: RegionServer,
     catchup_tasks: TaskTracker<()>,
     downgrade_tasks: TaskTracker<()>,
+    flush_tasks: TaskTracker<()>,
 }
 
 impl HandlerContext {
@@ -63,6 +65,7 @@ impl HandlerContext {
             region_server,
             catchup_tasks: TaskTracker::new(),
             downgrade_tasks: TaskTracker::new(),
+            flush_tasks: TaskTracker::new(),
         }
     }
 }
@@ -74,6 +77,7 @@ impl RegionHeartbeatResponseHandler {
             region_server,
             catchup_tasks: TaskTracker::new(),
             downgrade_tasks: TaskTracker::new(),
+            flush_tasks: TaskTracker::new(),
         }
     }
 
@@ -95,8 +99,11 @@ impl RegionHeartbeatResponseHandler {
                 handler_context.handle_upgrade_region_instruction(upgrade_region)
             })),
             Instruction::InvalidateCaches(_) => InvalidHeartbeatResponseSnafu.fail(),
-            Instruction::FlushRegion(flush_regions) => Ok(Box::new(move |handler_context| {
-                handler_context.handle_flush_region_instruction(flush_regions)
+            Instruction::FlushRegions(flush_regions) => Ok(Box::new(move |handler_context| {
+                handler_context.handle_flush_regions_instruction(flush_regions)
+            })),
+            Instruction::FlushRegion(flush_region) => Ok(Box::new(move |handler_context| {
+                handler_context.handle_flush_region_instruction(flush_region)
             })),
         }
     }
@@ -111,6 +118,7 @@ impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
                 | Some((_, Instruction::CloseRegion { .. }))
                 | Some((_, Instruction::DowngradeRegion { .. }))
                 | Some((_, Instruction::UpgradeRegion { .. }))
+                | Some((_, Instruction::FlushRegion { .. }))
         )
     }
 
@@ -124,12 +132,14 @@ impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
         let region_server = self.region_server.clone();
         let catchup_tasks = self.catchup_tasks.clone();
         let downgrade_tasks = self.downgrade_tasks.clone();
+        let flush_tasks = self.flush_tasks.clone();
         let handler = Self::build_handler(instruction)?;
         let _handle = common_runtime::spawn_global(async move {
             let reply = handler(HandlerContext {
                 region_server,
                 catchup_tasks,
                 downgrade_tasks,
+                flush_tasks,
             })
             .await;
 
