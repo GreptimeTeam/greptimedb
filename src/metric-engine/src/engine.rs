@@ -42,11 +42,11 @@ pub(crate) use state::MetricEngineState;
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
 use store_api::region_engine::{
-    RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef, RegionStatistic,
-    SetRegionRoleStateResponse, SetRegionRoleStateSuccess, SettableRegionRoleState,
-    SyncManifestResponse,
+    BatchResponses, RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef,
+    RegionStatistic, SetRegionRoleStateResponse, SetRegionRoleStateSuccess,
+    SettableRegionRoleState, SyncManifestResponse,
 };
-use store_api::region_request::{BatchRegionDdlRequest, RegionRequest};
+use store_api::region_request::{BatchRegionDdlRequest, RegionOpenRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 
 use crate::config::EngineConfig;
@@ -129,6 +129,17 @@ impl RegionEngine for MetricEngine {
     /// Name of this engine
     fn name(&self) -> &str {
         METRIC_ENGINE_NAME
+    }
+
+    async fn handle_batch_open_requests(
+        &self,
+        parallelism: usize,
+        requests: Vec<(RegionId, RegionOpenRequest)>,
+    ) -> Result<BatchResponses, BoxedError> {
+        self.inner
+            .handle_batch_open_requests(parallelism, requests)
+            .await
+            .map_err(BoxedError::new)
     }
 
     async fn handle_batch_ddl_requests(
