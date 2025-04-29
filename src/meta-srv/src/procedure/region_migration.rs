@@ -37,7 +37,7 @@ use common_meta::key::datanode_table::{DatanodeTableKey, DatanodeTableValue};
 use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
-use common_meta::lock_key::{CatalogLock, RegionLock, SchemaLock, TableLock};
+use common_meta::lock_key::{CatalogLock, RegionLock, SchemaLock};
 use common_meta::peer::Peer;
 use common_meta::region_keeper::{MemoryRegionKeeperRef, OperatingRegionGuard};
 use common_procedure::error::{
@@ -97,9 +97,6 @@ impl PersistentContext {
         let lock_key = vec![
             CatalogLock::Read(&self.catalog).into(),
             SchemaLock::read(&self.catalog, &self.schema).into(),
-            // The optimistic updating of table route is not working very well,
-            // so we need to use the write lock here.
-            TableLock::Write(region_id.table_id()).into(),
             RegionLock::Write(region_id).into(),
         ];
 

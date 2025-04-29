@@ -18,11 +18,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use common_procedure::rwlock::{KeyRwLock, OwnedKeyRwLockGuard};
 use common_procedure::store::poison_store::PoisonStore;
 use common_procedure::test_util::InMemoryPoisonStore;
 use common_procedure::{
     Context, ContextProvider, Output, PoisonKey, Procedure, ProcedureId, ProcedureState,
-    ProcedureWithId, Result, Status,
+    ProcedureWithId, Result, Status, StringKey,
 };
 
 /// A Mock [ContextProvider].
@@ -30,6 +31,7 @@ use common_procedure::{
 pub struct MockContextProvider {
     states: HashMap<ProcedureId, ProcedureState>,
     poison_manager: InMemoryPoisonStore,
+    dynamic_key_lock: Arc<KeyRwLock<String>>,
 }
 
 impl MockContextProvider {
@@ -38,6 +40,7 @@ impl MockContextProvider {
         MockContextProvider {
             states,
             poison_manager: InMemoryPoisonStore::default(),
+            dynamic_key_lock: Arc::new(KeyRwLock::new()),
         }
     }
 
@@ -57,6 +60,30 @@ impl ContextProvider for MockContextProvider {
         self.poison_manager
             .try_put_poison(key.to_string(), procedure_id.to_string())
             .await
+    }
+
+    async fn acquire_lock(&self, key: &StringKey) -> OwnedKeyRwLockGuard {
+        match key {
+            StringKey::Share(key) => {
+                let guard = self.dynamic_key_lock.read(key.to_string()).await;
+                OwnedKeyRwLockGuard::from(guard)
+            }
+            StringKey::Exclusive(key) => {
+                let guard = self.dynamic_key_lock.write(key.to_string()).await;
+                OwnedKeyRwLockGuard::from(guard)
+            }
+        }
+    }
+
+    fn clean_lock_keys(&self, key: &StringKey) {
+        match key {
+            StringKey::Share(key) => {
+                self.dynamic_key_lock.clean_keys(&[key.to_string()]);
+            }
+            StringKey::Exclusive(key) => {
+                self.dynamic_key_lock.clean_keys(&[key.to_string()]);
+            }
+        }
     }
 }
 
