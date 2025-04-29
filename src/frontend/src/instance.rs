@@ -166,7 +166,7 @@ impl Instance {
         let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor.as_ref();
 
-        let slow_query_timer = if let Some(recorder) = &self.slow_query_recorder {
+        let _slow_query_timer = if let Some(recorder) = &self.slow_query_recorder {
             recorder.start(QueryStatement::Sql(stmt.clone()), query_ctx.clone())
         } else {
             None
@@ -214,10 +214,6 @@ impl Instance {
                 self.statement_executor.execute_sql(stmt, query_ctx).await
             }
         };
-
-        if let Some(slow_query_timer) = slow_query_timer {
-            slow_query_timer.stop().await;
-        }
 
         output.context(TableOperationSnafu)
     }
@@ -381,7 +377,7 @@ impl PrometheusHandler for Instance {
             }
         })?;
 
-        let slow_query_timer = if let Some(recorder) = &self.slow_query_recorder {
+        let _slow_query_timer = if let Some(recorder) = &self.slow_query_recorder {
             recorder.start(stmt.clone(), query_ctx.clone())
         } else {
             None
@@ -402,10 +398,6 @@ impl PrometheusHandler for Instance {
             .await
             .map_err(BoxedError::new)
             .context(ExecuteQuerySnafu)?;
-
-        if let Some(slow_query_timer) = slow_query_timer {
-            slow_query_timer.stop().await;
-        }
 
         Ok(interceptor.post_execute(output, query_ctx)?)
     }

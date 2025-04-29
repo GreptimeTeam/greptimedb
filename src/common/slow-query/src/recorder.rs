@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::value::ValueData;
@@ -22,7 +23,7 @@ use api::v1::{
 use catalog::CatalogManagerRef;
 use common_catalog::consts::{default_engine, DEFAULT_PRIVATE_SCHEMA_NAME};
 use common_telemetry::logging::{SlowQueriesRecordType, SlowQueryOptions};
-use common_telemetry::{error, slow};
+use common_telemetry::{error, info, slow};
 use common_time::timestamp::{TimeUnit, Timestamp};
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutorRef;
@@ -30,8 +31,11 @@ use query::parser::QueryStatement;
 use rand::random;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::ResultExt;
+use table::TableRef;
+use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::task::JoinHandle;
 
-use crate::error::{CatalogSnafu, CreateTableSnafu, InsertRowsSnafu, Result, TableNotFoundSnafu};
+use crate::error::{CatalogSnafu, CreateTableSnafu, InsertRowsSnafu, Result};
 
 const SLOW_QUERY_TABLE_NAME: &str = "slow_queries";
 const SLOW_QUERY_TABLE_COST_COLUMN_NAME: &str = "cost";
@@ -40,13 +44,23 @@ const SLOW_QUERY_TABLE_QUERY_COLUMN_NAME: &str = "query";
 const SLOW_QUERY_TABLE_IS_PROMQL_COLUMN_NAME: &str = "is_promql";
 const SLOW_QUERY_TABLE_TIMESTAMP_COLUMN_NAME: &str = "timestamp";
 
+const DEFAULT_SLOW_QUERY_CHANNEL_SIZE: usize = 1024;
+
 /// SlowQueryRecorder is responsible for recording slow queries.
 #[derive(Clone)]
 pub struct SlowQueryRecorder {
+    tx: Sender<SlowQueryEvent>,
     slow_query_opts: SlowQueryOptions,
-    inserter: InserterRef,
-    statement_executor: StatementExecutorRef,
-    catalog_manager: CatalogManagerRef,
+    _handle: Arc<JoinHandle<()>>,
+}
+
+#[derive(Debug)]
+struct SlowQueryEvent {
+    cost: u64,
+    threshold: u64,
+    query: String,
+    is_promql: bool,
+    query_ctx: QueryContextRef,
 }
 
 impl SlowQueryRecorder {
@@ -57,16 +71,29 @@ impl SlowQueryRecorder {
         statement_executor: StatementExecutorRef,
         catalog_manager: CatalogManagerRef,
     ) -> Self {
-        Self {
-            slow_query_opts,
+        let (tx, rx) = channel(DEFAULT_SLOW_QUERY_CHANNEL_SIZE);
+
+        // Start a new task to process the slow query events.
+        let event_handler = SlowQueryEventHandler {
             inserter,
             statement_executor,
             catalog_manager,
+            rx,
+            record_type: slow_query_opts.record_type,
+        };
+
+        let handle = tokio::spawn(async move {
+            event_handler.process_slow_query().await;
+        });
+
+        Self {
+            tx,
+            slow_query_opts,
+            _handle: Arc::new(handle),
         }
     }
 
     /// Start a new SlowQueryTimer. Return `None` if the `slow_query.enable` is false.
-    /// When the query is finished, you need to call `stop()` to record the slow query.
     pub fn start(
         &self,
         stmt: QueryStatement,
@@ -74,15 +101,12 @@ impl SlowQueryRecorder {
     ) -> Option<SlowQueryTimer> {
         if self.slow_query_opts.enable {
             Some(SlowQueryTimer {
-                start: std::time::Instant::now(),
                 stmt,
+                query_ctx,
+                start: std::time::Instant::now(),
                 threshold: self.slow_query_opts.threshold,
                 sample_ratio: self.slow_query_opts.sample_ratio,
-                query_ctx,
-                inserter: self.inserter.clone(),
-                statement_executor: self.statement_executor.clone(),
-                catalog_manager: self.catalog_manager.clone(),
-                record_type: self.slow_query_opts.record_type,
+                tx: self.tx.clone(),
             })
         } else {
             None
@@ -90,163 +114,125 @@ impl SlowQueryRecorder {
     }
 }
 
-/// SlowQueryTimer is used to log slow query when it's dropped.
-pub struct SlowQueryTimer {
-    start: std::time::Instant,
-    stmt: QueryStatement,
-    threshold: Option<Duration>,
-    sample_ratio: Option<f64>,
-    query_ctx: QueryContextRef,
+struct SlowQueryEventHandler {
     inserter: InserterRef,
     statement_executor: StatementExecutorRef,
     catalog_manager: CatalogManagerRef,
+    rx: Receiver<SlowQueryEvent>,
     record_type: SlowQueriesRecordType,
 }
 
-impl SlowQueryTimer {
-    /// Stop the slow query timer and record the slow query.
-    pub async fn stop(&self) {
-        if self.record_type == SlowQueriesRecordType::SystemTable {
-            if let Err(e) = self.create_system_table().await {
-                error!(e; "Failed to create system table for slow queries");
-                return;
-            }
-        }
-
-        if let Some(threshold) = self.threshold {
-            let elapsed = self.start.elapsed();
-            if elapsed > threshold {
-                if let Some(ratio) = self.sample_ratio {
-                    // Generate a random number in [0, 1) and compare it with sample_ratio.
-                    if ratio >= 1.0 || random::<f64>() <= ratio {
-                        self.record_slow_query(elapsed, threshold).await;
-                    }
-                } else {
-                    // If sample_ratio is not set, log all slow queries.
-                    self.record_slow_query(elapsed, threshold).await;
-                }
-            }
+impl SlowQueryEventHandler {
+    async fn process_slow_query(mut self) {
+        info!(
+            "Start the background handler to process slow query events and record them in {:?}.",
+            self.record_type
+        );
+        while let Some(event) = self.rx.recv().await {
+            self.record_slow_query(event).await;
         }
     }
 
-    async fn record_slow_query(&self, elapsed: Duration, threshold: Duration) {
-        let cost = elapsed.as_millis() as u64;
-        let threshold = threshold.as_millis() as u64;
-        let (query, is_promql) = match &self.stmt {
-            QueryStatement::Sql(stmt) => (stmt.to_string(), false),
-            QueryStatement::Promql(stmt) => (stmt.to_string(), true),
-        };
-
+    async fn record_slow_query(&self, event: SlowQueryEvent) {
         match self.record_type {
             SlowQueriesRecordType::Log => {
                 // Record the slow query in a specific logs file.
                 slow!(
-                    cost = cost,
-                    threshold = threshold,
-                    query = query,
-                    is_promql = is_promql
+                    cost = event.cost,
+                    threshold = event.threshold,
+                    query = event.query,
+                    is_promql = event.is_promql
                 );
             }
             SlowQueriesRecordType::SystemTable => {
                 // Record the slow query in a system table.
-                if let Err(e) = self
-                    .insert_slow_query(cost, threshold, &query, is_promql)
-                    .await
-                {
-                    error!(e; "Failed to insert slow query, query: {}", query);
+                if let Err(e) = self.insert_slow_query(&event).await {
+                    error!(e; "Failed to insert slow query, query: {}", event.query);
                 }
             }
         }
     }
 
-    async fn insert_slow_query(
-        &self,
-        cost: u64,
-        threshold: u64,
-        query: &str,
-        is_promql: bool,
-    ) -> Result<()> {
-        if let Some(table) = self
+    async fn insert_slow_query(&self, event: &SlowQueryEvent) -> Result<()> {
+        let table = if let Some(table) = self
             .catalog_manager
             .table(
-                self.query_ctx.current_catalog(),
+                event.query_ctx.current_catalog(),
                 DEFAULT_PRIVATE_SCHEMA_NAME,
                 SLOW_QUERY_TABLE_NAME,
-                Some(&self.query_ctx),
+                Some(&event.query_ctx),
             )
             .await
             .context(CatalogSnafu)?
         {
-            let insert = RowInsertRequest {
-                table_name: SLOW_QUERY_TABLE_NAME.to_string(),
-                rows: Some(Rows {
-                    schema: self.build_insert_column_schema(),
-                    rows: vec![Row {
-                        values: vec![
-                            ValueData::U64Value(cost).into(),
-                            ValueData::U64Value(threshold).into(),
-                            ValueData::StringValue(query.to_string()).into(),
-                            ValueData::BoolValue(is_promql).into(),
-                            ValueData::TimestampNanosecondValue(
-                                Timestamp::current_time(TimeUnit::Nanosecond).value(),
-                            )
-                            .into(),
-                        ],
-                    }],
-                }),
-            };
-
-            let requests = RowInsertRequests {
-                inserts: vec![insert],
-            };
-
-            let table_info = table.table_info();
-            let query_ctx = QueryContextBuilder::default()
-                .current_catalog(table_info.catalog_name.to_string())
-                .current_schema(table_info.schema_name.to_string())
-                .build()
-                .into();
-
-            self.inserter
-                .handle_row_inserts(requests, query_ctx, &self.statement_executor)
-                .await
-                .context(InsertRowsSnafu)?;
-
-            Ok(())
+            table
         } else {
-            TableNotFoundSnafu {
-                catalog: self.query_ctx.current_catalog().to_string(),
-                schema: DEFAULT_PRIVATE_SCHEMA_NAME.to_string(),
-                table: SLOW_QUERY_TABLE_NAME.to_string(),
-            }
-            .fail()
-        }
+            self.create_system_table(event.query_ctx.clone()).await?
+        };
+
+        let insert = RowInsertRequest {
+            table_name: SLOW_QUERY_TABLE_NAME.to_string(),
+            rows: Some(Rows {
+                schema: self.build_insert_column_schema(),
+                rows: vec![Row {
+                    values: vec![
+                        ValueData::U64Value(event.cost).into(),
+                        ValueData::U64Value(event.threshold).into(),
+                        ValueData::StringValue(event.query.to_string()).into(),
+                        ValueData::BoolValue(event.is_promql).into(),
+                        ValueData::TimestampNanosecondValue(
+                            Timestamp::current_time(TimeUnit::Nanosecond).value(),
+                        )
+                        .into(),
+                    ],
+                }],
+            }),
+        };
+
+        let requests = RowInsertRequests {
+            inserts: vec![insert],
+        };
+
+        let table_info = table.table_info();
+        let query_ctx = QueryContextBuilder::default()
+            .current_catalog(table_info.catalog_name.to_string())
+            .current_schema(table_info.schema_name.to_string())
+            .build()
+            .into();
+
+        self.inserter
+            .handle_row_inserts(requests, query_ctx, &self.statement_executor)
+            .await
+            .context(InsertRowsSnafu)?;
+
+        Ok(())
     }
 
-    async fn create_system_table(&self) -> Result<()> {
-        let mut create_table_expr = self.build_create_table_expr(self.query_ctx.current_catalog());
-        if let Some(_table) = self
+    async fn create_system_table(&self, query_ctx: QueryContextRef) -> Result<TableRef> {
+        let mut create_table_expr = self.build_create_table_expr(query_ctx.current_catalog());
+        if let Some(table) = self
             .catalog_manager
             .table(
                 &create_table_expr.catalog_name,
                 &create_table_expr.schema_name,
                 &create_table_expr.table_name,
-                Some(&self.query_ctx),
+                Some(&query_ctx),
             )
             .await
             .context(CatalogSnafu)?
         {
             // The table is already created, so we don't need to create it again.
-            return Ok(());
+            return Ok(table);
         }
 
         // Create the `slow_queries` system table.
-        self.statement_executor
-            .create_table_inner(&mut create_table_expr, None, self.query_ctx.clone())
+        let table = self
+            .statement_executor
+            .create_table_inner(&mut create_table_expr, None, query_ctx.clone())
             .await
             .context(CreateTableSnafu)?;
 
-        Ok(())
+        Ok(table)
     }
 
     fn build_create_table_expr(&self, catalog: &str) -> CreateTableExpr {
@@ -351,5 +337,57 @@ impl SlowQueryTimer {
                 ..Default::default()
             },
         ]
+    }
+}
+
+/// SlowQueryTimer is used to log slow query when it's dropped.
+/// In drop(), it will check if the query is slow and send the slow query event to the handler.
+pub struct SlowQueryTimer {
+    start: std::time::Instant,
+    stmt: QueryStatement,
+    query_ctx: QueryContextRef,
+    threshold: Option<Duration>,
+    sample_ratio: Option<f64>,
+    tx: Sender<SlowQueryEvent>,
+}
+
+impl SlowQueryTimer {
+    fn send_slow_query_event(&self, elapsed: Duration, threshold: Duration) {
+        let cost = elapsed.as_millis() as u64;
+        let threshold = threshold.as_millis() as u64;
+        let (query, is_promql) = match &self.stmt {
+            QueryStatement::Sql(stmt) => (stmt.to_string(), false),
+            QueryStatement::Promql(stmt) => (stmt.to_string(), true),
+        };
+
+        // Send SlowQueryEvent to the handler.
+        if let Err(e) = self.tx.try_send(SlowQueryEvent {
+            cost,
+            threshold,
+            query,
+            is_promql,
+            query_ctx: self.query_ctx.clone(),
+        }) {
+            error!(e; "Failed to send slow query event");
+        }
+    }
+}
+
+impl Drop for SlowQueryTimer {
+    fn drop(&mut self) {
+        if let Some(threshold) = self.threshold {
+            let elapsed = self.start.elapsed();
+            if elapsed > threshold {
+                if let Some(ratio) = self.sample_ratio {
+                    // Generate a random number in [0, 1) and compare it with sample_ratio.
+                    if ratio >= 1.0 || random::<f64>() <= ratio {
+                        self.send_slow_query_event(elapsed, threshold);
+                    }
+                } else {
+                    // If sample_ratio is not set, log all slow queries.
+                    self.send_slow_query_event(elapsed, threshold);
+                }
+            }
+        }
     }
 }
