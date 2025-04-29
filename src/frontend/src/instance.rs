@@ -42,7 +42,6 @@ use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_query::Output;
-use common_slow_query::SlowQueryRecorder;
 use common_telemetry::{debug, error, info, tracing};
 use datafusion_expr::LogicalPlan;
 use log_store::raft_engine::RaftEngineBackend;
@@ -80,6 +79,7 @@ use crate::error::{
     TableOperationSnafu,
 };
 use crate::limiter::LimiterRef;
+use crate::slow_query_recorder::SlowQueryRecorder;
 
 /// The frontend instance contains necessary components, and implements many
 /// traits, like [`servers::query_handler::grpc::GrpcQueryHandler`],

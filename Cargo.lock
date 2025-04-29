@@ -2504,27 +2504,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "common-slow-query"
-version = "0.15.0"
-dependencies = [
- "api",
- "catalog",
- "common-catalog",
- "common-error",
- "common-macro",
- "common-query",
- "common-telemetry",
- "common-time",
- "operator",
- "query",
- "rand 0.9.0",
- "session",
- "snafu 0.8.5",
- "table",
- "tokio",
-]
-
-[[package]]
 name = "common-telemetry"
 version = "0.15.0"
 dependencies = [
@@ -4453,7 +4432,6 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-runtime",
- "common-slow-query",
  "common-telemetry",
  "common-test-util",
  "common-time",
@@ -4478,6 +4456,7 @@ dependencies = [
  "promql-parser",
  "prost 0.13.5",
  "query",
+ "rand 0.9.0",
  "serde",
  "serde_json",
  "servers",

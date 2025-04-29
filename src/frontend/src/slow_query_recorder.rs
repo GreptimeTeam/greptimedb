@@ -35,7 +35,7 @@ use table::TableRef;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::task::JoinHandle;
 
-use crate::error::{CatalogSnafu, CreateTableSnafu, InsertRowsSnafu, Result};
+use crate::error::{CatalogSnafu, Result, TableOperationSnafu};
 
 const SLOW_QUERY_TABLE_NAME: &str = "slow_queries";
 const SLOW_QUERY_TABLE_COST_COLUMN_NAME: &str = "cost";
@@ -203,7 +203,7 @@ impl SlowQueryEventHandler {
         self.inserter
             .handle_row_inserts(requests, query_ctx, &self.statement_executor)
             .await
-            .context(InsertRowsSnafu)?;
+            .context(TableOperationSnafu)?;
 
         Ok(())
     }
@@ -230,7 +230,7 @@ impl SlowQueryEventHandler {
             .statement_executor
             .create_table_inner(&mut create_table_expr, None, query_ctx.clone())
             .await
-            .context(CreateTableSnafu)?;
+            .context(TableOperationSnafu)?;
 
         Ok(table)
     }
