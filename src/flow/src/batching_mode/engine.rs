@@ -303,7 +303,7 @@ impl BatchingEngine {
             })
             .transpose()?;
 
-        info!(
+        debug!(
             "Flow id={}, found time window expr={}",
             flow_id,
             phy_expr
