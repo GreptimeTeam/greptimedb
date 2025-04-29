@@ -528,7 +528,11 @@ pub(crate) trait State: Sync + Send + Debug {
     }
 
     /// Yields the next [State] and [Status].
-    async fn next(&mut self, ctx: &mut Context) -> Result<(Box<dyn State>, Status)>;
+    async fn next(
+        &mut self,
+        ctx: &mut Context,
+        procedure_ctx: &ProcedureContext,
+    ) -> Result<(Box<dyn State>, Status)>;
 
     /// Returns as [Any](std::any::Any).
     fn as_any(&self) -> &dyn Any;
@@ -663,14 +667,14 @@ impl Procedure for RegionMigrationProcedure {
         true
     }
 
-    async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
+    async fn execute(&mut self, ctx: &ProcedureContext) -> ProcedureResult<Status> {
         let state = &mut self.state;
 
         let name = state.name();
         let _timer = METRIC_META_REGION_MIGRATION_EXECUTE
             .with_label_values(&[name])
             .start_timer();
-        let (next, status) = state.next(&mut self.context).await.map_err(|e| {
+        let (next, status) = state.next(&mut self.context, ctx).await.map_err(|e| {
             if e.is_retryable() {
                 METRIC_META_REGION_MIGRATION_ERROR
                     .with_label_values(&[name, "retryable"])
@@ -782,7 +786,11 @@ mod tests {
     #[async_trait::async_trait]
     #[typetag::serde]
     impl State for MockState {
-        async fn next(&mut self, _ctx: &mut Context) -> Result<(Box<dyn State>, Status)> {
+        async fn next(
+            &mut self,
+            _ctx: &mut Context,
+            _procedure_ctx: &ProcedureContext,
+        ) -> Result<(Box<dyn State>, Status)> {
             Ok((Box::new(MockState), Status::done()))
         }
 

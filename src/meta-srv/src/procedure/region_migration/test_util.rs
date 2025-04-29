@@ -262,7 +262,8 @@ impl ProcedureMigrationTestSuite {
         }
 
         debug!("suite test: {name} invoking next");
-        let result = self.state.next(&mut self.context).await;
+        let procedure_ctx = new_procedure_context();
+        let result = self.state.next(&mut self.context, &procedure_ctx).await;
 
         match assertion {
             Assertion::Simple(state_assert, status_assert) => {
@@ -561,5 +562,13 @@ fn test_merge_mailbox_messages() {
         assert_eq!(violated, "second");
     } else {
         unreachable!()
+    }
+}
+
+/// Returns a new [ProcedureContext].
+pub fn new_procedure_context() -> ProcedureContext {
+    ProcedureContext {
+        procedure_id: ProcedureId::random(),
+        provider: Arc::new(MockContextProvider::default()),
     }
 }

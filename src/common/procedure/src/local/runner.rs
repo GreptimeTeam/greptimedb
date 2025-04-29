@@ -669,7 +669,7 @@ mod tests {
                 unimplemented!()
             }
 
-            async fn acquire_lock(&self, _key: &StringKey) -> Result<OwnedKeyRwLockGuard> {
+            async fn acquire_lock(&self, _key: &StringKey) -> OwnedKeyRwLockGuard {
                 unimplemented!()
             }
 

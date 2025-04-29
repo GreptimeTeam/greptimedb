@@ -18,7 +18,9 @@ pub(crate) mod upgrade_candidate_region;
 
 use std::any::Any;
 
-use common_procedure::Status;
+use common_meta::lock_key::TableLock;
+use common_procedure::rwlock::OwnedKeyRwLockGuard;
+use common_procedure::{Context as ProcedureContext, Status, StringKey};
 use common_telemetry::warn;
 use serde::{Deserialize, Serialize};
 
@@ -39,30 +41,51 @@ pub enum UpdateMetadata {
     Rollback,
 }
 
+fn clean_lock_keys(procedure_ctx: &ProcedureContext, key: &StringKey, guard: OwnedKeyRwLockGuard) {
+    drop(guard);
+    procedure_ctx.provider.clean_lock_keys(key);
+}
+
 #[async_trait::async_trait]
 #[typetag::serde]
 impl State for UpdateMetadata {
-    async fn next(&mut self, ctx: &mut Context) -> Result<(Box<dyn State>, Status)> {
+    async fn next(
+        &mut self,
+        ctx: &mut Context,
+        procedure_ctx: &ProcedureContext,
+    ) -> Result<(Box<dyn State>, Status)> {
+        let table_id = TableLock::Write(ctx.region_id().table_id()).into();
+        let guard = procedure_ctx.provider.acquire_lock(&table_id).await;
+
         match self {
             UpdateMetadata::Downgrade => {
-                self.downgrade_leader_region(ctx).await?;
-
+                if let Err(err) = self.downgrade_leader_region(ctx).await {
+                    clean_lock_keys(procedure_ctx, &table_id, guard);
+                    return Err(err);
+                }
+                clean_lock_keys(procedure_ctx, &table_id, guard);
                 Ok((
                     Box::<DowngradeLeaderRegion>::default(),
                     Status::executing(false),
                 ))
             }
             UpdateMetadata::Upgrade => {
-                self.upgrade_candidate_region(ctx).await?;
-
+                if let Err(err) = self.upgrade_candidate_region(ctx).await {
+                    clean_lock_keys(procedure_ctx, &table_id, guard);
+                    return Err(err);
+                }
+                clean_lock_keys(procedure_ctx, &table_id, guard);
                 if let Err(err) = ctx.invalidate_table_cache().await {
                     warn!("Failed to broadcast the invalidate table cache message during the upgrade candidate, error: {err:?}");
                 };
                 Ok((Box::new(CloseDowngradedRegion), Status::executing(false)))
             }
             UpdateMetadata::Rollback => {
-                self.rollback_downgraded_region(ctx).await?;
-
+                if let Err(err) = self.rollback_downgraded_region(ctx).await {
+                    clean_lock_keys(procedure_ctx, &table_id, guard);
+                    return Err(err);
+                }
+                clean_lock_keys(procedure_ctx, &table_id, guard);
                 if let Err(err) = ctx.invalidate_table_cache().await {
                     warn!("Failed to broadcast the invalidate table cache message during the rollback, error: {err:?}");
                 };

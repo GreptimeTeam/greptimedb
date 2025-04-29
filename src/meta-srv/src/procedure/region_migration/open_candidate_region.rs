@@ -20,7 +20,7 @@ use common_meta::distributed_time_constants::REGION_LEASE_SECS;
 use common_meta::instruction::{Instruction, InstructionReply, OpenRegion, SimpleReply};
 use common_meta::key::datanode_table::RegionInfo;
 use common_meta::RegionIdent;
-use common_procedure::Status;
+use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
@@ -41,7 +41,11 @@ pub struct OpenCandidateRegion;
 #[async_trait::async_trait]
 #[typetag::serde]
 impl State for OpenCandidateRegion {
-    async fn next(&mut self, ctx: &mut Context) -> Result<(Box<dyn State>, Status)> {
+    async fn next(
+        &mut self,
+        ctx: &mut Context,
+        _procedure_ctx: &ProcedureContext,
+    ) -> Result<(Box<dyn State>, Status)> {
         let instruction = self.build_open_region_instruction(ctx).await?;
         let now = Instant::now();
         self.open_candidate_region(ctx, instruction).await?;
@@ -200,7 +204,7 @@ mod tests {
 
     use super::*;
     use crate::error::Error;
-    use crate::procedure::region_migration::test_util::{self, TestingEnv};
+    use crate::procedure::region_migration::test_util::{self, new_procedure_context, TestingEnv};
     use crate::procedure::region_migration::{ContextFactory, PersistentContext};
     use crate::procedure::test_util::{
         new_close_region_reply, new_open_region_reply, send_mock_reply,
@@ -434,8 +438,8 @@ mod tests {
             .await;
 
         send_mock_reply(mailbox, rx, |id| Ok(new_open_region_reply(id, true, None)));
-
-        let (next, _) = state.next(&mut ctx).await.unwrap();
+        let procedure_ctx = new_procedure_context();
+        let (next, _) = state.next(&mut ctx, &procedure_ctx).await.unwrap();
         let vc = ctx.volatile_ctx;
         assert_eq!(
             vc.opening_region_guard.unwrap().info(),
