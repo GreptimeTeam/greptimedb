@@ -272,7 +272,7 @@ impl DowngradeLeaderRegion {
                 ctx.volatile_ctx.reset_leader_region_lease_deadline();
                 ctx.volatile_ctx.set_leader_region_lease_deadline(deadline);
                 info!(
-                    "Datanode {}({}) last connected {:?}, updated leader region lease deadline to {:?}, region: {}",
+                    "Datanode {}({}) last connected {:?} ago, updated leader region lease deadline to {:?}, region: {}",
                     leader, last_connection_at, elapsed, ctx.volatile_ctx.leader_region_lease_deadline, ctx.persistent_ctx.region_id
                 );
             } else {

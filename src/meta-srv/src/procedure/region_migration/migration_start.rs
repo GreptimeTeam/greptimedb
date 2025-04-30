@@ -60,8 +60,16 @@ impl State for RegionMigrationStart {
         let from_peer = &ctx.persistent_ctx.from_peer;
 
         if self.has_migrated(&region_route, to_peer)? {
+            info!(
+                "Region has been migrated, region: {:?}, to_peer: {:?}",
+                region_route.region.id, to_peer
+            );
             Ok((Box::new(RegionMigrationEnd), Status::done()))
         } else if self.invalid_leader_peer(&region_route, from_peer)? {
+            info!(
+                "Abort region migration, region:{:?}, unexpected leader peer: {:?}, expected: {:?}",
+                region_route.region.id, region_route.leader_peer, from_peer,
+            );
             Ok((
                 Box::new(RegionMigrationAbort::new(&format!(
                     "Invalid region leader peer: {from_peer:?}, expected: {:?}",
@@ -142,12 +150,6 @@ impl RegionMigrationStart {
             })?
             .id
             != from_peer.id;
-        if is_invalid_leader_peer {
-            info!(
-                "Abort region migration, region:{:?}, unexpected leader peer: {:?}, expected: {:?}",
-                region_route.region.id, region_route.leader_peer, from_peer,
-            );
-        }
         Ok(is_invalid_leader_peer)
     }
 
@@ -167,14 +169,6 @@ impl RegionMigrationStart {
             })?
             .id
             == to_peer.id;
-
-        if region_migrated {
-            info!(
-                "Region has been migrated, region: {:?}, to_peer: {:?}",
-                region_route.region.id, to_peer
-            );
-        }
-
         Ok(region_migrated)
     }
 }
