@@ -596,7 +596,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
-    use crate::local::test_util;
+    use crate::local::{test_util, DynamicKeyLockGuard};
     use crate::procedure::PoisonKeys;
     use crate::store::proc_path;
     use crate::test_util::InMemoryPoisonStore;
@@ -669,11 +669,7 @@ mod tests {
                 unimplemented!()
             }
 
-            async fn acquire_lock(&self, _key: &StringKey) -> OwnedKeyRwLockGuard {
-                unimplemented!()
-            }
-
-            fn clean_lock_keys(&self, _key: &StringKey) {
+            async fn acquire_lock(&self, _key: &StringKey) -> DynamicKeyLockGuard {
                 unimplemented!()
             }
         }

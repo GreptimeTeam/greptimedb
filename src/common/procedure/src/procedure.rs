@@ -25,7 +25,7 @@ use snafu::{ResultExt, Snafu};
 use uuid::Uuid;
 
 use crate::error::{self, Error, Result};
-use crate::rwlock::OwnedKeyRwLockGuard;
+use crate::local::DynamicKeyLockGuard;
 use crate::watcher::Watcher;
 
 pub type Output = Arc<dyn Any + Send + Sync>;
@@ -147,10 +147,7 @@ pub trait ContextProvider: Send + Sync {
     async fn try_put_poison(&self, key: &PoisonKey, procedure_id: ProcedureId) -> Result<()>;
 
     /// Acquires a key lock for the procedure.
-    async fn acquire_lock(&self, key: &StringKey) -> OwnedKeyRwLockGuard;
-
-    /// Cleans the key lock.
-    fn clean_lock_keys(&self, key: &StringKey);
+    async fn acquire_lock(&self, key: &StringKey) -> DynamicKeyLockGuard;
 }
 
 /// Reference-counted pointer to [ContextProvider].

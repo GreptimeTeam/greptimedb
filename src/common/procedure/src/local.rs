@@ -164,6 +164,52 @@ struct LoadedProcedure {
 /// This allows for more fine-grained concurrency control during procedure execution.
 pub(crate) type DynamicKeyLock = Arc<KeyRwLock<String>>;
 
+/// Acquires a dynamic key lock for the given key.
+///
+/// This function takes a reference to the dynamic key lock and a pointer to the key.
+/// It then matches the key type and acquires the appropriate lock.
+pub async fn acquire_dynamic_key_lock(
+    lock: &DynamicKeyLock,
+    key: &StringKey,
+) -> DynamicKeyLockGuard {
+    match key {
+        StringKey::Share(key) => {
+            let guard = lock.read(key.to_string()).await;
+            DynamicKeyLockGuard {
+                guard: Some(OwnedKeyRwLockGuard::from(guard)),
+                key: key.to_string(),
+                lock: lock.clone(),
+            }
+        }
+        StringKey::Exclusive(key) => {
+            let guard = lock.write(key.to_string()).await;
+            DynamicKeyLockGuard {
+                guard: Some(OwnedKeyRwLockGuard::from(guard)),
+                key: key.to_string(),
+                lock: lock.clone(),
+            }
+        }
+    }
+}
+/// A guard for the dynamic key lock.
+///
+/// This guard is used to release the lock when the procedure no longer needs it.
+/// It also ensures that the lock is cleaned up when the guard is dropped.
+pub struct DynamicKeyLockGuard {
+    guard: Option<OwnedKeyRwLockGuard>,
+    key: String,
+    lock: DynamicKeyLock,
+}
+
+impl Drop for DynamicKeyLockGuard {
+    fn drop(&mut self) {
+        if let Some(guard) = self.guard.take() {
+            drop(guard);
+        }
+        self.lock.clean_keys(&[self.key.to_string()]);
+    }
+}
+
 /// Shared context of the manager.
 pub(crate) struct ManagerContext {
     /// Procedure loaders. The key is the type name of the procedure which the loader returns.
@@ -221,28 +267,8 @@ impl ContextProvider for ManagerContext {
         self.poison_manager.try_put_poison(key, procedure_id).await
     }
 
-    async fn acquire_lock(&self, key: &StringKey) -> OwnedKeyRwLockGuard {
-        match key {
-            StringKey::Share(key) => {
-                let guard = self.dynamic_key_lock.read(key.to_string()).await;
-                OwnedKeyRwLockGuard::from(guard)
-            }
-            StringKey::Exclusive(key) => {
-                let guard = self.dynamic_key_lock.write(key.to_string()).await;
-                OwnedKeyRwLockGuard::from(guard)
-            }
-        }
-    }
-
-    fn clean_lock_keys(&self, key: &StringKey) {
-        match key {
-            StringKey::Share(key) => {
-                self.dynamic_key_lock.clean_keys(&[key.to_string()]);
-            }
-            StringKey::Exclusive(key) => {
-                self.dynamic_key_lock.clean_keys(&[key.to_string()]);
-            }
-        }
+    async fn acquire_lock(&self, key: &StringKey) -> DynamicKeyLockGuard {
+        acquire_dynamic_key_lock(&self.dynamic_key_lock, key).await
     }
 }
 

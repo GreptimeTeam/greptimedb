@@ -18,7 +18,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use common_procedure::rwlock::{KeyRwLock, OwnedKeyRwLockGuard};
+use common_procedure::local::{acquire_dynamic_key_lock, DynamicKeyLockGuard};
+use common_procedure::rwlock::KeyRwLock;
 use common_procedure::store::poison_store::PoisonStore;
 use common_procedure::test_util::InMemoryPoisonStore;
 use common_procedure::{
@@ -62,28 +63,8 @@ impl ContextProvider for MockContextProvider {
             .await
     }
 
-    async fn acquire_lock(&self, key: &StringKey) -> OwnedKeyRwLockGuard {
-        match key {
-            StringKey::Share(key) => {
-                let guard = self.dynamic_key_lock.read(key.to_string()).await;
-                OwnedKeyRwLockGuard::from(guard)
-            }
-            StringKey::Exclusive(key) => {
-                let guard = self.dynamic_key_lock.write(key.to_string()).await;
-                OwnedKeyRwLockGuard::from(guard)
-            }
-        }
-    }
-
-    fn clean_lock_keys(&self, key: &StringKey) {
-        match key {
-            StringKey::Share(key) => {
-                self.dynamic_key_lock.clean_keys(&[key.to_string()]);
-            }
-            StringKey::Exclusive(key) => {
-                self.dynamic_key_lock.clean_keys(&[key.to_string()]);
-            }
-        }
+    async fn acquire_lock(&self, key: &StringKey) -> DynamicKeyLockGuard {
+        acquire_dynamic_key_lock(&self.dynamic_key_lock, key).await
     }
 }
 
