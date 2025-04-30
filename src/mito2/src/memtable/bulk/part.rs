@@ -517,7 +517,7 @@ mod tests {
 
     use super::*;
     use crate::memtable::bulk::context::BulkIterContext;
-    use crate::sst::parquet::format::ReadFormat;
+    use crate::sst::parquet::format::{PrimaryKeyReadFormat, ReadFormat};
     use crate::test_util::memtable_util::{build_key_values_with_ts_seq_values, metadata_for_test};
 
     fn check_binary_array_to_dictionary(
@@ -621,7 +621,7 @@ mod tests {
         let (batch, _, _) = mutations_to_record_batch(&mutations, &metadata, &pk_encoder, dedup)
             .unwrap()
             .unwrap();
-        let read_format = ReadFormat::new_with_all_columns(metadata.clone());
+        let read_format = PrimaryKeyReadFormat::new_with_all_columns(metadata.clone());
         let mut batches = VecDeque::new();
         read_format
             .convert_record_batch(&batch, &mut batches)

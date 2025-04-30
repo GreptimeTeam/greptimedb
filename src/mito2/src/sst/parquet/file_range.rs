@@ -303,8 +303,10 @@ impl RangeBase {
                     }
                 }
                 SemanticType::Field => {
-                    let Some(field_index) =
-                        self.read_format.field_index_by_id(filter_ctx.column_id())
+                    let Some(field_index) = self
+                        .read_format
+                        .as_primary_key()
+                        .field_index_by_id(filter_ctx.column_id())
                     else {
                         continue;
                     };

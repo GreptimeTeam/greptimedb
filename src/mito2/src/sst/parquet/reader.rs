@@ -1175,6 +1175,7 @@ where
 
             self.context
                 .read_format()
+                .as_primary_key()
                 .convert_record_batch(&record_batch, &mut self.batches)?;
             self.metrics.num_batches += self.batches.len();
         }
