@@ -1648,8 +1648,15 @@ fn convert_value(
     timezone: &Timezone,
     unary_op: Option<UnaryOperator>,
 ) -> Result<Value> {
-    sql_value_to_value("<NONAME>", &data_type, value, Some(timezone), unary_op)
-        .context(ParseSqlValueSnafu)
+    sql_value_to_value(
+        "<NONAME>",
+        &data_type,
+        value,
+        Some(timezone),
+        unary_op,
+        false,
+    )
+    .context(ParseSqlValueSnafu)
 }
 
 #[cfg(test)]
