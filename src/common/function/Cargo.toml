@@ -13,7 +13,7 @@ default = ["geo"]
 geo = ["geohash", "h3o", "s2", "wkt", "geo-types", "dep:geo"]
 
 [dependencies]
-ahash = "0.8"
+ahash.workspace = true
 api.workspace = true
 arc-swap = "1.0"
 async-trait.workspace = true

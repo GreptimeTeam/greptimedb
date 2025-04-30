@@ -10904,7 +10904,6 @@ dependencies = [
  "derive_builder 0.20.1",
  "futures",
  "futures-util",
- "hashbrown 0.15.2",
  "headers",
  "hostname",
  "http 1.1.0",

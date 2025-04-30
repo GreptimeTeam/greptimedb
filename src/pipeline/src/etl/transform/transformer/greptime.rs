@@ -30,16 +30,15 @@ use serde_json::Number;
 
 use crate::error::{
     IdentifyPipelineColumnTypeMismatchSnafu, ReachedMaxNestedLevelsSnafu, Result,
-    TransformColumnNameMustBeUniqueSnafu, TransformEmptySnafu,
-    TransformMultipleTimestampIndexSnafu, TransformTimestampIndexCountSnafu,
-    UnsupportedNumberTypeSnafu,
+    TransformColumnNameMustBeUniqueSnafu, TransformMultipleTimestampIndexSnafu,
+    TransformTimestampIndexCountSnafu, UnsupportedNumberTypeSnafu,
 };
 use crate::etl::field::{Field, Fields};
 use crate::etl::transform::index::Index;
 use crate::etl::transform::{Transform, Transforms};
 use crate::etl::value::{Timestamp, Value};
 use crate::etl::PipelineMap;
-use crate::IdentityTimeIndex;
+use crate::{IdentityTimeIndex, PipelineContext};
 
 const DEFAULT_GREPTIME_TIMESTAMP_COLUMN: &str = "greptime_timestamp";
 const DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING: usize = 10;
@@ -124,10 +123,7 @@ impl GreptimeTransformer {
 
 impl GreptimeTransformer {
     pub fn new(mut transforms: Transforms) -> Result<Self> {
-        if transforms.is_empty() {
-            return TransformEmptySnafu.fail();
-        }
-
+        // empty check is done in the caller
         let mut column_names_set = HashSet::new();
         let mut timestamp_columns = vec![];
 
@@ -491,11 +487,12 @@ fn resolve_value(
 }
 
 fn identity_pipeline_inner(
-    array: Vec<PipelineMap>,
-    custom_ts: Option<&IdentityTimeIndex>,
+    pipeline_maps: Vec<PipelineMap>,
+    pipeline_ctx: &PipelineContext<'_>,
 ) -> Result<(SchemaInfo, Vec<Row>)> {
-    let mut rows = Vec::with_capacity(array.len());
+    let mut rows = Vec::with_capacity(pipeline_maps.len());
     let mut schema_info = SchemaInfo::default();
+    let custom_ts = pipeline_ctx.pipeline_definition.get_custom_ts();
 
     // set time index column schema first
     schema_info.schema.push(ColumnSchema {
@@ -510,7 +507,7 @@ fn identity_pipeline_inner(
         options: None,
     });
 
-    for values in array {
+    for values in pipeline_maps {
         let row = values_to_row(&mut schema_info, values, custom_ts)?;
         rows.push(row);
     }
@@ -537,10 +534,9 @@ fn identity_pipeline_inner(
 pub fn identity_pipeline(
     array: Vec<PipelineMap>,
     table: Option<Arc<table::Table>>,
-    params: &GreptimePipelineParams,
-    custom_ts: Option<&IdentityTimeIndex>,
+    pipeline_ctx: &PipelineContext<'_>,
 ) -> Result<Rows> {
-    let input = if params.flatten_json_object() {
+    let input = if pipeline_ctx.pipeline_param.flatten_json_object() {
         array
             .into_iter()
             .map(|item| flatten_object(item, DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING))
@@ -549,7 +545,7 @@ pub fn identity_pipeline(
         array
     };
 
-    identity_pipeline_inner(input, custom_ts).map(|(mut schema, rows)| {
+    identity_pipeline_inner(input, pipeline_ctx).map(|(mut schema, rows)| {
         if let Some(table) = table {
             let table_info = table.table_info();
             for tag_name in table_info.meta.row_key_column_names() {
@@ -621,10 +617,13 @@ mod tests {
 
     use super::*;
     use crate::etl::{json_array_to_map, json_to_map};
-    use crate::identity_pipeline;
+    use crate::{identity_pipeline, PipelineDefinition};
 
     #[test]
     fn test_identify_pipeline() {
+        let params = GreptimePipelineParams::default();
+        let pipeline_ctx =
+            PipelineContext::new(&PipelineDefinition::GreptimeIdentityPipeline(None), &params);
         {
             let array = vec![
                 serde_json::json!({
@@ -647,7 +646,7 @@ mod tests {
                 }),
             ];
             let array = json_array_to_map(array).unwrap();
-            let rows = identity_pipeline(array, None, &GreptimePipelineParams::default(), None);
+            let rows = identity_pipeline(array, None, &pipeline_ctx);
             assert!(rows.is_err());
             assert_eq!(
                 rows.err().unwrap().to_string(),
@@ -675,12 +674,7 @@ mod tests {
                     "gaga": "gaga"
                 }),
             ];
-            let rows = identity_pipeline(
-                json_array_to_map(array).unwrap(),
-                None,
-                &GreptimePipelineParams::default(),
-                None,
-            );
+            let rows = identity_pipeline(json_array_to_map(array).unwrap(), None, &pipeline_ctx);
             assert!(rows.is_err());
             assert_eq!(
                 rows.err().unwrap().to_string(),
@@ -708,12 +702,7 @@ mod tests {
                     "gaga": "gaga"
                 }),
             ];
-            let rows = identity_pipeline(
-                json_array_to_map(array).unwrap(),
-                None,
-                &GreptimePipelineParams::default(),
-                None,
-            );
+            let rows = identity_pipeline(json_array_to_map(array).unwrap(), None, &pipeline_ctx);
             assert!(rows.is_ok());
             let rows = rows.unwrap();
             assert_eq!(rows.schema.len(), 8);
@@ -744,8 +733,8 @@ mod tests {
             ];
             let tag_column_names = ["name".to_string(), "address".to_string()];
 
-            let rows = identity_pipeline_inner(json_array_to_map(array).unwrap(), None).map(
-                |(mut schema, rows)| {
+            let rows = identity_pipeline_inner(json_array_to_map(array).unwrap(), &pipeline_ctx)
+                .map(|(mut schema, rows)| {
                     for name in tag_column_names {
                         if let Some(index) = schema.index.get(&name) {
                             schema.schema[*index].semantic_type = SemanticType::Tag as i32;
@@ -755,8 +744,7 @@ mod tests {
                         schema: schema.schema,
                         rows,
                     }
-                },
-            );
+                });
 
             assert!(rows.is_ok());
             let rows = rows.unwrap();
