@@ -233,9 +233,9 @@ impl Pipeline {
             // get all ts values
             for (k, v) in val {
                 if let Value::Timestamp(ts) = v {
-                    ts_unit_map
-                        .entry(k.clone())
-                        .or_insert_with(|| ts.get_unit());
+                    if !ts_unit_map.contains_key(k) {
+                        ts_unit_map.insert(k.clone(), ts.get_unit());
+                    }
                 }
             }
             Ok(PipelineExecOutput::AutoTransform(table_suffix, ts_unit_map))
