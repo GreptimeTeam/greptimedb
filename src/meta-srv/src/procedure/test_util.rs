@@ -101,6 +101,24 @@ pub fn new_open_region_reply(id: u64, result: bool, error: Option<String>) -> Ma
     }
 }
 
+/// Generates a [InstructionReply::FlushRegion] reply.
+pub fn new_flush_region_reply(id: u64, result: bool, error: Option<String>) -> MailboxMessage {
+    MailboxMessage {
+        id,
+        subject: "mock".to_string(),
+        from: "datanode".to_string(),
+        to: "meta".to_string(),
+        timestamp_millis: current_time_millis(),
+        payload: Some(Payload::Json(
+            serde_json::to_string(&InstructionReply::FlushRegion(SimpleReply {
+                result,
+                error,
+            }))
+            .unwrap(),
+        )),
+    }
+}
+
 /// Generates a [InstructionReply::CloseRegion] reply.
 pub fn new_close_region_reply(id: u64) -> MailboxMessage {
     MailboxMessage {
