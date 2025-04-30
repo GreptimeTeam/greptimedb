@@ -16,7 +16,7 @@ use std::any::Any;
 
 use api::v1::meta::MailboxMessage;
 use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
-use common_procedure::Status;
+use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::{info, warn};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
@@ -37,7 +37,11 @@ pub struct PreFlushRegion;
 #[async_trait::async_trait]
 #[typetag::serde]
 impl State for PreFlushRegion {
-    async fn next(&mut self, ctx: &mut Context) -> Result<(Box<dyn State>, Status)> {
+    async fn next(
+        &mut self,
+        ctx: &mut Context,
+        _procedure_ctx: &ProcedureContext,
+    ) -> Result<(Box<dyn State>, Status)> {
         let timer = Instant::now();
         self.flush_region(ctx).await?;
         ctx.update_flush_leader_region_elapsed(timer);
@@ -163,7 +167,7 @@ mod tests {
     use store_api::storage::RegionId;
 
     use super::*;
-    use crate::procedure::region_migration::test_util::{self, TestingEnv};
+    use crate::procedure::region_migration::test_util::{self, new_procedure_context, TestingEnv};
     use crate::procedure::region_migration::{ContextFactory, PersistentContext};
     use crate::procedure::test_util::{
         new_close_region_reply, new_flush_region_reply, send_mock_reply,
@@ -277,7 +281,8 @@ mod tests {
             .insert_heartbeat_response_receiver(Channel::Datanode(from_peer_id), tx)
             .await;
         send_mock_reply(mailbox, rx, |id| Ok(new_flush_region_reply(id, true, None)));
-        let (next, _) = state.next(&mut ctx).await.unwrap();
+        let procedure_ctx = new_procedure_context();
+        let (next, _) = state.next(&mut ctx, &procedure_ctx).await.unwrap();
 
         let update_metadata = next.as_any().downcast_ref::<UpdateMetadata>().unwrap();
         assert_matches!(update_metadata, UpdateMetadata::Downgrade);

@@ -196,7 +196,7 @@ mod tests {
 
     use crate::error::Error;
     use crate::procedure::region_migration::close_downgraded_region::CloseDowngradedRegion;
-    use crate::procedure::region_migration::test_util::{self, TestingEnv};
+    use crate::procedure::region_migration::test_util::{self, new_procedure_context, TestingEnv};
     use crate::procedure::region_migration::update_metadata::UpdateMetadata;
     use crate::procedure::region_migration::{ContextFactory, PersistentContext, State};
 
@@ -469,7 +469,8 @@ mod tests {
 
         let table_metadata_manager = env.table_metadata_manager();
 
-        let (next, _) = state.next(&mut ctx).await.unwrap();
+        let procedure_ctx = new_procedure_context();
+        let (next, _) = state.next(&mut ctx, &procedure_ctx).await.unwrap();
 
         let _ = next
             .as_any()

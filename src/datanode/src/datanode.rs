@@ -398,45 +398,46 @@ impl DatanodeBuilder {
         schema_metadata_manager: SchemaMetadataManagerRef,
         plugins: Plugins,
     ) -> Result<Vec<RegionEngineRef>> {
-        let mut engines = vec![];
-        let mut metric_engine_config = opts.region_engine.iter().find_map(|c| match c {
-            RegionEngineConfig::Metric(config) => Some(config.clone()),
-            _ => None,
-        });
+        let mut metric_engine_config = metric_engine::config::EngineConfig::default();
+        let mut mito_engine_config = MitoConfig::default();
+        let mut file_engine_config = file_engine::config::EngineConfig::default();
 
         for engine in &opts.region_engine {
             match engine {
                 RegionEngineConfig::Mito(config) => {
-                    let mito_engine = Self::build_mito_engine(
-                        opts,
-                        object_store_manager.clone(),
-                        config.clone(),
-                        schema_metadata_manager.clone(),
-                        plugins.clone(),
-                    )
-                    .await?;
-
-                    let metric_engine = MetricEngine::try_new(
-                        mito_engine.clone(),
-                        metric_engine_config.take().unwrap_or_default(),
-                    )
-                    .context(BuildMetricEngineSnafu)?;
-                    engines.push(Arc::new(mito_engine) as _);
-                    engines.push(Arc::new(metric_engine) as _);
+                    mito_engine_config = config.clone();
                 }
                 RegionEngineConfig::File(config) => {
-                    let engine = FileRegionEngine::new(
-                        config.clone(),
-                        object_store_manager.default_object_store().clone(), // TODO: implement custom storage for file engine
-                    );
-                    engines.push(Arc::new(engine) as _);
+                    file_engine_config = config.clone();
                 }
-                RegionEngineConfig::Metric(_) => {
-                    // Already handled in `build_mito_engine`.
+                RegionEngineConfig::Metric(metric_config) => {
+                    metric_engine_config = metric_config.clone();
                 }
             }
         }
-        Ok(engines)
+
+        let mito_engine = Self::build_mito_engine(
+            opts,
+            object_store_manager.clone(),
+            mito_engine_config,
+            schema_metadata_manager.clone(),
+            plugins.clone(),
+        )
+        .await?;
+
+        let metric_engine = MetricEngine::try_new(mito_engine.clone(), metric_engine_config)
+            .context(BuildMetricEngineSnafu)?;
+
+        let file_engine = FileRegionEngine::new(
+            file_engine_config,
+            object_store_manager.default_object_store().clone(), // TODO: implement custom storage for file engine
+        );
+
+        Ok(vec![
+            Arc::new(mito_engine) as _,
+            Arc::new(metric_engine) as _,
+            Arc::new(file_engine) as _,
+        ])
     }
 
     /// Builds [MitoEngine] according to options.
