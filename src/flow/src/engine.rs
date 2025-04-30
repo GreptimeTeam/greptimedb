@@ -25,6 +25,26 @@ use crate::Error;
 pub type FlowId = u64;
 pub type TableName = [String; 3];
 
+#[derive(Debug, Clone)]
+pub struct FlowAuthHeader {
+    auth_schema: api::v1::auth_header::AuthScheme,
+}
+
+impl FlowAuthHeader {
+    pub fn from_user_pwd(username: &str, pwd: &str) -> Self {
+        Self {
+            auth_schema: api::v1::auth_header::AuthScheme::Basic(api::v1::Basic {
+                username: username.to_string(),
+                password: pwd.to_string(),
+            }),
+        }
+    }
+
+    pub fn auth(&self) -> &api::v1::auth_header::AuthScheme {
+        &self.auth_schema
+    }
+}
+
 /// The arguments to create a flow
 #[derive(Debug, Clone)]
 pub struct CreateFlowArgs {

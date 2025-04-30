@@ -107,6 +107,7 @@ pub struct FlownodeOptions {
     pub tracing: TracingOptions,
     pub heartbeat: HeartbeatOptions,
     pub query: QueryOptions,
+    pub user_provider: Option<String>,
 }
 
 impl Default for FlownodeOptions {
@@ -121,6 +122,7 @@ impl Default for FlownodeOptions {
             tracing: TracingOptions::default(),
             heartbeat: HeartbeatOptions::default(),
             query: QueryOptions::default(),
+            user_provider: None,
         }
     }
 }

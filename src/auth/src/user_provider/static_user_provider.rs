@@ -15,15 +15,15 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 
-use crate::error::{InvalidConfigSnafu, Result};
+use crate::error::{FromUtf8Snafu, InvalidConfigSnafu, Result};
 use crate::user_provider::{authenticate_with_credential, load_credential_from_file};
 use crate::{Identity, Password, UserInfoRef, UserProvider};
 
 pub(crate) const STATIC_USER_PROVIDER: &str = "static_user_provider";
 
-pub(crate) struct StaticUserProvider {
+pub struct StaticUserProvider {
     users: HashMap<String, Vec<u8>>,
 }
 
@@ -59,6 +59,18 @@ impl StaticUserProvider {
             }
                 .fail(),
         }
+    }
+
+    /// Make sure there is only one username/password pair
+    /// And return it
+    pub fn get_one_user_pwd(&self) -> Result<(String, String)> {
+        let kv = self.users.iter().next().context(InvalidConfigSnafu {
+            value: "",
+            msg: "Expect one and only one pair of username and password",
+        })?;
+        let username = kv.0;
+        let pwd = String::from_utf8(kv.1.clone()).context(FromUtf8Snafu)?;
+        Ok((username.clone(), pwd))
     }
 }
 

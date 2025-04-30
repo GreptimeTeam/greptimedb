@@ -572,7 +572,8 @@ impl<'a> FlownodeServiceBuilder<'a> {
         }
     }
 
-    pub fn build(mut self) -> Result<ServerHandlers, Error> {
+    /// TODO(discord9): add plugins to FlowDualEngine
+    pub async fn build(mut self) -> Result<ServerHandlers, Error> {
         let handlers = ServerHandlers::default();
         if let Some(grpc_server) = self.grpc_server.take() {
             let addr: SocketAddr = self.opts.grpc.bind_addr.parse().context(ParseAddrSnafu {

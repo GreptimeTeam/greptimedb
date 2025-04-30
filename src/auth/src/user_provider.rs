@@ -15,6 +15,7 @@
 pub(crate) mod static_user_provider;
 pub(crate) mod watch_file_user_provider;
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io;
@@ -33,7 +34,7 @@ use crate::user_info::DefaultUserInfo;
 use crate::{auth_mysql, UserInfoRef};
 
 #[async_trait::async_trait]
-pub trait UserProvider: Send + Sync {
+pub trait UserProvider: Send + Sync + Any {
     fn name(&self) -> &str;
 
     /// Checks whether a user is valid and allowed to access the database.

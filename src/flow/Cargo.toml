@@ -13,6 +13,7 @@ arrow.workspace = true
 arrow-schema.workspace = true
 async-recursion = "1.0"
 async-trait.workspace = true
+auth.workspace = true
 bytes.workspace = true
 cache.workspace = true
 catalog.workspace = true

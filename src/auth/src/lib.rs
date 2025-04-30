@@ -26,6 +26,7 @@ pub use common::{
 };
 pub use permission::{PermissionChecker, PermissionReq, PermissionResp};
 pub use user_info::UserInfo;
+pub use user_provider::static_user_provider::StaticUserProvider;
 pub use user_provider::UserProvider;
 
 /// pub type alias
