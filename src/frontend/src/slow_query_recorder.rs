@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use api::v1::value::ValueData;
 use api::v1::{
@@ -44,7 +44,7 @@ const SLOW_QUERY_TABLE_QUERY_COLUMN_NAME: &str = "query";
 const SLOW_QUERY_TABLE_IS_PROMQL_COLUMN_NAME: &str = "is_promql";
 const SLOW_QUERY_TABLE_TIMESTAMP_COLUMN_NAME: &str = "timestamp";
 
-const DEFAULT_SLOW_QUERY_CHANNEL_SIZE: usize = 1024;
+const DEFAULT_SLOW_QUERY_EVENTS_CHANNEL_SIZE: usize = 1024;
 
 /// SlowQueryRecorder is responsible for recording slow queries.
 #[derive(Clone)]
@@ -71,7 +71,7 @@ impl SlowQueryRecorder {
         statement_executor: StatementExecutorRef,
         catalog_manager: CatalogManagerRef,
     ) -> Self {
-        let (tx, rx) = channel(DEFAULT_SLOW_QUERY_CHANNEL_SIZE);
+        let (tx, rx) = channel(DEFAULT_SLOW_QUERY_EVENTS_CHANNEL_SIZE);
 
         // Start a new task to process the slow query events.
         let event_handler = SlowQueryEventHandler {
@@ -82,6 +82,7 @@ impl SlowQueryRecorder {
             record_type: slow_query_opts.record_type,
         };
 
+        // Start a new background task to process the slow query events.
         let handle = tokio::spawn(async move {
             event_handler.process_slow_query().await;
         });
@@ -93,7 +94,8 @@ impl SlowQueryRecorder {
         }
     }
 
-    /// Start a new SlowQueryTimer. Return `None` if the `slow_query.enable` is false.
+    /// Starts a new SlowQueryTimer. Returns `None` if `slow_query.enable` is false.
+    /// The timer sets the start time when created and calculates the elapsed duration when dropped.
     pub fn start(
         &self,
         stmt: QueryStatement,
@@ -103,7 +105,7 @@ impl SlowQueryRecorder {
             Some(SlowQueryTimer {
                 stmt,
                 query_ctx,
-                start: std::time::Instant::now(),
+                start: Instant::now(), // Set the initial start time.
                 threshold: self.slow_query_opts.threshold,
                 sample_ratio: self.slow_query_opts.sample_ratio,
                 tx: self.tx.clone(),
@@ -145,9 +147,9 @@ impl SlowQueryEventHandler {
                 );
             }
             SlowQueriesRecordType::SystemTable => {
-                // Record the slow query in a system table.
+                // Record the slow query in a system table that is stored in greptimedb itself.
                 if let Err(e) = self.insert_slow_query(&event).await {
-                    error!(e; "Failed to insert slow query, query: {}", event.query);
+                    error!(e; "Failed to insert slow query, query: {:?}", event);
                 }
             }
         }
@@ -167,6 +169,7 @@ impl SlowQueryEventHandler {
         {
             table
         } else {
+            // Create the system table if it doesn't exist.
             self.create_system_table(event.query_ctx.clone()).await?
         };
 
@@ -291,7 +294,7 @@ impl SlowQueryEventHandler {
 
         CreateTableExpr {
             catalog_name: catalog.to_string(),
-            schema_name: DEFAULT_PRIVATE_SCHEMA_NAME.to_string(),
+            schema_name: DEFAULT_PRIVATE_SCHEMA_NAME.to_string(), // Always to store in the `greptime_private` schema.
             table_name: SLOW_QUERY_TABLE_NAME.to_string(),
             desc: "GreptimeDB system table for storing slow queries".to_string(),
             column_defs,
@@ -299,7 +302,7 @@ impl SlowQueryEventHandler {
             primary_keys: vec![],
             create_if_not_exists: true,
             table_options: Default::default(),
-            table_id: None, // Should and will be assigned by Meta.
+            table_id: None,
             engine: default_engine().to_string(),
         }
     }
@@ -343,7 +346,7 @@ impl SlowQueryEventHandler {
 /// SlowQueryTimer is used to log slow query when it's dropped.
 /// In drop(), it will check if the query is slow and send the slow query event to the handler.
 pub struct SlowQueryTimer {
-    start: std::time::Instant,
+    start: Instant,
     stmt: QueryStatement,
     query_ctx: QueryContextRef,
     threshold: Option<Duration>,
@@ -376,15 +379,17 @@ impl SlowQueryTimer {
 impl Drop for SlowQueryTimer {
     fn drop(&mut self) {
         if let Some(threshold) = self.threshold {
+            // Calculate the elaspsed duration since the timer is created.
             let elapsed = self.start.elapsed();
             if elapsed > threshold {
                 if let Some(ratio) = self.sample_ratio {
+                    // Only capture a portion of slow queries based on sample_ratio.
                     // Generate a random number in [0, 1) and compare it with sample_ratio.
                     if ratio >= 1.0 || random::<f64>() <= ratio {
                         self.send_slow_query_event(elapsed, threshold);
                     }
                 } else {
-                    // If sample_ratio is not set, log all slow queries.
+                    // Captures all slow queries if sample_ratio is not set.
                     self.send_slow_query_event(elapsed, threshold);
                 }
             }
