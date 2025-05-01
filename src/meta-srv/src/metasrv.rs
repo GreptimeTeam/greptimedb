@@ -14,7 +14,7 @@
 
 pub mod builder;
 
-use std::fmt::Display;
+use std::fmt::{self, Display};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
@@ -96,7 +96,7 @@ pub enum BackendImpl {
     MysqlStore,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MetasrvOptions {
     /// The address the server listens on.
@@ -164,6 +164,47 @@ pub struct MetasrvOptions {
     pub meta_election_lock_id: u64,
     #[serde(with = "humantime_serde")]
     pub node_max_idle_time: Duration,
+}
+
+impl fmt::Debug for MetasrvOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug_struct = f.debug_struct("MetasrvOptions");
+        debug_struct
+            .field("bind_addr", &self.bind_addr)
+            .field("server_addr", &self.server_addr)
+            .field("store_addrs", &self.sanitize_store_addrs())
+            .field("selector", &self.selector)
+            .field("use_memory_store", &self.use_memory_store)
+            .field("enable_region_failover", &self.enable_region_failover)
+            .field(
+                "allow_region_failover_on_local_wal",
+                &self.allow_region_failover_on_local_wal,
+            )
+            .field("http", &self.http)
+            .field("logging", &self.logging)
+            .field("procedure", &self.procedure)
+            .field("failure_detector", &self.failure_detector)
+            .field("datanode", &self.datanode)
+            .field("enable_telemetry", &self.enable_telemetry)
+            .field("data_home", &self.data_home)
+            .field("wal", &self.wal)
+            .field("export_metrics", &self.export_metrics)
+            .field("store_key_prefix", &self.store_key_prefix)
+            .field("max_txn_ops", &self.max_txn_ops)
+            .field("flush_stats_factor", &self.flush_stats_factor)
+            .field("tracing", &self.tracing)
+            .field("backend", &self.backend);
+
+        #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
+        debug_struct.field("meta_table_name", &self.meta_table_name);
+
+        #[cfg(feature = "pg_kvbackend")]
+        debug_struct.field("meta_election_lock_id", &self.meta_election_lock_id);
+
+        debug_struct
+            .field("node_max_idle_time", &self.node_max_idle_time)
+            .finish()
+    }
 }
 
 const DEFAULT_METASRV_ADDR_PORT: &str = "3002";
@@ -248,6 +289,13 @@ impl MetasrvOptions {
         if self.server_addr.is_empty() {
             common_telemetry::debug!("detect local IP is not supported on Android");
         }
+    }
+
+    fn sanitize_store_addrs(&self) -> Vec<String> {
+        self.store_addrs
+            .iter()
+            .map(|addr| common_meta::kv_backend::util::sanitize_connection_string(addr))
+            .collect()
     }
 }
 

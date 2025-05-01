@@ -24,11 +24,19 @@ on:
         description: Release dev-builder-android image
         required: false
         default: false
+      update_dev_builder_image_tag:
+        type: boolean
+        description: Update the DEV_BUILDER_IMAGE_TAG in Makefile and create a PR
+        required: false
+        default: false
 
 jobs:
   release-dev-builder-images:
     name: Release dev builder images
-    if: ${{ inputs.release_dev_builder_ubuntu_image || inputs.release_dev_builder_centos_image || inputs.release_dev_builder_android_image }} # Only manually trigger this job.
+    # The jobs are triggered by the following events:
+    # 1. Manually triggered workflow_dispatch event
+    # 2. Push event when the PR that modifies the `rust-toolchain.toml` or `docker/dev-builder/**` is merged to main
+    if: ${{ github.event_name == 'push' || inputs.release_dev_builder_ubuntu_image || inputs.release_dev_builder_centos_image || inputs.release_dev_builder_android_image }}
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.set-version.outputs.version }}
@@ -57,9 +65,9 @@ jobs:
           version: ${{ env.VERSION }}
           dockerhub-image-registry-username: ${{ secrets.DOCKERHUB_USERNAME }}
           dockerhub-image-registry-token: ${{ secrets.DOCKERHUB_TOKEN }}
-          build-dev-builder-ubuntu: ${{ inputs.release_dev_builder_ubuntu_image }}
-          build-dev-builder-centos: ${{ inputs.release_dev_builder_centos_image }}
-          build-dev-builder-android: ${{ inputs.release_dev_builder_android_image }}
+          build-dev-builder-ubuntu: ${{ inputs.release_dev_builder_ubuntu_image || github.event_name == 'push' }}
+          build-dev-builder-centos: ${{ inputs.release_dev_builder_centos_image || github.event_name == 'push' }}
+          build-dev-builder-android: ${{ inputs.release_dev_builder_android_image || github.event_name == 'push' }}
 
   release-dev-builder-images-ecr:
     name: Release dev builder images to AWS ECR
@@ -85,7 +93,7 @@ jobs:
 
       - name: Push dev-builder-ubuntu image
         shell: bash
-        if: ${{ inputs.release_dev_builder_ubuntu_image }}
+        if: ${{ inputs.release_dev_builder_ubuntu_image || github.event_name == 'push' }}
         env:
           IMAGE_VERSION: ${{ needs.release-dev-builder-images.outputs.version }}
           IMAGE_NAMESPACE: ${{ vars.IMAGE_NAMESPACE }}
@@ -106,7 +114,7 @@ jobs:
 
       - name: Push dev-builder-centos image
         shell: bash
-        if: ${{ inputs.release_dev_builder_centos_image }}
+        if: ${{ inputs.release_dev_builder_centos_image || github.event_name == 'push' }}
         env:
           IMAGE_VERSION: ${{ needs.release-dev-builder-images.outputs.version }}
           IMAGE_NAMESPACE: ${{ vars.IMAGE_NAMESPACE }}
@@ -127,7 +135,7 @@ jobs:
 
       - name: Push dev-builder-android image
         shell: bash
-        if: ${{ inputs.release_dev_builder_android_image }}
+        if: ${{ inputs.release_dev_builder_android_image || github.event_name == 'push' }}
         env:
           IMAGE_VERSION: ${{ needs.release-dev-builder-images.outputs.version }}
           IMAGE_NAMESPACE: ${{ vars.IMAGE_NAMESPACE }}
@@ -162,7 +170,7 @@ jobs:
 
       - name: Push dev-builder-ubuntu image
         shell: bash
-        if: ${{ inputs.release_dev_builder_ubuntu_image }}
+        if: ${{ inputs.release_dev_builder_ubuntu_image || github.event_name == 'push' }}
         env:
           IMAGE_VERSION: ${{ needs.release-dev-builder-images.outputs.version }}
           IMAGE_NAMESPACE: ${{ vars.IMAGE_NAMESPACE }}
@@ -176,7 +184,7 @@ jobs:
 
       - name: Push dev-builder-centos image
         shell: bash
-        if: ${{ inputs.release_dev_builder_centos_image }}
+        if: ${{ inputs.release_dev_builder_centos_image || github.event_name == 'push' }}
         env:
           IMAGE_VERSION: ${{ needs.release-dev-builder-images.outputs.version }}
           IMAGE_NAMESPACE: ${{ vars.IMAGE_NAMESPACE }}
@@ -190,7 +198,7 @@ jobs:
 
       - name: Push dev-builder-android image
         shell: bash
-        if: ${{ inputs.release_dev_builder_android_image }}
+        if: ${{ inputs.release_dev_builder_android_image || github.event_name == 'push' }}
         env:
           IMAGE_VERSION: ${{ needs.release-dev-builder-images.outputs.version }}
           IMAGE_NAMESPACE: ${{ vars.IMAGE_NAMESPACE }}
@@ -201,3 +209,24 @@ jobs:
             quay.io/skopeo/stable:latest \
             copy -a docker://docker.io/$IMAGE_NAMESPACE/dev-builder-android:$IMAGE_VERSION \
             docker://$ACR_IMAGE_REGISTRY/$IMAGE_NAMESPACE/dev-builder-android:$IMAGE_VERSION
+  
+  update-dev-builder-image-tag:
+    name: Update dev-builder image tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    if: ${{ github.event_name == 'push' || inputs.update_dev_builder_image_tag }}
+    needs: [
+      release-dev-builder-images
+    ]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Update dev-builder image tag
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ./.github/scripts/update-dev-builder-version.sh ${{ needs.release-dev-builder-images.outputs.version }}
