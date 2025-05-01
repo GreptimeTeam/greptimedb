@@ -13,15 +13,9 @@
 // limitations under the License.
 
 mod bench;
-pub mod error;
-// Wait for https://github.com/GreptimeTeam/greptimedb/issues/2373
-#[allow(unused)]
-mod cmd;
-mod export;
-mod helper;
-
-// Wait for https://github.com/GreptimeTeam/greptimedb/issues/2373
 mod database;
+pub mod error;
+mod export;
 mod import;
 
 use async_trait::async_trait;
