@@ -30,7 +30,6 @@ use common_meta::ddl::create_flow::FlowType;
 use common_meta::ddl::ExecutorContext;
 use common_meta::instruction::CacheIdent;
 use common_meta::key::schema_name::{SchemaName, SchemaNameKey};
-use common_meta::key::table_name::TableNameKey;
 use common_meta::key::NAME_PATTERN;
 use common_meta::rpc::ddl::{
     CreateFlowTask, DdlTask, DropFlowTask, DropViewTask, SubmitDdlTaskRequest,
@@ -406,14 +405,14 @@ impl StatementExecutor {
     ) -> Result<FlowType> {
         // first check if source table's ttl is instant, if it is, force streaming mode
         for src_table_name in &expr.source_table_names {
-            let table_id = self
-                .table_metadata_manager
-                .table_name_manager()
-                .get(TableNameKey {
-                    catalog: &src_table_name.catalog_name,
-                    schema: &src_table_name.schema_name,
-                    table: &src_table_name.table_name,
-                })
+            let table = self
+                .catalog_manager()
+                .table(
+                    &src_table_name.catalog_name,
+                    &src_table_name.schema_name,
+                    &src_table_name.table_name,
+                    Some(&query_ctx),
+                )
                 .await
                 .map_err(BoxedError::new)
                 .context(ExternalSnafu)?
@@ -424,27 +423,10 @@ impl StatementExecutor {
                         src_table_name.table_name.clone(),
                     ]
                     .join("."),
-                })?
-                .table_id();
-            let table_info = self
-                .table_metadata_manager
-                .table_info_manager()
-                .get(table_id)
-                .await
-                .map_err(BoxedError::new)
-                .context(ExternalSnafu)?
-                .with_context(|| TableNotFoundSnafu {
-                    table_name: [
-                        src_table_name.catalog_name.clone(),
-                        src_table_name.schema_name.clone(),
-                        src_table_name.table_name.clone(),
-                    ]
-                    .join("."),
-                })?
-                .into_inner();
+                })?;
 
             // instant source table can only be handled by streaming mode
-            if table_info.table_info.meta.options.ttl == Some(common_time::TimeToLive::Instant) {
+            if table.table_info().meta.options.ttl == Some(common_time::TimeToLive::Instant) {
                 return Ok(FlowType::Streaming);
             }
         }
