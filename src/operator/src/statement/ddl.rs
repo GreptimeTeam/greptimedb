@@ -37,7 +37,7 @@ use common_meta::rpc::ddl::{
 };
 use common_meta::rpc::router::{Partition, Partition as MetaPartition};
 use common_query::Output;
-use common_telemetry::{debug, info, tracing};
+use common_telemetry::{debug, info, tracing, warn};
 use common_time::Timezone;
 use datafusion_common::tree_node::TreeNodeVisitor;
 use datafusion_expr::LogicalPlan;
@@ -417,16 +417,24 @@ impl StatementExecutor {
                 .map_err(BoxedError::new)
                 .context(ExternalSnafu)?
                 .with_context(|| TableNotFoundSnafu {
-                    table_name: [
-                        src_table_name.catalog_name.clone(),
-                        src_table_name.schema_name.clone(),
-                        src_table_name.table_name.clone(),
-                    ]
-                    .join("."),
+                    table_name: format_full_table_name(
+                        &src_table_name.catalog_name,
+                        &src_table_name.schema_name,
+                        &src_table_name.table_name,
+                    ),
                 })?;
 
             // instant source table can only be handled by streaming mode
             if table.table_info().meta.options.ttl == Some(common_time::TimeToLive::Instant) {
+                warn!(
+                    "Source table `{}` for flow `{}`'s ttl=instant, fallback to streaming mode",
+                    format_full_table_name(
+                        &src_table_name.catalog_name,
+                        &src_table_name.schema_name,
+                        &src_table_name.table_name
+                    ),
+                    expr.flow_name
+                );
                 return Ok(FlowType::Streaming);
             }
         }
