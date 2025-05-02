@@ -485,7 +485,7 @@ jobs:
         env:
           VERSION: ${{ needs.allocate-runners.outputs.version }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          WEBSITES_REPO_TOKEN: ${{ secrets.WEBSITES_REPO_TOKEN }}
+          WEBSITE_REPO_TOKEN: ${{ secrets.WEBSITE_REPO_TOKEN }}
 
   notification:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'push' || github.event_name == 'schedule') && always() }}
