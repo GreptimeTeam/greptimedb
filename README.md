@@ -94,6 +94,7 @@
 **Performance:**
 * [GreptimeDB tops JSONBench's billion-record cold run test!](https://greptime.com/blogs/2025-03-18-jsonbench-greptimedb-performance)
 * [TSBS Benchmark](https://github.com/GreptimeTeam/greptimedb/tree/main/docs/benchmarks/tsbs)
+
 Read [more benchmark reports](https://docs.greptime.com/user-guide/concepts/features-that-you-concern#how-is-greptimedbs-performance-compared-to-other-solutions).
 
 ## Try GreptimeDB
@@ -114,7 +115,7 @@ docker pull greptime/greptimedb
 
 ```shell
 docker run -p 127.0.0.1:4000-4003:4000-4003 \
-  -v "$(pwd)/greptimedb:./greptimedb_data" \
+  -v "$(pwd)/greptimedb:/greptimedb_data" \
   --name greptime --rm \
   greptime/greptimedb:latest standalone start \
   --http-addr 0.0.0.0:4000 \
