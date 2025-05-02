@@ -7,6 +7,7 @@
 </p>
 
 <h2 align="center">Real-Time & Cloud-Native Observability  Database<br/>for metrics, logs, and traces</h2>
+
 >  Delivers sub-second querying at PB scale and exceptional cost efficiency from edge to cloud.
 
 <div align="center">
