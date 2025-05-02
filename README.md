@@ -51,7 +51,7 @@
 </div>
 
 - [Introduction](#introduction)
-- [**Features: Why GreptimeDB**](#features)
+- [⭐ Key Features](#features)
 - [Quick Comparison](#quick-comparison)
 - [Architecture](https://docs.greptime.com/contributor-guide/overview/#architecture)
 - [Try GreptimeDB](#try-greptimedb)
@@ -60,18 +60,14 @@
 - [Tools & Extensions](#tools--extensions)
 - [Project Status](#project-status)
 - [Community](#community)
-- [Commercial Support](#commercial-support)
 - [License](#license)
+- [Commercial Support](#commercial-support)
 - [Contributing](#contributing)
 - [Acknowledgement](#acknowledgement)
 
 ## Introduction
 
 **GreptimeDB** is an open-source, cloud-native database purpose-built for the unified collection and analysis of observability data (metrics, logs, and traces). Whether you’re operating on the edge, in the cloud, or across hybrid environments, GreptimeDB empowers real-time insights at massive scale — all in one system.
-
-## News
-
-**[GreptimeDB tops JSONBench's billion-record cold run test!](https://greptime.com/blogs/2025-03-18-jsonbench-greptimedb-performance)**
 
 ## Features
 
@@ -94,6 +90,11 @@
 | Deployment                      | Edge + Cloud          | Cloud/On-prem      | Mostly central  |
 | Indexing & Performance          | PB-Scale, Sub-second  | Varies             | Varies          |
 | Integration                     | REST, SQL, Common protocols | Varies     | Varies          |
+
+**Performance:**
+* [GreptimeDB tops JSONBench's billion-record cold run test!](https://greptime.com/blogs/2025-03-18-jsonbench-greptimedb-performance)
+* [TSBS Benchmark](https://github.com/GreptimeTeam/greptimedb/tree/main/docs/benchmarks/tsbs)
+Read [more benchmark reports](https://docs.greptime.com/user-guide/concepts/features-that-you-concern#how-is-greptimedbs-performance-compared-to-other-solutions).
 
 ## Try GreptimeDB
 
@@ -168,9 +169,7 @@ cargo run -- standalone start
 
 For production use, we recommend using the latest stable release.
 [![Star History Chart](https://api.star-history.com/svg?repos=GreptimeTeam/GreptimeDB&type=Date)](https://www.star-history.com/#GreptimeTeam/GreptimeDB&Date)
-
-If you find GreptimeDB helpful, please consider giving us a ⭐ on GitHub to show your support!
-[![Star GreptimeDB](https://img.shields.io/github/stars/GreptimeTeam/greptimedb.svg?style=social&label=⭐%20Star)](https://github.com/GreptimeTeam/greptimedb/stargazers/) If you find this project useful, a star would mean a lot to us!
+If you find this project useful, a ⭐ would mean a lot to us!
 <img alt="Known Users" src="https://greptime.com/logo/img/users.png"/>
 
 ## Community
@@ -184,20 +183,20 @@ We invite you to engage and contribute!
 - [LinkedIn](https://www.linkedin.com/company/greptime/)
 - [Twitter](https://twitter.com/greptime)
 
+## License
+
+GreptimeDB is licensed under the [Apache License 2.0](https://apache.org/licenses/LICENSE-2.0.txt).
+
 ## Commercial Support
 
 Running GreptimeDB in your organization?  
 We offer enterprise add-ons, services, training, and consulting.  
 [Contact us](https://greptime.com/contactus) for details.
 
-## License
-
-GreptimeDB is licensed under the [Apache License 2.0](https://apache.org/licenses/LICENSE-2.0.txt).
-
 ## Contributing
 
 - Read our [Contribution Guidelines](https://github.com/GreptimeTeam/greptimedb/blob/main/CONTRIBUTING.md).
-- Explore [Internal Concepts](https://docs.greptime.com/contributor-guide/overview.html).
+- Explore [Internal Concepts](https://docs.greptime.com/contributor-guide/overview.html) and [DeepWiki](https://deepwiki.com/GreptimeTeam/greptimedb).
 - Pick up a [good first issue](https://github.com/GreptimeTeam/greptimedb/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) and join the #contributors [Slack](https://greptime.com/slack) channel.
 
 ## Acknowledgement
