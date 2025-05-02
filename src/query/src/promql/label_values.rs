@@ -15,10 +15,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use datafusion_common::{Column, ScalarValue};
-use datafusion_expr::expr::Alias;
 use datafusion_expr::utils::conjunction;
 use datafusion_expr::{col, Cast, Expr, LogicalPlan, LogicalPlanBuilder};
-use datafusion_sql::TableReference;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, TimeUnit as ArrowTimeUnit};
 use datatypes::prelude::ConcreteDataType;
 use snafu::{OptionExt, ResultExt};
@@ -44,16 +42,12 @@ fn build_time_filter(time_index_expr: Expr, start: i64, end: i64) -> Expr {
 /// Rewrite label values query to DataFusion logical plan.
 pub fn rewrite_label_values_query(
     table: TableRef,
-    mut scan_plan: LogicalPlan,
+    scan_plan: LogicalPlan,
     mut conditions: Vec<Expr>,
     label_name: String,
     start: SystemTime,
     end: SystemTime,
 ) -> Result<LogicalPlan> {
-    let table_ref = TableReference::partial(
-        table.table_info().schema_name.as_str(),
-        table.table_info().name.as_str(),
-    );
     let schema = table.schema();
     let ts_column = schema
         .timestamp_column()
@@ -63,26 +57,14 @@ pub fn rewrite_label_values_query(
 
     let is_time_index_ms =
         ts_column.data_type == ConcreteDataType::timestamp_millisecond_datatype();
-    let time_index_expr = col(Column::from_name(ts_column.name.clone()));
+    let mut time_index_expr = col(Column::from_name(ts_column.name.clone()));
 
     if !is_time_index_ms {
         // cast to ms if time_index not in Millisecond precision
-        let expr = vec![
-            col(Column::from_name(label_name.clone())),
-            Expr::Alias(Alias {
-                expr: Box::new(Expr::Cast(Cast {
-                    expr: Box::new(time_index_expr.clone()),
-                    data_type: ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
-                })),
-                relation: Some(table_ref),
-                name: ts_column.name.clone(),
-            }),
-        ];
-        scan_plan = LogicalPlanBuilder::from(scan_plan)
-            .project(expr)
-            .context(DataFusionPlanningSnafu)?
-            .build()
-            .context(DataFusionPlanningSnafu)?;
+        time_index_expr = Expr::Cast(Cast {
+            expr: Box::new(time_index_expr.clone()),
+            data_type: ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+        });
     };
 
     let start = start.duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;

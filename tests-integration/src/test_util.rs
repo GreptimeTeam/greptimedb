@@ -491,10 +491,14 @@ pub async fn setup_test_prom_app_with_frontend(
     // build physical table
     let sql = "CREATE TABLE phy (ts timestamp time index, val double, host string primary key) engine=metric with ('physical_metric_table' = '')";
     run_sql(sql, &instance).await;
+    let sql = "CREATE TABLE phy_ns (ts timestamp(0) time index, val double, host string primary key) engine=metric with ('physical_metric_table' = '')";
+    run_sql(sql, &instance).await;
     // build metric tables
     let sql = "CREATE TABLE demo (ts timestamp time index, val double, host string primary key) engine=metric with ('on_physical_table' = 'phy')";
     run_sql(sql, &instance).await;
     let sql = "CREATE TABLE demo_metrics (ts timestamp time index, val double, idc string primary key) engine=metric with ('on_physical_table' = 'phy')";
+    run_sql(sql, &instance).await;
+    let sql = "CREATE TABLE multi_labels (ts timestamp(0) time index, val double, idc string, env string, host string, primary key (idc, env, host)) engine=metric with ('on_physical_table' = 'phy_ns')";
     run_sql(sql, &instance).await;
 
     // insert rows
@@ -505,6 +509,10 @@ pub async fn setup_test_prom_app_with_frontend(
     run_sql(sql, &instance).await;
     // insert a row with empty label
     let sql = "INSERT INTO demo_metrics(val, ts) VALUES (1.1, 0)";
+    run_sql(sql, &instance).await;
+
+    // insert rows to multi_labels
+    let sql = "INSERT INTO multi_labels(idc, env, host, val, ts) VALUES ('idc1', 'dev', 'host1', 1.1, 0), ('idc1', 'dev', 'host2', 2.1, 0), ('idc2', 'dev', 'host1', 1.1, 0), ('idc2', 'test', 'host3', 2.1, 0)";
     run_sql(sql, &instance).await;
 
     // build physical table
