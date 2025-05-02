@@ -7,6 +7,7 @@
 </p>
 
 <h2 align="center">Real-Time & Cloud-Native Observability  Database<br/>for metrics, logs, and traces</h2>
+>  Delivers sub-second querying at PB scale and exceptional cost efficiency from edge to cloud.
 
 <div align="center">
 <h3 align="center">
@@ -165,9 +166,10 @@ cargo run -- standalone start
 - Suitable for evaluation and pilot deployments
 
 For production use, we recommend using the latest stable release.
-
 [![Star History Chart](https://api.star-history.com/svg?repos=GreptimeTeam/GreptimeDB&type=Date)](https://www.star-history.com/#GreptimeTeam/GreptimeDB&Date)
 
+If you find GreptimeDB helpful, please consider giving us a ⭐ on GitHub to show your support!
+[![Star GreptimeDB](https://img.shields.io/github/stars/GreptimeTeam/greptimedb.svg?style=social&label=⭐%20Star)](https://github.com/GreptimeTeam/greptimedb/stargazers/) If you find this project useful, a star would mean a lot to us!
 <img alt="Known Users" src="https://greptime.com/logo/img/users.png"/>
 
 ## Community
