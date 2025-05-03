@@ -211,7 +211,7 @@ impl MetricEngineInner {
                 region_id: data_region_id,
             })?;
         // Checks the time index unit of each request.
-        for (logical_region_id, request) in &requests {
+        for (_, request) in &requests {
             // Safety: verify_region_create_request() ensures that the request is valid.
             let time_index_column = request
                 .column_metadatas
