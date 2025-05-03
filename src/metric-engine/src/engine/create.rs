@@ -146,6 +146,23 @@ impl MetricEngineInner {
             .iter()
             .map(|metadata| (metadata.column_schema.name.clone(), metadata.column_id))
             .collect::<HashMap<_, _>>();
+        let time_index_unit = create_data_region_request
+            .column_metadatas
+            .iter()
+            .find_map(|metadata| {
+                if metadata.semantic_type == SemanticType::Timestamp {
+                    metadata
+                        .column_schema
+                        .data_type
+                        .as_timestamp()
+                        .map(|data_type| data_type.unit())
+                } else {
+                    None
+                }
+            })
+            .context(UnexpectedRequestSnafu {
+                reason: "No time index column found",
+            })?;
         self.mito
             .handle_request(
                 data_region_id,
@@ -170,6 +187,7 @@ impl MetricEngineInner {
             physical_columns,
             primary_key_encoding,
             physical_region_options,
+            time_index_unit,
         );
 
         Ok(())
@@ -184,15 +202,38 @@ impl MetricEngineInner {
     ) -> Result<()> {
         let data_region_id = utils::to_data_region_id(physical_region_id);
 
-        ensure!(
-            self.state
-                .read()
-                .unwrap()
-                .exist_physical_region(data_region_id),
-            PhysicalRegionNotFoundSnafu {
+        let unit = self
+            .state
+            .read()
+            .unwrap()
+            .physical_region_time_index_unit(physical_region_id)
+            .context(PhysicalRegionNotFoundSnafu {
                 region_id: data_region_id,
-            }
-        );
+            })?;
+        // Checks the time index unit of each request.
+        for (logical_region_id, request) in &requests {
+            // Safety: verify_region_create_request() ensures that the request is valid.
+            let time_index_column = request
+                .column_metadatas
+                .iter()
+                .find(|col| col.semantic_type == SemanticType::Timestamp)
+                .unwrap();
+            let request_unit = time_index_column
+                .column_schema
+                .data_type
+                .as_timestamp()
+                .unwrap()
+                .unit();
+            ensure!(
+                request_unit == unit,
+                UnexpectedRequestSnafu {
+                    reason: format!(
+                        "Metric has differenttime unit ({:?}) than the physical region ({:?})",
+                        request_unit, unit
+                    ),
+                }
+            );
+        }
 
         // Filters out the requests that the logical region already exists
         let requests = {
