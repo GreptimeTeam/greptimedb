@@ -170,7 +170,7 @@ cargo run -- standalone start
 > **Status:** Beta.  
 > **GA (v1.0):** Targeted for mid 2025.
 
-- Used in production by early adopters
+- Being used in production by early adopters
 - Stable, actively maintained, with regular releases ([version info](https://docs.greptime.com/nightly/reference/about-greptimedb-version))
 - Suitable for evaluation and pilot deployments
 
