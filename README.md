@@ -101,7 +101,7 @@ Read [more benchmark reports](https://docs.greptime.com/user-guide/concepts/feat
 
 * Read the [architecture](https://docs.greptime.com/contributor-guide/overview/#architecture) document.
 * [DeepWiki](https://deepwiki.com/GreptimeTeam/greptimedb/1-overview) provides an in-depth look at GreptimeDB:
-<img alt="GreptimeDB System Overview" src="https://raw.githubusercontent.com/GreptimeTeam/greptimedb/refs/heads/main/docs/architecture.png?raw=true">
+<img alt="GreptimeDB System Overview" src="docs/architecture.png">
 
 ## Try GreptimeDB
 
