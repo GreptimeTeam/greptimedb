@@ -53,7 +53,7 @@
 - [Introduction](#introduction)
 - [⭐ Key Features](#features)
 - [Quick Comparison](#quick-comparison)
-- [Architecture](https://docs.greptime.com/contributor-guide/overview/#architecture)
+- [Architecture](#architecture)
 - [Try GreptimeDB](#try-greptimedb)
 - [Getting Started](#getting-started)
 - [Build From Source](#build-from-source)
@@ -96,6 +96,12 @@
 * [TSBS Benchmark](https://github.com/GreptimeTeam/greptimedb/tree/main/docs/benchmarks/tsbs)
 
 Read [more benchmark reports](https://docs.greptime.com/user-guide/concepts/features-that-you-concern#how-is-greptimedbs-performance-compared-to-other-solutions).
+
+## Architecture
+
+* Read the [architecture](https://docs.greptime.com/contributor-guide/overview/#architecture) document.
+* [DeepWiki](https://deepwiki.com/GreptimeTeam/greptimedb/1-overview) provides an in-depth look at GreptimeDB:
+<img alt="GreptimeDB System Overview" src="https://raw.githubusercontent.com/GreptimeTeam/greptimedb/refs/heads/main/docs/architecture.png" width="400px">
 
 ## Try GreptimeDB
 
