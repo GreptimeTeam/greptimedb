@@ -35,23 +35,6 @@ async function triggerWorkflow(workflowId: string, version: string) {
   }
 }
 
-function determineWorkflow(version: string): [string, string] {
-  const parts = version.split('.');
-
-  if (parts.length !== 3) {
-    throw new Error('Invalid version format');
-  }
-
-  // If patch version (last number) is 0, it's a major version
-  // Return only major.minor version
-  if (parts[2] === '0') {
-    return ['bump-version.yml', `${parts[0]}.${parts[1]}`];
-  }
-
-  // Otherwise it's a patch version, use full version
-  return ['bump-patch-version.yml', version];
-}
-
 const version = process.env.VERSION;
 if (!version) {
   core.setFailed("VERSION environment variable is required");
@@ -67,8 +50,7 @@ if (cleanVersion.includes('nightly')) {
 }
 
 try {
-  const [workflowId, apiVersion] = determineWorkflow(cleanVersion);
-  triggerWorkflow(workflowId, apiVersion);
+  triggerWorkflow('bump-patch-version.yml', cleanVersion);
 } catch (error) {
   core.setFailed(`Error processing version: ${error.message}`);
   process.exit(1);
