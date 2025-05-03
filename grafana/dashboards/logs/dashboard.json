@@ -1,0 +1,292 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": 12,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {
+        "default": false,
+        "type": "mysql",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 20,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "dedupStrategy": "none",
+        "enableInfiniteScrolling": true,
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": false,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": false
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "dataset": "greptime_private",
+          "datasource": {
+            "type": "mysql",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT `timestamp`, CONCAT('[', `level`, ']', ' ', '<', `target`, '>', ' ', `message`),\n  `role`,\n  `pod`,\n  `pod_ip`,\n  `namespace`,\n  `cluster`,\n  `err`,\n  `file`,\n  `module_path`\nFROM\n  `_gt_logs`\nWHERE\n  (\n    \"$level\" = \"'all'\"\n    OR `level` IN ($level)\n  ) \n  AND (\n    \"$role\" = \"'all'\"\n    OR `role` IN ($role)\n  )\n  AND (\n    \"$pod\" = \"\"\n    OR `pod` = '$pod'\n  )\n  AND (\n    \"$target\" = \"\"\n    OR `target` = '$target'\n  )\n  AND (\n    \"$search\" = \"\"\n    OR matches_term(`message`, '$search')\n  )\n  AND (\n    \"$exclude\" = \"\"\n    OR NOT matches_term(`message`, '$exclude')\n  )\n  AND $__timeFilter(`timestamp`)\nORDER BY `timestamp` DESC\nLIMIT $limit;\n",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "Logs",
+      "type": "logs"
+    }
+  ],
+  "preload": false,
+  "refresh": "",
+  "schemaVersion": 41,
+  "tags": [],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "text": "logs",
+          "value": "P98F38F12DB221A8C"
+        },
+        "includeAll": false,
+        "name": "datasource",
+        "options": [],
+        "query": "mysql",
+        "refresh": 1,
+        "regex": "",
+        "type": "datasource"
+      },
+      {
+        "allValue": "'all'",
+        "current": {
+          "text": [
+            "$__all"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "includeAll": true,
+        "label": "level",
+        "multi": true,
+        "name": "level",
+        "options": [
+          {
+            "selected": false,
+            "text": "INFO",
+            "value": "INFO"
+          },
+          {
+            "selected": false,
+            "text": "ERROR",
+            "value": "ERROR"
+          },
+          {
+            "selected": false,
+            "text": "WARN",
+            "value": "WARN"
+          },
+          {
+            "selected": false,
+            "text": "DEBUG",
+            "value": "DEBUG"
+          },
+          {
+            "selected": false,
+            "text": "TRACE",
+            "value": "TRACE"
+          }
+        ],
+        "query": "INFO,ERROR,WARN,DEBUG,TRACE",
+        "type": "custom"
+      },
+      {
+        "allValue": "'all'",
+        "current": {
+          "text": [
+            "$__all"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "includeAll": true,
+        "label": "role",
+        "multi": true,
+        "name": "role",
+        "options": [
+          {
+            "selected": false,
+            "text": "datanode",
+            "value": "datanode"
+          },
+          {
+            "selected": false,
+            "text": "frontend",
+            "value": "frontend"
+          },
+          {
+            "selected": false,
+            "text": "meta",
+            "value": "meta"
+          }
+        ],
+        "query": "datanode,frontend,meta",
+        "type": "custom"
+      },
+      {
+        "current": {
+          "text": "",
+          "value": ""
+        },
+        "label": "pod",
+        "name": "pod",
+        "options": [
+          {
+            "selected": true,
+            "text": "",
+            "value": ""
+          }
+        ],
+        "query": "",
+        "type": "textbox"
+      },
+      {
+        "current": {
+          "text": "",
+          "value": ""
+        },
+        "label": "target",
+        "name": "target",
+        "options": [
+          {
+            "selected": true,
+            "text": "",
+            "value": ""
+          }
+        ],
+        "query": "",
+        "type": "textbox"
+      },
+      {
+        "current": {
+          "text": "",
+          "value": ""
+        },
+        "label": "search",
+        "name": "search",
+        "options": [
+          {
+            "selected": true,
+            "text": "",
+            "value": ""
+          }
+        ],
+        "query": "",
+        "type": "textbox"
+      },
+      {
+        "current": {
+          "text": "",
+          "value": ""
+        },
+        "label": "exclude",
+        "name": "exclude",
+        "options": [
+          {
+            "selected": true,
+            "text": "",
+            "value": ""
+          }
+        ],
+        "query": "",
+        "type": "textbox"
+      },
+      {
+        "current": {
+          "text": "2000",
+          "value": "2000"
+        },
+        "includeAll": false,
+        "label": "limit",
+        "name": "limit",
+        "options": [
+          {
+            "selected": true,
+            "text": "2000",
+            "value": "2000"
+          },
+          {
+            "selected": false,
+            "text": "5000",
+            "value": "5000"
+          },
+          {
+            "selected": false,
+            "text": "8000",
+            "value": "8000"
+          }
+        ],
+        "query": "2000,5000,8000",
+        "type": "custom"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "GreptimeDB Logs",
+  "uid": "edx5veo4rd3wge2",
+  "version": 1
+}
