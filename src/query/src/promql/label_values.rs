@@ -14,29 +14,33 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use common_time::timestamp::TimeUnit;
+use common_time::Timestamp;
 use datafusion_common::{Column, ScalarValue};
 use datafusion_expr::utils::conjunction;
-use datafusion_expr::{col, Cast, Expr, LogicalPlan, LogicalPlanBuilder};
-use datatypes::arrow::datatypes::{DataType as ArrowDataType, TimeUnit as ArrowTimeUnit};
-use datatypes::prelude::ConcreteDataType;
+use datafusion_expr::{col, Expr, LogicalPlan, LogicalPlanBuilder};
 use snafu::{OptionExt, ResultExt};
 use table::TableRef;
 
-use crate::promql::error::{DataFusionPlanningSnafu, Result, TimeIndexNotFoundSnafu};
+use crate::promql::error::{
+    DataFusionPlanningSnafu, Result, TimeIndexNotFoundSnafu, TimestampOutOfRangeSnafu,
+};
 
-fn build_time_filter(time_index_expr: Expr, start: i64, end: i64) -> Expr {
+fn build_time_filter(time_index_expr: Expr, start: Timestamp, end: Timestamp) -> Expr {
     time_index_expr
         .clone()
-        .gt_eq(Expr::Literal(ScalarValue::TimestampMillisecond(
-            Some(start),
-            None,
-        )))
-        .and(
-            time_index_expr.lt_eq(Expr::Literal(ScalarValue::TimestampMillisecond(
-                Some(end),
-                None,
-            ))),
-        )
+        .gt_eq(Expr::Literal(timestamp_to_scalar_value(start)))
+        .and(time_index_expr.lt_eq(Expr::Literal(timestamp_to_scalar_value(end))))
+}
+
+fn timestamp_to_scalar_value(timestamp: Timestamp) -> ScalarValue {
+    let value = timestamp.value();
+    match timestamp.unit() {
+        TimeUnit::Second => ScalarValue::TimestampSecond(Some(value), None),
+        TimeUnit::Millisecond => ScalarValue::TimestampMillisecond(Some(value), None),
+        TimeUnit::Microsecond => ScalarValue::TimestampMicrosecond(Some(value), None),
+        TimeUnit::Nanosecond => ScalarValue::TimestampNanosecond(Some(value), None),
+    }
 }
 
 /// Rewrite label values query to DataFusion logical plan.
@@ -54,21 +58,28 @@ pub fn rewrite_label_values_query(
         .with_context(|| TimeIndexNotFoundSnafu {
             table: table.table_info().full_table_name(),
         })?;
+    let unit = ts_column
+        .data_type
+        .as_timestamp()
+        .map(|data_type| data_type.unit())
+        .with_context(|| TimeIndexNotFoundSnafu {
+            table: table.table_info().full_table_name(),
+        })?;
 
-    let is_time_index_ms =
-        ts_column.data_type == ConcreteDataType::timestamp_millisecond_datatype();
-    let mut time_index_expr = col(Column::from_name(ts_column.name.clone()));
-
-    if !is_time_index_ms {
-        // cast to ms if time_index not in Millisecond precision
-        time_index_expr = Expr::Cast(Cast {
-            expr: Box::new(time_index_expr.clone()),
-            data_type: ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
-        });
-    };
-
-    let start = start.duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
-    let end = end.duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
+    // We only support millisecond precision at most.
+    let start =
+        Timestamp::new_millisecond(start.duration_since(UNIX_EPOCH).unwrap().as_millis() as i64);
+    let start = start.convert_to(unit).context(TimestampOutOfRangeSnafu {
+        timestamp: start.value(),
+        unit,
+    })?;
+    let end =
+        Timestamp::new_millisecond(end.duration_since(UNIX_EPOCH).unwrap().as_millis() as i64);
+    let end = end.convert_to(unit).context(TimestampOutOfRangeSnafu {
+        timestamp: end.value(),
+        unit,
+    })?;
+    let time_index_expr = col(Column::from_name(ts_column.name.clone()));
 
     conditions.push(build_time_filter(time_index_expr, start, end));
     // Safety: `conditions` is not empty.
