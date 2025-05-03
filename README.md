@@ -77,7 +77,7 @@
 | [High Performance & Cost Effective](https://docs.greptime.com/user-guide/manage-data/data-index) | Written in Rust, with a distributed query engine, [rich indexing](https://docs.greptime.com/user-guide/manage-data/data-index), and optimized columnar storage, delivering sub-second responses at PB scale. |
 | [Cloud-Native Architecture](https://docs.greptime.com/user-guide/concepts/architecture) | Designed for [Kubernetes](https://docs.greptime.com/user-guide/deployments/deploy-on-kubernetes/greptimedb-operator-management), with compute/storage separation, native object storage (AWS S3, Azure Blob, etc.) and seamless cross-cloud access. |
 | [Developer-Friendly](https://docs.greptime.com/user-guide/protocols/overview) | Access via SQL/PromQL interfaces, REST API, MySQL/PostgreSQL protocols, and popular ingestion [protocols](https://docs.greptime.com/user-guide/protocols/overview). |
-| [Flexible Deployment](https://docs.greptime.com/user-guide/deployments/run-on-android/) | Deploy anywhere: edge (including ARM/Android) or cloud, with unified APIs and efficient data sync. |
+| [Flexible Deployment](https://docs.greptime.com/user-guide/deployments/overview) | Deploy anywhere: edge (including ARM/[Android](https://docs.greptime.com/user-guide/deployments/run-on-android)) or cloud, with unified APIs and efficient data sync. |
 
 [Learn more in Why GreptimeDB](https://docs.greptime.com/user-guide/concepts/why-greptimedb).
 
@@ -86,7 +86,7 @@
 | Feature                         | GreptimeDB            | Traditional TSDB   | Log Stores      |
 |----------------------------------|-----------------------|--------------------|-----------------|
 | Data Types                      | Metrics, Logs, Traces | Metrics only       | Logs only       |
-| Query Language                  | SQL, PromQL, Streaming| Usually PromQL     | Custom/DSL      |
+| Query Language                  | SQL, PromQL, Streaming|  Custom/PromQL     | Custom/DSL      |
 | Deployment                      | Edge + Cloud          | Cloud/On-prem      | Mostly central  |
 | Indexing & Performance          | PB-Scale, Sub-second  | Varies             | Varies          |
 | Integration                     | REST, SQL, Common protocols | Varies     | Varies          |
