@@ -35,9 +35,6 @@ use common_grpc::flight::{FlightDecoder, FlightMessage};
 use common_grpc::FlightData;
 use common_recordbatch::DfRecordBatch;
 use common_time::TimeToLive;
-use datatypes::arrow;
-use datatypes::arrow::array::BooleanArray;
-use datatypes::arrow::buffer::{BooleanBuffer, Buffer};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
 use prost::Message;
@@ -47,8 +44,8 @@ use strum::{AsRefStr, IntoStaticStr};
 
 use crate::logstore::entry;
 use crate::metadata::{
-    ColumnMetadata, DecodeArrowIpcSnafu, DecodeProtoSnafu, FlightCodecSnafu,
-    InvalidRawRegionRequestSnafu, InvalidRegionRequestSnafu, InvalidSetRegionOptionRequestSnafu,
+    ColumnMetadata, DecodeProtoSnafu, FlightCodecSnafu, InvalidRawRegionRequestSnafu,
+    InvalidRegionRequestSnafu, InvalidSetRegionOptionRequestSnafu,
     InvalidUnsetRegionOptionRequestSnafu, MetadataError, ProstSnafu, RegionMetadata, Result,
     UnexpectedSnafu,
 };
@@ -337,58 +334,25 @@ fn make_region_bulk_inserts(request: BulkInsertRequest) -> Result<Vec<(RegionId,
         return Ok(vec![]);
     };
 
-    let mut region_requests: HashMap<u64, DfRecordBatch> =
-        HashMap::with_capacity(request.region_selection.len());
-
     let decoder_timer = metrics::CONVERT_REGION_BULK_REQUEST
         .with_label_values(&["decode"])
         .start_timer();
     let schema_data = FlightData::decode(request.schema.clone()).context(ProstSnafu)?;
     let payload_data = FlightData::decode(request.payload.clone()).context(ProstSnafu)?;
     let mut decoder = FlightDecoder::default();
-    let _schema_message = decoder.try_decode(schema_data).context(FlightCodecSnafu)?;
+    let _ = decoder.try_decode(schema_data).context(FlightCodecSnafu)?;
     let FlightMessage::Recordbatch(rb) =
         decoder.try_decode(payload_data).context(FlightCodecSnafu)?
     else {
         unreachable!("Always expect record batch message after schema");
     };
     decoder_timer.observe_duration();
-
-    let filter_batch_timer = metrics::CONVERT_REGION_BULK_REQUEST
-        .with_label_values(&["filter_batch"])
-        .start_timer();
-
-    for region_selection in request.region_selection {
-        let region_id = region_selection.region_id;
-        let region_mask = BooleanArray::new(
-            BooleanBuffer::new(Buffer::from(region_selection.selection), 0, rb.num_rows()),
-            None,
-        );
-
-        let region_batch = if region_mask.true_count() == rb.num_rows() {
-            rb.df_record_batch().clone()
-        } else {
-            arrow::compute::filter_record_batch(rb.df_record_batch(), &region_mask)
-                .context(DecodeArrowIpcSnafu)?
-        };
-
-        region_requests.insert(region_id, region_batch);
-    }
-    filter_batch_timer.observe_duration();
-
-    let result = region_requests
-        .into_iter()
-        .map(|(region_id, payload)| {
-            (
-                region_id.into(),
-                RegionRequest::BulkInserts(RegionBulkInsertsRequest {
-                    region_id: region_id.into(),
-                    payload,
-                }),
-            )
-        })
-        .collect::<Vec<_>>();
-    Ok(result)
+    let payload = rb.into_df_record_batch();
+    let region_id: RegionId = request.region_id.into();
+    Ok(vec![(
+        region_id,
+        RegionRequest::BulkInserts(RegionBulkInsertsRequest { region_id, payload }),
+    )])
 }
 
 /// Request to put data into a region.

@@ -814,6 +814,14 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to perform arrow compute"))]
+    ComputeArrow {
+        #[snafu(source)]
+        error: ArrowError,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -936,6 +944,7 @@ impl ErrorExt for Error {
             Error::StatementTimeout { .. } => StatusCode::Cancelled,
             Error::ColumnOptions { source, .. } => source.status_code(),
             Error::DecodeFlightData { source, .. } => source.status_code(),
+            Error::ComputeArrow { .. } => StatusCode::Internal,
         }
     }
 

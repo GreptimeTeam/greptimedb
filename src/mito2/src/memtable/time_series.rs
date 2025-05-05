@@ -41,10 +41,7 @@ use store_api::storage::{ColumnId, SequenceNumber};
 use table::predicate::Predicate;
 
 use crate::error;
-use crate::error::{
-    ComputeArrowSnafu, ConvertVectorSnafu, PrimaryKeyLengthMismatchSnafu, Result,
-    UnsupportedOperationSnafu,
-};
+use crate::error::{ComputeArrowSnafu, ConvertVectorSnafu, PrimaryKeyLengthMismatchSnafu, Result};
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::builder::{FieldBuilder, StringBuilder};
 use crate::memtable::bulk::part::BulkPart;
@@ -250,11 +247,15 @@ impl Memtable for TimeSeriesMemtable {
         res
     }
 
-    fn write_bulk(&self, _part: BulkPart) -> Result<()> {
-        UnsupportedOperationSnafu {
-            err_msg: "TimeSeriesMemtable does not support write_bulk",
+    fn write_bulk(&self, part: BulkPart) -> Result<()> {
+        // Default implementation fallback to row iteration.
+        let mutation = part.to_mutation(&self.region_metadata)?;
+        if let Some(key_values) = KeyValues::new(&self.region_metadata, mutation) {
+            for kv in key_values.iter() {
+                self.write_one(kv)?
+            }
         }
-        .fail()
+        Ok(())
     }
 
     fn iter(
