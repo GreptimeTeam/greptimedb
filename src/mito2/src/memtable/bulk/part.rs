@@ -80,7 +80,7 @@ impl BulkPart {
                 Some(col) => Helper::try_into_vector(col).map(Some),
             })
             .collect::<datatypes::error::Result<Vec<_>>>()
-            .unwrap();
+            .context(error::ComputeVectorSnafu)?;
 
         let rows = (0..self.num_rows)
             .map(|row_idx| {

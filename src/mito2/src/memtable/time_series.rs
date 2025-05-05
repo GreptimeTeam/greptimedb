@@ -917,7 +917,9 @@ impl ValueBuilder {
                 }
                 FieldBuilder::Other(builder) => {
                     let len = field_src.len();
-                    builder.extend_slice_of(&*field_src, 0, len).unwrap();
+                    builder
+                        .extend_slice_of(&*field_src, 0, len)
+                        .context(error::ComputeVectorSnafu)?;
                 }
             }
         }
