@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
+
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_meta::ddl::table_meta::PeerAllocator;
@@ -51,6 +53,7 @@ impl MetasrvPeerAllocator {
                 SelectorOptions {
                     min_required_items: regions,
                     allow_duplication: true,
+                    exclude_peer_ids: HashSet::new(),
                 },
             )
             .await?;

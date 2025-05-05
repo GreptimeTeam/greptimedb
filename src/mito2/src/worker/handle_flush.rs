@@ -141,11 +141,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // But the flush is skipped if memtables are empty. Thus should update the `topic_latest_entry_id`
         // when handling flush request instead of in `schedule_flush` or `flush_finished`.
         self.update_topic_latest_entry_id(&region);
-        info!(
-            "Region {} flush request, high watermark: {}",
-            region_id,
-            region.topic_latest_entry_id.load(Ordering::Relaxed)
-        );
 
         let reason = if region.is_downgrading() {
             FlushReason::Downgrading
@@ -269,15 +264,17 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 .store()
                 .high_watermark(&region.provider)
                 .unwrap_or(0);
-            if high_watermark != 0 {
+            let topic_last_entry_id = region.topic_latest_entry_id.load(Ordering::Relaxed);
+
+            if high_watermark != 0 && high_watermark > topic_last_entry_id {
                 region
                     .topic_latest_entry_id
                     .store(high_watermark, Ordering::Relaxed);
+                info!(
+                    "Region {} high watermark updated to {}",
+                    region.region_id, high_watermark
+                );
             }
-            info!(
-                "Region {} high watermark updated to {}",
-                region.region_id, high_watermark
-            );
         }
     }
 }

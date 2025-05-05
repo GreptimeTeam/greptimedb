@@ -59,7 +59,6 @@ use servers::grpc::flight::FlightCraftWrapper;
 use servers::grpc::region_server::RegionServerRequestHandler;
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::server::ServerHandlers;
-use servers::Mode;
 use tempfile::TempDir;
 use tonic::codec::CompressionEncoding;
 use tonic::transport::Server;
@@ -333,13 +332,11 @@ impl GreptimeDbClusterBuilder {
                 .build(),
         );
 
-        let mut datanode = DatanodeBuilder::new(opts, Plugins::default(), Mode::Distributed)
-            .with_kv_backend(meta_backend)
+        let mut builder = DatanodeBuilder::new(opts, Plugins::default(), meta_backend);
+        builder
             .with_cache_registry(layered_cache_registry)
-            .with_meta_client(meta_client)
-            .build()
-            .await
-            .unwrap();
+            .with_meta_client(meta_client);
+        let mut datanode = builder.build().await.unwrap();
 
         datanode.start_heartbeat().await.unwrap();
 
@@ -489,10 +486,7 @@ async fn create_datanode_client(datanode: &Datanode) -> (String, Client) {
                     if let Some(client) = client {
                         Ok(TokioIo::new(client))
                     } else {
-                        Err(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            "Client already taken",
-                        ))
+                        Err(std::io::Error::other("Client already taken"))
                     }
                 }
             }),

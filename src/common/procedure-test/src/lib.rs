@@ -18,11 +18,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use common_procedure::local::{acquire_dynamic_key_lock, DynamicKeyLockGuard};
+use common_procedure::rwlock::KeyRwLock;
 use common_procedure::store::poison_store::PoisonStore;
 use common_procedure::test_util::InMemoryPoisonStore;
 use common_procedure::{
     Context, ContextProvider, Output, PoisonKey, Procedure, ProcedureId, ProcedureState,
-    ProcedureWithId, Result, Status,
+    ProcedureWithId, Result, Status, StringKey,
 };
 
 /// A Mock [ContextProvider].
@@ -30,6 +32,7 @@ use common_procedure::{
 pub struct MockContextProvider {
     states: HashMap<ProcedureId, ProcedureState>,
     poison_manager: InMemoryPoisonStore,
+    dynamic_key_lock: Arc<KeyRwLock<String>>,
 }
 
 impl MockContextProvider {
@@ -38,6 +41,7 @@ impl MockContextProvider {
         MockContextProvider {
             states,
             poison_manager: InMemoryPoisonStore::default(),
+            dynamic_key_lock: Arc::new(KeyRwLock::new()),
         }
     }
 
@@ -57,6 +61,10 @@ impl ContextProvider for MockContextProvider {
         self.poison_manager
             .try_put_poison(key.to_string(), procedure_id.to_string())
             .await
+    }
+
+    async fn acquire_lock(&self, key: &StringKey) -> DynamicKeyLockGuard {
+        acquire_dynamic_key_lock(&self.dynamic_key_lock, key).await
     }
 }
 

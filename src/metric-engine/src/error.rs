@@ -42,6 +42,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to batch open mito region"))]
+    BatchOpenMitoRegion {
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to close mito region, region id: {}", region_id))]
     CloseMitoRegion {
         region_id: RegionId,
@@ -282,6 +289,14 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to start repeated task: {}", name))]
+    StartRepeatedTask {
+        name: String,
+        source: common_runtime::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -329,11 +344,14 @@ impl ErrorExt for Error {
             | MitoCatchupOperation { source, .. }
             | MitoFlushOperation { source, .. }
             | MitoDeleteOperation { source, .. }
-            | MitoSyncOperation { source, .. } => source.status_code(),
+            | MitoSyncOperation { source, .. }
+            | BatchOpenMitoRegion { source, .. } => source.status_code(),
 
             EncodePrimaryKey { source, .. } => source.status_code(),
 
             CollectRecordBatchStream { source, .. } => source.status_code(),
+
+            StartRepeatedTask { source, .. } => source.status_code(),
 
             MetricManifestInfo { .. } => StatusCode::Internal,
         }

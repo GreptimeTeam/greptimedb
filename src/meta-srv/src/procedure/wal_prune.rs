@@ -181,7 +181,7 @@ impl WalPruneProcedure {
         let peer_and_instructions = peer_region_ids_map
             .into_iter()
             .map(|(peer, region_ids)| {
-                let flush_instruction = Instruction::FlushRegion(FlushRegions { region_ids });
+                let flush_instruction = Instruction::FlushRegions(FlushRegions { region_ids });
                 (peer.clone(), flush_instruction)
             })
             .collect();
@@ -335,22 +335,21 @@ impl WalPruneProcedure {
             })?;
         partition_client
             .delete_records(
-                (self.data.prunable_entry_id + 1) as i64,
+                // notice here no "+1" is needed because the offset arg is exclusive, and it's defensive programming just in case somewhere else have a off by one error, see https://kafka.apache.org/36/javadoc/org/apache/kafka/clients/consumer/KafkaConsumer.html#endOffsets(java.util.Collection) which we use to get the end offset from high watermark
+                self.data.prunable_entry_id as i64,
                 DELETE_RECORDS_TIMEOUT.as_millis() as i32,
             )
             .await
             .context(DeleteRecordsSnafu {
                 topic: &self.data.topic,
                 partition: DEFAULT_PARTITION,
-                offset: (self.data.prunable_entry_id + 1),
+                offset: self.data.prunable_entry_id,
             })
             .map_err(BoxedError::new)
             .with_context(|_| error::RetryLaterWithSourceSnafu {
                 reason: format!(
                     "Failed to delete records for topic: {}, partition: {}, offset: {}",
-                    self.data.topic,
-                    DEFAULT_PARTITION,
-                    self.data.prunable_entry_id + 1
+                    self.data.topic, DEFAULT_PARTITION, self.data.prunable_entry_id
                 ),
             })?;
         info!(
@@ -537,7 +536,7 @@ mod tests {
         let msg = resp.mailbox_message.unwrap();
         let flush_instruction = HeartbeatMailbox::json_instruction(&msg).unwrap();
         let mut flush_requested_region_ids = match flush_instruction {
-            Instruction::FlushRegion(FlushRegions { region_ids, .. }) => region_ids,
+            Instruction::FlushRegions(FlushRegions { region_ids, .. }) => region_ids,
             _ => unreachable!(),
         };
         let sorted_region_ids = region_ids
@@ -605,19 +604,19 @@ mod tests {
                 // Step 3: Test `on_prune`.
                 let status = procedure.on_prune().await.unwrap();
                 assert_matches!(status, Status::Done { output: None });
-                // Check if the entry ids after `prunable_entry_id` still exist.
-                check_entry_id_existence(
-                    procedure.context.client.clone(),
-                    &topic_name,
-                    procedure.data.prunable_entry_id as i64 + 1,
-                    true,
-                )
-                .await;
-                // Check if the entry s before `prunable_entry_id` are deleted.
+                // Check if the entry ids after(include) `prunable_entry_id` still exist.
                 check_entry_id_existence(
                     procedure.context.client.clone(),
                     &topic_name,
                     procedure.data.prunable_entry_id as i64,
+                    true,
+                )
+                .await;
+                // Check if the entry ids before `prunable_entry_id` are deleted.
+                check_entry_id_existence(
+                    procedure.context.client.clone(),
+                    &topic_name,
+                    procedure.data.prunable_entry_id as i64 - 1,
                     false,
                 )
                 .await;

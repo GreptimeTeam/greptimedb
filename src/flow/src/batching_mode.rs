@@ -31,4 +31,19 @@ pub const DEFAULT_BATCHING_ENGINE_QUERY_TIMEOUT: Duration = Duration::from_secs(
 pub const SLOW_QUERY_THRESHOLD: Duration = Duration::from_secs(60);
 
 /// The minimum duration between two queries execution by batching mode task
-const MIN_REFRESH_DURATION: Duration = Duration::new(5, 0);
+pub const MIN_REFRESH_DURATION: Duration = Duration::new(5, 0);
+
+/// Grpc connection timeout
+const GRPC_CONN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Grpc max retry number
+const GRPC_MAX_RETRIES: u32 = 3;
+
+/// Flow wait for available frontend timeout,
+/// if failed to find available frontend after FRONTEND_SCAN_TIMEOUT elapsed, return error
+/// which should prevent flownode from starting
+pub const FRONTEND_SCAN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Frontend activity timeout
+/// if frontend is down(not sending heartbeat) for more than FRONTEND_ACTIVITY_TIMEOUT, it will be removed from the list that flownode use to connect
+pub const FRONTEND_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(60);

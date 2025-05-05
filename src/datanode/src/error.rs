@@ -150,12 +150,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Expect KvBackend but not found"))]
-    MissingKvBackend {
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Invalid SQL, error: {}", msg))]
     InvalidSql { msg: String },
 
@@ -336,6 +330,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to build metric engine"))]
+    BuildMetricEngine {
+        source: metric_engine::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to serialize options to TOML"))]
     TomlFormat {
         #[snafu(implicit)]
@@ -419,7 +420,6 @@ impl ErrorExt for Error {
             | MissingRequiredField { .. }
             | RegionEngineNotFound { .. }
             | ParseAddr { .. }
-            | MissingKvBackend { .. }
             | TomlFormat { .. } => StatusCode::InvalidArguments,
 
             PayloadNotExist { .. }
@@ -452,6 +452,7 @@ impl ErrorExt for Error {
 
             FindLogicalRegions { source, .. } => source.status_code(),
             BuildMitoEngine { source, .. } => source.status_code(),
+            BuildMetricEngine { source, .. } => source.status_code(),
             ConcurrentQueryLimiterClosed { .. } | ConcurrentQueryLimiterTimeout { .. } => {
                 StatusCode::RegionBusy
             }

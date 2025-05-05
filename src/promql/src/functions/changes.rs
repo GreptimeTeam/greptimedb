@@ -90,6 +90,7 @@ mod test {
             Changes::scalar_udf(),
             ts_array_1,
             value_array_1,
+            vec![],
             vec![Some(0.0), Some(3.0), Some(5.0), Some(8.0), None],
         );
 
@@ -101,6 +102,7 @@ mod test {
             Changes::scalar_udf(),
             ts_array_2,
             value_array_2,
+            vec![],
             vec![Some(0.0), Some(3.0), Some(5.0), Some(9.0), None],
         );
 
@@ -111,6 +113,7 @@ mod test {
             Changes::scalar_udf(),
             ts_array_3,
             value_array_3,
+            vec![],
             vec![Some(0.0), Some(0.0), Some(1.0), Some(1.0), None],
         );
     }

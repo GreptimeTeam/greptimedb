@@ -514,10 +514,8 @@ fn query_request_type(request: &QueryRequest) -> &'static str {
         Some(Query::Sql(_)) => "query.sql",
         Some(Query::LogicalPlan(_)) => "query.logical_plan",
         Some(Query::PromRangeQuery(_)) => "query.prom_range",
+        Some(Query::InsertIntoPlan(_)) => "query.insert_into_plan",
         None => "query.empty",
-        Some(Query::InsertIntoPlan(_)) => {
-            todo!("wait for #5903 to be merged")
-        }
     }
 }
 

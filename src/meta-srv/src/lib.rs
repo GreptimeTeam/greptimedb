@@ -14,7 +14,6 @@
 
 #![feature(result_flattening)]
 #![feature(assert_matches)]
-#![feature(extract_if)]
 #![feature(hash_set_entry)]
 
 pub mod bootstrap;
@@ -31,6 +30,7 @@ pub mod metasrv;
 pub mod metrics;
 #[cfg(feature = "mock")]
 pub mod mocks;
+pub mod node_excluder;
 pub mod procedure;
 pub mod pubsub;
 pub mod region;

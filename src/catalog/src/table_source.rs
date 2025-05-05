@@ -27,7 +27,7 @@ use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
-mod dummy_catalog;
+pub mod dummy_catalog;
 use dummy_catalog::DummyCatalogList;
 use table::TableRef;
 

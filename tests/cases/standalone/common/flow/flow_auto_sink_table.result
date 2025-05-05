@@ -9,11 +9,12 @@ Affected Rows: 0
 
 CREATE FLOW test_numbers_basic SINK TO out_num_cnt_basic AS
 SELECT
-    sum(number)
+    sum(number),
+    date_bin(INTERVAL '1 second', ts, '2021-07-01 00:00:00') as time_window
 FROM
     numbers_input_basic
 GROUP BY
-    tumble(ts, '1 second', '2021-07-01 00:00:00');
+    time_window;
 
 Affected Rows: 0
 
@@ -24,11 +25,9 @@ SHOW CREATE TABLE out_num_cnt_basic;
 +-------------------+--------------------------------------------------+
 | out_num_cnt_basic | CREATE TABLE IF NOT EXISTS "out_num_cnt_basic" ( |
 |                   |   "sum(numbers_input_basic.number)" BIGINT NULL, |
-|                   |   "window_start" TIMESTAMP(3) NOT NULL,          |
-|                   |   "window_end" TIMESTAMP(3) NULL,                |
+|                   |   "time_window" TIMESTAMP(9) NOT NULL,           |
 |                   |   "update_at" TIMESTAMP(3) NULL,                 |
-|                   |   TIME INDEX ("window_start"),                   |
-|                   |   PRIMARY KEY ("window_end")                     |
+|                   |   TIME INDEX ("time_window")                     |
 |                   | )                                                |
 |                   |                                                  |
 |                   | ENGINE=mito                                      |
@@ -45,6 +44,15 @@ ADMIN FLUSH_FLOW('test_numbers_basic');
 +----------------------------------------+
 
 -- SQLNESS ARG restart=true
+SELECT 1;
+
++----------+
+| Int64(1) |
++----------+
+| 1        |
++----------+
+
+-- SQLNESS SLEEP 3s
 SHOW CREATE TABLE out_num_cnt_basic;
 
 +-------------------+--------------------------------------------------+
@@ -52,11 +60,9 @@ SHOW CREATE TABLE out_num_cnt_basic;
 +-------------------+--------------------------------------------------+
 | out_num_cnt_basic | CREATE TABLE IF NOT EXISTS "out_num_cnt_basic" ( |
 |                   |   "sum(numbers_input_basic.number)" BIGINT NULL, |
-|                   |   "window_start" TIMESTAMP(3) NOT NULL,          |
-|                   |   "window_end" TIMESTAMP(3) NULL,                |
+|                   |   "time_window" TIMESTAMP(9) NOT NULL,           |
 |                   |   "update_at" TIMESTAMP(3) NULL,                 |
-|                   |   TIME INDEX ("window_start"),                   |
-|                   |   PRIMARY KEY ("window_end")                     |
+|                   |   TIME INDEX ("time_window")                     |
 |                   | )                                                |
 |                   |                                                  |
 |                   | ENGINE=mito                                      |
@@ -65,13 +71,13 @@ SHOW CREATE TABLE out_num_cnt_basic;
 
 SHOW CREATE FLOW test_numbers_basic;
 
-+--------------------+-------------------------------------------------------------------------------------------------------+
-| Flow               | Create Flow                                                                                           |
-+--------------------+-------------------------------------------------------------------------------------------------------+
-| test_numbers_basic | CREATE FLOW IF NOT EXISTS test_numbers_basic                                                          |
-|                    | SINK TO out_num_cnt_basic                                                                             |
-|                    | AS SELECT sum(number) FROM numbers_input_basic GROUP BY tumble(ts, '1 second', '2021-07-01 00:00:00') |
-+--------------------+-------------------------------------------------------------------------------------------------------+
++--------------------+----------------------------------------------------------------------------------------------------------------------------------------------+
+| Flow               | Create Flow                                                                                                                                  |
++--------------------+----------------------------------------------------------------------------------------------------------------------------------------------+
+| test_numbers_basic | CREATE FLOW IF NOT EXISTS test_numbers_basic                                                                                                 |
+|                    | SINK TO out_num_cnt_basic                                                                                                                    |
+|                    | AS SELECT sum(number), date_bin(INTERVAL '1 second', ts, '2021-07-01 00:00:00') AS time_window FROM numbers_input_basic GROUP BY time_window |
++--------------------+----------------------------------------------------------------------------------------------------------------------------------------------+
 
 DROP FLOW test_numbers_basic;
 
@@ -104,6 +110,16 @@ GROUP BY
 
 Affected Rows: 0
 
+-- SQLNESS ARG restart=true
+SELECT 1;
+
++----------+
+| Int64(1) |
++----------+
+| 1        |
++----------+
+
+-- SQLNESS SLEEP 3s
 SHOW CREATE TABLE out_num_cnt_basic;
 
 +-------------------+--------------------------------------------------+
@@ -121,6 +137,15 @@ SHOW CREATE TABLE out_num_cnt_basic;
 +-------------------+--------------------------------------------------+
 
 -- SQLNESS ARG restart=true
+SELECT 1;
+
++----------+
+| Int64(1) |
++----------+
+| 1        |
++----------+
+
+-- SQLNESS SLEEP 3s
 SHOW CREATE FLOW test_numbers_basic;
 
 +--------------------+---------------------------------------------------------------------------------------+

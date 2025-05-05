@@ -56,8 +56,8 @@ use datanode::datanode::{Datanode, DatanodeBuilder};
 use datanode::region_server::RegionServer;
 use file_engine::config::EngineConfig as FileEngineConfig;
 use flow::{
-    FlowConfig, FlowWorkerManager, FlownodeBuilder, FlownodeInstance, FlownodeOptions,
-    FrontendClient, FrontendInvoker,
+    FlowConfig, FlownodeBuilder, FlownodeInstance, FlownodeOptions, FrontendClient,
+    FrontendInvoker, GrpcQueryHandlerWithBoxedError, StreamingEngine,
 };
 use frontend::frontend::{Frontend, FrontendOptions};
 use frontend::instance::builder::FrontendBuilder;
@@ -75,7 +75,6 @@ use servers::export_metrics::{ExportMetricsOption, ExportMetricsTask};
 use servers::grpc::GrpcOptions;
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
-use servers::Mode;
 use snafu::ResultExt;
 use tokio::sync::RwLock;
 use tracing_appender::non_blocking::WorkerGuard;
@@ -497,12 +496,9 @@ impl StartCommand {
             .build(),
         );
 
-        let datanode = DatanodeBuilder::new(dn_opts, plugins.clone(), Mode::Standalone)
-            .with_kv_backend(kv_backend.clone())
-            .with_cache_registry(layered_cache_registry.clone())
-            .build()
-            .await
-            .context(error::StartDatanodeSnafu)?;
+        let mut builder = DatanodeBuilder::new(dn_opts, plugins.clone(), kv_backend.clone());
+        builder.with_cache_registry(layered_cache_registry.clone());
+        let datanode = builder.build().await.context(error::StartDatanodeSnafu)?;
 
         let information_extension = Arc::new(StandaloneInformationExtension::new(
             datanode.region_server(),
@@ -524,17 +520,17 @@ impl StartCommand {
             ..Default::default()
         };
 
-        // TODO(discord9): for standalone not use grpc, but just somehow get a handler to frontend grpc client without
+        // for standalone not use grpc, but get a handler to frontend grpc client without
         // actually make a connection
-        let fe_server_addr = fe_opts.grpc.bind_addr.clone();
-        let frontend_client = FrontendClient::from_static_grpc_addr(fe_server_addr);
+        let (frontend_client, frontend_instance_handler) =
+            FrontendClient::from_empty_grpc_handler();
         let flow_builder = FlownodeBuilder::new(
             flownode_options,
             plugins.clone(),
             table_metadata_manager.clone(),
             catalog_manager.clone(),
             flow_metadata_manager.clone(),
-            Arc::new(frontend_client),
+            Arc::new(frontend_client.clone()),
         );
         let flownode = flow_builder
             .build()
@@ -544,15 +540,15 @@ impl StartCommand {
 
         // set the ref to query for the local flow state
         {
-            let flow_worker_manager = flownode.flow_worker_manager();
+            let flow_streaming_engine = flownode.flow_engine().streaming_engine();
             information_extension
-                .set_flow_worker_manager(flow_worker_manager.clone())
+                .set_flow_streaming_engine(flow_streaming_engine)
                 .await;
         }
 
         let node_manager = Arc::new(StandaloneDatanodeManager {
             region_server: datanode.region_server(),
-            flow_server: flownode.flow_worker_manager(),
+            flow_server: flownode.flow_engine(),
         });
 
         let table_id_sequence = Arc::new(
@@ -606,10 +602,19 @@ impl StartCommand {
         .context(error::StartFrontendSnafu)?;
         let fe_instance = Arc::new(fe_instance);
 
-        let flow_worker_manager = flownode.flow_worker_manager();
+        // set the frontend client for flownode
+        let grpc_handler = fe_instance.clone() as Arc<dyn GrpcQueryHandlerWithBoxedError>;
+        let weak_grpc_handler = Arc::downgrade(&grpc_handler);
+        frontend_instance_handler
+            .lock()
+            .unwrap()
+            .replace(weak_grpc_handler);
+
+        // set the frontend invoker for flownode
+        let flow_streaming_engine = flownode.flow_engine().streaming_engine();
         // flow server need to be able to use frontend to write insert requests back
         let invoker = FrontendInvoker::build_from(
-            flow_worker_manager.clone(),
+            flow_streaming_engine.clone(),
             catalog_manager.clone(),
             kv_backend.clone(),
             layered_cache_registry.clone(),
@@ -618,7 +623,7 @@ impl StartCommand {
         )
         .await
         .context(error::StartFlownodeSnafu)?;
-        flow_worker_manager.set_frontend_invoker(invoker).await;
+        flow_streaming_engine.set_frontend_invoker(invoker).await;
 
         let export_metrics_task = ExportMetricsTask::try_new(&opts.export_metrics, Some(&plugins))
             .context(error::ServersSnafu)?;
@@ -694,7 +699,7 @@ pub struct StandaloneInformationExtension {
     region_server: RegionServer,
     procedure_manager: ProcedureManagerRef,
     start_time_ms: u64,
-    flow_worker_manager: RwLock<Option<Arc<FlowWorkerManager>>>,
+    flow_streaming_engine: RwLock<Option<Arc<StreamingEngine>>>,
 }
 
 impl StandaloneInformationExtension {
@@ -703,14 +708,14 @@ impl StandaloneInformationExtension {
             region_server,
             procedure_manager,
             start_time_ms: common_time::util::current_time_millis() as u64,
-            flow_worker_manager: RwLock::new(None),
+            flow_streaming_engine: RwLock::new(None),
         }
     }
 
-    /// Set the flow worker manager for the standalone instance.
-    pub async fn set_flow_worker_manager(&self, flow_worker_manager: Arc<FlowWorkerManager>) {
-        let mut guard = self.flow_worker_manager.write().await;
-        *guard = Some(flow_worker_manager);
+    /// Set the flow streaming engine for the standalone instance.
+    pub async fn set_flow_streaming_engine(&self, flow_streaming_engine: Arc<StreamingEngine>) {
+        let mut guard = self.flow_streaming_engine.write().await;
+        *guard = Some(flow_streaming_engine);
     }
 }
 
@@ -789,7 +794,7 @@ impl InformationExtension for StandaloneInformationExtension {
 
     async fn flow_stats(&self) -> std::result::Result<Option<FlowStat>, Self::Error> {
         Ok(Some(
-            self.flow_worker_manager
+            self.flow_streaming_engine
                 .read()
                 .await
                 .as_ref()

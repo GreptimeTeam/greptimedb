@@ -19,6 +19,7 @@ use std::sync::{Arc, RwLock};
 
 use api::v1::OpType;
 use datatypes::vectors::Helper;
+use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, SequenceNumber};
 use table::predicate::Predicate;
@@ -128,6 +129,14 @@ impl SimpleBulkMemtable {
         stats.min_ts = stats.min_ts.min(ts);
         stats.max_ts = stats.max_ts.max(ts);
     }
+
+    /// Updates memtable stats.
+    fn update_stats(&self, stats: WriteMetrics) {
+        self.alloc_tracker
+            .on_allocation(stats.key_bytes + stats.value_bytes);
+        self.max_timestamp.fetch_max(stats.max_ts, Ordering::SeqCst);
+        self.min_timestamp.fetch_min(stats.min_ts, Ordering::SeqCst);
+    }
 }
 
 impl Debug for SimpleBulkMemtable {
@@ -151,7 +160,7 @@ impl Memtable for SimpleBulkMemtable {
         self.max_sequence.fetch_max(max_sequence, Ordering::SeqCst);
         self.alloc_tracker
             .on_allocation(stats.key_bytes + stats.value_bytes);
-        stats.update_timestamp_range(&self.max_timestamp, &self.min_timestamp);
+        self.update_stats(stats);
         Ok(())
     }
 
@@ -162,7 +171,7 @@ impl Memtable for SimpleBulkMemtable {
 
         self.alloc_tracker
             .on_allocation(stats.key_bytes + stats.value_bytes);
-        stats.update_timestamp_range(&self.max_timestamp, &self.min_timestamp);
+        self.update_stats(stats);
         Ok(())
     }
 
@@ -171,9 +180,15 @@ impl Memtable for SimpleBulkMemtable {
 
         let ts = Helper::try_into_vector(
             rb.column_by_name(&self.region_metadata.time_index_column().column_schema.name)
-                .unwrap(),
+                .ok_or(
+                    error::InvalidRequestSnafu {
+                        region_id: self.region_metadata.region_id,
+                        reason: "Timestamp not found",
+                    }
+                    .build(),
+                )?,
         )
-        .unwrap();
+        .context(error::ConvertVectorSnafu)?;
 
         let sequence = part.sequence;
 
@@ -181,23 +196,26 @@ impl Memtable for SimpleBulkMemtable {
             .region_metadata
             .field_columns()
             .map(|f| {
-                Helper::try_into_vector(rb.column_by_name(&f.column_schema.name).unwrap()).unwrap()
+                let array = rb.column_by_name(&f.column_schema.name).ok_or_else(|| {
+                    error::InvalidRequestSnafu {
+                        region_id: self.region_metadata.region_id,
+                        reason: format!("Column {} not found", f.column_schema.name),
+                    }
+                    .build()
+                })?;
+                Helper::try_into_vector(array).context(error::ConvertVectorSnafu)
             })
-            .collect();
+            .collect::<error::Result<Vec<_>>>()?;
 
-        let lock_timer = metrics::REGION_WORKER_HANDLE_WRITE_ELAPSED
-            .with_label_values(&["bulk_wait_lock"])
-            .start_timer();
         let mut series = self.series.write().unwrap();
-        lock_timer.observe_duration();
         let extend_timer = metrics::REGION_WORKER_HANDLE_WRITE_ELAPSED
             .with_label_values(&["bulk_extend"])
             .start_timer();
-        series
-            .extend(ts, OpType::Put as u8, sequence, fields.into_iter())
-            .unwrap();
+        series.extend(ts, OpType::Put as u8, sequence, fields.into_iter())?;
         extend_timer.observe_duration();
         self.alloc_tracker.on_allocation(part.estimated_size());
+        self.max_timestamp.fetch_max(part.max_ts, Ordering::Relaxed);
+        self.min_timestamp.fetch_min(part.min_ts, Ordering::Relaxed);
         Ok(())
     }
 

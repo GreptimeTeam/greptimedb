@@ -135,7 +135,7 @@ impl GrpcQueryHandler for DummyInstance {
                         );
                         result.remove(0)?
                     }
-                    Query::LogicalPlan(_) => unimplemented!(),
+                    Query::LogicalPlan(_) | Query::InsertIntoPlan(_) => unimplemented!(),
                     Query::PromRangeQuery(promql) => {
                         let prom_query = PromQuery {
                             query: promql.query,
@@ -153,9 +153,6 @@ impl GrpcQueryHandler for DummyInstance {
                             }
                         );
                         result.remove(0)?
-                    }
-                    Query::InsertIntoPlan(_) => {
-                        todo!("wait for #5903 to be merged")
                     }
                 }
             }

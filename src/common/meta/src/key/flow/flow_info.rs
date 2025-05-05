@@ -121,6 +121,13 @@ pub struct FlowInfoValue {
     pub(crate) flownode_ids: BTreeMap<FlowPartitionId, FlownodeId>,
     /// The catalog name.
     pub(crate) catalog_name: String,
+    /// The query context used when create flow.
+    /// Although flow doesn't belong to any schema, this query_context is needed to remember
+    /// the query context when `create_flow` is executed
+    /// for recovering flow using the same sql&query_context after db restart.
+    /// if none, should use default query context
+    #[serde(default)]
+    pub(crate) query_context: Option<crate::rpc::ddl::QueryContext>,
     /// The flow name.
     pub(crate) flow_name: String,
     /// The raw sql.
@@ -153,6 +160,10 @@ impl FlowInfoValue {
 
     pub fn catalog_name(&self) -> &String {
         &self.catalog_name
+    }
+
+    pub fn query_context(&self) -> &Option<crate::rpc::ddl::QueryContext> {
+        &self.query_context
     }
 
     pub fn flow_name(&self) -> &String {

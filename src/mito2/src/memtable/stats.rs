@@ -14,8 +14,6 @@
 
 //! Internal metrics of the memtable.
 
-use std::sync::atomic::{AtomicI64, Ordering};
-
 /// Metrics of writing memtables.
 pub(crate) struct WriteMetrics {
     /// Size allocated by keys.
@@ -26,14 +24,6 @@ pub(crate) struct WriteMetrics {
     pub(crate) min_ts: i64,
     /// Maximum timestamp
     pub(crate) max_ts: i64,
-}
-
-impl WriteMetrics {
-    /// Update the min/max timestamp range according to current write metric.
-    pub(crate) fn update_timestamp_range(&self, prev_max_ts: &AtomicI64, prev_min_ts: &AtomicI64) {
-        prev_max_ts.fetch_max(self.max_ts, Ordering::SeqCst);
-        prev_min_ts.fetch_min(self.min_ts, Ordering::SeqCst);
-    }
 }
 
 impl Default for WriteMetrics {

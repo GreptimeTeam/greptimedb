@@ -288,8 +288,14 @@ impl<'a> ParserContext<'a> {
                 .with_context(|| InvalidIntervalSnafu {
                     reason: format!("cannot cast {} to interval type", expire_after_expr),
                 })?;
-            if let ScalarValue::IntervalMonthDayNano(Some(nanoseconds)) = expire_after_lit {
-                Some(nanoseconds.nanoseconds / 1_000_000_000)
+            if let ScalarValue::IntervalMonthDayNano(Some(interval)) = expire_after_lit {
+                Some(
+                    interval.nanoseconds / 1_000_000_000
+                        + interval.days as i64 * 60 * 60 * 24
+                        + interval.months as i64 * 60 * 60 * 24 * 3044 / 1000, // 1 month=365.25/12=30.44 days
+                                                                               // this is to keep the same as https://docs.rs/humantime/latest/humantime/fn.parse_duration.html
+                                                                               // which we use in database to parse i.e. ttl interval and many other intervals
+                )
             } else {
                 unreachable!()
             }
@@ -1325,6 +1331,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
         let sql = r"
 CREATE FLOW `task_2`
 SINK TO schema_1.table_1
+EXPIRE AFTER '1 month 2 days 1h 2 min'
 AS
 SELECT max(c1), min(c2) FROM schema_2.table_2;";
         let stmts =
@@ -1337,7 +1344,10 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
         };
         assert!(!create_task.or_replace);
         assert!(!create_task.if_not_exists);
-        assert!(create_task.expire_after.is_none());
+        assert_eq!(
+            create_task.expire_after,
+            Some(86400 * 3044 / 1000 + 2 * 86400 + 3600 + 2 * 60)
+        );
         assert!(create_task.comment.is_none());
         assert_eq!(create_task.flow_name.to_string(), "`task_2`");
     }

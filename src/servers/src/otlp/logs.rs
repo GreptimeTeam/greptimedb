@@ -24,7 +24,7 @@ use jsonb::{Number as JsonbNumber, Value as JsonbValue};
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, InstrumentationScope, KeyValue};
 use opentelemetry_proto::tonic::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
-use pipeline::{GreptimePipelineParams, PipelineWay, SchemaInfo, SelectInfo};
+use pipeline::{GreptimePipelineParams, PipelineContext, PipelineWay, SchemaInfo, SelectInfo};
 use serde_json::{Map, Value};
 use session::context::QueryContextRef;
 use snafu::{ensure, ResultExt};
@@ -33,6 +33,7 @@ use crate::error::{
     IncompatibleSchemaSnafu, NotSupportedSnafu, PipelineSnafu, Result,
     UnsupportedJsonDataTypeForTagSnafu,
 };
+use crate::http::event::PipelineIngestRequest;
 use crate::otlp::trace::attributes::OtlpAnyValue;
 use crate::otlp::utils::{bytes_to_hex_string, key_value_to_jsonb};
 use crate::pipeline::run_pipeline;
@@ -74,12 +75,14 @@ pub async fn to_grpc_insert_requests(
             let data = parse_export_logs_service_request(request);
             let array = pipeline::json_array_to_map(data).context(PipelineSnafu)?;
 
+            let pipeline_ctx = PipelineContext::new(&pipeline_def, &pipeline_params);
             let inserts = run_pipeline(
                 &pipeline_handler,
-                &pipeline_def,
-                &pipeline_params,
-                array,
-                table_name,
+                &pipeline_ctx,
+                PipelineIngestRequest {
+                    table: table_name,
+                    values: array,
+                },
                 query_ctx,
                 true,
             )

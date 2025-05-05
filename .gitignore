@@ -28,6 +28,7 @@ debug/
 # Logs
 **/__unittest_logs
 logs/
+!grafana/dashboards/logs/
 
 # cpython's generated python byte code
 **/__pycache__/

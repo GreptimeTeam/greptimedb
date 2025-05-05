@@ -43,6 +43,7 @@ use mito2::config::MitoConfig;
 use mito2::engine::MitoEngine;
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::util::normalize_dir;
+use query::dummy_catalog::TableProviderFactoryRef;
 use query::QueryEngineFactory;
 use servers::export_metrics::ExportMetricsTask;
 use servers::server::ServerHandlers;
@@ -57,8 +58,8 @@ use tokio::sync::Notify;
 
 use crate::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
 use crate::error::{
-    self, BuildMitoEngineSnafu, CreateDirSnafu, GetMetadataSnafu, MissingCacheSnafu,
-    MissingKvBackendSnafu, MissingNodeIdSnafu, OpenLogStoreSnafu, Result, ShutdownInstanceSnafu,
+    self, BuildMetricEngineSnafu, BuildMitoEngineSnafu, CreateDirSnafu, GetMetadataSnafu,
+    MissingCacheSnafu, MissingNodeIdSnafu, OpenLogStoreSnafu, Result, ShutdownInstanceSnafu,
     ShutdownServerSnafu, StartServerSnafu,
 };
 use crate::event_listener::{
@@ -157,50 +158,45 @@ impl Datanode {
 
 pub struct DatanodeBuilder {
     opts: DatanodeOptions,
-    mode: Mode,
+    table_provider_factory: Option<TableProviderFactoryRef>,
     plugins: Plugins,
     meta_client: Option<MetaClientRef>,
-    kv_backend: Option<KvBackendRef>,
+    kv_backend: KvBackendRef,
     cache_registry: Option<Arc<LayeredCacheRegistry>>,
 }
 
 impl DatanodeBuilder {
-    /// `kv_backend` is optional. If absent, the builder will try to build one
-    /// by using the given `opts`
-    pub fn new(opts: DatanodeOptions, plugins: Plugins, mode: Mode) -> Self {
+    pub fn new(opts: DatanodeOptions, plugins: Plugins, kv_backend: KvBackendRef) -> Self {
         Self {
             opts,
-            mode,
+            table_provider_factory: None,
             plugins,
             meta_client: None,
-            kv_backend: None,
+            kv_backend,
             cache_registry: None,
         }
     }
 
-    pub fn with_meta_client(self, meta_client: MetaClientRef) -> Self {
-        Self {
-            meta_client: Some(meta_client),
-            ..self
-        }
+    pub fn with_meta_client(&mut self, client: MetaClientRef) -> &mut Self {
+        self.meta_client = Some(client);
+        self
     }
 
-    pub fn with_cache_registry(self, cache_registry: Arc<LayeredCacheRegistry>) -> Self {
-        Self {
-            cache_registry: Some(cache_registry),
-            ..self
-        }
+    pub fn with_cache_registry(&mut self, registry: Arc<LayeredCacheRegistry>) -> &mut Self {
+        self.cache_registry = Some(registry);
+        self
     }
 
-    pub fn with_kv_backend(self, kv_backend: KvBackendRef) -> Self {
-        Self {
-            kv_backend: Some(kv_backend),
-            ..self
-        }
+    pub fn kv_backend(&self) -> &KvBackendRef {
+        &self.kv_backend
+    }
+
+    pub fn with_table_provider_factory(&mut self, factory: TableProviderFactoryRef) -> &mut Self {
+        self.table_provider_factory = Some(factory);
+        self
     }
 
     pub async fn build(mut self) -> Result<Datanode> {
-        let mode = &self.mode;
         let node_id = self.opts.node_id.context(MissingNodeIdSnafu)?;
 
         let meta_client = self.meta_client.take();
@@ -209,8 +205,6 @@ impl DatanodeBuilder {
         // Otherwise the region server is self-controlled, meaning no heartbeat and immediately
         // writable upon open.
         let controlled_by_metasrv = meta_client.is_some();
-
-        let kv_backend = self.kv_backend.take().context(MissingKvBackendSnafu)?;
 
         // build and initialize region server
         let (region_event_listener, region_event_receiver) = if controlled_by_metasrv {
@@ -233,7 +227,7 @@ impl DatanodeBuilder {
             .new_region_server(schema_metadata_manager, region_event_listener)
             .await?;
 
-        let datanode_table_manager = DatanodeTableManager::new(kv_backend.clone());
+        let datanode_table_manager = DatanodeTableManager::new(self.kv_backend.clone());
         let table_values = datanode_table_manager
             .tables(node_id)
             .try_collect::<Vec<_>>()
@@ -273,9 +267,14 @@ impl DatanodeBuilder {
             None
         };
 
+        let mode = if heartbeat_task.is_none() {
+            Mode::Standalone
+        } else {
+            Mode::Distributed
+        };
         let greptimedb_telemetry_task = get_greptimedb_telemetry_task(
             Some(self.opts.storage.data_home.clone()),
-            mode,
+            &mode,
             self.opts.enable_telemetry,
         )
         .await;
@@ -363,7 +362,11 @@ impl DatanodeBuilder {
         );
         let query_engine = query_engine_factory.query_engine();
 
-        let table_provider_factory = Arc::new(DummyTableProviderFactory);
+        let table_provider_factory = self
+            .table_provider_factory
+            .clone()
+            .unwrap_or_else(|| Arc::new(DummyTableProviderFactory));
+
         let mut region_server = RegionServer::with_table_provider(
             query_engine,
             common_runtime::global_runtime(),
@@ -398,44 +401,46 @@ impl DatanodeBuilder {
         schema_metadata_manager: SchemaMetadataManagerRef,
         plugins: Plugins,
     ) -> Result<Vec<RegionEngineRef>> {
-        let mut engines = vec![];
-        let mut metric_engine_config = opts.region_engine.iter().find_map(|c| match c {
-            RegionEngineConfig::Metric(config) => Some(config.clone()),
-            _ => None,
-        });
+        let mut metric_engine_config = metric_engine::config::EngineConfig::default();
+        let mut mito_engine_config = MitoConfig::default();
+        let mut file_engine_config = file_engine::config::EngineConfig::default();
 
         for engine in &opts.region_engine {
             match engine {
                 RegionEngineConfig::Mito(config) => {
-                    let mito_engine = Self::build_mito_engine(
-                        opts,
-                        object_store_manager.clone(),
-                        config.clone(),
-                        schema_metadata_manager.clone(),
-                        plugins.clone(),
-                    )
-                    .await?;
-
-                    let metric_engine = MetricEngine::new(
-                        mito_engine.clone(),
-                        metric_engine_config.take().unwrap_or_default(),
-                    );
-                    engines.push(Arc::new(mito_engine) as _);
-                    engines.push(Arc::new(metric_engine) as _);
+                    mito_engine_config = config.clone();
                 }
                 RegionEngineConfig::File(config) => {
-                    let engine = FileRegionEngine::new(
-                        config.clone(),
-                        object_store_manager.default_object_store().clone(), // TODO: implement custom storage for file engine
-                    );
-                    engines.push(Arc::new(engine) as _);
+                    file_engine_config = config.clone();
                 }
-                RegionEngineConfig::Metric(_) => {
-                    // Already handled in `build_mito_engine`.
+                RegionEngineConfig::Metric(metric_config) => {
+                    metric_engine_config = metric_config.clone();
                 }
             }
         }
-        Ok(engines)
+
+        let mito_engine = Self::build_mito_engine(
+            opts,
+            object_store_manager.clone(),
+            mito_engine_config,
+            schema_metadata_manager.clone(),
+            plugins.clone(),
+        )
+        .await?;
+
+        let metric_engine = MetricEngine::try_new(mito_engine.clone(), metric_engine_config)
+            .context(BuildMetricEngineSnafu)?;
+
+        let file_engine = FileRegionEngine::new(
+            file_engine_config,
+            object_store_manager.default_object_store().clone(), // TODO: implement custom storage for file engine
+        );
+
+        Ok(vec![
+            Arc::new(mito_engine) as _,
+            Arc::new(metric_engine) as _,
+            Arc::new(file_engine) as _,
+        ])
     }
 
     /// Builds [MitoEngine] according to options.
@@ -633,7 +638,6 @@ mod tests {
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::kv_backend::KvBackendRef;
     use mito2::engine::MITO_ENGINE_NAME;
-    use servers::Mode;
     use store_api::region_request::RegionRequest;
     use store_api::storage::RegionId;
 
@@ -669,19 +673,19 @@ mod tests {
         let kv_backend = Arc::new(MemoryKvBackend::new());
         let layered_cache_registry = Arc::new(
             LayeredCacheRegistryBuilder::default()
-                .add_cache_registry(build_datanode_cache_registry(kv_backend))
+                .add_cache_registry(build_datanode_cache_registry(kv_backend.clone()))
                 .build(),
         );
 
-        let builder = DatanodeBuilder::new(
+        let mut builder = DatanodeBuilder::new(
             DatanodeOptions {
                 node_id: Some(0),
                 ..Default::default()
             },
             Plugins::default(),
-            Mode::Standalone,
-        )
-        .with_cache_registry(layered_cache_registry);
+            kv_backend,
+        );
+        builder.with_cache_registry(layered_cache_registry);
 
         let kv = Arc::new(MemoryKvBackend::default()) as _;
         setup_table_datanode(&kv).await;

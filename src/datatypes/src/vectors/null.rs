@@ -120,9 +120,7 @@ impl fmt::Debug for NullVector {
 
 impl Serializable for NullVector {
     fn serialize_to_json(&self) -> Result<Vec<serde_json::Value>> {
-        Ok(std::iter::repeat(serde_json::Value::Null)
-            .take(self.len())
-            .collect())
+        Ok(std::iter::repeat_n(serde_json::Value::Null, self.len()).collect())
     }
 }
 

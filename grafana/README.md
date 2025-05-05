@@ -2,24 +2,63 @@
 
 ## Overview
 
-This repository maintains the Grafana dashboards for GreptimeDB. It has two types of dashboards:
+This repository contains Grafana dashboards for visualizing metrics and logs of GreptimeDB instances running in either cluster or standalone mode. **The Grafana version should be greater than 9.0**.
 
-- `cluster/`: The dashboard for the GreptimeDB cluster. Read the [dashboard.md](./dashboards/cluster/dashboard.md) for more details.
-- `standalone/`: The dashboard for the standalone GreptimeDB instance. Read the [dashboard.md](./dashboards/standalone/dashboard.md) for more details.
+We highly recommend using the self-monitoring feature provided by [GreptimeDB Operator](https://github.com/GrepTimeTeam/greptimedb-operator) to automatically collect metrics and logs from your GreptimeDB instances and store them in a dedicated GreptimeDB instance.
 
-As the rapid development of GreptimeDB, the metrics may be changed, and please feel free to submit your feedback and/or contribution to this dashboard 🤗
+- **Metrics Dashboards**
 
-To maintain the dashboards, we use the [`dac`](https://github.com/zyy17/dac) tool to generate the intermediate dashboards and markdown documents:
+  - `dashboards/metrics/cluster/dashboard.json`: The Grafana dashboard for the GreptimeDB cluster. Read the [dashboard.md](./dashboards/metrics/cluster/dashboard.md) for more details.
+  
+  - `dashboards/metrics/standalone/dashboard.json`: The Grafana dashboard for the standalone GreptimeDB instance. **It's generated from the `cluster/dashboard.json` by removing the instance filter through the `make dashboards` command**. Read the [dashboard.md](./dashboards/metrics/standalone/dashboard.md) for more details.
 
-- `cluster/dashboard.yaml`: The intermediate dashboard for the GreptimeDB cluster.
-- `standalone/dashboard.yaml`: The intermediatedashboard for the standalone GreptimeDB instance.
+- **Logs Dashboard**
+
+  The `dashboards/logs/dashboard.json` provides a comprehensive Grafana dashboard for visualizing GreptimeDB logs. To utilize this dashboard effectively, you need to collect logs in JSON format from your GreptimeDB instances and store them in a dedicated GreptimeDB instance.
+
+  For proper integration, the logs table must adhere to the following schema design with the table name `_gt_logs`:
+
+  ```sql
+  CREATE TABLE IF NOT EXISTS `_gt_logs` (
+    `pod_ip` STRING NULL,
+    `namespace` STRING NULL,
+    `cluster` STRING NULL,
+    `file` STRING NULL,
+    `module_path` STRING NULL,
+    `level` STRING NULL,
+    `target` STRING NULL,
+    `role` STRING NULL,
+    `pod` STRING NULL SKIPPING INDEX WITH(granularity = '10240', type = 'BLOOM'),
+    `message` STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', backend = 'bloom', case_sensitive = 'false'),
+    `err` STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', backend = 'bloom', case_sensitive = 'false'),
+    `timestamp` TIMESTAMP(9) NOT NULL,
+    TIME INDEX (`timestamp`),
+    PRIMARY KEY (`level`, `target`, `role`)
+  )
+    ENGINE=mito
+  WITH (
+    append_mode = 'true'
+  )
+  ```
+
+## Development
+
+As GreptimeDB evolves rapidly, metrics may change over time. We welcome your feedback and contributions to improve these dashboards 🤗
+
+To modify the metrics dashboards, simply edit the `dashboards/metrics/cluster/dashboard.json` file and run the `make dashboards` command. This will automatically generate the updated `dashboards/metrics/standalone/dashboard.json` and other related files.
+
+For easier dashboard maintenance, we utilize the [`dac`](https://github.com/zyy17/dac) tool to generate human-readable intermediate dashboards and documentation:
+
+- `dashboards/metrics/cluster/dashboard.yaml`: The intermediate dashboard file for the GreptimeDB cluster.
+- `dashboards/metrics/standalone/dashboard.yaml`: The intermediate dashboard file for standalone GreptimeDB instances.
 
 ## Data Sources
 
-There are two data sources for the dashboards to fetch the metrics:
+The following data sources are used to fetch metrics and logs:
 
-- **Prometheus**: Expose the metrics of GreptimeDB.
-- **Information Schema**: It is the MySQL port of the current monitored instance. The `overview` dashboard will use this datasource to show the information schema of the current instance.
+- **`${metrics}`**: Prometheus data source for providing the GreptimeDB metrics.
+- **`${logs}`**: MySQL data source for providing the GreptimeDB logs.
+- **`${information_schema}`**: MySQL data source for providing the information schema of the current instance and used for the `overview` panel. It is the MySQL port of the current monitored instance.
 
 ## Instance Filters
 
@@ -37,9 +76,9 @@ And the legend will be like: `[{{instance}}]-[{{ pod }}]`.
 
 ## Deployment
 
-### Helm
+### (Recommended) Helm Chart
 
-If you use the Helm [chart](https://github.com/GreptimeTeam/helm-charts) to deploy a GreptimeDB cluster, you can enable self-monitoring by setting the following values in your Helm chart:
+If you use the [Helm Chart](https://github.com/GreptimeTeam/helm-charts) to deploy a GreptimeDB cluster, you can enable self-monitoring by setting the following values in your Helm chart:
 
 - `monitoring.enabled=true`: Deploys a standalone GreptimeDB instance dedicated to monitoring the cluster;
 - `grafana.enabled=true`: Deploys Grafana and automatically imports the monitoring dashboard;
@@ -79,5 +118,5 @@ The standalone GreptimeDB instance will collect metrics from your cluster, and t
 
 3. **Import the dashboards based on your deployment scenario**
 
-   - **Cluster**: Import the `cluster/dashboard.json` dashboard.
-   - **Standalone**: Import the `standalone/dashboard.json` dashboard.
+   - **Cluster**: Import the `dashboards/metrics/cluster/dashboard.json` dashboard.
+   - **Standalone**: Import the `dashboards/metrics/standalone/dashboard.json` dashboard.

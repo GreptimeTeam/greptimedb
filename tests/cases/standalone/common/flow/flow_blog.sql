@@ -15,7 +15,9 @@ CREATE TABLE avg_speed (
 
 CREATE FLOW calc_avg_speed SINK TO avg_speed AS
 SELECT
-    avg((left_wheel + right_wheel) / 2)
+    avg((left_wheel + right_wheel) / 2) as avg_speed,
+    date_bin(INTERVAL '5 second', ts) as start_window,
+    date_bin(INTERVAL '5 second', ts) + INTERVAL '5 second' as end_window,
 FROM
     velocity
 WHERE
@@ -24,7 +26,7 @@ WHERE
     AND left_wheel < 60
     AND right_wheel < 60
 GROUP BY
-    tumble(ts, '5 second');
+    start_window;
 
 INSERT INTO
     velocity

@@ -41,7 +41,7 @@ use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use datanode::datanode::DatanodeBuilder;
-use flow::{FlownodeBuilder, FrontendClient};
+use flow::{FlownodeBuilder, FrontendClient, GrpcQueryHandlerWithBoxedError};
 use frontend::frontend::Frontend;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{Instance, StandaloneDatanodeManager};
@@ -49,7 +49,6 @@ use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
 use query::stats::StatementStatistics;
 use servers::grpc::GrpcOptions;
 use servers::server::ServerHandlers;
-use servers::Mode;
 use snafu::ResultExt;
 
 use crate::test_util::{self, create_tmp_dir_and_datanode_opts, StorageType, TestGuard};
@@ -144,13 +143,10 @@ impl GreptimeDbStandaloneBuilder {
                 .build(),
         );
 
-        let datanode =
-            DatanodeBuilder::new(opts.datanode_options(), plugins.clone(), Mode::Standalone)
-                .with_kv_backend(kv_backend.clone())
-                .with_cache_registry(layered_cache_registry)
-                .build()
-                .await
-                .unwrap();
+        let mut builder =
+            DatanodeBuilder::new(opts.datanode_options(), plugins.clone(), kv_backend.clone());
+        builder.with_cache_registry(layered_cache_registry);
+        let datanode = builder.build().await.unwrap();
 
         let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
         table_metadata_manager.init().await.unwrap();
@@ -174,8 +170,8 @@ impl GreptimeDbStandaloneBuilder {
             Some(procedure_manager.clone()),
         );
 
-        let fe_server_addr = opts.frontend_options().grpc.bind_addr.clone();
-        let frontend_client = FrontendClient::from_static_grpc_addr(fe_server_addr);
+        let (frontend_client, frontend_instance_handler) =
+            FrontendClient::from_empty_grpc_handler();
         let flow_builder = FlownodeBuilder::new(
             Default::default(),
             plugins.clone(),
@@ -188,7 +184,7 @@ impl GreptimeDbStandaloneBuilder {
 
         let node_manager = Arc::new(StandaloneDatanodeManager {
             region_server: datanode.region_server(),
-            flow_server: flownode.flow_worker_manager(),
+            flow_server: flownode.flow_engine(),
         });
 
         let table_id_sequence = Arc::new(
@@ -250,9 +246,17 @@ impl GreptimeDbStandaloneBuilder {
         .unwrap();
         let instance = Arc::new(instance);
 
-        let flow_worker_manager = flownode.flow_worker_manager();
+        // set the frontend client for flownode
+        let grpc_handler = instance.clone() as Arc<dyn GrpcQueryHandlerWithBoxedError>;
+        let weak_grpc_handler = Arc::downgrade(&grpc_handler);
+        frontend_instance_handler
+            .lock()
+            .unwrap()
+            .replace(weak_grpc_handler);
+
+        let flow_streaming_engine = flownode.flow_engine().streaming_engine();
         let invoker = flow::FrontendInvoker::build_from(
-            flow_worker_manager.clone(),
+            flow_streaming_engine.clone(),
             catalog_manager.clone(),
             kv_backend.clone(),
             cache_registry.clone(),
@@ -263,7 +267,7 @@ impl GreptimeDbStandaloneBuilder {
         .context(StartFlownodeSnafu)
         .unwrap();
 
-        flow_worker_manager.set_frontend_invoker(invoker).await;
+        flow_streaming_engine.set_frontend_invoker(invoker).await;
 
         procedure_manager.start().await.unwrap();
         wal_options_allocator.start().await.unwrap();

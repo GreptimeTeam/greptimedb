@@ -40,7 +40,8 @@ use common_meta::state_store::KvStateStore;
 use common_meta::wal_options_allocator::{build_kafka_client, build_wal_options_allocator};
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::ProcedureManagerRef;
-use snafu::ResultExt;
+use common_telemetry::{info, warn};
+use snafu::{ensure, ResultExt};
 
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
@@ -53,16 +54,16 @@ use crate::handler::region_lease_handler::{CustomizedRegionLeaseRenewerRef, Regi
 use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatMailbox, Pushers};
 use crate::lease::MetaPeerLookupService;
 use crate::metasrv::{
-    ElectionRef, Metasrv, MetasrvInfo, MetasrvOptions, SelectTarget, SelectorContext, SelectorRef,
-    FLOW_ID_SEQ, TABLE_ID_SEQ,
+    ElectionRef, Metasrv, MetasrvInfo, MetasrvOptions, RegionStatAwareSelectorRef, SelectTarget,
+    SelectorContext, SelectorRef, FLOW_ID_SEQ, TABLE_ID_SEQ,
 };
 use crate::procedure::region_migration::manager::RegionMigrationManager;
 use crate::procedure::region_migration::DefaultContextFactory;
 use crate::procedure::wal_prune::manager::{WalPruneManager, WalPruneTicker};
 use crate::procedure::wal_prune::Context as WalPruneContext;
 use crate::region::supervisor::{
-    HeartbeatAcceptor, RegionFailureDetectorControl, RegionSupervisor, RegionSupervisorTicker,
-    DEFAULT_TICK_INTERVAL,
+    HeartbeatAcceptor, RegionFailureDetectorControl, RegionSupervisor, RegionSupervisorSelector,
+    RegionSupervisorTicker, DEFAULT_TICK_INTERVAL,
 };
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::selector::round_robin::RoundRobinSelector;
@@ -190,7 +191,7 @@ impl MetasrvBuilder {
 
         let meta_peer_client = meta_peer_client
             .unwrap_or_else(|| build_default_meta_peer_client(&election, &in_memory));
-        let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector));
+        let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector::default()));
         let pushers = Pushers::default();
         let mailbox = build_mailbox(&kv_backend, &pushers);
         let procedure_manager = build_procedure_manager(&options, &kv_backend);
@@ -234,13 +235,17 @@ impl MetasrvBuilder {
             ))
         });
 
+        let flow_selector = Arc::new(RoundRobinSelector::new(
+            SelectTarget::Flownode,
+            Arc::new(Vec::new()),
+        )) as SelectorRef;
+
         let flow_metadata_allocator = {
             // for now flownode just use round-robin selector
-            let flow_selector = RoundRobinSelector::new(SelectTarget::Flownode);
             let flow_selector_ctx = selector_ctx.clone();
             let peer_allocator = Arc::new(FlowPeerAllocator::new(
                 flow_selector_ctx,
-                Arc::new(flow_selector),
+                flow_selector.clone(),
             ));
             let seq = Arc::new(
                 SequenceBuilder::new(FLOW_ID_SEQ, kv_backend.clone())
@@ -272,18 +277,25 @@ impl MetasrvBuilder {
             },
         ));
         let peer_lookup_service = Arc::new(MetaPeerLookupService::new(meta_peer_client.clone()));
+
         if !is_remote_wal && options.enable_region_failover {
-            return error::UnexpectedSnafu {
-                violated: "Region failover is not supported in the local WAL implementation!",
+            ensure!(
+                options.allow_region_failover_on_local_wal,
+                error::UnexpectedSnafu {
+                    violated: "Region failover is not supported in the local WAL implementation! 
+                    If you want to enable region failover for local WAL, please set `allow_region_failover_on_local_wal` to true.",
+                }
+            );
+            if options.allow_region_failover_on_local_wal {
+                warn!("Region failover is force enabled in the local WAL implementation! This may lead to data loss during failover!");
             }
-            .fail();
         }
 
         let (tx, rx) = RegionSupervisor::channel();
         let (region_failure_detector_controller, region_supervisor_ticker): (
             RegionFailureDetectorControllerRef,
             Option<std::sync::Arc<RegionSupervisorTicker>>,
-        ) = if options.enable_region_failover && is_remote_wal {
+        ) = if options.enable_region_failover {
             (
                 Arc::new(RegionFailureDetectorControl::new(tx.clone())) as _,
                 Some(Arc::new(RegionSupervisorTicker::new(
@@ -308,13 +320,24 @@ impl MetasrvBuilder {
             ),
         ));
         region_migration_manager.try_start()?;
+        let region_supervisor_selector = plugins
+            .as_ref()
+            .and_then(|plugins| plugins.get::<RegionStatAwareSelectorRef>());
 
-        let region_failover_handler = if options.enable_region_failover && is_remote_wal {
+        let supervisor_selector = match region_supervisor_selector {
+            Some(selector) => {
+                info!("Using region stat aware selector");
+                RegionSupervisorSelector::RegionStatAwareSelector(selector)
+            }
+            None => RegionSupervisorSelector::NaiveSelector(selector.clone()),
+        };
+
+        let region_failover_handler = if options.enable_region_failover {
             let region_supervisor = RegionSupervisor::new(
                 rx,
                 options.failure_detector,
                 selector_ctx.clone(),
-                selector.clone(),
+                supervisor_selector,
                 region_migration_manager.clone(),
                 maintenance_mode_manager.clone(),
                 peer_lookup_service.clone(),
@@ -420,7 +443,7 @@ impl MetasrvBuilder {
             meta_peer_client: meta_peer_client.clone(),
             selector,
             // TODO(jeremy): We do not allow configuring the flow selector.
-            flow_selector: Arc::new(RoundRobinSelector::new(SelectTarget::Flownode)),
+            flow_selector,
             handler_group: RwLock::new(None),
             handler_group_builder: Mutex::new(Some(handler_group_builder)),
             election,
