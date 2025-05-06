@@ -14,29 +14,63 @@
 
 //! some utils for helping with batching mode
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 
+use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
-use common_telemetry::{debug, info};
+use common_telemetry::debug;
 use datafusion::error::Result as DfResult;
 use datafusion::logical_expr::Expr;
 use datafusion::sql::unparser::Unparser;
 use datafusion_common::tree_node::{
     Transformed, TreeNodeRecursion, TreeNodeRewriter, TreeNodeVisitor,
 };
-use datafusion_common::DataFusionError;
-use datafusion_expr::{Distinct, LogicalPlan};
-use datatypes::schema::RawSchema;
+use datafusion_common::{DFSchema, DataFusionError, ScalarValue};
+use datafusion_expr::{Distinct, LogicalPlan, Projection};
+use datatypes::schema::SchemaRef;
 use query::parser::QueryLanguageParser;
 use query::QueryEngineRef;
 use session::context::QueryContextRef;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
+use table::metadata::TableInfo;
 
 use crate::adapter::AUTO_CREATED_PLACEHOLDER_TS_COL;
 use crate::df_optimizer::apply_df_optimizer;
-use crate::error::{DatafusionSnafu, ExternalSnafu};
-use crate::Error;
+use crate::error::{DatafusionSnafu, ExternalSnafu, TableNotFoundSnafu};
+use crate::{Error, TableName};
+
+pub async fn get_table_info_df_schema(
+    catalog_mr: CatalogManagerRef,
+    table_name: TableName,
+) -> Result<(Arc<TableInfo>, Arc<DFSchema>), Error> {
+    let full_table_name = table_name.clone().join(".");
+    let table = catalog_mr
+        .table(&table_name[0], &table_name[1], &table_name[2], None)
+        .await
+        .map_err(BoxedError::new)
+        .context(ExternalSnafu)?
+        .context(TableNotFoundSnafu {
+            name: &full_table_name,
+        })?;
+    let table_info = table.table_info().clone();
+
+    let schema = table_info.meta.schema.clone();
+
+    let df_schema: Arc<DFSchema> = Arc::new(
+        schema
+            .arrow_schema()
+            .clone()
+            .try_into()
+            .with_context(|_| DatafusionSnafu {
+                context: format!(
+                    "Failed to convert arrow schema to datafusion schema, arrow_schema={:?}",
+                    schema.arrow_schema()
+                ),
+            })?,
+    );
+    Ok((table_info, df_schema))
+}
 
 /// Convert sql to datafusion logical plan
 pub async fn sql_to_df_plan(
@@ -104,9 +138,12 @@ impl TreeNodeVisitor<'_> for FindGroupByFinalName {
     fn f_down(&mut self, node: &Self::Node) -> datafusion_common::Result<TreeNodeRecursion> {
         if let LogicalPlan::Aggregate(aggregate) = node {
             self.group_exprs = Some(aggregate.group_expr.iter().cloned().collect());
-            debug!("Group by exprs: {:?}", self.group_exprs);
+            debug!(
+                "FindGroupByFinalName: Get Group by exprs from Aggregate: {:?}",
+                self.group_exprs
+            );
         } else if let LogicalPlan::Distinct(distinct) = node {
-            debug!("Distinct: {:#?}", distinct);
+            debug!("FindGroupByFinalName: Distinct: {}", node);
             match distinct {
                 Distinct::All(input) => {
                     if let LogicalPlan::TableScan(table_scan) = &**input {
@@ -128,7 +165,10 @@ impl TreeNodeVisitor<'_> for FindGroupByFinalName {
                     self.group_exprs = Some(distinct_on.on_expr.iter().cloned().collect())
                 }
             }
-            debug!("Group by exprs: {:?}", self.group_exprs);
+            debug!(
+                "FindGroupByFinalName: Get Group by exprs from Distinct: {:?}",
+                self.group_exprs
+            );
         }
 
         Ok(TreeNodeRecursion::Continue)
@@ -164,14 +204,16 @@ impl TreeNodeVisitor<'_> for FindGroupByFinalName {
 /// (which doesn't necessary need to have exact name just need to be a extra timestamp column)
 /// and `__ts_placeholder`(this column need to have exact this name and be a timestamp)
 /// with values like `now()` and `0`
+///
+/// it also give existing columns alias to column in sink table if needed
 #[derive(Debug)]
 pub struct AddAutoColumnRewriter {
-    pub schema: RawSchema,
+    pub schema: SchemaRef,
     pub is_rewritten: bool,
 }
 
 impl AddAutoColumnRewriter {
-    pub fn new(schema: RawSchema) -> Self {
+    pub fn new(schema: SchemaRef) -> Self {
         Self {
             schema,
             is_rewritten: false,
@@ -181,37 +223,97 @@ impl AddAutoColumnRewriter {
 
 impl TreeNodeRewriter for AddAutoColumnRewriter {
     type Node = LogicalPlan;
-    fn f_down(&mut self, node: Self::Node) -> DfResult<Transformed<Self::Node>> {
+    fn f_down(&mut self, mut node: Self::Node) -> DfResult<Transformed<Self::Node>> {
         if self.is_rewritten {
             return Ok(Transformed::no(node));
         }
 
-        // if is distinct all, go one level down
-        if let LogicalPlan::Distinct(Distinct::All(_)) = node {
-            return Ok(Transformed::no(node));
+        // if is distinct all, wrap it in a projection
+        if let LogicalPlan::Distinct(Distinct::All(_)) = &node {
+            let mut exprs = vec![];
+
+            for field in node.schema().fields().iter() {
+                exprs.push(Expr::Column(datafusion::common::Column::new_unqualified(
+                    field.name(),
+                )));
+            }
+
+            let projection =
+                LogicalPlan::Projection(Projection::try_new(exprs, Arc::new(node.clone()))?);
+
+            node = projection;
+        }
+        // handle table_scan by wrap it in a projection
+        else if let LogicalPlan::TableScan(table_scan) = node {
+            let mut exprs = vec![];
+
+            for field in table_scan.projected_schema.fields().iter() {
+                exprs.push(Expr::Column(datafusion::common::Column::new(
+                    Some(table_scan.table_name.clone()),
+                    field.name(),
+                )));
+            }
+
+            let projection = LogicalPlan::Projection(Projection::try_new(
+                exprs,
+                Arc::new(LogicalPlan::TableScan(table_scan)),
+            )?);
+
+            node = projection;
         }
 
-        // FIXME(discord9): just read plan.expr and do stuffs
-        let mut exprs = node.expressions();
+        // only do rewrite if found the outermost projection
+        let mut exprs = if let LogicalPlan::Projection(project) = &node {
+            project.expr.clone()
+        } else {
+            return Ok(Transformed::no(node));
+        };
+
+        let all_names = self
+            .schema
+            .column_schemas()
+            .iter()
+            .map(|c| c.name.clone())
+            .collect::<BTreeSet<_>>();
+        // first match by position
+        for (idx, expr) in exprs.iter_mut().enumerate() {
+            if !all_names.contains(&expr.qualified_name().1) {
+                if let Some(col_name) = self
+                    .schema
+                    .column_schemas()
+                    .get(idx)
+                    .map(|c| c.name.clone())
+                {
+                    // if the data type mismatched, later check_execute will error out
+                    // hence no need to check it here, beside, optimize pass might be able to cast it
+                    // so checking here is not necessary
+                    *expr = expr.clone().alias(col_name);
+                }
+            }
+        }
 
         // add columns if have different column count
         let query_col_cnt = exprs.len();
-        let table_col_cnt = self.schema.column_schemas.len();
-        info!("query_col_cnt={query_col_cnt}, table_col_cnt={table_col_cnt}");
+        let table_col_cnt = self.schema.column_schemas().len();
+        debug!("query_col_cnt={query_col_cnt}, table_col_cnt={table_col_cnt}");
+
+        let placeholder_ts_expr =
+            datafusion::logical_expr::lit(ScalarValue::TimestampMillisecond(Some(0), None))
+                .alias(AUTO_CREATED_PLACEHOLDER_TS_COL);
+
         if query_col_cnt == table_col_cnt {
-            self.is_rewritten = true;
-            return Ok(Transformed::no(node));
+            // still need to add alias, see below
         } else if query_col_cnt + 1 == table_col_cnt {
-            let last_col_schema = self.schema.column_schemas.last().unwrap();
+            let last_col_schema = self.schema.column_schemas().last().unwrap();
 
             // if time index column is auto created add it
             if last_col_schema.name == AUTO_CREATED_PLACEHOLDER_TS_COL
-                && self.schema.timestamp_index == Some(table_col_cnt - 1)
+                && self.schema.timestamp_index() == Some(table_col_cnt - 1)
             {
-                exprs.push(datafusion::logical_expr::lit(0));
+                exprs.push(placeholder_ts_expr);
             } else if last_col_schema.data_type.is_timestamp() {
                 // is the update at column
-                exprs.push(datafusion::prelude::now());
+                exprs.push(datafusion::prelude::now().alias(&last_col_schema.name));
             } else {
                 // helpful error message
                 return Err(DataFusionError::Plan(format!(
@@ -221,11 +323,11 @@ impl TreeNodeRewriter for AddAutoColumnRewriter {
                 )));
             }
         } else if query_col_cnt + 2 == table_col_cnt {
-            let mut col_iter = self.schema.column_schemas.iter().rev();
+            let mut col_iter = self.schema.column_schemas().iter().rev();
             let last_col_schema = col_iter.next().unwrap();
             let second_last_col_schema = col_iter.next().unwrap();
             if second_last_col_schema.data_type.is_timestamp() {
-                exprs.push(datafusion::prelude::now());
+                exprs.push(datafusion::prelude::now().alias(&second_last_col_schema.name));
             } else {
                 return Err(DataFusionError::Plan(format!(
                     "Expect the second last column in the table to be timestamp column, found column {} with type {:?}",
@@ -235,9 +337,9 @@ impl TreeNodeRewriter for AddAutoColumnRewriter {
             }
 
             if last_col_schema.name == AUTO_CREATED_PLACEHOLDER_TS_COL
-                && self.schema.timestamp_index == Some(table_col_cnt - 1)
+                && self.schema.timestamp_index() == Some(table_col_cnt - 1)
             {
-                exprs.push(datafusion::logical_expr::lit(0));
+                exprs.push(placeholder_ts_expr);
             } else {
                 return Err(DataFusionError::Plan(format!(
                     "Expect timestamp column {}, found {:?}",
@@ -247,7 +349,7 @@ impl TreeNodeRewriter for AddAutoColumnRewriter {
         } else {
             return Err(DataFusionError::Plan(format!(
                     "Expect table have 0,1 or 2 columns more than query columns, found {} query columns {:?}, {} table columns {:?}",
-                    query_col_cnt, node.expressions(), table_col_cnt, self.schema.column_schemas
+                    query_col_cnt, exprs, table_col_cnt, self.schema.column_schemas()
                 )));
         }
 
@@ -255,9 +357,12 @@ impl TreeNodeRewriter for AddAutoColumnRewriter {
         let new_plan = node.with_new_exprs(exprs, node.inputs().into_iter().cloned().collect())?;
         Ok(Transformed::yes(new_plan))
     }
-}
 
-// TODO(discord9): a method to found out the precise time window
+    /// We might add new columns, so we need to recompute the schema
+    fn f_up(&mut self, node: Self::Node) -> DfResult<Transformed<Self::Node>> {
+        node.recompute_schema().map(Transformed::yes)
+    }
+}
 
 /// Find out the `Filter` Node corresponding to innermost(deepest) `WHERE` and add a new filter expr to it
 #[derive(Debug)]
@@ -301,11 +406,15 @@ impl TreeNodeRewriter for AddFilterRewriter {
 
 #[cfg(test)]
 mod test {
+    use std::sync::Arc;
+
     use datafusion_common::tree_node::TreeNode as _;
     use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::ColumnSchema;
+    use datatypes::schema::{ColumnSchema, Schema};
     use pretty_assertions::assert_eq;
+    use query::query_engine::DefaultSerializer;
     use session::context::QueryContext;
+    use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 
     use super::*;
     use crate::test_utils::create_test_query_engine;
@@ -386,7 +495,7 @@ mod test {
             // add update_at
             (
                 "SELECT number FROM numbers_with_ts",
-                Ok("SELECT numbers_with_ts.number, now() FROM numbers_with_ts"),
+                Ok("SELECT numbers_with_ts.number, now() AS ts FROM numbers_with_ts"),
                 vec![
                     ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
                     ColumnSchema::new(
@@ -400,7 +509,7 @@ mod test {
             // add ts placeholder
             (
                 "SELECT number FROM numbers_with_ts",
-                Ok("SELECT numbers_with_ts.number, 0 FROM numbers_with_ts"),
+                Ok("SELECT numbers_with_ts.number, CAST('1970-01-01 00:00:00' AS TIMESTAMP) AS __ts_placeholder FROM numbers_with_ts"),
                 vec![
                     ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
                     ColumnSchema::new(
@@ -428,7 +537,7 @@ mod test {
             // add update_at and ts placeholder
             (
                 "SELECT number FROM numbers_with_ts",
-                Ok("SELECT numbers_with_ts.number, now(), 0 FROM numbers_with_ts"),
+                Ok("SELECT numbers_with_ts.number, now() AS update_at, CAST('1970-01-01 00:00:00' AS TIMESTAMP) AS __ts_placeholder FROM numbers_with_ts"),
                 vec![
                     ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
                     ColumnSchema::new(
@@ -447,7 +556,7 @@ mod test {
             // add ts placeholder
             (
                 "SELECT number, ts FROM numbers_with_ts",
-                Ok("SELECT numbers_with_ts.number, numbers_with_ts.ts, 0 FROM numbers_with_ts"),
+                Ok("SELECT numbers_with_ts.number, numbers_with_ts.ts AS update_at, CAST('1970-01-01 00:00:00' AS TIMESTAMP) AS __ts_placeholder FROM numbers_with_ts"),
                 vec![
                     ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
                     ColumnSchema::new(
@@ -466,7 +575,7 @@ mod test {
             // add update_at after time index column
             (
                 "SELECT number, ts FROM numbers_with_ts",
-                Ok("SELECT numbers_with_ts.number, numbers_with_ts.ts, now() FROM numbers_with_ts"),
+                Ok("SELECT numbers_with_ts.number, numbers_with_ts.ts, now() AS update_atat FROM numbers_with_ts"),
                 vec![
                     ColumnSchema::new("number", ConcreteDataType::int32_datatype(), true),
                     ColumnSchema::new(
@@ -528,8 +637,8 @@ mod test {
         let query_engine = create_test_query_engine();
         let ctx = QueryContext::arc();
         for (before, after, column_schemas) in testcases {
-            let raw_schema = RawSchema::new(column_schemas);
-            let mut add_auto_column_rewriter = AddAutoColumnRewriter::new(raw_schema);
+            let schema = Arc::new(Schema::new(column_schemas));
+            let mut add_auto_column_rewriter = AddAutoColumnRewriter::new(schema);
 
             let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), before, false)
                 .await
@@ -599,5 +708,19 @@ mod test {
                 group_by_exprs.get_group_expr_names().unwrap_or_default()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_null_cast() {
+        let query_engine = create_test_query_engine();
+        let ctx = QueryContext::arc();
+        let sql = "SELECT NULL::DOUBLE FROM numbers_with_ts";
+        let plan = sql_to_df_plan(ctx, query_engine.clone(), sql, false)
+            .await
+            .unwrap();
+
+        let _sub_plan = DFLogicalSubstraitConvertor {}
+            .encode(&plan, DefaultSerializer)
+            .unwrap();
     }
 }

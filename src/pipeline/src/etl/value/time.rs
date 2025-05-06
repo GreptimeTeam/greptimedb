@@ -95,6 +95,15 @@ impl Timestamp {
             TimeUnit::Nanosecond => self.timestamp_nanos(),
         }
     }
+
+    pub fn get_unit(&self) -> TimeUnit {
+        match self {
+            Timestamp::Nanosecond(_) => TimeUnit::Nanosecond,
+            Timestamp::Microsecond(_) => TimeUnit::Microsecond,
+            Timestamp::Millisecond(_) => TimeUnit::Millisecond,
+            Timestamp::Second(_) => TimeUnit::Second,
+        }
+    }
 }
 
 impl Default for Timestamp {

@@ -46,7 +46,7 @@ pub(crate) fn test_create_flow_task(
         create_if_not_exists,
         expire_after: Some(300),
         comment: "".to_string(),
-        sql: "raw_sql".to_string(),
+        sql: "select 1".to_string(),
         flow_options: Default::default(),
     }
 }

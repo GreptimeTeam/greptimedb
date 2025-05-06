@@ -85,11 +85,7 @@ pub struct UnstableTestVariables {
 pub fn load_unstable_test_env_variables() -> UnstableTestVariables {
     let _ = dotenv::dotenv();
     let binary_path = env::var(GT_FUZZ_BINARY_PATH).expect("GT_FUZZ_BINARY_PATH not found");
-    let root_dir = if let Ok(root) = env::var(GT_FUZZ_INSTANCE_ROOT_DIR) {
-        Some(root)
-    } else {
-        None
-    };
+    let root_dir = env::var(GT_FUZZ_INSTANCE_ROOT_DIR).ok();
 
     UnstableTestVariables {
         binary_path,

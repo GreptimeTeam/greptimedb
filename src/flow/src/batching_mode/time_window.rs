@@ -72,6 +72,17 @@ pub struct TimeWindowExpr {
     df_schema: DFSchema,
 }
 
+impl std::fmt::Display for TimeWindowExpr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TimeWindowExpr")
+            .field("phy_expr", &self.phy_expr.to_string())
+            .field("column_name", &self.column_name)
+            .field("logical_expr", &self.logical_expr.to_string())
+            .field("df_schema", &self.df_schema)
+            .finish()
+    }
+}
+
 impl TimeWindowExpr {
     pub fn from_expr(
         expr: &Expr,
@@ -256,7 +267,7 @@ fn columnar_to_ts_vector(columnar: &ColumnarValue) -> Result<Vec<Option<Timestam
     Ok(val)
 }
 
-/// Return (the column name of time index column, the time window expr, the expected time unit of time index column, the expr's schema for evaluating the time window)
+/// Return (`the column name of time index column`, `the time window expr`, `the expected time unit of time index column`, `the expr's schema for evaluating the time window`)
 ///
 /// The time window expr is expected to have one input column with Timestamp type, and also return Timestamp type, the time window expr is expected
 /// to be monotonic increasing and appears in the innermost GROUP BY clause
@@ -692,6 +703,28 @@ mod test {
                     Some(Timestamp::new(1740394140, TimeUnit::Second)),
                 ),
                 "SELECT arrow_cast(date_bin(INTERVAL '1 MINS', numbers_with_ts.ts), 'Timestamp(Second, None)') AS time_window FROM numbers_with_ts WHERE ((ts >= CAST('2025-02-24 10:48:00' AS TIMESTAMP)) AND (ts <= CAST('2025-02-24 10:49:00' AS TIMESTAMP))) GROUP BY arrow_cast(date_bin(INTERVAL '1 MINS', numbers_with_ts.ts), 'Timestamp(Second, None)')"
+            ),
+            // complex time window index with where
+            (
+                "SELECT arrow_cast(date_bin(INTERVAL '1 MINS', numbers_with_ts.ts), 'Timestamp(Second, None)') AS time_window FROM numbers_with_ts WHERE number in (2, 3, 4) GROUP BY time_window;",
+                Timestamp::new(1740394109, TimeUnit::Second),
+                (
+                    "ts".to_string(),
+                    Some(Timestamp::new(1740394080, TimeUnit::Second)),
+                    Some(Timestamp::new(1740394140, TimeUnit::Second)),
+                ),
+                "SELECT arrow_cast(date_bin(INTERVAL '1 MINS', numbers_with_ts.ts), 'Timestamp(Second, None)') AS time_window FROM numbers_with_ts WHERE numbers_with_ts.number IN (2, 3, 4) AND ((ts >= CAST('2025-02-24 10:48:00' AS TIMESTAMP)) AND (ts <= CAST('2025-02-24 10:49:00' AS TIMESTAMP))) GROUP BY arrow_cast(date_bin(INTERVAL '1 MINS', numbers_with_ts.ts), 'Timestamp(Second, None)')"
+            ),
+            // complex time window index with between and
+            (
+                "SELECT arrow_cast(date_bin(INTERVAL '1 MINS', numbers_with_ts.ts), 'Timestamp(Second, None)') AS time_window FROM numbers_with_ts WHERE number BETWEEN 2 AND 4 GROUP BY time_window;",
+                Timestamp::new(1740394109, TimeUnit::Second),
+                (
+                    "ts".to_string(),
+                    Some(Timestamp::new(1740394080, TimeUnit::Second)),
+                    Some(Timestamp::new(1740394140, TimeUnit::Second)),
+                ),
+                "SELECT arrow_cast(date_bin(INTERVAL '1 MINS', numbers_with_ts.ts), 'Timestamp(Second, None)') AS time_window FROM numbers_with_ts WHERE (numbers_with_ts.number BETWEEN 2 AND 4) AND ((ts >= CAST('2025-02-24 10:48:00' AS TIMESTAMP)) AND (ts <= CAST('2025-02-24 10:49:00' AS TIMESTAMP))) GROUP BY arrow_cast(date_bin(INTERVAL '1 MINS', numbers_with_ts.ts), 'Timestamp(Second, None)')"
             ),
             // no time index
             (

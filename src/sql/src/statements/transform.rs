@@ -55,7 +55,7 @@ pub fn transform_statements(stmts: &mut Vec<Statement>) -> Result<()> {
         }
     }
 
-    visit_expressions_mut(stmts, |expr| {
+    let _ = visit_expressions_mut(stmts, |expr| {
         for rule in RULES.iter() {
             rule.visit_expr(expr)?;
         }

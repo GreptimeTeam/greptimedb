@@ -253,9 +253,10 @@ fn create_current_timestamp_vector(
     data_type: &ConcreteDataType,
     num_rows: usize,
 ) -> Result<VectorRef> {
-    let current_timestamp_vector = TimestampMillisecondVector::from_values(
-        std::iter::repeat(util::current_time_millis()).take(num_rows),
-    );
+    let current_timestamp_vector = TimestampMillisecondVector::from_values(std::iter::repeat_n(
+        util::current_time_millis(),
+        num_rows,
+    ));
     if data_type.is_timestamp() {
         current_timestamp_vector.cast(data_type)
     } else {

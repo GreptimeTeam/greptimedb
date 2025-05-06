@@ -112,7 +112,7 @@ pub mod test_utils;
 mod tombstone;
 pub mod topic_name;
 pub mod topic_region;
-pub(crate) mod txn_helper;
+pub mod txn_helper;
 pub mod view_info;
 
 use std::collections::{BTreeMap, HashMap, HashSet};

@@ -202,8 +202,14 @@ fn boxed(body: String) -> BoxBody {
 
 #[cfg(test)]
 mod tests {
+    use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_meta::kv_backend::KvBackendRef;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
     use super::*;
-    use crate::error;
+    use crate::metasrv::builder::MetasrvBuilder;
+    use crate::metasrv::MetasrvOptions;
+    use crate::{bootstrap, error};
 
     struct MockOkHandler;
 
@@ -307,5 +313,103 @@ mod tests {
             .unwrap();
 
         assert_eq!(http::StatusCode::INTERNAL_SERVER_ERROR, res.status());
+    }
+
+    async fn test_metasrv(kv_backend: KvBackendRef) -> Metasrv {
+        let opts = MetasrvOptions::default();
+        let builder = MetasrvBuilder::new()
+            .options(opts)
+            .kv_backend(kv_backend.clone());
+
+        let metasrv = builder.build().await.unwrap();
+        metasrv
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_metasrv_maintenance_mode() {
+        common_telemetry::init_default_ut_logging();
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let metasrv = test_metasrv(kv_backend).await;
+        metasrv.try_start().await.unwrap();
+
+        let (mut client, server) = tokio::io::duplex(1024);
+        let metasrv = Arc::new(metasrv);
+        let service = metasrv.clone();
+        let _handle = tokio::spawn(async move {
+            let router = bootstrap::router(service);
+            router
+                .serve_with_incoming(futures::stream::iter(vec![Ok::<_, std::io::Error>(server)]))
+                .await
+        });
+
+        // Get maintenance mode
+        let http_request = b"GET /admin/maintenance HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        client.write_all(http_request).await.unwrap();
+        let mut buf = vec![0; 1024];
+        let n = client.read(&mut buf).await.unwrap();
+        let response = String::from_utf8_lossy(&buf[..n]);
+        assert!(response.contains(r#"{"enabled":false}"#));
+        assert!(response.contains("200 OK"));
+
+        // Set maintenance mode to true
+        let http_post = b"POST /admin/maintenance?enable=true HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n";
+        client.write_all(http_post).await.unwrap();
+        let mut buf = vec![0; 1024];
+        let n = client.read(&mut buf).await.unwrap();
+        let response = String::from_utf8_lossy(&buf[..n]);
+        assert!(response.contains(r#"{"enabled":true}"#));
+        assert!(response.contains("200 OK"));
+
+        let enabled = metasrv
+            .maintenance_mode_manager()
+            .maintenance_mode()
+            .await
+            .unwrap();
+        assert!(enabled);
+
+        // Get maintenance mode again
+        let http_request = b"GET /admin/maintenance HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        client.write_all(http_request).await.unwrap();
+        let mut buf = vec![0; 1024];
+        let n = client.read(&mut buf).await.unwrap();
+        let response = String::from_utf8_lossy(&buf[..n]);
+        assert!(response.contains(r#"{"enabled":true}"#));
+        assert!(response.contains("200 OK"));
+
+        // Set maintenance mode to false
+        let http_post = b"POST /admin/maintenance?enable=false HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n";
+        client.write_all(http_post).await.unwrap();
+        let mut buf = vec![0; 1024];
+        let n = client.read(&mut buf).await.unwrap();
+        let response = String::from_utf8_lossy(&buf[..n]);
+        assert!(response.contains(r#"{"enabled":false}"#));
+        assert!(response.contains("200 OK"));
+
+        let enabled = metasrv
+            .maintenance_mode_manager()
+            .maintenance_mode()
+            .await
+            .unwrap();
+        assert!(!enabled);
+
+        // Set maintenance mode to true via GET request
+        let http_request =
+            b"GET /admin/maintenance?enable=true HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        client.write_all(http_request).await.unwrap();
+        let mut buf = vec![0; 1024];
+        let n = client.read(&mut buf).await.unwrap();
+        let response = String::from_utf8_lossy(&buf[..n]);
+        assert!(response.contains(r#"{"enabled":true}"#));
+        assert!(response.contains("200 OK"));
+
+        // Set maintenance mode to false via GET request
+        let http_request =
+            b"PUT /admin/maintenance?enable=false HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        client.write_all(http_request).await.unwrap();
+        let mut buf = vec![0; 1024];
+        let n = client.read(&mut buf).await.unwrap();
+        let response = String::from_utf8_lossy(&buf[..n]);
+        assert!(response.contains(r#"{"enabled":false}"#));
+        assert!(response.contains("200 OK"));
     }
 }

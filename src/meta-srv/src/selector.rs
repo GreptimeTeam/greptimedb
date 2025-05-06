@@ -18,9 +18,12 @@ pub mod load_based;
 pub mod round_robin;
 #[cfg(test)]
 pub(crate) mod test_utils;
-mod weight_compute;
+pub mod weight_compute;
 pub mod weighted_choose;
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
+use store_api::storage::RegionId;
 use strum::AsRefStr;
 
 use crate::error;
@@ -34,12 +37,32 @@ pub trait Selector: Send + Sync {
     async fn select(&self, ctx: &Self::Context, opts: SelectorOptions) -> Result<Self::Output>;
 }
 
+/// A selector that aware of region statistics
+///
+/// It selects the best destination peer for a list of regions.
+/// The selection is based on the region statistics, such as the region leader's write throughput.
+#[async_trait::async_trait]
+pub trait RegionStatAwareSelector: Send + Sync {
+    type Context;
+    type Output;
+
+    async fn select(
+        &self,
+        ctx: &Self::Context,
+        from_peer_id: u64,
+        region_ids: &[RegionId],
+        exclude_peer_ids: HashSet<u64>,
+    ) -> Result<Self::Output>;
+}
+
 #[derive(Debug)]
 pub struct SelectorOptions {
     /// Minimum number of selected results.
     pub min_required_items: usize,
     /// Whether duplicates are allowed in the selected result, default false.
     pub allow_duplication: bool,
+    /// The peers to exclude from the selection.
+    pub exclude_peer_ids: HashSet<u64>,
 }
 
 impl Default for SelectorOptions {
@@ -47,6 +70,7 @@ impl Default for SelectorOptions {
         Self {
             min_required_items: 1,
             allow_duplication: false,
+            exclude_peer_ids: HashSet::new(),
         }
     }
 }

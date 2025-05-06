@@ -13,7 +13,6 @@
 // limitations under the License.
 
 mod runner;
-mod rwlock;
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -30,7 +29,6 @@ use snafu::{ensure, OptionExt, ResultExt};
 use tokio::sync::watch::{self, Receiver, Sender};
 use tokio::sync::{Mutex as TokioMutex, Notify};
 
-use self::rwlock::KeyRwLock;
 use crate::error::{
     self, DuplicateProcedureSnafu, Error, LoaderConflictSnafu, ManagerNotStartSnafu,
     PoisonKeyNotDefinedSnafu, ProcedureNotFoundSnafu, Result, StartRemoveOutdatedMetaTaskSnafu,
@@ -38,11 +36,12 @@ use crate::error::{
 };
 use crate::local::runner::Runner;
 use crate::procedure::{BoxedProcedureLoader, InitProcedureState, PoisonKeys, ProcedureInfo};
+use crate::rwlock::{KeyRwLock, OwnedKeyRwLockGuard};
 use crate::store::poison_store::PoisonStoreRef;
 use crate::store::{ProcedureMessage, ProcedureMessages, ProcedureStore, StateStoreRef};
 use crate::{
     BoxedProcedure, ContextProvider, LockKey, PoisonKey, ProcedureId, ProcedureManager,
-    ProcedureState, ProcedureWithId, Watcher,
+    ProcedureState, ProcedureWithId, StringKey, Watcher,
 };
 
 /// The expired time of a procedure's metadata.
@@ -157,12 +156,80 @@ struct LoadedProcedure {
     step: u32,
 }
 
+/// The dynamic lock for procedure execution.
+///
+/// Unlike the procedure-level locks, these locks are acquired dynamically by the procedure
+/// during execution. They are only held when the procedure specifically needs these keys
+/// and are released as soon as the procedure no longer needs them.
+/// This allows for more fine-grained concurrency control during procedure execution.
+pub(crate) type DynamicKeyLock = Arc<KeyRwLock<String>>;
+
+/// Acquires a dynamic key lock for the given key.
+///
+/// This function takes a reference to the dynamic key lock and a pointer to the key.
+/// It then matches the key type and acquires the appropriate lock.
+pub async fn acquire_dynamic_key_lock(
+    lock: &DynamicKeyLock,
+    key: &StringKey,
+) -> DynamicKeyLockGuard {
+    match key {
+        StringKey::Share(key) => {
+            let guard = lock.read(key.to_string()).await;
+            DynamicKeyLockGuard {
+                guard: Some(OwnedKeyRwLockGuard::from(guard)),
+                key: key.to_string(),
+                lock: lock.clone(),
+            }
+        }
+        StringKey::Exclusive(key) => {
+            let guard = lock.write(key.to_string()).await;
+            DynamicKeyLockGuard {
+                guard: Some(OwnedKeyRwLockGuard::from(guard)),
+                key: key.to_string(),
+                lock: lock.clone(),
+            }
+        }
+    }
+}
+/// A guard for the dynamic key lock.
+///
+/// This guard is used to release the lock when the procedure no longer needs it.
+/// It also ensures that the lock is cleaned up when the guard is dropped.
+pub struct DynamicKeyLockGuard {
+    guard: Option<OwnedKeyRwLockGuard>,
+    key: String,
+    lock: DynamicKeyLock,
+}
+
+impl Drop for DynamicKeyLockGuard {
+    fn drop(&mut self) {
+        if let Some(guard) = self.guard.take() {
+            drop(guard);
+        }
+        self.lock.clean_keys(&[self.key.to_string()]);
+    }
+}
+
 /// Shared context of the manager.
 pub(crate) struct ManagerContext {
     /// Procedure loaders. The key is the type name of the procedure which the loader returns.
     loaders: Mutex<HashMap<String, BoxedProcedureLoader>>,
+    /// The key lock for the procedure.
+    ///
+    /// The lock keys are defined in `Procedure::lock_key()`.
+    /// These locks are acquired before the procedure starts and released after the procedure finishes.
+    /// They ensure exclusive access to resources throughout the entire procedure lifecycle.
     key_lock: KeyRwLock<String>,
+    /// The dynamic lock for procedure execution.
+    ///
+    /// Unlike the procedure-level locks, these locks are acquired dynamically by the procedure
+    /// during execution. They are only held when the procedure specifically needs these keys
+    /// and are released as soon as the procedure no longer needs them.
+    /// This allows for more fine-grained concurrency control during procedure execution.
+    dynamic_key_lock: DynamicKeyLock,
+    /// Procedures in the manager.
     procedures: RwLock<HashMap<ProcedureId, ProcedureMetaRef>>,
+    /// Running procedures.
     running_procedures: Mutex<HashSet<ProcedureId>>,
     /// Ids and finished time of finished procedures.
     finished_procedures: Mutex<VecDeque<(ProcedureId, Instant)>>,
@@ -199,6 +266,10 @@ impl ContextProvider for ManagerContext {
         let procedure_id = procedure_id.to_string();
         self.poison_manager.try_put_poison(key, procedure_id).await
     }
+
+    async fn acquire_lock(&self, key: &StringKey) -> DynamicKeyLockGuard {
+        acquire_dynamic_key_lock(&self.dynamic_key_lock, key).await
+    }
 }
 
 impl ManagerContext {
@@ -206,6 +277,7 @@ impl ManagerContext {
     fn new(poison_manager: PoisonStoreRef) -> ManagerContext {
         ManagerContext {
             key_lock: KeyRwLock::new(),
+            dynamic_key_lock: Arc::new(KeyRwLock::new()),
             loaders: Mutex::new(HashMap::new()),
             procedures: RwLock::new(HashMap::new()),
             running_procedures: Mutex::new(HashSet::new()),

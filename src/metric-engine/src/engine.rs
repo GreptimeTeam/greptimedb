@@ -34,24 +34,26 @@ use api::region::RegionResponse;
 use async_trait::async_trait;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
+use common_runtime::RepeatedTask;
 use mito2::engine::MitoEngine;
 pub(crate) use options::IndexOptions;
 use snafu::ResultExt;
+pub(crate) use state::MetricEngineState;
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
 use store_api::region_engine::{
-    RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef, RegionStatistic,
-    SetRegionRoleStateResponse, SetRegionRoleStateSuccess, SettableRegionRoleState,
-    SyncManifestResponse,
+    BatchResponses, RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef,
+    RegionStatistic, SetRegionRoleStateResponse, SetRegionRoleStateSuccess,
+    SettableRegionRoleState, SyncManifestResponse,
 };
-use store_api::region_request::{BatchRegionDdlRequest, RegionRequest};
+use store_api::region_request::{BatchRegionDdlRequest, RegionOpenRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 
-use self::state::MetricEngineState;
 use crate::config::EngineConfig;
 use crate::data_region::DataRegion;
-use crate::error::{self, Result, UnsupportedRegionRequestSnafu};
+use crate::error::{self, Error, Result, StartRepeatedTaskSnafu, UnsupportedRegionRequestSnafu};
 use crate::metadata_region::MetadataRegion;
+use crate::repeated_task::FlushMetadataRegionTask;
 use crate::row_modifier::RowModifier;
 use crate::utils::{self, get_region_statistic};
 
@@ -127,6 +129,17 @@ impl RegionEngine for MetricEngine {
     /// Name of this engine
     fn name(&self) -> &str {
         METRIC_ENGINE_NAME
+    }
+
+    async fn handle_batch_open_requests(
+        &self,
+        parallelism: usize,
+        requests: Vec<(RegionId, RegionOpenRequest)>,
+    ) -> Result<BatchResponses, BoxedError> {
+        self.inner
+            .handle_batch_open_requests(parallelism, requests)
+            .await
+            .map_err(BoxedError::new)
     }
 
     async fn handle_batch_ddl_requests(
@@ -359,19 +372,32 @@ impl RegionEngine for MetricEngine {
 }
 
 impl MetricEngine {
-    pub fn new(mito: MitoEngine, config: EngineConfig) -> Self {
+    pub fn try_new(mito: MitoEngine, mut config: EngineConfig) -> Result<Self> {
         let metadata_region = MetadataRegion::new(mito.clone());
         let data_region = DataRegion::new(mito.clone());
-        Self {
-            inner: Arc::new(MetricEngineInner {
-                mito,
-                metadata_region,
-                data_region,
-                state: RwLock::default(),
-                config,
-                row_modifier: RowModifier::new(),
-            }),
-        }
+        let state = Arc::new(RwLock::default());
+        config.sanitize();
+        let flush_interval = config.flush_metadata_region_interval;
+        let inner = Arc::new(MetricEngineInner {
+            mito: mito.clone(),
+            metadata_region,
+            data_region,
+            state: state.clone(),
+            config,
+            row_modifier: RowModifier::new(),
+            flush_task: RepeatedTask::new(
+                flush_interval,
+                Box::new(FlushMetadataRegionTask {
+                    state: state.clone(),
+                    mito: mito.clone(),
+                }),
+            ),
+        });
+        inner
+            .flush_task
+            .start(common_runtime::global_runtime())
+            .context(StartRepeatedTaskSnafu { name: "flush_task" })?;
+        Ok(Self { inner })
     }
 
     pub fn mito(&self) -> MitoEngine {
@@ -426,15 +452,21 @@ impl MetricEngine {
     ) -> Result<common_recordbatch::SendableRecordBatchStream, BoxedError> {
         self.inner.scan_to_stream(region_id, request).await
     }
+
+    /// Returns the configuration of the engine.
+    pub fn config(&self) -> &EngineConfig {
+        &self.inner.config
+    }
 }
 
 struct MetricEngineInner {
     mito: MitoEngine,
     metadata_region: MetadataRegion,
     data_region: DataRegion,
-    state: RwLock<MetricEngineState>,
+    state: Arc<RwLock<MetricEngineState>>,
     config: EngineConfig,
     row_modifier: RowModifier,
+    flush_task: RepeatedTask<Error>,
 }
 
 #[cfg(test)]

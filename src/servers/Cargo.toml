@@ -18,7 +18,7 @@ workspace = true
 local-ip-address.workspace = true
 
 [dependencies]
-ahash = "0.8"
+ahash.workspace = true
 api.workspace = true
 arrow.workspace = true
 arrow-flight.workspace = true
@@ -58,7 +58,6 @@ datatypes.workspace = true
 derive_builder.workspace = true
 futures.workspace = true
 futures-util.workspace = true
-hashbrown = "0.15"
 headers = "0.4"
 hostname = "0.3"
 http.workspace = true

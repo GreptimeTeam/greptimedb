@@ -129,6 +129,7 @@ impl<'a> StatementToRegion<'a> {
                     column_schema,
                     &sql_row[i],
                     Some(&query_ctx.timezone()),
+                    query_ctx.auto_string_to_numeric(),
                 )?;
                 grpc_row.values.push(value);
             }
@@ -205,10 +206,14 @@ fn column_names<'a>(stmt: &'a Insert, table_schema: &'a SchemaRef) -> Vec<&'a St
     }
 }
 
+/// Converts SQL value to gRPC value according to the column schema.
+/// If `auto_string_to_numeric` is true, tries to cast the string value to numeric values,
+/// and fills the default value if the cast fails.
 fn sql_value_to_grpc_value(
     column_schema: &ColumnSchema,
     sql_val: &SqlValue,
     timezone: Option<&Timezone>,
+    auto_string_to_numeric: bool,
 ) -> Result<GrpcValue> {
     let column = &column_schema.name;
     let value = if replace_default(sql_val) {
@@ -222,8 +227,15 @@ fn sql_value_to_grpc_value(
             column: column.clone(),
         })?
     } else {
-        statements::sql_value_to_value(column, &column_schema.data_type, sql_val, timezone, None)
-            .context(ParseSqlSnafu)?
+        statements::sql_value_to_value(
+            column,
+            &column_schema.data_type,
+            sql_val,
+            timezone,
+            None,
+            auto_string_to_numeric,
+        )
+        .context(ParseSqlSnafu)?
     };
 
     let grpc_value = value_to_grpc_value(value);

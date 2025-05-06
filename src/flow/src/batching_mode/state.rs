@@ -22,13 +22,14 @@ use common_telemetry::tracing::warn;
 use common_time::Timestamp;
 use datatypes::value::Value;
 use session::context::QueryContextRef;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 
 use crate::batching_mode::task::BatchingTask;
+use crate::batching_mode::time_window::TimeWindowExpr;
 use crate::batching_mode::MIN_REFRESH_DURATION;
-use crate::error::{DatatypesSnafu, InternalSnafu, TimeSnafu};
+use crate::error::{DatatypesSnafu, InternalSnafu, TimeSnafu, UnexpectedSnafu};
 use crate::{Error, FlowId};
 
 /// The state of the [`BatchingTask`].
@@ -46,6 +47,8 @@ pub struct TaskState {
     exec_state: ExecState,
     /// Shutdown receiver
     pub(crate) shutdown_rx: oneshot::Receiver<()>,
+    /// Task handle
+    pub(crate) task_handle: Option<tokio::task::JoinHandle<()>>,
 }
 impl TaskState {
     pub fn new(query_ctx: QueryContextRef, shutdown_rx: oneshot::Receiver<()>) -> Self {
@@ -56,6 +59,7 @@ impl TaskState {
             dirty_time_windows: Default::default(),
             exec_state: ExecState::Idle,
             shutdown_rx,
+            task_handle: None,
         }
     }
 
@@ -70,7 +74,11 @@ impl TaskState {
     /// wait for at least `last_query_duration`, at most `max_timeout` to start next query
     ///
     /// if have more dirty time window, exec next query immediately
-    pub fn get_next_start_query_time(&self, max_timeout: Option<Duration>) -> Instant {
+    pub fn get_next_start_query_time(
+        &self,
+        flow_id: FlowId,
+        max_timeout: Option<Duration>,
+    ) -> Instant {
         let next_duration = max_timeout
             .unwrap_or(self.last_query_duration)
             .min(self.last_query_duration);
@@ -80,6 +88,12 @@ impl TaskState {
         if self.dirty_time_windows.windows.is_empty() {
             self.last_update_time + next_duration
         } else {
+            debug!(
+                "Flow id = {}, still have {} dirty time window({:?}), execute immediately",
+                flow_id,
+                self.dirty_time_windows.windows.len(),
+                self.dirty_time_windows.windows
+            );
             Instant::now()
         }
     }
@@ -113,6 +127,15 @@ impl DirtyTimeWindows {
             let entry = self.windows.entry(lower_bound);
             entry.or_insert(None);
         }
+    }
+
+    pub fn add_window(&mut self, start: Timestamp, end: Option<Timestamp>) {
+        self.windows.insert(start, end);
+    }
+
+    /// Clean all dirty time windows, useful when can't found time window expr
+    pub fn clean(&mut self) {
+        self.windows.clear();
     }
 
     /// Generate all filter expressions consuming all time windows
@@ -177,6 +200,18 @@ impl DirtyTimeWindows {
 
         let mut expr_lst = vec![];
         for (start, end) in first_nth.into_iter() {
+            // align using time window exprs
+            let (start, end) = if let Some(ctx) = task_ctx {
+                let Some(time_window_expr) = &ctx.config.time_window_expr else {
+                    UnexpectedSnafu {
+                        reason: "time_window_expr is not set",
+                    }
+                    .fail()?
+                };
+                self.align_time_window(start, end, time_window_expr)?
+            } else {
+                (start, end)
+            };
             debug!(
                 "Time window start: {:?}, end: {:?}",
                 start.to_iso8601_string(),
@@ -197,6 +232,30 @@ impl DirtyTimeWindows {
         }
         let expr = expr_lst.into_iter().reduce(|a, b| a.or(b));
         Ok(expr)
+    }
+
+    fn align_time_window(
+        &self,
+        start: Timestamp,
+        end: Option<Timestamp>,
+        time_window_expr: &TimeWindowExpr,
+    ) -> Result<(Timestamp, Option<Timestamp>), Error> {
+        let align_start = time_window_expr.eval(start)?.0.context(UnexpectedSnafu {
+            reason: format!(
+                "Failed to align start time {:?} with time window expr {:?}",
+                start, time_window_expr
+            ),
+        })?;
+        let align_end = end
+            .and_then(|end| {
+                time_window_expr
+                    .eval(end)
+                    // if after aligned, end is the same, then use end(because it's already aligned) else use aligned end
+                    .map(|r| if r.0 == Some(end) { r.0 } else { r.1 })
+                    .transpose()
+            })
+            .transpose()?;
+        Ok((align_start, align_end))
     }
 
     /// Merge time windows that overlaps or get too close
@@ -287,8 +346,12 @@ enum ExecState {
 #[cfg(test)]
 mod test {
     use pretty_assertions::assert_eq;
+    use session::context::QueryContext;
 
     use super::*;
+    use crate::batching_mode::time_window::find_time_window_expr;
+    use crate::batching_mode::utils::sql_to_df_plan;
+    use crate::test_utils::create_test_query_engine;
 
     #[test]
     fn test_merge_dirty_time_windows() {
@@ -402,6 +465,61 @@ mod test {
                 .as_ref()
                 .map(|e| unparser.expr_to_sql(e).unwrap().to_string());
             assert_eq!(expected_filter_expr, to_sql.as_deref());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_align_time_window() {
+        type TimeWindow = (Timestamp, Option<Timestamp>);
+        struct TestCase {
+            sql: String,
+            aligns: Vec<(TimeWindow, TimeWindow)>,
+        }
+        let testcases: Vec<TestCase> = vec![TestCase{
+            sql: "SELECT date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window;".to_string(),
+            aligns: vec![
+                ((Timestamp::new_second(3), None), (Timestamp::new_second(0), None)),
+                ((Timestamp::new_second(8), None), (Timestamp::new_second(5), None)),
+                ((Timestamp::new_second(8), Some(Timestamp::new_second(10))), (Timestamp::new_second(5), Some(Timestamp::new_second(10)))),
+                ((Timestamp::new_second(8), Some(Timestamp::new_second(9))), (Timestamp::new_second(5), Some(Timestamp::new_second(10)))),
+            ],
+        }];
+
+        let query_engine = create_test_query_engine();
+        let ctx = QueryContext::arc();
+        for TestCase { sql, aligns } in testcases {
+            let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), &sql, true)
+                .await
+                .unwrap();
+
+            let (column_name, time_window_expr, _, df_schema) = find_time_window_expr(
+                &plan,
+                query_engine.engine_state().catalog_manager().clone(),
+                ctx.clone(),
+            )
+            .await
+            .unwrap();
+
+            let time_window_expr = time_window_expr
+                .map(|expr| {
+                    TimeWindowExpr::from_expr(
+                        &expr,
+                        &column_name,
+                        &df_schema,
+                        &query_engine.engine_state().session_state(),
+                    )
+                })
+                .transpose()
+                .unwrap()
+                .unwrap();
+
+            let dirty = DirtyTimeWindows::default();
+            for (before_align, expected_after_align) in aligns {
+                let after_align = dirty
+                    .align_time_window(before_align.0, before_align.1, &time_window_expr)
+                    .unwrap();
+                assert_eq!(expected_after_align, after_align);
+            }
         }
     }
 }

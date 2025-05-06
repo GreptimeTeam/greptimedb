@@ -61,6 +61,16 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "No available frontend found after timeout: {timeout:?}, context: {context}"
+    ))]
+    NoAvailableFrontend {
+        timeout: std::time::Duration,
+        context: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("External error"))]
     External {
         source: BoxedError,
@@ -149,6 +159,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Unsupported: {reason}"))]
+    Unsupported {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Unsupported temporal filter: {reason}"))]
     UnsupportedTemporalFilter {
         reason: String,
@@ -185,6 +202,25 @@ pub enum Error {
     #[snafu(display("Unexpected: {reason}"))]
     Unexpected {
         reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Illegal check task state: {reason}"))]
+    IllegalCheckTaskState {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Failed to sync with check task for flow {} with allow_drop={}",
+        flow_id,
+        allow_drop
+    ))]
+    SyncCheckTask {
+        flow_id: FlowId,
+        allow_drop: bool,
         #[snafu(implicit)]
         location: Location,
     },
@@ -270,7 +306,8 @@ impl ErrorExt for Error {
             Self::Eval { .. }
             | Self::JoinTask { .. }
             | Self::Datafusion { .. }
-            | Self::InsertIntoFlow { .. } => StatusCode::Internal,
+            | Self::InsertIntoFlow { .. }
+            | Self::NoAvailableFrontend { .. } => StatusCode::Internal,
             Self::FlowAlreadyExist { .. } => StatusCode::TableAlreadyExists,
             Self::TableNotFound { .. }
             | Self::TableNotFoundMeta { .. }
@@ -280,10 +317,12 @@ impl ErrorExt for Error {
             Self::CreateFlow { .. } | Self::Arrow { .. } | Self::Time { .. } => {
                 StatusCode::EngineExecuteQuery
             }
-            Self::Unexpected { .. } => StatusCode::Unexpected,
-            Self::NotImplemented { .. } | Self::UnsupportedTemporalFilter { .. } => {
-                StatusCode::Unsupported
-            }
+            Self::Unexpected { .. }
+            | Self::SyncCheckTask { .. }
+            | Self::IllegalCheckTaskState { .. } => StatusCode::Unexpected,
+            Self::NotImplemented { .. }
+            | Self::UnsupportedTemporalFilter { .. }
+            | Self::Unsupported { .. } => StatusCode::Unsupported,
             Self::External { source, .. } => source.status_code(),
             Self::Internal { .. } | Self::CacheRequired { .. } => StatusCode::Internal,
             Self::StartServer { source, .. } | Self::ShutdownServer { source, .. } => {
