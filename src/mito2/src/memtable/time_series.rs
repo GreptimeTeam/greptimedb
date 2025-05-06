@@ -15,14 +15,13 @@
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, Bound, HashSet};
 use std::fmt::{Debug, Formatter};
-use std::str::FromStr;
 use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use api::v1::OpType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
-use common_telemetry::{debug, error, info};
+use common_telemetry::{debug, error};
 use common_time::Timestamp;
 use datatypes::arrow;
 use datatypes::arrow::array::ArrayRef;
@@ -90,13 +89,7 @@ impl TimeSeriesMemtableBuilder {
 
 impl MemtableBuilder for TimeSeriesMemtableBuilder {
     fn build(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef {
-        if std::env::var("enable_experimental_bulk_memtable")
-            .ok()
-            .and_then(|v| bool::from_str(&v).ok())
-            .unwrap_or(false)
-            && metadata.primary_key.is_empty()
-        {
-            info!("Using SimpleBulkMemtable");
+        if metadata.primary_key.is_empty() {
             Arc::new(SimpleBulkMemtable::new(
                 id,
                 metadata.clone(),
@@ -168,6 +161,9 @@ impl TimeSeriesMemtable {
             .on_allocation(stats.key_bytes + stats.value_bytes);
         self.max_timestamp.fetch_max(stats.max_ts, Ordering::SeqCst);
         self.min_timestamp.fetch_min(stats.min_ts, Ordering::SeqCst);
+        self.max_sequence
+            .fetch_max(stats.max_sequence, Ordering::SeqCst);
+        self.num_rows.fetch_add(stats.num_rows, Ordering::SeqCst);
     }
 
     fn write_key_value(&self, kv: KeyValue, stats: &mut WriteMetrics) -> Result<()> {
@@ -217,17 +213,12 @@ impl Memtable for TimeSeriesMemtable {
         }
         local_stats.value_bytes += kvs.num_rows() * std::mem::size_of::<Timestamp>();
         local_stats.value_bytes += kvs.num_rows() * std::mem::size_of::<OpType>();
-
+        local_stats.max_sequence = kvs.max_sequence();
+        local_stats.num_rows = kvs.num_rows();
         // TODO(hl): this maybe inaccurate since for-iteration may return early.
         // We may lift the primary key length check out of Memtable::write
         // so that we can ensure writing to memtable will succeed.
         self.update_stats(local_stats);
-
-        // update max_sequence
-        let sequence = kvs.max_sequence();
-        self.max_sequence.fetch_max(sequence, Ordering::Relaxed);
-
-        self.num_rows.fetch_add(kvs.num_rows(), Ordering::Relaxed);
         Ok(())
     }
 
@@ -235,27 +226,30 @@ impl Memtable for TimeSeriesMemtable {
         let mut metrics = WriteMetrics::default();
         let res = self.write_key_value(key_value, &mut metrics);
         metrics.value_bytes += std::mem::size_of::<Timestamp>() + std::mem::size_of::<OpType>();
+        metrics.max_sequence = key_value.sequence();
+        metrics.num_rows = 1;
 
-        self.update_stats(metrics);
-
-        // update max_sequence
         if res.is_ok() {
-            self.max_sequence
-                .fetch_max(key_value.sequence(), Ordering::Relaxed);
+            self.update_stats(metrics);
         }
-
-        self.num_rows.fetch_add(1, Ordering::Relaxed);
         res
     }
 
     fn write_bulk(&self, part: BulkPart) -> Result<()> {
         // Default implementation fallback to row iteration.
         let mutation = part.to_mutation(&self.region_metadata)?;
+        let mut metrics = WriteMetrics::default();
         if let Some(key_values) = KeyValues::new(&self.region_metadata, mutation) {
             for kv in key_values.iter() {
-                self.write_one(kv)?
+                self.write_key_value(kv, &mut metrics)?
             }
         }
+
+        metrics.max_sequence = part.sequence;
+        metrics.max_ts = part.max_ts;
+        metrics.min_ts = part.min_ts;
+        metrics.num_rows = part.num_rows;
+        self.update_stats(metrics);
         Ok(())
     }
 
@@ -291,7 +285,7 @@ impl Memtable for TimeSeriesMemtable {
         projection: Option<&[ColumnId]>,
         predicate: PredicateGroup,
         sequence: Option<SequenceNumber>,
-    ) -> MemtableRanges {
+    ) -> Result<MemtableRanges> {
         let projection = if let Some(projection) = projection {
             projection.iter().copied().collect()
         } else {
@@ -310,10 +304,10 @@ impl Memtable for TimeSeriesMemtable {
         });
         let context = Arc::new(MemtableRangeContext::new(self.id, builder, predicate));
 
-        MemtableRanges {
+        Ok(MemtableRanges {
             ranges: [(0, MemtableRange::new(context))].into(),
             stats: self.stats(),
-        }
+        })
     }
 
     fn is_empty(&self) -> bool {

@@ -72,7 +72,7 @@ impl Memtable for BulkMemtable {
         _projection: Option<&[ColumnId]>,
         _predicate: PredicateGroup,
         _sequence: Option<SequenceNumber>,
-    ) -> MemtableRanges {
+    ) -> Result<MemtableRanges> {
         todo!()
     }
 

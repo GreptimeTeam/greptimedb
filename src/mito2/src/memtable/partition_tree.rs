@@ -148,15 +148,11 @@ impl Memtable for PartitionTreeMemtable {
         // Ensures the memtable always updates stats.
         let res = self.tree.write(kvs, &mut pk_buffer, &mut metrics);
 
-        self.update_stats(&metrics);
-
-        // update max_sequence
         if res.is_ok() {
-            let sequence = kvs.max_sequence();
-            self.max_sequence.fetch_max(sequence, Ordering::Relaxed);
+            metrics.max_sequence = kvs.max_sequence();
+            metrics.num_rows = kvs.num_rows();
+            self.update_stats(&metrics);
         }
-
-        self.num_rows.fetch_add(kvs.num_rows(), Ordering::Relaxed);
         res
     }
 
@@ -166,15 +162,12 @@ impl Memtable for PartitionTreeMemtable {
         // Ensures the memtable always updates stats.
         let res = self.tree.write_one(key_value, &mut pk_buffer, &mut metrics);
 
-        self.update_stats(&metrics);
-
         // update max_sequence
         if res.is_ok() {
-            self.max_sequence
-                .fetch_max(key_value.sequence(), Ordering::Relaxed);
+            metrics.max_sequence = metrics.max_sequence.max(key_value.sequence());
+            metrics.num_rows = 1;
+            self.update_stats(&metrics);
         }
-
-        self.num_rows.fetch_add(1, Ordering::Relaxed);
         res
     }
 
@@ -199,7 +192,7 @@ impl Memtable for PartitionTreeMemtable {
         projection: Option<&[ColumnId]>,
         predicate: PredicateGroup,
         sequence: Option<SequenceNumber>,
-    ) -> MemtableRanges {
+    ) -> Result<MemtableRanges> {
         let projection = projection.map(|ids| ids.to_vec());
         let builder = Box::new(PartitionTreeIterBuilder {
             tree: self.tree.clone(),
@@ -209,10 +202,10 @@ impl Memtable for PartitionTreeMemtable {
         });
         let context = Arc::new(MemtableRangeContext::new(self.id, builder, predicate));
 
-        MemtableRanges {
+        Ok(MemtableRanges {
             ranges: [(0, MemtableRange::new(context))].into(),
             stats: self.stats(),
-        }
+        })
     }
 
     fn is_empty(&self) -> bool {
@@ -307,6 +300,9 @@ impl PartitionTreeMemtable {
             .fetch_max(metrics.max_ts, Ordering::SeqCst);
         self.min_timestamp
             .fetch_min(metrics.min_ts, Ordering::SeqCst);
+        self.num_rows.fetch_add(metrics.num_rows, Ordering::SeqCst);
+        self.max_sequence
+            .fetch_max(metrics.max_sequence, Ordering::SeqCst);
     }
 }
 

@@ -161,7 +161,7 @@ pub trait Memtable: Send + Sync + fmt::Debug {
         projection: Option<&[ColumnId]>,
         predicate: PredicateGroup,
         sequence: Option<SequenceNumber>,
-    ) -> MemtableRanges;
+    ) -> Result<MemtableRanges>;
 
     /// Returns true if the memtable is empty.
     fn is_empty(&self) -> bool;

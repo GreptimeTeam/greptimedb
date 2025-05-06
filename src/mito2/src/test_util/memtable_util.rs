@@ -96,8 +96,8 @@ impl Memtable for EmptyMemtable {
         _projection: Option<&[ColumnId]>,
         _predicate: PredicateGroup,
         _sequence: Option<SequenceNumber>,
-    ) -> MemtableRanges {
-        MemtableRanges::default()
+    ) -> Result<MemtableRanges> {
+        Ok(MemtableRanges::default())
     }
 
     fn is_empty(&self) -> bool {

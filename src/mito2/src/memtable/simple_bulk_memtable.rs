@@ -102,7 +102,7 @@ impl SimpleBulkMemtable {
         let values = if series.is_empty() {
             None
         } else {
-            Some(series.compact(&self.region_metadata).unwrap().clone())
+            Some(series.compact(&self.region_metadata)?.clone())
         };
 
         let projection = self.build_projection(projection);
@@ -134,8 +134,11 @@ impl SimpleBulkMemtable {
     fn update_stats(&self, stats: WriteMetrics) {
         self.alloc_tracker
             .on_allocation(stats.key_bytes + stats.value_bytes);
+        self.num_rows.fetch_add(stats.num_rows, Ordering::SeqCst);
         self.max_timestamp.fetch_max(stats.max_ts, Ordering::SeqCst);
         self.min_timestamp.fetch_min(stats.min_ts, Ordering::SeqCst);
+        self.max_sequence
+            .fetch_max(stats.max_sequence, Ordering::SeqCst);
     }
 }
 
@@ -156,10 +159,8 @@ impl Memtable for SimpleBulkMemtable {
         for kv in kvs.iter() {
             self.write_key_value(kv, &mut stats);
         }
-
-        self.max_sequence.fetch_max(max_sequence, Ordering::SeqCst);
-        self.alloc_tracker
-            .on_allocation(stats.key_bytes + stats.value_bytes);
+        stats.max_sequence = max_sequence;
+        stats.num_rows = kvs.num_rows();
         self.update_stats(stats);
         Ok(())
     }
@@ -168,9 +169,8 @@ impl Memtable for SimpleBulkMemtable {
         debug_assert_eq!(0, kv.num_primary_keys());
         let mut stats = WriteMetrics::default();
         self.write_key_value(kv, &mut stats);
-
-        self.alloc_tracker
-            .on_allocation(stats.key_bytes + stats.value_bytes);
+        stats.num_rows = 1;
+        stats.max_sequence = kv.sequence();
         self.update_stats(stats);
         Ok(())
     }
@@ -213,9 +213,15 @@ impl Memtable for SimpleBulkMemtable {
             .start_timer();
         series.extend(ts, OpType::Put as u8, sequence, fields.into_iter())?;
         extend_timer.observe_duration();
-        self.alloc_tracker.on_allocation(part.estimated_size());
-        self.max_timestamp.fetch_max(part.max_ts, Ordering::Relaxed);
-        self.min_timestamp.fetch_min(part.min_ts, Ordering::Relaxed);
+
+        self.update_stats(WriteMetrics {
+            key_bytes: 0,
+            value_bytes: part.estimated_size(),
+            min_ts: part.min_ts,
+            max_ts: part.max_ts,
+            num_rows: part.num_rows,
+            max_sequence: sequence,
+        });
         Ok(())
     }
 
@@ -240,14 +246,14 @@ impl Memtable for SimpleBulkMemtable {
         projection: Option<&[ColumnId]>,
         predicate: PredicateGroup,
         sequence: Option<SequenceNumber>,
-    ) -> MemtableRanges {
+    ) -> error::Result<MemtableRanges> {
         let builder = Box::new(self.create_iter(projection, sequence).unwrap());
 
         let context = Arc::new(MemtableRangeContext::new(self.id, builder, predicate));
-        MemtableRanges {
+        Ok(MemtableRanges {
             ranges: [(0, MemtableRange::new(context))].into(),
             stats: self.stats(),
-        }
+        })
     }
 
     fn is_empty(&self) -> bool {

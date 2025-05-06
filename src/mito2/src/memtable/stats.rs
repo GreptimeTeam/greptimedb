@@ -14,6 +14,8 @@
 
 //! Internal metrics of the memtable.
 
+use store_api::storage::SequenceNumber;
+
 /// Metrics of writing memtables.
 pub(crate) struct WriteMetrics {
     /// Size allocated by keys.
@@ -24,6 +26,10 @@ pub(crate) struct WriteMetrics {
     pub(crate) min_ts: i64,
     /// Maximum timestamp
     pub(crate) max_ts: i64,
+    /// Rows written.
+    pub(crate) num_rows: usize,
+    /// Max sequence number written.
+    pub(crate) max_sequence: SequenceNumber,
 }
 
 impl Default for WriteMetrics {
@@ -33,6 +39,8 @@ impl Default for WriteMetrics {
             value_bytes: 0,
             min_ts: i64::MAX,
             max_ts: i64::MIN,
+            num_rows: 0,
+            max_sequence: SequenceNumber::MIN,
         }
     }
 }
