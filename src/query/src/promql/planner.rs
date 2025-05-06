@@ -415,6 +415,7 @@ impl PromPlanner {
         session_state: &SessionState,
         binary_expr: &PromBinaryExpr,
     ) -> Result<LogicalPlan> {
+        common_telemetry::info!("prom_binary_expr_to_plan, binary_expr: {:?}", binary_expr);
         let PromBinaryExpr {
             lhs,
             rhs,
@@ -431,6 +432,7 @@ impl PromPlanner {
         };
         let is_comparison_op = Self::is_token_a_comparison_op(*op);
 
+        common_telemetry::info!("Try build literal expr, lhs: <{:?}>, rhs: <{:?}>", lhs, rhs);
         // we should build a filter plan here if the op is comparison op and need not
         // to return 0/1. Otherwise, we should build a projection plan
         match (
@@ -438,6 +440,12 @@ impl PromPlanner {
             Self::try_build_literal_expr(rhs),
         ) {
             (Some(lhs), Some(rhs)) => {
+                common_telemetry::info!(
+                    "prom_binary_expr_to_plan both literal, lhs: {}, rhs: {}",
+                    lhs,
+                    rhs
+                );
+
                 self.ctx.time_index_column = Some(DEFAULT_TIME_INDEX_COLUMN.to_string());
                 self.ctx.field_columns = vec![DEFAULT_FIELD_COLUMN.to_string()];
                 self.ctx.reset_table_name_and_schema();
@@ -467,7 +475,17 @@ impl PromPlanner {
             }
             // lhs is a literal, rhs is a column
             (Some(mut expr), None) => {
+                common_telemetry::info!(
+                    "prom_binary_expr_to_plan left literal, lhs: {}, None",
+                    expr
+                );
+
                 let input = self.prom_expr_to_plan(rhs, session_state).await?;
+                common_telemetry::info!(
+                    "prom_binary_expr_to_plan, lhs: {}, rhs_input: {}",
+                    expr,
+                    input,
+                );
                 // check if the literal is a special time expr
                 if let Some(time_expr) = Self::try_build_special_time_expr(
                     lhs,
@@ -496,7 +514,17 @@ impl PromPlanner {
             }
             // lhs is a column, rhs is a literal
             (None, Some(mut expr)) => {
+                common_telemetry::info!(
+                    "prom_binary_expr_to_plan right literal, None, rhs: {}",
+                    expr
+                );
+
                 let input = self.prom_expr_to_plan(lhs, session_state).await?;
+                common_telemetry::info!(
+                    "prom_binary_expr_to_plan, lhs_input: {}, rhs: {}",
+                    input,
+                    expr
+                );
                 // check if the literal is a special time expr
                 if let Some(time_expr) = Self::try_build_special_time_expr(
                     rhs,
@@ -525,6 +553,8 @@ impl PromPlanner {
             }
             // both are columns. join them on time index
             (None, None) => {
+                common_telemetry::info!("prom_binary_expr_to_plan no literal, None, None");
+
                 let left_input = self.prom_expr_to_plan(lhs, session_state).await?;
                 let left_field_columns = self.ctx.field_columns.clone();
                 let left_time_index_column = self.ctx.time_index_column.clone();
@@ -743,6 +773,11 @@ impl PromPlanner {
         session_state: &SessionState,
         call_expr: &Call,
     ) -> Result<LogicalPlan> {
+        common_telemetry::info!(
+            "Planning Prometheus call expression, call_expr: {:?}",
+            call_expr
+        );
+
         let Call { func, args } = call_expr;
         // some special functions that are not expression but a plan
         match func.name {
@@ -756,9 +791,11 @@ impl PromPlanner {
 
         // transform function arguments
         let args = self.create_function_args(&args.args)?;
+        common_telemetry::info!("Planning function args, args: {:?}", args);
         let input = if let Some(prom_expr) = &args.input {
             self.prom_expr_to_plan(prom_expr, session_state).await?
         } else {
+            common_telemetry::info!("Planning function args, no input, reset time index");
             self.ctx.time_index_column = Some(SPECIAL_TIME_FUNCTION.to_string());
             self.ctx.reset_table_name_and_schema();
             LogicalPlan::Extension(Extension {
@@ -2828,6 +2865,13 @@ impl PromPlanner {
         let project_fields = non_field_columns_iter
             .chain(field_columns_iter)
             .collect::<Result<Vec<_>>>()?;
+
+        common_telemetry::info!(
+            "Project for each field, input: <{}>, project fields: {:?}",
+            input,
+            project_fields
+        );
+
         LogicalPlanBuilder::from(input)
             .project(project_fields)
             .context(DataFusionPlanningSnafu)?
