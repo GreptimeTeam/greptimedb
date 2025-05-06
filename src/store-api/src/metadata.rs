@@ -29,7 +29,10 @@ use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datatypes::arrow;
 use datatypes::arrow::datatypes::FieldRef;
-use datatypes::schema::{ColumnSchema, FulltextOptions, Schema, SchemaRef, SkippingIndexOptions};
+use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::{
+    ColumnDefaultConstraint, ColumnSchema, FulltextOptions, Schema, SchemaRef, SkippingIndexOptions,
+};
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{ensure, Location, OptionExt, ResultExt, Snafu};
@@ -567,7 +570,7 @@ impl RegionMetadataBuilder {
         match kind {
             AlterKind::AddColumns { columns } => self.add_columns(columns)?,
             AlterKind::DropColumns { names } => self.drop_columns(&names),
-            AlterKind::ModifyColumnTypes { columns } => self.modify_column_types(columns),
+            AlterKind::ModifyColumnTypes { columns } => self.modify_column_types(columns)?,
             AlterKind::SetIndex { options } => match options {
                 ApiSetIndexOptions::Fulltext {
                     column_name,
@@ -681,7 +684,7 @@ impl RegionMetadataBuilder {
     }
 
     /// Changes columns type to the metadata if exist.
-    fn modify_column_types(&mut self, columns: Vec<ModifyColumnType>) {
+    fn modify_column_types(&mut self, columns: Vec<ModifyColumnType>) -> Result<()> {
         let mut change_type_map: HashMap<_, _> = columns
             .into_iter()
             .map(
@@ -694,9 +697,24 @@ impl RegionMetadataBuilder {
 
         for column_meta in self.column_metadatas.iter_mut() {
             if let Some(target_type) = change_type_map.remove(&column_meta.column_schema.name) {
-                column_meta.column_schema.data_type = target_type;
+                column_meta.column_schema.data_type = target_type.clone();
+                // also cast default value to target_type if default value exist
+                let new_default =
+                    if let Some(default_value) = column_meta.column_schema.default_constraint() {
+                        Some(default_value.cast_to_datatype(&target_type).context(
+                            CastDefaultValueSnafu {
+                                default_value: default_value.clone(),
+                                target_type,
+                            },
+                        )?)
+                    } else {
+                        None
+                    };
+                column_meta.column_schema.default_constraint = new_default;
             }
         }
+
+        Ok(())
     }
 
     fn change_column_inverted_index_options(
@@ -963,6 +981,15 @@ pub enum MetadataError {
     DecodeArrowIpc {
         #[snafu(source)]
         error: arrow::error::ArrowError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to cast default value {:?} to {}", default_value, target_type))]
+    CastDefaultValue {
+        default_value: ColumnDefaultConstraint,
+        target_type: ConcreteDataType,
+        source: datatypes::Error,
         #[snafu(implicit)]
         location: Location,
     },

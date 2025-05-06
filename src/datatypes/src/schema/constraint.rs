@@ -20,6 +20,7 @@ use snafu::{ensure, ResultExt};
 
 use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{self, Result};
+use crate::types::cast;
 use crate::value::Value;
 use crate::vectors::operations::VectorOp;
 use crate::vectors::{TimestampMillisecondVector, VectorRef};
@@ -175,6 +176,18 @@ impl ColumnDefaultConstraint {
 
                 Ok(v.clone())
             }
+        }
+    }
+
+    /// Cast default value to given type
+    pub fn cast_to_datatype(&self, data_type: &ConcreteDataType) -> Result<Self> {
+        match self {
+            ColumnDefaultConstraint::Value(v) => Ok(Self::Value(cast(v.clone(), data_type)?)),
+            ColumnDefaultConstraint::Function(expr) => match &expr[..] {
+                // no need to cast, since function always require a data_type when need to create default value
+                CURRENT_TIMESTAMP | CURRENT_TIMESTAMP_FN | NOW_FN => Ok(self.clone()),
+                _ => error::UnsupportedDefaultExprSnafu { expr }.fail(),
+            },
         }
     }
 
