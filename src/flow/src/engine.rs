@@ -25,9 +25,25 @@ use crate::Error;
 pub type FlowId = u64;
 pub type TableName = [String; 3];
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct FlowAuthHeader {
     auth_schema: api::v1::auth_header::AuthScheme,
+}
+
+impl std::fmt::Debug for FlowAuthHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.auth() {
+            api::v1::auth_header::AuthScheme::Basic(basic) => f
+                .debug_struct("Basic")
+                .field("username", &basic.username)
+                .field("password", &"<RETRACTED>")
+                .finish(),
+            api::v1::auth_header::AuthScheme::Token(_) => f
+                .debug_struct("Token")
+                .field("token", &"<RETRACTED>")
+                .finish(),
+        }
+    }
 }
 
 impl FlowAuthHeader {
