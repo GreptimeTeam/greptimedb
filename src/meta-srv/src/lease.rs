@@ -41,7 +41,7 @@ pub async fn find_datanode_lease_value(
     let lease_key = DatanodeLeaseKey {
         node_id: datanode_id,
     };
-    let lease_key_bytes: Vec<u8> = lease_key.clone().try_into()?;
+    let lease_key_bytes: Vec<u8> = lease_key.try_into()?;
     let Some(kv) = in_memory_key
         .get(&lease_key_bytes)
         .await
