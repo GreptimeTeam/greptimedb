@@ -2467,7 +2467,8 @@ pub async fn test_pipeline_auto_transform_with_select(store_type: StorageType) {
           - select:
               fields:
                 - ts
-                - http_status_code, s_code
+                - name: http_status_code
+                  to: s_code
         "#;
 
         // 1. create pipeline

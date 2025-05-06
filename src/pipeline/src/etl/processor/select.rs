@@ -13,9 +13,10 @@
 // limitations under the License.
 
 use ahash::{HashSet, HashSetExt};
+use common_telemetry::warn;
 use snafu::OptionExt;
 
-use crate::error::{Error, InvalidInputSnafu, KeyMustBeStringSnafu, Result};
+use crate::error::{Error, KeyMustBeStringSnafu, ProcessorUnsupportedValueSnafu, Result};
 use crate::etl::field::Fields;
 use crate::etl::processor::{
     yaml_new_field, yaml_new_fields, yaml_string, FIELDS_NAME, FIELD_NAME, TYPE_NAME,
@@ -40,9 +41,9 @@ impl TryFrom<String> for SelectType {
         match value.as_str() {
             INCLUDE_KEY => Ok(SelectType::Include),
             EXCLUDE_KEY => Ok(SelectType::Exclude),
-            _ => InvalidInputSnafu {
-                input: value,
-                reason: "expect 'include' or 'exclude'",
+            _ => ProcessorUnsupportedValueSnafu {
+                processor: PROCESSOR_SELECT.to_string(),
+                val: format!("'{}', expect '{}' or '{}'", value, INCLUDE_KEY, EXCLUDE_KEY),
             }
             .fail(),
         }
@@ -61,6 +62,8 @@ impl TryFrom<&yaml_rust::yaml::Hash> for SelectProcessor {
     fn try_from(value: &yaml_rust::yaml::Hash) -> std::result::Result<Self, Self::Error> {
         let mut fields = Fields::default();
         let mut select_type = SelectType::default();
+
+        warn!("[DEBUG]select processor config: {:?}", value);
 
         for (k, v) in value.iter() {
             let key = k

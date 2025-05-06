@@ -24,14 +24,6 @@ use snafu::{Location, Snafu};
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
-    #[snafu(display("Invalid input: {input}, reason: {reason}"))]
-    InvalidInput {
-        input: String,
-        reason: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Empty input field"))]
     EmptyInputField {
         #[snafu(implicit)]
@@ -43,6 +35,14 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Field renaming must be a string pair of 'name' and 'to', got: {value:?}"))]
+    InvalidFieldRename {
+        value: yaml_rust::Yaml,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Processor must be a map"))]
     ProcessorMustBeMap {
         #[snafu(implicit)]
@@ -747,8 +747,7 @@ impl ErrorExt for Error {
             CollectRecords { source, .. } => source.status_code(),
             PipelineNotFound { .. }
             | InvalidPipelineVersion { .. }
-            | InvalidCustomTimeIndex { .. }
-            | InvalidInput { .. } => StatusCode::InvalidArguments,
+            | InvalidCustomTimeIndex { .. } => StatusCode::InvalidArguments,
             BuildDfLogicalPlan { .. } => StatusCode::Internal,
             ExecuteInternalStatement { source, .. } => source.status_code(),
             DataFrame { source, .. } => source.status_code(),
@@ -757,6 +756,7 @@ impl ErrorExt for Error {
 
             EmptyInputField { .. }
             | MissingInputField { .. }
+            | InvalidFieldRename { .. }
             | ProcessorMustBeMap { .. }
             | ProcessorMissingField { .. }
             | ProcessorExpectString { .. }
