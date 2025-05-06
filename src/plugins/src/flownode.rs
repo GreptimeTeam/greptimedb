@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
-
 use auth::StaticUserProvider;
 use common_base::Plugins;
 use flow::error::{IllegalAuthConfigSnafu, NotImplementedSnafu, Result};
@@ -26,28 +24,28 @@ use crate::options::PluginOptions;
 pub async fn setup_flownode_plugins(
     plugins: &mut Plugins,
     _plugin_options: &[PluginOptions],
-    fe_opts: &FlownodeOptions,
+    fn_opts: &FlownodeOptions,
 ) -> Result<()> {
-    if let Some(user_provider) = fe_opts.user_provider.as_ref() {
+    if let Some(user_provider) = fn_opts.user_provider.as_ref() {
         let provider =
             auth::user_provider_from_option(user_provider).context(IllegalAuthConfigSnafu)?;
+
         // downcast to StaticUserProvider
-        // TODO: extract password from static user provider and wrap in AuthScheme basic
-        let Some(static_provider) = (&provider as &dyn Any).downcast_ref::<StaticUserProvider>()
-        else {
+        if let Some(static_provider) = provider.as_any().downcast_ref::<StaticUserProvider>() {
+            let (usr, pwd) = static_provider
+                .get_one_user_pwd()
+                .context(IllegalAuthConfigSnafu)?;
+            let auth_header = FlowAuthHeader::from_user_pwd(&usr, &pwd);
+            plugins.insert(auth_header);
+        } else {
             NotImplementedSnafu {
                 reason: format!(
-                    "flownode Only support static provider for now, get {:?}",
-                    provider.type_id()
+                    "flownode Only support static provider for now, get {}",
+                    (*provider).type_name()
                 ),
             }
             .fail()?
         };
-        let (usr, pwd) = static_provider
-            .get_one_user_pwd()
-            .context(IllegalAuthConfigSnafu)?;
-        let auth_header = FlowAuthHeader::from_user_pwd(&usr, &pwd);
-        plugins.insert(auth_header);
     }
     Ok(())
 }

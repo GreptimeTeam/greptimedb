@@ -15,12 +15,14 @@
 pub(crate) mod static_user_provider;
 pub(crate) mod watch_file_user_provider;
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io;
 use std::io::BufRead;
 use std::path::Path;
 
+use common_base::named_any::NamedAny;
 use common_base::secrets::ExposeSecret;
 use snafu::{ensure, OptionExt, ResultExt};
 
@@ -33,7 +35,7 @@ use crate::user_info::DefaultUserInfo;
 use crate::{auth_mysql, UserInfoRef};
 
 #[async_trait::async_trait]
-pub trait UserProvider: Send + Sync {
+pub trait UserProvider: Send + Sync + NamedAny {
     fn name(&self) -> &str;
 
     /// Checks whether a user is valid and allowed to access the database.
@@ -62,6 +64,8 @@ pub trait UserProvider: Send + Sync {
     fn external(&self) -> bool {
         false
     }
+
+    fn as_any(&self) -> &dyn Any;
 }
 
 fn load_credential_from_file(filepath: &str) -> Result<Option<HashMap<String, Vec<u8>>>> {

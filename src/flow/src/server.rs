@@ -383,6 +383,7 @@ impl FlownodeBuilder {
             batching,
             self.flow_metadata_manager.clone(),
             self.catalog_manager.clone(),
+            self.plugins.clone(),
         );
 
         let server = FlownodeServer::new(FlowService::new(Arc::new(dual)));

@@ -12,16 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod bit_vec;
-pub mod bytes;
-pub mod named_any;
-pub mod plugins;
-pub mod range_read;
-#[allow(clippy::all)]
-pub mod readable_size;
-pub mod secrets;
+//! named any trait, for printing typename in log msg
+//!
 
-pub type AffectedRows = usize;
+use std::any::Any;
 
-pub use bit_vec::BitVec;
-pub use plugins::Plugins;
+/// TODO(discord9): binary bloat due to this?
+pub trait NamedAny {
+    fn type_name(&self) -> &'static str;
+}
+
+impl<T: Any> NamedAny for T {
+    fn type_name(&self) -> &'static str {
+        std::any::type_name::<T>()
+    }
+}

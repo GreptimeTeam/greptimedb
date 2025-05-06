@@ -117,6 +117,10 @@ impl UserProvider for MockUserProvider {
             .fail()
         }
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 #[tokio::test]
