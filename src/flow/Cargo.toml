@@ -40,7 +40,7 @@ datafusion-expr.workspace = true
 datafusion-physical-expr.workspace = true
 datafusion-substrait.workspace = true
 datatypes.workspace = true
-dfir_rs = "0.13.0"
+dfir_rs = { version = "0.13.0", default-features = false }
 enum-as-inner = "0.6.0"
 enum_dispatch = "0.3"
 futures.workspace = true
