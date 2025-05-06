@@ -38,7 +38,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to convert to utf8, error={:?}", error))]
+    #[snafu(display("Failed to convert to utf8"))]
     FromUtf8 {
         #[snafu(source)]
         error: std::string::FromUtf8Error,

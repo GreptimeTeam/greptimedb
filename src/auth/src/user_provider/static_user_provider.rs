@@ -61,12 +61,12 @@ impl StaticUserProvider {
         }
     }
 
-    /// Make sure there is only one username/password pair
-    /// And return it
+    /// Retrun a random username/password pair
+    /// This is useful for invoking from other components in the cluster
     pub fn get_one_user_pwd(&self) -> Result<(String, String)> {
         let kv = self.users.iter().next().context(InvalidConfigSnafu {
             value: "",
-            msg: "Expect one and only one pair of username and password",
+            msg: "Expect at least one pair of username and password",
         })?;
         let username = kv.0;
         let pwd = String::from_utf8(kv.1.clone()).context(FromUtf8Snafu)?;

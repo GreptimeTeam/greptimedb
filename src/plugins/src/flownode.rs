@@ -12,41 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use auth::StaticUserProvider;
 use common_base::Plugins;
-use flow::error::{IllegalAuthConfigSnafu, NotImplementedSnafu, Result};
-use flow::{FlowAuthHeader, FlownodeOptions};
-use snafu::ResultExt;
+use flow::error::Result;
+use flow::FlownodeOptions;
 
 use crate::options::PluginOptions;
 
 #[allow(unused_mut)]
 pub async fn setup_flownode_plugins(
-    plugins: &mut Plugins,
+    _plugins: &mut Plugins,
     _plugin_options: &[PluginOptions],
-    fn_opts: &FlownodeOptions,
+    _fn_opts: &FlownodeOptions,
 ) -> Result<()> {
-    if let Some(user_provider) = fn_opts.user_provider.as_ref() {
-        let provider =
-            auth::user_provider_from_option(user_provider).context(IllegalAuthConfigSnafu)?;
-
-        // downcast to StaticUserProvider
-        if let Some(static_provider) = provider.as_any().downcast_ref::<StaticUserProvider>() {
-            let (usr, pwd) = static_provider
-                .get_one_user_pwd()
-                .context(IllegalAuthConfigSnafu)?;
-            let auth_header = FlowAuthHeader::from_user_pwd(&usr, &pwd);
-            plugins.insert(auth_header);
-        } else {
-            NotImplementedSnafu {
-                reason: format!(
-                    "flownode Only support static provider for now, get {}",
-                    (*provider).type_name()
-                ),
-            }
-            .fail()?
-        };
-    }
     Ok(())
 }
 

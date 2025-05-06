@@ -33,8 +33,8 @@ use common_telemetry::info;
 use common_telemetry::logging::TracingOptions;
 use common_version::{short_version, version};
 use flow::{
-    FlowAuthHeader, FlownodeBuilder, FlownodeInstance, FlownodeServiceBuilder, FrontendClient,
-    FrontendInvoker,
+    get_flow_auth_options, FlownodeBuilder, FlownodeInstance, FlownodeServiceBuilder,
+    FrontendClient, FrontendInvoker,
 };
 use meta_client::{MetaClientOptions, MetaClientType};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -258,7 +258,6 @@ impl StartCommand {
         plugins::setup_flownode_plugins(&mut plugins, &plugin_opts, &opts)
             .await
             .context(StartFlownodeSnafu)?;
-        info!("Setup auth header: {:?}", plugins.get::<FlowAuthHeader>());
 
         let member_id = opts
             .node_id
@@ -334,8 +333,9 @@ impl StartCommand {
         );
 
         let flow_metadata_manager = Arc::new(FlowMetadataManager::new(cached_meta_backend.clone()));
+        let flow_auth_header = get_flow_auth_options(&opts).context(StartFlownodeSnafu)?;
         let frontend_client =
-            FrontendClient::from_meta_client(meta_client.clone(), plugins.get::<FlowAuthHeader>());
+            FrontendClient::from_meta_client(meta_client.clone(), flow_auth_header);
         let flownode_builder = FlownodeBuilder::new(
             opts.clone(),
             plugins,
