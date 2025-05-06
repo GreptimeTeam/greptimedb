@@ -18,6 +18,7 @@
 
 #![feature(let_chains)]
 #![feature(assert_matches)]
+#![feature(result_flattening)]
 
 #[cfg(any(test, feature = "test"))]
 #[cfg_attr(feature = "test", allow(unused))]
