@@ -45,15 +45,16 @@ VALUES
 
 Affected Rows: 28
 
+-- SQLNESS SORT_RESULT 3 1
 tql eval(1697731200, 1698595200, 120) max_over_time(test_metric[30s]) > 100 and on () (day_of_week() == 0 or day_of_week() == 6);
 
 +---------------------+-------------------------------------------+-------------+-----------+-------------+
 | timestamp           | prom_max_over_time(timestamp_range,value) | asset       | attribute | measurement |
 +---------------------+-------------------------------------------+-------------+-----------+-------------+
-| 2023-10-29T00:00:00 | 219.1                                     | Generator01 | voltage   | electrical  |
-| 2023-10-28T12:00:00 | 219.4                                     | Generator02 | voltage   | electrical  |
-| 2023-10-29T12:00:00 | 220.0                                     | Generator02 | voltage   | electrical  |
 | 2023-10-28T00:00:00 | 218.5                                     | Generator01 | voltage   | electrical  |
+| 2023-10-28T12:00:00 | 219.4                                     | Generator02 | voltage   | electrical  |
+| 2023-10-29T00:00:00 | 219.1                                     | Generator01 | voltage   | electrical  |
+| 2023-10-29T12:00:00 | 220.0                                     | Generator02 | voltage   | electrical  |
 +---------------------+-------------------------------------------+-------------+-----------+-------------+
 
 DROP TABLE test_metric;

@@ -41,6 +41,7 @@ VALUES
 ('Generator02', 'voltage', 'electrical', '2023-10-29 12:00:00', 220.0),
 ('Generator02', 'current', 'electrical', '2023-10-29 18:00:00', 14.6);
 
+-- SQLNESS SORT_RESULT 3 1
 tql eval(1697731200, 1698595200, 120) max_over_time(test_metric[30s]) > 100 and on () (day_of_week() == 0 or day_of_week() == 6);
 
 DROP TABLE test_metric;
