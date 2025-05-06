@@ -705,6 +705,8 @@ impl Procedure for RegionMigrationProcedure {
                         .inc();
                     Err(ProcedureError::retry_later(e))
                 } else {
+                    // Consumes the opening region guard before deregistering the failure detectors.
+                    self.context.volatile_ctx.opening_region_guard.take();
                     self.context
                         .deregister_failure_detectors_for_candidate_region()
                         .await;
