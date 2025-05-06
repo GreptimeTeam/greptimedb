@@ -47,7 +47,6 @@ use query::dummy_catalog::TableProviderFactoryRef;
 use query::QueryEngineFactory;
 use servers::export_metrics::ExportMetricsTask;
 use servers::server::ServerHandlers;
-use servers::Mode;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::path_utils::{region_dir, WAL_DIR};
 use store_api::region_engine::{RegionEngineRef, RegionRole};
@@ -267,24 +266,18 @@ impl DatanodeBuilder {
             None
         };
 
-        let mode = if heartbeat_task.is_none() {
-            Mode::Standalone
-        } else {
-            Mode::Distributed
-        };
+        let is_standalone = heartbeat_task.is_none();
         let greptimedb_telemetry_task = get_greptimedb_telemetry_task(
             Some(self.opts.storage.data_home.clone()),
-            &mode,
-            self.opts.enable_telemetry,
+            is_standalone && self.opts.enable_telemetry,
         )
         .await;
 
-        let leases_notifier =
-            if self.opts.require_lease_before_startup && matches!(mode, Mode::Distributed) {
-                Some(Arc::new(Notify::new()))
-            } else {
-                None
-            };
+        let leases_notifier = if self.opts.require_lease_before_startup && !is_standalone {
+            Some(Arc::new(Notify::new()))
+        } else {
+            None
+        };
 
         let export_metrics_task =
             ExportMetricsTask::try_new(&self.opts.export_metrics, Some(&self.plugins))

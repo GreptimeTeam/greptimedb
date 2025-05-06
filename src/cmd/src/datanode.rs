@@ -281,7 +281,6 @@ mod tests {
         common_telemetry::init_default_ut_logging();
         let mut file = create_named_temp_file();
         let toml_str = r#"
-            mode = "distributed"
             enable_memory_catalog = false
             node_id = 42
 
@@ -308,7 +307,6 @@ mod tests {
     fn test_read_from_config_file() {
         let mut file = create_named_temp_file();
         let toml_str = r#"
-            mode = "distributed"
             enable_memory_catalog = false
             node_id = 42
 
@@ -474,7 +472,6 @@ mod tests {
     fn test_config_precedence_order() {
         let mut file = create_named_temp_file();
         let toml_str = r#"
-            mode = "distributed"
             enable_memory_catalog = false
             node_id = 42
             rpc_addr = "127.0.0.1:3001"
