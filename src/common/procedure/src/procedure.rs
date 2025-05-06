@@ -25,6 +25,7 @@ use snafu::{ResultExt, Snafu};
 use uuid::Uuid;
 
 use crate::error::{self, Error, Result};
+use crate::local::DynamicKeyLockGuard;
 use crate::watcher::Watcher;
 
 pub type Output = Arc<dyn Any + Send + Sync>;
@@ -144,6 +145,9 @@ pub trait ContextProvider: Send + Sync {
     /// This method is used to mark a resource as being operated on by a procedure.
     /// If the poison key already exists with a different value, the operation will fail.
     async fn try_put_poison(&self, key: &PoisonKey, procedure_id: ProcedureId) -> Result<()>;
+
+    /// Acquires a key lock for the procedure.
+    async fn acquire_lock(&self, key: &StringKey) -> DynamicKeyLockGuard;
 }
 
 /// Reference-counted pointer to [ContextProvider].

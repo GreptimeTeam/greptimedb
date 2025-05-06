@@ -128,7 +128,8 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
             session_state
                 .register_udf(udf)
                 .context(RegisterUdfSnafu { name: func.name() })?;
-            let _ = session_state.register_udaf(Arc::new(UddSketchState::udf_impl()));
+            let _ = session_state.register_udaf(Arc::new(UddSketchState::state_udf_impl()));
+            let _ = session_state.register_udaf(Arc::new(UddSketchState::merge_udf_impl()));
             let _ = session_state.register_udaf(Arc::new(HllState::state_udf_impl()));
             let _ = session_state.register_udaf(Arc::new(HllState::merge_udf_impl()));
             let _ = session_state.register_udaf(Arc::new(GeoPathAccumulator::udf_impl()));

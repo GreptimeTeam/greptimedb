@@ -1,7 +1,7 @@
 #! /usr/bin/env bash
 
-CLUSTER_DASHBOARD_DIR=${1:-grafana/dashboards/cluster}
-STANDALONE_DASHBOARD_DIR=${2:-grafana/dashboards/standalone}
+CLUSTER_DASHBOARD_DIR=${1:-grafana/dashboards/metrics/cluster}
+STANDALONE_DASHBOARD_DIR=${2:-grafana/dashboards/metrics/standalone}
 DAC_IMAGE=ghcr.io/zyy17/dac:20250423-522bd35
 
 remove_instance_filters() {

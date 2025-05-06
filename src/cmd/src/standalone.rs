@@ -74,7 +74,6 @@ use servers::export_metrics::{ExportMetricsOption, ExportMetricsTask};
 use servers::grpc::GrpcOptions;
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
-use servers::Mode;
 use snafu::ResultExt;
 use tokio::sync::RwLock;
 use tracing_appender::non_blocking::WorkerGuard;
@@ -500,12 +499,9 @@ impl StartCommand {
             .build(),
         );
 
-        let datanode = DatanodeBuilder::new(dn_opts, plugins.clone(), Mode::Standalone)
-            .with_kv_backend(kv_backend.clone())
-            .with_cache_registry(layered_cache_registry.clone())
-            .build()
-            .await
-            .context(error::StartDatanodeSnafu)?;
+        let mut builder = DatanodeBuilder::new(dn_opts, plugins.clone(), kv_backend.clone());
+        builder.with_cache_registry(layered_cache_registry.clone());
+        let datanode = builder.build().await.context(error::StartDatanodeSnafu)?;
 
         let information_extension = Arc::new(StandaloneInformationExtension::new(
             datanode.region_server(),
@@ -860,8 +856,6 @@ mod tests {
     fn test_read_from_config_file() {
         let mut file = create_named_temp_file();
         let toml_str = r#"
-            mode = "distributed"
-
             enable_memory_catalog = true
 
             [wal]
@@ -992,8 +986,6 @@ mod tests {
     fn test_config_precedence_order() {
         let mut file = create_named_temp_file();
         let toml_str = r#"
-            mode = "standalone"
-
             [http]
             addr = "127.0.0.1:4000"
 

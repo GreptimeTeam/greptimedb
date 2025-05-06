@@ -290,7 +290,7 @@ impl RegionMetadata {
     pub fn project(&self, projection: &[ColumnId]) -> Result<RegionMetadata> {
         // check time index
         ensure!(
-            projection.iter().any(|id| *id == self.time_index),
+            projection.contains(&self.time_index),
             TimeIndexNotFoundSnafu
         );
 
@@ -970,6 +970,21 @@ pub enum MetadataError {
     #[snafu(display("Unexpected: {}", reason))]
     Unexpected {
         reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to encode/decode flight message"))]
+    FlightCodec {
+        source: common_grpc::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to decode prost message"))]
+    Prost {
+        #[snafu(source)]
+        error: prost::DecodeError,
         #[snafu(implicit)]
         location: Location,
     },

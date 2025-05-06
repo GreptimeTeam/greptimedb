@@ -60,7 +60,7 @@ pub enum GenericFn {
     Mul,
     Div,
     Mod,
-    // varadic func
+    // variadic func
     And,
     Or,
     // unmaterized func

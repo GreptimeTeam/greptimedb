@@ -176,15 +176,12 @@ impl TableRoute {
                 })?
                 .into();
 
-            let leader_peer = peers
-                .get(region_route.leader_peer_index as usize)
-                .cloned()
-                .map(Into::into);
+            let leader_peer = peers.get(region_route.leader_peer_index as usize).cloned();
 
             let follower_peers = region_route
                 .follower_peer_indexes
                 .into_iter()
-                .filter_map(|x| peers.get(x as usize).cloned().map(Into::into))
+                .filter_map(|x| peers.get(x as usize).cloned())
                 .collect::<Vec<_>>();
 
             region_routes.push(RegionRoute {

@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use auth::UserProviderRef;
 use common_base::Plugins;
-use common_config::{Configurable, Mode};
+use common_config::Configurable;
 use servers::error::Error as ServerError;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::greptime_handler::GreptimeRequestHandler;
@@ -143,15 +143,10 @@ where
         let user_provider = self.plugins.get::<UserProviderRef>();
 
         // Determine whether it is Standalone or Distributed mode based on whether the meta client is configured.
-        let mode = if opts.meta_client.is_none() {
-            Mode::Standalone
+        let runtime = if opts.meta_client.is_none() {
+            Some(builder.runtime().clone())
         } else {
-            Mode::Distributed
-        };
-
-        let runtime = match mode {
-            Mode::Standalone => Some(builder.runtime().clone()),
-            _ => None,
+            None
         };
 
         let greptime_request_handler = GreptimeRequestHandler::new(

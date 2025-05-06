@@ -18,7 +18,8 @@ pub(crate) mod upgrade_candidate_region;
 
 use std::any::Any;
 
-use common_procedure::Status;
+use common_meta::lock_key::TableLock;
+use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::warn;
 use serde::{Deserialize, Serialize};
 
@@ -42,7 +43,14 @@ pub enum UpdateMetadata {
 #[async_trait::async_trait]
 #[typetag::serde]
 impl State for UpdateMetadata {
-    async fn next(&mut self, ctx: &mut Context) -> Result<(Box<dyn State>, Status)> {
+    async fn next(
+        &mut self,
+        ctx: &mut Context,
+        procedure_ctx: &ProcedureContext,
+    ) -> Result<(Box<dyn State>, Status)> {
+        let table_id = TableLock::Write(ctx.region_id().table_id()).into();
+        let _guard = procedure_ctx.provider.acquire_lock(&table_id).await;
+
         match self {
             UpdateMetadata::Downgrade => {
                 self.downgrade_leader_region(ctx).await?;

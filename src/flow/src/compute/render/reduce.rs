@@ -22,7 +22,7 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::DataType;
 use datatypes::value::{ListValue, Value};
 use datatypes::vectors::{BooleanVector, NullVector};
-use hydroflow::scheduled::graph_ext::GraphExt;
+use dfir_rs::scheduled::graph_ext::GraphExt;
 use itertools::Itertools;
 use snafu::{ensure, OptionExt, ResultExt};
 
@@ -1212,7 +1212,7 @@ mod test {
 
     use common_time::Timestamp;
     use datatypes::data_type::{ConcreteDataType, ConcreteDataType as CDT};
-    use hydroflow::scheduled::graph::Hydroflow;
+    use dfir_rs::scheduled::graph::Dfir;
 
     use super::*;
     use crate::compute::render::test::{get_output_handle, harness_test_ctx, run_and_check};
@@ -1228,7 +1228,7 @@ mod test {
     /// expected: sum(number), window_start, window_end
     #[test]
     fn test_tumble_group_by() {
-        let mut df = Hydroflow::new();
+        let mut df = Dfir::new();
         let mut state = DataflowState::default();
         let mut ctx = harness_test_ctx(&mut df, &mut state);
         const START: i64 = 1625097600000;
@@ -1389,7 +1389,7 @@ mod test {
     /// select avg(number) from number;
     #[test]
     fn test_avg_eval() {
-        let mut df = Hydroflow::new();
+        let mut df = Dfir::new();
         let mut state = DataflowState::default();
         let mut ctx = harness_test_ctx(&mut df, &mut state);
 
@@ -1500,7 +1500,7 @@ mod test {
     /// | col  | Int64 |
     #[test]
     fn test_basic_distinct() {
-        let mut df = Hydroflow::new();
+        let mut df = Dfir::new();
         let mut state = DataflowState::default();
         let mut ctx = harness_test_ctx(&mut df, &mut state);
 
@@ -1556,7 +1556,7 @@ mod test {
     /// | col  | Int64 |
     #[test]
     fn test_basic_batch_reduce_accum() {
-        let mut df = Hydroflow::new();
+        let mut df = Dfir::new();
         let mut state = DataflowState::default();
         let now = state.current_time_ref();
         let mut ctx = harness_test_ctx(&mut df, &mut state);
@@ -1662,7 +1662,7 @@ mod test {
     /// | col  | Int64 |
     #[test]
     fn test_basic_reduce_accum() {
-        let mut df = Hydroflow::new();
+        let mut df = Dfir::new();
         let mut state = DataflowState::default();
         let mut ctx = harness_test_ctx(&mut df, &mut state);
 
@@ -1739,7 +1739,7 @@ mod test {
     /// this test include even more insert/delete case to cover all case for eval_distinct_core
     #[test]
     fn test_delete_reduce_distinct_accum() {
-        let mut df = Hydroflow::new();
+        let mut df = Dfir::new();
         let mut state = DataflowState::default();
         let mut ctx = harness_test_ctx(&mut df, &mut state);
 
@@ -1818,7 +1818,7 @@ mod test {
     /// this test include insert and delete which should cover all case for eval_distinct_core
     #[test]
     fn test_basic_reduce_distinct_accum() {
-        let mut df = Hydroflow::new();
+        let mut df = Dfir::new();
         let mut state = DataflowState::default();
         let mut ctx = harness_test_ctx(&mut df, &mut state);
 
@@ -1896,7 +1896,7 @@ mod test {
     /// | col  | Int64 |
     #[test]
     fn test_composite_reduce_distinct_accum() {
-        let mut df = Hydroflow::new();
+        let mut df = Dfir::new();
         let mut state = DataflowState::default();
         let mut ctx = harness_test_ctx(&mut df, &mut state);
 

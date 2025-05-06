@@ -20,7 +20,7 @@ use arrow_schema::DataType;
 use catalog::table_source::DfTableSourceProvider;
 use common_function::aggr::{
     GeoPathAccumulator, HllState, UddSketchState, GEO_PATH_NAME, HLL_MERGE_NAME, HLL_NAME,
-    UDDSKETCH_STATE_NAME,
+    UDDSKETCH_MERGE_NAME, UDDSKETCH_STATE_NAME,
 };
 use common_function::scalars::udf::create_udf;
 use common_query::logical_plan::create_aggregate_function;
@@ -165,7 +165,9 @@ impl ContextProvider for DfContextProviderAdapter {
 
     fn get_aggregate_meta(&self, name: &str) -> Option<Arc<AggregateUDF>> {
         if name == UDDSKETCH_STATE_NAME {
-            return Some(Arc::new(UddSketchState::udf_impl()));
+            return Some(Arc::new(UddSketchState::state_udf_impl()));
+        } else if name == UDDSKETCH_MERGE_NAME {
+            return Some(Arc::new(UddSketchState::merge_udf_impl()));
         } else if name == HLL_NAME {
             return Some(Arc::new(HllState::state_udf_impl()));
         } else if name == HLL_MERGE_NAME {

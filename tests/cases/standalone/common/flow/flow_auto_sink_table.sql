@@ -20,6 +20,9 @@ SHOW CREATE TABLE out_num_cnt_basic;
 ADMIN FLUSH_FLOW('test_numbers_basic');
 
 -- SQLNESS ARG restart=true
+SELECT 1;
+
+-- SQLNESS SLEEP 3s
 SHOW CREATE TABLE out_num_cnt_basic;
 
 SHOW CREATE FLOW test_numbers_basic;
@@ -44,10 +47,16 @@ FROM
     numbers_input_basic
 GROUP BY
     ts;
+-- SQLNESS ARG restart=true
+SELECT 1;
 
+-- SQLNESS SLEEP 3s
 SHOW CREATE TABLE out_num_cnt_basic;
 
 -- SQLNESS ARG restart=true
+SELECT 1;
+
+-- SQLNESS SLEEP 3s
 SHOW CREATE FLOW test_numbers_basic;
 
 SHOW CREATE TABLE out_num_cnt_basic;

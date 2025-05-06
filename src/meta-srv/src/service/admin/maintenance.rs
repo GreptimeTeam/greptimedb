@@ -15,19 +15,36 @@
 use std::collections::HashMap;
 
 use common_meta::key::maintenance::MaintenanceModeManagerRef;
+use common_telemetry::{info, warn};
+use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use tonic::codegen::http;
 use tonic::codegen::http::Response;
 
 use crate::error::{
-    InvalidHttpBodySnafu, MaintenanceModeManagerSnafu, MissingRequiredParameterSnafu,
-    ParseBoolSnafu, UnsupportedSnafu,
+    self, InvalidHttpBodySnafu, MaintenanceModeManagerSnafu, MissingRequiredParameterSnafu,
+    ParseBoolSnafu, Result, UnsupportedSnafu,
 };
 use crate::service::admin::HttpHandler;
 
 #[derive(Clone)]
 pub struct MaintenanceHandler {
     pub manager: MaintenanceModeManagerRef,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct MaintenanceResponse {
+    enabled: bool,
+}
+
+impl TryFrom<MaintenanceResponse> for String {
+    type Error = error::Error;
+
+    fn try_from(response: MaintenanceResponse) -> Result<Self> {
+        serde_json::to_string(&response).context(error::SerializeToJsonSnafu {
+            input: format!("{response:?}"),
+        })
+    }
 }
 
 impl MaintenanceHandler {
@@ -37,14 +54,10 @@ impl MaintenanceHandler {
             .maintenance_mode()
             .await
             .context(MaintenanceModeManagerSnafu)?;
-        let response = if enabled {
-            "Maintenance mode is enabled"
-        } else {
-            "Maintenance mode is disabled"
-        };
+        let response = MaintenanceResponse { enabled }.try_into()?;
         http::Response::builder()
             .status(http::StatusCode::OK)
-            .body(response.into())
+            .body(response)
             .context(InvalidHttpBodySnafu)
     }
 
@@ -60,23 +73,24 @@ impl MaintenanceHandler {
                 err_msg: "'enable' must be 'true' or 'false'",
             })?;
 
-        let response = if enable {
+        if enable {
             self.manager
                 .set_maintenance_mode()
                 .await
                 .context(MaintenanceModeManagerSnafu)?;
-            "Maintenance mode enabled"
+            info!("Enable the maintenance mode.");
         } else {
             self.manager
                 .unset_maintenance_mode()
                 .await
                 .context(MaintenanceModeManagerSnafu)?;
-            "Maintenance mode disabled"
+            info!("Disable the maintenance mode.");
         };
 
+        let response = MaintenanceResponse { enabled: enable }.try_into()?;
         http::Response::builder()
             .status(http::StatusCode::OK)
-            .body(response.into())
+            .body(response)
             .context(InvalidHttpBodySnafu)
     }
 }
@@ -90,8 +104,23 @@ impl HttpHandler for MaintenanceHandler {
         params: &HashMap<String, String>,
     ) -> crate::Result<Response<String>> {
         match method {
-            http::Method::GET => self.get_maintenance().await,
-            http::Method::PUT => self.set_maintenance(params).await,
+            http::Method::GET => {
+                if params.is_empty() {
+                    self.get_maintenance().await
+                } else {
+                    warn!(
+                        "Found URL parameters in '/admin/maintenance' request, it's deprecated, will be removed in the future"
+                    );
+                    // The old version operator will send GET request with URL parameters,
+                    // so we need to support it.
+                    self.set_maintenance(params).await
+                }
+            }
+            http::Method::PUT => {
+                warn!("Found PUT request to '/admin/maintenance', it's deprecated, will be removed in the future");
+                self.set_maintenance(params).await
+            }
+            http::Method::POST => self.set_maintenance(params).await,
             _ => UnsupportedSnafu {
                 operation: format!("http method {method}"),
             }

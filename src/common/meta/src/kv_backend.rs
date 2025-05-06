@@ -35,7 +35,7 @@ pub mod memory;
 pub mod rds;
 pub mod test;
 pub mod txn;
-
+pub mod util;
 pub type KvBackendRef<E = Error> = Arc<dyn KvBackend<Error = E> + Send + Sync>;
 
 #[async_trait]

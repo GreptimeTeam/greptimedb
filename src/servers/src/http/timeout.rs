@@ -117,7 +117,7 @@ where
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         match self.inner.poll_ready(cx) {
             Poll::Pending => Poll::Pending,
-            Poll::Ready(r) => Poll::Ready(r.map_err(Into::into)),
+            Poll::Ready(r) => Poll::Ready(r),
         }
     }
 

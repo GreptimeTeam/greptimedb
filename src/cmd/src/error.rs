@@ -177,9 +177,6 @@ pub enum Error {
         source: meta_srv::error::Error,
     },
 
-    #[snafu(display("Invalid REPL command: {reason}"))]
-    InvalidReplCommand { reason: String },
-
     #[snafu(display("Failed to parse SQL: {}", sql))]
     ParseSql {
         sql: String,
@@ -331,7 +328,6 @@ impl ErrorExt for Error {
             Error::MissingConfig { .. }
             | Error::LoadLayeredConfig { .. }
             | Error::IllegalConfig { .. }
-            | Error::InvalidReplCommand { .. }
             | Error::InitTimezone { .. }
             | Error::ConnectEtcd { .. }
             | Error::CreateDir { .. }

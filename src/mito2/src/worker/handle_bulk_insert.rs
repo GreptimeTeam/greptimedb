@@ -14,8 +14,11 @@
 
 //! Handles bulk insert requests.
 
+use std::collections::HashMap;
+
 use api::helper::{value_to_grpc_value, ColumnDataTypeWrapper};
 use api::v1::{ColumnSchema, OpType, Row, Rows};
+use common_base::AffectedRows;
 use common_recordbatch::DfRecordBatch;
 use datatypes::prelude::VectorRef;
 use datatypes::vectors::Helper;
@@ -23,62 +26,64 @@ use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::{BulkInsertPayload, RegionBulkInsertsRequest};
+use tokio::sync::oneshot::Receiver;
 
 use crate::error;
 use crate::request::{OptionOutputTx, SenderWriteRequest, WriteRequest};
 use crate::worker::RegionWorkerLoop;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
-    pub(crate) async fn handle_bulk_inserts(
+    pub(crate) async fn handle_bulk_insert(
         &mut self,
-        request: RegionBulkInsertsRequest,
+        mut request: RegionBulkInsertsRequest,
         region_metadata: RegionMetadataRef,
         pending_write_requests: &mut Vec<SenderWriteRequest>,
         sender: OptionOutputTx,
     ) {
-        let schema = match region_metadata_to_column_schema(&region_metadata) {
-            Ok(schema) => schema,
-            Err(e) => {
-                sender.send(Err(e));
-                return;
-            }
-        };
+        let (column_schemas, name_to_index) =
+            match region_metadata_to_column_schema(&region_metadata) {
+                Ok(schema) => schema,
+                Err(e) => {
+                    sender.send(Err(e));
+                    return;
+                }
+            };
+
+        // fast path: only one payload.
+        if request.payloads.len() == 1 {
+            match Self::handle_payload(
+                &region_metadata,
+                request.payloads.swap_remove(0),
+                pending_write_requests,
+                column_schemas,
+                name_to_index,
+            ) {
+                Ok(task_future) => common_runtime::spawn_global(async move {
+                    sender.send(task_future.await.context(error::RecvSnafu).flatten());
+                }),
+                Err(e) => {
+                    sender.send(Err(e));
+                    return;
+                }
+            };
+            return;
+        }
+
         let mut pending_tasks = Vec::with_capacity(request.payloads.len());
         for req in request.payloads {
-            match req {
-                BulkInsertPayload::ArrowIpc(df_record_batch) => {
-                    let rows = match record_batch_to_rows(&region_metadata, &df_record_batch) {
-                        Ok(rows) => rows,
-                        Err(e) => {
-                            sender.send(Err(e));
-                            return;
-                        }
-                    };
-
-                    let write_request = match WriteRequest::new(
-                        region_metadata.region_id,
-                        OpType::Put,
-                        Rows {
-                            schema: schema.clone(),
-                            rows,
-                        },
-                        Some(region_metadata.clone()),
-                    ) {
-                        Ok(write_request) => write_request,
-                        Err(e) => {
-                            sender.send(Err(e));
-                            return;
-                        }
-                    };
-
-                    let (tx, rx) = tokio::sync::oneshot::channel();
-                    let sender = OptionOutputTx::from(tx);
-                    let req = SenderWriteRequest {
-                        sender,
-                        request: write_request,
-                    };
-                    pending_tasks.push(rx);
-                    pending_write_requests.push(req);
+            match Self::handle_payload(
+                &region_metadata,
+                req,
+                pending_write_requests,
+                column_schemas.clone(),
+                name_to_index.clone(),
+            ) {
+                Ok(task_future) => {
+                    pending_tasks.push(task_future);
+                }
+                Err(e) => {
+                    sender.send(Err(e));
+                    return;
                 }
             }
         }
@@ -91,35 +96,135 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     return;
                 }
             };
-            let result1 = match results.into_iter().collect::<error::Result<Vec<_>>>() {
-                Ok(results) => Ok(results.into_iter().sum()),
-                Err(e) => Err(e),
-            };
-            sender.send(result1);
+            sender.send(
+                match results.into_iter().collect::<error::Result<Vec<_>>>() {
+                    Ok(results) => Ok(results.into_iter().sum()),
+                    Err(e) => Err(e),
+                },
+            );
         });
+    }
+
+    fn handle_payload(
+        region_metadata: &RegionMetadataRef,
+        payload: BulkInsertPayload,
+        pending_write_requests: &mut Vec<SenderWriteRequest>,
+        column_schemas: Vec<ColumnSchema>,
+        name_to_index: HashMap<String, usize>,
+    ) -> error::Result<Receiver<error::Result<AffectedRows>>> {
+        let rx = match payload {
+            BulkInsertPayload::ArrowIpc(rb) => Self::handle_arrow_ipc(
+                region_metadata,
+                rb,
+                pending_write_requests,
+                column_schemas,
+                name_to_index,
+            ),
+            BulkInsertPayload::Rows { data, has_null } => Self::handle_rows(
+                region_metadata,
+                data,
+                column_schemas,
+                has_null,
+                pending_write_requests,
+                name_to_index,
+            ),
+        }?;
+
+        Ok(rx)
+    }
+
+    fn handle_arrow_ipc(
+        region_metadata: &RegionMetadataRef,
+        df_record_batch: DfRecordBatch,
+        pending_write_requests: &mut Vec<SenderWriteRequest>,
+        column_schemas: Vec<ColumnSchema>,
+        name_to_index: HashMap<String, usize>,
+    ) -> error::Result<Receiver<error::Result<AffectedRows>>> {
+        let has_null: Vec<_> = df_record_batch
+            .columns()
+            .iter()
+            .map(|c| c.null_count() > 0)
+            .collect();
+
+        let rows = record_batch_to_rows(region_metadata, &df_record_batch)?;
+
+        let write_request = WriteRequest {
+            region_id: region_metadata.region_id,
+            op_type: OpType::Put,
+            rows: Rows {
+                schema: column_schemas,
+                rows,
+            },
+            name_to_index,
+            has_null,
+            hint: None,
+            region_metadata: Some(region_metadata.clone()),
+        };
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let sender = OptionOutputTx::from(tx);
+        let req = SenderWriteRequest {
+            sender,
+            request: write_request,
+        };
+        pending_write_requests.push(req);
+        Ok(rx)
+    }
+
+    fn handle_rows(
+        region_metadata: &RegionMetadataRef,
+        rows: Vec<Row>,
+        column_schemas: Vec<ColumnSchema>,
+        has_null: Vec<bool>,
+        pending_write_requests: &mut Vec<SenderWriteRequest>,
+        name_to_index: HashMap<String, usize>,
+    ) -> error::Result<Receiver<error::Result<AffectedRows>>> {
+        let write_request = WriteRequest {
+            region_id: region_metadata.region_id,
+            op_type: OpType::Put,
+            rows: Rows {
+                schema: column_schemas,
+                rows,
+            },
+            name_to_index,
+            has_null,
+            hint: None,
+            region_metadata: Some(region_metadata.clone()),
+        };
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let sender = OptionOutputTx::from(tx);
+        let req = SenderWriteRequest {
+            sender,
+            request: write_request,
+        };
+        pending_write_requests.push(req);
+        Ok(rx)
     }
 }
 
 fn region_metadata_to_column_schema(
     region_meta: &RegionMetadataRef,
-) -> error::Result<Vec<ColumnSchema>> {
-    region_meta
-        .column_metadatas
-        .iter()
-        .map(|c| {
-            let wrapper = ColumnDataTypeWrapper::try_from(c.column_schema.data_type.clone())
-                .with_context(|_| error::ConvertDataTypeSnafu {
-                    data_type: c.column_schema.data_type.clone(),
-                })?;
+) -> error::Result<(Vec<ColumnSchema>, HashMap<String, usize>)> {
+    let mut column_schemas = Vec::with_capacity(region_meta.column_metadatas.len());
+    let mut name_to_index = HashMap::with_capacity(region_meta.column_metadatas.len());
 
-            Ok(ColumnSchema {
-                column_name: c.column_schema.name.clone(),
-                datatype: wrapper.datatype() as i32,
-                semantic_type: c.semantic_type as i32,
-                ..Default::default()
-            })
-        })
-        .collect::<error::Result<_>>()
+    for (idx, c) in region_meta.column_metadatas.iter().enumerate() {
+        let wrapper = ColumnDataTypeWrapper::try_from(c.column_schema.data_type.clone())
+            .with_context(|_| error::ConvertDataTypeSnafu {
+                data_type: c.column_schema.data_type.clone(),
+            })?;
+        column_schemas.push(ColumnSchema {
+            column_name: c.column_schema.name.clone(),
+            datatype: wrapper.datatype() as i32,
+            semantic_type: c.semantic_type as i32,
+            ..Default::default()
+        });
+
+        name_to_index.insert(c.column_schema.name.clone(), idx);
+    }
+
+    Ok((column_schemas, name_to_index))
 }
 
 /// Convert [DfRecordBatch] to gRPC rows.
@@ -187,7 +292,7 @@ mod tests {
     #[test]
     fn test_region_metadata_to_column_schema() {
         let region_metadata = Arc::new(TestRegionMetadataBuilder::default().build());
-        let result = region_metadata_to_column_schema(&region_metadata).unwrap();
+        let (result, _) = region_metadata_to_column_schema(&region_metadata).unwrap();
         assert_eq!(result.len(), 3);
 
         assert_eq!(result[0].column_name, "ts");

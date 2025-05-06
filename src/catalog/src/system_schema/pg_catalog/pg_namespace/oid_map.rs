@@ -84,12 +84,6 @@ mod tests {
         let key1 = "3178510";
         let key2 = "4215648";
 
-        // have collision
-        assert_eq!(
-            oid_map.hasher.hash_one(key1) as u32,
-            oid_map.hasher.hash_one(key2) as u32
-        );
-
         // insert them into oid_map
         let oid1 = oid_map.get_oid(key1);
         let oid2 = oid_map.get_oid(key2);

@@ -52,7 +52,41 @@ select uddsketch_calc(0.95, uddsketch_state(128, 0.01, `value`)) from test_uddsk
 | 100.49456770856492                                                                           |
 +----------------------------------------------------------------------------------------------+
 
+CREATE TABLE grouped_uddsketch (
+    `state` BINARY,
+    id_group INT PRIMARY KEY,
+    `ts` timestamp time index default now()
+);
+
+Affected Rows: 0
+
+INSERT INTO grouped_uddsketch (`state`, id_group) SELECT uddsketch_state(128, 0.01, `value`), `id`/5*5 as id_group FROM test_uddsketch GROUP BY id_group;
+
+Affected Rows: 3
+
+SELECT uddsketch_calc(0.1, uddsketch_merge(128, 0.01, `state`)) FROM grouped_uddsketch;
+
++------------------------------------------------------------------------------------------------+
+| uddsketch_calc(Float64(0.1),uddsketch_merge(Int64(128),Float64(0.01),grouped_uddsketch.state)) |
++------------------------------------------------------------------------------------------------+
+| 19.886670240866184                                                                             |
++------------------------------------------------------------------------------------------------+
+
+-- should fail
+SELECT uddsketch_calc(0.1, uddsketch_merge(128, 0.1, `state`)) FROM grouped_uddsketch;
+
+Error: 3001(EngineExecuteQuery), Error during planning: Merging UDDSketch with different parameters: arguments=(128, 0.1) vs actual input=(128, 0.01)
+
+-- should fail
+SELECT uddsketch_calc(0.1, uddsketch_merge(64, 0.01, `state`)) FROM grouped_uddsketch;
+
+Error: 3001(EngineExecuteQuery), Error during planning: Merging UDDSketch with different parameters: arguments=(64, 0.01) vs actual input=(128, 0.01)
+
 drop table test_uddsketch;
+
+Affected Rows: 0
+
+drop table grouped_uddsketch;
 
 Affected Rows: 0
 

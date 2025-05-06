@@ -302,7 +302,10 @@ impl PartitionTreeMemtable {
     fn update_stats(&self, metrics: &WriteMetrics) {
         // Only let the tracker tracks value bytes.
         self.alloc_tracker.on_allocation(metrics.value_bytes);
-        metrics.update_timestamp_range(&self.max_timestamp, &self.min_timestamp);
+        self.max_timestamp
+            .fetch_max(metrics.max_ts, Ordering::SeqCst);
+        self.min_timestamp
+            .fetch_min(metrics.min_ts, Ordering::SeqCst);
     }
 }
 

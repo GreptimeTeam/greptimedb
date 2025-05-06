@@ -44,6 +44,7 @@ use crate::error::{self, Error, Result};
 use crate::metasrv::MetasrvInfo;
 use crate::procedure::region_migration::close_downgraded_region::CloseDowngradedRegion;
 use crate::procedure::region_migration::downgrade_leader_region::DowngradeLeaderRegion;
+use crate::procedure::region_migration::flush_leader_region::PreFlushRegion;
 use crate::procedure::region_migration::manager::RegionMigrationProcedureTracker;
 use crate::procedure::region_migration::migration_abort::RegionMigrationAbort;
 use crate::procedure::region_migration::migration_end::RegionMigrationEnd;
@@ -261,7 +262,8 @@ impl ProcedureMigrationTestSuite {
         }
 
         debug!("suite test: {name} invoking next");
-        let result = self.state.next(&mut self.context).await;
+        let procedure_ctx = new_procedure_context();
+        let result = self.state.next(&mut self.context, &procedure_ctx).await;
 
         match assertion {
             Assertion::Simple(state_assert, status_assert) => {
@@ -415,6 +417,11 @@ pub(crate) fn assert_open_candidate_region(next: &dyn State) {
     let _ = next.as_any().downcast_ref::<OpenCandidateRegion>().unwrap();
 }
 
+/// Asserts the [State] should be [FlushLeaderRegion].
+pub(crate) fn assert_flush_leader_region(next: &dyn State) {
+    let _ = next.as_any().downcast_ref::<PreFlushRegion>().unwrap();
+}
+
 /// Asserts the [State] should be [UpdateMetadata::Downgrade].
 pub(crate) fn assert_update_metadata_downgrade(next: &dyn State) {
     let state = next.as_any().downcast_ref::<UpdateMetadata>().unwrap();
@@ -555,5 +562,13 @@ fn test_merge_mailbox_messages() {
         assert_eq!(violated, "second");
     } else {
         unreachable!()
+    }
+}
+
+/// Returns a new [ProcedureContext].
+pub fn new_procedure_context() -> ProcedureContext {
+    ProcedureContext {
+        procedure_id: ProcedureId::random(),
+        provider: Arc::new(MockContextProvider::default()),
     }
 }

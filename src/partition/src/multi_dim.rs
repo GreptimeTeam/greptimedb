@@ -211,6 +211,13 @@ impl MultiDimPartitionRule {
         record_batch: &RecordBatch,
     ) -> Result<HashMap<RegionNumber, BooleanArray>> {
         let num_rows = record_batch.num_rows();
+        if self.regions.len() == 1 {
+            return Ok(
+                [(self.regions[0], BooleanArray::from(vec![true; num_rows]))]
+                    .into_iter()
+                    .collect(),
+            );
+        }
         let physical_exprs = {
             let cache_read_guard = self.physical_expr_cache.read().unwrap();
             if let Some((cached_exprs, schema)) = cache_read_guard.as_ref()

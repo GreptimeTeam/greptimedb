@@ -36,8 +36,8 @@ use common_grpc::flight::{FlightDecoder, FlightMessage};
 use common_query::Output;
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::RecordBatchStreamWrapper;
-use common_telemetry::error;
 use common_telemetry::tracing_context::W3cTrace;
+use common_telemetry::{error, warn};
 use futures::future;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use prost::Message;
@@ -190,6 +190,36 @@ impl Database {
         let request = self.to_rpc_request(request);
         let response = client.handle(request).await?.into_inner();
         from_grpc_response(response)
+    }
+
+    /// Retry if connection fails, max_retries is the max number of retries, so the total wait time
+    /// is `max_retries * GRPC_CONN_TIMEOUT`
+    pub async fn handle_with_retry(&self, request: Request, max_retries: u32) -> Result<u32> {
+        let mut client = make_database_client(&self.client)?.inner;
+        let mut retries = 0;
+        let request = self.to_rpc_request(request);
+        loop {
+            let raw_response = client.handle(request.clone()).await;
+            match (raw_response, retries < max_retries) {
+                (Ok(resp), _) => return from_grpc_response(resp.into_inner()),
+                (Err(err), true) => {
+                    // determine if the error is retryable
+                    if is_grpc_retryable(&err) {
+                        // retry
+                        retries += 1;
+                        warn!("Retrying {} times with error = {:?}", retries, err);
+                        continue;
+                    }
+                }
+                (Err(err), false) => {
+                    error!(
+                        "Failed to send request to grpc handle after {} retries, error = {:?}",
+                        retries, err
+                    );
+                    return Err(err.into());
+                }
+            }
+        }
     }
 
     #[inline]
@@ -366,6 +396,11 @@ impl Database {
             .boxed();
         Ok(response)
     }
+}
+
+/// by grpc standard, only `Unavailable` is retryable, see: https://github.com/grpc/grpc/blob/master/doc/statuscodes.md#status-codes-and-their-use-in-grpc
+pub fn is_grpc_retryable(err: &tonic::Status) -> bool {
+    matches!(err.code(), tonic::Code::Unavailable)
 }
 
 #[derive(Default, Debug, Clone)]

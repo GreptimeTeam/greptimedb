@@ -73,10 +73,11 @@ edition = "2021"
 license = "Apache-2.0"
 
 [workspace.lints]
-clippy.print_stdout = "warn"
-clippy.print_stderr = "warn"
 clippy.dbg_macro = "warn"
 clippy.implicit_clone = "warn"
+clippy.result_large_err = "allow"
+clippy.large_enum_variant = "allow"
+clippy.doc_overindented_list_items = "allow"
 rust.unknown_lints = "deny"
 rust.unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
 
@@ -129,7 +130,7 @@ etcd-client = "0.14"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "e82b0158cd38d4021edb4e4c0ae77f999051e62f" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "ce65659d95a4a11c5d668d27edb4f1c1eed36824" }
 hex = "0.4"
 http = "1"
 humantime = "2.1"
@@ -162,7 +163,7 @@ paste = "1.0"
 pin-project = "1.0"
 prometheus = { version = "0.13.3", features = ["process"] }
 promql-parser = { version = "0.5.1", features = ["ser"] }
-prost = "0.13"
+prost = { version = "0.13", features = ["no-recursion-limit"] }
 raft-engine = { version = "0.4.1", default-features = false }
 rand = "0.9"
 ratelimit = "0.10"

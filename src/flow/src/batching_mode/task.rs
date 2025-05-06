@@ -192,7 +192,7 @@ impl BatchingTask {
         frontend_client: &Arc<FrontendClient>,
     ) -> Result<Option<(u32, Duration)>, Error> {
         if let Some(new_query) = self.gen_insert_plan(engine).await? {
-            debug!("Generate new query: {:#?}", new_query);
+            debug!("Generate new query: {}", new_query);
             self.execute_logical_plan(frontend_client, &new_query).await
         } else {
             debug!("Generate no query");

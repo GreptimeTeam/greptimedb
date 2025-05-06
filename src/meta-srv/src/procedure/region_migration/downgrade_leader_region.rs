@@ -20,7 +20,7 @@ use common_meta::distributed_time_constants::REGION_LEASE_SECS;
 use common_meta::instruction::{
     DowngradeRegion, DowngradeRegionReply, Instruction, InstructionReply,
 };
-use common_procedure::Status;
+use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
@@ -53,7 +53,11 @@ impl Default for DowngradeLeaderRegion {
 #[async_trait::async_trait]
 #[typetag::serde]
 impl State for DowngradeLeaderRegion {
-    async fn next(&mut self, ctx: &mut Context) -> Result<(Box<dyn State>, Status)> {
+    async fn next(
+        &mut self,
+        ctx: &mut Context,
+        _procedure_ctx: &ProcedureContext,
+    ) -> Result<(Box<dyn State>, Status)> {
         let now = Instant::now();
         // Ensures the `leader_region_lease_deadline` must exist after recovering.
         ctx.volatile_ctx
@@ -170,7 +174,7 @@ impl DowngradeLeaderRegion {
                 if error.is_some() {
                     return error::RetryLaterSnafu {
                         reason: format!(
-                            "Failed to downgrade the region {} on Datanode {:?}, error: {:?}, elapsed: {:?}",
+                            "Failed to downgrade the region {} on datanode {:?}, error: {:?}, elapsed: {:?}",
                             region_id, leader, error, now.elapsed()
                         ),
                     }
@@ -179,13 +183,14 @@ impl DowngradeLeaderRegion {
 
                 if !exists {
                     warn!(
-                        "Trying to downgrade the region {} on Datanode {}, but region doesn't exist!, elapsed: {:?}",
+                        "Trying to downgrade the region {} on datanode {:?}, but region doesn't exist!, elapsed: {:?}",
                         region_id, leader, now.elapsed()
                     );
                 } else {
                     info!(
-                        "Region {} leader is downgraded, last_entry_id: {:?}, metadata_last_entry_id: {:?}, elapsed: {:?}",
+                        "Region {} leader is downgraded on datanode {:?}, last_entry_id: {:?}, metadata_last_entry_id: {:?}, elapsed: {:?}",
                         region_id,
+                        leader,
                         last_entry_id,
                         metadata_last_entry_id,
                         now.elapsed()
@@ -269,7 +274,7 @@ mod tests {
 
     use super::*;
     use crate::error::Error;
-    use crate::procedure::region_migration::test_util::TestingEnv;
+    use crate::procedure::region_migration::test_util::{new_procedure_context, TestingEnv};
     use crate::procedure::region_migration::{ContextFactory, PersistentContext};
     use crate::procedure::test_util::{
         new_close_region_reply, new_downgrade_region_reply, send_mock_reply,
@@ -571,7 +576,8 @@ mod tests {
         });
 
         let timer = Instant::now();
-        let (next, _) = state.next(&mut ctx).await.unwrap();
+        let procedure_ctx = new_procedure_context();
+        let (next, _) = state.next(&mut ctx, &procedure_ctx).await.unwrap();
         let elapsed = timer.elapsed().as_secs();
         assert!(elapsed < REGION_LEASE_SECS / 2);
         assert_eq!(ctx.volatile_ctx.leader_region_last_entry_id, Some(1));
@@ -605,7 +611,8 @@ mod tests {
         send_mock_reply(mailbox, rx, |id| {
             Ok(new_downgrade_region_reply(id, None, true, None))
         });
-        let (next, _) = state.next(&mut ctx).await.unwrap();
+        let procedure_ctx = new_procedure_context();
+        let (next, _) = state.next(&mut ctx, &procedure_ctx).await.unwrap();
         let update_metadata = next.as_any().downcast_ref::<UpdateMetadata>().unwrap();
         assert_matches!(update_metadata, UpdateMetadata::Rollback);
     }

@@ -17,7 +17,6 @@
 #![feature(exclusive_wrapper)]
 #![feature(let_chains)]
 #![feature(if_let_guard)]
-#![feature(trait_upcasting)]
 
 use datafusion_expr::LogicalPlan;
 use datatypes::schema::Schema;
@@ -51,8 +50,6 @@ pub mod repeated_field;
 mod row_writer;
 pub mod server;
 pub mod tls;
-
-pub use common_config::Mode;
 
 /// Cached SQL and logical plan for database interfaces
 #[derive(Clone)]

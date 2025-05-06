@@ -3,7 +3,7 @@ create database pg_catalog;
 
 Error: 1004(InvalidArguments), Schema pg_catalog already exists
 
--- session_user because session_user is based on the current user so is not null is for test 
+-- session_user because session_user is based on the current user so is not null is for test
 -- SQLNESS PROTOCOL POSTGRES
 SELECT session_user is not null;
 
@@ -107,12 +107,13 @@ select * from pg_catalog.pg_type order by oid;
 +-----+-----------+--------+
 
 -- SQLNESS PROTOCOL POSTGRES
+-- SQLNESS REPLACE (\d+\s*) OID
 select * from pg_catalog.pg_database where datname = 'public';
 
 +------------+---------+
 | oid        | datname |
 +------------+---------+
-| 3927743705 | public  |
+| OID| public  |
 +------------+---------+
 
 -- \d
@@ -159,15 +160,16 @@ ORDER BY 1,2;
 
 -- make sure oid of namespace keep stable
 -- SQLNESS PROTOCOL POSTGRES
-SELECT * FROM pg_namespace ORDER BY oid;
+-- SQLNESS REPLACE (\d+\s*) OID
+SELECT * FROM pg_namespace ORDER BY nspname;
 
 +------------+--------------------+
 | oid        | nspname            |
 +------------+--------------------+
-| 667359454  | pg_catalog         |
-| 3174397350 | information_schema |
-| 3338153620 | greptime_private   |
-| 3927743705 | public             |
+| OID| greptime_private   |
+| OID| information_schema |
+| OID| pg_catalog         |
+| OID| public             |
 +------------+--------------------+
 
 -- SQLNESS PROTOCOL POSTGRES
@@ -260,6 +262,7 @@ where relnamespace in (
 +---------+
 
 -- SQLNESS PROTOCOL POSTGRES
+-- SQLNESS REPLACE (\d+\s*) OID
 select relnamespace, relname, relkind
 from pg_catalog.pg_class
 where relnamespace in (
@@ -274,7 +277,7 @@ order by relnamespace, relname;
 +--------------+---------+---------+
 | relnamespace | relname | relkind |
 +--------------+---------+---------+
-| 434869349    | foo     | r       |
+| OID| foo     | r       |
 +--------------+---------+---------+
 
 -- SQLNESS PROTOCOL POSTGRES

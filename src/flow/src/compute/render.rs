@@ -18,9 +18,9 @@
 
 use std::collections::BTreeMap;
 
-use hydroflow::scheduled::graph::Hydroflow;
-use hydroflow::scheduled::graph_ext::GraphExt;
-use hydroflow::scheduled::port::{PortCtx, SEND};
+use dfir_rs::scheduled::graph::Dfir;
+use dfir_rs::scheduled::graph_ext::GraphExt;
+use dfir_rs::scheduled::port::{PortCtx, SEND};
 use itertools::Itertools;
 use snafu::OptionExt;
 
@@ -38,7 +38,7 @@ mod src_sink;
 /// The Context for build a Operator with id of `GlobalId`
 pub struct Context<'referred, 'df> {
     pub id: GlobalId,
-    pub df: &'referred mut Hydroflow<'df>,
+    pub df: &'referred mut Dfir<'df>,
     pub compute_state: &'referred mut DataflowState,
     /// a list of all collections being used in the operator
     ///
@@ -361,16 +361,16 @@ mod test {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    use hydroflow::scheduled::graph::Hydroflow;
-    use hydroflow::scheduled::graph_ext::GraphExt;
-    use hydroflow::scheduled::handoff::VecHandoff;
+    use dfir_rs::scheduled::graph::Dfir;
+    use dfir_rs::scheduled::graph_ext::GraphExt;
+    use dfir_rs::scheduled::handoff::VecHandoff;
     use pretty_assertions::assert_eq;
 
     use super::*;
     use crate::repr::Row;
     pub fn run_and_check(
         state: &mut DataflowState,
-        df: &mut Hydroflow,
+        df: &mut Dfir,
         time_range: std::ops::Range<i64>,
         expected: BTreeMap<i64, Vec<DiffRow>>,
         output: Rc<RefCell<Vec<DiffRow>>>,
@@ -416,7 +416,7 @@ mod test {
     }
 
     pub fn harness_test_ctx<'r, 'h>(
-        df: &'r mut Hydroflow<'h>,
+        df: &'r mut Dfir<'h>,
         state: &'r mut DataflowState,
     ) -> Context<'r, 'h> {
         let err_collector = state.get_err_collector();
@@ -436,7 +436,7 @@ mod test {
     /// that is it only emit once, not multiple times
     #[test]
     fn test_render_constant() {
-        let mut df = Hydroflow::new();
+        let mut df = Dfir::new();
         let mut state = DataflowState::default();
         let mut ctx = harness_test_ctx(&mut df, &mut state);
 
@@ -473,7 +473,7 @@ mod test {
     /// a simple example to show how to use source and sink
     #[test]
     fn example_source_sink() {
-        let mut df = Hydroflow::new();
+        let mut df = Dfir::new();
         let (send_port, recv_port) = df.make_edge::<_, VecHandoff<i32>>("test_handoff");
         df.add_subgraph_source("test_handoff_source", send_port, move |_ctx, send| {
             for i in 0..10 {
@@ -498,8 +498,8 @@ mod test {
 
     #[test]
     fn test_tee_auto_schedule() {
-        use hydroflow::scheduled::handoff::TeeingHandoff as Toff;
-        let mut df = Hydroflow::new();
+        use dfir_rs::scheduled::handoff::TeeingHandoff as Toff;
+        let mut df = Dfir::new();
         let (send_port, recv_port) = df.make_edge::<_, Toff<i32>>("test_handoff");
         let source = df.add_subgraph_source("test_handoff_source", send_port, move |_ctx, send| {
             for i in 0..10 {

@@ -20,7 +20,7 @@ use common_meta::distributed_time_constants::REGION_LEASE_SECS;
 use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
 use common_meta::key::datanode_table::RegionInfo;
 use common_meta::RegionIdent;
-use common_procedure::Status;
+use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::{info, warn};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
@@ -40,7 +40,11 @@ pub struct CloseDowngradedRegion;
 #[async_trait::async_trait]
 #[typetag::serde]
 impl State for CloseDowngradedRegion {
-    async fn next(&mut self, ctx: &mut Context) -> Result<(Box<dyn State>, Status)> {
+    async fn next(
+        &mut self,
+        ctx: &mut Context,
+        _procedure_ctx: &ProcedureContext,
+    ) -> Result<(Box<dyn State>, Status)> {
         if let Err(err) = self.close_downgraded_leader_region(ctx).await {
             let downgrade_leader_datanode = &ctx.persistent_ctx.from_peer;
             let region_id = ctx.region_id();

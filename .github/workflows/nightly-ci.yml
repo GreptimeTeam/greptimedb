@@ -117,13 +117,13 @@ jobs:
     name: Run clean build on Linux
     runs-on: ubuntu-latest
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-    timeout-minutes: 60
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: cachix/install-nix-action@v27
+      - uses: cachix/install-nix-action@v31
         with:
           nix_path: nixpkgs=channel:nixos-24.11
       - run: nix develop --command cargo build

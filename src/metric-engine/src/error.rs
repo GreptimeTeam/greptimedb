@@ -42,6 +42,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to batch open mito region"))]
+    BatchOpenMitoRegion {
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to close mito region, region id: {}", region_id))]
     CloseMitoRegion {
         region_id: RegionId,
@@ -337,7 +344,8 @@ impl ErrorExt for Error {
             | MitoCatchupOperation { source, .. }
             | MitoFlushOperation { source, .. }
             | MitoDeleteOperation { source, .. }
-            | MitoSyncOperation { source, .. } => source.status_code(),
+            | MitoSyncOperation { source, .. }
+            | BatchOpenMitoRegion { source, .. } => source.status_code(),
 
             EncodePrimaryKey { source, .. } => source.status_code(),
 

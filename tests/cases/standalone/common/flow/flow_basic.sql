@@ -24,6 +24,9 @@ ADMIN FLUSH_FLOW('test_numbers_basic');
 SHOW CREATE TABLE out_num_cnt_basic;
 
 -- SQLNESS ARG restart=true
+SELECT 1;
+
+-- SQLNESS SLEEP 3s
 INSERT INTO
     numbers_input_basic
 VALUES
@@ -91,6 +94,9 @@ FROM
 SHOW CREATE TABLE out_basic;
 
 -- SQLNESS ARG restart=true
+SELECT 1;
+
+-- SQLNESS SLEEP 3s
 INSERT INTO
     input_basic
 VALUES
@@ -130,6 +136,9 @@ SHOW CREATE TABLE out_distinct_basic;
 ADMIN FLUSH_FLOW('test_distinct_basic');
 
 -- SQLNESS ARG restart=true
+SELECT 1;
+
+-- SQLNESS SLEEP 3s
 INSERT INTO
     distinct_basic
 VALUES
@@ -788,6 +797,9 @@ SHOW CREATE TABLE out_num_cnt_basic;
 ADMIN FLUSH_FLOW('test_numbers_basic');
 
 -- SQLNESS ARG restart=true
+SELECT 1;
+
+-- SQLNESS SLEEP 3s
 INSERT INTO
     numbers_input_basic
 VALUES

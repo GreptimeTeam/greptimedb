@@ -19,13 +19,15 @@ use api::v1::meta::{HeartbeatRequest, RegionLease, Role};
 use async_trait::async_trait;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::region_keeper::MemoryRegionKeeperRef;
-use store_api::region_engine::{GrantedRegion, RegionRole};
+use store_api::region_engine::GrantedRegion;
 use store_api::storage::RegionId;
 
 use crate::error::Result;
 use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
-use crate::region::lease_keeper::{RegionLeaseKeeperRef, RenewRegionLeasesResponse};
+use crate::region::lease_keeper::{
+    RegionLeaseInfo, RegionLeaseKeeperRef, RenewRegionLeasesResponse,
+};
 use crate::region::RegionLeaseKeeper;
 
 pub struct RegionLeaseHandler {
@@ -40,7 +42,7 @@ pub trait CustomizedRegionLeaseRenewer: Send + Sync {
     fn renew(
         &self,
         ctx: &mut Context,
-        regions: HashMap<RegionId, RegionRole>,
+        regions: HashMap<RegionId, RegionLeaseInfo>,
     ) -> Vec<GrantedRegion>;
 }
 
@@ -98,7 +100,9 @@ impl HeartbeatHandler for RegionLeaseHandler {
         } else {
             renewed
                 .into_iter()
-                .map(|(region_id, region_role)| GrantedRegion::new(region_id, region_role).into())
+                .map(|(region_id, region_lease_info)| {
+                    GrantedRegion::new(region_id, region_lease_info.role).into()
+                })
                 .collect::<Vec<_>>()
         };
 

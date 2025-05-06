@@ -18,10 +18,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use common_error::ext::ErrorExt;
-use hydroflow::scheduled::graph::Hydroflow;
-use hydroflow::scheduled::handoff::TeeingHandoff;
-use hydroflow::scheduled::port::RecvPort;
-use hydroflow::scheduled::SubgraphId;
+use dfir_rs::scheduled::graph::Dfir;
+use dfir_rs::scheduled::handoff::TeeingHandoff;
+use dfir_rs::scheduled::port::RecvPort;
+use dfir_rs::scheduled::SubgraphId;
 use itertools::Itertools;
 use tokio::sync::Mutex;
 
@@ -46,7 +46,7 @@ impl<T: 'static + Clone> Collection<T> {
     /// clone a collection, require a mutable reference to the hydroflow instance
     ///
     /// Note: need to be the same hydroflow instance that this collection is created from
-    pub fn clone(&self, df: &mut Hydroflow) -> Self {
+    pub fn clone(&self, df: &mut Dfir) -> Self {
         Collection {
             stream: self.stream.tee(df),
         }
@@ -151,7 +151,7 @@ impl<T: 'static> CollectionBundle<T> {
 }
 
 impl<T: 'static + Clone> CollectionBundle<T> {
-    pub fn clone(&self, df: &mut Hydroflow) -> Self {
+    pub fn clone(&self, df: &mut Dfir) -> Self {
         Self {
             collection: self.collection.clone(df),
             arranged: self

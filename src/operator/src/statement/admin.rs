@@ -185,7 +185,7 @@ fn values_to_vectors_by_exact_types(
     args.iter()
         .zip(exact_types.iter())
         .map(|(value, data_type)| {
-            let value = sql_value_to_value(DUMMY_COLUMN, data_type, value, tz, None)
+            let value = sql_value_to_value(DUMMY_COLUMN, data_type, value, tz, None, false)
                 .context(error::ParseSqlValueSnafu)?;
 
             Ok(value_to_vector(value))
@@ -202,7 +202,9 @@ fn values_to_vectors_by_valid_types(
     args.iter()
         .map(|value| {
             for data_type in valid_types {
-                if let Ok(value) = sql_value_to_value(DUMMY_COLUMN, data_type, value, tz, None) {
+                if let Ok(value) =
+                    sql_value_to_value(DUMMY_COLUMN, data_type, value, tz, None, false)
+                {
                     return Ok(value_to_vector(value));
                 }
             }

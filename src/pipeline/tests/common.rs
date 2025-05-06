@@ -22,7 +22,7 @@ pub fn parse_and_exec(input_str: &str, pipeline_yaml: &str) -> Rows {
     let yaml_content = Content::Yaml(pipeline_yaml);
     let pipeline: Pipeline = parse(&yaml_content).expect("failed to parse pipeline");
 
-    let schema = pipeline.schemas().clone();
+    let schema = pipeline.schemas().unwrap().clone();
 
     let mut rows = Vec::new();
 

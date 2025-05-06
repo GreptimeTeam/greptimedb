@@ -14,7 +14,7 @@
 
 use std::any::Any;
 
-use common_procedure::Status;
+use common_procedure::{Context as ProcedureContext, Status};
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
@@ -26,7 +26,11 @@ pub struct RegionMigrationEnd;
 #[async_trait::async_trait]
 #[typetag::serde]
 impl State for RegionMigrationEnd {
-    async fn next(&mut self, _: &mut Context) -> Result<(Box<dyn State>, Status)> {
+    async fn next(
+        &mut self,
+        _: &mut Context,
+        _: &ProcedureContext,
+    ) -> Result<(Box<dyn State>, Status)> {
         Ok((Box::new(RegionMigrationEnd), Status::done()))
     }
 

@@ -322,13 +322,10 @@ impl ScanRegion {
         let memtables: Vec<_> = memtables
             .into_iter()
             .filter(|mem| {
-                if mem.is_empty() {
+                // check if memtable is empty by reading stats.
+                let Some((start, end)) = mem.stats().time_range() else {
                     return false;
-                }
-                let stats = mem.stats();
-                // Safety: the memtable is not empty.
-                let (start, end) = stats.time_range().unwrap();
-
+                };
                 // The time range of the memtable is inclusive.
                 let memtable_range = TimestampRange::new_inclusive(Some(start), Some(end));
                 memtable_range.intersects(&time_range)

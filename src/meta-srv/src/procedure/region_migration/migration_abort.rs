@@ -14,7 +14,7 @@
 
 use std::any::Any;
 
-use common_procedure::Status;
+use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::warn;
 use serde::{Deserialize, Serialize};
 
@@ -38,7 +38,11 @@ impl RegionMigrationAbort {
 #[async_trait::async_trait]
 #[typetag::serde]
 impl State for RegionMigrationAbort {
-    async fn next(&mut self, ctx: &mut Context) -> Result<(Box<dyn State>, Status)> {
+    async fn next(
+        &mut self,
+        ctx: &mut Context,
+        _procedure_ctx: &ProcedureContext,
+    ) -> Result<(Box<dyn State>, Status)> {
         warn!(
             "Region migration is aborted: {}, region_id: {}, from_peer: {}, to_peer: {}, {}",
             self.reason,

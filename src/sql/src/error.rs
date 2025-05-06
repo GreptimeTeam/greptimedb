@@ -355,6 +355,14 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Unable to convert {} to datatype {:?}", value, datatype))]
+    ConvertStr {
+        value: String,
+        datatype: ConcreteDataType,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -391,7 +399,8 @@ impl ErrorExt for Error {
             | InvalidInterval { .. }
             | InvalidUnaryOp { .. }
             | InvalidPartitionNumber { .. }
-            | UnsupportedUnaryOp { .. } => StatusCode::InvalidArguments,
+            | UnsupportedUnaryOp { .. }
+            | ConvertStr { .. } => StatusCode::InvalidArguments,
 
             SerializeColumnDefaultConstraint { source, .. } => source.status_code(),
             ConvertToGrpcDataType { source, .. } => source.status_code(),

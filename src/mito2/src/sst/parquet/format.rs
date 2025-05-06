@@ -134,6 +134,7 @@ impl WriteFormat {
 
 /// Helper for reading the SST format.
 pub struct ReadFormat {
+    /// The metadata stored in the SST.
     metadata: RegionMetadataRef,
     /// SST file schema.
     arrow_schema: SchemaRef,
@@ -305,17 +306,23 @@ impl ReadFormat {
         &self,
         row_groups: &[impl Borrow<RowGroupMetaData>],
         column_id: ColumnId,
-    ) -> Option<ArrayRef> {
-        let column = self.metadata.column_by_id(column_id)?;
+    ) -> StatValues {
+        let Some(column) = self.metadata.column_by_id(column_id) else {
+            // No such column in the SST.
+            return StatValues::NoColumn;
+        };
         match column.semantic_type {
             SemanticType::Tag => self.tag_values(row_groups, column, true),
             SemanticType::Field => {
-                let index = self.field_id_to_index.get(&column_id)?;
-                Self::column_values(row_groups, column, *index, true)
+                // Safety: `field_id_to_index` is initialized by the semantic type.
+                let index = self.field_id_to_index.get(&column_id).unwrap();
+                let stats = Self::column_values(row_groups, column, *index, true);
+                StatValues::from_stats_opt(stats)
             }
             SemanticType::Timestamp => {
                 let index = self.time_index_position();
-                Self::column_values(row_groups, column, index, true)
+                let stats = Self::column_values(row_groups, column, index, true);
+                StatValues::from_stats_opt(stats)
             }
         }
     }
@@ -325,17 +332,23 @@ impl ReadFormat {
         &self,
         row_groups: &[impl Borrow<RowGroupMetaData>],
         column_id: ColumnId,
-    ) -> Option<ArrayRef> {
-        let column = self.metadata.column_by_id(column_id)?;
+    ) -> StatValues {
+        let Some(column) = self.metadata.column_by_id(column_id) else {
+            // No such column in the SST.
+            return StatValues::NoColumn;
+        };
         match column.semantic_type {
             SemanticType::Tag => self.tag_values(row_groups, column, false),
             SemanticType::Field => {
-                let index = self.field_id_to_index.get(&column_id)?;
-                Self::column_values(row_groups, column, *index, false)
+                // Safety: `field_id_to_index` is initialized by the semantic type.
+                let index = self.field_id_to_index.get(&column_id).unwrap();
+                let stats = Self::column_values(row_groups, column, *index, false);
+                StatValues::from_stats_opt(stats)
             }
             SemanticType::Timestamp => {
                 let index = self.time_index_position();
-                Self::column_values(row_groups, column, index, false)
+                let stats = Self::column_values(row_groups, column, index, false);
+                StatValues::from_stats_opt(stats)
             }
         }
     }
@@ -345,17 +358,23 @@ impl ReadFormat {
         &self,
         row_groups: &[impl Borrow<RowGroupMetaData>],
         column_id: ColumnId,
-    ) -> Option<ArrayRef> {
-        let column = self.metadata.column_by_id(column_id)?;
+    ) -> StatValues {
+        let Some(column) = self.metadata.column_by_id(column_id) else {
+            // No such column in the SST.
+            return StatValues::NoColumn;
+        };
         match column.semantic_type {
-            SemanticType::Tag => None,
+            SemanticType::Tag => StatValues::NoStats,
             SemanticType::Field => {
-                let index = self.field_id_to_index.get(&column_id)?;
-                Self::column_null_counts(row_groups, *index)
+                // Safety: `field_id_to_index` is initialized by the semantic type.
+                let index = self.field_id_to_index.get(&column_id).unwrap();
+                let stats = Self::column_null_counts(row_groups, *index);
+                StatValues::from_stats_opt(stats)
             }
             SemanticType::Timestamp => {
                 let index = self.time_index_position();
-                Self::column_null_counts(row_groups, index)
+                let stats = Self::column_null_counts(row_groups, index);
+                StatValues::from_stats_opt(stats)
             }
         }
     }
@@ -390,8 +409,7 @@ impl ReadFormat {
         row_groups: &[impl Borrow<RowGroupMetaData>],
         column: &ColumnMetadata,
         is_min: bool,
-    ) -> Option<ArrayRef> {
-        let primary_key_encoding = self.metadata.primary_key_encoding;
+    ) -> StatValues {
         let is_first_tag = self
             .metadata
             .primary_key
@@ -400,9 +418,28 @@ impl ReadFormat {
             .unwrap_or(false);
         if !is_first_tag {
             // Only the min-max of the first tag is available in the primary key.
-            return None;
+            return StatValues::NoStats;
         }
 
+        StatValues::from_stats_opt(self.first_tag_values(row_groups, column, is_min))
+    }
+
+    /// Returns min/max values of the first tag.
+    /// Returns None if the tag does not have statistics.
+    fn first_tag_values(
+        &self,
+        row_groups: &[impl Borrow<RowGroupMetaData>],
+        column: &ColumnMetadata,
+        is_min: bool,
+    ) -> Option<ArrayRef> {
+        debug_assert!(self
+            .metadata
+            .primary_key
+            .first()
+            .map(|id| *id == column.column_id)
+            .unwrap_or(false));
+
+        let primary_key_encoding = self.metadata.primary_key_encoding;
         let converter = build_primary_key_codec_with_fields(
             primary_key_encoding,
             [(
@@ -452,6 +489,7 @@ impl ReadFormat {
     }
 
     /// Returns min/max values of specific non-tag columns.
+    /// Returns None if the column does not have statistics.
     fn column_values(
         row_groups: &[impl Borrow<RowGroupMetaData>],
         column: &ColumnMetadata,
@@ -541,6 +579,29 @@ impl ReadFormat {
     /// Index of a field column by its column id.
     pub fn field_index_by_id(&self, column_id: ColumnId) -> Option<usize> {
         self.field_id_to_projected_index.get(&column_id).copied()
+    }
+}
+
+/// Values of column statistics of the SST.
+///
+/// It also distinguishes the case that a column is not found and
+/// the column exists but has no statistics.
+pub enum StatValues {
+    /// Values of each row group.
+    Values(ArrayRef),
+    /// No such column.
+    NoColumn,
+    /// Column exists but has no statistics.
+    NoStats,
+}
+
+impl StatValues {
+    /// Creates a new `StatValues` instance from optional statistics.
+    pub fn from_stats_opt(stats: Option<ArrayRef>) -> Self {
+        match stats {
+            Some(stats) => StatValues::Values(stats),
+            None => StatValues::NoStats,
+        }
     }
 }
 
@@ -755,7 +816,7 @@ mod tests {
         ));
         let mut keys = vec![];
         for (index, num_rows) in pk_row_nums.iter().map(|v| v.1).enumerate() {
-            keys.extend(std::iter::repeat(index as u32).take(num_rows));
+            keys.extend(std::iter::repeat_n(index as u32, num_rows));
         }
         let keys = UInt32Array::from(keys);
         Arc::new(DictionaryArray::new(keys, values))

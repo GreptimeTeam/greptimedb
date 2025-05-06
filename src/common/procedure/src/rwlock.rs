@@ -18,8 +18,18 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
+/// A guard that owns a read or write lock on a key.
+///
+/// This enum wraps either a read or write lock guard obtained from a `KeyRwLock`.
+/// The guard is automatically released when it is dropped.
 pub enum OwnedKeyRwLockGuard {
+    /// Represents a shared read lock on a key.
+    /// Multiple read locks can be held simultaneously for the same key.
     Read { _guard: OwnedRwLockReadGuard<()> },
+
+    /// Represents an exclusive write lock on a key.
+    /// Only one write lock can be held at a time for a given key,
+    /// and no read locks can be held simultaneously with a write lock.
     Write { _guard: OwnedRwLockWriteGuard<()> },
 }
 
@@ -36,7 +46,7 @@ impl From<OwnedRwLockWriteGuard<()>> for OwnedKeyRwLockGuard {
 }
 
 /// Locks based on a key, allowing other keys to lock independently.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct KeyRwLock<K> {
     /// The inner map of locks for specific keys.
     inner: Mutex<HashMap<K, Arc<RwLock<()>>>>,

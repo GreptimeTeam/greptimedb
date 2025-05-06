@@ -10,7 +10,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-ahash = "0.8"
+ahash.workspace = true
 api.workspace = true
 arrow.workspace = true
 async-trait.workspace = true

@@ -25,7 +25,7 @@ use parquet::file::metadata::RowGroupMetaData;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 
-use crate::sst::parquet::format::ReadFormat;
+use crate::sst::parquet::format::{ReadFormat, StatValues};
 
 /// Statistics for pruning row groups.
 pub(crate) struct RowGroupPruningStats<'a, T> {
@@ -100,16 +100,18 @@ impl<T: Borrow<RowGroupMetaData>> PruningStatistics for RowGroupPruningStats<'_,
     fn min_values(&self, column: &Column) -> Option<ArrayRef> {
         let column_id = self.column_id_to_prune(&column.name)?;
         match self.read_format.min_values(self.row_groups, column_id) {
-            Some(values) => Some(values),
-            None => self.compat_default_value(&column.name),
+            StatValues::Values(values) => Some(values),
+            StatValues::NoColumn => self.compat_default_value(&column.name),
+            StatValues::NoStats => None,
         }
     }
 
     fn max_values(&self, column: &Column) -> Option<ArrayRef> {
         let column_id = self.column_id_to_prune(&column.name)?;
         match self.read_format.max_values(self.row_groups, column_id) {
-            Some(values) => Some(values),
-            None => self.compat_default_value(&column.name),
+            StatValues::Values(values) => Some(values),
+            StatValues::NoColumn => self.compat_default_value(&column.name),
+            StatValues::NoStats => None,
         }
     }
 
@@ -118,10 +120,12 @@ impl<T: Borrow<RowGroupMetaData>> PruningStatistics for RowGroupPruningStats<'_,
     }
 
     fn null_counts(&self, column: &Column) -> Option<ArrayRef> {
-        let Some(column_id) = self.column_id_to_prune(&column.name) else {
-            return self.compat_null_count(&column.name);
-        };
-        self.read_format.null_counts(self.row_groups, column_id)
+        let column_id = self.column_id_to_prune(&column.name)?;
+        match self.read_format.null_counts(self.row_groups, column_id) {
+            StatValues::Values(values) => Some(values),
+            StatValues::NoColumn => self.compat_null_count(&column.name),
+            StatValues::NoStats => None,
+        }
     }
 
     fn row_counts(&self, _column: &Column) -> Option<ArrayRef> {

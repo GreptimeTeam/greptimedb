@@ -19,8 +19,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use common_telemetry::info;
+use dfir_rs::scheduled::graph::Dfir;
 use enum_as_inner::EnumAsInner;
-use hydroflow::scheduled::graph::Hydroflow;
 use snafu::ensure;
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 
@@ -49,9 +49,9 @@ pub fn create_worker<'a>() -> (WorkerHandle, Worker<'a>) {
     (worker_handle, worker)
 }
 
-/// ActiveDataflowState is a wrapper around `Hydroflow` and `DataflowState`
+/// ActiveDataflowState is a wrapper around `Dfir` and `DataflowState`
 pub(crate) struct ActiveDataflowState<'subgraph> {
-    df: Hydroflow<'subgraph>,
+    df: Dfir<'subgraph>,
     state: DataflowState,
     err_collector: ErrCollector,
 }
@@ -59,7 +59,7 @@ pub(crate) struct ActiveDataflowState<'subgraph> {
 impl std::fmt::Debug for ActiveDataflowState<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ActiveDataflowState")
-            .field("df", &"<Hydroflow>")
+            .field("df", &"<Dfir>")
             .field("state", &self.state)
             .field("err_collector", &self.err_collector)
             .finish()
@@ -69,7 +69,7 @@ impl std::fmt::Debug for ActiveDataflowState<'_> {
 impl Default for ActiveDataflowState<'_> {
     fn default() -> Self {
         ActiveDataflowState {
-            df: Hydroflow::new(),
+            df: Dfir::new(),
             state: DataflowState::default(),
             err_collector: ErrCollector::default(),
         }

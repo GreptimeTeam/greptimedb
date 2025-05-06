@@ -37,7 +37,7 @@ use common_meta::rpc::ddl::{
 };
 use common_meta::rpc::router::{Partition, Partition as MetaPartition};
 use common_query::Output;
-use common_telemetry::{debug, info, tracing};
+use common_telemetry::{debug, info, tracing, warn};
 use common_time::Timezone;
 use datafusion_common::tree_node::TreeNodeVisitor;
 use datafusion_expr::LogicalPlan;
@@ -369,7 +369,7 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let flow_type = self
-            .determine_flow_type(&expr.sql, query_context.clone())
+            .determine_flow_type(&expr, query_context.clone())
             .await?;
         info!("determined flow={} type: {:#?}", expr.flow_name, flow_type);
 
@@ -398,9 +398,49 @@ impl StatementExecutor {
     /// Determine the flow type based on the SQL query
     ///
     /// If it contains aggregation or distinct, then it is a batch flow, otherwise it is a streaming flow
-    async fn determine_flow_type(&self, sql: &str, query_ctx: QueryContextRef) -> Result<FlowType> {
+    async fn determine_flow_type(
+        &self,
+        expr: &CreateFlowExpr,
+        query_ctx: QueryContextRef,
+    ) -> Result<FlowType> {
+        // first check if source table's ttl is instant, if it is, force streaming mode
+        for src_table_name in &expr.source_table_names {
+            let table = self
+                .catalog_manager()
+                .table(
+                    &src_table_name.catalog_name,
+                    &src_table_name.schema_name,
+                    &src_table_name.table_name,
+                    Some(&query_ctx),
+                )
+                .await
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?
+                .with_context(|| TableNotFoundSnafu {
+                    table_name: format_full_table_name(
+                        &src_table_name.catalog_name,
+                        &src_table_name.schema_name,
+                        &src_table_name.table_name,
+                    ),
+                })?;
+
+            // instant source table can only be handled by streaming mode
+            if table.table_info().meta.options.ttl == Some(common_time::TimeToLive::Instant) {
+                warn!(
+                    "Source table `{}` for flow `{}`'s ttl=instant, fallback to streaming mode",
+                    format_full_table_name(
+                        &src_table_name.catalog_name,
+                        &src_table_name.schema_name,
+                        &src_table_name.table_name
+                    ),
+                    expr.flow_name
+                );
+                return Ok(FlowType::Streaming);
+            }
+        }
+
         let engine = &self.query_engine;
-        let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx)
+        let stmt = QueryLanguageParser::parse_sql(&expr.sql, &query_ctx)
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;
         let plan = engine
@@ -1648,8 +1688,15 @@ fn convert_value(
     timezone: &Timezone,
     unary_op: Option<UnaryOperator>,
 ) -> Result<Value> {
-    sql_value_to_value("<NONAME>", &data_type, value, Some(timezone), unary_op)
-        .context(ParseSqlValueSnafu)
+    sql_value_to_value(
+        "<NONAME>",
+        &data_type,
+        value,
+        Some(timezone),
+        unary_op,
+        false,
+    )
+    .context(ParseSqlValueSnafu)
 }
 
 #[cfg(test)]

@@ -17,7 +17,7 @@
 use std::collections::BTreeMap;
 
 use common_telemetry::{debug, trace};
-use hydroflow::scheduled::graph_ext::GraphExt;
+use dfir_rs::scheduled::graph_ext::GraphExt;
 use itertools::Itertools;
 use snafu::OptionExt;
 use tokio::sync::broadcast::error::TryRecvError;

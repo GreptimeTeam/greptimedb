@@ -382,8 +382,6 @@ async fn test_status() {
 #[tokio::test]
 async fn test_config() {
     let toml_str = r#"
-            mode = "distributed"
-
             [http]
             addr = "127.0.0.1:4000"
             timeout = "0s"

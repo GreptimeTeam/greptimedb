@@ -172,6 +172,8 @@ impl FlownodeServer {
     }
 
     /// Start the background task for streaming computation.
+    ///
+    /// Should be called only after heartbeat is establish, hence can get cluster info
     async fn start_workers(&self) -> Result<(), Error> {
         let manager_ref = self.inner.flow_service.dual_engine.clone();
         let handle = manager_ref

@@ -62,9 +62,9 @@ pub struct WriteRequest {
     /// Rows to write.
     pub rows: Rows,
     /// Map column name to column index in `rows`.
-    name_to_index: HashMap<String, usize>,
+    pub name_to_index: HashMap<String, usize>,
     /// Whether each column has null.
-    has_null: Vec<bool>,
+    pub has_null: Vec<bool>,
     /// Write hint.
     pub hint: Option<WriteHint>,
     /// Region metadata on the time of this request is created.

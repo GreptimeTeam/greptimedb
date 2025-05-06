@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt;
+use std::iter::repeat_n;
 use std::sync::Arc;
-use std::{fmt, iter};
 
 use common_query::error::{InvalidFuncArgsSnafu, Result};
 use common_query::prelude::Volatility;
@@ -126,9 +127,10 @@ impl Function for MatchesTermFunction {
             let term = term_column.get_ref(0).as_string().unwrap();
             match term {
                 None => {
-                    return Ok(Arc::new(BooleanVector::from_iter(
-                        iter::repeat(None).take(text_column.len()),
-                    )));
+                    return Ok(Arc::new(BooleanVector::from_iter(repeat_n(
+                        None,
+                        text_column.len(),
+                    ))));
                 }
                 Some(term) => Some(MatchesTermFinder::new(term)),
             }
@@ -217,7 +219,7 @@ impl MatchesTermFinder {
         }
 
         let mut pos = 0;
-        while let Some(found_pos) = self.finder.find(text[pos..].as_bytes()) {
+        while let Some(found_pos) = self.finder.find(&text.as_bytes()[pos..]) {
             let actual_pos = pos + found_pos;
 
             let prev_ok = self.starts_with_non_alnum

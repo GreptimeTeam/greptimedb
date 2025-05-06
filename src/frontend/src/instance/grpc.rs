@@ -24,15 +24,18 @@ use api::v1::{
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use common_base::AffectedRows;
+use common_grpc::flight::FlightDecoder;
+use common_grpc::FlightData;
 use common_query::logical_plan::add_insert_to_logical_plan;
 use common_query::Output;
 use common_telemetry::tracing::{self};
 use query::parser::PromQuery;
 use servers::interceptor::{GrpcQueryInterceptor, GrpcQueryInterceptorRef};
-use servers::query_handler::grpc::{GrpcQueryHandler, RawRecordBatch};
+use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
+use table::metadata::TableId;
 use table::table_name::TableName;
 
 use crate::error::{
@@ -230,29 +233,35 @@ impl GrpcQueryHandler for Instance {
     async fn put_record_batch(
         &self,
         table: &TableName,
-        record_batch: RawRecordBatch,
+        table_id: &mut Option<TableId>,
+        decoder: &mut FlightDecoder,
+        data: FlightData,
     ) -> Result<AffectedRows> {
-        let _table = self
-            .catalog_manager()
-            .table(
-                &table.catalog_name,
-                &table.schema_name,
-                &table.table_name,
-                None,
-            )
-            .await
-            .context(CatalogSnafu)?
-            .with_context(|| TableNotFoundSnafu {
-                table_name: table.to_string(),
-            })?;
+        let table_id = if let Some(table_id) = table_id {
+            *table_id
+        } else {
+            let table = self
+                .catalog_manager()
+                .table(
+                    &table.catalog_name,
+                    &table.schema_name,
+                    &table.table_name,
+                    None,
+                )
+                .await
+                .context(CatalogSnafu)?
+                .with_context(|| TableNotFoundSnafu {
+                    table_name: table.to_string(),
+                })?;
+            let id = table.table_info().table_id();
+            *table_id = Some(id);
+            id
+        };
 
-        // TODO(LFC): Implement it.
-        common_telemetry::debug!(
-            "calling put_record_batch with table: {:?} and record_batch size: {}",
-            table,
-            record_batch.len()
-        );
-        Ok(record_batch.len())
+        self.inserter
+            .handle_bulk_insert(table_id, decoder, data)
+            .await
+            .context(TableOperationSnafu)
     }
 }
 
