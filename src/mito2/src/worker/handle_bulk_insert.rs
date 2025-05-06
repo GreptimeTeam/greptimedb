@@ -23,7 +23,6 @@ use datatypes::arrow::datatypes::{DataType, TimeUnit};
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::RegionBulkInsertsRequest;
-use tokio::sync::oneshot::Receiver;
 
 use crate::memtable::bulk::part::BulkPart;
 use crate::request::{OptionOutputTx, SenderBulkRequest};

@@ -45,7 +45,6 @@ impl Inserter {
         let decode_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
             .with_label_values(&["decode_request"])
             .start_timer();
-        let raw_flight_data = Bytes::from(data.encode_to_vec());
         let body_size = data.data_body.len();
         // Build region server requests
         let message = decoder
@@ -99,10 +98,6 @@ impl Inserter {
                 .find_region_leader(region_id)
                 .await
                 .context(error::FindRegionLeaderSnafu)?;
-            let selection = RegionSelection {
-                region_id: region_id.as_u64(),
-                selection: mask.values().inner().as_slice().to_vec(),
-            };
             mask_per_datanode
                 .entry(datanode)
                 .or_insert_with(Vec::new)
@@ -113,29 +108,6 @@ impl Inserter {
         let wait_all_datanode_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
             .with_label_values(&["wait_all_datanode"])
             .start_timer();
-        // fast path: only one datanode
-        if mask_per_datanode.len() == 1 {
-            let (peer, requests) = mask_per_datanode.into_iter().next().unwrap();
-            let datanode = self.node_manager.datanode(&peer).await;
-            let request = RegionRequest {
-                header: Some(RegionRequestHeader {
-                    tracing_context: TracingContext::from_current_span().to_w3c(),
-                    ..Default::default()
-                }),
-                body: Some(region_request::Body::BulkInsert(BulkInsertRequest {
-                    body: Some(bulk_insert_request::Body::ArrowIpc(ArrowIpc {
-                        schema: schema_data,
-                        payload: raw_flight_data,
-                        region_selection: requests,
-                    })),
-                })),
-            };
-            let response = datanode
-                .handle(request)
-                .await
-                .context(error::RequestRegionSnafu)?;
-            return Ok(response.affected_rows);
-        }
 
         let mut handles = Vec::with_capacity(mask_per_datanode.len());
         let record_batch_schema =
@@ -186,14 +158,14 @@ impl Inserter {
                             })),
                         };
 
-                    let datanode = node_manager.datanode(&peer).await;
-                    datanode
-                        .handle(request)
-                        .await
-                        .context(error::RequestRegionSnafu)
-                });
-            handles.push(handle);
-        }
+                        let datanode = node_manager.datanode(&peer).await;
+                        datanode
+                            .handle(request)
+                            .await
+                            .context(error::RequestRegionSnafu)
+                    });
+                handles.push(handle);
+            }
         }
 
         let region_responses = futures::future::try_join_all(handles)

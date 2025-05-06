@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::fmt::{self, Display};
 
-use api::helper::{value_to_grpc_value, ColumnDataTypeWrapper};
+use api::helper::ColumnDataTypeWrapper;
 use api::v1::add_column_location::LocationType;
 use api::v1::column_def::{
     as_fulltext_option_analyzer, as_fulltext_option_backend, as_skipping_index_type,
@@ -27,7 +27,7 @@ use api::v1::region::{
     DropRequests, FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
 };
 use api::v1::{
-    self, set_index, Analyzer, FulltextBackend as PbFulltextBackend, Option as PbOption, Row, Rows,
+    self, set_index, Analyzer, FulltextBackend as PbFulltextBackend, Option as PbOption, Rows,
     SemanticType, SkippingIndexType as PbSkippingIndexType, WriteHint,
 };
 pub use common_base::AffectedRows;
@@ -154,7 +154,7 @@ impl RegionRequest {
             region_request::Body::Creates(creates) => make_region_creates(creates),
             region_request::Body::Drops(drops) => make_region_drops(drops),
             region_request::Body::Alters(alters) => make_region_alters(alters),
-            region_request::Body::BulkInsert(bulk) => make_region_rows_bulk_inserts(bulk),
+            region_request::Body::BulkInsert(bulk) => make_region_bulk_inserts(bulk),
             region_request::Body::Sync(_) => UnexpectedSnafu {
                 reason: "Sync request should be handled separately by RegionServer",
             }
@@ -353,38 +353,6 @@ fn make_region_bulk_inserts(request: BulkInsertRequest) -> Result<Vec<(RegionId,
         region_id,
         RegionRequest::BulkInserts(RegionBulkInsertsRequest { region_id, payload }),
     )])
-}
-
-/// Convert [DfRecordBatch] to gRPC rows.
-fn record_batch_to_rows(rb: &DfRecordBatch) -> (Vec<Row>, Vec<bool>) {
-    let num_rows = rb.num_rows();
-    let mut rows = Vec::with_capacity(num_rows);
-    if num_rows == 0 {
-        return (rows, vec![false; rb.num_columns()]);
-    }
-
-    let mut vectors = Vec::with_capacity(rb.num_columns());
-    let mut has_null = Vec::with_capacity(rb.num_columns());
-    for c in rb.columns() {
-        vectors.push(Helper::try_into_vector(c).unwrap());
-        has_null.push(c.null_count() > 0);
-    }
-
-    for row_idx in 0..num_rows {
-        let row = Row {
-            values: row_at(&vectors, row_idx),
-        };
-        rows.push(row);
-    }
-    (rows, has_null)
-}
-
-fn row_at(vectors: &[VectorRef], row_idx: usize) -> Vec<api::v1::Value> {
-    let mut row = Vec::with_capacity(vectors.len());
-    for a in vectors {
-        row.push(value_to_grpc_value(a.get(row_idx)))
-    }
-    row
 }
 
 /// Request to put data into a region.
