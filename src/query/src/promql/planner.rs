@@ -816,6 +816,11 @@ impl PromPlanner {
             self.create_function_expr(func, args.literals.clone(), session_state)?;
         func_exprs.insert(0, self.create_time_index_column_expr()?);
         func_exprs.extend_from_slice(&self.create_tag_column_exprs()?);
+        common_telemetry::info!(
+            "Planning function with input, input: {}, func: {:?}",
+            input,
+            func_exprs
+        );
 
         let builder = LogicalPlanBuilder::from(input)
             .project(func_exprs)
