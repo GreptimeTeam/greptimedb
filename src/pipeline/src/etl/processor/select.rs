@@ -99,7 +99,7 @@ impl Processor for SelectProcessor {
     fn exec_mut(&self, val: &mut PipelineMap) -> Result<()> {
         match self.select_type {
             SelectType::Include => {
-                let mut retain_set = HashSet::with_capacity(val.len());
+                let mut include_key_set = HashSet::with_capacity(val.len());
                 for field in self.fields.iter() {
                     // If the field has a target, move the value to the target
                     let field_name = field.input_field();
@@ -107,12 +107,12 @@ impl Processor for SelectProcessor {
                         if let Some(v) = val.remove(field_name) {
                             val.insert(target_name.to_string(), v);
                         }
-                        retain_set.insert(target_name);
+                        include_key_set.insert(target_name);
                     } else {
-                        retain_set.insert(field_name);
+                        include_key_set.insert(field_name);
                     }
                 }
-                val.retain(|k, _| retain_set.contains(k.as_str()));
+                val.retain(|k, _| include_key_set.contains(k.as_str()));
             }
             SelectType::Exclude => {
                 for field in self.fields.iter() {

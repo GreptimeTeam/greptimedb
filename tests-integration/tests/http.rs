@@ -2400,7 +2400,7 @@ pub async fn test_pipeline_auto_transform_with_select(store_type: StorageType) {
 2024-05-25 20:16:37.217 404 hello
 2024-05-25 20:16:37.218 200 hello world"#;
 
-    // select retain
+    // select include
     {
         let body = r#"
         processors:
@@ -2450,7 +2450,7 @@ pub async fn test_pipeline_auto_transform_with_select(store_type: StorageType) {
         .await;
     }
 
-    // select retain rename
+    // select include rename
     {
         let body = r#"
         processors:
