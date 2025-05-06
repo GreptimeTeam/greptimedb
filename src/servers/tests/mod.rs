@@ -154,9 +154,6 @@ impl GrpcQueryHandler for DummyInstance {
                         );
                         result.remove(0)?
                     }
-                    Query::InsertIntoPlan(_) => {
-                        todo!("wait for #5903 to be merged")
-                    }
                 }
             }
             Request::Ddl(_) => unimplemented!(),

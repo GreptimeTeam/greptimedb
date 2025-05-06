@@ -35,7 +35,6 @@ use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
-use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableId;
 use table::table_name::TableName;
 
@@ -143,9 +142,6 @@ impl GrpcQueryHandler for Instance {
                         );
                         let output = result.remove(0)?;
                         attach_timer(output, timer)
-                    }
-                    Query::InsertIntoPlan(_) => {
-                        todo!("wait for #5903 to be merged")
                     }
                 }
             }
