@@ -63,8 +63,6 @@ impl TryFrom<&yaml_rust::yaml::Hash> for SelectProcessor {
         let mut fields = Fields::default();
         let mut select_type = SelectType::default();
 
-        warn!("[DEBUG]select processor config: {:?}", value);
-
         for (k, v) in value.iter() {
             let key = k
                 .as_str()

@@ -250,13 +250,13 @@ pub(crate) fn yaml_strings(v: &yaml_rust::Yaml, field: &str) -> Result<Vec<Strin
 
 pub(crate) fn yaml_list<T>(
     v: &yaml_rust::Yaml,
-    fns: impl Fn(&str, &yaml_rust::Yaml) -> Result<T>,
+    conv_fn: impl Fn(&str, &yaml_rust::Yaml) -> Result<T>,
     field: &str,
 ) -> Result<Vec<T>> {
     v.as_vec()
         .context(FieldMustBeTypeSnafu { field, ty: "list" })?
         .iter()
-        .map(|v| fns(field, v))
+        .map(|v| conv_fn(field, v))
         .collect()
 }
 
