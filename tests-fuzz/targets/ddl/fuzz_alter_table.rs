@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use arbitrary::{Arbitrary, Unstructured};
 use common_telemetry::info;
+use datatypes::prelude::ConcreteDataType;
 use libfuzzer_sys::fuzz_target;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaChaRng;
@@ -26,7 +27,7 @@ use snafu::ResultExt;
 use sqlx::{MySql, Pool};
 use strum::{EnumIter, IntoEnumIterator};
 use tests_fuzz::context::{TableContext, TableContextRef};
-use tests_fuzz::error::{self, Result};
+use tests_fuzz::error::{self, Result, UnexpectedSnafu};
 use tests_fuzz::fake::{
     merge_two_word_map_fn, random_capitalize_map, uppercase_and_keyword_backtick_map,
     MappedGenerator, WordGenerator,
@@ -39,7 +40,8 @@ use tests_fuzz::generator::alter_expr::{
 use tests_fuzz::generator::create_expr::CreateTableExprGeneratorBuilder;
 use tests_fuzz::generator::Generator;
 use tests_fuzz::ir::{
-    droppable_columns, modifiable_columns, AlterTableExpr, AlterTableOption, CreateTableExpr,
+    droppable_columns, modifiable_columns, AlterTableExpr, AlterTableOption, Column,
+    CreateTableExpr,
 };
 use tests_fuzz::translator::mysql::alter_expr::AlterTableExprTranslator;
 use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
@@ -92,6 +94,41 @@ fn generate_create_table_expr<R: Rng + 'static>(rng: &mut R) -> Result<CreateTab
         .build()
         .unwrap();
     create_table_generator.generate(rng)
+}
+
+/// Returns (`the insert sql`, `column with special value`, `that special value`)
+fn generate_insert_table_sql<R: Rng + 'static>(
+    rng: &mut R,
+    create_table_expr: &CreateTableExpr,
+) -> Result<(String, Column, datatypes::value::Value)> {
+    use datatypes::value::Value;
+    let first_column = create_table_expr
+        .columns
+        .first()
+        .expect("At least one column");
+
+    let marker_value = match first_column.column_type {
+        ConcreteDataType::Boolean(_) => Value::Boolean(true),
+        ConcreteDataType::Int16(_) => Value::Int16(42),
+        ConcreteDataType::Int32(_) => Value::Int32(42),
+        ConcreteDataType::Int64(_) => Value::Int64(42),
+        ConcreteDataType::Float32(_) => Value::from(42.f32),
+        ConcreteDataType::Float64(_) => Value::from(42.f64),
+        ConcreteDataType::String(_) => Value::from("How many roads must a man walk down?"),
+        _ => UnexpectedSnafu {
+            violated: format!(
+                "Unexpected datatype, found {} in create-table={:?}",
+                first_column.column_type, create_table_expr
+            ),
+        },
+    };
+
+    let sql = format!(
+        "INSERT INTO {} ({}) VALUES ({});",
+        create_table_expr.table_name, first_column.name, marker_value
+    );
+
+    Ok((sql, first_column.clone(), marker_value))
 }
 
 fn generate_alter_table_expr<R: Rng + 'static>(
@@ -173,6 +210,13 @@ async fn execute_alter_table(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
         .context(error::ExecuteQuerySnafu { sql: &sql })?;
     info!("Create table: {sql}, result: {result:?}");
 
+    let (insert, marker_column, marker_value) = generate_insert_table_sql(&mut rng, &expr)?;
+    let result = sqlx::query(&insert)
+        .execute(&ctx.greptime)
+        .await
+        .context(error::ExecuteQuerySnafu { sql: &sql })?;
+    info!("Insert Into table: {insert}, result: {result:?}");
+
     // Alter table actions
     let mut table_ctx = Arc::new(TableContext::from(&expr));
     for _ in 0..input.actions {
@@ -186,6 +230,15 @@ async fn execute_alter_table(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
         info!("Alter table: {sql}, result: {result:?}");
         // Applies changes
         table_ctx = Arc::new(Arc::unwrap_or_clone(table_ctx).alter(expr).unwrap());
+
+        // validate value
+        validator::column::valid_marker_value(
+            &ctx.greptime,
+            "public".into(),
+            table_ctx.name.clone(),
+            &marker_column,
+            &marker_value,
+        )?;
 
         // Validates columns
         let mut column_entries = validator::column::fetch_columns(

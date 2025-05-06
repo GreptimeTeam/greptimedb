@@ -14,10 +14,11 @@
 
 use common_telemetry::debug;
 use datatypes::data_type::DataType;
+use datatypes::value::Value;
 use snafu::{ensure, ResultExt};
 use sqlx::MySqlPool;
 
-use crate::error::{self, Result};
+use crate::error::{self, Result, UnexpectedSnafu};
 use crate::ir::create_expr::ColumnOption;
 use crate::ir::{Column, Ident};
 
@@ -209,6 +210,35 @@ pub async fn fetch_columns(
         .fetch_all(db)
         .await
         .context(error::ExecuteQuerySnafu { sql })
+}
+
+/// validate that apart from marker column(if it still exists, every thing else is just default value)
+pub async fn valid_marker_value(
+    db: &MySqlPool,
+    schema_name: Ident,
+    table_name: Ident,
+    marker_column: &Column,
+    marker_value: &Value,
+) -> Result<bool> {
+    let sql = "SELECT * FROM ?.?";
+    let res = sqlx::query(sql)
+        .bind(schema_name.value.to_string())
+        .bind(table_name.value.to_string())
+        .fetch_all(db)
+        .await
+        .context(error::ExecuteQuerySnafu { sql })?;
+    if res.len() != 1 {
+        UnexpectedSnafu {
+            violated: format!(
+                "Expected one row after alter table, found {}:{:?}",
+                res.len(),
+                res
+            ),
+        }
+        .fail()?
+    }
+    // TODO(discord9): make sure marker value is set
+    Ok(true)
 }
 
 #[cfg(test)]
