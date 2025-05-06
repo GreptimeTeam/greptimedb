@@ -33,8 +33,7 @@ pub async fn setup_flownode_plugins(
             auth::user_provider_from_option(user_provider).context(IllegalAuthConfigSnafu)?;
         // downcast to StaticUserProvider
         // TODO: extract password from static user provider and wrap in AuthScheme basic
-        let Some(static_provider) =
-            (provider.as_ref() as &dyn Any).downcast_ref::<StaticUserProvider>()
+        let Some(static_provider) = (&provider as &dyn Any).downcast_ref::<StaticUserProvider>()
         else {
             NotImplementedSnafu {
                 reason: format!(
