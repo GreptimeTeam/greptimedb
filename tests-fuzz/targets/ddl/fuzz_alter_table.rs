@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use arbitrary::{Arbitrary, Unstructured};
 use common_telemetry::info;
-use datatypes::prelude::ConcreteDataType;
+use datatypes::prelude::{ConcreteDataType, DataType};
 use libfuzzer_sys::fuzz_target;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaChaRng;
@@ -40,8 +40,7 @@ use tests_fuzz::generator::alter_expr::{
 use tests_fuzz::generator::create_expr::CreateTableExprGeneratorBuilder;
 use tests_fuzz::generator::Generator;
 use tests_fuzz::ir::{
-    droppable_columns, modifiable_columns, AlterTableExpr, AlterTableOption, Column,
-    CreateTableExpr,
+    droppable_columns, modifiable_columns, AlterTableExpr, AlterTableOption, CreateTableExpr,
 };
 use tests_fuzz::translator::mysql::alter_expr::AlterTableExprTranslator;
 use tests_fuzz::translator::mysql::create_expr::CreateTableExprTranslator;
@@ -96,39 +95,61 @@ fn generate_create_table_expr<R: Rng + 'static>(rng: &mut R) -> Result<CreateTab
     create_table_generator.generate(rng)
 }
 
-/// Returns (`the insert sql`, `column with special value`, `that special value`)
+/// Returns the insert sql that insert one row of non-default value in table
+#[allow(unused)]
 fn generate_insert_table_sql<R: Rng + 'static>(
     rng: &mut R,
     create_table_expr: &CreateTableExpr,
-) -> Result<(String, Column, datatypes::value::Value)> {
+) -> Result<String> {
     use datatypes::value::Value;
-    let first_column = create_table_expr
-        .columns
-        .first()
-        .expect("At least one column");
+    let mut column_names = vec![];
+    let mut column_values = vec![];
+    for column in &create_table_expr.columns {
+        if column.is_time_index() {
+            continue;
+        }
 
-    let marker_value = match first_column.column_type {
-        ConcreteDataType::Boolean(_) => Value::Boolean(true),
-        ConcreteDataType::Int16(_) => Value::Int16(42),
-        ConcreteDataType::Int32(_) => Value::Int32(42),
-        ConcreteDataType::Int64(_) => Value::Int64(42),
-        ConcreteDataType::Float32(_) => Value::from(42.f32),
-        ConcreteDataType::Float64(_) => Value::from(42.f64),
-        ConcreteDataType::String(_) => Value::from("How many roads must a man walk down?"),
-        _ => UnexpectedSnafu {
-            violated: format!(
-                "Unexpected datatype, found {} in create-table={:?}",
-                first_column.column_type, create_table_expr
-            ),
-        },
-    };
+        let marker_name = &column.name;
+        let marker_value = match column.column_type {
+            ConcreteDataType::Boolean(_) => Value::Boolean(true),
+            ConcreteDataType::Int16(_) => Value::Int16(42),
+            ConcreteDataType::Int32(_) => Value::Int32(42),
+            ConcreteDataType::Int64(_) => Value::Int64(42),
+            ConcreteDataType::Float32(_) => Value::from(42.0f32),
+            ConcreteDataType::Float64(_) => Value::from(42.0f64),
+            ConcreteDataType::String(_) => Value::from("How many roads must a man walk down?"),
+            _ => UnexpectedSnafu {
+                violated: format!(
+                    "Unexpected datatype, found {} in create-table={:?}",
+                    column.column_type, create_table_expr
+                ),
+            }
+            .fail()?,
+        };
+        column_names.push(marker_name.to_string());
+        column_values.push(marker_value.to_string());
+    }
+
+    let table_name = &create_table_expr.table_name;
+
+    let ts_column = create_table_expr
+        .columns
+        .iter()
+        .find(|c| c.is_time_index())
+        .unwrap();
+
+    let ts_column_name = &ts_column.name;
+    let ts_column_value = ts_column.column_type.default_value();
+
+    let concat_column_names = column_names.join(",");
+
+    let concat_column_values = column_values.join(",");
 
     let sql = format!(
-        "INSERT INTO {} ({}) VALUES ({});",
-        create_table_expr.table_name, first_column.name, marker_value
+        "INSERT INTO {table_name} ({concat_column_names}, {ts_column_name}) VALUES ({concat_column_values}, \"{ts_column_value}\");"
     );
 
-    Ok((sql, first_column.clone(), marker_value))
+    Ok(sql)
 }
 
 fn generate_alter_table_expr<R: Rng + 'static>(
@@ -210,11 +231,11 @@ async fn execute_alter_table(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
         .context(error::ExecuteQuerySnafu { sql: &sql })?;
     info!("Create table: {sql}, result: {result:?}");
 
-    let (insert, marker_column, marker_value) = generate_insert_table_sql(&mut rng, &expr)?;
+    let insert = generate_insert_table_sql(&mut rng, &expr)?;
     let result = sqlx::query(&insert)
         .execute(&ctx.greptime)
         .await
-        .context(error::ExecuteQuerySnafu { sql: &sql })?;
+        .context(error::ExecuteQuerySnafu { sql: &insert })?;
     info!("Insert Into table: {insert}, result: {result:?}");
 
     // Alter table actions
@@ -236,9 +257,8 @@ async fn execute_alter_table(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
             &ctx.greptime,
             "public".into(),
             table_ctx.name.clone(),
-            &marker_column,
-            &marker_value,
-        )?;
+        )
+        .await?;
 
         // Validates columns
         let mut column_entries = validator::column::fetch_columns(

@@ -14,7 +14,6 @@
 
 use common_telemetry::debug;
 use datatypes::data_type::DataType;
-use datatypes::value::Value;
 use snafu::{ensure, ResultExt};
 use sqlx::MySqlPool;
 
@@ -213,17 +212,17 @@ pub async fn fetch_columns(
 }
 
 /// validate that apart from marker column(if it still exists, every thing else is just default value)
+#[allow(unused)]
 pub async fn valid_marker_value(
     db: &MySqlPool,
-    schema_name: Ident,
+    _schema_name: Ident,
     table_name: Ident,
-    marker_column: &Column,
-    marker_value: &Value,
 ) -> Result<bool> {
-    let sql = "SELECT * FROM ?.?";
-    let res = sqlx::query(sql)
-        .bind(schema_name.value.to_string())
-        .bind(table_name.value.to_string())
+    let sql = format!("SELECT * FROM {table_name}");
+    // cache is useless and buggy anyway since alter happens all the time
+    // TODO(discord9): invalid prepared sql after alter
+    let res = sqlx::query(&sql)
+        .persistent(false)
         .fetch_all(db)
         .await
         .context(error::ExecuteQuerySnafu { sql })?;
