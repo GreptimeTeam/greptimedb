@@ -236,7 +236,7 @@ impl DowngradeLeaderRegion {
         }
     }
 
-    async fn update_region_lease_deadline_with_pusher_disconnect_time(&self, ctx: &mut Context) {
+    async fn update_leader_region_lease_deadline(&self, ctx: &mut Context) {
         let leader = &ctx.persistent_ctx.from_peer;
 
         let last_connection_at = match find_datanode_lease_value(leader.id, &ctx.in_memory).await {
@@ -267,10 +267,12 @@ impl DowngradeLeaderRegion {
                     ctx.persistent_ctx.region_id
                 );
             } else if elapsed > 0 {
-                let deadline =
+                // `now - last_connection_at` < REGION_LEASE_SECS * 1000
+                let lease_timeout =
                     region_lease - Duration::from_millis((now - last_connection_at) as u64);
                 ctx.volatile_ctx.reset_leader_region_lease_deadline();
-                ctx.volatile_ctx.set_leader_region_lease_deadline(deadline);
+                ctx.volatile_ctx
+                    .set_leader_region_lease_deadline(lease_timeout);
                 info!(
                     "Datanode {}({}) last connected {:?} ago, updated leader region lease deadline to {:?}, region: {}",
                     leader, last_connection_at, elapsed, ctx.volatile_ctx.leader_region_lease_deadline, ctx.persistent_ctx.region_id
@@ -314,8 +316,7 @@ impl DowngradeLeaderRegion {
                 } else if matches!(err, error::Error::PusherNotFound { .. }) {
                     // Throws the error immediately if the datanode is unreachable.
                     error!(err; "Failed to downgrade region leader, region: {}, datanode({}) is unreachable(PusherNotFound)", ctx.persistent_ctx.region_id, ctx.persistent_ctx.from_peer.id);
-                    self.update_region_lease_deadline_with_pusher_disconnect_time(ctx)
-                        .await;
+                    self.update_leader_region_lease_deadline(ctx).await;
                     return Err(err);
                 } else if err.is_retryable() && retry < self.optimistic_retry {
                     error!(err; "Failed to downgrade region leader, region: {}, retry later", ctx.persistent_ctx.region_id);
