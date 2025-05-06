@@ -23,14 +23,14 @@ use crate::etl::processor::{
 use crate::{PipelineMap, Processor};
 
 pub(crate) const PROCESSOR_SELECT: &str = "select";
-const RETAIN: &str = "retain";
-const DISASSOCIATE: &str = "disassociate";
+const INCLUDE_KEY: &str = "include";
+const EXCLUDE_KEY: &str = "exclude";
 
 #[derive(Debug, Default)]
 pub enum SelectType {
     #[default]
-    Retain,
-    Disassociate,
+    Include,
+    Exclude,
 }
 
 impl TryFrom<String> for SelectType {
@@ -38,11 +38,11 @@ impl TryFrom<String> for SelectType {
 
     fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
         match value.as_str() {
-            RETAIN => Ok(SelectType::Retain),
-            DISASSOCIATE => Ok(SelectType::Disassociate),
+            INCLUDE_KEY => Ok(SelectType::Include),
+            EXCLUDE_KEY => Ok(SelectType::Exclude),
             _ => InvalidInputSnafu {
                 input: value,
-                reason: "expect 'retain' or 'disassociate'",
+                reason: "expect 'include' or 'exclude'",
             }
             .fail(),
         }
@@ -98,7 +98,7 @@ impl Processor for SelectProcessor {
 
     fn exec_mut(&self, val: &mut PipelineMap) -> Result<()> {
         match self.select_type {
-            SelectType::Retain => {
+            SelectType::Include => {
                 let mut retain_set = HashSet::with_capacity(val.len());
                 for field in self.fields.iter() {
                     // If the field has a target, move the value to the target
@@ -114,7 +114,7 @@ impl Processor for SelectProcessor {
                 }
                 val.retain(|k, _| retain_set.contains(k.as_str()));
             }
-            SelectType::Disassociate => {
+            SelectType::Exclude => {
                 for field in self.fields.iter() {
                     val.remove(field.input_field());
                 }
@@ -135,7 +135,7 @@ mod test {
     fn test_select() {
         let processor = SelectProcessor {
             fields: Fields::one(Field::new("hello", None)),
-            select_type: SelectType::Retain,
+            select_type: SelectType::Include,
         };
 
         let mut p = PipelineMap::new();
@@ -152,7 +152,7 @@ mod test {
     fn test_select_with_target() {
         let processor = SelectProcessor {
             fields: Fields::one(Field::new("hello", Some("hello3".to_string()))),
-            select_type: SelectType::Retain,
+            select_type: SelectType::Include,
         };
 
         let mut p = PipelineMap::new();
@@ -166,10 +166,10 @@ mod test {
     }
 
     #[test]
-    fn test_select_with_disassociate() {
+    fn test_select_with_exclude() {
         let processor = SelectProcessor {
             fields: Fields::one(Field::new("hello", None)),
-            select_type: SelectType::Disassociate,
+            select_type: SelectType::Exclude,
         };
 
         let mut p = PipelineMap::new();

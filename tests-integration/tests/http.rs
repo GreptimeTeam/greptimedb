@@ -2510,7 +2510,7 @@ pub async fn test_pipeline_auto_transform_with_select(store_type: StorageType) {
         .await;
     }
 
-    // select disassociate
+    // select exclude
     {
         let body = r#"
             processors:
@@ -2525,7 +2525,7 @@ pub async fn test_pipeline_auto_transform_with_select(store_type: StorageType) {
                   formats:
                     - "%Y-%m-%d %H:%M:%S%.3f"
               - select:
-                  type: disassociate
+                  type: exclude
                   fields:
                     - http_status_code
             "#;
