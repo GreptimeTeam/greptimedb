@@ -798,6 +798,8 @@ impl PromPlanner {
             common_telemetry::info!("Planning function args, no input, reset time index");
             self.ctx.time_index_column = Some(SPECIAL_TIME_FUNCTION.to_string());
             self.ctx.reset_table_name_and_schema();
+            self.ctx.tag_columns = vec![];
+            self.ctx.field_columns = vec![DEFAULT_FIELD_COLUMN.to_string()];
             LogicalPlan::Extension(Extension {
                 node: Arc::new(
                     EmptyMetric::new(
@@ -819,6 +821,14 @@ impl PromPlanner {
         common_telemetry::info!(
             "Planning function with input, input: {}, func: {:?}",
             input,
+            func_exprs
+        );
+
+        common_telemetry::info!(
+            "prom call expr to plan, input: {}, func: {:?}, args: {:?}, func_exprs: {:?}",
+            input,
+            func,
+            args,
             func_exprs
         );
 
