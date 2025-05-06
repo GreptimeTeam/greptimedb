@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use ahash::{HashSet, HashSetExt};
-use common_telemetry::warn;
 use snafu::OptionExt;
 
 use crate::error::{Error, KeyMustBeStringSnafu, ProcessorUnsupportedValueSnafu, Result};
