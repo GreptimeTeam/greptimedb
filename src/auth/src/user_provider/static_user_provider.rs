@@ -61,7 +61,7 @@ impl StaticUserProvider {
         }
     }
 
-    /// Retrun a random username/password pair
+    /// Return a random username/password pair
     /// This is useful for invoking from other components in the cluster
     pub fn get_one_user_pwd(&self) -> Result<(String, String)> {
         let kv = self.users.iter().next().context(InvalidConfigSnafu {
@@ -92,10 +92,6 @@ impl UserProvider for StaticUserProvider {
     ) -> Result<()> {
         // default allow all
         Ok(())
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
     }
 }
 

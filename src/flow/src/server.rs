@@ -18,7 +18,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use api::v1::{RowDeleteRequests, RowInsertRequests};
-use auth::StaticUserProvider;
 use cache::{TABLE_FLOWNODE_SET_CACHE_NAME, TABLE_ROUTE_CACHE_NAME};
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
@@ -58,8 +57,8 @@ use crate::batching_mode::engine::BatchingEngine;
 use crate::engine::FlowEngine;
 use crate::error::{
     to_status_with_last_err, CacheRequiredSnafu, CreateFlowSnafu, ExternalSnafu, FlowNotFoundSnafu,
-    IllegalAuthConfigSnafu, ListFlowsSnafu, NotImplementedSnafu, ParseAddrSnafu,
-    ShutdownServerSnafu, StartServerSnafu, UnexpectedSnafu,
+    IllegalAuthConfigSnafu, ListFlowsSnafu, ParseAddrSnafu, ShutdownServerSnafu, StartServerSnafu,
+    UnexpectedSnafu,
 };
 use crate::heartbeat::HeartbeatTask;
 use crate::metrics::{METRIC_FLOW_PROCESSING_TIME, METRIC_FLOW_ROWS};
@@ -316,25 +315,14 @@ impl FlownodeInstance {
 
 pub fn get_flow_auth_options(fn_opts: &FlownodeOptions) -> Result<Option<FlowAuthHeader>, Error> {
     if let Some(user_provider) = fn_opts.user_provider.as_ref() {
-        let provider =
-            auth::user_provider_from_option(user_provider).context(IllegalAuthConfigSnafu)?;
+        let static_provider = auth::static_user_provider_from_option(user_provider)
+            .context(IllegalAuthConfigSnafu)?;
 
-        // downcast to StaticUserProvider
-        if let Some(static_provider) = provider.as_any().downcast_ref::<StaticUserProvider>() {
-            let (usr, pwd) = static_provider
-                .get_one_user_pwd()
-                .context(IllegalAuthConfigSnafu)?;
-            let auth_header = FlowAuthHeader::from_user_pwd(&usr, &pwd);
-            return Ok(Some(auth_header));
-        } else {
-            NotImplementedSnafu {
-                reason: format!(
-                    "flownode Only support static provider for now, get {}",
-                    (*provider).type_name()
-                ),
-            }
-            .fail()?
-        };
+        let (usr, pwd) = static_provider
+            .get_one_user_pwd()
+            .context(IllegalAuthConfigSnafu)?;
+        let auth_header = FlowAuthHeader::from_user_pwd(&usr, &pwd);
+        return Ok(Some(auth_header));
     }
 
     Ok(None)

@@ -57,6 +57,24 @@ pub fn user_provider_from_option(opt: &String) -> Result<UserProviderRef> {
     }
 }
 
+pub fn static_user_provider_from_option(opt: &String) -> Result<StaticUserProvider> {
+    let (name, content) = opt.split_once(':').context(InvalidConfigSnafu {
+        value: opt.to_string(),
+        msg: "UserProviderOption must be in format `<option>:<value>`",
+    })?;
+    match name {
+        STATIC_USER_PROVIDER => {
+            let provider = StaticUserProvider::new(content)?;
+            Ok(provider)
+        }
+        _ => InvalidConfigSnafu {
+            value: name.to_string(),
+            msg: format!("Invalid UserProviderOption, expect only {STATIC_USER_PROVIDER}"),
+        }
+        .fail(),
+    }
+}
+
 type Username<'a> = &'a str;
 type HostOrIp<'a> = &'a str;
 
