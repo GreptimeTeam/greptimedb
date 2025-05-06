@@ -26,6 +26,9 @@ pub fn metadata_store_dir(store_dir: &str) -> String {
     format!("{store_dir}/metadata")
 }
 
+/// The default data home directory.
+pub const DEFAULT_DATA_HOME: &str = "./greptimedb_data";
+
 /// The Server running mode
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Copy)]
 #[serde(rename_all = "lowercase")]

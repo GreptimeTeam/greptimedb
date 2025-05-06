@@ -222,10 +222,7 @@ impl Default for MetasrvOptions {
             enable_region_failover: false,
             allow_region_failover_on_local_wal: false,
             http: HttpOptions::default(),
-            logging: LoggingOptions {
-                dir: format!("{METASRV_HOME}/logs"),
-                ..Default::default()
-            },
+            logging: LoggingOptions::default(),
             procedure: ProcedureConfig {
                 max_retry_times: 12,
                 retry_delay: Duration::from_millis(500),

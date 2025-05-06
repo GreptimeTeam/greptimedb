@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::fmt;
+use std::path::Path;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -20,7 +21,7 @@ use clap::Parser;
 use common_base::Plugins;
 use common_config::Configurable;
 use common_telemetry::info;
-use common_telemetry::logging::TracingOptions;
+use common_telemetry::logging::{TracingOptions, DEFAULT_LOGGING_DIR};
 use common_version::{short_version, version};
 use meta_srv::bootstrap::MetasrvInstance;
 use meta_srv::metasrv::BackendImpl;
@@ -272,6 +273,14 @@ impl StartCommand {
 
         if let Some(data_home) = &self.data_home {
             opts.data_home.clone_from(data_home);
+        }
+
+        // If the logging dir is not set, use the default logs dir in the data home.
+        if opts.logging.dir.is_empty() {
+            opts.logging.dir = Path::new(&opts.data_home)
+                .join(DEFAULT_LOGGING_DIR)
+                .to_string_lossy()
+                .to_string();
         }
 
         if !self.store_key_prefix.is_empty() {
