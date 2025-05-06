@@ -37,6 +37,9 @@ use crate::tracing_sampler::{create_sampler, TracingSampleOptions};
 
 pub const DEFAULT_OTLP_ENDPOINT: &str = "http://localhost:4317";
 
+/// The default logs directory.
+pub const DEFAULT_LOGGING_DIR: &str = "logs/";
+
 // Handle for reloading log level
 pub static RELOAD_HANDLE: OnceCell<tracing_subscriber::reload::Handle<Targets, Registry>> =
     OnceCell::new();
@@ -133,7 +136,8 @@ impl Eq for LoggingOptions {}
 impl Default for LoggingOptions {
     fn default() -> Self {
         Self {
-            dir: "./greptimedb_data/logs".to_string(),
+            // The directory path will be configured at application startup, typically using the data home directory as a base.
+            dir: "".to_string(),
             level: None,
             log_format: LogFormat::Text,
             enable_otlp_tracing: false,

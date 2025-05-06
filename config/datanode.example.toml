@@ -116,7 +116,7 @@ provider = "raft_engine"
 ## The directory to store the WAL files.
 ## **It's only used when the provider is `raft_engine`**.
 ## @toml2docs:none-default
-dir = "./greptimedb_data/wal"
+dir = "./greptimedb_data/wal/"
 
 ## The size of the WAL segment file.
 ## **It's only used when the provider is `raft_engine`**.
@@ -608,7 +608,7 @@ experimental_sparse_primary_key_encoding = false
 ## The logging options.
 [logging]
 ## The directory to store the log files. If set to empty, logs will not be written to files.
-dir = "./greptimedb_data/logs"
+dir = "./greptimedb_data/logs/"
 
 ## The log level. Can be `info`/`debug`/`warn`/`error`.
 ## @toml2docs:none-default

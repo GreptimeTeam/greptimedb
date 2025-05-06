@@ -181,7 +181,7 @@
 | `region_engine.metric` | -- | -- | Metric engine options. |
 | `region_engine.metric.experimental_sparse_primary_key_encoding` | Bool | `false` | Whether to enable the experimental sparse primary key encoding. |
 | `logging` | -- | -- | The logging options. |
-| `logging.dir` | String | `./greptimedb_data/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
+| `logging.dir` | String | `./greptimedb_data/logs/` | The directory to store the log files. If set to empty, logs will not be written to files. |
 | `logging.level` | String | Unset | The log level. Can be `info`/`debug`/`warn`/`error`. |
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
 | `logging.otlp_endpoint` | String | `http://localhost:4317` | The OTLP tracing endpoint. |
@@ -283,7 +283,7 @@
 | `datanode.client.connect_timeout` | String | `10s` | -- |
 | `datanode.client.tcp_nodelay` | Bool | `true` | -- |
 | `logging` | -- | -- | The logging options. |
-| `logging.dir` | String | `./greptimedb_data/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
+| `logging.dir` | String | `./greptimedb_data/logs/` | The directory to store the log files. If set to empty, logs will not be written to files. |
 | `logging.level` | String | Unset | The log level. Can be `info`/`debug`/`warn`/`error`. |
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
 | `logging.otlp_endpoint` | String | `http://localhost:4317` | The OTLP tracing endpoint. |
@@ -314,7 +314,7 @@
 
 | Key | Type | Default | Descriptions |
 | --- | -----| ------- | ----------- |
-| `data_home` | String | `./greptimedb_data/metasrv/` | The working home directory. |
+| `data_home` | String | `./greptimedb_data/` | The working home directory. |
 | `bind_addr` | String | `127.0.0.1:3002` | The bind address of metasrv. |
 | `server_addr` | String | `127.0.0.1:3002` | The communication server address for the frontend and datanode to connect to metasrv.<br/>If left empty or unset, the server will automatically use the IP address of the first network interface<br/>on the host, with the same port number as the one specified in `bind_addr`. |
 | `store_addrs` | Array | -- | Store server address default to etcd store.<br/>For postgres store, the format is:<br/>"password=password dbname=postgres user=postgres host=localhost port=5432"<br/>For etcd store, the format is:<br/>"127.0.0.1:2379" |
@@ -359,7 +359,7 @@
 | `wal.replication_factor` | Integer | `1` | Expected number of replicas of each partition. |
 | `wal.create_topic_timeout` | String | `30s` | Above which a topic creation operation will be cancelled. |
 | `logging` | -- | -- | The logging options. |
-| `logging.dir` | String | `./greptimedb_data/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
+| `logging.dir` | String | `./greptimedb_data/logs/` | The directory to store the log files. If set to empty, logs will not be written to files. |
 | `logging.level` | String | Unset | The log level. Can be `info`/`debug`/`warn`/`error`. |
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
 | `logging.otlp_endpoint` | String | `http://localhost:4317` | The OTLP tracing endpoint. |
@@ -523,7 +523,7 @@
 | `region_engine.metric` | -- | -- | Metric engine options. |
 | `region_engine.metric.experimental_sparse_primary_key_encoding` | Bool | `false` | Whether to enable the experimental sparse primary key encoding. |
 | `logging` | -- | -- | The logging options. |
-| `logging.dir` | String | `./greptimedb_data/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
+| `logging.dir` | String | `./greptimedb_data/logs/` | The directory to store the log files. If set to empty, logs will not be written to files. |
 | `logging.level` | String | Unset | The log level. Can be `info`/`debug`/`warn`/`error`. |
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
 | `logging.otlp_endpoint` | String | `http://localhost:4317` | The OTLP tracing endpoint. |
@@ -575,7 +575,7 @@
 | `heartbeat.interval` | String | `3s` | Interval for sending heartbeat messages to the metasrv. |
 | `heartbeat.retry_interval` | String | `3s` | Interval for retrying to send heartbeat messages to the metasrv. |
 | `logging` | -- | -- | The logging options. |
-| `logging.dir` | String | `./greptimedb_data/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
+| `logging.dir` | String | `./greptimedb_data/logs/` | The directory to store the log files. If set to empty, logs will not be written to files. |
 | `logging.level` | String | Unset | The log level. Can be `info`/`debug`/`warn`/`error`. |
 | `logging.enable_otlp_tracing` | Bool | `false` | Enable OTLP tracing. |
 | `logging.otlp_endpoint` | String | `http://localhost:4317` | The OTLP tracing endpoint. |
