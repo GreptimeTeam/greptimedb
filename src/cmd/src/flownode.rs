@@ -33,7 +33,8 @@ use common_telemetry::info;
 use common_telemetry::logging::TracingOptions;
 use common_version::{short_version, version};
 use flow::{
-    FlownodeBuilder, FlownodeInstance, FlownodeServiceBuilder, FrontendClient, FrontendInvoker,
+    get_flow_auth_options, FlownodeBuilder, FlownodeInstance, FlownodeServiceBuilder,
+    FrontendClient, FrontendInvoker,
 };
 use meta_client::{MetaClientOptions, MetaClientType};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -82,6 +83,10 @@ impl App for Instance {
     }
 
     async fn start(&mut self) -> Result<()> {
+        plugins::start_flownode_plugins(self.flownode.flow_engine().plugins().clone())
+            .await
+            .context(StartFlownodeSnafu)?;
+
         self.flownode.start().await.context(StartFlownodeSnafu)
     }
 
@@ -151,6 +156,9 @@ struct StartCommand {
     /// HTTP request timeout in seconds.
     #[clap(long)]
     http_timeout: Option<u64>,
+    /// User Provider cfg, for auth, currently only support static user provider
+    #[clap(long)]
+    user_provider: Option<String>,
 }
 
 impl StartCommand {
@@ -214,6 +222,10 @@ impl StartCommand {
             opts.http.timeout = Duration::from_secs(http_timeout);
         }
 
+        if let Some(user_provider) = &self.user_provider {
+            opts.user_provider = Some(user_provider.clone());
+        }
+
         ensure!(
             opts.node_id.is_some(),
             MissingConfigSnafu {
@@ -238,8 +250,14 @@ impl StartCommand {
         info!("Flownode start command: {:#?}", self);
         info!("Flownode options: {:#?}", opts);
 
+        let plugin_opts = opts.plugins;
         let mut opts = opts.component;
         opts.grpc.detect_server_addr();
+
+        let mut plugins = Plugins::new();
+        plugins::setup_flownode_plugins(&mut plugins, &plugin_opts, &opts)
+            .await
+            .context(StartFlownodeSnafu)?;
 
         let member_id = opts
             .node_id
@@ -315,10 +333,12 @@ impl StartCommand {
         );
 
         let flow_metadata_manager = Arc::new(FlowMetadataManager::new(cached_meta_backend.clone()));
-        let frontend_client = FrontendClient::from_meta_client(meta_client.clone());
+        let flow_auth_header = get_flow_auth_options(&opts).context(StartFlownodeSnafu)?;
+        let frontend_client =
+            FrontendClient::from_meta_client(meta_client.clone(), flow_auth_header);
         let flownode_builder = FlownodeBuilder::new(
             opts.clone(),
-            Plugins::new(),
+            plugins,
             table_metadata_manager,
             catalog_manager.clone(),
             flow_metadata_manager,

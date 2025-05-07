@@ -57,13 +57,16 @@ use crate::batching_mode::engine::BatchingEngine;
 use crate::engine::FlowEngine;
 use crate::error::{
     to_status_with_last_err, CacheRequiredSnafu, CreateFlowSnafu, ExternalSnafu, FlowNotFoundSnafu,
-    ListFlowsSnafu, ParseAddrSnafu, ShutdownServerSnafu, StartServerSnafu, UnexpectedSnafu,
+    IllegalAuthConfigSnafu, ListFlowsSnafu, ParseAddrSnafu, ShutdownServerSnafu, StartServerSnafu,
+    UnexpectedSnafu,
 };
 use crate::heartbeat::HeartbeatTask;
 use crate::metrics::{METRIC_FLOW_PROCESSING_TIME, METRIC_FLOW_ROWS};
 use crate::transform::register_function_to_query_engine;
 use crate::utils::{SizeReportSender, StateReportHandler};
-use crate::{CreateFlowArgs, Error, FlownodeOptions, FrontendClient, StreamingEngine};
+use crate::{
+    CreateFlowArgs, Error, FlowAuthHeader, FlownodeOptions, FrontendClient, StreamingEngine,
+};
 
 pub const FLOW_NODE_SERVER_NAME: &str = "FLOW_NODE_SERVER";
 /// wrapping flow node manager to avoid orphan rule with Arc<...>
@@ -310,6 +313,21 @@ impl FlownodeInstance {
     }
 }
 
+pub fn get_flow_auth_options(fn_opts: &FlownodeOptions) -> Result<Option<FlowAuthHeader>, Error> {
+    if let Some(user_provider) = fn_opts.user_provider.as_ref() {
+        let static_provider = auth::static_user_provider_from_option(user_provider)
+            .context(IllegalAuthConfigSnafu)?;
+
+        let (usr, pwd) = static_provider
+            .get_one_user_pwd()
+            .context(IllegalAuthConfigSnafu)?;
+        let auth_header = FlowAuthHeader::from_user_pwd(&usr, &pwd);
+        return Ok(Some(auth_header));
+    }
+
+    Ok(None)
+}
+
 /// [`FlownodeInstance`] Builder
 pub struct FlownodeBuilder {
     opts: FlownodeOptions,
@@ -383,6 +401,7 @@ impl FlownodeBuilder {
             batching,
             self.flow_metadata_manager.clone(),
             self.catalog_manager.clone(),
+            self.plugins.clone(),
         );
 
         let server = FlownodeServer::new(FlowService::new(Arc::new(dual)));
