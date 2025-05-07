@@ -151,6 +151,7 @@ pub struct GrpcServer {
             >,
         >,
     >,
+    bind_addr: Option<SocketAddr>,
 }
 
 /// Grpc Server configuration
@@ -236,7 +237,7 @@ impl Server for GrpcServer {
         Ok(())
     }
 
-    async fn start(&self, addr: SocketAddr) -> Result<SocketAddr> {
+    async fn start(&mut self, addr: SocketAddr) -> Result<()> {
         let routes = {
             let mut routes = self.routes.lock().await;
             let Some(routes) = routes.take() else {
@@ -298,10 +299,16 @@ impl Server for GrpcServer {
                 .context(StartGrpcSnafu);
             serve_state_tx.send(result)
         });
-        Ok(addr)
+
+        self.bind_addr = Some(addr);
+        Ok(())
     }
 
     fn name(&self) -> &str {
         GRPC_SERVER
+    }
+
+    fn bind_addr(&self) -> Option<SocketAddr> {
+        self.bind_addr
     }
 }

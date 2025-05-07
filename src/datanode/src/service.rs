@@ -62,7 +62,7 @@ impl<'a> DatanodeServiceBuilder<'a> {
         }
     }
 
-    pub async fn build(mut self) -> Result<ServerHandlers> {
+    pub fn build(mut self) -> Result<ServerHandlers> {
         let handlers = ServerHandlers::default();
 
         if let Some(grpc_server) = self.grpc_server.take() {
@@ -70,7 +70,7 @@ impl<'a> DatanodeServiceBuilder<'a> {
                 addr: &self.opts.grpc.bind_addr,
             })?;
             let handler: ServerHandler = (Box::new(grpc_server), addr);
-            handlers.insert(handler).await;
+            handlers.insert(handler);
         }
 
         if self.enable_http_service {
@@ -82,7 +82,7 @@ impl<'a> DatanodeServiceBuilder<'a> {
                 addr: &self.opts.http.addr,
             })?;
             let handler: ServerHandler = (Box::new(http_server), addr);
-            handlers.insert(handler).await;
+            handlers.insert(handler);
         }
 
         Ok(handlers)

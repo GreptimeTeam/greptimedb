@@ -129,7 +129,7 @@ impl Datanode {
         self.services = services;
     }
 
-    pub async fn shutdown(&self) -> Result<()> {
+    pub async fn shutdown(&mut self) -> Result<()> {
         self.services
             .shutdown_all()
             .await

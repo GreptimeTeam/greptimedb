@@ -85,7 +85,7 @@ impl App for Instance {
         self.flownode.start().await.context(StartFlownodeSnafu)
     }
 
-    async fn stop(&self) -> Result<()> {
+    async fn stop(&mut self) -> Result<()> {
         self.flownode
             .shutdown()
             .await
@@ -331,7 +331,6 @@ impl StartCommand {
             .with_grpc_server(flownode.flownode_server().clone())
             .enable_http_service()
             .build()
-            .await
             .context(StartFlownodeSnafu)?;
         flownode.setup_services(services);
         let flownode = flownode;

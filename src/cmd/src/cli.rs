@@ -58,7 +58,7 @@ impl App for Instance {
         false
     }
 
-    async fn stop(&self) -> Result<()> {
+    async fn stop(&mut self) -> Result<()> {
         Ok(())
     }
 }

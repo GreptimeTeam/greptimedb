@@ -111,6 +111,7 @@ pub struct MysqlServer {
     base_server: BaseTcpServer,
     spawn_ref: Arc<MysqlSpawnRef>,
     spawn_config: Arc<MysqlSpawnConfig>,
+    bind_addr: Option<SocketAddr>,
 }
 
 impl MysqlServer {
@@ -123,6 +124,7 @@ impl MysqlServer {
             base_server: BaseTcpServer::create_server("MySQL", io_runtime),
             spawn_ref,
             spawn_config,
+            bind_addr: None,
         })
     }
 
@@ -221,7 +223,7 @@ impl Server for MysqlServer {
         self.base_server.shutdown().await
     }
 
-    async fn start(&self, listening: SocketAddr) -> Result<SocketAddr> {
+    async fn start(&mut self, listening: SocketAddr) -> Result<()> {
         let (stream, addr) = self
             .base_server
             .bind(listening, self.spawn_config.keep_alive_secs)
@@ -230,10 +232,16 @@ impl Server for MysqlServer {
 
         let join_handle = common_runtime::spawn_global(self.accept(io_runtime, stream));
         self.base_server.start_with(join_handle).await?;
-        Ok(addr)
+
+        self.bind_addr = Some(addr);
+        Ok(())
     }
 
     fn name(&self) -> &str {
         MYSQL_SERVER
+    }
+
+    fn bind_addr(&self) -> Option<SocketAddr> {
+        self.bind_addr
     }
 }

@@ -231,10 +231,10 @@ impl servers::server::Server for FlownodeServer {
         Ok(())
     }
 
-    async fn start(&self, addr: SocketAddr) -> Result<SocketAddr, servers::error::Error> {
+    async fn start(&mut self, addr: SocketAddr) -> Result<(), servers::error::Error> {
         let mut rx_server = self.inner.server_shutdown_tx.lock().await.subscribe();
 
-        let (incoming, addr) = {
+        let incoming = {
             let listener = TcpListener::bind(addr)
                 .await
                 .context(TcpBindSnafu { addr })?;
@@ -243,7 +243,7 @@ impl servers::server::Server for FlownodeServer {
                 TcpIncoming::from_listener(listener, true, None).context(TcpIncomingSnafu)?;
             info!("flow server is bound to {}", addr);
 
-            (incoming, addr)
+            incoming
         };
 
         let builder = tonic::transport::Server::builder().add_service(self.create_flow_service());
@@ -255,7 +255,7 @@ impl servers::server::Server for FlownodeServer {
                 .context(StartGrpcSnafu);
         });
 
-        Ok(addr)
+        Ok(())
     }
 
     fn name(&self) -> &str {
@@ -282,7 +282,7 @@ impl FlownodeInstance {
 
         Ok(())
     }
-    pub async fn shutdown(&self) -> Result<(), crate::Error> {
+    pub async fn shutdown(&mut self) -> Result<(), Error> {
         self.services
             .shutdown_all()
             .await
@@ -391,7 +391,7 @@ impl FlownodeBuilder {
 
         let instance = FlownodeInstance {
             flownode_server: server,
-            services: ServerHandlers::new(),
+            services: ServerHandlers::default(),
             heartbeat_task,
         };
         Ok(instance)
@@ -572,14 +572,14 @@ impl<'a> FlownodeServiceBuilder<'a> {
         }
     }
 
-    pub async fn build(mut self) -> Result<ServerHandlers, Error> {
+    pub fn build(mut self) -> Result<ServerHandlers, Error> {
         let handlers = ServerHandlers::default();
         if let Some(grpc_server) = self.grpc_server.take() {
             let addr: SocketAddr = self.opts.grpc.bind_addr.parse().context(ParseAddrSnafu {
                 addr: &self.opts.grpc.bind_addr,
             })?;
             let handler: ServerHandler = (Box::new(grpc_server), addr);
-            handlers.insert(handler).await;
+            handlers.insert(handler);
         }
 
         if self.enable_http_service {
@@ -590,7 +590,7 @@ impl<'a> FlownodeServiceBuilder<'a> {
                 addr: &self.opts.http.addr,
             })?;
             let handler: ServerHandler = (Box::new(http_server), addr);
-            handlers.insert(handler).await;
+            handlers.insert(handler);
         }
         Ok(handlers)
     }
