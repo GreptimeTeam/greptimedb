@@ -80,7 +80,7 @@ macro_rules! yaml_map_get_str {
     ($map:expr, $key:expr, $value:expr) => {
         $map.get(&yaml_rust::Yaml::String($key.to_string()))
             .and_then(|v| v.as_str())
-            .context(InvalidFieldRenameSnafu {
+            .with_context(|| InvalidFieldRenameSnafu {
                 value: $value.clone(),
             })
     };
