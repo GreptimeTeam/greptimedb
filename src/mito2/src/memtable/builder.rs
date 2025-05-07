@@ -26,12 +26,14 @@ use datatypes::prelude::{ConcreteDataType, MutableVector, VectorRef};
 use datatypes::value::ValueRef;
 use datatypes::vectors::StringVector;
 
+/// Field builder with special implementation for strings.
 pub(crate) enum FieldBuilder {
     String(StringBuilder),
     Other(Box<dyn MutableVector>),
 }
 
 impl FieldBuilder {
+    /// Creates a [FieldBuilder] instance with given type and capacity.
     pub fn create(data_type: &ConcreteDataType, init_cap: usize) -> Self {
         if let ConcreteDataType::String(_) = data_type {
             Self::String(StringBuilder::with_capacity(init_cap / 16, init_cap))
@@ -40,6 +42,7 @@ impl FieldBuilder {
         }
     }
 
+    /// Pushes a value into builder.
     pub(crate) fn push(&mut self, value: ValueRef) -> datatypes::error::Result<()> {
         match self {
             FieldBuilder::String(b) => {
@@ -54,6 +57,7 @@ impl FieldBuilder {
         }
     }
 
+    /// Push n null values into builder.
     pub(crate) fn push_nulls(&mut self, n: usize) {
         match self {
             FieldBuilder::String(s) => {
@@ -65,6 +69,7 @@ impl FieldBuilder {
         }
     }
 
+    /// Finishes builder and builder a [VectorRef].
     pub(crate) fn finish(&mut self) -> VectorRef {
         match self {
             FieldBuilder::String(s) => Arc::new(StringVector::from(s.build())) as _,
@@ -73,6 +78,8 @@ impl FieldBuilder {
     }
 }
 
+/// [StringBuilder] serves as a workaround for lacking [`GenericStringBuilder::append_array`](https://docs.rs/arrow-array/latest/arrow_array/builder/type.GenericStringBuilder.html#method.append_array)
+/// which is only available since arrow-rs 55.0.0.
 pub(crate) struct StringBuilder {
     value_builder: UInt8BufferBuilder,
     offsets_builder: BufferBuilder<i32>,
@@ -117,7 +124,10 @@ impl StringBuilder {
         self.null_buffer_builder.len()
     }
 
-    pub fn append_string_vector(&mut self, array: &StringArray) {
+    /// Based on arrow-rs' GenericByteBuilder:
+    /// https://github.com/apache/arrow-rs/blob/7905545537c50590fdb4dc645e3e0130fce80b57/arrow-array/src/builder/generic_bytes_builder.rs#L135
+    pub fn append_vector(&mut self, vector: &StringVector) {
+        let array = &vector.array;
         if array.len() == 0 {
             return;
         }
@@ -232,12 +242,12 @@ mod tests {
         builder_1.append("hello");
         builder_1.append_null();
         builder_1.append("world");
-        let array = builder_1.build();
+        let vector = StringVector::from(builder_1.build());
 
         let mut builder_2 = StringBuilder::default();
         builder_2.append_null();
         builder_2.append("!");
-        builder_2.append_string_vector(&array);
+        builder_2.append_vector(&vector);
         assert_eq!(
             vec![None, Some("!"), Some("hello"), None, Some("world")],
             builder_2.build().iter().collect::<Vec<_>>()
@@ -246,9 +256,9 @@ mod tests {
 
     #[test]
     fn test_append_empty_array() {
-        let empty_array = StringArray::from(vec![] as Vec<&str>);
+        let empty_vector = StringVector::from(StringArray::from(vec![] as Vec<&str>));
         let mut builder = StringBuilder::default();
-        builder.append_string_vector(&empty_array);
+        builder.append_vector(&empty_vector);
         let array = builder.build();
         assert_eq!(0, array.len());
     }
@@ -256,10 +266,10 @@ mod tests {
     #[test]
     fn test_append_partial_array() {
         let source = StringArray::from(vec![Some("a"), None, Some("b"), Some("c")]);
-        let sliced = source.slice(1, 2); // [None, Some("b")]
+        let sliced = StringVector::from(source.slice(1, 2)); // [None, Some("b")]
 
         let mut builder = StringBuilder::default();
-        builder.append_string_vector(&sliced);
+        builder.append_vector(&sliced);
         let array = builder.build();
         assert_eq!(vec![None, Some("b")], array.iter().collect::<Vec<_>>());
     }

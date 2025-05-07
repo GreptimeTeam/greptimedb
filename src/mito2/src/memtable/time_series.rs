@@ -906,8 +906,16 @@ impl ValueBuilder {
             });
             match builder {
                 FieldBuilder::String(builder) => {
-                    let string_vector = field_src.as_any().downcast_ref::<StringVector>().unwrap();
-                    builder.append_string_vector(&string_vector.array);
+                    let string_vector = field_src.as_any().downcast_ref::<StringVector>().ok_or(
+                        error::InvalidBatchSnafu {
+                            reason: format!(
+                                "Field type mismatch, expecting String, given: {}",
+                                field_src.data_type()
+                            ),
+                        }
+                        .build(),
+                    )?;
+                    builder.append_vector(string_vector);
                 }
                 FieldBuilder::Other(builder) => {
                     let len = field_src.len();

@@ -140,6 +140,11 @@ impl SimpleBulkMemtable {
         self.max_sequence
             .fetch_max(stats.max_sequence, Ordering::SeqCst);
     }
+
+    #[cfg(test)]
+    fn schema(&self) -> &RegionMetadataRef {
+        &self.region_metadata
+    }
 }
 
 impl Debug for SimpleBulkMemtable {
@@ -361,9 +366,12 @@ mod tests {
 
     use api::v1::value::ValueData;
     use api::v1::{Mutation, OpType, Row, Rows, SemanticType};
+    use common_recordbatch::DfRecordBatch;
     use common_time::Timestamp;
+    use datatypes::arrow::array::{ArrayRef, Float64Array, TimestampMillisecondArray};
+    use datatypes::arrow_array::StringArray;
     use datatypes::data_type::ConcreteDataType;
-    use datatypes::prelude::Vector;
+    use datatypes::prelude::{ScalarVector, Vector};
     use datatypes::schema::ColumnSchema;
     use datatypes::value::Value;
     use datatypes::vectors::TimestampMillisecondVector;
@@ -528,5 +536,141 @@ mod tests {
 
         assert_eq!(1, batch.num_rows()); // deduped to 1 row
         assert_eq!(2.0, batch.fields()[0].data.get(0).as_f64_lossy().unwrap()); // last write wins
+    }
+
+    #[test]
+    fn test_write_one() {
+        let memtable = new_test_memtable(false, MergeMode::LastRow);
+        let kvs = build_key_values(&memtable.region_metadata, 0, &[(1, 1.0, "a".to_string())]);
+        let kv = kvs.iter().next().unwrap();
+        memtable.write_one(kv).unwrap();
+
+        let mut iter = memtable.iter(None, None, None).unwrap();
+        let batch = iter.next().unwrap().unwrap();
+        assert_eq!(1, batch.num_rows());
+    }
+
+    #[test]
+    fn test_write_bulk() {
+        let memtable = new_test_memtable(false, MergeMode::LastRow);
+        let arrow_schema = memtable.schema().schema.arrow_schema().clone();
+        let arrays = vec![
+            Arc::new(TimestampMillisecondArray::from(vec![1, 2])) as ArrayRef,
+            Arc::new(Float64Array::from(vec![1.0, 2.0])) as ArrayRef,
+            Arc::new(StringArray::from(vec!["a", "b"])) as ArrayRef,
+        ];
+        let rb = DfRecordBatch::try_new(arrow_schema, arrays).unwrap();
+
+        let part = BulkPart {
+            batch: rb,
+            sequence: 1,
+            min_ts: 1,
+            max_ts: 2,
+            num_rows: 2,
+        };
+        memtable.write_bulk(part).unwrap();
+
+        let mut iter = memtable.iter(None, None, None).unwrap();
+        let batch = iter.next().unwrap().unwrap();
+        assert_eq!(2, batch.num_rows());
+
+        let stats = memtable.stats();
+        assert_eq!(1, stats.max_sequence);
+        assert_eq!(2, stats.num_rows);
+        assert_eq!(
+            Some((Timestamp::new_millisecond(1), Timestamp::new_millisecond(2))),
+            stats.time_range
+        );
+
+        let kvs = build_key_values(&memtable.region_metadata, 2, &[(3, 3.0, "c".to_string())]);
+        memtable.write(&kvs).unwrap();
+        let mut iter = memtable.iter(None, None, None).unwrap();
+        let batch = iter.next().unwrap().unwrap();
+        assert_eq!(3, batch.num_rows());
+        assert_eq!(
+            vec![1, 2, 3],
+            batch
+                .timestamps()
+                .as_any()
+                .downcast_ref::<TimestampMillisecondVector>()
+                .unwrap()
+                .iter_data()
+                .map(|t| { t.unwrap().0.value() })
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_is_empty() {
+        let memtable = new_test_memtable(false, MergeMode::LastRow);
+        assert!(memtable.is_empty());
+
+        memtable
+            .write(&build_key_values(
+                &memtable.region_metadata,
+                0,
+                &[(1, 1.0, "a".to_string())],
+            ))
+            .unwrap();
+        assert!(!memtable.is_empty());
+    }
+
+    #[test]
+    fn test_stats() {
+        let memtable = new_test_memtable(false, MergeMode::LastRow);
+        let stats = memtable.stats();
+        assert_eq!(0, stats.num_rows);
+        assert!(stats.time_range.is_none());
+
+        memtable
+            .write(&build_key_values(
+                &memtable.region_metadata,
+                0,
+                &[(1, 1.0, "a".to_string())],
+            ))
+            .unwrap();
+        let stats = memtable.stats();
+        assert_eq!(1, stats.num_rows);
+        assert!(stats.time_range.is_some());
+    }
+
+    #[test]
+    fn test_fork() {
+        let memtable = new_test_memtable(false, MergeMode::LastRow);
+        memtable
+            .write(&build_key_values(
+                &memtable.region_metadata,
+                0,
+                &[(1, 1.0, "a".to_string())],
+            ))
+            .unwrap();
+
+        let forked = memtable.fork(2, &memtable.region_metadata);
+        assert!(forked.is_empty());
+    }
+
+    #[test]
+    fn test_sequence_filter() {
+        let memtable = new_test_memtable(false, MergeMode::LastRow);
+        memtable
+            .write(&build_key_values(
+                &memtable.region_metadata,
+                0,
+                &[(1, 1.0, "a".to_string())],
+            ))
+            .unwrap();
+        memtable
+            .write(&build_key_values(
+                &memtable.region_metadata,
+                1,
+                &[(2, 2.0, "b".to_string())],
+            ))
+            .unwrap();
+
+        // Filter with sequence 0 should only return first write
+        let mut iter = memtable.iter(None, None, Some(0)).unwrap();
+        let batch = iter.next().unwrap().unwrap();
+        assert_eq!(1, batch.num_rows());
+        assert_eq!(1.0, batch.fields()[0].data.get(0).as_f64_lossy().unwrap());
     }
 }
