@@ -61,7 +61,7 @@ pub struct ColumnSchema {
     pub data_type: ConcreteDataType,
     is_nullable: bool,
     is_time_index: bool,
-    pub default_constraint: Option<ColumnDefaultConstraint>,
+    default_constraint: Option<ColumnDefaultConstraint>,
     metadata: Metadata,
 }
 
