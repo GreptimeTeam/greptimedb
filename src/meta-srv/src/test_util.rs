@@ -42,17 +42,22 @@ pub(crate) fn new_region_route(region_id: u64, peers: &[Peer], leader_node: u64)
     }
 }
 
-/// Builds and returns a [`SelectorContext`]. To access its inner state,
-/// use `memory_backend` on [`MetaPeerClientRef`].
-pub(crate) fn create_selector_context() -> SelectorContext {
+pub(crate) fn create_meta_peer_client() -> MetaPeerClientRef {
     let in_memory = Arc::new(MemoryKvBackend::new());
-    let meta_peer_client = MetaPeerClientBuilder::default()
+    MetaPeerClientBuilder::default()
         .election(None)
         .in_memory(in_memory.clone())
         .build()
         .map(Arc::new)
         // Safety: all required fields set at initialization
-        .unwrap();
+        .unwrap()
+}
+
+/// Builds and returns a [`SelectorContext`]. To access its inner state,
+/// use `memory_backend` on [`MetaPeerClientRef`].
+pub(crate) fn create_selector_context() -> SelectorContext {
+    let meta_peer_client = create_meta_peer_client();
+    let in_memory = meta_peer_client.memory_backend();
 
     SelectorContext {
         datanode_lease_secs: 10,
