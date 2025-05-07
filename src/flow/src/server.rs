@@ -282,7 +282,7 @@ impl FlownodeInstance {
 
         Ok(())
     }
-    pub async fn shutdown(&self) -> Result<(), crate::Error> {
+    pub async fn shutdown(&mut self) -> Result<(), Error> {
         self.services
             .shutdown_all()
             .await

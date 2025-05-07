@@ -293,7 +293,7 @@ impl App for Instance {
         Ok(())
     }
 
-    async fn stop(&self) -> Result<()> {
+    async fn stop(&mut self) -> Result<()> {
         self.frontend
             .shutdown()
             .await

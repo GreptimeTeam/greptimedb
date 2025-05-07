@@ -85,7 +85,7 @@ impl App for Instance {
         self.flownode.start().await.context(StartFlownodeSnafu)
     }
 
-    async fn stop(&self) -> Result<()> {
+    async fn stop(&mut self) -> Result<()> {
         self.flownode
             .shutdown()
             .await

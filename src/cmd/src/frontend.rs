@@ -89,7 +89,7 @@ impl App for Instance {
             .context(error::StartFrontendSnafu)
     }
 
-    async fn stop(&self) -> Result<()> {
+    async fn stop(&mut self) -> Result<()> {
         self.frontend
             .shutdown()
             .await

@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_runtime::Runtime;
@@ -35,7 +35,7 @@ pub type ServerHandler = (Box<dyn Server>, SocketAddr);
 #[derive(Clone)]
 pub enum ServerHandlers {
     Init(Arc<std::sync::Mutex<HashMap<String, ServerHandler>>>),
-    Started(Arc<RwLock<HashMap<String, Box<dyn Server>>>>),
+    Started(Arc<HashMap<String, Box<dyn Server>>>),
 }
 
 impl Default for ServerHandlers {
@@ -73,7 +73,6 @@ impl ServerHandlers {
         let ServerHandlers::Started(handlers) = self else {
             return None;
         };
-        let handlers = handlers.read().unwrap();
         handlers.get(name).and_then(|x| x.bind_addr())
     }
 
@@ -107,24 +106,18 @@ impl ServerHandlers {
             .into_iter()
             .map(|(k, v)| (k, v.0))
             .collect::<HashMap<_, _>>();
-        *self = ServerHandlers::Started(Arc::new(RwLock::new(handlers)));
+        *self = ServerHandlers::Started(Arc::new(handlers));
         Ok(())
     }
 
     /// Shutdown all the managed services. It will block until all the services are shutdown.
-    pub async fn shutdown_all(&self) -> Result<()> {
+    pub async fn shutdown_all(&mut self) -> Result<()> {
         let ServerHandlers::Started(handlers) = self else {
             // If not started, do nothing.
             return Ok(());
         };
 
-        let handlers = {
-            let mut handlers = handlers.write().unwrap();
-            std::mem::take(&mut *handlers)
-        };
-
-        // Even though the `shutdown` method in server does not require mut self, we still acquire
-        // write lock to pair with `start_all` method.
+        let handlers = std::mem::take(handlers);
         try_join_all(handlers.values().map(|server| async move {
             server.shutdown().await?;
             info!("Service {} is shutdown!", server.name());

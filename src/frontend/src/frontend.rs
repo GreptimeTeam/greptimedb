@@ -128,7 +128,7 @@ impl Frontend {
             .context(error::StartServerSnafu)
     }
 
-    pub async fn shutdown(&self) -> Result<()> {
+    pub async fn shutdown(&mut self) -> Result<()> {
         self.servers
             .shutdown_all()
             .await
