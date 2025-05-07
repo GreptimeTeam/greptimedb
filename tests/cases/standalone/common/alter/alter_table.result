@@ -145,7 +145,7 @@ INSERT INTO test_alt_table_default (h, j) VALUES (1, 0), (2, 1);
 
 Affected Rows: 2
 
-SELECT * FROM test_alt_table_default;
+SELECT * FROM test_alt_table_default ORDER BY h;
 
 +---+-------+-------------------------+
 | h | i     | j                       |
@@ -153,6 +153,60 @@ SELECT * FROM test_alt_table_default;
 | 1 | false | 1970-01-01T00:00:00     |
 | 2 | false | 1970-01-01T00:00:00.001 |
 +---+-------+-------------------------+
+
+ALTER TABLE test_alt_table_default MODIFY COLUMN i INTEGER;
+
+Affected Rows: 0
+
+DESC TABLE test_alt_table_default;
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| h      | Int32                | PRI | YES  |         | TAG           |
+| i      | Int32                |     | YES  | 0       | FIELD         |
+| j      | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
++--------+----------------------+-----+------+---------+---------------+
+
+INSERT INTO test_alt_table_default (h, j) VALUES (3, 0), (4, 1);
+
+Affected Rows: 2
+
+SELECT * FROM test_alt_table_default ORDER BY h;
+
++---+---+-------------------------+
+| h | i | j                       |
++---+---+-------------------------+
+| 1 | 0 | 1970-01-01T00:00:00     |
+| 2 | 0 | 1970-01-01T00:00:00.001 |
+| 3 | 0 | 1970-01-01T00:00:00     |
+| 4 | 0 | 1970-01-01T00:00:00.001 |
++---+---+-------------------------+
+
+ALTER TABLE test_alt_table_default MODIFY COLUMN i STRING;
+
+Affected Rows: 0
+
+INSERT INTO test_alt_table_default (h, j) VALUES (5, 0);
+
+Affected Rows: 1
+
+INSERT INTO test_alt_table_default (h, i, j) VALUES (6, "word" ,1);
+
+Affected Rows: 1
+
+SELECT * FROM test_alt_table_default ORDER BY h;
+
++---+------+-------------------------+
+| h | i    | j                       |
++---+------+-------------------------+
+| 1 | 0    | 1970-01-01T00:00:00     |
+| 2 | 0    | 1970-01-01T00:00:00.001 |
+| 3 | 0    | 1970-01-01T00:00:00     |
+| 4 | 0    | 1970-01-01T00:00:00.001 |
+| 5 | 0    | 1970-01-01T00:00:00     |
+| 6 | word | 1970-01-01T00:00:00.001 |
++---+------+-------------------------+
 
 DROP TABLE test_alt_table_default;
 

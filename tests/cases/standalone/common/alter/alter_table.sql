@@ -50,7 +50,23 @@ ALTER TABLE test_alt_table_default MODIFY COLUMN i BOOLEAN;
 
 INSERT INTO test_alt_table_default (h, j) VALUES (1, 0), (2, 1);
 
-SELECT * FROM test_alt_table_default;
+SELECT * FROM test_alt_table_default ORDER BY h;
+
+ALTER TABLE test_alt_table_default MODIFY COLUMN i INTEGER;
+
+DESC TABLE test_alt_table_default;
+
+INSERT INTO test_alt_table_default (h, j) VALUES (3, 0), (4, 1);
+
+SELECT * FROM test_alt_table_default ORDER BY h;
+
+ALTER TABLE test_alt_table_default MODIFY COLUMN i STRING;
+
+INSERT INTO test_alt_table_default (h, j) VALUES (5, 0);
+
+INSERT INTO test_alt_table_default (h, i, j) VALUES (6, "word" ,1);
+
+SELECT * FROM test_alt_table_default ORDER BY h;
 
 DROP TABLE test_alt_table_default;
 

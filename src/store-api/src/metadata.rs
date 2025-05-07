@@ -707,6 +707,7 @@ impl RegionMetadataBuilder {
                                 .with_context(|_| CastDefaultValueSnafu {
                                     default_value: Some(default_value.clone()),
                                     target_type: target_type.clone(),
+                                    reason: "Failed to cast default value",
                                 })?,
                         )
                     } else {
@@ -715,10 +716,11 @@ impl RegionMetadataBuilder {
                 column_meta.column_schema = column_meta
                     .column_schema
                     .clone()
-                    .with_default_constraint(new_default)
+                    .with_default_constraint(new_default.clone())
                     .with_context(|_| CastDefaultValueSnafu {
                         default_value: column_meta.column_schema.default_constraint().cloned(),
                         target_type,
+                        reason: format!("Failed to set new default: {:?}", new_default),
                     })?;
             }
         }
@@ -994,10 +996,16 @@ pub enum MetadataError {
         location: Location,
     },
 
-    #[snafu(display("Failed to cast default value {:?} to {}", default_value, target_type))]
+    #[snafu(display(
+        "Failed to cast default value {:?} to {}, reason: {}",
+        default_value,
+        target_type,
+        reason
+    ))]
     CastDefaultValue {
         default_value: Option<ColumnDefaultConstraint>,
         target_type: ConcreteDataType,
+        reason: String,
         source: datatypes::Error,
         #[snafu(implicit)]
         location: Location,
