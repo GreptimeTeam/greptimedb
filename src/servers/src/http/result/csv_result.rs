@@ -76,7 +76,7 @@ macro_rules! http_try {
             Err(err) => {
                 let msg = err.to_string();
                 return HttpResponse::Error(ErrorResponse::from_error_message(
-                    StatusCode::InvalidArguments,
+                    StatusCode::Unexpected,
                     msg,
                 ))
                 .into_response();
