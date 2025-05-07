@@ -57,7 +57,7 @@ pub struct ScanRequest {
     /// will be returned.
     pub sequence: Option<SequenceNumber>,
     /// Optional constraint on the minimal sequence number in the SST files.
-    /// If set, only the SST files that contains sequences greater than this value will be scanned.
+    /// If set, only the SST files that contain sequences greater than this value will be scanned.
     pub sst_min_sequence: Option<SequenceNumber>,
     /// Optional hint for the distribution of time-series data.
     pub distribution: Option<TimeSeriesDistribution>,
