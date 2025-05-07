@@ -255,8 +255,8 @@ pub struct Instance {
 
 impl Instance {
     /// Find the socket addr of a server by its `name`.
-    pub async fn server_addr(&self, name: &str) -> Option<SocketAddr> {
-        self.frontend.server_handlers().addr(name).await
+    pub fn server_addr(&self, name: &str) -> Option<SocketAddr> {
+        self.frontend.server_handlers().addr(name)
     }
 }
 
@@ -630,7 +630,6 @@ impl StartCommand {
 
         let servers = Services::new(opts, fe_instance.clone(), plugins)
             .build()
-            .await
             .context(error::StartFrontendSnafu)?;
 
         let frontend = Frontend {

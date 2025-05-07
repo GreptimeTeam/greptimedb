@@ -29,7 +29,7 @@ use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::query_engine::DescribeResult;
 use query::{QueryEngineFactory, QueryEngineRef};
 use servers::error::{Error, NotSupportedSnafu, Result};
-use servers::query_handler::grpc::{GrpcQueryHandler, ServerGrpcQueryHandlerRef};
+use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::{ServerSqlQueryHandlerRef, SqlQueryHandler};
 use session::context::QueryContextRef;
 use snafu::ensure;
@@ -38,13 +38,10 @@ use table::metadata::TableId;
 use table::table_name::TableName;
 use table::TableRef;
 
-mod grpc;
 mod http;
 mod interceptor;
 mod mysql;
 mod postgres;
-
-const LOCALHOST_WITH_0: &str = "127.0.0.1:0";
 
 pub struct DummyInstance {
     query_engine: QueryEngineRef,
@@ -192,9 +189,5 @@ fn create_testing_instance(table: TableRef) -> DummyInstance {
 }
 
 fn create_testing_sql_query_handler(table: TableRef) -> ServerSqlQueryHandlerRef {
-    Arc::new(create_testing_instance(table)) as _
-}
-
-fn create_testing_grpc_query_handler(table: TableRef) -> ServerGrpcQueryHandlerRef {
     Arc::new(create_testing_instance(table)) as _
 }

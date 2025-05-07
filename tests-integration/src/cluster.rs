@@ -213,7 +213,7 @@ impl GreptimeDbClusterBuilder {
         self.wait_datanodes_alive(metasrv.metasrv.meta_peer_client(), datanodes)
             .await;
 
-        let frontend = self.build_frontend(metasrv.clone(), datanode_clients).await;
+        let mut frontend = self.build_frontend(metasrv.clone(), datanode_clients).await;
 
         test_util::prepare_another_catalog_and_schema(&frontend.instance).await;
 
@@ -225,7 +225,7 @@ impl GreptimeDbClusterBuilder {
             datanode_instances,
             kv_backend: self.kv_backend.clone(),
             metasrv: metasrv.metasrv,
-            frontend,
+            frontend: Arc::new(frontend),
         }
     }
 
@@ -347,7 +347,7 @@ impl GreptimeDbClusterBuilder {
         &self,
         metasrv: MockInfo,
         datanode_clients: Arc<NodeClients>,
-    ) -> Arc<Frontend> {
+    ) -> Frontend {
         let mut meta_client = MetaClientBuilder::frontend_default_options()
             .channel_manager(metasrv.channel_manager)
             .enable_access_cluster_info()
@@ -413,11 +413,10 @@ impl GreptimeDbClusterBuilder {
 
         Frontend {
             instance,
-            servers: ServerHandlers::new(),
+            servers: ServerHandlers::default(),
             heartbeat_task: Some(heartbeat_task),
             export_metrics_task: None,
         }
-        .into()
     }
 }
 

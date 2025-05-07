@@ -382,7 +382,6 @@ impl StartCommand {
 
         let servers = Services::new(opts, instance.clone(), plugins)
             .build()
-            .await
             .context(error::StartFrontendSnafu)?;
 
         let frontend = Frontend {

@@ -106,7 +106,7 @@ pub struct Frontend {
 }
 
 impl Frontend {
-    pub async fn start(&self) -> Result<()> {
+    pub async fn start(&mut self) -> Result<()> {
         if let Some(t) = &self.heartbeat_task {
             t.start().await?;
         }

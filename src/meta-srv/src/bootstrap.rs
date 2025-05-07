@@ -79,7 +79,7 @@ use crate::{error, Result};
 pub struct MetasrvInstance {
     metasrv: Arc<Metasrv>,
 
-    httpsrv: Arc<HttpServer>,
+    http_server: HttpServer,
 
     opts: MetasrvOptions,
 
@@ -96,12 +96,11 @@ impl MetasrvInstance {
         plugins: Plugins,
         metasrv: Metasrv,
     ) -> Result<MetasrvInstance> {
-        let httpsrv = Arc::new(
-            HttpServerBuilder::new(opts.http.clone())
-                .with_metrics_handler(MetricsHandler)
-                .with_greptime_config_options(opts.to_toml().context(error::TomlFormatSnafu)?)
-                .build(),
-        );
+        let http_server = HttpServerBuilder::new(opts.http.clone())
+            .with_metrics_handler(MetricsHandler)
+            .with_greptime_config_options(opts.to_toml().context(error::TomlFormatSnafu)?)
+            .build();
+
         let metasrv = Arc::new(metasrv);
         // put metasrv into plugins for later use
         plugins.insert::<Arc<Metasrv>>(metasrv.clone());
@@ -109,7 +108,7 @@ impl MetasrvInstance {
             .context(error::InitExportMetricsTaskSnafu)?;
         Ok(MetasrvInstance {
             metasrv,
-            httpsrv,
+            http_server,
             opts,
             signal_sender: None,
             plugins,
@@ -138,10 +137,9 @@ impl MetasrvInstance {
             addr: &self.opts.http.addr,
         })?;
         let http_srv = async {
-            self.httpsrv
+            self.http_server
                 .start(addr)
                 .await
-                .map(|_| ())
                 .context(error::StartHttpSnafu)
         };
         future::try_join(metasrv, http_srv).await?;
@@ -156,11 +154,11 @@ impl MetasrvInstance {
                 .context(error::SendShutdownSignalSnafu)?;
         }
         self.metasrv.shutdown().await?;
-        self.httpsrv
+        self.http_server
             .shutdown()
             .await
             .context(error::ShutdownServerSnafu {
-                server: self.httpsrv.name(),
+                server: self.http_server.name(),
             })?;
         Ok(())
     }

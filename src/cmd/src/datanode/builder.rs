@@ -129,7 +129,6 @@ impl InstanceBuilder {
             .with_default_grpc_server(&datanode.region_server())
             .enable_http_service()
             .build()
-            .await
             .context(StartDatanodeSnafu)?;
         datanode.setup_services(services);
 

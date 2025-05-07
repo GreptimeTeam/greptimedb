@@ -90,7 +90,8 @@ macro_rules! grpc_tests {
 }
 
 pub async fn test_invalid_dbname(store_type: StorageType) {
-    let (addr, _db, fe_grpc_server) = setup_grpc_server(store_type, "test_invalid_dbname").await;
+    let (_db, fe_grpc_server) = setup_grpc_server(store_type, "test_invalid_dbname").await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
 
     let grpc_client = Client::with_urls(vec![addr]);
     let db = Database::new_with_dbname("tom", grpc_client);
@@ -117,7 +118,8 @@ pub async fn test_invalid_dbname(store_type: StorageType) {
 }
 
 pub async fn test_dbname(store_type: StorageType) {
-    let (addr, _db, fe_grpc_server) = setup_grpc_server(store_type, "test_dbname").await;
+    let (_db, fe_grpc_server) = setup_grpc_server(store_type, "test_dbname").await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
 
     let grpc_client = Client::with_urls(vec![addr]);
     let db = Database::new_with_dbname(
@@ -134,8 +136,9 @@ pub async fn test_grpc_message_size_ok(store_type: StorageType) {
         max_send_message_size: 1024,
         ..Default::default()
     };
-    let (addr, _db, fe_grpc_server) =
+    let (_db, fe_grpc_server) =
         setup_grpc_server_with(store_type, "test_grpc_message_size_ok", None, Some(config)).await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
 
     let grpc_client = Client::with_urls(vec![addr]);
     let db = Database::new_with_dbname(
@@ -153,8 +156,9 @@ pub async fn test_grpc_zstd_compression(store_type: StorageType) {
         max_send_message_size: 1024,
         ..Default::default()
     };
-    let (addr, _db, fe_grpc_server) =
+    let (_db, fe_grpc_server) =
         setup_grpc_server_with(store_type, "test_grpc_zstd_compression", None, Some(config)).await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
 
     let grpc_client = Client::with_urls(vec![addr]);
     let db = Database::new_with_dbname(
@@ -171,13 +175,14 @@ pub async fn test_grpc_message_size_limit_send(store_type: StorageType) {
         max_send_message_size: 50,
         ..Default::default()
     };
-    let (addr, _db, fe_grpc_server) = setup_grpc_server_with(
+    let (_db, fe_grpc_server) = setup_grpc_server_with(
         store_type,
         "test_grpc_message_size_limit_send",
         None,
         Some(config),
     )
     .await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
 
     let grpc_client = Client::with_urls(vec![addr]);
     let db = Database::new_with_dbname(
@@ -195,13 +200,14 @@ pub async fn test_grpc_message_size_limit_recv(store_type: StorageType) {
         max_send_message_size: 1024,
         ..Default::default()
     };
-    let (addr, _db, fe_grpc_server) = setup_grpc_server_with(
+    let (_db, fe_grpc_server) = setup_grpc_server_with(
         store_type,
         "test_grpc_message_size_limit_recv",
         None,
         Some(config),
     )
     .await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
 
     let grpc_client = Client::with_urls(vec![addr]);
     let db = Database::new_with_dbname(
@@ -222,9 +228,10 @@ pub async fn test_grpc_auth(store_type: StorageType) {
         &"static_user_provider:cmd:greptime_user=greptime_pwd".to_string(),
     )
     .unwrap();
-    let (addr, _db, fe_grpc_server) =
+    let (_db, fe_grpc_server) =
         setup_grpc_server_with_user_provider(store_type, "auto_create_table", Some(user_provider))
             .await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
 
     let grpc_client = Client::with_urls(vec![addr]);
     let mut db = Database::new_with_dbname(
@@ -270,7 +277,8 @@ pub async fn test_grpc_auth(store_type: StorageType) {
 }
 
 pub async fn test_auto_create_table(store_type: StorageType) {
-    let (addr, _db, fe_grpc_server) = setup_grpc_server(store_type, "test_auto_create_table").await;
+    let (_db, fe_grpc_server) = setup_grpc_server(store_type, "test_auto_create_table").await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
 
     let grpc_client = Client::with_urls(vec![addr]);
     let db = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, grpc_client);
@@ -279,8 +287,9 @@ pub async fn test_auto_create_table(store_type: StorageType) {
 }
 
 pub async fn test_auto_create_table_with_hints(store_type: StorageType) {
-    let (addr, _db, fe_grpc_server) =
-        setup_grpc_server(store_type, "auto_create_table_with_hints").await;
+    let (_db, fe_grpc_server) =
+        setup_grpc_server(store_type, "test_auto_create_table_with_hints").await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
 
     let grpc_client = Client::with_urls(vec![addr]);
     let db = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, grpc_client);
@@ -346,7 +355,8 @@ fn expect_data() -> (Column, Column, Column, Column) {
 
 pub async fn test_insert_and_select(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
-    let (addr, _db, fe_grpc_server) = setup_grpc_server(store_type, "test_insert_and_select").await;
+    let (_db, fe_grpc_server) = setup_grpc_server(store_type, "test_insert_and_select").await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
 
     let grpc_client = Client::with_urls(vec![addr]);
     let db = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, grpc_client);
@@ -587,7 +597,8 @@ fn testing_create_expr() -> CreateTableExpr {
 }
 
 pub async fn test_health_check(store_type: StorageType) {
-    let (addr, _db, fe_grpc_server) = setup_grpc_server(store_type, "test_health_check").await;
+    let (_db, fe_grpc_server) = setup_grpc_server(store_type, "test_health_check").await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
 
     let grpc_client = Client::with_urls(vec![addr]);
     grpc_client.health_check().await.unwrap();
@@ -599,8 +610,9 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
 
     // prepare connection
-    let (addr, _db, fe_grpc_server) =
-        setup_grpc_server(store_type, "test_prom_gateway_query").await;
+    let (_db, fe_grpc_server) = setup_grpc_server(store_type, "test_prom_gateway_query").await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
+
     let grpc_client = Client::with_urls(vec![addr]);
     let db = Database::new(
         DEFAULT_CATALOG_NAME,
@@ -775,8 +787,9 @@ pub async fn test_grpc_timezone(store_type: StorageType) {
         max_send_message_size: 1024,
         ..Default::default()
     };
-    let (addr, _db, fe_grpc_server) =
+    let (_db, fe_grpc_server) =
         setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
 
     let grpc_client = Client::with_urls(vec![addr]);
     let mut db = Database::new_with_dbname(
@@ -849,8 +862,9 @@ pub async fn test_grpc_tls_config(store_type: StorageType) {
         max_send_message_size: 1024,
         tls,
     };
-    let (addr, _db, fe_grpc_server) =
+    let (_db, fe_grpc_server) =
         setup_grpc_server_with(store_type, "tls_create_table", None, Some(config)).await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
 
     let mut client_tls = ClientTlsOption {
         server_ca_cert_path: ca_path,
