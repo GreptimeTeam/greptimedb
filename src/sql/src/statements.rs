@@ -107,6 +107,8 @@ fn parse_string_to_value(
                         target_unit: t.unit(),
                     },
                 )?))
+            } else if let Ok(ts) = i64::from_str(s.as_str()) {
+                Ok(Value::Timestamp(Timestamp::new(ts, t.unit())))
             } else {
                 ParseSqlValueSnafu {
                     msg: format!("Failed to parse {s} to Timestamp value"),

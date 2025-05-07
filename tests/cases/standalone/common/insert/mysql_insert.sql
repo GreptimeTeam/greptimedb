@@ -9,7 +9,7 @@ CREATE TABLE integers (
 INSERT INTO integers VALUES (11, 1), (12, 2);
 
 -- SQLNESS PROTOCOL MYSQL
-INSERT INTO integers VALUES ('13', 3), ('14', 4);
+INSERT INTO integers VALUES ('13', '3'), ('14', '4');
 
 -- SQLNESS PROTOCOL MYSQL
 INSERT INTO integers VALUES ('15a', 5), ('16', 6);
