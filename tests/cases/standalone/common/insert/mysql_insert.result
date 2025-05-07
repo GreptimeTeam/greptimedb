@@ -13,7 +13,7 @@ INSERT INTO integers VALUES (11, 1), (12, 2);
 affected_rows: 2
 
 -- SQLNESS PROTOCOL MYSQL
-INSERT INTO integers VALUES ('13', 3), ('14', 4);
+INSERT INTO integers VALUES ('13', '3'), ('14', '4');
 
 affected_rows: 2
 
