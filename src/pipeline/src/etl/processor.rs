@@ -70,10 +70,9 @@ const SEPARATOR_NAME: &str = "separator";
 const TARGET_FIELDS_NAME: &str = "target_fields";
 const JSON_PATH_NAME: &str = "json_path";
 const JSON_PATH_RESULT_INDEX_NAME: &str = "result_index";
-const SIMPLE_EXTRACT_KEY_NAME: &str = "key";
+const KEY_NAME: &str = "key";
 const TYPE_NAME: &str = "type";
-const NAME_KEY: &str = "name";
-const TO_KEY: &str = "to";
+const RENAME_TO_KEY: &str = "rename_to";
 
 /// Macro to extract a string value from a YAML map
 #[macro_export]
@@ -96,13 +95,13 @@ lazy_static::lazy_static! {
         match v {
             yaml_rust::Yaml::String(s) => Field::from_str(s),
             yaml_rust::Yaml::Hash(m) => {
-                let name = yaml_map_get_str!(m, NAME_KEY, v)?;
-                let target = yaml_map_get_str!(m, TO_KEY, v)?;
-                Ok(Field::new(name, Some(target.to_string())))
+                let key = yaml_map_get_str!(m, KEY_NAME, v)?;
+                let rename_to = yaml_map_get_str!(m, RENAME_TO_KEY, v)?;
+                Ok(Field::new(key, Some(rename_to.to_string())))
             }
             _ => FieldMustBeTypeSnafu {
                 field,
-                ty: "string or name-to map",
+                ty: "string or key-rename_to map",
             }
             .fail(),
         }

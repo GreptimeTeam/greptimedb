@@ -36,7 +36,9 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Field renaming must be a string pair of 'name' and 'to', got: {value:?}"))]
+    #[snafu(display(
+        "Field renaming must be a string pair of 'key' and 'rename_to', got: {value:?}"
+    ))]
     InvalidFieldRename {
         value: yaml_rust::Yaml,
         #[snafu(implicit)]
