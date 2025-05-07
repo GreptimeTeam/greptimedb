@@ -270,7 +270,7 @@ pub async fn test_sql_api(store_type: StorageType) {
 
     // test insert and select
     let res = client
-        .get("/v1/sql?sql=insert into demo values('host', 66.6, 1024, 0)")
+        .get("/v1/sql?sql=insert into demo values('host, \"name', 66.6, 1024, 0)")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
@@ -289,7 +289,7 @@ pub async fn test_sql_api(store_type: StorageType) {
     assert_eq!(
         output[0],
         serde_json::from_value::<GreptimeQueryOutput>(json!({
-            "records":{"schema":{"column_schemas":[{"name":"host","data_type":"String"},{"name":"cpu","data_type":"Float64"},{"name":"memory","data_type":"Float64"},{"name":"ts","data_type":"TimestampMillisecond"}]},"rows":[["host",66.6,1024.0,0]],"total_rows":1}
+            "records":{"schema":{"column_schemas":[{"name":"host","data_type":"String"},{"name":"cpu","data_type":"Float64"},{"name":"memory","data_type":"Float64"},{"name":"ts","data_type":"TimestampMillisecond"}]},"rows":[["host, \"name",66.6,1024.0,0]],"total_rows":1}
         })).unwrap()
     );
 
@@ -435,6 +435,16 @@ pub async fn test_sql_api(store_type: StorageType) {
     assert_eq!(output.len(), 1);
     // this is something only json format can show
     assert!(format!("{:?}", output[0]).contains("\\\"param\\\""));
+
+    // test csv format
+    let res = client
+        .get("/v1/sql?format=csv&sql=select cpu,ts,host from demo limit 1")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = &res.text().await;
+    // Must be escaped correctly: 66.6,0,"host, ""name"
+    assert_eq!(body, "66.6,0,\"host, \"\"name\"\n");
 
     // test parse method
     let res = client.get("/v1/sql/parse?sql=desc table t").send().await;
