@@ -591,7 +591,7 @@ impl<'a> FlownodeServiceBuilder<'a> {
         }
     }
 
-    pub async fn build(mut self) -> Result<ServerHandlers, Error> {
+    pub fn build(mut self) -> Result<ServerHandlers, Error> {
         let handlers = ServerHandlers::default();
         if let Some(grpc_server) = self.grpc_server.take() {
             let addr: SocketAddr = self.opts.grpc.bind_addr.parse().context(ParseAddrSnafu {
