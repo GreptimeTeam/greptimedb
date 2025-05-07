@@ -35,6 +35,16 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display(
+        "Field renaming must be a string pair of 'key' and 'rename_to', got: {value:?}"
+    ))]
+    InvalidFieldRename {
+        value: yaml_rust::Yaml,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Processor must be a map"))]
     ProcessorMustBeMap {
         #[snafu(implicit)]
@@ -748,6 +758,7 @@ impl ErrorExt for Error {
 
             EmptyInputField { .. }
             | MissingInputField { .. }
+            | InvalidFieldRename { .. }
             | ProcessorMustBeMap { .. }
             | ProcessorMissingField { .. }
             | ProcessorExpectString { .. }

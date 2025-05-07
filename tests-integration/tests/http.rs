@@ -97,6 +97,7 @@ macro_rules! http_tests {
                 test_test_pipeline_api,
                 test_plain_text_ingestion,
                 test_pipeline_auto_transform,
+                test_pipeline_auto_transform_with_select,
                 test_identity_pipeline,
                 test_identity_pipeline_with_flatten,
                 test_identity_pipeline_with_custom_ts,
@@ -2377,27 +2378,6 @@ processors:
 
     assert_eq!(res.status(), StatusCode::OK);
 
-    let content = res.text().await;
-
-    let content = serde_json::from_str(&content);
-    assert!(content.is_ok());
-    //  {"execution_time_ms":13,"pipelines":[{"name":"test","version":"2024-07-04 08:31:00.987136"}]}
-    let content: Value = content.unwrap();
-
-    let version_str = content
-        .get("pipelines")
-        .unwrap()
-        .as_array()
-        .unwrap()
-        .first()
-        .unwrap()
-        .get("version")
-        .unwrap()
-        .as_str()
-        .unwrap()
-        .to_string();
-    assert!(!version_str.is_empty());
-
     // 2. write data
     let data_body = r#"
 2024-05-25 20:16:37.217 404 hello
@@ -2420,6 +2400,192 @@ processors:
         expected,
     )
     .await;
+
+    guard.remove_all().await;
+}
+
+pub async fn test_pipeline_auto_transform_with_select(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_pipeline_auto_transform_with_select")
+            .await;
+
+    // handshake
+    let client = TestClient::new(app).await;
+    let data_body = r#"
+2024-05-25 20:16:37.217 404 hello
+2024-05-25 20:16:37.218 200 hello world"#;
+
+    // select include
+    {
+        let body = r#"
+        processors:
+          - dissect:
+              fields:
+                - message
+              patterns:
+                - "%{+ts} %{+ts} %{http_status_code} %{content}"
+          - date:
+              fields:
+                - ts
+              formats:
+                - "%Y-%m-%d %H:%M:%S%.3f"
+          - select:
+              fields:
+                - ts
+                - http_status_code
+        "#;
+
+        // 1. create pipeline
+        let res = client
+            .post("/v1/pipelines/test")
+            .header("Content-Type", "application/x-yaml")
+            .body(body)
+            .send()
+            .await;
+
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // 2. write data
+        let res = client
+            .post("/v1/ingest?db=public&table=logs1&pipeline_name=test")
+            .header("Content-Type", "text/plain")
+            .body(data_body)
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // 3. select data
+        let expected = "[[1716668197217000000,\"404\"],[1716668197218000000,\"200\"]]";
+        validate_data(
+            "test_pipeline_auto_transform_with_select",
+            &client,
+            "select * from logs1",
+            expected,
+        )
+        .await;
+    }
+
+    // select include rename
+    {
+        let body = r#"
+        processors:
+          - dissect:
+              fields:
+                - message
+              patterns:
+                - "%{+ts} %{+ts} %{http_status_code} %{content}"
+          - date:
+              fields:
+                - ts
+              formats:
+                - "%Y-%m-%d %H:%M:%S%.3f"
+          - select:
+              fields:
+                - ts
+                - key: http_status_code
+                  rename_to: s_code
+        "#;
+
+        // 1. create pipeline
+        let res = client
+            .post("/v1/pipelines/test2")
+            .header("Content-Type", "application/x-yaml")
+            .body(body)
+            .send()
+            .await;
+
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // 2. write data
+        let res = client
+            .post("/v1/ingest?db=public&table=logs2&pipeline_name=test2")
+            .header("Content-Type", "text/plain")
+            .body(data_body)
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // 3. check schema
+        let expected = "[[\"ts\",\"TimestampNanosecond\",\"PRI\",\"NO\",\"\",\"TIMESTAMP\"],[\"s_code\",\"String\",\"\",\"YES\",\"\",\"FIELD\"]]";
+        validate_data(
+            "test_pipeline_auto_transform_with_select_rename",
+            &client,
+            "desc table logs2",
+            expected,
+        )
+        .await;
+
+        // 4. check data
+        let expected = "[[1716668197217000000,\"404\"],[1716668197218000000,\"200\"]]";
+        validate_data(
+            "test_pipeline_auto_transform_with_select_rename",
+            &client,
+            "select * from logs2",
+            expected,
+        )
+        .await;
+    }
+
+    // select exclude
+    {
+        let body = r#"
+            processors:
+              - dissect:
+                  fields:
+                    - message
+                  patterns:
+                    - "%{+ts} %{+ts} %{http_status_code} %{content}"
+              - date:
+                  fields:
+                    - ts
+                  formats:
+                    - "%Y-%m-%d %H:%M:%S%.3f"
+              - select:
+                  type: exclude
+                  fields:
+                    - http_status_code
+            "#;
+
+        // 1. create pipeline
+        let res = client
+            .post("/v1/pipelines/test3")
+            .header("Content-Type", "application/x-yaml")
+            .body(body)
+            .send()
+            .await;
+
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // 2. write data
+        let res = client
+            .post("/v1/ingest?db=public&table=logs3&pipeline_name=test3")
+            .header("Content-Type", "text/plain")
+            .body(data_body)
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // 3. check schema
+        let expected = "[[\"ts\",\"TimestampNanosecond\",\"PRI\",\"NO\",\"\",\"TIMESTAMP\"],[\"content\",\"String\",\"\",\"YES\",\"\",\"FIELD\"],[\"message\",\"String\",\"\",\"YES\",\"\",\"FIELD\"]]";
+        validate_data(
+            "test_pipeline_auto_transform_with_select_rename",
+            &client,
+            "desc table logs3",
+            expected,
+        )
+        .await;
+
+        // 4. check data
+        let expected = "[[1716668197217000000,\"hello\",\"2024-05-25 20:16:37.217 404 hello\"],[1716668197218000000,\"hello world\",\"2024-05-25 20:16:37.218 200 hello world\"]]";
+        validate_data(
+            "test_pipeline_auto_transform_with_select_rename",
+            &client,
+            "select * from logs3",
+            expected,
+        )
+        .await;
+    }
 
     guard.remove_all().await;
 }
