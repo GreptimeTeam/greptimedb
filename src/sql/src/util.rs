@@ -77,10 +77,11 @@ pub fn extract_tables_from_query(query: &SqlOrTql) -> impl Iterator<Item = Objec
 pub fn location_to_index(sql: &str, location: &sqlparser::tokenizer::Location) -> usize {
     let mut index = 0;
     for (lno, line) in sql.lines().enumerate() {
-        index = if lno + 1 == location.line as usize {
-            index + location.column as usize
+        if lno + 1 == location.line as usize {
+            index += location.column as usize;
+            break;
         } else {
-            index + line.len() + 1 // +1 for the newline
+            index += line.len() + 1; // +1 for the newline
         }
     }
     // -1 because the index is 0-based

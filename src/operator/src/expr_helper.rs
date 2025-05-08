@@ -814,6 +814,44 @@ TQL EVAL (0, 15, '5s') count_values("status_code", http_requests);"#;
     #[test]
     fn test_create_flow_expr() {
         let sql = r"
+CREATE FLOW test_distinct_basic SINK TO out_distinct_basic AS
+SELECT
+    DISTINCT number as dis
+FROM
+    distinct_basic;";
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+
+        let Statement::CreateFlow(create_flow) = stmt else {
+            unreachable!()
+        };
+        let expr = to_create_flow_task_expr(create_flow, &QueryContext::arc()).unwrap();
+
+        let to_dot_sep =
+            |c: TableName| format!("{}.{}.{}", c.catalog_name, c.schema_name, c.table_name);
+        assert_eq!("test_distinct_basic", expr.flow_name);
+        assert_eq!("greptime", expr.catalog_name);
+        assert_eq!(
+            "greptime.public.out_distinct_basic",
+            expr.sink_table_name.map(to_dot_sep).unwrap()
+        );
+        assert_eq!(1, expr.source_table_names.len());
+        assert_eq!(
+            "greptime.public.distinct_basic",
+            to_dot_sep(expr.source_table_names[0].clone())
+        );
+        assert_eq!(
+            r"SELECT
+    DISTINCT number as dis
+FROM
+    distinct_basic",
+            expr.sql
+        );
+
+        let sql = r"
 CREATE FLOW `task_2`
 SINK TO schema_1.table_1
 AS
