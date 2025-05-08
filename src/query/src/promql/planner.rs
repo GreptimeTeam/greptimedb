@@ -174,6 +174,15 @@ pub fn normalize_matcher(mut matcher: Matcher) -> Matcher {
     matcher
 }
 
+/// Unescapes the value of the regex string literal
+pub fn normalize_regex_string_literal(literal: &str) -> String {
+    if let Ok(unescaped_value) = unescaper::unescape(literal) {
+        unescaped_value
+    } else {
+        literal.to_string()
+    }
+}
+
 impl PromPlanner {
     pub async fn stmt_to_plan(
         table_provider: DfTableSourceProvider,
@@ -1166,7 +1175,7 @@ impl PromPlanner {
                         left: Box::new(col),
                         op: Operator::RegexMatch,
                         right: Box::new(DfExpr::Literal(ScalarValue::Utf8(Some(
-                            re.as_str().to_string(),
+                            normalize_regex_string_literal(re.as_str()),
                         )))),
                     })
                 }
@@ -1174,7 +1183,7 @@ impl PromPlanner {
                     left: Box::new(col),
                     op: Operator::RegexNotMatch,
                     right: Box::new(DfExpr::Literal(ScalarValue::Utf8(Some(
-                        re.as_str().to_string(),
+                        normalize_regex_string_literal(re.as_str()),
                     )))),
                 }),
             };
@@ -4197,8 +4206,7 @@ mod test {
             interval: Duration::from_secs(5),
             lookback_delta: Duration::from_secs(1),
         };
-        let case =
-            r#"sum(prometheus_tsdb_head_series{tag_1=~"(10.0.160.237:8080|10.0.160.237:9090)"})"#;
+        let case = r#"sum(prometheus_tsdb_head_series{tag_1=~"(10\\.0\\.160\\.237:8080|10\\.0\\.160\\.237:9090)"})"#;
 
         let prom_expr = parser::parse(case).unwrap();
         eval_stmt.expr = prom_expr;
@@ -4219,7 +4227,7 @@ mod test {
         \n    PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N]\
         \n      PromSeriesDivide: tags=[\"tag_0\", \"tag_1\", \"tag_2\"] [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N]\
         \n        Sort: prometheus_tsdb_head_series.tag_0 ASC NULLS FIRST, prometheus_tsdb_head_series.tag_1 ASC NULLS FIRST, prometheus_tsdb_head_series.tag_2 ASC NULLS FIRST, prometheus_tsdb_head_series.timestamp ASC NULLS FIRST [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N]\
-        \n          Filter: prometheus_tsdb_head_series.tag_1 ~ Utf8(\"^(10.0.160.237:8080|10.0.160.237:9090)$\") AND prometheus_tsdb_head_series.timestamp >= TimestampMillisecond(-1000, None) AND prometheus_tsdb_head_series.timestamp <= TimestampMillisecond(100001000, None) [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N]\
+        \n          Filter: prometheus_tsdb_head_series.tag_1 ~ Utf8(\"^(10\\.0\\.160\\.237:8080|10\\.0\\.160\\.237:9090)$\") AND prometheus_tsdb_head_series.timestamp >= TimestampMillisecond(-1000, None) AND prometheus_tsdb_head_series.timestamp <= TimestampMillisecond(100001000, None) [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N]\
         \n            TableScan: prometheus_tsdb_head_series [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N]";
         assert_eq!(plan.display_indent_schema().to_string(), expected);
     }
@@ -4235,7 +4243,7 @@ mod test {
             interval: Duration::from_secs(5),
             lookback_delta: Duration::from_secs(1),
         };
-        let case = r#"topk(10, sum(prometheus_tsdb_head_series{ip=~"(10.0.160.237:8080|10.0.160.237:9090)"}) by (ip))"#;
+        let case = r#"topk(10, sum(prometheus_tsdb_head_series{ip=~"(10\\.0\\.160\\.237:8080|10\\.0\\.160\\.237:9090)"}) by (ip))"#;
 
         let prom_expr = parser::parse(case).unwrap();
         eval_stmt.expr = prom_expr;
@@ -4266,7 +4274,7 @@ mod test {
         \n            PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[greptime_timestamp] [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]\
         \n              PromSeriesDivide: tags=[\"ip\"] [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]\
         \n                Sort: prometheus_tsdb_head_series.ip ASC NULLS FIRST, prometheus_tsdb_head_series.greptime_timestamp ASC NULLS FIRST [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]\
-        \n                  Filter: prometheus_tsdb_head_series.ip ~ Utf8(\"^(10.0.160.237:8080|10.0.160.237:9090)$\") AND prometheus_tsdb_head_series.greptime_timestamp >= TimestampMillisecond(-1000, None) AND prometheus_tsdb_head_series.greptime_timestamp <= TimestampMillisecond(100001000, None) [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]\
+        \n                  Filter: prometheus_tsdb_head_series.ip ~ Utf8(\"^(10\\.0\\.160\\.237:8080|10\\.0\\.160\\.237:9090)$\") AND prometheus_tsdb_head_series.greptime_timestamp >= TimestampMillisecond(-1000, None) AND prometheus_tsdb_head_series.greptime_timestamp <= TimestampMillisecond(100001000, None) [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]\
         \n                    TableScan: prometheus_tsdb_head_series [ip:Utf8, greptime_timestamp:Timestamp(Millisecond, None), greptime_value:Float64;N]";
 
         assert_eq!(plan.display_indent_schema().to_string(), expected);
