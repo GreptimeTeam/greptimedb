@@ -126,8 +126,7 @@ impl StringBuilder {
 
     /// Based on arrow-rs' GenericByteBuilder:
     /// https://github.com/apache/arrow-rs/blob/7905545537c50590fdb4dc645e3e0130fce80b57/arrow-array/src/builder/generic_bytes_builder.rs#L135
-    pub fn append_vector(&mut self, vector: &StringVector) {
-        let array = &vector.array;
+    pub fn append_array(&mut self, array: &StringArray) {
         if array.len() == 0 {
             return;
         }
@@ -242,12 +241,11 @@ mod tests {
         builder_1.append("hello");
         builder_1.append_null();
         builder_1.append("world");
-        let vector = StringVector::from(builder_1.build());
 
         let mut builder_2 = StringBuilder::default();
         builder_2.append_null();
         builder_2.append("!");
-        builder_2.append_vector(&vector);
+        builder_2.append_array(&builder_1.build());
         assert_eq!(
             vec![None, Some("!"), Some("hello"), None, Some("world")],
             builder_2.build().iter().collect::<Vec<_>>()
@@ -256,9 +254,8 @@ mod tests {
 
     #[test]
     fn test_append_empty_array() {
-        let empty_vector = StringVector::from(StringArray::from(vec![] as Vec<&str>));
         let mut builder = StringBuilder::default();
-        builder.append_vector(&empty_vector);
+        builder.append_array(&StringArray::from(vec![] as Vec<&str>));
         let array = builder.build();
         assert_eq!(0, array.len());
     }
@@ -266,10 +263,10 @@ mod tests {
     #[test]
     fn test_append_partial_array() {
         let source = StringArray::from(vec![Some("a"), None, Some("b"), Some("c")]);
-        let sliced = StringVector::from(source.slice(1, 2)); // [None, Some("b")]
+        let sliced = source.slice(1, 2); // [None, Some("b")]
 
         let mut builder = StringBuilder::default();
-        builder.append_vector(&sliced);
+        builder.append_array(&sliced);
         let array = builder.build();
         assert_eq!(vec![None, Some("b")], array.iter().collect::<Vec<_>>());
     }

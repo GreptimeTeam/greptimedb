@@ -25,14 +25,14 @@ use common_telemetry::{debug, error};
 use common_time::Timestamp;
 use datatypes::arrow;
 use datatypes::arrow::array::ArrayRef;
+use datatypes::arrow_array::StringArray;
 use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::prelude::{MutableVector, ScalarVector, ScalarVectorBuilder, Vector, VectorRef};
 use datatypes::types::TimestampType;
 use datatypes::value::{Value, ValueRef};
 use datatypes::vectors::{
-    Helper, StringVector, TimestampMicrosecondVector, TimestampMillisecondVector,
-    TimestampNanosecondVector, TimestampSecondVector, UInt64Vector, UInt64VectorBuilder,
-    UInt8Vector, UInt8VectorBuilder,
+    Helper, TimestampMicrosecondVector, TimestampMillisecondVector, TimestampNanosecondVector,
+    TimestampSecondVector, UInt64Vector, UInt64VectorBuilder, UInt8Vector, UInt8VectorBuilder,
 };
 use snafu::{ensure, ResultExt};
 use store_api::metadata::RegionMetadataRef;
@@ -906,7 +906,8 @@ impl ValueBuilder {
             });
             match builder {
                 FieldBuilder::String(builder) => {
-                    let string_vector = field_src.as_any().downcast_ref::<StringVector>().ok_or(
+                    let array = field_src.to_arrow_array();
+                    let string_array = array.as_any().downcast_ref::<StringArray>().ok_or(
                         error::InvalidBatchSnafu {
                             reason: format!(
                                 "Field type mismatch, expecting String, given: {}",
@@ -915,7 +916,7 @@ impl ValueBuilder {
                         }
                         .build(),
                     )?;
-                    builder.append_vector(string_vector);
+                    builder.append_array(string_array);
                 }
                 FieldBuilder::Other(builder) => {
                     let len = field_src.len();

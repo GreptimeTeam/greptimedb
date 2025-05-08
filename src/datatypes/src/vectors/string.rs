@@ -29,7 +29,7 @@ use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
 /// Vector of strings.
 #[derive(Debug, PartialEq)]
 pub struct StringVector {
-    pub array: StringArray,
+    array: StringArray,
 }
 
 impl StringVector {
