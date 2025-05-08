@@ -92,6 +92,17 @@ struct ScanMetricsSet {
 
     /// Elapsed time before the first poll operation.
     first_poll: Duration,
+
+    /// Number of send timeout in SeriesScan.
+    num_series_send_timeout: usize,
+    /// Number of rows the series distributor scanned.
+    num_distributor_rows: usize,
+    /// Number of batches the series distributor scanned.
+    num_distributor_batches: usize,
+    /// Duration of the series distributor to scan.
+    distributor_scan_cost: Duration,
+    /// Duration of the series distributor to yield.
+    distributor_yield_cost: Duration,
 }
 
 impl fmt::Debug for ScanMetricsSet {
@@ -122,6 +133,11 @@ impl fmt::Debug for ScanMetricsSet {
             num_sst_batches,
             num_sst_rows,
             first_poll,
+            num_series_send_timeout,
+            num_distributor_rows,
+            num_distributor_batches,
+            distributor_scan_cost,
+            distributor_yield_cost,
         } = self;
 
         write!(
@@ -150,7 +166,12 @@ impl fmt::Debug for ScanMetricsSet {
             num_sst_record_batches={num_sst_record_batches}, \
             num_sst_batches={num_sst_batches}, \
             num_sst_rows={num_sst_rows}, \
-            first_poll={first_poll:?}}}"
+            first_poll={first_poll:?}, \
+            num_series_send_timeout={num_series_send_timeout}, \
+            num_distributor_rows={num_distributor_rows}, \
+            num_distributor_batches={num_distributor_batches}, \
+            distributor_scan_cost={distributor_scan_cost:?}, \
+            distributor_yield_cost={distributor_yield_cost:?}}},"
         )
     }
 }
@@ -226,6 +247,23 @@ impl ScanMetricsSet {
         self.num_sst_record_batches += *num_record_batches;
         self.num_sst_batches += *num_batches;
         self.num_sst_rows += *num_rows;
+    }
+
+    /// Sets distributor metrics.
+    fn set_distributor_metrics(&mut self, distributor_metrics: &SeriesDistributorMetrics) {
+        let SeriesDistributorMetrics {
+            num_series_send_timeout,
+            num_rows,
+            num_batches,
+            scan_cost,
+            yield_cost,
+        } = distributor_metrics;
+
+        self.num_series_send_timeout += *num_series_send_timeout;
+        self.num_distributor_rows += *num_rows;
+        self.num_distributor_batches += *num_batches;
+        self.distributor_scan_cost += *scan_cost;
+        self.distributor_yield_cost += *yield_cost;
     }
 
     /// Observes metrics.
@@ -439,6 +477,12 @@ impl PartitionMetrics {
     pub(crate) fn on_finish(&self) {
         self.0.on_finish();
     }
+
+    /// Sets the distributor metrics.
+    pub(crate) fn set_distributor_metrics(&self, metrics: &SeriesDistributorMetrics) {
+        let mut metrics_set = self.0.metrics.lock().unwrap();
+        metrics_set.set_distributor_metrics(metrics);
+    }
 }
 
 impl fmt::Debug for PartitionMetrics {
@@ -446,6 +490,21 @@ impl fmt::Debug for PartitionMetrics {
         let metrics = self.0.metrics.lock().unwrap();
         write!(f, "[partition={}, {:?}]", self.0.partition, metrics)
     }
+}
+
+/// Metrics for the series distributor.
+#[derive(Default)]
+pub(crate) struct SeriesDistributorMetrics {
+    /// Number of send timeout in SeriesScan.
+    pub(crate) num_series_send_timeout: usize,
+    /// Number of rows the series distributor scanned.
+    pub(crate) num_rows: usize,
+    /// Number of batches the series distributor scanned.
+    pub(crate) num_batches: usize,
+    /// Duration of the series distributor to scan.
+    pub(crate) scan_cost: Duration,
+    /// Duration of the series distributor to yield.
+    pub(crate) yield_cost: Duration,
 }
 
 /// Scans memtable ranges at `index`.
