@@ -45,7 +45,7 @@ use crate::statements::create::{
 use crate::statements::statement::Statement;
 use crate::statements::transform::type_alias::get_data_type_by_alias_name;
 use crate::statements::{sql_data_type_to_concrete_data_type, OptionMap};
-use crate::util::parse_option_string;
+use crate::util::{location_to_index, parse_option_string};
 
 pub const ENGINE: &str = "ENGINE";
 pub const MAXVALUE: &str = "MAXVALUE";
@@ -282,12 +282,13 @@ impl<'a> ParserContext<'a> {
             .consume_tokens(&[Token::make_keyword(EXPIRE), Token::make_keyword(AFTER)])
         {
             let expire_after_expr = self.parser.parse_expr().context(error::SyntaxSnafu)?;
-            let expire_after_lit = utils::parser_expr_to_scalar_value(expire_after_expr.clone())?
-                .cast_to(&ArrowDataType::Interval(IntervalUnit::MonthDayNano))
-                .ok()
-                .with_context(|| InvalidIntervalSnafu {
-                    reason: format!("cannot cast {} to interval type", expire_after_expr),
-                })?;
+            let expire_after_lit =
+                utils::parser_expr_to_scalar_value_literal(expire_after_expr.clone())?
+                    .cast_to(&ArrowDataType::Interval(IntervalUnit::MonthDayNano))
+                    .ok()
+                    .with_context(|| InvalidIntervalSnafu {
+                        reason: format!("cannot cast {} to interval type", expire_after_expr),
+                    })?;
             if let ScalarValue::IntervalMonthDayNano(Some(interval)) = expire_after_lit {
                 Some(
                     interval.nanoseconds / 1_000_000_000
@@ -324,8 +325,18 @@ impl<'a> ParserContext<'a> {
             .expect_keyword(Keyword::AS)
             .context(SyntaxSnafu)?;
 
+        let start_loc = self.parser.peek_token().span.start;
+        let start_index = location_to_index(self.sql, &start_loc);
         let query = self.parse_statement()?;
-        let query = Box::new(SqlOrTql::try_from_statement(query)?);
+        let end_token = self.parser.peek_token();
+        let raw_query = if end_token == Token::EOF {
+            &self.sql[start_index - 1..]
+        } else {
+            let end_loc = end_token.span.end;
+            let end_index = location_to_index(self.sql, &end_loc);
+            &self.sql[start_index..end_index.min(self.sql.len())]
+        };
+        let query = Box::new(SqlOrTql::try_from_statement(query, raw_query)?);
 
         Ok(Statement::CreateFlow(CreateFlow {
             flow_name,

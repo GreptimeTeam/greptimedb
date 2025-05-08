@@ -63,14 +63,27 @@ pub fn extract_tables_from_query(query: &SqlOrTql) -> impl Iterator<Item = Objec
     let mut names = HashSet::new();
 
     match query {
-        SqlOrTql::Sql(query) => extract_tables_from_set_expr(&query.body, &mut names),
-        SqlOrTql::Tql(_tql) => {
+        SqlOrTql::Sql(query, _) => extract_tables_from_set_expr(&query.body, &mut names),
+        SqlOrTql::Tql(_tql, _) => {
             // since tql have sliding time window, so we don't need to extract tables from it
             // (because we are going to eval it fully anyway)
         }
     }
 
     names.into_iter()
+}
+
+/// translate the start location to the index in the sql string
+pub fn location_to_index(sql: &str, location: &sqlparser::tokenizer::Location) -> usize {
+    let mut index = 0;
+    for (lno, line) in sql.lines().enumerate() {
+        index = if lno + 1 == location.line as usize {
+            index + location.column as usize
+        } else {
+            index + line.len() + 1 // +1 for the newline
+        }
+    }
+    index
 }
 
 /// Helper function for [extract_tables_from_query].

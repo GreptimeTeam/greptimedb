@@ -959,7 +959,9 @@ pub fn show_create_flow(
         ParserContext::new(query_ctx.sql_dialect(), flow_val.raw_sql()).context(error::SqlSnafu)?;
 
     let query = Box::new(parser_ctx.parse_statement().context(error::SqlSnafu)?);
-    let query = Box::new(SqlOrTql::try_from_statement(*query).context(error::SqlSnafu)?);
+    let query = Box::new(
+        SqlOrTql::try_from_statement(*query, flow_val.raw_sql()).context(error::SqlSnafu)?,
+    );
 
     let comment = if flow_val.comment().is_empty() {
         None

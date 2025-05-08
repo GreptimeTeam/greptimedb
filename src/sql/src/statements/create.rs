@@ -383,28 +383,33 @@ pub struct CreateFlow {
 /// Either a sql query or a tql query
 #[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize)]
 pub enum SqlOrTql {
-    Sql(Query),
-    Tql(Tql),
-}
-
-impl SqlOrTql {
-    pub fn try_from_statement(value: Statement) -> std::result::Result<Self, crate::error::Error> {
-        match value {
-            Statement::Query(query) => Ok(Self::Sql((*query).try_into()?)),
-            Statement::Tql(tql) => Ok(Self::Tql(tql)),
-            _ => InvalidFlowQuerySnafu {
-                reason: format!("Expect either sql query or promql query, found {:?}", value),
-            }
-            .fail(),
-        }
-    }
+    Sql(Query, String),
+    Tql(Tql, String),
 }
 
 impl std::fmt::Display for SqlOrTql {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Sql(sql) => sql.fmt(f),
-            Self::Tql(tql) => tql.fmt(f),
+            Self::Sql(_, s) => write!(f, "{}", s),
+            Self::Tql(_, s) => write!(f, "{}", s),
+        }
+    }
+}
+
+impl SqlOrTql {
+    pub fn try_from_statement(
+        value: Statement,
+        original_query: &str,
+    ) -> std::result::Result<Self, crate::error::Error> {
+        match value {
+            Statement::Query(query) => {
+                Ok(Self::Sql((*query).try_into()?, original_query.to_string()))
+            }
+            Statement::Tql(tql) => Ok(Self::Tql(tql, original_query.to_string())),
+            _ => InvalidFlowQuerySnafu {
+                reason: format!("Expect either sql query or promql query, found {:?}", value),
+            }
+            .fail(),
         }
     }
 }
