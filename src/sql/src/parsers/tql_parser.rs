@@ -217,9 +217,20 @@ impl ParserContext<'_> {
         while matches!(parser.peek_token().token, Token::Comma) {
             let _skip_token = parser.next_token();
         }
-        let index = parser.next_token().span.start.column as usize;
-        if index == 0 {
+        let start_tql = parser.next_token();
+        if start_tql == Token::EOF {
             return Err(ParserError::ParserError("empty TQL query".to_string()));
+        }
+
+        let start_location = start_tql.span.start;
+        // translate the start location to the index in the sql string
+        let mut index = 0;
+        for (lno, line) in sql.lines().enumerate() {
+            index = if lno + 1 == start_location.line as usize {
+                index + start_location.column as usize
+            } else {
+                index + line.len() + 1 // +1 for the newline
+            }
         }
 
         let query = &sql[index - 1..];

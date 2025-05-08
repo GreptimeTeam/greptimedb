@@ -40,7 +40,7 @@ use crate::parsers::utils::{
 };
 use crate::statements::create::{
     Column, ColumnExtensions, CreateDatabase, CreateExternalTable, CreateFlow, CreateTable,
-    CreateTableLike, CreateView, Partitions, TableConstraint, VECTOR_OPT_DIM,
+    CreateTableLike, CreateView, Partitions, SqlOrTql, TableConstraint, VECTOR_OPT_DIM,
 };
 use crate::statements::statement::Statement;
 use crate::statements::transform::type_alias::get_data_type_by_alias_name;
@@ -324,7 +324,8 @@ impl<'a> ParserContext<'a> {
             .expect_keyword(Keyword::AS)
             .context(SyntaxSnafu)?;
 
-        let query = self.parser.parse_query().context(error::SyntaxSnafu)?;
+        let query = self.parse_statement()?;
+        let query = Box::new(SqlOrTql::try_from_statement(query)?);
 
         Ok(Statement::CreateFlow(CreateFlow {
             flow_name,

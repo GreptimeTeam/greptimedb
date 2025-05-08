@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::collections::{BTreeSet, HashSet};
-use std::ops::Deref;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -29,6 +28,7 @@ use datafusion::optimizer::analyzer::count_wildcard_rule::CountWildcardRule;
 use datafusion::optimizer::AnalyzerRule;
 use datafusion::sql::unparser::expr_to_sql;
 use datafusion_common::tree_node::{Transformed, TreeNode};
+use datafusion_common::DFSchemaRef;
 use datafusion_expr::{DmlStatement, LogicalPlan, WriteOp};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
@@ -68,7 +68,8 @@ use crate::{Error, FlowId};
 pub struct TaskConfig {
     pub flow_id: FlowId,
     pub query: String,
-    plan: Arc<LogicalPlan>,
+    /// output schema of the query
+    pub output_schema: DFSchemaRef,
     pub time_window_expr: Option<TimeWindowExpr>,
     /// in seconds
     pub expire_after: Option<i64>,
@@ -101,12 +102,12 @@ impl BatchingTask {
             config: Arc::new(TaskConfig {
                 flow_id,
                 query: query.to_string(),
-                plan: Arc::new(plan),
                 time_window_expr,
                 expire_after,
                 sink_table_name,
                 source_table_names: source_table_names.into_iter().collect(),
                 catalog_manager,
+                output_schema: plan.schema().clone(),
             }),
             state: Arc::new(RwLock::new(TaskState::new(query_ctx, shutdown_rx))),
         }
@@ -472,7 +473,7 @@ impl BatchingTask {
             .unwrap_or(u64::MIN);
 
         let low_bound = Timestamp::new_second(low_bound as i64);
-        let schema_len = self.config.plan.schema().fields().len();
+        let schema_len = self.config.output_schema.fields().len();
 
         let expire_time_window_bound = self
             .config
@@ -520,19 +521,23 @@ impl BatchingTask {
                         // clean dirty time window too, this could be from create flow's check_execute
                         self.state.write().unwrap().dirty_time_windows.clean();
 
+                        // TODO(discord9): not add auto column for tql query?
                         let mut add_auto_column =
                             AddAutoColumnRewriter::new(sink_table_schema.clone());
-                        let plan = self
-                            .config
-                            .plan
-                            .deref()
+
+                        let plan = sql_to_df_plan(
+                            query_ctx.clone(),
+                            engine.clone(),
+                            &self.config.query,
+                            false,
+                        )
+                        .await?;
+
+                        let plan = plan
                             .clone()
                             .rewrite(&mut add_auto_column)
                             .with_context(|_| DatafusionSnafu {
-                                context: format!(
-                                    "Failed to rewrite plan:\n {}\n",
-                                    self.config.plan
-                                ),
+                                context: format!("Failed to rewrite plan:\n {}\n", plan),
                             })?
                             .data;
                         let schema_len = plan.schema().fields().len();

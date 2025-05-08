@@ -15,9 +15,10 @@
 use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
 
-use sqlparser::ast::{Expr, ObjectName, Query, SetExpr, SqlOption, TableFactor, Value};
+use sqlparser::ast::{Expr, ObjectName, SetExpr, SqlOption, TableFactor, Value};
 
 use crate::error::{InvalidSqlSnafu, InvalidTableOptionValueSnafu, Result};
+use crate::statements::create::SqlOrTql;
 
 /// Format an [ObjectName] without any quote of its idents.
 pub fn format_raw_object_name(name: &ObjectName) -> String {
@@ -58,10 +59,16 @@ pub fn parse_option_string(option: SqlOption) -> Result<(String, String)> {
 }
 
 /// Walk through a [Query] and extract all the tables referenced in it.
-pub fn extract_tables_from_query(query: &Query) -> impl Iterator<Item = ObjectName> {
+pub fn extract_tables_from_query(query: &SqlOrTql) -> impl Iterator<Item = ObjectName> {
     let mut names = HashSet::new();
 
-    extract_tables_from_set_expr(&query.body, &mut names);
+    match query {
+        SqlOrTql::Sql(query) => extract_tables_from_set_expr(&query.body, &mut names),
+        SqlOrTql::Tql(_tql) => {
+            // since tql have sliding time window, so we don't need to extract tables from it
+            // (because we are going to eval it fully anyway)
+        }
+    }
 
     names.into_iter()
 }

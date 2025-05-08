@@ -29,15 +29,18 @@ use datafusion_common::tree_node::{
 use datafusion_common::{DFSchema, DataFusionError, ScalarValue};
 use datafusion_expr::{Distinct, LogicalPlan, Projection};
 use datatypes::schema::SchemaRef;
-use query::parser::QueryLanguageParser;
+use query::parser::{PromQuery, QueryLanguageParser, QueryStatement, DEFAULT_LOOKBACK_STRING};
 use query::QueryEngineRef;
 use session::context::QueryContextRef;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
+use sql::parser::{ParseOptions, ParserContext};
+use sql::statements::statement::Statement;
+use sql::statements::tql::Tql;
 use table::metadata::TableInfo;
 
 use crate::adapter::AUTO_CREATED_PLACEHOLDER_TS_COL;
 use crate::df_optimizer::apply_df_optimizer;
-use crate::error::{DatafusionSnafu, ExternalSnafu, TableNotFoundSnafu};
+use crate::error::{DatafusionSnafu, ExternalSnafu, InvalidQuerySnafu, TableNotFoundSnafu};
 use crate::{Error, TableName};
 
 pub async fn get_table_info_df_schema(
@@ -73,21 +76,57 @@ pub async fn get_table_info_df_schema(
 }
 
 /// Convert sql to datafusion logical plan
+/// Also support TQL (but only Eval not Explain or Analyze)
 pub async fn sql_to_df_plan(
     query_ctx: QueryContextRef,
     engine: QueryEngineRef,
     sql: &str,
     optimize: bool,
 ) -> Result<LogicalPlan, Error> {
-    let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx)
-        .map_err(BoxedError::new)
-        .context(ExternalSnafu)?;
+    let stmts =
+        ParserContext::create_with_dialect(&sql, query_ctx.sql_dialect(), ParseOptions::default())
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+
+    ensure!(
+        stmts.len() == 1,
+        InvalidQuerySnafu {
+            reason: format!("Expect only one statement, found {}", stmts.len())
+        }
+    );
+    let stmt = &stmts[0];
+    let query_stmt = match stmt {
+        Statement::Tql(tql) => match tql {
+            Tql::Eval(eval) => {
+                let eval = eval.clone();
+                let promql = PromQuery {
+                    start: eval.start,
+                    end: eval.end,
+                    step: eval.step,
+                    query: eval.query,
+                    lookback: eval
+                        .lookback
+                        .unwrap_or_else(|| DEFAULT_LOOKBACK_STRING.to_string()),
+                };
+
+                QueryLanguageParser::parse_promql(&promql, &query_ctx)
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)?
+            }
+            _ => InvalidQuerySnafu {
+                reason: format!("TQL statement {tql:?} is not supported, expect only TQL EVAL"),
+            }
+            .fail()?,
+        },
+        _ => QueryStatement::Sql(stmt.clone()),
+    };
     let plan = engine
         .planner()
-        .plan(&stmt, query_ctx)
+        .plan(&query_stmt, query_ctx)
         .await
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
+
     let plan = if optimize {
         apply_df_optimizer(plan).await?
     } else {

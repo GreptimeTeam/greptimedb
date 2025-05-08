@@ -48,7 +48,7 @@ use lazy_static::lazy_static;
 use partition::expr::{Operand, PartitionExpr, RestrictedOp};
 use partition::multi_dim::MultiDimPartitionRule;
 use partition::partition::{PartitionBound, PartitionDef};
-use query::parser::{QueryLanguageParser, QueryStatement};
+use query::parser::QueryStatement;
 use query::plan::extract_and_rewrite_full_table_names;
 use query::query_engine::DefaultSerializer;
 use query::sql::create_table_stmt;
@@ -56,6 +56,7 @@ use regex::Regex;
 use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
 use snafu::{ensure, OptionExt, ResultExt};
+use sql::parser::{ParseOptions, ParserContext};
 use sql::statements::alter::{AlterDatabase, AlterTable};
 use sql::statements::create::{
     CreateExternalTable, CreateFlow, CreateTable, CreateTableLike, CreateView, Partitions,
@@ -440,15 +441,32 @@ impl StatementExecutor {
         }
 
         let engine = &self.query_engine;
-        let stmt = QueryLanguageParser::parse_sql(&expr.sql, &query_ctx)
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)?;
-        let plan = engine
-            .planner()
-            .plan(&stmt, query_ctx)
-            .await
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)?;
+        let stmts = ParserContext::create_with_dialect(
+            &expr.sql,
+            query_ctx.sql_dialect(),
+            ParseOptions::default(),
+        )
+        .map_err(BoxedError::new)
+        .context(ExternalSnafu)?;
+
+        ensure!(
+            stmts.len() == 1,
+            InvalidSqlSnafu {
+                err_msg: format!("Expect only one statement, found {}", stmts.len())
+            }
+        );
+        let stmt = &stmts[0];
+
+        // support tql parse too
+        let plan = match stmt {
+            Statement::Tql(tql) => self.plan_tql(tql.clone(), &query_ctx).await?,
+            _ => engine
+                .planner()
+                .plan(&QueryStatement::Sql(stmt.clone()), query_ctx)
+                .await
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?,
+        };
 
         /// Visitor to find aggregation or distinct
         struct FindAggr {

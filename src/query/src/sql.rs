@@ -55,7 +55,7 @@ pub use show_create_table::create_table_stmt;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::Ident;
 use sql::parser::ParserContext;
-use sql::statements::create::{CreateDatabase, CreateFlow, CreateView, Partitions};
+use sql::statements::create::{CreateDatabase, CreateFlow, CreateView, Partitions, SqlOrTql};
 use sql::statements::show::{
     ShowColumns, ShowDatabases, ShowFlows, ShowIndex, ShowKind, ShowRegion, ShowTableStatus,
     ShowTables, ShowVariables, ShowViews,
@@ -958,7 +958,8 @@ pub fn show_create_flow(
     let mut parser_ctx =
         ParserContext::new(query_ctx.sql_dialect(), flow_val.raw_sql()).context(error::SqlSnafu)?;
 
-    let query = parser_ctx.parser_query().context(error::SqlSnafu)?;
+    let query = Box::new(parser_ctx.parse_statement().context(error::SqlSnafu)?);
+    let query = Box::new(SqlOrTql::try_from_statement(*query).context(error::SqlSnafu)?);
 
     let comment = if flow_val.comment().is_empty() {
         None
