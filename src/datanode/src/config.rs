@@ -559,17 +559,21 @@ mod tests {
     #[test]
     fn test_datanode_sanitize() {
         common_telemetry::init_default_ut_logging();
-        let mut opts = DatanodeOptions::default();
-        opts.workload_types = vec![
-            DatanodeWorkloadType::Hybrid,
-            DatanodeWorkloadType::Ingest,
-            DatanodeWorkloadType::Query,
-        ];
+        let mut opts = DatanodeOptions {
+            workload_types: vec![
+                DatanodeWorkloadType::Hybrid,
+                DatanodeWorkloadType::Ingest,
+                DatanodeWorkloadType::Query,
+            ],
+            ..Default::default()
+        };
         opts.sanitize();
         assert_eq!(opts.workload_types, vec![DatanodeWorkloadType::Hybrid]);
 
-        let mut opts = DatanodeOptions::default();
-        opts.workload_types = vec![];
+        let mut opts = DatanodeOptions {
+            workload_types: vec![],
+            ..Default::default()
+        };
         opts.sanitize();
         assert_eq!(opts.workload_types, vec![DatanodeWorkloadType::Hybrid]);
     }
