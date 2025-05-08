@@ -14,6 +14,8 @@
 
 use std::sync::Arc;
 
+use api::v1::meta::heartbeat_request::NodeWorkloads;
+use api::v1::meta::{DatanodeWorkloadType, DatanodeWorkloads};
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{Region, RegionRoute};
@@ -71,6 +73,9 @@ pub(crate) async fn put_datanodes(meta_peer_client: &MetaPeerClientRef, datanode
         let lease_value = LeaseValue {
             timestamp_millis: time_util::current_time_millis(),
             node_addr: datanode.addr,
+            workloads: NodeWorkloads::Datanode(DatanodeWorkloads {
+                types: vec![DatanodeWorkloadType::Hybrid as i32],
+            }),
         };
         let lease_key_bytes: Vec<u8> = lease_key.try_into().unwrap();
         let lease_value_bytes: Vec<u8> = lease_value.try_into().unwrap();

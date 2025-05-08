@@ -166,6 +166,8 @@ async fn get_leader_peer_ids(
 mod tests {
     use std::collections::HashMap;
 
+    use api::v1::meta::heartbeat_request::NodeWorkloads;
+    use api::v1::meta::{DatanodeWorkloadType, DatanodeWorkloads};
     use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue};
 
     use crate::key::{DatanodeLeaseKey, LeaseValue};
@@ -193,6 +195,9 @@ mod tests {
             LeaseValue {
                 timestamp_millis: 0,
                 node_addr: "127.0.0.1:3002".to_string(),
+                workloads: NodeWorkloads::Datanode(DatanodeWorkloads {
+                    types: vec![DatanodeWorkloadType::Hybrid as i32],
+                }),
             },
         );
 

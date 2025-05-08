@@ -17,7 +17,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::v1::meta::{HeartbeatRequest, NodeInfo, Peer, RegionRole, RegionStat};
+use api::v1::meta::heartbeat_request::NodeWorkloads;
+use api::v1::meta::{
+    DatanodeWorkloadType, DatanodeWorkloads, HeartbeatRequest, NodeInfo, Peer, RegionRole,
+    RegionStat,
+};
 use common_base::Plugins;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::datanode::REGION_STATISTIC_KEY;
@@ -51,6 +55,7 @@ pub(crate) mod task_tracker;
 /// The datanode heartbeat task which sending `[HeartbeatRequest]` to Metasrv periodically in background.
 pub struct HeartbeatTask {
     node_id: u64,
+    workload_types: Vec<DatanodeWorkloadType>,
     node_epoch: u64,
     peer_addr: String,
     running: Arc<AtomicBool>,
@@ -91,6 +96,7 @@ impl HeartbeatTask {
 
         Ok(Self {
             node_id: opts.node_id.unwrap_or(0),
+            workload_types: opts.to_pb_workload_types(),
             // We use datanode's start time millis as the node's epoch.
             node_epoch: common_time::util::current_time_millis() as u64,
             peer_addr: addrs::resolve_addr(&opts.grpc.bind_addr, Some(&opts.grpc.server_addr)),
@@ -221,6 +227,7 @@ impl HeartbeatTask {
             addr: addr.clone(),
         });
         let epoch = self.region_alive_keeper.epoch();
+        let workload_types = self.workload_types.clone();
 
         self.region_alive_keeper.start(Some(event_receiver)).await?;
         let mut last_sent = Instant::now();
@@ -239,6 +246,9 @@ impl HeartbeatTask {
                     start_time_ms: node_epoch,
                     cpus: num_cpus::get() as u32,
                 }),
+                node_workloads: Some(NodeWorkloads::Datanode(DatanodeWorkloads {
+                    types: workload_types.iter().map(|w| *w as i32).collect(),
+                })),
                 ..Default::default()
             };
 

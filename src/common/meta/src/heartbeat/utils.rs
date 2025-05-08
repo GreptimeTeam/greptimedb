@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use api::v1::meta::heartbeat_request::NodeWorkloads;
 use api::v1::meta::mailbox_message::Payload;
-use api::v1::meta::MailboxMessage;
+use api::v1::meta::{DatanodeWorkloadType, DatanodeWorkloads, MailboxMessage};
 use common_time::util::current_time_millis;
 use snafu::{OptionExt, ResultExt};
 
@@ -55,4 +56,16 @@ pub fn outgoing_message_to_mailbox_message(
             serde_json::to_string(&reply).context(error::EncodeJsonSnafu)?,
         )),
     })
+}
+
+/// Extracts datanode workloads from the provided optional `NodeWorkloads`.
+///
+/// Returns default datanode workloads if the input is `None`.
+pub fn get_datanode_workloads(node_workloads: Option<&NodeWorkloads>) -> DatanodeWorkloads {
+    match node_workloads {
+        Some(NodeWorkloads::Datanode(datanode_workloads)) => datanode_workloads.clone(),
+        _ => DatanodeWorkloads {
+            types: vec![DatanodeWorkloadType::Hybrid as i32],
+        },
+    }
 }

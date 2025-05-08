@@ -156,6 +156,7 @@ impl StartCommand {
         .context(LoadLayeredConfigSnafu)?;
 
         self.merge_with_cli_options(global_options, &mut opts)?;
+        opts.component.sanitize();
 
         Ok(opts)
     }
