@@ -76,9 +76,7 @@ impl PostgresServer {
         accepting_stream.for_each(move |tcp_stream| {
             let io_runtime = io_runtime.clone();
 
-            let tls_acceptor = tls_server_config
-                .get_server_config()
-                .map(|server_config| Arc::new(TlsAcceptor::from(server_config)));
+            let tls_acceptor = tls_server_config.get_server_config().map(TlsAcceptor::from);
 
             let handler_maker = handler_maker.clone();
 
