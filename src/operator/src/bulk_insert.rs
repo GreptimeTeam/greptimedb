@@ -54,7 +54,6 @@ impl Inserter {
             return Ok(0);
         };
         let record_batch = rb.df_record_batch();
-        metrics::BULK_REQUEST_MESSAGE_SIZE.observe(body_size as f64);
         decode_timer.observe_duration();
         metrics::BULK_REQUEST_MESSAGE_SIZE.observe(body_size as f64);
         metrics::BULK_REQUEST_ROWS

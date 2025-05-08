@@ -97,7 +97,8 @@ lazy_static! {
         "greptime_table_operator_bulk_insert_message_rows",
         "table operator bulk inserts message rows",
         &["type"],
-        linear_buckets(0.0, 10000.0, 10).unwrap()
+        // 10 ~ 1_000_000
+        exponential_buckets(10.0, 10.0, 5).unwrap()
     )
     .unwrap();
 }

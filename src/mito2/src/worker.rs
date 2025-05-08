@@ -648,7 +648,10 @@ impl StalledRequests {
 
     /// Returns the total number of all stalled requests.
     pub(crate) fn stalled_count(&self) -> usize {
-        self.requests.values().map(|reqs| reqs.1.len()).sum()
+        self.requests
+            .values()
+            .map(|(_, reqs, bulk_reqs)| reqs.len() + bulk_reqs.len())
+            .sum()
     }
 }
 
