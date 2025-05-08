@@ -15,7 +15,7 @@
 //! Partitions memtables by time.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use common_telemetry::debug;
@@ -160,10 +160,87 @@ impl TimePartitions {
             if !(rb.max_ts < part_time_range.min_timestamp.value()
                 || rb.min_ts >= part_time_range.max_timestamp.value())
             {
+                // find all intersecting time partitions.
                 matched.push(part);
             }
         }
-        matched[0].write_record_batch(rb)
+
+        if !matched.is_empty() {
+            // fixme(hl): we now only write to the first time partition, we should strictly
+            // split the record batch according to time window
+            matched[0].write_record_batch(rb)
+        } else {
+            // safety: part_duration field must be set when reach here because otherwise
+            // matched won't be empty.
+            let part_duration = self.part_duration.unwrap();
+            let bulk_start_ts = self
+                .metadata
+                .time_index_column()
+                .column_schema
+                .data_type
+                .as_timestamp()
+                .unwrap()
+                .create_timestamp(rb.min_ts);
+            let part_start =
+                partition_start_timestamp(bulk_start_ts, part_duration).with_context(|| {
+                    InvalidRequestSnafu {
+                        region_id: self.metadata.region_id,
+                        reason: format!(
+                        "timestamp {bulk_start_ts:?} and bucket {part_duration:?} are out of range"
+                    ),
+                    }
+                })?;
+
+            let new_part = {
+                let mut inner = self.inner.lock().unwrap();
+                self.create_time_partition(part_start, &mut inner)?
+            };
+            new_part.memtable.write_bulk(rb)
+        }
+    }
+
+    // Creates new parts and return the partition created.
+    // Acquires the lock to avoid others create the same partition.
+    fn create_time_partition(
+        &self,
+        part_start: Timestamp,
+        inner: &mut MutexGuard<PartitionsInner>,
+    ) -> Result<TimePartition> {
+        let part_duration = self.part_duration.unwrap();
+        let part_pos = match inner
+            .parts
+            .iter()
+            .position(|part| part.time_range.unwrap().min_timestamp == part_start)
+        {
+            Some(pos) => pos,
+            None => {
+                let range = PartTimeRange::from_start_duration(part_start, part_duration)
+                    .with_context(|| InvalidRequestSnafu {
+                        region_id: self.metadata.region_id,
+                        reason: format!(
+                            "Partition time range for {part_start:?} is out of bound, bucket size: {part_duration:?}",
+                        ),
+                    })?;
+                let memtable = self
+                    .builder
+                    .build(inner.alloc_memtable_id(), &self.metadata);
+                debug!(
+                        "Create time partition {:?} for region {}, duration: {:?}, memtable_id: {}, parts_total: {}",
+                        range,
+                        self.metadata.region_id,
+                        part_duration,
+                        memtable.id(),
+                        inner.parts.len() + 1
+                    );
+                let pos = inner.parts.len();
+                inner.parts.push(TimePartition {
+                    memtable,
+                    time_range: Some(range),
+                });
+                pos
+            }
+        };
+        Ok(inner.parts[part_pos].clone())
     }
 
     /// Append memtables in partitions to `memtables`.
@@ -355,48 +432,13 @@ impl TimePartitions {
             }
         }
 
-        let part_duration = self.part_duration.unwrap();
         // Creates new parts and writes to them. Acquires the lock to avoid others create
         // the same partition.
         let mut inner = self.inner.lock().unwrap();
         for (part_start, key_values) in missing_parts {
-            let part_pos = match inner
-                .parts
-                .iter()
-                .position(|part| part.time_range.unwrap().min_timestamp == part_start)
-            {
-                Some(pos) => pos,
-                None => {
-                    let range = PartTimeRange::from_start_duration(part_start, part_duration)
-                        .with_context(|| InvalidRequestSnafu {
-                            region_id: self.metadata.region_id,
-                            reason: format!(
-                                "Partition time range for {part_start:?} is out of bound, bucket size: {part_duration:?}",
-                            ),
-                        })?;
-                    let memtable = self
-                        .builder
-                        .build(inner.alloc_memtable_id(), &self.metadata);
-                    debug!(
-                        "Create time partition {:?} for region {}, duration: {:?}, memtable_id: {}, parts_total: {}",
-                        range,
-                        self.metadata.region_id,
-                        part_duration,
-                        memtable.id(),
-                        inner.parts.len() + 1
-                    );
-                    let pos = inner.parts.len();
-                    inner.parts.push(TimePartition {
-                        memtable,
-                        time_range: Some(range),
-                    });
-                    pos
-                }
-            };
-
-            let memtable = &inner.parts[part_pos].memtable;
+            let partition = self.create_time_partition(part_start, &mut inner)?;
             for kv in key_values {
-                memtable.write_one(kv)?;
+                partition.memtable.write_one(kv)?;
             }
         }
 
