@@ -22,6 +22,7 @@ concurrency:
 
 jobs:
   check-typos-and-docs:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     name: Check typos and docs
     runs-on: ubuntu-latest
     steps:
@@ -36,6 +37,7 @@ jobs:
           || (echo "'config/config.md' is not up-to-date, please run 'make config-docs'." && exit 1)
 
   license-header-check:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     runs-on: ubuntu-latest
     name: Check License Header
     steps:
@@ -45,6 +47,7 @@ jobs:
       - uses: korandoru/hawkeye@v5
 
   check:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     name: Check
     runs-on: ${{ matrix.os }}
     strategy:
@@ -71,6 +74,7 @@ jobs:
         run: cargo check --locked --workspace --all-targets
 
   toml:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     name: Toml Check
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -85,6 +89,7 @@ jobs:
         run: taplo format --check
 
   build:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     name: Build GreptimeDB binaries
     runs-on: ${{ matrix.os }}
     strategy:
@@ -127,6 +132,7 @@ jobs:
           version: current
 
   fuzztest:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     name: Fuzz Test
     needs: build
     runs-on: ubuntu-latest
@@ -183,6 +189,7 @@ jobs:
           max-total-time: 120
 
   unstable-fuzztest:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     name: Unstable Fuzz Test
     needs: build-greptime-ci
     runs-on: ubuntu-latest
@@ -244,6 +251,7 @@ jobs:
           retention-days: 3
 
   build-greptime-ci:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     name: Build GreptimeDB binary (profile-CI)
     runs-on: ${{ matrix.os }}
     strategy:
@@ -285,6 +293,7 @@ jobs:
           version: current
 
   distributed-fuzztest:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     name: Fuzz Test (Distributed, ${{ matrix.mode.name }}, ${{ matrix.target }})
     runs-on: ubuntu-latest
     needs:  build-greptime-ci
@@ -416,6 +425,7 @@ jobs:
           docker system prune -f
 
   distributed-fuzztest-with-chaos:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     name: Fuzz Test with Chaos (Distributed, ${{ matrix.mode.name }}, ${{ matrix.target }})
     runs-on: ubuntu-latest
     needs:  build-greptime-ci
@@ -563,6 +573,7 @@ jobs:
           docker system prune -f
 
   sqlness:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     name: Sqlness Test (${{ matrix.mode.name }})
     needs: build
     runs-on: ${{ matrix.os }}
@@ -609,6 +620,7 @@ jobs:
           retention-days: 3
 
   fmt:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     name: Rustfmt
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -626,6 +638,7 @@ jobs:
         run: make fmt-check
 
   clippy:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     name: Clippy
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -651,6 +664,7 @@ jobs:
         run: make clippy
 
   conflict-check:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     name: Check for conflict
     runs-on: ubuntu-latest
     steps:
@@ -661,7 +675,7 @@ jobs:
         uses: olivernybroe/action-conflict-finder@v4.0
 
   test:
-    if: github.event_name != 'merge_group'
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && github.event_name != 'merge_group' }}
     runs-on: ubuntu-22.04-arm
     timeout-minutes: 60
     needs:  [conflict-check, clippy, fmt]
@@ -713,7 +727,7 @@ jobs:
           UNITTEST_LOG_DIR: "__unittest_logs"
 
   coverage:
-    if: github.event_name == 'merge_group'
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && github.event_name == 'merge_group' }}
     runs-on: ubuntu-22.04-8-cores
     timeout-minutes: 60
     steps:
@@ -773,6 +787,7 @@ jobs:
           verbose: true
 
   # compat:
+  #   if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
   #   name: Compatibility Test
   #   needs: build
   #   runs-on: ubuntu-22.04
