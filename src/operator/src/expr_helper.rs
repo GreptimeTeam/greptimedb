@@ -781,6 +781,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_create_flow_tql_expr() {
+        let sql = r#"
+CREATE FLOW calc_reqs SINK TO cnt_reqs AS
+TQL EVAL (0, 15, '5s') count_values("status_code", http_requests);"#;
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+
+        let Statement::CreateFlow(create_flow) = stmt else {
+            unreachable!()
+        };
+        let expr = to_create_flow_task_expr(create_flow, &QueryContext::arc()).unwrap();
+
+        let to_dot_sep =
+            |c: TableName| format!("{}.{}.{}", c.catalog_name, c.schema_name, c.table_name);
+        assert_eq!("calc_reqs", expr.flow_name);
+        assert_eq!("greptime", expr.catalog_name);
+        assert_eq!(
+            "greptime.public.cnt_reqs",
+            expr.sink_table_name.map(to_dot_sep).unwrap()
+        );
+        assert!(expr.source_table_names.is_empty());
+        assert_eq!(
+            r#"TQL EVAL (0, 15, '5s') count_values("status_code", http_requests)"#,
+            expr.sql
+        );
+    }
+
+    #[test]
     fn test_create_flow_expr() {
         let sql = r"
 CREATE FLOW `task_2`
