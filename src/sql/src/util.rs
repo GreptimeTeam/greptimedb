@@ -83,7 +83,9 @@ pub fn location_to_index(sql: &str, location: &sqlparser::tokenizer::Location) -
             index + line.len() + 1 // +1 for the newline
         }
     }
-    index
+    // -1 because the index is 0-based
+    // and the location is 1-based
+    index - 1
 }
 
 /// Helper function for [extract_tables_from_query].

@@ -778,7 +778,7 @@ WITH(
                     r#"
 CREATE FLOW filter_numbers
 SINK TO out_num_cnt
-AS SELECT number FROM numbers_input WHERE number > 10"#,
+AS SELECT number FROM numbers_input where number > 10"#,
                     &new_sql
                 );
 
