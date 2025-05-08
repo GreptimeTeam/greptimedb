@@ -330,12 +330,13 @@ impl<'a> ParserContext<'a> {
         let query = self.parse_statement()?;
         let end_token = self.parser.peek_token();
         let raw_query = if end_token == Token::EOF {
-            &self.sql[start_index - 1..]
+            &self.sql[start_index..]
         } else {
             let end_loc = end_token.span.end;
             let end_index = location_to_index(self.sql, &end_loc);
             &self.sql[start_index..end_index.min(self.sql.len())]
         };
+        let raw_query = raw_query.trim_end_matches(";");
         let query = Box::new(SqlOrTql::try_from_statement(query, raw_query)?);
 
         Ok(Statement::CreateFlow(CreateFlow {
