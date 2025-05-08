@@ -327,8 +327,10 @@ impl<'a> ParserContext<'a> {
 
         let start_loc = self.parser.peek_token().span.start;
         let start_index = location_to_index(self.sql, &start_loc);
+
         let query = self.parse_statement()?;
         let end_token = self.parser.peek_token();
+
         let raw_query = if end_token == Token::EOF {
             &self.sql[start_index..]
         } else {
@@ -337,6 +339,7 @@ impl<'a> ParserContext<'a> {
             &self.sql[start_index..end_index.min(self.sql.len())]
         };
         let raw_query = raw_query.trim_end_matches(";");
+
         let query = Box::new(SqlOrTql::try_from_statement(query, raw_query)?);
 
         Ok(Statement::CreateFlow(CreateFlow {
