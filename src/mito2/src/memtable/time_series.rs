@@ -35,7 +35,7 @@ use datatypes::vectors::{
     Helper, TimestampMicrosecondVector, TimestampMillisecondVector, TimestampNanosecondVector,
     TimestampSecondVector, UInt64Vector, UInt8Vector,
 };
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, SequenceNumber};
 use table::predicate::Predicate;
@@ -908,15 +908,16 @@ impl ValueBuilder {
             match builder {
                 FieldBuilder::String(builder) => {
                     let array = field_src.to_arrow_array();
-                    let string_array = array.as_any().downcast_ref::<StringArray>().ok_or(
-                        error::InvalidBatchSnafu {
-                            reason: format!(
-                                "Field type mismatch, expecting String, given: {}",
-                                field_src.data_type()
-                            ),
-                        }
-                        .build(),
-                    )?;
+                    let string_array =
+                        array
+                            .as_any()
+                            .downcast_ref::<StringArray>()
+                            .with_context(|| error::InvalidBatchSnafu {
+                                reason: format!(
+                                    "Field type mismatch, expecting String, given: {}",
+                                    field_src.data_type()
+                                ),
+                            })?;
                     builder.append_array(string_array);
                 }
                 FieldBuilder::Other(builder) => {

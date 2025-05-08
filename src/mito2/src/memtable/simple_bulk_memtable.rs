@@ -19,7 +19,7 @@ use std::sync::{Arc, RwLock};
 
 use api::v1::OpType;
 use datatypes::vectors::Helper;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, SequenceNumber};
 use table::predicate::Predicate;
@@ -185,13 +185,10 @@ impl Memtable for SimpleBulkMemtable {
 
         let ts = Helper::try_into_vector(
             rb.column_by_name(&self.region_metadata.time_index_column().column_schema.name)
-                .ok_or(
-                    error::InvalidRequestSnafu {
-                        region_id: self.region_metadata.region_id,
-                        reason: "Timestamp not found",
-                    }
-                    .build(),
-                )?,
+                .with_context(|| error::InvalidRequestSnafu {
+                    region_id: self.region_metadata.region_id,
+                    reason: "Timestamp not found",
+                })?,
         )
         .context(error::ConvertVectorSnafu)?;
 
