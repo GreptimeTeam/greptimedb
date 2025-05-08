@@ -459,7 +459,8 @@ impl StatementExecutor {
 
         // support tql parse too
         let plan = match stmt {
-            Statement::Tql(tql) => self.plan_tql(tql.clone(), &query_ctx).await?,
+            // prom ql is only supported in batching mode
+            Statement::Tql(_) => return Ok(FlowType::Batching),
             _ => engine
                 .planner()
                 .plan(&QueryStatement::Sql(stmt.clone()), query_ctx)
