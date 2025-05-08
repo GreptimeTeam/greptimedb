@@ -281,7 +281,7 @@ pub type Float64VectorBuilder = PrimitiveVectorBuilder<Float64Type>;
 
 /// Builder to build a primitive vector.
 pub struct PrimitiveVectorBuilder<T: LogicalPrimitiveType> {
-    pub mutable_array: PrimitiveBuilder<T::ArrowPrimitive>,
+    mutable_array: PrimitiveBuilder<T::ArrowPrimitive>,
 }
 
 impl<T: LogicalPrimitiveType> MutableVector for PrimitiveVectorBuilder<T> {
