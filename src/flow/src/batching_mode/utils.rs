@@ -84,7 +84,7 @@ pub async fn sql_to_df_plan(
     optimize: bool,
 ) -> Result<LogicalPlan, Error> {
     let stmts =
-        ParserContext::create_with_dialect(&sql, query_ctx.sql_dialect(), ParseOptions::default())
+        ParserContext::create_with_dialect(sql, query_ctx.sql_dialect(), ParseOptions::default())
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;
 
@@ -96,28 +96,35 @@ pub async fn sql_to_df_plan(
     );
     let stmt = &stmts[0];
     let query_stmt = match stmt {
-        Statement::Tql(tql) => match tql {
-            Tql::Eval(eval) => {
-                let eval = eval.clone();
-                let promql = PromQuery {
-                    start: eval.start,
-                    end: eval.end,
-                    step: eval.step,
-                    query: eval.query,
-                    lookback: eval
-                        .lookback
-                        .unwrap_or_else(|| DEFAULT_LOOKBACK_STRING.to_string()),
-                };
+        Statement::Tql(tql) => {
+            // TODO(discord9): remove this once tql is fully supported to run in flownode
+            InvalidQuerySnafu {
+                reason: format!("TQL statement {tql:?} is not supported yet"),
+            }
+            .fail()?;
+            match tql {
+                Tql::Eval(eval) => {
+                    let eval = eval.clone();
+                    let promql = PromQuery {
+                        start: eval.start,
+                        end: eval.end,
+                        step: eval.step,
+                        query: eval.query,
+                        lookback: eval
+                            .lookback
+                            .unwrap_or_else(|| DEFAULT_LOOKBACK_STRING.to_string()),
+                    };
 
-                QueryLanguageParser::parse_promql(&promql, &query_ctx)
-                    .map_err(BoxedError::new)
-                    .context(ExternalSnafu)?
+                    QueryLanguageParser::parse_promql(&promql, &query_ctx)
+                        .map_err(BoxedError::new)
+                        .context(ExternalSnafu)?
+                }
+                _ => InvalidQuerySnafu {
+                    reason: format!("TQL statement {tql:?} is not supported, expect only TQL EVAL"),
+                }
+                .fail()?,
             }
-            _ => InvalidQuerySnafu {
-                reason: format!("TQL statement {tql:?} is not supported, expect only TQL EVAL"),
-            }
-            .fail()?,
-        },
+        }
         _ => QueryStatement::Sql(stmt.clone()),
     };
     let plan = engine

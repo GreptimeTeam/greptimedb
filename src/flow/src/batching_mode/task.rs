@@ -482,107 +482,108 @@ impl BatchingTask {
             .map(|expr| expr.eval(low_bound))
             .transpose()?;
 
-        let new_plan = {
-            let expr = {
-                match expire_time_window_bound {
-                    Some((Some(l), Some(u))) => {
-                        let window_size = u.sub(&l).with_context(|| UnexpectedSnafu {
-                            reason: format!("Can't get window size from {u:?} - {l:?}"),
+        let expr = {
+            match expire_time_window_bound {
+                Some((Some(l), Some(u))) => {
+                    debug!(
+                        "Flow id = {:?}, found time window: precise_lower_bound={:?}, precise_upper_bound={:?}",
+                        self.config.flow_id, l, u
+                    );
+                    let window_size = u.sub(&l).with_context(|| UnexpectedSnafu {
+                        reason: format!("Can't get window size from {u:?} - {l:?}"),
+                    })?;
+                    let col_name = self
+                        .config
+                        .time_window_expr
+                        .as_ref()
+                        .map(|expr| expr.column_name.clone())
+                        .with_context(|| UnexpectedSnafu {
+                            reason: format!(
+                                "Flow id={:?}, Failed to get column name from time window expr",
+                                self.config.flow_id
+                            ),
                         })?;
-                        let col_name = self
-                            .config
-                            .time_window_expr
-                            .as_ref()
-                            .map(|expr| expr.column_name.clone())
-                            .with_context(|| UnexpectedSnafu {
-                                reason: format!(
-                                    "Flow id={:?}, Failed to get column name from time window expr",
-                                    self.config.flow_id
-                                ),
-                            })?;
 
-                        self.state
-                            .write()
-                            .unwrap()
-                            .dirty_time_windows
-                            .gen_filter_exprs(
-                                &col_name,
-                                Some(l),
-                                window_size,
-                                self.config.flow_id,
-                                Some(self),
-                            )?
-                    }
-                    _ => {
-                        // use sink_table_meta to add to query the `update_at` and `__ts_placeholder` column's value too for compatibility reason
-                        debug!(
+                    self.state
+                        .write()
+                        .unwrap()
+                        .dirty_time_windows
+                        .gen_filter_exprs(
+                            &col_name,
+                            Some(l),
+                            window_size,
+                            self.config.flow_id,
+                            Some(self),
+                        )?
+                }
+                _ => {
+                    // use sink_table_meta to add to query the `update_at` and `__ts_placeholder` column's value too for compatibility reason
+                    debug!(
                             "Flow id = {:?}, can't get window size: precise_lower_bound={expire_time_window_bound:?}, using the same query", self.config.flow_id
                         );
-                        // clean dirty time window too, this could be from create flow's check_execute
-                        self.state.write().unwrap().dirty_time_windows.clean();
+                    // clean dirty time window too, this could be from create flow's check_execute
+                    self.state.write().unwrap().dirty_time_windows.clean();
 
-                        // TODO(discord9): not add auto column for tql query?
-                        let mut add_auto_column =
-                            AddAutoColumnRewriter::new(sink_table_schema.clone());
+                    // TODO(discord9): not add auto column for tql query?
+                    let mut add_auto_column = AddAutoColumnRewriter::new(sink_table_schema.clone());
 
-                        let plan = sql_to_df_plan(
-                            query_ctx.clone(),
-                            engine.clone(),
-                            &self.config.query,
-                            false,
-                        )
-                        .await?;
+                    let plan = sql_to_df_plan(
+                        query_ctx.clone(),
+                        engine.clone(),
+                        &self.config.query,
+                        false,
+                    )
+                    .await?;
 
-                        let plan = plan
-                            .clone()
-                            .rewrite(&mut add_auto_column)
-                            .with_context(|_| DatafusionSnafu {
-                                context: format!("Failed to rewrite plan:\n {}\n", plan),
-                            })?
-                            .data;
-                        let schema_len = plan.schema().fields().len();
+                    let plan = plan
+                        .clone()
+                        .rewrite(&mut add_auto_column)
+                        .with_context(|_| DatafusionSnafu {
+                            context: format!("Failed to rewrite plan:\n {}\n", plan),
+                        })?
+                        .data;
+                    let schema_len = plan.schema().fields().len();
 
-                        // since no time window lower/upper bound is found, just return the original query(with auto columns)
-                        return Ok(Some((plan, schema_len)));
-                    }
+                    // since no time window lower/upper bound is found, just return the original query(with auto columns)
+                    return Ok(Some((plan, schema_len)));
                 }
-            };
-
-            debug!(
-                "Flow id={:?}, Generated filter expr: {:?}",
-                self.config.flow_id,
-                expr.as_ref()
-                    .map(|expr| expr_to_sql(expr).with_context(|_| DatafusionSnafu {
-                        context: format!("Failed to generate filter expr from {expr:?}"),
-                    }))
-                    .transpose()?
-                    .map(|s| s.to_string())
-            );
-
-            let Some(expr) = expr else {
-                // no new data, hence no need to update
-                debug!("Flow id={:?}, no new data, not update", self.config.flow_id);
-                return Ok(None);
-            };
-
-            // TODO(discord9): add auto column or not? This might break compatibility for auto created sink table before this, but that's ok right?
-
-            let mut add_filter = AddFilterRewriter::new(expr);
-            let mut add_auto_column = AddAutoColumnRewriter::new(sink_table_schema.clone());
-
-            let plan = sql_to_df_plan(query_ctx.clone(), engine.clone(), &self.config.query, false)
-                .await?;
-            let rewrite = plan
-                .clone()
-                .rewrite(&mut add_filter)
-                .and_then(|p| p.data.rewrite(&mut add_auto_column))
-                .with_context(|_| DatafusionSnafu {
-                    context: format!("Failed to rewrite plan:\n {}\n", plan),
-                })?
-                .data;
-            // only apply optimize after complex rewrite is done
-            apply_df_optimizer(rewrite).await?
+            }
         };
+
+        debug!(
+            "Flow id={:?}, Generated filter expr: {:?}",
+            self.config.flow_id,
+            expr.as_ref()
+                .map(|expr| expr_to_sql(expr).with_context(|_| DatafusionSnafu {
+                    context: format!("Failed to generate filter expr from {expr:?}"),
+                }))
+                .transpose()?
+                .map(|s| s.to_string())
+        );
+
+        let Some(expr) = expr else {
+            // no new data, hence no need to update
+            debug!("Flow id={:?}, no new data, not update", self.config.flow_id);
+            return Ok(None);
+        };
+
+        // TODO(discord9): add auto column or not? This might break compatibility for auto created sink table before this, but that's ok right?
+
+        let mut add_filter = AddFilterRewriter::new(expr);
+        let mut add_auto_column = AddAutoColumnRewriter::new(sink_table_schema.clone());
+
+        let plan =
+            sql_to_df_plan(query_ctx.clone(), engine.clone(), &self.config.query, false).await?;
+        let rewrite = plan
+            .clone()
+            .rewrite(&mut add_filter)
+            .and_then(|p| p.data.rewrite(&mut add_auto_column))
+            .with_context(|_| DatafusionSnafu {
+                context: format!("Failed to rewrite plan:\n {}\n", plan),
+            })?
+            .data;
+        // only apply optimize after complex rewrite is done
+        let new_plan = apply_df_optimizer(rewrite).await?;
 
         Ok(Some((new_plan, schema_len)))
     }
