@@ -761,6 +761,8 @@ impl PromPlanner {
         } else {
             self.ctx.time_index_column = Some(SPECIAL_TIME_FUNCTION.to_string());
             self.ctx.reset_table_name_and_schema();
+            self.ctx.tag_columns = vec![];
+            self.ctx.field_columns = vec![DEFAULT_FIELD_COLUMN.to_string()];
             LogicalPlan::Extension(Extension {
                 node: Arc::new(
                     EmptyMetric::new(
@@ -2828,6 +2830,7 @@ impl PromPlanner {
         let project_fields = non_field_columns_iter
             .chain(field_columns_iter)
             .collect::<Result<Vec<_>>>()?;
+
         LogicalPlanBuilder::from(input)
             .project(project_fields)
             .context(DataFusionPlanningSnafu)?

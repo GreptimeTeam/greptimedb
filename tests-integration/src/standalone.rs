@@ -274,18 +274,17 @@ impl GreptimeDbStandaloneBuilder {
 
         test_util::prepare_another_catalog_and_schema(&instance).await;
 
-        let frontend = Frontend {
+        let mut frontend = Frontend {
             instance,
-            servers: ServerHandlers::new(),
+            servers: ServerHandlers::default(),
             heartbeat_task: None,
             export_metrics_task: None,
         };
-        let frontend = Arc::new(frontend);
 
         frontend.start().await.unwrap();
 
         GreptimeDbStandalone {
-            frontend,
+            frontend: Arc::new(frontend),
             opts,
             guard,
             kv_backend,

@@ -1,0 +1,47 @@
+CREATE TABLE IF NOT EXISTS `test_metric` (
+  `asset` STRING NULL,
+  `attribute` STRING NULL,
+  `timestamp` TIMESTAMP(3) NOT NULL,
+  `value` DOUBLE NULL,
+  `measurement` STRING NULL,
+  TIME INDEX (`timestamp`),
+  PRIMARY KEY (`asset`, `attribute`, `measurement`)
+);
+
+-- Saturday 2023-10-28
+-- Sunday 2023-10-29
+INSERT INTO test_metric (asset, attribute, measurement, `timestamp`, `value`)
+VALUES
+('Generator01', 'voltage', 'electrical', '2023-10-23 00:00:00', 220.5),
+('Generator01', 'current', 'electrical', '2023-10-23 06:00:00', 15.2),
+('Generator02', 'voltage', 'electrical', '2023-10-23 12:00:00', 219.8),
+('Generator02', 'current', 'electrical', '2023-10-23 18:00:00', 14.9),
+('Generator01', 'voltage', 'electrical', '2023-10-24 00:00:00', 221.3),
+('Generator01', 'current', 'electrical', '2023-10-24 06:00:00', 15.4),
+('Generator02', 'voltage', 'electrical', '2023-10-24 12:00:00', 220.1),
+('Generator02', 'current', 'electrical', '2023-10-24 18:00:00', 15.0),
+('Generator01', 'voltage', 'electrical', '2023-10-25 00:00:00', 219.7),
+('Generator01', 'current', 'electrical', '2023-10-25 06:00:00', 15.3),
+('Generator02', 'voltage', 'electrical', '2023-10-25 12:00:00', 220.5),
+('Generator02', 'current', 'electrical', '2023-10-25 18:00:00', 15.1),
+('Generator01', 'voltage', 'electrical', '2023-10-26 00:00:00', 220.2),
+('Generator01', 'current', 'electrical', '2023-10-26 06:00:00', 15.5),
+('Generator02', 'voltage', 'electrical', '2023-10-26 12:00:00', 219.9),
+('Generator02', 'current', 'electrical', '2023-10-26 18:00:00', 14.8),
+('Generator01', 'voltage', 'electrical', '2023-10-27 00:00:00', 220.9),
+('Generator01', 'current', 'electrical', '2023-10-27 06:00:00', 15.6),
+('Generator02', 'voltage', 'electrical', '2023-10-27 12:00:00', 220.3),
+('Generator02', 'current', 'electrical', '2023-10-27 18:00:00', 15.2),
+('Generator01', 'voltage', 'electrical', '2023-10-28 00:00:00', 218.5),
+('Generator01', 'current', 'electrical', '2023-10-28 06:00:00', 14.9),
+('Generator02', 'voltage', 'electrical', '2023-10-28 12:00:00', 219.4),
+('Generator02', 'current', 'electrical', '2023-10-28 18:00:00', 14.7),
+('Generator01', 'voltage', 'electrical', '2023-10-29 00:00:00', 219.1),
+('Generator01', 'current', 'electrical', '2023-10-29 06:00:00', 14.8),
+('Generator02', 'voltage', 'electrical', '2023-10-29 12:00:00', 220.0),
+('Generator02', 'current', 'electrical', '2023-10-29 18:00:00', 14.6);
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval(1697731200, 1698595200, 120) max_over_time(test_metric[30s]) > 100 and on () (day_of_week() == 0 or day_of_week() == 6);
+
+DROP TABLE test_metric;

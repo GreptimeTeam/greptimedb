@@ -75,9 +75,9 @@ ALTER TABLE
 ADD
     COLUMN at2 STRING;
 
-ALTER TABLE 
-    t2 
-ADD 
+ALTER TABLE
+    t2
+ADD
     COLUMN at4 UINT16;
 
 INSERT INTO
@@ -109,7 +109,7 @@ INSERT INTO grpc_latencies (ts, host, method_name, latency) VALUES
 
 SELECT * FROM grpc_latencies;
 
-ALTER TABLE grpc_latencies SET ttl = '10d';
+ALTER TABLE grpc_latencies SET ttl = '10000d';
 
 ALTER TABLE grpc_latencies ADD COLUMN home INTEGER FIRST;
 

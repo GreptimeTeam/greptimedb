@@ -360,10 +360,9 @@ impl RegionSupervisor {
             Ok(false) => {}
             Ok(true) => {
                 warn!(
-                    "Skipping failover since maintenance mode is enabled. Removing failure detectors for regions: {:?}",
+                    "Skipping failover since maintenance mode is enabled. Detected region failures: {:?}",
                     regions
                 );
-                self.deregister_failure_detectors(regions).await;
                 return;
             }
             Err(err) => {

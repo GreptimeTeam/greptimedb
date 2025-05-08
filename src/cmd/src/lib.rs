@@ -74,7 +74,7 @@ pub trait App: Send {
         true
     }
 
-    async fn stop(&self) -> Result<()>;
+    async fn stop(&mut self) -> Result<()>;
 
     async fn run(&mut self) -> Result<()> {
         info!("Starting app: {}", self.name());

@@ -77,7 +77,7 @@ impl App for Instance {
         self.datanode.start().await.context(StartDatanodeSnafu)
     }
 
-    async fn stop(&self) -> Result<()> {
+    async fn stop(&mut self) -> Result<()> {
         self.datanode
             .shutdown()
             .await

@@ -38,7 +38,7 @@ use crate::batching_mode::{
     GRPC_MAX_RETRIES,
 };
 use crate::error::{ExternalSnafu, InvalidRequestSnafu, NoAvailableFrontendSnafu, UnexpectedSnafu};
-use crate::Error;
+use crate::{Error, FlowAuthHeader};
 
 /// Just like [`GrpcQueryHandler`] but use BoxedError
 ///
@@ -81,6 +81,7 @@ pub enum FrontendClient {
     Distributed {
         meta_client: Arc<MetaClient>,
         chnl_mgr: ChannelManager,
+        auth: Option<FlowAuthHeader>,
     },
     Standalone {
         /// for the sake of simplicity still use grpc even in standalone mode
@@ -101,7 +102,8 @@ impl FrontendClient {
         )
     }
 
-    pub fn from_meta_client(meta_client: Arc<MetaClient>) -> Self {
+    pub fn from_meta_client(meta_client: Arc<MetaClient>, auth: Option<FlowAuthHeader>) -> Self {
+        common_telemetry::info!("Frontend client build with auth={:?}", auth);
         Self::Distributed {
             meta_client,
             chnl_mgr: {
@@ -110,6 +112,7 @@ impl FrontendClient {
                     .timeout(DEFAULT_BATCHING_ENGINE_QUERY_TIMEOUT);
                 ChannelManager::with_config(cfg)
             },
+            auth,
         }
     }
 
@@ -186,6 +189,7 @@ impl FrontendClient {
         let Self::Distributed {
             meta_client: _,
             chnl_mgr,
+            auth,
         } = self
         else {
             return UnexpectedSnafu {
@@ -216,7 +220,13 @@ impl FrontendClient {
             {
                 let addr = &node_info.peer.addr;
                 let client = Client::with_manager_and_urls(chnl_mgr.clone(), vec![addr.clone()]);
-                let database = Database::new(catalog, schema, client);
+                let database = {
+                    let mut db = Database::new(catalog, schema, client);
+                    if let Some(auth) = auth {
+                        db.set_auth(auth.auth().clone());
+                    }
+                    db
+                };
                 let db = DatabaseWithPeer::new(database, node_info.peer.clone());
                 match db.try_select_one().await {
                     Ok(_) => return Ok(db),

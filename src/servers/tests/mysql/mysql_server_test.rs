@@ -80,10 +80,9 @@ fn create_mysql_server(table: TableRef, opts: MysqlOpts<'_>) -> Result<Box<dyn S
 async fn test_start_mysql_server() -> Result<()> {
     let table = MemTable::default_numbers_table();
 
-    let mysql_server = create_mysql_server(table, Default::default())?;
+    let mut mysql_server = create_mysql_server(table, Default::default())?;
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
-    let result = mysql_server.start(listening).await;
-    let _ = result.unwrap();
+    mysql_server.start(listening).await.unwrap();
 
     let result = mysql_server.start(listening).await;
     assert!(result
@@ -97,7 +96,7 @@ async fn test_start_mysql_server() -> Result<()> {
 async fn test_reject_no_database() -> Result<()> {
     common_telemetry::init_default_ut_logging();
     let table = MemTable::default_numbers_table();
-    let mysql_server = create_mysql_server(
+    let mut mysql_server = create_mysql_server(
         table,
         MysqlOpts {
             reject_no_database: true,
@@ -105,7 +104,8 @@ async fn test_reject_no_database() -> Result<()> {
         },
     )?;
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
-    let server_addr = mysql_server.start(listening).await.unwrap();
+    mysql_server.start(listening).await.unwrap();
+    let server_addr = mysql_server.bind_addr().unwrap();
     let server_port = server_addr.port();
 
     let fail = create_connection(server_port, None, false).await;
@@ -122,7 +122,7 @@ async fn test_reject_no_database() -> Result<()> {
 async fn test_schema_validation() -> Result<()> {
     async fn generate_server(auth_info: DatabaseAuthInfo<'_>) -> Result<(Box<dyn Server>, u16)> {
         let table = MemTable::default_numbers_table();
-        let mysql_server = create_mysql_server(
+        let mut mysql_server = create_mysql_server(
             table,
             MysqlOpts {
                 auth_info: Some(auth_info),
@@ -130,7 +130,8 @@ async fn test_schema_validation() -> Result<()> {
             },
         )?;
         let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
-        let server_addr = mysql_server.start(listening).await.unwrap();
+        mysql_server.start(listening).await.unwrap();
+        let server_addr = mysql_server.bind_addr().unwrap();
         Ok((mysql_server, server_addr.port()))
     }
 
@@ -168,7 +169,7 @@ async fn test_shutdown_mysql_server() -> Result<()> {
 
     let table = MemTable::default_numbers_table();
 
-    let mysql_server = create_mysql_server(table, Default::default())?;
+    let mut mysql_server = create_mysql_server(table, Default::default())?;
     let result = mysql_server.shutdown().await;
     assert!(result
         .unwrap_err()
@@ -176,7 +177,8 @@ async fn test_shutdown_mysql_server() -> Result<()> {
         .contains("MySQL server is not started."));
 
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
-    let server_addr = mysql_server.start(listening).await.unwrap();
+    mysql_server.start(listening).await.unwrap();
+    let server_addr = mysql_server.bind_addr().unwrap();
     let server_port = server_addr.port();
 
     let mut join_handles = vec![];
@@ -272,7 +274,7 @@ async fn test_server_required_secure_client_plain() -> Result<()> {
     let recordbatch = RecordBatch::new(schema, columns).unwrap();
     let table = MemTable::table("all_datatypes", recordbatch);
 
-    let mysql_server = create_mysql_server(
+    let mut mysql_server = create_mysql_server(
         table,
         MysqlOpts {
             tls: server_tls,
@@ -281,7 +283,8 @@ async fn test_server_required_secure_client_plain() -> Result<()> {
     )?;
 
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
-    let server_addr = mysql_server.start(listening).await.unwrap();
+    mysql_server.start(listening).await.unwrap();
+    let server_addr = mysql_server.bind_addr().unwrap();
 
     let r = create_connection(server_addr.port(), None, client_tls).await;
     assert!(r.is_err());
@@ -310,7 +313,7 @@ async fn test_server_required_secure_client_plain_with_pkcs8_priv_key() -> Resul
     let recordbatch = RecordBatch::new(schema, columns).unwrap();
     let table = MemTable::table("all_datatypes", recordbatch);
 
-    let mysql_server = create_mysql_server(
+    let mut mysql_server = create_mysql_server(
         table,
         MysqlOpts {
             tls: server_tls,
@@ -319,7 +322,8 @@ async fn test_server_required_secure_client_plain_with_pkcs8_priv_key() -> Resul
     )?;
 
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
-    let server_addr = mysql_server.start(listening).await.unwrap();
+    mysql_server.start(listening).await.unwrap();
+    let server_addr = mysql_server.bind_addr().unwrap();
 
     let r = create_connection_default_db_name(server_addr.port(), client_tls).await;
     assert!(r.is_err());
@@ -342,7 +346,7 @@ async fn test_db_name() -> Result<()> {
     let recordbatch = RecordBatch::new(schema, columns).unwrap();
     let table = MemTable::table("all_datatypes", recordbatch);
 
-    let mysql_server = create_mysql_server(
+    let mut mysql_server = create_mysql_server(
         table,
         MysqlOpts {
             tls: server_tls,
@@ -351,7 +355,8 @@ async fn test_db_name() -> Result<()> {
     )?;
 
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
-    let server_addr = mysql_server.start(listening).await.unwrap();
+    mysql_server.start(listening).await.unwrap();
+    let server_addr = mysql_server.bind_addr().unwrap();
 
     // None actually uses default database name
     let r = create_connection_default_db_name(server_addr.port(), client_tls).await;
@@ -374,7 +379,7 @@ async fn do_test_query_all_datatypes(server_tls: TlsOption, client_tls: bool) ->
     let recordbatch = RecordBatch::new(schema, columns).unwrap();
     let table = MemTable::table("all_datatypes", recordbatch);
 
-    let mysql_server = create_mysql_server(
+    let mut mysql_server = create_mysql_server(
         table,
         MysqlOpts {
             tls: server_tls,
@@ -383,7 +388,8 @@ async fn do_test_query_all_datatypes(server_tls: TlsOption, client_tls: bool) ->
     )?;
 
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
-    let server_addr = mysql_server.start(listening).await.unwrap();
+    mysql_server.start(listening).await.unwrap();
+    let server_addr = mysql_server.bind_addr().unwrap();
 
     let mut connection = create_connection_default_db_name(server_addr.port(), client_tls)
         .await
@@ -415,9 +421,10 @@ async fn test_query_concurrently() -> Result<()> {
 
     let table = MemTable::default_numbers_table();
 
-    let mysql_server = create_mysql_server(table, Default::default())?;
+    let mut mysql_server = create_mysql_server(table, Default::default())?;
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
-    let server_addr = mysql_server.start(listening).await.unwrap();
+    mysql_server.start(listening).await.unwrap();
+    let server_addr = mysql_server.bind_addr().unwrap();
     let server_port = server_addr.port();
 
     let threads = 4;
@@ -470,7 +477,7 @@ async fn test_query_prepared() -> Result<()> {
     let recordbatch = RecordBatch::new(schema, columns.clone()).unwrap();
     let table = MemTable::table("all_datatypes", recordbatch);
 
-    let mysql_server = create_mysql_server(
+    let mut mysql_server = create_mysql_server(
         table,
         MysqlOpts {
             ..Default::default()
@@ -478,7 +485,8 @@ async fn test_query_prepared() -> Result<()> {
     )?;
 
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
-    let server_addr = mysql_server.start(listening).await.unwrap();
+    mysql_server.start(listening).await.unwrap();
+    let server_addr = mysql_server.bind_addr().unwrap();
 
     let mut connection = create_connection_default_db_name(server_addr.port(), false)
         .await

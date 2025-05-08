@@ -311,6 +311,7 @@ impl MetasrvBuilder {
         let region_migration_manager = Arc::new(RegionMigrationManager::new(
             procedure_manager.clone(),
             DefaultContextFactory::new(
+                in_memory.clone(),
                 table_metadata_manager.clone(),
                 memory_region_keeper.clone(),
                 region_failure_detector_controller.clone(),

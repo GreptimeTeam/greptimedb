@@ -69,7 +69,7 @@ impl App for Instance {
         self.instance.start().await.context(StartMetaServerSnafu)
     }
 
-    async fn stop(&self) -> Result<()> {
+    async fn stop(&mut self) -> Result<()> {
         self.instance
             .shutdown()
             .await

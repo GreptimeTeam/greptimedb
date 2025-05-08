@@ -97,6 +97,7 @@ macro_rules! http_tests {
                 test_test_pipeline_api,
                 test_plain_text_ingestion,
                 test_pipeline_auto_transform,
+                test_pipeline_auto_transform_with_select,
                 test_identity_pipeline,
                 test_identity_pipeline_with_flatten,
                 test_identity_pipeline_with_custom_ts,
@@ -269,7 +270,7 @@ pub async fn test_sql_api(store_type: StorageType) {
 
     // test insert and select
     let res = client
-        .get("/v1/sql?sql=insert into demo values('host', 66.6, 1024, 0)")
+        .get("/v1/sql?sql=insert into demo values('host, \"name', 66.6, 1024, 0)")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
@@ -288,7 +289,7 @@ pub async fn test_sql_api(store_type: StorageType) {
     assert_eq!(
         output[0],
         serde_json::from_value::<GreptimeQueryOutput>(json!({
-            "records":{"schema":{"column_schemas":[{"name":"host","data_type":"String"},{"name":"cpu","data_type":"Float64"},{"name":"memory","data_type":"Float64"},{"name":"ts","data_type":"TimestampMillisecond"}]},"rows":[["host",66.6,1024.0,0]],"total_rows":1}
+            "records":{"schema":{"column_schemas":[{"name":"host","data_type":"String"},{"name":"cpu","data_type":"Float64"},{"name":"memory","data_type":"Float64"},{"name":"ts","data_type":"TimestampMillisecond"}]},"rows":[["host, \"name",66.6,1024.0,0]],"total_rows":1}
         })).unwrap()
     );
 
@@ -434,6 +435,16 @@ pub async fn test_sql_api(store_type: StorageType) {
     assert_eq!(output.len(), 1);
     // this is something only json format can show
     assert!(format!("{:?}", output[0]).contains("\\\"param\\\""));
+
+    // test csv format
+    let res = client
+        .get("/v1/sql?format=csv&sql=select cpu,ts,host from demo limit 1")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = &res.text().await;
+    // Must be escaped correctly: 66.6,0,"host, ""name"
+    assert_eq!(body, "66.6,0,\"host, \"\"name\"\n");
 
     // test parse method
     let res = client.get("/v1/sql/parse?sql=desc table t").send().await;
@@ -603,8 +614,10 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     assert_eq!(body.status, "success");
     assert_eq!(
         body.data,
-        serde_json::from_value::<PrometheusResponse>(json!(["__name__", "host", "idc", "number",]))
-            .unwrap()
+        serde_json::from_value::<PrometheusResponse>(json!([
+            "__name__", "env", "host", "idc", "number",
+        ]))
+        .unwrap()
     );
 
     // labels query with multiple match[] params
@@ -725,6 +738,19 @@ pub async fn test_prom_http_api(store_type: StorageType) {
         serde_json::from_value::<PrometheusResponse>(json!(["idc1"])).unwrap()
     );
 
+    // match labels.
+    let res = client
+        .get("/v1/prometheus/api/v1/label/host/values?match[]=multi_labels{idc=\"idc1\", env=\"dev\"}&start=0&end=600")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = serde_json::from_str::<PrometheusJsonResponse>(&res.text().await).unwrap();
+    assert_eq!(body.status, "success");
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PrometheusResponse>(json!(["host1", "host2"])).unwrap()
+    );
+
     // search field name
     let res = client
         .get("/v1/prometheus/api/v1/label/__field__/values?match[]=demo")
@@ -814,6 +840,7 @@ pub async fn test_prom_http_api(store_type: StorageType) {
             "demo_metrics_with_nanos".to_string(),
             "logic_table".to_string(),
             "mito".to_string(),
+            "multi_labels".to_string(),
             "numbers".to_string()
         ])
     );
@@ -2361,27 +2388,6 @@ processors:
 
     assert_eq!(res.status(), StatusCode::OK);
 
-    let content = res.text().await;
-
-    let content = serde_json::from_str(&content);
-    assert!(content.is_ok());
-    //  {"execution_time_ms":13,"pipelines":[{"name":"test","version":"2024-07-04 08:31:00.987136"}]}
-    let content: Value = content.unwrap();
-
-    let version_str = content
-        .get("pipelines")
-        .unwrap()
-        .as_array()
-        .unwrap()
-        .first()
-        .unwrap()
-        .get("version")
-        .unwrap()
-        .as_str()
-        .unwrap()
-        .to_string();
-    assert!(!version_str.is_empty());
-
     // 2. write data
     let data_body = r#"
 2024-05-25 20:16:37.217 404 hello
@@ -2404,6 +2410,192 @@ processors:
         expected,
     )
     .await;
+
+    guard.remove_all().await;
+}
+
+pub async fn test_pipeline_auto_transform_with_select(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_pipeline_auto_transform_with_select")
+            .await;
+
+    // handshake
+    let client = TestClient::new(app).await;
+    let data_body = r#"
+2024-05-25 20:16:37.217 404 hello
+2024-05-25 20:16:37.218 200 hello world"#;
+
+    // select include
+    {
+        let body = r#"
+        processors:
+          - dissect:
+              fields:
+                - message
+              patterns:
+                - "%{+ts} %{+ts} %{http_status_code} %{content}"
+          - date:
+              fields:
+                - ts
+              formats:
+                - "%Y-%m-%d %H:%M:%S%.3f"
+          - select:
+              fields:
+                - ts
+                - http_status_code
+        "#;
+
+        // 1. create pipeline
+        let res = client
+            .post("/v1/pipelines/test")
+            .header("Content-Type", "application/x-yaml")
+            .body(body)
+            .send()
+            .await;
+
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // 2. write data
+        let res = client
+            .post("/v1/ingest?db=public&table=logs1&pipeline_name=test")
+            .header("Content-Type", "text/plain")
+            .body(data_body)
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // 3. select data
+        let expected = "[[1716668197217000000,\"404\"],[1716668197218000000,\"200\"]]";
+        validate_data(
+            "test_pipeline_auto_transform_with_select",
+            &client,
+            "select * from logs1",
+            expected,
+        )
+        .await;
+    }
+
+    // select include rename
+    {
+        let body = r#"
+        processors:
+          - dissect:
+              fields:
+                - message
+              patterns:
+                - "%{+ts} %{+ts} %{http_status_code} %{content}"
+          - date:
+              fields:
+                - ts
+              formats:
+                - "%Y-%m-%d %H:%M:%S%.3f"
+          - select:
+              fields:
+                - ts
+                - key: http_status_code
+                  rename_to: s_code
+        "#;
+
+        // 1. create pipeline
+        let res = client
+            .post("/v1/pipelines/test2")
+            .header("Content-Type", "application/x-yaml")
+            .body(body)
+            .send()
+            .await;
+
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // 2. write data
+        let res = client
+            .post("/v1/ingest?db=public&table=logs2&pipeline_name=test2")
+            .header("Content-Type", "text/plain")
+            .body(data_body)
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // 3. check schema
+        let expected = "[[\"ts\",\"TimestampNanosecond\",\"PRI\",\"NO\",\"\",\"TIMESTAMP\"],[\"s_code\",\"String\",\"\",\"YES\",\"\",\"FIELD\"]]";
+        validate_data(
+            "test_pipeline_auto_transform_with_select_rename",
+            &client,
+            "desc table logs2",
+            expected,
+        )
+        .await;
+
+        // 4. check data
+        let expected = "[[1716668197217000000,\"404\"],[1716668197218000000,\"200\"]]";
+        validate_data(
+            "test_pipeline_auto_transform_with_select_rename",
+            &client,
+            "select * from logs2",
+            expected,
+        )
+        .await;
+    }
+
+    // select exclude
+    {
+        let body = r#"
+            processors:
+              - dissect:
+                  fields:
+                    - message
+                  patterns:
+                    - "%{+ts} %{+ts} %{http_status_code} %{content}"
+              - date:
+                  fields:
+                    - ts
+                  formats:
+                    - "%Y-%m-%d %H:%M:%S%.3f"
+              - select:
+                  type: exclude
+                  fields:
+                    - http_status_code
+            "#;
+
+        // 1. create pipeline
+        let res = client
+            .post("/v1/pipelines/test3")
+            .header("Content-Type", "application/x-yaml")
+            .body(body)
+            .send()
+            .await;
+
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // 2. write data
+        let res = client
+            .post("/v1/ingest?db=public&table=logs3&pipeline_name=test3")
+            .header("Content-Type", "text/plain")
+            .body(data_body)
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // 3. check schema
+        let expected = "[[\"ts\",\"TimestampNanosecond\",\"PRI\",\"NO\",\"\",\"TIMESTAMP\"],[\"content\",\"String\",\"\",\"YES\",\"\",\"FIELD\"],[\"message\",\"String\",\"\",\"YES\",\"\",\"FIELD\"]]";
+        validate_data(
+            "test_pipeline_auto_transform_with_select_rename",
+            &client,
+            "desc table logs3",
+            expected,
+        )
+        .await;
+
+        // 4. check data
+        let expected = "[[1716668197217000000,\"hello\",\"2024-05-25 20:16:37.217 404 hello\"],[1716668197218000000,\"hello world\",\"2024-05-25 20:16:37.218 200 hello world\"]]";
+        validate_data(
+            "test_pipeline_auto_transform_with_select_rename",
+            &client,
+            "select * from logs3",
+            expected,
+        )
+        .await;
+    }
 
     guard.remove_all().await;
 }

@@ -22,10 +22,12 @@ mod user_provider;
 pub mod tests;
 
 pub use common::{
-    auth_mysql, user_provider_from_option, userinfo_by_name, HashedPassword, Identity, Password,
+    auth_mysql, static_user_provider_from_option, user_provider_from_option, userinfo_by_name,
+    HashedPassword, Identity, Password,
 };
 pub use permission::{PermissionChecker, PermissionReq, PermissionResp};
 pub use user_info::UserInfo;
+pub use user_provider::static_user_provider::StaticUserProvider;
 pub use user_provider::UserProvider;
 
 /// pub type alias

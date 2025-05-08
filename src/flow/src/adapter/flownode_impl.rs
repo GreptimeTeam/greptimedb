@@ -21,6 +21,7 @@ use api::v1::flow::{
 };
 use api::v1::region::InsertRequests;
 use catalog::CatalogManager;
+use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_meta::ddl::create_flow::FlowType;
 use common_meta::error::Result as MetaResult;
@@ -63,6 +64,7 @@ pub struct FlowDualEngine {
     flow_metadata_manager: Arc<FlowMetadataManager>,
     catalog_manager: Arc<dyn CatalogManager>,
     check_task: tokio::sync::Mutex<Option<ConsistentCheckTask>>,
+    plugins: Plugins,
 }
 
 impl FlowDualEngine {
@@ -71,6 +73,7 @@ impl FlowDualEngine {
         batching_engine: Arc<BatchingEngine>,
         flow_metadata_manager: Arc<FlowMetadataManager>,
         catalog_manager: Arc<dyn CatalogManager>,
+        plugins: Plugins,
     ) -> Self {
         Self {
             streaming_engine,
@@ -79,7 +82,12 @@ impl FlowDualEngine {
             flow_metadata_manager,
             catalog_manager,
             check_task: Mutex::new(None),
+            plugins,
         }
+    }
+
+    pub fn plugins(&self) -> &Plugins {
+        &self.plugins
     }
 
     /// Determine if the engine is in distributed mode

@@ -37,6 +37,7 @@ use common_meta::key::datanode_table::{DatanodeTableKey, DatanodeTableValue};
 use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
+use common_meta::kv_backend::ResettableKvBackendRef;
 use common_meta::lock_key::{CatalogLock, RegionLock, SchemaLock};
 use common_meta::peer::Peer;
 use common_meta::region_keeper::{MemoryRegionKeeperRef, OperatingRegionGuard};
@@ -266,6 +267,7 @@ pub trait ContextFactory {
 #[derive(Clone)]
 pub struct DefaultContextFactory {
     volatile_ctx: VolatileContext,
+    in_memory_key: ResettableKvBackendRef,
     table_metadata_manager: TableMetadataManagerRef,
     opening_region_keeper: MemoryRegionKeeperRef,
     region_failure_detector_controller: RegionFailureDetectorControllerRef,
@@ -277,6 +279,7 @@ pub struct DefaultContextFactory {
 impl DefaultContextFactory {
     /// Returns an [`DefaultContextFactory`].
     pub fn new(
+        in_memory_key: ResettableKvBackendRef,
         table_metadata_manager: TableMetadataManagerRef,
         opening_region_keeper: MemoryRegionKeeperRef,
         region_failure_detector_controller: RegionFailureDetectorControllerRef,
@@ -286,6 +289,7 @@ impl DefaultContextFactory {
     ) -> Self {
         Self {
             volatile_ctx: VolatileContext::default(),
+            in_memory_key,
             table_metadata_manager,
             opening_region_keeper,
             region_failure_detector_controller,
@@ -301,6 +305,7 @@ impl ContextFactory for DefaultContextFactory {
         Context {
             persistent_ctx,
             volatile_ctx: self.volatile_ctx,
+            in_memory: self.in_memory_key,
             table_metadata_manager: self.table_metadata_manager,
             opening_region_keeper: self.opening_region_keeper,
             region_failure_detector_controller: self.region_failure_detector_controller,
@@ -315,6 +320,7 @@ impl ContextFactory for DefaultContextFactory {
 pub struct Context {
     persistent_ctx: PersistentContext,
     volatile_ctx: VolatileContext,
+    in_memory: ResettableKvBackendRef,
     table_metadata_manager: TableMetadataManagerRef,
     opening_region_keeper: MemoryRegionKeeperRef,
     region_failure_detector_controller: RegionFailureDetectorControllerRef,
@@ -417,14 +423,27 @@ impl Context {
 
     /// Notifies the RegionSupervisor to deregister failure detectors.
     ///
-    /// The original failure detectors was removed once the procedure was triggered.
-    /// However, the `from_peer` may still send the heartbeats contains the failed region.
+    /// The original failure detectors won't be removed once the procedure was triggered.
+    /// We need to deregister the failure detectors for the original region if the procedure is finished.
     pub async fn deregister_failure_detectors(&self) {
         let datanode_id = self.persistent_ctx.from_peer.id;
         let region_id = self.persistent_ctx.region_id;
 
         self.region_failure_detector_controller
             .deregister_failure_detectors(vec![(datanode_id, region_id)])
+            .await;
+    }
+
+    /// Notifies the RegionSupervisor to deregister failure detectors for the candidate region on the destination peer.
+    ///
+    /// The candidate region may be created on the destination peer,
+    /// so we need to deregister the failure detectors for the candidate region if the procedure is aborted.
+    pub async fn deregister_failure_detectors_for_candidate_region(&self) {
+        let to_peer_id = self.persistent_ctx.to_peer.id;
+        let region_id = self.persistent_ctx.region_id;
+
+        self.region_failure_detector_controller
+            .deregister_failure_detectors(vec![(to_peer_id, region_id)])
             .await;
     }
 
@@ -674,30 +693,38 @@ impl Procedure for RegionMigrationProcedure {
         let _timer = METRIC_META_REGION_MIGRATION_EXECUTE
             .with_label_values(&[name])
             .start_timer();
-        let (next, status) = state.next(&mut self.context, ctx).await.map_err(|e| {
-            if e.is_retryable() {
-                METRIC_META_REGION_MIGRATION_ERROR
-                    .with_label_values(&[name, "retryable"])
-                    .inc();
-                ProcedureError::retry_later(e)
-            } else {
-                error!(
-                    e;
-                    "Region migration procedure failed, region_id: {}, from_peer: {}, to_peer: {}, {}",
-                    self.context.region_id(),
-                    self.context.persistent_ctx.from_peer,
-                    self.context.persistent_ctx.to_peer,
-                    self.context.volatile_ctx.metrics,
-                );
-                METRIC_META_REGION_MIGRATION_ERROR
-                    .with_label_values(&[name, "external"])
-                    .inc();
-                ProcedureError::external(e)
+        match state.next(&mut self.context, ctx).await {
+            Ok((next, status)) => {
+                *state = next;
+                Ok(status)
             }
-        })?;
-
-        *state = next;
-        Ok(status)
+            Err(e) => {
+                if e.is_retryable() {
+                    METRIC_META_REGION_MIGRATION_ERROR
+                        .with_label_values(&[name, "retryable"])
+                        .inc();
+                    Err(ProcedureError::retry_later(e))
+                } else {
+                    // Consumes the opening region guard before deregistering the failure detectors.
+                    self.context.volatile_ctx.opening_region_guard.take();
+                    self.context
+                        .deregister_failure_detectors_for_candidate_region()
+                        .await;
+                    error!(
+                        e;
+                        "Region migration procedure failed, region_id: {}, from_peer: {}, to_peer: {}, {}",
+                        self.context.region_id(),
+                        self.context.persistent_ctx.from_peer,
+                        self.context.persistent_ctx.to_peer,
+                        self.context.volatile_ctx.metrics,
+                    );
+                    METRIC_META_REGION_MIGRATION_ERROR
+                        .with_label_values(&[name, "external"])
+                        .inc();
+                    Err(ProcedureError::external(e))
+                }
+            }
+        }
     }
 
     fn dump(&self) -> ProcedureResult<String> {

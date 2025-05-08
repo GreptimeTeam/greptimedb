@@ -45,8 +45,10 @@ mod test_utils;
 
 pub use adapter::{FlowConfig, FlowStreamingEngineRef, FlownodeOptions, StreamingEngine};
 pub use batching_mode::frontend_client::{FrontendClient, GrpcQueryHandlerWithBoxedError};
+pub use engine::FlowAuthHeader;
 pub(crate) use engine::{CreateFlowArgs, FlowId, TableName};
 pub use error::{Error, Result};
 pub use server::{
-    FlownodeBuilder, FlownodeInstance, FlownodeServer, FlownodeServiceBuilder, FrontendInvoker,
+    get_flow_auth_options, FlownodeBuilder, FlownodeInstance, FlownodeServer,
+    FlownodeServiceBuilder, FrontendInvoker,
 };

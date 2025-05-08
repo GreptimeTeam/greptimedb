@@ -106,7 +106,7 @@ pub struct Frontend {
 }
 
 impl Frontend {
-    pub async fn start(&self) -> Result<()> {
+    pub async fn start(&mut self) -> Result<()> {
         if let Some(t) = &self.heartbeat_task {
             t.start().await?;
         }
@@ -128,7 +128,7 @@ impl Frontend {
             .context(error::StartServerSnafu)
     }
 
-    pub async fn shutdown(&self) -> Result<()> {
+    pub async fn shutdown(&mut self) -> Result<()> {
         self.servers
             .shutdown_all()
             .await

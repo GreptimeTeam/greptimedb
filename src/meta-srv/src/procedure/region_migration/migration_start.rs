@@ -17,6 +17,7 @@ use std::any::Any;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::RegionRoute;
 use common_procedure::{Context as ProcedureContext, Status};
+use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
@@ -59,8 +60,16 @@ impl State for RegionMigrationStart {
         let from_peer = &ctx.persistent_ctx.from_peer;
 
         if self.has_migrated(&region_route, to_peer)? {
+            info!(
+                "Region has been migrated, region: {:?}, to_peer: {:?}",
+                region_route.region.id, to_peer
+            );
             Ok((Box::new(RegionMigrationEnd), Status::done()))
         } else if self.invalid_leader_peer(&region_route, from_peer)? {
+            info!(
+                "Abort region migration, region:{:?}, unexpected leader peer: {:?}, expected: {:?}",
+                region_route.region.id, region_route.leader_peer, from_peer,
+            );
             Ok((
                 Box::new(RegionMigrationAbort::new(&format!(
                     "Invalid region leader peer: {from_peer:?}, expected: {:?}",
@@ -152,7 +161,7 @@ impl RegionMigrationStart {
     fn has_migrated(&self, region_route: &RegionRoute, to_peer: &Peer) -> Result<bool> {
         let region_id = region_route.region.id;
 
-        let region_opened = region_route
+        let region_migrated = region_route
             .leader_peer
             .as_ref()
             .context(error::UnexpectedSnafu {
@@ -160,8 +169,7 @@ impl RegionMigrationStart {
             })?
             .id
             == to_peer.id;
-
-        Ok(region_opened)
+        Ok(region_migrated)
     }
 }
 

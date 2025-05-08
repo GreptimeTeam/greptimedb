@@ -12,19 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::region::RegionRequestHeader;
-use datafusion_expr::LogicalPlan;
-use store_api::storage::RegionId;
+use common_base::Plugins;
+use flow::error::Result;
+use flow::FlownodeOptions;
 
-/// The query request to be handled by the RegionServer (Datanode).
-#[derive(Clone, Debug)]
-pub struct QueryRequest {
-    /// The header of this request. Often to store some context of the query. None means all to defaults.
-    pub header: Option<RegionRequestHeader>,
+use crate::options::PluginOptions;
 
-    /// The id of the region to be queried.
-    pub region_id: RegionId,
+#[allow(unused_mut)]
+pub async fn setup_flownode_plugins(
+    _plugins: &mut Plugins,
+    _plugin_options: &[PluginOptions],
+    _fn_opts: &FlownodeOptions,
+) -> Result<()> {
+    Ok(())
+}
 
-    /// The form of the query: a logical plan.
-    pub plan: LogicalPlan,
+pub async fn start_flownode_plugins(_plugins: Plugins) -> Result<()> {
+    Ok(())
 }

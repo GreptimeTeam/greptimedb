@@ -89,7 +89,7 @@ impl App for Instance {
             .context(error::StartFrontendSnafu)
     }
 
-    async fn stop(&self) -> Result<()> {
+    async fn stop(&mut self) -> Result<()> {
         self.frontend
             .shutdown()
             .await
@@ -382,7 +382,6 @@ impl StartCommand {
 
         let servers = Services::new(opts, instance.clone(), plugins)
             .build()
-            .await
             .context(error::StartFrontendSnafu)?;
 
         let frontend = Frontend {

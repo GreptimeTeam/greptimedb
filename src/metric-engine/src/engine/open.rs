@@ -16,6 +16,7 @@
 
 use std::collections::HashSet;
 
+use api::v1::SemanticType;
 use common_telemetry::info;
 use mito2::engine::MITO_ENGINE_NAME;
 use object_store::util::join_dir;
@@ -223,6 +224,21 @@ impl MetricEngineInner {
         {
             let mut state = self.state.write().unwrap();
             // recover physical column names
+            // Safety: The physical columns are loaded from the data region, which always
+            // has a time index.
+            let time_index_unit = physical_columns
+                .iter()
+                .find_map(|col| {
+                    if col.semantic_type == SemanticType::Timestamp {
+                        col.column_schema
+                            .data_type
+                            .as_timestamp()
+                            .map(|data_type| data_type.unit())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap();
             let physical_columns = physical_columns
                 .into_iter()
                 .map(|col| (col.column_schema.name, col.column_id))
@@ -232,6 +248,7 @@ impl MetricEngineInner {
                 physical_columns,
                 primary_key_encoding,
                 physical_region_options,
+                time_index_unit,
             );
             // recover logical regions
             for logical_region_id in &logical_regions {

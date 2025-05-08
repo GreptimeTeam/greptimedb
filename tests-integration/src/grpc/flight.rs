@@ -16,7 +16,6 @@
 mod test {
     use std::net::SocketAddr;
     use std::sync::Arc;
-    use std::time::Duration;
 
     use api::v1::auth_header::AuthScheme;
     use api::v1::{Basic, ColumnDataType, ColumnDef, CreateTableExpr, SemanticType};
@@ -48,8 +47,9 @@ mod test {
     async fn test_standalone_flight_do_put() {
         common_telemetry::init_default_ut_logging();
 
-        let (addr, db, _server) =
+        let (db, server) =
             setup_grpc_server(StorageType::File, "test_standalone_flight_do_put").await;
+        let addr = server.bind_addr().unwrap().to_string();
 
         let client = Client::with_urls(vec![addr]);
         let client = Database::new_with_dbname("greptime-public", client);
@@ -95,17 +95,14 @@ mod test {
             .ok(),
             Some(runtime.clone()),
         );
-        let grpc_server = GrpcServerBuilder::new(GrpcServerConfig::default(), runtime)
+        let mut grpc_server = GrpcServerBuilder::new(GrpcServerConfig::default(), runtime)
             .flight_handler(Arc::new(greptime_request_handler))
             .build();
-        let addr = grpc_server
+        grpc_server
             .start("127.0.0.1:0".parse::<SocketAddr>().unwrap())
             .await
-            .unwrap()
-            .to_string();
-
-        // wait for GRPC server to start
-        tokio::time::sleep(Duration::from_secs(1)).await;
+            .unwrap();
+        let addr = grpc_server.bind_addr().unwrap().to_string();
 
         let client = Client::with_urls(vec![addr]);
         let mut client = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);

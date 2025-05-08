@@ -336,6 +336,15 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to downgrade region leader, region: {}", region_id))]
+    DowngradeLeader {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        source: BoxedError,
+    },
+
     #[snafu(display("Region's leader peer changed: {}", msg))]
     LeaderPeerChanged {
         msg: String,
@@ -956,7 +965,7 @@ impl ErrorExt for Error {
             Error::StartTelemetryTask { source, .. } => source.status_code(),
 
             Error::NextSequence { source, .. } => source.status_code(),
-
+            Error::DowngradeLeader { source, .. } => source.status_code(),
             Error::RegisterProcedureLoader { source, .. } => source.status_code(),
             Error::SubmitDdlTask { source, .. } => source.status_code(),
             Error::ConvertProtoData { source, .. }
