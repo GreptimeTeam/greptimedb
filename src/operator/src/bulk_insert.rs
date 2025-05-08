@@ -83,16 +83,9 @@ impl Inserter {
             .context(error::SplitInsertSnafu)?;
         partition_timer.observe_duration();
 
-        let group_request_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
-            .with_label_values(&["group_request"])
-            .start_timer();
-
         let mut mask_per_datanode = HashMap::with_capacity(region_masks.len());
         for (region_number, mask) in region_masks {
             let region_id = RegionId::new(table_id, region_number);
-            metrics::BULK_REQUEST_ROWS
-                .with_label_values(&["rows_per_region"])
-                .observe(mask.true_count() as f64);
             let datanode = self
                 .partition_manager
                 .find_region_leader(region_id)
@@ -103,7 +96,6 @@ impl Inserter {
                 .or_insert_with(Vec::new)
                 .push((region_id, mask));
         }
-        group_request_timer.observe_duration();
 
         let wait_all_datanode_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
             .with_label_values(&["wait_all_datanode"])
@@ -128,6 +120,9 @@ impl Inserter {
                         let rb = arrow::compute::filter_record_batch(&rb, &mask)
                             .context(error::ComputeArrowSnafu)?;
                         filter_timer.observe_duration();
+                        metrics::BULK_REQUEST_ROWS
+                            .with_label_values(&["rows_per_region"])
+                            .observe(rb.num_rows() as f64);
 
                         let encode_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
                             .with_label_values(&["encode"])
