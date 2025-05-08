@@ -53,6 +53,8 @@ mod prune_test;
 #[cfg(test)]
 mod row_selector_test;
 #[cfg(test)]
+mod scan_test;
+#[cfg(test)]
 mod set_role_state_test;
 #[cfg(test)]
 mod sync_test;

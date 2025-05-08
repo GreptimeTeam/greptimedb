@@ -16,6 +16,7 @@
 
 use std::collections::HashSet;
 use std::fmt;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -301,14 +302,26 @@ impl ScanRegion {
 
     /// Creates a scan input.
     fn scan_input(mut self, filter_deleted: bool) -> Result<ScanInput> {
+        let sst_min_sequence = self.request.sst_min_sequence.and_then(NonZeroU64::new);
         let time_range = self.build_time_range_predicate();
 
         let ssts = &self.version.ssts;
         let mut files = Vec::new();
         for level in ssts.levels() {
             for file in level.files.values() {
+                let exceed_min_sequence = match (sst_min_sequence, file.meta_ref().sequence) {
+                    (Some(min_sequence), Some(file_sequence)) => file_sequence > min_sequence,
+                    // If the file's sequence is None (or actually is zero), it could mean the file
+                    // is generated and added to the region "directly". In this case, its data should
+                    // be considered as fresh as the memtable. So its sequence is treated greater than
+                    // the min_sequence, whatever the value of min_sequence is. Hence the default
+                    // "true" in this arm.
+                    (Some(_), None) => true,
+                    (None, _) => true,
+                };
+
                 // Finds SST files in range.
-                if file_in_range(file, &time_range) {
+                if exceed_min_sequence && file_in_range(file, &time_range) {
                     files.push(file.clone());
                 }
                 // There is no need to check and prune for file's sequence here as the sequence number is usually very new,

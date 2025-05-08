@@ -347,11 +347,7 @@ impl MetadataRegion {
         ScanRequest {
             projection: Some(projection),
             filters: vec![filter_expr],
-            output_ordering: None,
-            limit: None,
-            series_row_selector: None,
-            sequence: None,
-            distribution: None,
+            ..Default::default()
         }
     }
 
@@ -537,11 +533,7 @@ impl MetadataRegion {
         let scan_req = ScanRequest {
             projection: Some(vec![METADATA_SCHEMA_VALUE_COLUMN_INDEX]),
             filters: vec![filter_expr],
-            output_ordering: None,
-            limit: None,
-            series_row_selector: None,
-            sequence: None,
-            distribution: None,
+            ..Default::default()
         };
         let record_batch_stream = self
             .mito
