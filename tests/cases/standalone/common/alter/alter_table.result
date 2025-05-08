@@ -155,9 +155,9 @@ ADD
 
 Affected Rows: 0
 
-ALTER TABLE 
-    t2 
-ADD 
+ALTER TABLE
+    t2
+ADD
     COLUMN at4 UINT16;
 
 Affected Rows: 0
@@ -215,7 +215,7 @@ SELECT * FROM grpc_latencies;
 | 2024-07-11T20:00:06 | host1 | GetUser     | 103.0   |
 +---------------------+-------+-------------+---------+
 
-ALTER TABLE grpc_latencies SET ttl = '10d';
+ALTER TABLE grpc_latencies SET ttl = '10000d';
 
 Affected Rows: 0
 
