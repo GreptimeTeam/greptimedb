@@ -151,7 +151,19 @@ impl TimePartitions {
     pub fn write_bulk(&self, rb: BulkPart) -> Result<()> {
         // Get all parts.
         let parts = self.list_partitions();
-        parts[0].write_record_batch(rb)
+        let mut matched = vec![];
+        for part in &parts {
+            let Some(part_time_range) = part.time_range.as_ref() else {
+                matched.push(part);
+                continue;
+            };
+            if !(rb.max_ts < part_time_range.min_timestamp.value()
+                || rb.min_ts >= part_time_range.max_timestamp.value())
+            {
+                matched.push(part);
+            }
+        }
+        matched[0].write_record_batch(rb)
     }
 
     /// Append memtables in partitions to `memtables`.
