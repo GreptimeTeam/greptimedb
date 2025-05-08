@@ -37,6 +37,8 @@ use query::query_engine::DefaultSerializer;
 use query::QueryEngineRef;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
+use sql::parser::{ParseOptions, ParserContext};
+use sql::statements::statement::Statement;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use tokio::sync::oneshot;
 use tokio::sync::oneshot::error::TryRecvError;
@@ -76,6 +78,34 @@ pub struct TaskConfig {
     sink_table_name: [String; 3],
     pub source_table_names: HashSet<[String; 3]>,
     catalog_manager: CatalogManagerRef,
+    query_type: QueryType,
+}
+
+fn determine_query_type(query: &str, query_ctx: &QueryContextRef) -> Result<QueryType, Error> {
+    let stmts =
+        ParserContext::create_with_dialect(query, query_ctx.sql_dialect(), ParseOptions::default())
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+
+    ensure!(
+        stmts.len() == 1,
+        InvalidQuerySnafu {
+            reason: format!("Expect only one statement, found {}", stmts.len())
+        }
+    );
+    let stmt = &stmts[0];
+    match stmt {
+        Statement::Tql(_) => Ok(QueryType::Tql),
+        _ => Ok(QueryType::Sql),
+    }
+}
+
+#[derive(Debug, Clone)]
+enum QueryType {
+    /// query is a tql query
+    Tql,
+    /// query is a sql query
+    Sql,
 }
 
 #[derive(Clone)]
@@ -86,7 +116,7 @@ pub struct BatchingTask {
 
 impl BatchingTask {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub fn try_new(
         flow_id: FlowId,
         query: &str,
         plan: LogicalPlan,
@@ -97,8 +127,8 @@ impl BatchingTask {
         query_ctx: QueryContextRef,
         catalog_manager: CatalogManagerRef,
         shutdown_rx: oneshot::Receiver<()>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, Error> {
+        Ok(Self {
             config: Arc::new(TaskConfig {
                 flow_id,
                 query: query.to_string(),
@@ -108,9 +138,10 @@ impl BatchingTask {
                 source_table_names: source_table_names.into_iter().collect(),
                 catalog_manager,
                 output_schema: plan.schema().clone(),
+                query_type: determine_query_type(query, &query_ctx)?,
             }),
             state: Arc::new(RwLock::new(TaskState::new(query_ctx, shutdown_rx))),
-        }
+        })
     }
 
     /// mark time window range (now - expire_after, now) as dirty (or (0, now) if expire_after not set)
@@ -482,73 +513,67 @@ impl BatchingTask {
             .map(|expr| expr.eval(low_bound))
             .transpose()?;
 
-        let expr = {
-            match expire_time_window_bound {
-                Some((Some(l), Some(u))) => {
-                    debug!(
-                        "Flow id = {:?}, found time window: precise_lower_bound={:?}, precise_upper_bound={:?}",
-                        self.config.flow_id, l, u
-                    );
-                    let window_size = u.sub(&l).with_context(|| UnexpectedSnafu {
-                        reason: format!("Can't get window size from {u:?} - {l:?}"),
-                    })?;
-                    let col_name = self
-                        .config
-                        .time_window_expr
-                        .as_ref()
-                        .map(|expr| expr.column_name.clone())
-                        .with_context(|| UnexpectedSnafu {
-                            reason: format!(
-                                "Flow id={:?}, Failed to get column name from time window expr",
-                                self.config.flow_id
-                            ),
-                        })?;
+        let (Some((Some(l), Some(u))), QueryType::Sql) =
+            (expire_time_window_bound, &self.config.query_type)
+        else {
+            // either no time window or not a sql query, then just use the original query
+            // use sink_table_meta to add to query the `update_at` and `__ts_placeholder` column's value too for compatibility reason
+            debug!(
+                "Flow id = {:?}, can't get window size: precise_lower_bound={expire_time_window_bound:?}, using the same query", self.config.flow_id
+            );
+            // clean dirty time window too, this could be from create flow's check_execute
+            self.state.write().unwrap().dirty_time_windows.clean();
 
-                    self.state
-                        .write()
-                        .unwrap()
-                        .dirty_time_windows
-                        .gen_filter_exprs(
-                            &col_name,
-                            Some(l),
-                            window_size,
-                            self.config.flow_id,
-                            Some(self),
-                        )?
-                }
-                _ => {
-                    // use sink_table_meta to add to query the `update_at` and `__ts_placeholder` column's value too for compatibility reason
-                    debug!(
-                            "Flow id = {:?}, can't get window size: precise_lower_bound={expire_time_window_bound:?}, using the same query", self.config.flow_id
-                        );
-                    // clean dirty time window too, this could be from create flow's check_execute
-                    self.state.write().unwrap().dirty_time_windows.clean();
+            // TODO(discord9): not add auto column for tql query?
+            let mut add_auto_column = AddAutoColumnRewriter::new(sink_table_schema.clone());
 
-                    // TODO(discord9): not add auto column for tql query?
-                    let mut add_auto_column = AddAutoColumnRewriter::new(sink_table_schema.clone());
+            let plan = sql_to_df_plan(query_ctx.clone(), engine.clone(), &self.config.query, false)
+                .await?;
 
-                    let plan = sql_to_df_plan(
-                        query_ctx.clone(),
-                        engine.clone(),
-                        &self.config.query,
-                        false,
-                    )
-                    .await?;
+            let plan = plan
+                .clone()
+                .rewrite(&mut add_auto_column)
+                .with_context(|_| DatafusionSnafu {
+                    context: format!("Failed to rewrite plan:\n {}\n", plan),
+                })?
+                .data;
+            let schema_len = plan.schema().fields().len();
 
-                    let plan = plan
-                        .clone()
-                        .rewrite(&mut add_auto_column)
-                        .with_context(|_| DatafusionSnafu {
-                            context: format!("Failed to rewrite plan:\n {}\n", plan),
-                        })?
-                        .data;
-                    let schema_len = plan.schema().fields().len();
-
-                    // since no time window lower/upper bound is found, just return the original query(with auto columns)
-                    return Ok(Some((plan, schema_len)));
-                }
-            }
+            // since no time window lower/upper bound is found, just return the original query(with auto columns)
+            return Ok(Some((plan, schema_len)));
         };
+
+        debug!(
+            "Flow id = {:?}, found time window: precise_lower_bound={:?}, precise_upper_bound={:?}",
+            self.config.flow_id, l, u
+        );
+        let window_size = u.sub(&l).with_context(|| UnexpectedSnafu {
+            reason: format!("Can't get window size from {u:?} - {l:?}"),
+        })?;
+        let col_name = self
+            .config
+            .time_window_expr
+            .as_ref()
+            .map(|expr| expr.column_name.clone())
+            .with_context(|| UnexpectedSnafu {
+                reason: format!(
+                    "Flow id={:?}, Failed to get column name from time window expr",
+                    self.config.flow_id
+                ),
+            })?;
+
+        let expr = self
+            .state
+            .write()
+            .unwrap()
+            .dirty_time_windows
+            .gen_filter_exprs(
+                &col_name,
+                Some(l),
+                window_size,
+                self.config.flow_id,
+                Some(self),
+            )?;
 
         debug!(
             "Flow id={:?}, Generated filter expr: {:?}",
