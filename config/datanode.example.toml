@@ -2,20 +2,6 @@
 ## @toml2docs:none-default
 node_id = 42
 
-## The acceptable workload types of the datanode.
-## The default value is `["hybrid"]`.
-##
-## Available values(enterprise version):
-## - `hybrid`: all workloads, which means the datanode can handle all regions.
-## - `ingest`: only ingest workload, which means the datanode can only handle writable regions.
-## - `query`: only query workload, which means the datanode can only handle read-only regions.
-##
-## Available values(community version):
-## - `hybrid`: all workloads, which means the datanode can handle all regions.
-workload_types = [
-    "hybrid"
-]
-
 ## Start services after regions have obtained leases.
 ## It will block the datanode start if it can't receive leases in the heartbeat from metasrv.
 require_lease_before_startup = false

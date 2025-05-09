@@ -8,7 +8,6 @@ license.workspace = true
 testing = []
 pg_kvbackend = ["dep:tokio-postgres", "dep:backon", "dep:deadpool-postgres", "dep:deadpool"]
 mysql_kvbackend = ["dep:sqlx", "dep:backon"]
-enterprise = []
 
 [lints]
 workspace = true
@@ -35,6 +34,7 @@ common-recordbatch.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
 common-wal.workspace = true
+common-workload.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
 datatypes.workspace = true

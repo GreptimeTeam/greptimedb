@@ -283,7 +283,7 @@ impl TryFrom<i32> for Role {
 mod tests {
     use std::assert_matches::assert_matches;
 
-    use api::v1::meta::DatanodeWorkloadType;
+    use common_workload::DatanodeWorkloadType;
 
     use super::*;
     use crate::cluster::Role::{Datanode, Frontend};
@@ -318,7 +318,7 @@ mod tests {
                 leader_regions: 3,
                 follower_regions: 4,
                 workloads: DatanodeWorkloads {
-                    types: vec![DatanodeWorkloadType::Hybrid as i32],
+                    types: vec![DatanodeWorkloadType::Hybrid.to_i32()],
                 },
             }),
             version: "".to_string(),

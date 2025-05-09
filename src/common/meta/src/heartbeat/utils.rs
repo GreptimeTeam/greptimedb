@@ -14,8 +14,10 @@
 
 use api::v1::meta::heartbeat_request::NodeWorkloads;
 use api::v1::meta::mailbox_message::Payload;
-use api::v1::meta::{DatanodeWorkloadType, DatanodeWorkloads, MailboxMessage};
+use api::v1::meta::{DatanodeWorkloads, MailboxMessage};
+use common_telemetry::warn;
 use common_time::util::current_time_millis;
+use common_workload::DatanodeWorkloadType;
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{self, Result};
@@ -62,21 +64,20 @@ pub fn outgoing_message_to_mailbox_message(
 ///
 /// Returns default datanode workloads if the input is `None`.
 pub fn get_datanode_workloads(node_workloads: Option<&NodeWorkloads>) -> DatanodeWorkloads {
-    #[cfg(feature = "enterprise")]
     match node_workloads {
-        Some(NodeWorkloads::Datanode(datanode_workloads)) => datanode_workloads.clone(),
+        Some(NodeWorkloads::Datanode(datanode_workloads)) => {
+            let mut datanode_workloads = datanode_workloads.clone();
+            let unexpected_workloads = datanode_workloads
+                .types
+                .extract_if(.., |t| DatanodeWorkloadType::from_i32(*t).is_none())
+                .collect::<Vec<_>>();
+            if !unexpected_workloads.is_empty() {
+                warn!("Unexpected datanode workloads: {:?}", unexpected_workloads);
+            }
+            datanode_workloads
+        }
         _ => DatanodeWorkloads {
-            types: vec![DatanodeWorkloadType::Hybrid as i32],
-        },
-    }
-
-    #[cfg(not(feature = "enterprise"))]
-    match node_workloads {
-        Some(NodeWorkloads::Datanode(_)) => DatanodeWorkloads {
-            types: vec![DatanodeWorkloadType::Hybrid as i32],
-        },
-        _ => DatanodeWorkloads {
-            types: vec![DatanodeWorkloadType::Hybrid as i32],
+            types: vec![DatanodeWorkloadType::Hybrid.to_i32()],
         },
     }
 }
@@ -88,31 +89,9 @@ mod tests {
     #[test]
     fn test_get_datanode_workloads() {
         let node_workloads = Some(NodeWorkloads::Datanode(DatanodeWorkloads {
-            types: vec![
-                DatanodeWorkloadType::Hybrid as i32,
-                DatanodeWorkloadType::Query as i32,
-            ],
+            types: vec![DatanodeWorkloadType::Hybrid.to_i32(), 100],
         }));
-
-        #[cfg(feature = "enterprise")]
-        {
-            let datanode_workloads = get_datanode_workloads(node_workloads.as_ref());
-            assert_eq!(
-                datanode_workloads.types,
-                vec![
-                    DatanodeWorkloadType::Hybrid as i32,
-                    DatanodeWorkloadType::Query as i32,
-                ]
-            );
-        }
-
-        #[cfg(not(feature = "enterprise"))]
-        {
-            let datanode_workloads = get_datanode_workloads(node_workloads.as_ref());
-            assert_eq!(
-                datanode_workloads.types,
-                vec![DatanodeWorkloadType::Hybrid as i32]
-            );
-        }
+        let workloads = get_datanode_workloads(node_workloads.as_ref());
+        assert_eq!(workloads.types, vec![DatanodeWorkloadType::Hybrid.to_i32()]);
     }
 }

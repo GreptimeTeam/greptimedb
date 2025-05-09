@@ -168,8 +168,9 @@ mod tests {
     use std::collections::HashMap;
 
     use api::v1::meta::heartbeat_request::NodeWorkloads;
-    use api::v1::meta::{DatanodeWorkloadType, DatanodeWorkloads};
+    use api::v1::meta::DatanodeWorkloads;
     use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue};
+    use common_workload::DatanodeWorkloadType;
 
     use crate::key::{DatanodeLeaseKey, LeaseValue};
     use crate::selector::load_based::filter_out_expired_datanode;
@@ -197,7 +198,7 @@ mod tests {
                 timestamp_millis: 0,
                 node_addr: "127.0.0.1:3002".to_string(),
                 workloads: NodeWorkloads::Datanode(DatanodeWorkloads {
-                    types: vec![DatanodeWorkloadType::Hybrid as i32],
+                    types: vec![DatanodeWorkloadType::Hybrid.to_i32()],
                 }),
             },
         );

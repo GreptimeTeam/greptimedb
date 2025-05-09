@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use api::v1::meta::heartbeat_request::NodeWorkloads;
-use api::v1::meta::{FlownodeWorkloadType, FlownodeWorkloads, HeartbeatRequest, Peer, Role};
+use api::v1::meta::{FlownodeWorkloads, HeartbeatRequest, Peer, Role};
 use common_meta::heartbeat::utils::get_datanode_workloads;
 use common_meta::rpc::store::PutRequest;
 use common_telemetry::{trace, warn};
@@ -97,9 +97,7 @@ impl HeartbeatHandler for FlownodeKeepLeaseHandler {
         let value = LeaseValue {
             timestamp_millis: time_util::current_time_millis(),
             node_addr: peer.addr.clone(),
-            workloads: NodeWorkloads::Flownode(FlownodeWorkloads {
-                types: vec![FlownodeWorkloadType::FlownodeDefault as i32],
-            }),
+            workloads: NodeWorkloads::Flownode(FlownodeWorkloads { types: vec![] }),
         };
 
         trace!("Receive a heartbeat from flownode: {key:?}, {value:?}");

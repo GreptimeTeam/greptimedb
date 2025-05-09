@@ -19,15 +19,28 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum DatanodeWorkloadType {
-    /// The datanode can handle all workloads (including ingest and query workloads).
+    /// The datanode can handle all workloads.
     Hybrid = 0,
 }
 
-impl From<DatanodeWorkloadType> for api::v1::meta::DatanodeWorkloadType {
-    fn from(value: DatanodeWorkloadType) -> Self {
+impl DatanodeWorkloadType {
+    /// Convert from `i32` to `DatanodeWorkloadType`.
+    pub fn from_i32(value: i32) -> Option<Self> {
         match value {
-            DatanodeWorkloadType::Hybrid => api::v1::meta::DatanodeWorkloadType::Hybrid,
+            0 => Some(DatanodeWorkloadType::Hybrid),
+            _ => None,
         }
+    }
+
+    /// Convert from `DatanodeWorkloadType` to `i32`.
+    pub fn to_i32(self) -> i32 {
+        match self {
+            DatanodeWorkloadType::Hybrid => 0,
+        }
+    }
+
+    pub fn accept_ingest(&self) -> bool {
+        matches!(self, DatanodeWorkloadType::Hybrid)
     }
 }
 

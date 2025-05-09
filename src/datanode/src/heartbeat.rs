@@ -18,10 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::heartbeat_request::NodeWorkloads;
-use api::v1::meta::{
-    DatanodeWorkloadType, DatanodeWorkloads, HeartbeatRequest, NodeInfo, Peer, RegionRole,
-    RegionStat,
-};
+use api::v1::meta::{DatanodeWorkloads, HeartbeatRequest, NodeInfo, Peer, RegionRole, RegionStat};
 use common_base::Plugins;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::datanode::REGION_STATISTIC_KEY;
@@ -34,6 +31,7 @@ use common_meta::heartbeat::handler::{
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MailboxRef};
 use common_meta::heartbeat::utils::outgoing_message_to_mailbox_message;
 use common_telemetry::{debug, error, info, trace, warn};
+use common_workload::DatanodeWorkloadType;
 use meta_client::client::{HeartbeatSender, MetaClient};
 use meta_client::MetaClientRef;
 use servers::addrs;
@@ -96,11 +94,7 @@ impl HeartbeatTask {
 
         Ok(Self {
             node_id: opts.node_id.unwrap_or(0),
-            workload_types: opts
-                .workload_types
-                .iter()
-                .map(|w| api::v1::meta::DatanodeWorkloadType::from(*w))
-                .collect(),
+            workload_types: opts.workload_types.clone(),
             // We use datanode's start time millis as the node's epoch.
             node_epoch: common_time::util::current_time_millis() as u64,
             peer_addr: addrs::resolve_addr(&opts.grpc.bind_addr, Some(&opts.grpc.server_addr)),

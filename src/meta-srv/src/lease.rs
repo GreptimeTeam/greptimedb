@@ -19,12 +19,12 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use api::v1::meta::heartbeat_request::NodeWorkloads;
-use api::v1::meta::DatanodeWorkloadType;
 use common_error::ext::BoxedError;
 use common_meta::kv_backend::{KvBackend, ResettableKvBackendRef};
 use common_meta::peer::{Peer, PeerLookupService};
 use common_meta::{util, DatanodeId, FlownodeId};
 use common_time::util as time_util;
+use common_workload::DatanodeWorkloadType;
 use snafu::ResultExt;
 
 use crate::cluster::MetaPeerClientRef;
@@ -48,7 +48,7 @@ pub fn is_datanode_accept_ingest_workload(lease_value: &LeaseValue) -> bool {
         NodeWorkloads::Datanode(workloads) => workloads
             .types
             .iter()
-            .filter_map(|w| DatanodeWorkloadType::try_from(*w).ok())
+            .filter_map(|w| DatanodeWorkloadType::from_i32(*w))
             .any(|w| w.accept_ingest()),
         _ => false,
     }
@@ -275,10 +275,11 @@ impl PeerLookupService for MetaPeerLookupService {
 #[cfg(test)]
 mod tests {
     use api::v1::meta::heartbeat_request::NodeWorkloads;
-    use api::v1::meta::{DatanodeWorkloadType, DatanodeWorkloads};
+    use api::v1::meta::DatanodeWorkloads;
     use common_meta::kv_backend::ResettableKvBackendRef;
     use common_meta::rpc::store::PutRequest;
     use common_time::util::current_time_millis;
+    use common_workload::DatanodeWorkloadType;
 
     use crate::key::{DatanodeLeaseKey, LeaseValue};
     use crate::lease::{alive_datanodes, is_datanode_accept_ingest_workload};
@@ -333,7 +334,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(feature = "enterprise")]
     async fn test_alive_datanodes_with_condition() {
         let client = create_meta_peer_client();
         let in_memory = client.memory_backend();
@@ -368,7 +368,7 @@ mod tests {
             timestamp_millis: current_time_millis(),
             node_addr: "127.0.0.1:20203".to_string(),
             workloads: NodeWorkloads::Datanode(DatanodeWorkloads {
-                types: vec![DatanodeWorkloadType::Query as i32],
+                types: vec![i32::MAX],
             }),
         };
         put_lease_value(&in_memory, key, value).await;
@@ -379,7 +379,7 @@ mod tests {
             timestamp_millis: current_time_millis(),
             node_addr: "127.0.0.1:20204".to_string(),
             workloads: NodeWorkloads::Datanode(DatanodeWorkloads {
-                types: vec![DatanodeWorkloadType::Ingest as i32],
+                types: vec![i32::MAX],
             }),
         };
         put_lease_value(&in_memory, key, value).await;
@@ -391,21 +391,5 @@ mod tests {
         assert_eq!(leases.len(), 2);
         assert!(leases.contains_key(&DatanodeLeaseKey { node_id: 2 }));
         assert!(leases.contains_key(&DatanodeLeaseKey { node_id: 4 }));
-    }
-
-    #[test]
-    fn test_is_datanode_accept_ingest_workload() {
-        let value = LeaseValue {
-            timestamp_millis: current_time_millis(),
-            node_addr: "127.0.0.1:20201".to_string(),
-            workloads: NodeWorkloads::Datanode(DatanodeWorkloads {
-                types: vec![DatanodeWorkloadType::Ingest as i32],
-            }),
-        };
-        #[cfg(feature = "enterprise")]
-        assert!(is_datanode_accept_ingest_workload(&value));
-        // The community version does not have the `Ingest` workload type, only `Hybrid` is supported.
-        #[cfg(not(feature = "enterprise"))]
-        assert!(!is_datanode_accept_ingest_workload(&value));
     }
 }

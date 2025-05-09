@@ -15,11 +15,12 @@
 use std::sync::Arc;
 
 use api::v1::meta::heartbeat_request::NodeWorkloads;
-use api::v1::meta::{DatanodeWorkloadType, DatanodeWorkloads};
+use api::v1::meta::DatanodeWorkloads;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_time::util as time_util;
+use common_workload::DatanodeWorkloadType;
 
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 use crate::key::{DatanodeLeaseKey, LeaseValue};
@@ -79,7 +80,7 @@ pub(crate) async fn put_datanodes(meta_peer_client: &MetaPeerClientRef, datanode
             timestamp_millis: time_util::current_time_millis(),
             node_addr: datanode.addr,
             workloads: NodeWorkloads::Datanode(DatanodeWorkloads {
-                types: vec![DatanodeWorkloadType::Hybrid as i32],
+                types: vec![DatanodeWorkloadType::Hybrid.to_i32()],
             }),
         };
         let lease_key_bytes: Vec<u8> = lease_key.try_into().unwrap();
