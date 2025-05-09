@@ -27,26 +27,42 @@ impl DatanodeWorkloadType {
     /// Convert from `i32` to `DatanodeWorkloadType`.
     pub fn from_i32(value: i32) -> Option<Self> {
         match value {
-            0 => Some(DatanodeWorkloadType::Hybrid),
+            v if v == Self::Hybrid as i32 => Some(Self::Hybrid),
             _ => None,
         }
     }
 
     /// Convert from `DatanodeWorkloadType` to `i32`.
     pub fn to_i32(self) -> i32 {
-        match self {
-            DatanodeWorkloadType::Hybrid => 0,
-        }
+        self as i32
     }
 
     pub fn accept_ingest(&self) -> bool {
-        matches!(self, DatanodeWorkloadType::Hybrid)
+        matches!(self, Self::Hybrid)
     }
 }
 
 /// Sanitize the workload types.
 pub fn sanitize_workload_types(workload_types: &mut Vec<DatanodeWorkloadType>) {
-    info!("The Oss version only support Hybrid workload type");
-    workload_types.clear();
-    workload_types.push(DatanodeWorkloadType::Hybrid);
+    if workload_types.is_empty() {
+        info!("The workload types is empty, use Hybrid workload type");
+        workload_types.push(DatanodeWorkloadType::Hybrid);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sanitize_workload_types() {
+        let hybrid = DatanodeWorkloadType::Hybrid;
+        assert_eq!(hybrid as i32, 0);
+        let hybrid_i32 = hybrid.to_i32();
+        assert_eq!(hybrid_i32, 0);
+        assert_eq!(DatanodeWorkloadType::from_i32(hybrid_i32), Some(hybrid));
+
+        let unexpected_i32 = 100;
+        assert_eq!(DatanodeWorkloadType::from_i32(unexpected_i32), None);
+    }
 }

@@ -245,7 +245,7 @@ impl HeartbeatTask {
                     cpus: num_cpus::get() as u32,
                 }),
                 node_workloads: Some(NodeWorkloads::Datanode(DatanodeWorkloads {
-                    types: workload_types.iter().map(|w| *w as i32).collect(),
+                    types: workload_types.iter().map(|w| w.to_i32()).collect(),
                 })),
                 ..Default::default()
             };
