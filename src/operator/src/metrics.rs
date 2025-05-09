@@ -93,4 +93,12 @@ lazy_static! {
         ]
     )
     .unwrap();
+    pub static ref BULK_REQUEST_ROWS: HistogramVec = register_histogram_vec!(
+        "greptime_table_operator_bulk_insert_message_rows",
+        "table operator bulk inserts message rows",
+        &["type"],
+        // 10 ~ 100_000
+        exponential_buckets(10.0, 10.0, 5).unwrap()
+    )
+    .unwrap();
 }

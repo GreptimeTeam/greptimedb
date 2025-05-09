@@ -236,13 +236,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         request.on_success();
 
         // Handle pending requests for the region.
-        if let Some((mut ddl_requests, mut write_requests)) =
+        if let Some((mut ddl_requests, mut write_requests, mut bulk_writes)) =
             self.flush_scheduler.on_flush_success(region_id)
         {
             // Perform DDLs first because they require empty memtables.
             self.handle_ddl_requests(&mut ddl_requests).await;
             // Handle pending write requests, we don't stall these requests.
-            self.handle_write_requests(&mut write_requests, false).await;
+            self.handle_write_requests(&mut write_requests, &mut bulk_writes, false)
+                .await;
         }
 
         // Handle stalled requests.

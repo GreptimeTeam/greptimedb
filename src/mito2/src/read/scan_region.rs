@@ -371,14 +371,14 @@ impl ScanRegion {
         let memtables = memtables
             .into_iter()
             .map(|mem| {
-                let ranges = mem.ranges(
+                mem.ranges(
                     Some(mapper.column_ids()),
                     predicate.clone(),
                     self.request.sequence,
-                );
-                MemRangeBuilder::new(ranges)
+                )
+                .map(MemRangeBuilder::new)
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
 
         let input = ScanInput::new(self.access_layer, mapper)
             .with_time_range(Some(time_range))
