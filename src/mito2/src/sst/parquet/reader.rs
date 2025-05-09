@@ -14,8 +14,7 @@
 
 //! Parquet reader.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::ops::Range;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -27,7 +26,6 @@ use datafusion_expr::Expr;
 use datatypes::arrow::error::ArrowError;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
-use itertools::Itertools;
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, RowSelection};
 use parquet::arrow::{parquet_to_arrow_field_levels, FieldLevels, ProjectionMask};
@@ -58,9 +56,7 @@ use crate::sst::parquet::file_range::{FileRangeContext, FileRangeContextRef};
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::row_group::InMemoryRowGroup;
-use crate::sst::parquet::row_selection::{
-    intersect_row_selections, row_selection_from_row_ranges, row_selection_from_sorted_row_ids,
-};
+use crate::sst::parquet::row_selection::RowGroupSelection;
 use crate::sst::parquet::stats::RowGroupPruningStats;
 use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, PARQUET_METADATA_KEY};
 
@@ -176,8 +172,8 @@ impl ParquetReaderBuilder {
     pub async fn build(&self) -> Result<ParquetReader> {
         let mut metrics = ReaderMetrics::default();
 
-        let (context, row_groups) = self.build_reader_input(&mut metrics).await?;
-        ParquetReader::new(Arc::new(context), row_groups).await
+        let (context, selection) = self.build_reader_input(&mut metrics).await?;
+        ParquetReader::new(Arc::new(context), selection).await
     }
 
     /// Builds a [FileRangeContext] and collects row groups to read.
@@ -186,7 +182,7 @@ impl ParquetReaderBuilder {
     pub(crate) async fn build_reader_input(
         &self,
         metrics: &mut ReaderMetrics,
-    ) -> Result<(FileRangeContext, RowGroupMap)> {
+    ) -> Result<(FileRangeContext, RowGroupSelection)> {
         let start = Instant::now();
 
         let file_path = self.file_handle.file_path(&self.file_dir);
@@ -224,7 +220,7 @@ impl ParquetReaderBuilder {
         let field_levels =
             parquet_to_arrow_field_levels(parquet_schema_desc, projection_mask.clone(), hint)
                 .context(ReadDataPartSnafu)?;
-        let row_groups = self
+        let selection = self
             .row_groups_to_read(&read_format, &parquet_meta, &mut metrics.filter_metrics)
             .await;
 
@@ -260,7 +256,7 @@ impl ParquetReaderBuilder {
 
         metrics.build_cost += start.elapsed();
 
-        Ok((context, row_groups))
+        Ok((context, selection))
     }
 
     /// Decodes region metadata from key value.
@@ -331,24 +327,24 @@ impl ParquetReaderBuilder {
         read_format: &ReadFormat,
         parquet_meta: &ParquetMetaData,
         metrics: &mut ReaderFilterMetrics,
-    ) -> BTreeMap<usize, Option<RowSelection>> {
+    ) -> RowGroupSelection {
         let num_row_groups = parquet_meta.num_row_groups();
         let num_rows = parquet_meta.file_metadata().num_rows();
         if num_row_groups == 0 || num_rows == 0 {
-            return BTreeMap::default();
+            return RowGroupSelection::default();
         }
 
         // Let's assume that the number of rows in the first row group
         // can represent the `row_group_size` of the Parquet file.
         let row_group_size = parquet_meta.row_group(0).num_rows() as usize;
         if row_group_size == 0 {
-            return BTreeMap::default();
+            return RowGroupSelection::default();
         }
 
         metrics.rg_total += num_row_groups;
         metrics.rows_total += num_rows as usize;
 
-        let mut output = (0..num_row_groups).map(|i| (i, None)).collect();
+        let mut output = RowGroupSelection::new(row_group_size, num_rows as _);
 
         self.prune_row_groups_by_fulltext_index(row_group_size, parquet_meta, &mut output, metrics)
             .await;
@@ -357,7 +353,7 @@ impl ParquetReaderBuilder {
         }
 
         let inverted_filtered = self
-            .prune_row_groups_by_inverted_index(row_group_size, parquet_meta, &mut output, metrics)
+            .prune_row_groups_by_inverted_index(row_group_size, &mut output, metrics)
             .await;
         if output.is_empty() {
             return output;
@@ -365,14 +361,19 @@ impl ParquetReaderBuilder {
 
         if !inverted_filtered {
             self.prune_row_groups_by_minmax(read_format, parquet_meta, &mut output, metrics);
+            if output.is_empty() {
+                return output;
+            }
         }
 
-        self.prune_row_groups_by_bloom_filter(parquet_meta, &mut output, metrics)
+        self.prune_row_groups_by_bloom_filter(row_group_size, parquet_meta, &mut output, metrics)
             .await;
+        if output.is_empty() {
+            return output;
+        }
 
-        self.prune_row_groups_by_fulltext_bloom(parquet_meta, &mut output, metrics)
+        self.prune_row_groups_by_fulltext_bloom(row_group_size, parquet_meta, &mut output, metrics)
             .await;
-
         output
     }
 
@@ -381,7 +382,7 @@ impl ParquetReaderBuilder {
         &self,
         row_group_size: usize,
         parquet_meta: &ParquetMetaData,
-        output: &mut BTreeMap<usize, Option<RowSelection>>,
+        output: &mut RowGroupSelection,
         metrics: &mut ReaderFilterMetrics,
     ) -> bool {
         let Some(index_applier) = &self.fulltext_index_applier else {
@@ -419,44 +420,19 @@ impl ParquetReaderBuilder {
             }
         };
 
-        let row_group_to_row_ids =
-            Self::group_row_ids(apply_res, row_group_size, parquet_meta.num_row_groups());
-        Self::prune_row_groups_by_rows(
-            parquet_meta,
-            row_group_to_row_ids,
-            output,
-            &mut metrics.rg_fulltext_filtered,
-            &mut metrics.rows_fulltext_filtered,
+        let selection = RowGroupSelection::from_row_ids(
+            apply_res,
+            row_group_size,
+            parquet_meta.num_row_groups(),
         );
+        let intersection = output.intersect(&selection);
+
+        metrics.rg_fulltext_filtered += output.row_group_count() - intersection.row_group_count();
+        metrics.rows_fulltext_filtered += output.row_count() - intersection.row_count();
+
+        *output = intersection;
 
         true
-    }
-
-    /// Groups row IDs into row groups, with each group's row IDs starting from 0.
-    fn group_row_ids(
-        row_ids: BTreeSet<u32>,
-        row_group_size: usize,
-        num_row_groups: usize,
-    ) -> Vec<(usize, Vec<usize>)> {
-        let est_rows_per_group = row_ids.len() / num_row_groups;
-
-        let mut row_group_to_row_ids: Vec<(usize, Vec<usize>)> = Vec::with_capacity(num_row_groups);
-        for row_id in row_ids {
-            let row_group_id = row_id as usize / row_group_size;
-            let row_id_in_group = row_id as usize % row_group_size;
-
-            if let Some((rg_id, row_ids)) = row_group_to_row_ids.last_mut()
-                && *rg_id == row_group_id
-            {
-                row_ids.push(row_id_in_group);
-            } else {
-                let mut row_ids = Vec::with_capacity(est_rows_per_group);
-                row_ids.push(row_id_in_group);
-                row_group_to_row_ids.push((row_group_id, row_ids));
-            }
-        }
-
-        row_group_to_row_ids
     }
 
     /// Applies index to prune row groups.
@@ -467,8 +443,7 @@ impl ParquetReaderBuilder {
     async fn prune_row_groups_by_inverted_index(
         &self,
         row_group_size: usize,
-        parquet_meta: &ParquetMetaData,
-        output: &mut BTreeMap<usize, Option<RowSelection>>,
+        output: &mut RowGroupSelection,
         metrics: &mut ReaderFilterMetrics,
     ) -> bool {
         let Some(index_applier) = &self.inverted_index_applier else {
@@ -503,32 +478,14 @@ impl ParquetReaderBuilder {
             }
         };
 
-        let segment_row_count = apply_output.segment_row_count;
-        let grouped_in_row_groups = apply_output
-            .matched_segment_ids
-            .iter_ones()
-            .map(|seg_id| {
-                let begin_row_id = seg_id * segment_row_count;
-                let row_group_id = begin_row_id / row_group_size;
+        let selection =
+            RowGroupSelection::from_inverted_index_apply_output(row_group_size, apply_output);
+        let intersection = output.intersect(&selection);
 
-                let rg_begin_row_id = begin_row_id % row_group_size;
-                let rg_end_row_id = rg_begin_row_id + segment_row_count;
+        metrics.rg_inverted_filtered += output.row_group_count() - intersection.row_group_count();
+        metrics.rows_inverted_filtered += output.row_count() - intersection.row_count();
 
-                (row_group_id, rg_begin_row_id..rg_end_row_id)
-            })
-            .chunk_by(|(row_group_id, _)| *row_group_id);
-
-        let ranges_in_row_groups = grouped_in_row_groups
-            .into_iter()
-            .map(|(row_group_id, group)| (row_group_id, group.map(|(_, ranges)| ranges)));
-
-        Self::prune_row_groups_by_ranges(
-            parquet_meta,
-            ranges_in_row_groups,
-            output,
-            &mut metrics.rg_inverted_filtered,
-            &mut metrics.rows_inverted_filtered,
-        );
+        *output = intersection;
 
         true
     }
@@ -538,14 +495,14 @@ impl ParquetReaderBuilder {
         &self,
         read_format: &ReadFormat,
         parquet_meta: &ParquetMetaData,
-        output: &mut BTreeMap<usize, Option<RowSelection>>,
+        output: &mut RowGroupSelection,
         metrics: &mut ReaderFilterMetrics,
     ) -> bool {
         let Some(predicate) = &self.predicate else {
             return false;
         };
 
-        let row_groups_before = output.len();
+        let row_groups_before = output.row_group_count();
 
         let region_meta = read_format.metadata();
         let row_groups = parquet_meta.row_groups();
@@ -560,31 +517,27 @@ impl ParquetReaderBuilder {
         // Here we use the schema of the SST to build the physical expression. If the column
         // in the SST doesn't have the same column id as the column in the expected metadata,
         // we will get a None statistics for that column.
-        let res = predicate
+        predicate
             .prune_with_stats(&stats, prune_schema)
             .iter()
             .zip(0..parquet_meta.num_row_groups())
-            .filter_map(|(mask, row_group)| {
+            .for_each(|(mask, row_group)| {
                 if !*mask {
-                    return None;
+                    output.remove_row_group(row_group);
                 }
+            });
 
-                let selection = output.remove(&row_group)?;
-                Some((row_group, selection))
-            })
-            .collect::<BTreeMap<_, _>>();
-
-        let row_groups_after = res.len();
+        let row_groups_after = output.row_group_count();
         metrics.rg_minmax_filtered += row_groups_before - row_groups_after;
 
-        *output = res;
         true
     }
 
     async fn prune_row_groups_by_bloom_filter(
         &self,
+        row_group_size: usize,
         parquet_meta: &ParquetMetaData,
-        output: &mut BTreeMap<usize, Option<RowSelection>>,
+        output: &mut RowGroupSelection,
         metrics: &mut ReaderFilterMetrics,
     ) -> bool {
         let Some(index_applier) = &self.bloom_filter_index_applier else {
@@ -604,7 +557,7 @@ impl ParquetReaderBuilder {
                     .row_groups()
                     .iter()
                     .enumerate()
-                    .map(|(i, rg)| (rg.num_rows() as usize, output.contains_key(&i))),
+                    .map(|(i, rg)| (rg.num_rows() as usize, output.contains_row_group(i))),
             )
             .await
         {
@@ -628,23 +581,22 @@ impl ParquetReaderBuilder {
             }
         };
 
-        Self::prune_row_groups_by_ranges(
-            parquet_meta,
-            apply_output
-                .into_iter()
-                .map(|(rg, ranges)| (rg, ranges.into_iter())),
-            output,
-            &mut metrics.rg_bloom_filtered,
-            &mut metrics.rows_bloom_filtered,
-        );
+        let selection = RowGroupSelection::from_row_ranges(apply_output, row_group_size);
+        let intersection = output.intersect(&selection);
+
+        metrics.rg_bloom_filtered += output.row_group_count() - intersection.row_group_count();
+        metrics.rows_bloom_filtered += output.row_count() - intersection.row_count();
+
+        *output = intersection;
 
         true
     }
 
     async fn prune_row_groups_by_fulltext_bloom(
         &self,
+        row_group_size: usize,
         parquet_meta: &ParquetMetaData,
-        output: &mut BTreeMap<usize, Option<RowSelection>>,
+        output: &mut RowGroupSelection,
         metrics: &mut ReaderFilterMetrics,
     ) -> bool {
         let Some(index_applier) = &self.fulltext_index_applier else {
@@ -664,7 +616,7 @@ impl ParquetReaderBuilder {
                     .row_groups()
                     .iter()
                     .enumerate()
-                    .map(|(i, rg)| (rg.num_rows() as usize, output.contains_key(&i))),
+                    .map(|(i, rg)| (rg.num_rows() as usize, output.contains_row_group(i))),
             )
             .await
         {
@@ -689,122 +641,15 @@ impl ParquetReaderBuilder {
             }
         };
 
-        Self::prune_row_groups_by_ranges(
-            parquet_meta,
-            apply_output
-                .into_iter()
-                .map(|(rg, ranges)| (rg, ranges.into_iter())),
-            output,
-            &mut metrics.rg_fulltext_filtered,
-            &mut metrics.rows_fulltext_filtered,
-        );
+        let selection = RowGroupSelection::from_row_ranges(apply_output, row_group_size);
+        let intersection = output.intersect(&selection);
+
+        metrics.rg_fulltext_filtered += output.row_group_count() - intersection.row_group_count();
+        metrics.rows_fulltext_filtered += output.row_count() - intersection.row_count();
+
+        *output = intersection;
 
         true
-    }
-
-    /// Prunes row groups by rows. The `rows_in_row_groups` is like a map from row group to
-    /// a list of row ids to keep.
-    fn prune_row_groups_by_rows(
-        parquet_meta: &ParquetMetaData,
-        rows_in_row_groups: Vec<(usize, Vec<usize>)>,
-        output: &mut BTreeMap<usize, Option<RowSelection>>,
-        filtered_row_groups: &mut usize,
-        filtered_rows: &mut usize,
-    ) {
-        let row_groups_before = output.len();
-        let mut rows_in_row_group_before = 0;
-        let mut rows_in_row_group_after = 0;
-
-        let mut res = BTreeMap::new();
-        for (row_group, row_ids) in rows_in_row_groups {
-            let Some(selection) = output.remove(&row_group) else {
-                continue;
-            };
-
-            let total_row_count = parquet_meta.row_group(row_group).num_rows() as usize;
-            rows_in_row_group_before += selection
-                .as_ref()
-                .map_or(total_row_count, |s| s.row_count());
-
-            let new_selection =
-                row_selection_from_sorted_row_ids(row_ids.into_iter(), total_row_count);
-            let intersected_selection = intersect_row_selections(selection, Some(new_selection));
-
-            let num_rows_after = intersected_selection
-                .as_ref()
-                .map_or(total_row_count, |s| s.row_count());
-            rows_in_row_group_after += num_rows_after;
-
-            if num_rows_after > 0 {
-                res.insert(row_group, intersected_selection);
-            }
-        }
-
-        // Pruned row groups.
-        while let Some((row_group, selection)) = output.pop_first() {
-            let total_row_count = parquet_meta.row_group(row_group).num_rows() as usize;
-            rows_in_row_group_before += selection
-                .as_ref()
-                .map_or(total_row_count, |s| s.row_count());
-        }
-
-        let row_groups_after = res.len();
-        *filtered_row_groups += row_groups_before - row_groups_after;
-        *filtered_rows += rows_in_row_group_before - rows_in_row_group_after;
-
-        *output = res;
-    }
-
-    /// Prunes row groups by ranges. The `ranges_in_row_groups` is like a map from row group to
-    /// a list of row ranges to keep.
-    fn prune_row_groups_by_ranges(
-        parquet_meta: &ParquetMetaData,
-        ranges_in_row_groups: impl Iterator<Item = (usize, impl Iterator<Item = Range<usize>>)>,
-        output: &mut BTreeMap<usize, Option<RowSelection>>,
-        filtered_row_groups: &mut usize,
-        filtered_rows: &mut usize,
-    ) {
-        let row_groups_before = output.len();
-        let mut rows_in_row_group_before = 0;
-        let mut rows_in_row_group_after = 0;
-
-        let mut res = BTreeMap::new();
-        for (row_group, row_ranges) in ranges_in_row_groups {
-            let Some(selection) = output.remove(&row_group) else {
-                continue;
-            };
-
-            let total_row_count = parquet_meta.row_group(row_group).num_rows() as usize;
-            rows_in_row_group_before += selection
-                .as_ref()
-                .map_or(total_row_count, |s| s.row_count());
-
-            let new_selection = row_selection_from_row_ranges(row_ranges, total_row_count);
-            let intersected_selection = intersect_row_selections(selection, Some(new_selection));
-
-            let num_rows_after = intersected_selection
-                .as_ref()
-                .map_or(total_row_count, |s| s.row_count());
-            rows_in_row_group_after += num_rows_after;
-
-            if num_rows_after > 0 {
-                res.insert(row_group, intersected_selection);
-            }
-        }
-
-        // Pruned row groups.
-        while let Some((row_group, selection)) = output.pop_first() {
-            let total_row_count = parquet_meta.row_group(row_group).num_rows() as usize;
-            rows_in_row_group_before += selection
-                .as_ref()
-                .map_or(total_row_count, |s| s.row_count());
-        }
-
-        let row_groups_after = res.len();
-        *filtered_row_groups += row_groups_before - row_groups_after;
-        *filtered_rows += rows_in_row_group_before - rows_in_row_group_after;
-
-        *output = res;
     }
 }
 
@@ -1119,14 +964,12 @@ fn pruned_by_default(filter: &SimpleFilterEvaluator, column: &ColumnMetadata) ->
     Some(!matches)
 }
 
-type RowGroupMap = BTreeMap<usize, Option<RowSelection>>;
-
 /// Parquet batch reader to read our SST format.
 pub struct ParquetReader {
     /// File range context.
     context: FileRangeContextRef,
-    /// Indices of row groups to read, along with their respective row selections.
-    row_groups: RowGroupMap,
+    /// Row group selection to read.
+    selection: RowGroupSelection,
     /// Reader of current row group.
     reader_state: ReaderState,
 }
@@ -1144,11 +987,11 @@ impl BatchReader for ParquetReader {
         }
 
         // No more items in current row group, reads next row group.
-        while let Some((row_group_idx, row_selection)) = self.row_groups.pop_first() {
+        while let Some((row_group_idx, row_selection)) = self.selection.pop_first() {
             let parquet_reader = self
                 .context
                 .reader_builder()
-                .build(row_group_idx, row_selection)
+                .build(row_group_idx, Some(row_selection))
                 .await?;
 
             // Resets the parquet reader.
@@ -1198,15 +1041,12 @@ impl Drop for ParquetReader {
 
 impl ParquetReader {
     /// Creates a new reader.
-    async fn new(
-        context: FileRangeContextRef,
-        mut row_groups: BTreeMap<usize, Option<RowSelection>>,
-    ) -> Result<Self> {
+    async fn new(context: FileRangeContextRef, mut selection: RowGroupSelection) -> Result<Self> {
         // No more items in current row group, reads next row group.
-        let reader_state = if let Some((row_group_idx, row_selection)) = row_groups.pop_first() {
+        let reader_state = if let Some((row_group_idx, row_selection)) = selection.pop_first() {
             let parquet_reader = context
                 .reader_builder()
-                .build(row_group_idx, row_selection)
+                .build(row_group_idx, Some(row_selection))
                 .await?;
             ReaderState::Readable(PruneReader::new_with_row_group_reader(
                 context.clone(),
@@ -1218,7 +1058,7 @@ impl ParquetReader {
 
         Ok(ParquetReader {
             context,
-            row_groups,
+            selection,
             reader_state,
         })
     }
@@ -1352,302 +1192,5 @@ where
 {
     async fn next_batch(&mut self) -> Result<Option<Batch>> {
         self.next_inner()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use parquet::arrow::arrow_reader::RowSelector;
-    use parquet::file::metadata::{FileMetaData, RowGroupMetaData};
-    use parquet::schema::types::{SchemaDescriptor, Type};
-
-    use super::*;
-
-    fn mock_parquet_metadata_from_row_groups(num_rows_in_row_groups: Vec<i64>) -> ParquetMetaData {
-        let tp = Arc::new(Type::group_type_builder("test").build().unwrap());
-        let schema_descr = Arc::new(SchemaDescriptor::new(tp));
-
-        let mut row_groups = Vec::new();
-        for num_rows in &num_rows_in_row_groups {
-            let row_group = RowGroupMetaData::builder(schema_descr.clone())
-                .set_num_rows(*num_rows)
-                .build()
-                .unwrap();
-            row_groups.push(row_group);
-        }
-
-        let file_meta = FileMetaData::new(
-            0,
-            num_rows_in_row_groups.iter().sum(),
-            None,
-            None,
-            schema_descr,
-            None,
-        );
-        ParquetMetaData::new(file_meta, row_groups)
-    }
-
-    #[test]
-    fn test_group_row_ids() {
-        let row_ids = [0, 1, 2, 5, 6, 7, 8, 12].into_iter().collect();
-        let row_group_size = 5;
-        let num_row_groups = 3;
-
-        let row_group_to_row_ids =
-            ParquetReaderBuilder::group_row_ids(row_ids, row_group_size, num_row_groups);
-
-        assert_eq!(
-            row_group_to_row_ids,
-            vec![(0, vec![0, 1, 2]), (1, vec![0, 1, 2, 3]), (2, vec![2])]
-        );
-    }
-
-    #[test]
-    fn prune_row_groups_by_rows_from_empty() {
-        let parquet_meta = mock_parquet_metadata_from_row_groups(vec![10, 10, 5]);
-
-        let rows_in_row_groups = vec![(0, vec![5, 6, 7, 8, 9]), (2, vec![0, 1, 2, 3, 4])];
-
-        // The original output is empty. No row groups are pruned.
-        let mut output = BTreeMap::new();
-        let mut filtered_row_groups = 0;
-        let mut filtered_rows = 0;
-
-        ParquetReaderBuilder::prune_row_groups_by_rows(
-            &parquet_meta,
-            rows_in_row_groups,
-            &mut output,
-            &mut filtered_row_groups,
-            &mut filtered_rows,
-        );
-
-        assert!(output.is_empty());
-        assert_eq!(filtered_row_groups, 0);
-        assert_eq!(filtered_rows, 0);
-    }
-
-    #[test]
-    fn prune_row_groups_by_rows_from_full() {
-        let parquet_meta = mock_parquet_metadata_from_row_groups(vec![10, 10, 5]);
-
-        let rows_in_row_groups = vec![(0, vec![5, 6, 7, 8, 9]), (2, vec![0, 1, 2, 3, 4])];
-
-        // The original output is full.
-        let mut output = BTreeMap::from([(0, None), (1, None), (2, None)]);
-        let mut filtered_row_groups = 0;
-        let mut filtered_rows = 0;
-
-        ParquetReaderBuilder::prune_row_groups_by_rows(
-            &parquet_meta,
-            rows_in_row_groups,
-            &mut output,
-            &mut filtered_row_groups,
-            &mut filtered_rows,
-        );
-
-        assert_eq!(
-            output,
-            BTreeMap::from([
-                (
-                    0,
-                    Some(RowSelection::from(vec![
-                        RowSelector::skip(5),
-                        RowSelector::select(5),
-                    ]))
-                ),
-                (2, Some(RowSelection::from(vec![RowSelector::select(5)]))),
-            ])
-        );
-        assert_eq!(filtered_row_groups, 1);
-        assert_eq!(filtered_rows, 15);
-    }
-
-    #[test]
-    fn prune_row_groups_by_rows_from_not_full() {
-        let parquet_meta = mock_parquet_metadata_from_row_groups(vec![10, 10, 5]);
-
-        let rows_in_row_groups = vec![(0, vec![5, 6, 7, 8, 9]), (2, vec![0, 1, 2, 3, 4])];
-
-        // The original output is not full.
-        let mut output = BTreeMap::from([
-            (
-                0,
-                Some(RowSelection::from(vec![
-                    RowSelector::select(5),
-                    RowSelector::skip(5),
-                ])),
-            ),
-            (
-                1,
-                Some(RowSelection::from(vec![
-                    RowSelector::select(5),
-                    RowSelector::skip(5),
-                ])),
-            ),
-            (2, Some(RowSelection::from(vec![RowSelector::select(5)]))),
-        ]);
-        let mut filtered_row_groups = 0;
-        let mut filtered_rows = 0;
-
-        ParquetReaderBuilder::prune_row_groups_by_rows(
-            &parquet_meta,
-            rows_in_row_groups,
-            &mut output,
-            &mut filtered_row_groups,
-            &mut filtered_rows,
-        );
-
-        assert_eq!(
-            output,
-            BTreeMap::from([(2, Some(RowSelection::from(vec![RowSelector::select(5)])))])
-        );
-        assert_eq!(filtered_row_groups, 2);
-        assert_eq!(filtered_rows, 10);
-    }
-
-    #[test]
-    fn prune_row_groups_by_ranges_from_empty() {
-        let parquet_meta = mock_parquet_metadata_from_row_groups(vec![10, 10, 5]);
-
-        let ranges_in_row_groups = [(0, Some(5..10).into_iter()), (2, Some(0..5).into_iter())];
-
-        // The original output is empty. No row groups are pruned.
-        let mut output = BTreeMap::new();
-        let mut filtered_row_groups = 0;
-        let mut filtered_rows = 0;
-
-        ParquetReaderBuilder::prune_row_groups_by_ranges(
-            &parquet_meta,
-            ranges_in_row_groups.into_iter(),
-            &mut output,
-            &mut filtered_row_groups,
-            &mut filtered_rows,
-        );
-
-        assert!(output.is_empty());
-        assert_eq!(filtered_row_groups, 0);
-        assert_eq!(filtered_rows, 0);
-    }
-
-    #[test]
-    fn prune_row_groups_by_ranges_from_full() {
-        let parquet_meta = mock_parquet_metadata_from_row_groups(vec![10, 10, 5]);
-
-        let ranges_in_row_groups = [(0, Some(5..10).into_iter()), (2, Some(0..5).into_iter())];
-
-        // The original output is full.
-        let mut output = BTreeMap::from([(0, None), (1, None), (2, None)]);
-        let mut filtered_row_groups = 0;
-        let mut filtered_rows = 0;
-
-        ParquetReaderBuilder::prune_row_groups_by_ranges(
-            &parquet_meta,
-            ranges_in_row_groups.into_iter(),
-            &mut output,
-            &mut filtered_row_groups,
-            &mut filtered_rows,
-        );
-
-        assert_eq!(
-            output,
-            BTreeMap::from([
-                (
-                    0,
-                    Some(RowSelection::from(vec![
-                        RowSelector::skip(5),
-                        RowSelector::select(5),
-                    ]))
-                ),
-                (2, Some(RowSelection::from(vec![RowSelector::select(5)]))),
-            ])
-        );
-        assert_eq!(filtered_row_groups, 1);
-        assert_eq!(filtered_rows, 15);
-    }
-
-    #[test]
-    fn prune_row_groups_by_ranges_from_not_full() {
-        let parquet_meta = mock_parquet_metadata_from_row_groups(vec![10, 10, 5]);
-
-        let ranges_in_row_groups = [(0, Some(5..10).into_iter()), (2, Some(0..5).into_iter())];
-
-        // The original output is not full.
-        let mut output = BTreeMap::from([
-            (
-                0,
-                Some(RowSelection::from(vec![
-                    RowSelector::select(5),
-                    RowSelector::skip(5),
-                ])),
-            ),
-            (
-                1,
-                Some(RowSelection::from(vec![
-                    RowSelector::select(5),
-                    RowSelector::skip(5),
-                ])),
-            ),
-            (2, Some(RowSelection::from(vec![RowSelector::select(5)]))),
-        ]);
-        let mut filtered_row_groups = 0;
-        let mut filtered_rows = 0;
-
-        ParquetReaderBuilder::prune_row_groups_by_ranges(
-            &parquet_meta,
-            ranges_in_row_groups.into_iter(),
-            &mut output,
-            &mut filtered_row_groups,
-            &mut filtered_rows,
-        );
-
-        assert_eq!(
-            output,
-            BTreeMap::from([(2, Some(RowSelection::from(vec![RowSelector::select(5)])))])
-        );
-        assert_eq!(filtered_row_groups, 2);
-        assert_eq!(filtered_rows, 10);
-    }
-
-    #[test]
-    fn prune_row_groups_by_ranges_exceed_end() {
-        let parquet_meta = mock_parquet_metadata_from_row_groups(vec![10, 10, 5]);
-
-        // The range exceeds the end of the row group.
-        let ranges_in_row_groups = [(0, Some(5..10).into_iter()), (2, Some(0..10).into_iter())];
-
-        let mut output = BTreeMap::from([
-            (
-                0,
-                Some(RowSelection::from(vec![
-                    RowSelector::select(5),
-                    RowSelector::skip(5),
-                ])),
-            ),
-            (
-                1,
-                Some(RowSelection::from(vec![
-                    RowSelector::select(5),
-                    RowSelector::skip(5),
-                ])),
-            ),
-            (2, Some(RowSelection::from(vec![RowSelector::select(5)]))),
-        ]);
-        let mut filtered_row_groups = 0;
-        let mut filtered_rows = 0;
-
-        ParquetReaderBuilder::prune_row_groups_by_ranges(
-            &parquet_meta,
-            ranges_in_row_groups.into_iter(),
-            &mut output,
-            &mut filtered_row_groups,
-            &mut filtered_rows,
-        );
-
-        assert_eq!(
-            output,
-            BTreeMap::from([(2, Some(RowSelection::from(vec![RowSelector::select(5)])))])
-        );
-        assert_eq!(filtered_row_groups, 2);
-        assert_eq!(filtered_rows, 10);
     }
 }
