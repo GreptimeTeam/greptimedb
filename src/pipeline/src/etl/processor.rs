@@ -298,5 +298,5 @@ pub(crate) fn yaml_new_fields(v: &yaml_rust::Yaml, field: &str) -> Result<Fields
 }
 
 pub(crate) fn yaml_new_field(v: &yaml_rust::Yaml, field: &str) -> Result<Field> {
-    yaml_parse_string(v, field)
+    STRING_OR_HASH_FN(field, v)
 }
