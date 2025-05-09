@@ -72,7 +72,7 @@ pub fn get_datanode_workloads(node_workloads: Option<&NodeWorkloads>) -> Datanod
 
     #[cfg(not(feature = "enterprise"))]
     match node_workloads {
-        Some(NodeWorkloads::Datanode(datanode_workloads)) => DatanodeWorkloads {
+        Some(NodeWorkloads::Datanode(_)) => DatanodeWorkloads {
             types: vec![DatanodeWorkloadType::Hybrid as i32],
         },
         _ => DatanodeWorkloads {

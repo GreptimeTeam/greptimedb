@@ -13,15 +13,16 @@
 // limitations under the License.
 
 use api::v1::meta::heartbeat_request::NodeWorkloads;
-use api::v1::meta::{DatanodeWorkloadType, DatanodeWorkloads};
+use api::v1::meta::DatanodeWorkloadType;
 
 /// Convert workload types to node workloads.
+#[allow(unused_variables)]
 pub fn convert_workload_types_to_node_workloads(
     workload_types: &[DatanodeWorkloadType],
 ) -> Option<NodeWorkloads> {
     #[cfg(feature = "enterprise")]
     {
-        Some(NodeWorkloads::Datanode(DatanodeWorkloads {
+        Some(NodeWorkloads::Datanode(api::v1::meta::DatanodeWorkloads {
             types: workload_types.iter().map(|w| *w as i32).collect(),
         }))
     }
