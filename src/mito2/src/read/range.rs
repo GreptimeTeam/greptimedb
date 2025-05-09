@@ -14,11 +14,9 @@
 
 //! Structs for partition ranges.
 
-use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use common_time::Timestamp;
-use parquet::arrow::arrow_reader::RowSelection;
 use smallvec::{smallvec, SmallVec};
 use store_api::region_engine::PartitionRange;
 use store_api::storage::TimeSeriesDistribution;
@@ -31,6 +29,7 @@ use crate::sst::file::{overlaps, FileHandle, FileTimeRange};
 use crate::sst::parquet::file_range::{FileRange, FileRangeContextRef};
 use crate::sst::parquet::format::parquet_row_group_time_range;
 use crate::sst::parquet::reader::ReaderMetrics;
+use crate::sst::parquet::row_selection::RowGroupSelection;
 use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 
 const ALL_ROW_GROUPS: i64 = -1;
@@ -371,20 +370,16 @@ pub(crate) struct FileRangeBuilder {
     /// Context for the file.
     /// None indicates nothing to read.
     context: Option<FileRangeContextRef>,
-    /// Row selections for each row group to read.
-    /// It skips the row group if it is not in the map.
-    row_groups: BTreeMap<usize, Option<RowSelection>>,
+    /// Row group selection for the file to read.
+    selection: RowGroupSelection,
 }
 
 impl FileRangeBuilder {
     /// Builds a file range builder from context and row groups.
-    pub(crate) fn new(
-        context: FileRangeContextRef,
-        row_groups: BTreeMap<usize, Option<RowSelection>>,
-    ) -> Self {
+    pub(crate) fn new(context: FileRangeContextRef, selection: RowGroupSelection) -> Self {
         Self {
             context: Some(context),
-            row_groups,
+            selection,
         }
     }
 
@@ -397,21 +392,25 @@ impl FileRangeBuilder {
         if row_group_index >= 0 {
             let row_group_index = row_group_index as usize;
             // Scans one row group.
-            let Some(row_selection) = self.row_groups.get(&row_group_index) else {
+            let Some(row_selection) = self.selection.get(row_group_index) else {
                 return;
             };
             ranges.push(FileRange::new(
                 context,
                 row_group_index,
-                row_selection.clone(),
+                Some(row_selection.clone()),
             ));
         } else {
             // Scans all row groups.
             ranges.extend(
-                self.row_groups
+                self.selection
                     .iter()
                     .map(|(row_group_index, row_selection)| {
-                        FileRange::new(context.clone(), *row_group_index, row_selection.clone())
+                        FileRange::new(
+                            context.clone(),
+                            *row_group_index,
+                            Some(row_selection.clone()),
+                        )
                     }),
             );
         }

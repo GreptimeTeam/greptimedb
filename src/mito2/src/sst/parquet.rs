@@ -30,7 +30,7 @@ pub(crate) mod metadata;
 pub(crate) mod page_reader;
 pub mod reader;
 pub mod row_group;
-mod row_selection;
+pub mod row_selection;
 pub(crate) mod stats;
 pub mod writer;
 
