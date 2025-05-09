@@ -35,6 +35,16 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display(
+        "Field renaming must be a string pair of 'key' and 'rename_to', got: {value:?}"
+    ))]
+    InvalidFieldRename {
+        value: yaml_rust::Yaml,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Processor must be a map"))]
     ProcessorMustBeMap {
         #[snafu(implicit)]
@@ -395,14 +405,16 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("Transform cannot be empty"))]
-    TransformEmpty {
-        #[snafu(implicit)]
-        location: Location,
-    },
     #[snafu(display("Column name must be unique, but got duplicated: {duplicates}"))]
     TransformColumnNameMustBeUnique {
         duplicates: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display(
+        "At least one timestamp-related processor is required to use auto transform"
+    ))]
+    TransformNoTimestampProcessor {
         #[snafu(implicit)]
         location: Location,
     },
@@ -418,6 +430,11 @@ pub enum Error {
     TransformTimestampIndexCount {
         count: usize,
         columns: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Exactly one timestamp value is required to use auto transform"))]
+    AutoTransformOneTimestamp {
         #[snafu(implicit)]
         location: Location,
     },
@@ -741,6 +758,7 @@ impl ErrorExt for Error {
 
             EmptyInputField { .. }
             | MissingInputField { .. }
+            | InvalidFieldRename { .. }
             | ProcessorMustBeMap { .. }
             | ProcessorMissingField { .. }
             | ProcessorExpectString { .. }
@@ -793,10 +811,11 @@ impl ErrorExt for Error {
             | TransformOnFailureInvalidValue { .. }
             | TransformElementMustBeMap { .. }
             | TransformTypeMustBeSet { .. }
-            | TransformEmpty { .. }
             | TransformColumnNameMustBeUnique { .. }
             | TransformMultipleTimestampIndex { .. }
+            | TransformNoTimestampProcessor { .. }
             | TransformTimestampIndexCount { .. }
+            | AutoTransformOneTimestamp { .. }
             | CoerceUnsupportedNullType { .. }
             | CoerceUnsupportedNullTypeTo { .. }
             | CoerceUnsupportedEpochType { .. }

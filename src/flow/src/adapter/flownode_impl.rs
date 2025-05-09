@@ -21,6 +21,7 @@ use api::v1::flow::{
 };
 use api::v1::region::InsertRequests;
 use catalog::CatalogManager;
+use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_meta::ddl::create_flow::FlowType;
 use common_meta::error::Result as MetaResult;
@@ -37,11 +38,12 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::adapter::{CreateFlowArgs, StreamingEngine};
 use crate::batching_mode::engine::BatchingEngine;
+use crate::batching_mode::{FRONTEND_SCAN_TIMEOUT, MIN_REFRESH_DURATION};
 use crate::engine::FlowEngine;
 use crate::error::{
     CreateFlowSnafu, ExternalSnafu, FlowNotFoundSnafu, IllegalCheckTaskStateSnafu,
-    InsertIntoFlowSnafu, InternalSnafu, JoinTaskSnafu, ListFlowsSnafu, SyncCheckTaskSnafu,
-    UnexpectedSnafu,
+    InsertIntoFlowSnafu, InternalSnafu, JoinTaskSnafu, ListFlowsSnafu, NoAvailableFrontendSnafu,
+    SyncCheckTaskSnafu, UnexpectedSnafu,
 };
 use crate::metrics::METRIC_FLOW_TASK_COUNT;
 use crate::repr::{self, DiffRow};
@@ -62,6 +64,7 @@ pub struct FlowDualEngine {
     flow_metadata_manager: Arc<FlowMetadataManager>,
     catalog_manager: Arc<dyn CatalogManager>,
     check_task: tokio::sync::Mutex<Option<ConsistentCheckTask>>,
+    plugins: Plugins,
 }
 
 impl FlowDualEngine {
@@ -70,6 +73,7 @@ impl FlowDualEngine {
         batching_engine: Arc<BatchingEngine>,
         flow_metadata_manager: Arc<FlowMetadataManager>,
         catalog_manager: Arc<dyn CatalogManager>,
+        plugins: Plugins,
     ) -> Self {
         Self {
             streaming_engine,
@@ -78,7 +82,17 @@ impl FlowDualEngine {
             flow_metadata_manager,
             catalog_manager,
             check_task: Mutex::new(None),
+            plugins,
         }
+    }
+
+    pub fn plugins(&self) -> &Plugins {
+        &self.plugins
+    }
+
+    /// Determine if the engine is in distributed mode
+    pub fn is_distributed(&self) -> bool {
+        self.streaming_engine.node_id.is_some()
     }
 
     pub fn streaming_engine(&self) -> Arc<StreamingEngine> {
@@ -87,6 +101,39 @@ impl FlowDualEngine {
 
     pub fn batching_engine(&self) -> Arc<BatchingEngine> {
         self.batching_engine.clone()
+    }
+
+    /// In distributed mode, scan periodically(1s) until available frontend is found, or timeout,
+    /// in standalone mode, return immediately
+    /// notice here if any frontend appear in cluster info this function will return immediately
+    async fn wait_for_available_frontend(&self, timeout: std::time::Duration) -> Result<(), Error> {
+        if !self.is_distributed() {
+            return Ok(());
+        }
+        let frontend_client = self.batching_engine().frontend_client.clone();
+        let sleep_duration = std::time::Duration::from_millis(1_000);
+        let now = std::time::Instant::now();
+        loop {
+            let frontend_list = frontend_client.scan_for_frontend().await?;
+            if !frontend_list.is_empty() {
+                let fe_list = frontend_list
+                    .iter()
+                    .map(|(_, info)| &info.peer.addr)
+                    .collect::<Vec<_>>();
+                info!("Available frontend found: {:?}", fe_list);
+                return Ok(());
+            }
+            let elapsed = now.elapsed();
+            tokio::time::sleep(sleep_duration).await;
+            info!("Waiting for available frontend, elapsed={:?}", elapsed);
+            if elapsed >= timeout {
+                return NoAvailableFrontendSnafu {
+                    timeout,
+                    context: "No available frontend found in cluster info",
+                }
+                .fail();
+            }
+        }
     }
 
     /// Try to sync with check task, this is only used in drop flow&flush flow, so a flow id is required
@@ -338,18 +385,36 @@ struct ConsistentCheckTask {
 
 impl ConsistentCheckTask {
     async fn start_check_task(engine: &Arc<FlowDualEngine>) -> Result<Self, Error> {
-        // first do recover flows
-        engine.check_flow_consistent(true, false).await?;
-
-        let inner = engine.clone();
+        let engine = engine.clone();
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let (trigger_tx, mut trigger_rx) =
             tokio::sync::mpsc::channel::<(bool, bool, tokio::sync::oneshot::Sender<()>)>(10);
         let handle = common_runtime::spawn_global(async move {
+            // first check if available frontend is found
+            if let Err(err) = engine
+                .wait_for_available_frontend(FRONTEND_SCAN_TIMEOUT)
+                .await
+            {
+                warn!("No frontend is available yet:\n {err:?}");
+            }
+
+            // then do recover flows, if failed, always retry
+            let mut recover_retry = 0;
+            while let Err(err) = engine.check_flow_consistent(true, false).await {
+                recover_retry += 1;
+                error!(
+                    "Failed to recover flows:\n {err:?}, retry {} in {}s",
+                    recover_retry,
+                    MIN_REFRESH_DURATION.as_secs()
+                );
+                tokio::time::sleep(MIN_REFRESH_DURATION).await;
+            }
+
+            // then do check flows, with configurable allow_create and allow_drop
             let (mut allow_create, mut allow_drop) = (false, false);
             let mut ret_signal: Option<tokio::sync::oneshot::Sender<()>> = None;
             loop {
-                if let Err(err) = inner.check_flow_consistent(allow_create, allow_drop).await {
+                if let Err(err) = engine.check_flow_consistent(allow_create, allow_drop).await {
                     error!(err; "Failed to check flow consistent");
                 }
                 if let Some(done) = ret_signal.take() {
@@ -534,7 +599,12 @@ impl FlowEngine for FlowDualEngine {
         match flow_type {
             Some(FlowType::Batching) => self.batching_engine.flush_flow(flow_id).await,
             Some(FlowType::Streaming) => self.streaming_engine.flush_flow(flow_id).await,
-            None => Ok(0),
+            None => {
+                warn!(
+                    "Currently flow={flow_id} doesn't exist in flownode, ignore flush_flow request"
+                );
+                Ok(0)
+            }
         }
     }
 

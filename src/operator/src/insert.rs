@@ -76,8 +76,8 @@ use crate::statement::StatementExecutor;
 
 pub struct Inserter {
     catalog_manager: CatalogManagerRef,
-    partition_manager: PartitionRuleManagerRef,
-    node_manager: NodeManagerRef,
+    pub(crate) partition_manager: PartitionRuleManagerRef,
+    pub(crate) node_manager: NodeManagerRef,
     table_flownode_set_cache: TableFlownodeSetCacheRef,
 }
 

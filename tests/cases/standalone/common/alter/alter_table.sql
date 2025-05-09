@@ -25,9 +25,50 @@ ALTER TABLE test_alt_table ADD COLUMN n interval;
 -- Should fail issue #5422
 ALTER TABLE test_alt_table MODIFY COLUMN m interval;
 
+INSERT INTO test_alt_table (h, i, j, m, dt) VALUES (42, 42, 0, 11, 0);
+
+ALTER TABLE test_alt_table MODIFY COLUMN m Float64;
+
+SELECT * FROM test_alt_table;
+
+ALTER TABLE test_alt_table MODIFY COLUMN m INTEGER;
+
+SELECT * FROM test_alt_table;
+
+ALTER TABLE test_alt_table MODIFY COLUMN m BOOLEAN;
+
+SELECT * FROM test_alt_table;
+
 DESC TABLE test_alt_table;
 
 DROP TABLE test_alt_table;
+
+-- test if column with default value can change type properly
+CREATE TABLE test_alt_table_default(h INTEGER, i INTEGER DEFAULT 0, j TIMESTAMP TIME INDEX, PRIMARY KEY (h));
+
+ALTER TABLE test_alt_table_default MODIFY COLUMN i BOOLEAN;
+
+INSERT INTO test_alt_table_default (h, j) VALUES (1, 0), (2, 1);
+
+SELECT * FROM test_alt_table_default ORDER BY h;
+
+ALTER TABLE test_alt_table_default MODIFY COLUMN i INTEGER;
+
+DESC TABLE test_alt_table_default;
+
+INSERT INTO test_alt_table_default (h, j) VALUES (3, 0), (4, 1);
+
+SELECT * FROM test_alt_table_default ORDER BY h;
+
+ALTER TABLE test_alt_table_default MODIFY COLUMN i STRING;
+
+INSERT INTO test_alt_table_default (h, j) VALUES (5, 0);
+
+INSERT INTO test_alt_table_default (h, i, j) VALUES (6, "word" ,1);
+
+SELECT * FROM test_alt_table_default ORDER BY h;
+
+DROP TABLE test_alt_table_default;
 
 -- to test if same name column can be added
 CREATE TABLE phy (ts timestamp time index, val double) engine = metric with ("physical_metric_table" = "");
@@ -75,9 +116,9 @@ ALTER TABLE
 ADD
     COLUMN at2 STRING;
 
-ALTER TABLE 
-    t2 
-ADD 
+ALTER TABLE
+    t2
+ADD
     COLUMN at4 UINT16;
 
 INSERT INTO
@@ -109,7 +150,7 @@ INSERT INTO grpc_latencies (ts, host, method_name, latency) VALUES
 
 SELECT * FROM grpc_latencies;
 
-ALTER TABLE grpc_latencies SET ttl = '10d';
+ALTER TABLE grpc_latencies SET ttl = '10000d';
 
 ALTER TABLE grpc_latencies ADD COLUMN home INTEGER FIRST;
 

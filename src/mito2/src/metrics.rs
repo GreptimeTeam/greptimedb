@@ -392,6 +392,15 @@ lazy_static! {
         // 0.01 ~ 1000
         exponential_buckets(0.01, 10.0, 6).unwrap(),
     ).unwrap();
+
+
+    pub static ref REGION_WORKER_HANDLE_WRITE_ELAPSED: HistogramVec = register_histogram_vec!(
+        "greptime_region_worker_handle_write",
+        "elapsed time for handling writes in region worker loop",
+        &["stage"],
+        exponential_buckets(0.001, 10.0, 5).unwrap()
+    ).unwrap();
+
 }
 
 /// Stager notifier to collect metrics.

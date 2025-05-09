@@ -17,7 +17,7 @@ use datatypes::data_type::DataType;
 use snafu::{ensure, ResultExt};
 use sqlx::MySqlPool;
 
-use crate::error::{self, Result};
+use crate::error::{self, Result, UnexpectedSnafu};
 use crate::ir::create_expr::ColumnOption;
 use crate::ir::{Column, Ident};
 
@@ -209,6 +209,35 @@ pub async fn fetch_columns(
         .fetch_all(db)
         .await
         .context(error::ExecuteQuerySnafu { sql })
+}
+
+/// validate that apart from marker column(if it still exists, every thing else is just default value)
+#[allow(unused)]
+pub async fn valid_marker_value(
+    db: &MySqlPool,
+    _schema_name: Ident,
+    table_name: Ident,
+) -> Result<bool> {
+    let sql = format!("SELECT * FROM {table_name}");
+    // cache is useless and buggy anyway since alter happens all the time
+    // TODO(discord9): invalid prepared sql after alter
+    let res = sqlx::query(&sql)
+        .persistent(false)
+        .fetch_all(db)
+        .await
+        .context(error::ExecuteQuerySnafu { sql })?;
+    if res.len() != 1 {
+        UnexpectedSnafu {
+            violated: format!(
+                "Expected one row after alter table, found {}:{:?}",
+                res.len(),
+                res
+            ),
+        }
+        .fail()?
+    }
+    // TODO(discord9): make sure marker value is set
+    Ok(true)
 }
 
 #[cfg(test)]

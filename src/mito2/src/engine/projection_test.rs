@@ -76,11 +76,7 @@ async fn test_scan_projection() {
     let request = ScanRequest {
         projection: Some(vec![1, 3, 4]),
         filters: Vec::new(),
-        output_ordering: None,
-        limit: None,
-        series_row_selector: None,
-        sequence: None,
-        distribution: None,
+        ..Default::default()
     };
     let stream = engine.scan_to_stream(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();

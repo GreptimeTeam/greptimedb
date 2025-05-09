@@ -464,6 +464,29 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DOCS_REPO_TOKEN: ${{ secrets.DOCS_REPO_TOKEN }}
 
+  bump-website-version:
+    name: Bump website version
+    if: ${{ github.event_name == 'push' || github.event_name == 'schedule' }}
+    needs: [allocate-runners]
+    runs-on: ubuntu-latest
+    # Permission reference: https://docs.github.com/en/actions/using-jobs/assigning-permissions-to-jobs
+    permissions:
+      issues: write # Allows the action to create issues for cyborg.
+      contents: write # Allows the action to create a release.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup-cyborg
+      - name: Bump website version
+        working-directory: cyborg
+        run: pnpm tsx bin/bump-website-version.ts
+        env:
+          VERSION: ${{ needs.allocate-runners.outputs.version }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WEBSITE_REPO_TOKEN: ${{ secrets.WEBSITE_REPO_TOKEN }}
+
   notification:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'push' || github.event_name == 'schedule') && always() }}
     name: Send notification to Greptime team

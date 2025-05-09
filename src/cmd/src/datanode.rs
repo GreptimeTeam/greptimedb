@@ -12,33 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
+pub mod builder;
+
 use std::time::Duration;
 
 use async_trait::async_trait;
-use cache::build_datanode_cache_registry;
-use catalog::kvbackend::MetaKvBackend;
 use clap::Parser;
-use common_base::Plugins;
 use common_config::Configurable;
-use common_meta::cache::LayeredCacheRegistryBuilder;
 use common_telemetry::logging::TracingOptions;
 use common_telemetry::{info, warn};
-use common_version::{short_version, version};
 use common_wal::config::DatanodeWalConfig;
-use datanode::datanode::{Datanode, DatanodeBuilder};
-use datanode::service::DatanodeServiceBuilder;
-use meta_client::{MetaClientOptions, MetaClientType};
-use servers::Mode;
-use snafu::{ensure, OptionExt, ResultExt};
+use datanode::datanode::Datanode;
+use meta_client::MetaClientOptions;
+use snafu::{ensure, ResultExt};
 use tracing_appender::non_blocking::WorkerGuard;
 
+use crate::datanode::builder::InstanceBuilder;
 use crate::error::{
-    LoadLayeredConfigSnafu, MetaClientInitSnafu, MissingConfigSnafu, Result, ShutdownDatanodeSnafu,
-    StartDatanodeSnafu,
+    LoadLayeredConfigSnafu, MissingConfigSnafu, Result, ShutdownDatanodeSnafu, StartDatanodeSnafu,
 };
 use crate::options::{GlobalOptions, GreptimeOptions};
-use crate::{log_versions, App};
+use crate::App;
 
 pub const APP_NAME: &str = "greptime-datanode";
 
@@ -83,7 +77,7 @@ impl App for Instance {
         self.datanode.start().await.context(StartDatanodeSnafu)
     }
 
-    async fn stop(&self) -> Result<()> {
+    async fn stop(&mut self) -> Result<()> {
         self.datanode
             .shutdown()
             .await
@@ -98,8 +92,8 @@ pub struct Command {
 }
 
 impl Command {
-    pub async fn build(&self, opts: DatanodeOptions) -> Result<Instance> {
-        self.subcmd.build(opts).await
+    pub async fn build_with(&self, builder: InstanceBuilder) -> Result<Instance> {
+        self.subcmd.build_with(builder).await
     }
 
     pub fn load_options(&self, global_options: &GlobalOptions) -> Result<DatanodeOptions> {
@@ -115,9 +109,12 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(&self, opts: DatanodeOptions) -> Result<Instance> {
+    async fn build_with(&self, builder: InstanceBuilder) -> Result<Instance> {
         match self {
-            SubCommand::Start(cmd) => cmd.build(opts).await,
+            SubCommand::Start(cmd) => {
+                info!("Building datanode with {:#?}", cmd);
+                builder.build().await
+            }
         }
     }
 }
@@ -263,74 +260,6 @@ impl StartCommand {
 
         Ok(())
     }
-
-    async fn build(&self, opts: DatanodeOptions) -> Result<Instance> {
-        common_runtime::init_global_runtimes(&opts.runtime);
-
-        let guard = common_telemetry::init_global_logging(
-            APP_NAME,
-            &opts.component.logging,
-            &opts.component.tracing,
-            opts.component.node_id.map(|x| x.to_string()),
-        );
-        log_versions(version(), short_version(), APP_NAME);
-
-        info!("Datanode start command: {:#?}", self);
-        info!("Datanode options: {:#?}", opts);
-
-        let plugin_opts = opts.plugins;
-        let mut opts = opts.component;
-        opts.grpc.detect_server_addr();
-        let mut plugins = Plugins::new();
-        plugins::setup_datanode_plugins(&mut plugins, &plugin_opts, &opts)
-            .await
-            .context(StartDatanodeSnafu)?;
-
-        let member_id = opts
-            .node_id
-            .context(MissingConfigSnafu { msg: "'node_id'" })?;
-
-        let meta_config = opts.meta_client.as_ref().context(MissingConfigSnafu {
-            msg: "'meta_client_options'",
-        })?;
-
-        let meta_client = meta_client::create_meta_client(
-            MetaClientType::Datanode { member_id },
-            meta_config,
-            None,
-        )
-        .await
-        .context(MetaClientInitSnafu)?;
-
-        let meta_backend = Arc::new(MetaKvBackend {
-            client: meta_client.clone(),
-        });
-
-        // Builds cache registry for datanode.
-        let layered_cache_registry = Arc::new(
-            LayeredCacheRegistryBuilder::default()
-                .add_cache_registry(build_datanode_cache_registry(meta_backend.clone()))
-                .build(),
-        );
-
-        let mut datanode = DatanodeBuilder::new(opts.clone(), plugins, Mode::Distributed)
-            .with_meta_client(meta_client)
-            .with_kv_backend(meta_backend)
-            .with_cache_registry(layered_cache_registry)
-            .build()
-            .await
-            .context(StartDatanodeSnafu)?;
-
-        let services = DatanodeServiceBuilder::new(&opts)
-            .with_default_grpc_server(&datanode.region_server())
-            .enable_http_service()
-            .build()
-            .await
-            .context(StartDatanodeSnafu)?;
-        datanode.setup_services(services);
-
-        Ok(Instance::new(datanode, guard))
-    }
 }
 
 #[cfg(test)]
@@ -352,7 +281,6 @@ mod tests {
         common_telemetry::init_default_ut_logging();
         let mut file = create_named_temp_file();
         let toml_str = r#"
-            mode = "distributed"
             enable_memory_catalog = false
             node_id = 42
 
@@ -379,7 +307,6 @@ mod tests {
     fn test_read_from_config_file() {
         let mut file = create_named_temp_file();
         let toml_str = r#"
-            mode = "distributed"
             enable_memory_catalog = false
             node_id = 42
 
@@ -545,7 +472,6 @@ mod tests {
     fn test_config_precedence_order() {
         let mut file = create_named_temp_file();
         let toml_str = r#"
-            mode = "distributed"
             enable_memory_catalog = false
             node_id = 42
             rpc_addr = "127.0.0.1:3001"

@@ -36,6 +36,7 @@ pub struct PostgresServer {
     make_handler: Arc<MakePostgresServerHandler>,
     tls_server_config: Arc<ReloadableTlsServerConfig>,
     keep_alive_secs: u64,
+    bind_addr: Option<SocketAddr>,
 }
 
 impl PostgresServer {
@@ -61,6 +62,7 @@ impl PostgresServer {
             make_handler,
             tls_server_config,
             keep_alive_secs,
+            bind_addr: None,
         }
     }
 
@@ -74,9 +76,7 @@ impl PostgresServer {
         accepting_stream.for_each(move |tcp_stream| {
             let io_runtime = io_runtime.clone();
 
-            let tls_acceptor = tls_server_config
-                .get_server_config()
-                .map(|server_config| Arc::new(TlsAcceptor::from(server_config)));
+            let tls_acceptor = tls_server_config.get_server_config().map(TlsAcceptor::from);
 
             let handler_maker = handler_maker.clone();
 
@@ -118,7 +118,7 @@ impl Server for PostgresServer {
         self.base_server.shutdown().await
     }
 
-    async fn start(&self, listening: SocketAddr) -> Result<SocketAddr> {
+    async fn start(&mut self, listening: SocketAddr) -> Result<()> {
         let (stream, addr) = self
             .base_server
             .bind(listening, self.keep_alive_secs)
@@ -128,10 +128,16 @@ impl Server for PostgresServer {
         let join_handle = common_runtime::spawn_global(self.accept(io_runtime, stream));
 
         self.base_server.start_with(join_handle).await?;
-        Ok(addr)
+
+        self.bind_addr = Some(addr);
+        Ok(())
     }
 
     fn name(&self) -> &str {
         POSTGRES_SERVER
+    }
+
+    fn bind_addr(&self) -> Option<SocketAddr> {
+        self.bind_addr
     }
 }

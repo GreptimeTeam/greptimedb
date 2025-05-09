@@ -130,6 +130,7 @@ pub struct HttpServer {
 
     // server configs
     options: HttpOptions,
+    bind_addr: Option<SocketAddr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -689,6 +690,7 @@ impl HttpServerBuilder {
             shutdown_tx: Mutex::new(None),
             plugins: self.plugins,
             router: StdMutex::new(self.router),
+            bind_addr: None,
         }
     }
 }
@@ -1101,7 +1103,7 @@ impl Server for HttpServer {
         Ok(())
     }
 
-    async fn start(&self, listening: SocketAddr) -> Result<SocketAddr> {
+    async fn start(&mut self, listening: SocketAddr) -> Result<()> {
         let (tx, rx) = oneshot::channel();
         let serve = {
             let mut shutdown_tx = self.shutdown_tx.lock().await;
@@ -1157,11 +1159,17 @@ impl Server for HttpServer {
                 error!(e; "Failed to shutdown http server");
             }
         });
-        Ok(listening)
+
+        self.bind_addr = Some(listening);
+        Ok(())
     }
 
     fn name(&self) -> &str {
         HTTP_SERVER
+    }
+
+    fn bind_addr(&self) -> Option<SocketAddr> {
+        self.bind_addr
     }
 }
 

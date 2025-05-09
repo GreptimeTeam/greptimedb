@@ -150,9 +150,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         };
         let version = region.version();
         if !version.memtables.is_empty() {
+            let current = region.version_control.current();
             warn!(
-                "Region {} memtables is not empty, which should not happen, manifest version: {}",
-                region.region_id, manifest.manifest_version
+                "Region {} memtables is not empty, which should not happen, manifest version: {}, last entry id: {}",
+                region.region_id, manifest.manifest_version, current.last_entry_id
             );
         }
         let region_options = version.options.clone();

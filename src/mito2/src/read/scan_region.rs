@@ -16,6 +16,7 @@
 
 use std::collections::HashSet;
 use std::fmt;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -301,14 +302,26 @@ impl ScanRegion {
 
     /// Creates a scan input.
     fn scan_input(mut self, filter_deleted: bool) -> Result<ScanInput> {
+        let sst_min_sequence = self.request.sst_min_sequence.and_then(NonZeroU64::new);
         let time_range = self.build_time_range_predicate();
 
         let ssts = &self.version.ssts;
         let mut files = Vec::new();
         for level in ssts.levels() {
             for file in level.files.values() {
+                let exceed_min_sequence = match (sst_min_sequence, file.meta_ref().sequence) {
+                    (Some(min_sequence), Some(file_sequence)) => file_sequence > min_sequence,
+                    // If the file's sequence is None (or actually is zero), it could mean the file
+                    // is generated and added to the region "directly". In this case, its data should
+                    // be considered as fresh as the memtable. So its sequence is treated greater than
+                    // the min_sequence, whatever the value of min_sequence is. Hence the default
+                    // "true" in this arm.
+                    (Some(_), None) => true,
+                    (None, _) => true,
+                };
+
                 // Finds SST files in range.
-                if file_in_range(file, &time_range) {
+                if exceed_min_sequence && file_in_range(file, &time_range) {
                     files.push(file.clone());
                 }
                 // There is no need to check and prune for file's sequence here as the sequence number is usually very new,
@@ -322,13 +335,10 @@ impl ScanRegion {
         let memtables: Vec<_> = memtables
             .into_iter()
             .filter(|mem| {
-                if mem.is_empty() {
+                // check if memtable is empty by reading stats.
+                let Some((start, end)) = mem.stats().time_range() else {
                     return false;
-                }
-                let stats = mem.stats();
-                // Safety: the memtable is not empty.
-                let (start, end) = stats.time_range().unwrap();
-
+                };
                 // The time range of the memtable is inclusive.
                 let memtable_range = TimestampRange::new_inclusive(Some(start), Some(end));
                 memtable_range.intersects(&time_range)
@@ -361,14 +371,14 @@ impl ScanRegion {
         let memtables = memtables
             .into_iter()
             .map(|mem| {
-                let ranges = mem.ranges(
+                mem.ranges(
                     Some(mapper.column_ids()),
                     predicate.clone(),
                     self.request.sequence,
-                );
-                MemRangeBuilder::new(ranges)
+                )
+                .map(MemRangeBuilder::new)
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
 
         let input = ScanInput::new(self.access_layer, mapper)
             .with_time_range(Some(time_range))

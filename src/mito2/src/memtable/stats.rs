@@ -14,7 +14,7 @@
 
 //! Internal metrics of the memtable.
 
-use std::sync::atomic::{AtomicI64, Ordering};
+use store_api::storage::SequenceNumber;
 
 /// Metrics of writing memtables.
 pub(crate) struct WriteMetrics {
@@ -26,51 +26,10 @@ pub(crate) struct WriteMetrics {
     pub(crate) min_ts: i64,
     /// Maximum timestamp
     pub(crate) max_ts: i64,
-}
-
-impl WriteMetrics {
-    /// Update the min/max timestamp range according to current write metric.
-    pub(crate) fn update_timestamp_range(&self, prev_max_ts: &AtomicI64, prev_min_ts: &AtomicI64) {
-        loop {
-            let current_min = prev_min_ts.load(Ordering::Relaxed);
-            if self.min_ts >= current_min {
-                break;
-            }
-
-            let Err(updated) = prev_min_ts.compare_exchange(
-                current_min,
-                self.min_ts,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) else {
-                break;
-            };
-
-            if updated == self.min_ts {
-                break;
-            }
-        }
-
-        loop {
-            let current_max = prev_max_ts.load(Ordering::Relaxed);
-            if self.max_ts <= current_max {
-                break;
-            }
-
-            let Err(updated) = prev_max_ts.compare_exchange(
-                current_max,
-                self.max_ts,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) else {
-                break;
-            };
-
-            if updated == self.max_ts {
-                break;
-            }
-        }
-    }
+    /// Rows written.
+    pub(crate) num_rows: usize,
+    /// Max sequence number written.
+    pub(crate) max_sequence: SequenceNumber,
 }
 
 impl Default for WriteMetrics {
@@ -80,6 +39,8 @@ impl Default for WriteMetrics {
             value_bytes: 0,
             min_ts: i64::MAX,
             max_ts: i64::MIN,
+            num_rows: 0,
+            max_sequence: SequenceNumber::MIN,
         }
     }
 }

@@ -50,6 +50,7 @@ ADMIN FLUSH_FLOW('calc_access_log_10s');
 +-----------------------------------------+
 
 -- query should return 3 rows
+-- SQLNESS SORT_RESULT 3 1
 SELECT "url", time_window FROM access_log_10s
 ORDER BY
     time_window;
@@ -63,6 +64,7 @@ ORDER BY
 +------------+---------------------+
 
 -- use hll_count to query the approximate data in access_log_10s
+-- SQLNESS SORT_RESULT 3 1
 SELECT "url", time_window, hll_count(state) FROM access_log_10s
 ORDER BY
     time_window;
@@ -76,6 +78,7 @@ ORDER BY
 +------------+---------------------+---------------------------------+
 
 -- further, we can aggregate 10 seconds of data to every minute, by using hll_merge to merge 10 seconds of hyperloglog state
+-- SQLNESS SORT_RESULT 3 1
 SELECT
     "url",
     date_bin('1 minute'::INTERVAL, time_window) AS time_window_1m,
@@ -91,8 +94,8 @@ ORDER BY
 +------------+---------------------+------------+
 | url        | time_window_1m      | uv_per_min |
 +------------+---------------------+------------+
-| /not_found | 2025-03-04T00:00:00 | 1          |
 | /dashboard | 2025-03-04T00:00:00 | 3          |
+| /not_found | 2025-03-04T00:00:00 | 1          |
 +------------+---------------------+------------+
 
 DROP FLOW calc_access_log_10s;
@@ -201,6 +204,13 @@ CREATE TABLE percentile_5s (
 
 Affected Rows: 0
 
+CREATE TABLE percentile_10s (
+    "percentile_state" BINARY,
+    time_window timestamp(0) time index
+);
+
+Affected Rows: 0
+
 CREATE FLOW calc_percentile_5s SINK TO percentile_5s
 AS
 SELECT
@@ -210,6 +220,18 @@ FROM
     percentile_base
 GROUP BY
     time_window;
+
+Affected Rows: 0
+
+CREATE FLOW calc_percentile_10s SINK TO percentile_10s
+AS
+SELECT
+    uddsketch_merge(128, 0.01, percentile_state),
+    date_bin('10 seconds'::INTERVAL, time_window) AS time_window
+FROM
+    percentile_5s
+GROUP BY
+    date_bin('10 seconds'::INTERVAL, time_window);
 
 Affected Rows: 0
 
@@ -236,6 +258,15 @@ ADMIN FLUSH_FLOW('calc_percentile_5s');
 |  FLOW_FLUSHED  |
 +----------------------------------------+
 
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('calc_percentile_10s');
+
++-----------------------------------------+
+| ADMIN FLUSH_FLOW('calc_percentile_10s') |
++-----------------------------------------+
+|  FLOW_FLUSHED  |
++-----------------------------------------+
+
 SELECT
     time_window,
     uddsketch_calc(0.99, percentile_state) AS p99
@@ -252,11 +283,34 @@ ORDER BY
 | 1970-01-01T00:00:10 |                    |
 +---------------------+--------------------+
 
+SELECT
+    time_window,
+    uddsketch_calc(0.99, percentile_state) AS p99
+FROM
+    percentile_10s
+ORDER BY
+    time_window;
+
++---------------------+--------------------+
+| time_window         | p99                |
++---------------------+--------------------+
+| 1970-01-01T00:00:00 | 59.745049810145126 |
+| 1970-01-01T00:00:10 |                    |
++---------------------+--------------------+
+
 DROP FLOW calc_percentile_5s;
 
 Affected Rows: 0
 
+DROP FLOW calc_percentile_10s;
+
+Affected Rows: 0
+
 DROP TABLE percentile_5s;
+
+Affected Rows: 0
+
+DROP TABLE percentile_10s;
 
 Affected Rows: 0
 

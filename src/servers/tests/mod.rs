@@ -16,10 +16,12 @@ use std::sync::Arc;
 
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
+use arrow_flight::FlightData;
 use async_trait::async_trait;
 use catalog::memory::MemoryCatalogManager;
 use common_base::AffectedRows;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_grpc::flight::FlightDecoder;
 use common_query::Output;
 use datafusion_expr::LogicalPlan;
 use query::options::QueryOptions;
@@ -27,21 +29,19 @@ use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::query_engine::DescribeResult;
 use query::{QueryEngineFactory, QueryEngineRef};
 use servers::error::{Error, NotSupportedSnafu, Result};
-use servers::query_handler::grpc::{GrpcQueryHandler, RawRecordBatch, ServerGrpcQueryHandlerRef};
+use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::{ServerSqlQueryHandlerRef, SqlQueryHandler};
 use session::context::QueryContextRef;
 use snafu::ensure;
 use sql::statements::statement::Statement;
+use table::metadata::TableId;
 use table::table_name::TableName;
 use table::TableRef;
 
-mod grpc;
 mod http;
 mod interceptor;
 mod mysql;
 mod postgres;
-
-const LOCALHOST_WITH_0: &str = "127.0.0.1:0";
 
 pub struct DummyInstance {
     query_engine: QueryEngineRef,
@@ -161,10 +161,14 @@ impl GrpcQueryHandler for DummyInstance {
     async fn put_record_batch(
         &self,
         table: &TableName,
-        record_batch: RawRecordBatch,
+        table_id: &mut Option<TableId>,
+        decoder: &mut FlightDecoder,
+        data: FlightData,
     ) -> std::result::Result<AffectedRows, Self::Error> {
         let _ = table;
-        let _ = record_batch;
+        let _ = data;
+        let _ = table_id;
+        let _ = decoder;
         unimplemented!()
     }
 }
@@ -185,9 +189,5 @@ fn create_testing_instance(table: TableRef) -> DummyInstance {
 }
 
 fn create_testing_sql_query_handler(table: TableRef) -> ServerSqlQueryHandlerRef {
-    Arc::new(create_testing_instance(table)) as _
-}
-
-fn create_testing_grpc_query_handler(table: TableRef) -> ServerGrpcQueryHandlerRef {
     Arc::new(create_testing_instance(table)) as _
 }

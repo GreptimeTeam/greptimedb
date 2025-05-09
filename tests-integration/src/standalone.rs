@@ -49,7 +49,6 @@ use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
 use query::stats::StatementStatistics;
 use servers::grpc::GrpcOptions;
 use servers::server::ServerHandlers;
-use servers::Mode;
 use snafu::ResultExt;
 
 use crate::test_util::{self, create_tmp_dir_and_datanode_opts, StorageType, TestGuard};
@@ -144,13 +143,10 @@ impl GreptimeDbStandaloneBuilder {
                 .build(),
         );
 
-        let datanode =
-            DatanodeBuilder::new(opts.datanode_options(), plugins.clone(), Mode::Standalone)
-                .with_kv_backend(kv_backend.clone())
-                .with_cache_registry(layered_cache_registry)
-                .build()
-                .await
-                .unwrap();
+        let mut builder =
+            DatanodeBuilder::new(opts.datanode_options(), plugins.clone(), kv_backend.clone());
+        builder.with_cache_registry(layered_cache_registry);
+        let datanode = builder.build().await.unwrap();
 
         let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
         table_metadata_manager.init().await.unwrap();
@@ -278,18 +274,17 @@ impl GreptimeDbStandaloneBuilder {
 
         test_util::prepare_another_catalog_and_schema(&instance).await;
 
-        let frontend = Frontend {
+        let mut frontend = Frontend {
             instance,
-            servers: ServerHandlers::new(),
+            servers: ServerHandlers::default(),
             heartbeat_task: None,
             export_metrics_task: None,
         };
-        let frontend = Arc::new(frontend);
 
         frontend.start().await.unwrap();
 
         GreptimeDbStandalone {
-            frontend,
+            frontend: Arc::new(frontend),
             opts,
             guard,
             kv_backend,

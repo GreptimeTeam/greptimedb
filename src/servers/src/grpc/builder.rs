@@ -181,6 +181,7 @@ impl GrpcServerBuilder {
             serve_state: Mutex::new(None),
             tls_config: self.tls_config,
             otel_arrow_service: Mutex::new(self.otel_arrow_service),
+            bind_addr: None,
         }
     }
 }

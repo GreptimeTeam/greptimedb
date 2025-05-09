@@ -166,7 +166,7 @@ impl ScalarVector for StringVector {
 }
 
 pub struct StringVectorBuilder {
-    mutable_array: MutableStringArray,
+    pub mutable_array: MutableStringArray,
 }
 
 impl MutableVector for StringVectorBuilder {

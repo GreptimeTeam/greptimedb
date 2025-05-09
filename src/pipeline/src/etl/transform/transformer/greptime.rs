@@ -32,9 +32,8 @@ use session::context::Channel;
 
 use crate::error::{
     IdentifyPipelineColumnTypeMismatchSnafu, ReachedMaxNestedLevelsSnafu, Result,
-    TransformColumnNameMustBeUniqueSnafu, TransformEmptySnafu,
-    TransformMultipleTimestampIndexSnafu, TransformTimestampIndexCountSnafu,
-    UnsupportedNumberTypeSnafu,
+    TransformColumnNameMustBeUniqueSnafu, TransformMultipleTimestampIndexSnafu,
+    TransformTimestampIndexCountSnafu, UnsupportedNumberTypeSnafu,
 };
 use crate::etl::field::{Field, Fields};
 use crate::etl::transform::index::Index;
@@ -126,10 +125,7 @@ impl GreptimeTransformer {
 
 impl GreptimeTransformer {
     pub fn new(mut transforms: Transforms) -> Result<Self> {
-        if transforms.is_empty() {
-            return TransformEmptySnafu.fail();
-        }
-
+        // empty check is done in the caller
         let mut column_names_set = HashSet::new();
         let mut timestamp_columns = vec![];
 
@@ -519,12 +515,11 @@ fn resolve_value(
 }
 
 fn identity_pipeline_inner(
-    array: Vec<PipelineMap>,
+    pipeline_maps: Vec<PipelineMap>,
     pipeline_ctx: &PipelineContext<'_>,
 ) -> Result<(SchemaInfo, Vec<Row>)> {
-    let mut rows = Vec::with_capacity(array.len());
+    let mut rows = Vec::with_capacity(pipeline_maps.len());
     let mut schema_info = SchemaInfo::default();
-
     let custom_ts = pipeline_ctx.pipeline_definition.get_custom_ts();
 
     // set time index column schema first
@@ -544,7 +539,7 @@ fn identity_pipeline_inner(
         options: None,
     });
 
-    for values in array {
+    for values in pipeline_maps {
         let row = values_to_row(&mut schema_info, values, pipeline_ctx)?;
         rows.push(row);
     }
@@ -658,9 +653,12 @@ mod tests {
 
     #[test]
     fn test_identify_pipeline() {
-        let pipeline_def = PipelineDefinition::GreptimeIdentityPipeline(None);
-        let pipeline_params = GreptimePipelineParams::default();
-        let pipeline_ctx = PipelineContext::new(&pipeline_def, &pipeline_params, Channel::Unknown);
+        let params = GreptimePipelineParams::default();
+        let pipeline_ctx = PipelineContext::new(
+            &PipelineDefinition::GreptimeIdentityPipeline(None),
+            &params,
+            Channel::Unknown,
+        );
         {
             let array = vec![
                 serde_json::json!({

@@ -89,7 +89,7 @@ impl App for Instance {
             .context(error::StartFrontendSnafu)
     }
 
-    async fn stop(&self) -> Result<()> {
+    async fn stop(&mut self) -> Result<()> {
         self.frontend
             .shutdown()
             .await
@@ -382,7 +382,6 @@ impl StartCommand {
 
         let servers = Services::new(opts, instance.clone(), plugins)
             .build()
-            .await
             .context(error::StartFrontendSnafu)?;
 
         let frontend = Frontend {
@@ -448,8 +447,6 @@ mod tests {
     fn test_read_from_config_file() {
         let mut file = create_named_temp_file();
         let toml_str = r#"
-            mode = "distributed"
-
             [http]
             addr = "127.0.0.1:4000"
             timeout = "0s"
@@ -538,8 +535,6 @@ mod tests {
     fn test_config_precedence_order() {
         let mut file = create_named_temp_file();
         let toml_str = r#"
-            mode = "distributed"
-
             [http]
             addr = "127.0.0.1:4000"
 

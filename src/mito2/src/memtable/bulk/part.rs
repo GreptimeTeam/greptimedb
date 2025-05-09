@@ -17,13 +17,15 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use api::v1::Mutation;
+use api::helper::{value_to_grpc_value, ColumnDataTypeWrapper};
+use api::v1::{Mutation, OpType};
 use bytes::Bytes;
+use common_recordbatch::DfRecordBatch as RecordBatch;
 use common_time::timestamp::TimeUnit;
 use datafusion::arrow::array::{TimestampNanosecondArray, UInt64Builder};
 use datatypes::arrow;
 use datatypes::arrow::array::{
-    Array, ArrayRef, BinaryBuilder, DictionaryArray, RecordBatch, TimestampMicrosecondArray,
+    Array, ArrayRef, BinaryBuilder, DictionaryArray, TimestampMicrosecondArray,
     TimestampMillisecondArray, TimestampSecondArray, UInt32Array, UInt64Array, UInt8Array,
     UInt8Builder,
 };
@@ -32,34 +34,105 @@ use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow_array::BinaryArray;
 use datatypes::data_type::DataType;
 use datatypes::prelude::{MutableVector, ScalarVectorBuilder, Vector};
-use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions};
+use datatypes::value::Value;
+use datatypes::vectors::Helper;
 use parquet::arrow::ArrowWriter;
 use parquet::data_type::AsBytes;
 use parquet::file::metadata::ParquetMetaData;
 use parquet::file::properties::WriterProperties;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, SequenceNumber};
+use store_api::storage::SequenceNumber;
 use table::predicate::Predicate;
 
 use crate::error;
 use crate::error::{ComputeArrowSnafu, EncodeMemtableSnafu, NewRecordBatchSnafu, Result};
 use crate::memtable::bulk::context::BulkIterContextRef;
 use crate::memtable::bulk::part_reader::BulkPartIter;
-use crate::memtable::key_values::KeyValuesRef;
+use crate::memtable::key_values::{KeyValue, KeyValuesRef};
 use crate::memtable::BoxedBatchIterator;
 use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodec, PrimaryKeyCodecExt};
 use crate::sst::parquet::format::{PrimaryKeyArray, ReadFormat};
 use crate::sst::parquet::helper::parse_parquet_metadata;
 use crate::sst::to_sst_arrow_schema;
 
-#[derive(Debug)]
 pub struct BulkPart {
+    pub(crate) batch: RecordBatch,
+    pub(crate) num_rows: usize,
+    pub(crate) max_ts: i64,
+    pub(crate) min_ts: i64,
+    pub(crate) sequence: u64,
+}
+
+impl BulkPart {
+    pub(crate) fn estimated_size(&self) -> usize {
+        self.batch.get_array_memory_size()
+    }
+
+    /// Converts [BulkPart] to [Mutation] for fallback `write_bulk` implementation.
+    pub(crate) fn to_mutation(&self, region_metadata: &RegionMetadataRef) -> Result<Mutation> {
+        let vectors = region_metadata
+            .schema
+            .column_schemas()
+            .iter()
+            .map(|col| match self.batch.column_by_name(&col.name) {
+                None => Ok(None),
+                Some(col) => Helper::try_into_vector(col).map(Some),
+            })
+            .collect::<datatypes::error::Result<Vec<_>>>()
+            .context(error::ComputeVectorSnafu)?;
+
+        let rows = (0..self.num_rows)
+            .map(|row_idx| {
+                let values = (0..self.batch.num_columns())
+                    .map(|col_idx| {
+                        if let Some(v) = &vectors[col_idx] {
+                            value_to_grpc_value(v.get(row_idx))
+                        } else {
+                            api::v1::Value { value_data: None }
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                api::v1::Row { values }
+            })
+            .collect::<Vec<_>>();
+
+        let schema = region_metadata
+            .column_metadatas
+            .iter()
+            .map(|c| {
+                let data_type_wrapper =
+                    ColumnDataTypeWrapper::try_from(c.column_schema.data_type.clone())?;
+                Ok(api::v1::ColumnSchema {
+                    column_name: c.column_schema.name.clone(),
+                    datatype: data_type_wrapper.datatype() as i32,
+                    semantic_type: c.semantic_type as i32,
+                    ..Default::default()
+                })
+            })
+            .collect::<api::error::Result<Vec<_>>>()
+            .context(error::ConvertColumnDataTypeSnafu {
+                reason: "failed to convert region metadata to column schema",
+            })?;
+
+        let rows = api::v1::Rows { schema, rows };
+
+        Ok(Mutation {
+            op_type: OpType::Put as i32,
+            sequence: self.sequence,
+            rows: Some(rows),
+            write_hint: None,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct EncodedBulkPart {
     data: Bytes,
     metadata: BulkPartMeta,
 }
 
-impl BulkPart {
+impl EncodedBulkPart {
     pub fn new(data: Bytes, metadata: BulkPartMeta) -> Self {
         Self { data, metadata }
     }
@@ -138,8 +211,8 @@ impl BulkPartEncoder {
 }
 
 impl BulkPartEncoder {
-    /// Encodes mutations to a [BulkPart], returns true if encoded data has been written to `dest`.
-    fn encode_mutations(&self, mutations: &[Mutation]) -> Result<Option<BulkPart>> {
+    /// Encodes mutations to a [EncodedBulkPart], returns true if encoded data has been written to `dest`.
+    fn encode_mutations(&self, mutations: &[Mutation]) -> Result<Option<EncodedBulkPart>> {
         let Some((arrow_record_batch, min_ts, max_ts)) =
             mutations_to_record_batch(mutations, &self.metadata, &self.pk_encoder, self.dedup)?
         else {
@@ -162,7 +235,7 @@ impl BulkPartEncoder {
         let buf = Bytes::from(buf);
         let parquet_metadata = Arc::new(parse_parquet_metadata(file_metadata)?);
 
-        Ok(Some(BulkPart {
+        Ok(Some(EncodedBulkPart {
             data: buf,
             metadata: BulkPartMeta {
                 num_rows: arrow_record_batch.num_rows(),
@@ -742,7 +815,7 @@ mod tests {
         );
     }
 
-    fn encode(input: &[MutationInput]) -> BulkPart {
+    fn encode(input: &[MutationInput]) -> EncodedBulkPart {
         let metadata = metadata_for_test();
         let mutations = input
             .iter()
@@ -823,7 +896,7 @@ mod tests {
         assert_eq!(vec![0.1, 0.2, 0.0], field);
     }
 
-    fn prepare(key_values: Vec<(&str, u32, (i64, i64), u64)>) -> BulkPart {
+    fn prepare(key_values: Vec<(&str, u32, (i64, i64), u64)>) -> EncodedBulkPart {
         let metadata = metadata_for_test();
         let mutations = key_values
             .into_iter()
@@ -838,7 +911,11 @@ mod tests {
         encoder.encode_mutations(&mutations).unwrap().unwrap()
     }
 
-    fn check_prune_row_group(part: &BulkPart, predicate: Option<Predicate>, expected_rows: usize) {
+    fn check_prune_row_group(
+        part: &EncodedBulkPart,
+        predicate: Option<Predicate>,
+        expected_rows: usize,
+    ) {
         let context = Arc::new(BulkIterContext::new(
             part.metadata.region_metadata.clone(),
             &None,

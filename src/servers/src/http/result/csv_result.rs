@@ -12,13 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt::Write;
-
 use axum::http::{header, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use common_error::status_code::StatusCode;
 use common_query::Output;
-use itertools::Itertools;
 use mime_guess::mime;
 use serde::{Deserialize, Serialize};
 
@@ -72,6 +69,22 @@ impl CsvResponse {
     }
 }
 
+macro_rules! http_try {
+    ($handle: expr) => {
+        match $handle {
+            Ok(res) => res,
+            Err(err) => {
+                let msg = err.to_string();
+                return HttpResponse::Error(ErrorResponse::from_error_message(
+                    StatusCode::Unexpected,
+                    msg,
+                ))
+                .into_response();
+            }
+        }
+    };
+}
+
 impl IntoResponse for CsvResponse {
     fn into_response(mut self) -> Response {
         debug_assert!(
@@ -87,12 +100,15 @@ impl IntoResponse for CsvResponse {
                 format!("{n}\n")
             }
             Some(GreptimeQueryOutput::Records(records)) => {
-                let mut result = String::new();
+                let mut wtr = csv::Writer::from_writer(Vec::new());
+
                 for row in records.rows {
-                    let row = row.iter().map(|v| v.to_string()).join(",");
-                    writeln!(result, "{row}").unwrap();
+                    http_try!(wtr.serialize(row));
                 }
-                result
+                http_try!(wtr.flush());
+
+                let bytes = http_try!(wtr.into_inner());
+                http_try!(String::from_utf8(bytes))
             }
         };
 

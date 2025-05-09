@@ -150,12 +150,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Expect KvBackend but not found"))]
-    MissingKvBackend {
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Invalid SQL, error: {}", msg))]
     InvalidSql { msg: String },
 
@@ -426,7 +420,6 @@ impl ErrorExt for Error {
             | MissingRequiredField { .. }
             | RegionEngineNotFound { .. }
             | ParseAddr { .. }
-            | MissingKvBackend { .. }
             | TomlFormat { .. } => StatusCode::InvalidArguments,
 
             PayloadNotExist { .. }

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -68,7 +69,7 @@ impl App for Instance {
         self.instance.start().await.context(StartMetaServerSnafu)
     }
 
-    async fn stop(&self) -> Result<()> {
+    async fn stop(&mut self) -> Result<()> {
         self.instance
             .shutdown()
             .await
@@ -131,7 +132,7 @@ impl SubCommand {
     }
 }
 
-#[derive(Debug, Default, Parser)]
+#[derive(Default, Parser)]
 pub struct StartCommand {
     /// The address to bind the gRPC server.
     #[clap(long, alias = "bind-addr")]
@@ -171,6 +172,27 @@ pub struct StartCommand {
     backend: Option<BackendImpl>,
 }
 
+impl fmt::Debug for StartCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StartCommand")
+            .field("rpc_bind_addr", &self.rpc_bind_addr)
+            .field("rpc_server_addr", &self.rpc_server_addr)
+            .field("store_addrs", &self.sanitize_store_addrs())
+            .field("config_file", &self.config_file)
+            .field("selector", &self.selector)
+            .field("use_memory_store", &self.use_memory_store)
+            .field("enable_region_failover", &self.enable_region_failover)
+            .field("http_addr", &self.http_addr)
+            .field("http_timeout", &self.http_timeout)
+            .field("env_prefix", &self.env_prefix)
+            .field("data_home", &self.data_home)
+            .field("store_key_prefix", &self.store_key_prefix)
+            .field("max_txn_ops", &self.max_txn_ops)
+            .field("backend", &self.backend)
+            .finish()
+    }
+}
+
 impl StartCommand {
     pub fn load_options(&self, global_options: &GlobalOptions) -> Result<MetasrvOptions> {
         let mut opts = MetasrvOptions::load_layered_options(
@@ -182,6 +204,15 @@ impl StartCommand {
         self.merge_with_cli_options(global_options, &mut opts)?;
 
         Ok(opts)
+    }
+
+    fn sanitize_store_addrs(&self) -> Option<Vec<String>> {
+        self.store_addrs.as_ref().map(|addrs| {
+            addrs
+                .iter()
+                .map(|addr| common_meta::kv_backend::util::sanitize_connection_string(addr))
+                .collect()
+        })
     }
 
     // The precedence order is: cli > config file > environment variables > default values.

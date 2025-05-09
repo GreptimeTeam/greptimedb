@@ -59,7 +59,6 @@ use servers::grpc::flight::FlightCraftWrapper;
 use servers::grpc::region_server::RegionServerRequestHandler;
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::server::ServerHandlers;
-use servers::Mode;
 use tempfile::TempDir;
 use tonic::codec::CompressionEncoding;
 use tonic::transport::Server;
@@ -214,7 +213,7 @@ impl GreptimeDbClusterBuilder {
         self.wait_datanodes_alive(metasrv.metasrv.meta_peer_client(), datanodes)
             .await;
 
-        let frontend = self.build_frontend(metasrv.clone(), datanode_clients).await;
+        let mut frontend = self.build_frontend(metasrv.clone(), datanode_clients).await;
 
         test_util::prepare_another_catalog_and_schema(&frontend.instance).await;
 
@@ -226,7 +225,7 @@ impl GreptimeDbClusterBuilder {
             datanode_instances,
             kv_backend: self.kv_backend.clone(),
             metasrv: metasrv.metasrv,
-            frontend,
+            frontend: Arc::new(frontend),
         }
     }
 
@@ -333,13 +332,11 @@ impl GreptimeDbClusterBuilder {
                 .build(),
         );
 
-        let mut datanode = DatanodeBuilder::new(opts, Plugins::default(), Mode::Distributed)
-            .with_kv_backend(meta_backend)
+        let mut builder = DatanodeBuilder::new(opts, Plugins::default(), meta_backend);
+        builder
             .with_cache_registry(layered_cache_registry)
-            .with_meta_client(meta_client)
-            .build()
-            .await
-            .unwrap();
+            .with_meta_client(meta_client);
+        let mut datanode = builder.build().await.unwrap();
 
         datanode.start_heartbeat().await.unwrap();
 
@@ -350,7 +347,7 @@ impl GreptimeDbClusterBuilder {
         &self,
         metasrv: MockInfo,
         datanode_clients: Arc<NodeClients>,
-    ) -> Arc<Frontend> {
+    ) -> Frontend {
         let mut meta_client = MetaClientBuilder::frontend_default_options()
             .channel_manager(metasrv.channel_manager)
             .enable_access_cluster_info()
@@ -416,11 +413,10 @@ impl GreptimeDbClusterBuilder {
 
         Frontend {
             instance,
-            servers: ServerHandlers::new(),
+            servers: ServerHandlers::default(),
             heartbeat_task: Some(heartbeat_task),
             export_metrics_task: None,
         }
-        .into()
     }
 }
 

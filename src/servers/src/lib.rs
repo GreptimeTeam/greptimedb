@@ -51,8 +51,6 @@ mod row_writer;
 pub mod server;
 pub mod tls;
 
-pub use common_config::Mode;
-
 /// Cached SQL and logical plan for database interfaces
 #[derive(Clone)]
 pub struct SqlPlan {

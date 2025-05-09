@@ -567,7 +567,7 @@ impl RegionMetadataBuilder {
         match kind {
             AlterKind::AddColumns { columns } => self.add_columns(columns)?,
             AlterKind::DropColumns { names } => self.drop_columns(&names),
-            AlterKind::ModifyColumnTypes { columns } => self.modify_column_types(columns),
+            AlterKind::ModifyColumnTypes { columns } => self.modify_column_types(columns)?,
             AlterKind::SetIndex { options } => match options {
                 ApiSetIndexOptions::Fulltext {
                     column_name,
@@ -681,7 +681,7 @@ impl RegionMetadataBuilder {
     }
 
     /// Changes columns type to the metadata if exist.
-    fn modify_column_types(&mut self, columns: Vec<ModifyColumnType>) {
+    fn modify_column_types(&mut self, columns: Vec<ModifyColumnType>) -> Result<()> {
         let mut change_type_map: HashMap<_, _> = columns
             .into_iter()
             .map(
@@ -694,9 +694,34 @@ impl RegionMetadataBuilder {
 
         for column_meta in self.column_metadatas.iter_mut() {
             if let Some(target_type) = change_type_map.remove(&column_meta.column_schema.name) {
-                column_meta.column_schema.data_type = target_type;
+                column_meta.column_schema.data_type = target_type.clone();
+                // also cast default value to target_type if default value exist
+                let new_default =
+                    if let Some(default_value) = column_meta.column_schema.default_constraint() {
+                        Some(
+                            default_value
+                                .cast_to_datatype(&target_type)
+                                .with_context(|_| CastDefaultValueSnafu {
+                                    reason: format!(
+                                        "Failed to cast default value from {:?} to type {:?}",
+                                        default_value, target_type
+                                    ),
+                                })?,
+                        )
+                    } else {
+                        None
+                    };
+                column_meta.column_schema = column_meta
+                    .column_schema
+                    .clone()
+                    .with_default_constraint(new_default.clone())
+                    .with_context(|_| CastDefaultValueSnafu {
+                        reason: format!("Failed to set new default: {:?}", new_default),
+                    })?;
             }
         }
+
+        Ok(())
     }
 
     fn change_column_inverted_index_options(
@@ -967,9 +992,32 @@ pub enum MetadataError {
         location: Location,
     },
 
+    #[snafu(display("Failed to cast default value, reason: {}", reason))]
+    CastDefaultValue {
+        reason: String,
+        source: datatypes::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Unexpected: {}", reason))]
     Unexpected {
         reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to encode/decode flight message"))]
+    FlightCodec {
+        source: common_grpc::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to decode prost message"))]
+    Prost {
+        #[snafu(source)]
+        error: prost::DecodeError,
         #[snafu(implicit)]
         location: Location,
     },

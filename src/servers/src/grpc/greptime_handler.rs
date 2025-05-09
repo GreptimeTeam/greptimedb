@@ -27,6 +27,7 @@ use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_grpc::flight::do_put::DoPutResponse;
+use common_grpc::flight::FlightDecoder;
 use common_query::Output;
 use common_runtime::runtime::RuntimeTrait;
 use common_runtime::Runtime;
@@ -36,6 +37,7 @@ use common_time::timezone::parse_timezone;
 use futures_util::StreamExt;
 use session::context::{QueryContext, QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
+use table::metadata::TableId;
 use tokio::sync::mpsc;
 
 use crate::error::Error::UnsupportedAuthScheme;
@@ -45,6 +47,7 @@ use crate::error::{
 };
 use crate::grpc::flight::{PutRecordBatchRequest, PutRecordBatchRequestStream};
 use crate::grpc::TonicResult;
+use crate::metrics;
 use crate::metrics::{METRIC_AUTH_FAILURE, METRIC_SERVER_GRPC_DB_REQUEST_TIMER};
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 
@@ -140,6 +143,10 @@ impl GreptimeRequestHandler {
             .clone()
             .unwrap_or_else(common_runtime::global_runtime);
         runtime.spawn(async move {
+            // Cached table id
+            let mut table_id: Option<TableId> = None;
+
+            let mut decoder = FlightDecoder::default();
             while let Some(request) = stream.next().await {
                 let request = match request {
                     Ok(request) => request,
@@ -148,13 +155,17 @@ impl GreptimeRequestHandler {
                         break;
                     }
                 };
-
                 let PutRecordBatchRequest {
                     table_name,
                     request_id,
-                    record_batch,
+                    data,
                 } = request;
-                let result = handler.put_record_batch(&table_name, record_batch).await;
+
+                let timer = metrics::GRPC_BULK_INSERT_ELAPSED.start_timer();
+                let result = handler
+                    .put_record_batch(&table_name, &mut table_id, &mut decoder, data)
+                    .await;
+                timer.observe_duration();
                 let result = result
                     .map(|x| DoPutResponse::new(request_id, x))
                     .map_err(Into::into);

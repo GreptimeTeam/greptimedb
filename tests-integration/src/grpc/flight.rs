@@ -16,7 +16,6 @@
 mod test {
     use std::net::SocketAddr;
     use std::sync::Arc;
-    use std::time::Duration;
 
     use api::v1::auth_header::AuthScheme;
     use api::v1::{Basic, ColumnDataType, ColumnDef, CreateTableExpr, SemanticType};
@@ -48,8 +47,9 @@ mod test {
     async fn test_standalone_flight_do_put() {
         common_telemetry::init_default_ut_logging();
 
-        let (addr, db, _server) =
+        let (db, server) =
             setup_grpc_server(StorageType::File, "test_standalone_flight_do_put").await;
+        let addr = server.bind_addr().unwrap().to_string();
 
         let client = Client::with_urls(vec![addr]);
         let client = Database::new_with_dbname("greptime-public", client);
@@ -61,8 +61,19 @@ mod test {
 
         let sql = "select ts, a, b from foo order by ts";
         let expected = "\
-++
-++";
++-------------------------+----+----+
+| ts                      | a  | b  |
++-------------------------+----+----+
+| 1970-01-01T00:00:00.001 | -1 | s1 |
+| 1970-01-01T00:00:00.002 | -2 | s2 |
+| 1970-01-01T00:00:00.003 | -3 | s3 |
+| 1970-01-01T00:00:00.004 | -4 | s4 |
+| 1970-01-01T00:00:00.005 | -5 | s5 |
+| 1970-01-01T00:00:00.006 | -6 | s6 |
+| 1970-01-01T00:00:00.007 | -7 | s7 |
+| 1970-01-01T00:00:00.008 | -8 | s8 |
+| 1970-01-01T00:00:00.009 | -9 | s9 |
++-------------------------+----+----+";
         query_and_expect(db.frontend().as_ref(), sql, expected).await;
     }
 
@@ -84,17 +95,14 @@ mod test {
             .ok(),
             Some(runtime.clone()),
         );
-        let grpc_server = GrpcServerBuilder::new(GrpcServerConfig::default(), runtime)
+        let mut grpc_server = GrpcServerBuilder::new(GrpcServerConfig::default(), runtime)
             .flight_handler(Arc::new(greptime_request_handler))
             .build();
-        let addr = grpc_server
+        grpc_server
             .start("127.0.0.1:0".parse::<SocketAddr>().unwrap())
             .await
-            .unwrap()
-            .to_string();
-
-        // wait for GRPC server to start
-        tokio::time::sleep(Duration::from_secs(1)).await;
+            .unwrap();
+        let addr = grpc_server.bind_addr().unwrap().to_string();
 
         let client = Client::with_urls(vec![addr]);
         let mut client = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
@@ -110,35 +118,52 @@ mod test {
 
         let sql = "select ts, a, b from foo order by ts";
         let expected = "\
-++
-++";
++-------------------------+----+----+
+| ts                      | a  | b  |
++-------------------------+----+----+
+| 1970-01-01T00:00:00.001 | -1 | s1 |
+| 1970-01-01T00:00:00.002 | -2 | s2 |
+| 1970-01-01T00:00:00.003 | -3 | s3 |
+| 1970-01-01T00:00:00.004 | -4 | s4 |
+| 1970-01-01T00:00:00.005 | -5 | s5 |
+| 1970-01-01T00:00:00.006 | -6 | s6 |
+| 1970-01-01T00:00:00.007 | -7 | s7 |
+| 1970-01-01T00:00:00.008 | -8 | s8 |
+| 1970-01-01T00:00:00.009 | -9 | s9 |
++-------------------------+----+----+";
         query_and_expect(db.fe_instance().as_ref(), sql, expected).await;
     }
 
     async fn test_put_record_batches(client: &Database, record_batches: Vec<RecordBatch>) {
         let requests_count = record_batches.len();
+        let schema = record_batches[0].schema.clone();
 
-        let stream = tokio_stream::iter(record_batches)
-            .enumerate()
-            .map(|(i, x)| {
-                let mut encoder = FlightEncoder::default();
-                let message = FlightMessage::Recordbatch(x);
-                let mut data = encoder.encode(message);
-
-                let metadata = DoPutMetadata::new(i as i64);
-                data.app_metadata = serde_json::to_vec(&metadata).unwrap().into();
-
-                // first message in "DoPut" stream should carry table name in flight descriptor
-                if i == 0 {
-                    data.flight_descriptor = Some(FlightDescriptor {
-                        r#type: arrow_flight::flight_descriptor::DescriptorType::Path as i32,
-                        path: vec!["foo".to_string()],
-                        ..Default::default()
-                    });
-                }
-                data
-            })
-            .boxed();
+        let stream = futures::stream::once(async move {
+            let mut schema_data = FlightEncoder::default().encode(FlightMessage::Schema(schema));
+            let metadata = DoPutMetadata::new(0);
+            schema_data.app_metadata = serde_json::to_vec(&metadata).unwrap().into();
+            // first message in "DoPut" stream should carry table name in flight descriptor
+            schema_data.flight_descriptor = Some(FlightDescriptor {
+                r#type: arrow_flight::flight_descriptor::DescriptorType::Path as i32,
+                path: vec!["foo".to_string()],
+                ..Default::default()
+            });
+            schema_data
+        })
+        .chain(
+            tokio_stream::iter(record_batches)
+                .enumerate()
+                .map(|(i, x)| {
+                    let mut encoder = FlightEncoder::default();
+                    let message = FlightMessage::Recordbatch(x);
+                    let mut data = encoder.encode(message);
+                    let metadata = DoPutMetadata::new((i + 1) as i64);
+                    data.app_metadata = serde_json::to_vec(&metadata).unwrap().into();
+                    data
+                })
+                .boxed(),
+        )
+        .boxed();
 
         let response_stream = client.do_put(stream).await.unwrap();
 
@@ -148,9 +173,14 @@ mod test {
             assert!(response.is_ok(), "{}", response.err().unwrap());
             let response = response.unwrap();
             assert_eq!(response.request_id(), i as i64);
-            assert_eq!(response.affected_rows(), 448);
+            if i == 0 {
+                // the first is schema
+                assert_eq!(response.affected_rows(), 0);
+            } else {
+                assert_eq!(response.affected_rows(), 3);
+            }
         }
-        assert_eq!(requests_count, responses_count);
+        assert_eq!(requests_count + 1, responses_count);
     }
 
     fn create_record_batches(start: i64) -> Vec<RecordBatch> {

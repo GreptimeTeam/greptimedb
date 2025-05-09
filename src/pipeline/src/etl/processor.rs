@@ -25,9 +25,12 @@ pub mod json_parse;
 pub mod json_path;
 pub mod letter;
 pub mod regex;
+pub mod select;
 pub mod simple_extract;
 pub mod timestamp;
 pub mod urlencoding;
+
+use std::str::FromStr;
 
 use cmcd::CmcdProcessor;
 use csv::CsvProcessor;
@@ -47,11 +50,13 @@ use timestamp::TimestampProcessor;
 use urlencoding::UrlEncodingProcessor;
 
 use crate::error::{
-    Error, FailedParseFieldFromStringSnafu, FieldMustBeTypeSnafu, ProcessorKeyMustBeStringSnafu,
-    ProcessorMustBeMapSnafu, ProcessorMustHaveStringKeySnafu, Result, UnsupportedProcessorSnafu,
+    Error, FailedParseFieldFromStringSnafu, FieldMustBeTypeSnafu, InvalidFieldRenameSnafu,
+    ProcessorKeyMustBeStringSnafu, ProcessorMustBeMapSnafu, ProcessorMustHaveStringKeySnafu,
+    Result, UnsupportedProcessorSnafu,
 };
 use crate::etl::field::{Field, Fields};
 use crate::etl::processor::json_parse::JsonParseProcessor;
+use crate::etl::processor::select::SelectProcessor;
 use crate::etl::processor::simple_extract::SimpleExtractProcessor;
 use crate::etl::PipelineMap;
 
@@ -65,7 +70,43 @@ const SEPARATOR_NAME: &str = "separator";
 const TARGET_FIELDS_NAME: &str = "target_fields";
 const JSON_PATH_NAME: &str = "json_path";
 const JSON_PATH_RESULT_INDEX_NAME: &str = "result_index";
-const SIMPLE_EXTRACT_KEY_NAME: &str = "key";
+const KEY_NAME: &str = "key";
+const TYPE_NAME: &str = "type";
+const RENAME_TO_KEY: &str = "rename_to";
+
+/// Macro to extract a string value from a YAML map
+#[macro_export]
+macro_rules! yaml_map_get_str {
+    ($map:expr, $key:expr, $value:expr) => {
+        $map.get(&yaml_rust::Yaml::String($key.to_string()))
+            .and_then(|v| v.as_str())
+            .with_context(|| InvalidFieldRenameSnafu {
+                value: $value.clone(),
+            })
+    };
+}
+
+lazy_static::lazy_static! {
+    static ref STRING_FN: fn(&str, &yaml_rust::Yaml) -> Result<String> = |_, v| {
+        Ok(v.as_str().unwrap_or_default().into())
+    };
+
+    static ref STRING_OR_HASH_FN: fn(&str, &yaml_rust::Yaml) -> Result<Field> = |field, v| {
+        match v {
+            yaml_rust::Yaml::String(s) => Field::from_str(s),
+            yaml_rust::Yaml::Hash(m) => {
+                let key = yaml_map_get_str!(m, KEY_NAME, v)?;
+                let rename_to = yaml_map_get_str!(m, RENAME_TO_KEY, v)?;
+                Ok(Field::new(key, Some(rename_to.to_string())))
+            }
+            _ => FieldMustBeTypeSnafu {
+                field,
+                ty: "string or key-rename_to map",
+            }
+            .fail(),
+        }
+    };
+}
 
 /// Processor trait defines the interface for all processors.
 ///
@@ -104,6 +145,7 @@ pub enum ProcessorKind {
     SimpleJsonPath(SimpleExtractProcessor),
     Decolorize(DecolorizeProcessor),
     Digest(DigestProcessor),
+    Select(SelectProcessor),
 }
 
 #[derive(Debug, Default)]
@@ -185,6 +227,7 @@ fn parse_processor(doc: &yaml_rust::Yaml) -> Result<ProcessorKind> {
         json_parse::PROCESSOR_JSON_PARSE => {
             ProcessorKind::JsonParse(JsonParseProcessor::try_from(value)?)
         }
+        select::PROCESSOR_SELECT => ProcessorKind::Select(SelectProcessor::try_from(value)?),
         _ => return UnsupportedProcessorSnafu { processor: str_key }.fail(),
     };
 
@@ -201,16 +244,19 @@ pub(crate) fn yaml_string(v: &yaml_rust::Yaml, field: &str) -> Result<String> {
 }
 
 pub(crate) fn yaml_strings(v: &yaml_rust::Yaml, field: &str) -> Result<Vec<String>> {
-    let vec = v
-        .as_vec()
-        .context(FieldMustBeTypeSnafu {
-            field,
-            ty: "list of string",
-        })?
+    yaml_list(v, *STRING_FN, field)
+}
+
+pub(crate) fn yaml_list<T>(
+    v: &yaml_rust::Yaml,
+    conv_fn: impl Fn(&str, &yaml_rust::Yaml) -> Result<T>,
+    field: &str,
+) -> Result<Vec<T>> {
+    v.as_vec()
+        .context(FieldMustBeTypeSnafu { field, ty: "list" })?
         .iter()
-        .map(|v| v.as_str().unwrap_or_default().into())
-        .collect();
-    Ok(vec)
+        .map(|v| conv_fn(field, v))
+        .collect()
 }
 
 pub(crate) fn yaml_bool(v: &yaml_rust::Yaml, field: &str) -> Result<bool> {
@@ -248,9 +294,9 @@ where
 }
 
 pub(crate) fn yaml_new_fields(v: &yaml_rust::Yaml, field: &str) -> Result<Fields> {
-    yaml_parse_strings(v, field).map(Fields::new)
+    yaml_list(v, *STRING_OR_HASH_FN, field).map(Fields::new)
 }
 
 pub(crate) fn yaml_new_field(v: &yaml_rust::Yaml, field: &str) -> Result<Field> {
-    yaml_parse_string(v, field)
+    STRING_OR_HASH_FN(field, v)
 }

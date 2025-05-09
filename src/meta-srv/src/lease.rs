@@ -16,14 +16,14 @@ use std::collections::HashMap;
 use std::hash::Hash;
 
 use common_error::ext::BoxedError;
-use common_meta::kv_backend::KvBackend;
+use common_meta::kv_backend::{KvBackend, ResettableKvBackendRef};
 use common_meta::peer::{Peer, PeerLookupService};
 use common_meta::{util, DatanodeId, FlownodeId};
 use common_time::util as time_util;
 use snafu::ResultExt;
 
 use crate::cluster::MetaPeerClientRef;
-use crate::error::{Error, Result};
+use crate::error::{Error, KvBackendSnafu, Result};
 use crate::key::{DatanodeLeaseKey, FlownodeLeaseKey, LeaseValue};
 
 fn build_lease_filter(lease_secs: u64) -> impl Fn(&LeaseValue) -> bool {
@@ -31,6 +31,28 @@ fn build_lease_filter(lease_secs: u64) -> impl Fn(&LeaseValue) -> bool {
         ((time_util::current_time_millis() - v.timestamp_millis) as u64)
             < lease_secs.checked_mul(1000).unwrap_or(u64::MAX)
     }
+}
+
+/// Returns the lease value of the given datanode id, if the datanode is not found, returns None.
+pub async fn find_datanode_lease_value(
+    datanode_id: DatanodeId,
+    in_memory_key: &ResettableKvBackendRef,
+) -> Result<Option<LeaseValue>> {
+    let lease_key = DatanodeLeaseKey {
+        node_id: datanode_id,
+    };
+    let lease_key_bytes: Vec<u8> = lease_key.try_into()?;
+    let Some(kv) = in_memory_key
+        .get(&lease_key_bytes)
+        .await
+        .context(KvBackendSnafu)?
+    else {
+        return Ok(None);
+    };
+
+    let lease_value: LeaseValue = kv.value.try_into()?;
+
+    Ok(Some(lease_value))
 }
 
 /// look up [`Peer`] given [`ClusterId`] and [`DatanodeId`], will only return if it's alive under given `lease_secs`

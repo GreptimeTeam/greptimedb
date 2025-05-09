@@ -192,6 +192,10 @@ impl FlightDecoder {
             }
         }
     }
+
+    pub fn schema(&self) -> Option<&SchemaRef> {
+        self.schema.as_ref()
+    }
 }
 
 pub fn flight_messages_to_recordbatches(messages: Vec<FlightMessage>) -> Result<RecordBatches> {

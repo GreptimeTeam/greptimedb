@@ -61,6 +61,16 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "No available frontend found after timeout: {timeout:?}, context: {context}"
+    ))]
+    NoAvailableFrontend {
+        timeout: std::time::Duration,
+        context: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("External error"))]
     External {
         source: BoxedError,
@@ -141,6 +151,9 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Invalid auth config"))]
+    IllegalAuthConfig { source: auth::error::Error },
 
     #[snafu(display("Flow plan error: {reason}"))]
     Plan {
@@ -296,7 +309,8 @@ impl ErrorExt for Error {
             Self::Eval { .. }
             | Self::JoinTask { .. }
             | Self::Datafusion { .. }
-            | Self::InsertIntoFlow { .. } => StatusCode::Internal,
+            | Self::InsertIntoFlow { .. }
+            | Self::NoAvailableFrontend { .. } => StatusCode::Internal,
             Self::FlowAlreadyExist { .. } => StatusCode::TableAlreadyExists,
             Self::TableNotFound { .. }
             | Self::TableNotFoundMeta { .. }
@@ -319,9 +333,10 @@ impl ErrorExt for Error {
             }
             Self::MetaClientInit { source, .. } => source.status_code(),
 
-            Self::InvalidQuery { .. } | Self::InvalidRequest { .. } | Self::ParseAddr { .. } => {
-                StatusCode::InvalidArguments
-            }
+            Self::InvalidQuery { .. }
+            | Self::InvalidRequest { .. }
+            | Self::ParseAddr { .. }
+            | Self::IllegalAuthConfig { .. } => StatusCode::InvalidArguments,
 
             Error::SubstraitEncodeLogicalPlan { source, .. } => source.status_code(),
 

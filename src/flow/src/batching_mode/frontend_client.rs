@@ -15,6 +15,7 @@
 //! Frontend client to run flow as batching task which is time-window-aware normal query triggered every tick set by user
 
 use std::sync::{Arc, Weak};
+use std::time::SystemTime;
 
 use api::v1::greptime_request::Request;
 use api::v1::CreateTableExpr;
@@ -26,16 +27,18 @@ use common_meta::peer::Peer;
 use common_meta::rpc::store::RangeRequest;
 use common_query::Output;
 use common_telemetry::warn;
+use itertools::Itertools;
 use meta_client::client::MetaClient;
 use servers::query_handler::grpc::GrpcQueryHandler;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
 
 use crate::batching_mode::{
-    DEFAULT_BATCHING_ENGINE_QUERY_TIMEOUT, GRPC_CONN_TIMEOUT, GRPC_MAX_RETRIES,
+    DEFAULT_BATCHING_ENGINE_QUERY_TIMEOUT, FRONTEND_ACTIVITY_TIMEOUT, GRPC_CONN_TIMEOUT,
+    GRPC_MAX_RETRIES,
 };
-use crate::error::{ExternalSnafu, InvalidRequestSnafu, UnexpectedSnafu};
-use crate::Error;
+use crate::error::{ExternalSnafu, InvalidRequestSnafu, NoAvailableFrontendSnafu, UnexpectedSnafu};
+use crate::{Error, FlowAuthHeader};
 
 /// Just like [`GrpcQueryHandler`] but use BoxedError
 ///
@@ -78,6 +81,7 @@ pub enum FrontendClient {
     Distributed {
         meta_client: Arc<MetaClient>,
         chnl_mgr: ChannelManager,
+        auth: Option<FlowAuthHeader>,
     },
     Standalone {
         /// for the sake of simplicity still use grpc even in standalone mode
@@ -98,7 +102,8 @@ impl FrontendClient {
         )
     }
 
-    pub fn from_meta_client(meta_client: Arc<MetaClient>) -> Self {
+    pub fn from_meta_client(meta_client: Arc<MetaClient>, auth: Option<FlowAuthHeader>) -> Self {
+        common_telemetry::info!("Frontend client build with auth={:?}", auth);
         Self::Distributed {
             meta_client,
             chnl_mgr: {
@@ -107,6 +112,7 @@ impl FrontendClient {
                     .timeout(DEFAULT_BATCHING_ENGINE_QUERY_TIMEOUT);
                 ChannelManager::with_config(cfg)
             },
+            auth,
         }
     }
 
@@ -127,10 +133,24 @@ impl DatabaseWithPeer {
     fn new(database: Database, peer: Peer) -> Self {
         Self { database, peer }
     }
+
+    /// Try sending a "SELECT 1" to the database
+    async fn try_select_one(&self) -> Result<(), Error> {
+        // notice here use `sql` for `SELECT 1` return 1 row
+        let _ = self
+            .database
+            .sql("SELECT 1")
+            .await
+            .with_context(|_| InvalidRequestSnafu {
+                context: format!("Failed to handle `SELECT 1` request at {:?}", self.peer),
+            })?;
+        Ok(())
+    }
 }
 
 impl FrontendClient {
-    async fn scan_for_frontend(&self) -> Result<Vec<(NodeInfoKey, NodeInfo)>, Error> {
+    /// scan for available frontend from metadata
+    pub(crate) async fn scan_for_frontend(&self) -> Result<Vec<(NodeInfoKey, NodeInfo)>, Error> {
         let Self::Distributed { meta_client, .. } = self else {
             return Ok(vec![]);
         };
@@ -160,8 +180,8 @@ impl FrontendClient {
         Ok(res)
     }
 
-    /// Get the database with max `last_activity_ts`
-    async fn get_last_active_frontend(
+    /// Get the database with maximum `last_activity_ts`& is able to process query
+    async fn get_latest_active_frontend(
         &self,
         catalog: &str,
         schema: &str,
@@ -169,6 +189,7 @@ impl FrontendClient {
         let Self::Distributed {
             meta_client: _,
             chnl_mgr,
+            auth,
         } = self
         else {
             return UnexpectedSnafu {
@@ -177,22 +198,56 @@ impl FrontendClient {
             .fail();
         };
 
-        let frontends = self.scan_for_frontend().await?;
-        let mut peer = None;
+        let mut interval = tokio::time::interval(GRPC_CONN_TIMEOUT);
+        interval.tick().await;
+        for retry in 0..GRPC_MAX_RETRIES {
+            let frontends = self.scan_for_frontend().await?;
+            let now_in_ms = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as i64;
 
-        if let Some((_, val)) = frontends.iter().max_by_key(|(_, val)| val.last_activity_ts) {
-            peer = Some(val.peer.clone());
+            // found node with maximum last_activity_ts
+            for (_, node_info) in frontends
+                .iter()
+                .sorted_by_key(|(_, node_info)| node_info.last_activity_ts)
+                .rev()
+                // filter out frontend that have been down for more than 1 min
+                .filter(|(_, node_info)| {
+                    node_info.last_activity_ts + FRONTEND_ACTIVITY_TIMEOUT.as_millis() as i64
+                        > now_in_ms
+                })
+            {
+                let addr = &node_info.peer.addr;
+                let client = Client::with_manager_and_urls(chnl_mgr.clone(), vec![addr.clone()]);
+                let database = {
+                    let mut db = Database::new(catalog, schema, client);
+                    if let Some(auth) = auth {
+                        db.set_auth(auth.auth().clone());
+                    }
+                    db
+                };
+                let db = DatabaseWithPeer::new(database, node_info.peer.clone());
+                match db.try_select_one().await {
+                    Ok(_) => return Ok(db),
+                    Err(e) => {
+                        warn!(
+                            "Failed to connect to frontend {} on retry={}: \n{e:?}",
+                            addr, retry
+                        );
+                    }
+                }
+            }
+            // no available frontend
+            // sleep and retry
+            interval.tick().await;
         }
 
-        let Some(peer) = peer else {
-            UnexpectedSnafu {
-                reason: format!("No frontend available: {:?}", frontends),
-            }
-            .fail()?
-        };
-        let client = Client::with_manager_and_urls(chnl_mgr.clone(), vec![peer.addr.clone()]);
-        let database = Database::new(catalog, schema, client);
-        Ok(DatabaseWithPeer::new(database, peer))
+        NoAvailableFrontendSnafu {
+            timeout: GRPC_CONN_TIMEOUT,
+            context: "No available frontend found that is able to process query",
+        }
+        .fail()
     }
 
     pub async fn create(
@@ -222,38 +277,18 @@ impl FrontendClient {
     ) -> Result<u32, Error> {
         match self {
             FrontendClient::Distributed { .. } => {
-                let db = self.get_last_active_frontend(catalog, schema).await?;
+                let db = self.get_latest_active_frontend(catalog, schema).await?;
 
                 *peer_desc = Some(PeerDesc::Dist {
                     peer: db.peer.clone(),
                 });
 
-                let mut retry = 0;
-
-                loop {
-                    let ret = db.database.handle(req.clone()).await.with_context(|_| {
-                        InvalidRequestSnafu {
-                            context: format!("Failed to handle request: {:?}", req),
-                        }
-                    });
-                    if let Err(err) = ret {
-                        if retry < GRPC_MAX_RETRIES {
-                            retry += 1;
-                            warn!(
-                                "Failed to send request to grpc handle at Peer={:?}, retry = {}, error = {:?}",
-                                db.peer, retry, err
-                            );
-                            continue;
-                        } else {
-                            common_telemetry::error!(
-                                "Failed to send request to grpc handle at Peer={:?} after {} retries, error = {:?}",
-                                db.peer, retry, err
-                            );
-                            return Err(err);
-                        }
-                    }
-                    return ret;
-                }
+                db.database
+                    .handle_with_retry(req.clone(), GRPC_MAX_RETRIES)
+                    .await
+                    .with_context(|_| InvalidRequestSnafu {
+                        context: format!("Failed to handle request at {:?}: {:?}", db.peer, req),
+                    })
             }
             FrontendClient::Standalone { database_client } => {
                 let ctx = QueryContextBuilder::default()

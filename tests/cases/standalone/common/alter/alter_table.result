@@ -69,6 +69,52 @@ ALTER TABLE test_alt_table MODIFY COLUMN m interval;
 
 Error: 1001(Unsupported), Not supported: Modify column type to interval type
 
+INSERT INTO test_alt_table (h, i, j, m, dt) VALUES (42, 42, 0, 11, 0);
+
+Affected Rows: 1
+
+ALTER TABLE test_alt_table MODIFY COLUMN m Float64;
+
+Affected Rows: 0
+
+SELECT * FROM test_alt_table;
+
++----+----+-------------------------+---+------+---------------------+
+| h  | i  | j                       | k | m    | dt                  |
++----+----+-------------------------+---+------+---------------------+
+| 1  | 1  | 1970-01-01T00:00:00     |   |      |                     |
+| 2  | 2  | 1970-01-01T00:00:00.001 |   |      |                     |
+| 42 | 42 | 1970-01-01T00:00:00     |   | 11.0 | 1970-01-01T00:00:00 |
++----+----+-------------------------+---+------+---------------------+
+
+ALTER TABLE test_alt_table MODIFY COLUMN m INTEGER;
+
+Affected Rows: 0
+
+SELECT * FROM test_alt_table;
+
++----+----+-------------------------+---+----+---------------------+
+| h  | i  | j                       | k | m  | dt                  |
++----+----+-------------------------+---+----+---------------------+
+| 1  | 1  | 1970-01-01T00:00:00     |   |    |                     |
+| 2  | 2  | 1970-01-01T00:00:00.001 |   |    |                     |
+| 42 | 42 | 1970-01-01T00:00:00     |   | 11 | 1970-01-01T00:00:00 |
++----+----+-------------------------+---+----+---------------------+
+
+ALTER TABLE test_alt_table MODIFY COLUMN m BOOLEAN;
+
+Affected Rows: 0
+
+SELECT * FROM test_alt_table;
+
++----+----+-------------------------+---+------+---------------------+
+| h  | i  | j                       | k | m    | dt                  |
++----+----+-------------------------+---+------+---------------------+
+| 1  | 1  | 1970-01-01T00:00:00     |   |      |                     |
+| 2  | 2  | 1970-01-01T00:00:00.001 |   |      |                     |
+| 42 | 42 | 1970-01-01T00:00:00     |   | true | 1970-01-01T00:00:00 |
++----+----+-------------------------+---+------+---------------------+
+
 DESC TABLE test_alt_table;
 
 +--------+----------------------+-----+------+---------+---------------+
@@ -78,11 +124,91 @@ DESC TABLE test_alt_table;
 | i      | Int32                | PRI | YES  |         | TAG           |
 | j      | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
 | k      | String               | PRI | YES  |         | TAG           |
-| m      | Int32                |     | YES  |         | FIELD         |
+| m      | Boolean              |     | YES  |         | FIELD         |
 | dt     | TimestampMicrosecond |     | YES  |         | FIELD         |
 +--------+----------------------+-----+------+---------+---------------+
 
 DROP TABLE test_alt_table;
+
+Affected Rows: 0
+
+-- test if column with default value can change type properly
+CREATE TABLE test_alt_table_default(h INTEGER, i INTEGER DEFAULT 0, j TIMESTAMP TIME INDEX, PRIMARY KEY (h));
+
+Affected Rows: 0
+
+ALTER TABLE test_alt_table_default MODIFY COLUMN i BOOLEAN;
+
+Affected Rows: 0
+
+INSERT INTO test_alt_table_default (h, j) VALUES (1, 0), (2, 1);
+
+Affected Rows: 2
+
+SELECT * FROM test_alt_table_default ORDER BY h;
+
++---+-------+-------------------------+
+| h | i     | j                       |
++---+-------+-------------------------+
+| 1 | false | 1970-01-01T00:00:00     |
+| 2 | false | 1970-01-01T00:00:00.001 |
++---+-------+-------------------------+
+
+ALTER TABLE test_alt_table_default MODIFY COLUMN i INTEGER;
+
+Affected Rows: 0
+
+DESC TABLE test_alt_table_default;
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| h      | Int32                | PRI | YES  |         | TAG           |
+| i      | Int32                |     | YES  | 0       | FIELD         |
+| j      | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
++--------+----------------------+-----+------+---------+---------------+
+
+INSERT INTO test_alt_table_default (h, j) VALUES (3, 0), (4, 1);
+
+Affected Rows: 2
+
+SELECT * FROM test_alt_table_default ORDER BY h;
+
++---+---+-------------------------+
+| h | i | j                       |
++---+---+-------------------------+
+| 1 | 0 | 1970-01-01T00:00:00     |
+| 2 | 0 | 1970-01-01T00:00:00.001 |
+| 3 | 0 | 1970-01-01T00:00:00     |
+| 4 | 0 | 1970-01-01T00:00:00.001 |
++---+---+-------------------------+
+
+ALTER TABLE test_alt_table_default MODIFY COLUMN i STRING;
+
+Affected Rows: 0
+
+INSERT INTO test_alt_table_default (h, j) VALUES (5, 0);
+
+Affected Rows: 1
+
+INSERT INTO test_alt_table_default (h, i, j) VALUES (6, "word" ,1);
+
+Affected Rows: 1
+
+SELECT * FROM test_alt_table_default ORDER BY h;
+
++---+------+-------------------------+
+| h | i    | j                       |
++---+------+-------------------------+
+| 1 | 0    | 1970-01-01T00:00:00     |
+| 2 | 0    | 1970-01-01T00:00:00.001 |
+| 3 | 0    | 1970-01-01T00:00:00     |
+| 4 | 0    | 1970-01-01T00:00:00.001 |
+| 5 | 0    | 1970-01-01T00:00:00     |
+| 6 | word | 1970-01-01T00:00:00.001 |
++---+------+-------------------------+
+
+DROP TABLE test_alt_table_default;
 
 Affected Rows: 0
 
@@ -155,9 +281,9 @@ ADD
 
 Affected Rows: 0
 
-ALTER TABLE 
-    t2 
-ADD 
+ALTER TABLE
+    t2
+ADD
     COLUMN at4 UINT16;
 
 Affected Rows: 0
@@ -215,7 +341,7 @@ SELECT * FROM grpc_latencies;
 | 2024-07-11T20:00:06 | host1 | GetUser     | 103.0   |
 +---------------------+-------+-------------+---------+
 
-ALTER TABLE grpc_latencies SET ttl = '10d';
+ALTER TABLE grpc_latencies SET ttl = '10000d';
 
 Affected Rows: 0
 

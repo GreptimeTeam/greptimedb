@@ -20,6 +20,9 @@ CREATE TABLE t4 (ts timestamp time index, val double, host double, primary key (
 -- create logical table with different column name on field column
 CREATE TABLE t5 (ts timestamp time index, valval double, host string primary key) engine = metric with ("on_physical_table" = "phy");
 
+-- create logical table with different time unit on time index column
+CREATE TABLE t6 (ts timestamp(6) time index, job string primary key, val double) engine = metric with ("on_physical_table" = "phy");
+
 SELECT table_catalog, table_schema, table_name, table_type, engine FROM information_schema.tables WHERE engine = 'metric' order by table_name;
 
 DESC TABLE phy;
@@ -73,7 +76,7 @@ with
 
 CREATE TABLE t1(ts timestamp time index, val double, host string primary key) engine=metric with ("on_physical_table" = "phy");
 
-INSERT INTO t1 (ts, val, host) VALUES 
+INSERT INTO t1 (ts, val, host) VALUES
   ('2022-01-01 00:00:00', 1.23, 'example.com'),
   ('2022-01-02 00:00:00', 4.56, 'example.com'),
   ('2022-01-03 00:00:00', 7.89, 'example.com'),

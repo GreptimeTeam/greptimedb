@@ -18,7 +18,7 @@ workspace = true
 local-ip-address.workspace = true
 
 [dependencies]
-ahash = "0.8"
+ahash.workspace = true
 api.workspace = true
 arrow.workspace = true
 arrow-flight.workspace = true
@@ -50,6 +50,7 @@ common-session.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
 common-version = { workspace = true, features = ["codec"] }
+csv = "1.3"
 dashmap.workspace = true
 datafusion.workspace = true
 datafusion-common.workspace = true
@@ -58,7 +59,6 @@ datatypes.workspace = true
 derive_builder.workspace = true
 futures.workspace = true
 futures-util.workspace = true
-hashbrown = "0.15"
 headers = "0.4"
 hostname = "0.3"
 http.workspace = true
@@ -87,7 +87,7 @@ opensrv-mysql = { git = "https://github.com/datafuselabs/opensrv", rev = "a1fb4d
 opentelemetry-proto.workspace = true
 otel-arrow-rust.workspace = true
 parking_lot.workspace = true
-pgwire = { version = "0.28.0", default-features = false, features = ["server-api-ring"] }
+pgwire = { version = "0.29", default-features = false, features = ["server-api-ring"] }
 pin-project = "1.0"
 pipeline.workspace = true
 postgres-types = { version = "0.2", features = ["with-chrono-0_4", "with-serde_json-1"] }

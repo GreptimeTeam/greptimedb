@@ -10,7 +10,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-ahash = "0.8"
+ahash.workspace = true
 api.workspace = true
 arrow.workspace = true
 async-trait.workspace = true
@@ -28,7 +28,7 @@ common-runtime.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
 crossbeam-utils.workspace = true
-csv = "1.3.0"
+csv = "1.3"
 dashmap.workspace = true
 datafusion.workspace = true
 datafusion-common.workspace = true

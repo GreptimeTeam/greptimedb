@@ -428,7 +428,7 @@ transform:
         .expect("expect transformed result ");
 
     let output = Rows {
-        schema: pipeline.schemas().clone(),
+        schema: pipeline.schemas().unwrap().clone(),
         rows: vec![row.0],
     };
 

@@ -57,13 +57,16 @@ use crate::batching_mode::engine::BatchingEngine;
 use crate::engine::FlowEngine;
 use crate::error::{
     to_status_with_last_err, CacheRequiredSnafu, CreateFlowSnafu, ExternalSnafu, FlowNotFoundSnafu,
-    ListFlowsSnafu, ParseAddrSnafu, ShutdownServerSnafu, StartServerSnafu, UnexpectedSnafu,
+    IllegalAuthConfigSnafu, ListFlowsSnafu, ParseAddrSnafu, ShutdownServerSnafu, StartServerSnafu,
+    UnexpectedSnafu,
 };
 use crate::heartbeat::HeartbeatTask;
 use crate::metrics::{METRIC_FLOW_PROCESSING_TIME, METRIC_FLOW_ROWS};
 use crate::transform::register_function_to_query_engine;
 use crate::utils::{SizeReportSender, StateReportHandler};
-use crate::{CreateFlowArgs, Error, FlownodeOptions, FrontendClient, StreamingEngine};
+use crate::{
+    CreateFlowArgs, Error, FlowAuthHeader, FlownodeOptions, FrontendClient, StreamingEngine,
+};
 
 pub const FLOW_NODE_SERVER_NAME: &str = "FLOW_NODE_SERVER";
 /// wrapping flow node manager to avoid orphan rule with Arc<...>
@@ -172,6 +175,8 @@ impl FlownodeServer {
     }
 
     /// Start the background task for streaming computation.
+    ///
+    /// Should be called only after heartbeat is establish, hence can get cluster info
     async fn start_workers(&self) -> Result<(), Error> {
         let manager_ref = self.inner.flow_service.dual_engine.clone();
         let handle = manager_ref
@@ -229,10 +234,10 @@ impl servers::server::Server for FlownodeServer {
         Ok(())
     }
 
-    async fn start(&self, addr: SocketAddr) -> Result<SocketAddr, servers::error::Error> {
+    async fn start(&mut self, addr: SocketAddr) -> Result<(), servers::error::Error> {
         let mut rx_server = self.inner.server_shutdown_tx.lock().await.subscribe();
 
-        let (incoming, addr) = {
+        let incoming = {
             let listener = TcpListener::bind(addr)
                 .await
                 .context(TcpBindSnafu { addr })?;
@@ -241,7 +246,7 @@ impl servers::server::Server for FlownodeServer {
                 TcpIncoming::from_listener(listener, true, None).context(TcpIncomingSnafu)?;
             info!("flow server is bound to {}", addr);
 
-            (incoming, addr)
+            incoming
         };
 
         let builder = tonic::transport::Server::builder().add_service(self.create_flow_service());
@@ -253,7 +258,7 @@ impl servers::server::Server for FlownodeServer {
                 .context(StartGrpcSnafu);
         });
 
-        Ok(addr)
+        Ok(())
     }
 
     fn name(&self) -> &str {
@@ -280,7 +285,7 @@ impl FlownodeInstance {
 
         Ok(())
     }
-    pub async fn shutdown(&self) -> Result<(), crate::Error> {
+    pub async fn shutdown(&mut self) -> Result<(), Error> {
         self.services
             .shutdown_all()
             .await
@@ -306,6 +311,21 @@ impl FlownodeInstance {
     pub fn setup_services(&mut self, services: ServerHandlers) {
         self.services = services;
     }
+}
+
+pub fn get_flow_auth_options(fn_opts: &FlownodeOptions) -> Result<Option<FlowAuthHeader>, Error> {
+    if let Some(user_provider) = fn_opts.user_provider.as_ref() {
+        let static_provider = auth::static_user_provider_from_option(user_provider)
+            .context(IllegalAuthConfigSnafu)?;
+
+        let (usr, pwd) = static_provider
+            .get_one_user_pwd()
+            .context(IllegalAuthConfigSnafu)?;
+        let auth_header = FlowAuthHeader::from_user_pwd(&usr, &pwd);
+        return Ok(Some(auth_header));
+    }
+
+    Ok(None)
 }
 
 /// [`FlownodeInstance`] Builder
@@ -381,6 +401,7 @@ impl FlownodeBuilder {
             batching,
             self.flow_metadata_manager.clone(),
             self.catalog_manager.clone(),
+            self.plugins.clone(),
         );
 
         let server = FlownodeServer::new(FlowService::new(Arc::new(dual)));
@@ -389,7 +410,7 @@ impl FlownodeBuilder {
 
         let instance = FlownodeInstance {
             flownode_server: server,
-            services: ServerHandlers::new(),
+            services: ServerHandlers::default(),
             heartbeat_task,
         };
         Ok(instance)
@@ -570,14 +591,14 @@ impl<'a> FlownodeServiceBuilder<'a> {
         }
     }
 
-    pub async fn build(mut self) -> Result<ServerHandlers, Error> {
+    pub fn build(mut self) -> Result<ServerHandlers, Error> {
         let handlers = ServerHandlers::default();
         if let Some(grpc_server) = self.grpc_server.take() {
             let addr: SocketAddr = self.opts.grpc.bind_addr.parse().context(ParseAddrSnafu {
                 addr: &self.opts.grpc.bind_addr,
             })?;
             let handler: ServerHandler = (Box::new(grpc_server), addr);
-            handlers.insert(handler).await;
+            handlers.insert(handler);
         }
 
         if self.enable_http_service {
@@ -588,7 +609,7 @@ impl<'a> FlownodeServiceBuilder<'a> {
                 addr: &self.opts.http.addr,
             })?;
             let handler: ServerHandler = (Box::new(http_server), addr);
-            handlers.insert(handler).await;
+            handlers.insert(handler);
         }
         Ok(handlers)
     }

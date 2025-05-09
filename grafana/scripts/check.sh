@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-DASHBOARD_DIR=${1:-grafana/dashboards}
+DASHBOARD_DIR=${1:-grafana/dashboards/metrics}
 
 check_dashboard_description() {
   for dashboard in $(find $DASHBOARD_DIR -name "*.json"); do
@@ -25,7 +25,7 @@ check_dashboard_description() {
 check_dashboards_generation() {
   ./grafana/scripts/gen-dashboards.sh
 
-  if [[ -n "$(git diff --name-only grafana/dashboards)" ]]; then
+  if [[ -n "$(git diff --name-only grafana/dashboards/metrics)" ]]; then
     echo "Error: The dashboards are not generated correctly. You should execute the `make dashboards` command."
     exit 1
   fi

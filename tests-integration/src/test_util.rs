@@ -16,7 +16,6 @@ use std::env;
 use std::fmt::Display;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use auth::UserProviderRef;
 use axum::Router;
@@ -491,10 +490,14 @@ pub async fn setup_test_prom_app_with_frontend(
     // build physical table
     let sql = "CREATE TABLE phy (ts timestamp time index, val double, host string primary key) engine=metric with ('physical_metric_table' = '')";
     run_sql(sql, &instance).await;
+    let sql = "CREATE TABLE phy_ns (ts timestamp(0) time index, val double, host string primary key) engine=metric with ('physical_metric_table' = '')";
+    run_sql(sql, &instance).await;
     // build metric tables
     let sql = "CREATE TABLE demo (ts timestamp time index, val double, host string primary key) engine=metric with ('on_physical_table' = 'phy')";
     run_sql(sql, &instance).await;
     let sql = "CREATE TABLE demo_metrics (ts timestamp time index, val double, idc string primary key) engine=metric with ('on_physical_table' = 'phy')";
+    run_sql(sql, &instance).await;
+    let sql = "CREATE TABLE multi_labels (ts timestamp(0) time index, val double, idc string, env string, host string, primary key (idc, env, host)) engine=metric with ('on_physical_table' = 'phy_ns')";
     run_sql(sql, &instance).await;
 
     // insert rows
@@ -505,6 +508,10 @@ pub async fn setup_test_prom_app_with_frontend(
     run_sql(sql, &instance).await;
     // insert a row with empty label
     let sql = "INSERT INTO demo_metrics(val, ts) VALUES (1.1, 0)";
+    run_sql(sql, &instance).await;
+
+    // insert rows to multi_labels
+    let sql = "INSERT INTO multi_labels(idc, env, host, val, ts) VALUES ('idc1', 'dev', 'host1', 1.1, 0), ('idc1', 'dev', 'host2', 2.1, 0), ('idc2', 'dev', 'host1', 1.1, 0), ('idc2', 'test', 'host3', 2.1, 0)";
     run_sql(sql, &instance).await;
 
     // build physical table
@@ -546,7 +553,7 @@ pub async fn setup_test_prom_app_with_frontend(
 pub async fn setup_grpc_server(
     store_type: StorageType,
     name: &str,
-) -> (String, GreptimeDbStandalone, Arc<GrpcServer>) {
+) -> (GreptimeDbStandalone, Arc<GrpcServer>) {
     setup_grpc_server_with(store_type, name, None, None).await
 }
 
@@ -554,7 +561,7 @@ pub async fn setup_grpc_server_with_user_provider(
     store_type: StorageType,
     name: &str,
     user_provider: Option<UserProviderRef>,
-) -> (String, GreptimeDbStandalone, Arc<GrpcServer>) {
+) -> (GreptimeDbStandalone, Arc<GrpcServer>) {
     setup_grpc_server_with(store_type, name, user_provider, None).await
 }
 
@@ -563,7 +570,7 @@ pub async fn setup_grpc_server_with(
     name: &str,
     user_provider: Option<UserProviderRef>,
     grpc_config: Option<GrpcServerConfig>,
-) -> (String, GreptimeDbStandalone, Arc<GrpcServer>) {
+) -> (GreptimeDbStandalone, Arc<GrpcServer>) {
     let instance = setup_standalone_instance(name, store_type).await;
 
     let runtime: Runtime = RuntimeBuilder::default()
@@ -590,25 +597,18 @@ pub async fn setup_grpc_server_with(
         .with_tls_config(grpc_config.tls)
         .unwrap();
 
-    let fe_grpc_server = Arc::new(grpc_builder.build());
+    let mut grpc_server = grpc_builder.build();
 
     let fe_grpc_addr = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
-    let fe_grpc_addr = fe_grpc_server
-        .start(fe_grpc_addr)
-        .await
-        .unwrap()
-        .to_string();
+    grpc_server.start(fe_grpc_addr).await.unwrap();
 
-    // wait for GRPC server to start
-    tokio::time::sleep(Duration::from_secs(1)).await;
-
-    (fe_grpc_addr, instance, fe_grpc_server)
+    (instance, Arc::new(grpc_server))
 }
 
 pub async fn setup_mysql_server(
     store_type: StorageType,
     name: &str,
-) -> (String, TestGuard, Arc<Box<dyn Server>>) {
+) -> (TestGuard, Arc<Box<dyn Server>>) {
     setup_mysql_server_with_user_provider(store_type, name, None).await
 }
 
@@ -616,7 +616,7 @@ pub async fn setup_mysql_server_with_user_provider(
     store_type: StorageType,
     name: &str,
     user_provider: Option<UserProviderRef>,
-) -> (String, TestGuard, Arc<Box<dyn Server>>) {
+) -> (TestGuard, Arc<Box<dyn Server>>) {
     let instance = setup_standalone_instance(name, store_type).await;
 
     let runtime = RuntimeBuilder::default()
@@ -632,7 +632,7 @@ pub async fn setup_mysql_server_with_user_provider(
         addr: fe_mysql_addr.clone(),
         ..Default::default()
     };
-    let fe_mysql_server = Arc::new(MysqlServer::create_server(
+    let mut mysql_server = MysqlServer::create_server(
         runtime,
         Arc::new(MysqlSpawnRef::new(
             ServerSqlQueryHandlerAdapter::arc(fe_instance_ref),
@@ -647,24 +647,20 @@ pub async fn setup_mysql_server_with_user_provider(
             0,
             opts.reject_no_database.unwrap_or(false),
         )),
-    ));
+    );
 
-    let fe_mysql_addr_clone = fe_mysql_addr.clone();
-    let fe_mysql_server_clone = fe_mysql_server.clone();
-    let _handle = tokio::spawn(async move {
-        let addr = fe_mysql_addr_clone.parse::<SocketAddr>().unwrap();
-        fe_mysql_server_clone.start(addr).await.unwrap()
-    });
+    mysql_server
+        .start(fe_mysql_addr.parse::<SocketAddr>().unwrap())
+        .await
+        .unwrap();
 
-    tokio::time::sleep(Duration::from_secs(1)).await;
-
-    (fe_mysql_addr, instance.guard, fe_mysql_server)
+    (instance.guard, Arc::new(mysql_server))
 }
 
 pub async fn setup_pg_server(
     store_type: StorageType,
     name: &str,
-) -> (String, TestGuard, Arc<Box<dyn Server>>) {
+) -> (TestGuard, Arc<Box<dyn Server>>) {
     setup_pg_server_with_user_provider(store_type, name, None).await
 }
 
@@ -672,7 +668,7 @@ pub async fn setup_pg_server_with_user_provider(
     store_type: StorageType,
     name: &str,
     user_provider: Option<UserProviderRef>,
-) -> (String, TestGuard, Arc<Box<dyn Server>>) {
+) -> (TestGuard, Arc<Box<dyn Server>>) {
     let instance = setup_standalone_instance(name, store_type).await;
 
     let runtime = RuntimeBuilder::default()
@@ -693,25 +689,21 @@ pub async fn setup_pg_server_with_user_provider(
             .expect("Failed to load certificates and keys"),
     );
 
-    let fe_pg_server = Arc::new(Box::new(PostgresServer::new(
+    let mut pg_server = Box::new(PostgresServer::new(
         ServerSqlQueryHandlerAdapter::arc(fe_instance_ref),
         opts.tls.should_force_tls(),
         tls_server_config,
         0,
         runtime,
         user_provider,
-    )) as Box<dyn Server>);
+    ));
 
-    let fe_pg_addr_clone = fe_pg_addr.clone();
-    let fe_pg_server_clone = fe_pg_server.clone();
-    let _handle = tokio::spawn(async move {
-        let addr = fe_pg_addr_clone.parse::<SocketAddr>().unwrap();
-        fe_pg_server_clone.start(addr).await.unwrap()
-    });
+    pg_server
+        .start(fe_pg_addr.parse::<SocketAddr>().unwrap())
+        .await
+        .unwrap();
 
-    tokio::time::sleep(Duration::from_secs(1)).await;
-
-    (fe_pg_addr, instance.guard, fe_pg_server)
+    (instance.guard, Arc::new(pg_server))
 }
 
 pub(crate) async fn prepare_another_catalog_and_schema(instance: &Instance) {

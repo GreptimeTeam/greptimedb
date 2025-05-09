@@ -98,7 +98,7 @@ mod tests {
         let env = TestEnv::with_prefix_and_config(
             "test_flush_metadata_region_task",
             EngineConfig {
-                flush_metadata_region_interval: Duration::from_millis(100),
+                flush_metadata_region_interval: Duration::from_millis(10),
                 ..Default::default()
             },
         )
@@ -106,7 +106,7 @@ mod tests {
         env.init_metric_region().await;
         let engine = env.metric();
         // Wait for flush task run
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
         let physical_region_id = env.default_physical_region_id();
         let stat = engine.region_statistic(physical_region_id).unwrap();
 
