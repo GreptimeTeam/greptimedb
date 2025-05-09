@@ -27,8 +27,9 @@ use common_meta::peer::Peer;
 use common_meta::rpc::store::RangeRequest;
 use common_query::Output;
 use common_telemetry::warn;
-use itertools::Itertools;
 use meta_client::client::MetaClient;
+use rand::rng;
+use rand::seq::SliceRandom;
 use servers::query_handler::grpc::GrpcQueryHandler;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
@@ -201,17 +202,17 @@ impl FrontendClient {
         let mut interval = tokio::time::interval(GRPC_CONN_TIMEOUT);
         interval.tick().await;
         for retry in 0..GRPC_MAX_RETRIES {
-            let frontends = self.scan_for_frontend().await?;
+            let mut frontends = self.scan_for_frontend().await?;
             let now_in_ms = SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap()
                 .as_millis() as i64;
+            // shuffle the frontends to avoid always pick the same one
+            frontends.shuffle(&mut rng());
 
             // found node with maximum last_activity_ts
             for (_, node_info) in frontends
                 .iter()
-                .sorted_by_key(|(_, node_info)| node_info.last_activity_ts)
-                .rev()
                 // filter out frontend that have been down for more than 1 min
                 .filter(|(_, node_info)| {
                     node_info.last_activity_ts + FRONTEND_ACTIVITY_TIMEOUT.as_millis() as i64

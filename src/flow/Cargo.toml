@@ -59,6 +59,7 @@ partition.workspace = true
 prometheus.workspace = true
 prost.workspace = true
 query.workspace = true
+rand.workspace = true
 serde.workspace = true
 servers.workspace = true
 session.workspace = true
