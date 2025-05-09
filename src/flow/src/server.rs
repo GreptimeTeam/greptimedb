@@ -459,7 +459,7 @@ impl FlownodeBuilder {
 
         // TODO(discord9): recover in parallel
         info!("Recovering {} flows: {:?}", cnt, to_be_recovered);
-        for flow_id in to_be_recovered {
+        for flow_id in to_be_recovered.clone() {
             let info = self
                 .flow_metadata_manager
                 .flow_info_manager()
@@ -515,6 +515,8 @@ impl FlownodeBuilder {
                     sql: info.raw_sql().clone(),
                 })?;
         }
+
+        info!("{} flows recovered: {:?}", cnt, to_be_recovered);
 
         Ok(cnt)
     }
