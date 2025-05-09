@@ -46,7 +46,7 @@ pub(crate) fn create_meta_peer_client() -> MetaPeerClientRef {
     let in_memory = Arc::new(MemoryKvBackend::new());
     MetaPeerClientBuilder::default()
         .election(None)
-        .in_memory(in_memory.clone())
+        .in_memory(in_memory)
         .build()
         .map(Arc::new)
         // Safety: all required fields set at initialization

@@ -44,29 +44,13 @@ fn build_lease_filter(lease_secs: u64) -> impl Fn(&LeaseValue) -> bool {
 /// - Hybrid workload (both ingest and query workloads)
 /// - Ingest workload (only ingest workload)
 pub fn is_datanode_accept_ingest_workload(lease_value: &LeaseValue) -> bool {
-    #[cfg(feature = "enterprise")]
-    {
-        match &lease_value.workloads {
-            NodeWorkloads::Datanode(workloads) => {
-                workloads
-                    .types
-                    .contains(&(DatanodeWorkloadType::Hybrid as i32))
-                    || workloads
-                        .types
-                        .contains(&(DatanodeWorkloadType::Ingest as i32))
-            }
-            _ => false,
-        }
-    }
-
-    #[cfg(not(feature = "enterprise"))]
-    {
-        match &lease_value.workloads {
-            NodeWorkloads::Datanode(workloads) => workloads
-                .types
-                .contains(&(DatanodeWorkloadType::Hybrid as i32)),
-            _ => false,
-        }
+    match &lease_value.workloads {
+        NodeWorkloads::Datanode(workloads) => workloads
+            .types
+            .iter()
+            .filter_map(|w| DatanodeWorkloadType::try_from(*w).ok())
+            .any(|w| w.accept_ingest()),
+        _ => false,
     }
 }
 
@@ -169,7 +153,8 @@ where
         if this.inner_future.is_none() {
             let lease_filter = build_lease_filter(this.lease_secs);
             let condition = this.condition;
-            let fut = filter(this.key_prefix.clone(), this.meta_peer_client, move |v| {
+            let key_prefix = std::mem::take(&mut this.key_prefix);
+            let fut = filter(key_prefix, this.meta_peer_client, move |v| {
                 lease_filter(v) && condition.unwrap_or(|_| true)(v)
             });
 
@@ -419,6 +404,7 @@ mod tests {
         };
         #[cfg(feature = "enterprise")]
         assert!(is_datanode_accept_ingest_workload(&value));
+        // The community version does not have the `Ingest` workload type, only `Hybrid` is supported.
         #[cfg(not(feature = "enterprise"))]
         assert!(!is_datanode_accept_ingest_workload(&value));
     }
