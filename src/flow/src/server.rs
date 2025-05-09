@@ -517,6 +517,7 @@ impl FlownodeBuilder {
         }
 
         info!("{} flows recovered: {:?}", cnt, to_be_recovered);
+        manager.set_done_recovering();
 
         Ok(cnt)
     }

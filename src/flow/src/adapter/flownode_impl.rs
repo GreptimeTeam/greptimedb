@@ -14,6 +14,7 @@
 
 //! impl `FlowNode` trait for FlowNodeManager so standalone can call them
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use api::v1::flow::{
@@ -65,6 +66,7 @@ pub struct FlowDualEngine {
     catalog_manager: Arc<dyn CatalogManager>,
     check_task: tokio::sync::Mutex<Option<ConsistentCheckTask>>,
     plugins: Plugins,
+    done_recovering: AtomicBool,
 }
 
 impl FlowDualEngine {
@@ -83,7 +85,20 @@ impl FlowDualEngine {
             catalog_manager,
             check_task: Mutex::new(None),
             plugins,
+            done_recovering: AtomicBool::new(false),
         }
+    }
+
+    /// Set `done_recovering` to true
+    pub fn set_done_recovering(&self) {
+        self.done_recovering
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Check if `done_recovering` is true
+    pub fn is_recover_done(&self) -> bool {
+        self.done_recovering
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     pub fn plugins(&self) -> &Plugins {
@@ -629,11 +644,20 @@ impl FlowEngine for FlowDualEngine {
         &self,
         request: api::v1::region::InsertRequests,
     ) -> Result<(), Error> {
+        if !self.is_recover_done() {
+            warn!(
+                "FlowDualEngine is not done recovering, ignore {} rows of insert request",
+                request.requests.len()
+            );
+            // TODO(discord9): also put to centralized logging for flow once it implemented
+            return Ok(());
+        }
         // TODO(discord9): make as little clone as possible
         let mut to_stream_engine = Vec::with_capacity(request.requests.len());
         let mut to_batch_engine = request.requests;
 
         {
+            // TODO(discord9); not locking this, or recover flows will be starved when also handling flow inserts
             let src_table2flow = self.src_table2flow.read().await;
             to_batch_engine.retain(|req| {
                 let region_id = RegionId::from(req.region_id);
