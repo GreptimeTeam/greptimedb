@@ -243,6 +243,8 @@ pub enum Error {
         region_id: RegionId,
         column: String,
         source: datatypes::Error,
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display("Failed to build entry, region_id: {}", region_id))]
