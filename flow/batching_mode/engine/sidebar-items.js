@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["get_table_info","get_table_name"],"struct":["BatchingEngine"]};

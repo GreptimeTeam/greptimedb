@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_REGION"],"struct":["MultiDimPartitionRule","RuleChecker","SplitPoint"],"type":["Axis","PhysicalExprCache"]};

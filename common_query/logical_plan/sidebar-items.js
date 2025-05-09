@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["add_insert_to_logical_plan","breakup_insert_plan","build_filter_from_timestamp","build_same_type_ts_filter","create_aggregate_function","rename_logical_plan_columns"],"mod":["accumulator","expr","udaf"],"struct":["AggregateFunction"],"trait":["SubstraitPlanDecoder"],"type":["SubstraitPlanDecoderRef"]};

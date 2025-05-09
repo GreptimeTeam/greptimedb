@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["FULLTEXT_GRPC_KEY","INVERTED_INDEX_GRPC_KEY","SKIPPING_INDEX_GRPC_KEY"],"fn":["as_fulltext_option_analyzer","as_fulltext_option_backend","as_skipping_index_type","contains_fulltext","contains_skipping","options_from_column_schema","options_from_fulltext","options_from_inverted","options_from_skipping","try_as_column_schema"]};

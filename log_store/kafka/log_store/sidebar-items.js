@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_HIGH_WATERMARK_UPDATE_INTERVAL"],"fn":["build_entry","check_termination"],"struct":["KafkaLogStore"]};

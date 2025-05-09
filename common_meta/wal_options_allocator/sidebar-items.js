@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["WalOptionsAllocator"],"fn":["allocate_region_wal_options","build_kafka_client","build_kafka_topic_creator","build_wal_options_allocator","prepare_wal_options"],"mod":["selector","topic_creator","topic_manager","topic_pool"],"type":["WalOptionsAllocatorRef"]};
