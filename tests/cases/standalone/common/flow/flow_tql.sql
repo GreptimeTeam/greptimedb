@@ -9,28 +9,30 @@ CREATE TABLE http_requests (
 CREATE FLOW calc_reqs SINK TO cnt_reqs AS
 TQL EVAL (now() - '1m'::interval, now(), '5s') count_values("status_code", http_requests);
 
+SHOW CREATE TABLE cnt_reqs;
+
 INSERT INTO TABLE http_requests VALUES
-    (now() - '15s'::interval, 'host1', 'idc1', 200),
-    (now() - '15s'::interval, 'host2', 'idc1', 200),
-    (now() - '15s'::interval, 'host3', 'idc2', 200),
-    (now() - '15s'::interval, 'host4', 'idc2', 401),
-    (now() - '10s'::interval, 'host1', 'idc1', 404),
-    (now() - '10s'::interval, 'host2', 'idc1', 401),
-    (now() - '10s'::interval, 'host3', 'idc2', 404),
-    (now() - '10s'::interval, 'host4', 'idc2', 500),
-    (now() - '5s'::interval, 'host1', 'idc1', 200),
-    (now() - '5s'::interval, 'host2', 'idc1', 200),
-    (now() - '5s'::interval, 'host3', 'idc2', 201),
-    (now() - '5s'::interval, 'host4', 'idc2', 201),
-    (now(), 'host1', 'idc1', 500),
-    (now(), 'host2', 'idc1', 500),
-    (now(), 'host3', 'idc2', 500),
-    (now(), 'host4', 'idc2', 500);
+    (now() - '17s'::interval, 'host1', 'idc1', 200),
+    (now() - '17s'::interval, 'host2', 'idc1', 200),
+    (now() - '17s'::interval, 'host3', 'idc2', 200),
+    (now() - '17s'::interval, 'host4', 'idc2', 401),
+    (now() - '13s'::interval, 'host1', 'idc1', 404),
+    (now() - '13s'::interval, 'host2', 'idc1', 401),
+    (now() - '13s'::interval, 'host3', 'idc2', 404),
+    (now() - '13s'::interval, 'host4', 'idc2', 500),
+    (now() - '7s'::interval, 'host1', 'idc1', 200),
+    (now() - '7s'::interval, 'host2', 'idc1', 200),
+    (now() - '7s'::interval, 'host3', 'idc2', 201),
+    (now() - '7s'::interval, 'host4', 'idc2', 201),
+    (now() - '3s'::interval, 'host1', 'idc1', 500),
+    (now() - '3s'::interval, 'host2', 'idc1', 500),
+    (now() - '3s'::interval, 'host3', 'idc2', 500),
+    (now() - '3s'::interval, 'host4', 'idc2', 500);
 
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_reqs');
 
-SELECT "count(http_requests.val)" as cnt, status_code FROM cnt_reqs ORDER BY status_code, cnt DESC;
+SELECT "count(http_requests.val)" as cnt, status_code FROM cnt_reqs ORDER BY ts ASC;
 
 DROP FLOW calc_reqs;
 DROP TABLE http_requests;
