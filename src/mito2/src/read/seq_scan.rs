@@ -206,6 +206,14 @@ impl SeqScan {
                 .build(),
             ));
         }
+        if self.properties.partitions[partition].is_empty() {
+            return Ok(Box::pin(RecordBatchStreamWrapper::new(
+                self.stream_ctx.input.mapper.output_schema(),
+                common_recordbatch::EmptyRecordBatchStream::new(
+                    self.stream_ctx.input.mapper.output_schema(),
+                ),
+            )));
+        }
 
         if self.stream_ctx.input.distribution == Some(TimeSeriesDistribution::PerSeries) {
             return self.scan_partition_by_series(metrics_set, partition);

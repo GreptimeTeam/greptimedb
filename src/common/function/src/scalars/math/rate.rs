@@ -37,7 +37,7 @@ impl fmt::Display for RateFunction {
 
 impl Function for RateFunction {
     fn name(&self) -> &str {
-        "prom_rate"
+        "rate"
     }
 
     fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
@@ -82,7 +82,7 @@ mod tests {
     #[test]
     fn test_rate_function() {
         let rate = RateFunction;
-        assert_eq!("prom_rate", rate.name());
+        assert_eq!("rate", rate.name());
         assert_eq!(
             ConcreteDataType::float64_datatype(),
             rate.return_type(&[]).unwrap()

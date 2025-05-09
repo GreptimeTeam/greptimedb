@@ -42,7 +42,7 @@ use greptime_proto::substrait_extension as pb;
 use prost::Message;
 use snafu::ResultExt;
 
-use crate::error::{DataFusionPlanningSnafu, DeserializeSnafu, Result};
+use crate::error::{DeserializeSnafu, Result};
 use crate::extension_plan::{Millisecond, METRIC_NUM_SERIES};
 use crate::metrics::PROMQL_SERIES_COUNT;
 use crate::range_array::RangeArray;
@@ -194,20 +194,26 @@ impl RangeManipulate {
 
     pub fn deserialize(bytes: &[u8]) -> Result<Self> {
         let pb_range_manipulate = pb::RangeManipulate::decode(bytes).context(DeserializeSnafu)?;
+        let empty_schema = Arc::new(DFSchema::empty());
         let placeholder_plan = LogicalPlan::EmptyRelation(EmptyRelation {
             produce_one_row: false,
-            schema: Arc::new(DFSchema::empty()),
+            schema: empty_schema.clone(),
         });
-        Self::new(
-            pb_range_manipulate.start,
-            pb_range_manipulate.end,
-            pb_range_manipulate.interval,
-            pb_range_manipulate.range,
-            pb_range_manipulate.time_index,
-            pb_range_manipulate.tag_columns,
-            placeholder_plan,
-        )
-        .context(DataFusionPlanningSnafu)
+
+        // Unlike `Self::new()`, this method doesn't check the input schema as it will fail
+        // because the input schema is empty.
+        // But this is Ok since datafusion guarantees to call `with_exprs_and_inputs` for the
+        // deserialized plan.
+        Ok(Self {
+            start: pb_range_manipulate.start,
+            end: pb_range_manipulate.end,
+            interval: pb_range_manipulate.interval,
+            range: pb_range_manipulate.range,
+            time_index: pb_range_manipulate.time_index,
+            field_columns: pb_range_manipulate.tag_columns,
+            input: placeholder_plan,
+            output_schema: empty_schema,
+        })
     }
 }
 
@@ -270,13 +276,18 @@ impl UserDefinedLogicalNodeCore for RangeManipulate {
     fn with_exprs_and_inputs(
         &self,
         _exprs: Vec<Expr>,
-        inputs: Vec<LogicalPlan>,
+        mut inputs: Vec<LogicalPlan>,
     ) -> DataFusionResult<Self> {
-        if inputs.is_empty() {
+        if inputs.len() != 1 {
             return Err(DataFusionError::Internal(
-                "RangeManipulate should have at least one input".to_string(),
+                "RangeManipulate should have at exact one input".to_string(),
             ));
         }
+
+        let input: LogicalPlan = inputs.pop().unwrap();
+        let input_schema = input.schema();
+        let output_schema =
+            Self::calculate_output_schema(input_schema, &self.time_index, &self.field_columns)?;
 
         Ok(Self {
             start: self.start,
@@ -285,8 +296,8 @@ impl UserDefinedLogicalNodeCore for RangeManipulate {
             range: self.range,
             time_index: self.time_index.clone(),
             field_columns: self.field_columns.clone(),
-            input: inputs.into_iter().next().unwrap(),
-            output_schema: self.output_schema.clone(),
+            input,
+            output_schema,
         })
     }
 }
