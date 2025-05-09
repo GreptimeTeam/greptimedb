@@ -6,7 +6,7 @@ node_id = 42
 ## The default value is `["hybrid"]`.
 ##
 ## Available values:
-## - `hybrid`: both ingest and query workloads, which means the datanode can handle both writable and read-only regions.
+## - `hybrid`: all workloads, which means the datanode can handle all regions.
 ## - `ingest`: only ingest workload, which means the datanode can only handle writable regions.
 ## - `query`: only query workload, which means the datanode can only handle read-only regions.
 workload_types = [

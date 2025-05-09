@@ -96,7 +96,11 @@ impl HeartbeatTask {
 
         Ok(Self {
             node_id: opts.node_id.unwrap_or(0),
-            workload_types: opts.to_pb_workload_types(),
+            workload_types: opts
+                .workload_types
+                .iter()
+                .map(|w| api::v1::meta::DatanodeWorkloadType::from(*w))
+                .collect(),
             // We use datanode's start time millis as the node's epoch.
             node_epoch: common_time::util::current_time_millis() as u64,
             peer_addr: addrs::resolve_addr(&opts.grpc.bind_addr, Some(&opts.grpc.server_addr)),

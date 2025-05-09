@@ -383,7 +383,7 @@
 | Key | Type | Default | Descriptions |
 | --- | -----| ------- | ----------- |
 | `node_id` | Integer | Unset | The datanode identifier and should be unique in the cluster. |
-| `workload_types` | Array | -- | The acceptable workload types of the datanode.<br/>The default value is `["hybrid"]`.<br/><br/>Available values:<br/>- `hybrid`: both ingest and query workloads, which means the datanode can handle both writable and read-only regions.<br/>- `ingest`: only ingest workload, which means the datanode can only handle writable regions.<br/>- `query`: only query workload, which means the datanode can only handle read-only regions. |
+| `workload_types` | Array | -- | The acceptable workload types of the datanode.<br/>The default value is `["hybrid"]`.<br/><br/>Available values:<br/>- `hybrid`: all workloads, which means the datanode can handle all regions.<br/>- `ingest`: only ingest workload, which means the datanode can only handle writable regions.<br/>- `query`: only query workload, which means the datanode can only handle read-only regions. |
 | `require_lease_before_startup` | Bool | `false` | Start services after regions have obtained leases.<br/>It will block the datanode start if it can't receive leases in the heartbeat from metasrv. |
 | `init_regions_in_background` | Bool | `false` | Initialize all regions in the background during the startup.<br/>By default, it provides services after all regions have been initialized. |
 | `init_regions_parallelism` | Integer | `16` | Parallelism of initializing regions. |

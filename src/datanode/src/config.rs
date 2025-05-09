@@ -361,11 +361,11 @@ impl Default for ObjectStoreConfig {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum DatanodeWorkloadType {
-    /// / The datanode can handle all workloads (both ingest and query).
+    /// The datanode can handle all workloads (including ingest and query workloads).
     Hybrid = 0,
-    /// / The datanode can only handle ingest workloads.
+    /// The datanode can only handle ingest workloads.
     Ingest = 1,
-    /// / The datanode can only handle query workloads.
+    /// The datanode can only handle query workloads.
     Query = 2,
 }
 
@@ -421,20 +421,12 @@ impl DatanodeOptions {
         if self.workload_types.is_empty() {
             warn!("workload_types is empty, set to Hybrid");
             self.workload_types = vec![DatanodeWorkloadType::Hybrid];
-        } else if !self.workload_types.is_empty()
+        } else if self.workload_types.len() > 1
             && self.workload_types.contains(&DatanodeWorkloadType::Hybrid)
         {
             warn!("workload_types contains Hybrid, ignore other workload types");
             self.workload_types = vec![DatanodeWorkloadType::Hybrid];
         }
-    }
-
-    /// Converts the internal workload types to protobuf workload types.
-    pub fn to_pb_workload_types(&self) -> Vec<api::v1::meta::DatanodeWorkloadType> {
-        self.workload_types
-            .iter()
-            .map(|w| api::v1::meta::DatanodeWorkloadType::from(*w))
-            .collect()
     }
 }
 
@@ -569,6 +561,13 @@ mod tests {
         };
         opts.sanitize();
         assert_eq!(opts.workload_types, vec![DatanodeWorkloadType::Hybrid]);
+
+        let mut opts = DatanodeOptions {
+            workload_types: vec![DatanodeWorkloadType::Ingest],
+            ..Default::default()
+        };
+        opts.sanitize();
+        assert_eq!(opts.workload_types, vec![DatanodeWorkloadType::Ingest]);
 
         let mut opts = DatanodeOptions {
             workload_types: vec![],
