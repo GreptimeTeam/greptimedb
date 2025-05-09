@@ -444,7 +444,7 @@ jobs:
   bump-doc-version:
     name: Bump doc version
     if: ${{ github.event_name == 'push' || github.event_name == 'schedule' }}
-    needs: [allocate-runners]
+    needs: [publish-github-release]
     runs-on: ubuntu-latest
     # Permission reference: https://docs.github.com/en/actions/using-jobs/assigning-permissions-to-jobs
     permissions:
@@ -466,8 +466,8 @@ jobs:
 
   bump-website-version:
     name: Bump website version
-    if: ${{ github.event_name == 'push' || github.event_name == 'schedule' }}
-    needs: [allocate-runners]
+    if: ${{ github.event_name == 'push' }}
+    needs: [publish-github-release]
     runs-on: ubuntu-latest
     # Permission reference: https://docs.github.com/en/actions/using-jobs/assigning-permissions-to-jobs
     permissions:
