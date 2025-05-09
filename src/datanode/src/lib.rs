@@ -18,7 +18,6 @@
 pub mod alive_keeper;
 pub mod config;
 pub mod datanode;
-pub mod enterprise;
 pub mod error;
 pub mod event_listener;
 mod greptimedb_telemetry;

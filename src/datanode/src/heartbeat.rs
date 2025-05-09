@@ -17,8 +17,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use api::v1::meta::heartbeat_request::NodeWorkloads;
 use api::v1::meta::{
-    DatanodeWorkloadType, HeartbeatRequest, NodeInfo, Peer, RegionRole, RegionStat,
+    DatanodeWorkloadType, DatanodeWorkloads, HeartbeatRequest, NodeInfo, Peer, RegionRole,
+    RegionStat,
 };
 use common_base::Plugins;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
@@ -42,7 +44,6 @@ use tokio::time::Instant;
 use self::handler::RegionHeartbeatResponseHandler;
 use crate::alive_keeper::{CountdownTaskHandlerExtRef, RegionAliveKeeper};
 use crate::config::DatanodeOptions;
-use crate::enterprise::convert_workload_types_to_node_workloads;
 use crate::error::{self, MetaClientInitSnafu, Result};
 use crate::event_listener::RegionServerEventReceiver;
 use crate::metrics::{self, HEARTBEAT_RECV_COUNT, HEARTBEAT_SENT_COUNT};
@@ -249,7 +250,9 @@ impl HeartbeatTask {
                     start_time_ms: node_epoch,
                     cpus: num_cpus::get() as u32,
                 }),
-                node_workloads: convert_workload_types_to_node_workloads(&workload_types),
+                node_workloads: Some(NodeWorkloads::Datanode(DatanodeWorkloads {
+                    types: workload_types.iter().map(|w| *w as i32).collect(),
+                })),
                 ..Default::default()
             };
 
