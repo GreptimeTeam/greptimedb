@@ -107,7 +107,7 @@ impl PreFlushRegion {
         let result = ctx.mailbox.send(&ch, msg, operation_timeout).await;
 
         match result {
-            Ok(receiver) => match receiver.await? {
+            Ok(receiver) => match receiver.await {
                 Ok(msg) => {
                     let reply = HeartbeatMailbox::json_reply(&msg)?;
                     info!(
