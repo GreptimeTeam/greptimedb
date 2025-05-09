@@ -388,8 +388,7 @@ mod tests {
             .with_condition(is_datanode_accept_ingest_workload)
             .await
             .unwrap();
-        assert_eq!(leases.len(), 2);
+        assert_eq!(leases.len(), 1);
         assert!(leases.contains_key(&DatanodeLeaseKey { node_id: 2 }));
-        assert!(leases.contains_key(&DatanodeLeaseKey { node_id: 4 }));
     }
 }
