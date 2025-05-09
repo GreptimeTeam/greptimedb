@@ -478,10 +478,11 @@ impl TableRouteStorage {
         ))
     }
 
+    // TODO(LFC): restore its original visibility after some test utility codes are refined
     /// Builds a update table route transaction,
     /// it expected the remote value equals the `current_table_route_value`.
     /// It retrieves the latest value if the comparing failed.
-    pub(crate) fn build_update_txn(
+    pub fn build_update_txn(
         &self,
         table_id: TableId,
         current_table_route_value: &DeserializedValueWithBytes<TableRouteValue>,

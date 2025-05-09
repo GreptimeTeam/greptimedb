@@ -176,6 +176,10 @@ impl DatanodeBuilder {
         }
     }
 
+    pub fn options(&self) -> &DatanodeOptions {
+        &self.opts
+    }
+
     pub fn with_meta_client(&mut self, client: MetaClientRef) -> &mut Self {
         self.meta_client = Some(client);
         self
