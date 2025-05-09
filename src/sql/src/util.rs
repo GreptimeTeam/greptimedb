@@ -15,9 +15,10 @@
 use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
 
-use sqlparser::ast::{Expr, ObjectName, Query, SetExpr, SqlOption, TableFactor, Value};
+use sqlparser::ast::{Expr, ObjectName, SetExpr, SqlOption, TableFactor, Value};
 
 use crate::error::{InvalidSqlSnafu, InvalidTableOptionValueSnafu, Result};
+use crate::statements::create::SqlOrTql;
 
 /// Format an [ObjectName] without any quote of its idents.
 pub fn format_raw_object_name(name: &ObjectName) -> String {
@@ -58,12 +59,34 @@ pub fn parse_option_string(option: SqlOption) -> Result<(String, String)> {
 }
 
 /// Walk through a [Query] and extract all the tables referenced in it.
-pub fn extract_tables_from_query(query: &Query) -> impl Iterator<Item = ObjectName> {
+pub fn extract_tables_from_query(query: &SqlOrTql) -> impl Iterator<Item = ObjectName> {
     let mut names = HashSet::new();
 
-    extract_tables_from_set_expr(&query.body, &mut names);
+    match query {
+        SqlOrTql::Sql(query, _) => extract_tables_from_set_expr(&query.body, &mut names),
+        SqlOrTql::Tql(_tql, _) => {
+            // since tql have sliding time window, so we don't need to extract tables from it
+            // (because we are going to eval it fully anyway)
+        }
+    }
 
     names.into_iter()
+}
+
+/// translate the start location to the index in the sql string
+pub fn location_to_index(sql: &str, location: &sqlparser::tokenizer::Location) -> usize {
+    let mut index = 0;
+    for (lno, line) in sql.lines().enumerate() {
+        if lno + 1 == location.line as usize {
+            index += location.column as usize;
+            break;
+        } else {
+            index += line.len() + 1; // +1 for the newline
+        }
+    }
+    // -1 because the index is 0-based
+    // and the location is 1-based
+    index - 1
 }
 
 /// Helper function for [extract_tables_from_query].

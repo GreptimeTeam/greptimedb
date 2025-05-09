@@ -24,8 +24,11 @@ use sqlparser::ast::{ColumnOptionDef, DataType, Expr, Query};
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::{ColumnDef, Ident, ObjectName, Value as SqlValue};
-use crate::error::{Result, SetFulltextOptionSnafu, SetSkippingIndexOptionSnafu};
+use crate::error::{
+    InvalidFlowQuerySnafu, Result, SetFulltextOptionSnafu, SetSkippingIndexOptionSnafu,
+};
 use crate::statements::statement::Statement;
+use crate::statements::tql::Tql;
 use crate::statements::OptionMap;
 
 const LINE_SEP: &str = ",\n";
@@ -374,7 +377,41 @@ pub struct CreateFlow {
     /// Comment string
     pub comment: Option<String>,
     /// SQL statement
-    pub query: Box<Query>,
+    pub query: Box<SqlOrTql>,
+}
+
+/// Either a sql query or a tql query
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize)]
+pub enum SqlOrTql {
+    Sql(Query, String),
+    Tql(Tql, String),
+}
+
+impl std::fmt::Display for SqlOrTql {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Sql(_, s) => write!(f, "{}", s),
+            Self::Tql(_, s) => write!(f, "{}", s),
+        }
+    }
+}
+
+impl SqlOrTql {
+    pub fn try_from_statement(
+        value: Statement,
+        original_query: &str,
+    ) -> std::result::Result<Self, crate::error::Error> {
+        match value {
+            Statement::Query(query) => {
+                Ok(Self::Sql((*query).try_into()?, original_query.to_string()))
+            }
+            Statement::Tql(tql) => Ok(Self::Tql(tql, original_query.to_string())),
+            _ => InvalidFlowQuerySnafu {
+                reason: format!("Expect either sql query or promql query, found {:?}", value),
+            }
+            .fail(),
+        }
+    }
 }
 
 impl Display for CreateFlow {
@@ -741,7 +778,7 @@ WITH(
                     r#"
 CREATE FLOW filter_numbers
 SINK TO out_num_cnt
-AS SELECT number FROM numbers_input WHERE number > 10"#,
+AS SELECT number FROM numbers_input where number > 10"#,
                     &new_sql
                 );
 

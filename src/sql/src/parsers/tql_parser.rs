@@ -23,6 +23,7 @@ use crate::parser::ParserContext;
 use crate::parsers::utils;
 use crate::statements::statement::Statement;
 use crate::statements::tql::{Tql, TqlAnalyze, TqlEval, TqlExplain, TqlParameters};
+use crate::util::location_to_index;
 
 pub const TQL: &str = "TQL";
 const EVAL: &str = "EVAL";
@@ -159,7 +160,7 @@ impl ParserContext<'_> {
                 let value = match tokens[0].clone() {
                     Token::Number(n, _) => n,
                     Token::DoubleQuotedString(s) | Token::SingleQuotedString(s) => s,
-                    Token::Word(_) => Self::parse_tokens(tokens)?,
+                    Token::Word(_) => Self::parse_tokens_to_ts(tokens)?,
                     unexpected => {
                         return Err(ParserError::ParserError(format!(
                             "Expected number, string or word, but have {unexpected:?}"
@@ -169,7 +170,7 @@ impl ParserContext<'_> {
                 };
                 Ok(value)
             }
-            _ => Self::parse_tokens(tokens),
+            _ => Self::parse_tokens_to_ts(tokens),
         };
         for token in delimiter_tokens {
             if parser.consume_token(token) {
@@ -182,9 +183,10 @@ impl ParserContext<'_> {
         .context(ParserSnafu)
     }
 
-    fn parse_tokens(tokens: Vec<Token>) -> std::result::Result<String, TQLError> {
+    /// Parse the tokens to seconds and convert to string.
+    fn parse_tokens_to_ts(tokens: Vec<Token>) -> std::result::Result<String, TQLError> {
         let parser_expr = Self::parse_to_expr(tokens)?;
-        let lit = utils::parser_expr_to_scalar_value(parser_expr)
+        let lit = utils::parser_expr_to_scalar_value_literal(parser_expr)
             .map_err(Box::new)
             .context(ConvertToLogicalExpressionSnafu)?;
 
@@ -217,10 +219,14 @@ impl ParserContext<'_> {
         while matches!(parser.peek_token().token, Token::Comma) {
             let _skip_token = parser.next_token();
         }
-        let index = parser.next_token().span.start.column as usize;
-        if index == 0 {
+        let start_tql = parser.next_token();
+        if start_tql == Token::EOF {
             return Err(ParserError::ParserError("empty TQL query".to_string()));
         }
+
+        let start_location = start_tql.span.start;
+        // translate the start location to the index in the sql string
+        let index = location_to_index(sql, &start_location);
 
         let query = &sql[index - 1..];
         while parser.next_token() != Token::EOF {
