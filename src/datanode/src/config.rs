@@ -21,8 +21,8 @@ use common_base::secrets::{ExposeSecret, SecretString};
 use common_config::Configurable;
 pub use common_procedure::options::ProcedureConfig;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
-use common_telemetry::tracing::warn;
 use common_wal::config::DatanodeWalConfig;
+use common_workload::{sanitize_workload_types, DatanodeWorkloadType};
 use file_engine::config::EngineConfig as FileEngineConfig;
 use meta_client::MetaClientOptions;
 use metric_engine::config::EngineConfig as MetricEngineConfig;
@@ -357,28 +357,6 @@ impl Default for ObjectStoreConfig {
     }
 }
 
-/// The workload type of the datanode.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum DatanodeWorkloadType {
-    /// The datanode can handle all workloads (including ingest and query workloads).
-    Hybrid = 0,
-    /// The datanode can only handle ingest workloads.
-    Ingest = 1,
-    /// The datanode can only handle query workloads.
-    Query = 2,
-}
-
-impl From<DatanodeWorkloadType> for api::v1::meta::DatanodeWorkloadType {
-    fn from(value: DatanodeWorkloadType) -> Self {
-        match value {
-            DatanodeWorkloadType::Hybrid => api::v1::meta::DatanodeWorkloadType::Hybrid,
-            DatanodeWorkloadType::Ingest => api::v1::meta::DatanodeWorkloadType::Ingest,
-            DatanodeWorkloadType::Query => api::v1::meta::DatanodeWorkloadType::Query,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct DatanodeOptions {
@@ -418,15 +396,7 @@ pub struct DatanodeOptions {
 impl DatanodeOptions {
     /// Sanitize the `DatanodeOptions` to ensure the config is valid.
     pub fn sanitize(&mut self) {
-        if self.workload_types.is_empty() {
-            warn!("workload_types is empty, set to Hybrid");
-            self.workload_types = vec![DatanodeWorkloadType::Hybrid];
-        } else if self.workload_types.len() > 1
-            && self.workload_types.contains(&DatanodeWorkloadType::Hybrid)
-        {
-            warn!("workload_types contains Hybrid, ignore other workload types");
-            self.workload_types = vec![DatanodeWorkloadType::Hybrid];
-        }
+        sanitize_workload_types(&mut self.workload_types);
     }
 }
 
@@ -546,34 +516,5 @@ mod tests {
             }
             _ => unreachable!(),
         }
-    }
-
-    #[test]
-    fn test_datanode_sanitize() {
-        common_telemetry::init_default_ut_logging();
-        let mut opts = DatanodeOptions {
-            workload_types: vec![
-                DatanodeWorkloadType::Hybrid,
-                DatanodeWorkloadType::Ingest,
-                DatanodeWorkloadType::Query,
-            ],
-            ..Default::default()
-        };
-        opts.sanitize();
-        assert_eq!(opts.workload_types, vec![DatanodeWorkloadType::Hybrid]);
-
-        let mut opts = DatanodeOptions {
-            workload_types: vec![DatanodeWorkloadType::Ingest],
-            ..Default::default()
-        };
-        opts.sanitize();
-        assert_eq!(opts.workload_types, vec![DatanodeWorkloadType::Ingest]);
-
-        let mut opts = DatanodeOptions {
-            workload_types: vec![],
-            ..Default::default()
-        };
-        opts.sanitize();
-        assert_eq!(opts.workload_types, vec![DatanodeWorkloadType::Hybrid]);
     }
 }

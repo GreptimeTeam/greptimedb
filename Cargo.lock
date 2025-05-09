@@ -2591,6 +2591,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-workload"
+version = "0.15.0"
+dependencies = [
+ "api",
+ "common-telemetry",
+ "serde",
+]
+
+[[package]]
 name = "concurrent-queue"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3517,6 +3526,7 @@ dependencies = [
  "common-time",
  "common-version",
  "common-wal",
+ "common-workload",
  "dashmap",
  "datafusion",
  "datafusion-common",

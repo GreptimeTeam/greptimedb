@@ -62,10 +62,57 @@ pub fn outgoing_message_to_mailbox_message(
 ///
 /// Returns default datanode workloads if the input is `None`.
 pub fn get_datanode_workloads(node_workloads: Option<&NodeWorkloads>) -> DatanodeWorkloads {
+    #[cfg(feature = "enterprise")]
     match node_workloads {
         Some(NodeWorkloads::Datanode(datanode_workloads)) => datanode_workloads.clone(),
         _ => DatanodeWorkloads {
             types: vec![DatanodeWorkloadType::Hybrid as i32],
         },
+    }
+
+    #[cfg(not(feature = "enterprise"))]
+    match node_workloads {
+        Some(NodeWorkloads::Datanode(datanode_workloads)) => DatanodeWorkloads {
+            types: vec![DatanodeWorkloadType::Hybrid as i32],
+        },
+        _ => DatanodeWorkloads {
+            types: vec![DatanodeWorkloadType::Hybrid as i32],
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_datanode_workloads() {
+        let node_workloads = Some(NodeWorkloads::Datanode(DatanodeWorkloads {
+            types: vec![
+                DatanodeWorkloadType::Hybrid as i32,
+                DatanodeWorkloadType::Query as i32,
+            ],
+        }));
+
+        #[cfg(feature = "enterprise")]
+        {
+            let datanode_workloads = get_datanode_workloads(node_workloads.as_ref());
+            assert_eq!(
+                datanode_workloads.types,
+                vec![
+                    DatanodeWorkloadType::Hybrid as i32,
+                    DatanodeWorkloadType::Query as i32,
+                ]
+            );
+        }
+
+        #[cfg(not(feature = "enterprise"))]
+        {
+            let datanode_workloads = get_datanode_workloads(node_workloads.as_ref());
+            assert_eq!(
+                datanode_workloads.types,
+                vec![DatanodeWorkloadType::Hybrid as i32]
+            );
+        }
     }
 }

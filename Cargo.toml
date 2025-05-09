@@ -36,6 +36,7 @@ members = [
     "src/common/time",
     "src/common/version",
     "src/common/wal",
+    "src/common/workload",
     "src/datanode",
     "src/datatypes",
     "src/file-engine",
@@ -256,6 +257,7 @@ common-test-util = { path = "src/common/test-util" }
 common-time = { path = "src/common/time" }
 common-version = { path = "src/common/version" }
 common-wal = { path = "src/common/wal" }
+common-workload = { path = "src/common/workload" }
 datanode = { path = "src/datanode" }
 datatypes = { path = "src/datatypes" }
 file-engine = { path = "src/file-engine" }

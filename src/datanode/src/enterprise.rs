@@ -12,20 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(assert_matches)]
-#![feature(let_chains)]
+use api::v1::meta::heartbeat_request::NodeWorkloads;
+use api::v1::meta::{DatanodeWorkloadType, DatanodeWorkloads};
 
-pub mod enterprise;
-pub mod alive_keeper;
-pub mod config;
-pub mod datanode;
-pub mod error;
-pub mod event_listener;
-mod greptimedb_telemetry;
-pub mod heartbeat;
-pub mod metrics;
-pub mod region_server;
-pub mod service;
-pub mod store;
-#[cfg(any(test, feature = "testing"))]
-pub mod tests;
+/// Convert workload types to node workloads.
+pub fn convert_workload_types_to_node_workloads(
+    workload_types: &[DatanodeWorkloadType],
+) -> Option<NodeWorkloads> {
+    #[cfg(feature = "enterprise")]
+    {
+        Some(NodeWorkloads::Datanode(DatanodeWorkloads {
+            types: workload_types.iter().map(|w| *w as i32).collect(),
+        }))
+    }
+
+    #[cfg(not(feature = "enterprise"))]
+    None
+}

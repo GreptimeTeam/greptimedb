@@ -9,6 +9,7 @@ mock = []
 pg_kvbackend = ["dep:tokio-postgres", "common-meta/pg_kvbackend", "dep:deadpool-postgres", "dep:deadpool"]
 mysql_kvbackend = ["dep:sqlx", "common-meta/mysql_kvbackend"]
 testing = ["common-wal/testing"]
+enterprise = ["common-meta/enterprise"]
 
 [lints]
 workspace = true

@@ -44,16 +44,29 @@ fn build_lease_filter(lease_secs: u64) -> impl Fn(&LeaseValue) -> bool {
 /// - Hybrid workload (both ingest and query workloads)
 /// - Ingest workload (only ingest workload)
 pub fn is_datanode_accept_ingest_workload(lease_value: &LeaseValue) -> bool {
-    match &lease_value.workloads {
-        NodeWorkloads::Datanode(workloads) => {
-            workloads
-                .types
-                .contains(&(DatanodeWorkloadType::Hybrid as i32))
-                || workloads
+    #[cfg(feature = "enterprise")]
+    {
+        match &lease_value.workloads {
+            NodeWorkloads::Datanode(workloads) => {
+                workloads
                     .types
-                    .contains(&(DatanodeWorkloadType::Ingest as i32))
+                    .contains(&(DatanodeWorkloadType::Hybrid as i32))
+                    || workloads
+                        .types
+                        .contains(&(DatanodeWorkloadType::Ingest as i32))
+            }
+            _ => false,
         }
-        _ => false,
+    }
+
+    #[cfg(not(feature = "enterprise"))]
+    {
+        match &lease_value.workloads {
+            NodeWorkloads::Datanode(workloads) => workloads
+                .types
+                .contains(&(DatanodeWorkloadType::Hybrid as i32)),
+            _ => false,
+        }
     }
 }
 
@@ -335,6 +348,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "enterprise")]
     async fn test_alive_datanodes_with_condition() {
         let client = create_meta_peer_client();
         let in_memory = client.memory_backend();
@@ -392,5 +406,20 @@ mod tests {
         assert_eq!(leases.len(), 2);
         assert!(leases.contains_key(&DatanodeLeaseKey { node_id: 2 }));
         assert!(leases.contains_key(&DatanodeLeaseKey { node_id: 4 }));
+    }
+
+    #[test]
+    fn test_is_datanode_accept_ingest_workload() {
+        let value = LeaseValue {
+            timestamp_millis: current_time_millis(),
+            node_addr: "127.0.0.1:20201".to_string(),
+            workloads: NodeWorkloads::Datanode(DatanodeWorkloads {
+                types: vec![DatanodeWorkloadType::Ingest as i32],
+            }),
+        };
+        #[cfg(feature = "enterprise")]
+        assert!(is_datanode_accept_ingest_workload(&value));
+        #[cfg(not(feature = "enterprise"))]
+        assert!(!is_datanode_accept_ingest_workload(&value));
     }
 }
