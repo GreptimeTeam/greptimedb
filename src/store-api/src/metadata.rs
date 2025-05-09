@@ -29,10 +29,7 @@ use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datatypes::arrow;
 use datatypes::arrow::datatypes::FieldRef;
-use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{
-    ColumnDefaultConstraint, ColumnSchema, FulltextOptions, Schema, SchemaRef, SkippingIndexOptions,
-};
+use datatypes::schema::{ColumnSchema, FulltextOptions, Schema, SchemaRef, SkippingIndexOptions};
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{ensure, Location, OptionExt, ResultExt, Snafu};
