@@ -42,11 +42,11 @@ use futures::future;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use prost::Message;
 use snafu::{ensure, ResultExt};
-use tonic::metadata::{AsciiMetadataKey, MetadataMap, MetadataValue};
+use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue, MetadataMap, MetadataValue};
 use tonic::transport::Channel;
 
 use crate::error::{
-    ConvertFlightDataSnafu, Error, FlightGetSnafu, IllegalFlightMessagesSnafu, InvalidAsciiSnafu,
+    ConvertFlightDataSnafu, Error, FlightGetSnafu, IllegalFlightMessagesSnafu,
     InvalidTonicMetadataValueSnafu, ServerSnafu,
 };
 use crate::{from_grpc_response, Client, Result};
@@ -172,22 +172,17 @@ impl Database {
     }
 
     fn put_hints(metadata: &mut MetadataMap, hints: &[(&str, &str)]) -> Result<()> {
-        for (key, value) in hints {
-            let key = AsciiMetadataKey::from_bytes(format!("x-greptime-hint-{}", key).as_bytes())
-                .map_err(|_| {
-                InvalidAsciiSnafu {
-                    value: key.to_string(),
-                }
-                .build()
-            })?;
-            let value = value.parse().map_err(|_| {
-                InvalidAsciiSnafu {
-                    value: value.to_string(),
-                }
-                .build()
-            })?;
-            metadata.insert(key, value);
-        }
+        let Some(value) = hints
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .reduce(|a, b| format!("{},{}", a, b))
+        else {
+            return Ok(());
+        };
+
+        let key = AsciiMetadataKey::from_static("x-greptime-hints");
+        let value = AsciiMetadataValue::from_str(&value).context(InvalidTonicMetadataValueSnafu)?;
+        metadata.insert(key, value);
         Ok(())
     }
 

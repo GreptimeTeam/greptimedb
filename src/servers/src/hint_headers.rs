@@ -18,6 +18,8 @@ use tonic::metadata::MetadataMap;
 // For the given format: `x-greptime-hints: auto_create_table=true, ttl=7d`
 pub const HINTS_KEY: &str = "x-greptime-hints";
 
+pub const READ_PREFERENCE_HINT: &str = "read_preference";
+
 const HINT_KEYS: [&str; 7] = [
     "x-greptime-hint-auto_create_table",
     "x-greptime-hint-ttl",
@@ -25,7 +27,7 @@ const HINT_KEYS: [&str; 7] = [
     "x-greptime-hint-merge_mode",
     "x-greptime-hint-physical_table",
     "x-greptime-hint-skip_wal",
-    "x-greptime-hint-read-preference",
+    "x-greptime-hint-read_preference",
 ];
 
 pub(crate) fn extract_hints<T: ToHeaderMap>(headers: &T) -> Vec<(String, String)> {
@@ -92,7 +94,7 @@ mod tests {
             HeaderValue::from_static("table1"),
         );
         headers.insert(
-            "x-greptime-hint-read-preference",
+            "x-greptime-hint-read_preference",
             HeaderValue::from_static("leader"),
         );
 
@@ -112,7 +114,7 @@ mod tests {
         );
         assert_eq!(
             hints[5],
-            ("read-preference".to_string(), "leader".to_string())
+            ("read_preference".to_string(), "leader".to_string())
         );
     }
 
@@ -141,7 +143,7 @@ mod tests {
         headers.insert(
             "x-greptime-hints",
             HeaderValue::from_static(" auto_create_table=true, ttl =3600d, append_mode=true , merge_mode=false , physical_table= table1,\
-            read-preference=leader"),
+            read_preference=leader"),
         );
 
         let hints = extract_hints(&headers);
@@ -160,7 +162,7 @@ mod tests {
         );
         assert_eq!(
             hints[5],
-            ("read-preference".to_string(), "leader".to_string())
+            ("read_preference".to_string(), "leader".to_string())
         );
     }
 
@@ -185,7 +187,7 @@ mod tests {
             MetadataValue::from_static("table1"),
         );
         metadata.insert(
-            "x-greptime-hint-read-preference",
+            "x-greptime-hint-read_preference",
             MetadataValue::from_static("leader"),
         );
 
@@ -205,7 +207,7 @@ mod tests {
         );
         assert_eq!(
             hints[5],
-            ("read-preference".to_string(), "leader".to_string())
+            ("read_preference".to_string(), "leader".to_string())
         );
     }
 

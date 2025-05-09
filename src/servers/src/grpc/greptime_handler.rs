@@ -49,6 +49,7 @@ use crate::error::{
 };
 use crate::grpc::flight::{PutRecordBatchRequest, PutRecordBatchRequestStream};
 use crate::grpc::TonicResult;
+use crate::hint_headers::READ_PREFERENCE_HINT;
 use crate::metrics;
 use crate::metrics::{METRIC_AUTH_FAILURE, METRIC_SERVER_GRPC_DB_REQUEST_TIMER};
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
@@ -316,7 +317,10 @@ pub(crate) fn create_query_context(
         .current_schema(schema)
         .timezone(timezone);
 
-    if let Some(x) = extensions.iter().position(|(k, _)| k == "read-preference") {
+    if let Some(x) = extensions
+        .iter()
+        .position(|(k, _)| k == READ_PREFERENCE_HINT)
+    {
         let (k, v) = extensions.swap_remove(x);
         let Ok(read_preference) = ReadPreference::from_str(&v) else {
             return UnknownHintSnafu {
@@ -390,7 +394,7 @@ mod tests {
             Some(&header),
             vec![
                 ("auto_create_table".to_string(), "true".to_string()),
-                ("read-preference".to_string(), "leader".to_string()),
+                ("read_preference".to_string(), "leader".to_string()),
             ],
         )
         .unwrap();
