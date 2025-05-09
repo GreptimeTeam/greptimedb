@@ -30,16 +30,22 @@ pub enum Output {
     Flamegraph,
 }
 
+#[derive(Default, Serialize, Deserialize, Debug)]
+#[serde(default)]
+pub struct MemPprofQuery {
+    output: Output,
+}
+
 #[cfg(feature = "mem-prof")]
 #[axum_macros::debug_handler]
 pub async fn mem_prof_handler(
-    Query(req): Query<Output>,
+    Query(req): Query<MemPprofQuery>,
 ) -> crate::error::Result<impl IntoResponse> {
     use snafu::ResultExt;
 
     use crate::error::DumpProfileDataSnafu;
 
-    let dump = match req {
+    let dump = match req.output {
         Output::Proto => common_mem_prof::dump_pprof().await,
         Output::Text => common_mem_prof::dump_profile().await,
         Output::Flamegraph => common_mem_prof::dump_flamegraph().await,

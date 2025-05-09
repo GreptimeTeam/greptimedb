@@ -73,7 +73,7 @@ pub async fn dump_profile() -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-pub async fn dump_profile_to_stack_profile() -> Result<StackProfile> {
+async fn dump_profile_to_stack_profile() -> Result<StackProfile> {
     let profile = dump_profile().await?;
     let profile = BufReader::new(profile.as_slice());
     parse_jeheap(profile, MAPPINGS.as_deref()).context(ParseJeHeapSnafu)
