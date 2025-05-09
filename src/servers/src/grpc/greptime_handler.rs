@@ -14,6 +14,7 @@
 
 //! Handler for Greptime Database service. It's implemented by frontend.
 
+use std::str::FromStr;
 use std::time::Instant;
 
 use api::helper::request_type;
@@ -31,6 +32,7 @@ use common_grpc::flight::FlightDecoder;
 use common_query::Output;
 use common_runtime::runtime::RuntimeTrait;
 use common_runtime::Runtime;
+use common_session::ReadPreference;
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{debug, error, tracing, warn};
 use common_time::timezone::parse_timezone;
@@ -43,7 +45,7 @@ use tokio::sync::mpsc;
 use crate::error::Error::UnsupportedAuthScheme;
 use crate::error::{
     AuthSnafu, InvalidAuthHeaderInvalidUtf8ValueSnafu, InvalidBase64ValueSnafu, InvalidQuerySnafu,
-    JoinTaskSnafu, NotFoundAuthHeaderSnafu, Result,
+    JoinTaskSnafu, NotFoundAuthHeaderSnafu, Result, UnknownHintSnafu,
 };
 use crate::grpc::flight::{PutRecordBatchRequest, PutRecordBatchRequestStream};
 use crate::grpc::TonicResult;
@@ -82,7 +84,7 @@ impl GreptimeRequestHandler {
         })?;
 
         let header = request.header.as_ref();
-        let query_ctx = create_query_context(header, hints);
+        let query_ctx = create_query_context(header, hints)?;
         let user_info = auth(self.user_provider.clone(), header, &query_ctx).await?;
         query_ctx.set_current_user(user_info);
 
@@ -279,8 +281,8 @@ pub(crate) async fn auth(
 
 pub(crate) fn create_query_context(
     header: Option<&RequestHeader>,
-    extensions: Vec<(String, String)>,
-) -> QueryContextRef {
+    mut extensions: Vec<(String, String)>,
+) -> Result<QueryContextRef> {
     let (catalog, schema) = header
         .map(|header| {
             // We provide dbname field in newer versions of protos/sdks
@@ -313,10 +315,22 @@ pub(crate) fn create_query_context(
         .current_catalog(catalog)
         .current_schema(schema)
         .timezone(timezone);
+
+    if let Some(x) = extensions.iter().position(|(k, _)| k == "read-preference") {
+        let (k, v) = extensions.swap_remove(x);
+        let Ok(read_preference) = ReadPreference::from_str(&v) else {
+            return UnknownHintSnafu {
+                hint: format!("{k}={v}"),
+            }
+            .fail();
+        };
+        ctx_builder = ctx_builder.read_preference(read_preference);
+    }
+
     for (key, value) in extensions {
         ctx_builder = ctx_builder.set_extension(key, value);
     }
-    ctx_builder.build().into()
+    Ok(ctx_builder.build().into())
 }
 
 /// Histogram timer for handling gRPC request.
@@ -355,5 +369,44 @@ impl Drop for RequestTimer {
                 self.status_code.as_ref(),
             ])
             .observe(self.start.elapsed().as_secs_f64());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::FixedOffset;
+    use common_time::Timezone;
+
+    use super::*;
+
+    #[test]
+    fn test_create_query_context() {
+        let header = RequestHeader {
+            catalog: "cat-a-log".to_string(),
+            timezone: "+01:00".to_string(),
+            ..Default::default()
+        };
+        let query_context = create_query_context(
+            Some(&header),
+            vec![
+                ("auto_create_table".to_string(), "true".to_string()),
+                ("read-preference".to_string(), "leader".to_string()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(query_context.current_catalog(), "cat-a-log");
+        assert_eq!(query_context.current_schema(), DEFAULT_SCHEMA_NAME);
+        assert_eq!(
+            query_context.timezone(),
+            Timezone::Offset(FixedOffset::east_opt(3600).unwrap())
+        );
+        assert!(matches!(
+            query_context.read_preference(),
+            ReadPreference::Leader
+        ));
+        assert_eq!(
+            query_context.extensions().into_iter().collect::<Vec<_>>(),
+            vec![("auto_create_table".to_string(), "true".to_string())]
+        );
     }
 }

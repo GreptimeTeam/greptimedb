@@ -125,6 +125,15 @@ impl QueryContextBuilder {
             .explain_options = explain_options;
         self
     }
+
+    pub fn read_preference(mut self, read_preference: ReadPreference) -> Self {
+        self.mutable_session_data
+            .get_or_insert_default()
+            .write()
+            .unwrap()
+            .read_preference = read_preference;
+        self
+    }
 }
 
 impl From<&RegionRequestHeader> for QueryContext {

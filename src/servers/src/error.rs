@@ -620,6 +620,9 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Unknown hint: {}", hint))]
+    UnknownHint { hint: String },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -690,7 +693,8 @@ impl ErrorExt for Error {
             | FailedToParseQuery { .. }
             | InvalidElasticsearchInput { .. }
             | InvalidJaegerQuery { .. }
-            | ParseTimestamp { .. } => StatusCode::InvalidArguments,
+            | ParseTimestamp { .. }
+            | UnknownHint { .. } => StatusCode::InvalidArguments,
 
             Catalog { source, .. } => source.status_code(),
             RowWriter { source, .. } => source.status_code(),

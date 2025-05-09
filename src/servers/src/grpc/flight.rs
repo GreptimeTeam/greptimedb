@@ -42,13 +42,13 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
-use crate::error;
 use crate::error::{InvalidParameterSnafu, ParseJsonSnafu, Result, ToJsonSnafu};
 pub use crate::grpc::flight::stream::FlightRecordBatchStream;
 use crate::grpc::greptime_handler::{get_request_type, GreptimeRequestHandler};
 use crate::grpc::TonicResult;
 use crate::http::header::constants::GREPTIME_DB_HEADER_NAME;
 use crate::http::AUTHORIZATION_HEADER;
+use crate::{error, hint_headers};
 
 pub type TonicStream<T> = Pin<Box<dyn Stream<Item = TonicResult<T>> + Send + 'static>>;
 
@@ -183,6 +183,8 @@ impl FlightCraft for GreptimeRequestHandler {
         &self,
         request: Request<Ticket>,
     ) -> TonicResult<Response<TonicStream<FlightData>>> {
+        let hints = hint_headers::extract_hints(request.metadata());
+
         let ticket = request.into_inner().ticket;
         let request =
             GreptimeRequest::decode(ticket.as_ref()).context(error::InvalidFlightTicketSnafu)?;
@@ -194,7 +196,7 @@ impl FlightCraft for GreptimeRequestHandler {
             request_type = get_request_type(&request)
         );
         async {
-            let output = self.handle_request(request, Default::default()).await?;
+            let output = self.handle_request(request, hints).await?;
             let stream = to_flight_data_stream(output, TracingContext::from_current_span());
             Ok(Response::new(stream))
         }
