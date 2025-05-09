@@ -244,6 +244,7 @@ impl StartCommand {
             &opts.component.logging,
             &opts.component.tracing,
             opts.component.node_id.map(|x| x.to_string()),
+            None,
         );
         log_versions(version(), short_version(), APP_NAME);
 

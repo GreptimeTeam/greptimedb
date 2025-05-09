@@ -18,7 +18,7 @@ use cmd::options::GreptimeOptions;
 use cmd::standalone::StandaloneOptions;
 use common_config::Configurable;
 use common_options::datanode::{ClientOptions, DatanodeClientOptions};
-use common_telemetry::logging::{LoggingOptions, SlowQueryOptions, DEFAULT_OTLP_ENDPOINT};
+use common_telemetry::logging::{LoggingOptions, DEFAULT_OTLP_ENDPOINT};
 use common_wal::config::raft_engine::RaftEngineConfig;
 use common_wal::config::DatanodeWalConfig;
 use datanode::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
@@ -167,11 +167,6 @@ fn test_load_metasrv_example_config() {
                 level: Some("info".to_string()),
                 otlp_endpoint: Some(DEFAULT_OTLP_ENDPOINT.to_string()),
                 tracing_sample_ratio: Some(Default::default()),
-                slow_query: SlowQueryOptions {
-                    enable: false,
-                    threshold: None,
-                    sample_ratio: None,
-                },
                 ..Default::default()
             },
             datanode: DatanodeClientOptions {

@@ -1093,9 +1093,6 @@ max_log_files = 720
 append_stdout = true
 enable_otlp_tracing = false
 
-[logging.slow_query]
-enable = false
-
 [[region_engine]]
 
 [region_engine.mito]

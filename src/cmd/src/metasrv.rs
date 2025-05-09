@@ -300,6 +300,7 @@ impl StartCommand {
             &opts.component.logging,
             &opts.component.tracing,
             None,
+            None,
         );
         log_versions(version(), short_version(), APP_NAME);
 

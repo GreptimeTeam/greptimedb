@@ -56,6 +56,7 @@ prometheus.workspace = true
 promql-parser.workspace = true
 prost.workspace = true
 query.workspace = true
+rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 servers.workspace = true

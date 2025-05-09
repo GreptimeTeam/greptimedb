@@ -64,6 +64,7 @@ impl InstanceBuilder {
             &dn_opts.logging,
             &dn_opts.tracing,
             dn_opts.node_id.map(|x| x.to_string()),
+            None,
         );
 
         log_versions(version(), short_version(), APP_NAME);
