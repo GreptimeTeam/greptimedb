@@ -657,7 +657,7 @@ impl FlowEngine for FlowDualEngine {
         let mut to_batch_engine = request.requests;
 
         {
-            // TODO(discord9); not locking this, or recover flows will be starved when also handling flow inserts
+            // not locking this, or recover flows will be starved when also handling flow inserts
             let src_table2flow = self.src_table2flow.read().await;
             to_batch_engine.retain(|req| {
                 let region_id = RegionId::from(req.region_id);
