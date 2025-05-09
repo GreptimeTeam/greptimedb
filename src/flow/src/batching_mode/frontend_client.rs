@@ -181,8 +181,9 @@ impl FrontendClient {
         Ok(res)
     }
 
-    /// Get the database with maximum `last_activity_ts`& is able to process query
-    async fn get_latest_active_frontend(
+    /// Get the frontend with recent enough(less than 1 minute from now) `last_activity_ts`
+    /// and is able to process query
+    async fn get_random_active_frontend(
         &self,
         catalog: &str,
         schema: &str,
@@ -278,7 +279,7 @@ impl FrontendClient {
     ) -> Result<u32, Error> {
         match self {
             FrontendClient::Distributed { .. } => {
-                let db = self.get_latest_active_frontend(catalog, schema).await?;
+                let db = self.get_random_active_frontend(catalog, schema).await?;
 
                 *peer_desc = Some(PeerDesc::Dist {
                     peer: db.peer.clone(),
