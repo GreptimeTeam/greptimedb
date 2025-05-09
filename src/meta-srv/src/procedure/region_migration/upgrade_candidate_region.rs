@@ -133,7 +133,7 @@ impl UpgradeCandidateRegion {
         let ch = Channel::Datanode(candidate.id);
         let receiver = ctx.mailbox.send(&ch, msg, operation_timeout).await?;
 
-        match receiver.await? {
+        match receiver.await {
             Ok(msg) => {
                 let reply = HeartbeatMailbox::json_reply(&msg)?;
                 let InstructionReply::UpgradeRegion(UpgradeRegionReply {
