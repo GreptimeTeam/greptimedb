@@ -36,6 +36,7 @@ members = [
     "src/common/time",
     "src/common/version",
     "src/common/wal",
+    "src/common/workload",
     "src/datanode",
     "src/datatypes",
     "src/file-engine",
@@ -130,7 +131,7 @@ etcd-client = "0.14"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "17a3550751c8b1e02ec16be40101d5f24dc255c3" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "7668a882d57ca6a2333146e0574b8f0c9d5008ae" }
 hex = "0.4"
 http = "1"
 humantime = "2.1"
@@ -256,6 +257,7 @@ common-test-util = { path = "src/common/test-util" }
 common-time = { path = "src/common/time" }
 common-version = { path = "src/common/version" }
 common-wal = { path = "src/common/wal" }
+common-workload = { path = "src/common/workload" }
 datanode = { path = "src/datanode" }
 datatypes = { path = "src/datatypes" }
 file-engine = { path = "src/file-engine" }

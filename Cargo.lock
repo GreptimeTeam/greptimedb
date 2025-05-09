@@ -2322,6 +2322,7 @@ dependencies = [
  "common-telemetry",
  "common-time",
  "common-wal",
+ "common-workload",
  "datafusion-common",
  "datafusion-expr",
  "datatypes",
@@ -2591,6 +2592,15 @@ dependencies = [
  "snafu 0.8.5",
  "tokio",
  "toml 0.8.19",
+]
+
+[[package]]
+name = "common-workload"
+version = "0.15.0"
+dependencies = [
+ "api",
+ "common-telemetry",
+ "serde",
 ]
 
 [[package]]
@@ -3520,6 +3530,7 @@ dependencies = [
  "common-time",
  "common-version",
  "common-wal",
+ "common-workload",
  "dashmap",
  "datafusion",
  "datafusion-common",
@@ -4842,7 +4853,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=17a3550751c8b1e02ec16be40101d5f24dc255c3#17a3550751c8b1e02ec16be40101d5f24dc255c3"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=7668a882d57ca6a2333146e0574b8f0c9d5008ae#7668a882d57ca6a2333146e0574b8f0c9d5008ae"
 dependencies = [
  "prost 0.13.5",
  "serde",
@@ -6771,6 +6782,7 @@ dependencies = [
  "common-time",
  "common-version",
  "common-wal",
+ "common-workload",
  "dashmap",
  "datatypes",
  "deadpool",
