@@ -326,7 +326,7 @@ async fn dryrun_pipeline_inner(
     let params = GreptimePipelineParams::default();
 
     let pipeline_def = PipelineDefinition::Resolved(pipeline);
-    let pipeline_ctx = PipelineContext::new(&pipeline_def, &params);
+    let pipeline_ctx = PipelineContext::new(&pipeline_def, &params, query_ctx.channel());
     let results = run_pipeline(
         &pipeline_handler,
         &pipeline_ctx,
@@ -693,7 +693,7 @@ pub(crate) async fn ingest_logs_inner(
             .and_then(|v| v.to_str().ok()),
     );
 
-    let pipeline_ctx = PipelineContext::new(&pipeline, &pipeline_params);
+    let pipeline_ctx = PipelineContext::new(&pipeline, &pipeline_params, query_ctx.channel());
     for pipeline_req in log_ingest_requests {
         let requests =
             run_pipeline(&handler, &pipeline_ctx, pipeline_req, &query_ctx, true).await?;
