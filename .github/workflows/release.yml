@@ -490,7 +490,7 @@ jobs:
   bump-helm-charts-version:
     name: Bump helm charts version
     if: ${{ github.ref_type == 'tag' && !contains(github.ref_name, 'nightly') && github.event_name != 'schedule' }}
-    needs: [release-images-to-dockerhub]
+    needs: [publish-github-release]
     runs-on: ubuntu-latest
     permissions:
       contents: write
