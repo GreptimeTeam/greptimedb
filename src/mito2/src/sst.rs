@@ -81,3 +81,31 @@ fn internal_fields() -> [FieldRef; 3] {
         Arc::new(Field::new(OP_TYPE_COLUMN_NAME, ArrowDataType::UInt8, false)),
     ]
 }
+
+/// Gets the arrow schema to store in parquet.
+pub fn to_plain_sst_arrow_schema(metadata: &RegionMetadata) -> SchemaRef {
+    let fields = Fields::from_iter(
+        metadata
+            .schema
+            .arrow_schema()
+            .fields()
+            .iter()
+            .cloned()
+            .chain(plain_internal_fields()),
+    );
+
+    Arc::new(Schema::new(fields))
+}
+
+/// Fields for internal columns.
+fn plain_internal_fields() -> [FieldRef; 2] {
+    // Internal columns are always not null.
+    [
+        Arc::new(Field::new(
+            SEQUENCE_COLUMN_NAME,
+            ArrowDataType::UInt64,
+            false,
+        )),
+        Arc::new(Field::new(OP_TYPE_COLUMN_NAME, ArrowDataType::UInt8, false)),
+    ]
+}
