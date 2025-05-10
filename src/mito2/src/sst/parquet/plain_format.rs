@@ -14,7 +14,7 @@
 
 //! Format to store in parquet.
 //!
-//! We store two addtional internal columns at last:
+//! We store two additional internal columns at last:
 //! - `__sequence`, the sequence number of a row. Type: uint64
 //! - `__op_type`, the op type of the row. Type: uint8
 //!
