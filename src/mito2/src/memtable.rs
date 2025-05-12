@@ -29,7 +29,6 @@ use table::predicate::Predicate;
 use crate::config::MitoConfig;
 use crate::error::Result;
 use crate::flush::WriteBufferManagerRef;
-use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::key_values::KeyValue;
 pub use crate::memtable::key_values::KeyValues;
 use crate::memtable::partition_tree::{PartitionTreeConfig, PartitionTreeMemtableBuilder};
@@ -50,6 +49,11 @@ mod stats;
 pub mod time_partition;
 pub mod time_series;
 pub(crate) mod version;
+
+#[cfg(any(test, feature = "test"))]
+pub use bulk::part::BulkPart;
+#[cfg(any(test, feature = "test"))]
+pub use time_partition::filter_record_batch;
 
 /// Id for memtables.
 ///
@@ -142,7 +146,7 @@ pub trait Memtable: Send + Sync + fmt::Debug {
     fn write_one(&self, key_value: KeyValue) -> Result<()>;
 
     /// Writes an encoded batch of into memtable.
-    fn write_bulk(&self, part: BulkPart) -> Result<()>;
+    fn write_bulk(&self, part: crate::memtable::bulk::part::BulkPart) -> Result<()>;
 
     /// Scans the memtable.
     /// `projection` selects columns to read, `None` means reading all columns.

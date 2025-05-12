@@ -58,12 +58,12 @@ use crate::sst::to_sst_arrow_schema;
 
 #[derive(Clone)]
 pub struct BulkPart {
-    pub(crate) batch: RecordBatch,
-    pub(crate) num_rows: usize,
-    pub(crate) max_ts: i64,
-    pub(crate) min_ts: i64,
-    pub(crate) sequence: u64,
-    pub(crate) timestamp_index: usize,
+    pub batch: RecordBatch,
+    pub num_rows: usize,
+    pub max_ts: i64,
+    pub min_ts: i64,
+    pub sequence: u64,
+    pub timestamp_index: usize,
 }
 
 impl BulkPart {
@@ -127,7 +127,7 @@ impl BulkPart {
         })
     }
 
-    pub(crate) fn timestamps(&self) -> &ArrayRef {
+    pub fn timestamps(&self) -> &ArrayRef {
         self.batch.column(self.timestamp_index)
     }
 }

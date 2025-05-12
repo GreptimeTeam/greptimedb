@@ -24,12 +24,11 @@ use common_time::timestamp_millis::BucketAligned;
 use common_time::Timestamp;
 use datatypes::arrow;
 use datatypes::arrow::array::{
-    ArrayRef, BooleanArray, Int64Array, RecordBatch, RecordBatchOptions, TimestampMicrosecondArray,
+    BooleanArray, RecordBatch, RecordBatchOptions, TimestampMicrosecondArray,
     TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray,
 };
 use datatypes::arrow::buffer::{BooleanBuffer, MutableBuffer};
-use datatypes::arrow::datatypes::{DataType, Int64Type, TimestampMillisecondType};
-use datatypes::arrow::util::bit_util::ceil;
+use datatypes::arrow::datatypes::DataType;
 use smallvec::{smallvec, SmallVec};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
@@ -77,7 +76,7 @@ impl TimePartition {
         let Some(range) = self.time_range else {
             unreachable!("TimePartition must have explicit time range when a bulk request involves multiple time partition")
         };
-        let Some(filtered) = split_record_batch(
+        let Some(filtered) = filter_record_batch(
             part,
             range.min_timestamp.value(),
             range.max_timestamp.value(),
@@ -89,219 +88,82 @@ impl TimePartition {
     }
 }
 
-fn split_record_batch(part: &BulkPart, min: i64, max: i64) -> Result<Option<BulkPart>> {
-    // safety: timestamp column must be of timestamp data type hence can be cast to Int64Array
+macro_rules! create_filter_buffer {
+    ($ts_array:expr, $min:expr, $max:expr) => {{
+        let len = $ts_array.len();
+        let mut buffer = MutableBuffer::new(len.div_ceil(64) * 8);
+
+        let f = |idx: usize| -> bool {
+            // SAFETY: we only iterate the array within index bound.
+            unsafe {
+                let val = $ts_array.value_unchecked(idx);
+                val >= $min && val < $max
+            }
+        };
+
+        let chunks = len / 64;
+        let remainder = len % 64;
+
+        for chunk in 0..chunks {
+            let mut packed = 0;
+            for bit_idx in 0..64 {
+                let i = bit_idx + chunk * 64;
+                packed |= (f(i) as u64) << bit_idx;
+            }
+            // SAFETY: Already allocated sufficient capacity
+            unsafe { buffer.push_unchecked(packed) }
+        }
+
+        if remainder != 0 {
+            let mut packed = 0;
+            for bit_idx in 0..remainder {
+                let i = bit_idx + chunks * 64;
+                packed |= (f(i) as u64) << bit_idx;
+            }
+            // SAFETY: Already allocated sufficient capacity
+            unsafe { buffer.push_unchecked(packed) }
+        }
+
+        BooleanArray::new(BooleanBuffer::new(buffer.into(), 0, len), None)
+    }};
+}
+
+macro_rules! handle_timestamp_array {
+    ($ts_array:expr, $array_type:ty, $min:expr, $max:expr) => {{
+        let ts_array = $ts_array.as_any().downcast_ref::<$array_type>().unwrap();
+        let filter = create_filter_buffer!(ts_array, $min, $max);
+
+        let res = arrow::compute::filter(ts_array, &filter).context(error::ComputeArrowSnafu)?;
+        if res.is_empty() {
+            return Ok(None);
+        }
+
+        let i64array = res.as_any().downcast_ref::<$array_type>().unwrap();
+        // safety: we've checked res is not empty
+        let max_ts = arrow::compute::max(i64array).unwrap();
+        let min_ts = arrow::compute::min(i64array).unwrap();
+
+        (res, filter, min_ts, max_ts)
+    }};
+}
+
+/// Filters the given part according to min (inclusive) and max (exclusive) timestamp range.
+/// Returns [None] if no matching rows.
+pub fn filter_record_batch(part: &BulkPart, min: i64, max: i64) -> Result<Option<BulkPart>> {
     let ts_array = part.timestamps();
     let (ts_array, filter, min_ts, max_ts) = match ts_array.data_type() {
         DataType::Timestamp(unit, _) => match unit {
             arrow::datatypes::TimeUnit::Second => {
-                let ts_array = ts_array
-                    .as_any()
-                    .downcast_ref::<TimestampSecondArray>()
-                    .unwrap();
-
-                let len = ts_array.len();
-                let mut buffer = MutableBuffer::new(ceil(len, 64) * 8);
-
-                let f = |idx: usize| -> bool {
-                    unsafe {
-                        let val = ts_array.value_unchecked(idx);
-                        val >= min && val < max
-                    }
-                };
-
-                let chunks = len / 64;
-                let remainder = len % 64;
-                for chunk in 0..chunks {
-                    let mut packed = 0;
-                    for bit_idx in 0..64 {
-                        let i = bit_idx + chunk * 64;
-                        packed |= (f(i) as u64) << bit_idx;
-                    }
-                    // SAFETY: Already allocated sufficient capacity
-                    unsafe { buffer.push_unchecked(packed) }
-                }
-
-                if remainder != 0 {
-                    let mut packed = 0;
-                    for bit_idx in 0..remainder {
-                        let i = bit_idx + chunks * 64;
-                        packed |= (f(i) as u64) << bit_idx;
-                    }
-
-                    // SAFETY: Already allocated sufficient capacity
-                    unsafe { buffer.push_unchecked(packed) }
-                }
-                let filter = BooleanArray::new(BooleanBuffer::new(buffer.into(), 0, len), None);
-                let res =
-                    arrow::compute::filter(ts_array, &filter).context(error::ComputeArrowSnafu)?;
-                if res.is_empty() {
-                    return Ok(None);
-                }
-                let i64array = res.as_any().downcast_ref::<TimestampSecondArray>().unwrap();
-                // safety: we've checked res is not empty
-                let max_ts = arrow::compute::max(i64array).unwrap();
-                let min_ts = arrow::compute::min(i64array).unwrap();
-                (res, filter, min_ts, max_ts)
+                handle_timestamp_array!(ts_array, TimestampSecondArray, min, max)
             }
             arrow::datatypes::TimeUnit::Millisecond => {
-                let ts_array = ts_array
-                    .as_any()
-                    .downcast_ref::<TimestampMillisecondArray>()
-                    .unwrap();
-
-                let len = ts_array.len();
-                let mut buffer = MutableBuffer::new(ceil(len, 64) * 8);
-
-                let f = |idx: usize| -> bool {
-                    unsafe {
-                        let val = ts_array.value_unchecked(idx);
-                        val >= min && val < max
-                    }
-                };
-
-                let chunks = len / 64;
-                let remainder = len % 64;
-                for chunk in 0..chunks {
-                    let mut packed = 0;
-                    for bit_idx in 0..64 {
-                        let i = bit_idx + chunk * 64;
-                        packed |= (f(i) as u64) << bit_idx;
-                    }
-                    // SAFETY: Already allocated sufficient capacity
-                    unsafe { buffer.push_unchecked(packed) }
-                }
-
-                if remainder != 0 {
-                    let mut packed = 0;
-                    for bit_idx in 0..remainder {
-                        let i = bit_idx + chunks * 64;
-                        packed |= (f(i) as u64) << bit_idx;
-                    }
-
-                    // SAFETY: Already allocated sufficient capacity
-                    unsafe { buffer.push_unchecked(packed) }
-                }
-                let filter = BooleanArray::new(BooleanBuffer::new(buffer.into(), 0, len), None);
-                let res =
-                    arrow::compute::filter(ts_array, &filter).context(error::ComputeArrowSnafu)?;
-                if res.is_empty() {
-                    return Ok(None);
-                }
-                let i64array = res
-                    .as_any()
-                    .downcast_ref::<TimestampMillisecondArray>()
-                    .unwrap();
-                // safety: we've checked res is not empty
-                let max_ts = arrow::compute::max(i64array).unwrap();
-                let min_ts = arrow::compute::min(i64array).unwrap();
-                (res, filter, min_ts, max_ts)
+                handle_timestamp_array!(ts_array, TimestampMillisecondArray, min, max)
             }
             arrow::datatypes::TimeUnit::Microsecond => {
-                let ts_array = ts_array
-                    .as_any()
-                    .downcast_ref::<TimestampMicrosecondArray>()
-                    .unwrap();
-
-                let len = ts_array.len();
-                let mut buffer = MutableBuffer::new(ceil(len, 64) * 8);
-
-                let f = |idx: usize| -> bool {
-                    unsafe {
-                        let val = ts_array.value_unchecked(idx);
-                        val >= min && val < max
-                    }
-                };
-
-                let chunks = len / 64;
-                let remainder = len % 64;
-                for chunk in 0..chunks {
-                    let mut packed = 0;
-                    for bit_idx in 0..64 {
-                        let i = bit_idx + chunk * 64;
-                        packed |= (f(i) as u64) << bit_idx;
-                    }
-                    // SAFETY: Already allocated sufficient capacity
-                    unsafe { buffer.push_unchecked(packed) }
-                }
-
-                if remainder != 0 {
-                    let mut packed = 0;
-                    for bit_idx in 0..remainder {
-                        let i = bit_idx + chunks * 64;
-                        packed |= (f(i) as u64) << bit_idx;
-                    }
-
-                    // SAFETY: Already allocated sufficient capacity
-                    unsafe { buffer.push_unchecked(packed) }
-                }
-                let filter = BooleanArray::new(BooleanBuffer::new(buffer.into(), 0, len), None);
-                let res =
-                    arrow::compute::filter(ts_array, &filter).context(error::ComputeArrowSnafu)?;
-                if res.is_empty() {
-                    return Ok(None);
-                }
-                let i64array = res
-                    .as_any()
-                    .downcast_ref::<TimestampMicrosecondArray>()
-                    .unwrap();
-                // safety: we've checked res is not empty
-                let max_ts = arrow::compute::max(i64array).unwrap();
-                let min_ts = arrow::compute::min(i64array).unwrap();
-                (res, filter, min_ts, max_ts)
+                handle_timestamp_array!(ts_array, TimestampMicrosecondArray, min, max)
             }
             arrow::datatypes::TimeUnit::Nanosecond => {
-                let ts_array = ts_array
-                    .as_any()
-                    .downcast_ref::<TimestampNanosecondArray>()
-                    .unwrap();
-
-                let len = ts_array.len();
-                let mut buffer = MutableBuffer::new(ceil(len, 64) * 8);
-
-                let f = |idx: usize| -> bool {
-                    unsafe {
-                        let val = ts_array.value_unchecked(idx);
-                        val >= min && val < max
-                    }
-                };
-
-                let chunks = len / 64;
-                let remainder = len % 64;
-                for chunk in 0..chunks {
-                    let mut packed = 0;
-                    for bit_idx in 0..64 {
-                        let i = bit_idx + chunk * 64;
-                        packed |= (f(i) as u64) << bit_idx;
-                    }
-                    // SAFETY: Already allocated sufficient capacity
-                    unsafe { buffer.push_unchecked(packed) }
-                }
-
-                if remainder != 0 {
-                    let mut packed = 0;
-                    for bit_idx in 0..remainder {
-                        let i = bit_idx + chunks * 64;
-                        packed |= (f(i) as u64) << bit_idx;
-                    }
-
-                    // SAFETY: Already allocated sufficient capacity
-                    unsafe { buffer.push_unchecked(packed) }
-                }
-                let filter = BooleanArray::new(BooleanBuffer::new(buffer.into(), 0, len), None);
-                let res =
-                    arrow::compute::filter(ts_array, &filter).context(error::ComputeArrowSnafu)?;
-                if res.is_empty() {
-                    return Ok(None);
-                }
-                let i64array = res
-                    .as_any()
-                    .downcast_ref::<TimestampNanosecondArray>()
-                    .unwrap();
-                // safety: we've checked res is not empty
-                let max_ts = arrow::compute::max(i64array).unwrap();
-                let min_ts = arrow::compute::min(i64array).unwrap();
-                (res, filter, min_ts, max_ts)
+                handle_timestamp_array!(ts_array, TimestampNanosecondArray, min, max)
             }
         },
         _ => {
@@ -647,8 +509,6 @@ impl TimePartitions {
     ) -> Result<(Vec<&'a TimePartition>, Vec<Timestamp>)> {
         let mut matching = Vec::new();
 
-        let mut matching_min = i64::MAX;
-        let mut matching_max = i64::MIN;
         let mut present = HashSet::new();
         // First find any existing partitions that overlap
         for part in existing_parts {
@@ -658,8 +518,6 @@ impl TimePartitions {
             };
 
             if !(max < part_time_range.min_timestamp || min >= part_time_range.max_timestamp) {
-                matching_min = matching_min.min(part_time_range.min_timestamp.value());
-                matching_max = matching_max.max(part_time_range.max_timestamp.value());
                 matching.push(part);
                 present.insert(part_time_range.min_timestamp.value());
             }
@@ -842,7 +700,7 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::SemanticType;
-    use datatypes::arrow::array::{ArrayRef, Int64Array, StringArray, TimestampMillisecondArray};
+    use datatypes::arrow::array::{ArrayRef, StringArray, TimestampMillisecondArray};
     use datatypes::arrow::datatypes::{DataType, Field, Schema};
     use datatypes::arrow::record_batch::RecordBatch;
     use datatypes::prelude::ConcreteDataType;
@@ -1371,7 +1229,7 @@ mod tests {
             timestamp_index: 0,
         };
 
-        let result = split_record_batch(&part, 1000, 2000).unwrap();
+        let result = filter_record_batch(&part, 1000, 2000).unwrap();
         assert!(result.is_some());
         let filtered = result.unwrap();
         assert_eq!(filtered.num_rows, 1);
@@ -1379,7 +1237,7 @@ mod tests {
         assert_eq!(filtered.max_ts, 1000);
 
         // Test splitting with range [3000, 6000)
-        let result = split_record_batch(&part, 3000, 6000).unwrap();
+        let result = filter_record_batch(&part, 3000, 6000).unwrap();
         assert!(result.is_some());
         let filtered = result.unwrap();
         assert_eq!(filtered.num_rows, 1);
@@ -1387,11 +1245,11 @@ mod tests {
         assert_eq!(filtered.max_ts, 5000);
 
         // Test splitting with range that includes no points
-        let result = split_record_batch(&part, 3000, 4000).unwrap();
+        let result = filter_record_batch(&part, 3000, 4000).unwrap();
         assert!(result.is_none());
 
         // Test splitting with range that includes all points
-        let result = split_record_batch(&part, 0, 9000).unwrap();
+        let result = filter_record_batch(&part, 0, 9000).unwrap();
         assert!(result.is_some());
         let filtered = result.unwrap();
         assert_eq!(filtered.num_rows, 5);

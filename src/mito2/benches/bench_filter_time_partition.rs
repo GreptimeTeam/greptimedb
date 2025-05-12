@@ -13,71 +13,86 @@
 // limitations under the License.
 
 use std::str::FromStr;
+use std::sync::Arc;
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use datatypes::arrow;
-use datatypes::arrow::array::{ArrayRef, BooleanArray, Int64Array};
-use datatypes::arrow::buffer::{BooleanBuffer, MutableBuffer};
-use datatypes::arrow::util::bit_util::ceil;
+use datatypes::arrow::array::{ArrayRef, RecordBatch, TimestampMillisecondArray};
+use datatypes::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+use datatypes::arrow_array::StringArray;
+use mito2::memtable::{filter_record_batch, BulkPart};
 
-fn random_array(num: usize) -> Int64Array {
-    let data: Vec<_> = (0..num).map(|_| rand::random::<i64>()).collect();
-    Int64Array::from(data)
-}
+fn random_array(num: usize) -> BulkPart {
+    let mut min = i64::MAX;
+    let mut max = i64::MIN;
 
-fn filter_arrow_impl(array: &Int64Array, min: i64, max: i64) -> (ArrayRef, i64, i64) {
-    let gt_eq = arrow::compute::kernels::cmp::gt_eq(array, &Int64Array::new_scalar(min)).unwrap();
-    let lt = arrow::compute::kernels::cmp::lt(array, &Int64Array::new_scalar(max)).unwrap();
-    let res = arrow::compute::and(&gt_eq, &lt).unwrap();
-    let array = arrow::compute::filter(array, &res).unwrap();
-    let i64array = array.as_any().downcast_ref::<Int64Array>().unwrap();
-    let max = arrow::compute::max(i64array).unwrap_or(i64::MIN);
-    let min = arrow::compute::min(i64array).unwrap_or(i64::MAX);
-    (array, min, max)
-}
+    let ts_data: Vec<_> = (0..num)
+        .map(|_| {
+            let val = rand::random::<i64>();
+            min = min.min(val);
+            max = max.max(val);
+            val
+        })
+        .collect();
 
-fn filter_manual_impl(array: &Int64Array, min: i64, max: i64) -> (ArrayRef, i64, i64) {
-    let len = array.len();
-    let mut buffer = MutableBuffer::new(ceil(len, 64) * 8);
+    let val = StringArray::from_iter_values(ts_data.iter().map(|v| v.to_string()));
+    let ts = TimestampMillisecondArray::from(ts_data);
 
-    let f = |idx: usize| -> bool {
-        unsafe {
-            let val = array.value_unchecked(idx);
-            val >= min && val < max
-        }
-    };
-
-    let chunks = len / 64;
-    let remainder = len % 64;
-    for chunk in 0..chunks {
-        let mut packed = 0;
-        for bit_idx in 0..64 {
-            let i = bit_idx + chunk * 64;
-            packed |= (f(i) as u64) << bit_idx;
-        }
-        // SAFETY: Already allocated sufficient capacity
-        unsafe { buffer.push_unchecked(packed) }
-    }
-
-    if remainder != 0 {
-        let mut packed = 0;
-        for bit_idx in 0..remainder {
-            let i = bit_idx + chunks * 64;
-            packed |= (f(i) as u64) << bit_idx;
-        }
-
-        // SAFETY: Already allocated sufficient capacity
-        unsafe { buffer.push_unchecked(packed) }
-    }
-    let res = arrow::compute::filter(
-        array,
-        &BooleanArray::new(BooleanBuffer::new(buffer.into(), 0, len), None),
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ),
+        Field::new("val", DataType::Utf8, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![Arc::new(ts) as ArrayRef, Arc::new(val) as ArrayRef],
     )
     .unwrap();
-    let i64array = res.as_any().downcast_ref::<Int64Array>().unwrap();
-    let max = arrow::compute::max(i64array).unwrap_or(i64::MIN);
-    let min = arrow::compute::min(i64array).unwrap_or(i64::MAX);
-    (res, min, max)
+    BulkPart {
+        batch,
+        num_rows: num,
+        max_ts: max,
+        min_ts: min,
+        sequence: 0,
+        timestamp_index: 0,
+    }
+}
+
+fn filter_arrow_impl(part: &BulkPart, min: i64, max: i64) -> Option<BulkPart> {
+    let ts_array = part.timestamps();
+    let gt_eq =
+        arrow::compute::kernels::cmp::gt_eq(ts_array, &TimestampMillisecondArray::new_scalar(min))
+            .unwrap();
+    let lt =
+        arrow::compute::kernels::cmp::lt(ts_array, &TimestampMillisecondArray::new_scalar(max))
+            .unwrap();
+    let predicate = arrow::compute::and(&gt_eq, &lt).unwrap();
+
+    let ts_filtered = arrow::compute::filter(ts_array, &predicate).unwrap();
+    if ts_filtered.is_empty() {
+        return None;
+    }
+
+    let num_rows_filtered = ts_filtered.len();
+    let i64array = ts_filtered
+        .as_any()
+        .downcast_ref::<TimestampMillisecondArray>()
+        .unwrap();
+    let max = arrow::compute::max(i64array).unwrap();
+    let min = arrow::compute::min(i64array).unwrap();
+
+    let batch = arrow::compute::filter_record_batch(&part.batch, &predicate).unwrap();
+    Some(BulkPart {
+        batch,
+        num_rows: num_rows_filtered,
+        max_ts: max,
+        min_ts: min,
+        sequence: 0,
+        timestamp_index: part.timestamp_index,
+    })
 }
 
 fn filter_batch_by_time_range(c: &mut Criterion) {
@@ -85,20 +100,20 @@ fn filter_batch_by_time_range(c: &mut Criterion) {
         .ok()
         .and_then(|v| usize::from_str(&v).ok())
         .unwrap_or(10000);
-    let array = random_array(num);
+    let part = random_array(num);
     let min = 0;
     let max = 10000;
 
     let mut group = c.benchmark_group("filter_by_time_range");
     group.bench_function("arrow_impl", |b| {
         b.iter(|| {
-            let _ = black_box(filter_arrow_impl(&array, min, max));
+            let _ = black_box(filter_arrow_impl(&part, min, max));
         });
     });
 
     group.bench_function("manual_impl", |b| {
         b.iter(|| {
-            let _ = black_box(filter_manual_impl(&array, min, max));
+            let _ = black_box(filter_record_batch(&part, min, max));
         });
     });
 
