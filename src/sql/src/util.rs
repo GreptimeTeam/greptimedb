@@ -121,3 +121,53 @@ fn table_factor_to_object_name(table_factor: &TableFactor, names: &mut HashSet<O
         names.insert(name.to_owned());
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use sqlparser::tokenizer::Token;
+
+    use super::*;
+    use crate::dialect::GreptimeDbDialect;
+    use crate::parser::ParserContext;
+
+    #[test]
+    fn test_location_to_index() {
+        let testcases = vec![
+            "SELECT * FROM t WHERE a = 1",
+            // start or end with newline
+            r"
+SELECT *
+FROM
+t
+WHERE a = 
+1
+",
+            r"SELECT *
+FROM
+t
+WHERE a = 
+1
+",
+            r"
+SELECT *
+FROM
+t
+WHERE a = 
+1",
+        ];
+
+        for sql in testcases {
+            let mut parser = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
+            loop {
+                let token = parser.parser.next_token();
+                if token == Token::EOF {
+                    break;
+                }
+                let span = token.span;
+                let subslice =
+                    &sql[location_to_index(sql, &span.start)..location_to_index(sql, &span.end)];
+                assert_eq!(token.to_string(), subslice);
+            }
+        }
+    }
+}
