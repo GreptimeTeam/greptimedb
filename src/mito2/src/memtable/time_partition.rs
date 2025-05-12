@@ -706,6 +706,7 @@ mod tests {
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use store_api::storage::SequenceNumber;
 
     use super::*;
     use crate::memtable::partition_tree::PartitionTreeMemtableBuilder;
@@ -1060,6 +1061,40 @@ mod tests {
         assert_eq!(missing[0].value(), -5000);
     }
 
+    fn build_part(ts: &[i64], sequence: SequenceNumber) -> BulkPart {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "ts",
+                arrow::datatypes::DataType::Timestamp(
+                    arrow::datatypes::TimeUnit::Millisecond,
+                    None,
+                ),
+                false,
+            ),
+            Field::new("val", DataType::Utf8, true),
+        ]));
+        let ts_data = ts.to_vec();
+        let ts_array = Arc::new(TimestampMillisecondArray::from(ts_data));
+        let val_array = Arc::new(StringArray::from_iter_values(
+            ts.iter().map(|v| v.to_string()),
+        ));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![ts_array.clone() as ArrayRef, val_array.clone() as ArrayRef],
+        )
+        .unwrap();
+        let max_ts = ts.iter().max().copied().unwrap();
+        let min_ts = ts.iter().min().copied().unwrap();
+        BulkPart {
+            batch,
+            num_rows: ts.len(),
+            max_ts,
+            min_ts,
+            sequence,
+            timestamp_index: 0,
+        }
+    }
+
     #[test]
     fn test_write_bulk() {
         let mut metadata_builder = RegionMetadataBuilder::new(0.into());
@@ -1089,26 +1124,10 @@ mod tests {
             Some(Duration::from_secs(5)),
         );
 
-        // Create test data
-        let schema = metadata.schema.arrow_schema().clone();
-
         // Test case 1: Write to single partition
-        let ts_array = Arc::new(TimestampMillisecondArray::from(vec![1000, 2000, 3000]));
-        let val_array = Arc::new(StringArray::from(vec!["a", "b", "c"]));
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![ts_array.clone() as ArrayRef, val_array.clone() as ArrayRef],
-        )
-        .unwrap();
-        let bulk_part = BulkPart {
-            batch,
-            num_rows: 3,
-            max_ts: 3000,
-            min_ts: 1000,
-            sequence: 0,
-            timestamp_index: 0,
-        };
-        partitions.write_bulk(bulk_part).unwrap();
+        partitions
+            .write_bulk(build_part(&[1000, 2000, 3000], 0))
+            .unwrap();
 
         let parts = partitions.list_partitions();
         assert_eq!(1, parts.len());
@@ -1117,53 +1136,24 @@ mod tests {
         assert_eq!(&[1000, 2000, 3000], &timestamps[..]);
 
         // Test case 2: Write across multiple existing partitions
-        let ts_array = Arc::new(TimestampMillisecondArray::from(vec![4000, 5000, 6000]));
-        let val_array = Arc::new(StringArray::from(vec!["d", "e", "f"]));
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![ts_array.clone() as ArrayRef, val_array.clone() as ArrayRef],
-        )
-        .unwrap();
-        let bulk_part = BulkPart {
-            batch,
-            num_rows: 3,
-            max_ts: 6000,
-            min_ts: 4000,
-            sequence: 1,
-            timestamp_index: 0,
-        };
-        partitions.write_bulk(bulk_part).unwrap();
-
+        partitions
+            .write_bulk(build_part(&[4000, 5000, 6000], 1))
+            .unwrap();
         let parts = partitions.list_partitions();
         assert_eq!(2, parts.len());
-
         // Check first partition [0, 5000)
         let iter = parts[0].memtable.iter(None, None, None).unwrap();
         let timestamps = collect_iter_timestamps(iter);
         assert_eq!(&[1000, 2000, 3000, 4000], &timestamps[..]);
-
         // Check second partition [5000, 10000)
         let iter = parts[1].memtable.iter(None, None, None).unwrap();
         let timestamps = collect_iter_timestamps(iter);
         assert_eq!(&[5000, 6000], &timestamps[..]);
 
         // Test case 3: Write requiring new partition
-        let ts_array = Arc::new(TimestampMillisecondArray::from(vec![11000, 12000]));
-        let val_array = Arc::new(StringArray::from(vec!["g", "h"]));
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![ts_array.clone() as ArrayRef, val_array.clone() as ArrayRef],
-        )
-        .unwrap();
-        let bulk_part = BulkPart {
-            batch,
-            num_rows: 2,
-            max_ts: 12000,
-            min_ts: 11000,
-            sequence: 2,
-            timestamp_index: 0,
-        };
-        partitions.write_bulk(bulk_part).unwrap();
+        partitions
+            .write_bulk(build_part(&[11000, 12000], 3))
+            .unwrap();
 
         let parts = partitions.list_partitions();
         assert_eq!(3, parts.len());
@@ -1175,22 +1165,10 @@ mod tests {
 
         // Test case 4: Write with no time range partitioning
         let partitions = TimePartitions::new(metadata.clone(), builder, 3, None);
-        let ts_array = Arc::new(TimestampMillisecondArray::from(vec![1000, 5000, 9000]));
-        let val_array = Arc::new(StringArray::from(vec!["i", "j", "k"]));
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![ts_array.clone() as ArrayRef, val_array.clone() as ArrayRef],
-        )
-        .unwrap();
-        let bulk_part = BulkPart {
-            batch,
-            num_rows: 3,
-            max_ts: 9000,
-            min_ts: 1000,
-            sequence: 3,
-            timestamp_index: 0,
-        };
-        partitions.write_bulk(bulk_part).unwrap();
+
+        partitions
+            .write_bulk(build_part(&[1000, 5000, 9000], 4))
+            .unwrap();
 
         let parts = partitions.list_partitions();
         assert_eq!(1, parts.len());
