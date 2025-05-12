@@ -274,6 +274,8 @@ impl SeqScan {
                 stream_ctx.input.num_memtables(),
                 stream_ctx.input.num_files(),
             ));
+            // Safety: Only primary key format use this scan method.
+            let mapper = stream_ctx.input.mapper.as_primary_key().unwrap();
             // Scans each part.
             for part_range in partition_ranges {
                 let mut sources = Vec::new();
@@ -309,7 +311,7 @@ impl SeqScan {
                     #[cfg(debug_assertions)]
                     checker.ensure_part_range_batch(
                         "SeqScan",
-                        stream_ctx.input.mapper.metadata().region_id,
+                        mapper.metadata().region_id,
                         partition,
                         part_range,
                         &batch,
