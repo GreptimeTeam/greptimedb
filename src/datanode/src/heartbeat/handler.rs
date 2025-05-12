@@ -99,9 +99,6 @@ impl RegionHeartbeatResponseHandler {
                 handler_context.handle_upgrade_region_instruction(upgrade_region)
             })),
             Instruction::InvalidateCaches(_) => InvalidHeartbeatResponseSnafu.fail(),
-            Instruction::FlushRegions(flush_regions) => Ok(Box::new(move |handler_context| {
-                handler_context.handle_flush_regions_instruction(flush_regions)
-            })),
             Instruction::FlushRegion(flush_region) => Ok(Box::new(move |handler_context| {
                 handler_context.handle_flush_region_instruction(flush_region)
             })),

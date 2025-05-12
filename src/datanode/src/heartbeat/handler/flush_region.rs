@@ -12,95 +12,147 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_meta::instruction::{FlushRegions, InstructionReply, SimpleReply};
+use std::collections::HashMap;
+
+use common_meta::instruction::{
+    FlushErrorStrategy, FlushRegionConfig, FlushRegionReply, FlushResult, FlushTarget,
+    InstructionReply,
+};
 use common_telemetry::warn;
 use futures_util::future::BoxFuture;
 use store_api::region_request::{RegionFlushRequest, RegionRequest};
-use store_api::storage::RegionId;
 
 use crate::error;
 use crate::heartbeat::handler::HandlerContext;
 
 impl HandlerContext {
-    pub(crate) fn handle_flush_regions_instruction(
+    pub(crate) fn handle_flush_region_instruction(
         self,
-        flush_regions: FlushRegions,
+        config: FlushRegionConfig,
     ) -> BoxFuture<'static, Option<InstructionReply>> {
         Box::pin(async move {
-            for region_id in flush_regions.region_ids {
-                let request = RegionRequest::Flush(RegionFlushRequest {
-                    row_group_size: None,
-                });
-                let result = self.region_server.handle_request(region_id, request).await;
-
-                match result {
-                    Ok(_) => {}
-                    Err(error::Error::RegionNotFound { .. }) => {
-                        warn!("Received a flush region instruction from meta, but target region: {region_id} is not found.");
+            let region_ids = match config.target {
+                FlushTarget::All => self
+                    .region_server
+                    .reportable_regions()
+                    .into_iter()
+                    .map(|stat| stat.region_id)
+                    .collect(),
+                FlushTarget::Regions(ids) => ids,
+                FlushTarget::Table(table_id) => self
+                    .region_server
+                    .reportable_regions()
+                    .into_iter()
+                    .filter(|stat| stat.region_id.table_id() == table_id)
+                    .map(|stat| stat.region_id)
+                    .collect(),
+            };
+            let mut results = HashMap::new();
+            let mut overall_success = true;
+            if config.is_hint {
+                for region_id in region_ids {
+                    let request = RegionRequest::Flush(RegionFlushRequest {
+                        row_group_size: None,
+                    });
+                    let result = self.region_server.handle_request(region_id, request).await;
+                    match result {
+                        Ok(_) => {
+                            results.insert(
+                                region_id,
+                                FlushResult {
+                                    success: true,
+                                    error: None,
+                                    skipped: false,
+                                },
+                            );
+                        }
+                        Err(err) => {
+                            if let error::Error::RegionNotFound { .. } = err {
+                                warn!("Received a flush region instruction from meta, but target region:{region_id} is not found.");
+                            }
+                            results.insert(
+                                region_id,
+                                FlushResult {
+                                    success: false,
+                                    error: Some(err.to_string()),
+                                    skipped: false,
+                                },
+                            );
+                            if config.error_strategy == FlushErrorStrategy::FailFast {
+                                overall_success = false;
+                                break;
+                            }
+                            if config.error_strategy == FlushErrorStrategy::TryAllStrict {
+                                overall_success = false;
+                            }
+                        }
                     }
-                    Err(err) => {
-                        warn!(
-                            "Failed to flush region: {region_id}, error: {err}",
-                            region_id = region_id,
-                            err = err,
-                        );
+                }
+            } else {
+                let mut watcher_tasks = vec![];
+                for region_id in region_ids {
+                    let region_server = self.region_server.clone();
+                    let request = RegionRequest::Flush(RegionFlushRequest {
+                        row_group_size: None,
+                    });
+                    let fut = async move {
+                        region_server
+                            .handle_request(region_id, request)
+                            .await
+                            .map(|_| ())
+                    };
+                    let register_result = self
+                        .flush_tasks
+                        .try_register(region_id, Box::pin(fut))
+                        .await;
+                    if register_result.is_busy() {
+                        warn!("Another flush task is running for the region: {region_id}");
+                    }
+                    let watcher = register_result.into_watcher();
+                    watcher_tasks.push((region_id, watcher));
+                }
+
+                for (region_id, mut watcher) in watcher_tasks {
+                    let result = self.flush_tasks.wait_until_finish(&mut watcher).await;
+                    match result {
+                        Ok(_) => {
+                            results.insert(
+                                region_id,
+                                FlushResult {
+                                    success: true,
+                                    error: None,
+                                    skipped: false,
+                                },
+                            );
+                        }
+                        Err(err) => {
+                            if let error::Error::RegionNotFound { .. } = err {
+                                warn!("Received a flush region instruction from meta, but target region:{region_id} is not found.");
+                            }
+                            results.insert(
+                                region_id,
+                                FlushResult {
+                                    success: false,
+                                    error: Some(err.to_string()),
+                                    skipped: false,
+                                },
+                            );
+                            if config.error_strategy == FlushErrorStrategy::FailFast {
+                                overall_success = false;
+                                break;
+                            }
+                            if config.error_strategy == FlushErrorStrategy::TryAllStrict {
+                                overall_success = false;
+                            }
+                        }
                     }
                 }
             }
-            None
-        })
-    }
-
-    pub(crate) fn handle_flush_region_instruction(
-        self,
-        region_id: RegionId,
-    ) -> BoxFuture<'static, Option<InstructionReply>> {
-        Box::pin(async move {
-            let Some(writable) = self.region_server.is_region_leader(region_id) else {
-                return Some(InstructionReply::FlushRegion(SimpleReply {
-                    result: false,
-                    error: Some("Region is not leader".to_string()),
-                }));
-            };
-
-            if !writable {
-                return Some(InstructionReply::FlushRegion(SimpleReply {
-                    result: false,
-                    error: Some("Region is not writable".to_string()),
-                }));
-            }
-
-            let region_server_moved = self.region_server.clone();
-            let register_result = self
-                .flush_tasks
-                .try_register(
-                    region_id,
-                    Box::pin(async move {
-                        let request = RegionRequest::Flush(RegionFlushRequest {
-                            row_group_size: None,
-                        });
-                        region_server_moved
-                            .handle_request(region_id, request)
-                            .await?;
-                        Ok(())
-                    }),
-                )
-                .await;
-            if register_result.is_busy() {
-                warn!("Another flush task is running for the region: {region_id}");
-            }
-            let mut watcher = register_result.into_watcher();
-            let result = self.flush_tasks.wait_until_finish(&mut watcher).await;
-            match result {
-                Ok(()) => Some(InstructionReply::FlushRegion(SimpleReply {
-                    result: true,
-                    error: None,
-                })),
-                Err(err) => Some(InstructionReply::FlushRegion(SimpleReply {
-                    result: false,
-                    error: Some(format!("{err:?}")),
-                })),
-            }
+            Some(InstructionReply::FlushRegion(FlushRegionReply {
+                success: overall_success,
+                results,
+                error_strategy: config.error_strategy,
+            }))
         })
     }
 }
@@ -109,7 +161,6 @@ impl HandlerContext {
 mod tests {
     use std::sync::{Arc, RwLock};
 
-    use common_meta::instruction::FlushRegions;
     use mito2::engine::MITO_ENGINE_NAME;
     use store_api::storage::RegionId;
 
@@ -138,21 +189,31 @@ mod tests {
 
         let reply = handler_context
             .clone()
-            .handle_flush_regions_instruction(FlushRegions {
-                region_ids: region_ids.clone(),
+            .handle_flush_region_instruction(FlushRegionConfig {
+                target: FlushTarget::Regions(region_ids.clone()),
+                error_strategy: FlushErrorStrategy::FailFast,
+                is_hint: false,
+                timeout: None,
             })
             .await;
-        assert!(reply.is_none());
-        assert_eq!(*flushed_region_ids.read().unwrap(), region_ids);
+        assert!(reply.is_some());
+        let mut actual = flushed_region_ids.read().unwrap().clone();
+        let mut expected = region_ids.clone();
+        actual.sort();
+        expected.sort();
+        assert_eq!(actual, expected);
 
         flushed_region_ids.write().unwrap().clear();
         let not_found_region_ids = (0..2).map(|i| RegionId::new(2048, i)).collect::<Vec<_>>();
         let reply = handler_context
-            .handle_flush_regions_instruction(FlushRegions {
-                region_ids: not_found_region_ids.clone(),
+            .handle_flush_region_instruction(FlushRegionConfig {
+                target: FlushTarget::Regions(not_found_region_ids.clone()),
+                error_strategy: FlushErrorStrategy::FailFast,
+                is_hint: false,
+                timeout: None,
             })
             .await;
-        assert!(reply.is_none());
+        assert!(reply.is_some());
         assert!(flushed_region_ids.read().unwrap().is_empty());
     }
 }

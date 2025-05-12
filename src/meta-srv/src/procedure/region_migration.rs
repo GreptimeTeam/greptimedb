@@ -746,7 +746,7 @@ mod tests {
     use std::sync::Arc;
 
     use common_meta::distributed_time_constants::REGION_LEASE_SECS;
-    use common_meta::instruction::Instruction;
+    use common_meta::instruction::{FlushRegionReply, Instruction};
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::rpc::router::{Region, RegionRoute};
 
@@ -1276,7 +1276,16 @@ mod tests {
                 "Should be the flush leader region",
                 Some(mock_datanode_reply(
                     from_peer_id,
-                    Arc::new(|id| Ok(new_flush_region_reply(id, true, None))),
+                    Arc::new(|id| {
+                        Ok(new_flush_region_reply(
+                            id,
+                            FlushRegionReply {
+                                success: true,
+                                results: Default::default(),
+                                error_strategy: Default::default(),
+                            },
+                        ))
+                    }),
                 )),
                 Assertion::simple(assert_update_metadata_downgrade, assert_no_persist),
             ),
