@@ -23,6 +23,7 @@ use datatypes::arrow::datatypes::{
 };
 use datatypes::prelude::ConcreteDataType;
 use store_api::codec::PrimaryKeyEncoding;
+use serde::{Deserialize, Serialize};
 use store_api::metadata::RegionMetadata;
 use store_api::storage::consts::{
     OP_TYPE_COLUMN_NAME, PRIMARY_KEY_COLUMN_NAME, SEQUENCE_COLUMN_NAME,
@@ -41,6 +42,17 @@ pub const DEFAULT_WRITE_BUFFER_SIZE: ReadableSize = ReadableSize::mb(8);
 
 /// Default number of concurrent write, it only works on object store backend(e.g., S3).
 pub const DEFAULT_WRITE_CONCURRENCY: usize = 8;
+
+/// Format type of the SST file.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FormatType {
+    /// Parquet with primary key encoded.
+    #[default]
+    PrimaryKeyParquet,
+    /// Flat Parquet format.
+    FlatParquet,
+}
 
 /// Gets the arrow schema to store in parquet.
 pub fn to_sst_arrow_schema(metadata: &RegionMetadata) -> SchemaRef {

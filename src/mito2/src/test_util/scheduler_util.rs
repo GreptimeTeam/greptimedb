@@ -29,6 +29,7 @@ use crate::access_layer::{AccessLayer, AccessLayerRef};
 use crate::cache::CacheManager;
 use crate::compaction::CompactionScheduler;
 use crate::config::MitoConfig;
+use crate::sst::FormatType;
 use crate::error::Result;
 use crate::flush::FlushScheduler;
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
@@ -134,6 +135,7 @@ impl SchedulerEnv {
                 },
                 Default::default(),
                 Default::default(),
+                FormatType::PrimaryKeyParquet,
             )
             .await
             .unwrap(),

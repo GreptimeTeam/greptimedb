@@ -49,6 +49,7 @@ use crate::manifest::manager::RegionManifestManager;
 use crate::memtable::MemtableBuilderRef;
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::request::{OnFailure, OptionOutputTx};
+use crate::sst::FormatType;
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::location::{index_file_path, sst_file_path};
 use crate::time_provider::TimeProviderRef;
@@ -131,7 +132,7 @@ pub struct MitoRegion {
     ///
     /// The value will be updated to the latest offset of the topic
     /// if region receives a flush request or schedules a periodic flush task
-    /// and the region's memtable is empty.    
+    /// and the region's memtable is empty.
     ///
     /// There are no WAL entries in range [flushed_entry_id, topic_latest_entry_id] for current region,
     /// which means these WAL entries maybe able to be pruned up to `topic_latest_entry_id`.
@@ -140,6 +141,8 @@ pub struct MitoRegion {
     pub(crate) written_bytes: Arc<AtomicU64>,
     /// Memtable builder for the region.
     pub(crate) memtable_builder: MemtableBuilderRef,
+    /// Format type of the SST file.
+    pub(crate) sst_format: FormatType,
     /// manifest stats
     stats: ManifestStats,
 }
@@ -191,12 +194,17 @@ impl MitoRegion {
         self.last_flush_millis.store(now, Ordering::Relaxed);
     }
 
-    /// Return last compaction time in millis.
+    /// Returns last compaction timestamp in millis.
     pub(crate) fn last_compaction_millis(&self) -> i64 {
         self.last_compaction_millis.load(Ordering::Relaxed)
     }
 
-    /// Update compaction time to now millis.
+    /// Returns format type of the SST file.
+    pub(crate) fn sst_format(&self) -> FormatType {
+        self.sst_format
+    }
+
+    /// Update compaction time to current time.
     pub(crate) fn update_compaction_millis(&self) {
         let now = self.time_provider.current_time_millis();
         self.last_compaction_millis.store(now, Ordering::Relaxed);
@@ -443,6 +451,7 @@ impl MitoRegion {
             if manifest_meta.partition_expr.is_none() && current_meta.partition_expr.is_some() {
                 let action = RegionMetaAction::Change(RegionChange {
                     metadata: current_meta.clone(),
+                    sst_format: self.sst_format(),
                 });
                 let result = manager
                     .update(
@@ -1155,6 +1164,7 @@ mod tests {
     use crate::region::{
         ManifestContext, ManifestStats, MitoRegion, RegionLeaderState, RegionRoleState,
     };
+    use crate::sst::FormatType;
     use crate::sst::index::intermediate::IntermediateManager;
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
     use crate::test_util::memtable_util::EmptyMemtableBuilder;
@@ -1239,6 +1249,7 @@ mod tests {
                 },
                 Default::default(),
                 Default::default(),
+                FormatType::PrimaryKeyParquet,
             )
             .await
             .unwrap();
@@ -1305,6 +1316,7 @@ mod tests {
             },
             Default::default(),
             Default::default(),
+            FormatType::PrimaryKeyParquet,
         )
         .await
         .unwrap();
@@ -1327,6 +1339,7 @@ mod tests {
             topic_latest_entry_id: Default::default(),
             written_bytes: Arc::new(AtomicU64::new(0)),
             memtable_builder: Arc::new(EmptyMemtableBuilder::default()),
+            sst_format: FormatType::PrimaryKeyParquet,
             stats: ManifestStats::default(),
         };
 

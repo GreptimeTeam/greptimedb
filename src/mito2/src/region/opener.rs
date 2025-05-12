@@ -65,6 +65,7 @@ use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::sst::location::region_dir_from_table_dir;
+use crate::sst::FormatType;
 use crate::time_provider::TimeProviderRef;
 use crate::wal::entry_reader::WalEntryReader;
 use crate::wal::{EntryId, Wal};
@@ -254,6 +255,8 @@ impl RegionOpener {
         let object_store = get_object_store(&options.storage, &self.object_store_manager)?;
         let provider = self.provider::<S>(&options.wal_options)?;
         let metadata = Arc::new(metadata);
+        // Default to PrimaryKeyParquet for newly created regions
+        let sst_format = FormatType::PrimaryKeyParquet;
         // Create a manifest manager for this region and writes regions to the manifest file.
         let region_manifest_options =
             Self::manifest_options(config, &options, &region_dir, &self.object_store_manager)?;
@@ -265,6 +268,7 @@ impl RegionOpener {
             region_manifest_options,
             self.stats.total_manifest_size.clone(),
             self.stats.manifest_version.clone(),
+            sst_format,
         )
         .await?;
 
@@ -319,6 +323,7 @@ impl RegionOpener {
             topic_latest_entry_id: AtomicU64::new(0),
             memtable_builder,
             written_bytes: Arc::new(AtomicU64::new(0)),
+            sst_format,
             stats: self.stats,
         })
     }
@@ -525,6 +530,9 @@ impl RegionOpener {
         }
 
         let now = self.time_provider.current_time_millis();
+        // Read sst_format from manifest
+        let sst_format = manifest.sst_format;
+
         let region = MitoRegion {
             region_id: self.region_id,
             version_control,
@@ -542,6 +550,7 @@ impl RegionOpener {
             topic_latest_entry_id: AtomicU64::new(topic_latest_entry_id),
             written_bytes: Arc::new(AtomicU64::new(0)),
             memtable_builder,
+            sst_format,
             stats: self.stats.clone(),
         };
         Ok(Some(region))

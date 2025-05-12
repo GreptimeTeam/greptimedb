@@ -30,6 +30,7 @@ use crate::manifest::action::{
     RegionChange, RegionCheckpoint, RegionEdit, RegionManifest, RegionManifestBuilder,
     RegionMetaAction, RegionMetaActionList,
 };
+use crate::sst::FormatType;
 use crate::manifest::checkpointer::Checkpointer;
 use crate::manifest::storage::{
     ManifestObjectStore, file_version, is_checkpoint_file, is_delta_file,
@@ -154,6 +155,7 @@ impl RegionManifestManager {
         options: RegionManifestOptions,
         total_manifest_size: Arc<AtomicU64>,
         manifest_version: Arc<AtomicU64>,
+        sst_format: FormatType,
     ) -> Result<Self> {
         // construct storage
         let mut store = ManifestObjectStore::new(
@@ -175,6 +177,7 @@ impl RegionManifestManager {
             version,
             RegionChange {
                 metadata: metadata.clone(),
+                sst_format,
             },
         );
         let manifest = manifest_builder.try_build()?;
@@ -185,7 +188,7 @@ impl RegionManifestManager {
             options.manifest_dir, manifest
         );
 
-        let mut actions = vec![RegionMetaAction::Change(RegionChange { metadata })];
+        let mut actions = vec![RegionMetaAction::Change(RegionChange { metadata, sst_format })];
         if flushed_entry_id > 0 {
             actions.push(RegionMetaAction::Edit(RegionEdit {
                 files_to_add: vec![],
@@ -792,6 +795,7 @@ mod test {
         let action_list =
             RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange {
                 metadata: new_metadata.clone(),
+                sst_format: FormatType::PrimaryKeyParquet,
             }));
 
         let current_version = manager
@@ -860,6 +864,7 @@ mod test {
         let action_list =
             RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange {
                 metadata: new_metadata.clone(),
+                sst_format: FormatType::PrimaryKeyParquet,
             }));
 
         let current_version = manager
