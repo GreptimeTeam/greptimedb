@@ -330,7 +330,7 @@ impl BatchingEngine {
         let frontend = self.frontend_client.clone();
 
         // check execute once first to detect any error early
-        task.check_execute(&engine, &frontend).await?;
+        task.check_or_create_sink_table(&engine, &frontend).await?;
 
         // TODO(discord9): use time wheel or what for better
         let handle = common_runtime::spawn_global(async move {
