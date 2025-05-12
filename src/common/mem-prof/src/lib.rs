@@ -23,3 +23,13 @@ pub use jemalloc::{dump_flamegraph, dump_pprof, dump_profile};
 pub async fn dump_profile() -> error::Result<Vec<u8>> {
     error::ProfilingNotSupportedSnafu.fail()
 }
+
+#[cfg(windows)]
+pub async fn dump_pprof() -> error::Result<Vec<u8>> {
+    error::ProfilingNotSupportedSnafu.fail()
+}
+
+#[cfg(windows)]
+pub async fn dump_flamegraph() -> error::Result<Vec<u8>> {
+    error::ProfilingNotSupportedSnafu.fail()
+}
