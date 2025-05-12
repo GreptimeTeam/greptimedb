@@ -531,17 +531,25 @@ impl TimePartitions {
             .column_schema
             .data_type
             .as_timestamp()
-            .unwrap(); //safety: timestamp column must be a timestamp.
+            .unwrap(); // SAFETY: timestamp column must be a timestamp.
 
-        let bulk_start_sec = min.convert_to(TimeUnit::Second).unwrap().value();
-        let bulk_end_sec = max.convert_to(TimeUnit::Second).unwrap().value();
         let part_duration_sec = part_duration.as_secs() as i64;
+        // SAFETY: Timestamps won't overflow when converting to Second.
+        let bulk_start_sec = min
+            .convert_to(TimeUnit::Second)
+            .unwrap()
+            .value()
+            .div_euclid(part_duration_sec);
+        let bulk_end_sec = max
+            .convert_to(TimeUnit::Second)
+            .unwrap()
+            .value()
+            .div_euclid(part_duration_sec);
 
         let missing: Vec<_> = (bulk_start_sec..=bulk_end_sec)
-            .filter_map(|sec| {
-                let timestamp =
-                    Timestamp::new_second(sec.div_euclid(part_duration_sec) * part_duration_sec)
-                        .convert_to(timestamp_type.unit())?;
+            .filter_map(|start_sec| {
+                let timestamp = Timestamp::new_second(start_sec * part_duration_sec)
+                    .convert_to(timestamp_type.unit())?;
                 if present.insert(timestamp.value()) {
                     Some(timestamp)
                 } else {
