@@ -163,6 +163,8 @@ impl UnorderedScan {
             for part_range in part_ranges {
                 let mut metrics = ScannerMetrics::default();
                 let mut fetch_start = Instant::now();
+                // Safety: Only primary key format use this scan method.
+                let mapper = stream_ctx.input.mapper.as_primary_key().unwrap();
                 #[cfg(debug_assertions)]
                 let mut checker = crate::read::BatchChecker::default()
                     .with_start(Some(part_range.start))
@@ -188,14 +190,14 @@ impl UnorderedScan {
                     #[cfg(debug_assertions)]
                     checker.ensure_part_range_batch(
                         "UnorderedScan",
-                        stream_ctx.input.mapper.metadata().region_id,
+                        mapper.metadata().region_id,
                         partition,
                         part_range,
                         &batch,
                     );
 
                     let convert_start = Instant::now();
-                    let record_batch = stream_ctx.input.mapper.convert(&batch, cache)?;
+                    let record_batch = mapper.convert(&batch, cache)?;
                     metrics.convert_cost += convert_start.elapsed();
                     let yield_start = Instant::now();
                     yield record_batch;
@@ -208,7 +210,7 @@ impl UnorderedScan {
                 // The query engine can use this to optimize some queries.
                 if distinguish_range {
                     let yield_start = Instant::now();
-                    yield stream_ctx.input.mapper.empty_record_batch();
+                    yield mapper.empty_record_batch();
                     metrics.yield_cost += yield_start.elapsed();
                 }
 

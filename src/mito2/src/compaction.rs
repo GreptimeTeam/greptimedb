@@ -629,7 +629,7 @@ struct CompactionSstReaderBuilder<'a> {
 impl CompactionSstReaderBuilder<'_> {
     /// Builds [BoxedBatchReader] that reads all SST files and yields batches in primary key order.
     async fn build_sst_reader(self) -> Result<BoxedBatchReader> {
-        let mut scan_input = ScanInput::new(self.sst_layer, ProjectionMapper::all(&self.metadata)?)
+        let mut scan_input = ScanInput::new(self.sst_layer, ProjectionMapper::all(&self.metadata, false)?)
             .with_files(self.inputs.to_vec())
             .with_append_mode(self.append_mode)
             // We use special cache strategy for compaction.
