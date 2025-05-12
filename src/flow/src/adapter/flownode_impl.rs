@@ -42,9 +42,9 @@ use crate::batching_mode::engine::BatchingEngine;
 use crate::batching_mode::{FRONTEND_SCAN_TIMEOUT, MIN_REFRESH_DURATION};
 use crate::engine::FlowEngine;
 use crate::error::{
-    CreateFlowSnafu, ExternalSnafu, FlowNotFoundSnafu, IllegalCheckTaskStateSnafu,
-    InsertIntoFlowSnafu, InternalSnafu, JoinTaskSnafu, ListFlowsSnafu, NoAvailableFrontendSnafu,
-    SyncCheckTaskSnafu, UnexpectedSnafu,
+    CreateFlowSnafu, ExternalSnafu, FlowNotFoundSnafu, FlowNotRecoveredSnafu,
+    IllegalCheckTaskStateSnafu, InsertIntoFlowSnafu, InternalSnafu, JoinTaskSnafu, ListFlowsSnafu,
+    NoAvailableFrontendSnafu, SyncCheckTaskSnafu, UnexpectedSnafu,
 };
 use crate::metrics::METRIC_FLOW_TASK_COUNT;
 use crate::repr::{self, DiffRow};
@@ -90,7 +90,9 @@ impl FlowDualEngine {
     }
 
     /// Set `done_recovering` to true
+    /// indicate that we are ready to handle requests
     pub fn set_done_recovering(&self) {
+        info!("FlowDualEngine done recovering");
         self.done_recovering
             .store(true, std::sync::atomic::Ordering::Release);
     }
@@ -99,6 +101,37 @@ impl FlowDualEngine {
     pub fn is_recover_done(&self) -> bool {
         self.done_recovering
             .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// wait for recovering to be done, this will only happen when flownode just started
+    async fn wait_for_all_flow_recover(&self, waiting_req_cnt: usize) -> Result<(), Error> {
+        if self.is_recover_done() {
+            return Ok(());
+        }
+
+        warn!(
+            "FlowDualEngine is not done recovering, {} insert request waiting for recovery",
+            waiting_req_cnt
+        );
+        // wait 3 seconds, check every 1 second
+        // TODO(discord9): make this configurable
+        let mut retry = 0;
+        let max_retry = 3;
+        while retry < max_retry && !self.is_recover_done() {
+            warn!(
+                "FlowDualEngine is not done recovering, retry {} in 1s",
+                retry
+            );
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            retry += 1;
+        }
+        if retry == max_retry {
+            return FlowNotRecoveredSnafu.fail();
+        } else {
+            info!("FlowDualEngine is done recovering");
+        }
+        // TODO(discord9): also put to centralized logging for flow once it implemented
+        Ok(())
     }
 
     pub fn plugins(&self) -> &Plugins {
@@ -258,7 +291,7 @@ impl FlowDualEngine {
                     to_be_created
                 );
                 let mut errors = vec![];
-                for flow_id in to_be_created {
+                for flow_id in to_be_created.clone() {
                     let flow_id = *flow_id;
                     let info = self
                         .flow_metadata_manager
@@ -317,6 +350,10 @@ impl FlowDualEngine {
                         errors.push((flow_id, err));
                     }
                 }
+                if errors.is_empty() {
+                    info!("Recover flows successfully, flows: {:?}", to_be_created);
+                }
+
                 for (flow_id, err) in errors {
                     warn!("Failed to recreate flow {}, err={:#?}", flow_id, err);
                 }
@@ -424,6 +461,8 @@ impl ConsistentCheckTask {
                 );
                 tokio::time::sleep(MIN_REFRESH_DURATION).await;
             }
+
+            engine.set_done_recovering();
 
             // then do check flows, with configurable allow_create and allow_drop
             let (mut allow_create, mut allow_drop) = (false, false);
@@ -644,14 +683,8 @@ impl FlowEngine for FlowDualEngine {
         &self,
         request: api::v1::region::InsertRequests,
     ) -> Result<(), Error> {
-        if !self.is_recover_done() {
-            warn!(
-                "FlowDualEngine is not done recovering, ignore {} rows of insert request",
-                request.requests.len()
-            );
-            // TODO(discord9): also put to centralized logging for flow once it implemented
-            return Ok(());
-        }
+        self.wait_for_all_flow_recover(request.requests.len())
+            .await?;
         // TODO(discord9): make as little clone as possible
         let mut to_stream_engine = Vec::with_capacity(request.requests.len());
         let mut to_batch_engine = request.requests;
