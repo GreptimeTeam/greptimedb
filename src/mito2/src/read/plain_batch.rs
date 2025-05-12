@@ -76,7 +76,7 @@ impl PlainBatch {
 
     /// Returns all columns.
     pub fn columns(&self) -> &[ArrayRef] {
-        &self.record_batch.columns()
+        self.record_batch.columns()
     }
 
     /// Returns the array of column at index `idx`.
