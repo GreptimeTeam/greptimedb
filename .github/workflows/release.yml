@@ -501,12 +501,33 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Create Pull Request
+      - name: Bump helm charts version
         env:
           GITHUB_TOKEN: ${{ secrets.HELM_CHARTS_REPO_TOKEN }}
           VERSION: ${{ needs.allocate-runners.outputs.version }}
         run: |
           ./.github/scripts/update-helm-charts-version.sh
+
+  bump-homebrew-greptime-version:
+    name: Bump homebrew greptime version
+    if: ${{ github.ref_type == 'tag' && !contains(github.ref_name, 'nightly') && github.event_name != 'schedule' }}
+    needs: [publish-github-release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Bump homebrew greptime version
+        env:
+          GITHUB_TOKEN: ${{ secrets.HOMEBREW_GREPTIME_REPO_TOKEN }}
+          VERSION: ${{ needs.allocate-runners.outputs.version }}
+        run: |
+          ./.github/scripts/update-homebrew-greptme-version.sh
 
   notification:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'push' || github.event_name == 'schedule') && always() }}
