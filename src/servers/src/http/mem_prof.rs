@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(feature = "mem-prof")]
 use axum::extract::Query;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
