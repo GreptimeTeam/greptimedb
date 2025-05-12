@@ -14,7 +14,7 @@ impl SqlQueryHandler for Instance {
 ```
 
 Normally, when a SQL query arrives at GreptimeDB, the `do_query` method will be called. After some parsing work, the SQL
-will be feed into `StatementExecutor`:
+will be fed into `StatementExecutor`:
 
 ```rust
 // in Frontend Instance:
@@ -27,7 +27,7 @@ an example.
 
 Now, what if the statements should be handled differently for GreptimeDB Standalone and Cluster? You can see there's
 a `SqlStatementExecutor` field in `StatementExecutor`. Each GreptimeDB Standalone and Cluster has its own implementation
-of `SqlStatementExecutor`. If you are going to implement the statements differently in the two mode (
+of `SqlStatementExecutor`. If you are going to implement the statements differently in the two modes (
 like `CREATE TABLE`), you have to implement them in their own `SqlStatementExecutor`s.
 
 Summarize as the diagram below:

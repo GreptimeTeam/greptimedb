@@ -11,6 +11,6 @@ And database will reply with something like:
 Log Level changed from Some("info") to "trace,flow=debug"%
 ```
 
-The data is a string in the format of `global_level,module1=level1,module2=level2,...` that follow the same rule of `RUST_LOG`. 
+The data is a string in the format of `global_level,module1=level1,module2=level2,...` that follows the same rule of `RUST_LOG`. 
 
 The module is the module name of the log, and the level is the log level. The log level can be one of the following: `trace`, `debug`, `info`, `warn`, `error`, `off`(case insensitive).
