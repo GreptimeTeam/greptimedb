@@ -22,8 +22,13 @@ use common_telemetry::debug;
 use common_time::timestamp::TimeUnit;
 use common_time::timestamp_millis::BucketAligned;
 use common_time::Timestamp;
+use datatypes::arrow;
+use datatypes::arrow::array::{AsArray, BooleanArray, Int64Array, RecordBatch, RecordBatchOptions};
+use datatypes::arrow::buffer::{BooleanBuffer, MutableBuffer};
+use datatypes::arrow::datatypes::{DataType, Int64Type};
+use datatypes::arrow::util::bit_util::ceil;
 use smallvec::{smallvec, SmallVec};
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 
 use crate::error;
@@ -38,7 +43,8 @@ use crate::memtable::{KeyValues, MemtableBuilderRef, MemtableId, MemtableRef};
 pub struct TimePartition {
     /// Memtable of the partition.
     memtable: MemtableRef,
-    /// Time range of the partition. `None` means there is no time range. The time
+    /// Time range of the partition. `min` is inclusive and `max` is exclusive.
+    /// `None` means there is no time range. The time
     /// range is `None` if and only if the [TimePartitions::part_duration] is `None`.
     time_range: Option<PartTimeRange>,
 }
@@ -59,9 +65,100 @@ impl TimePartition {
     }
 
     /// Writes a record batch to memtable.
-    fn write_record_batch(&self, rb: BulkPart) -> error::Result<()> {
+    fn write_record_batch(&self, rb: BulkPart) -> Result<()> {
         self.memtable.write_bulk(rb)
     }
+
+    /// Write a partial [BulkPart] according to [TimePartition::time_range].
+    fn write_record_batch_partial(&self, part: &BulkPart) -> error::Result<()> {
+        let Some(range) = self.time_range else {
+            unreachable!("TimePartition must have explicit time range when a bulk request involves multiple time partition")
+        };
+        let Some(filtered) = split_record_batch(
+            part,
+            range.min_timestamp.value(),
+            range.max_timestamp.value(),
+        ) else {
+            return Ok(());
+        };
+        self.write_record_batch(filtered)
+    }
+}
+
+fn split_record_batch(part: &BulkPart, min: i64, max: i64) -> Result<Option<BulkPart>> {
+    let ts_array = part.timestamps();
+    // safety: timestamp column must be of timestamp data type hence can be cast to Int64Array
+    let ts_primitive = ts_array.as_primitive::<Int64Type>();
+    let len = ts_primitive.len();
+    let mut buffer = MutableBuffer::new(ceil(len, 64) * 8);
+
+    let f = |idx: usize| -> bool {
+        unsafe {
+            let val = ts_primitive.value_unchecked(idx);
+            val >= min && val < max
+        }
+    };
+
+    let chunks = len / 64;
+    let remainder = len % 64;
+    for chunk in 0..chunks {
+        let mut packed = 0;
+        for bit_idx in 0..64 {
+            let i = bit_idx + chunk * 64;
+            packed |= (f(i) as u64) << bit_idx;
+        }
+        // SAFETY: Already allocated sufficient capacity
+        unsafe { buffer.push_unchecked(packed) }
+    }
+
+    if remainder != 0 {
+        let mut packed = 0;
+        for bit_idx in 0..remainder {
+            let i = bit_idx + chunks * 64;
+            packed |= (f(i) as u64) << bit_idx;
+        }
+
+        // SAFETY: Already allocated sufficient capacity
+        unsafe { buffer.push_unchecked(packed) }
+    }
+    let filter = BooleanArray::new(BooleanBuffer::new(buffer.into(), 0, len), None);
+    let res = arrow::compute::filter(ts_primitive, &filter).context(error::ComputeArrowSnafu)?;
+    if res.is_empty() {
+        return Ok(None);
+    }
+    let i64array = res.as_any().downcast_ref::<Int64Array>().unwrap();
+    // safety: we've checked res is not empty
+    let max_ts = arrow::compute::max(i64array).unwrap();
+    let min_ts = arrow::compute::min(i64array).unwrap();
+
+    let num_rows = i64array.len();
+    let arrays = part
+        .batch
+        .columns()
+        .iter()
+        .enumerate()
+        .map(|(index, array)| {
+            if index == part.timestamp_index {
+                Ok(res.clone())
+            } else {
+                arrow::compute::filter(&array, &filter).context(error::ComputeArrowSnafu)
+            }
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let batch = RecordBatch::try_new_with_options(
+        part.batch.schema(),
+        arrays,
+        &RecordBatchOptions::default().with_row_count(Some(num_rows)),
+    )
+    .context(error::NewRecordBatchSnafu)?;
+    Ok(Some(BulkPart {
+        batch,
+        num_rows,
+        max_ts,
+        min_ts,
+        sequence: part.sequence,
+        timestamp_index: part.timestamp_index,
+    }))
 }
 
 type PartitionVec = SmallVec<[TimePartition; 2]>;
@@ -522,6 +619,12 @@ struct PartitionToWrite<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use datatypes::arrow::array::{ArrayRef, Int64Array, StringArray};
+    use datatypes::arrow::datatypes::{DataType, Field, Schema};
+    use datatypes::arrow::record_batch::RecordBatch;
+
     use super::*;
     use crate::memtable::partition_tree::PartitionTreeMemtableBuilder;
     use crate::test_util::memtable_util::{self, collect_iter_timestamps};
@@ -744,5 +847,57 @@ mod tests {
         assert_eq!(Duration::from_secs(10), new_parts.part_duration().unwrap());
         assert_eq!(3, new_parts.list_partitions()[0].memtable.id());
         assert_eq!(4, new_parts.next_memtable_id());
+    }
+
+    #[test]
+    fn test_split_record_batch() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("ts", DataType::Int64, false),
+            Field::new("val", DataType::Utf8, true),
+        ]));
+
+        let ts_array = Arc::new(Int64Array::from(vec![1000, 2000, 5000, 7000, 8000]));
+        let val_array = Arc::new(StringArray::from(vec!["a", "b", "c", "d", "e"]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![ts_array as ArrayRef, val_array as ArrayRef],
+        )
+        .unwrap();
+
+        let part = BulkPart {
+            batch,
+            num_rows: 5,
+            max_ts: 8000,
+            min_ts: 1000,
+            sequence: 0,
+            timestamp_index: 0,
+        };
+
+        let result = split_record_batch(part.clone(), 1000, 2000).unwrap();
+        assert!(result.is_some());
+        let filtered = result.unwrap();
+        assert_eq!(filtered.num_rows, 1);
+        assert_eq!(filtered.min_ts, 1000);
+        assert_eq!(filtered.max_ts, 1000);
+
+        // Test splitting with range [3000, 6000)
+        let result = split_record_batch(part.clone(), 3000, 6000).unwrap();
+        assert!(result.is_some());
+        let filtered = result.unwrap();
+        assert_eq!(filtered.num_rows, 1);
+        assert_eq!(filtered.min_ts, 5000);
+        assert_eq!(filtered.max_ts, 5000);
+
+        // Test splitting with range that includes no points
+        let result = split_record_batch(part.clone(), 3000, 4000).unwrap();
+        assert!(result.is_none());
+
+        // Test splitting with range that includes all points
+        let result = split_record_batch(part.clone(), 0, 9000).unwrap();
+        assert!(result.is_some());
+        let filtered = result.unwrap();
+        assert_eq!(filtered.num_rows, 5);
+        assert_eq!(filtered.min_ts, 1000);
+        assert_eq!(filtered.max_ts, 8000);
     }
 }
