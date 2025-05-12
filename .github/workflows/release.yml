@@ -487,6 +487,27 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WEBSITE_REPO_TOKEN: ${{ secrets.WEBSITE_REPO_TOKEN }}
 
+  bump-helm-charts-version:
+    name: Bump helm charts version
+    if: ${{ github.ref_type == 'tag' && !contains(github.ref_name, 'nightly') && github.event_name != 'schedule' }}
+    needs: [publish-github-release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create Pull Request
+        env:
+          GITHUB_TOKEN: ${{ secrets.HELM_CHARTS_REPO_TOKEN }}
+          VERSION: ${{ needs.allocate-runners.outputs.version }}
+        run: |
+          ./.github/scripts/update-helm-charts-version.sh
+
   notification:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'push' || github.event_name == 'schedule') && always() }}
     name: Send notification to Greptime team
