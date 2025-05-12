@@ -70,7 +70,8 @@ ORDER BY
 | 0_| 0_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[collect_time_utc@0 as collect_time, peak_current@1 as peak_current] REDACTED
-|_|_|_SortExec: expr=[collect_time_utc@0 ASC NULLS LAST], preserve_partitioning=[false] REDACTED
+|_|_|_SortPreservingMergeExec: [collect_time_utc@0 ASC NULLS LAST] REDACTED
+|_|_|_SortExec: expr=[collect_time_utc@0 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges) REDACTED
 |_|_|_|
 |_|_| Total rows: 8_|
@@ -117,7 +118,8 @@ ORDER BY
 | 0_| 0_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[collect_time_utc@0 as collect_time_0, peak_current@1 as peak_current] REDACTED
-|_|_|_SortExec: expr=[collect_time_utc@0 ASC NULLS LAST], preserve_partitioning=[false] REDACTED
+|_|_|_SortPreservingMergeExec: [collect_time_utc@0 ASC NULLS LAST] REDACTED
+|_|_|_SortExec: expr=[collect_time_utc@0 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges) REDACTED
 |_|_|_|
 |_|_| Total rows: 8_|
@@ -167,8 +169,8 @@ ORDER BY
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[collect_time@0 as true_collect_time, collect_time_utc@1 as collect_time, peak_current@2 as peak_current] REDACTED
 |_|_|_SortPreservingMergeExec: [collect_time@0 DESC] REDACTED
-|_|_|_WindowedSortExec: expr=collect_time@0 DESC num_ranges=1 REDACTED
-|_|_|_PartSortExec: expr=collect_time@0 DESC num_ranges=1 REDACTED
+|_|_|_WindowedSortExec: expr=collect_time@0 DESC num_ranges=32 REDACTED
+|_|_|_PartSortExec: expr=collect_time@0 DESC num_ranges=32 REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges) REDACTED
 |_|_|_|
 |_|_| Total rows: 8_|
@@ -218,8 +220,8 @@ ORDER BY
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[collect_time_utc@0 as collect_time, collect_time@1 as true_collect_time, peak_current@2 as peak_current] REDACTED
 |_|_|_SortPreservingMergeExec: [collect_time@1 DESC] REDACTED
-|_|_|_WindowedSortExec: expr=collect_time@1 DESC num_ranges=1 REDACTED
-|_|_|_PartSortExec: expr=collect_time@1 DESC num_ranges=1 REDACTED
+|_|_|_WindowedSortExec: expr=collect_time@1 DESC num_ranges=32 REDACTED
+|_|_|_PartSortExec: expr=collect_time@1 DESC num_ranges=32 REDACTED
 |_|_|_ProjectionExec: expr=[collect_time_utc@1 as collect_time_utc, collect_time@0 as collect_time, peak_current@2 as peak_current] REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges) REDACTED
 |_|_|_|

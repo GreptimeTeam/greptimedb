@@ -500,12 +500,6 @@ mod test {
         assert_eq!(batch2.df_record_batch(), &recordbatches[1]);
 
         let result = plan.execute(0, ctx.task_ctx());
-        assert!(result.is_err());
-        match result {
-            Err(e) => assert!(e
-                .to_string()
-                .contains("Not expected to run ExecutionPlan more than once")),
-            _ => unreachable!(),
-        }
+        assert!(result.is_ok());
     }
 }

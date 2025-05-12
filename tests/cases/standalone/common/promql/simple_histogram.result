@@ -130,7 +130,8 @@ tql eval (3000, 3000, '1s') label_replace(histogram_quantile(0.8, histogram_buck
 -- quantile with rate is covered in other cases
 tql eval (3000, 3000, '1s') histogram_quantile(0.2, rate(histogram_bucket[5m]));
 
-Error: 3001(EngineExecuteQuery), Unsupported arrow data type, type: Dictionary(Int64, Float64)
+++
+++
 
 drop table histogram_bucket;
 

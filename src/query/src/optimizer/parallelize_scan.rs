@@ -112,10 +112,7 @@ impl ParallelizeScan {
     /// Distribute [`PartitionRange`]s to each partition.
     ///
     /// Currently we assign ranges to partitions according to their rows so each partition
-    /// has similar number of rows.
-    /// This method may return partitions with smaller number than `expected_partition_num`
-    /// if the number of ranges is smaller than `expected_partition_num`. But this will
-    /// return at least one partition.
+    /// has similar number of rows. This method always return `expected_partition_num` partitions.
     fn assign_partition_range(
         mut ranges: Vec<PartitionRange>,
         expected_partition_num: usize,
@@ -162,7 +159,6 @@ impl ParallelizeScan {
 
         // Assigns the range to the partition with the smallest number of rows.
         for range in ranges {
-            // Safety: actual_partition_num always > 0.
             let mut node = part_heap.pop().unwrap();
             let partition_idx = node.partition_idx;
             node.num_rows += range.num_rows;

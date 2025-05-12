@@ -30,9 +30,9 @@ use datafusion::logical_expr::LogicalPlan;
 use datafusion_expr::UserDefinedLogicalNode;
 use greptime_proto::substrait_extension::MergeScan as PbMergeScan;
 use promql::functions::{
-    AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, IDelta, Increase,
-    LastOverTime, MaxOverTime, MinOverTime, PresentOverTime, Rate, Resets, StddevOverTime,
-    StdvarOverTime, SumOverTime,
+    quantile_udaf, AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, IDelta,
+    Increase, LastOverTime, MaxOverTime, MinOverTime, PresentOverTime, Rate, Resets,
+    StddevOverTime, StdvarOverTime, SumOverTime,
 };
 use prost::Message;
 use session::context::QueryContextRef;
@@ -137,6 +137,7 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
             let _ = session_state.register_udaf(Arc::new(HllState::state_udf_impl()));
             let _ = session_state.register_udaf(Arc::new(HllState::merge_udf_impl()));
             let _ = session_state.register_udaf(Arc::new(GeoPathAccumulator::udf_impl()));
+            let _ = session_state.register_udaf(quantile_udaf());
 
             let _ = session_state.register_udf(Arc::new(IDelta::<false>::scalar_udf()));
             let _ = session_state.register_udf(Arc::new(IDelta::<true>::scalar_udf()));
