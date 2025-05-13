@@ -26,21 +26,19 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_time::Timestamp;
-use datafusion_common::ScalarValue;
-use datatypes::arrow::array::{ArrayRef, UInt64Array};
+use datatypes::arrow::array::UInt64Array;
 use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow::record_batch::RecordBatch;
-use datatypes::prelude::DataType;
 use parquet::file::metadata::{ParquetMetaData, RowGroupMetaData};
 use parquet::file::statistics::Statistics;
 use snafu::ResultExt;
-use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
+use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::{ColumnId, SequenceNumber};
 
 use crate::error::{NewRecordBatchSnafu, Result};
 use crate::read::plain_batch::PlainBatch;
 use crate::sst::file::{FileId, FileTimeRange};
-use crate::sst::parquet::format::StatValues;
+use crate::sst::parquet::format::{ReadFormat, StatValues};
 use crate::sst::to_plain_sst_arrow_schema;
 
 /// Number of columns that have fixed positions.
@@ -98,6 +96,7 @@ impl PlainWriteFormat {
 }
 
 /// Helper for reading the SST format.
+#[allow(dead_code)]
 pub struct PlainReadFormat {
     /// The metadata stored in the SST.
     metadata: RegionMetadataRef,
@@ -159,24 +158,6 @@ impl PlainReadFormat {
         }
     }
 
-    /// Gets the arrow schema of the SST file.
-    ///
-    /// This schema is computed from the region metadata but should be the same
-    /// as the arrow schema decoded from the file metadata.
-    pub(crate) fn arrow_schema(&self) -> &SchemaRef {
-        &self.arrow_schema
-    }
-
-    /// Gets the metadata of the SST.
-    pub(crate) fn metadata(&self) -> &RegionMetadataRef {
-        &self.metadata
-    }
-
-    /// Gets sorted projection indices to read.
-    pub(crate) fn projection_indices(&self) -> &[usize] {
-        &self.projection_indices
-    }
-
     /// Index of a column in the projected batch by its column id.
     pub fn projected_index_by_id(&self, column_id: ColumnId) -> Option<usize> {
         self.column_id_to_projected_index.get(&column_id).copied()
@@ -193,7 +174,7 @@ impl PlainReadFormat {
             return StatValues::NoColumn;
         };
         let column = &self.metadata.column_metadatas[column_index];
-        let stats = Self::column_values(row_groups, column, column_index, true);
+        let stats = ReadFormat::column_values(row_groups, column, column_index, true);
         StatValues::from_stats_opt(stats)
     }
 
@@ -208,7 +189,7 @@ impl PlainReadFormat {
             return StatValues::NoColumn;
         };
         let column = &self.metadata.column_metadatas[column_index];
-        let stats = Self::column_values(row_groups, column, column_index, false);
+        let stats = ReadFormat::column_values(row_groups, column, column_index, false);
         StatValues::from_stats_opt(stats)
     }
 
@@ -222,86 +203,26 @@ impl PlainReadFormat {
             // No such column in the SST.
             return StatValues::NoColumn;
         };
-        let stats = Self::column_null_counts(row_groups, column_index);
+        let stats = ReadFormat::column_null_counts(row_groups, column_index);
         StatValues::from_stats_opt(stats)
     }
 
-    /// Returns min/max values of specific column.
-    /// Returns None if the column does not have statistics.
-    fn column_values(
-        row_groups: &[impl Borrow<RowGroupMetaData>],
-        column: &ColumnMetadata,
-        column_index: usize,
-        is_min: bool,
-    ) -> Option<ArrayRef> {
-        let null_scalar: ScalarValue = column
-            .column_schema
-            .data_type
-            .as_arrow_type()
-            .try_into()
-            .ok()?;
-        let scalar_values = row_groups
-            .iter()
-            .map(|meta| {
-                let stats = meta.borrow().column(column_index).statistics()?;
-                match stats {
-                    Statistics::Boolean(s) => Some(ScalarValue::Boolean(Some(if is_min {
-                        *s.min_opt()?
-                    } else {
-                        *s.max_opt()?
-                    }))),
-                    Statistics::Int32(s) => Some(ScalarValue::Int32(Some(if is_min {
-                        *s.min_opt()?
-                    } else {
-                        *s.max_opt()?
-                    }))),
-                    Statistics::Int64(s) => Some(ScalarValue::Int64(Some(if is_min {
-                        *s.min_opt()?
-                    } else {
-                        *s.max_opt()?
-                    }))),
-
-                    Statistics::Int96(_) => None,
-                    Statistics::Float(s) => Some(ScalarValue::Float32(Some(if is_min {
-                        *s.min_opt()?
-                    } else {
-                        *s.max_opt()?
-                    }))),
-                    Statistics::Double(s) => Some(ScalarValue::Float64(Some(if is_min {
-                        *s.min_opt()?
-                    } else {
-                        *s.max_opt()?
-                    }))),
-                    Statistics::ByteArray(s) => {
-                        let bytes = if is_min {
-                            s.min_bytes_opt()?
-                        } else {
-                            s.max_bytes_opt()?
-                        };
-                        let s = String::from_utf8(bytes.to_vec()).ok();
-                        Some(ScalarValue::Utf8(s))
-                    }
-
-                    Statistics::FixedLenByteArray(_) => None,
-                }
-            })
-            .map(|maybe_scalar| maybe_scalar.unwrap_or_else(|| null_scalar.clone()))
-            .collect::<Vec<ScalarValue>>();
-        debug_assert_eq!(scalar_values.len(), row_groups.len());
-        ScalarValue::iter_to_array(scalar_values).ok()
+    /// Gets the arrow schema of the SST file.
+    ///
+    /// This schema is computed from the region metadata but should be the same
+    /// as the arrow schema decoded from the file metadata.
+    pub(crate) fn arrow_schema(&self) -> &SchemaRef {
+        &self.arrow_schema
     }
 
-    /// Returns null counts of specific column.
-    fn column_null_counts(
-        row_groups: &[impl Borrow<RowGroupMetaData>],
-        column_index: usize,
-    ) -> Option<ArrayRef> {
-        let values = row_groups.iter().map(|meta| {
-            let col = meta.borrow().column(column_index);
-            let stat = col.statistics()?;
-            stat.null_count_opt()
-        });
-        Some(Arc::new(UInt64Array::from_iter(values)))
+    /// Gets the metadata of the SST.
+    pub(crate) fn metadata(&self) -> &RegionMetadataRef {
+        &self.metadata
+    }
+
+    /// Gets sorted projection indices to read.
+    pub(crate) fn projection_indices(&self) -> &[usize] {
+        &self.projection_indices
     }
 }
 
