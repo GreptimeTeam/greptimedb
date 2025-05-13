@@ -525,13 +525,7 @@ impl TimePartitions {
 
         // safety: self.part_duration can only be present when reach here.
         let part_duration = self.part_duration.unwrap();
-        let timestamp_type = self
-            .metadata
-            .time_index_column()
-            .column_schema
-            .data_type
-            .as_timestamp()
-            .unwrap(); // SAFETY: timestamp column must be a timestamp.
+        let timestamp_unit = self.metadata.time_index_type().unit();
 
         let part_duration_sec = part_duration.as_secs() as i64;
         // SAFETY: Timestamps won't overflow when converting to Second.
@@ -546,17 +540,26 @@ impl TimePartitions {
             .value()
             .div_euclid(part_duration_sec);
 
-        let missing: Vec<_> = (bulk_start_sec..=bulk_end_sec)
+        let missing = (bulk_start_sec..=bulk_end_sec)
             .filter_map(|start_sec| {
-                let timestamp = Timestamp::new_second(start_sec * part_duration_sec)
-                    .convert_to(timestamp_type.unit())?;
+                let Some(timestamp) =
+                    Timestamp::new_second(start_sec * part_duration_sec).convert_to(timestamp_unit)
+                else {
+                    return Some(
+                        InvalidRequestSnafu {
+                            region_id: self.metadata.region_id,
+                            reason: format!("Timestamp out of range: {}", start_sec),
+                        }
+                        .fail(),
+                    );
+                };
                 if present.insert(timestamp.value()) {
-                    Some(timestamp)
+                    Some(Ok(timestamp))
                 } else {
                     None
                 }
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
         Ok((matching, missing))
     }
 
