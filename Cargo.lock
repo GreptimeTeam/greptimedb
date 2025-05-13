@@ -9908,6 +9908,7 @@ dependencies = [
  "hmac",
  "pbkdf2",
  "rand 0.8.5",
+ "serde",
  "serde_json",
  "sha2",
  "stringprep",
@@ -9916,8 +9917,8 @@ dependencies = [
 
 [[package]]
 name = "rskafka"
-version = "0.5.0"
-source = "git+https://github.com/influxdata/rskafka.git?rev=75535b5ad9bae4a5dbb582c82e44dfd81ec10105#75535b5ad9bae4a5dbb582c82e44dfd81ec10105"
+version = "0.6.0"
+source = "git+https://github.com/influxdata/rskafka.git?rev=8dbd01ed809f5a791833a594e85b144e36e45820#8dbd01ed809f5a791833a594e85b144e36e45820"
 dependencies = [
  "bytes",
  "chrono",
@@ -9927,11 +9928,11 @@ dependencies = [
  "integer-encoding 4.0.2",
  "lz4",
  "parking_lot 0.12.3",
- "rand 0.8.5",
+ "rand 0.9.0",
  "rsasl",
  "rustls",
  "snap",
- "thiserror 1.0.64",
+ "thiserror 2.0.12",
  "tokio",
  "tokio-rustls",
  "tracing",

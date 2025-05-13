@@ -176,7 +176,7 @@ reqwest = { version = "0.12", default-features = false, features = [
     "stream",
     "multipart",
 ] }
-rskafka = { git = "https://github.com/influxdata/rskafka.git", rev = "75535b5ad9bae4a5dbb582c82e44dfd81ec10105", features = [
+rskafka = { git = "https://github.com/influxdata/rskafka.git", rev = "8dbd01ed809f5a791833a594e85b144e36e45820", features = [
     "transport-tls",
 ] }
 rstest = "0.25"
