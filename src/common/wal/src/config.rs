@@ -58,6 +58,8 @@ impl From<DatanodeWalConfig> for MetasrvWalConfig {
                 auto_prune_interval: config.auto_prune_interval,
                 trigger_flush_threshold: config.trigger_flush_threshold,
                 auto_prune_parallelism: config.auto_prune_parallelism,
+                prune_stale_records_in_existing_topics: config
+                    .prune_stale_records_in_existing_topics,
             }),
         }
     }
@@ -202,8 +204,10 @@ mod tests {
                 num_partitions: 1,
                 replication_factor: 1,
                 create_topic_timeout: Duration::from_secs(30),
+                delete_records_timeouts: Duration::from_secs(30),
             },
             auto_create_topics: true,
+            prune_stale_records_in_existing_topics: false,
             auto_prune_interval: Duration::from_secs(0),
             trigger_flush_threshold: 0,
             auto_prune_parallelism: 10,
@@ -236,6 +240,7 @@ mod tests {
                 num_partitions: 1,
                 replication_factor: 1,
                 create_topic_timeout: Duration::from_secs(30),
+                delete_records_timeouts: Duration::from_secs(30),
             },
             ..Default::default()
         };

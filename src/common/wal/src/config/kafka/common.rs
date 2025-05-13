@@ -25,9 +25,9 @@ use snafu::{OptionExt, ResultExt};
 /// The default backoff config for kafka client.
 pub const DEFAULT_BACKOFF_CONFIG: BackoffConfig = BackoffConfig {
     init_backoff: Duration::from_millis(100),
-    max_backoff: Duration::from_secs(10),
-    base: 2.0,
-    deadline: Some(Duration::from_secs(120)),
+    max_backoff: Duration::from_secs(1),
+    base: 3.0,
+    deadline: Some(Duration::from_secs(3)),
 };
 
 /// Default interval for auto WAL pruning.
@@ -183,6 +183,9 @@ pub struct KafkaTopicConfig {
     /// The timeout of topic creation.
     #[serde(with = "humantime_serde")]
     pub create_topic_timeout: Duration,
+    /// The timeout of deleting records.
+    #[serde(with = "humantime_serde")]
+    pub delete_records_timeouts: Duration,
     /// Topic name prefix.
     pub topic_name_prefix: String,
 }
@@ -195,6 +198,7 @@ impl Default for KafkaTopicConfig {
             selector_type: TopicSelectorType::RoundRobin,
             replication_factor: 1,
             create_topic_timeout: Duration::from_secs(30),
+            delete_records_timeouts: Duration::from_secs(30),
             topic_name_prefix: TOPIC_NAME_PREFIX.to_string(),
         }
     }

@@ -33,6 +33,8 @@ pub struct MetasrvKafkaConfig {
     pub kafka_topic: KafkaTopicConfig,
     // Automatically create topics for WAL.
     pub auto_create_topics: bool,
+    /// Whether to prune stale records from the topic during creation.
+    pub prune_stale_records_in_existing_topics: bool,
     // Interval of WAL pruning.
     #[serde(with = "humantime_serde")]
     pub auto_prune_interval: Duration,
@@ -49,6 +51,7 @@ impl Default for MetasrvKafkaConfig {
             connection: Default::default(),
             kafka_topic: Default::default(),
             auto_create_topics: true,
+            prune_stale_records_in_existing_topics: true,
             auto_prune_interval: DEFAULT_AUTO_PRUNE_INTERVAL,
             trigger_flush_threshold: DEFAULT_TRIGGER_FLUSH_THRESHOLD,
             auto_prune_parallelism: DEFAULT_AUTO_PRUNE_PARALLELISM,

@@ -41,16 +41,13 @@ impl KafkaTopicManager {
     }
 
     /// Restores topics from the key-value backend. and returns the topics that are not stored in kvbackend.
-    pub async fn get_topics_to_create<'a>(
-        &self,
-        all_topics: &'a [String],
-    ) -> Result<Vec<&'a String>> {
+    pub async fn get_topics_to_create(&self, all_topics: &[String]) -> Result<Vec<String>> {
         let existing_topics = self.restore_topics().await?;
         let existing_topic_set = existing_topics.iter().collect::<HashSet<_>>();
         let mut topics_to_create = Vec::with_capacity(all_topics.len());
         for topic in all_topics {
             if !existing_topic_set.contains(topic) {
-                topics_to_create.push(topic);
+                topics_to_create.push(topic.to_string());
             }
         }
         Ok(topics_to_create)
@@ -67,6 +64,14 @@ impl KafkaTopicManager {
             )
             .await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+impl KafkaTopicManager {
+    /// Lists all topics in the key-value backend.
+    pub async fn list_topics(&self) -> Result<Vec<String>> {
+        self.topic_name_manager.range().await
     }
 }
 
@@ -94,7 +99,7 @@ mod tests {
             .await
             .unwrap();
         topics_to_be_created.sort();
-        let mut expected = all_topics.iter().collect::<Vec<_>>();
+        let mut expected = all_topics.clone();
         expected.sort();
         assert_eq!(expected, topics_to_be_created);
 
@@ -148,7 +153,7 @@ mod tests {
             .await
             .unwrap();
         topics_to_be_created.sort();
-        let mut expected = all_topics.iter().collect::<Vec<_>>();
+        let mut expected = all_topics.clone();
         expected.sort();
         assert_eq!(expected, topics_to_be_created);
 
