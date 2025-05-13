@@ -50,7 +50,7 @@ use response_header_handler::ResponseHeaderHandler;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::Sender;
-use tokio::sync::{oneshot, Notify, RwLock};
+use tokio::sync::{oneshot, watch, Notify, RwLock};
 
 use crate::error::{self, DeserializeFromJsonSnafu, Result, UnexpectedInstructionReplySnafu};
 use crate::handler::flow_state_handler::FlowStateHandler;
@@ -148,10 +148,27 @@ impl PusherId {
     }
 }
 
+/// The receiver of the deregister signal.
+pub type DeregisterSignalReceiver = watch::Receiver<bool>;
+
 /// The pusher of the heartbeat response.
 pub struct Pusher {
     sender: Sender<std::result::Result<HeartbeatResponse, tonic::Status>>,
+    // The sender of the deregister signal.
+    // default is false, means the pusher is not deregistered.
+    // when the pusher is deregistered, the sender will be notified.
+    deregister_signal_sender: watch::Sender<bool>,
+    deregister_signal_receiver: DeregisterSignalReceiver,
+
     res_header: ResponseHeader,
+}
+
+impl Drop for Pusher {
+    fn drop(&mut self) {
+        // Ignore the error here.
+        // if all the receivers have been dropped, means no body cares the deregister signal.
+        let _ = self.deregister_signal_sender.send(true);
+    }
 }
 
 impl Pusher {
@@ -160,8 +177,13 @@ impl Pusher {
             protocol_version: PROTOCOL_VERSION,
             ..Default::default()
         };
-
-        Self { sender, res_header }
+        let (deregister_signal_sender, deregister_signal_receiver) = watch::channel(false);
+        Self {
+            sender,
+            deregister_signal_sender,
+            deregister_signal_receiver,
+            res_header,
+        }
     }
 
     #[inline]
@@ -185,19 +207,26 @@ impl Pusher {
 pub struct Pushers(Arc<RwLock<BTreeMap<String, Pusher>>>);
 
 impl Pushers {
-    async fn push(&self, pusher_id: PusherId, mailbox_message: MailboxMessage) -> Result<()> {
+    async fn push(
+        &self,
+        pusher_id: PusherId,
+        mailbox_message: MailboxMessage,
+    ) -> Result<DeregisterSignalReceiver> {
         let pusher_id = pusher_id.string_key();
         let pushers = self.0.read().await;
         let pusher = pushers
             .get(&pusher_id)
             .context(error::PusherNotFoundSnafu { pusher_id })?;
+
         pusher
             .push(HeartbeatResponse {
                 header: Some(pusher.header()),
                 mailbox_message: Some(mailbox_message),
                 ..Default::default()
             })
-            .await
+            .await?;
+
+        Ok(pusher.deregister_signal_receiver.clone())
     }
 
     async fn broadcast(
@@ -447,9 +476,14 @@ impl Mailbox for HeartbeatMailbox {
         self.timeouts.insert(message_id, deadline);
         self.timeout_notify.notify_one();
 
-        self.pushers.push(pusher_id, msg).await?;
+        let deregister_signal_receiver = self.pushers.push(pusher_id, msg).await?;
 
-        Ok(MailboxReceiver::new(message_id, rx, *ch))
+        Ok(MailboxReceiver::new(
+            message_id,
+            rx,
+            deregister_signal_receiver,
+            *ch,
+        ))
     }
 
     async fn send_oneway(&self, ch: &Channel, mut msg: MailboxMessage) -> Result<()> {
@@ -809,7 +843,7 @@ mod tests {
 
         mailbox.on_recv(id, Ok(resp_msg)).await.unwrap();
 
-        let recv_msg = receiver.await.unwrap().unwrap();
+        let recv_msg = receiver.await.unwrap();
         assert_eq!(recv_msg.id, id);
         assert_eq!(recv_msg.timestamp_millis, 456);
         assert_eq!(recv_msg.subject, "resp-test".to_string());
@@ -818,7 +852,7 @@ mod tests {
     #[tokio::test]
     async fn test_mailbox_timeout() {
         let (_, receiver) = push_msg_via_mailbox().await;
-        let res = receiver.await.unwrap();
+        let res = receiver.await;
         assert!(res.is_err());
     }
 
@@ -1150,5 +1184,15 @@ mod tests {
             .replace_handler("NotExists", CollectStatsHandler::default())
             .unwrap_err();
         assert_matches!(err, error::Error::HandlerNotFound { .. });
+    }
+
+    #[tokio::test]
+    async fn test_pusher_drop() {
+        let (tx, _rx) = mpsc::channel(1);
+        let pusher = Pusher::new(tx);
+        let mut deregister_signal_tx = pusher.deregister_signal_receiver.clone();
+
+        drop(pusher);
+        deregister_signal_tx.changed().await.unwrap();
     }
 }

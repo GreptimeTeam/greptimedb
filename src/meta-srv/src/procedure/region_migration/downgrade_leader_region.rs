@@ -164,7 +164,7 @@ impl DowngradeLeaderRegion {
         let now = Instant::now();
         let receiver = ctx.mailbox.send(&ch, msg, operation_timeout).await?;
 
-        match receiver.await? {
+        match receiver.await {
             Ok(msg) => {
                 let reply = HeartbeatMailbox::json_reply(&msg)?;
                 info!(

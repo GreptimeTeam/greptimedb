@@ -20,11 +20,11 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use api::v1::meta::{MailboxMessage, Role};
-use futures::Future;
+use futures::{Future, FutureExt};
 use tokio::sync::oneshot;
 
 use crate::error::{self, Result};
-use crate::handler::PusherId;
+use crate::handler::{DeregisterSignalReceiver, PusherId};
 
 pub type MailboxRef = Arc<dyn Mailbox>;
 
@@ -87,43 +87,109 @@ impl BroadcastChannel {
     }
 }
 
-pub struct MailboxReceiver {
-    message_id: MessageId,
-    rx: oneshot::Receiver<Result<MailboxMessage>>,
-    ch: Channel,
+/// The mailbox receiver
+pub enum MailboxReceiver {
+    Init {
+        message_id: MessageId,
+        ch: Channel,
+        /// The [`MailboxMessage`] receiver
+        rx: Option<oneshot::Receiver<Result<MailboxMessage>>>,
+        /// The pusher deregister signal receiver
+        pusher_deregister_signal_receiver: Option<DeregisterSignalReceiver>,
+    },
+    Polling {
+        message_id: MessageId,
+        ch: Channel,
+        inner_future: Pin<Box<dyn Future<Output = Result<MailboxMessage>> + Send + 'static>>,
+    },
 }
 
 impl MailboxReceiver {
     pub fn new(
         message_id: MessageId,
         rx: oneshot::Receiver<Result<MailboxMessage>>,
+        pusher_deregister_signal_receiver: DeregisterSignalReceiver,
         ch: Channel,
     ) -> Self {
-        Self { message_id, rx, ch }
+        Self::Init {
+            message_id,
+            rx: Some(rx),
+            pusher_deregister_signal_receiver: Some(pusher_deregister_signal_receiver),
+            ch,
+        }
     }
 
+    /// Get the message id of the mailbox receiver
     pub fn message_id(&self) -> MessageId {
-        self.message_id
+        match self {
+            MailboxReceiver::Init { message_id, .. } => *message_id,
+            MailboxReceiver::Polling { message_id, .. } => *message_id,
+        }
     }
 
+    /// Get the channel of the mailbox receiver
     pub fn channel(&self) -> Channel {
-        self.ch
+        match self {
+            MailboxReceiver::Init { ch, .. } => *ch,
+            MailboxReceiver::Polling { ch, .. } => *ch,
+        }
+    }
+
+    async fn wait_for_message(
+        rx: oneshot::Receiver<Result<MailboxMessage>>,
+        mut pusher_deregister_signal_receiver: DeregisterSignalReceiver,
+        channel: Channel,
+        message_id: MessageId,
+    ) -> Result<MailboxMessage> {
+        tokio::select! {
+            res = rx => {
+                res.map_err(|e| error::MailboxReceiverSnafu {
+                    id: message_id,
+                    err_msg: e.to_string(),
+                }.build())?
+            }
+            _ = pusher_deregister_signal_receiver.changed() => {
+                 Err(error::MailboxChannelClosedSnafu {
+                    channel,
+                }.build())
+            }
+        }
     }
 }
 
 impl Future for MailboxReceiver {
-    type Output = Result<Result<MailboxMessage>>;
+    type Output = Result<MailboxMessage>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut self.rx).poll(cx).map(|r| {
-            r.map_err(|e| {
-                error::MailboxReceiverSnafu {
-                    id: self.message_id,
-                    err_msg: e.to_string(),
-                }
-                .build()
-            })
-        })
+        match &mut *self {
+            MailboxReceiver::Init {
+                message_id,
+                ch,
+                rx,
+                pusher_deregister_signal_receiver,
+            } => {
+                let polling = MailboxReceiver::Polling {
+                    message_id: *message_id,
+                    ch: *ch,
+                    inner_future: Self::wait_for_message(
+                        rx.take().expect("rx already taken"),
+                        pusher_deregister_signal_receiver
+                            .take()
+                            .expect("pusher_deregister_signal_receiver already taken"),
+                        *ch,
+                        *message_id,
+                    )
+                    .boxed(),
+                };
+
+                *self = polling;
+                self.poll(cx)
+            }
+            MailboxReceiver::Polling { inner_future, .. } => {
+                let result = futures::ready!(inner_future.as_mut().poll(cx));
+                Poll::Ready(result)
+            }
+        }
     }
 }
 
@@ -145,6 +211,11 @@ pub trait Mailbox: Send + Sync {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches::assert_matches;
+
+    use common_time::util::current_time_millis;
+    use tokio::sync::watch;
+
     use super::*;
 
     #[test]
@@ -161,5 +232,45 @@ mod tests {
             BroadcastChannel::Flownode.pusher_range(),
             ("2-".to_string().."3-".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn test_mailbox_receiver() {
+        let (tx, rx) = oneshot::channel();
+        let (_deregister_signal_tx, deregister_signal_rx) = watch::channel(false);
+        let receiver = MailboxReceiver::new(1, rx, deregister_signal_rx, Channel::Datanode(1));
+
+        let timestamp_millis = current_time_millis();
+        tokio::spawn(async move {
+            tx.send(Ok(MailboxMessage {
+                id: 1,
+                subject: "test-subject".to_string(),
+                from: "test-from".to_string(),
+                to: "test-to".to_string(),
+                timestamp_millis,
+                payload: None,
+            }))
+        });
+
+        let result = receiver.await.unwrap();
+        assert_eq!(result.id, 1);
+        assert_eq!(result.subject, "test-subject");
+        assert_eq!(result.from, "test-from");
+        assert_eq!(result.to, "test-to");
+    }
+
+    #[tokio::test]
+    async fn test_mailbox_receiver_deregister_signal() {
+        let (_tx, rx) = oneshot::channel();
+        let (deregister_signal_tx, deregister_signal_rx) = watch::channel(false);
+        let receiver = MailboxReceiver::new(1, rx, deregister_signal_rx, Channel::Datanode(1));
+
+        // Sends the deregister signal
+        tokio::spawn(async move {
+            let _ = deregister_signal_tx.send(true);
+        });
+
+        let err = receiver.await.unwrap_err();
+        assert_matches!(err, error::Error::MailboxChannelClosed { .. });
     }
 }
