@@ -529,18 +529,18 @@ impl TimePartitions {
 
         let part_duration_sec = part_duration.as_secs() as i64;
         // SAFETY: Timestamps won't overflow when converting to Second.
-        let bulk_start_sec = min
+        let start_bucket = min
             .convert_to(TimeUnit::Second)
             .unwrap()
             .value()
             .div_euclid(part_duration_sec);
-        let bulk_end_sec = max
+        let end_bucket = max
             .convert_to(TimeUnit::Second)
             .unwrap()
             .value()
             .div_euclid(part_duration_sec);
 
-        let missing = (bulk_start_sec..=bulk_end_sec)
+        let missing = (start_bucket..=end_bucket)
             .filter_map(|start_sec| {
                 let Some(timestamp) =
                     Timestamp::new_second(start_sec * part_duration_sec).convert_to(timestamp_unit)
