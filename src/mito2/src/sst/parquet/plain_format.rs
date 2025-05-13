@@ -101,7 +101,6 @@ impl PlainWriteFormat {
 }
 
 /// Helper for reading the SST format.
-#[allow(dead_code)]
 pub struct PlainReadFormat {
     /// The metadata stored in the SST.
     metadata: RegionMetadataRef,
@@ -216,19 +215,16 @@ impl PlainReadFormat {
     ///
     /// This schema is computed from the region metadata but should be the same
     /// as the arrow schema decoded from the file metadata.
-    #[allow(dead_code)]
     pub(crate) fn arrow_schema(&self) -> &SchemaRef {
         &self.arrow_schema
     }
 
     /// Gets the metadata of the SST.
-    #[allow(dead_code)]
     pub(crate) fn metadata(&self) -> &RegionMetadataRef {
         &self.metadata
     }
 
     /// Gets sorted projection indices to read.
-    #[allow(dead_code)]
     pub(crate) fn projection_indices(&self) -> &[usize] {
         &self.projection_indices
     }
