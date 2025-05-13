@@ -1738,7 +1738,7 @@ impl PromPlanner {
         // regexp_replace(src_label, regex, replacement)
         let args = vec![
             if src_label.is_empty() {
-                DfExpr::Literal(ScalarValue::Null)
+                DfExpr::Literal(ScalarValue::Utf8(Some(String::new())))
             } else {
                 DfExpr::Column(Column::from_name(src_label))
             },
