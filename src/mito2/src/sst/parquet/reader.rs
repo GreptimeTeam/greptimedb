@@ -1131,8 +1131,10 @@ impl<T> RowGroupReaderBase<T>
 where
     T: RowGroupReaderContext,
 {
-    /// Creates a new reader.
+    /// Creates a new reader to read the primary key format.
     pub(crate) fn create(context: T, reader: ParquetRecordBatchReader) -> Self {
+        assert!(context.read_format().as_primary_key().is_some());
+
         Self {
             context,
             reader,
@@ -1173,9 +1175,11 @@ where
             };
             self.metrics.num_record_batches += 1;
 
+            // Safety: We ensures the format is primary key in the constructor.
             self.context
                 .read_format()
                 .as_primary_key()
+                .unwrap()
                 .convert_record_batch(&record_batch, &mut self.batches)?;
             self.metrics.num_batches += self.batches.len();
         }

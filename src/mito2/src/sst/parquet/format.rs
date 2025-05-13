@@ -133,13 +133,14 @@ impl WriteFormat {
     }
 }
 
+/// Helper to read parquet formats.
 pub enum ReadFormat {
     PrimaryKey(PrimaryKeyReadFormat),
     Plain(PlainReadFormat),
 }
 
 impl ReadFormat {
-    // TODO(yingwen): Remove this.
+    // TODO(yingwen): Add a flag to choose format type.
     pub(crate) fn new(
         metadata: RegionMetadataRef,
         column_ids: impl Iterator<Item = ColumnId>,
@@ -147,6 +148,7 @@ impl ReadFormat {
         Self::new_primary_key(metadata, column_ids)
     }
 
+    /// Creates a helper to read the primary key format.
     pub fn new_primary_key(
         metadata: RegionMetadataRef,
         column_ids: impl Iterator<Item = ColumnId>,
@@ -154,6 +156,7 @@ impl ReadFormat {
         ReadFormat::PrimaryKey(PrimaryKeyReadFormat::new(metadata, column_ids))
     }
 
+    /// Creates a helper to read the plain format.
     pub fn new_plain(
         metadata: RegionMetadataRef,
         column_ids: impl Iterator<Item = ColumnId>,
@@ -161,10 +164,10 @@ impl ReadFormat {
         ReadFormat::Plain(PlainReadFormat::new(metadata, column_ids))
     }
 
-    pub(crate) fn as_primary_key(&self) -> &PrimaryKeyReadFormat {
+    pub(crate) fn as_primary_key(&self) -> Option<&PrimaryKeyReadFormat> {
         match self {
-            ReadFormat::PrimaryKey(format) => format,
-            _ => panic!("not a primary key format"),
+            ReadFormat::PrimaryKey(format) => Some(format),
+            _ => None,
         }
     }
 
