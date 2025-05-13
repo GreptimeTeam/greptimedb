@@ -45,6 +45,7 @@ ADMIN FLUSH_FLOW('test_numbers_basic');
 |  FLOW_FLUSHED  |
 +----------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SHOW CREATE TABLE out_num_cnt_basic;
 
 +-------------------+--------------------------------------------------+
@@ -88,6 +89,7 @@ ADMIN FLUSH_FLOW('test_numbers_basic');
 |  FLOW_FLUSHED  |
 +----------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT
     "sum(numbers_input_basic.number)",
     time_window
@@ -109,6 +111,7 @@ ADMIN FLUSH_FLOW('test_numbers_basic');
 |  FLOW_FLUSHED  |
 +----------------------------------------+
 
+-- SQLNESS SLEEP 1s
 INSERT INTO
     numbers_input_basic
 VALUES
@@ -241,6 +244,7 @@ ADMIN FLUSH_FLOW('test_wildcard_basic');
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SHOW CREATE TABLE out_basic;
 
 +-----------+---------------------------------------------+
@@ -351,6 +355,7 @@ ADMIN FLUSH_FLOW('test_distinct_basic');
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SHOW CREATE TABLE out_distinct_basic;
 
 +--------------------+---------------------------------------------------+
@@ -389,6 +394,7 @@ ADMIN FLUSH_FLOW('test_distinct_basic');
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
 
+-- SQLNESS SLEEP 1s
 INSERT INTO
     distinct_basic
 VALUES
@@ -496,6 +502,7 @@ ADMIN FLUSH_FLOW('find_approx_rate');
 |  FLOW_FLUSHED  |
 +--------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT
     rate,
     time_window
@@ -525,6 +532,7 @@ ADMIN FLUSH_FLOW('find_approx_rate');
 |  FLOW_FLUSHED  |
 +--------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT
     rate,
     time_window
@@ -555,6 +563,7 @@ ADMIN FLUSH_FLOW('find_approx_rate');
 |  FLOW_FLUSHED  |
 +--------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT
     rate,
     time_window
@@ -586,6 +595,7 @@ ADMIN FLUSH_FLOW('find_approx_rate');
 |  FLOW_FLUSHED  |
 +--------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT
     rate,
     time_window
@@ -664,6 +674,7 @@ ADMIN FLUSH_FLOW('calc_ngx_country');
 |  FLOW_FLUSHED  |
 +--------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SHOW CREATE TABLE ngx_country;
 
 +-------------+---------------------------------------------+
@@ -709,6 +720,7 @@ ADMIN FLUSH_FLOW('calc_ngx_country');
 |  FLOW_FLUSHED  |
 +--------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT
     country
 FROM
@@ -736,6 +748,7 @@ ADMIN FLUSH_FLOW('calc_ngx_country');
 |  FLOW_FLUSHED  |
 +--------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT
     country
 FROM
@@ -814,6 +827,7 @@ ADMIN FLUSH_FLOW('calc_ngx_country');
 |  FLOW_FLUSHED  |
 +--------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SHOW CREATE TABLE ngx_country;
 
 +-------------+--------------------------------------------+
@@ -860,6 +874,7 @@ ADMIN FLUSH_FLOW('calc_ngx_country');
 |  FLOW_FLUSHED  |
 +--------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT
     country,
     time_window
@@ -888,6 +903,7 @@ ADMIN FLUSH_FLOW('calc_ngx_country');
 |  FLOW_FLUSHED  |
 +--------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT
     country,
     time_window
@@ -1009,6 +1025,7 @@ ADMIN FLUSH_FLOW('temp_monitoring');
 |  FLOW_FLUSHED  |
 +-------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SHOW TABLES LIKE 'temp_alerts';
 
 +-------------+
@@ -1047,6 +1064,7 @@ ADMIN FLUSH_FLOW('temp_monitoring');
 |  FLOW_FLUSHED  |
 +-------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT
     sensor_id,
     loc,
@@ -1146,6 +1164,7 @@ ADMIN FLUSH_FLOW('calc_ngx_distribution');
 |  FLOW_FLUSHED  |
 +-------------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT
     stat,
     bucket_size,
@@ -1180,6 +1199,7 @@ ADMIN FLUSH_FLOW('calc_ngx_distribution');
 |  FLOW_FLUSHED  |
 +-------------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT
     stat,
     bucket_size,
@@ -1279,6 +1299,7 @@ ADMIN FLUSH_FLOW('requests_long_term');
 |  FLOW_FLUSHED  |
 +----------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT
     *
 FROM
@@ -1332,6 +1353,7 @@ ADMIN FLUSH_FLOW('requests_long_term');
 |  FLOW_FLUSHED  |
 +----------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT
     *
 FROM
@@ -1379,6 +1401,7 @@ ADMIN FLUSH_FLOW('requests_long_term');
 |  FLOW_FLUSHED  |
 +----------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT
     *
 FROM
@@ -1491,6 +1514,7 @@ ADMIN FLUSH_FLOW('calc_android_log_abnormal');
 |  FLOW_FLUSHED  |
 +-----------------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT crash, fatal, backtrace, anr FROM android_log_abnormal;
 
 +-------+-------+-----------+-----+
@@ -1514,6 +1538,7 @@ ADMIN FLUSH_FLOW('calc_android_log_abnormal');
 |  FLOW_FLUSHED  |
 +-----------------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT crash, fatal, backtrace, anr FROM android_log_abnormal;
 
 +-------+-------+-----------+-----+
@@ -1604,6 +1629,7 @@ ADMIN FLUSH_FLOW('calc_android_log_abnormal');
 |  FLOW_FLUSHED  |
 +-----------------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT crash, fatal, backtrace, anr FROM android_log_abnormal;
 
 +-------+-------+-----------+-----+
@@ -1627,6 +1653,7 @@ ADMIN FLUSH_FLOW('calc_android_log_abnormal');
 |  FLOW_FLUSHED  |
 +-----------------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT crash, fatal, backtrace, anr FROM android_log_abnormal;
 
 +-------+-------+-----------+-----+
@@ -1718,6 +1745,7 @@ ADMIN FLUSH_FLOW('test_numbers_basic');
 |  FLOW_FLUSHED  |
 +----------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT avg_after_filter_num FROM out_num_cnt_basic;
 
 +----------------------+
@@ -1743,6 +1771,7 @@ ADMIN FLUSH_FLOW('test_numbers_basic');
 |  FLOW_FLUSHED  |
 +----------------------------------------+
 
+-- SQLNESS SLEEP 1s
 DROP FLOW test_numbers_basic;
 
 Affected Rows: 0
@@ -1832,6 +1861,7 @@ ADMIN FLUSH_FLOW('live_connection_aggregation_detail');
 |  FLOW_FLUSHED  |
 +--------------------------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT device_model,
   connect_protocol,
   connect_mode,

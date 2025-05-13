@@ -63,6 +63,7 @@ ADMIN FLUSH_FLOW('find_approx_rate');
 |  FLOW_FLUSHED  |
 +--------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT
     rate,
     time_window
@@ -93,6 +94,7 @@ ADMIN FLUSH_FLOW('find_approx_rate');
 |  FLOW_FLUSHED  |
 +--------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT
     rate,
     time_window
@@ -124,6 +126,7 @@ ADMIN FLUSH_FLOW('find_approx_rate');
 |  FLOW_FLUSHED  |
 +--------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT
     rate,
     time_window
@@ -156,6 +159,7 @@ ADMIN FLUSH_FLOW('find_approx_rate');
 |  FLOW_FLUSHED  |
 +--------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT
     rate,
     time_window

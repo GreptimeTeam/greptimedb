@@ -52,6 +52,7 @@ ADMIN FLUSH_FLOW('calc_avg_speed');
 |  FLOW_FLUSHED  |
 +------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT
     avg_speed,
     start_window
@@ -81,6 +82,7 @@ ADMIN FLUSH_FLOW('calc_avg_speed');
 |  FLOW_FLUSHED  |
 +------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT
     avg_speed,
     start_window

@@ -36,6 +36,7 @@ ADMIN FLUSH_FLOW('test_numbers_basic');
 |  FLOW_FLUSHED  |
 +----------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT
     "sum(numbers_input_basic.number)",
     time_window

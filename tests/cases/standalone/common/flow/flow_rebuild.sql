@@ -22,6 +22,7 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_wildcard_basic');
 
+-- SQLNESS SLEEP 1s
 SELECT wildcard FROM out_basic;
 
 DROP TABLE input_basic;
@@ -54,6 +55,7 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_wildcard_basic');
 
+-- SQLNESS SLEEP 1s
 SELECT wildcard FROM out_basic;
 
 DROP TABLE input_basic;
@@ -129,6 +131,7 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_wildcard_basic');
 
+-- SQLNESS SLEEP 1s
 SELECT wildcard FROM out_basic;
 
 DROP FLOW test_wildcard_basic;
@@ -151,6 +154,7 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_wildcard_basic');
 
+-- SQLNESS SLEEP 1s
 SELECT wildcard FROM out_basic;
 
 -- test again, this time with db restart
@@ -186,6 +190,7 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_wildcard_basic');
 
+-- SQLNESS SLEEP 1s
 SELECT wildcard FROM out_basic;
 
 DROP TABLE input_basic;
@@ -224,6 +229,7 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_wildcard_basic');
 
+-- SQLNESS SLEEP 1s
 SELECT wildcard FROM out_basic;
 
 DROP TABLE input_basic;
@@ -316,6 +322,7 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_wildcard_basic');
 
+-- SQLNESS SLEEP 1s
 SELECT wildcard FROM out_basic;
 
 DROP FLOW test_wildcard_basic;
@@ -343,6 +350,7 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_wildcard_basic');
 
+-- SQLNESS SLEEP 1s
 SELECT wildcard FROM out_basic;
 
 DROP FLOW test_wildcard_basic;
@@ -396,6 +404,7 @@ INSERT INTO `api_log` (`time`, `key`, `status_code`, `method`, `path`, `raw_quer
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('api_stats_flow');
 
+-- SQLNESS SLEEP 1s
 SELECT key FROM api_stats;
 
 -- SQLNESS ARG restart=true
@@ -409,6 +418,7 @@ INSERT INTO `api_log` (`time`, `key`, `status_code`, `method`, `path`, `raw_quer
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('api_stats_flow');
 
+-- SQLNESS SLEEP 1s
 SELECT key FROM api_stats;
 
 DROP FLOW api_stats_flow;

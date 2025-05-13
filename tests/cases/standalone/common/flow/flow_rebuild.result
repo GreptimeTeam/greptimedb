@@ -34,6 +34,7 @@ ADMIN FLUSH_FLOW('test_wildcard_basic');
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT wildcard FROM out_basic;
 
 +----------+
@@ -89,6 +90,7 @@ ADMIN FLUSH_FLOW('test_wildcard_basic');
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT wildcard FROM out_basic;
 
 +----------+
@@ -231,6 +233,7 @@ ADMIN FLUSH_FLOW('test_wildcard_basic');
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT wildcard FROM out_basic;
 
 +----------+
@@ -273,6 +276,7 @@ ADMIN FLUSH_FLOW('test_wildcard_basic');
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT wildcard FROM out_basic;
 
 +----------+
@@ -340,6 +344,7 @@ ADMIN FLUSH_FLOW('test_wildcard_basic');
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT wildcard FROM out_basic;
 
 +----------+
@@ -407,6 +412,7 @@ ADMIN FLUSH_FLOW('test_wildcard_basic');
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT wildcard FROM out_basic;
 
 +----------+
@@ -585,6 +591,7 @@ ADMIN FLUSH_FLOW('test_wildcard_basic');
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT wildcard FROM out_basic;
 
 +----------+
@@ -638,6 +645,7 @@ ADMIN FLUSH_FLOW('test_wildcard_basic');
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT wildcard FROM out_basic;
 
 +----------+
@@ -721,6 +729,7 @@ ADMIN FLUSH_FLOW('api_stats_flow');
 |  FLOW_FLUSHED  |
 +------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT key FROM api_stats;
 
 +-----+
@@ -754,6 +763,7 @@ ADMIN FLUSH_FLOW('api_stats_flow');
 |  FLOW_FLUSHED  |
 +------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT key FROM api_stats;
 
 +-----+
