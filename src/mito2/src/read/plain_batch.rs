@@ -47,7 +47,11 @@ pub struct PlainBatch {
 impl PlainBatch {
     /// Creates a new [PlainBatch] from a [RecordBatch].
     pub fn new(record_batch: RecordBatch) -> Self {
-        debug_assert!(record_batch.num_columns() >= 2);
+        assert!(
+            record_batch.num_columns() >= 2,
+            "record batch missing internal columns, num_columns: {}",
+            record_batch.num_columns()
+        );
 
         Self { record_batch }
     }
