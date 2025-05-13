@@ -296,22 +296,22 @@ impl TimePartitions {
 
         // Get all parts.
         let parts = self.list_partitions();
-        let (matchings, missings) = self.find_partitions_by_time_range(
+        let (matching_parts, missing_parts) = self.find_partitions_by_time_range(
             &parts,
             time_type.create_timestamp(part.min_ts),
             time_type.create_timestamp(part.max_ts),
         )?;
 
-        if matchings.len() == 1 && missings.is_empty() {
+        if matching_parts.len() == 1 && missing_parts.is_empty() {
             // fast path: all timestamps fall in one time partition.
-            return matchings[0].write_record_batch(part);
+            return matching_parts[0].write_record_batch(part);
         }
 
-        for matching in matchings {
+        for matching in matching_parts {
             matching.write_record_batch_partial(&part)?
         }
 
-        for missing in missings {
+        for missing in missing_parts {
             let new_part = {
                 let mut inner = self.inner.lock().unwrap();
                 self.get_or_create_time_partition(missing, &mut inner)?
