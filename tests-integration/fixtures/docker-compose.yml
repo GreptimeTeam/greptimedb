@@ -8,7 +8,7 @@ services:
       - ALLOW_ANONYMOUS_LOGIN=yes
 
   kafka:
-    image: docker.io/bitnami/kafka:3.6.0
+    image: docker.io/bitnami/kafka:3.9.0
     container_name: kafka
     ports:
       - 9092:9092
