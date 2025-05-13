@@ -376,7 +376,7 @@ impl Export {
         let timer = Instant::now();
         let db_names = self.get_db_names().await?;
         let db_count = db_names.len();
-        let operator = self.build_prefer_fs_operator().await?;
+        let operator = self.build_operator().await?;
 
         for schema in db_names {
             let create_database = self
@@ -406,7 +406,7 @@ impl Export {
         let semaphore = Arc::new(Semaphore::new(self.parallelism));
         let db_names = self.get_db_names().await?;
         let db_count = db_names.len();
-        let operator = Arc::new(self.build_prefer_fs_operator().await?);
+        let operator = Arc::new(self.build_operator().await?);
         let mut tasks = Vec::with_capacity(db_names.len());
 
         for schema in db_names {
@@ -468,17 +468,6 @@ impl Export {
             self.build_s3_operator().await
         } else {
             self.build_fs_operator().await
-        }
-    }
-
-    /// build operator with preference for file system
-    async fn build_prefer_fs_operator(&self) -> Result<Operator> {
-        if self.output_dir.is_some() {
-            return self.build_fs_operator().await;
-        } else if self.s3 {
-            return self.build_s3_operator().await;
-        } else {
-            OutputDirNotSetSnafu.fail()
         }
     }
 
