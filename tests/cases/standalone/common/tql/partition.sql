@@ -11,6 +11,7 @@ create table t (
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
 tql analyze (0, 10, '1s') 100 - (avg by (k) (irate(t[1m])) * 100);
 
 drop table t;
@@ -30,6 +31,7 @@ create table t (
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
 tql analyze (0, 10, '1s') 100 - (avg by (k) (irate(t[1m])) * 100);
 
 drop table t;
@@ -49,6 +51,7 @@ create table t (
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
 tql analyze (0, 10, '1s') 100 - (avg by (k) (irate(t[1m])) * 100);
 
 drop table t;
