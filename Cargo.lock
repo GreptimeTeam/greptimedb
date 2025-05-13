@@ -8971,8 +8971,7 @@ dependencies = [
 [[package]]
 name = "promql-parser"
 version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "60d851f6523a8215e2fbf86b6cef4548433f8b76092e9ffb607105de52ae63fd"
+source = "git+https://github.com/GreptimeTeam/promql-parser.git?rev=711d484d9e19b19e073f0cbfd2dd16ad031972b6#711d484d9e19b19e073f0cbfd2dd16ad031972b6"
 dependencies = [
  "cfgrammar",
  "chrono",
@@ -8982,6 +8981,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "unescaper",
 ]
 
 [[package]]
