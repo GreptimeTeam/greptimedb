@@ -56,6 +56,11 @@ pub struct ExportCommand {
 
     /// Directory to put the exported data. E.g.: /tmp/greptimedb-export
     /// for local export.
+    ///
+    /// if both `output_dir` and `s3` are set, `output_dir` will be only used for
+    /// exported SQL files, and the data will be exported to s3.
+    ///
+    /// if `s3` is set but `output_dir` is not set, both SQL&data will be exported to s3.
     #[clap(long)]
     output_dir: Option<String>,
 
@@ -115,6 +120,11 @@ pub struct ExportCommand {
     #[clap(long)]
     s3_bucket: Option<String>,
 
+    // The s3 root path
+    /// if s3 is set, this is required
+    #[clap(long)]
+    s3_root: Option<String>,
+
     /// The s3 endpoint
     /// if s3 is set, this is required
     #[clap(long)]
@@ -173,6 +183,7 @@ impl ExportCommand {
             end_time: self.end_time.clone(),
             s3: self.s3,
             s3_bucket: self.s3_bucket.clone(),
+            s3_root: self.s3_root.clone(),
             s3_endpoint: self.s3_endpoint.clone(),
             s3_access_key: self.s3_access_key.clone(),
             s3_secret_key: self.s3_secret_key.clone(),
@@ -193,6 +204,7 @@ pub struct Export {
     end_time: Option<String>,
     s3: bool,
     s3_bucket: Option<String>,
+    s3_root: Option<String>,
     s3_endpoint: Option<String>,
     s3_access_key: Option<String>,
     s3_secret_key: Option<String>,
@@ -364,7 +376,7 @@ impl Export {
         let timer = Instant::now();
         let db_names = self.get_db_names().await?;
         let db_count = db_names.len();
-        let operator = self.build_operator().await?;
+        let operator = self.build_prefer_fs_operator().await?;
 
         for schema in db_names {
             let create_database = self
@@ -394,7 +406,7 @@ impl Export {
         let semaphore = Arc::new(Semaphore::new(self.parallelism));
         let db_names = self.get_db_names().await?;
         let db_count = db_names.len();
-        let operator = Arc::new(self.build_operator().await?);
+        let operator = Arc::new(self.build_prefer_fs_operator().await?);
         let mut tasks = Vec::with_capacity(db_names.len());
 
         for schema in db_names {
@@ -459,12 +471,27 @@ impl Export {
         }
     }
 
+    /// build operator with preference for file system
+    async fn build_prefer_fs_operator(&self) -> Result<Operator> {
+        if self.output_dir.is_some() {
+            return self.build_fs_operator().await;
+        } else if self.s3 {
+            return self.build_s3_operator().await;
+        } else {
+            OutputDirNotSetSnafu.fail()
+        }
+    }
+
     async fn build_s3_operator(&self) -> Result<Operator> {
-        let mut builder = services::S3::default().root("").bucket(
+        let mut builder = services::S3::default().bucket(
             self.s3_bucket
                 .as_ref()
                 .expect("s3_bucket must be provided when s3 is enabled"),
         );
+
+        if let Some(root) = self.s3_root.as_ref() {
+            builder = builder.root(root);
+        }
 
         if let Some(endpoint) = self.s3_endpoint.as_ref() {
             builder = builder.endpoint(endpoint);
