@@ -979,7 +979,8 @@ pub(crate) fn column_metadata_to_column_schema(metadata: &ColumnMetadata) -> api
     }
 }
 
-/// Build rows with schema (string, f64, ts_millis).
+/// Build rows with schema (string, f64, ts_millis) in range `[start, end)`.
+/// `start`, `end` are in second resolution.
 pub fn build_rows(start: usize, end: usize) -> Vec<Row> {
     (start..end)
         .map(|i| api::v1::Row {
