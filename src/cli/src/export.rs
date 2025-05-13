@@ -376,7 +376,7 @@ impl Export {
         let timer = Instant::now();
         let db_names = self.get_db_names().await?;
         let db_count = db_names.len();
-        let operator = self.build_operator().await?;
+        let operator = self.build_prefer_fs_operator().await?;
 
         for schema in db_names {
             let create_database = self
@@ -406,7 +406,7 @@ impl Export {
         let semaphore = Arc::new(Semaphore::new(self.parallelism));
         let db_names = self.get_db_names().await?;
         let db_count = db_names.len();
-        let operator = Arc::new(self.build_operator().await?);
+        let operator = Arc::new(self.build_prefer_fs_operator().await?);
         let mut tasks = Vec::with_capacity(db_names.len());
 
         for schema in db_names {
@@ -471,6 +471,17 @@ impl Export {
         }
     }
 
+    /// build operator with preference for file system
+    async fn build_prefer_fs_operator(&self) -> Result<Operator> {
+        if self.output_dir.is_some() {
+            return self.build_fs_operator().await;
+        } else if self.s3 {
+            return self.build_s3_operator().await;
+        } else {
+            OutputDirNotSetSnafu.fail()
+        }
+    }
+
     async fn build_s3_operator(&self) -> Result<Operator> {
         let mut builder = services::S3::default().bucket(
             self.s3_bucket
@@ -525,6 +536,7 @@ impl Export {
         let db_count = db_names.len();
         let mut tasks = Vec::with_capacity(db_count);
         let operator = Arc::new(self.build_operator().await?);
+        let fs_first_operator = Arc::new(self.build_prefer_fs_operator().await?);
         let with_options = build_with_options(&self.start_time, &self.end_time);
 
         for schema in db_names {
@@ -532,6 +544,7 @@ impl Export {
             let export_self = self.clone();
             let with_options_clone = with_options.clone();
             let operator = operator.clone();
+            let fs_first_operator = fs_first_operator.clone();
 
             tasks.push(async move {
                 let _permit = semaphore_moved.acquire().await.unwrap();
@@ -565,7 +578,7 @@ impl Export {
                 let copy_from_path = export_self.get_file_path(&schema, "copy_from.sql");
                 export_self
                     .write_to_storage(
-                        &operator,
+                        &fs_first_operator,
                         &copy_from_path,
                         copy_database_from_sql.into_bytes(),
                     )
