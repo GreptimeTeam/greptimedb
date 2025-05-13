@@ -14,6 +14,7 @@ SELECT sum(abs(number)), date_bin(INTERVAL '1 second', ts, '2021-07-01 00:00:00'
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_numbers_df_func');
 
+-- SQLNESS SLEEP 1s
 INSERT INTO numbers_input_df_func
 VALUES
     (-20, "2021-07-01 00:00:00.200"),
@@ -29,6 +30,7 @@ SELECT "sum(abs(numbers_input_df_func.number))", time_window FROM out_num_cnt_df
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_numbers_df_func');
 
+-- SQLNESS SLEEP 1s
 INSERT INTO numbers_input_df_func
 VALUES
     (23,"2021-07-01 00:00:01.000"),
@@ -60,6 +62,7 @@ SELECT abs(sum(number)), date_bin(INTERVAL '1 second', ts, '2021-07-01 00:00:00'
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_numbers_df_func');
 
+-- SQLNESS SLEEP 1s
 INSERT INTO numbers_input_df_func
 VALUES
     (-20, "2021-07-01 00:00:00.200"),
@@ -69,11 +72,13 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_numbers_df_func');
 
+-- SQLNESS SLEEP 1s
 SELECT "abs(sum(numbers_input_df_func.number))", time_window FROM out_num_cnt_df_func;
 
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_numbers_df_func');
 
+-- SQLNESS SLEEP 1s
 INSERT INTO numbers_input_df_func
 VALUES
     (23,"2021-07-01 00:00:01.000"),
@@ -82,6 +87,7 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_numbers_df_func');
 
+-- SQLNESS SLEEP 1s
 SELECT "abs(sum(numbers_input_df_func.number))", time_window FROM out_num_cnt_df_func;
 
 DROP FLOW test_numbers_df_func;
@@ -104,6 +110,7 @@ SELECT max(number) - min(number) as maxmin, date_bin(INTERVAL '1 second', ts, '2
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_numbers_df_func');
 
+-- SQLNESS SLEEP 1s
 INSERT INTO numbers_input_df_func
 VALUES
     (20, "2021-07-01 00:00:00.200"),
@@ -112,11 +119,13 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_numbers_df_func');
 
+-- SQLNESS SLEEP 1s
 SELECT maxmin, time_window FROM out_num_cnt_df_func;
 
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_numbers_df_func');
 
+-- SQLNESS SLEEP 1s
 INSERT INTO numbers_input_df_func
 VALUES
     (23,"2021-07-01 00:00:01.000"),
@@ -125,6 +134,7 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_numbers_df_func');
 
+-- SQLNESS SLEEP 1s
 SELECT maxmin, time_window FROM out_num_cnt_df_func;
 
 DROP FLOW test_numbers_df_func;
@@ -148,6 +158,7 @@ SELECT date_trunc('second', ts) as time_window, sum(number) as sum_num FROM numb
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_numbers_df_func');
 
+-- SQLNESS SLEEP 1s
 INSERT INTO numbers_input_df_func
 VALUES
     (20, "2021-07-01 00:00:00.200"),
@@ -156,11 +167,13 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_numbers_df_func');
 
+-- SQLNESS SLEEP 1s
 SELECT time_window, sum_num FROM out_num_cnt;
 
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_numbers_df_func');
 
+-- SQLNESS SLEEP 1s
 INSERT INTO numbers_input_df_func
 VALUES
     (23,"2021-07-01 00:00:01.000"),
@@ -169,6 +182,7 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_numbers_df_func');
 
+-- SQLNESS SLEEP 1s
 SELECT time_window, sum_num FROM out_num_cnt;
 
 DROP FLOW test_numbers_df_func;

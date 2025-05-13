@@ -119,6 +119,7 @@ ADMIN FLUSH_FLOW('ngx_aggregation');
 |  FLOW_FLUSHED  |
 +-------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT
     status,
     total_logs,
@@ -179,6 +180,7 @@ ADMIN FLUSH_FLOW('ngx_aggregation');
 |  FLOW_FLUSHED  |
 +-------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT
     status,
     total_logs,
@@ -266,6 +268,7 @@ ADMIN FLUSH_FLOW('calc_ngx_country');
 |  FLOW_FLUSHED  |
 +--------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT
     country
 FROM
@@ -353,6 +356,7 @@ ADMIN FLUSH_FLOW('calc_ngx_country');
 |  FLOW_FLUSHED  |
 +--------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT
     country,
     time_window
@@ -436,6 +440,7 @@ ADMIN FLUSH_FLOW('temp_monitoring');
 |  FLOW_FLUSHED  |
 +-------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT
     sensor_id,
     loc,
@@ -464,6 +469,7 @@ ADMIN FLUSH_FLOW('temp_monitoring');
 |  FLOW_FLUSHED  |
 +-------------------------------------+
 
+-- SQLNESS SLEEP 1s
 /* wait at least one second for flow to update results to sink table */
 SELECT
     sensor_id,
@@ -557,6 +563,7 @@ ADMIN FLUSH_FLOW('calc_ngx_distribution');
 |  FLOW_FLUSHED  |
 +-------------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT
     stat,
     bucket_size,
