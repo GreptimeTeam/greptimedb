@@ -488,9 +488,10 @@ impl ReadFormat {
         Some(vector.to_arrow_array())
     }
 
-    /// Returns min/max values of specific non-tag columns.
+    /// Returns min/max values of specific columns.
     /// Returns None if the column does not have statistics.
-    fn column_values(
+    /// The column should not be encoded as a part of a primary key.
+    pub(crate) fn column_values(
         row_groups: &[impl Borrow<RowGroupMetaData>],
         column: &ColumnMetadata,
         column_index: usize,
@@ -553,8 +554,9 @@ impl ReadFormat {
         ScalarValue::iter_to_array(scalar_values).ok()
     }
 
-    /// Returns null counts of specific non-tag columns.
-    fn column_null_counts(
+    /// Returns null counts of specific columns.
+    /// The column should not be encoded as a part of a primary key.
+    pub(crate) fn column_null_counts(
         row_groups: &[impl Borrow<RowGroupMetaData>],
         column_index: usize,
     ) -> Option<ArrayRef> {
