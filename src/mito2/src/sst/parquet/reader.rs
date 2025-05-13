@@ -1256,13 +1256,16 @@ impl<T> RowGroupReaderBase<T>
 where
     T: RowGroupReaderContext,
 {
-    /// Creates a new reader.
+    /// Creates a new reader to read the primary key format.
     pub(crate) fn create(context: T, reader: ParquetRecordBatchReader) -> Self {
         // The batch length from the reader should be less than or equal to DEFAULT_READ_BATCH_SIZE.
         let override_sequence = context
             .read_format()
             .as_primary_key()
+            .unwrap()
             .new_override_sequence_array(DEFAULT_READ_BATCH_SIZE);
+        assert!(context.read_format().as_primary_key().is_some());
+
         Self {
             context,
             reader,
@@ -1304,9 +1307,11 @@ where
             };
             self.metrics.num_record_batches += 1;
 
+            // Safety: We ensures the format is primary key in the constructor.
             self.context
                 .read_format()
                 .as_primary_key()
+                .unwrap()
                 .convert_record_batch(
                     &record_batch,
                     self.override_sequence.as_ref(),
