@@ -67,21 +67,6 @@ impl ParallelizeScan {
                         return Ok(Transformed::no(plan));
                     }
 
-                    if matches!(
-                        region_scan_exec.distribution(),
-                        Some(TimeSeriesDistribution::PerSeries)
-                    ) {
-                        let partition_range = region_scan_exec.get_partition_ranges();
-                        // HACK: Allocate expected_partition_num empty partitions to indicate
-                        // the expected partition number.
-                        let mut new_partitions = vec![vec![]; expected_partition_num];
-                        new_partitions[0] = partition_range;
-                        let new_plan = region_scan_exec
-                            .with_new_partitions(new_partitions, expected_partition_num)
-                            .map_err(|e| DataFusionError::External(e.into_inner()))?;
-                        return Ok(Transformed::yes(Arc::new(new_plan)));
-                    }
-
                     let ranges = region_scan_exec.get_partition_ranges();
                     let total_range_num = ranges.len();
 
