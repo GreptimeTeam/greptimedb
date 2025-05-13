@@ -28,6 +28,7 @@ pub mod format;
 pub(crate) mod helper;
 pub(crate) mod metadata;
 pub(crate) mod page_reader;
+pub mod plain_format;
 pub mod reader;
 pub mod row_group;
 pub mod row_selection;

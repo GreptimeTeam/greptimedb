@@ -18,6 +18,7 @@ pub mod compat;
 pub mod dedup;
 pub mod last_row;
 pub mod merge;
+pub mod plain_batch;
 pub mod projection;
 pub(crate) mod prune;
 pub(crate) mod range;
