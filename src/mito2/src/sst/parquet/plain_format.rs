@@ -47,6 +47,7 @@ use crate::sst::to_plain_sst_arrow_schema;
 pub(crate) const PLAIN_FIXED_POS_COLUMN_NUM: usize = 2;
 
 /// Helper for writing the SST format.
+#[allow(dead_code)]
 pub(crate) struct PlainWriteFormat {
     metadata: RegionMetadataRef,
     /// SST file schema.
@@ -56,6 +57,7 @@ pub(crate) struct PlainWriteFormat {
 
 impl PlainWriteFormat {
     /// Creates a new helper.
+    #[allow(dead_code)]
     pub(crate) fn new(metadata: RegionMetadataRef) -> PlainWriteFormat {
         let arrow_schema = to_plain_sst_arrow_schema(&metadata);
         PlainWriteFormat {
@@ -66,6 +68,7 @@ impl PlainWriteFormat {
     }
 
     /// Set override sequence.
+    #[allow(dead_code)]
     pub(crate) fn with_override_sequence(
         mut self,
         override_sequence: Option<SequenceNumber>,
@@ -75,11 +78,13 @@ impl PlainWriteFormat {
     }
 
     /// Gets the arrow schema to store in parquet.
+    #[allow(dead_code)]
     pub(crate) fn arrow_schema(&self) -> &SchemaRef {
         &self.arrow_schema
     }
 
     /// Convert `batch` to a arrow record batch to store in parquet.
+    #[allow(dead_code)]
     pub(crate) fn convert_batch(&self, batch: &PlainBatch) -> Result<RecordBatch> {
         debug_assert_eq!(batch.num_columns(), self.arrow_schema.fields().len());
 
@@ -211,16 +216,19 @@ impl PlainReadFormat {
     ///
     /// This schema is computed from the region metadata but should be the same
     /// as the arrow schema decoded from the file metadata.
+    #[allow(dead_code)]
     pub(crate) fn arrow_schema(&self) -> &SchemaRef {
         &self.arrow_schema
     }
 
     /// Gets the metadata of the SST.
+    #[allow(dead_code)]
     pub(crate) fn metadata(&self) -> &RegionMetadataRef {
         &self.metadata
     }
 
     /// Gets sorted projection indices to read.
+    #[allow(dead_code)]
     pub(crate) fn projection_indices(&self) -> &[usize] {
         &self.projection_indices
     }
@@ -239,6 +247,7 @@ impl PlainReadFormat {
 
 /// Gets the min/max time index of the SST from the parquet meta.
 /// It assumes the parquet is created by the mito engine.
+#[allow(dead_code)]
 pub(crate) fn parquet_time_range(
     file_id: FileId,
     parquet_meta: &ParquetMetaData,
