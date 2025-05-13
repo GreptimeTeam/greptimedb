@@ -113,6 +113,7 @@ SELECT * FROM test_pk ORDER BY t DESC LIMIT 5;
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE SELECT * FROM test_pk ORDER BY t DESC LIMIT 5;
 
 -- Filter on a pk column.

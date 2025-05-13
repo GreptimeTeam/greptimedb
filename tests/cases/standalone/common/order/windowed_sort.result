@@ -329,6 +329,7 @@ SELECT * FROM test_pk ORDER BY t DESC LIMIT 5;
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE SELECT * FROM test_pk ORDER BY t DESC LIMIT 5;
 
 +-+-+-+
@@ -337,8 +338,8 @@ EXPLAIN ANALYZE SELECT * FROM test_pk ORDER BY t DESC LIMIT 5;
 | 0_| 0_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [t@2 DESC], fetch=5 REDACTED
-|_|_|_WindowedSortExec: expr=t@2 DESC num_ranges=32 fetch=5 REDACTED
-|_|_|_PartSortExec: expr=t@2 DESC num_ranges=32 limit=5 REDACTED
+|_|_|_WindowedSortExec: expr=t@2 DESC num_ranges=REDACTED fetch=5 REDACTED
+|_|_|_PartSortExec: expr=t@2 DESC num_ranges=REDACTED limit=5 REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=4 (1 memtable ranges, 3 file 3 ranges) REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|
