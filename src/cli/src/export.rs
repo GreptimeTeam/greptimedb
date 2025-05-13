@@ -596,8 +596,13 @@ impl Export {
     fn format_output_path(&self, file_path: &str) -> String {
         if self.s3 {
             format!(
-                "s3://{}/{}",
+                "s3://{}{}/{}",
                 self.s3_bucket.as_ref().unwrap_or(&String::new()),
+                if let Some(root) = &self.s3_root {
+                    format!("/{}", root)
+                } else {
+                    String::new()
+                },
                 file_path
             )
         } else {
@@ -621,9 +626,14 @@ impl Export {
     fn get_storage_params(&self, schema: &str) -> (String, String) {
         if self.s3 {
             let s3_path = format!(
-                "s3://{}/{}/{}/",
+                "s3://{}{}/{}/{}/",
                 // Safety: s3_bucket is required when s3 is enabled
                 self.s3_bucket.as_ref().unwrap(),
+                if let Some(root) = &self.s3_root {
+                    format!("/{}", root)
+                } else {
+                    String::new()
+                },
                 self.catalog,
                 schema
             );
