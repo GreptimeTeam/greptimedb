@@ -20,7 +20,7 @@ use std::sync::Arc;
 use arrow::array::{Array, ArrayRef, StringArray};
 use arrow::compute;
 use arrow::compute::kernels::comparison;
-use arrow::datatypes::{DataType as ArrowDataType, Int32Type, TimeUnit};
+use arrow::datatypes::{DataType as ArrowDataType, Int64Type, TimeUnit};
 use arrow_array::DictionaryArray;
 use arrow_schema::IntervalUnit;
 use datafusion_common::ScalarValue;
@@ -348,11 +348,11 @@ impl Helper {
             ArrowDataType::Decimal128(_, _) => {
                 Arc::new(Decimal128Vector::try_from_arrow_array(array)?)
             }
-            ArrowDataType::Dictionary(key, value) if matches!(&**key, ArrowDataType::Int32) => {
+            ArrowDataType::Dictionary(key, value) if matches!(&**key, ArrowDataType::Int64) => {
                 let array = array
                     .as_ref()
                     .as_any()
-                    .downcast_ref::<DictionaryArray<Int32Type>>()
+                    .downcast_ref::<DictionaryArray<Int64Type>>()
                     .unwrap(); // Safety: the type is guarded by match arm condition
                 Arc::new(DictionaryVector::new(
                     array.clone(),

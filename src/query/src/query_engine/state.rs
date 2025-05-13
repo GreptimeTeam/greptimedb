@@ -31,6 +31,7 @@ use datafusion::error::Result as DfResult;
 use datafusion::execution::context::{QueryPlanner, SessionConfig, SessionContext, SessionState};
 use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::execution::SessionStateBuilder;
+use datafusion::physical_optimizer::enforce_sorting::EnforceSorting;
 use datafusion::physical_optimizer::optimizer::PhysicalOptimizer;
 use datafusion::physical_optimizer::sanity_checker::SanityCheckPlan;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
@@ -142,6 +143,9 @@ impl QueryEngineState {
         physical_optimizer
             .rules
             .insert(1, Arc::new(PassDistribution));
+        physical_optimizer
+            .rules
+            .insert(2, Arc::new(EnforceSorting {}));
         // Add rule for windowed sort
         physical_optimizer
             .rules

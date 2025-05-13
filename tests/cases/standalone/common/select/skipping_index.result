@@ -62,7 +62,6 @@ EXPLAIN ANALYZE SELECT * FROM skipping_table WHERE id = 'id2' ORDER BY `name`;
 |_|_|_SortExec: expr=[name@2 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: id@1 = id2 REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=3 (0 memtable ranges, 3 file 3 ranges) REDACTED
 |_|_|_|
 |_|_| Total rows: 1_|
@@ -85,7 +84,6 @@ EXPLAIN ANALYZE SELECT * FROM skipping_table WHERE id = 'id5' ORDER BY `name`;
 |_|_|_SortExec: expr=[name@2 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: id@1 = id5 REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=3 (0 memtable ranges, 3 file 3 ranges) REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|

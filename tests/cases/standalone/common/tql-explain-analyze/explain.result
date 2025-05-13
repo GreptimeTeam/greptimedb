@@ -12,18 +12,13 @@ Affected Rows: 3
 -- SQLNESS REPLACE (peers.*) REDACTED
 TQL EXPLAIN (0, 10, '5s') test;
 
-+---------------+-----------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                          |
-+---------------+-----------------------------------------------------------------------------------------------+
-| logical_plan  | PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[j]     |
-|               |   PromSeriesDivide: tags=["k"]                                                                |
-|               |     Projection: test.i, test.j, test.k                                                        |
-|               |       MergeScan [is_placeholder=false]                                                        |
-| physical_plan | PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[j] |
-|               |   PromSeriesDivideExec: tags=["k"]                                                            |
-|               |     MergeScanExec: REDACTED
-|               |                                                                                               |
-+---------------+-----------------------------------------------------------------------------------------------+
++---------------+-------------------------------------------------+
+| plan_type     | plan                                            |
++---------------+-------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false]                |
+| physical_plan | MergeScanExec: REDACTED
+|               |                                                 |
++---------------+-------------------------------------------------+
 
 -- 'lookback' parameter is not fully supported, the test has to be updated
 -- explain at 0s, 5s and 10s. No point at 0s.
@@ -31,36 +26,26 @@ TQL EXPLAIN (0, 10, '5s') test;
 -- SQLNESS REPLACE (peers.*) REDACTED
 TQL EXPLAIN (0, 10, '1s', '2s') test;
 
-+---------------+---------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                        |
-+---------------+---------------------------------------------------------------------------------------------+
-| logical_plan  | PromInstantManipulate: range=[0..0], lookback=[2000], interval=[300000], time index=[j]     |
-|               |   PromSeriesDivide: tags=["k"]                                                              |
-|               |     Projection: test.i, test.j, test.k                                                      |
-|               |       MergeScan [is_placeholder=false]                                                      |
-| physical_plan | PromInstantManipulateExec: range=[0..0], lookback=[2000], interval=[300000], time index=[j] |
-|               |   PromSeriesDivideExec: tags=["k"]                                                          |
-|               |     MergeScanExec: REDACTED
-|               |                                                                                             |
-+---------------+---------------------------------------------------------------------------------------------+
++---------------+-------------------------------------------------+
+| plan_type     | plan                                            |
++---------------+-------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false]                |
+| physical_plan | MergeScanExec: REDACTED
+|               |                                                 |
++---------------+-------------------------------------------------+
 
 -- explain at 0s, 5s and 10s. No point at 0s.
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 TQL EXPLAIN ('1970-01-01T00:00:00'::timestamp, '1970-01-01T00:00:00'::timestamp + '10 seconds'::interval, '5s') test;
 
-+---------------+-----------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                          |
-+---------------+-----------------------------------------------------------------------------------------------+
-| logical_plan  | PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[j]     |
-|               |   PromSeriesDivide: tags=["k"]                                                                |
-|               |     Projection: test.i, test.j, test.k                                                        |
-|               |       MergeScan [is_placeholder=false]                                                        |
-| physical_plan | PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[j] |
-|               |   PromSeriesDivideExec: tags=["k"]                                                            |
-|               |     MergeScanExec: REDACTED
-|               |                                                                                               |
-+---------------+-----------------------------------------------------------------------------------------------+
++---------------+-------------------------------------------------+
+| plan_type     | plan                                            |
++---------------+-------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false]                |
+| physical_plan | MergeScanExec: REDACTED
+|               |                                                 |
++---------------+-------------------------------------------------+
 
 -- explain verbose at 0s, 5s and 10s. No point at 0s.
 -- SQLNESS REPLACE (-+) -
@@ -85,9 +70,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 | logical_plan after expand_wildcard_rule_| SAME TEXT AS ABOVE_|
 | logical_plan after resolve_grouping_function_| SAME TEXT AS ABOVE_|
 | logical_plan after type_coercion_| SAME TEXT AS ABOVE_|
-| logical_plan after DistPlannerAnalyzer_| PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[j]_|
-|_|_PromSeriesDivide: tags=["k"]_|
-|_|_Projection: test.i, test.j, test.k_|
+| logical_plan after DistPlannerAnalyzer_| Projection: test.i, test.j, test.k_|
 |_|_MergeScan [is_placeholder=false]_|
 | analyzed_logical_plan_| SAME TEXT AS ABOVE_|
 | logical_plan after eliminate_nested_union_| SAME TEXT AS ABOVE_|
@@ -114,37 +97,46 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 | logical_plan after unwrap_cast_in_comparison_| SAME TEXT AS ABOVE_|
 | logical_plan after common_sub_expression_eliminate_| SAME TEXT AS ABOVE_|
 | logical_plan after eliminate_group_by_constant_| SAME TEXT AS ABOVE_|
+| logical_plan after optimize_projections_| MergeScan [is_placeholder=false]_|
+| logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_nested_union_| SAME TEXT AS ABOVE_|
+| logical_plan after simplify_expressions_| SAME TEXT AS ABOVE_|
+| logical_plan after unwrap_cast_in_comparison_| SAME TEXT AS ABOVE_|
+| logical_plan after replace_distinct_aggregate_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_join_| SAME TEXT AS ABOVE_|
+| logical_plan after decorrelate_predicate_subquery_| SAME TEXT AS ABOVE_|
+| logical_plan after scalar_subquery_to_join_| SAME TEXT AS ABOVE_|
+| logical_plan after extract_equijoin_predicate_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_duplicated_expr_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_filter_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_cross_join_| SAME TEXT AS ABOVE_|
+| logical_plan after common_sub_expression_eliminate_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_limit_| SAME TEXT AS ABOVE_|
+| logical_plan after propagate_empty_relation_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_one_union_| SAME TEXT AS ABOVE_|
+| logical_plan after filter_null_join_keys_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_outer_join_| SAME TEXT AS ABOVE_|
+| logical_plan after push_down_limit_| SAME TEXT AS ABOVE_|
+| logical_plan after push_down_filter_| SAME TEXT AS ABOVE_|
+| logical_plan after single_distinct_aggregation_to_group_by | SAME TEXT AS ABOVE_|
+| logical_plan after simplify_expressions_| SAME TEXT AS ABOVE_|
+| logical_plan after unwrap_cast_in_comparison_| SAME TEXT AS ABOVE_|
+| logical_plan after common_sub_expression_eliminate_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_group_by_constant_| SAME TEXT AS ABOVE_|
 | logical_plan after optimize_projections_| SAME TEXT AS ABOVE_|
 | logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
-| logical_plan_| PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[j]_|
-|_|_PromSeriesDivide: tags=["k"]_|
-|_|_Projection: test.i, test.j, test.k_|
-|_|_MergeScan [is_placeholder=false]_|
-| initial_physical_plan_| PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[j]_|
-|_|_PromSeriesDivideExec: tags=["k"]_|
-|_|_ProjectionExec: expr=[i@0 as i, j@1 as j, k@2 as k]_|
-|_|_MergeScanExec: REDACTED
+| logical_plan_| MergeScan [is_placeholder=false]_|
+| initial_physical_plan_| MergeScanExec: REDACTED
 |_|_|
-| initial_physical_plan_with_stats_| PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[j], statistics=[Rows=Inexact(0), Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]] |
-|_|_PromSeriesDivideExec: tags=["k"], statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
-|_|_ProjectionExec: expr=[i@0 as i, j@1 as j, k@2 as k], statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
-|_|_MergeScanExec: REDACTED
+| initial_physical_plan_with_stats_| MergeScanExec: REDACTED
 |_|_|
-| initial_physical_plan_with_schema_| PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[j], schema=[i:Float64;N, j:Timestamp(Millisecond, None), k:Utf8;N]_|
-|_|_PromSeriesDivideExec: tags=["k"], schema=[i:Float64;N, j:Timestamp(Millisecond, None), k:Utf8;N]_|
-|_|_ProjectionExec: expr=[i@0 as i, j@1 as j, k@2 as k], schema=[i:Float64;N, j:Timestamp(Millisecond, None), k:Utf8;N]_|
-|_|_MergeScanExec: REDACTED
+| initial_physical_plan_with_schema_| MergeScanExec: REDACTED
 |_|_|
-| physical_plan after parallelize_scan_| PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[j]_|
-|_|_PromSeriesDivideExec: tags=["k"]_|
-|_|_ProjectionExec: expr=[i@0 as i, j@1 as j, k@2 as k]_|
-|_|_MergeScanExec: REDACTED
+| physical_plan after parallelize_scan_| MergeScanExec: REDACTED
 |_|_|
 | physical_plan after PassDistributionRule_| SAME TEXT AS ABOVE_|
+| physical_plan after EnforceSorting_| SAME TEXT AS ABOVE_|
 | physical_plan after OutputRequirements_| OutputRequirementExec_|
-|_|_PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[j]_|
-|_|_PromSeriesDivideExec: tags=["k"]_|
-|_|_ProjectionExec: expr=[i@0 as i, j@1 as j, k@2 as k]_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 | physical_plan after aggregate_statistics_| SAME TEXT AS ABOVE_|
@@ -154,15 +146,9 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 | physical_plan after CombinePartialFinalAggregate_| SAME TEXT AS ABOVE_|
 | physical_plan after EnforceSorting_| SAME TEXT AS ABOVE_|
 | physical_plan after OptimizeAggregateOrder_| SAME TEXT AS ABOVE_|
-| physical_plan after ProjectionPushdown_| OutputRequirementExec_|
-|_|_PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[j]_|
-|_|_PromSeriesDivideExec: tags=["k"]_|
-|_|_MergeScanExec: REDACTED
-|_|_|
+| physical_plan after ProjectionPushdown_| SAME TEXT AS ABOVE_|
 | physical_plan after coalesce_batches_| SAME TEXT AS ABOVE_|
-| physical_plan after OutputRequirements_| PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[j]_|
-|_|_PromSeriesDivideExec: tags=["k"]_|
-|_|_MergeScanExec: REDACTED
+| physical_plan after OutputRequirements_| MergeScanExec: REDACTED
 |_|_|
 | physical_plan after LimitAggregation_| SAME TEXT AS ABOVE_|
 | physical_plan after ProjectionPushdown_| SAME TEXT AS ABOVE_|
@@ -171,17 +157,11 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 | physical_plan after MatchesConstantTerm_| SAME TEXT AS ABOVE_|
 | physical_plan after RemoveDuplicateRule_| SAME TEXT AS ABOVE_|
 | physical_plan after SanityCheckPlan_| SAME TEXT AS ABOVE_|
-| physical_plan_| PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[j]_|
-|_|_PromSeriesDivideExec: tags=["k"]_|
-|_|_MergeScanExec: REDACTED
+| physical_plan_| MergeScanExec: REDACTED
 |_|_|
-| physical_plan_with_stats_| PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[j], statistics=[Rows=Inexact(0), Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]] |
-|_|_PromSeriesDivideExec: tags=["k"], statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
-|_|_MergeScanExec: REDACTED
+| physical_plan_with_stats_| MergeScanExec: REDACTED
 |_|_|
-| physical_plan_with_schema_| PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[j], schema=[i:Float64;N, j:Timestamp(Millisecond, None), k:Utf8;N]_|
-|_|_PromSeriesDivideExec: tags=["k"], schema=[i:Float64;N, j:Timestamp(Millisecond, None), k:Utf8;N]_|
-|_|_MergeScanExec: REDACTED
+| physical_plan_with_schema_| MergeScanExec: REDACTED
 |_|_|
 +-+-+
 
