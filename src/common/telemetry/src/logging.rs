@@ -291,57 +291,7 @@ pub fn init_global_logging(
             None
         };
 
-        let slow_query_logging_layer = if let Some(slow_query_opts) = slow_query_opts {
-            if !opts.dir.is_empty()
-                && slow_query_opts.enable
-                && slow_query_opts.record_type == SlowQueriesRecordType::Log
-            {
-                let rolling_appender = RollingFileAppender::builder()
-                    .rotation(Rotation::HOURLY)
-                    .filename_prefix("greptimedb-slow-queries")
-                    .max_log_files(opts.max_log_files)
-                    .build(&opts.dir)
-                    .unwrap_or_else(|e| {
-                        panic!(
-                            "initializing rolling file appender at {} failed: {}",
-                            &opts.dir, e
-                        )
-                    });
-                let (writer, guard) = tracing_appender::non_blocking(rolling_appender);
-                guards.push(guard);
-
-                // Only logs if the field contains "slow".
-                let slow_query_filter = FilterFn::new(|metadata| {
-                    metadata
-                        .fields()
-                        .iter()
-                        .any(|field| field.name().contains("slow"))
-                });
-
-                if opts.log_format == LogFormat::Json {
-                    Some(
-                        Layer::new()
-                            .json()
-                            .with_writer(writer)
-                            .with_ansi(false)
-                            .with_filter(slow_query_filter)
-                            .boxed(),
-                    )
-                } else {
-                    Some(
-                        Layer::new()
-                            .with_writer(writer)
-                            .with_ansi(false)
-                            .with_filter(slow_query_filter)
-                            .boxed(),
-                    )
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let slow_query_logging_layer = build_slow_query_logger(opts, slow_query_opts, &mut guards);
 
         // resolve log level settings from:
         // - options from command line or config files
@@ -454,4 +404,68 @@ pub fn init_global_logging(
     });
 
     guards
+}
+
+fn build_slow_query_logger<S>(
+    opts: &LoggingOptions,
+    slow_query_opts: Option<&SlowQueryOptions>,
+    guards: &mut Vec<WorkerGuard>,
+) -> Option<Box<dyn tracing_subscriber::Layer<S> + Send + Sync + 'static>>
+where
+    S: tracing::Subscriber
+        + Send
+        + 'static
+        + for<'span> tracing_subscriber::registry::LookupSpan<'span>,
+{
+    if let Some(slow_query_opts) = slow_query_opts {
+        if !opts.dir.is_empty()
+            && slow_query_opts.enable
+            && slow_query_opts.record_type == SlowQueriesRecordType::Log
+        {
+            let rolling_appender = RollingFileAppender::builder()
+                .rotation(Rotation::HOURLY)
+                .filename_prefix("greptimedb-slow-queries")
+                .max_log_files(opts.max_log_files)
+                .build(&opts.dir)
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "initializing rolling file appender at {} failed: {}",
+                        &opts.dir, e
+                    )
+                });
+            let (writer, guard) = tracing_appender::non_blocking(rolling_appender);
+            guards.push(guard);
+
+            // Only logs if the field contains "slow".
+            let slow_query_filter = FilterFn::new(|metadata| {
+                metadata
+                    .fields()
+                    .iter()
+                    .any(|field| field.name().contains("slow"))
+            });
+
+            if opts.log_format == LogFormat::Json {
+                Some(
+                    Layer::new()
+                        .json()
+                        .with_writer(writer)
+                        .with_ansi(false)
+                        .with_filter(slow_query_filter)
+                        .boxed(),
+                )
+            } else {
+                Some(
+                    Layer::new()
+                        .with_writer(writer)
+                        .with_ansi(false)
+                        .with_filter(slow_query_filter)
+                        .boxed(),
+                )
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    }
 }
