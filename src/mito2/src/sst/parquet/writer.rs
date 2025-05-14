@@ -41,7 +41,7 @@ use crate::error::{InvalidMetadataSnafu, OpenDalSnafu, Result, WriteParquetSnafu
 use crate::read::{Batch, Source};
 use crate::sst::file::FileId;
 use crate::sst::index::{Indexer, IndexerBuilder};
-use crate::sst::parquet::format::WriteFormat;
+use crate::sst::parquet::format::PrimaryKeyWriteFormat;
 use crate::sst::parquet::helper::parse_parquet_metadata;
 use crate::sst::parquet::{SstInfo, WriteOptions, PARQUET_METADATA_KEY};
 use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
@@ -158,7 +158,7 @@ where
         opts: &WriteOptions,
     ) -> Result<SstInfoArray> {
         let write_format =
-            WriteFormat::new(self.metadata.clone()).with_override_sequence(override_sequence);
+            PrimaryKeyWriteFormat::new(self.metadata.clone()).with_override_sequence(override_sequence);
         let mut stats = SourceStats::default();
 
         while let Some(res) = self
@@ -236,7 +236,7 @@ where
     async fn write_next_batch(
         &mut self,
         source: &mut Source,
-        write_format: &WriteFormat,
+        write_format: &PrimaryKeyWriteFormat,
         opts: &WriteOptions,
     ) -> Result<Option<Batch>> {
         let Some(batch) = source.next_batch().await? else {

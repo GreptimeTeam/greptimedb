@@ -61,19 +61,19 @@ pub(crate) type PrimaryKeyArray = DictionaryArray<UInt32Type>;
 /// Contains: time index and internal columns.
 const FIXED_POS_COLUMN_NUM: usize = 4;
 
-/// Helper for writing the SST format.
-pub(crate) struct WriteFormat {
+/// Helper for writing the SST format with primary key.
+pub(crate) struct PrimaryKeyWriteFormat {
     metadata: RegionMetadataRef,
     /// SST file schema.
     arrow_schema: SchemaRef,
     override_sequence: Option<SequenceNumber>,
 }
 
-impl WriteFormat {
+impl PrimaryKeyWriteFormat {
     /// Creates a new helper.
-    pub(crate) fn new(metadata: RegionMetadataRef) -> WriteFormat {
+    pub(crate) fn new(metadata: RegionMetadataRef) -> PrimaryKeyWriteFormat {
         let arrow_schema = to_sst_arrow_schema(&metadata);
-        WriteFormat {
+        PrimaryKeyWriteFormat {
             metadata,
             arrow_schema,
             override_sequence: None,
@@ -905,7 +905,7 @@ mod tests {
     #[test]
     fn test_to_sst_arrow_schema() {
         let metadata = build_test_region_metadata();
-        let write_format = WriteFormat::new(metadata);
+        let write_format = PrimaryKeyWriteFormat::new(metadata);
         assert_eq!(&build_test_arrow_schema(), write_format.arrow_schema());
     }
 
@@ -931,7 +931,7 @@ mod tests {
     #[test]
     fn test_convert_batch() {
         let metadata = build_test_region_metadata();
-        let write_format = WriteFormat::new(metadata);
+        let write_format = PrimaryKeyWriteFormat::new(metadata);
 
         let num_rows = 4;
         let batch = new_batch(b"test", 1, 2, num_rows);
@@ -952,7 +952,8 @@ mod tests {
     #[test]
     fn test_convert_batch_with_override_sequence() {
         let metadata = build_test_region_metadata();
-        let write_format = WriteFormat::new(metadata).with_override_sequence(Some(415411));
+        let write_format =
+            PrimaryKeyWriteFormat::new(metadata).with_override_sequence(Some(415411));
 
         let num_rows = 4;
         let batch = new_batch(b"test", 1, 2, num_rows);
