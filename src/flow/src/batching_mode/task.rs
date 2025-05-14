@@ -380,6 +380,23 @@ impl BatchingTask {
         frontend_client: Arc<FrontendClient>,
     ) {
         loop {
+            // first check if shutdown signal is received
+            // if so, break the loop
+            {
+                let mut state = self.state.write().unwrap();
+                match state.shutdown_rx.try_recv() {
+                    Ok(()) => break,
+                    Err(TryRecvError::Closed) => {
+                        warn!(
+                            "Unexpected shutdown flow {}, shutdown anyway",
+                            self.config.flow_id
+                        );
+                        break;
+                    }
+                    Err(TryRecvError::Empty) => (),
+                }
+            }
+
             let mut new_query = None;
             let mut gen_and_exec = async || {
                 new_query = self.gen_insert_plan(&engine).await?;
@@ -393,20 +410,15 @@ impl BatchingTask {
                 // normal execute, sleep for some time before doing next query
                 Ok(Some(_)) => {
                     let sleep_until = {
-                        let mut state = self.state.write().unwrap();
-                        match state.shutdown_rx.try_recv() {
-                            Ok(()) => break,
-                            Err(TryRecvError::Closed) => {
-                                warn!(
-                                    "Unexpected shutdown flow {}, shutdown anyway",
-                                    self.config.flow_id
-                                );
-                                break;
-                            }
-                            Err(TryRecvError::Empty) => (),
-                        }
+                        let state = self.state.write().unwrap();
+
                         state.get_next_start_query_time(
                             self.config.flow_id,
+                            &self
+                                .config
+                                .time_window_expr
+                                .as_ref()
+                                .and_then(|t| *t.time_window_size()),
                             Some(DEFAULT_BATCHING_ENGINE_QUERY_TIMEOUT),
                         )
                     };

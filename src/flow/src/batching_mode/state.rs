@@ -71,18 +71,24 @@ impl TaskState {
         self.last_update_time = Instant::now();
     }
 
-    /// wait for at least `last_query_duration`, at most `max_timeout` to start next query
+    /// wait for time window size / 2 to start next query
+    /// if time window size is not set, wait for last query duration
+    /// and at least `last_query_duration`, at most `max_timeout` to start next query
     ///
     /// if have more dirty time window, exec next query immediately
+    /// TODO(discord9): make this configurable
     pub fn get_next_start_query_time(
         &self,
         flow_id: FlowId,
+        time_window_size: &Option<Duration>,
         max_timeout: Option<Duration>,
     ) -> Instant {
-        let next_duration = max_timeout
+        let last_duration = max_timeout
             .unwrap_or(self.last_query_duration)
-            .min(self.last_query_duration);
-        let next_duration = next_duration.max(MIN_REFRESH_DURATION);
+            .min(self.last_query_duration)
+            .max(MIN_REFRESH_DURATION);
+
+        let next_duration = time_window_size.map(|t| t / 2).unwrap_or(last_duration);
 
         // if have dirty time window, execute immediately to clean dirty time window
         if self.dirty_time_windows.windows.is_empty() {

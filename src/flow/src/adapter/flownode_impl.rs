@@ -379,7 +379,7 @@ impl FlowDualEngine {
                 }
             } else {
                 warn!(
-                    "Flownode {:?} found flows not exist in flownode, flow_ids={:?}",
+                    "Flownode {:?} found flows not exist in metadata, flow_ids={:?}",
                     nodeid, to_be_dropped
                 );
             }
