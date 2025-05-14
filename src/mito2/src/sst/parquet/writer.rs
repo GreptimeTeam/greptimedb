@@ -229,8 +229,8 @@ where
         opts: &WriteOptions,
     ) -> Result<SstInfoArray> {
         let mut results = smallvec![];
-        let write_format =
-            PrimaryKeyWriteFormat::new(self.metadata.clone()).with_override_sequence(override_sequence);
+        let write_format = PrimaryKeyWriteFormat::new(self.metadata.clone())
+            .with_override_sequence(override_sequence);
         let mut stats = SourceStats::default();
 
         while let Some(res) = self
