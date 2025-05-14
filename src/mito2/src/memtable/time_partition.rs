@@ -24,11 +24,11 @@ use common_time::timestamp_millis::BucketAligned;
 use common_time::Timestamp;
 use datatypes::arrow;
 use datatypes::arrow::array::{
-    BooleanArray, RecordBatch, RecordBatchOptions, TimestampMicrosecondArray,
+    ArrayRef, BooleanArray, RecordBatch, RecordBatchOptions, TimestampMicrosecondArray,
     TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray,
 };
 use datatypes::arrow::buffer::{BooleanBuffer, MutableBuffer};
-use datatypes::arrow::datatypes::DataType;
+use datatypes::arrow::datatypes::{DataType, Int64Type};
 use smallvec::{smallvec, SmallVec};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
@@ -297,6 +297,7 @@ impl TimePartitions {
         // Get all parts.
         let parts = self.list_partitions();
         let (matching_parts, missing_parts) = self.find_partitions_by_time_range(
+            part.timestamps(),
             &parts,
             time_type.create_timestamp(part.min_ts),
             time_type.create_timestamp(part.max_ts),
@@ -503,6 +504,7 @@ impl TimePartitions {
     /// any new partitions that need to be created
     fn find_partitions_by_time_range<'a>(
         &self,
+        ts_array: &ArrayRef,
         existing_parts: &'a [TimePartition],
         min: Timestamp,
         max: Timestamp,
@@ -539,27 +541,83 @@ impl TimePartitions {
             .unwrap()
             .value()
             .div_euclid(part_duration_sec);
+        let bucket_num = (end_bucket - start_bucket + 1) as usize;
 
-        let missing = (start_bucket..=end_bucket)
-            .filter_map(|start_sec| {
-                let Some(timestamp) =
-                    Timestamp::new_second(start_sec * part_duration_sec).convert_to(timestamp_unit)
-                else {
-                    return Some(
-                        InvalidRequestSnafu {
-                            region_id: self.metadata.region_id,
-                            reason: format!("Timestamp out of range: {}", start_sec),
-                        }
-                        .fail(),
-                    );
-                };
-                if present.insert(timestamp.value()) {
-                    Some(Ok(timestamp))
-                } else {
-                    None
-                }
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let num_timestamps = ts_array.len();
+        let missing = if bucket_num <= num_timestamps {
+            (start_bucket..=end_bucket)
+                .filter_map(|start_sec| {
+                    let Some(timestamp) = Timestamp::new_second(start_sec * part_duration_sec)
+                        .convert_to(timestamp_unit)
+                    else {
+                        return Some(
+                            InvalidRequestSnafu {
+                                region_id: self.metadata.region_id,
+                                reason: format!("Timestamp out of range: {}", start_sec),
+                            }
+                            .fail(),
+                        );
+                    };
+                    if present.insert(timestamp.value()) {
+                        Some(Ok(timestamp))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            let ts_primitive = match ts_array.data_type() {
+                DataType::Timestamp(unit, _) => match unit {
+                    arrow::datatypes::TimeUnit::Second => ts_array
+                        .as_any()
+                        .downcast_ref::<TimestampSecondArray>()
+                        .unwrap()
+                        .reinterpret_cast::<Int64Type>(),
+                    arrow::datatypes::TimeUnit::Millisecond => ts_array
+                        .as_any()
+                        .downcast_ref::<TimestampMillisecondArray>()
+                        .unwrap()
+                        .reinterpret_cast::<Int64Type>(),
+                    arrow::datatypes::TimeUnit::Microsecond => ts_array
+                        .as_any()
+                        .downcast_ref::<TimestampMicrosecondArray>()
+                        .unwrap()
+                        .reinterpret_cast::<Int64Type>(),
+                    arrow::datatypes::TimeUnit::Nanosecond => ts_array
+                        .as_any()
+                        .downcast_ref::<TimestampNanosecondArray>()
+                        .unwrap()
+                        .reinterpret_cast::<Int64Type>(),
+                },
+                _ => unreachable!(),
+            };
+
+            ts_primitive
+                .values()
+                .iter()
+                .filter_map(|ts| {
+                    let ts = self.metadata.time_index_type().create_timestamp(*ts);
+                    let Some(bucket_start) = ts
+                        .convert_to(TimeUnit::Second)
+                        .and_then(|ts| ts.align_by_bucket(part_duration_sec))
+                        .and_then(|ts| ts.convert_to(timestamp_unit))
+                    else {
+                        return Some(
+                            InvalidRequestSnafu {
+                                region_id: self.metadata.region_id,
+                                reason: format!("Timestamp out of range: {:?}", ts),
+                            }
+                            .fail(),
+                        );
+                    };
+                    if present.insert(bucket_start.value()) {
+                        Some(Ok(bucket_start))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Result<Vec<_>>>()?
+        };
         Ok((matching, missing))
     }
 
@@ -954,6 +1012,7 @@ mod tests {
         let parts = partitions.list_partitions();
         let (matching, missing) = partitions
             .find_partitions_by_time_range(
+                &(Arc::new(TimestampMillisecondArray::from_iter_values(1000..=2000)) as ArrayRef),
                 &parts,
                 Timestamp::new_millisecond(1000),
                 Timestamp::new_millisecond(2000),
@@ -985,6 +1044,7 @@ mod tests {
         // Test case 2a: Query fully within existing partition
         let (matching, missing) = partitions
             .find_partitions_by_time_range(
+                &(Arc::new(TimestampMillisecondArray::from_iter_values(2000..=4000)) as ArrayRef),
                 &parts,
                 Timestamp::new_millisecond(2000),
                 Timestamp::new_millisecond(4000),
@@ -997,6 +1057,7 @@ mod tests {
         // Test case 2b: Query spanning multiple existing partitions
         let (matching, missing) = partitions
             .find_partitions_by_time_range(
+                &(Arc::new(TimestampMillisecondArray::from_iter_values(3000..=8000)) as ArrayRef),
                 &parts,
                 Timestamp::new_millisecond(3000),
                 Timestamp::new_millisecond(8000),
@@ -1010,6 +1071,7 @@ mod tests {
         // Test case 2c: Query requiring new partition
         let (matching, missing) = partitions
             .find_partitions_by_time_range(
+                &(Arc::new(TimestampMillisecondArray::from_iter_values(12000..=13000)) as ArrayRef),
                 &parts,
                 Timestamp::new_millisecond(12000),
                 Timestamp::new_millisecond(13000),
@@ -1022,6 +1084,7 @@ mod tests {
         // Test case 2d: Query partially overlapping existing partition
         let (matching, missing) = partitions
             .find_partitions_by_time_range(
+                &(Arc::new(TimestampMillisecondArray::from_iter_values(4000..=6000)) as ArrayRef),
                 &parts,
                 Timestamp::new_millisecond(4000),
                 Timestamp::new_millisecond(6000),
@@ -1035,6 +1098,7 @@ mod tests {
         // Test case 2e: Corner case
         let (matching, missing) = partitions
             .find_partitions_by_time_range(
+                &(Arc::new(TimestampMillisecondArray::from_iter_values(4999..=5000)) as ArrayRef),
                 &parts,
                 Timestamp::new_millisecond(4999),
                 Timestamp::new_millisecond(5000),
@@ -1048,6 +1112,7 @@ mod tests {
         // Test case 2f: Corner case with
         let (matching, missing) = partitions
             .find_partitions_by_time_range(
+                &(Arc::new(TimestampMillisecondArray::from_iter_values(9999..=10000)) as ArrayRef),
                 &parts,
                 Timestamp::new_millisecond(9999),
                 Timestamp::new_millisecond(10000),
@@ -1061,6 +1126,7 @@ mod tests {
         // Test case 2g: Cross 0
         let (matching, missing) = partitions
             .find_partitions_by_time_range(
+                &(Arc::new(TimestampMillisecondArray::from_iter_values(-1000..=1000)) as ArrayRef),
                 &parts,
                 Timestamp::new_millisecond(-1000),
                 Timestamp::new_millisecond(1000),
@@ -1070,6 +1136,26 @@ mod tests {
         assert_eq!(matching[0].time_range.unwrap().min_timestamp.value(), 0);
         assert_eq!(1, missing.len());
         assert_eq!(missing[0].value(), -5000);
+
+        // Test case 3: sparse data
+        let (matching, missing) = partitions
+            .find_partitions_by_time_range(
+                &(Arc::new(TimestampMillisecondArray::from(vec![
+                    -100000000000,
+                    0,
+                    100000000000,
+                ])) as ArrayRef),
+                &parts,
+                Timestamp::new_millisecond(-100000000000),
+                Timestamp::new_millisecond(100000000000),
+            )
+            .unwrap();
+        assert_eq!(2, matching.len());
+        assert_eq!(matching[0].time_range.unwrap().min_timestamp.value(), 0);
+        assert_eq!(matching[1].time_range.unwrap().min_timestamp.value(), 5000);
+        assert_eq!(2, missing.len());
+        assert_eq!(missing[0].value(), -100000000000);
+        assert_eq!(missing[1].value(), 100000000000);
     }
 
     fn build_part(ts: &[i64], sequence: SequenceNumber) -> BulkPart {
