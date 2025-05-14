@@ -103,14 +103,6 @@ impl ProjectionMapper {
         }
     }
 
-    /// Returns an empty [RecordBatch].
-    pub(crate) fn empty_record_batch(&self) -> RecordBatch {
-        match self {
-            ProjectionMapper::PrimaryKey(m) => m.empty_record_batch(),
-            ProjectionMapper::Plain(m) => m.empty_record_batch(),
-        }
-    }
-
     /// Returns the primary key projection mapper or None if this is not a primary key mapper.
     pub fn as_primary_key(&self) -> Option<&PrimaryKeyProjectionMapper> {
         match self {
