@@ -28,6 +28,7 @@ use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 
 use crate::error::{InvalidRequestSnafu, Result};
+use crate::read::plain_batch::PlainBatch;
 
 /// Handles projection and converts a projected `PlainBatch` to a projected [RecordBatch].
 ///
@@ -164,28 +165,28 @@ impl PlainProjectionMapper {
         RecordBatch::new_empty(self.output_schema.clone())
     }
 
-    // /// Converts a [PlainBatch] to a [RecordBatch].
-    // ///
-    // /// The batch must match the `projection` using to build the mapper.
-    // pub(crate) fn convert(
-    //     &self,
-    //     batch: &PlainBatch,
-    // ) -> common_recordbatch::error::Result<RecordBatch> {
-    //     if self.is_empty_projection {
-    //         return RecordBatch::new_with_count(self.output_schema.clone(), batch.num_rows());
-    //     }
+    /// Converts a [PlainBatch] to a [RecordBatch].
+    ///
+    /// The batch must match the `projection` using to build the mapper.
+    pub(crate) fn convert(
+        &self,
+        batch: &PlainBatch,
+    ) -> common_recordbatch::error::Result<RecordBatch> {
+        if self.is_empty_projection {
+            return RecordBatch::new_with_count(self.output_schema.clone(), batch.num_rows());
+        }
 
-    //     let mut columns = Vec::with_capacity(self.output_schema.num_columns());
-    //     for index in &self.batch_indices {
-    //         let array = batch.column(*index).clone();
-    //         let vector = Helper::try_into_vector(array)
-    //             .map_err(BoxedError::new)
-    //             .context(ExternalSnafu)?;
-    //         columns.push(vector);
-    //     }
+        let mut columns = Vec::with_capacity(self.output_schema.num_columns());
+        for index in &self.batch_indices {
+            let array = batch.column(*index).clone();
+            let vector = Helper::try_into_vector(array)
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?;
+            columns.push(vector);
+        }
 
-    //     RecordBatch::new(self.output_schema.clone(), columns)
-    // }
+        RecordBatch::new(self.output_schema.clone(), columns)
+    }
 }
 
 /// Returns ids and datatypes of columns of the output batch after applying the `projection`.
