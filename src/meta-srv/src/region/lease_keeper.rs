@@ -166,12 +166,18 @@ impl RegionLeaseKeeper {
             if let Ok(Some(region_route)) = table_route.region_route(region_id) {
                 return renew_region_lease_via_region_route(&region_route, datanode_id, region_id)
                     .map(RegionLeaseInfo::from);
+            } else {
+                warn!(
+                    "Denied to renew region lease for datanode: {datanode_id}, region_id: {region_id}, region route is not found in table({})",
+                    region_id.table_id()
+                );
             }
+        } else {
+            warn!(
+                "Denied to renew region lease for datanode: {datanode_id}, region_id: {region_id}, table({}) is not found",
+                region_id.table_id()
+            );
         }
-        warn!(
-            "Denied to renew region lease for datanode: {datanode_id}, region_id: {region_id}, table({}) is not found",
-            region_id.table_id()
-        );
         None
     }
 
@@ -187,6 +193,8 @@ impl RegionLeaseKeeper {
         let table_ids = region_ids
             .into_iter()
             .map(|region_id| region_id.table_id())
+            .collect::<HashSet<_>>()
+            .into_iter()
             .collect::<Vec<_>>();
         let table_metadata = self.collect_table_metadata(&table_ids).await?;
         Ok((table_metadata, operating_regions))
