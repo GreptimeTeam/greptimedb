@@ -489,9 +489,9 @@ impl Export {
                 .finish();
             Ok(op)
         } else if self.s3 {
-            return self.build_s3_operator().await;
+            self.build_s3_operator().await
         } else {
-            OutputDirNotSetSnafu.fail()
+            self.build_fs_operator().await
         }
     }
 
