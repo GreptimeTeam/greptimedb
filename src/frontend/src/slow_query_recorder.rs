@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use api::v1::value::ValueData;
 use api::v1::{
@@ -24,7 +24,7 @@ use api::v1::{
 use catalog::CatalogManagerRef;
 use common_catalog::consts::{default_engine, DEFAULT_PRIVATE_SCHEMA_NAME};
 use common_telemetry::logging::{SlowQueriesRecordType, SlowQueryOptions};
-use common_telemetry::{error, info, slow};
+use common_telemetry::{debug, error, info, slow};
 use common_time::timestamp::{TimeUnit, Timestamp};
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutorRef;
@@ -43,8 +43,12 @@ const SLOW_QUERY_TABLE_NAME: &str = "slow_queries";
 const SLOW_QUERY_TABLE_COST_COLUMN_NAME: &str = "cost";
 const SLOW_QUERY_TABLE_THRESHOLD_COLUMN_NAME: &str = "threshold";
 const SLOW_QUERY_TABLE_QUERY_COLUMN_NAME: &str = "query";
-const SLOW_QUERY_TABLE_IS_PROMQL_COLUMN_NAME: &str = "is_promql";
 const SLOW_QUERY_TABLE_TIMESTAMP_COLUMN_NAME: &str = "timestamp";
+const SLOW_QUERY_TABLE_IS_PROMQL_COLUMN_NAME: &str = "is_promql";
+const SLOW_QUERY_TABLE_PROMQL_START_COLUMN_NAME: &str = "promql_start";
+const SLOW_QUERY_TABLE_PROMQL_END_COLUMN_NAME: &str = "promql_end";
+const SLOW_QUERY_TABLE_PROMQL_RANGE_COLUMN_NAME: &str = "promql_range";
+const SLOW_QUERY_TABLE_PROMQL_STEP_COLUMN_NAME: &str = "promql_step";
 
 const DEFAULT_SLOW_QUERY_TABLE_TTL: &str = "30d";
 const DEFAULT_SLOW_QUERY_EVENTS_CHANNEL_SIZE: usize = 1024;
@@ -64,6 +68,10 @@ struct SlowQueryEvent {
     query: String,
     is_promql: bool,
     query_ctx: QueryContextRef,
+    promql_range: Option<u64>,
+    promql_step: Option<u64>,
+    promql_start: Option<i64>,
+    promql_end: Option<i64>,
 }
 
 impl SlowQueryRecorder {
@@ -153,7 +161,11 @@ impl SlowQueryEventHandler {
                     cost = event.cost,
                     threshold = event.threshold,
                     query = event.query,
-                    is_promql = event.is_promql
+                    is_promql = event.is_promql,
+                    promql_range = event.promql_range,
+                    promql_step = event.promql_step,
+                    promql_start = event.promql_start,
+                    promql_end = event.promql_end,
                 );
             }
             SlowQueriesRecordType::SystemTable => {
@@ -166,6 +178,8 @@ impl SlowQueryEventHandler {
     }
 
     async fn insert_slow_query(&self, event: &SlowQueryEvent) -> Result<()> {
+        debug!("Handle the slow query event: {:?}", event);
+
         let table = if let Some(table) = self
             .catalog_manager
             .table(
@@ -197,6 +211,11 @@ impl SlowQueryEventHandler {
                             Timestamp::current_time(TimeUnit::Nanosecond).value(),
                         )
                         .into(),
+                        ValueData::U64Value(event.promql_range.unwrap_or(0)).into(),
+                        ValueData::U64Value(event.promql_step.unwrap_or(0)).into(),
+                        ValueData::TimestampMillisecondValue(event.promql_start.unwrap_or(0))
+                            .into(),
+                        ValueData::TimestampMillisecondValue(event.promql_end.unwrap_or(0)).into(),
                     ],
                 }],
             }),
@@ -258,7 +277,7 @@ impl SlowQueryEventHandler {
                 is_nullable: false,
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
-                comment: "".to_string(),
+                comment: "The cost of the slow query in milliseconds".to_string(),
                 datatype_extension: None,
                 options: None,
             },
@@ -268,7 +287,9 @@ impl SlowQueryEventHandler {
                 is_nullable: false,
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
-                comment: "".to_string(),
+                comment:
+                    "When the query cost exceeds this value, it will be recorded as a slow query"
+                        .to_string(),
                 datatype_extension: None,
                 options: None,
             },
@@ -278,7 +299,7 @@ impl SlowQueryEventHandler {
                 is_nullable: false,
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
-                comment: "".to_string(),
+                comment: "The original query statement".to_string(),
                 datatype_extension: None,
                 options: None,
             },
@@ -288,7 +309,7 @@ impl SlowQueryEventHandler {
                 is_nullable: false,
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
-                comment: "".to_string(),
+                comment: "Whether the query is a PromQL query".to_string(),
                 datatype_extension: None,
                 options: None,
             },
@@ -298,7 +319,47 @@ impl SlowQueryEventHandler {
                 is_nullable: false,
                 default_constraint: vec![],
                 semantic_type: SemanticType::Timestamp as i32,
-                comment: "".to_string(),
+                comment: "The timestamp of the slow query".to_string(),
+                datatype_extension: None,
+                options: None,
+            },
+            ColumnDef {
+                name: SLOW_QUERY_TABLE_PROMQL_RANGE_COLUMN_NAME.to_string(),
+                data_type: ColumnDataType::Uint64 as i32,
+                is_nullable: false,
+                default_constraint: vec![],
+                semantic_type: SemanticType::Field as i32,
+                comment: "The time range of the PromQL query in milliseconds".to_string(),
+                datatype_extension: None,
+                options: None,
+            },
+            ColumnDef {
+                name: SLOW_QUERY_TABLE_PROMQL_STEP_COLUMN_NAME.to_string(),
+                data_type: ColumnDataType::Uint64 as i32,
+                is_nullable: false,
+                default_constraint: vec![],
+                semantic_type: SemanticType::Field as i32,
+                comment: "The step of the PromQL query in milliseconds".to_string(),
+                datatype_extension: None,
+                options: None,
+            },
+            ColumnDef {
+                name: SLOW_QUERY_TABLE_PROMQL_START_COLUMN_NAME.to_string(),
+                data_type: ColumnDataType::TimestampMillisecond as i32,
+                is_nullable: false,
+                default_constraint: vec![],
+                semantic_type: SemanticType::Field as i32,
+                comment: "The start timestamp of the PromQL query in milliseconds".to_string(),
+                datatype_extension: None,
+                options: None,
+            },
+            ColumnDef {
+                name: SLOW_QUERY_TABLE_PROMQL_END_COLUMN_NAME.to_string(),
+                data_type: ColumnDataType::TimestampMillisecond as i32,
+                is_nullable: false,
+                default_constraint: vec![],
+                semantic_type: SemanticType::Field as i32,
+                comment: "The end timestamp of the PromQL query in milliseconds".to_string(),
                 datatype_extension: None,
                 options: None,
             },
@@ -356,6 +417,30 @@ impl SlowQueryEventHandler {
                 semantic_type: SemanticType::Timestamp.into(),
                 ..Default::default()
             },
+            ColumnSchema {
+                column_name: SLOW_QUERY_TABLE_PROMQL_RANGE_COLUMN_NAME.to_string(),
+                datatype: ColumnDataType::Uint64.into(),
+                semantic_type: SemanticType::Field.into(),
+                ..Default::default()
+            },
+            ColumnSchema {
+                column_name: SLOW_QUERY_TABLE_PROMQL_STEP_COLUMN_NAME.to_string(),
+                datatype: ColumnDataType::Uint64.into(),
+                semantic_type: SemanticType::Field.into(),
+                ..Default::default()
+            },
+            ColumnSchema {
+                column_name: SLOW_QUERY_TABLE_PROMQL_START_COLUMN_NAME.to_string(),
+                datatype: ColumnDataType::TimestampMillisecond.into(),
+                semantic_type: SemanticType::Field.into(),
+                ..Default::default()
+            },
+            ColumnSchema {
+                column_name: SLOW_QUERY_TABLE_PROMQL_END_COLUMN_NAME.to_string(),
+                datatype: ColumnDataType::TimestampMillisecond.into(),
+                semantic_type: SemanticType::Field.into(),
+                ..Default::default()
+            },
         ]
     }
 }
@@ -373,21 +458,49 @@ pub struct SlowQueryTimer {
 
 impl SlowQueryTimer {
     fn send_slow_query_event(&self, elapsed: Duration, threshold: Duration) {
-        let cost = elapsed.as_millis() as u64;
-        let threshold = threshold.as_millis() as u64;
-        let (query, is_promql) = match &self.stmt {
-            QueryStatement::Sql(stmt) => (stmt.to_string(), false),
-            QueryStatement::Promql(stmt) => (stmt.to_string(), true),
+        let mut slow_query_event = SlowQueryEvent {
+            cost: elapsed.as_millis() as u64,
+            threshold: threshold.as_millis() as u64,
+            query: "".to_string(),
+            query_ctx: self.query_ctx.clone(),
+
+            // The following fields are only used for PromQL queries.
+            is_promql: false,
+            promql_range: None,
+            promql_step: None,
+            promql_start: None,
+            promql_end: None,
         };
 
+        match &self.stmt {
+            QueryStatement::Promql(stmt) => {
+                slow_query_event.is_promql = true;
+                slow_query_event.query = stmt.expr.to_string();
+                slow_query_event.promql_step = Some(stmt.interval.as_millis() as u64);
+
+                let start = stmt
+                    .start
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64;
+
+                let end = stmt
+                    .end
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64;
+
+                slow_query_event.promql_range = Some((end - start) as u64);
+                slow_query_event.promql_start = Some(start);
+                slow_query_event.promql_end = Some(end);
+            }
+            QueryStatement::Sql(stmt) => {
+                slow_query_event.query = stmt.to_string();
+            }
+        }
+
         // Send SlowQueryEvent to the handler.
-        if let Err(e) = self.tx.try_send(SlowQueryEvent {
-            cost,
-            threshold,
-            query,
-            is_promql,
-            query_ctx: self.query_ctx.clone(),
-        }) {
+        if let Err(e) = self.tx.try_send(slow_query_event) {
             error!(e; "Failed to send slow query event");
         }
     }
