@@ -157,8 +157,8 @@ where
         override_sequence: Option<SequenceNumber>, // override the `sequence` field from `Source`
         opts: &WriteOptions,
     ) -> Result<SstInfoArray> {
-        let write_format =
-            PrimaryKeyWriteFormat::new(self.metadata.clone()).with_override_sequence(override_sequence);
+        let write_format = PrimaryKeyWriteFormat::new(self.metadata.clone())
+            .with_override_sequence(override_sequence);
         let mut stats = SourceStats::default();
 
         while let Some(res) = self
