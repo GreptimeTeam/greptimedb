@@ -39,7 +39,6 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('requests_long_term');
 
--- SQLNESS SLEEP 1s
 SELECT
     *
 FROM
@@ -92,7 +91,6 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_ngx_country');
 
--- SQLNESS SLEEP 1s
 SELECT
     client,
     country,
@@ -110,7 +108,6 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_ngx_country');
 
--- SQLNESS SLEEP 1s
 SELECT
     client,
     country,
@@ -127,7 +124,6 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_ngx_country');
 
--- SQLNESS SLEEP 1s
 SELECT
     client,
     country,
@@ -177,7 +173,6 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_nullable_pk');
 
--- SQLNESS SLEEP 1s
 SELECT * FROM out_nullable_pk;
 
 -- pk is nullable
@@ -191,7 +186,6 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_nullable_pk');
 
--- SQLNESS SLEEP 1s
 SELECT * FROM out_nullable_pk;
 
 DROP FLOW calc_nullable_pk;

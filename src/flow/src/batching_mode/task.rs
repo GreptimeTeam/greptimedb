@@ -592,8 +592,6 @@ impl BatchingTask {
             return Ok(None);
         };
 
-        // TODO(discord9): add auto column or not? This might break compatibility for auto created sink table before this, but that's ok right?
-
         let mut add_filter = AddFilterRewriter::new(expr);
         let mut add_auto_column = AddAutoColumnRewriter::new(sink_table_schema.clone());
 

@@ -21,7 +21,6 @@ SHOW CREATE TABLE out_num_cnt_basic;
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_numbers_basic');
 
--- SQLNESS SLEEP 1s
 SHOW CREATE TABLE out_num_cnt_basic;
 
 -- SQLNESS ARG restart=true
@@ -37,7 +36,6 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_numbers_basic');
 
--- SQLNESS SLEEP 1s
 SELECT
     "sum(numbers_input_basic.number)",
     time_window
@@ -47,7 +45,6 @@ FROM
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_numbers_basic');
 
--- SQLNESS SLEEP 1s
 INSERT INTO
     numbers_input_basic
 VALUES
@@ -109,7 +106,6 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_wildcard_basic');
 
--- SQLNESS SLEEP 1s
 SHOW CREATE TABLE out_basic;
 
 SELECT wildcard FROM out_basic;
@@ -153,7 +149,6 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_distinct_basic');
 
--- SQLNESS SLEEP 1s
 SHOW CREATE TABLE out_distinct_basic;
 
 SELECT
@@ -164,7 +159,6 @@ FROM
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_distinct_basic');
 
--- SQLNESS SLEEP 1s
 INSERT INTO
     distinct_basic
 VALUES
@@ -221,7 +215,6 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('find_approx_rate');
 
--- SQLNESS SLEEP 1s
 SELECT
     rate,
     time_window
@@ -237,7 +230,6 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('find_approx_rate');
 
--- SQLNESS SLEEP 1s
 SELECT
     rate,
     time_window
@@ -253,7 +245,6 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('find_approx_rate');
 
--- SQLNESS SLEEP 1s
 SELECT
     rate,
     time_window
@@ -269,7 +260,6 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('find_approx_rate');
 
--- SQLNESS SLEEP 1s
 SELECT
     rate,
     time_window
@@ -306,7 +296,6 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_ngx_country');
 
--- SQLNESS SLEEP 1s
 SHOW CREATE TABLE ngx_country;
 
 SELECT
@@ -323,7 +312,6 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_ngx_country');
 
--- SQLNESS SLEEP 1s
 SELECT
     country
 FROM
@@ -337,7 +325,6 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_ngx_country');
 
--- SQLNESS SLEEP 1s
 SELECT
     country
 FROM
@@ -376,7 +363,6 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_ngx_country');
 
--- SQLNESS SLEEP 1s
 SHOW CREATE TABLE ngx_country;
 
 SELECT
@@ -394,7 +380,6 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_ngx_country');
 
--- SQLNESS SLEEP 1s
 SELECT
     country,
     time_window
@@ -409,7 +394,6 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_ngx_country');
 
--- SQLNESS SLEEP 1s
 SELECT
     country,
     time_window
@@ -474,7 +458,6 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('temp_monitoring');
 
--- SQLNESS SLEEP 1s
 SHOW TABLES LIKE 'temp_alerts';
 
 SELECT
@@ -493,7 +476,6 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('temp_monitoring');
 
--- SQLNESS SLEEP 1s
 SELECT
     sensor_id,
     loc,
@@ -550,7 +532,6 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_ngx_distribution');
 
--- SQLNESS SLEEP 1s
 SELECT
     stat,
     bucket_size,
@@ -571,7 +552,6 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_ngx_distribution');
 
--- SQLNESS SLEEP 1s
 SELECT
     stat,
     bucket_size,
@@ -627,7 +607,6 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('requests_long_term');
 
--- SQLNESS SLEEP 1s
 SELECT
     *
 FROM
@@ -654,7 +633,6 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('requests_long_term');
 
--- SQLNESS SLEEP 1s
 SELECT
     *
 FROM
@@ -675,7 +653,6 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('requests_long_term');
 
--- SQLNESS SLEEP 1s
 SELECT
     *
 FROM
@@ -726,7 +703,6 @@ INSERT INTO android_log values
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_android_log_abnormal');
 
--- SQLNESS SLEEP 1s
 SELECT crash, fatal, backtrace, anr FROM android_log_abnormal;
 
 INSERT INTO android_log values
@@ -736,7 +712,6 @@ INSERT INTO android_log values
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_android_log_abnormal');
 
--- SQLNESS SLEEP 1s
 SELECT crash, fatal, backtrace, anr FROM android_log_abnormal;
 
 DROP FLOW calc_android_log_abnormal;
@@ -784,7 +759,6 @@ INSERT INTO android_log values
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_android_log_abnormal');
 
--- SQLNESS SLEEP 1s
 SELECT crash, fatal, backtrace, anr FROM android_log_abnormal;
 
 INSERT INTO android_log values
@@ -794,7 +768,6 @@ INSERT INTO android_log values
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_android_log_abnormal');
 
--- SQLNESS SLEEP 1s
 SELECT crash, fatal, backtrace, anr FROM android_log_abnormal;
 
 DROP FLOW calc_android_log_abnormal;
@@ -836,7 +809,6 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_numbers_basic');
 
--- SQLNESS SLEEP 1s
 SELECT avg_after_filter_num FROM out_num_cnt_basic;
 
 INSERT INTO
@@ -848,7 +820,6 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_numbers_basic');
 
--- SQLNESS SLEEP 1s
 DROP FLOW test_numbers_basic;
 DROP TABLE numbers_input_basic;
 DROP TABLE out_num_cnt_basic;
@@ -916,7 +887,6 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('live_connection_aggregation_detail');
 
--- SQLNESS SLEEP 1s
 SELECT device_model,
   connect_protocol,
   connect_mode,

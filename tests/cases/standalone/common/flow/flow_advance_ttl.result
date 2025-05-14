@@ -82,7 +82,6 @@ ADMIN FLUSH_FLOW('test_distinct_basic');
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
 
--- SQLNESS SLEEP 1s
 SELECT
     dis
 FROM
@@ -125,7 +124,6 @@ ADMIN FLUSH_FLOW('test_distinct_basic');
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
 
--- SQLNESS SLEEP 1s
 SELECT
     dis
 FROM
@@ -212,7 +210,6 @@ ADMIN FLUSH_FLOW('test_distinct_basic');
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
 
--- SQLNESS SLEEP 1s
 SHOW CREATE TABLE distinct_basic;
 
 +----------------+-----------------------------------------------------------+
@@ -294,7 +291,6 @@ ADMIN FLUSH_FLOW('test_distinct_basic');
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
 
--- SQLNESS SLEEP 1s
 SELECT
     dis
 FROM

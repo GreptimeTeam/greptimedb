@@ -24,7 +24,6 @@ ADMIN FLUSH_FLOW('test_numbers_df_func');
 |  FLOW_FLUSHED  |
 +------------------------------------------+
 
--- SQLNESS SLEEP 1s
 INSERT INTO numbers_input_df_func
 VALUES
     (-20, "2021-07-01 00:00:00.200"),
@@ -60,7 +59,6 @@ ADMIN FLUSH_FLOW('test_numbers_df_func');
 |  FLOW_FLUSHED  |
 +------------------------------------------+
 
--- SQLNESS SLEEP 1s
 INSERT INTO numbers_input_df_func
 VALUES
     (23,"2021-07-01 00:00:01.000"),
@@ -125,7 +123,6 @@ ADMIN FLUSH_FLOW('test_numbers_df_func');
 |  FLOW_FLUSHED  |
 +------------------------------------------+
 
--- SQLNESS SLEEP 1s
 INSERT INTO numbers_input_df_func
 VALUES
     (-20, "2021-07-01 00:00:00.200"),
@@ -143,7 +140,6 @@ ADMIN FLUSH_FLOW('test_numbers_df_func');
 |  FLOW_FLUSHED  |
 +------------------------------------------+
 
--- SQLNESS SLEEP 1s
 SELECT "abs(sum(numbers_input_df_func.number))", time_window FROM out_num_cnt_df_func;
 
 +----------------------------------------+---------------------+
@@ -161,7 +157,6 @@ ADMIN FLUSH_FLOW('test_numbers_df_func');
 |  FLOW_FLUSHED  |
 +------------------------------------------+
 
--- SQLNESS SLEEP 1s
 INSERT INTO numbers_input_df_func
 VALUES
     (23,"2021-07-01 00:00:01.000"),
@@ -178,7 +173,6 @@ ADMIN FLUSH_FLOW('test_numbers_df_func');
 |  FLOW_FLUSHED  |
 +------------------------------------------+
 
--- SQLNESS SLEEP 1s
 SELECT "abs(sum(numbers_input_df_func.number))", time_window FROM out_num_cnt_df_func;
 
 +----------------------------------------+---------------------+
@@ -226,7 +220,6 @@ ADMIN FLUSH_FLOW('test_numbers_df_func');
 |  FLOW_FLUSHED  |
 +------------------------------------------+
 
--- SQLNESS SLEEP 1s
 INSERT INTO numbers_input_df_func
 VALUES
     (20, "2021-07-01 00:00:00.200"),
@@ -243,7 +236,6 @@ ADMIN FLUSH_FLOW('test_numbers_df_func');
 |  FLOW_FLUSHED  |
 +------------------------------------------+
 
--- SQLNESS SLEEP 1s
 SELECT maxmin, time_window FROM out_num_cnt_df_func;
 
 +--------+---------------------+
@@ -261,7 +253,6 @@ ADMIN FLUSH_FLOW('test_numbers_df_func');
 |  FLOW_FLUSHED  |
 +------------------------------------------+
 
--- SQLNESS SLEEP 1s
 INSERT INTO numbers_input_df_func
 VALUES
     (23,"2021-07-01 00:00:01.000"),
@@ -278,7 +269,6 @@ ADMIN FLUSH_FLOW('test_numbers_df_func');
 |  FLOW_FLUSHED  |
 +------------------------------------------+
 
--- SQLNESS SLEEP 1s
 SELECT maxmin, time_window FROM out_num_cnt_df_func;
 
 +--------+---------------------+
@@ -326,7 +316,6 @@ ADMIN FLUSH_FLOW('test_numbers_df_func');
 |  FLOW_FLUSHED  |
 +------------------------------------------+
 
--- SQLNESS SLEEP 1s
 INSERT INTO numbers_input_df_func
 VALUES
     (20, "2021-07-01 00:00:00.200"),
@@ -343,7 +332,6 @@ ADMIN FLUSH_FLOW('test_numbers_df_func');
 |  FLOW_FLUSHED  |
 +------------------------------------------+
 
--- SQLNESS SLEEP 1s
 SELECT time_window, sum_num FROM out_num_cnt;
 
 +---------------------+---------+
@@ -361,7 +349,6 @@ ADMIN FLUSH_FLOW('test_numbers_df_func');
 |  FLOW_FLUSHED  |
 +------------------------------------------+
 
--- SQLNESS SLEEP 1s
 INSERT INTO numbers_input_df_func
 VALUES
     (23,"2021-07-01 00:00:01.000"),
@@ -378,7 +365,6 @@ ADMIN FLUSH_FLOW('test_numbers_df_func');
 |  FLOW_FLUSHED  |
 +------------------------------------------+
 
--- SQLNESS SLEEP 1s
 SELECT time_window, sum_num FROM out_num_cnt;
 
 +---------------------+---------+

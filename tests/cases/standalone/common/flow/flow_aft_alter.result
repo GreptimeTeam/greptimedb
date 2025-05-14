@@ -80,7 +80,6 @@ ADMIN FLUSH_FLOW('find_approx_rate');
 |  FLOW_FLUSHED  |
 +--------------------------------------+
 
--- SQLNESS SLEEP 1s
 SELECT
     rate,
     sample_cnt,
