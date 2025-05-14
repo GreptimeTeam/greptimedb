@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -31,6 +32,7 @@ use query::parser::QueryStatement;
 use rand::random;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::ResultExt;
+use store_api::mito_engine_options::{APPEND_MODE_KEY, TTL_KEY};
 use table::TableRef;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::task::JoinHandle;
@@ -44,6 +46,7 @@ const SLOW_QUERY_TABLE_QUERY_COLUMN_NAME: &str = "query";
 const SLOW_QUERY_TABLE_IS_PROMQL_COLUMN_NAME: &str = "is_promql";
 const SLOW_QUERY_TABLE_TIMESTAMP_COLUMN_NAME: &str = "timestamp";
 
+const DEFAULT_SLOW_QUERY_TABLE_TTL: &str = "30d";
 const DEFAULT_SLOW_QUERY_EVENTS_CHANNEL_SIZE: usize = 1024;
 
 /// SlowQueryRecorder is responsible for recording slow queries.
@@ -73,6 +76,11 @@ impl SlowQueryRecorder {
     ) -> Self {
         let (tx, rx) = channel(DEFAULT_SLOW_QUERY_EVENTS_CHANNEL_SIZE);
 
+        let ttl = slow_query_opts
+            .ttl
+            .clone()
+            .unwrap_or(DEFAULT_SLOW_QUERY_TABLE_TTL.to_string());
+
         // Start a new task to process the slow query events.
         let event_handler = SlowQueryEventHandler {
             inserter,
@@ -80,6 +88,7 @@ impl SlowQueryRecorder {
             catalog_manager,
             rx,
             record_type: slow_query_opts.record_type,
+            ttl,
         };
 
         // Start a new background task to process the slow query events.
@@ -122,6 +131,7 @@ struct SlowQueryEventHandler {
     catalog_manager: CatalogManagerRef,
     rx: Receiver<SlowQueryEvent>,
     record_type: SlowQueriesRecordType,
+    ttl: String,
 }
 
 impl SlowQueryEventHandler {
@@ -235,6 +245,8 @@ impl SlowQueryEventHandler {
             .await
             .context(TableOperationSnafu)?;
 
+        info!("Create the slow_queries system table successfully.");
+
         Ok(table)
     }
 
@@ -292,6 +304,11 @@ impl SlowQueryEventHandler {
             },
         ];
 
+        let table_options = HashMap::from([
+            (APPEND_MODE_KEY.to_string(), "true".to_string()),
+            (TTL_KEY.to_string(), self.ttl.to_string()),
+        ]);
+
         CreateTableExpr {
             catalog_name: catalog.to_string(),
             schema_name: DEFAULT_PRIVATE_SCHEMA_NAME.to_string(), // Always to store in the `greptime_private` schema.
@@ -301,7 +318,7 @@ impl SlowQueryEventHandler {
             time_index: SLOW_QUERY_TABLE_TIMESTAMP_COLUMN_NAME.to_string(),
             primary_keys: vec![],
             create_if_not_exists: true,
-            table_options: Default::default(),
+            table_options,
             table_id: None,
             engine: default_engine().to_string(),
         }

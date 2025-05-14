@@ -86,6 +86,10 @@ pub struct SlowQueryOptions {
 
     /// The sample ratio of slow queries.
     pub sample_ratio: Option<f64>,
+
+    /// The table TTL of `slow_queries` system table. Default is "30d".
+    /// It's used when `record_type` is `SystemTable`.
+    pub ttl: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default, Copy, PartialEq)]
