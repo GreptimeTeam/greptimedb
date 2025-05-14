@@ -34,6 +34,7 @@ use crate::read::plain_batch::PlainBatch;
 ///
 /// This mapper support duplicate and unsorted projection indices.
 /// The output schema is determined by the projection indices.
+#[allow(dead_code)]
 pub struct PlainProjectionMapper {
     /// Metadata of the region.
     metadata: RegionMetadataRef,
@@ -149,6 +150,7 @@ impl PlainProjectionMapper {
     }
 
     /// Returns ids of columns of the batch that the mapper expects to convert.
+    #[allow(dead_code)]
     pub(crate) fn batch_schema(&self) -> &[(ColumnId, ConcreteDataType)] {
         &self.batch_schema
     }
@@ -161,6 +163,7 @@ impl PlainProjectionMapper {
     }
 
     /// Returns an empty [RecordBatch].
+    #[allow(dead_code)]
     pub(crate) fn empty_record_batch(&self) -> RecordBatch {
         RecordBatch::new_empty(self.output_schema.clone())
     }
@@ -168,6 +171,7 @@ impl PlainProjectionMapper {
     /// Converts a [PlainBatch] to a [RecordBatch].
     ///
     /// The batch must match the `projection` using to build the mapper.
+    #[allow(dead_code)]
     pub(crate) fn convert(
         &self,
         batch: &PlainBatch,
