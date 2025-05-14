@@ -111,7 +111,6 @@ ADMIN FLUSH_FLOW('filter_numbers_show');
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
 
--- SQLNESS SLEEP 1s
 SELECT number, ts FROM out_num_cnt_show;
 
 +--------+-------------------------+
@@ -149,7 +148,6 @@ ADMIN FLUSH_FLOW('filter_numbers_show');
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
 
--- SQLNESS SLEEP 1s
 SELECT number, ts FROM out_num_cnt_show;
 
 +--------+-------------------------+
@@ -188,7 +186,6 @@ ADMIN FLUSH_FLOW('filter_numbers_show');
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
 
--- SQLNESS SLEEP 1s
 SELECT number, ts FROM out_num_cnt_show;
 
 +--------+-------------------------+
@@ -308,7 +305,6 @@ ADMIN FLUSH_FLOW('filter_numbers_show');
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
 
--- SQLNESS SLEEP 1s
 SELECT * FROM out_num_cnt_show;
 
 +--------+-------------------------+
@@ -369,7 +365,6 @@ ADMIN FLUSH_FLOW('filter_numbers_show');
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
 
--- SQLNESS SLEEP 1s
 SELECT number FROM out_num_cnt_show;
 
 +--------+

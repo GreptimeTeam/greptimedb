@@ -52,7 +52,6 @@ ADMIN FLUSH_FLOW('requests_long_term');
 |  FLOW_FLUSHED  |
 +----------------------------------------+
 
--- SQLNESS SLEEP 1s
 SELECT
     *
 FROM
@@ -138,7 +137,6 @@ ADMIN FLUSH_FLOW('calc_ngx_country');
 |  FLOW_FLUSHED  |
 +--------------------------------------+
 
--- SQLNESS SLEEP 1s
 SELECT
     client,
     country,
@@ -173,7 +171,6 @@ ADMIN FLUSH_FLOW('calc_ngx_country');
 |  FLOW_FLUSHED  |
 +--------------------------------------+
 
--- SQLNESS SLEEP 1s
 SELECT
     client,
     country,
@@ -207,7 +204,6 @@ ADMIN FLUSH_FLOW('calc_ngx_country');
 |  FLOW_FLUSHED  |
 +--------------------------------------+
 
--- SQLNESS SLEEP 1s
 SELECT
     client,
     country,
@@ -286,7 +282,6 @@ ADMIN FLUSH_FLOW('calc_nullable_pk');
 |  FLOW_FLUSHED  |
 +--------------------------------------+
 
--- SQLNESS SLEEP 1s
 SELECT * FROM out_nullable_pk;
 
 +-----+--------+---------------------+
@@ -316,7 +311,6 @@ ADMIN FLUSH_FLOW('calc_nullable_pk');
 |  FLOW_FLUSHED  |
 +--------------------------------------+
 
--- SQLNESS SLEEP 1s
 SELECT * FROM out_nullable_pk;
 
 +-----+--------+---------------------+

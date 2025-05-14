@@ -105,7 +105,6 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('ngx_aggregation');
 
--- SQLNESS SLEEP 1s
 SELECT
     status,
     total_logs,
@@ -150,7 +149,6 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('ngx_aggregation');
 
--- SQLNESS SLEEP 1s
 SELECT
     status,
     total_logs,
@@ -210,7 +208,6 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_ngx_country');
 
--- SQLNESS SLEEP 1s
 SELECT
     country
 FROM
@@ -268,7 +265,6 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_ngx_country');
 
--- SQLNESS SLEEP 1s
 SELECT
     country,
     time_window
@@ -322,7 +318,6 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('temp_monitoring');
 
--- SQLNESS SLEEP 1s
 SELECT
     sensor_id,
     loc,
@@ -340,7 +335,6 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('temp_monitoring');
 
--- SQLNESS SLEEP 1s
 /* wait at least one second for flow to update results to sink table */
 SELECT
     sensor_id,
@@ -405,7 +399,6 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_ngx_distribution');
 
--- SQLNESS SLEEP 1s
 SELECT
     stat,
     bucket_size,

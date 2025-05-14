@@ -162,7 +162,6 @@ ADMIN FLUSH_FLOW('calc_percentile_5s');
 |  FLOW_FLUSHED  |
 +----------------------------------------+
 
--- SQLNESS SLEEP 1s
 SELECT
     time_window,
     uddsketch_calc(0.99, `percentile_state`) AS p99
@@ -268,7 +267,6 @@ ADMIN FLUSH_FLOW('calc_percentile_10s');
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
 
--- SQLNESS SLEEP 1s
 SELECT
     time_window,
     uddsketch_calc(0.99, percentile_state) AS p99

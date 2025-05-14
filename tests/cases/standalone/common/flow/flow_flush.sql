@@ -24,7 +24,6 @@ GROUP BY
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_numbers_basic');
 
--- SQLNESS SLEEP 1s
 SELECT
     "sum(numbers_input_basic.number)",
     time_window

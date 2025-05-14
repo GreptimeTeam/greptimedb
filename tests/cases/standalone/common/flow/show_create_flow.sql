@@ -48,7 +48,6 @@ INSERT INTO numbers_input_show VALUES (10, 0),(15, 1),(16, 2);
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('filter_numbers_show');
 
--- SQLNESS SLEEP 1s
 SELECT number, ts FROM out_num_cnt_show;
 
 -- after this one, the flow SHOULD NOT be replaced
@@ -63,7 +62,6 @@ INSERT INTO numbers_input_show VALUES (4,4),(5,4),(10, 3),(11, 4);
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('filter_numbers_show');
 
--- SQLNESS SLEEP 1s
 SELECT number, ts FROM out_num_cnt_show;
 
 -- after this, the flow SHOULD be replaced
@@ -78,7 +76,6 @@ INSERT INTO numbers_input_show VALUES (3, 1),(4, 2),(10, 3),(11, 4);
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('filter_numbers_show');
 
--- SQLNESS SLEEP 1s
 SELECT number, ts FROM out_num_cnt_show;
 
 -- after this, the flow SHOULD error out since having both `replace` and `if not exists`
@@ -124,7 +121,6 @@ INSERT INTO numbers_input_show VALUES(-4,0), (-3,1), (-2,2), (-1,3);
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('filter_numbers_show');
 
--- SQLNESS SLEEP 1s
 SELECT * FROM out_num_cnt_show;
 
 DROP FLOW filter_numbers_show;
@@ -152,7 +148,6 @@ INSERT INTO numbers_input_show VALUES (10, 0),(15, 1),(16, 2);
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('filter_numbers_show');
 
--- SQLNESS SLEEP 1s
 SELECT number FROM out_num_cnt_show;
 
 -- should mismatch, hence the old flow remains
