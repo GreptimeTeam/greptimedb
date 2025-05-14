@@ -40,7 +40,7 @@ use parquet::arrow::ArrowWriter;
 use parquet::data_type::AsBytes;
 use parquet::file::metadata::ParquetMetaData;
 use parquet::file::properties::WriterProperties;
-use snafu::{OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, Snafu};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::SequenceNumber;
 use table::predicate::Predicate;
@@ -56,12 +56,14 @@ use crate::sst::parquet::format::{PrimaryKeyArray, ReadFormat};
 use crate::sst::parquet::helper::parse_parquet_metadata;
 use crate::sst::to_sst_arrow_schema;
 
+#[derive(Clone)]
 pub struct BulkPart {
-    pub(crate) batch: RecordBatch,
-    pub(crate) num_rows: usize,
-    pub(crate) max_ts: i64,
-    pub(crate) min_ts: i64,
-    pub(crate) sequence: u64,
+    pub batch: RecordBatch,
+    pub num_rows: usize,
+    pub max_ts: i64,
+    pub min_ts: i64,
+    pub sequence: u64,
+    pub timestamp_index: usize,
 }
 
 impl BulkPart {
@@ -123,6 +125,10 @@ impl BulkPart {
             rows: Some(rows),
             write_hint: None,
         })
+    }
+
+    pub fn timestamps(&self) -> &ArrayRef {
+        self.batch.column(self.timestamp_index)
     }
 }
 

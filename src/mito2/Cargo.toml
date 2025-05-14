@@ -92,3 +92,8 @@ toml.workspace = true
 name = "memtable_bench"
 harness = false
 required-features = ["test"]
+
+[[bench]]
+name = "bench_filter_time_partition"
+harness = false
+required-features = ["test"]
