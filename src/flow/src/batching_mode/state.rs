@@ -88,7 +88,20 @@ impl TaskState {
             .min(self.last_query_duration)
             .max(MIN_REFRESH_DURATION);
 
-        let next_duration = time_window_size.map(|t| t / 2).unwrap_or(last_duration);
+        let next_duration = time_window_size
+            .map(|t| {
+                let half = t / 2;
+                if half > last_duration {
+                    // this means query run fast enough, so we can wait a bit longer
+                    // to wait for next query
+                    half
+                } else {
+                    // if query run longer than half of time window size, use last query duration
+                    // so the refresh delay isn't too long
+                    last_duration
+                }
+            })
+            .unwrap_or(last_duration);
 
         // if have dirty time window, execute immediately to clean dirty time window
         if self.dirty_time_windows.windows.is_empty() {
