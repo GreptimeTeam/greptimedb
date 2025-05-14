@@ -56,11 +56,6 @@ pub struct ExportCommand {
 
     /// Directory to put the exported data. E.g.: /tmp/greptimedb-export
     /// for local export.
-    ///
-    /// if both `output_dir` and `s3` are set, `output_dir` will be only used for
-    /// exported SQL files, and the data will be exported to s3.
-    ///
-    /// if `s3` is set but `output_dir` is not set, both SQL&data will be exported to s3.
     #[clap(long)]
     output_dir: Option<String>,
 
@@ -114,6 +109,16 @@ pub struct ExportCommand {
     /// if export data to s3
     #[clap(long)]
     s3: bool,
+
+    /// if both `s3_ddl_local_dir` and `s3` are set, `s3_ddl_local_dir` will be only used for
+    /// exported SQL files, and the data will be exported to s3.
+    ///
+    /// Note that `s3_ddl_local_dir` export sql files to **LOCAL** file system, this is useful if export client don't have
+    /// direct access to s3.
+    ///
+    /// if `s3` is set but `s3_ddl_local_dir` is not set, both SQL&data will be exported to s3.
+    #[clap(long)]
+    s3_ddl_local_dir: Option<String>,
 
     /// The s3 bucket name
     /// if s3 is set, this is required
@@ -182,6 +187,7 @@ impl ExportCommand {
             start_time: self.start_time.clone(),
             end_time: self.end_time.clone(),
             s3: self.s3,
+            s3_ddl_local_dir: self.s3_ddl_local_dir.clone(),
             s3_bucket: self.s3_bucket.clone(),
             s3_root: self.s3_root.clone(),
             s3_endpoint: self.s3_endpoint.clone(),
@@ -203,6 +209,7 @@ pub struct Export {
     start_time: Option<String>,
     end_time: Option<String>,
     s3: bool,
+    s3_ddl_local_dir: Option<String>,
     s3_bucket: Option<String>,
     s3_root: Option<String>,
     s3_endpoint: Option<String>,
@@ -473,8 +480,14 @@ impl Export {
 
     /// build operator with preference for file system
     async fn build_prefer_fs_operator(&self) -> Result<Operator> {
-        if self.output_dir.is_some() {
-            return self.build_fs_operator().await;
+        // is under s3 mode and s3_ddl_dir is set, use it as root
+        if self.s3 && self.s3_ddl_local_dir.is_some() {
+            let root = self.s3_ddl_local_dir.as_ref().unwrap().clone();
+            let op = Operator::new(services::Fs::default().root(&root))
+                .context(OpenDalSnafu)?
+                .layer(LoggingLayer::default())
+                .finish();
+            Ok(op)
         } else if self.s3 {
             return self.build_s3_operator().await;
         } else {
