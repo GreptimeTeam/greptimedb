@@ -799,6 +799,8 @@ pub(crate) fn parquet_row_group_time_range(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use api::v1::OpType;
     use datatypes::arrow::array::{Int64Array, TimestampMillisecondArray, UInt64Array, UInt8Array};
     use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field, Schema, TimeUnit};
@@ -809,6 +811,8 @@ mod tests {
     use store_api::storage::RegionId;
 
     use super::*;
+    use crate::read::plain_batch::PlainBatch;
+    use crate::sst::parquet::plain_format::PlainWriteFormat;
 
     const TEST_SEQUENCE: u64 = 1;
     const TEST_OP_TYPE: u8 = OpType::Put as u8;
@@ -975,16 +979,16 @@ mod tests {
     fn test_projection_indices() {
         let metadata = build_test_region_metadata();
         // Only read tag1
-        let read_format = ReadFormat::new(metadata.clone(), [3].iter().copied());
+        let read_format = ReadFormat::new_primary_key(metadata.clone(), [3].iter().copied());
         assert_eq!(&[2, 3, 4, 5], read_format.projection_indices());
         // Only read field1
-        let read_format = ReadFormat::new(metadata.clone(), [4].iter().copied());
+        let read_format = ReadFormat::new_primary_key(metadata.clone(), [4].iter().copied());
         assert_eq!(&[0, 2, 3, 4, 5], read_format.projection_indices());
         // Only read ts
-        let read_format = ReadFormat::new(metadata.clone(), [5].iter().copied());
+        let read_format = ReadFormat::new_primary_key(metadata.clone(), [5].iter().copied());
         assert_eq!(&[2, 3, 4, 5], read_format.projection_indices());
         // Read field0, tag0, ts
-        let read_format = ReadFormat::new(metadata, [2, 1, 5].iter().copied());
+        let read_format = ReadFormat::new_primary_key(metadata, [2, 1, 5].iter().copied());
         assert_eq!(&[1, 2, 3, 4, 5], read_format.projection_indices());
     }
 
@@ -1071,5 +1075,98 @@ mod tests {
             vec![new_batch(b"one", 1, 1, 2), new_batch(b"two", 11, 10, 2)],
             batches.into_iter().collect::<Vec<_>>(),
         );
+    }
+
+    fn build_test_plain_sst_schema() -> SchemaRef {
+        let fields = vec![
+            Field::new("tag0", ArrowDataType::Int64, true),
+            Field::new("field1", ArrowDataType::Int64, true),
+            Field::new("tag1", ArrowDataType::Int64, true),
+            Field::new("field0", ArrowDataType::Int64, true),
+            Field::new(
+                "ts",
+                ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("__sequence", ArrowDataType::UInt64, false),
+            Field::new("__op_type", ArrowDataType::UInt8, false),
+        ];
+        Arc::new(Schema::new(fields))
+    }
+
+    #[test]
+    fn test_plain_to_sst_arrow_schema() {
+        let metadata = build_test_region_metadata();
+        let format = PlainWriteFormat::new(metadata);
+        assert_eq!(&build_test_plain_sst_schema(), format.arrow_schema());
+    }
+
+    fn input_columns_for_plain_batch(num_rows: usize) -> Vec<ArrayRef> {
+        vec![
+            Arc::new(Int64Array::from(vec![1; num_rows])), // tag0
+            Arc::new(Int64Array::from(vec![2; num_rows])), // field1
+            Arc::new(Int64Array::from(vec![1; num_rows])), // tag1
+            Arc::new(Int64Array::from(vec![3; num_rows])), // field0
+            Arc::new(TimestampMillisecondArray::from(vec![1, 2, 3, 4])), // ts
+            Arc::new(UInt64Array::from(vec![TEST_SEQUENCE; num_rows])), // sequence
+            Arc::new(UInt8Array::from(vec![TEST_OP_TYPE; num_rows])), // op type
+        ]
+    }
+
+    #[test]
+    fn test_plain_convert_batch() {
+        let metadata = build_test_region_metadata();
+        let format = PlainWriteFormat::new(metadata);
+
+        let columns: Vec<ArrayRef> = input_columns_for_plain_batch(4);
+        let rb = RecordBatch::try_new(build_test_plain_sst_schema(), columns.clone()).unwrap();
+        let batch = PlainBatch::new(rb);
+        let expect_record = RecordBatch::try_new(build_test_plain_sst_schema(), columns).unwrap();
+
+        let actual = format.convert_batch(&batch).unwrap();
+        assert_eq!(expect_record, actual);
+    }
+
+    #[test]
+    fn test_plain_convert_with_override_sequence() {
+        let metadata = build_test_region_metadata();
+        let format = PlainWriteFormat::new(metadata).with_override_sequence(Some(415411));
+
+        let num_rows = 4;
+        let columns: Vec<ArrayRef> = input_columns_for_plain_batch(num_rows);
+        let rb = RecordBatch::try_new(build_test_plain_sst_schema(), columns).unwrap();
+        let batch = PlainBatch::new(rb);
+
+        let expected_columns: Vec<ArrayRef> = vec![
+            Arc::new(Int64Array::from(vec![1; num_rows])), // tag0
+            Arc::new(Int64Array::from(vec![2; num_rows])), // field1
+            Arc::new(Int64Array::from(vec![1; num_rows])), // tag1
+            Arc::new(Int64Array::from(vec![3; num_rows])), // field0
+            Arc::new(TimestampMillisecondArray::from(vec![1, 2, 3, 4])), // ts
+            Arc::new(UInt64Array::from(vec![415411; num_rows])), // overridden sequence
+            Arc::new(UInt8Array::from(vec![TEST_OP_TYPE; num_rows])), // op type
+        ];
+        let expected_record =
+            RecordBatch::try_new(build_test_plain_sst_schema(), expected_columns).unwrap();
+
+        let actual = format.convert_batch(&batch).unwrap();
+        assert_eq!(expected_record, actual);
+    }
+
+    #[test]
+    fn test_plain_projection_indices() {
+        let metadata = build_test_region_metadata();
+        // Only read tag1
+        let read_format = ReadFormat::new_plain(metadata.clone(), [3].iter().copied());
+        assert_eq!(&[2, 5, 6], read_format.projection_indices());
+        // Only read field1
+        let read_format = ReadFormat::new_plain(metadata.clone(), [4].iter().copied());
+        assert_eq!(&[1, 5, 6], read_format.projection_indices());
+        // Only read ts
+        let read_format = ReadFormat::new_plain(metadata.clone(), [5].iter().copied());
+        assert_eq!(&[4, 5, 6], read_format.projection_indices());
+        // Read field0, tag0, ts
+        let read_format = ReadFormat::new_plain(metadata, [2, 1, 5].iter().copied());
+        assert_eq!(&[0, 3, 4, 5, 6], read_format.projection_indices());
     }
 }
