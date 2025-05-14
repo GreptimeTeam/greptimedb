@@ -36,12 +36,10 @@ use datafusion::arrow::array::{Float64Array, TimestampMillisecondArray};
 use datafusion::arrow::datatypes::TimeUnit;
 use datafusion::common::{DataFusionError, Result as DfResult};
 use datafusion::logical_expr::{ScalarUDF, Volatility};
-use datafusion::physical_plan::{values, ColumnarValue};
+use datafusion::physical_plan::ColumnarValue;
 use datafusion_expr::create_udf;
 use datatypes::arrow::array::{Array, Int64Array};
 use datatypes::arrow::datatypes::DataType;
-use datatypes::timestamp::TimestampMillisecond;
-use datatypes::value;
 
 use crate::extension_plan::Millisecond;
 use crate::functions::extract_array;
@@ -138,6 +136,7 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
             .unwrap()
             .values();
         for index in 0..ts_range.len() {
+            // Safety: we are inside `ts_range`'s iterator which guarantees the index is valid.
             let (offset, length) = ts_range.get_offset_length(index).unwrap();
 
             let timestamps = &all_timestamps[offset..offset + length];
