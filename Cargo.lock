@@ -4457,6 +4457,7 @@ dependencies = [
  "promql-parser",
  "prost 0.13.5",
  "query",
+ "rand 0.9.0",
  "serde",
  "serde_json",
  "servers",
