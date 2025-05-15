@@ -334,6 +334,29 @@ fn resolve_number_schema(
     )
 }
 
+fn calc_ts(p_ctx: &PipelineContext, values: &PipelineMap) -> Result<Option<ValueData>> {
+    match p_ctx.channel {
+        Channel::Prometheus => Ok(Some(ValueData::TimestampMillisecondValue(
+            values
+                .get(GREPTIME_TIMESTAMP)
+                .and_then(|v| v.as_i64())
+                .unwrap_or_default(),
+        ))),
+        _ => {
+            let custom_ts = p_ctx.pipeline_definition.get_custom_ts();
+            match custom_ts {
+                Some(ts) => {
+                    let ts_field = values.get(ts.get_column_name());
+                    Some(ts.get_timestamp(ts_field)).transpose()
+                }
+                None => Ok(Some(ValueData::TimestampNanosecondValue(
+                    chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default(),
+                ))),
+            }
+        }
+    }
+}
+
 fn values_to_row(
     schema_info: &mut SchemaInfo,
     values: PipelineMap,
@@ -342,28 +365,8 @@ fn values_to_row(
     let mut row: Vec<GreptimeValue> = Vec::with_capacity(schema_info.schema.len());
     let custom_ts = pipeline_ctx.pipeline_definition.get_custom_ts();
 
-    // TODO(shuiyisong): we should use match later for more channels
-    let is_prometheus = pipeline_ctx.channel == Channel::Prometheus;
-
-    // set time index value
-    let ts = if is_prometheus {
-        Some(ValueData::TimestampMillisecondValue(
-            values
-                .get(GREPTIME_TIMESTAMP)
-                .and_then(|v| v.as_i64())
-                .unwrap_or_default(),
-        ))
-    } else {
-        match custom_ts {
-            Some(ts) => {
-                let ts_field = values.get(ts.get_column_name());
-                Some(ts.get_timestamp(ts_field)?)
-            }
-            None => Some(ValueData::TimestampNanosecondValue(
-                chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default(),
-            )),
-        }
-    };
+    // calculate timestamp value based on the channel
+    let ts = calc_ts(pipeline_ctx, &values)?;
 
     row.push(GreptimeValue { value_data: ts });
 
@@ -371,43 +374,40 @@ fn values_to_row(
         row.push(GreptimeValue { value_data: None });
     }
 
+    // skip ts column
+    let ts_column_name = custom_ts
+        .as_ref()
+        .map_or(DEFAULT_GREPTIME_TIMESTAMP_COLUMN, |ts| ts.get_column_name());
+
     for (column_name, value) in values {
-        // skip ts column
-        let ts_column = custom_ts
-            .as_ref()
-            .map_or(DEFAULT_GREPTIME_TIMESTAMP_COLUMN, |ts| ts.get_column_name());
-        if column_name == ts_column {
+        if column_name == ts_column_name {
             continue;
         }
 
-        let index = schema_info.index.get(&column_name).copied();
-        resolve_value(
-            index,
-            value,
-            column_name,
-            &mut row,
-            schema_info,
-            is_prometheus,
-        )?;
+        resolve_value(value, column_name, &mut row, schema_info, pipeline_ctx)?;
     }
     Ok(Row { values: row })
 }
 
+fn decide_semantic(p_ctx: &PipelineContext, column_name: &str) -> i32 {
+    if p_ctx.channel == Channel::Prometheus && column_name != GREPTIME_VALUE {
+        SemanticType::Tag as i32
+    } else {
+        SemanticType::Field as i32
+    }
+}
+
 fn resolve_value(
-    index: Option<usize>,
     value: Value,
     column_name: String,
     row: &mut Vec<GreptimeValue>,
     schema_info: &mut SchemaInfo,
-    is_prometheus: bool,
+    p_ctx: &PipelineContext,
 ) -> Result<()> {
+    let index = schema_info.index.get(&column_name).copied();
     let mut resolve_simple_type =
         |value_data: ValueData, column_name: String, data_type: ColumnDataType| {
-            let semantic_type = if is_prometheus && column_name != GREPTIME_VALUE {
-                SemanticType::Tag
-            } else {
-                SemanticType::Field
-            } as i32;
+            let semantic_type = decide_semantic(p_ctx, &column_name);
             resolve_schema(
                 index,
                 value_data,
