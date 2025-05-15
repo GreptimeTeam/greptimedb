@@ -15,17 +15,13 @@
 //! This file contains code to find sorted runs in a set if ranged items and
 //! along with the best way to merge these items to satisfy the desired run count.
 
-use std::cmp::Ordering;
-
 use common_base::BitVec;
 use common_time::Timestamp;
-use itertools::Itertools;
-use smallvec::{smallvec, SmallVec};
 
 use crate::sst::file::FileHandle;
 
-/// Trait for any items with specific range.
-pub(crate) trait Ranged {
+/// Trait for any items with specific range (both boundaries are inclusive).
+pub trait Ranged {
     type BoundType: Ord + Copy;
 
     /// Returns the inclusive range of item.
@@ -37,12 +33,21 @@ pub(crate) trait Ranged {
     {
         let (lhs_start, lhs_end) = self.range();
         let (rhs_start, rhs_end) = other.range();
-        match lhs_start.cmp(&rhs_start) {
-            Ordering::Less => lhs_end >= rhs_start,
-            Ordering::Equal => true,
-            Ordering::Greater => lhs_start <= rhs_end,
+        lhs_start.max(rhs_start) <= lhs_end.min(rhs_end)
+    }
+}
+
+pub fn find_overlapping_items<T: Ranged + Clone>(l: &[T], r: &[T]) -> Vec<T> {
+    let mut res = vec![];
+    for lhs in l {
+        for rhs in r {
+            if lhs.overlap(rhs) {
+                res.push(lhs.clone());
+                res.push(rhs.clone());
+            }
         }
     }
+    res
 }
 
 // Sorts ranges by start asc and end desc.
@@ -55,7 +60,7 @@ fn sort_ranged_items<T: Ranged>(values: &mut [T]) {
 }
 
 /// Trait for items to merge.
-pub(crate) trait Item: Ranged + Clone {
+pub trait Item: Ranged + Clone {
     /// Size is used to calculate the cost of merging items.
     fn size(&self) -> usize;
 }
@@ -74,68 +79,11 @@ impl Item for FileHandle {
     }
 }
 
-#[derive(Debug, Clone)]
-struct MergeItems<T: Item> {
-    items: SmallVec<[T; 4]>,
-    start: T::BoundType,
-    end: T::BoundType,
-    size: usize,
-}
-
-impl<T: Item> Ranged for MergeItems<T> {
-    type BoundType = T::BoundType;
-
-    fn range(&self) -> (Self::BoundType, Self::BoundType) {
-        (self.start, self.end)
-    }
-}
-
-impl<T: Item> MergeItems<T> {
-    /// Creates unmerged item from given value.
-    pub fn new_unmerged(val: T) -> Self {
-        let (start, end) = val.range();
-        let size = val.size();
-        Self {
-            items: smallvec![val],
-            start,
-            end,
-            size,
-        }
-    }
-
-    /// The range of current merge item
-    pub(crate) fn range(&self) -> (T::BoundType, T::BoundType) {
-        (self.start, self.end)
-    }
-
-    /// Merges current item with other item.
-    pub(crate) fn merge(self, other: Self) -> Self {
-        let start = self.start.min(other.start);
-        let end = self.end.max(other.end);
-        let size = self.size + other.size;
-
-        let mut items = SmallVec::with_capacity(self.items.len() + other.items.len());
-        items.extend(self.items);
-        items.extend(other.items);
-        Self {
-            start,
-            end,
-            size,
-            items,
-        }
-    }
-
-    /// Returns true if current item is merged from two items.
-    pub fn merged(&self) -> bool {
-        self.items.len() > 1
-    }
-}
-
 /// A set of files with non-overlapping time ranges.
 #[derive(Debug, Clone)]
-pub(crate) struct SortedRun<T: Item> {
+pub struct SortedRun<T: Item> {
     /// Items to merge
-    items: Vec<MergeItems<T>>,
+    items: Vec<T>,
     /// penalty is defined as the total size of merged items.
     penalty: usize,
     /// The lower bound of all items.
@@ -162,11 +110,9 @@ impl<T> SortedRun<T>
 where
     T: Item,
 {
-    fn push_item(&mut self, t: MergeItems<T>) {
+    fn push_item(&mut self, t: T) {
         let (file_start, file_end) = t.range();
-        if t.merged() {
-            self.penalty += t.size;
-        }
+        self.penalty += t.size();
         self.items.push(t);
         self.start = Some(self.start.map_or(file_start, |v| v.min(file_start)));
         self.end = Some(self.end.map_or(file_end, |v| v.max(file_end)));
@@ -174,7 +120,7 @@ where
 }
 
 /// Finds sorted runs in given items.
-pub(crate) fn find_sorted_runs<T>(items: &mut [T]) -> Vec<SortedRun<T>>
+pub fn find_sorted_runs<T>(items: &mut [T]) -> Vec<SortedRun<T>>
 where
     T: Item,
 {
@@ -195,20 +141,19 @@ where
                 // item is already assigned.
                 continue;
             }
-            let current_item = MergeItems::new_unmerged(item.clone());
             match current_run.items.last() {
                 None => {
                     // current run is empty, just add current_item
                     selected.set(true);
-                    current_run.push_item(current_item);
+                    current_run.push_item(item.clone());
                 }
                 Some(last) => {
                     // the current item does not overlap with the last item in current run,
                     // then it belongs to current run.
-                    if !last.overlap(&current_item) {
+                    if !last.overlap(item) {
                         // does not overlap, push to current run
                         selected.set(true);
-                        current_run.push_item(current_item);
+                        current_run.push_item(item.clone());
                     }
                 }
             }
@@ -219,52 +164,15 @@ where
     runs
 }
 
-fn merge_all_runs<T: Item>(runs: Vec<SortedRun<T>>) -> SortedRun<T> {
-    assert!(!runs.is_empty());
-    let mut all_items = runs
-        .into_iter()
-        .flat_map(|r| r.items.into_iter())
-        .collect::<Vec<_>>();
-
-    sort_ranged_items(&mut all_items);
-
-    let mut res = SortedRun::default();
-    let mut iter = all_items.into_iter();
-    // safety: all_items is not empty
-    let mut current_item = iter.next().unwrap();
-
-    for item in iter {
-        if current_item.overlap(&item) {
-            current_item = current_item.merge(item);
-        } else {
-            res.push_item(current_item);
-            current_item = item;
-        }
-    }
-    res.push_item(current_item);
-    res
-}
-
 /// Reduces the num of runs to given target and returns items to merge.
-/// The time complexity of this function is `C_{k}_{runs.len()}` where k=`runs.len()`-target+1.
-pub(crate) fn reduce_runs<T: Item>(runs: Vec<SortedRun<T>>, target: usize) -> Vec<Vec<T>> {
-    assert_ne!(target, 0);
-    if target >= runs.len() {
+pub fn reduce_runs<T: Item>(mut runs: Vec<SortedRun<T>>, _target: usize) -> Vec<Vec<T>> {
+    if runs.len() <= 1 {
         // already satisfied.
         return vec![];
     }
+    runs.sort_by(|l, r| l.penalty.cmp(&r.penalty).reverse());
 
-    let k = runs.len() + 1 - target;
-    runs.into_iter()
-        .combinations(k) // find all possible solutions
-        .map(|runs_to_merge| merge_all_runs(runs_to_merge)) // calculate merge penalty
-        .min_by(|p, r| p.penalty.cmp(&r.penalty)) // find solution with the min penalty
-        .unwrap() // safety: their must be at least one solution.
-        .items
-        .into_iter()
-        .filter(|m| m.merged()) // find all files to merge in that solution
-        .map(|m| m.items.to_vec())
-        .collect()
+    runs.into_iter().take(2).map(|run| run.items).collect()
 }
 
 #[cfg(test)]
@@ -369,166 +277,6 @@ mod tests {
                 vec![(21, 22), (31, 32)],
                 vec![(32, 42)],
             ],
-        );
-    }
-
-    fn check_merge_sorted_runs(
-        items: &[(i64, i64)],
-        expected_penalty: usize,
-        expected: &[Vec<(i64, i64)>],
-    ) {
-        let mut items = build_items(items);
-        let runs = find_sorted_runs(&mut items);
-        assert_eq!(2, runs.len());
-        let res = merge_all_runs(runs);
-        let penalty = res.penalty;
-        let ranges = res
-            .items
-            .into_iter()
-            .map(|i| {
-                i.items
-                    .into_iter()
-                    .map(|f| (f.start, f.end))
-                    .sorted_by(|l, r| l.0.cmp(&r.0).then(l.1.cmp(&r.1)))
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(expected, &ranges);
-        assert_eq!(expected_penalty, penalty);
-    }
-
-    #[test]
-    fn test_merge_sorted_runs() {
-        // [1..2]
-        // [1...3]
-        check_merge_sorted_runs(&[(1, 2), (1, 3)], 3, &[vec![(1, 2), (1, 3)]]);
-
-        // [1..2][3..4]
-        //    [2..3]
-        check_merge_sorted_runs(
-            &[(1, 2), (2, 3), (3, 4)],
-            3,
-            &[vec![(1, 2), (2, 3), (3, 4)]],
-        );
-
-        // [1..10][11..20][21...30]
-        //          [18]
-        check_merge_sorted_runs(
-            &[(1, 10), (11, 20), (21, 30), (18, 18)],
-            9,
-            &[vec![(1, 10)], vec![(11, 20), (18, 18)], vec![(21, 30)]],
-        );
-
-        // [1..3][4..5]
-        //   [2...4]
-        check_merge_sorted_runs(
-            &[(1, 3), (2, 4), (4, 5)],
-            5,
-            &[vec![(1, 3), (2, 4), (4, 5)]],
-        );
-
-        // [1..2][3..4]    [7..8]
-        //          [4..6]
-        check_merge_sorted_runs(
-            &[(1, 2), (3, 4), (4, 6), (7, 8)],
-            3,
-            &[vec![(1, 2)], vec![(3, 4), (4, 6)], vec![(7, 8)]],
-        );
-
-        // [1..2][3..4][5..6][7..8]
-        //       [3........6]   [8..9]
-        //
-        check_merge_sorted_runs(
-            &[(1, 2), (3, 4), (5, 6), (3, 6), (7, 8), (8, 9)],
-            7,
-            &[
-                vec![(1, 2)],
-                vec![(3, 4), (3, 6), (5, 6)],
-                vec![(7, 8), (8, 9)],
-            ],
-        );
-
-        // [10.....19][20........29][30........39]
-        //              [21..22]     [31..32]
-        check_merge_sorted_runs(
-            &[(10, 19), (20, 29), (21, 22), (30, 39), (31, 32)],
-            20,
-            &[
-                vec![(10, 19)],
-                vec![(20, 29), (21, 22)],
-                vec![(30, 39), (31, 32)],
-            ],
-        );
-
-        // [1..10][11..20][21..30]
-        // [1..10]        [21..30]
-        check_merge_sorted_runs(
-            &[(1, 10), (1, 10), (11, 20), (21, 30), (21, 30)],
-            36,
-            &[
-                vec![(1, 10), (1, 10)],
-                vec![(11, 20)],
-                vec![(21, 30), (21, 30)],
-            ],
-        );
-
-        // [1..10][11..20][21...30]
-        //                 [22..30]
-        check_merge_sorted_runs(
-            &[(1, 10), (11, 20), (21, 30), (22, 30)],
-            17,
-            &[vec![(1, 10)], vec![(11, 20)], vec![(21, 30), (22, 30)]],
-        );
-    }
-
-    /// files: file arrangement with two sorted runs.
-    fn check_merge_all_sorted_runs(
-        files: &[(i64, i64)],
-        expected_penalty: usize,
-        expected: &[Vec<(i64, i64)>],
-    ) {
-        let mut files = build_items(files);
-        let runs = find_sorted_runs(&mut files);
-        let result = merge_all_runs(runs);
-        assert_eq!(expected_penalty, result.penalty);
-        assert_eq!(expected.len(), result.items.len());
-        let res = result
-            .items
-            .iter()
-            .map(|i| {
-                let mut res = i.items.iter().map(|f| (f.start, f.end)).collect::<Vec<_>>();
-                res.sort_unstable_by(|l, r| l.0.cmp(&r.0));
-                res
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(expected, &res);
-    }
-
-    #[test]
-    fn test_merge_all_sorted_runs() {
-        // [1..2][3..4]
-        //          [4..10]
-        check_merge_all_sorted_runs(
-            &[(1, 2), (3, 4), (4, 10)],
-            7, // 1+6
-            &[vec![(1, 2)], vec![(3, 4), (4, 10)]],
-        );
-
-        // [1..2] [3..4] [5..6]
-        //           [4..........10]
-        check_merge_all_sorted_runs(
-            &[(1, 2), (3, 4), (5, 6), (4, 10)],
-            8, // 1+1+6
-            &[vec![(1, 2)], vec![(3, 4), (4, 10), (5, 6)]],
-        );
-
-        // [10..20] [30..40] [50....60]
-        //             [35........55]
-        //                     [51..61]
-        check_merge_all_sorted_runs(
-            &[(10, 20), (30, 40), (50, 60), (35, 55), (51, 61)],
-            50,
-            &[vec![(10, 20)], vec![(30, 40), (35, 55), (50, 60), (51, 61)]],
         );
     }
 
