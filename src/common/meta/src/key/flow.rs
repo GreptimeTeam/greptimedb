@@ -246,27 +246,32 @@ impl FlowMetadataManager {
         new_flow_info: &FlowInfoValue,
         flow_routes: Vec<(FlowPartitionId, FlowRouteValue)>,
     ) -> Result<()> {
-        let (create_flow_flow_name_txn, on_create_flow_flow_name_failure) =
+        let (update_flow_flow_name_txn, on_create_flow_flow_name_failure) =
             self.flow_name_manager.build_update_txn(
                 &new_flow_info.catalog_name,
                 &new_flow_info.flow_name,
                 flow_id,
             )?;
 
-        let (create_flow_txn, on_create_flow_failure) =
+        let (update_flow_txn, on_create_flow_failure) =
             self.flow_info_manager
                 .build_update_txn(flow_id, current_flow_info, new_flow_info)?;
 
-        let create_flow_routes_txn = self
-            .flow_route_manager
-            .build_create_txn(flow_id, flow_routes.clone())?;
-
-        let create_flownode_flow_txn = self
-            .flownode_flow_manager
-            .build_create_txn(flow_id, new_flow_info.flownode_ids().clone());
-
-        let create_table_flow_txn = self.table_flow_manager.build_create_txn(
+        let update_flow_routes_txn = self.flow_route_manager.build_update_txn(
             flow_id,
+            current_flow_info,
+            flow_routes.clone(),
+        )?;
+
+        let update_flownode_flow_txn = self.flownode_flow_manager.build_update_txn(
+            flow_id,
+            current_flow_info,
+            new_flow_info.flownode_ids().clone(),
+        );
+
+        let update_table_flow_txn = self.table_flow_manager.build_update_txn(
+            flow_id,
+            current_flow_info,
             flow_routes
                 .into_iter()
                 .map(|(partition_id, route)| (partition_id, TableFlowValue { peer: route.peer }))
@@ -275,11 +280,11 @@ impl FlowMetadataManager {
         )?;
 
         let txn = Txn::merge_all(vec![
-            create_flow_flow_name_txn,
-            create_flow_txn,
-            create_flow_routes_txn,
-            create_flownode_flow_txn,
-            create_table_flow_txn,
+            update_flow_flow_name_txn,
+            update_flow_txn,
+            update_flow_routes_txn,
+            update_flownode_flow_txn,
+            update_table_flow_txn,
         ]);
         info!(
             "Creating flow {}.{}({}), with {} txn operations",
@@ -776,6 +781,141 @@ mod tests {
                         TableFlowKey::new(table_id, 2, flow_id, 2),
                         TableFlowValue {
                             peer: Peer::empty(2)
+                        }
+                    )
+                ]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_update_flow_metadata_diff_flownode() {
+        let mem_kv = Arc::new(MemoryKvBackend::default());
+        let flow_metadata_manager = FlowMetadataManager::new(mem_kv.clone());
+        let flow_id = 10;
+        let flow_value = test_flow_info_value(
+            "flow",
+            [(0u32, 1u64), (1u32, 2u64)].into(),
+            vec![1024, 1025, 1026],
+        );
+        let flow_routes = vec![
+            (
+                0u32,
+                FlowRouteValue {
+                    peer: Peer::empty(1),
+                },
+            ),
+            (
+                1,
+                FlowRouteValue {
+                    peer: Peer::empty(2),
+                },
+            ),
+        ];
+        flow_metadata_manager
+            .create_flow_metadata(flow_id, flow_value.clone(), flow_routes.clone())
+            .await
+            .unwrap();
+
+        let new_flow_value = {
+            let mut tmp = flow_value.clone();
+            tmp.raw_sql = "new".to_string();
+            // move to different flownodes
+            tmp.flownode_ids = [(0, 3u64), (1, 4u64)].into();
+            tmp
+        };
+        let new_flow_routes = vec![
+            (
+                0u32,
+                FlowRouteValue {
+                    peer: Peer::empty(3),
+                },
+            ),
+            (
+                1,
+                FlowRouteValue {
+                    peer: Peer::empty(4),
+                },
+            ),
+        ];
+
+        // Update flow instead
+        flow_metadata_manager
+            .update_flow_metadata(
+                flow_id,
+                &DeserializedValueWithBytes::from_inner(flow_value.clone()),
+                &new_flow_value,
+                new_flow_routes.clone(),
+            )
+            .await
+            .unwrap();
+
+        let got = flow_metadata_manager
+            .flow_info_manager()
+            .get(flow_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let routes = flow_metadata_manager
+            .flow_route_manager()
+            .routes(flow_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            routes,
+            vec![
+                (
+                    FlowRouteKey::new(flow_id, 0),
+                    FlowRouteValue {
+                        peer: Peer::empty(3),
+                    },
+                ),
+                (
+                    FlowRouteKey::new(flow_id, 1),
+                    FlowRouteValue {
+                        peer: Peer::empty(4),
+                    },
+                ),
+            ]
+        );
+        assert_eq!(got, new_flow_value);
+
+        let flows = flow_metadata_manager
+            .flownode_flow_manager()
+            .flows(1)
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        // should moved to different flownode
+        assert_eq!(flows, vec![]);
+
+        let flows = flow_metadata_manager
+            .flownode_flow_manager()
+            .flows(3)
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(flows, vec![(flow_id, 0)]);
+
+        for table_id in [1024, 1025, 1026] {
+            let nodes = flow_metadata_manager
+                .table_flow_manager()
+                .flows(table_id)
+                .await
+                .unwrap();
+            assert_eq!(
+                nodes,
+                vec![
+                    (
+                        TableFlowKey::new(table_id, 3, flow_id, 0),
+                        TableFlowValue {
+                            peer: Peer::empty(3)
+                        }
+                    ),
+                    (
+                        TableFlowKey::new(table_id, 4, flow_id, 1),
+                        TableFlowValue {
+                            peer: Peer::empty(4)
                         }
                     )
                 ]
