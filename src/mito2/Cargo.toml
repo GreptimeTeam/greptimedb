@@ -97,3 +97,8 @@ required-features = ["test"]
 name = "bench_filter_time_partition"
 harness = false
 required-features = ["test"]
+
+[[bench]]
+name = "run_bench"
+harness = false
+required-features = ["test"]
