@@ -18,6 +18,7 @@ use common_meta::leadership_notifier::LeadershipChangeListener;
 use common_procedure::ProcedureManagerRef;
 use snafu::ResultExt;
 
+pub mod flow_migration;
 pub mod region_migration;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_util;

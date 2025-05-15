@@ -24,8 +24,9 @@ use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
 use table::metadata::TableId;
 
+use crate::key::{FlowId, FlowPartitionId};
 use crate::peer::Peer;
-use crate::DatanodeId;
+use crate::{DatanodeId, FlownodeId};
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -334,6 +335,20 @@ pub enum Error {
         flow_name: String,
         #[snafu(implicit)]
         location: Location,
+    },
+
+    #[snafu(display(
+        "Flow (flow_id={}, partition_id={}) not exist on flownode {}",
+        flow_id,
+        partition_id,
+        flownode_id
+    ))]
+    FlowNotExistOnFlownode {
+        #[snafu(implicit)]
+        location: Location,
+        flow_id: FlowId,
+        partition_id: FlowPartitionId,
+        flownode_id: FlownodeId,
     },
 
     #[snafu(display("Schema already exists, catalog:{}, schema: {}", catalog, schema))]
@@ -885,7 +900,9 @@ impl ErrorExt for Error {
             | InvalidUnsetDatabaseOption { .. }
             | InvalidTopicNamePrefix { .. }
             | InvalidTimeZone { .. } => StatusCode::InvalidArguments,
-            InvalidFlowRequestBody { .. } => StatusCode::InvalidArguments,
+            InvalidFlowRequestBody { .. } | FlowNotExistOnFlownode { .. } => {
+                StatusCode::InvalidArguments
+            }
 
             FlowNotFound { .. } => StatusCode::FlowNotFound,
             FlowRouteNotFound { .. } => StatusCode::Unexpected,
