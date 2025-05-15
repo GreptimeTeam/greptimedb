@@ -48,7 +48,7 @@ impl Inserter {
         let body_size = data.data_body.len();
         // Build region server requests
         let message = decoder
-            .try_decode(data)
+            .try_decode(&data)
             .context(error::DecodeFlightDataSnafu)?;
         let FlightMessage::Recordbatch(rb) = message else {
             return Ok(0);
@@ -81,6 +81,51 @@ impl Inserter {
             .split_record_batch(record_batch)
             .context(error::SplitInsertSnafu)?;
         partition_timer.observe_duration();
+
+        // fast path: only one region.
+        if region_masks.len() == 1 {
+            metrics::BULK_REQUEST_ROWS
+                .with_label_values(&["rows_per_region"])
+                .observe(record_batch.num_rows() as f64);
+
+            // SAFETY: region masks length checked
+            let (region_number, _) = region_masks.into_iter().next().unwrap();
+            let region_id = RegionId::new(table_id, region_number);
+            let datanode = self
+                .partition_manager
+                .find_region_leader(region_id)
+                .await
+                .context(error::FindRegionLeaderSnafu)?;
+            let payload = {
+                let _encode_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
+                    .with_label_values(&["encode"])
+                    .start_timer();
+                Bytes::from(data.encode_to_vec())
+            };
+            let request = RegionRequest {
+                header: Some(RegionRequestHeader {
+                    tracing_context: TracingContext::from_current_span().to_w3c(),
+                    ..Default::default()
+                }),
+                body: Some(region_request::Body::BulkInsert(BulkInsertRequest {
+                    body: Some(bulk_insert_request::Body::ArrowIpc(ArrowIpc {
+                        region_id: region_id.as_u64(),
+                        schema: schema_bytes,
+                        payload,
+                    })),
+                })),
+            };
+
+            let _datanode_handle_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
+                .with_label_values(&["datanode_handle"])
+                .start_timer();
+            let datanode = self.node_manager.datanode(&datanode).await;
+            return datanode
+                .handle(request)
+                .await
+                .context(error::RequestRegionSnafu)
+                .map(|r| r.affected_rows);
+        }
 
         let mut mask_per_datanode = HashMap::with_capacity(region_masks.len());
         for (region_number, mask) in region_masks {

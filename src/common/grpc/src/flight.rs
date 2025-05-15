@@ -127,7 +127,7 @@ pub struct FlightDecoder {
 }
 
 impl FlightDecoder {
-    pub fn try_decode(&mut self, flight_data: FlightData) -> Result<FlightMessage> {
+    pub fn try_decode(&mut self, flight_data: &FlightData) -> Result<FlightMessage> {
         let message = root_as_message(&flight_data.data_header).map_err(|e| {
             InvalidFlightDataSnafu {
                 reason: e.to_string(),
@@ -136,7 +136,7 @@ impl FlightDecoder {
         })?;
         match message.header_type() {
             MessageHeader::NONE => {
-                let metadata = FlightMetadata::decode(flight_data.app_metadata)
+                let metadata = FlightMetadata::decode(flight_data.app_metadata.clone())
                     .context(DecodeFlightDataSnafu)?;
                 if let Some(AffectedRows { value }) = metadata.affected_rows {
                     return Ok(FlightMessage::AffectedRows(value as _));
@@ -152,7 +152,7 @@ impl FlightDecoder {
                 .fail()
             }
             MessageHeader::Schema => {
-                let arrow_schema = ArrowSchema::try_from(&flight_data).map_err(|e| {
+                let arrow_schema = ArrowSchema::try_from(flight_data).map_err(|e| {
                     InvalidFlightDataSnafu {
                         reason: e.to_string(),
                     }
@@ -172,7 +172,7 @@ impl FlightDecoder {
                 let arrow_schema = schema.arrow_schema().clone();
 
                 let arrow_batch =
-                    flight_data_to_arrow_batch(&flight_data, arrow_schema, &HashMap::new())
+                    flight_data_to_arrow_batch(flight_data, arrow_schema, &HashMap::new())
                         .map_err(|e| {
                             InvalidFlightDataSnafu {
                                 reason: e.to_string(),
@@ -287,14 +287,14 @@ mod test {
         let decoder = &mut FlightDecoder::default();
         assert!(decoder.schema.is_none());
 
-        let result = decoder.try_decode(d2.clone());
+        let result = decoder.try_decode(&d2);
         assert!(matches!(result, Err(Error::InvalidFlightData { .. })));
         assert!(result
             .unwrap_err()
             .to_string()
             .contains("Should have decoded schema first!"));
 
-        let message = decoder.try_decode(d1.clone()).unwrap();
+        let message = decoder.try_decode(&d1).unwrap();
         assert!(matches!(message, FlightMessage::Schema(_)));
         let FlightMessage::Schema(decoded_schema) = message else {
             unreachable!()
@@ -303,14 +303,14 @@ mod test {
 
         let _ = decoder.schema.as_ref().unwrap();
 
-        let message = decoder.try_decode(d2.clone()).unwrap();
+        let message = decoder.try_decode(&d2).unwrap();
         assert!(matches!(message, FlightMessage::Recordbatch(_)));
         let FlightMessage::Recordbatch(actual_batch) = message else {
             unreachable!()
         };
         assert_eq!(actual_batch, batch1);
 
-        let message = decoder.try_decode(d3.clone()).unwrap();
+        let message = decoder.try_decode(&d3).unwrap();
         assert!(matches!(message, FlightMessage::Recordbatch(_)));
         let FlightMessage::Recordbatch(actual_batch) = message else {
             unreachable!()
