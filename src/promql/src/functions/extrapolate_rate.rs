@@ -122,20 +122,26 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
 
         // calculation
         let mut result_array = Vec::with_capacity(ts_range.len());
+
+        let all_timestamps = ts_range
+            .values()
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap()
+            .values();
+        let all_values = value_range
+            .values()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .values();
         for index in 0..ts_range.len() {
-            let timestamps = ts_range.get(index).unwrap();
-            let timestamps = timestamps
-                .as_any()
-                .downcast_ref::<TimestampMillisecondArray>()
-                .unwrap()
-                .values();
+            // Safety: we are inside `ts_range`'s iterator which guarantees the index is valid.
+            let (offset, length) = ts_range.get_offset_length(index).unwrap();
+
+            let timestamps = &all_timestamps[offset..offset + length];
             let end_ts = ts.value(index);
-            let values = value_range.get(index).unwrap();
-            let values = values
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .unwrap()
-                .values();
+            let values = &all_values[offset..offset + length];
 
             if values.len() < 2 {
                 result_array.push(None);
