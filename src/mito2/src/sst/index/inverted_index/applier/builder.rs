@@ -18,7 +18,7 @@ mod eq_list;
 mod in_list;
 mod regex_match;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
 use common_telemetry::warn;
 use datafusion_common::ScalarValue;
@@ -35,6 +35,7 @@ use store_api::storage::ColumnId;
 
 use crate::cache::file_cache::FileCacheRef;
 use crate::cache::index::inverted_index::InvertedIndexCacheRef;
+use crate::cache::index::result_cache::PredicateKey;
 use crate::error::{BuildIndexApplierSnafu, ColumnNotFoundSnafu, ConvertValueSnafu, Result};
 use crate::row_converter::SortField;
 use crate::sst::index::codec::IndexValueCodec;
@@ -59,7 +60,7 @@ pub(crate) struct InvertedIndexApplierBuilder<'a> {
     indexed_column_ids: HashSet<ColumnId>,
 
     /// Stores predicates during traversal on the Expr tree.
-    output: HashMap<ColumnId, Vec<Predicate>>,
+    output: BTreeMap<ColumnId, Vec<Predicate>>,
 
     /// The puffin manager factory.
     puffin_manager_factory: PuffinManagerFactory,
@@ -85,7 +86,7 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
             object_store,
             metadata,
             indexed_column_ids,
-            output: HashMap::default(),
+            output: BTreeMap::default(),
             puffin_manager_factory,
             file_cache: None,
             inverted_index_cache: None,
@@ -130,11 +131,12 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
 
         let predicates = self
             .output
-            .into_iter()
-            .map(|(column_id, predicates)| (column_id.to_string(), predicates))
+            .iter()
+            .map(|(column_id, predicates)| (column_id.to_string(), predicates.clone()))
             .collect();
         let applier = PredicatesIndexApplier::try_from(predicates);
 
+        let predicate_key = PredicateKey::new_inverted(std::mem::take(&mut self.output));
         Ok(Some(
             InvertedIndexApplier::new(
                 self.region_dir,
@@ -142,6 +144,7 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
                 self.object_store,
                 Box::new(applier.context(BuildIndexApplierSnafu)?),
                 self.puffin_manager_factory,
+                predicate_key,
             )
             .with_file_cache(self.file_cache)
             .with_puffin_metadata_cache(self.puffin_metadata_cache)

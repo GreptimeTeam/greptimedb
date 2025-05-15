@@ -31,6 +31,7 @@ use store_api::storage::RegionId;
 use crate::access_layer::{RegionFilePathFactory, WriteCachePathProvider};
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::index::inverted_index::{CachedInvertedIndexBlobReader, InvertedIndexCacheRef};
+use crate::cache::index::result_cache::PredicateKey;
 use crate::error::{
     ApplyInvertedIndexSnafu, MetadataSnafu, PuffinBuildReaderSnafu, PuffinReadBlobSnafu, Result,
 };
@@ -67,6 +68,9 @@ pub(crate) struct InvertedIndexApplier {
 
     /// Puffin metadata cache.
     puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
+
+    /// Predicate key. Used to identify the predicate and fetch result from cache.
+    predicate_key: Arc<PredicateKey>,
 }
 
 pub(crate) type InvertedIndexApplierRef = Arc<InvertedIndexApplier>;
@@ -79,6 +83,7 @@ impl InvertedIndexApplier {
         store: ObjectStore,
         index_applier: Box<dyn IndexApplier>,
         puffin_manager_factory: PuffinManagerFactory,
+        predicate_key: PredicateKey,
     ) -> Self {
         INDEX_APPLY_MEMORY_USAGE.add(index_applier.memory_usage() as i64);
 
@@ -91,6 +96,7 @@ impl InvertedIndexApplier {
             puffin_manager_factory,
             inverted_index_cache: None,
             puffin_metadata_cache: None,
+            predicate_key: Arc::new(predicate_key),
         }
     }
 
@@ -218,6 +224,11 @@ impl InvertedIndexApplier {
             .await
             .context(PuffinBuildReaderSnafu)
     }
+
+    /// Returns the predicate key.
+    pub fn predicate_key(&self) -> &Arc<PredicateKey> {
+        &self.predicate_key
+    }
 }
 
 impl Drop for InvertedIndexApplier {
@@ -235,6 +246,7 @@ mod tests {
     use puffin::puffin_manager::PuffinWriter;
 
     use super::*;
+    use crate::cache::index::result_cache::InvertedIndexKey;
 
     #[tokio::test]
     async fn test_index_applier_apply_basic() {
@@ -276,6 +288,7 @@ mod tests {
             object_store,
             Box::new(mock_index_applier),
             puffin_manager_factory,
+            PredicateKey::Inverted(InvertedIndexKey::default()),
         );
         let output = sst_index_applier.apply(file_id, None).await.unwrap();
         assert_eq!(
@@ -323,6 +336,7 @@ mod tests {
             object_store,
             Box::new(mock_index_applier),
             puffin_manager_factory,
+            PredicateKey::Inverted(InvertedIndexKey::default()),
         );
         let res = sst_index_applier.apply(file_id, None).await;
         assert!(format!("{:?}", res.unwrap_err()).contains("Blob not found"));

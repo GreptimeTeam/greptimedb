@@ -177,6 +177,7 @@ impl WorkerGroup {
                 .index_metadata_size(config.index.metadata_cache_size.as_bytes())
                 .index_content_size(config.index.content_cache_size.as_bytes())
                 .index_content_page_size(config.index.content_cache_page_size.as_bytes())
+                .index_result_cache_size(config.index.result_cache_size.as_bytes())
                 .puffin_metadata_size(config.index.metadata_cache_size.as_bytes())
                 .write_cache(write_cache)
                 .build(),

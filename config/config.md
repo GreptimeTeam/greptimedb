@@ -154,6 +154,7 @@
 | `region_engine.mito.index.metadata_cache_size` | String | `64MiB` | Cache size for inverted index metadata. |
 | `region_engine.mito.index.content_cache_size` | String | `128MiB` | Cache size for inverted index content. |
 | `region_engine.mito.index.content_cache_page_size` | String | `64KiB` | Page size for inverted index content cache. |
+| `region_engine.mito.index.result_cache_size` | String | `8MiB` | Cache size for index result. |
 | `region_engine.mito.inverted_index` | -- | -- | The options for inverted index in Mito engine. |
 | `region_engine.mito.inverted_index.create_on_flush` | String | `auto` | Whether to create the index on flush.<br/>- `auto`: automatically (default)<br/>- `disable`: never |
 | `region_engine.mito.inverted_index.create_on_compaction` | String | `auto` | Whether to create the index on compaction.<br/>- `auto`: automatically (default)<br/>- `disable`: never |
@@ -495,6 +496,7 @@
 | `region_engine.mito.index.metadata_cache_size` | String | `64MiB` | Cache size for inverted index metadata. |
 | `region_engine.mito.index.content_cache_size` | String | `128MiB` | Cache size for inverted index content. |
 | `region_engine.mito.index.content_cache_page_size` | String | `64KiB` | Page size for inverted index content cache. |
+| `region_engine.mito.index.result_cache_size` | String | `8MiB` | Cache size for index result. |
 | `region_engine.mito.inverted_index` | -- | -- | The options for inverted index in Mito engine. |
 | `region_engine.mito.inverted_index.create_on_flush` | String | `auto` | Whether to create the index on flush.<br/>- `auto`: automatically (default)<br/>- `disable`: never |
 | `region_engine.mito.inverted_index.create_on_compaction` | String | `auto` | Whether to create the index on compaction.<br/>- `auto`: automatically (default)<br/>- `disable`: never |

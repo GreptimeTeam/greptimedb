@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use common_telemetry::warn;
 use datafusion_common::ScalarValue;
@@ -30,6 +30,7 @@ use store_api::storage::ColumnId;
 
 use crate::cache::file_cache::FileCacheRef;
 use crate::cache::index::bloom_filter_index::BloomFilterIndexCacheRef;
+use crate::cache::index::result_cache::PredicateKey;
 use crate::error::{ColumnNotFoundSnafu, ConvertValueSnafu, Result};
 use crate::row_converter::SortField;
 use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplier;
@@ -44,7 +45,7 @@ pub struct BloomFilterIndexApplierBuilder<'a> {
     file_cache: Option<FileCacheRef>,
     puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
     bloom_filter_index_cache: Option<BloomFilterIndexCacheRef>,
-    predicates: HashMap<ColumnId, Vec<InListPredicate>>,
+    predicates: BTreeMap<ColumnId, Vec<InListPredicate>>,
 }
 
 impl<'a> BloomFilterIndexApplierBuilder<'a> {
@@ -62,7 +63,7 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
             file_cache: None,
             puffin_metadata_cache: None,
             bloom_filter_index_cache: None,
-            predicates: HashMap::default(),
+            predicates: BTreeMap::default(),
         }
     }
 
@@ -102,7 +103,8 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
             self.metadata.region_id,
             self.object_store,
             self.puffin_manager_factory,
-            self.predicates,
+            self.predicates.clone(),
+            PredicateKey::new_bloom(self.predicates),
         )
         .with_file_cache(self.file_cache)
         .with_puffin_metadata_cache(self.puffin_metadata_cache)
@@ -168,7 +170,7 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
             .entry(column_id)
             .or_default()
             .push(InListPredicate {
-                list: HashSet::from([value]),
+                list: BTreeSet::from([value]),
             });
 
         Ok(())
@@ -196,7 +198,7 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
             .map(|lit| encode_lit(lit, data_type.clone()));
 
         // Collect successful conversions
-        let mut valid_predicates = HashSet::new();
+        let mut valid_predicates = BTreeSet::new();
         for predicate in predicates {
             match predicate {
                 Ok(p) => {
@@ -323,7 +325,7 @@ mod tests {
             ConcreteDataType::string_datatype(),
         )
         .unwrap();
-        assert_eq!(column_predicates[0].list, HashSet::from([expected]));
+        assert_eq!(column_predicates[0].list, BTreeSet::from([expected]));
     }
 
     fn int64_lit(i: i64) -> Expr {
