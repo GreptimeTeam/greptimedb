@@ -15,7 +15,7 @@
 use std::{fs, path};
 
 use common_telemetry::info;
-use mito2::access_layer::ATOMIC_WRITE_DIR;
+use mito2::access_layer::{ATOMIC_WRITE_DIR, OLD_ATOMIC_WRITE_DIR};
 use object_store::services::Fs;
 use object_store::util::join_dir;
 use object_store::ObjectStore;
@@ -36,6 +36,10 @@ pub async fn new_fs_object_store(
 
     let atomic_write_dir = join_dir(data_home, ATOMIC_WRITE_DIR);
     store::clean_temp_dir(&atomic_write_dir)?;
+
+    // Compatible code. Remove this after a major release.
+    let old_atomic_temp_dir = join_dir(data_home, OLD_ATOMIC_WRITE_DIR);
+    store::clean_temp_dir(&old_atomic_temp_dir)?;
 
     let builder = Fs::default()
         .root(data_home)
