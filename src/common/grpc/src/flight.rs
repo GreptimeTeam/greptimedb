@@ -287,14 +287,14 @@ mod test {
         let decoder = &mut FlightDecoder::default();
         assert!(decoder.schema.is_none());
 
-        let result = decoder.try_decode(&d2);
+        let result = decoder.try_decode(d2);
         assert!(matches!(result, Err(Error::InvalidFlightData { .. })));
         assert!(result
             .unwrap_err()
             .to_string()
             .contains("Should have decoded schema first!"));
 
-        let message = decoder.try_decode(&d1).unwrap();
+        let message = decoder.try_decode(d1).unwrap();
         assert!(matches!(message, FlightMessage::Schema(_)));
         let FlightMessage::Schema(decoded_schema) = message else {
             unreachable!()
@@ -303,14 +303,14 @@ mod test {
 
         let _ = decoder.schema.as_ref().unwrap();
 
-        let message = decoder.try_decode(&d2).unwrap();
+        let message = decoder.try_decode(d2).unwrap();
         assert!(matches!(message, FlightMessage::Recordbatch(_)));
         let FlightMessage::Recordbatch(actual_batch) = message else {
             unreachable!()
         };
         assert_eq!(actual_batch, batch1);
 
-        let message = decoder.try_decode(&d3).unwrap();
+        let message = decoder.try_decode(d3).unwrap();
         assert!(matches!(message, FlightMessage::Recordbatch(_)));
         let FlightMessage::Recordbatch(actual_batch) = message else {
             unreachable!()
