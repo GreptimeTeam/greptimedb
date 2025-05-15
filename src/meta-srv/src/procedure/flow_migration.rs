@@ -20,6 +20,7 @@ use api::v1::flow::CreateRequest;
 use api::v1::meta::Peer;
 use common_meta::ddl::utils::{add_peer_context_if_needed, handle_retry_error};
 use common_meta::ddl::DdlContext;
+use common_meta::instruction::{CacheIdent, CreateFlow};
 use common_meta::key::flow::flow_info::FlowInfoValue;
 use common_meta::key::{FlowId, FlowPartitionId};
 use common_meta::lock_key::{CatalogLock, FlowLock};
@@ -257,7 +258,22 @@ impl FlowMigrationProcedure {
     }
 
     async fn on_broadcast(&mut self) -> common_meta::error::Result<Status> {
-        todo!()
+        debug_assert!(self.data.state == FlowMigrationState::InvalidateFlowCache);
+        // Safety: The flow id must be allocated.
+        let flow_id = self.data.flow_id;
+
+        let ctx = common_meta::cache_invalidator::Context {
+            subject: Some(format!("Invalidate flow cache by migrating flow(id={}, partition={}) from flownode {:?} to {:?}", flow_id, self.data.partition_id, self.data.src_flownode, self.data.dest_flownode)),
+        };
+
+        self.context
+            .cache_invalidator
+            .invalidate(&ctx, &[todo!(), CacheIdent::FlowId(flow_id)])
+            .await?;
+
+        self.data.state = FlowMigrationState::DropFlowOnSrc;
+
+        Ok(Status::executing(true))
     }
 
     async fn drop_flow_on_src_node(&mut self) -> common_meta::error::Result<Status> {
