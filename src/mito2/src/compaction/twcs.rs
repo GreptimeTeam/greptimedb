@@ -16,7 +16,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Debug;
 
-use common_telemetry::{info, trace};
+use common_telemetry::info;
 use common_time::timestamp::TimeUnit;
 use common_time::timestamp_millis::BucketAligned;
 use common_time::Timestamp;
@@ -64,7 +64,7 @@ impl TwcsPicker {
         for (window, files) in time_windows {
             let sorted_runs = find_sorted_runs(&mut files.files);
 
-            let (max_runs, max_files) = if let Some(active_window) = active_window
+            let (max_runs, _) = if let Some(active_window) = active_window
                 && *window == active_window
             {
                 (self.max_active_window_runs, self.max_active_window_files)
@@ -81,52 +81,31 @@ impl TwcsPicker {
             let filter_deleted =
                 !files.overlapping && (found_runs == 1 || max_runs == 1) && !self.append_mode;
 
-            let inputs = if found_runs > max_runs {
-                let files_to_compact = reduce_runs(sorted_runs, max_runs);
-                let files_to_compact_len = files_to_compact.len();
-                info!(
-                    "Building compaction output, active window: {:?}, \
+            let inputs = reduce_runs(sorted_runs);
+            let num_inputs = inputs.len();
+            info!(
+                "Building compaction output, active window: {:?}, \
                         current window: {}, \
                         max runs: {}, \
                         found runs: {}, \
                         output size: {}, \
                         max output size: {:?}, \
                         remove deletion markers: {}",
-                    active_window,
-                    *window,
-                    max_runs,
-                    found_runs,
-                    files_to_compact_len,
-                    self.max_output_file_size,
-                    filter_deleted
-                );
-                files_to_compact
-            } else if files.files.len() > max_files {
-                info!(
-                    "Enforcing max file num in window: {}, active: {:?}, max: {}, current: {}, max output size: {:?}, filter delete: {}",
-                    *window,
-                    active_window,
-                    max_files,
-                    files.files.len(),
-                    self.max_output_file_size,
-                    filter_deleted,
-                );
-                // Files in window exceeds file num limit
-                vec![enforce_file_num(&files.files, max_files)]
-            } else {
-                trace!("Skip building compaction output, active window: {:?}, current window: {}, max runs: {}, found runs: {}, ", active_window, *window, max_runs, found_runs);
-                continue;
-            };
+                active_window,
+                *window,
+                max_runs,
+                found_runs,
+                num_inputs,
+                self.max_output_file_size,
+                filter_deleted
+            );
 
-            for input in inputs {
-                debug_assert!(input.len() > 1);
-                output.push(CompactionOutput {
-                    output_level: LEVEL_COMPACTED, // always compact to l1
-                    inputs: input,
-                    filter_deleted,
-                    output_time_range: None, // we do not enforce output time range in twcs compactions.
-                });
-            }
+            output.push(CompactionOutput {
+                output_level: LEVEL_COMPACTED, // always compact to l1
+                inputs,
+                filter_deleted,
+                output_time_range: None, // we do not enforce output time range in twcs compactions.
+            });
         }
         output
     }
