@@ -162,6 +162,17 @@ impl RangeArray {
         Some(array)
     }
 
+    pub fn get_offset_length(&self, index: usize) -> Option<(usize, usize)> {
+        if index >= self.len() {
+            return None;
+        }
+
+        let compound_key = self.array.keys().value(index);
+        let (offset, length) = unpack(compound_key);
+
+        Some((offset as usize, length as usize))
+    }
+
     /// Return the underlying Arrow's [DictionaryArray]. Notes the dictionary array might be
     /// invalid from Arrow's definition. Be care if try to access this dictionary through
     /// Arrow's API.
