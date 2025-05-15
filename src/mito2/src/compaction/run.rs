@@ -37,16 +37,62 @@ pub trait Ranged {
     }
 }
 
-pub fn find_overlapping_items<T: Ranged + Clone>(l: &[T], r: &[T]) -> Vec<T> {
-    let mut res = vec![];
-    for lhs in l {
-        for rhs in r {
-            if lhs.overlap(rhs) {
-                res.push(lhs.clone());
-                res.push(rhs.clone());
+pub fn find_overlapping_items<T: Ranged + Clone>(l: &mut Vec<T>, r: &mut Vec<T>) -> Vec<T> {
+    if l.is_empty() || r.is_empty() {
+        return vec![];
+    }
+
+    let mut res = Vec::with_capacity(l.len() + r.len());
+
+    // Sort both arrays by start boundary for more efficient overlap detection
+    sort_ranged_items(l);
+    sort_ranged_items(r);
+
+    let mut r_idx = 0;
+
+    let mut selected = BitVec::repeat(false, r.len() + l.len());
+
+    for (lhs_idx, lhs) in l.iter().enumerate() {
+        let (lhs_start, lhs_end) = lhs.range();
+
+        // Skip right elements that end before current left element starts
+        while r_idx < r.len() {
+            let (_, rhs_end) = r[r_idx].range();
+            if rhs_end < lhs_start {
+                r_idx += 1;
+            } else {
+                break;
             }
         }
+
+        // Check for overlaps with remaining right elements
+        let mut j = r_idx;
+        while j < r.len() {
+            let (rhs_start, rhs_end) = r[j].range();
+
+            // If right element starts after left element ends, no more overlaps possible
+            if rhs_start > lhs_end {
+                break;
+            }
+
+            // We have an overlap
+            if lhs_start.max(rhs_start) <= lhs_end.min(rhs_end) {
+                if !selected[lhs_idx] {
+                    res.push(lhs.clone());
+                    selected.set(lhs_idx, true);
+                }
+
+                let rhs_selected_idx = l.len() + j;
+                if !selected[rhs_selected_idx] {
+                    res.push(r[j].clone());
+                    selected.set(rhs_selected_idx, true);
+                }
+            }
+
+            j += 1;
+        }
     }
+
     res
 }
 
@@ -165,14 +211,27 @@ where
 }
 
 /// Reduces the num of runs to given target and returns items to merge.
-pub fn reduce_runs<T: Item>(mut runs: Vec<SortedRun<T>>, _target: usize) -> Vec<Vec<T>> {
+pub fn reduce_runs<T: Item>(runs: Vec<SortedRun<T>>) -> Vec<T> {
     if runs.len() <= 1 {
         // already satisfied.
         return vec![];
     }
-    runs.sort_by(|l, r| l.penalty.cmp(&r.penalty).reverse());
 
-    runs.into_iter().take(2).map(|run| run.items).collect()
+    let mut min_penalty = usize::MAX;
+    let mut files = vec![];
+    for i in 0..runs.len() {
+        for j in i + 1..runs.len() {
+            let mut l = runs[i].items.clone();
+            let mut r = runs[j].items.clone();
+            let files_to_merge = find_overlapping_items(&mut l, &mut r);
+            let penalty = files_to_merge.iter().map(|e| e.size()).sum();
+            if penalty < min_penalty {
+                min_penalty = penalty;
+                files = files_to_merge;
+            }
+        }
+    }
+    files
 }
 
 #[cfg(test)]
@@ -181,7 +240,7 @@ mod tests {
 
     use super::*;
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, PartialEq)]
     struct MockFile {
         start: i64,
         end: i64,
@@ -297,22 +356,17 @@ mod tests {
     fn check_reduce_runs(
         files: &[(i64, i64)],
         expected_runs: &[Vec<(i64, i64)>],
-        target: usize,
-        expected: &[Vec<(i64, i64)>],
+        expected: &[(i64, i64)],
     ) {
         let runs = check_sorted_runs(files, expected_runs);
-        let files_to_merge = reduce_runs(runs, target);
-        let file_timestamps = files_to_merge
+        let files_to_merge = reduce_runs(runs);
+        let file_to_merge_timestamps = files_to_merge
             .into_iter()
-            .map(|f| {
-                let mut overlapping = f.into_iter().map(|f| (f.start, f.end)).collect::<Vec<_>>();
-                overlapping.sort_unstable_by(|l, r| l.0.cmp(&r.0).then(l.1.cmp(&r.1)));
-                overlapping
-            })
+            .map(|f| (f.start, f.end))
             .collect::<HashSet<_>>();
 
         let expected = expected.iter().cloned().collect::<HashSet<_>>();
-        assert_eq!(&expected, &file_timestamps);
+        assert_eq!(&expected, &file_to_merge_timestamps);
     }
 
     #[test]
@@ -322,8 +376,7 @@ mod tests {
         check_reduce_runs(
             &[(1, 3), (2, 4), (5, 6)],
             &[vec![(1, 3), (5, 6)], vec![(2, 4)]],
-            1,
-            &[vec![(1, 3), (2, 4)]],
+            &[(1, 3), (2, 4)],
         );
 
         // [1..2][3..5]
@@ -331,24 +384,7 @@ mod tests {
         check_reduce_runs(
             &[(1, 2), (3, 5), (4, 6)],
             &[vec![(1, 2), (3, 5)], vec![(4, 6)]],
-            1,
-            &[vec![(3, 5), (4, 6)]],
-        );
-
-        // [1..4]
-        //  [2..5]
-        //   [3..6]
-        check_reduce_runs(
-            &[(1, 4), (2, 5), (3, 6)],
-            &[vec![(1, 4)], vec![(2, 5)], vec![(3, 6)]],
-            1,
-            &[vec![(1, 4), (2, 5), (3, 6)]],
-        );
-        check_reduce_runs(
-            &[(1, 4), (2, 5), (3, 6)],
-            &[vec![(1, 4)], vec![(2, 5)], vec![(3, 6)]],
-            2,
-            &[vec![(1, 4), (2, 5)]],
+            &[(3, 5), (4, 6)],
         );
 
         // [1..2][3..4]    [7..8]
@@ -356,8 +392,7 @@ mod tests {
         check_reduce_runs(
             &[(1, 2), (3, 4), (4, 6), (7, 8)],
             &[vec![(1, 2), (3, 4), (7, 8)], vec![(4, 6)]],
-            1,
-            &[vec![(3, 4), (4, 6)]],
+            &[(3, 4), (4, 6)],
         );
 
         // [1..2][3........6][7..8]
@@ -365,8 +400,7 @@ mod tests {
         check_reduce_runs(
             &[(1, 2), (3, 4), (5, 6), (3, 6), (7, 8), (8, 9)],
             &[vec![(1, 2), (3, 6), (7, 8)], vec![(3, 4), (5, 6), (8, 9)]],
-            2,
-            &[], // already satisfied
+            &[(5, 6), (3, 4), (3, 6), (7, 8), (8, 9)], // already satisfied
         );
 
         // [1..2][3........6][7..8]
@@ -374,8 +408,7 @@ mod tests {
         check_reduce_runs(
             &[(1, 2), (3, 4), (5, 6), (3, 6), (7, 8), (8, 9)],
             &[vec![(1, 2), (3, 6), (7, 8)], vec![(3, 4), (5, 6), (8, 9)]],
-            1,
-            &[vec![(3, 4), (3, 6), (5, 6)], vec![(7, 8), (8, 9)]],
+            &[(3, 4), (3, 6), (5, 6), (7, 8), (8, 9)],
         );
 
         // [10..20] [30..40] [50........80]  [100..110]
@@ -396,8 +429,7 @@ mod tests {
                 vec![(50, 60), (80, 100)],
                 vec![(80, 90)],
             ],
-            2,
-            &[vec![(80, 90), (80, 100)]],
+            &[(80, 90), (80, 100)],
         );
 
         // [10..20] [30..40] [50........80]     [100..110]
@@ -418,8 +450,7 @@ mod tests {
                 vec![(50, 60), (80, 100)],
                 vec![(80, 90)],
             ],
-            1,
-            &[vec![(50, 60), (50, 80), (80, 90), (80, 100), (100, 110)]],
+            &[(80, 90), (80, 100)],
         );
 
         // [0..10]
@@ -429,29 +460,72 @@ mod tests {
         check_reduce_runs(
             &[(0, 10), (0, 11), (0, 12), (0, 13)],
             &[vec![(0, 13)], vec![(0, 12)], vec![(0, 11)], vec![(0, 10)]],
-            4,
-            &[],
+            &[(0, 10), (0, 11)],
         );
-        // enforce 3 runs
-        check_reduce_runs(
-            &[(0, 10), (0, 11), (0, 12), (0, 13)],
-            &[vec![(0, 13)], vec![(0, 12)], vec![(0, 11)], vec![(0, 10)]],
-            3,
-            &[vec![(0, 10), (0, 11)]],
+    }
+
+    #[test]
+    fn test_find_overlapping_items() {
+        // Test empty inputs
+        assert_eq!(
+            find_overlapping_items(&mut Vec::<MockFile>::new(), &mut Vec::<MockFile>::new()),
+            Vec::<MockFile>::new()
         );
-        // enforce 2 runs
-        check_reduce_runs(
-            &[(0, 10), (0, 11), (0, 12), (0, 13)],
-            &[vec![(0, 13)], vec![(0, 12)], vec![(0, 11)], vec![(0, 10)]],
-            2,
-            &[vec![(0, 10), (0, 11), (0, 12)]],
+
+        let mut files1 = build_items(&[(1, 3)]);
+        assert_eq!(
+            find_overlapping_items(&mut files1.clone(), &mut Vec::<MockFile>::new()),
+            Vec::<MockFile>::new()
         );
-        // enforce 1 run
-        check_reduce_runs(
-            &[(0, 10), (0, 11), (0, 12), (0, 13)],
-            &[vec![(0, 13)], vec![(0, 12)], vec![(0, 11)], vec![(0, 10)]],
-            1,
-            &[vec![(0, 10), (0, 11), (0, 12), (0, 13)]],
+        assert_eq!(
+            find_overlapping_items(&mut Vec::<MockFile>::new(), &mut files1),
+            Vec::<MockFile>::new()
         );
+
+        // Test non-overlapping ranges
+        let mut files1 = build_items(&[(1, 3), (5, 7)]);
+        let mut files2 = build_items(&[(10, 12), (15, 20)]);
+        assert_eq!(
+            find_overlapping_items(&mut files1, &mut files2),
+            Vec::<MockFile>::new()
+        );
+
+        // Test simple overlap
+        let mut files1 = build_items(&[(1, 5)]);
+        let mut files2 = build_items(&[(3, 7)]);
+        let result = find_overlapping_items(&mut files1, &mut files2);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].range(), (1, 5));
+        assert_eq!(result[1].range(), (3, 7));
+
+        // Test multiple overlaps
+        let mut files1 = build_items(&[(1, 5), (8, 12), (15, 20)]);
+        let mut files2 = build_items(&[(3, 6), (7, 10), (18, 25)]);
+        let result = find_overlapping_items(&mut files1, &mut files2);
+        assert_eq!(result.len(), 6);
+
+        // Test boundary cases (touching but not overlapping)
+        let mut files1 = build_items(&[(1, 5)]);
+        let mut files2 = build_items(&[(5, 10)]); // Touching at 5
+        let result = find_overlapping_items(&mut files1, &mut files2);
+        assert_eq!(result.len(), 2); // Should overlap since ranges are inclusive
+
+        // Test completely contained ranges
+        let mut files1 = build_items(&[(1, 10)]);
+        let mut files2 = build_items(&[(3, 7)]);
+        let result = find_overlapping_items(&mut files1, &mut files2);
+        assert_eq!(result.len(), 2);
+
+        // Test identical ranges
+        let mut files1 = build_items(&[(1, 5)]);
+        let mut files2 = build_items(&[(1, 5)]);
+        let result = find_overlapping_items(&mut files1, &mut files2);
+        assert_eq!(result.len(), 2);
+
+        // Test unsorted input handling
+        let mut files1 = build_items(&[(5, 10), (1, 3)]); // Unsorted
+        let mut files2 = build_items(&[(2, 7), (8, 12)]); // Unsorted
+        let result = find_overlapping_items(&mut files1, &mut files2);
+        assert_eq!(result.len(), 4); // Should find both overlaps
     }
 }
