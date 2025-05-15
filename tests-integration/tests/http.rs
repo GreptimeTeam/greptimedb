@@ -1146,7 +1146,15 @@ type = "time_series"
 enable = false
 write_interval = "30s"
 
-[tracing]"#,
+[tracing]
+
+[slow_query]
+enable = true
+record_type = "system_table"
+threshold = "5s"
+sample_ratio = 1.0
+ttl = "30d"
+"#,
     )
     .trim()
     .to_string();

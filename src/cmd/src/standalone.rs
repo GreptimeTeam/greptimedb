@@ -184,7 +184,7 @@ impl Default for StandaloneOptions {
             init_regions_in_background: false,
             init_regions_parallelism: 16,
             max_in_flight_write_bytes: None,
-            slow_query: None,
+            slow_query: Some(SlowQueryOptions::default()),
         }
     }
 }

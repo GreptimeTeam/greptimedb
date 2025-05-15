@@ -264,7 +264,10 @@ impl SlowQueryEventHandler {
             .await
             .context(TableOperationSnafu)?;
 
-        info!("Create the slow_queries system table successfully.");
+        info!(
+            "Create the {} system table in {:?} successfully.",
+            SLOW_QUERY_TABLE_NAME, DEFAULT_PRIVATE_SCHEMA_NAME
+        );
 
         Ok(table)
     }

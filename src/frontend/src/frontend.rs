@@ -87,7 +87,7 @@ impl Default for FrontendOptions {
             tracing: TracingOptions::default(),
             query: QueryOptions::default(),
             max_in_flight_write_bytes: None,
-            slow_query: None,
+            slow_query: Some(SlowQueryOptions::default()),
         }
     }
 }

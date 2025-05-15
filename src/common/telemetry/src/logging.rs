@@ -71,8 +71,7 @@ pub struct LoggingOptions {
 }
 
 /// The options of slow query.
-#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
-#[serde(default)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct SlowQueryOptions {
     /// Whether to enable slow query log.
     pub enable: bool,
@@ -92,12 +91,23 @@ pub struct SlowQueryOptions {
     pub ttl: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Default, Copy, PartialEq)]
+impl Default for SlowQueryOptions {
+    fn default() -> Self {
+        Self {
+            enable: true,
+            record_type: SlowQueriesRecordType::SystemTable,
+            threshold: Some(Duration::from_secs(5)),
+            sample_ratio: Some(1.0),
+            ttl: Some("30d".to_string()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Copy, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum SlowQueriesRecordType {
-    #[default]
-    Log,
     SystemTable,
+    Log,
 }
 
 #[derive(Clone, Debug, Copy, PartialEq, Eq, Serialize, Deserialize)]
