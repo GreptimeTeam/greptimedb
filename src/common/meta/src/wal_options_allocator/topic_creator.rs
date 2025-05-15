@@ -149,8 +149,6 @@ impl KafkaTopicCreator {
     }
 
     /// Creates a [PartitionClient] for the given topic.
-    ///
-    /// We assume the topic already exists, so we use `Error` to handle the case that the topic does not exist.
     async fn partition_client(&self, topic: &str) -> Result<PartitionClient> {
         self.client
             .partition_client(topic, DEFAULT_PARTITION, UnknownTopicHandling::Retry)

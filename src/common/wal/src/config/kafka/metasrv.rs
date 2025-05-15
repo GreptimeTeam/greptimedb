@@ -51,7 +51,7 @@ impl Default for MetasrvKafkaConfig {
             connection: Default::default(),
             kafka_topic: Default::default(),
             auto_create_topics: true,
-            prune_stale_records_in_existing_topics: true,
+            prune_stale_records_in_existing_topics: false,
             auto_prune_interval: DEFAULT_AUTO_PRUNE_INTERVAL,
             trigger_flush_threshold: DEFAULT_TRIGGER_FLUSH_THRESHOLD,
             auto_prune_parallelism: DEFAULT_AUTO_PRUNE_PARALLELISM,
