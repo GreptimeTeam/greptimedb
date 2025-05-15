@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::fmt::{Debug, Formatter};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -21,6 +22,7 @@ use common_runtime::Runtime;
 use common_telemetry::{error, info};
 use futures::future::{try_join_all, AbortHandle, AbortRegistration, Abortable};
 use snafu::{ensure, ResultExt};
+use strum::Display;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -32,10 +34,16 @@ pub(crate) type AbortableStream = Abortable<TcpListenerStream>;
 pub type ServerHandler = (Box<dyn Server>, SocketAddr);
 
 /// [ServerHandlers] is used to manage the lifecycle of all the services like http or grpc in the GreptimeDB server.
-#[derive(Clone)]
+#[derive(Clone, Display)]
 pub enum ServerHandlers {
     Init(Arc<std::sync::Mutex<HashMap<String, ServerHandler>>>),
     Started(Arc<HashMap<String, Box<dyn Server>>>),
+}
+
+impl Debug for ServerHandlers {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ServerHandlers::{}", self)
+    }
 }
 
 impl Default for ServerHandlers {
@@ -91,13 +99,7 @@ impl ServerHandlers {
 
         try_join_all(handlers.values_mut().map(|(server, addr)| async move {
             server.start(*addr).await?;
-
-            let bind_addr = server.bind_addr();
-            info!(
-                "Server {} is started and bind to {:?}",
-                server.name(),
-                bind_addr,
-            );
+            info!("Server {} is started", server.name());
             Ok::<(), error::Error>(())
         }))
         .await?;

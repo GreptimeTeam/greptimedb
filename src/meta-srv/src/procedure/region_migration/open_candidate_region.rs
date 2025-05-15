@@ -146,7 +146,7 @@ impl OpenCandidateRegion {
             .send(&ch, msg, OPEN_CANDIDATE_REGION_TIMEOUT)
             .await?;
 
-        match receiver.await? {
+        match receiver.await {
             Ok(msg) => {
                 let reply = HeartbeatMailbox::json_reply(&msg)?;
                 info!(

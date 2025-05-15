@@ -43,7 +43,7 @@ use servers::error::{StartGrpcSnafu, TcpBindSnafu, TcpIncomingSnafu};
 use servers::http::HttpServerBuilder;
 use servers::metrics_handler::MetricsHandler;
 use servers::server::{ServerHandler, ServerHandlers};
-use session::context::{QueryContextBuilder, QueryContextRef};
+use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, oneshot, Mutex};
@@ -54,19 +54,15 @@ use tonic::{Request, Response, Status};
 use crate::adapter::flownode_impl::{FlowDualEngine, FlowDualEngineRef};
 use crate::adapter::{create_worker, FlowStreamingEngineRef};
 use crate::batching_mode::engine::BatchingEngine;
-use crate::engine::FlowEngine;
 use crate::error::{
-    to_status_with_last_err, CacheRequiredSnafu, CreateFlowSnafu, ExternalSnafu, FlowNotFoundSnafu,
-    IllegalAuthConfigSnafu, ListFlowsSnafu, ParseAddrSnafu, ShutdownServerSnafu, StartServerSnafu,
-    UnexpectedSnafu,
+    to_status_with_last_err, CacheRequiredSnafu, ExternalSnafu, IllegalAuthConfigSnafu,
+    ListFlowsSnafu, ParseAddrSnafu, ShutdownServerSnafu, StartServerSnafu, UnexpectedSnafu,
 };
 use crate::heartbeat::HeartbeatTask;
 use crate::metrics::{METRIC_FLOW_PROCESSING_TIME, METRIC_FLOW_ROWS};
 use crate::transform::register_function_to_query_engine;
 use crate::utils::{SizeReportSender, StateReportHandler};
-use crate::{
-    CreateFlowArgs, Error, FlowAuthHeader, FlownodeOptions, FrontendClient, StreamingEngine,
-};
+use crate::{Error, FlowAuthHeader, FlownodeOptions, FrontendClient, StreamingEngine};
 
 pub const FLOW_NODE_SERVER_NAME: &str = "FLOW_NODE_SERVER";
 /// wrapping flow node manager to avoid orphan rule with Arc<...>
@@ -414,109 +410,6 @@ impl FlownodeBuilder {
             heartbeat_task,
         };
         Ok(instance)
-    }
-
-    /// recover all flow tasks in this flownode in distributed mode(nodeid is Some(<num>))
-    ///
-    /// or recover all existing flow tasks if in standalone mode(nodeid is None)
-    ///
-    /// TODO(discord9): persistent flow tasks with internal state
-    async fn recover_flows(&self, manager: &FlowDualEngine) -> Result<usize, Error> {
-        let nodeid = self.opts.node_id;
-        let to_be_recovered: Vec<_> = if let Some(nodeid) = nodeid {
-            let to_be_recover = self
-                .flow_metadata_manager
-                .flownode_flow_manager()
-                .flows(nodeid)
-                .try_collect::<Vec<_>>()
-                .await
-                .context(ListFlowsSnafu { id: Some(nodeid) })?;
-            to_be_recover.into_iter().map(|(id, _)| id).collect()
-        } else {
-            let all_catalogs = self
-                .catalog_manager
-                .catalog_names()
-                .await
-                .map_err(BoxedError::new)
-                .context(ExternalSnafu)?;
-            let mut all_flow_ids = vec![];
-            for catalog in all_catalogs {
-                let flows = self
-                    .flow_metadata_manager
-                    .flow_name_manager()
-                    .flow_names(&catalog)
-                    .await
-                    .try_collect::<Vec<_>>()
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(ExternalSnafu)?;
-
-                all_flow_ids.extend(flows.into_iter().map(|(_, id)| id.flow_id()));
-            }
-            all_flow_ids
-        };
-        let cnt = to_be_recovered.len();
-
-        // TODO(discord9): recover in parallel
-        info!("Recovering {} flows: {:?}", cnt, to_be_recovered);
-        for flow_id in to_be_recovered {
-            let info = self
-                .flow_metadata_manager
-                .flow_info_manager()
-                .get(flow_id)
-                .await
-                .map_err(BoxedError::new)
-                .context(ExternalSnafu)?
-                .context(FlowNotFoundSnafu { id: flow_id })?;
-
-            let sink_table_name = [
-                info.sink_table_name().catalog_name.clone(),
-                info.sink_table_name().schema_name.clone(),
-                info.sink_table_name().table_name.clone(),
-            ];
-
-            let args = CreateFlowArgs {
-                flow_id: flow_id as _,
-                sink_table_name,
-                source_table_ids: info.source_table_ids().to_vec(),
-                // because recover should only happen on restart the `create_if_not_exists` and `or_replace` can be arbitrary value(since flow doesn't exist)
-                // but for the sake of consistency and to make sure recover of flow actually happen, we set both to true
-                // (which is also fine since checks for not allow both to be true is on metasrv and we already pass that)
-                create_if_not_exists: true,
-                or_replace: true,
-                expire_after: info.expire_after(),
-                comment: Some(info.comment().clone()),
-                sql: info.raw_sql().clone(),
-                flow_options: info.options().clone(),
-                query_ctx: info
-                    .query_context()
-                    .clone()
-                    .map(|ctx| {
-                        ctx.try_into()
-                            .map_err(BoxedError::new)
-                            .context(ExternalSnafu)
-                    })
-                    .transpose()?
-                    // or use default QueryContext with catalog_name from info
-                    // to keep compatibility with old version
-                    .or_else(|| {
-                        Some(
-                            QueryContextBuilder::default()
-                                .current_catalog(info.catalog_name().to_string())
-                                .build(),
-                        )
-                    }),
-            };
-            manager
-                .create_flow(args)
-                .await
-                .map_err(BoxedError::new)
-                .with_context(|_| CreateFlowSnafu {
-                    sql: info.raw_sql().clone(),
-                })?;
-        }
-
-        Ok(cnt)
     }
 
     /// build [`FlowWorkerManager`], note this doesn't take ownership of `self`,

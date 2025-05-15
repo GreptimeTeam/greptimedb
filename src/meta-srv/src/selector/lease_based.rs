@@ -51,8 +51,9 @@ impl Selector for LeaseBasedSelector {
 
     async fn select(&self, ctx: &Self::Context, opts: SelectorOptions) -> Result<Self::Output> {
         // 1. get alive datanodes.
-        let lease_kvs =
-            lease::alive_datanodes(&ctx.meta_peer_client, ctx.datanode_lease_secs).await?;
+        let lease_kvs = lease::alive_datanodes(&ctx.meta_peer_client, ctx.datanode_lease_secs)
+            .with_condition(lease::is_datanode_accept_ingest_workload)
+            .await?;
 
         // 2. compute weight array, but the weight of each item is the same.
         let mut weight_array = lease_kvs

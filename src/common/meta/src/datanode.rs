@@ -15,7 +15,7 @@
 use std::collections::HashSet;
 use std::str::FromStr;
 
-use api::v1::meta::{HeartbeatRequest, RequestHeader};
+use api::v1::meta::{DatanodeWorkloads, HeartbeatRequest, RequestHeader};
 use common_time::util as time_util;
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -27,6 +27,7 @@ use table::metadata::TableId;
 
 use crate::error;
 use crate::error::Result;
+use crate::heartbeat::utils::get_datanode_workloads;
 
 pub(crate) const DATANODE_LEASE_PREFIX: &str = "__meta_datanode_lease";
 const INACTIVE_REGION_PREFIX: &str = "__meta_inactive_region";
@@ -65,6 +66,8 @@ pub struct Stat {
     pub region_stats: Vec<RegionStat>,
     // The node epoch is used to check whether the node has restarted or redeployed.
     pub node_epoch: u64,
+    /// The datanode workloads.
+    pub datanode_workloads: DatanodeWorkloads,
 }
 
 /// The statistics of a region.
@@ -197,6 +200,7 @@ impl TryFrom<&HeartbeatRequest> for Stat {
             peer,
             region_stats,
             node_epoch,
+            node_workloads,
             ..
         } = value;
 
@@ -207,6 +211,7 @@ impl TryFrom<&HeartbeatRequest> for Stat {
                     .map(RegionStat::from)
                     .collect::<Vec<_>>();
 
+                let datanode_workloads = get_datanode_workloads(node_workloads.as_ref());
                 Ok(Self {
                     timestamp_millis: time_util::current_time_millis(),
                     // datanode id
@@ -218,6 +223,7 @@ impl TryFrom<&HeartbeatRequest> for Stat {
                     region_num: region_stats.len() as u64,
                     region_stats,
                     node_epoch: *node_epoch,
+                    datanode_workloads,
                 })
             }
             (header, _) => Err(header.clone()),

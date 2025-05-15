@@ -62,7 +62,9 @@ impl RoundRobinSelector {
             SelectTarget::Datanode => {
                 // 1. get alive datanodes.
                 let lease_kvs =
-                    lease::alive_datanodes(&ctx.meta_peer_client, ctx.datanode_lease_secs).await?;
+                    lease::alive_datanodes(&ctx.meta_peer_client, ctx.datanode_lease_secs)
+                        .with_condition(lease::is_datanode_accept_ingest_workload)
+                        .await?;
 
                 let mut exclude_peer_ids = self
                     .node_excluder

@@ -8,6 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+anyhow = "1"
 common-error.workspace = true
 common-macro.workspace = true
 snafu.workspace = true
@@ -16,6 +17,11 @@ tokio.workspace = true
 
 [target.'cfg(not(windows))'.dependencies]
 tikv-jemalloc-ctl = { version = "0.6", features = ["use_std", "stats"] }
+jemalloc-pprof-utils = { version = "0.7", package = "pprof_util", features = [
+    "flamegraph",
+    "symbolize",
+] } # for parsing jemalloc prof dump
+jemalloc-pprof-mappings = { version = "0.7", package = "mappings" } # for get the name of functions in the prof dump
 
 [target.'cfg(not(windows))'.dependencies.tikv-jemalloc-sys]
 features = ["stats", "profiling", "unprefixed_malloc_on_supported_platforms"]

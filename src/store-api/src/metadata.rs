@@ -30,6 +30,7 @@ use common_macro::stack_trace_debug;
 use datatypes::arrow;
 use datatypes::arrow::datatypes::FieldRef;
 use datatypes::schema::{ColumnSchema, FulltextOptions, Schema, SchemaRef, SkippingIndexOptions};
+use datatypes::types::TimestampType;
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{ensure, Location, OptionExt, ResultExt, Snafu};
@@ -239,6 +240,19 @@ impl RegionMetadata {
     pub fn time_index_column(&self) -> &ColumnMetadata {
         let index = self.id_to_index[&self.time_index];
         &self.column_metadatas[index]
+    }
+
+    /// Returns timestamp type of time index column
+    ///
+    /// # Panics
+    /// Panics if the time index column id is invalid.
+    pub fn time_index_type(&self) -> TimestampType {
+        let index = self.id_to_index[&self.time_index];
+        self.column_metadatas[index]
+            .column_schema
+            .data_type
+            .as_timestamp()
+            .unwrap()
     }
 
     /// Returns the position of the time index.

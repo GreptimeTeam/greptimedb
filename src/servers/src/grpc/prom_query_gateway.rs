@@ -77,7 +77,7 @@ impl PrometheusGateway for PrometheusGatewayService {
         };
 
         let header = inner.header.as_ref();
-        let query_ctx = create_query_context(header, Default::default());
+        let query_ctx = create_query_context(header, Default::default())?;
         let user_info = auth(self.user_provider.clone(), header, &query_ctx).await?;
         query_ctx.set_current_user(user_info);
 

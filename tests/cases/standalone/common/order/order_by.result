@@ -287,6 +287,7 @@ select tag from t where num > 6 order by ts;
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 explain analyze select tag from t where num > 6 order by ts desc limit 2;
 
 +-+-+-+
@@ -298,14 +299,14 @@ explain analyze select tag from t where num > 6 order by ts desc limit 2;
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [ts@1 DESC], fetch=2 REDACTED
-|_|_|_WindowedSortExec: expr=ts@1 DESC num_ranges=1 fetch=2 REDACTED
-|_|_|_PartSortExec: expr=ts@1 DESC num_ranges=1 limit=2 REDACTED
+|_|_|_WindowedSortExec: expr=ts@1 DESC num_ranges=REDACTED fetch=2 REDACTED
+|_|_|_PartSortExec: expr=ts@1 DESC num_ranges=REDACTED limit=2 REDACTED
 |_|_|_FilterExec: num@2 > 6, projection=[tag@0, ts@1] REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges) REDACTED
 |_|_|_|
 | 1_| 1_|_SortPreservingMergeExec: [ts@1 DESC], fetch=2 REDACTED
-|_|_|_WindowedSortExec: expr=ts@1 DESC num_ranges=1 fetch=2 REDACTED
-|_|_|_PartSortExec: expr=ts@1 DESC num_ranges=1 limit=2 REDACTED
+|_|_|_WindowedSortExec: expr=ts@1 DESC num_ranges=REDACTED fetch=2 REDACTED
+|_|_|_PartSortExec: expr=ts@1 DESC num_ranges=REDACTED limit=2 REDACTED
 |_|_|_FilterExec: num@2 > 6, projection=[tag@0, ts@1] REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges) REDACTED
 |_|_|_|

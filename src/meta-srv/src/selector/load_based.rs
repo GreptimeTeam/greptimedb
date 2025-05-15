@@ -66,8 +66,9 @@ where
 
     async fn select(&self, ctx: &Self::Context, opts: SelectorOptions) -> Result<Self::Output> {
         // 1. get alive datanodes.
-        let lease_kvs =
-            lease::alive_datanodes(&ctx.meta_peer_client, ctx.datanode_lease_secs).await?;
+        let lease_kvs = lease::alive_datanodes(&ctx.meta_peer_client, ctx.datanode_lease_secs)
+            .with_condition(lease::is_datanode_accept_ingest_workload)
+            .await?;
 
         // 2. get stat kvs and filter out expired datanodes.
         let stat_keys = lease_kvs.keys().map(|k| k.into()).collect();
@@ -166,7 +167,10 @@ async fn get_leader_peer_ids(
 mod tests {
     use std::collections::HashMap;
 
+    use api::v1::meta::heartbeat_request::NodeWorkloads;
+    use api::v1::meta::DatanodeWorkloads;
     use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue};
+    use common_workload::DatanodeWorkloadType;
 
     use crate::key::{DatanodeLeaseKey, LeaseValue};
     use crate::selector::load_based::filter_out_expired_datanode;
@@ -193,6 +197,9 @@ mod tests {
             LeaseValue {
                 timestamp_millis: 0,
                 node_addr: "127.0.0.1:3002".to_string(),
+                workloads: NodeWorkloads::Datanode(DatanodeWorkloads {
+                    types: vec![DatanodeWorkloadType::Hybrid.to_i32()],
+                }),
             },
         );
 

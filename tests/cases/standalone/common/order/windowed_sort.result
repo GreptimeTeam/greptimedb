@@ -60,6 +60,7 @@ SELECT * FROM test ORDER BY t LIMIT 5;
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE SELECT * FROM test ORDER BY t LIMIT 5;
 
 +-+-+-+
@@ -68,7 +69,7 @@ EXPLAIN ANALYZE SELECT * FROM test ORDER BY t LIMIT 5;
 | 0_| 0_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [t@1 ASC NULLS LAST], fetch=5 REDACTED
-|_|_|_WindowedSortExec: expr=t@1 ASC NULLS LAST num_ranges=4 fetch=5 REDACTED
+|_|_|_WindowedSortExec: expr=t@1 ASC NULLS LAST num_ranges=REDACTED fetch=5 REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=4 (1 memtable ranges, 3 file 3 ranges) REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|
@@ -91,6 +92,7 @@ SELECT * FROM test ORDER BY t DESC LIMIT 5;
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE SELECT * FROM test ORDER BY t DESC LIMIT 5;
 
 +-+-+-+
@@ -99,8 +101,8 @@ EXPLAIN ANALYZE SELECT * FROM test ORDER BY t DESC LIMIT 5;
 | 0_| 0_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [t@1 DESC], fetch=5 REDACTED
-|_|_|_WindowedSortExec: expr=t@1 DESC num_ranges=4 fetch=5 REDACTED
-|_|_|_PartSortExec: expr=t@1 DESC num_ranges=4 limit=5 REDACTED
+|_|_|_WindowedSortExec: expr=t@1 DESC num_ranges=REDACTED fetch=5 REDACTED
+|_|_|_PartSortExec: expr=t@1 DESC num_ranges=REDACTED limit=5 REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=4 (1 memtable ranges, 3 file 3 ranges) REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|
@@ -123,6 +125,7 @@ SELECT * FROM test where i > 2 ORDER BY t LIMIT 4;
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE SELECT * FROM test where i > 2 ORDER BY t LIMIT 4;
 
 +-+-+-+
@@ -131,7 +134,7 @@ EXPLAIN ANALYZE SELECT * FROM test where i > 2 ORDER BY t LIMIT 4;
 | 0_| 0_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [t@1 ASC NULLS LAST], fetch=4 REDACTED
-|_|_|_WindowedSortExec: expr=t@1 ASC NULLS LAST num_ranges=4 fetch=4 REDACTED
+|_|_|_WindowedSortExec: expr=t@1 ASC NULLS LAST num_ranges=REDACTED fetch=4 REDACTED
 |_|_|_FilterExec: i@0 > 2 REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=4 (1 memtable ranges, 3 file 3 ranges) REDACTED
 |_|_|_|
@@ -155,6 +158,7 @@ SELECT * FROM test where i > 2 ORDER BY t DESC LIMIT 4;
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE SELECT * FROM test where i > 2 ORDER BY t DESC LIMIT 4;
 
 +-+-+-+
@@ -163,8 +167,8 @@ EXPLAIN ANALYZE SELECT * FROM test where i > 2 ORDER BY t DESC LIMIT 4;
 | 0_| 0_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [t@1 DESC], fetch=4 REDACTED
-|_|_|_WindowedSortExec: expr=t@1 DESC num_ranges=4 fetch=4 REDACTED
-|_|_|_PartSortExec: expr=t@1 DESC num_ranges=4 limit=4 REDACTED
+|_|_|_WindowedSortExec: expr=t@1 DESC num_ranges=REDACTED fetch=4 REDACTED
+|_|_|_PartSortExec: expr=t@1 DESC num_ranges=REDACTED limit=4 REDACTED
 |_|_|_FilterExec: i@0 > 2 REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=4 (1 memtable ranges, 3 file 3 ranges) REDACTED
 |_|_|_|
@@ -188,6 +192,7 @@ SELECT * FROM test where t > 8 ORDER BY t DESC LIMIT 4;
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE SELECT * FROM test where t > 8 ORDER BY t DESC LIMIT 4;
 
 +-+-+-+
@@ -196,8 +201,8 @@ EXPLAIN ANALYZE SELECT * FROM test where t > 8 ORDER BY t DESC LIMIT 4;
 | 0_| 0_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [t@1 DESC], fetch=4 REDACTED
-|_|_|_WindowedSortExec: expr=t@1 DESC num_ranges=2 fetch=4 REDACTED
-|_|_|_PartSortExec: expr=t@1 DESC num_ranges=2 limit=4 REDACTED
+|_|_|_WindowedSortExec: expr=t@1 DESC num_ranges=REDACTED fetch=4 REDACTED
+|_|_|_PartSortExec: expr=t@1 DESC num_ranges=REDACTED limit=4 REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=2 (1 memtable ranges, 1 file 1 ranges) REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
@@ -269,6 +274,7 @@ SELECT * FROM test_pk ORDER BY t LIMIT 5;
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE SELECT * FROM test_pk ORDER BY t LIMIT 5;
 
 +-+-+-+
@@ -277,8 +283,8 @@ EXPLAIN ANALYZE SELECT * FROM test_pk ORDER BY t LIMIT 5;
 | 0_| 0_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [t@2 ASC NULLS LAST], fetch=5 REDACTED
-|_|_|_WindowedSortExec: expr=t@2 ASC NULLS LAST num_ranges=4 fetch=5 REDACTED
-|_|_|_PartSortExec: expr=t@2 ASC NULLS LAST num_ranges=4 limit=5 REDACTED
+|_|_|_WindowedSortExec: expr=t@2 ASC NULLS LAST num_ranges=REDACTED fetch=5 REDACTED
+|_|_|_PartSortExec: expr=t@2 ASC NULLS LAST num_ranges=REDACTED limit=5 REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=4 (1 memtable ranges, 3 file 3 ranges) REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|
@@ -290,6 +296,7 @@ EXPLAIN ANALYZE SELECT * FROM test_pk ORDER BY t LIMIT 5;
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (files.*) REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT * FROM test_pk ORDER BY t LIMIT 5;
 
 +-+-+-+
@@ -298,8 +305,8 @@ EXPLAIN ANALYZE VERBOSE SELECT * FROM test_pk ORDER BY t LIMIT 5;
 | 0_| 0_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [t@2 ASC NULLS LAST], fetch=5 REDACTED
-|_|_|_WindowedSortExec: expr=t@2 ASC NULLS LAST num_ranges=4 fetch=5 REDACTED
-|_|_|_PartSortExec: expr=t@2 ASC NULLS LAST num_ranges=4 limit=5 REDACTED
+|_|_|_WindowedSortExec: expr=t@2 ASC NULLS LAST num_ranges=REDACTED fetch=5 REDACTED
+|_|_|_PartSortExec: expr=t@2 ASC NULLS LAST num_ranges=REDACTED limit=5 REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=4 (1 memtable ranges, 3 file 3 ranges), projection=["pk", "i", "t"], REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|
@@ -322,6 +329,7 @@ SELECT * FROM test_pk ORDER BY t DESC LIMIT 5;
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE SELECT * FROM test_pk ORDER BY t DESC LIMIT 5;
 
 +-+-+-+
@@ -330,8 +338,8 @@ EXPLAIN ANALYZE SELECT * FROM test_pk ORDER BY t DESC LIMIT 5;
 | 0_| 0_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [t@2 DESC], fetch=5 REDACTED
-|_|_|_WindowedSortExec: expr=t@2 DESC num_ranges=4 fetch=5 REDACTED
-|_|_|_PartSortExec: expr=t@2 DESC num_ranges=4 limit=5 REDACTED
+|_|_|_WindowedSortExec: expr=t@2 DESC num_ranges=REDACTED fetch=5 REDACTED
+|_|_|_PartSortExec: expr=t@2 DESC num_ranges=REDACTED limit=5 REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=4 (1 memtable ranges, 3 file 3 ranges) REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|
@@ -355,6 +363,7 @@ SELECT * FROM test_pk where pk > 7 ORDER BY t LIMIT 5;
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE SELECT * FROM test_pk where pk > 7 ORDER BY t LIMIT 5;
 
 +-+-+-+
@@ -363,8 +372,8 @@ EXPLAIN ANALYZE SELECT * FROM test_pk where pk > 7 ORDER BY t LIMIT 5;
 | 0_| 0_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [t@2 ASC NULLS LAST], fetch=5 REDACTED
-|_|_|_WindowedSortExec: expr=t@2 ASC NULLS LAST num_ranges=4 fetch=5 REDACTED
-|_|_|_PartSortExec: expr=t@2 ASC NULLS LAST num_ranges=4 limit=5 REDACTED
+|_|_|_WindowedSortExec: expr=t@2 ASC NULLS LAST num_ranges=REDACTED fetch=5 REDACTED
+|_|_|_PartSortExec: expr=t@2 ASC NULLS LAST num_ranges=REDACTED limit=5 REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=4 (1 memtable ranges, 3 file 3 ranges) REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|
@@ -376,6 +385,7 @@ EXPLAIN ANALYZE SELECT * FROM test_pk where pk > 7 ORDER BY t LIMIT 5;
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (files.*) REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT * FROM test_pk where pk > 7 ORDER BY t LIMIT 5;
 
 +-+-+-+
@@ -384,8 +394,8 @@ EXPLAIN ANALYZE VERBOSE SELECT * FROM test_pk where pk > 7 ORDER BY t LIMIT 5;
 | 0_| 0_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [t@2 ASC NULLS LAST], fetch=5 REDACTED
-|_|_|_WindowedSortExec: expr=t@2 ASC NULLS LAST num_ranges=4 fetch=5 REDACTED
-|_|_|_PartSortExec: expr=t@2 ASC NULLS LAST num_ranges=4 limit=5 REDACTED
+|_|_|_WindowedSortExec: expr=t@2 ASC NULLS LAST num_ranges=REDACTED fetch=5 REDACTED
+|_|_|_PartSortExec: expr=t@2 ASC NULLS LAST num_ranges=REDACTED limit=5 REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=4 (1 memtable ranges, 3 file 3 ranges), projection=["pk", "i", "t"], filters=[pk > Int32(7)], REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|

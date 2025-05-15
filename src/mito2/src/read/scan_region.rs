@@ -787,7 +787,7 @@ impl ScanInput {
             .expected_metadata(Some(self.mapper.metadata().clone()))
             .build_reader_input(reader_metrics)
             .await;
-        let (mut file_range_ctx, row_groups) = match res {
+        let (mut file_range_ctx, selection) = match res {
             Ok(x) => x,
             Err(e) => {
                 if e.is_object_not_found() && self.ignore_file_not_found {
@@ -810,7 +810,7 @@ impl ScanInput {
             )?;
             file_range_ctx.set_compat_batch(Some(compat));
         }
-        Ok(FileRangeBuilder::new(Arc::new(file_range_ctx), row_groups))
+        Ok(FileRangeBuilder::new(Arc::new(file_range_ctx), selection))
     }
 
     /// Scans the input source in another task and sends batches to the sender.

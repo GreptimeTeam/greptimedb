@@ -46,6 +46,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Flow engine is still recovering"))]
+    FlowNotRecovered {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Error encountered while creating flow: {sql}"))]
     CreateFlow {
         sql: String,
@@ -310,7 +316,8 @@ impl ErrorExt for Error {
             | Self::JoinTask { .. }
             | Self::Datafusion { .. }
             | Self::InsertIntoFlow { .. }
-            | Self::NoAvailableFrontend { .. } => StatusCode::Internal,
+            | Self::NoAvailableFrontend { .. }
+            | Self::FlowNotRecovered { .. } => StatusCode::Internal,
             Self::FlowAlreadyExist { .. } => StatusCode::TableAlreadyExists,
             Self::TableNotFound { .. }
             | Self::TableNotFoundMeta { .. }

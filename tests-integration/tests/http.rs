@@ -1094,9 +1094,6 @@ max_log_files = 720
 append_stdout = true
 enable_otlp_tracing = false
 
-[logging.slow_query]
-enable = false
-
 [[region_engine]]
 
 [region_engine.mito]
@@ -1150,7 +1147,15 @@ type = "time_series"
 enable = false
 write_interval = "30s"
 
-[tracing]"#,
+[tracing]
+
+[slow_query]
+enable = true
+record_type = "system_table"
+threshold = "5s"
+sample_ratio = 1.0
+ttl = "30d"
+"#,
     )
     .trim()
     .to_string();
@@ -2897,7 +2902,7 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
     )
     .await;
 
-    let expected_ddl = r#"[["mytable_services","CREATE TABLE IF NOT EXISTS \"mytable_services\" (\n  \"timestamp\" TIMESTAMP(9) NOT NULL,\n  \"service_name\" STRING NULL,\n  TIME INDEX (\"timestamp\")\n)\n\nENGINE=mito\nWITH(\n  append_mode = 'true'\n)"]]"#;
+    let expected_ddl = r#"[["mytable_services","CREATE TABLE IF NOT EXISTS \"mytable_services\" (\n  \"timestamp\" TIMESTAMP(9) NOT NULL,\n  \"service_name\" STRING NULL,\n  TIME INDEX (\"timestamp\"),\n  PRIMARY KEY (\"service_name\")\n)\n\nENGINE=mito\nWITH(\n  append_mode = 'false'\n)"]]"#;
     validate_data(
         "otlp_traces",
         &client,

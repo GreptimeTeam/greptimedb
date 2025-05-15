@@ -15,16 +15,19 @@
 mod error;
 
 use std::ffi::{c_char, CString};
+use std::io::BufReader;
 use std::path::PathBuf;
 
 use error::{
     BuildTempPathSnafu, DumpProfileDataSnafu, OpenTempFileSnafu, ProfilingNotEnabledSnafu,
     ReadOptProfSnafu,
 };
+use jemalloc_pprof_mappings::MAPPINGS;
+use jemalloc_pprof_utils::{parse_jeheap, FlamegraphOptions, StackProfile};
 use snafu::{ensure, ResultExt};
 use tokio::io::AsyncReadExt;
 
-use crate::error::Result;
+use crate::error::{FlamegraphSnafu, ParseJeHeapSnafu, Result};
 
 const PROF_DUMP: &[u8] = b"prof.dump\0";
 const OPT_PROF: &[u8] = b"opt.prof\0";
@@ -70,6 +73,26 @@ pub async fn dump_profile() -> Result<Vec<u8>> {
     Ok(buf)
 }
 
+async fn dump_profile_to_stack_profile() -> Result<StackProfile> {
+    let profile = dump_profile().await?;
+    let profile = BufReader::new(profile.as_slice());
+    parse_jeheap(profile, MAPPINGS.as_deref()).context(ParseJeHeapSnafu)
+}
+
+pub async fn dump_pprof() -> Result<Vec<u8>> {
+    let profile = dump_profile_to_stack_profile().await?;
+    let pprof = profile.to_pprof(("inuse_space", "bytes"), ("space", "bytes"), None);
+    Ok(pprof)
+}
+
+pub async fn dump_flamegraph() -> Result<Vec<u8>> {
+    let profile = dump_profile_to_stack_profile().await?;
+    let mut opts = FlamegraphOptions::default();
+    opts.title = "inuse_space".to_string();
+    opts.count_name = "bytes".to_string();
+    let flamegraph = profile.to_flamegraph(&mut opts).context(FlamegraphSnafu)?;
+    Ok(flamegraph)
+}
 fn is_prof_enabled() -> Result<bool> {
     // safety: OPT_PROF variable, if present, is always a boolean value.
     Ok(unsafe { tikv_jemalloc_ctl::raw::read::<bool>(OPT_PROF).context(ReadOptProfSnafu)? })

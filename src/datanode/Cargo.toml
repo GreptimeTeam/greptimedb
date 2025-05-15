@@ -33,6 +33,7 @@ common-telemetry.workspace = true
 common-time.workspace = true
 common-version.workspace = true
 common-wal.workspace = true
+common-workload.workspace = true
 dashmap.workspace = true
 datafusion.workspace = true
 datafusion-common.workspace = true

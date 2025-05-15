@@ -12,6 +12,7 @@ with cte1(xxx) as (Select i as j from a) select x from cte1 t1(x);
 
 with cte1 as (Select i as j from a), cte2 as (select ref.j as k from cte1 as ref), cte3 as (select ref2.j+1 as i from cte1 as ref2) select * from cte2 , cte3;
 
+-- SQLNESS SORT_RESULT 3 1
 with cte1 as (select i as j from a), cte2 as (select ref.j as k from cte1 as ref), cte3 as (select ref2.j+1 as i from cte1 as ref2) select * from cte2 union all select * FROM cte3 order by 1;
 
 with cte1 as (select 42), cte1 as (select 42) select * FROM cte1;

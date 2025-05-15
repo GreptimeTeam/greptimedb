@@ -17,6 +17,7 @@ mod flownode;
 
 use std::str::FromStr;
 
+use api::v1::meta::heartbeat_request::NodeWorkloads;
 pub use datanode::*;
 pub use flownode::*;
 use serde::{Deserialize, Serialize};
@@ -74,11 +75,12 @@ macro_rules! impl_try_from_lease_key {
 impl_try_from_lease_key!(FlownodeLeaseKey, FLOWNODE_LEASE_PREFIX);
 impl_try_from_lease_key!(DatanodeLeaseKey, DATANODE_LEASE_PREFIX);
 
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LeaseValue {
     // last activity
     pub timestamp_millis: i64,
     pub node_addr: String,
+    pub workloads: NodeWorkloads,
 }
 
 impl FromStr for LeaseValue {
@@ -113,6 +115,8 @@ impl TryFrom<LeaseValue> for Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use api::v1::meta::DatanodeWorkloads;
+
     use super::*;
 
     #[test]
@@ -120,6 +124,7 @@ mod tests {
         let value = LeaseValue {
             timestamp_millis: 111,
             node_addr: "127.0.0.1:3002".to_string(),
+            workloads: NodeWorkloads::Datanode(DatanodeWorkloads { types: vec![] }),
         };
 
         let value_bytes: Vec<u8> = value.clone().try_into().unwrap();

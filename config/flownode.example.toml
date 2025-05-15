@@ -100,19 +100,6 @@ max_log_files = 720
 [logging.tracing_sample_ratio]
 default_ratio = 1.0
 
-## The slow query log options.
-[logging.slow_query]
-## Whether to enable slow query log.
-enable = false
-
-## The threshold of slow query.
-## @toml2docs:none-default
-threshold = "10s"
-
-## The sampling ratio of slow query log. The value should be in the range of (0, 1].
-## @toml2docs:none-default
-sample_ratio = 1.0
-
 ## The tracing options. Only effect when compiled with `tokio-console` feature.
 #+ [tracing]
 ## The tokio console address.

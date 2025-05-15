@@ -42,11 +42,11 @@ use futures::future;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use prost::Message;
 use snafu::{ensure, ResultExt};
-use tonic::metadata::{AsciiMetadataKey, MetadataValue};
+use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue, MetadataMap, MetadataValue};
 use tonic::transport::Channel;
 
 use crate::error::{
-    ConvertFlightDataSnafu, Error, FlightGetSnafu, IllegalFlightMessagesSnafu, InvalidAsciiSnafu,
+    ConvertFlightDataSnafu, Error, FlightGetSnafu, IllegalFlightMessagesSnafu,
     InvalidTonicMetadataValueSnafu, ServerSnafu,
 };
 use crate::{from_grpc_response, Client, Result};
@@ -165,24 +165,25 @@ impl Database {
 
         let mut request = tonic::Request::new(request);
         let metadata = request.metadata_mut();
-        for (key, value) in hints {
-            let key = AsciiMetadataKey::from_bytes(format!("x-greptime-hint-{}", key).as_bytes())
-                .map_err(|_| {
-                InvalidAsciiSnafu {
-                    value: key.to_string(),
-                }
-                .build()
-            })?;
-            let value = value.parse().map_err(|_| {
-                InvalidAsciiSnafu {
-                    value: value.to_string(),
-                }
-                .build()
-            })?;
-            metadata.insert(key, value);
-        }
+        Self::put_hints(metadata, hints)?;
+
         let response = client.handle(request).await?.into_inner();
         from_grpc_response(response)
+    }
+
+    fn put_hints(metadata: &mut MetadataMap, hints: &[(&str, &str)]) -> Result<()> {
+        let Some(value) = hints
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .reduce(|a, b| format!("{},{}", a, b))
+        else {
+            return Ok(());
+        };
+
+        let key = AsciiMetadataKey::from_static("x-greptime-hints");
+        let value = AsciiMetadataValue::from_str(&value).context(InvalidTonicMetadataValueSnafu)?;
+        metadata.insert(key, value);
+        Ok(())
     }
 
     pub async fn handle(&self, request: Request) -> Result<u32> {
@@ -242,38 +243,48 @@ impl Database {
     where
         S: AsRef<str>,
     {
-        self.do_get(Request::Query(QueryRequest {
+        self.sql_with_hint(sql, &[]).await
+    }
+
+    pub async fn sql_with_hint<S>(&self, sql: S, hints: &[(&str, &str)]) -> Result<Output>
+    where
+        S: AsRef<str>,
+    {
+        let request = Request::Query(QueryRequest {
             query: Some(Query::Sql(sql.as_ref().to_string())),
-        }))
-        .await
+        });
+        self.do_get(request, hints).await
     }
 
     pub async fn logical_plan(&self, logical_plan: Vec<u8>) -> Result<Output> {
-        self.do_get(Request::Query(QueryRequest {
+        let request = Request::Query(QueryRequest {
             query: Some(Query::LogicalPlan(logical_plan)),
-        }))
-        .await
+        });
+        self.do_get(request, &[]).await
     }
 
     pub async fn create(&self, expr: CreateTableExpr) -> Result<Output> {
-        self.do_get(Request::Ddl(DdlRequest {
+        let request = Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::CreateTable(expr)),
-        }))
-        .await
+        });
+        self.do_get(request, &[]).await
     }
 
     pub async fn alter(&self, expr: AlterTableExpr) -> Result<Output> {
-        self.do_get(Request::Ddl(DdlRequest {
+        let request = Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::AlterTable(expr)),
-        }))
-        .await
+        });
+        self.do_get(request, &[]).await
     }
 
-    async fn do_get(&self, request: Request) -> Result<Output> {
+    async fn do_get(&self, request: Request, hints: &[(&str, &str)]) -> Result<Output> {
         let request = self.to_rpc_request(request);
         let request = Ticket {
             ticket: request.encode_to_vec().into(),
         };
+
+        let mut request = tonic::Request::new(request);
+        Self::put_hints(request.metadata_mut(), hints)?;
 
         let mut client = self.client.make_flight_client()?;
 

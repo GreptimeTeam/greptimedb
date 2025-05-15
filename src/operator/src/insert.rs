@@ -580,6 +580,10 @@ impl Inserter {
                 // for it's a very unexpected behavior and should be set by user explicitly
                 for mut create_table in create_tables {
                     if create_table.table_name == trace_services_table_name(trace_table_name) {
+                        // Disable append mode for trace services table since it requires upsert behavior.
+                        create_table
+                            .table_options
+                            .insert(APPEND_MODE_KEY.to_string(), "false".to_string());
                         let table = self
                             .create_physical_table(create_table, None, ctx, statement_executor)
                             .await?;

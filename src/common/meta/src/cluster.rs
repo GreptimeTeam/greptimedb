@@ -15,7 +15,7 @@
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::str::FromStr;
 
-use api::v1::meta::HeartbeatRequest;
+use api::v1::meta::{DatanodeWorkloads, HeartbeatRequest};
 use common_error::ext::ErrorExt;
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -161,6 +161,8 @@ pub struct DatanodeStatus {
     pub leader_regions: usize,
     /// How many follower regions on this node.
     pub follower_regions: usize,
+    /// The workloads of the datanode.
+    pub workloads: DatanodeWorkloads,
 }
 
 /// The status of a frontend.
@@ -281,6 +283,8 @@ impl TryFrom<i32> for Role {
 mod tests {
     use std::assert_matches::assert_matches;
 
+    use common_workload::DatanodeWorkloadType;
+
     use super::*;
     use crate::cluster::Role::{Datanode, Frontend};
     use crate::cluster::{DatanodeStatus, NodeInfo, NodeInfoKey, NodeStatus};
@@ -313,6 +317,9 @@ mod tests {
                 wcus: 2,
                 leader_regions: 3,
                 follower_regions: 4,
+                workloads: DatanodeWorkloads {
+                    types: vec![DatanodeWorkloadType::Hybrid.to_i32()],
+                },
             }),
             version: "".to_string(),
             git_commit: "".to_string(),
@@ -332,6 +339,7 @@ mod tests {
                     wcus: 2,
                     leader_regions: 3,
                     follower_regions: 4,
+                    ..
                 }),
                 start_time_ms: 1,
                 ..

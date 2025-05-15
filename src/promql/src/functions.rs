@@ -40,7 +40,7 @@ pub use holt_winters::HoltWinters;
 pub use idelta::IDelta;
 pub use predict_linear::PredictLinear;
 pub use quantile::QuantileOverTime;
-pub use quantile_aggr::quantile_udaf;
+pub use quantile_aggr::{quantile_udaf, QUANTILE_NAME};
 pub use resets::Resets;
 pub use round::Round;
 

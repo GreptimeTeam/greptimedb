@@ -22,9 +22,8 @@ use std::sync::{Arc, Mutex};
 use api::greptime_proto::v1::meta::{GrantedRegion as PbGrantedRegion, RegionRole as PbRegionRole};
 use api::region::RegionResponse;
 use async_trait::async_trait;
-use common_error::ext::{BoxedError, PlainError};
-use common_error::status_code::StatusCode;
-use common_recordbatch::SendableRecordBatchStream;
+use common_error::ext::BoxedError;
+use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use common_time::Timestamp;
 use datafusion_physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion_physical_plan::{DisplayAs, DisplayFormatType};
@@ -834,12 +833,10 @@ impl RegionScanner for SinglePartitionScanner {
         _partition: usize,
     ) -> Result<SendableRecordBatchStream, BoxedError> {
         let mut stream = self.stream.lock().unwrap();
-        stream.take().ok_or_else(|| {
-            BoxedError::new(PlainError::new(
-                "Not expected to run ExecutionPlan more than once".to_string(),
-                StatusCode::Unexpected,
-            ))
-        })
+        let result = stream
+            .take()
+            .or_else(|| Some(Box::pin(EmptyRecordBatchStream::new(self.schema.clone()))));
+        Ok(result.unwrap())
     }
 
     fn has_predicate(&self) -> bool {

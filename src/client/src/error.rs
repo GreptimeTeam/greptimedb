@@ -110,13 +110,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to parse ascii string: {}", value))]
-    InvalidAscii {
-        value: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Invalid Tonic metadata value"))]
     InvalidTonicMetadataValue {
         #[snafu(source)]
@@ -143,10 +136,7 @@ impl ErrorExt for Error {
             | Error::ConvertFlightData { source, .. }
             | Error::CreateTlsChannel { source, .. } => source.status_code(),
             Error::IllegalGrpcClientState { .. } => StatusCode::Unexpected,
-
-            Error::InvalidAscii { .. } | Error::InvalidTonicMetadataValue { .. } => {
-                StatusCode::InvalidArguments
-            }
+            Error::InvalidTonicMetadataValue { .. } => StatusCode::InvalidArguments,
         }
     }
 

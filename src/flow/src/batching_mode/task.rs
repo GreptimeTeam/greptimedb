@@ -142,26 +142,12 @@ impl BatchingTask {
         Ok(())
     }
 
-    /// Test execute, for check syntax or such
-    pub async fn check_execute(
+    /// Create sink table if not exists
+    pub async fn check_or_create_sink_table(
         &self,
         engine: &QueryEngineRef,
         frontend_client: &Arc<FrontendClient>,
     ) -> Result<Option<(u32, Duration)>, Error> {
-        // use current time to test get a dirty time window, which should be safe
-        let start = SystemTime::now();
-        let ts = Timestamp::new_second(
-            start
-                .duration_since(UNIX_EPOCH)
-                .expect("Time went backwards")
-                .as_secs() as _,
-        );
-        self.state
-            .write()
-            .unwrap()
-            .dirty_time_windows
-            .add_lower_bounds(vec![ts].into_iter());
-
         if !self.is_table_exist(&self.config.sink_table_name).await? {
             let create_table = self.gen_create_table_expr(engine.clone()).await?;
             info!(
@@ -174,7 +160,8 @@ impl BatchingTask {
                 self.config.sink_table_name.join(".")
             );
         }
-        self.gen_exec_once(engine, frontend_client).await
+
+        Ok(None)
     }
 
     async fn is_table_exist(&self, table_name: &[String; 3]) -> Result<bool, Error> {

@@ -36,6 +36,7 @@ members = [
     "src/common/time",
     "src/common/version",
     "src/common/wal",
+    "src/common/workload",
     "src/datanode",
     "src/datatypes",
     "src/file-engine",
@@ -130,7 +131,7 @@ etcd-client = "0.14"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "17a3550751c8b1e02ec16be40101d5f24dc255c3" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "7668a882d57ca6a2333146e0574b8f0c9d5008ae" }
 hex = "0.4"
 http = "1"
 humantime = "2.1"
@@ -162,7 +163,9 @@ parquet = { version = "54.2", default-features = false, features = ["arrow", "as
 paste = "1.0"
 pin-project = "1.0"
 prometheus = { version = "0.13.3", features = ["process"] }
-promql-parser = { version = "0.5.1", features = ["ser"] }
+promql-parser = { git = "https://github.com/GreptimeTeam/promql-parser.git", rev = "711d484d9e19b19e073f0cbfd2dd16ad031972b6", features = [
+    "ser",
+] }
 prost = { version = "0.13", features = ["no-recursion-limit"] }
 raft-engine = { version = "0.4.1", default-features = false }
 rand = "0.9"
@@ -175,7 +178,7 @@ reqwest = { version = "0.12", default-features = false, features = [
     "stream",
     "multipart",
 ] }
-rskafka = { git = "https://github.com/influxdata/rskafka.git", rev = "75535b5ad9bae4a5dbb582c82e44dfd81ec10105", features = [
+rskafka = { git = "https://github.com/influxdata/rskafka.git", rev = "8dbd01ed809f5a791833a594e85b144e36e45820", features = [
     "transport-tls",
 ] }
 rstest = "0.25"
@@ -256,6 +259,7 @@ common-test-util = { path = "src/common/test-util" }
 common-time = { path = "src/common/time" }
 common-version = { path = "src/common/version" }
 common-wal = { path = "src/common/wal" }
+common-workload = { path = "src/common/workload" }
 datanode = { path = "src/datanode" }
 datatypes = { path = "src/datatypes" }
 file-engine = { path = "src/file-engine" }

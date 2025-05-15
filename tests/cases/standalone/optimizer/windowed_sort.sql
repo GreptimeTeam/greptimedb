@@ -84,6 +84,7 @@ ORDER BY
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE SELECT
   collect_time AS true_collect_time,
   collect_time_utc AS collect_time,
@@ -108,6 +109,7 @@ ORDER BY
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 EXPLAIN ANALYZE SELECT
   collect_time_utc AS collect_time,
   collect_time AS true_collect_time,

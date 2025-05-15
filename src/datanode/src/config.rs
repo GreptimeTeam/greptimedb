@@ -22,6 +22,7 @@ use common_config::Configurable;
 pub use common_procedure::options::ProcedureConfig;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use common_wal::config::DatanodeWalConfig;
+use common_workload::{sanitize_workload_types, DatanodeWorkloadType};
 use file_engine::config::EngineConfig as FileEngineConfig;
 use meta_client::MetaClientOptions;
 use metric_engine::config::EngineConfig as MetricEngineConfig;
@@ -360,6 +361,7 @@ impl Default for ObjectStoreConfig {
 #[serde(default)]
 pub struct DatanodeOptions {
     pub node_id: Option<u64>,
+    pub workload_types: Vec<DatanodeWorkloadType>,
     pub require_lease_before_startup: bool,
     pub init_regions_in_background: bool,
     pub init_regions_parallelism: usize,
@@ -391,11 +393,19 @@ pub struct DatanodeOptions {
     pub rpc_max_send_message_size: Option<ReadableSize>,
 }
 
+impl DatanodeOptions {
+    /// Sanitize the `DatanodeOptions` to ensure the config is valid.
+    pub fn sanitize(&mut self) {
+        sanitize_workload_types(&mut self.workload_types);
+    }
+}
+
 impl Default for DatanodeOptions {
     #[allow(deprecated)]
     fn default() -> Self {
         Self {
             node_id: None,
+            workload_types: vec![DatanodeWorkloadType::Hybrid],
             require_lease_before_startup: false,
             init_regions_in_background: false,
             init_regions_parallelism: 16,

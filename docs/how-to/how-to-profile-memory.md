@@ -44,6 +44,10 @@ Dump memory profiling data through HTTP API:
 
 ```bash
 curl -X POST localhost:4000/debug/prof/mem > greptime.hprof
+# or output flamegraph directly
+curl -X POST "localhost:4000/debug/prof/mem?output=flamegraph" > greptime.svg
+# or output pprof format
+curl -X POST "localhost:4000/debug/prof/mem?output=proto" > greptime.pprof
 ```
 
 You can periodically dump profiling data and compare them to find the delta memory usage.

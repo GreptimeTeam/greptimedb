@@ -30,12 +30,25 @@ pub enum Error {
 
     #[snafu(display("Memory profiling is not supported"))]
     ProfilingNotSupported,
+
+    #[snafu(display("Failed to parse jeheap profile: {}", err))]
+    ParseJeHeap {
+        #[snafu(source)]
+        err: anyhow::Error,
+    },
+
+    #[snafu(display("Failed to dump profile data to flamegraph: {}", err))]
+    Flamegraph {
+        #[snafu(source)]
+        err: anyhow::Error,
+    },
 }
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::Internal { source } => source.status_code(),
+            Error::ParseJeHeap { .. } | Error::Flamegraph { .. } => StatusCode::Internal,
             Error::ProfilingNotSupported => StatusCode::Unsupported,
         }
     }
