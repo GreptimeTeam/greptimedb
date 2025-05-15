@@ -25,6 +25,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_telemetry::{info, warn};
+use mito2::access_layer::ATOMIC_WRITE_DIR;
 use object_store::layers::{LruCacheLayer, RetryInterceptor, RetryLayer};
 use object_store::services::Fs;
 use object_store::util::{join_dir, normalize_dir, with_instrument_layers};
@@ -168,7 +169,7 @@ async fn build_cache_layer(
     if let Some(path) = cache_path.as_ref()
         && !path.trim().is_empty()
     {
-        let atomic_temp_dir = join_dir(path, ".tmp/");
+        let atomic_temp_dir = join_dir(path, ATOMIC_WRITE_DIR);
         clean_temp_dir(&atomic_temp_dir)?;
 
         let cache_store = Fs::default()

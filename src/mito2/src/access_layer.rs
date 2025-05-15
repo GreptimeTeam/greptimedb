@@ -42,6 +42,8 @@ pub type AccessLayerRef = Arc<AccessLayer>;
 /// SST write results.
 pub type SstInfoArray = SmallVec<[SstInfo; 2]>;
 
+pub const ATOMIC_WRITE_DIR: &'static str = "tmp/";
+
 /// A layer to access SST files under the same directory.
 pub struct AccessLayer {
     region_dir: String,
@@ -214,7 +216,7 @@ pub struct SstWriteRequest {
 }
 
 pub(crate) async fn new_fs_cache_store(root: &str) -> Result<ObjectStore> {
-    let atomic_write_dir = join_dir(root, ".tmp/");
+    let atomic_write_dir = join_dir(root, ATOMIC_WRITE_DIR);
     clean_dir(&atomic_write_dir).await?;
 
     let builder = Fs::default().root(root).atomic_write_dir(&atomic_write_dir);

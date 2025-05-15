@@ -15,6 +15,7 @@
 use std::{fs, path};
 
 use common_telemetry::info;
+use mito2::access_layer::ATOMIC_WRITE_DIR;
 use object_store::services::Fs;
 use object_store::util::join_dir;
 use object_store::ObjectStore;
@@ -33,7 +34,7 @@ pub async fn new_fs_object_store(
         .context(error::CreateDirSnafu { dir: data_home })?;
     info!("The file storage home is: {}", data_home);
 
-    let atomic_write_dir = join_dir(data_home, ".tmp/");
+    let atomic_write_dir = join_dir(data_home, ATOMIC_WRITE_DIR);
     store::clean_temp_dir(&atomic_write_dir)?;
 
     let builder = Fs::default()
