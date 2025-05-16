@@ -207,14 +207,6 @@ broker_endpoints = ["127.0.0.1:9092"]
 ## Otherwise, use topics named `topic_name_prefix_[0..num_topics)`
 auto_create_topics = true
 
-## Whether to prune stale records in existing topics.
-## Set to `true` to prune stale records in existing topics.
-## Set to `false` to disable pruning stale records in existing topics.
-##
-## **Notes: It's not recommended to set to `true` in production environment.
-## It's useful for POC and development.**
-prune_stale_records_in_existing_topics = false
-
 ## Number of topics.
 ## **It's only used when the provider is `kafka`**.
 num_topics = 64

@@ -227,7 +227,7 @@ pub async fn test_kafka_topic_pool(
         config.kafka_topic.topic_name_prefix = prefix.to_string();
     }
     let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
-    let topic_creator = build_kafka_topic_creator(&config.connection, &config.kafka_topic, false)
+    let topic_creator = build_kafka_topic_creator(&config.connection, &config.kafka_topic)
         .await
         .unwrap();
 

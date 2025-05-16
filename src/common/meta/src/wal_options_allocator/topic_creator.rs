@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_telemetry::{debug, error, info, warn};
+use common_telemetry::{debug, error, info};
 use common_wal::config::kafka::common::{
     KafkaConnectionConfig, KafkaTopicConfig, DEFAULT_BACKOFF_CONFIG,
 };
@@ -24,7 +24,7 @@ use rskafka::record::Record;
 use snafu::ResultExt;
 
 use crate::error::{
-    BuildKafkaClientSnafu, BuildKafkaCtrlClientSnafu, CreateKafkaWalTopicSnafu, DeleteRecordsSnafu,
+    BuildKafkaClientSnafu, BuildKafkaCtrlClientSnafu, CreateKafkaWalTopicSnafu,
     KafkaGetOffsetSnafu, KafkaPartitionClientSnafu, ProduceRecordSnafu, ResolveKafkaEndpointSnafu,
     Result, TlsConfigSnafu,
 };
@@ -36,16 +36,12 @@ const DEFAULT_PARTITION: i32 = 0;
 /// Creates topics in kafka.
 pub struct KafkaTopicCreator {
     client: Client,
-    /// Whether to prune stale records from the topic.
-    prune_stale_records: bool,
     /// The number of partitions per topic.
     num_partitions: i32,
     /// The replication factor of each topic.
     replication_factor: i16,
     /// The timeout of topic creation in milliseconds.
     create_topic_timeout: i32,
-    /// The timeout of deleting records in milliseconds.
-    delete_records_timeout: i32,
 }
 
 impl KafkaTopicCreator {
@@ -84,67 +80,7 @@ impl KafkaTopicCreator {
 
     async fn prepare_topic(&self, topic: &String) -> Result<()> {
         let partition_client = self.partition_client(topic).await?;
-        if self.prune_stale_records {
-            self.prune_stale_records(topic, &partition_client).await?;
-        }
         self.append_noop_record(topic, &partition_client).await?;
-        Ok(())
-    }
-
-    /// Prunes stale records from the topic.
-    /// 1. Fetches the end offset of the topic.
-    /// 2. Deletes the records from the topic.
-    async fn prune_stale_records(
-        &self,
-        topic: &String,
-        partition_client: &PartitionClient,
-    ) -> Result<()> {
-        let end_offset = partition_client
-            .get_offset(OffsetAt::Latest)
-            .await
-            .context(KafkaGetOffsetSnafu {
-                topic: topic.to_string(),
-                partition: DEFAULT_PARTITION,
-            })?;
-
-        let start_offset = partition_client
-            .get_offset(OffsetAt::Earliest)
-            .await
-            .context(KafkaGetOffsetSnafu {
-                topic: topic.to_string(),
-                partition: DEFAULT_PARTITION,
-            })?;
-        debug!(
-            "topic: {}, end_offset: {}, start_offset: {}",
-            topic, end_offset, start_offset
-        );
-
-        if end_offset == 0 || end_offset == start_offset {
-            return Ok(());
-        }
-
-        partition_client
-            .delete_records(end_offset, self.delete_records_timeout)
-            .await
-            .context(DeleteRecordsSnafu {
-                topic: topic.to_string(),
-                partition: DEFAULT_PARTITION,
-                offset: end_offset,
-            })?;
-
-        let start_offset = partition_client
-            .get_offset(OffsetAt::Earliest)
-            .await
-            .context(KafkaGetOffsetSnafu {
-                topic: topic.to_string(),
-                partition: DEFAULT_PARTITION,
-            })?;
-
-        warn!(
-            "Found stale records in topic {}, deleted records is smaller than end offset {}. Earliest offset is {}",
-            topic, end_offset, start_offset
-        );
-
         Ok(())
     }
 
@@ -204,8 +140,8 @@ impl KafkaTopicCreator {
     }
 
     /// Prepares topics in Kafka.
-    /// 1. Prunes stale records from each topic if `prune_stale_records` is true.
-    /// 2. Appends a noop record to each topic.
+    ///
+    /// It appends a noop record to each topic if the topic is empty.
     pub async fn prepare_topics(&self, topics: &[String]) -> Result<()> {
         // Try to create missing topics.
         let tasks = topics
@@ -295,7 +231,6 @@ pub async fn build_kafka_client(connection: &KafkaConnectionConfig) -> Result<Cl
 pub async fn build_kafka_topic_creator(
     connection: &KafkaConnectionConfig,
     kafka_topic: &KafkaTopicConfig,
-    prune_stale_records: bool,
 ) -> Result<KafkaTopicCreator> {
     let client = build_kafka_client(connection).await?;
     Ok(KafkaTopicCreator {
@@ -303,8 +238,6 @@ pub async fn build_kafka_topic_creator(
         num_partitions: kafka_topic.num_partitions,
         replication_factor: kafka_topic.replication_factor,
         create_topic_timeout: kafka_topic.create_topic_timeout.as_millis() as i32,
-        delete_records_timeout: kafka_topic.delete_records_timeouts.as_millis() as i32,
-        prune_stale_records,
     })
 }
 
@@ -316,17 +249,14 @@ mod tests {
 
     use super::*;
 
-    async fn test_topic_creator(
-        broker_endpoints: Vec<String>,
-        prune_stale_records: bool,
-    ) -> KafkaTopicCreator {
+    async fn test_topic_creator(broker_endpoints: Vec<String>) -> KafkaTopicCreator {
         let connection = KafkaConnectionConfig {
             broker_endpoints,
             ..Default::default()
         };
         let kafka_topic = KafkaTopicConfig::default();
 
-        build_kafka_topic_creator(&connection, &kafka_topic, prune_stale_records)
+        build_kafka_topic_creator(&connection, &kafka_topic)
             .await
             .unwrap()
     }
@@ -354,7 +284,7 @@ mod tests {
         common_telemetry::init_default_ut_logging();
         maybe_skip_kafka_integration_test!();
         let prefix = "append_noop_record_to_empty_topic";
-        let creator = test_topic_creator(get_kafka_endpoints(), false).await;
+        let creator = test_topic_creator(get_kafka_endpoints()).await;
 
         let topic = format!("{}{}", prefix, "0");
         // Clean up the topics before test
@@ -379,7 +309,7 @@ mod tests {
         common_telemetry::init_default_ut_logging();
         maybe_skip_kafka_integration_test!();
         let prefix = "append_noop_record_to_non_empty_topic";
-        let creator = test_topic_creator(get_kafka_endpoints(), false).await;
+        let creator = test_topic_creator(get_kafka_endpoints()).await;
 
         let topic = format!("{}{}", prefix, "0");
         // Clean up the topics before test
@@ -406,7 +336,7 @@ mod tests {
         common_telemetry::init_default_ut_logging();
         maybe_skip_kafka_integration_test!();
         let prefix = "create_topic";
-        let creator = test_topic_creator(get_kafka_endpoints(), false).await;
+        let creator = test_topic_creator(get_kafka_endpoints()).await;
 
         let topic = format!("{}{}", prefix, "0");
         // Clean up the topics before test
@@ -426,7 +356,7 @@ mod tests {
         common_telemetry::init_default_ut_logging();
         maybe_skip_kafka_integration_test!();
         let prefix = "prepare_topic";
-        let creator = test_topic_creator(get_kafka_endpoints(), false).await;
+        let creator = test_topic_creator(get_kafka_endpoints()).await;
 
         let topic = format!("{}{}", prefix, "0");
         // Clean up the topics before test
@@ -452,7 +382,7 @@ mod tests {
         maybe_skip_kafka_integration_test!();
 
         let prefix = "prepare_topic_with_stale_records_without_pruning";
-        let creator = test_topic_creator(get_kafka_endpoints(), false).await;
+        let creator = test_topic_creator(get_kafka_endpoints()).await;
 
         let topic = format!("{}{}", prefix, "0");
         // Clean up the topics before test
@@ -471,32 +401,5 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(start_offset, 0);
-    }
-
-    #[tokio::test]
-    async fn test_prepare_topic_with_stale_records() {
-        common_telemetry::init_default_ut_logging();
-        maybe_skip_kafka_integration_test!();
-        let prefix = "prepare_topic_with_stale_records";
-        let creator = test_topic_creator(get_kafka_endpoints(), true).await;
-
-        let topic = format!("{}{}", prefix, "0");
-        // Clean up the topics before test
-        creator.delete_topics(&[topic.to_string()]).await.unwrap();
-
-        creator.create_topics(&[topic.to_string()]).await.unwrap();
-        let partition_client = creator.partition_client(&topic).await.unwrap();
-        append_records(&partition_client, 10).await.unwrap();
-
-        creator.prepare_topic(&topic).await.unwrap();
-        let partition_client = creator.partition_client(&topic).await.unwrap();
-        let start_offset = partition_client
-            .get_offset(OffsetAt::Earliest)
-            .await
-            .unwrap();
-        assert_eq!(start_offset, 10);
-
-        let end_offset = partition_client.get_offset(OffsetAt::Latest).await.unwrap();
-        assert_eq!(end_offset, 10);
     }
 }

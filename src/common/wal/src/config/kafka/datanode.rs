@@ -41,11 +41,6 @@ pub struct DatanodeKafkaConfig {
     pub kafka_topic: KafkaTopicConfig,
     // Automatically create topics for WAL.
     pub auto_create_topics: bool,
-    /// Whether to prune stale records in existing topics.
-    ///
-    /// **Notes: It's not recommended to set to `true` in production environment.
-    /// It's useful for POC and development.**
-    pub prune_stale_records_in_existing_topics: bool,
     // Create index for WAL.
     pub create_index: bool,
     #[serde(with = "humantime_serde")]
@@ -71,7 +66,6 @@ impl Default for DatanodeKafkaConfig {
             consumer_wait_timeout: Duration::from_millis(100),
             kafka_topic: KafkaTopicConfig::default(),
             auto_create_topics: true,
-            prune_stale_records_in_existing_topics: false,
             create_index: true,
             dump_index_interval: Duration::from_secs(60),
             overwrite_entry_start_id: false,

@@ -541,22 +541,6 @@ pub enum Error {
         error: rskafka::client::error::Error,
     },
 
-    #[snafu(display(
-        "Failed to delete records from Kafka, topic: {}, partition: {}, offset: {}",
-        topic,
-        partition,
-        offset
-    ))]
-    DeleteRecords {
-        topic: String,
-        partition: i32,
-        offset: i64,
-        #[snafu(implicit)]
-        location: Location,
-        #[snafu(source)]
-        error: rskafka::client::error::Error,
-    },
-
     #[snafu(display("Failed to produce records to Kafka, topic: {}", topic))]
     ProduceRecord {
         topic: String,
@@ -883,8 +867,7 @@ impl ErrorExt for Error {
             | FromUtf8 { .. }
             | MetadataCorruption { .. }
             | ParseWalOptions { .. }
-            | KafkaGetOffset { .. }
-            | DeleteRecords { .. } => StatusCode::Unexpected,
+            | KafkaGetOffset { .. } => StatusCode::Unexpected,
 
             SendMessage { .. } | GetKvCache { .. } | CacheNotGet { .. } => StatusCode::Internal,
 

@@ -112,12 +112,9 @@ pub async fn build_wal_options_allocator(
                 NAME_PATTERN_REGEX.is_match(prefix),
                 InvalidTopicNamePrefixSnafu { prefix }
             );
-            let topic_creator = build_kafka_topic_creator(
-                &kafka_config.connection,
-                &kafka_config.kafka_topic,
-                kafka_config.prune_stale_records_in_existing_topics,
-            )
-            .await?;
+            let topic_creator =
+                build_kafka_topic_creator(&kafka_config.connection, &kafka_config.kafka_topic)
+                    .await?;
             let topic_pool = KafkaTopicPool::new(kafka_config, kv_backend, topic_creator);
             Ok(WalOptionsAllocator::Kafka(topic_pool))
         }
