@@ -127,9 +127,9 @@ impl RowGroupSelection {
                 // 1. For non-last row groups, it's the actual size
                 // 2. For the last row group, any ranges beyond the actual size will be clipped
                 //    by the min() operation above
-                let mut selection = row_selection_from_row_ranges(ranges, row_group_size);
+                let selection = row_selection_from_row_ranges(ranges, row_group_size);
                 let row_count = selection.row_count();
-                let selector_len = selector_len(&mut selection);
+                let selector_len = selector_len(&selection);
                 total_row_count += row_count;
                 total_selector_len += selector_len;
                 (
@@ -176,10 +176,10 @@ impl RowGroupSelection {
         let selection_in_rg = row_group_to_row_ids
             .into_iter()
             .map(|(row_group_id, row_ids)| {
-                let mut selection =
+                let selection =
                     row_selection_from_sorted_row_ids(row_ids.into_iter(), row_group_size);
                 let row_count = selection.row_count();
-                let selector_len = selector_len(&mut selection);
+                let selector_len = selector_len(&selection);
                 total_row_count += row_count;
                 total_selector_len += selector_len;
                 (
@@ -221,10 +221,9 @@ impl RowGroupSelection {
         let selection_in_rg = row_ranges
             .into_iter()
             .map(|(row_group_id, ranges)| {
-                let mut selection =
-                    row_selection_from_row_ranges(ranges.into_iter(), row_group_size);
+                let selection = row_selection_from_row_ranges(ranges.into_iter(), row_group_size);
                 let row_count = selection.row_count();
-                let selector_len = selector_len(&mut selection);
+                let selector_len = selector_len(&selection);
                 total_row_count += row_count;
                 total_selector_len += selector_len;
                 (
@@ -290,9 +289,9 @@ impl RowGroupSelection {
             let Some(y) = self.selection_in_rg.get(rg_id) else {
                 continue;
             };
-            let mut selection = x.selection.intersection(&y.selection);
+            let selection = x.selection.intersection(&y.selection);
             let row_count = selection.row_count();
-            let selector_len = selector_len(&mut selection);
+            let selector_len = selector_len(&selection);
             if row_count > 0 {
                 total_row_count += row_count;
                 total_selector_len += selector_len;
@@ -460,11 +459,8 @@ fn add_or_merge_selector(selectors: &mut Vec<RowSelector>, count: usize, is_skip
 }
 
 /// Returns the length of the selectors in the selection.
-fn selector_len(selection: &mut RowSelection) -> usize {
-    let selectors: Vec<RowSelector> = std::mem::take(selection).into();
-    let len = selectors.len();
-    *selection = RowSelection::from(selectors);
-    len
+fn selector_len(selection: &RowSelection) -> usize {
+    selection.iter().size_hint().0
 }
 
 #[cfg(test)]
@@ -474,14 +470,18 @@ mod tests {
 
     #[test]
     fn test_selector_len() {
-        let mut selection = RowSelection::from(vec![RowSelector::skip(5), RowSelector::select(5)]);
-        assert_eq!(selector_len(&mut selection), 2);
+        let selection = RowSelection::from(vec![RowSelector::skip(5), RowSelector::select(5)]);
+        assert_eq!(selector_len(&selection), 2);
 
-        let mut selection = RowSelection::from(vec![RowSelector::skip(5), RowSelector::select(5)]);
-        assert_eq!(selector_len(&mut selection), 2);
+        let selection = RowSelection::from(vec![
+            RowSelector::select(5),
+            RowSelector::skip(5),
+            RowSelector::select(5),
+        ]);
+        assert_eq!(selector_len(&selection), 3);
 
-        let mut selection = RowSelection::from(vec![]);
-        assert_eq!(selector_len(&mut selection), 0);
+        let selection = RowSelection::from(vec![]);
+        assert_eq!(selector_len(&selection), 0);
     }
 
     #[test]
