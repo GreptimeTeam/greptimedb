@@ -129,11 +129,6 @@ impl Inserter {
 
         let mut mask_per_datanode = HashMap::with_capacity(region_masks.len());
         for (region_number, mask) in region_masks {
-            let selected_rows = mask.true_count();
-            if selected_rows == 0 {
-                // skip region without data.
-                continue;
-            }
             let region_id = RegionId::new(table_id, region_number);
             let datanode = self
                 .partition_manager
@@ -143,7 +138,7 @@ impl Inserter {
             mask_per_datanode
                 .entry(datanode)
                 .or_insert_with(Vec::new)
-                .push((region_id, mask, selected_rows));
+                .push((region_id, mask));
         }
 
         let wait_all_datanode_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
@@ -156,13 +151,13 @@ impl Inserter {
 
         let mut raw_data_bytes = None;
         for (peer, masks) in mask_per_datanode {
-            for (region_id, mask, selected_rows) in masks {
+            for (region_id, mask) in masks {
                 let rb = record_batch.clone();
                 let schema_bytes = schema_bytes.clone();
                 let record_batch_schema = record_batch_schema.clone();
                 let node_manager = self.node_manager.clone();
                 let peer = peer.clone();
-                let raw_data = if selected_rows == rb.num_rows() {
+                let raw_data = if mask.select_all() {
                     Some(
                         raw_data_bytes
                             .get_or_insert_with(|| Bytes::from(data.encode_to_vec()))
@@ -173,14 +168,14 @@ impl Inserter {
                 };
                 let handle: common_runtime::JoinHandle<error::Result<api::region::RegionResponse>> =
                     common_runtime::spawn_global(async move {
-                        let payload = if selected_rows == rb.num_rows() {
+                        let payload = if mask.select_all() {
                             // SAFETY: raw data must be present, we can avoid re-encoding.
                             raw_data.unwrap()
                         } else {
                             let filter_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
                                 .with_label_values(&["filter"])
                                 .start_timer();
-                            let rb = arrow::compute::filter_record_batch(&rb, &mask)
+                            let rb = arrow::compute::filter_record_batch(&rb, mask.array())
                                 .context(error::ComputeArrowSnafu)?;
                             filter_timer.observe_duration();
                             metrics::BULK_REQUEST_ROWS

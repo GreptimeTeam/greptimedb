@@ -14,6 +14,7 @@
 
 use std::any::Any;
 use std::cmp::Ordering;
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -34,6 +35,7 @@ use crate::error::{
     UndefinedColumnSnafu,
 };
 use crate::expr::{Operand, PartitionExpr, RestrictedOp};
+use crate::partition::RegionMask;
 use crate::PartitionRule;
 
 /// The default region number when no partition exprs are matched.
@@ -209,14 +211,15 @@ impl MultiDimPartitionRule {
     pub fn split_record_batch(
         &self,
         record_batch: &RecordBatch,
-    ) -> Result<HashMap<RegionNumber, BooleanArray>> {
+    ) -> Result<HashMap<RegionNumber, RegionMask>> {
         let num_rows = record_batch.num_rows();
         if self.regions.len() == 1 {
-            return Ok(
-                [(self.regions[0], BooleanArray::from(vec![true; num_rows]))]
-                    .into_iter()
-                    .collect(),
-            );
+            return Ok([(
+                self.regions[0],
+                RegionMask::from(BooleanArray::from(vec![true; num_rows])),
+            )]
+            .into_iter()
+            .collect());
         }
         let physical_exprs = {
             let cache_read_guard = self.physical_expr_cache.read().unwrap();
@@ -240,32 +243,49 @@ impl MultiDimPartitionRule {
             }
         };
 
-        let mut result: HashMap<u32, BooleanArray> = physical_exprs
+        let mut result: HashMap<u32, RegionMask> = physical_exprs
             .iter()
             .zip(self.regions.iter())
-            .map(|(expr, region_num)| {
-                let ColumnarValue::Array(column) = expr
+            .filter_map(|(expr, region_num)| {
+                let col_val = match expr
                     .evaluate(record_batch)
-                    .context(error::EvaluateRecordBatchSnafu)?
-                else {
+                    .context(error::EvaluateRecordBatchSnafu)
+                {
+                    Ok(array) => array,
+                    Err(e) => {
+                        return Some(Err(e));
+                    }
+                };
+                let ColumnarValue::Array(column) = col_val else {
                     unreachable!("Expected an array")
                 };
-                Ok((
-                    *region_num,
-                    column
+                let array =
+                    match column
                         .as_any()
                         .downcast_ref::<BooleanArray>()
                         .with_context(|| error::UnexpectedColumnTypeSnafu {
                             data_type: column.data_type().clone(),
-                        })?
-                        .clone(),
-                ))
+                        }) {
+                        Ok(array) => array,
+                        Err(e) => {
+                            return Some(Err(e));
+                        }
+                    };
+                let selected_rows = array.true_count();
+                if selected_rows == 0 {
+                    // skip empty region in results.
+                    return None;
+                }
+                Some(Ok((
+                    *region_num,
+                    RegionMask::new(array.clone(), selected_rows),
+                )))
             })
             .collect::<error::Result<_>>()?;
 
         let mut selected = BooleanArray::new(BooleanBuffer::new_unset(num_rows), None);
-        for region_selection in result.values() {
-            selected = arrow::compute::kernels::boolean::or(&selected, region_selection)
+        for region_mask in result.values() {
+            selected = arrow::compute::kernels::boolean::or(&selected, region_mask.array())
                 .context(error::ComputeArrowKernelSnafu)?;
         }
 
@@ -277,12 +297,20 @@ impl MultiDimPartitionRule {
         // find unselected rows and assign to default region
         let unselected = arrow::compute::kernels::boolean::not(&selected)
             .context(error::ComputeArrowKernelSnafu)?;
-        let default_region_selection = result
-            .entry(DEFAULT_REGION)
-            .or_insert_with(|| unselected.clone());
-        *default_region_selection =
-            arrow::compute::kernels::boolean::or(default_region_selection, &unselected)
-                .context(error::ComputeArrowKernelSnafu)?;
+        match result.entry(DEFAULT_REGION) {
+            Entry::Occupied(mut o) => {
+                // merge default region with unselected rows.
+                let default_region_mask = RegionMask::from(
+                    arrow::compute::kernels::boolean::or(o.get().array(), &unselected)
+                        .context(error::ComputeArrowKernelSnafu)?,
+                );
+                o.insert(default_region_mask);
+            }
+            Entry::Vacant(v) => {
+                // default region has no rows, simply put all unselected rows to default region.
+                v.insert(RegionMask::from(unselected));
+            }
+        }
         Ok(result)
     }
 }
@@ -303,7 +331,7 @@ impl PartitionRule for MultiDimPartitionRule {
     fn split_record_batch(
         &self,
         record_batch: &RecordBatch,
-    ) -> Result<HashMap<RegionNumber, BooleanArray>> {
+    ) -> Result<HashMap<RegionNumber, RegionMask>> {
         self.split_record_batch(record_batch)
     }
 }
@@ -845,7 +873,7 @@ mod test_split_record_batch {
         assert_eq!(result.len(), expected.len());
         for (region, value) in &result {
             assert_eq!(
-                value,
+                value.array(),
                 expected.get(region).unwrap(),
                 "failed on region: {}",
                 region
@@ -904,7 +932,7 @@ mod test_split_record_batch {
         let expected = rule.split_record_batch_naive(&batch).unwrap();
         assert_eq!(result.len(), expected.len());
         for (region, value) in &result {
-            assert_eq!(value, expected.get(region).unwrap());
+            assert_eq!(value.array(), expected.get(region).unwrap());
         }
     }
 
@@ -937,9 +965,8 @@ mod test_split_record_batch {
             .unwrap();
         let result = rule.split_record_batch(&batch).unwrap();
         let expected = rule.split_record_batch_naive(&batch).unwrap();
-        assert_eq!(result.len(), expected.len());
         for (region, value) in &result {
-            assert_eq!(value, expected.get(region).unwrap());
+            assert_eq!(value.array(), expected.get(region).unwrap());
         }
     }
 }

@@ -136,10 +136,10 @@ mod tests {
 
     use api::v1::value::ValueData;
     use api::v1::{ColumnDataType, SemanticType};
-    use datatypes::arrow::array::BooleanArray;
     use serde::{Deserialize, Serialize};
 
     use super::*;
+    use crate::partition::RegionMask;
     use crate::PartitionRule;
 
     fn mock_rows() -> Rows {
@@ -214,7 +214,7 @@ mod tests {
         fn split_record_batch(
             &self,
             _record_batch: &datatypes::arrow::array::RecordBatch,
-        ) -> Result<HashMap<RegionNumber, BooleanArray>> {
+        ) -> Result<HashMap<RegionNumber, RegionMask>> {
             unimplemented!()
         }
     }
@@ -244,7 +244,7 @@ mod tests {
         fn split_record_batch(
             &self,
             _record_batch: &datatypes::arrow::array::RecordBatch,
-        ) -> Result<HashMap<RegionNumber, BooleanArray>> {
+        ) -> Result<HashMap<RegionNumber, RegionMask>> {
             unimplemented!()
         }
     }
@@ -268,7 +268,7 @@ mod tests {
         fn split_record_batch(
             &self,
             _record_batch: &datatypes::arrow::array::RecordBatch,
-        ) -> Result<HashMap<RegionNumber, BooleanArray>> {
+        ) -> Result<HashMap<RegionNumber, RegionMask>> {
             unimplemented!()
         }
     }
