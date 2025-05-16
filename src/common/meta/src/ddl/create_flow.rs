@@ -271,7 +271,7 @@ impl CreateFlowProcedure {
             CacheIdent::CreateFlow(CreateFlow {
                 flow_id,
                 source_table_ids: self.data.source_table_ids.clone(),
-                flow_part2peers,
+                partition_to_peer_mapping: flow_part2peers,
             }),
             CacheIdent::FlowId(flow_id),
         ]);

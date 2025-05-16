@@ -98,7 +98,7 @@ async fn handle_create_flow(
     CreateFlow {
         flow_id,
         source_table_ids,
-        flow_part2peers: flow_part2nodes,
+        partition_to_peer_mapping: flow_part2nodes,
     }: &CreateFlow,
 ) {
     for table_id in source_table_ids {
@@ -269,7 +269,7 @@ mod tests {
         let ident = vec![CacheIdent::CreateFlow(CreateFlow {
             flow_id: 2001,
             source_table_ids: vec![1024, 1025],
-            flow_part2peers: (1..=5).map(|i| (i as u32, Peer::empty(i + 1))).collect(),
+            partition_to_peer_mapping: (1..=5).map(|i| (i as u32, Peer::empty(i + 1))).collect(),
         })];
         cache.invalidate(&ident).await.unwrap();
         let set = cache.get(1024).await.unwrap().unwrap();
@@ -286,7 +286,7 @@ mod tests {
         let ident = vec![CacheIdent::CreateFlow(CreateFlow {
             flow_id: 2001,
             source_table_ids: vec![1024, 1025],
-            flow_part2peers: (1..=5).map(|i| (i as u32, Peer::empty(i + 1))).collect(),
+            partition_to_peer_mapping: (1..=5).map(|i| (i as u32, Peer::empty(i + 1))).collect(),
         })];
         cache.invalidate(&ident).await.unwrap();
         let set = cache.get(1024).await.unwrap().unwrap();
@@ -303,7 +303,9 @@ mod tests {
             CacheIdent::CreateFlow(CreateFlow {
                 flow_id: 2001,
                 source_table_ids: vec![1026, 1027],
-                flow_part2peers: (11..=15).map(|i| (i as u32, Peer::empty(i + 1))).collect(),
+                partition_to_peer_mapping: (11..=15)
+                    .map(|i| (i as u32, Peer::empty(i + 1)))
+                    .collect(),
             }),
             CacheIdent::FlowId(2001),
         ];
@@ -333,18 +335,24 @@ mod tests {
             CacheIdent::CreateFlow(CreateFlow {
                 flow_id: 2001,
                 source_table_ids: vec![1024, 1025],
-                flow_part2peers: (1..=5).map(|i| (i as u32, Peer::empty(i + 1))).collect(),
+                partition_to_peer_mapping: (1..=5)
+                    .map(|i| (i as u32, Peer::empty(i + 1)))
+                    .collect(),
             }),
             CacheIdent::CreateFlow(CreateFlow {
                 flow_id: 2002,
                 source_table_ids: vec![1024, 1025],
-                flow_part2peers: (11..=12).map(|i| (i as u32, Peer::empty(i + 1))).collect(),
+                partition_to_peer_mapping: (11..=12)
+                    .map(|i| (i as u32, Peer::empty(i + 1)))
+                    .collect(),
             }),
             // same flownode that hold multiple flows
             CacheIdent::CreateFlow(CreateFlow {
                 flow_id: 2003,
                 source_table_ids: vec![1024, 1025],
-                flow_part2peers: (1..=5).map(|i| (i as u32, Peer::empty(i + 1))).collect(),
+                partition_to_peer_mapping: (1..=5)
+                    .map(|i| (i as u32, Peer::empty(i + 1)))
+                    .collect(),
             }),
         ];
         cache.invalidate(&ident).await.unwrap();

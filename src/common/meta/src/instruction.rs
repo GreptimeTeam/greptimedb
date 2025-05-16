@@ -188,7 +188,7 @@ pub struct CreateFlow {
     pub flow_id: FlowId,
     pub source_table_ids: Vec<TableId>,
     /// Mapping of flow partition to peer information
-    pub flow_part2peers: Vec<(FlowPartitionId, Peer)>,
+    pub partition_to_peer_mapping: Vec<(FlowPartitionId, Peer)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
