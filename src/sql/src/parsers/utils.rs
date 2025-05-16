@@ -41,7 +41,7 @@ use crate::error::{
 /// Convert a parser expression to a scalar value. This function will try the
 /// best to resolve and reduce constants. Exprs like `1 + 1` or `now()` can be
 /// handled properly.
-pub fn parser_expr_to_scalar_value(expr: sqlparser::ast::Expr) -> Result<ScalarValue> {
+pub fn parser_expr_to_scalar_value_literal(expr: sqlparser::ast::Expr) -> Result<ScalarValue> {
     // 1. convert parser expr to logical expr
     let empty_df_schema = DFSchema::empty();
     let logical_expr = SqlToRel::new(&StubContextProvider::default())

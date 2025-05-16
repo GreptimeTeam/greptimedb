@@ -42,7 +42,7 @@ fn format_tql(
     lookback: Option<&str>,
     query: &str,
 ) -> std::fmt::Result {
-    write!(f, "({start}, {end}, {step}")?;
+    write!(f, "({start}, {end}, '{step}'")?;
     if let Some(lookback) = lookback {
         write!(f, ", {lookback}")?;
     }
