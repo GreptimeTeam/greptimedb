@@ -252,7 +252,7 @@ impl TempFileCleaner {
     ) {
         // We don't know the actual suffix of the file under atomic dir, so we have
         // to list the dir. The cost should be acceptable as there won't be to many files.
-        let Ok(entries) = local_store.list(ATOMIC_FS_PATH).await.inspect_err(|e| {
+        let Ok(entries) = local_store.list(ATOMIC_WRITE_DIR).await.inspect_err(|e| {
             if e.kind() != ErrorKind::NotFound {
                 common_telemetry::error!(e; "Failed to list tmp files for {:?}", names_to_remove)
             }
