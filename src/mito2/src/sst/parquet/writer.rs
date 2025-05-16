@@ -36,7 +36,7 @@ use store_api::storage::SequenceNumber;
 use tokio::io::AsyncWrite;
 use tokio_util::compat::{Compat, FuturesAsyncWriteCompatExt};
 
-use crate::access_layer::{FilePathProvider, SstInfoArray};
+use crate::access_layer::{FilePathProvider, SstInfoArray, TempFileCleaner};
 use crate::error::{InvalidMetadataSnafu, OpenDalSnafu, Result, WriteParquetSnafu};
 use crate::read::{Batch, Source};
 use crate::sst::file::FileId;
@@ -61,6 +61,8 @@ pub struct ParquetWriter<F: WriterFactory, I: IndexerBuilder, P: FilePathProvide
     /// Current active indexer.
     current_indexer: Option<Indexer>,
     bytes_written: Arc<AtomicUsize>,
+    /// Cleaner to remove temp files on failure.
+    file_cleaner: Option<TempFileCleaner>,
 }
 
 pub trait WriterFactory {
@@ -105,6 +107,11 @@ where
         )
         .await
     }
+
+    pub(crate) fn with_file_cleaner(mut self, cleaner: TempFileCleaner) -> Self {
+        self.file_cleaner = Some(cleaner);
+        self
+    }
 }
 
 impl<F, I, P> ParquetWriter<F, I, P>
@@ -132,6 +139,7 @@ where
             indexer_builder,
             current_indexer: Some(indexer),
             bytes_written: Arc::new(AtomicUsize::new(0)),
+            file_cleaner: None,
         }
     }
 
@@ -152,6 +160,25 @@ where
     ///
     /// Returns the [SstInfo] if the SST is written.
     pub async fn write_all(
+        &mut self,
+        source: Source,
+        override_sequence: Option<SequenceNumber>, // override the `sequence` field from `Source`
+        opts: &WriteOptions,
+    ) -> Result<SstInfoArray> {
+        let res = self
+            .write_all_without_cleaning(source, override_sequence, opts)
+            .await;
+        if res.is_err() {
+            // Clean tmp files explicitly on failure.
+            let file_id = self.current_file;
+            if let Some(cleaner) = &self.file_cleaner {
+                cleaner.clean_by_file_id(file_id).await;
+            }
+        }
+        res
+    }
+
+    async fn write_all_without_cleaning(
         &mut self,
         mut source: Source,
         override_sequence: Option<SequenceNumber>, // override the `sequence` field from `Source`
