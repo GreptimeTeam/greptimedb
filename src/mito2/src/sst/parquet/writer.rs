@@ -135,6 +135,11 @@ where
         }
     }
 
+    /// Returns current file to write.
+    pub(crate) fn current_file(&self) -> FileId {
+        self.current_file
+    }
+
     async fn get_or_create_indexer(&mut self) -> &mut Indexer {
         match self.current_indexer {
             None => {
