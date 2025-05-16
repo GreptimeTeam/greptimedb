@@ -340,9 +340,10 @@ fn make_region_bulk_inserts(request: BulkInsertRequest) -> Result<Vec<(RegionId,
     let schema_data = FlightData::decode(request.schema.clone()).context(ProstSnafu)?;
     let payload_data = FlightData::decode(request.payload.clone()).context(ProstSnafu)?;
     let mut decoder = FlightDecoder::default();
-    let _ = decoder.try_decode(schema_data).context(FlightCodecSnafu)?;
-    let FlightMessage::Recordbatch(rb) =
-        decoder.try_decode(payload_data).context(FlightCodecSnafu)?
+    let _ = decoder.try_decode(&schema_data).context(FlightCodecSnafu)?;
+    let FlightMessage::Recordbatch(rb) = decoder
+        .try_decode(&payload_data)
+        .context(FlightCodecSnafu)?
     else {
         unreachable!("Always expect record batch message after schema");
     };
