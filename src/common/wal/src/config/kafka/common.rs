@@ -23,10 +23,15 @@ use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 
 /// The default backoff config for kafka client.
+///
+/// If the operation fails, the client will retry 3 times.
+/// The backoff time is 100ms, 300ms, 900ms.
 pub const DEFAULT_BACKOFF_CONFIG: BackoffConfig = BackoffConfig {
     init_backoff: Duration::from_millis(100),
     max_backoff: Duration::from_secs(1),
     base: 3.0,
+    // The deadline shouldn't be too long,
+    // otherwise the client will block the worker loop for a long time.
     deadline: Some(Duration::from_secs(3)),
 };
 

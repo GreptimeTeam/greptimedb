@@ -78,31 +78,31 @@ impl KafkaTopicPool {
     }
 
     /// Tries to activate the topic manager when metasrv becomes the leader.
+    ///
     /// First tries to restore persisted topics from the kv backend.
-    /// If not enough topics retrieved, it will try to contact the Kafka cluster and request creating more topics.
+    /// If there are unprepared topics (topics that exist in the configuration but not in the kv backend),
+    /// it will create these topics in Kafka if `auto_create_topics` is enabled.
+    ///
+    /// Then it prepares all unprepared topics by appending a noop record if the topic is empty,
+    /// and persists them in the kv backend for future use.
     pub async fn activate(&self) -> Result<()> {
         let num_topics = self.topics.len();
         ensure!(num_topics > 0, InvalidNumTopicsSnafu { num_topics });
 
-        let topics_to_be_created = self
-            .topic_manager
-            .get_topics_to_create(&self.topics)
-            .await?;
+        let unprepared_topics = self.topic_manager.unprepare_topics(&self.topics).await?;
 
-        if !topics_to_be_created.is_empty() {
+        if !unprepared_topics.is_empty() {
             if self.auto_create_topics {
-                info!("Creating {} topics", topics_to_be_created.len());
-                self.topic_creator
-                    .create_topics(&topics_to_be_created)
-                    .await?;
+                info!("Creating {} topics", unprepared_topics.len());
+                self.topic_creator.create_topics(&unprepared_topics).await?;
             } else {
                 info!("Auto create topics is disabled, skipping topic creation.");
             }
             self.topic_creator
-                .prepare_topics(&topics_to_be_created)
+                .prepare_topics(&unprepared_topics)
                 .await?;
             self.topic_manager
-                .persist_topics(&topics_to_be_created)
+                .persist_prepared_topics(&unprepared_topics)
                 .await?;
         }
         info!("Activated topic pool with {} topics", self.topics.len());
@@ -199,7 +199,7 @@ mod tests {
         let topic_manager = pool.topic_manager();
         // persists one topic info, then pool.activate() will create new topics that not persisted.
         topic_manager
-            .persist_topics(&pool.topics[0..1])
+            .persist_prepared_topics(&pool.topics[0..1])
             .await
             .unwrap();
 
