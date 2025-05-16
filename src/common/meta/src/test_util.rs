@@ -20,6 +20,8 @@ use api::v1::region::{InsertRequests, RegionRequest};
 pub use common_base::AffectedRows;
 use common_query::request::QueryRequest;
 use common_recordbatch::SendableRecordBatchStream;
+use common_wal::config::kafka::common::{KafkaConnectionConfig, KafkaTopicConfig};
+use common_wal::config::kafka::MetasrvKafkaConfig;
 
 use crate::cache_invalidator::DummyCacheInvalidator;
 use crate::ddl::flow_meta::FlowMetadataAllocator;
@@ -37,7 +39,8 @@ use crate::peer::{Peer, PeerLookupService};
 use crate::region_keeper::MemoryRegionKeeper;
 use crate::region_registry::LeaderRegionRegistry;
 use crate::sequence::SequenceBuilder;
-use crate::wal_options_allocator::WalOptionsAllocator;
+use crate::wal_options_allocator::topic_pool::KafkaTopicPool;
+use crate::wal_options_allocator::{build_kafka_topic_creator, WalOptionsAllocator};
 use crate::{DatanodeId, FlownodeId};
 
 #[async_trait::async_trait]
@@ -198,4 +201,35 @@ impl PeerLookupService for NoopPeerLookupService {
     async fn flownode(&self, id: FlownodeId) -> Result<Option<Peer>> {
         Ok(Some(Peer::empty(id)))
     }
+}
+
+/// Create a kafka topic pool for testing.
+pub async fn test_kafka_topic_pool(
+    broker_endpoints: Vec<String>,
+    num_topics: usize,
+    auto_create_topics: bool,
+    topic_name_prefix: Option<&str>,
+) -> KafkaTopicPool {
+    let mut config = MetasrvKafkaConfig {
+        connection: KafkaConnectionConfig {
+            broker_endpoints,
+            ..Default::default()
+        },
+        kafka_topic: KafkaTopicConfig {
+            num_topics,
+
+            ..Default::default()
+        },
+        auto_create_topics,
+        ..Default::default()
+    };
+    if let Some(prefix) = topic_name_prefix {
+        config.kafka_topic.topic_name_prefix = prefix.to_string();
+    }
+    let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
+    let topic_creator = build_kafka_topic_creator(&config.connection, &config.kafka_topic)
+        .await
+        .unwrap();
+
+    KafkaTopicPool::new(&config, kv_backend, topic_creator)
 }

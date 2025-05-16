@@ -52,7 +52,7 @@ use crate::Result;
 
 pub type KafkaClientRef = Arc<Client>;
 
-const DELETE_RECORDS_TIMEOUT: Duration = Duration::from_secs(1);
+const DELETE_RECORDS_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The state of WAL pruning.
 #[derive(Debug, Serialize, Deserialize)]
@@ -558,6 +558,7 @@ mod tests {
                 topic_name = format!("test_procedure_execution-{}", topic_name);
                 let mut env = TestEnv::new();
                 let context = env.build_wal_prune_context(broker_endpoints).await;
+                TestEnv::prepare_topic(&context.client, &topic_name).await;
                 let mut procedure = WalPruneProcedure::new(topic_name.clone(), context, 10, None);
 
                 // Before any data in kvbackend is mocked, should return a retryable error.
