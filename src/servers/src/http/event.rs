@@ -431,7 +431,8 @@ pub struct PipelineDryrunParams {
     pub pipeline_name: Option<String>,
     pub pipeline_version: Option<String>,
     pub pipeline: Option<String>,
-    pub data: Vec<Value>,
+    pub data_type: Option<String>,
+    pub data: String,
 }
 
 /// Check if the payload is valid json
@@ -474,6 +475,18 @@ fn add_step_info_for_pipeline_dryrun_error(step_msg: &str, e: Error) -> Response
     (status_code_to_http_status(&e.status_code()), body).into_response()
 }
 
+fn parse_dryrun_data(data_type: String, data: String) -> Result<Vec<PipelineMap>> {
+    let content_type = ContentType::from_str(&data_type);
+    if content_type.is_err() {
+        return InvalidParameterSnafu {
+            reason: format!("invalid content type: {}, expected: one of: application/json, text/plain, application/x-ndjson", data_type),
+        }
+        .fail();
+    }
+    // Safety : the content type is valid
+    extract_pipeline_value_by_content_type(content_type.unwrap(), Bytes::from(data), false)
+}
+
 #[axum_macros::debug_handler]
 pub async fn pipeline_dryrun(
     State(log_state): State<LogState>,
@@ -489,7 +502,10 @@ pub async fn pipeline_dryrun(
 
     match check_pipeline_dryrun_params_valid(&payload) {
         Some(params) => {
-            let data = pipeline::json_array_to_map(params.data).context(PipelineSnafu)?;
+            let data = parse_dryrun_data(
+                params.data_type.unwrap_or("application/json".to_string()),
+                params.data,
+            )?;
 
             check_data_valid(data.len())?;
 
