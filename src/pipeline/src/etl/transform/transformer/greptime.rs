@@ -23,10 +23,12 @@ use api::v1::column_data_type_extension::TypeExt;
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnDataTypeExtension, JsonTypeExtension, SemanticType};
 use coerce::{coerce_columns, coerce_value};
+use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use greptime_proto::v1::{ColumnSchema, Row, Rows, Value as GreptimeValue};
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use serde_json::Number;
+use session::context::Channel;
 
 use crate::error::{
     IdentifyPipelineColumnTypeMismatchSnafu, ReachedMaxNestedLevelsSnafu, Result,
@@ -38,7 +40,7 @@ use crate::etl::transform::index::Index;
 use crate::etl::transform::{Transform, Transforms};
 use crate::etl::value::{Timestamp, Value};
 use crate::etl::PipelineMap;
-use crate::{IdentityTimeIndex, PipelineContext};
+use crate::PipelineContext;
 
 const DEFAULT_GREPTIME_TIMESTAMP_COLUMN: &str = "greptime_timestamp";
 const DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING: usize = 10;
@@ -332,61 +334,87 @@ fn resolve_number_schema(
     )
 }
 
+fn calc_ts(p_ctx: &PipelineContext, values: &PipelineMap) -> Result<Option<ValueData>> {
+    match p_ctx.channel {
+        Channel::Prometheus => Ok(Some(ValueData::TimestampMillisecondValue(
+            values
+                .get(GREPTIME_TIMESTAMP)
+                .and_then(|v| v.as_i64())
+                .unwrap_or_default(),
+        ))),
+        _ => {
+            let custom_ts = p_ctx.pipeline_definition.get_custom_ts();
+            match custom_ts {
+                Some(ts) => {
+                    let ts_field = values.get(ts.get_column_name());
+                    Some(ts.get_timestamp(ts_field)).transpose()
+                }
+                None => Ok(Some(ValueData::TimestampNanosecondValue(
+                    chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default(),
+                ))),
+            }
+        }
+    }
+}
+
 fn values_to_row(
     schema_info: &mut SchemaInfo,
     values: PipelineMap,
-    custom_ts: Option<&IdentityTimeIndex>,
+    pipeline_ctx: &PipelineContext<'_>,
 ) -> Result<Row> {
     let mut row: Vec<GreptimeValue> = Vec::with_capacity(schema_info.schema.len());
+    let custom_ts = pipeline_ctx.pipeline_definition.get_custom_ts();
 
-    // set time index value
-    let value_data = match custom_ts {
-        Some(ts) => {
-            let ts_field = values.get(ts.get_column_name());
-            Some(ts.get_timestamp(ts_field)?)
-        }
-        None => Some(ValueData::TimestampNanosecondValue(
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default(),
-        )),
-    };
+    // calculate timestamp value based on the channel
+    let ts = calc_ts(pipeline_ctx, &values)?;
 
-    row.push(GreptimeValue { value_data });
+    row.push(GreptimeValue { value_data: ts });
 
     for _ in 1..schema_info.schema.len() {
         row.push(GreptimeValue { value_data: None });
     }
 
+    // skip ts column
+    let ts_column_name = custom_ts
+        .as_ref()
+        .map_or(DEFAULT_GREPTIME_TIMESTAMP_COLUMN, |ts| ts.get_column_name());
+
     for (column_name, value) in values {
-        // skip ts column
-        let ts_column = custom_ts
-            .as_ref()
-            .map_or(DEFAULT_GREPTIME_TIMESTAMP_COLUMN, |ts| ts.get_column_name());
-        if column_name == ts_column {
+        if column_name == ts_column_name {
             continue;
         }
 
-        let index = schema_info.index.get(&column_name).copied();
-        resolve_value(index, value, column_name, &mut row, schema_info)?;
+        resolve_value(value, column_name, &mut row, schema_info, pipeline_ctx)?;
     }
     Ok(Row { values: row })
 }
 
+fn decide_semantic(p_ctx: &PipelineContext, column_name: &str) -> i32 {
+    if p_ctx.channel == Channel::Prometheus && column_name != GREPTIME_VALUE {
+        SemanticType::Tag as i32
+    } else {
+        SemanticType::Field as i32
+    }
+}
+
 fn resolve_value(
-    index: Option<usize>,
     value: Value,
     column_name: String,
     row: &mut Vec<GreptimeValue>,
     schema_info: &mut SchemaInfo,
+    p_ctx: &PipelineContext,
 ) -> Result<()> {
+    let index = schema_info.index.get(&column_name).copied();
     let mut resolve_simple_type =
         |value_data: ValueData, column_name: String, data_type: ColumnDataType| {
+            let semantic_type = decide_semantic(p_ctx, &column_name);
             resolve_schema(
                 index,
                 value_data,
                 ColumnSchema {
                     column_name,
                     datatype: data_type as i32,
-                    semantic_type: SemanticType::Field as i32,
+                    semantic_type,
                     datatype_extension: None,
                     options: None,
                 },
@@ -499,16 +527,20 @@ fn identity_pipeline_inner(
         column_name: custom_ts
             .map(|ts| ts.get_column_name().clone())
             .unwrap_or_else(|| DEFAULT_GREPTIME_TIMESTAMP_COLUMN.to_string()),
-        datatype: custom_ts
-            .map(|c| c.get_datatype())
-            .unwrap_or(ColumnDataType::TimestampNanosecond) as i32,
+        datatype: custom_ts.map(|c| c.get_datatype()).unwrap_or_else(|| {
+            if pipeline_ctx.channel == Channel::Prometheus {
+                ColumnDataType::TimestampMillisecond
+            } else {
+                ColumnDataType::TimestampNanosecond
+            }
+        }) as i32,
         semantic_type: SemanticType::Timestamp as i32,
         datatype_extension: None,
         options: None,
     });
 
     for values in pipeline_maps {
-        let row = values_to_row(&mut schema_info, values, custom_ts)?;
+        let row = values_to_row(&mut schema_info, values, pipeline_ctx)?;
         rows.push(row);
     }
 
@@ -622,8 +654,11 @@ mod tests {
     #[test]
     fn test_identify_pipeline() {
         let params = GreptimePipelineParams::default();
-        let pipeline_ctx =
-            PipelineContext::new(&PipelineDefinition::GreptimeIdentityPipeline(None), &params);
+        let pipeline_ctx = PipelineContext::new(
+            &PipelineDefinition::GreptimeIdentityPipeline(None),
+            &params,
+            Channel::Unknown,
+        );
         {
             let array = vec![
                 serde_json::json!({

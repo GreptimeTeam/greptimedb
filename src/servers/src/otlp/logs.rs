@@ -75,7 +75,8 @@ pub async fn to_grpc_insert_requests(
             let data = parse_export_logs_service_request(request);
             let array = pipeline::json_array_to_map(data).context(PipelineSnafu)?;
 
-            let pipeline_ctx = PipelineContext::new(&pipeline_def, &pipeline_params);
+            let pipeline_ctx =
+                PipelineContext::new(&pipeline_def, &pipeline_params, query_ctx.channel());
             let inserts = run_pipeline(
                 &pipeline_handler,
                 &pipeline_ctx,

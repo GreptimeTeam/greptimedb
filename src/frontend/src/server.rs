@@ -102,6 +102,7 @@ where
             builder = builder
                 .with_prom_handler(
                     self.instance.clone(),
+                    Some(self.instance.clone()),
                     opts.prom_store.with_metric_engine,
                     opts.http.is_strict_mode,
                 )
