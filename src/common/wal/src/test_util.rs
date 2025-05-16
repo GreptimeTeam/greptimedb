@@ -31,3 +31,33 @@ where
 
     test(endpoints).await
 }
+
+/// Get the kafka endpoints from the environment variable `GT_KAFKA_ENDPOINTS`.
+///
+/// The format of the environment variable is:
+/// ```
+/// GT_KAFKA_ENDPOINTS=localhost:9092,localhost:9093
+/// ```
+pub fn get_kafka_endpoints() -> Vec<String> {
+    let endpoints = std::env::var("GT_KAFKA_ENDPOINTS").unwrap();
+    endpoints
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .collect::<Vec<_>>()
+}
+
+#[macro_export]
+/// Skip the test if the environment variable `GT_KAFKA_ENDPOINTS` is not set.
+///
+/// The format of the environment variable is:
+/// ```
+/// GT_KAFKA_ENDPOINTS=localhost:9092,localhost:9093
+/// ```
+macro_rules! maybe_skip_kafka_integration_test {
+    () => {
+        if std::env::var("GT_KAFKA_ENDPOINTS").is_err() {
+            common_telemetry::warn!("The endpoints is empty, skipping the test");
+            return;
+        }
+    };
+}

@@ -145,6 +145,12 @@ pub(crate) async fn prepare_test_for_kafka_log_store(factory: &LogStoreFactory) 
 }
 
 pub(crate) async fn append_noop_record(client: &Client, topic: &str) {
+    let controller_client = client.controller_client().unwrap();
+    controller_client
+        .create_topic(topic, 1, 1, 5000)
+        .await
+        .unwrap();
+
     let partition_client = client
         .partition_client(topic, 0, UnknownTopicHandling::Retry)
         .await
