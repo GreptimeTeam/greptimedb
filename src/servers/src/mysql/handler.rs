@@ -483,6 +483,29 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             .with_label_values(&[crate::metrics::METRIC_MYSQL_TEXTQUERY, db.as_str()])
             .start_timer();
 
+        let mut query = query.trim_start();
+
+        loop {
+            if query.starts_with("--") || query.starts_with('#') {
+                // Skip single line comment
+                if let Some(pos) = query.find('\n') {
+                    query = &query[pos + 1..].trim_start();
+                } else {
+                    let outputs = vec![Ok(Output::new_with_affected_rows(0))];
+                    writer::write_output(writer, query_ctx, outputs).await?;
+                    return Ok(());
+                }
+            } else {
+                break;
+            }
+        }
+
+        if query.is_empty() {
+            let outputs = vec![Ok(Output::new_with_affected_rows(0))];
+            writer::write_output(writer, query_ctx, outputs).await?;
+            return Ok(());
+        }
+
         let query_upcase = query.to_uppercase();
         if query_upcase.starts_with("PREPARE ") {
             match ParserContext::parse_mysql_prepare_stmt(query, query_ctx.sql_dialect()) {
