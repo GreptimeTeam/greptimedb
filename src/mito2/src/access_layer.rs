@@ -44,7 +44,7 @@ pub type SstInfoArray = SmallVec<[SstInfo; 2]>;
 
 pub const ATOMIC_WRITE_DIR: &str = "tmp/";
 /// For compatibility. Remove this after a major version release.
-pub const OLD_ATOMIC_WRITE_DIR: &str = "tmp/";
+pub const OLD_ATOMIC_WRITE_DIR: &str = ".tmp/";
 
 /// A layer to access SST files under the same directory.
 pub struct AccessLayer {
