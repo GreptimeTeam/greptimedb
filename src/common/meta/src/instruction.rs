@@ -24,7 +24,7 @@ use table::table_name::TableName;
 
 use crate::flow_name::FlowName;
 use crate::key::schema_name::SchemaName;
-use crate::key::FlowId;
+use crate::key::{FlowId, FlowPartitionId};
 use crate::peer::Peer;
 use crate::{DatanodeId, FlownodeId};
 
@@ -184,14 +184,18 @@ pub enum CacheIdent {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CreateFlow {
+    pub flow_id: FlowId,
     pub source_table_ids: Vec<TableId>,
-    pub flownodes: Vec<Peer>,
+    /// Vec of (partition_id, flownode_id, peer)
+    pub flow_part2peers: Vec<(FlowPartitionId, FlownodeId, Peer)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DropFlow {
+    pub flow_id: FlowId,
     pub source_table_ids: Vec<TableId>,
-    pub flownode_ids: Vec<FlownodeId>,
+    /// Vec of (partition_id, flownode_id, peer)
+    pub flow_part2node_id: Vec<(FlowPartitionId, FlownodeId)>,
 }
 
 /// Flushes a batch of regions.
