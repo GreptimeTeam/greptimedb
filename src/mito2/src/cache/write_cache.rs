@@ -20,13 +20,13 @@ use std::time::Duration;
 use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, info};
 use futures::AsyncWriteExt;
-use object_store::{ErrorKind, ObjectStore};
+use object_store::ObjectStore;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
 
 use crate::access_layer::{
     new_fs_cache_store, FilePathProvider, RegionFilePathFactory, SstInfoArray, SstWriteRequest,
-    WriteCachePathProvider, ATOMIC_FS_PATH,
+    TempFileCleaner, WriteCachePathProvider,
 };
 use crate::cache::file_cache::{FileCache, FileCacheRef, FileType, IndexKey, IndexValue};
 use crate::error::{self, Result};
@@ -130,6 +130,7 @@ impl WriteCache {
             bloom_filter_index_config: write_request.bloom_filter_index_config,
         };
 
+        let cleaner = TempFileCleaner::new(region_id, store.clone());
         // Write to FileCache.
         let mut writer = ParquetWriter::new_with_object_store(
             store.clone(),
@@ -137,24 +138,12 @@ impl WriteCache {
             indexer,
             path_provider.clone(),
         )
-        .await;
+        .await
+        .with_file_cleaner(cleaner);
 
-        let sst_info = match writer
+        let sst_info = writer
             .write_all(write_request.source, write_request.max_sequence, write_opts)
-            .await
-        {
-            Ok(info) => info,
-            Err(e) => {
-                // Clean tmp files explicitly on failure.
-                let file_id = writer.current_file();
-                let sst_key = IndexKey::new(region_id, file_id, FileType::Parquet).to_string();
-                let index_key = IndexKey::new(region_id, file_id, FileType::Puffin).to_string();
-
-                Self::clean_atomic_dir_files(&store, &[&sst_key, &index_key]).await;
-
-                return Err(e);
-            }
-        };
+            .await?;
 
         timer.stop_and_record();
 
@@ -220,7 +209,8 @@ impl WriteCache {
             .await
         {
             let filename = index_key.to_string();
-            Self::clean_atomic_dir_files(&self.file_cache.local_store(), &[&filename]).await;
+            TempFileCleaner::clean_atomic_dir_files(&self.file_cache.local_store(), &[&filename])
+                .await;
 
             return Err(e);
         }
@@ -371,50 +361,6 @@ impl WriteCache {
         self.file_cache.put(index_key, index_value).await;
 
         Ok(())
-    }
-
-    /// Removes the files from the local atomic dir by their names.
-    async fn clean_atomic_dir_files(local_store: &ObjectStore, names_to_remove: &[&str]) {
-        // We don't know the actual suffix of the file under atomic dir, so we have
-        // to list the dir. The cost should be acceptable as there won't be to many files.
-        let Ok(entries) = local_store.list(ATOMIC_FS_PATH).await.inspect_err(|e| {
-            if e.kind() != ErrorKind::NotFound {
-                common_telemetry::error!(e; "Failed to list tmp files for {:?}", names_to_remove)
-            }
-        }) else {
-            return;
-        };
-
-        // In our case, we can ensure the file id is unique so it is safe to remove all files
-        // with the same file id under the atomic write dir.
-        let actual_files: Vec<_> = entries
-            .into_iter()
-            .filter_map(|entry| {
-                if entry.metadata().is_dir() {
-                    return None;
-                }
-
-                // Remove name that matches files_to_remove.
-                let should_remove = names_to_remove
-                    .iter()
-                    .any(|file| entry.name().starts_with(file));
-                if should_remove {
-                    Some(entry.path().to_string())
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        common_telemetry::warn!(
-            "Clean files {:?} under atomic write dir for {:?}",
-            actual_files,
-            names_to_remove
-        );
-
-        if let Err(e) = local_store.delete_iter(actual_files).await {
-            common_telemetry::error!(e; "Failed to delete tmp file for {:?}", names_to_remove);
-        }
     }
 }
 
