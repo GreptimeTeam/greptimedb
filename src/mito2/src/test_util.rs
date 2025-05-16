@@ -665,6 +665,27 @@ impl TestEnv {
         Arc::new(write_cache)
     }
 
+    /// Creates a write cache from a path.
+    pub async fn create_write_cache_from_path(
+        &self,
+        path: &str,
+        capacity: ReadableSize,
+    ) -> WriteCacheRef {
+        let index_aux_path = self.data_home.path().join("index_aux");
+        let puffin_mgr = PuffinManagerFactory::new(&index_aux_path, 4096, None, None)
+            .await
+            .unwrap();
+        let intm_mgr = IntermediateManager::init_fs(index_aux_path.to_str().unwrap())
+            .await
+            .unwrap();
+
+        let write_cache = WriteCache::new_fs(path, capacity, None, puffin_mgr, intm_mgr)
+            .await
+            .unwrap();
+
+        Arc::new(write_cache)
+    }
+
     pub fn get_schema_metadata_manager(&self) -> SchemaMetadataManagerRef {
         self.schema_metadata_manager.clone()
     }
