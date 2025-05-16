@@ -150,7 +150,7 @@ impl WriteCache {
                 let sst_key = IndexKey::new(region_id, file_id, FileType::Parquet).to_string();
                 let index_key = IndexKey::new(region_id, file_id, FileType::Puffin).to_string();
 
-                Self::clean_atomic_dir_files(&store, &[sst_key.as_str(), index_key.as_str()]).await;
+                Self::clean_atomic_dir_files(&store, &[&sst_key, &index_key]).await;
 
                 return Err(e);
             }
@@ -209,6 +209,25 @@ impl WriteCache {
     /// Downloads a file in `remote_path` from the remote object store to the local cache
     /// (specified by `index_key`).
     pub(crate) async fn download(
+        &self,
+        index_key: IndexKey,
+        remote_path: &str,
+        remote_store: &ObjectStore,
+        file_size: u64,
+    ) -> Result<()> {
+        if let Err(e) = self
+            .download_without_cleaning(index_key, remote_path, remote_store, file_size)
+            .await
+        {
+            let filename = index_key.to_string();
+            Self::clean_atomic_dir_files(&self.file_cache.local_store(), &[&filename]).await;
+
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    async fn download_without_cleaning(
         &self,
         index_key: IndexKey,
         remote_path: &str,
@@ -355,11 +374,11 @@ impl WriteCache {
     }
 
     /// Removes the file from the local atomic dir.
-    async fn clean_atomic_dir_files(local_store: &ObjectStore, files_to_remove: &[&str]) {
+    async fn clean_atomic_dir_files(local_store: &ObjectStore, names_to_remove: &[&str]) {
         // We don't know the actual suffix of the file under atomic dir, so we have
         // to list the dir. The cost should be acceptable as there won't be to many files.
         let Ok(entries) = local_store.list(ATOMIC_FS_PATH).await.inspect_err(
-            |e| common_telemetry::error!(e; "Failed to list tmp files for {:?}", files_to_remove),
+            |e| common_telemetry::error!(e; "Failed to list tmp files for {:?}", names_to_remove),
         ) else {
             return;
         };
@@ -374,7 +393,7 @@ impl WriteCache {
                 }
 
                 // Remove name that matches files_to_remove.
-                let should_remove = files_to_remove
+                let should_remove = names_to_remove
                     .iter()
                     .any(|file| entry.name().starts_with(file));
                 if should_remove {
@@ -388,11 +407,11 @@ impl WriteCache {
         common_telemetry::warn!(
             "Clean files {:?} under atomic write dir for {:?}",
             actual_files,
-            files_to_remove
+            names_to_remove
         );
 
         if let Err(e) = local_store.delete_iter(actual_files).await {
-            common_telemetry::error!(e; "Failed to delete tmp file for {:?}", files_to_remove);
+            common_telemetry::error!(e; "Failed to delete tmp file for {:?}", names_to_remove);
         }
     }
 }

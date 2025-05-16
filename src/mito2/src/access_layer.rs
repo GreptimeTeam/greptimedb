@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use object_store::services::Fs;
-use object_store::util::{join_dir, join_path, with_instrument_layers};
+use object_store::util::{join_dir, with_instrument_layers};
 use object_store::ObjectStore;
 use smallvec::SmallVec;
 use snafu::ResultExt;
@@ -263,18 +263,6 @@ impl WriteCachePathProvider {
             region_id,
             file_cache,
         }
-    }
-
-    /// Returns the index file path in the atomic dir.
-    pub(crate) fn build_atomic_index_file_path(&self, file_id: FileId) -> String {
-        let puffin_key = IndexKey::new(self.region_id, file_id, FileType::Puffin);
-        join_path(ATOMIC_FS_PATH, &puffin_key.to_string())
-    }
-
-    /// Returns the sst file path in the atomic dir.
-    pub(crate) fn build_atomic_sst_file_path(&self, file_id: FileId) -> String {
-        let parquet_file_key = IndexKey::new(self.region_id, file_id, FileType::Parquet);
-        join_path(ATOMIC_FS_PATH, &parquet_file_key.to_string())
     }
 }
 
