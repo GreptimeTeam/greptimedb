@@ -96,7 +96,7 @@ impl Default for SlowQueryOptions {
         Self {
             enable: true,
             record_type: SlowQueriesRecordType::SystemTable,
-            threshold: Some(Duration::from_secs(5)),
+            threshold: Some(Duration::from_secs(30)),
             sample_ratio: Some(1.0),
             ttl: Some("30d".to_string()),
         }

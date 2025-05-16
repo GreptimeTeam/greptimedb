@@ -38,12 +38,13 @@ use crate::sst::parquet::reader::ParquetReaderBuilder;
 use crate::sst::parquet::writer::ParquetWriter;
 use crate::sst::parquet::{SstInfo, WriteOptions};
 
-/// Path prefix of the atomic write path.
-pub(crate) const ATOMIC_FS_PATH: &str = ".tmp/";
-
 pub type AccessLayerRef = Arc<AccessLayer>;
 /// SST write results.
 pub type SstInfoArray = SmallVec<[SstInfo; 2]>;
+
+pub const ATOMIC_WRITE_DIR: &str = "tmp/";
+/// For compatibility. Remove this after a major version release.
+pub const OLD_ATOMIC_WRITE_DIR: &str = ".tmp/";
 
 /// A layer to access SST files under the same directory.
 pub struct AccessLayer {
@@ -293,8 +294,12 @@ impl TempFileCleaner {
 }
 
 pub(crate) async fn new_fs_cache_store(root: &str) -> Result<ObjectStore> {
-    let atomic_write_dir = join_dir(root, ATOMIC_FS_PATH);
+    let atomic_write_dir = join_dir(root, ATOMIC_WRITE_DIR);
     clean_dir(&atomic_write_dir).await?;
+
+    // Compatible code. Remove this after a major release.
+    let old_atomic_temp_dir = join_dir(root, OLD_ATOMIC_WRITE_DIR);
+    clean_dir(&old_atomic_temp_dir).await?;
 
     let builder = Fs::default().root(root).atomic_write_dir(&atomic_write_dir);
     let store = ObjectStore::new(builder).context(OpenDalSnafu)?.finish();
