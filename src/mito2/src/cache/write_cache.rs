@@ -373,7 +373,7 @@ impl WriteCache {
         Ok(())
     }
 
-    /// Removes the file from the local atomic dir.
+    /// Removes the files from the local atomic dir by their names.
     async fn clean_atomic_dir_files(local_store: &ObjectStore, names_to_remove: &[&str]) {
         // We don't know the actual suffix of the file under atomic dir, so we have
         // to list the dir. The cost should be acceptable as there won't be to many files.
