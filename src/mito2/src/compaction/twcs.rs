@@ -24,7 +24,7 @@ use common_time::Timestamp;
 use crate::compaction::buckets::infer_time_bucket;
 use crate::compaction::compactor::CompactionRegion;
 use crate::compaction::picker::{Picker, PickerOutput};
-use crate::compaction::run::{find_sorted_runs, reduce_runs, Item};
+use crate::compaction::run::{find_sorted_runs, merge_seq_files, reduce_runs};
 use crate::compaction::{get_expired_ssts, CompactionOutput};
 use crate::sst::file::{overlaps, FileHandle, Level};
 use crate::sst::version::LevelMeta;
@@ -62,7 +62,7 @@ impl TwcsPicker {
     ) -> Vec<CompactionOutput> {
         let mut output = vec![];
         for (window, files) in time_windows {
-            let sorted_runs = find_sorted_runs(&mut files.files);
+            let mut sorted_runs = find_sorted_runs(&mut files.files);
 
             let (max_runs, _) = if let Some(active_window) = active_window
                 && *window == active_window
@@ -81,7 +81,12 @@ impl TwcsPicker {
             let filter_deleted =
                 !files.overlapping && (found_runs == 1 || max_runs == 1) && !self.append_mode;
 
-            let inputs = reduce_runs(sorted_runs);
+            let inputs = if found_runs > 1 {
+                reduce_runs(sorted_runs)
+            } else {
+                let run = sorted_runs.swap_remove(0);
+                merge_seq_files(run.items(), self.max_output_file_size)
+            };
             let num_inputs = inputs.len();
             info!(
                 "Building compaction output, active window: {:?}, \
@@ -100,40 +105,17 @@ impl TwcsPicker {
                 filter_deleted
             );
 
-            output.push(CompactionOutput {
-                output_level: LEVEL_COMPACTED, // always compact to l1
-                inputs,
-                filter_deleted,
-                output_time_range: None, // we do not enforce output time range in twcs compactions.
-            });
+            if !inputs.is_empty() {
+                output.push(CompactionOutput {
+                    output_level: LEVEL_COMPACTED, // always compact to l1
+                    inputs,
+                    filter_deleted,
+                    output_time_range: None, // we do not enforce output time range in twcs compactions.
+                });
+            }
         }
         output
     }
-}
-
-/// Merges consecutive files so that file num does not exceed `max_file_num`, and chooses
-/// the solution with minimum overhead according to files sizes to be merged.
-/// `enforce_file_num` only merges consecutive files so that it won't create overlapping outputs.
-/// `runs` must be sorted according to time ranges.
-fn enforce_file_num<T: Item>(files: &[T], max_file_num: usize) -> Vec<T> {
-    debug_assert!(files.len() > max_file_num);
-    let to_merge = files.len() - max_file_num + 1;
-    let mut min_penalty = usize::MAX;
-    let mut min_idx = 0;
-
-    for idx in 0..=(files.len() - to_merge) {
-        let current_penalty: usize = files
-            .iter()
-            .skip(idx)
-            .take(to_merge)
-            .map(|f| f.size())
-            .sum();
-        if current_penalty < min_penalty {
-            min_penalty = current_penalty;
-            min_idx = idx;
-        }
-    }
-    files.iter().skip(min_idx).take(to_merge).cloned().collect()
 }
 
 impl Picker for TwcsPicker {
@@ -301,7 +283,7 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
-    use crate::compaction::test_util::{new_file_handle, new_file_handles};
+    use crate::compaction::test_util::new_file_handle;
     use crate::sst::file::{FileId, Level};
 
     #[test]
@@ -585,43 +567,6 @@ mod tests {
     struct ExpectedOutput {
         input_files: Vec<usize>,
         output_level: Level,
-    }
-
-    fn check_enforce_file_num(
-        input_files: &[(i64, i64, u64)],
-        max_file_num: usize,
-        files_to_merge: &[(i64, i64)],
-    ) {
-        let mut files = new_file_handles(input_files);
-        // ensure sorted
-        find_sorted_runs(&mut files);
-        let mut to_merge = enforce_file_num(&files, max_file_num);
-        to_merge.sort_unstable_by_key(|f| f.time_range().0);
-        assert_eq!(
-            files_to_merge.to_vec(),
-            to_merge
-                .iter()
-                .map(|f| {
-                    let (start, end) = f.time_range();
-                    (start.value(), end.value())
-                })
-                .collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn test_enforce_file_num() {
-        check_enforce_file_num(
-            &[(0, 300, 2), (100, 200, 1), (200, 400, 1)],
-            2,
-            &[(100, 200), (200, 400)],
-        );
-
-        check_enforce_file_num(
-            &[(0, 300, 200), (100, 200, 100), (200, 400, 100)],
-            1,
-            &[(0, 300), (100, 200), (200, 400)],
-        );
     }
 
     #[test]

@@ -37,7 +37,7 @@ pub trait Ranged {
     }
 }
 
-pub fn find_overlapping_items<T: Ranged + Clone>(l: &mut Vec<T>, r: &mut Vec<T>) -> Vec<T> {
+pub fn find_overlapping_items<T: Ranged + Clone>(l: &mut [T], r: &mut [T]) -> Vec<T> {
     if l.is_empty() || r.is_empty() {
         return vec![];
     }
@@ -130,8 +130,8 @@ impl Item for FileHandle {
 pub struct SortedRun<T: Item> {
     /// Items to merge
     items: Vec<T>,
-    /// penalty is defined as the total size of merged items.
-    penalty: usize,
+    /// The total size of all items.
+    size: usize,
     /// The lower bound of all items.
     start: Option<T::BoundType>,
     // The upper bound of all items.
@@ -145,7 +145,7 @@ where
     fn default() -> Self {
         Self {
             items: vec![],
-            penalty: 0,
+            size: 0,
             start: None,
             end: None,
         }
@@ -156,9 +156,13 @@ impl<T> SortedRun<T>
 where
     T: Item,
 {
+    pub fn items(&self) -> &[T] {
+        &self.items
+    }
+
     fn push_item(&mut self, t: T) {
         let (file_start, file_end) = t.range();
-        self.penalty += t.size();
+        self.size += t.size();
         self.items.push(t);
         self.start = Some(self.start.map_or(file_start, |v| v.min(file_start)));
         self.end = Some(self.end.map_or(file_end, |v| v.max(file_end)));
@@ -210,20 +214,20 @@ where
     runs
 }
 
-/// Reduces the num of runs to given target and returns items to merge.
-pub fn reduce_runs<T: Item>(runs: Vec<SortedRun<T>>) -> Vec<T> {
-    if runs.len() <= 1 {
-        // already satisfied.
-        return vec![];
-    }
-
+/// Finds a set of files with minimum penalty to merge that can reduce the total num of runs.
+/// The penalty of merging is defined as the size of all overlapping files between two runs.
+pub fn reduce_runs<T: Item>(mut runs: Vec<SortedRun<T>>) -> Vec<T> {
+    assert!(runs.len() > 1);
+    // sort runs by size
+    runs.sort_unstable_by(|a, b| a.size.cmp(&b.size));
+    // limit max probe runs to 100
+    let probe_end = runs.len().min(100);
     let mut min_penalty = usize::MAX;
     let mut files = vec![];
-    for i in 0..runs.len() {
-        for j in i + 1..runs.len() {
-            let mut l = runs[i].items.clone();
-            let mut r = runs[j].items.clone();
-            let files_to_merge = find_overlapping_items(&mut l, &mut r);
+    for i in 0..probe_end {
+        for j in i + 1..probe_end {
+            let (a, b) = runs.split_at_mut(j);
+            let files_to_merge = find_overlapping_items(&mut a[i].items, &mut b[0].items);
             let penalty = files_to_merge.iter().map(|e| e.size()).sum();
             if penalty < min_penalty {
                 min_penalty = penalty;
@@ -232,6 +236,10 @@ pub fn reduce_runs<T: Item>(runs: Vec<SortedRun<T>>) -> Vec<T> {
         }
     }
     files
+}
+
+pub fn merge_seq_files<T: Item>(input_files: &[T], target_file_size: Option<u64>) -> Vec<T> {
+    todo!()
 }
 
 #[cfg(test)]
