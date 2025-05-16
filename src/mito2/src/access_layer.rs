@@ -23,7 +23,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{RegionId, SequenceNumber};
 
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
-use crate::cache::write_cache::SstUploadRequest;
+use crate::cache::write_cache::{clean_atomic_dir_files, SstUploadRequest};
 use crate::cache::CacheManagerRef;
 use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
 use crate::error::{CleanDirSnafu, DeleteIndexSnafu, DeleteSstSnafu, OpenDalSnafu, Result};
@@ -170,9 +170,21 @@ impl AccessLayer {
                 path_provider,
             )
             .await;
-            writer
+            match writer
                 .write_all(request.source, request.max_sequence, write_opts)
-                .await?
+                .await
+            {
+                Ok(info) => info,
+                Err(e) => {
+                    let file_id = writer.current_file();
+                    let sst_key = IndexKey::new(region_id, file_id, FileType::Parquet).to_string();
+                    let index_key = IndexKey::new(region_id, file_id, FileType::Puffin).to_string();
+
+                    clean_atomic_dir_files(&self.object_store, &[&sst_key, &index_key]).await;
+
+                    return Err(e);
+                }
+            }
         };
 
         // Put parquet metadata to cache manager.
