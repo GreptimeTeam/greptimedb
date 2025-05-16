@@ -13,4 +13,8 @@ SELECT * FROM test;
 
 TQL EVAL (0, 100, '15s') test{host=~"(10.0.160.237:8080|10.0.160.237:9090)"};
 
+TQL EVAL (0, 100, '15s') test{host=~"10\\.0\\.160\\.237:808|nonexistence"};
+
+TQL EVAL (0, 100, '15s') test{host=~"(10\\.0\\.160\\.237:8080|10\\.0\\.160\\.237:9090)"};
+
 DROP TABLE test;
