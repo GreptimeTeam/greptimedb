@@ -55,6 +55,9 @@ use crate::error::{
 use crate::expr::error::DataTypeSnafu;
 use crate::Error;
 
+/// Represents a test timestamp in seconds since the Unix epoch.
+const DEFAULT_TEST_TIMESTAMP: Timestamp = Timestamp::new_second(17_0000_0000);
+
 /// Time window expr like `date_bin(INTERVAL '1' MINUTE, ts)`, this type help with
 /// evaluating the expr using given timestamp
 ///
@@ -104,10 +107,17 @@ impl TimeWindowExpr {
             df_schema: df_schema.clone(),
             eval_time_window_size: None,
         };
-        let test_ts = Timestamp::new_second(17_0000_0000);
+        let test_ts = DEFAULT_TEST_TIMESTAMP;
         let (l, u) = zelf.eval(test_ts)?;
         let time_window_size = match (l, u) {
-            (Some(l), Some(u)) => u.sub(&l).map(|r| r.to_std().unwrap()),
+            (Some(l), Some(u)) => u.sub(&l).map(|r| r.to_std()).transpose().map_err(|_| {
+                UnexpectedSnafu {
+                    reason: format!(
+                        "Expect upper bound older than lower bound, found upper={u:?} and lower={l:?}"
+                    ),
+                }
+                .build()
+            })?,
             _ => None,
         };
         zelf.eval_time_window_size = time_window_size;
