@@ -432,7 +432,7 @@ mod tests {
     use common_test_util::temp_dir::create_temp_dir;
 
     use super::*;
-    use crate::access_layer::{OperationType, ATOMIC_FS_PATH};
+    use crate::access_layer::{OperationType, ATOMIC_WRITE_DIR};
     use crate::cache::test_util::new_fs_store;
     use crate::cache::{CacheManager, CacheStrategy};
     use crate::error::InvalidBatchSnafu;
@@ -664,7 +664,7 @@ mod tests {
             .write_and_upload_sst(write_request, upload_request, &write_opts)
             .await
             .unwrap_err();
-        let atomic_write_dir = write_cache_dir.path().join(ATOMIC_FS_PATH);
+        let atomic_write_dir = write_cache_dir.path().join(ATOMIC_WRITE_DIR);
         let mut entries = tokio::fs::read_dir(&atomic_write_dir).await.unwrap();
         let mut has_files = false;
         while let Some(entry) = entries.next_entry().await.unwrap() {
