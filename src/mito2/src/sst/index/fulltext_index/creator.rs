@@ -356,7 +356,7 @@ impl AltFulltextCreator {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
 
     use api::v1::SemanticType;
@@ -375,6 +375,7 @@ mod tests {
 
     use super::*;
     use crate::access_layer::RegionFilePathFactory;
+    use crate::cache::index::result_cache::PredicateKey;
     use crate::read::{Batch, BatchColumn};
     use crate::sst::file::FileId;
     use crate::sst::index::fulltext_index::applier::builder::{
@@ -573,7 +574,7 @@ mod tests {
             let object_store = object_store.clone();
             let factory = factory.clone();
 
-            let mut requests: HashMap<ColumnId, FulltextRequest> = HashMap::new();
+            let mut requests: BTreeMap<ColumnId, FulltextRequest> = BTreeMap::new();
 
             // Add queries
             for (column_id, query) in queries {
@@ -605,8 +606,9 @@ mod tests {
                 region_dir,
                 region_metadata.region_id,
                 object_store,
-                requests,
+                requests.clone(),
                 factory,
+                PredicateKey::new_fulltext(requests),
             );
 
             let backend = backend.clone();

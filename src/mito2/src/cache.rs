@@ -29,6 +29,7 @@ use bytes::Bytes;
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
 use index::bloom_filter_index::{BloomFilterIndexCache, BloomFilterIndexCacheRef};
+use index::result_cache::IndexResultCache;
 use moka::notification::RemovalCause;
 use moka::sync::Cache;
 use parquet::column::page::Page;
@@ -242,6 +243,15 @@ impl CacheStrategy {
             CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
         }
     }
+
+    /// Calls [CacheManager::index_result_cache()].
+    /// It returns None if the strategy is [CacheStrategy::Compaction] or [CacheStrategy::Disabled].
+    pub fn index_result_cache(&self) -> Option<&IndexResultCache> {
+        match self {
+            CacheStrategy::EnableAll(cache_manager) => cache_manager.index_result_cache(),
+            CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
+        }
+    }
 }
 
 /// Manages cached data for the engine.
@@ -258,13 +268,15 @@ pub struct CacheManager {
     /// A Cache for writing files to object stores.
     write_cache: Option<WriteCacheRef>,
     /// Cache for inverted index.
-    index_cache: Option<InvertedIndexCacheRef>,
+    inverted_index_cache: Option<InvertedIndexCacheRef>,
     /// Cache for bloom filter index.
     bloom_filter_index_cache: Option<BloomFilterIndexCacheRef>,
     /// Puffin metadata cache.
     puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
     /// Cache for time series selectors.
     selector_result_cache: Option<SelectorResultCache>,
+    /// Cache for index result.
+    index_result_cache: Option<IndexResultCache>,
 }
 
 pub type CacheManagerRef = Arc<CacheManager>;
@@ -410,7 +422,7 @@ impl CacheManager {
     }
 
     pub(crate) fn inverted_index_cache(&self) -> Option<&InvertedIndexCacheRef> {
-        self.index_cache.as_ref()
+        self.inverted_index_cache.as_ref()
     }
 
     pub(crate) fn bloom_filter_index_cache(&self) -> Option<&BloomFilterIndexCacheRef> {
@@ -419,6 +431,10 @@ impl CacheManager {
 
     pub(crate) fn puffin_metadata_cache(&self) -> Option<&PuffinMetadataCacheRef> {
         self.puffin_metadata_cache.as_ref()
+    }
+
+    pub(crate) fn index_result_cache(&self) -> Option<&IndexResultCache> {
+        self.index_result_cache.as_ref()
     }
 }
 
@@ -441,6 +457,7 @@ pub struct CacheManagerBuilder {
     index_metadata_size: u64,
     index_content_size: u64,
     index_content_page_size: u64,
+    index_result_cache_size: u64,
     puffin_metadata_size: u64,
     write_cache: Option<WriteCacheRef>,
     selector_result_cache_size: u64,
@@ -486,6 +503,12 @@ impl CacheManagerBuilder {
     /// Sets page size for index content.
     pub fn index_content_page_size(mut self, bytes: u64) -> Self {
         self.index_content_page_size = bytes;
+        self
+    }
+
+    /// Sets cache size for index result.
+    pub fn index_result_cache_size(mut self, bytes: u64) -> Self {
+        self.index_result_cache_size = bytes;
         self
     }
 
@@ -566,6 +589,8 @@ impl CacheManagerBuilder {
             self.index_content_size,
             self.index_content_page_size,
         );
+        let index_result_cache = (self.index_result_cache_size != 0)
+            .then(|| IndexResultCache::new(self.index_result_cache_size));
         let puffin_metadata_cache =
             PuffinMetadataCache::new(self.puffin_metadata_size, &CACHE_BYTES);
         let selector_result_cache = (self.selector_result_cache_size != 0).then(|| {
@@ -588,10 +613,11 @@ impl CacheManagerBuilder {
             vector_cache,
             page_cache,
             write_cache: self.write_cache,
-            index_cache: Some(Arc::new(inverted_index_cache)),
+            inverted_index_cache: Some(Arc::new(inverted_index_cache)),
             bloom_filter_index_cache: Some(Arc::new(bloom_filter_index_cache)),
             puffin_metadata_cache: Some(Arc::new(puffin_metadata_cache)),
             selector_result_cache,
+            index_result_cache,
         }
     }
 }

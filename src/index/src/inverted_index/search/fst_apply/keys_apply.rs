@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::mem::size_of;
 
 use snafu::{ensure, ResultExt};
@@ -93,7 +93,7 @@ impl KeysFstApplier {
 
     fn intersect_with_lists(in_lists: &mut [Predicate]) -> Vec<Bytes> {
         #[inline]
-        fn get_list(p: &Predicate) -> &HashSet<Bytes> {
+        fn get_list(p: &Predicate) -> &BTreeSet<Bytes> {
             match p {
                 Predicate::InList(i) => &i.list,
                 _ => unreachable!(), // `in_lists` is filtered by `split_at_in_lists`
@@ -229,7 +229,7 @@ mod tests {
     fn test_keys_fst_applier_try_from() {
         let predicates = vec![
             Predicate::InList(InListPredicate {
-                list: HashSet::from_iter(vec![b("foo"), b("bar")]),
+                list: BTreeSet::from_iter(vec![b("foo"), b("bar")]),
             }),
             Predicate::Range(RangePredicate {
                 range: Range {
@@ -252,7 +252,7 @@ mod tests {
     fn test_keys_fst_applier_try_from_filter_out_unmatched_keys() {
         let predicates = vec![
             Predicate::InList(InListPredicate {
-                list: HashSet::from_iter(vec![b("foo"), b("bar")]),
+                list: BTreeSet::from_iter(vec![b("foo"), b("bar")]),
             }),
             Predicate::Range(RangePredicate {
                 range: Range {
@@ -300,7 +300,7 @@ mod tests {
     fn test_keys_fst_applier_try_from_with_invalid_regex() {
         let predicates = vec![
             Predicate::InList(InListPredicate {
-                list: HashSet::from_iter(vec![b("foo"), b("bar")]),
+                list: BTreeSet::from_iter(vec![b("foo"), b("bar")]),
             }),
             Predicate::RegexMatch(RegexMatchPredicate {
                 pattern: "*invalid regex".to_string(),

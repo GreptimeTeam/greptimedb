@@ -14,6 +14,7 @@
 
 pub mod bloom_filter_index;
 pub mod inverted_index;
+pub mod result_cache;
 
 use std::future::Future;
 use std::hash::Hash;

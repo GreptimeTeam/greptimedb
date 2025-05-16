@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use datafusion_common::ScalarValue;
 use datafusion_expr::expr::ScalarFunction;
@@ -24,6 +24,7 @@ use store_api::storage::{ColumnId, ConcreteDataType, RegionId};
 
 use crate::cache::file_cache::FileCacheRef;
 use crate::cache::index::bloom_filter_index::BloomFilterIndexCacheRef;
+use crate::cache::index::result_cache::PredicateKey;
 use crate::error::Result;
 use crate::sst::index::fulltext_index::applier::FulltextIndexApplier;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
@@ -31,7 +32,7 @@ use crate::sst::index::puffin_manager::PuffinManagerFactory;
 /// A request for fulltext index.
 ///
 /// It contains all the queries and terms for a column.
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FulltextRequest {
     pub queries: Vec<FulltextQuery>,
     pub terms: Vec<FulltextTerm>,
@@ -65,14 +66,14 @@ impl FulltextRequest {
 /// A query to be matched in fulltext index.
 ///
 /// `query` is the query to be matched, e.g. "+foo -bar" in `SELECT * FROM t WHERE matches(text, "+foo -bar")`.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FulltextQuery(pub String);
 
 /// A term to be matched in fulltext index.
 ///
 /// `term` is the term to be matched, e.g. "foo" in `SELECT * FROM t WHERE matches_term(text, "foo")`.
 /// `col_lowered` indicates whether the column is lowercased, e.g. `col_lowered = true` when `matches_term(lower(text), "foo")`.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FulltextTerm {
     pub col_lowered: bool,
     pub term: String,
@@ -137,7 +138,7 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
 
     /// Builds `SstIndexApplier` from the given expressions.
     pub fn build(self, exprs: &[Expr]) -> Result<Option<FulltextIndexApplier>> {
-        let mut requests = HashMap::new();
+        let mut requests = BTreeMap::new();
         for expr in exprs {
             Self::extract_requests(expr, self.metadata, &mut requests);
         }
@@ -147,6 +148,7 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
             .iter()
             .any(|(_, request)| !request.queries.is_empty() || !request.terms.is_empty());
 
+        let predicate_key = PredicateKey::new_fulltext(requests.clone());
         Ok(has_requests.then(|| {
             FulltextIndexApplier::new(
                 self.region_dir,
@@ -154,6 +156,7 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
                 self.store,
                 requests,
                 self.puffin_manager_factory,
+                predicate_key,
             )
             .with_file_cache(self.file_cache)
             .with_puffin_metadata_cache(self.puffin_metadata_cache)
@@ -164,7 +167,7 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
     fn extract_requests(
         expr: &Expr,
         metadata: &'a RegionMetadata,
-        requests: &mut HashMap<ColumnId, FulltextRequest>,
+        requests: &mut BTreeMap<ColumnId, FulltextRequest>,
     ) {
         match expr {
             Expr::BinaryExpr(BinaryExpr {
@@ -526,7 +529,7 @@ mod tests {
             func: matches_func(),
         });
 
-        let mut requests = HashMap::new();
+        let mut requests = BTreeMap::new();
         FulltextIndexApplierBuilder::extract_requests(&matches_expr, &metadata, &mut requests);
 
         assert_eq!(requests.len(), 1);
@@ -565,7 +568,7 @@ mod tests {
             right: Box::new(matches_term_expr),
         });
 
-        let mut requests = HashMap::new();
+        let mut requests = BTreeMap::new();
         FulltextIndexApplierBuilder::extract_requests(&binary_expr, &metadata, &mut requests);
 
         assert_eq!(requests.len(), 1);

@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 use crate::Bytes;
 
 /// Enumerates types of predicates for value filtering.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Predicate {
     /// Predicate for matching values in a list.
     InList(InListPredicate),
@@ -31,14 +31,14 @@ pub enum Predicate {
 
 /// `InListPredicate` contains a list of acceptable values. A value needs to match at least
 /// one of the elements (logical OR semantic) for the predicate to be satisfied.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct InListPredicate {
     /// List of acceptable values.
-    pub list: HashSet<Bytes>,
+    pub list: BTreeSet<Bytes>,
 }
 
 /// `Bound` is a sub-component of a range, representing a single-sided limit that could be inclusive or exclusive.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Bound {
     /// Whether the bound is inclusive or exclusive.
     pub inclusive: bool,
@@ -48,7 +48,7 @@ pub struct Bound {
 
 /// `Range` defines a single continuous range which can optionally have a lower and/or upper limit.
 /// Both the lower and upper bounds must be satisfied for the range condition to be true.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Range {
     /// The lower bound of the range.
     pub lower: Option<Bound>,
@@ -58,7 +58,7 @@ pub struct Range {
 
 /// `RangePredicate` encapsulates a range condition that must be satisfied
 /// for the predicate to hold true (logical AND semantic between the bounds).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RangePredicate {
     /// The range condition.
     pub range: Range,
@@ -66,7 +66,7 @@ pub struct RangePredicate {
 
 /// `RegexMatchPredicate` encapsulates a single regex pattern. A value must match
 /// the pattern for the predicate to be satisfied.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RegexMatchPredicate {
     /// The regex pattern.
     pub pattern: String,

@@ -183,7 +183,7 @@ impl TryFrom<Vec<Predicate>> for IntersectionFstApplier {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::BTreeSet;
 
     use super::*;
     use crate::inverted_index::error::Error;
@@ -405,7 +405,7 @@ mod tests {
     #[test]
     fn test_intersection_fst_applier_with_in_list_predicate() {
         let result = IntersectionFstApplier::try_from(vec![Predicate::InList(InListPredicate {
-            list: HashSet::from_iter([b"one".to_vec(), b"two".to_vec()]),
+            list: BTreeSet::from_iter([b"one".to_vec(), b"two".to_vec()]),
         })]);
         assert!(matches!(
             result,

@@ -14,7 +14,7 @@
 
 mod builder;
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -33,6 +33,7 @@ use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::index::bloom_filter_index::{
     BloomFilterIndexCacheRef, CachedBloomFilterIndexBlobReader, Tag,
 };
+use crate::cache::index::result_cache::PredicateKey;
 use crate::error::{
     ApplyBloomFilterIndexSnafu, Error, MetadataSnafu, PuffinBuildReaderSnafu, PuffinReadBlobSnafu,
     Result,
@@ -71,7 +72,10 @@ pub struct BloomFilterIndexApplier {
 
     /// Bloom filter predicates.
     /// For each column, the value will be retained only if it contains __all__ predicates.
-    predicates: HashMap<ColumnId, Vec<InListPredicate>>,
+    predicates: BTreeMap<ColumnId, Vec<InListPredicate>>,
+
+    /// Predicate key. Used to identify the predicate and fetch result from cache.
+    predicate_key: Arc<PredicateKey>,
 }
 
 impl BloomFilterIndexApplier {
@@ -83,7 +87,8 @@ impl BloomFilterIndexApplier {
         region_id: RegionId,
         object_store: ObjectStore,
         puffin_manager_factory: PuffinManagerFactory,
-        predicates: HashMap<ColumnId, Vec<InListPredicate>>,
+        predicates: BTreeMap<ColumnId, Vec<InListPredicate>>,
+        predicate_key: PredicateKey,
     ) -> Self {
         Self {
             region_dir,
@@ -94,6 +99,7 @@ impl BloomFilterIndexApplier {
             puffin_metadata_cache: None,
             bloom_filter_index_cache: None,
             predicates,
+            predicate_key: Arc::new(predicate_key),
         }
     }
 
@@ -319,6 +325,11 @@ impl BloomFilterIndexApplier {
         }
 
         Ok(())
+    }
+
+    /// Returns the predicate key.
+    pub fn predicate_key(&self) -> &Arc<PredicateKey> {
+        &self.predicate_key
     }
 }
 

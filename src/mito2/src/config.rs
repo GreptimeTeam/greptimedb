@@ -315,6 +315,8 @@ pub struct IndexConfig {
     pub content_cache_size: ReadableSize,
     /// Page size for inverted index content.
     pub content_cache_page_size: ReadableSize,
+    /// Cache size for index result. Setting it to 0 to disable the cache.
+    pub result_cache_size: ReadableSize,
 }
 
 impl Default for IndexConfig {
@@ -327,6 +329,7 @@ impl Default for IndexConfig {
             metadata_cache_size: ReadableSize::mb(64),
             content_cache_size: ReadableSize::mb(128),
             content_cache_page_size: ReadableSize::kb(64),
+            result_cache_size: ReadableSize::mb(8),
         }
     }
 }

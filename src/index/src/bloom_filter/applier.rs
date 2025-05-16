@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::ops::Range;
 
 use fastbloom::BloomFilter;
@@ -25,10 +25,10 @@ use crate::Bytes;
 
 /// `InListPredicate` contains a list of acceptable values. A value needs to match at least
 /// one of the elements (logical OR semantic) for the predicate to be satisfied.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct InListPredicate {
     /// List of acceptable values.
-    pub list: HashSet<Bytes>,
+    pub list: BTreeSet<Bytes>,
 }
 
 pub struct BloomFilterApplier {
@@ -277,21 +277,21 @@ mod tests {
             // Single value predicates
             (
                 vec![InListPredicate {
-                    list: HashSet::from_iter([b"row00".to_vec()]),
+                    list: BTreeSet::from_iter([b"row00".to_vec()]),
                 }],
                 0..28,
                 vec![0..4],
             ),
             (
                 vec![InListPredicate {
-                    list: HashSet::from_iter([b"row05".to_vec()]),
+                    list: BTreeSet::from_iter([b"row05".to_vec()]),
                 }],
                 4..8,
                 vec![4..8],
             ),
             (
                 vec![InListPredicate {
-                    list: HashSet::from_iter([b"row03".to_vec()]),
+                    list: BTreeSet::from_iter([b"row03".to_vec()]),
                 }],
                 4..8,
                 vec![],
@@ -299,14 +299,14 @@ mod tests {
             // Multiple values in a single predicate (OR logic)
             (
                 vec![InListPredicate {
-                    list: HashSet::from_iter([b"overl".to_vec(), b"row06".to_vec()]),
+                    list: BTreeSet::from_iter([b"overl".to_vec(), b"row06".to_vec()]),
                 }],
                 0..28,
                 vec![0..8],
             ),
             (
                 vec![InListPredicate {
-                    list: HashSet::from_iter([b"seg01".to_vec(), b"overp".to_vec()]),
+                    list: BTreeSet::from_iter([b"seg01".to_vec(), b"overp".to_vec()]),
                 }],
                 0..28,
                 vec![4..12],
@@ -314,7 +314,7 @@ mod tests {
             // Non-existent values
             (
                 vec![InListPredicate {
-                    list: HashSet::from_iter([b"row99".to_vec()]),
+                    list: BTreeSet::from_iter([b"row99".to_vec()]),
                 }],
                 0..28,
                 vec![],
@@ -322,7 +322,7 @@ mod tests {
             // Empty range
             (
                 vec![InListPredicate {
-                    list: HashSet::from_iter([b"row00".to_vec()]),
+                    list: BTreeSet::from_iter([b"row00".to_vec()]),
                 }],
                 12..12,
                 vec![],
@@ -330,21 +330,21 @@ mod tests {
             // Multiple values in a single predicate within specific ranges
             (
                 vec![InListPredicate {
-                    list: HashSet::from_iter([b"row04".to_vec(), b"row05".to_vec()]),
+                    list: BTreeSet::from_iter([b"row04".to_vec(), b"row05".to_vec()]),
                 }],
                 0..12,
                 vec![4..8],
             ),
             (
                 vec![InListPredicate {
-                    list: HashSet::from_iter([b"seg01".to_vec()]),
+                    list: BTreeSet::from_iter([b"seg01".to_vec()]),
                 }],
                 0..28,
                 vec![4..8],
             ),
             (
                 vec![InListPredicate {
-                    list: HashSet::from_iter([b"seg01".to_vec()]),
+                    list: BTreeSet::from_iter([b"seg01".to_vec()]),
                 }],
                 6..28,
                 vec![6..8],
@@ -352,21 +352,21 @@ mod tests {
             // Values spanning multiple segments
             (
                 vec![InListPredicate {
-                    list: HashSet::from_iter([b"overl".to_vec()]),
+                    list: BTreeSet::from_iter([b"overl".to_vec()]),
                 }],
                 0..28,
                 vec![0..8],
             ),
             (
                 vec![InListPredicate {
-                    list: HashSet::from_iter([b"overl".to_vec()]),
+                    list: BTreeSet::from_iter([b"overl".to_vec()]),
                 }],
                 2..28,
                 vec![2..8],
             ),
             (
                 vec![InListPredicate {
-                    list: HashSet::from_iter([b"overp".to_vec()]),
+                    list: BTreeSet::from_iter([b"overp".to_vec()]),
                 }],
                 0..10,
                 vec![4..10],
@@ -374,21 +374,21 @@ mod tests {
             // Duplicate values
             (
                 vec![InListPredicate {
-                    list: HashSet::from_iter([b"dup".to_vec()]),
+                    list: BTreeSet::from_iter([b"dup".to_vec()]),
                 }],
                 0..12,
                 vec![],
             ),
             (
                 vec![InListPredicate {
-                    list: HashSet::from_iter([b"dup".to_vec()]),
+                    list: BTreeSet::from_iter([b"dup".to_vec()]),
                 }],
                 0..16,
                 vec![12..16],
             ),
             (
                 vec![InListPredicate {
-                    list: HashSet::from_iter([b"dup".to_vec()]),
+                    list: BTreeSet::from_iter([b"dup".to_vec()]),
                 }],
                 0..28,
                 vec![12..28],
@@ -397,10 +397,10 @@ mod tests {
             (
                 vec![
                     InListPredicate {
-                        list: HashSet::from_iter([b"row00".to_vec(), b"row01".to_vec()]),
+                        list: BTreeSet::from_iter([b"row00".to_vec(), b"row01".to_vec()]),
                     },
                     InListPredicate {
-                        list: HashSet::from_iter([b"seg00".to_vec()]),
+                        list: BTreeSet::from_iter([b"seg00".to_vec()]),
                     },
                 ],
                 0..28,
@@ -409,10 +409,10 @@ mod tests {
             (
                 vec![
                     InListPredicate {
-                        list: HashSet::from_iter([b"overl".to_vec()]),
+                        list: BTreeSet::from_iter([b"overl".to_vec()]),
                     },
                     InListPredicate {
-                        list: HashSet::from_iter([b"seg01".to_vec()]),
+                        list: BTreeSet::from_iter([b"seg01".to_vec()]),
                     },
                 ],
                 0..28,
