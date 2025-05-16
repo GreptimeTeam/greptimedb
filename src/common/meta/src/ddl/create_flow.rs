@@ -262,16 +262,16 @@ impl CreateFlowProcedure {
         }
 
         let (_flow_info, flow_routes) = (&self.data).into();
-        let flow_part2nodes = flow_routes
+        let flow_part2peers = flow_routes
             .into_iter()
-            .map(|(part_id, route)| (part_id, route.peer.id, route.peer))
+            .map(|(part_id, route)| (part_id, route.peer))
             .collect();
 
         caches.extend([
             CacheIdent::CreateFlow(CreateFlow {
                 flow_id,
                 source_table_ids: self.data.source_table_ids.clone(),
-                flow_part2peers: flow_part2nodes,
+                flow_part2peers,
             }),
             CacheIdent::FlowId(flow_id),
         ]);

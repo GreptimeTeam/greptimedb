@@ -188,7 +188,7 @@ pub struct CreateFlow {
     pub flow_id: FlowId,
     pub source_table_ids: Vec<TableId>,
     /// Vec of (partition_id, flownode_id, peer)
-    pub flow_part2peers: Vec<(FlowPartitionId, FlownodeId, Peer)>,
+    pub flow_part2peers: Vec<(FlowPartitionId, Peer)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
