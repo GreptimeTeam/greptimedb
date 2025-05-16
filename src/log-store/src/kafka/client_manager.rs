@@ -183,6 +183,14 @@ impl ClientManager {
 }
 
 #[cfg(test)]
+impl ClientManager {
+    /// Returns the controller client.
+    pub(crate) fn controller_client(&self) -> rskafka::client::controller::ControllerClient {
+        self.client.controller_client().unwrap()
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use common_wal::test_util::run_test_with_kafka_wal;
     use tokio::sync::Barrier;

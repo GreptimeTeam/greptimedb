@@ -365,7 +365,7 @@ impl MetasrvBuilder {
             let (tx, rx) = WalPruneManager::channel();
             // Safety: Must be remote WAL.
             let remote_wal_options = options.wal.remote_wal_options().unwrap();
-            let kafka_client = build_kafka_client(remote_wal_options)
+            let kafka_client = build_kafka_client(&remote_wal_options.connection)
                 .await
                 .context(error::BuildKafkaClientSnafu)?;
             let wal_prune_context = WalPruneContext {

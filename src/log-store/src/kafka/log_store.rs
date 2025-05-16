@@ -552,6 +552,14 @@ mod tests {
             .collect()
     }
 
+    async fn prepare_topic(logstore: &KafkaLogStore, topic_name: &str) {
+        let controller_client = logstore.client_manager.controller_client();
+        controller_client
+            .create_topic(topic_name.to_string(), 1, 1, 5000)
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn test_append_batch_basic() {
         common_telemetry::init_default_ut_logging();
@@ -573,7 +581,9 @@ mod tests {
         };
         let logstore = KafkaLogStore::try_new(&config, None).await.unwrap();
         let topic_name = uuid::Uuid::new_v4().to_string();
+        prepare_topic(&logstore, &topic_name).await;
         let provider = Provider::kafka_provider(topic_name);
+
         let region_entries = (0..5)
             .map(|i| {
                 let region_id = RegionId::new(1, i);
@@ -647,6 +657,7 @@ mod tests {
         };
         let logstore = KafkaLogStore::try_new(&config, None).await.unwrap();
         let topic_name = uuid::Uuid::new_v4().to_string();
+        prepare_topic(&logstore, &topic_name).await;
         let provider = Provider::kafka_provider(topic_name);
         let region_entries = (0..5)
             .map(|i| {
