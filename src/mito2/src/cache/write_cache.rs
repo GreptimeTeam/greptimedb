@@ -26,7 +26,7 @@ use store_api::storage::RegionId;
 
 use crate::access_layer::{
     new_fs_cache_store, FilePathProvider, RegionFilePathFactory, SstInfoArray, SstWriteRequest,
-    WriteCachePathProvider,
+    TempFileCleaner, WriteCachePathProvider,
 };
 use crate::cache::file_cache::{FileCache, FileCacheRef, FileType, IndexKey, IndexValue};
 use crate::error::{self, Result};
@@ -122,7 +122,7 @@ impl WriteCache {
             row_group_size: write_opts.row_group_size,
             puffin_manager: self
                 .puffin_manager_factory
-                .build(store, path_provider.clone()),
+                .build(store.clone(), path_provider.clone()),
             intermediate_manager: self.intermediate_manager.clone(),
             index_options: write_request.index_options,
             inverted_index_config: write_request.inverted_index_config,
@@ -130,14 +130,16 @@ impl WriteCache {
             bloom_filter_index_config: write_request.bloom_filter_index_config,
         };
 
+        let cleaner = TempFileCleaner::new(region_id, store.clone());
         // Write to FileCache.
         let mut writer = ParquetWriter::new_with_object_store(
-            self.file_cache.local_store(),
+            store.clone(),
             write_request.metadata,
             indexer,
-            path_provider,
+            path_provider.clone(),
         )
-        .await;
+        .await
+        .with_file_cleaner(cleaner);
 
         let sst_info = writer
             .write_all(write_request.source, write_request.max_sequence, write_opts)
@@ -196,6 +198,26 @@ impl WriteCache {
     /// Downloads a file in `remote_path` from the remote object store to the local cache
     /// (specified by `index_key`).
     pub(crate) async fn download(
+        &self,
+        index_key: IndexKey,
+        remote_path: &str,
+        remote_store: &ObjectStore,
+        file_size: u64,
+    ) -> Result<()> {
+        if let Err(e) = self
+            .download_without_cleaning(index_key, remote_path, remote_store, file_size)
+            .await
+        {
+            let filename = index_key.to_string();
+            TempFileCleaner::clean_atomic_dir_files(&self.file_cache.local_store(), &[&filename])
+                .await;
+
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    async fn download_without_cleaning(
         &self,
         index_key: IndexKey,
         remote_path: &str,
@@ -410,9 +432,11 @@ mod tests {
     use common_test_util::temp_dir::create_temp_dir;
 
     use super::*;
-    use crate::access_layer::OperationType;
+    use crate::access_layer::{OperationType, ATOMIC_WRITE_DIR};
     use crate::cache::test_util::new_fs_store;
     use crate::cache::{CacheManager, CacheStrategy};
+    use crate::error::InvalidBatchSnafu;
+    use crate::read::Source;
     use crate::region::options::IndexOptions;
     use crate::sst::parquet::reader::ParquetReaderBuilder;
     use crate::test_util::sst_util::{
@@ -577,5 +601,83 @@ mod tests {
 
         // Check parquet metadata
         assert_parquet_metadata_eq(write_parquet_metadata, reader.parquet_metadata());
+    }
+
+    #[tokio::test]
+    async fn test_write_cache_clean_tmp_files() {
+        common_telemetry::init_default_ut_logging();
+        let mut env = TestEnv::new();
+        let data_home = env.data_home().display().to_string();
+        let mock_store = env.init_object_store_manager();
+
+        let write_cache_dir = create_temp_dir("");
+        let write_cache_path = write_cache_dir.path().to_str().unwrap();
+        let write_cache = env
+            .create_write_cache_from_path(write_cache_path, ReadableSize::mb(10))
+            .await;
+
+        // Create a cache manager using only write cache
+        let cache_manager = Arc::new(
+            CacheManager::builder()
+                .write_cache(Some(write_cache.clone()))
+                .build(),
+        );
+
+        // Create source
+        let metadata = Arc::new(sst_region_metadata());
+
+        // Creates a source that can return an error to abort the writer.
+        let source = Source::Iter(Box::new(
+            [
+                Ok(new_batch_by_range(&["a", "d"], 0, 60)),
+                InvalidBatchSnafu {
+                    reason: "Abort the writer",
+                }
+                .fail(),
+            ]
+            .into_iter(),
+        ));
+
+        // Write to local cache and upload sst to mock remote store
+        let write_request = SstWriteRequest {
+            op_type: OperationType::Flush,
+            metadata,
+            source,
+            storage: None,
+            max_sequence: None,
+            cache_manager: cache_manager.clone(),
+            index_options: IndexOptions::default(),
+            inverted_index_config: Default::default(),
+            fulltext_index_config: Default::default(),
+            bloom_filter_index_config: Default::default(),
+        };
+        let write_opts = WriteOptions {
+            row_group_size: 512,
+            ..Default::default()
+        };
+        let upload_request = SstUploadRequest {
+            dest_path_provider: RegionFilePathFactory::new(data_home.clone()),
+            remote_store: mock_store.clone(),
+        };
+
+        write_cache
+            .write_and_upload_sst(write_request, upload_request, &write_opts)
+            .await
+            .unwrap_err();
+        let atomic_write_dir = write_cache_dir.path().join(ATOMIC_WRITE_DIR);
+        let mut entries = tokio::fs::read_dir(&atomic_write_dir).await.unwrap();
+        let mut has_files = false;
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            if entry.file_type().await.unwrap().is_dir() {
+                continue;
+            }
+            has_files = true;
+            common_telemetry::warn!(
+                "Found remaining temporary file in atomic dir: {}",
+                entry.path().display()
+            );
+        }
+
+        assert!(!has_files);
     }
 }

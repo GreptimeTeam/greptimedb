@@ -14,6 +14,7 @@
 
 //! A cache for files.
 
+use std::fmt;
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -339,6 +340,18 @@ impl IndexKey {
     }
 }
 
+impl fmt::Display for IndexKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}.{}.{}",
+            self.region_id.as_u64(),
+            self.file_id,
+            self.file_type.as_str()
+        )
+    }
+}
+
 /// Type of the file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FileType {
@@ -380,15 +393,7 @@ pub(crate) struct IndexValue {
 ///
 /// The file name format is `{region_id}.{file_id}.{file_type}`
 fn cache_file_path(cache_file_dir: &str, key: IndexKey) -> String {
-    join_path(
-        cache_file_dir,
-        &format!(
-            "{}.{}.{}",
-            key.region_id.as_u64(),
-            key.file_id,
-            key.file_type.as_str()
-        ),
-    )
+    join_path(cache_file_dir, &key.to_string())
 }
 
 /// Parse index key from the file name.
