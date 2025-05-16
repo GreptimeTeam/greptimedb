@@ -187,7 +187,7 @@ pub struct CreateFlow {
     /// The unique identifier for the flow.
     pub flow_id: FlowId,
     pub source_table_ids: Vec<TableId>,
-    /// Vec of (partition_id, flownode_id, peer)
+    /// Mapping of flow partition to peer information
     pub flow_part2peers: Vec<(FlowPartitionId, Peer)>,
 }
 
@@ -195,7 +195,7 @@ pub struct CreateFlow {
 pub struct DropFlow {
     pub flow_id: FlowId,
     pub source_table_ids: Vec<TableId>,
-    /// Vec of (partition_id, flownode_id, peer)
+    /// Mapping of flow partition to flownode id
     pub flow_part2node_id: Vec<(FlowPartitionId, FlownodeId)>,
 }
 

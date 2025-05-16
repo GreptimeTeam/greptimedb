@@ -402,6 +402,7 @@ pub struct CreateFlowData {
     pub(crate) prev_flow_info_value: Option<DeserializedValueWithBytes<FlowInfoValue>>,
     /// Only set to true when replace actually happened.
     /// This is used to determine whether to invalidate the cache.
+    #[serde(default)]
     pub(crate) did_replace: bool,
     pub(crate) flow_type: Option<FlowType>,
 }
