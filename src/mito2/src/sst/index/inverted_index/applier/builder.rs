@@ -136,6 +136,8 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
             .collect();
         let applier = PredicatesIndexApplier::try_from(predicates);
 
+        // Use `std::mem::take` to transfer ownership of `self.output` to `PredicateKey::new_inverted`.
+        // This clears `self.output`, which is intentional as it is no longer needed after this point.
         let predicate_key = PredicateKey::new_inverted(std::mem::take(&mut self.output));
         Ok(Some(
             InvertedIndexApplier::new(
