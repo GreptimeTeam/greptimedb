@@ -283,11 +283,16 @@ impl MultiDimPartitionRule {
             })
             .collect::<error::Result<_>>()?;
 
-        let mut selected = BooleanArray::new(BooleanBuffer::new_unset(num_rows), None);
-        for region_mask in result.values() {
-            selected = arrow::compute::kernels::boolean::or(&selected, region_mask.array())
-                .context(error::ComputeArrowKernelSnafu)?;
-        }
+        let selected = if result.len() == 1 {
+            result.values().next().unwrap().array().clone()
+        } else {
+            let mut selected = BooleanArray::new(BooleanBuffer::new_unset(num_rows), None);
+            for region_mask in result.values() {
+                selected = arrow::compute::kernels::boolean::or(&selected, region_mask.array())
+                    .context(error::ComputeArrowKernelSnafu)?;
+            }
+            selected
+        };
 
         // fast path: all rows are selected
         if selected.true_count() == num_rows {
@@ -968,5 +973,114 @@ mod test_split_record_batch {
         for (region, value) in &result {
             assert_eq!(value.array(), expected.get(region).unwrap());
         }
+    }
+
+    #[test]
+    fn test_default_region_with_unselected_rows() {
+        // Create a rule where some rows won't match any partition
+        let rule = MultiDimPartitionRule::try_new(
+            vec!["host".to_string(), "value".to_string()],
+            vec![1, 2, 3],
+            vec![
+                col("value").eq(Value::Int64(10)),
+                col("value").eq(Value::Int64(20)),
+                col("value").eq(Value::Int64(30)),
+            ],
+        )
+        .unwrap();
+
+        let schema = test_schema();
+        let host_array =
+            StringArray::from(vec!["server1", "server2", "server3", "server4", "server5"]);
+        let value_array = Int64Array::from(vec![10, 20, 30, 40, 50]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(host_array), Arc::new(value_array)])
+            .unwrap();
+
+        let result = rule.split_record_batch(&batch).unwrap();
+
+        // Check that we have 4 regions (3 defined + default)
+        assert_eq!(result.len(), 4);
+
+        // Check that default region (0) contains the unselected rows
+        assert!(result.contains_key(&DEFAULT_REGION));
+        let default_mask = result.get(&DEFAULT_REGION).unwrap();
+
+        // The default region should have 2 rows (with values 40 and 50)
+        assert_eq!(default_mask.selected_rows(), 2);
+
+        // Verify each region has the correct number of rows
+        assert_eq!(result.get(&1).unwrap().selected_rows(), 1); // value = 10
+        assert_eq!(result.get(&2).unwrap().selected_rows(), 1); // value = 20
+        assert_eq!(result.get(&3).unwrap().selected_rows(), 1); // value = 30
+    }
+
+    #[test]
+    fn test_default_region_with_existing_default() {
+        // Create a rule where some rows are explicitly assigned to default region
+        // and some rows are implicitly assigned to default region
+        let rule = MultiDimPartitionRule::try_new(
+            vec!["host".to_string(), "value".to_string()],
+            vec![0, 1, 2],
+            vec![
+                col("value").eq(Value::Int64(10)), // Explicitly assign value=10 to region 0 (default)
+                col("value").eq(Value::Int64(20)),
+                col("value").eq(Value::Int64(30)),
+            ],
+        )
+        .unwrap();
+
+        let schema = test_schema();
+        let host_array =
+            StringArray::from(vec!["server1", "server2", "server3", "server4", "server5"]);
+        let value_array = Int64Array::from(vec![10, 20, 30, 40, 50]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(host_array), Arc::new(value_array)])
+            .unwrap();
+
+        let result = rule.split_record_batch(&batch).unwrap();
+
+        // Check that we have 3 regions
+        assert_eq!(result.len(), 3);
+
+        // Check that default region contains both explicitly assigned and unselected rows
+        assert!(result.contains_key(&DEFAULT_REGION));
+        let default_mask = result.get(&DEFAULT_REGION).unwrap();
+
+        // The default region should have 3 rows (value=10, 40, 50)
+        assert_eq!(default_mask.selected_rows(), 3);
+
+        // Verify each region has the correct number of rows
+        assert_eq!(result.get(&1).unwrap().selected_rows(), 1); // value = 20
+        assert_eq!(result.get(&2).unwrap().selected_rows(), 1); // value = 30
+    }
+
+    #[test]
+    fn test_all_rows_selected() {
+        // Test the fast path where all rows are selected by some partition
+        let rule = MultiDimPartitionRule::try_new(
+            vec!["value".to_string()],
+            vec![1, 2],
+            vec![
+                col("value").lt(Value::Int64(30)),
+                col("value").gt_eq(Value::Int64(30)),
+            ],
+        )
+        .unwrap();
+
+        let schema = test_schema();
+        let host_array = StringArray::from(vec!["server1", "server2", "server3", "server4"]);
+        let value_array = Int64Array::from(vec![10, 20, 30, 40]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(host_array), Arc::new(value_array)])
+            .unwrap();
+
+        let result = rule.split_record_batch(&batch).unwrap();
+
+        // Check that we have 2 regions and no default region
+        assert_eq!(result.len(), 2);
+        assert!(result.contains_key(&1));
+        assert!(result.contains_key(&2));
+
+        // Verify each region has the correct number of rows
+        assert_eq!(result.get(&1).unwrap().selected_rows(), 2); // values < 30
+        assert_eq!(result.get(&2).unwrap().selected_rows(), 2); // values >= 30
     }
 }
