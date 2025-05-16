@@ -129,6 +129,11 @@ impl Inserter {
 
         let mut mask_per_datanode = HashMap::with_capacity(region_masks.len());
         for (region_number, mask) in region_masks {
+            let selected_rows = mask.true_count();
+            if selected_rows == 0 {
+                // skip region without data.
+                continue;
+            }
             let region_id = RegionId::new(table_id, region_number);
             let datanode = self
                 .partition_manager
@@ -138,7 +143,7 @@ impl Inserter {
             mask_per_datanode
                 .entry(datanode)
                 .or_insert_with(Vec::new)
-                .push((region_id, mask));
+                .push((region_id, mask, selected_rows));
         }
 
         let wait_all_datanode_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
@@ -149,37 +154,53 @@ impl Inserter {
         let record_batch_schema =
             Arc::new(Schema::try_from(record_batch.schema()).context(error::ConvertSchemaSnafu)?);
 
+        let mut raw_data_bytes = None;
         for (peer, masks) in mask_per_datanode {
-            for (region_id, mask) in masks {
+            for (region_id, mask, selected_rows) in masks {
                 let rb = record_batch.clone();
                 let schema_bytes = schema_bytes.clone();
                 let record_batch_schema = record_batch_schema.clone();
                 let node_manager = self.node_manager.clone();
                 let peer = peer.clone();
+                let raw_data = if selected_rows == rb.num_rows() {
+                    Some(
+                        raw_data_bytes
+                            .get_or_insert_with(|| Bytes::from(data.encode_to_vec()))
+                            .clone(),
+                    )
+                } else {
+                    None
+                };
                 let handle: common_runtime::JoinHandle<error::Result<api::region::RegionResponse>> =
                     common_runtime::spawn_global(async move {
-                        let filter_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
-                            .with_label_values(&["filter"])
-                            .start_timer();
-                        let rb = arrow::compute::filter_record_batch(&rb, &mask)
-                            .context(error::ComputeArrowSnafu)?;
-                        filter_timer.observe_duration();
-                        metrics::BULK_REQUEST_ROWS
-                            .with_label_values(&["rows_per_region"])
-                            .observe(rb.num_rows() as f64);
+                        let payload = if selected_rows == rb.num_rows() {
+                            // SAFETY: raw data must be present, we can avoid re-encoding.
+                            raw_data.unwrap()
+                        } else {
+                            let filter_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
+                                .with_label_values(&["filter"])
+                                .start_timer();
+                            let rb = arrow::compute::filter_record_batch(&rb, &mask)
+                                .context(error::ComputeArrowSnafu)?;
+                            filter_timer.observe_duration();
+                            metrics::BULK_REQUEST_ROWS
+                                .with_label_values(&["rows_per_region"])
+                                .observe(rb.num_rows() as f64);
 
-                        let encode_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
-                            .with_label_values(&["encode"])
-                            .start_timer();
-                        let batch = RecordBatch::try_from_df_record_batch(record_batch_schema, rb)
-                            .context(error::BuildRecordBatchSnafu)?;
-                        let payload = Bytes::from(
-                            FlightEncoder::default()
-                                .encode(FlightMessage::Recordbatch(batch))
-                                .encode_to_vec(),
-                        );
-                        encode_timer.observe_duration();
-
+                            let encode_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
+                                .with_label_values(&["encode"])
+                                .start_timer();
+                            let batch =
+                                RecordBatch::try_from_df_record_batch(record_batch_schema, rb)
+                                    .context(error::BuildRecordBatchSnafu)?;
+                            let payload = Bytes::from(
+                                FlightEncoder::default()
+                                    .encode(FlightMessage::Recordbatch(batch))
+                                    .encode_to_vec(),
+                            );
+                            encode_timer.observe_duration();
+                            payload
+                        };
                         let _datanode_handle_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
                             .with_label_values(&["datanode_handle"])
                             .start_timer();
