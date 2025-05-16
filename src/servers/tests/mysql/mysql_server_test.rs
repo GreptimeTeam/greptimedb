@@ -606,3 +606,34 @@ async fn do_test_query_all_datatypes_with_secure_server(
 
     do_test_query_all_datatypes(server_tls, client_tls).await
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_query_with_comments_on_the_first_line() -> Result<()> {
+    common_telemetry::init_default_ut_logging();
+
+    let table = MemTable::default_numbers_table();
+
+    let mut mysql_server = create_mysql_server(table, Default::default())?;
+    let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
+    mysql_server.start(listening).await.unwrap();
+    let server_addr = mysql_server.bind_addr().unwrap();
+    let server_port = server_addr.port();
+
+    let mut connection = create_connection_default_db_name(server_port, false)
+        .await
+        .unwrap();
+
+    let result: Option<u32> = connection
+        .query_first("-- This is a comment\nSELECT uint32s FROM numbers LIMIT 1")
+        .await
+        .unwrap();
+    assert_eq!(result, Some(0));
+
+    let result: Option<u32> = connection
+        .query_first("# MySQL style comment\nSELECT uint32s FROM numbers LIMIT 1")
+        .await
+        .unwrap();
+    assert_eq!(result, Some(0));
+
+    Ok(())
+}
