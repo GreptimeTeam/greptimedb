@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["TimestampType"],"fn":["build_json_column_schema","check_schema","check_schema_number","write_by_schema","write_by_semantic_type","write_f64","write_fields","write_json","write_tag","write_tags","write_ts_to","write_ts_to_millis","write_ts_to_nanos"],"struct":["MultiTableData","TableData"]};

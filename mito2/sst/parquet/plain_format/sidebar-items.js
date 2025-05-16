@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["PLAIN_FIXED_POS_COLUMN_NUM"]};

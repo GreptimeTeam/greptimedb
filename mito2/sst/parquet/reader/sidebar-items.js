@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["MaybeFilter","ReaderState"],"fn":["pruned_by_default"],"struct":["ParquetReader","ParquetReaderBuilder","ReaderFilterMetrics","ReaderMetrics","RowGroupReaderBase","RowGroupReaderBuilder","SimpleFilterContext"],"trait":["RowGroupReaderContext"],"type":["RowGroupReader"]};
