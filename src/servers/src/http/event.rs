@@ -475,6 +475,9 @@ fn add_step_info_for_pipeline_dryrun_error(step_msg: &str, e: Error) -> Response
     (status_code_to_http_status(&e.status_code()), body).into_response()
 }
 
+/// Parse the data with given content type
+/// If the content type is invalid, return error
+/// content type is one of application/json, text/plain, application/x-ndjson
 fn parse_dryrun_data(data_type: String, data: String) -> Result<Vec<PipelineMap>> {
     let content_type = ContentType::from_str(&data_type);
     if content_type.is_err() {
