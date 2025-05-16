@@ -21,7 +21,7 @@ use datatypes::arrow::array::BooleanArray;
 use datatypes::arrow::buffer::BooleanBuffer;
 use snafu::ResultExt;
 
-use crate::error::{FilterRecordBatchSnafu, Result};
+use crate::error::{RecordBatchSnafu, Result};
 use crate::memtable::BoxedBatchIterator;
 use crate::read::last_row::RowGroupLastRowCachedReader;
 use crate::read::{Batch, BatchReader};
@@ -201,7 +201,7 @@ impl PruneTimeIterator {
             for filter in filters.iter() {
                 let result = filter
                     .evaluate_vector(batch.timestamps())
-                    .context(FilterRecordBatchSnafu)?;
+                    .context(RecordBatchSnafu)?;
                 mask = mask.bitand(&result);
             }
 

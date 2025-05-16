@@ -23,7 +23,7 @@ TQL ANALYZE (0, 10, '5s') test;
 |_|_|_|
 | 1_| 0_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["k"] REDACTED
-|_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges), distribution=PerSeries REDACTED
+|_|_|_SeriesScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges), distribution=PerSeries REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
 +-+-+-+
@@ -45,7 +45,7 @@ TQL ANALYZE (0, 10, '1s', '2s') test;
 |_|_|_|
 | 1_| 0_|_PromInstantManipulateExec: range=[0..10000], lookback=[2000], interval=[1000], time index=[j] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["k"] REDACTED
-|_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges), distribution=PerSeries REDACTED
+|_|_|_SeriesScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges), distribution=PerSeries REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
 +-+-+-+
@@ -66,7 +66,7 @@ TQL ANALYZE ('1970-01-01T00:00:00'::timestamp, '1970-01-01T00:00:00'::timestamp 
 |_|_|_|
 | 1_| 0_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["k"] REDACTED
-|_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges), distribution=PerSeries REDACTED
+|_|_|_SeriesScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges), distribution=PerSeries REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
 +-+-+-+
@@ -89,7 +89,7 @@ TQL ANALYZE VERBOSE (0, 10, '5s') test;
 |_|_|_|
 | 1_| 0_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["k"] REDACTED
-|_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges), distribution=PerSeries, projection=["i", "j", "k"], filters=[j >= TimestampMillisecond(-300000, None), j <= TimestampMillisecond(310000, None)], REDACTED
+|_|_|_SeriesScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges), distribution=PerSeries, projection=["i", "j", "k"], filters=[j >= TimestampMillisecond(-300000, None), j <= TimestampMillisecond(310000, None)], REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
 +-+-+-+
@@ -120,11 +120,11 @@ TQL ANALYZE (0, 10, '5s') test;
 |_|_|_|
 | 1_| 0_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["k", "l"] REDACTED
-|_|_|_SeqScan: region=REDACTED, partition_count=0 (0 memtable ranges, 0 file 0 ranges), distribution=PerSeries REDACTED
+|_|_|_SeriesScan: region=REDACTED, partition_count=0 (0 memtable ranges, 0 file 0 ranges), distribution=PerSeries REDACTED
 |_|_|_|
 | 1_| 1_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["k", "l"] REDACTED
-|_|_|_SeqScan: region=REDACTED, partition_count=0 (0 memtable ranges, 0 file 0 ranges), distribution=PerSeries REDACTED
+|_|_|_SeriesScan: region=REDACTED, partition_count=0 (0 memtable ranges, 0 file 0 ranges), distribution=PerSeries REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
 +-+-+-+
@@ -151,7 +151,7 @@ TQL ANALYZE (0, 10, '5s') rate(test[10s]);
 |_|_|_PromRangeManipulateExec: req range=[0..10000], interval=[5000], eval range=[10000], time index=[j] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["k", "l"] REDACTED
-|_|_|_SeqScan: region=REDACTED, partition_count=0 (0 memtable ranges, 0 file 0 ranges), distribution=PerSeries REDACTED
+|_|_|_SeriesScan: region=REDACTED, partition_count=0 (0 memtable ranges, 0 file 0 ranges), distribution=PerSeries REDACTED
 |_|_|_|
 | 1_| 1_|_ProjectionExec: expr=[j@0 as j, prom_rate(j_range,i,test.j,Int64(10000))@1 as prom_rate(j_range,i,j,Int64(10000)), k@2 as k, l@3 as l] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
@@ -160,7 +160,7 @@ TQL ANALYZE (0, 10, '5s') rate(test[10s]);
 |_|_|_PromRangeManipulateExec: req range=[0..10000], interval=[5000], eval range=[10000], time index=[j] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["k", "l"] REDACTED
-|_|_|_SeqScan: region=REDACTED, partition_count=0 (0 memtable ranges, 0 file 0 ranges), distribution=PerSeries REDACTED
+|_|_|_SeriesScan: region=REDACTED, partition_count=0 (0 memtable ranges, 0 file 0 ranges), distribution=PerSeries REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
 +-+-+-+

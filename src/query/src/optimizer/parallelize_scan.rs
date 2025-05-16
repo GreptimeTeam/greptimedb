@@ -61,13 +61,13 @@ impl ParallelizeScan {
                 } else if let Some(region_scan_exec) =
                     plan.as_any().downcast_ref::<RegionScanExec>()
                 {
+                    let expected_partition_num = config.execution.target_partitions;
                     if region_scan_exec.is_partition_set() {
                         return Ok(Transformed::no(plan));
                     }
 
                     let ranges = region_scan_exec.get_partition_ranges();
                     let total_range_num = ranges.len();
-                    let expected_partition_num = config.execution.target_partitions;
 
                     // assign ranges to each partition
                     let mut partition_ranges =
