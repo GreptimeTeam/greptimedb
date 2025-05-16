@@ -15,7 +15,10 @@
 use std::any::Any;
 
 use api::v1::meta::MailboxMessage;
-use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
+use common_meta::instruction::{
+    FlushErrorStrategy, FlushRegionConfig, FlushRegionReply, FlushTarget, Instruction,
+    InstructionReply,
+};
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::{info, warn};
 use serde::{Deserialize, Serialize};
@@ -65,7 +68,12 @@ impl PreFlushRegion {
     fn build_flush_leader_region_instruction(&self, ctx: &Context) -> Instruction {
         let pc = &ctx.persistent_ctx;
         let region_id = pc.region_id;
-        Instruction::FlushRegion(region_id)
+        Instruction::FlushRegion(FlushRegionConfig {
+            target: FlushTarget::Regions(vec![region_id]),
+            is_hint: false,
+            timeout: None,
+            error_strategy: FlushErrorStrategy::FailFast,
+        })
     }
 
     /// Tries to flush a leader region.
@@ -117,7 +125,12 @@ impl PreFlushRegion {
                         now.elapsed()
                     );
 
-                    let InstructionReply::FlushRegion(SimpleReply { result, error }) = reply else {
+                    let InstructionReply::FlushRegion(FlushRegionReply {
+                        success,
+                        results,
+                        error_strategy: _,
+                    }) = reply
+                    else {
                         return error::UnexpectedInstructionReplySnafu {
                             mailbox_message: msg.to_string(),
                             reason: "expect flush region reply",
@@ -125,12 +138,20 @@ impl PreFlushRegion {
                         .fail();
                     };
 
+                    let mut error: Option<String> = None;
+                    for (_region_id, result) in results.iter() {
+                        if !result.success {
+                            error = result.error.clone();
+                            break;
+                        }
+                    }
+
                     if error.is_some() {
                         warn!(
                             "Failed to flush leader region {} on datanode {:?}, error: {:?}. Skip flush operation.",
                             region_id, leader, error
                         );
-                    } else if result {
+                    } else if success {
                         info!(
                             "The flush leader region {} on datanode {:?} is successful, elapsed: {:?}",
                             region_id,
@@ -256,8 +277,11 @@ mod tests {
         send_mock_reply(mailbox, rx, |id| {
             Ok(new_flush_region_reply(
                 id,
-                false,
-                Some("test mocked".to_string()),
+                FlushRegionReply {
+                    success: false,
+                    results: Default::default(),
+                    error_strategy: Default::default(),
+                },
             ))
         });
         // Should be ok, if flush leader region failed. it will skip flush operation.
@@ -280,7 +304,16 @@ mod tests {
         mailbox_ctx
             .insert_heartbeat_response_receiver(Channel::Datanode(from_peer_id), tx)
             .await;
-        send_mock_reply(mailbox, rx, |id| Ok(new_flush_region_reply(id, true, None)));
+        send_mock_reply(mailbox, rx, |id| {
+            Ok(new_flush_region_reply(
+                id,
+                FlushRegionReply {
+                    success: true,
+                    results: Default::default(),
+                    error_strategy: Default::default(),
+                },
+            ))
+        });
         let procedure_ctx = new_procedure_context();
         let (next, _) = state.next(&mut ctx, &procedure_ctx).await.unwrap();
 

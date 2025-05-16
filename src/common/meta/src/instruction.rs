@@ -194,12 +194,6 @@ pub struct DropFlow {
     pub flownode_ids: Vec<FlownodeId>,
 }
 
-/// Flushes a batch of regions.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct FlushRegions {
-    pub region_ids: Vec<RegionId>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, Display, PartialEq)]
 pub enum Instruction {
     /// Opens a region.
@@ -216,10 +210,8 @@ pub enum Instruction {
     DowngradeRegion(DowngradeRegion),
     /// Invalidates batch cache.
     InvalidateCaches(Vec<CacheIdent>),
-    /// Flushes regions.
-    FlushRegions(FlushRegions),
-    /// Flushes a single region.
-    FlushRegion(RegionId),
+    /// Flushes one or more regions with specified configuration.
+    FlushRegion(FlushRegionConfig),
 }
 
 /// The reply of [UpgradeRegion].
@@ -250,7 +242,7 @@ pub enum InstructionReply {
     CloseRegion(SimpleReply),
     UpgradeRegion(UpgradeRegionReply),
     DowngradeRegion(DowngradeRegionReply),
-    FlushRegion(SimpleReply),
+    FlushRegion(FlushRegionReply),
 }
 
 impl Display for InstructionReply {
@@ -267,8 +259,77 @@ impl Display for InstructionReply {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Display, PartialEq, Eq)]
+pub enum FlushTarget {
+    All,
+    Regions(Vec<RegionId>),
+    Table(TableId),
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Display, PartialEq, Eq)]
+pub enum FlushErrorStrategy {
+    /// Stop on first error and return immediately
+    FailFast,
+    /// Try all regions and collect results, overall success if any region succeeds
+    TryAll,
+    /// Try all regions and collect results, overall success only if all regions succeed
+    TryAllStrict,
+}
+
+impl Default for FlushErrorStrategy {
+    fn default() -> Self {
+        Self::TryAll
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FlushRegionConfig {
+    pub target: FlushTarget,
+    pub is_hint: bool,
+    #[serde(with = "humantime_serde")]
+    pub timeout: Option<Duration>,
+    #[serde(default)]
+    pub error_strategy: FlushErrorStrategy,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+pub struct FlushResult {
+    pub success: bool,
+    pub error: Option<String>,
+    #[serde(default)]
+    pub skipped: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+pub struct FlushRegionReply {
+    pub success: bool,
+    pub results: HashMap<RegionId, FlushResult>,
+    pub error_strategy: FlushErrorStrategy,
+}
+
+impl Display for FlushRegionReply {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let total = self.results.len();
+        let succeeded = self.results.values().filter(|r| r.success).count();
+        let failed = self
+            .results
+            .values()
+            .filter(|r| !r.success && !r.skipped)
+            .count();
+        let skipped = self.results.values().filter(|r| r.skipped).count();
+
+        write!(
+            f,
+            "(success={}, total={}, succeeded={}, failed={}, skipped={}, strategy={:?})",
+            self.success, total, succeeded, failed, skipped, self.error_strategy
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     #[test]
@@ -347,5 +408,141 @@ mod tests {
             skip_wal_replay: false,
         };
         assert_eq!(expected, deserialized);
+    }
+
+    #[test]
+    fn test_flush_region_config() {
+        let config = FlushRegionConfig {
+            target: FlushTarget::All,
+            is_hint: true,
+            timeout: Some(Duration::from_secs(30)),
+            error_strategy: FlushErrorStrategy::TryAllStrict,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let decoded: FlushRegionConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, decoded);
+
+        let config = FlushRegionConfig {
+            target: FlushTarget::Regions(vec![RegionId::new(1, 1), RegionId::new(2, 1)]),
+            is_hint: false,
+            timeout: None,
+            error_strategy: FlushErrorStrategy::FailFast,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let decoded: FlushRegionConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, decoded);
+
+        let config = FlushRegionConfig {
+            target: FlushTarget::Table(TableId::from(42_u32)),
+            is_hint: true,
+            timeout: Some(Duration::from_secs(60)),
+            error_strategy: FlushErrorStrategy::default(),
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let decoded: FlushRegionConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, decoded);
+    }
+
+    #[test]
+    fn test_flush_region_reply() {
+        let mut results = HashMap::new();
+        // Successful flush
+        results.insert(
+            RegionId::new(1, 1),
+            FlushResult {
+                success: true,
+                error: None,
+                skipped: false,
+            },
+        );
+        // Failed flush
+        results.insert(
+            RegionId::new(2, 1),
+            FlushResult {
+                success: false,
+                error: Some("timeout".to_string()),
+                skipped: false,
+            },
+        );
+        // Skipped flush
+        results.insert(
+            RegionId::new(3, 1),
+            FlushResult {
+                success: false,
+                error: None,
+                skipped: true,
+            },
+        );
+
+        let reply = FlushRegionReply {
+            success: true,
+            results,
+            error_strategy: FlushErrorStrategy::TryAll,
+        };
+        let json = serde_json::to_string(&reply).unwrap();
+        let decoded: FlushRegionReply = serde_json::from_str(&json).unwrap();
+        assert_eq!(reply, decoded);
+
+        // Test Display implementation
+        let display = format!("{}", reply);
+        assert!(display.contains("total=3"));
+        assert!(display.contains("succeeded=1"));
+        assert!(display.contains("failed=1"));
+        assert!(display.contains("skipped=1"));
+    }
+
+    #[test]
+    fn test_flush_error_strategies() {
+        let mut results = HashMap::new();
+        results.insert(
+            RegionId::new(1, 1),
+            FlushResult {
+                success: true,
+                error: None,
+                skipped: false,
+            },
+        );
+        results.insert(
+            RegionId::new(2, 1),
+            FlushResult {
+                success: false,
+                error: Some("error".to_string()),
+                skipped: false,
+            },
+        );
+
+        // TryAll: success if any region succeeds
+        let reply = FlushRegionReply {
+            success: true,
+            results: results.clone(),
+            error_strategy: FlushErrorStrategy::TryAll,
+        };
+        assert!(reply.success);
+
+        // TryAllStrict: success only if all regions succeed
+        let reply = FlushRegionReply {
+            success: false,
+            results: results.clone(),
+            error_strategy: FlushErrorStrategy::TryAllStrict,
+        };
+        assert!(!reply.success);
+
+        // FailFast: should have only one result
+        let mut fail_fast_results = HashMap::new();
+        fail_fast_results.insert(
+            RegionId::new(2, 1),
+            FlushResult {
+                success: false,
+                error: Some("error".to_string()),
+                skipped: false,
+            },
+        );
+        let reply = FlushRegionReply {
+            success: false,
+            results: fail_fast_results,
+            error_strategy: FlushErrorStrategy::FailFast,
+        };
+        assert!(!reply.success);
+        assert_eq!(reply.results.len(), 1);
     }
 }
