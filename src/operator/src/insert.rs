@@ -960,9 +960,8 @@ impl FlowMirrorTask {
                         .collect::<Vec<_>>();
                     // dedup peers
                     let peers = {
-                        let mut tmp = peers;
-                        tmp.dedup();
-                        tmp
+                        let tmp: HashSet<_> = peers.into_iter().collect();
+                        tmp.into_iter().collect::<Vec<_>>()
                     };
 
                     if !peers.is_empty() {

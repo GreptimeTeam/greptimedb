@@ -184,6 +184,7 @@ pub enum CacheIdent {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CreateFlow {
+    /// The unique identifier for the flow.
     pub flow_id: FlowId,
     pub source_table_ids: Vec<TableId>,
     /// Vec of (partition_id, flownode_id, peer)
