@@ -45,6 +45,8 @@ pub struct PickerOutput {
     pub outputs: Vec<CompactionOutput>,
     pub expired_ssts: Vec<FileHandle>,
     pub time_window_size: i64,
+    /// Max single output file size in bytes.
+    pub max_file_size: Option<usize>,
 }
 
 /// SerializedPickerOutput is a serialized version of PickerOutput by replacing [CompactionOutput] and [FileHandle] with [SerializedCompactionOutput] and [FileMeta].
@@ -53,6 +55,7 @@ pub struct SerializedPickerOutput {
     pub outputs: Vec<SerializedCompactionOutput>,
     pub expired_ssts: Vec<FileMeta>,
     pub time_window_size: i64,
+    pub max_file_size: Option<usize>,
 }
 
 impl From<&PickerOutput> for SerializedPickerOutput {
@@ -76,6 +79,7 @@ impl From<&PickerOutput> for SerializedPickerOutput {
             outputs,
             expired_ssts,
             time_window_size: input.time_window_size,
+            max_file_size: input.max_file_size,
         }
     }
 }
@@ -111,6 +115,7 @@ impl PickerOutput {
             outputs,
             expired_ssts,
             time_window_size: input.time_window_size,
+            max_file_size: input.max_file_size,
         }
     }
 }
@@ -179,6 +184,7 @@ mod tests {
             ],
             expired_ssts: expired_ssts_file_handle.clone(),
             time_window_size: 1000,
+            max_file_size: None,
         };
 
         let picker_output_str =
