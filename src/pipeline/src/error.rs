@@ -561,8 +561,8 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("Prepare value must be an object"))]
-    PrepareValueMustBeObject {
+    #[snafu(display("Input value must be an object"))]
+    InputValueMustBeObject {
         #[snafu(implicit)]
         location: Location,
     },
@@ -833,7 +833,7 @@ impl ErrorExt for Error {
             | ValueYamlKeyMustBeString { .. }
             | YamlLoad { .. }
             | YamlParse { .. }
-            | PrepareValueMustBeObject { .. }
+            | InputValueMustBeObject { .. }
             | ColumnOptions { .. }
             | UnsupportedIndexType { .. }
             | UnsupportedNumberType { .. }
