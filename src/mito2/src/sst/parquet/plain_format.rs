@@ -142,9 +142,11 @@ impl PlainReadFormat {
             .collect();
         projection_indices.sort_unstable();
 
-        // Sort columns by their indices in the SST. Then the output order is their order
+        // Sorts columns by their indices in the SST. Then the output order is their order
         // in the batch returned from the SST.
         projected_column_id_index.sort_unstable_by_key(|x| x.1);
+        // Dedups the entries.
+        projected_column_id_index.dedup_by_key(|x| x.1);
         // Then we map the column id to the index of the column id in `projected_column_id_index`.
         // So we can get the index of the column id in the batch returned from the SST.
         let column_id_to_projected_index = projected_column_id_index
