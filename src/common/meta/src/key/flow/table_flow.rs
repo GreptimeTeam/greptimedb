@@ -22,9 +22,12 @@ use snafu::OptionExt;
 use table::metadata::TableId;
 
 use crate::error::{self, Result};
+use crate::key::flow::flow_info::FlowInfoValue;
 use crate::key::flow::{flownode_addr_helper, FlowScoped};
 use crate::key::node_address::NodeAddressKey;
-use crate::key::{BytesAdapter, FlowId, FlowPartitionId, MetadataKey, MetadataValue};
+use crate::key::{
+    BytesAdapter, DeserializedValueWithBytes, FlowId, FlowPartitionId, MetadataKey, MetadataValue,
+};
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 use crate::peer::Peer;
@@ -215,7 +218,7 @@ impl TableFlowManager {
 
     /// Builds a create table flow transaction.
     ///
-    /// Puts `__flow/source_table/{table_id}/{node_id}/{partition_id}` keys.
+    /// Puts `__flow/source_table/{table_id}/{node_id}/{flow_id}/{partition_id}` keys.
     pub fn build_create_txn(
         &self,
         flow_id: FlowId,
@@ -223,6 +226,44 @@ impl TableFlowManager {
         source_table_ids: &[TableId],
     ) -> Result<Txn> {
         let mut txns = Vec::with_capacity(source_table_ids.len() * table_flow_values.len());
+
+        for (partition_id, table_flow_value) in table_flow_values {
+            let flownode_id = table_flow_value.peer.id;
+            let value = table_flow_value.try_as_raw_value()?;
+            for source_table_id in source_table_ids {
+                txns.push(TxnOp::Put(
+                    TableFlowKey::new(*source_table_id, flownode_id, flow_id, partition_id)
+                        .to_bytes(),
+                    value.clone(),
+                ));
+            }
+        }
+
+        Ok(Txn::new().and_then(txns))
+    }
+
+    /// Builds a update table flow transaction.
+    ///
+    /// Puts `__flow/source_table/{table_id}/{node_id}/{flow_id}/{partition_id}` keys,
+    /// Also remove previous
+    /// `__flow/source_table/{table_id}/{old_node_id}/{flow_id}/{partition_id}` keys.
+    pub fn build_update_txn(
+        &self,
+        flow_id: FlowId,
+        current_flow_info: &DeserializedValueWithBytes<FlowInfoValue>,
+        table_flow_values: Vec<(FlowPartitionId, TableFlowValue)>,
+        source_table_ids: &[TableId],
+    ) -> Result<Txn> {
+        let mut txns = Vec::with_capacity(2 * source_table_ids.len() * table_flow_values.len());
+
+        // first remove the old keys
+        for (part_id, node_id) in current_flow_info.flownode_ids() {
+            for source_table_id in current_flow_info.source_table_ids() {
+                txns.push(TxnOp::Delete(
+                    TableFlowKey::new(*source_table_id, *node_id, flow_id, *part_id).to_bytes(),
+                ));
+            }
+        }
 
         for (partition_id, table_flow_value) in table_flow_values {
             let flownode_id = table_flow_value.peer.id;

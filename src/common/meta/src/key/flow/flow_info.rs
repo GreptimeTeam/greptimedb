@@ -272,10 +272,11 @@ impl FlowInfoManager {
         let raw_value = new_flow_value.try_as_raw_value()?;
         let prev_value = current_flow_value.get_raw_bytes();
         let txn = Txn::new()
-            .when(vec![
-                Compare::new(key.clone(), CompareOp::NotEqual, None),
-                Compare::new(key.clone(), CompareOp::Equal, Some(prev_value)),
-            ])
+            .when(vec![Compare::new(
+                key.clone(),
+                CompareOp::Equal,
+                Some(prev_value),
+            )])
             .and_then(vec![TxnOp::Put(key.clone(), raw_value)])
             .or_else(vec![TxnOp::Get(key.clone())]);
 

@@ -19,9 +19,12 @@ use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 
 use crate::error::{self, Result};
+use crate::key::flow::flow_info::FlowInfoValue;
 use crate::key::flow::{flownode_addr_helper, FlowScoped};
 use crate::key::node_address::NodeAddressKey;
-use crate::key::{BytesAdapter, FlowId, FlowPartitionId, MetadataKey, MetadataValue};
+use crate::key::{
+    BytesAdapter, DeserializedValueWithBytes, FlowId, FlowPartitionId, MetadataKey, MetadataValue,
+};
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 use crate::peer::Peer;
@@ -201,6 +204,33 @@ impl FlowRouteManager {
             })
             .collect::<Result<Vec<_>>>()?;
 
+        Ok(Txn::new().and_then(txns))
+    }
+
+    /// Builds a update flow routes transaction.
+    ///
+    /// Puts `__flow/route/{flow_id}/{partition_id}` keys.
+    /// Also removes `__flow/route/{flow_id}/{old_partition_id}` keys.
+    pub(crate) fn build_update_txn<I: IntoIterator<Item = (FlowPartitionId, FlowRouteValue)>>(
+        &self,
+        flow_id: FlowId,
+        current_flow_info: &DeserializedValueWithBytes<FlowInfoValue>,
+        flow_routes: I,
+    ) -> Result<Txn> {
+        let del_txns = current_flow_info
+            .flownode_ids()
+            .iter()
+            .map(|(partition_id, _)| {
+                let key = FlowRouteKey::new(flow_id, *partition_id).to_bytes();
+                Ok(TxnOp::Delete(key))
+            });
+
+        let put_txns = flow_routes.into_iter().map(|(partition_id, route)| {
+            let key = FlowRouteKey::new(flow_id, partition_id).to_bytes();
+
+            Ok(TxnOp::Put(key, route.try_as_raw_value()?))
+        });
+        let txns = del_txns.chain(put_txns).collect::<Result<Vec<_>>>()?;
         Ok(Txn::new().and_then(txns))
     }
 
