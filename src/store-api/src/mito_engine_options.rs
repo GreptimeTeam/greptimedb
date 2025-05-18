@@ -29,14 +29,8 @@ pub const SNAPSHOT_READ: &str = "snapshot_read";
 pub const COMPACTION_TYPE: &str = "compaction.type";
 /// TWCS compaction strategy.
 pub const COMPACTION_TYPE_TWCS: &str = "twcs";
-/// Option key for twcs max active window runs.
-pub const TWCS_MAX_ACTIVE_WINDOW_RUNS: &str = "compaction.twcs.max_active_window_runs";
-/// Option key for twcs max active window files.
-pub const TWCS_MAX_ACTIVE_WINDOW_FILES: &str = "compaction.twcs.max_active_window_files";
-/// Option key for twcs max inactive window runs.
-pub const TWCS_MAX_INACTIVE_WINDOW_RUNS: &str = "compaction.twcs.max_inactive_window_runs";
-/// Option key for twcs max inactive window files.
-pub const TWCS_MAX_INACTIVE_WINDOW_FILES: &str = "compaction.twcs.max_inactive_window_files";
+/// Option key for twcs min file num to trigger a compaction.
+pub const TWCS_TRIGGER_FILE_NUM: &str = "compaction.twcs.trigger_file_num";
 /// Option key for twcs max output file size.
 pub const TWCS_MAX_OUTPUT_FILE_SIZE: &str = "compaction.twcs.max_output_file_size";
 /// Option key for twcs time window.
@@ -68,10 +62,7 @@ pub fn is_mito_engine_option_key(key: &str) -> bool {
     [
         "ttl",
         COMPACTION_TYPE,
-        TWCS_MAX_ACTIVE_WINDOW_RUNS,
-        TWCS_MAX_ACTIVE_WINDOW_FILES,
-        TWCS_MAX_INACTIVE_WINDOW_RUNS,
-        TWCS_MAX_INACTIVE_WINDOW_FILES,
+        TWCS_TRIGGER_FILE_NUM,
         TWCS_MAX_OUTPUT_FILE_SIZE,
         TWCS_TIME_WINDOW,
         REMOTE_COMPACTION,
@@ -100,10 +91,7 @@ mod tests {
         assert!(is_mito_engine_option_key("ttl"));
         assert!(is_mito_engine_option_key("compaction.type"));
         assert!(is_mito_engine_option_key(
-            "compaction.twcs.max_active_window_runs"
-        ));
-        assert!(is_mito_engine_option_key(
-            "compaction.twcs.max_inactive_window_runs"
+            "compaction.twcs.trigger_file_num"
         ));
         assert!(is_mito_engine_option_key("compaction.twcs.time_window"));
         assert!(is_mito_engine_option_key("storage"));

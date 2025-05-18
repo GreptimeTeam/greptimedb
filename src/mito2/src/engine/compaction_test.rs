@@ -129,8 +129,6 @@ async fn test_compaction_region() {
 
     let request = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
-        .insert_option("compaction.twcs.max_active_window_runs", "1")
-        .insert_option("compaction.twcs.max_inactive_window_runs", "1")
         .build();
 
     let column_schemas = request
@@ -201,8 +199,6 @@ async fn test_compaction_region_with_overlapping() {
 
     let request = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
-        .insert_option("compaction.twcs.max_active_window_runs", "2")
-        .insert_option("compaction.twcs.max_inactive_window_runs", "2")
         .insert_option("compaction.twcs.time_window", "1h")
         .build();
 
@@ -257,10 +253,6 @@ async fn test_compaction_region_with_overlapping_delete_all() {
 
     let request = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
-        .insert_option("compaction.twcs.max_active_window_runs", "2")
-        .insert_option("compaction.twcs.max_active_window_files", "2")
-        .insert_option("compaction.twcs.max_inactive_window_runs", "2")
-        .insert_option("compaction.twcs.max_inactive_window_files", "2")
         .insert_option("compaction.twcs.time_window", "1h")
         .build();
 
@@ -332,7 +324,6 @@ async fn test_readonly_during_compaction() {
 
     let request = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
-        .insert_option("compaction.twcs.max_active_window_runs", "1")
         .build();
 
     let column_schemas = request
@@ -404,10 +395,6 @@ async fn test_compaction_update_time_window() {
 
     let request = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
-        .insert_option("compaction.twcs.max_active_window_runs", "2")
-        .insert_option("compaction.twcs.max_active_window_files", "2")
-        .insert_option("compaction.twcs.max_inactive_window_runs", "2")
-        .insert_option("compaction.twcs.max_inactive_window_files", "2")
         .build();
 
     let column_schemas = request
@@ -503,10 +490,6 @@ async fn test_change_region_compaction_window() {
 
     let request = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
-        .insert_option("compaction.twcs.max_active_window_runs", "1")
-        .insert_option("compaction.twcs.max_active_window_files", "1")
-        .insert_option("compaction.twcs.max_inactive_window_runs", "1")
-        .insert_option("compaction.twcs.max_inactive_window_files", "1")
         .build();
     let region_dir = request.region_dir.clone();
     let column_schemas = request
@@ -644,10 +627,6 @@ async fn test_open_overwrite_compaction_window() {
 
     let request = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
-        .insert_option("compaction.twcs.max_active_window_runs", "1")
-        .insert_option("compaction.twcs.max_active_window_files", "1")
-        .insert_option("compaction.twcs.max_inactive_window_runs", "1")
-        .insert_option("compaction.twcs.max_inactive_window_files", "1")
         .build();
     let region_dir = request.region_dir.clone();
     let column_schemas = request
