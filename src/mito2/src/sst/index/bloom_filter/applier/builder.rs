@@ -30,7 +30,6 @@ use store_api::storage::ColumnId;
 
 use crate::cache::file_cache::FileCacheRef;
 use crate::cache::index::bloom_filter_index::BloomFilterIndexCacheRef;
-use crate::cache::index::result_cache::PredicateKey;
 use crate::error::{ColumnNotFoundSnafu, ConvertValueSnafu, Result};
 use crate::row_converter::SortField;
 use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplier;
@@ -103,8 +102,7 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
             self.metadata.region_id,
             self.object_store,
             self.puffin_manager_factory,
-            self.predicates.clone(),
-            PredicateKey::new_bloom(self.predicates),
+            self.predicates,
         )
         .with_file_cache(self.file_cache)
         .with_puffin_metadata_cache(self.puffin_metadata_cache)

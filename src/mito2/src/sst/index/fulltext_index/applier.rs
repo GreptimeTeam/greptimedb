@@ -53,7 +53,7 @@ pub mod builder;
 /// `FulltextIndexApplier` is responsible for applying fulltext index to the provided SST files
 pub struct FulltextIndexApplier {
     /// Requests to be applied.
-    requests: BTreeMap<ColumnId, FulltextRequest>,
+    requests: Arc<BTreeMap<ColumnId, FulltextRequest>>,
 
     /// The source of the index.
     index_source: IndexSource,
@@ -62,7 +62,7 @@ pub struct FulltextIndexApplier {
     bloom_filter_index_cache: Option<BloomFilterIndexCacheRef>,
 
     /// Predicate key. Used to identify the predicate and fetch result from cache.
-    predicate_key: Arc<PredicateKey>,
+    predicate_key: PredicateKey,
 }
 
 pub type FulltextIndexApplierRef = Arc<FulltextIndexApplier>;
@@ -75,15 +75,15 @@ impl FulltextIndexApplier {
         store: ObjectStore,
         requests: BTreeMap<ColumnId, FulltextRequest>,
         puffin_manager_factory: PuffinManagerFactory,
-        predicate_key: PredicateKey,
     ) -> Self {
+        let requests = Arc::new(requests);
         let index_source = IndexSource::new(region_dir, region_id, puffin_manager_factory, store);
 
         Self {
+            predicate_key: PredicateKey::new_fulltext(requests.clone()),
             requests,
             index_source,
             bloom_filter_index_cache: None,
-            predicate_key: Arc::new(predicate_key),
         }
     }
 
@@ -113,7 +113,7 @@ impl FulltextIndexApplier {
     }
 
     /// Returns the predicate key.
-    pub fn predicate_key(&self) -> &Arc<PredicateKey> {
+    pub fn predicate_key(&self) -> &PredicateKey {
         &self.predicate_key
     }
 }
@@ -131,7 +131,7 @@ impl FulltextIndexApplier {
             .start_timer();
 
         let mut row_ids: Option<BTreeSet<RowId>> = None;
-        for (column_id, request) in &self.requests {
+        for (column_id, request) in self.requests.iter() {
             if request.queries.is_empty() && request.terms.is_empty() {
                 continue;
             }
@@ -244,7 +244,7 @@ impl FulltextIndexApplier {
         let (input, mut output) = Self::init_coarse_output(row_groups);
         let mut applied = false;
 
-        for (column_id, request) in &self.requests {
+        for (column_id, request) in self.requests.iter() {
             if request.terms.is_empty() {
                 // only apply terms
                 continue;

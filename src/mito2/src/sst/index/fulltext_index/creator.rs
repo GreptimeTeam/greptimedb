@@ -375,7 +375,6 @@ mod tests {
 
     use super::*;
     use crate::access_layer::RegionFilePathFactory;
-    use crate::cache::index::result_cache::PredicateKey;
     use crate::read::{Batch, BatchColumn};
     use crate::sst::file::FileId;
     use crate::sst::index::fulltext_index::applier::builder::{
@@ -606,9 +605,8 @@ mod tests {
                 region_dir,
                 region_metadata.region_id,
                 object_store,
-                requests.clone(),
+                requests,
                 factory,
-                PredicateKey::new_fulltext(requests),
             );
 
             let backend = backend.clone();

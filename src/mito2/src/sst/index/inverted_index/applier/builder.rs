@@ -35,7 +35,6 @@ use store_api::storage::ColumnId;
 
 use crate::cache::file_cache::FileCacheRef;
 use crate::cache::index::inverted_index::InvertedIndexCacheRef;
-use crate::cache::index::result_cache::PredicateKey;
 use crate::error::{BuildIndexApplierSnafu, ColumnNotFoundSnafu, ConvertValueSnafu, Result};
 use crate::row_converter::SortField;
 use crate::sst::index::codec::IndexValueCodec;
@@ -136,9 +135,6 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
             .collect();
         let applier = PredicatesIndexApplier::try_from(predicates);
 
-        // Use `std::mem::take` to transfer ownership of `self.output` to `PredicateKey::new_inverted`.
-        // This clears `self.output`, which is intentional as it is no longer needed after this point.
-        let predicate_key = PredicateKey::new_inverted(std::mem::take(&mut self.output));
         Ok(Some(
             InvertedIndexApplier::new(
                 self.region_dir,
@@ -146,7 +142,7 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
                 self.object_store,
                 Box::new(applier.context(BuildIndexApplierSnafu)?),
                 self.puffin_manager_factory,
-                predicate_key,
+                self.output,
             )
             .with_file_cache(self.file_cache)
             .with_puffin_metadata_cache(self.puffin_metadata_cache)

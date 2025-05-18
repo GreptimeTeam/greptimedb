@@ -676,7 +676,7 @@ impl ParquetReaderBuilder {
 
     fn index_result_cache_get(
         &self,
-        predicate_key: &Arc<PredicateKey>,
+        predicate_key: &PredicateKey,
         file_id: FileId,
         output: &mut RowGroupSelection,
         metrics: &mut ReaderFilterMetrics,
@@ -694,7 +694,7 @@ impl ParquetReaderBuilder {
 
     fn apply_index_result_and_update_cache(
         &self,
-        predicate_key: &Arc<PredicateKey>,
+        predicate_key: &PredicateKey,
         file_id: FileId,
         result: RowGroupSelection,
         output: &mut RowGroupSelection,

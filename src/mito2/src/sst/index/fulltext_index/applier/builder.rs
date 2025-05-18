@@ -24,7 +24,6 @@ use store_api::storage::{ColumnId, ConcreteDataType, RegionId};
 
 use crate::cache::file_cache::FileCacheRef;
 use crate::cache::index::bloom_filter_index::BloomFilterIndexCacheRef;
-use crate::cache::index::result_cache::PredicateKey;
 use crate::error::Result;
 use crate::sst::index::fulltext_index::applier::FulltextIndexApplier;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
@@ -148,7 +147,6 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
             .iter()
             .any(|(_, request)| !request.queries.is_empty() || !request.terms.is_empty());
 
-        let predicate_key = PredicateKey::new_fulltext(requests.clone());
         Ok(has_requests.then(|| {
             FulltextIndexApplier::new(
                 self.region_dir,
@@ -156,7 +154,6 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
                 self.store,
                 requests,
                 self.puffin_manager_factory,
-                predicate_key,
             )
             .with_file_cache(self.file_cache)
             .with_puffin_metadata_cache(self.puffin_metadata_cache)
