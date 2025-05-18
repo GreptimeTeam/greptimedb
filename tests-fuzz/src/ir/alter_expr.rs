@@ -21,9 +21,8 @@ use common_time::{Duration, FOREVER, INSTANT};
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 use store_api::mito_engine_options::{
-    APPEND_MODE_KEY, COMPACTION_TYPE, TTL_KEY, TWCS_MAX_ACTIVE_WINDOW_FILES,
-    TWCS_MAX_ACTIVE_WINDOW_RUNS, TWCS_MAX_INACTIVE_WINDOW_FILES, TWCS_MAX_INACTIVE_WINDOW_RUNS,
-    TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW,
+    APPEND_MODE_KEY, COMPACTION_TYPE, TTL_KEY, TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW,
+    TWCS_TRIGGER_FILE_NUM,
 };
 use strum::EnumIter;
 
@@ -78,10 +77,7 @@ pub enum AlterTableOption {
     Ttl(Ttl),
     TwcsTimeWindow(Duration),
     TwcsMaxOutputFileSize(ReadableSize),
-    TwcsMaxInactiveWindowFiles(u64),
-    TwcsMaxActiveWindowFiles(u64),
-    TwcsMaxInactiveWindowRuns(u64),
-    TwcsMaxActiveWindowRuns(u64),
+    TwcsTriggerFileNum(u64),
 }
 
 impl AlterTableOption {
@@ -90,10 +86,7 @@ impl AlterTableOption {
             AlterTableOption::Ttl(_) => TTL_KEY,
             AlterTableOption::TwcsTimeWindow(_) => TWCS_TIME_WINDOW,
             AlterTableOption::TwcsMaxOutputFileSize(_) => TWCS_MAX_OUTPUT_FILE_SIZE,
-            AlterTableOption::TwcsMaxInactiveWindowFiles(_) => TWCS_MAX_INACTIVE_WINDOW_FILES,
-            AlterTableOption::TwcsMaxActiveWindowFiles(_) => TWCS_MAX_ACTIVE_WINDOW_FILES,
-            AlterTableOption::TwcsMaxInactiveWindowRuns(_) => TWCS_MAX_INACTIVE_WINDOW_RUNS,
-            AlterTableOption::TwcsMaxActiveWindowRuns(_) => TWCS_MAX_ACTIVE_WINDOW_RUNS,
+            AlterTableOption::TwcsTriggerFileNum(_) => TWCS_TRIGGER_FILE_NUM,
         }
     }
 
@@ -111,21 +104,9 @@ impl AlterTableOption {
                 };
                 Ok(AlterTableOption::Ttl(ttl))
             }
-            TWCS_MAX_ACTIVE_WINDOW_RUNS => {
-                let runs = value.parse().unwrap();
-                Ok(AlterTableOption::TwcsMaxActiveWindowRuns(runs))
-            }
-            TWCS_MAX_ACTIVE_WINDOW_FILES => {
+            TWCS_TRIGGER_FILE_NUM => {
                 let files = value.parse().unwrap();
-                Ok(AlterTableOption::TwcsMaxActiveWindowFiles(files))
-            }
-            TWCS_MAX_INACTIVE_WINDOW_RUNS => {
-                let runs = value.parse().unwrap();
-                Ok(AlterTableOption::TwcsMaxInactiveWindowRuns(runs))
-            }
-            TWCS_MAX_INACTIVE_WINDOW_FILES => {
-                let files = value.parse().unwrap();
-                Ok(AlterTableOption::TwcsMaxInactiveWindowFiles(files))
+                Ok(AlterTableOption::TwcsTriggerFileNum(files))
             }
             TWCS_MAX_OUTPUT_FILE_SIZE => {
                 // may be "1M" instead of "1 MiB"
@@ -178,17 +159,8 @@ impl Display for AlterTableOption {
                 // Caution: to_string loses precision for ReadableSize
                 write!(f, "'{}' = '{}'", TWCS_MAX_OUTPUT_FILE_SIZE, s)
             }
-            AlterTableOption::TwcsMaxInactiveWindowFiles(u) => {
-                write!(f, "'{}' = '{}'", TWCS_MAX_INACTIVE_WINDOW_FILES, u)
-            }
-            AlterTableOption::TwcsMaxActiveWindowFiles(u) => {
-                write!(f, "'{}' = '{}'", TWCS_MAX_ACTIVE_WINDOW_FILES, u)
-            }
-            AlterTableOption::TwcsMaxInactiveWindowRuns(u) => {
-                write!(f, "'{}' = '{}'", TWCS_MAX_INACTIVE_WINDOW_RUNS, u)
-            }
-            AlterTableOption::TwcsMaxActiveWindowRuns(u) => {
-                write!(f, "'{}' = '{}'", TWCS_MAX_ACTIVE_WINDOW_RUNS, u)
+            AlterTableOption::TwcsTriggerFileNum(u) => {
+                write!(f, "'{}' = '{}'", TWCS_TRIGGER_FILE_NUM, u)
             }
         }
     }
@@ -212,21 +184,15 @@ mod tests {
             ]
         );
 
-        let option_string = "compaction.twcs.max_active_window_files = '5030469694939972912',
-  compaction.twcs.max_active_window_runs = '8361168990283879099',
-  compaction.twcs.max_inactive_window_files = '6028716566907830876',
-  compaction.twcs.max_inactive_window_runs = '10622283085591494074',
+        let option_string = "compaction.twcs.trigger_file_num = '5030469694939972912',
   compaction.twcs.max_output_file_size = '15686.4PiB',
   compaction.twcs.time_window = '2061999256ms',
   compaction.type = 'twcs',
   ttl = '1month 3days 15h 49m 8s 279ms'";
         let options = AlterTableOption::parse_kv_pairs(option_string).unwrap();
-        assert_eq!(options.len(), 7);
+        assert_eq!(options.len(), 4);
         let expected = vec![
-            AlterTableOption::TwcsMaxActiveWindowFiles(5030469694939972912),
-            AlterTableOption::TwcsMaxActiveWindowRuns(8361168990283879099),
-            AlterTableOption::TwcsMaxInactiveWindowFiles(6028716566907830876),
-            AlterTableOption::TwcsMaxInactiveWindowRuns(10622283085591494074),
+            AlterTableOption::TwcsTriggerFileNum(5030469694939972912),
             AlterTableOption::TwcsMaxOutputFileSize(ReadableSize::from_str("15686.4PiB").unwrap()),
             AlterTableOption::TwcsTimeWindow(Duration::new_nanosecond(2_061_999_256_000_000)),
             AlterTableOption::Ttl(Ttl::Duration(Duration::new_millisecond(

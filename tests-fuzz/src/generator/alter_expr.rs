@@ -238,21 +238,9 @@ impl<R: Rng> Generator<AlterTableExpr, R> for AlterExprSetTableOptionsGenerator<
                     let max_output_file_size: u64 = rng.random();
                     AlterTableOption::TwcsMaxOutputFileSize(ReadableSize(max_output_file_size))
                 }
-                AlterTableOption::TwcsMaxInactiveWindowRuns(_) => {
-                    let max_inactive_window_runs: u64 = rng.random();
-                    AlterTableOption::TwcsMaxInactiveWindowRuns(max_inactive_window_runs)
-                }
-                AlterTableOption::TwcsMaxActiveWindowFiles(_) => {
-                    let max_active_window_files: u64 = rng.random();
-                    AlterTableOption::TwcsMaxActiveWindowFiles(max_active_window_files)
-                }
-                AlterTableOption::TwcsMaxActiveWindowRuns(_) => {
-                    let max_active_window_runs: u64 = rng.random();
-                    AlterTableOption::TwcsMaxActiveWindowRuns(max_active_window_runs)
-                }
-                AlterTableOption::TwcsMaxInactiveWindowFiles(_) => {
-                    let max_inactive_window_files: u64 = rng.random();
-                    AlterTableOption::TwcsMaxInactiveWindowFiles(max_inactive_window_files)
+                AlterTableOption::TwcsTriggerFileNum(_) => {
+                    let trigger_file_num: u64 = rng.random();
+                    AlterTableOption::TwcsTriggerFileNum(trigger_file_num)
                 }
             })
             .collect();
@@ -365,7 +353,7 @@ mod tests {
             .generate(&mut rng)
             .unwrap();
         let serialized = serde_json::to_string(&expr).unwrap();
-        let expected = r#"{"table_name":{"value":"quasi","quote_style":null},"alter_kinds":{"SetTableOptions":{"options":[{"TwcsMaxOutputFileSize":16770910638250818741}]}}}"#;
+        let expected = r#"{"table_name":{"value":"quasi","quote_style":null},"alter_kinds":{"SetTableOptions":{"options":[{"TwcsTimeWindow":{"value":2428665013,"unit":"Millisecond"}}]}}}"#;
         assert_eq!(expected, serialized);
 
         let expr = AlterExprUnsetTableOptionsGeneratorBuilder::default()
@@ -375,7 +363,7 @@ mod tests {
             .generate(&mut rng)
             .unwrap();
         let serialized = serde_json::to_string(&expr).unwrap();
-        let expected = r#"{"table_name":{"value":"quasi","quote_style":null},"alter_kinds":{"UnsetTableOptions":{"keys":["compaction.twcs.max_active_window_runs","compaction.twcs.max_output_file_size","compaction.twcs.time_window","compaction.twcs.max_inactive_window_files","compaction.twcs.max_active_window_files"]}}}"#;
+        let expected = r#"{"table_name":{"value":"quasi","quote_style":null},"alter_kinds":{"UnsetTableOptions":{"keys":["compaction.twcs.trigger_file_num","compaction.twcs.time_window"]}}}"#;
         assert_eq!(expected, serialized);
     }
 }

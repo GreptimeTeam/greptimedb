@@ -214,28 +214,10 @@ fn set_twcs_options(
     region_id: RegionId,
 ) -> std::result::Result<(), MetadataError> {
     match key {
-        mito_engine_options::TWCS_MAX_ACTIVE_WINDOW_RUNS => {
-            let runs = parse_usize_with_default(key, value, default_option.max_active_window_runs)?;
-            log_option_update(region_id, key, options.max_active_window_runs, runs);
-            options.max_active_window_runs = runs;
-        }
-        mito_engine_options::TWCS_MAX_ACTIVE_WINDOW_FILES => {
-            let files =
-                parse_usize_with_default(key, value, default_option.max_active_window_files)?;
-            log_option_update(region_id, key, options.max_active_window_files, files);
-            options.max_active_window_files = files;
-        }
-        mito_engine_options::TWCS_MAX_INACTIVE_WINDOW_RUNS => {
-            let runs =
-                parse_usize_with_default(key, value, default_option.max_inactive_window_runs)?;
-            log_option_update(region_id, key, options.max_inactive_window_runs, runs);
-            options.max_inactive_window_runs = runs;
-        }
-        mito_engine_options::TWCS_MAX_INACTIVE_WINDOW_FILES => {
-            let files =
-                parse_usize_with_default(key, value, default_option.max_inactive_window_files)?;
-            log_option_update(region_id, key, options.max_inactive_window_files, files);
-            options.max_inactive_window_files = files;
+        mito_engine_options::TWCS_TRIGGER_FILE_NUM => {
+            let files = parse_usize_with_default(key, value, default_option.trigger_file_num)?;
+            log_option_update(region_id, key, options.trigger_file_num, files);
+            options.trigger_file_num = files;
         }
         mito_engine_options::TWCS_MAX_OUTPUT_FILE_SIZE => {
             let size = if value.is_empty() {

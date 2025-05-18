@@ -52,9 +52,7 @@ use crate::metadata::{
 use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use crate::metrics;
 use crate::mito_engine_options::{
-    TTL_KEY, TWCS_MAX_ACTIVE_WINDOW_FILES, TWCS_MAX_ACTIVE_WINDOW_RUNS,
-    TWCS_MAX_INACTIVE_WINDOW_FILES, TWCS_MAX_INACTIVE_WINDOW_RUNS, TWCS_MAX_OUTPUT_FILE_SIZE,
-    TWCS_TIME_WINDOW,
+    TTL_KEY, TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM,
 };
 use crate::path_utils::region_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
@@ -1026,12 +1024,9 @@ impl TryFrom<&PbOption> for SetRegionOption {
 
                 Ok(Self::Ttl(Some(ttl)))
             }
-            TWCS_MAX_ACTIVE_WINDOW_RUNS
-            | TWCS_MAX_ACTIVE_WINDOW_FILES
-            | TWCS_MAX_INACTIVE_WINDOW_FILES
-            | TWCS_MAX_INACTIVE_WINDOW_RUNS
-            | TWCS_MAX_OUTPUT_FILE_SIZE
-            | TWCS_TIME_WINDOW => Ok(Self::Twsc(key.to_string(), value.to_string())),
+            TWCS_TRIGGER_FILE_NUM | TWCS_MAX_OUTPUT_FILE_SIZE | TWCS_TIME_WINDOW => {
+                Ok(Self::Twsc(key.to_string(), value.to_string()))
+            }
             _ => InvalidSetRegionOptionRequestSnafu { key, value }.fail(),
         }
     }
@@ -1040,16 +1035,7 @@ impl TryFrom<&PbOption> for SetRegionOption {
 impl From<&UnsetRegionOption> for SetRegionOption {
     fn from(unset_option: &UnsetRegionOption) -> Self {
         match unset_option {
-            UnsetRegionOption::TwcsMaxActiveWindowFiles => {
-                SetRegionOption::Twsc(unset_option.to_string(), String::new())
-            }
-            UnsetRegionOption::TwcsMaxInactiveWindowFiles => {
-                SetRegionOption::Twsc(unset_option.to_string(), String::new())
-            }
-            UnsetRegionOption::TwcsMaxActiveWindowRuns => {
-                SetRegionOption::Twsc(unset_option.to_string(), String::new())
-            }
-            UnsetRegionOption::TwcsMaxInactiveWindowRuns => {
+            UnsetRegionOption::TwcsTriggerFileNum => {
                 SetRegionOption::Twsc(unset_option.to_string(), String::new())
             }
             UnsetRegionOption::TwcsMaxOutputFileSize => {
@@ -1069,10 +1055,7 @@ impl TryFrom<&str> for UnsetRegionOption {
     fn try_from(key: &str) -> Result<Self> {
         match key.to_ascii_lowercase().as_str() {
             TTL_KEY => Ok(Self::Ttl),
-            TWCS_MAX_ACTIVE_WINDOW_FILES => Ok(Self::TwcsMaxActiveWindowFiles),
-            TWCS_MAX_INACTIVE_WINDOW_FILES => Ok(Self::TwcsMaxInactiveWindowFiles),
-            TWCS_MAX_ACTIVE_WINDOW_RUNS => Ok(Self::TwcsMaxActiveWindowRuns),
-            TWCS_MAX_INACTIVE_WINDOW_RUNS => Ok(Self::TwcsMaxInactiveWindowRuns),
+            TWCS_TRIGGER_FILE_NUM => Ok(Self::TwcsTriggerFileNum),
             TWCS_MAX_OUTPUT_FILE_SIZE => Ok(Self::TwcsMaxOutputFileSize),
             TWCS_TIME_WINDOW => Ok(Self::TwcsTimeWindow),
             _ => InvalidUnsetRegionOptionRequestSnafu { key }.fail(),
@@ -1082,10 +1065,7 @@ impl TryFrom<&str> for UnsetRegionOption {
 
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
 pub enum UnsetRegionOption {
-    TwcsMaxActiveWindowFiles,
-    TwcsMaxInactiveWindowFiles,
-    TwcsMaxActiveWindowRuns,
-    TwcsMaxInactiveWindowRuns,
+    TwcsTriggerFileNum,
     TwcsMaxOutputFileSize,
     TwcsTimeWindow,
     Ttl,
@@ -1095,10 +1075,7 @@ impl UnsetRegionOption {
     pub fn as_str(&self) -> &str {
         match self {
             Self::Ttl => TTL_KEY,
-            Self::TwcsMaxActiveWindowFiles => TWCS_MAX_ACTIVE_WINDOW_FILES,
-            Self::TwcsMaxInactiveWindowFiles => TWCS_MAX_INACTIVE_WINDOW_FILES,
-            Self::TwcsMaxActiveWindowRuns => TWCS_MAX_ACTIVE_WINDOW_RUNS,
-            Self::TwcsMaxInactiveWindowRuns => TWCS_MAX_INACTIVE_WINDOW_RUNS,
+            Self::TwcsTriggerFileNum => TWCS_TRIGGER_FILE_NUM,
             Self::TwcsMaxOutputFileSize => TWCS_MAX_OUTPUT_FILE_SIZE,
             Self::TwcsTimeWindow => TWCS_TIME_WINDOW,
         }

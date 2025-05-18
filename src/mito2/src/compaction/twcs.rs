@@ -35,14 +35,8 @@ const LEVEL_COMPACTED: Level = 1;
 /// candidates.
 #[derive(Debug)]
 pub struct TwcsPicker {
-    /// Max allowed sorted runs in active window.
-    pub max_active_window_runs: usize,
-    /// Max allowed files in active window.
-    pub max_active_window_files: usize,
-    /// Max allowed sorted runs in inactive windows.
-    pub max_inactive_window_runs: usize,
-    /// Max allowed files in inactive windows.
-    pub max_inactive_window_files: usize,
+    /// Minimum file num to trigger a compaction.
+    pub trigger_file_num: usize,
     /// Compaction time window in seconds.
     pub time_window_seconds: Option<i64>,
     /// Max allowed compaction output file size.
@@ -53,8 +47,6 @@ pub struct TwcsPicker {
 
 impl TwcsPicker {
     /// Builds compaction output from files.
-    /// For active writing window, we allow for at most `max_active_window_runs` files to alleviate
-    /// fragmentation. For other windows, we allow at most 1 file at each window.
     fn build_output(
         &self,
         time_windows: &mut BTreeMap<i64, Window>,
@@ -75,7 +67,7 @@ impl TwcsPicker {
                 reduce_runs(sorted_runs)
             } else {
                 let run = sorted_runs.last().unwrap();
-                if run.items().len() < 4 {
+                if run.items().len() < self.trigger_file_num {
                     continue;
                 }
                 // no overlapping files, try merge small files
@@ -539,10 +531,7 @@ mod tests {
             let active_window =
                 find_latest_window_in_seconds(self.input_files.iter(), self.window_size);
             let output = TwcsPicker {
-                max_active_window_runs: 4,
-                max_active_window_files: usize::MAX,
-                max_inactive_window_runs: 1,
-                max_inactive_window_files: usize::MAX,
+                trigger_file_num: 4,
                 time_window_seconds: None,
                 max_output_file_size: None,
                 append_mode: false,
