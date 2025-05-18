@@ -1,5 +1,7 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use mito2::compaction::run::{find_overlapping_items, find_sorted_runs, reduce_runs, Item, Ranged};
+use mito2::compaction::run::{
+    find_overlapping_items, find_sorted_runs, merge_seq_files, reduce_runs, Item, Ranged,
+};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct MockFile {
@@ -38,7 +40,7 @@ fn generate_test_files(n: usize) -> Vec<MockFile> {
 fn bench_find_sorted_runs(c: &mut Criterion) {
     let mut group = c.benchmark_group("find_sorted_runs");
 
-    for size in [10, 100, 1000, 10000].iter() {
+    for size in [10, 100, 1000].iter() {
         group.bench_function(format!("size_{}", size), |b| {
             let mut files = generate_test_files(*size);
             b.iter(|| {
@@ -67,7 +69,7 @@ fn bench_reduce_runs(c: &mut Criterion) {
 fn bench_find_overlapping_items(c: &mut Criterion) {
     let mut group = c.benchmark_group("find_overlapping_items");
 
-    for size in [10, 50, 100].iter() {
+    for size in [10, 100, 1000].iter() {
         group.bench_function(format!("size_{}", size), |b| {
             // Create two sets of files with some overlapping ranges
             let mut files1 = Vec::with_capacity(*size);
@@ -95,10 +97,44 @@ fn bench_find_overlapping_items(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_merge_seq_files(c: &mut Criterion) {
+    let mut group = c.benchmark_group("merge_seq_files");
+
+    for size in [10, 100, 1000].iter() {
+        group.bench_function(format!("size_{}", size), |b| {
+            // Create a set of files with varying sizes
+            let mut files = Vec::with_capacity(*size);
+
+            for i in 0..*size {
+                // Create files with different sizes to test the scoring algorithm
+                let file_size = if i % 3 == 0 {
+                    5
+                } else if i % 3 == 1 {
+                    10
+                } else {
+                    15
+                };
+
+                files.push(MockFile {
+                    start: i as i64,
+                    end: (i + 1) as i64,
+                    size: file_size,
+                });
+            }
+
+            b.iter(|| {
+                merge_seq_files(black_box(&files), black_box(Some(50)));
+            });
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_find_sorted_runs,
     bench_reduce_runs,
-    bench_find_overlapping_items
+    bench_find_overlapping_items,
+    bench_merge_seq_files
 );
 criterion_main!(benches);

@@ -62,43 +62,36 @@ impl TwcsPicker {
     ) -> Vec<CompactionOutput> {
         let mut output = vec![];
         for (window, files) in time_windows {
-            let mut sorted_runs = find_sorted_runs(&mut files.files);
-
-            let (max_runs, _) = if let Some(active_window) = active_window
-                && *window == active_window
-            {
-                (self.max_active_window_runs, self.max_active_window_files)
-            } else {
-                (
-                    self.max_inactive_window_runs,
-                    self.max_inactive_window_files,
-                )
-            };
-
+            if files.files.is_empty() {
+                continue;
+            }
+            let sorted_runs = find_sorted_runs(&mut files.files);
             let found_runs = sorted_runs.len();
-            // We only remove deletion markers once no file in current window overlaps with any other window
-            // and region is not in append mode.
-            let filter_deleted =
-                !files.overlapping && (found_runs == 1 || max_runs == 1) && !self.append_mode;
+            // We only remove deletion markers if we found less than 2 runs and not in append mode.
+            // because after compaction there will be no overlapping files.
+            let filter_deleted = !files.overlapping && found_runs <= 2 && !self.append_mode;
 
             let inputs = if found_runs > 1 {
                 reduce_runs(sorted_runs)
             } else {
-                let run = sorted_runs.swap_remove(0);
+                let run = sorted_runs.last().unwrap();
+                if run.items().len() < 4 {
+                    continue;
+                }
+                // no overlapping files, try merge small files
                 merge_seq_files(run.items(), self.max_output_file_size)
             };
+
             let num_inputs = inputs.len();
             info!(
                 "Building compaction output, active window: {:?}, \
                         current window: {}, \
-                        max runs: {}, \
                         found runs: {}, \
-                        output size: {}, \
+                        input file num: {}, \
                         max output size: {:?}, \
                         remove deletion markers: {}",
                 active_window,
                 *window,
-                max_runs,
                 found_runs,
                 num_inputs,
                 self.max_output_file_size,
@@ -157,6 +150,17 @@ impl Picker for TwcsPicker {
             return None;
         }
 
+        for o in &outputs {
+            let file_ranges = o
+                .inputs
+                .iter()
+                .map(|f| {
+                    let range = f.time_range();
+                    (range.0.value(), range.1.value())
+                })
+                .collect::<Vec<_>>();
+            info!("=== merging file: {:?}", file_ranges);
+        }
         let max_file_size = self.max_output_file_size.map(|v| v as usize);
         Some(PickerOutput {
             outputs,
@@ -525,6 +529,12 @@ mod tests {
 
     impl CompactionPickerTestCase {
         fn check(&self) {
+            let file_id_to_idx = self
+                .input_files
+                .iter()
+                .enumerate()
+                .map(|(idx, file)| (file.file_id(), idx))
+                .collect::<HashMap<_, _>>();
             let mut windows = assign_to_windows(self.input_files.iter(), self.window_size);
             let active_window =
                 find_latest_window_in_seconds(self.input_files.iter(), self.window_size);
@@ -542,8 +552,11 @@ mod tests {
             let output = output
                 .iter()
                 .map(|o| {
-                    let input_file_ids =
-                        o.inputs.iter().map(|f| f.file_id()).collect::<HashSet<_>>();
+                    let input_file_ids = o
+                        .inputs
+                        .iter()
+                        .map(|f| file_id_to_idx.get(&f.file_id()).copied().unwrap())
+                        .collect::<HashSet<_>>();
                     (input_file_ids, o.output_level)
                 })
                 .collect::<Vec<_>>();
@@ -552,11 +565,7 @@ mod tests {
                 .expected_outputs
                 .iter()
                 .map(|o| {
-                    let input_file_ids = o
-                        .input_files
-                        .iter()
-                        .map(|idx| self.input_files[*idx].file_id())
-                        .collect::<HashSet<_>>();
+                    let input_file_ids = o.input_files.iter().copied().collect::<HashSet<_>>();
                     (input_file_ids, o.output_level)
                 })
                 .collect::<Vec<_>>();
@@ -573,6 +582,7 @@ mod tests {
     fn test_build_twcs_output() {
         let file_ids = (0..4).map(|_| FileId::random()).collect::<Vec<_>>();
 
+        // Case 1: 2 runs found in each time window.
         CompactionPickerTestCase {
             window_size: 3,
             input_files: [
@@ -582,13 +592,25 @@ mod tests {
                 new_file_handle(file_ids[3], 50, 2998, 0), //active windows
             ]
             .to_vec(),
-            expected_outputs: vec![ExpectedOutput {
-                input_files: vec![0, 1],
-                output_level: 1,
-            }],
+            expected_outputs: vec![
+                ExpectedOutput {
+                    input_files: vec![0, 1],
+                    output_level: 1,
+                },
+                ExpectedOutput {
+                    input_files: vec![2, 3],
+                    output_level: 1,
+                },
+            ],
         }
         .check();
 
+        // Case 2:
+        //    -2000........-3
+        // -3000.....-100
+        //                    0..............2999
+        //                      50..........2998
+        //                     11.........2990
         let file_ids = (0..6).map(|_| FileId::random()).collect::<Vec<_>>();
         CompactionPickerTestCase {
             window_size: 3,
@@ -598,7 +620,6 @@ mod tests {
                 new_file_handle(file_ids[2], 0, 2999, 0),
                 new_file_handle(file_ids[3], 50, 2998, 0),
                 new_file_handle(file_ids[4], 11, 2990, 0),
-                new_file_handle(file_ids[5], 50, 4998, 0),
             ]
             .to_vec(),
             expected_outputs: vec![
@@ -607,7 +628,7 @@ mod tests {
                     output_level: 1,
                 },
                 ExpectedOutput {
-                    input_files: vec![2, 3, 4],
+                    input_files: vec![2, 4],
                     output_level: 1,
                 },
             ],
