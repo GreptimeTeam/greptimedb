@@ -770,8 +770,23 @@ fn extract_pipeline_value_by_content_type(
     payload: Bytes,
     ignore_errors: bool,
 ) -> Result<Vec<PipelineMap>> {
-    EventPayloadResolver::try_from(&content_type)
-        .and_then(|resolver| resolver.parse_payload(payload, ignore_errors))
+    EventPayloadResolver::try_from(&content_type).and_then(|resolver| {
+        resolver
+            .parse_payload(payload, ignore_errors)
+            .map_err(|e| match &e {
+                Error::InvalidParameter { reason, .. } if content_type == *JSON_CONTENT_TYPE => {
+                    if reason.contains("invalid item:") {
+                        InvalidParameterSnafu {
+                            reason: "json format error, please check the date is valid JSON.",
+                        }
+                        .build()
+                    } else {
+                        e
+                    }
+                }
+                _ => e,
+            })
+    })
 }
 
 pub(crate) async fn ingest_logs_inner(

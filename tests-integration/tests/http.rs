@@ -2372,6 +2372,20 @@ transform:
         let body: Value = res.json().await;
         assert_eq!(body["error"], json!("Invalid request parameter: invalid content type: application/yaml, expected: one of application/json, application/x-ndjson, text/plain"));
 
+        body_for_text["data_type"] = json!("application/json");
+        let res = client
+            .post("/v1/pipelines/_dryrun")
+            .header("Content-Type", "application/json")
+            .body(body_for_text.to_string())
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let body: Value = res.json().await;
+        assert_eq!(
+            body["error"],
+            json!("Invalid request parameter: json format error, please check the date is valid JSON.")
+        );
+
         body_for_text["data_type"] = json!("text/plain");
         let res = client
             .post("/v1/pipelines/_dryrun")
@@ -2379,9 +2393,9 @@ transform:
             .body(body_for_text.to_string())
             .send()
             .await;
-        // assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.status(), StatusCode::OK);
         let body: Value = res.json().await;
-        common_telemetry::tracing::info!("body: {:?}", body);
+
         let schema = &body[0]["schema"];
         let rows = &body[0]["rows"];
         assert_eq!(schema, &dryrun_schema);
