@@ -58,3 +58,6 @@ tests-fuzz/corpus/
 
 ## default data home
 greptimedb_data
+
+# github
+!/.github
