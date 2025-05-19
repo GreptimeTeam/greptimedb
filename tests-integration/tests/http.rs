@@ -2361,6 +2361,18 @@ transform:
         assert_eq!(schema, &dryrun_schema);
         assert_eq!(rows, &dryrun_rows);
 
+        body_for_text["data_type"] = json!("application/yaml");
+        let res = client
+            .post("/v1/pipelines/_dryrun")
+            .header("Content-Type", "application/json")
+            .body(body_for_text.to_string())
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let body: Value = res.json().await;
+        assert_eq!(body["error"], json!("Invalid request parameter: invalid content type: application/yaml, expected: one of application/json, application/x-ndjson, text/plain"));
+
+        body_for_text["data_type"] = json!("text/plain");
         let res = client
             .post("/v1/pipelines/_dryrun")
             .header("Content-Type", "application/json")
