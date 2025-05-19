@@ -162,6 +162,8 @@ pub struct DatanodeBuilder {
     meta_client: Option<MetaClientRef>,
     kv_backend: KvBackendRef,
     cache_registry: Option<Arc<LayeredCacheRegistry>>,
+    #[cfg(feature = "enterprise")]
+    extension_range_provider_factory: Option<mito2::extension::BoxedExtensionRangeProviderFactory>,
 }
 
 impl DatanodeBuilder {
@@ -173,6 +175,8 @@ impl DatanodeBuilder {
             meta_client: None,
             kv_backend,
             cache_registry: None,
+            #[cfg(feature = "enterprise")]
+            extension_range_provider_factory: None,
         }
     }
 
@@ -196,6 +200,15 @@ impl DatanodeBuilder {
 
     pub fn with_table_provider_factory(&mut self, factory: TableProviderFactoryRef) -> &mut Self {
         self.table_provider_factory = Some(factory);
+        self
+    }
+
+    #[cfg(feature = "enterprise")]
+    pub fn with_extension_range_provider(
+        &mut self,
+        extension_range_provider_factory: mito2::extension::BoxedExtensionRangeProviderFactory,
+    ) -> &mut Self {
+        self.extension_range_provider_factory = Some(extension_range_provider_factory);
         self
     }
 
@@ -340,7 +353,7 @@ impl DatanodeBuilder {
     }
 
     async fn new_region_server(
-        &self,
+        &mut self,
         schema_metadata_manager: SchemaMetadataManagerRef,
         event_listener: RegionServerEventListenerRef,
     ) -> Result<RegionServer> {
@@ -381,6 +394,8 @@ impl DatanodeBuilder {
             object_store_manager,
             schema_metadata_manager,
             self.plugins.clone(),
+            #[cfg(feature = "enterprise")]
+            self.extension_range_provider_factory.take(),
         )
         .await?;
         for engine in engines {
@@ -398,6 +413,9 @@ impl DatanodeBuilder {
         object_store_manager: ObjectStoreManagerRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
         plugins: Plugins,
+        #[cfg(feature = "enterprise")] extension_range_provider_factory: Option<
+            mito2::extension::BoxedExtensionRangeProviderFactory,
+        >,
     ) -> Result<Vec<RegionEngineRef>> {
         let mut metric_engine_config = metric_engine::config::EngineConfig::default();
         let mut mito_engine_config = MitoConfig::default();
@@ -423,6 +441,8 @@ impl DatanodeBuilder {
             mito_engine_config,
             schema_metadata_manager.clone(),
             plugins.clone(),
+            #[cfg(feature = "enterprise")]
+            extension_range_provider_factory,
         )
         .await?;
 
@@ -448,6 +468,9 @@ impl DatanodeBuilder {
         mut config: MitoConfig,
         schema_metadata_manager: SchemaMetadataManagerRef,
         plugins: Plugins,
+        #[cfg(feature = "enterprise")] extension_range_provider_factory: Option<
+            mito2::extension::BoxedExtensionRangeProviderFactory,
+        >,
     ) -> Result<MitoEngine> {
         if opts.storage.is_object_storage() {
             // Enable the write cache when setting object storage
@@ -464,6 +487,8 @@ impl DatanodeBuilder {
                 object_store_manager,
                 schema_metadata_manager,
                 plugins,
+                #[cfg(feature = "enterprise")]
+                extension_range_provider_factory,
             )
             .await
             .context(BuildMitoEngineSnafu)?,
@@ -495,6 +520,8 @@ impl DatanodeBuilder {
                     object_store_manager,
                     schema_metadata_manager,
                     plugins,
+                    #[cfg(feature = "enterprise")]
+                    extension_range_provider_factory,
                 )
                 .await
                 .context(BuildMitoEngineSnafu)?

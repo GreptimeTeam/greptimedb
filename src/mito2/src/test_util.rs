@@ -289,6 +289,8 @@ impl TestEnv {
                 zelf.object_store_manager.as_ref().unwrap().clone(),
                 zelf.schema_metadata_manager.clone(),
                 Plugins::new(),
+                #[cfg(feature = "enterprise")]
+                None,
             )
             .await
             .unwrap()
