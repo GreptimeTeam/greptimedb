@@ -14,13 +14,13 @@
 
 use std::any::Any;
 
+use common_error::define_from_tonic_status;
 use common_error::ext::{BoxedError, ErrorExt};
-use common_error::status_code::{convert_tonic_code_to_status_code, StatusCode};
-use common_error::{GREPTIME_DB_HEADER_ERROR_CODE, GREPTIME_DB_HEADER_ERROR_MSG};
+use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use snafu::{location, Location, Snafu};
 use tonic::metadata::errors::InvalidMetadataValue;
-use tonic::{Code, Status};
+use tonic::Code;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -124,6 +124,15 @@ pub enum Error {
         location: Location,
         source: datatypes::error::Error,
     },
+
+    #[snafu(display("{}", msg))]
+    Tonic {
+        code: StatusCode,
+        msg: String,
+        tonic_code: Code,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -135,7 +144,7 @@ impl ErrorExt for Error {
             | Error::MissingField { .. }
             | Error::IllegalDatabaseResponse { .. } => StatusCode::Internal,
 
-            Error::Server { code, .. } => *code,
+            Error::Server { code, .. } | Error::Tonic { code, .. } => *code,
             Error::FlightGet { source, .. }
             | Error::RegionServer { source, .. }
             | Error::FlowServer { source, .. } => source.status_code(),
@@ -153,34 +162,7 @@ impl ErrorExt for Error {
     }
 }
 
-impl From<Status> for Error {
-    fn from(e: Status) -> Self {
-        fn get_metadata_value(e: &Status, key: &str) -> Option<String> {
-            e.metadata()
-                .get(key)
-                .and_then(|v| String::from_utf8(v.as_bytes().to_vec()).ok())
-        }
-
-        let code = get_metadata_value(&e, GREPTIME_DB_HEADER_ERROR_CODE).and_then(|s| {
-            if let Ok(code) = s.parse::<u32>() {
-                StatusCode::from_u32(code)
-            } else {
-                None
-            }
-        });
-        let tonic_code = e.code();
-        let code = code.unwrap_or_else(|| convert_tonic_code_to_status_code(tonic_code));
-
-        let msg = get_metadata_value(&e, GREPTIME_DB_HEADER_ERROR_MSG)
-            .unwrap_or_else(|| e.message().to_string());
-
-        Self::Server {
-            code,
-            msg,
-            location: location!(),
-        }
-    }
-}
+define_from_tonic_status!(Error, Tonic);
 
 impl Error {
     pub fn should_retry(&self) -> bool {
