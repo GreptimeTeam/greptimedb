@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod metadata;
+
 use api::v1::flow::{flow_request, DropRequest, FlowRequest};
 use async_trait::async_trait;
 use common_catalog::format_full_flow_name;
@@ -153,6 +154,12 @@ impl DropFlowProcedure {
         };
         let flow_info_value = self.data.flow_info_value.as_ref().unwrap();
 
+        let flow_part2nodes = flow_info_value
+            .flownode_ids()
+            .clone()
+            .into_iter()
+            .collect::<Vec<_>>();
+
         self.context
             .cache_invalidator
             .invalidate(
@@ -164,8 +171,9 @@ impl DropFlowProcedure {
                         flow_name: flow_info_value.flow_name.to_string(),
                     }),
                     CacheIdent::DropFlow(DropFlow {
+                        flow_id,
                         source_table_ids: flow_info_value.source_table_ids.clone(),
-                        flownode_ids: flow_info_value.flownode_ids.values().cloned().collect(),
+                        flow_part2node_id: flow_part2nodes,
                     }),
                 ],
             )
