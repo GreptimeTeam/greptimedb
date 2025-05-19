@@ -950,6 +950,7 @@ impl FlowMirrorTask {
                 // already know this is not source table
                 Some(None) => continue,
                 _ => {
+                    // dedup peers
                     let peers = cache
                         .get(table_id)
                         .await
@@ -957,9 +958,9 @@ impl FlowMirrorTask {
                         .unwrap_or_default()
                         .values()
                         .cloned()
-                        .collect::<HashSet<_>>();
-                    // dedup peers
-                    let peers = peers.into_iter().collect::<Vec<_>>();
+                        .collect::<HashSet<_>>()
+                        .into_iter()
+                        .collect::<Vec<_>>();
 
                     if !peers.is_empty() {
                         let mut reqs = RegionInsertRequests::default();
