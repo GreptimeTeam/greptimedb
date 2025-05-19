@@ -32,6 +32,7 @@ pub mod compaction;
 pub mod config;
 pub mod engine;
 pub mod error;
+pub mod extension;
 pub mod flush;
 pub mod manifest;
 pub mod memtable;

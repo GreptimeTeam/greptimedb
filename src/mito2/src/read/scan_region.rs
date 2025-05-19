@@ -32,7 +32,7 @@ use datafusion_expr::Expr;
 use smallvec::SmallVec;
 use store_api::metadata::RegionMetadata;
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
-use store_api::storage::{ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector};
+use store_api::storage::{RegionId, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector};
 use table::predicate::{build_time_range_predicate, Predicate};
 use tokio::sync::{mpsc, Semaphore};
 use tokio_stream::wrappers::ReceiverStream;
@@ -41,6 +41,7 @@ use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheStrategy;
 use crate::config::DEFAULT_SCAN_CHANNEL_SIZE;
 use crate::error::Result;
+use crate::extension::{BoxedExtensionRange, BoxedExtensionRangeProvider};
 use crate::memtable::MemtableRange;
 use crate::metrics::READ_SST_COUNT;
 use crate::read::compat::{self, CompatBatch};
@@ -48,6 +49,7 @@ use crate::read::projection::ProjectionMapper;
 use crate::read::range::{FileRangeBuilder, MemRangeBuilder, RangeMeta, RowGroupIndex};
 use crate::read::seq_scan::SeqScan;
 use crate::read::series_scan::SeriesScan;
+use crate::read::stream::ScanBatchStream;
 use crate::read::unordered_scan::UnorderedScan;
 use crate::read::{Batch, Source};
 use crate::region::options::MergeMode;
@@ -80,6 +82,14 @@ impl Scanner {
             Scanner::Seq(seq_scan) => seq_scan.build_stream(),
             Scanner::Unordered(unordered_scan) => unordered_scan.build_stream().await,
             Scanner::Series(series_scan) => series_scan.build_stream().await,
+        }
+    }
+
+    pub(crate) fn scan_batch(&self) -> Result<ScanBatchStream, BoxedError> {
+        match self {
+            Scanner::Seq(x) => x.scan_all_partitions(),
+            Scanner::Unordered(x) => x.scan_all_partitions(),
+            Scanner::Series(x) => x.scan_all_partitions(),
         }
     }
 }
@@ -195,6 +205,7 @@ pub(crate) struct ScanRegion {
     ignore_bloom_filter: bool,
     /// Start time of the scan task.
     start_time: Option<Instant>,
+    extension_range_provider: Option<BoxedExtensionRangeProvider>,
 }
 
 impl ScanRegion {
@@ -215,6 +226,7 @@ impl ScanRegion {
             ignore_fulltext_index: false,
             ignore_bloom_filter: false,
             start_time: None,
+            extension_range_provider: None,
         }
     }
 
@@ -255,52 +267,68 @@ impl ScanRegion {
         self
     }
 
+    #[allow(unused)] // FIXME(LFC)
+    #[must_use]
+    pub(crate) fn with_extension_range_provider(
+        self,
+        provider: BoxedExtensionRangeProvider,
+    ) -> Self {
+        Self {
+            extension_range_provider: Some(provider),
+            ..self
+        }
+    }
+
     /// Returns a [Scanner] to scan the region.
-    pub(crate) fn scanner(self) -> Result<Scanner> {
+    pub(crate) async fn scanner(self) -> Result<Scanner> {
         if self.use_series_scan() {
-            self.series_scan().map(Scanner::Series)
+            self.series_scan().await.map(Scanner::Series)
         } else if self.use_unordered_scan() {
             // If table is append only and there is no series row selector, we use unordered scan in query.
             // We still use seq scan in compaction.
-            self.unordered_scan().map(Scanner::Unordered)
+            self.unordered_scan().await.map(Scanner::Unordered)
         } else {
-            self.seq_scan().map(Scanner::Seq)
+            self.seq_scan().await.map(Scanner::Seq)
         }
     }
 
     /// Returns a [RegionScanner] to scan the region.
     #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
-    pub(crate) fn region_scanner(self) -> Result<RegionScannerRef> {
+    pub(crate) async fn region_scanner(self) -> Result<RegionScannerRef> {
         if self.use_series_scan() {
-            self.series_scan().map(|scanner| Box::new(scanner) as _)
+            self.series_scan()
+                .await
+                .map(|scanner| Box::new(scanner) as _)
         } else if self.use_unordered_scan() {
-            self.unordered_scan().map(|scanner| Box::new(scanner) as _)
+            self.unordered_scan()
+                .await
+                .map(|scanner| Box::new(scanner) as _)
         } else {
-            self.seq_scan().map(|scanner| Box::new(scanner) as _)
+            self.seq_scan().await.map(|scanner| Box::new(scanner) as _)
         }
     }
 
     /// Scan sequentially.
-    pub(crate) fn seq_scan(self) -> Result<SeqScan> {
-        let input = self.scan_input(true)?;
+    pub(crate) async fn seq_scan(self) -> Result<SeqScan> {
+        let input = self.scan_input(true).await?;
         Ok(SeqScan::new(input, false))
     }
 
     /// Unordered scan.
-    pub(crate) fn unordered_scan(self) -> Result<UnorderedScan> {
-        let input = self.scan_input(true)?;
+    pub(crate) async fn unordered_scan(self) -> Result<UnorderedScan> {
+        let input = self.scan_input(true).await?;
         Ok(UnorderedScan::new(input))
     }
 
     /// Scans by series.
-    pub(crate) fn series_scan(self) -> Result<SeriesScan> {
-        let input = self.scan_input(true)?;
+    pub(crate) async fn series_scan(self) -> Result<SeriesScan> {
+        let input = self.scan_input(true).await?;
         Ok(SeriesScan::new(input))
     }
 
     #[cfg(test)]
-    pub(crate) fn scan_without_filter_deleted(self) -> Result<SeqScan> {
-        let input = self.scan_input(false)?;
+    pub(crate) async fn scan_without_filter_deleted(self) -> Result<SeqScan> {
+        let input = self.scan_input(false).await?;
         Ok(SeqScan::new(input, false))
     }
 
@@ -324,7 +352,7 @@ impl ScanRegion {
     }
 
     /// Creates a scan input.
-    fn scan_input(mut self, filter_deleted: bool) -> Result<ScanInput> {
+    async fn scan_input(mut self, filter_deleted: bool) -> Result<ScanInput> {
         let sst_min_sequence = self.request.sst_min_sequence.and_then(NonZeroU64::new);
         let time_range = self.build_time_range_predicate();
 
@@ -368,9 +396,10 @@ impl ScanRegion {
             })
             .collect();
 
+        let region_id = self.region_id();
         debug!(
             "Scan region {}, request: {:?}, time range: {:?}, memtables: {}, ssts_to_read: {}, append_mode: {}",
-            self.version.metadata.region_id,
+            region_id,
             self.request,
             time_range,
             memtables.len(),
@@ -403,7 +432,7 @@ impl ScanRegion {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let input = ScanInput::new(self.access_layer, mapper)
+        let mut input = ScanInput::new(self.access_layer, mapper)
             .with_time_range(Some(time_range))
             .with_predicate(predicate)
             .with_memtables(memtables)
@@ -419,7 +448,19 @@ impl ScanRegion {
             .with_merge_mode(self.version.options.merge_mode())
             .with_series_row_selector(self.request.series_row_selector)
             .with_distribution(self.request.distribution);
+
+        if let Some(provider) = self.extension_range_provider {
+            let ranges = provider
+                .find_extension_ranges(region_id, time_range, &self.request)
+                .await?;
+            input = input.with_extension_ranges(ranges);
+        }
+
         Ok(input)
+    }
+
+    fn region_id(&self) -> RegionId {
+        self.version.metadata.region_id
     }
 
     /// Build time range predicate from filters.
@@ -538,7 +579,7 @@ impl ScanRegion {
         let bloom_filter_index_cache = self.cache_strategy.bloom_filter_index_cache().cloned();
         FulltextIndexApplierBuilder::new(
             self.access_layer.region_dir().to_string(),
-            self.version.metadata.region_id,
+            self.region_id(),
             self.access_layer.object_store().clone(),
             self.access_layer.puffin_manager_factory().clone(),
             self.version.metadata.as_ref(),
@@ -601,6 +642,7 @@ pub(crate) struct ScanInput {
     pub(crate) series_row_selector: Option<TimeSeriesRowSelector>,
     /// Hint for the required distribution of the scanner.
     pub(crate) distribution: Option<TimeSeriesDistribution>,
+    extension_ranges: Vec<BoxedExtensionRange>,
 }
 
 impl ScanInput {
@@ -626,6 +668,7 @@ impl ScanInput {
             merge_mode: MergeMode::default(),
             series_row_selector: None,
             distribution: None,
+            extension_ranges: Vec::new(),
         }
     }
 
@@ -758,6 +801,14 @@ impl ScanInput {
         self
     }
 
+    #[must_use]
+    pub(crate) fn with_extension_ranges(self, extension_ranges: Vec<BoxedExtensionRange>) -> Self {
+        Self {
+            extension_ranges,
+            ..self
+        }
+    }
+
     /// Scans sources in parallel.
     ///
     /// # Panics if the input doesn't allow parallel scan.
@@ -869,7 +920,14 @@ impl ScanInput {
     pub(crate) fn total_rows(&self) -> usize {
         let rows_in_files: usize = self.files.iter().map(|f| f.num_rows()).sum();
         let rows_in_memtables: usize = self.memtables.iter().map(|m| m.stats().num_rows()).sum();
-        rows_in_files + rows_in_memtables
+
+        let extension_range_rows = self
+            .extension_ranges
+            .iter()
+            .map(|x| x.num_rows())
+            .sum::<u64>() as usize;
+
+        rows_in_files + rows_in_memtables + extension_range_rows
     }
 
     /// Returns table predicate of all exprs.
@@ -886,6 +944,14 @@ impl ScanInput {
     pub(crate) fn num_files(&self) -> usize {
         self.files.len()
     }
+
+    pub(crate) fn extension_ranges(&self) -> &[BoxedExtensionRange] {
+        &self.extension_ranges
+    }
+
+    pub(crate) fn extension_range(&self, i: usize) -> &BoxedExtensionRange {
+        &self.extension_ranges[i - self.num_memtables() - self.num_files()]
+    }
 }
 
 #[cfg(test)]
@@ -898,7 +964,7 @@ impl ScanInput {
 
 /// Context shared by different streams from a scanner.
 /// It contains the input and ranges to scan.
-pub(crate) struct StreamContext {
+pub struct StreamContext {
     /// Input memtables and files.
     pub(crate) input: ScanInput,
     /// Metadata for partition ranges.
@@ -939,6 +1005,11 @@ impl StreamContext {
     /// Returns true if the index refers to a memtable.
     pub(crate) fn is_mem_range_index(&self, index: RowGroupIndex) -> bool {
         self.input.num_memtables() > index.index
+    }
+
+    pub(crate) fn is_file_range_index(&self, index: RowGroupIndex) -> bool {
+        !self.is_mem_range_index(index)
+            && index.index < self.input.num_files() + self.input.num_memtables()
     }
 
     /// Retrieves the partition ranges.

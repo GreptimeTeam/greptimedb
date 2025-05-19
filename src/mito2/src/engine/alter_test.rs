@@ -42,7 +42,7 @@ use crate::test_util::{
 
 async fn scan_check_after_alter(engine: &MitoEngine, region_id: RegionId, expected: &str) {
     let request = ScanRequest::default();
-    let scanner = engine.scanner(region_id, request).unwrap();
+    let scanner = engine.scanner(region_id, request).await.unwrap();
     assert_eq!(0, scanner.num_memtables());
     assert_eq!(1, scanner.num_files());
     let stream = scanner.scan().await.unwrap();
@@ -459,7 +459,7 @@ async fn test_alter_on_flushing() {
         .unwrap();
 
     let request = ScanRequest::default();
-    let scanner = engine.scanner(region_id, request).unwrap();
+    let scanner = engine.scanner(region_id, request).await.unwrap();
     assert_eq!(0, scanner.num_memtables());
     assert_eq!(1, scanner.num_files());
     let stream = scanner.scan().await.unwrap();
@@ -815,7 +815,7 @@ async fn test_write_stall_on_altering() {
 |       | 2     | 2.0     | 1970-01-01T00:00:02 |
 +-------+-------+---------+---------------------+";
     let request = ScanRequest::default();
-    let scanner = engine.scanner(region_id, request).unwrap();
+    let scanner = engine.scanner(region_id, request).await.unwrap();
     let stream = scanner.scan().await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     assert_eq!(expected, batches.pretty_print().unwrap());

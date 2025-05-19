@@ -73,7 +73,7 @@ async fn test_manual_flush() {
     flush_region(&engine, region_id, None).await;
 
     let request = ScanRequest::default();
-    let scanner = engine.scanner(region_id, request).unwrap();
+    let scanner = engine.scanner(region_id, request).await.unwrap();
     assert_eq!(0, scanner.num_memtables());
     assert_eq!(1, scanner.num_files());
     let stream = scanner.scan().await.unwrap();
@@ -142,7 +142,7 @@ async fn test_flush_engine() {
     listener.wait().await;
 
     let request = ScanRequest::default();
-    let scanner = engine.scanner(region_id, request).unwrap();
+    let scanner = engine.scanner(region_id, request).await.unwrap();
     assert_eq!(1, scanner.num_memtables());
     assert_eq!(1, scanner.num_files());
     let stream = scanner.scan().await.unwrap();
@@ -217,7 +217,7 @@ async fn test_write_stall() {
     put_rows(&engine, region_id, rows).await;
 
     let request = ScanRequest::default();
-    let scanner = engine.scanner(region_id, request).unwrap();
+    let scanner = engine.scanner(region_id, request).await.unwrap();
     assert_eq!(1, scanner.num_memtables());
     assert_eq!(1, scanner.num_files());
     let stream = scanner.scan().await.unwrap();
@@ -267,7 +267,7 @@ async fn test_flush_empty() {
     flush_region(&engine, region_id, None).await;
 
     let request = ScanRequest::default();
-    let scanner = engine.scanner(region_id, request).unwrap();
+    let scanner = engine.scanner(region_id, request).await.unwrap();
     assert_eq!(0, scanner.num_memtables());
     assert_eq!(0, scanner.num_files());
     let stream = scanner.scan().await.unwrap();
@@ -450,7 +450,7 @@ async fn test_auto_flush_engine() {
         .unwrap();
 
     let request = ScanRequest::default();
-    let scanner = engine.scanner(region_id, request).unwrap();
+    let scanner = engine.scanner(region_id, request).await.unwrap();
     assert_eq!(0, scanner.num_memtables());
     assert_eq!(1, scanner.num_files());
     let stream = scanner.scan().await.unwrap();
@@ -530,7 +530,7 @@ async fn test_flush_workers() {
 
     // Scans region 1.
     let request = ScanRequest::default();
-    let scanner = engine.scanner(region_id1, request).unwrap();
+    let scanner = engine.scanner(region_id1, request).await.unwrap();
     assert_eq!(0, scanner.num_memtables());
     assert_eq!(1, scanner.num_files());
     let stream = scanner.scan().await.unwrap();

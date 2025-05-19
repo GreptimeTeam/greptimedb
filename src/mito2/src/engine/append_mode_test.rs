@@ -81,7 +81,7 @@ async fn test_append_mode_write_query() {
     let scan = engine
         .scan_region(region_id, ScanRequest::default())
         .unwrap();
-    let seq_scan = scan.seq_scan().unwrap();
+    let seq_scan = scan.seq_scan().await.unwrap();
     let stream = seq_scan.build_stream().unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     assert_eq!(expected, batches.pretty_print().unwrap());
@@ -174,7 +174,10 @@ async fn test_append_mode_compaction() {
 | b     | 1.0     | 1970-01-01T00:00:01 |
 +-------+---------+---------------------+";
     // Scans in parallel.
-    let mut scanner = engine.scanner(region_id, ScanRequest::default()).unwrap();
+    let mut scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
     assert_eq!(1, scanner.num_files());
     assert_eq!(1, scanner.num_memtables());
     scanner.set_target_partitions(2);
