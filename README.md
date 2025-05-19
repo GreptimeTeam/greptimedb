@@ -215,4 +215,3 @@ Special thanks to all contributors! See [AUTHORS.md](https://github.com/Greptime
 - [Apache Parquet™](https://parquet.apache.org/) (file storage)
 - [Apache Arrow DataFusion™](https://arrow.apache.org/datafusion/) (query engine)
 - [Apache OpenDAL™](https://opendal.apache.org/) (data access abstraction)
-- [etcd](https://etcd.io/) (meta service)
