@@ -660,21 +660,20 @@ impl TryFrom<&ContentType> for EventPayloadResolverInner {
     type Error = Error;
 
     fn try_from(content_type: &ContentType) -> Result<Self> {
-        if *content_type == *JSON_CONTENT_TYPE {
-            Ok(EventPayloadResolverInner::Json)
-        } else if *content_type == *NDJSON_CONTENT_TYPE {
-            Ok(EventPayloadResolverInner::Ndjson)
-        } else if *content_type == *TEXT_CONTENT_TYPE || *content_type == *TEXT_UTF8_CONTENT_TYPE {
-            Ok(EventPayloadResolverInner::Text)
-        } else {
-            InvalidParameterSnafu {
+        match content_type {
+            x if *x == *JSON_CONTENT_TYPE => Ok(EventPayloadResolverInner::Json),
+            x if *x == *NDJSON_CONTENT_TYPE => Ok(EventPayloadResolverInner::Ndjson),
+            x if *x == *TEXT_CONTENT_TYPE || *x == *TEXT_UTF8_CONTENT_TYPE => {
+                Ok(EventPayloadResolverInner::Text)
+            }
+            _ => InvalidParameterSnafu {
                 reason: format!(
                     "invalid content type: {}, expected: one of {}",
                     content_type,
                     EventPayloadResolver::support_content_type_list().join(", ")
                 ),
             }
-            .fail()
+            .fail(),
         }
     }
 }
