@@ -7,6 +7,7 @@ license.workspace = true
 [features]
 default = []
 test = ["common-test-util", "rstest", "rstest_reuse", "rskafka"]
+enterprise = []
 
 [lints]
 workspace = true
@@ -19,6 +20,7 @@ async-stream.workspace = true
 async-trait.workspace = true
 bytemuck.workspace = true
 bytes.workspace = true
+cfg-if.workspace = true
 common-base.workspace = true
 common-config.workspace = true
 common-datasource.workspace = true

@@ -23,6 +23,7 @@ use common_telemetry::debug;
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder, Time};
 use futures::Stream;
 use prometheus::IntGauge;
+use smallvec::SmallVec;
 use store_api::storage::RegionId;
 
 use crate::error::Result;
@@ -34,6 +35,7 @@ use crate::read::range::{RangeBuilderList, RowGroupIndex};
 use crate::read::scan_region::StreamContext;
 use crate::read::{Batch, ScannerMetrics, Source};
 use crate::sst::file::FileTimeRange;
+use crate::sst::parquet::file_range::FileRange;
 use crate::sst::parquet::reader::{ReaderFilterMetrics, ReaderMetrics};
 
 /// Verbose scan metrics for a partition.
@@ -465,7 +467,7 @@ impl PartitionMetrics {
     }
 
     /// Merges [ReaderMetrics] and `build_reader_cost`.
-    pub(crate) fn merge_reader_metrics(&self, metrics: &ReaderMetrics) {
+    pub fn merge_reader_metrics(&self, metrics: &ReaderMetrics) {
         self.0.build_parts_cost.add_duration(metrics.build_cost);
 
         let mut metrics_set = self.0.metrics.lock().unwrap();
@@ -534,18 +536,36 @@ pub(crate) fn scan_mem_ranges(
 }
 
 /// Scans file ranges at `index`.
-pub(crate) fn scan_file_ranges(
+pub(crate) async fn scan_file_ranges(
     stream_ctx: Arc<StreamContext>,
     part_metrics: PartitionMetrics,
     index: RowGroupIndex,
     read_type: &'static str,
     range_builder: Arc<RangeBuilderList>,
-) -> impl Stream<Item = Result<Batch>> {
-    try_stream! {
-        let mut reader_metrics = ReaderMetrics::default();
-        let ranges = range_builder.build_file_ranges(&stream_ctx.input, index, &mut reader_metrics).await?;
-        part_metrics.inc_num_file_ranges(ranges.len());
+) -> Result<impl Stream<Item = Result<Batch>>> {
+    let mut reader_metrics = ReaderMetrics::default();
+    let ranges = range_builder
+        .build_file_ranges(&stream_ctx.input, index, &mut reader_metrics)
+        .await?;
+    part_metrics.inc_num_file_ranges(ranges.len());
+    part_metrics.merge_reader_metrics(&reader_metrics);
 
+    Ok(build_file_range_scan_stream(
+        stream_ctx,
+        part_metrics,
+        read_type,
+        ranges,
+    ))
+}
+
+pub fn build_file_range_scan_stream<'a>(
+    stream_ctx: Arc<StreamContext>,
+    part_metrics: PartitionMetrics,
+    read_type: &'static str,
+    ranges: SmallVec<[FileRange; 2]>,
+) -> impl Stream<Item = Result<Batch>> + 'a {
+    try_stream! {
+        let reader_metrics = &mut ReaderMetrics::default();
         for range in ranges {
             let build_reader_start = Instant::now();
             let reader = range.reader(stream_ctx.input.series_row_selector).await?;
@@ -568,6 +588,6 @@ pub(crate) fn scan_file_ranges(
         // Reports metrics.
         reader_metrics.observe_rows(read_type);
         reader_metrics.filter_metrics.observe();
-        part_metrics.merge_reader_metrics(&reader_metrics);
+        part_metrics.merge_reader_metrics(reader_metrics);
     }
 }

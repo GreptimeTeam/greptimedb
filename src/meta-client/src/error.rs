@@ -12,12 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_error::define_from_tonic_status;
 use common_error::ext::ErrorExt;
-use common_error::status_code::{convert_tonic_code_to_status_code, StatusCode};
-use common_error::{GREPTIME_DB_HEADER_ERROR_CODE, GREPTIME_DB_HEADER_ERROR_MSG};
+use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use snafu::{location, Location, Snafu};
-use tonic::Status;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -161,33 +160,4 @@ impl Error {
     }
 }
 
-// FIXME(dennis): partial duplicated with src/client/src/error.rs
-impl From<Status> for Error {
-    fn from(e: Status) -> Self {
-        fn get_metadata_value(s: &Status, key: &str) -> Option<String> {
-            s.metadata()
-                .get(key)
-                .and_then(|v| String::from_utf8(v.as_bytes().to_vec()).ok())
-        }
-
-        let code = get_metadata_value(&e, GREPTIME_DB_HEADER_ERROR_CODE).and_then(|s| {
-            if let Ok(code) = s.parse::<u32>() {
-                StatusCode::from_u32(code)
-            } else {
-                None
-            }
-        });
-        let tonic_code = e.code();
-        let code = code.unwrap_or_else(|| convert_tonic_code_to_status_code(tonic_code));
-
-        let msg = get_metadata_value(&e, GREPTIME_DB_HEADER_ERROR_MSG)
-            .unwrap_or_else(|| e.message().to_string());
-
-        Self::MetaServer {
-            code,
-            msg,
-            tonic_code,
-            location: location!(),
-        }
-    }
-}
+define_from_tonic_status!(Error, MetaServer);

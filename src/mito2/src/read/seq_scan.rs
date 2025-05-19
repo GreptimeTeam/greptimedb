@@ -19,6 +19,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_stream::try_stream;
+use cfg_if::cfg_if;
 use common_error::ext::BoxedError;
 use common_recordbatch::util::ChainedRecordBatchStream;
 use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
@@ -27,13 +28,13 @@ use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::schema::SchemaRef;
 use futures::StreamExt;
-use snafu::ensure;
+use snafu::{ensure, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{PartitionRange, PrepareRequest, RegionScanner, ScannerProperties};
 use store_api::storage::TimeSeriesRowSelector;
 use tokio::sync::Semaphore;
 
-use crate::error::{PartitionOutOfRangeSnafu, Result};
+use crate::error::{PartitionOutOfRangeSnafu, Result, ScanExternalRangeSnafu};
 use crate::read::dedup::{DedupReader, LastNonNull, LastRow};
 use crate::read::last_row::LastRowReader;
 use crate::read::merge::MergeReaderBuilder;
@@ -149,7 +150,8 @@ impl SeqScan {
                 part_metrics,
                 range_builder_list.clone(),
                 &mut sources,
-            );
+            )
+            .await?;
         }
 
         common_telemetry::debug!(
@@ -270,7 +272,7 @@ impl SeqScan {
                     &part_metrics,
                     range_builder_list.clone(),
                     &mut sources,
-                );
+                ).await?;
 
                 let mut metrics = ScannerMetrics::default();
                 let mut fetch_start = Instant::now();
@@ -426,14 +428,14 @@ impl fmt::Debug for SeqScan {
 }
 
 /// Builds sources for the partition range and push them to the `sources` vector.
-pub(crate) fn build_sources(
+pub(crate) async fn build_sources(
     stream_ctx: &Arc<StreamContext>,
     part_range: &PartitionRange,
     compaction: bool,
     part_metrics: &PartitionMetrics,
     range_builder_list: Arc<RangeBuilderList>,
     sources: &mut Vec<Source>,
-) {
+) -> Result<()> {
     // Gets range meta.
     let range_meta = &stream_ctx.ranges[part_range.identifier];
     #[cfg(debug_assertions)]
@@ -460,7 +462,7 @@ pub(crate) fn build_sources(
                 range_meta.time_range,
             );
             Box::pin(stream) as _
-        } else {
+        } else if stream_ctx.is_file_range_index(*index) {
             let read_type = if compaction {
                 "compaction"
             } else {
@@ -472,11 +474,28 @@ pub(crate) fn build_sources(
                 *index,
                 read_type,
                 range_builder_list.clone(),
-            );
+            )
+            .await?;
             Box::pin(stream) as _
+        } else {
+            cfg_if! {
+                if #[cfg(feature = "enterprise")] {
+                    let range = stream_ctx.input.extension_range(index.index);
+                    let reader = range.reader(stream_ctx.as_ref());
+                    reader
+                        .read(stream_ctx.clone(), part_metrics.clone(), *index)
+                        .await
+                        .context(ScanExternalRangeSnafu)?
+                } else {
+                    return crate::error::UnexpectedSnafu {
+                        reason: "unknown scan range type"
+                    }.fail();
+                }
+            }
         };
         sources.push(Source::Stream(stream));
     }
+    Ok(())
 }
 
 #[cfg(test)]
