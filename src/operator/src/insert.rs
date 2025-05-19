@@ -957,12 +957,9 @@ impl FlowMirrorTask {
                         .unwrap_or_default()
                         .values()
                         .cloned()
-                        .collect::<Vec<_>>();
+                        .collect::<HashSet<_>>();
                     // dedup peers
-                    let peers = {
-                        let tmp: HashSet<_> = peers.into_iter().collect();
-                        tmp.into_iter().collect::<Vec<_>>()
-                    };
+                    let peers = peers.into_iter().collect::<Vec<_>>();
 
                     if !peers.is_empty() {
                         let mut reqs = RegionInsertRequests::default();
