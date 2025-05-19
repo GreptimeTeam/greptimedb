@@ -680,15 +680,15 @@ impl TryFrom<&ContentType> for EventPayloadResolverInner {
 }
 
 #[derive(Debug)]
-struct EventPayloadResolver {
+struct EventPayloadResolver<'a> {
     inner: EventPayloadResolverInner,
     /// The content type of the payload.
     /// keep it for logging original content type
     #[allow(dead_code)]
-    content_type: ContentType,
+    content_type: &'a ContentType,
 }
 
-impl EventPayloadResolver {
+impl EventPayloadResolver<'_> {
     pub(super) fn support_content_type_list() -> Vec<String> {
         EventPayloadResolverInner::iter()
             .map(|x| x.to_string())
@@ -696,19 +696,19 @@ impl EventPayloadResolver {
     }
 }
 
-impl TryFrom<&ContentType> for EventPayloadResolver {
+impl<'a> TryFrom<&'a ContentType> for EventPayloadResolver<'a> {
     type Error = Error;
 
-    fn try_from(content_type: &ContentType) -> Result<Self> {
+    fn try_from(content_type: &'a ContentType) -> Result<Self> {
         let inner = EventPayloadResolverInner::try_from(content_type)?;
         Ok(EventPayloadResolver {
             inner,
-            content_type: content_type.clone(),
+            content_type,
         })
     }
 }
 
-impl EventPayloadResolver {
+impl EventPayloadResolver<'_> {
     fn parse_payload(&self, payload: Bytes, ignore_errors: bool) -> Result<Vec<PipelineMap>> {
         match self.inner {
             EventPayloadResolverInner::Json => {
