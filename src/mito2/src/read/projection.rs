@@ -199,6 +199,10 @@ impl ProjectionMapper {
         batch: &Batch,
         cache_strategy: &CacheStrategy,
     ) -> common_recordbatch::error::Result<RecordBatch> {
+        if batch.is_empty() {
+            return Ok(self.empty_record_batch());
+        }
+
         if self.is_empty_projection {
             return RecordBatch::new_with_count(self.output_schema.clone(), batch.num_rows());
         }

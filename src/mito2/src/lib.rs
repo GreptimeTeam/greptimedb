@@ -33,6 +33,8 @@ pub mod compaction;
 pub mod config;
 pub mod engine;
 pub mod error;
+#[cfg(feature = "enterprise")]
+pub mod extension;
 pub mod flush;
 pub mod manifest;
 pub mod memtable;

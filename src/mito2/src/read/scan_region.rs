@@ -30,7 +30,7 @@ use datafusion_common::Column;
 use datafusion_expr::utils::expr_to_columns;
 use datafusion_expr::Expr;
 use smallvec::SmallVec;
-use store_api::metadata::RegionMetadata;
+use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
 use store_api::storage::{RegionId, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector};
 use table::predicate::{build_time_range_predicate, Predicate};
@@ -41,6 +41,8 @@ use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheStrategy;
 use crate::config::DEFAULT_SCAN_CHANNEL_SIZE;
 use crate::error::Result;
+#[cfg(feature = "enterprise")]
+use crate::extension::{BoxedExtensionRange, BoxedExtensionRangeProvider};
 use crate::memtable::MemtableRange;
 use crate::metrics::READ_SST_COUNT;
 use crate::read::compat::{self, CompatBatch};
@@ -48,6 +50,7 @@ use crate::read::projection::ProjectionMapper;
 use crate::read::range::{FileRangeBuilder, MemRangeBuilder, RangeMeta, RowGroupIndex};
 use crate::read::seq_scan::SeqScan;
 use crate::read::series_scan::SeriesScan;
+use crate::read::stream::ScanBatchStream;
 use crate::read::unordered_scan::UnorderedScan;
 use crate::read::{Batch, Source};
 use crate::region::options::MergeMode;
@@ -80,6 +83,14 @@ impl Scanner {
             Scanner::Seq(seq_scan) => seq_scan.build_stream(),
             Scanner::Unordered(unordered_scan) => unordered_scan.build_stream().await,
             Scanner::Series(series_scan) => series_scan.build_stream().await,
+        }
+    }
+
+    pub(crate) fn scan_batch(&self) -> Result<ScanBatchStream> {
+        match self {
+            Scanner::Seq(x) => x.scan_all_partitions(),
+            Scanner::Unordered(x) => x.scan_all_partitions(),
+            Scanner::Series(x) => x.scan_all_partitions(),
         }
     }
 }
@@ -198,6 +209,8 @@ pub(crate) struct ScanRegion {
     /// Whether to filter out the deleted rows.
     /// Usually true for normal read, and false for scan for compaction.
     filter_deleted: bool,
+    #[cfg(feature = "enterprise")]
+    extension_range_provider: Option<BoxedExtensionRangeProvider>,
 }
 
 impl ScanRegion {
@@ -219,6 +232,8 @@ impl ScanRegion {
             ignore_bloom_filter: false,
             start_time: None,
             filter_deleted: true,
+            #[cfg(feature = "enterprise")]
+            extension_range_provider: None,
         }
     }
 
@@ -259,9 +274,16 @@ impl ScanRegion {
         self
     }
 
-    #[cfg(test)]
     pub(crate) fn set_filter_deleted(&mut self, filter_deleted: bool) {
         self.filter_deleted = filter_deleted;
+    }
+
+    #[cfg(feature = "enterprise")]
+    pub(crate) fn set_extension_range_provider(
+        &mut self,
+        extension_range_provider: BoxedExtensionRangeProvider,
+    ) {
+        self.extension_range_provider = Some(extension_range_provider);
     }
 
     /// Returns a [Scanner] to scan the region.
@@ -411,7 +433,7 @@ impl ScanRegion {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let input = ScanInput::new(self.access_layer, mapper)
+        let mut input = ScanInput::new(self.access_layer, mapper)
             .with_time_range(Some(time_range))
             .with_predicate(predicate)
             .with_memtables(memtables)
@@ -427,6 +449,14 @@ impl ScanRegion {
             .with_merge_mode(self.version.options.merge_mode())
             .with_series_row_selector(self.request.series_row_selector)
             .with_distribution(self.request.distribution);
+
+        if let Some(provider) = self.extension_range_provider {
+            let ranges = provider
+                .find_extension_ranges(time_range, &self.request)
+                .await?;
+            input = input.with_extension_ranges(ranges);
+        }
+
         Ok(input)
     }
 
@@ -613,6 +643,8 @@ pub struct ScanInput {
     pub(crate) series_row_selector: Option<TimeSeriesRowSelector>,
     /// Hint for the required distribution of the scanner.
     pub(crate) distribution: Option<TimeSeriesDistribution>,
+    #[cfg(feature = "enterprise")]
+    extension_ranges: Vec<BoxedExtensionRange>,
 }
 
 impl ScanInput {
@@ -638,6 +670,8 @@ impl ScanInput {
             merge_mode: MergeMode::default(),
             series_row_selector: None,
             distribution: None,
+            #[cfg(feature = "enterprise")]
+            extension_ranges: Vec::new(),
         }
     }
 
@@ -770,6 +804,15 @@ impl ScanInput {
         self
     }
 
+    #[cfg(feature = "enterprise")]
+    #[must_use]
+    pub(crate) fn with_extension_ranges(self, extension_ranges: Vec<BoxedExtensionRange>) -> Self {
+        Self {
+            extension_ranges,
+            ..self
+        }
+    }
+
     /// Scans sources in parallel.
     ///
     /// # Panics if the input doesn't allow parallel scan.
@@ -880,7 +923,14 @@ impl ScanInput {
     pub(crate) fn total_rows(&self) -> usize {
         let rows_in_files: usize = self.files.iter().map(|f| f.num_rows()).sum();
         let rows_in_memtables: usize = self.memtables.iter().map(|m| m.stats().num_rows()).sum();
-        rows_in_files + rows_in_memtables
+
+        let extension_range_rows = self
+            .extension_ranges
+            .iter()
+            .map(|x| x.num_rows())
+            .sum::<u64>() as usize;
+
+        rows_in_files + rows_in_memtables + extension_range_rows
     }
 
     /// Returns table predicate of all exprs.
@@ -896,6 +946,20 @@ impl ScanInput {
     /// Returns number of SST files to scan.
     pub(crate) fn num_files(&self) -> usize {
         self.files.len()
+    }
+
+    #[cfg(feature = "enterprise")]
+    pub(crate) fn extension_ranges(&self) -> &[BoxedExtensionRange] {
+        &self.extension_ranges
+    }
+
+    #[cfg(feature = "enterprise")]
+    pub(crate) fn extension_range(&self, i: usize) -> &BoxedExtensionRange {
+        &self.extension_ranges[i - self.num_memtables() - self.num_files()]
+    }
+
+    pub fn region_metadata(&self) -> &RegionMetadataRef {
+        self.mapper.metadata()
     }
 }
 
@@ -950,6 +1014,11 @@ impl StreamContext {
     /// Returns true if the index refers to a memtable.
     pub(crate) fn is_mem_range_index(&self, index: RowGroupIndex) -> bool {
         self.input.num_memtables() > index.index
+    }
+
+    pub(crate) fn is_file_range_index(&self, index: RowGroupIndex) -> bool {
+        !self.is_mem_range_index(index)
+            && index.index < self.input.num_files() + self.input.num_memtables()
     }
 
     /// Retrieves the partition ranges.

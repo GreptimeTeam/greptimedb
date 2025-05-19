@@ -97,10 +97,13 @@ use crate::error::{
     InvalidRequestSnafu, JoinSnafu, MitoManifestInfoSnafu, RecvSnafu, RegionNotFoundSnafu, Result,
     SerdeJsonSnafu,
 };
+#[cfg(feature = "enterprise")]
+use crate::extension::BoxedExtensionRangeProviderFactory;
 use crate::manifest::action::RegionEdit;
 use crate::memtable::MemtableStats;
 use crate::metrics::HANDLE_REQUEST_ELAPSED;
 use crate::read::scan_region::{ScanRegion, Scanner};
+use crate::read::stream::ScanBatchStream;
 use crate::region::MitoRegionRef;
 use crate::request::{RegionEditRequest, WorkerRequest};
 use crate::sst::file::FileMeta;
@@ -127,6 +130,9 @@ impl MitoEngine {
         object_store_manager: ObjectStoreManagerRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
         plugins: Plugins,
+        #[cfg(feature = "enterprise")] extension_range_provider_factory: Option<
+            BoxedExtensionRangeProviderFactory,
+        >,
     ) -> Result<MitoEngine> {
         config.sanitize(data_home)?;
 
@@ -138,6 +144,8 @@ impl MitoEngine {
                     object_store_manager,
                     schema_metadata_manager,
                     plugins,
+                    #[cfg(feature = "enterprise")]
+                    extension_range_provider_factory,
                 )
                 .await?,
             ),
@@ -181,6 +189,17 @@ impl MitoEngine {
             .map_err(BoxedError::new)?
             .scan()
             .await
+    }
+
+    pub async fn scan_batch(
+        &self,
+        region_id: RegionId,
+        request: ScanRequest,
+        filter_deleted: bool,
+    ) -> Result<ScanBatchStream> {
+        let mut scan_region = self.scan_region(region_id, request)?;
+        scan_region.set_filter_deleted(filter_deleted);
+        scan_region.scanner().await?.scan_batch()
     }
 
     /// Returns a scanner to scan for `request`.
@@ -303,6 +322,8 @@ struct EngineInner {
     config: Arc<MitoConfig>,
     /// The Wal raw entry reader.
     wal_raw_entry_reader: Arc<dyn RawEntryReader>,
+    #[cfg(feature = "enterprise")]
+    extension_range_provider_factory: Option<BoxedExtensionRangeProviderFactory>,
 }
 
 type TopicGroupedRegionOpenRequests = HashMap<String, Vec<(RegionId, RegionOpenRequest)>>;
@@ -346,6 +367,9 @@ impl EngineInner {
         object_store_manager: ObjectStoreManagerRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
         plugins: Plugins,
+        #[cfg(feature = "enterprise")] extension_range_provider_factory: Option<
+            BoxedExtensionRangeProviderFactory,
+        >,
     ) -> Result<EngineInner> {
         let config = Arc::new(config);
         let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(log_store.clone()));
@@ -360,6 +384,8 @@ impl EngineInner {
             .await?,
             config,
             wal_raw_entry_reader,
+            #[cfg(feature = "enterprise")]
+            extension_range_provider_factory,
         })
     }
 
@@ -511,7 +537,25 @@ impl EngineInner {
         .with_ignore_bloom_filter(self.config.bloom_filter_index.apply_on_query.disabled())
         .with_start_time(query_start);
 
+        #[cfg(feature = "enterprise")]
+        let scan_region = self.maybe_fill_extension_range_provider(scan_region, region);
+
         Ok(scan_region)
+    }
+
+    #[cfg(feature = "enterprise")]
+    fn maybe_fill_extension_range_provider(
+        &self,
+        mut scan_region: ScanRegion,
+        region: MitoRegionRef,
+    ) -> ScanRegion {
+        if region.is_follower()
+            && let Some(factory) = self.extension_range_provider_factory.as_ref()
+        {
+            scan_region
+                .set_extension_range_provider(factory.create_extension_range_provider(region));
+        }
+        scan_region
     }
 
     /// Converts the [`RegionRole`].
@@ -743,6 +787,8 @@ impl MitoEngine {
                 .await?,
                 config,
                 wal_raw_entry_reader,
+                #[cfg(feature = "enterprise")]
+                extension_range_provider_factory: None,
             }),
         })
     }
