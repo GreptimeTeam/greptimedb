@@ -241,6 +241,14 @@ impl MergeOutput {
     pub fn is_empty(&self) -> bool {
         self.files_to_add.is_empty() && self.files_to_remove.is_empty()
     }
+
+    pub fn input_file_size(&self) -> u64 {
+        self.files_to_remove.iter().map(|f| f.file_size).sum()
+    }
+
+    pub fn output_file_size(&self) -> u64 {
+        self.files_to_add.iter().map(|f| f.file_size).sum()
+    }
 }
 
 /// Compactor is the trait that defines the compaction logic.
@@ -463,18 +471,8 @@ impl Compactor for DefaultCompactor {
             return Ok(());
         }
 
-        let compaction_input_bytes = merge_output
-            .files_to_remove
-            .iter()
-            .map(|f| f.file_size)
-            .sum::<u64>();
-        let compaction_output_bytes = merge_output
-            .files_to_add
-            .iter()
-            .map(|f| f.file_size)
-            .sum::<u64>();
-        metrics::COMPACTION_INPUT_BYTES.observe(compaction_input_bytes as f64);
-        metrics::COMPACTION_OUTPUT_BYTES.observe(compaction_output_bytes as f64);
+        metrics::COMPACTION_INPUT_BYTES.inc_by(merge_output.input_file_size() as f64);
+        metrics::COMPACTION_OUTPUT_BYTES.inc_by(merge_output.output_file_size() as f64);
         self.update_manifest(compaction_region, merge_output)
             .await?;
 

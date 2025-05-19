@@ -189,7 +189,7 @@ async fn test_merge_mode_compaction() {
 +-------+---------+---------+---------------------+";
     // Scans in parallel.
     let mut scanner = engine.scanner(region_id, ScanRequest::default()).unwrap();
-    assert_eq!(1, scanner.num_files());
+    assert_eq!(2, scanner.num_files());
     assert_eq!(1, scanner.num_memtables());
     scanner.set_target_partitions(2);
     let stream = scanner.scan().await.unwrap();

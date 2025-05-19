@@ -16,10 +16,12 @@ use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Debug;
 
+use common_base::readable_size::ReadableSize;
 use common_telemetry::info;
 use common_time::timestamp::TimeUnit;
 use common_time::timestamp_millis::BucketAligned;
 use common_time::Timestamp;
+use store_api::storage::RegionId;
 
 use crate::compaction::buckets::infer_time_bucket;
 use crate::compaction::compactor::CompactionRegion;
@@ -49,6 +51,7 @@ impl TwcsPicker {
     /// Builds compaction output from files.
     fn build_output(
         &self,
+        region_id: RegionId,
         time_windows: &mut BTreeMap<i64, Window>,
         active_window: Option<i64>,
     ) -> Vec<CompactionOutput> {
@@ -74,23 +77,17 @@ impl TwcsPicker {
                 merge_seq_files(run.items(), self.max_output_file_size)
             };
 
-            let num_inputs = inputs.len();
-            info!(
-                "Building compaction output, active window: {:?}, \
-                        current window: {}, \
-                        found runs: {}, \
-                        input file num: {}, \
-                        max output size: {:?}, \
-                        remove deletion markers: {}",
-                active_window,
-                *window,
-                found_runs,
-                num_inputs,
-                self.max_output_file_size,
-                filter_deleted
-            );
-
             if !inputs.is_empty() {
+                log_pick_result(
+                    region_id,
+                    *window,
+                    active_window,
+                    found_runs,
+                    files.files.len(),
+                    self.max_output_file_size,
+                    filter_deleted,
+                    &inputs,
+                );
                 output.push(CompactionOutput {
                     output_level: LEVEL_COMPACTED, // always compact to l1
                     inputs,
@@ -101,6 +98,40 @@ impl TwcsPicker {
         }
         output
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn log_pick_result(
+    region_id: RegionId,
+    window: i64,
+    active_window: Option<i64>,
+    found_runs: usize,
+    file_num: usize,
+    max_output_file_size: Option<u64>,
+    filter_deleted: bool,
+    inputs: &[FileHandle],
+) {
+    let input_file_str: Vec<String> = inputs
+        .iter()
+        .map(|f| {
+            let range = f.time_range();
+            let start = range.0.to_iso8601_string();
+            let end = range.1.to_iso8601_string();
+            let num_rows = f.num_rows();
+            format!(
+                "SST{{id: {}, range: ({}, {}), size: {}, num rows: {} }}",
+                f.file_id(),
+                start,
+                end,
+                ReadableSize(f.size()),
+                num_rows
+            )
+        })
+        .collect();
+    let window_str = Timestamp::new_second(window).to_iso8601_string();
+    let active_window_str = active_window.map(|s| Timestamp::new_second(s).to_iso8601_string());
+    let max_output_file_size = max_output_file_size.map(|size| ReadableSize(size).to_string());
+    info!("Region ({:?}) compaction pick result: current window: {}, active window: {:?}, found runs: {}, file num: {}, max output file size: {:?}, filter deleted: {}, input files: {:?}", region_id,window_str, active_window_str, found_runs, file_num , max_output_file_size, filter_deleted, input_file_str);
 }
 
 impl Picker for TwcsPicker {
@@ -136,7 +167,7 @@ impl Picker for TwcsPicker {
         // Assign files to windows
         let mut windows =
             assign_to_windows(levels.iter().flat_map(LevelMeta::files), time_window_size);
-        let outputs = self.build_output(&mut windows, active_window);
+        let outputs = self.build_output(region_id, &mut windows, active_window);
 
         if outputs.is_empty() && expired_ssts.is_empty() {
             return None;
@@ -525,7 +556,7 @@ mod tests {
                 max_output_file_size: None,
                 append_mode: false,
             }
-            .build_output(&mut windows, active_window);
+            .build_output(RegionId::from_u64(0), &mut windows, active_window);
 
             let output = output
                 .iter()

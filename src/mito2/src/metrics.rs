@@ -403,20 +403,16 @@ lazy_static! {
 }
 
 lazy_static! {
-    /// Histogram for compaction input file size.
-    pub static ref COMPACTION_INPUT_BYTES: Histogram = register_histogram!(
+    /// Counter for compaction input file size.
+    pub static ref COMPACTION_INPUT_BYTES: Counter = register_counter!(
         "greptime_mito_compaction_input_bytes",
         "mito compaction input file size",
-        // 4mb ~ 4gb
-        exponential_buckets(4194304.0, 2.0, 10).unwrap()
         ).unwrap();
 
-    /// Histogram for compaction output file size.
-    pub static ref COMPACTION_OUTPUT_BYTES: Histogram = register_histogram!(
+    /// Counter for compaction output file size.
+    pub static ref COMPACTION_OUTPUT_BYTES: Counter = register_counter!(
         "greptime_mito_compaction_output_bytes",
         "mito compaction output file size",
-        // 4mb ~ 4gb
-        exponential_buckets(4194304.0, 2.0, 10).unwrap()
         ).unwrap();
 }
 

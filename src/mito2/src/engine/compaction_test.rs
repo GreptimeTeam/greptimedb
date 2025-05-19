@@ -180,6 +180,71 @@ async fn test_compaction_region() {
 }
 
 #[tokio::test]
+async fn test_compaction_overlapping_files() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::new();
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let request = CreateRequestBuilder::new()
+        .insert_option("compaction.type", "twcs")
+        .build();
+
+    let column_schemas = request
+        .column_metadatas
+        .iter()
+        .map(column_metadata_to_column_schema)
+        .collect::<Vec<_>>();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    // Flush 5 SSTs for compaction.
+    put_and_flush(&engine, region_id, &column_schemas, 0..10).await;
+    delete_and_flush(&engine, region_id, &column_schemas, 10..20).await;
+    put_and_flush(&engine, region_id, &column_schemas, 20..30).await;
+    delete_and_flush(&engine, region_id, &column_schemas, 30..40).await;
+
+    let result = engine
+        .handle_request(
+            region_id,
+            RegionRequest::Compact(RegionCompactRequest::default()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.affected_rows, 0);
+
+    let scanner = engine.scanner(region_id, ScanRequest::default()).unwrap();
+    assert_eq!(
+        1,
+        scanner.num_files(),
+        "unexpected files: {:?}",
+        scanner.file_ids()
+    );
+    let stream = scanner.scan().await.unwrap();
+
+    let vec = collect_stream_ts(stream).await;
+    assert_eq!(
+        vec,
+        (0..=9)
+            .map(|v| v * 1000)
+            .chain((20..=29).map(|v| v * 1000))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
 async fn test_compaction_region_with_overlapping() {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::new();

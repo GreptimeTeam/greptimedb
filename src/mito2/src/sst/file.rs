@@ -15,11 +15,13 @@
 //! Structures to describe metadata of files.
 
 use std::fmt;
+use std::fmt::{Debug, Formatter};
 use std::num::NonZeroU64;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use common_base::readable_size::ReadableSize;
 use common_time::Timestamp;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
@@ -105,7 +107,7 @@ pub(crate) fn overlaps(l: &FileTimeRange, r: &FileTimeRange) -> bool {
 }
 
 /// Metadata of a SST file.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct FileMeta {
     /// Region of file.
@@ -140,6 +142,42 @@ pub struct FileMeta {
     /// This sequence is the only sequence in this file. And it's retrieved from the max
     /// sequence of the rows on generating this file.
     pub sequence: Option<NonZeroU64>,
+}
+
+impl Debug for FileMeta {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let mut debug_struct = f.debug_struct("FileMeta");
+        debug_struct
+            .field("region_id", &self.region_id)
+            .field_with("file_id", |f| write!(f, "{} ", self.file_id))
+            .field_with("time_range", |f| {
+                write!(
+                    f,
+                    "({}, {}) ",
+                    self.time_range.0.to_iso8601_string(),
+                    self.time_range.1.to_iso8601_string()
+                )
+            })
+            .field("level", &self.level)
+            .field("file_size", &ReadableSize(self.file_size));
+        if !self.available_indexes.is_empty() {
+            debug_struct
+                .field("available_indexes", &self.available_indexes)
+                .field("index_file_size", &ReadableSize(self.index_file_size));
+        }
+        debug_struct
+            .field("num_rows", &self.num_rows)
+            .field("num_row_groups", &self.num_row_groups)
+            .field_with("sequence", |f| match self.sequence {
+                None => {
+                    write!(f, "None")
+                }
+                Some(seq) => {
+                    write!(f, "{}", seq)
+                }
+            })
+            .finish()
+    }
 }
 
 /// Type of index.
