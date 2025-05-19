@@ -16,11 +16,13 @@
 //! migrating flow data between different flownodes in the system.
 //!
 
-use api::v1::flow::CreateRequest;
+use api::v1::flow::{flow_request, CreateRequest, DropRequest, FlowRequest, FlushFlow};
 use api::v1::meta::Peer;
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_meta::ddl::utils::{add_peer_context_if_needed, handle_retry_error};
 use common_meta::ddl::DdlContext;
-use common_meta::instruction::{CacheIdent, CreateFlow};
+use common_meta::instruction::{CacheIdent, CreateFlow, DropFlow};
 use common_meta::key::flow::flow_info::FlowInfoValue;
 use common_meta::key::{FlowId, FlowPartitionId};
 use common_meta::lock_key::{CatalogLock, FlowLock};
@@ -46,6 +48,10 @@ pub struct FlowMigrationData {
     pub(crate) dest_flownode: Peer,
     pub(crate) state: FlowMigrationState,
     pub(crate) query_ctx: QueryContext,
+    pub(crate) old_flow_info: Option<FlowInfoValue>,
+    pub(crate) old_flow_routes: Option<Vec<(FlowPartitionId, Peer)>>,
+    pub(crate) new_flow_info: Option<FlowInfoValue>,
+    pub(crate) new_flow_routes: Option<Vec<(FlowPartitionId, Peer)>>,
 }
 
 /// The state of [CreateFlowProcedure].
@@ -90,6 +96,10 @@ impl FlowMigrationProcedure {
                 dest_flownode,
                 query_ctx,
                 state: FlowMigrationState::Prepare,
+                old_flow_info: None,
+                old_flow_routes: None,
+                new_flow_info: None,
+                new_flow_routes: None,
             },
         }
     }
@@ -213,6 +223,22 @@ impl FlowMigrationProcedure {
                 partition_id,
             })?;
 
+        let old_flow_routes = self
+            .context
+            .flow_metadata_manager
+            .flow_route_manager()
+            .routes(flow_id)
+            .await?;
+
+        self.data.old_flow_info = Some(old_flow_info.clone().into_inner());
+        self.data.old_flow_routes = Some(
+            old_flow_routes
+                .clone()
+                .into_iter()
+                .map(|(k, v)| (k.partition_id(), v.peer().clone()))
+                .collect(),
+        );
+
         let new_flow_info = {
             let mut info = old_flow_info.clone();
             let old_flownode = info.migrate_flow(partition_id, dst_flownode.id);
@@ -222,16 +248,9 @@ impl FlowMigrationProcedure {
                 }.fail()?;
             }
             info
-        };
+        }.into_inner();
 
-        let old_flow_routes = self
-            .context
-            .flow_metadata_manager
-            .flow_route_manager()
-            .routes(flow_id)
-            .await?;
-
-        let new_flow_routes = old_flow_routes
+        let new_flow_routes: Vec<(FlowPartitionId, _)> = old_flow_routes
             .clone()
             .into_iter()
             .map(|(k, mut v)| {
@@ -247,10 +266,18 @@ impl FlowMigrationProcedure {
             .update_flow_metadata(
                 flow_id,
                 &old_flow_info,
-                &new_flow_info.into_inner(),
-                new_flow_routes,
+                &new_flow_info,
+                new_flow_routes.clone(),
             )
             .await?;
+
+        self.data.new_flow_info = Some(new_flow_info);
+        self.data.new_flow_routes = Some(
+            new_flow_routes
+                .into_iter()
+                .map(|(k, v)| (k, v.peer().clone()))
+                .collect(),
+        );
 
         self.data.state = FlowMigrationState::InvalidateFlowCache;
 
@@ -261,14 +288,44 @@ impl FlowMigrationProcedure {
         debug_assert!(self.data.state == FlowMigrationState::InvalidateFlowCache);
         // Safety: The flow id must be allocated.
         let flow_id = self.data.flow_id;
+        let old_flow_info = self.data.old_flow_info.as_ref().unwrap();
+        let new_flow_info = self.data.new_flow_info.as_ref().unwrap();
+        let new_flow_routes = self.data.new_flow_routes.as_ref().unwrap();
 
         let ctx = common_meta::cache_invalidator::Context {
-            subject: Some(format!("Invalidate flow cache by migrating flow(id={}, partition={}) from flownode {:?} to {:?}", flow_id, self.data.partition_id, self.data.src_flownode, self.data.dest_flownode)),
+            subject: Some(
+                format!(
+                    "Invalidate flow cache by migrating flow(id={}, partition={}) from flownode {:?} to {:?}",
+                    flow_id,
+                    self.data.partition_id,
+                    self.data.src_flownode,
+                    self.data.dest_flownode
+                )
+            ),
         };
 
         self.context
             .cache_invalidator
-            .invalidate(&ctx, &[todo!(), CacheIdent::FlowId(flow_id)])
+            .invalidate(
+                &ctx,
+                &[
+                    CacheIdent::DropFlow(DropFlow {
+                        flow_id,
+                        source_table_ids: old_flow_info.source_table_ids().to_vec(),
+                        flow_part2node_id: old_flow_info
+                            .flownode_ids()
+                            .clone()
+                            .into_iter()
+                            .collect(),
+                    }),
+                    CacheIdent::CreateFlow(CreateFlow {
+                        flow_id,
+                        source_table_ids: new_flow_info.source_table_ids().to_vec(),
+                        partition_to_peer_mapping: new_flow_routes.clone(),
+                    }),
+                    CacheIdent::FlowId(flow_id),
+                ],
+            )
             .await?;
 
         self.data.state = FlowMigrationState::DropFlowOnSrc;
@@ -277,11 +334,117 @@ impl FlowMigrationProcedure {
     }
 
     async fn drop_flow_on_src_node(&mut self) -> common_meta::error::Result<Status> {
-        todo!()
+        // first flush flow then drop flow
+        let src_flownode = self.data.src_flownode.clone();
+        let flow_id = self.data.flow_id;
+
+        let requester = self.context.node_manager.flownode(&src_flownode).await;
+        let flush_request = FlowRequest {
+            body: Some(flow_request::Body::Flush(FlushFlow {
+                flow_id: Some(api::v1::FlowId { id: flow_id }),
+            })),
+            ..Default::default()
+        };
+        let drop_request = FlowRequest {
+            body: Some(flow_request::Body::Drop(DropRequest {
+                flow_id: Some(api::v1::FlowId { id: flow_id }),
+            })),
+            ..Default::default()
+        };
+
+        let flush_and_drop_result = {
+            if let Err(err) = requester.handle(flush_request).await {
+                Err(err)
+            } else {
+                requester.handle(drop_request).await
+            }
+        };
+
+        if let Err(err) = flush_and_drop_result {
+            if err.status_code() != StatusCode::FlowNotFound {
+                return Err(add_peer_context_if_needed(src_flownode.clone())(err));
+            }
+        }
+
+        Ok(Status::done())
     }
 
     async fn rollback_inner(&mut self) -> common_meta::error::Result<()> {
-        todo!()
+        match self.data.state {
+            FlowMigrationState::Prepare => {
+                // No need to rollback since no change was done
+                Ok(())
+            }
+            FlowMigrationState::CreateFlowOnDest => {
+                // drop flow on dest
+                let dest_flownode = self.data.dest_flownode.clone();
+                let flow_id = self.data.flow_id;
+                let requester = self.context.node_manager.flownode(&dest_flownode).await;
+                let drop_request = FlowRequest {
+                    body: Some(flow_request::Body::Drop(DropRequest {
+                        flow_id: Some(api::v1::FlowId { id: flow_id }),
+                    })),
+                    ..Default::default()
+                };
+                if let Err(err) = requester.handle(drop_request).await {
+                    // for case when error happen before create flow
+                    if err.status_code() != StatusCode::FlowNotFound {
+                        return Err(add_peer_context_if_needed(dest_flownode.clone())(err));
+                    }
+                }
+                Ok(())
+            }
+            FlowMigrationState::AlterMetadata => {
+                // if the txns failed, nothing will change
+                // if something else failed, no need to change
+                Ok(())
+            }
+            FlowMigrationState::InvalidateFlowCache => {
+                // if cache invalid went wrong, then invalid all related entries just in case
+                let old_flow_info = self.data.old_flow_info.as_ref().unwrap();
+                let new_flow_info = self.data.new_flow_info.as_ref().unwrap();
+                let flow_id = self.data.flow_id;
+
+                let invalid_old = CacheIdent::DropFlow(DropFlow {
+                    flow_id,
+                    source_table_ids: old_flow_info.source_table_ids().to_vec(),
+                    flow_part2node_id: old_flow_info.flownode_ids().clone().into_iter().collect(),
+                });
+
+                let invalid_new = CacheIdent::DropFlow(DropFlow {
+                    flow_id,
+                    source_table_ids: new_flow_info.source_table_ids().to_vec(),
+                    flow_part2node_id: new_flow_info.flownode_ids().clone().into_iter().collect(),
+                });
+
+                let ctx = common_meta::cache_invalidator::Context {
+                    subject: Some(
+                        format!(
+                            "Rollback after failed, invalid all related entries: Invalidate flow cache by migrating flow(id={}, partition={}) from flownode {:?} to {:?}",
+                            flow_id,
+                            self.data.partition_id,
+                            self.data.src_flownode,
+                            self.data.dest_flownode
+                        )
+                    ),
+                };
+
+                self.context
+                    .cache_invalidator
+                    .invalidate(
+                        &ctx,
+                        &[invalid_old, invalid_new, CacheIdent::FlowId(flow_id)],
+                    )
+                    .await?;
+                Ok(())
+            }
+            FlowMigrationState::DropFlowOnSrc => {
+                // shouldn't fail,
+                // since both flush_flow&drop_flow
+                // shouldn't fail/only fail with FlowNotFound Error which are safely ignored
+                Ok(())
+            }
+        }
     }
 }
 
