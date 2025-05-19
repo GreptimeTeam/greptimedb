@@ -108,7 +108,7 @@ impl UnorderedScan {
                     for await batch in stream {
                         yield batch;
                     }
-                } else {
+                } else if stream_ctx.is_file_range_index(*index) {
                     let stream = scan_file_ranges(
                         stream_ctx.clone(),
                         part_metrics.clone(),
@@ -116,6 +116,13 @@ impl UnorderedScan {
                         "unordered_scan_files",
                         range_builder_list.clone(),
                     );
+                    for await batch in stream {
+                        yield batch;
+                    }
+                } else {
+                    let range = stream_ctx.input.extension_range(index.index);
+                    let reader = range.reader();
+                    let stream = reader.read(stream_ctx.as_ref(), &part_metrics, *index);
                     for await batch in stream {
                         yield batch;
                     }

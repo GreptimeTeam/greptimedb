@@ -445,7 +445,7 @@ pub(crate) fn build_sources(
                 range_meta.time_range,
             );
             Box::pin(stream) as _
-        } else {
+        } else if stream_ctx.is_file_range_index(*index) {
             let read_type = if compaction {
                 "compaction"
             } else {
@@ -459,6 +459,10 @@ pub(crate) fn build_sources(
                 range_builder_list.clone(),
             );
             Box::pin(stream) as _
+        } else {
+            let range = stream_ctx.input.extension_range(index.index);
+            let reader = range.reader();
+            reader.read(stream_ctx.as_ref(), part_metrics, *index)
         };
         sources.push(Source::Stream(stream));
     }

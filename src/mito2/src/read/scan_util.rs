@@ -399,7 +399,7 @@ impl PartitionMetricsList {
 
 /// Metrics while reading a partition.
 #[derive(Clone)]
-pub(crate) struct PartitionMetrics(Arc<PartitionMetricsInner>);
+pub struct PartitionMetrics(Arc<PartitionMetricsInner>);
 
 impl PartitionMetrics {
     pub(crate) fn new(

@@ -158,7 +158,10 @@ async fn test_compaction_region() {
         .unwrap();
     assert_eq!(result.affected_rows, 0);
 
-    let scanner = engine.scanner(region_id, ScanRequest::default()).unwrap();
+    let scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
     // Input:
     // [0..9]
     //       [10...19]
@@ -230,7 +233,10 @@ async fn test_compaction_region_with_overlapping() {
         .unwrap();
     assert_eq!(result.affected_rows, 0);
 
-    let scanner = engine.scanner(region_id, ScanRequest::default()).unwrap();
+    let scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
     let stream = scanner.scan().await.unwrap();
     let vec = collect_stream_ts(stream).await;
     assert_eq!((3600..10800).map(|i| { i * 1000 }).collect::<Vec<_>>(), vec);
@@ -288,7 +294,10 @@ async fn test_compaction_region_with_overlapping_delete_all() {
         .unwrap();
     assert_eq!(result.affected_rows, 0);
 
-    let scanner = engine.scanner(region_id, ScanRequest::default()).unwrap();
+    let scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
     assert_eq!(
         4,
         scanner.num_files(),
@@ -370,7 +379,10 @@ async fn test_readonly_during_compaction() {
         .unwrap();
     notify.notified().await;
 
-    let scanner = engine.scanner(region_id, ScanRequest::default()).unwrap();
+    let scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
     assert_eq!(
         2,
         scanner.num_files(),
@@ -433,7 +445,10 @@ async fn test_compaction_update_time_window() {
         .unwrap();
     assert_eq!(result.affected_rows, 0);
 
-    let scanner = engine.scanner(region_id, ScanRequest::default()).unwrap();
+    let scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
     assert_eq!(0, scanner.num_memtables());
     // We keep at most two files.
     assert_eq!(
@@ -452,7 +467,10 @@ async fn test_compaction_update_time_window() {
         rows: build_rows_for_key("a", 3600, 4000, 0),
     };
     put_rows(&engine, region_id, rows).await;
-    let scanner = engine.scanner(region_id, ScanRequest::default()).unwrap();
+    let scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
     assert_eq!(1, scanner.num_memtables());
     let stream = scanner.scan().await.unwrap();
     let vec = collect_stream_ts(stream).await;
@@ -464,7 +482,10 @@ async fn test_compaction_update_time_window() {
         rows: build_rows_for_key("a", 2400, 3600, 0),
     };
     put_rows(&engine, region_id, rows).await;
-    let scanner = engine.scanner(region_id, ScanRequest::default()).unwrap();
+    let scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
     assert_eq!(2, scanner.num_memtables());
     let stream = scanner.scan().await.unwrap();
     let vec = collect_stream_ts(stream).await;
