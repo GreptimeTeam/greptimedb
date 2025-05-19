@@ -21,7 +21,7 @@
         lib = nixpkgs.lib;
         rustToolchain = fenix.packages.${system}.fromToolchainName {
           name = (lib.importTOML ./rust-toolchain.toml).toolchain.channel;
-          sha256 = "sha256-arzEYlWLGGYeOhECHpBxQd2joZ4rPKV3qLNnZ+eql6A=";
+          sha256 = "sha256-tJJr8oqX3YD+ohhPK7jlt/7kvKBnBqJVjYtoFr520d4=";
         };
       in
       {
