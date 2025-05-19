@@ -226,13 +226,9 @@ pub struct FileHandle {
 impl fmt::Debug for FileHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FileHandle")
-            .field("region_id", &self.inner.meta.region_id)
-            .field("file_id", &self.inner.meta.file_id)
-            .field("time_range", &self.inner.meta.time_range)
-            .field("size", &self.inner.meta.file_size)
-            .field("level", &self.inner.meta.level)
-            .field("compacting", &self.inner.compacting)
-            .field("deleted", &self.inner.deleted)
+            .field("meta", self.meta_ref())
+            .field("compacting", &self.compacting())
+            .field("deleted", &self.inner.deleted.load(Ordering::Relaxed))
             .finish()
     }
 }
