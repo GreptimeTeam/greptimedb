@@ -19,8 +19,9 @@ use regex::Regex;
 use snafu::OptionExt;
 
 use crate::error::{self, Result};
+use crate::key::flow::flow_info::FlowInfoValue;
 use crate::key::flow::FlowScoped;
-use crate::key::{BytesAdapter, FlowId, FlowPartitionId, MetadataKey};
+use crate::key::{BytesAdapter, DeserializedValueWithBytes, FlowId, FlowPartitionId, MetadataKey};
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
@@ -199,6 +200,33 @@ impl FlownodeFlowManager {
                 TxnOp::Put(key, vec![])
             })
             .collect::<Vec<_>>();
+
+        Txn::new().and_then(txns)
+    }
+
+    /// Builds a update flownode flow transaction.
+    ///
+    /// Puts `__flownode_flow/{flownode_id}/{flow_id}/{partition_id}` keys.
+    /// Remove the old `__flownode_flow/{old_flownode_id}/{flow_id}/{old_partition_id}` keys.
+    pub(crate) fn build_update_txn<I: IntoIterator<Item = (FlowPartitionId, FlownodeId)>>(
+        &self,
+        flow_id: FlowId,
+        current_flow_info: &DeserializedValueWithBytes<FlowInfoValue>,
+        flownode_ids: I,
+    ) -> Txn {
+        let del_txns =
+            current_flow_info
+                .flownode_ids()
+                .iter()
+                .map(|(partition_id, flownode_id)| {
+                    let key = FlownodeFlowKey::new(*flownode_id, flow_id, *partition_id).to_bytes();
+                    TxnOp::Delete(key)
+                });
+        let put_txns = flownode_ids.into_iter().map(|(partition_id, flownode_id)| {
+            let key = FlownodeFlowKey::new(flownode_id, flow_id, partition_id).to_bytes();
+            TxnOp::Put(key, vec![])
+        });
+        let txns = del_txns.chain(put_txns).collect::<Vec<_>>();
 
         Txn::new().and_then(txns)
     }
