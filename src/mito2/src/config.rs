@@ -265,6 +265,8 @@ impl MitoConfig {
         self.vector_cache_size = mem_cache_size;
         self.page_cache_size = page_cache_size;
         self.selector_result_cache_size = mem_cache_size;
+
+        self.index.adjust_buffer_and_cache_size(sys_memory);
     }
 
     /// Enable write cache.
@@ -329,7 +331,7 @@ impl Default for IndexConfig {
             metadata_cache_size: ReadableSize::mb(64),
             content_cache_size: ReadableSize::mb(128),
             content_cache_page_size: ReadableSize::kb(64),
-            result_cache_size: ReadableSize::mb(8),
+            result_cache_size: ReadableSize::mb(128),
         }
     }
 }
@@ -367,6 +369,13 @@ impl IndexConfig {
         }
 
         Ok(())
+    }
+
+    pub fn adjust_buffer_and_cache_size(&mut self, sys_memory: ReadableSize) {
+        let cache_size = cmp::min(sys_memory / MEM_CACHE_SIZE_FACTOR, ReadableSize::mb(128));
+        self.result_cache_size = cmp::min(self.result_cache_size, cache_size);
+        self.content_cache_size = cmp::min(self.content_cache_size, cache_size);
+        self.metadata_cache_size = cmp::min(self.metadata_cache_size, cache_size);
     }
 }
 

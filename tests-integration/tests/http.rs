@@ -1118,7 +1118,6 @@ staging_size = "2GiB"
 staging_ttl = "7days"
 write_buffer_size = "8MiB"
 content_cache_page_size = "64KiB"
-result_cache_size = "8MiB"
 
 [region_engine.mito.inverted_index]
 create_on_flush = "auto"
@@ -1182,6 +1181,7 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
         "selector_result_cache_size =",
         "metadata_cache_size =",
         "content_cache_size =",
+        "result_cache_size =",
         "name =",
         "recovery_parallelism =",
         "max_background_flushes =",

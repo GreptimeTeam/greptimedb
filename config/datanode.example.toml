@@ -500,7 +500,7 @@ content_cache_size = "128MiB"
 content_cache_page_size = "64KiB"
 
 ## Cache size for index result.
-result_cache_size = "8MiB"
+result_cache_size = "128MiB"
 
 ## The options for inverted index in Mito engine.
 [region_engine.mito.inverted_index]
