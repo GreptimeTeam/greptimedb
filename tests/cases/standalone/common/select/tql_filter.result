@@ -21,7 +21,7 @@ tql analyze (1, 3, '1s') t1{ a = "a" };
 |_|_|_|
 | 1_| 0_|_PromInstantManipulateExec: range=[1000..3000], lookback=[300000], interval=[1000], time index=[b] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a"] REDACTED
-|_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges), distribution=PerSeries REDACTED
+|_|_|_SeriesScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges), distribution=PerSeries REDACTED
 |_|_|_|
 |_|_| Total rows: 3_|
 +-+-+-+
@@ -41,7 +41,7 @@ tql analyze (1, 3, '1s') t1{ a =~ ".*" };
 |_|_|_|
 | 1_| 0_|_PromInstantManipulateExec: range=[1000..3000], lookback=[300000], interval=[1000], time index=[b] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a"] REDACTED
-|_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges), distribution=PerSeries REDACTED
+|_|_|_SeriesScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges), distribution=PerSeries REDACTED
 |_|_|_|
 |_|_| Total rows: 6_|
 +-+-+-+
@@ -61,7 +61,7 @@ tql analyze (1, 3, '1s') t1{ a =~ "a.*" };
 |_|_|_|
 | 1_| 0_|_PromInstantManipulateExec: range=[1000..3000], lookback=[300000], interval=[1000], time index=[b] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a"] REDACTED
-|_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges), distribution=PerSeries REDACTED
+|_|_|_SeriesScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges), distribution=PerSeries REDACTED
 |_|_|_|
 |_|_| Total rows: 3_|
 +-+-+-+

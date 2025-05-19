@@ -125,7 +125,7 @@ impl RegionRequester {
         let mut flight_message_stream = flight_data_stream.map(move |flight_data| {
             flight_data
                 .map_err(Error::from)
-                .and_then(|data| decoder.try_decode(data).context(ConvertFlightDataSnafu))
+                .and_then(|data| decoder.try_decode(&data).context(ConvertFlightDataSnafu))
         });
 
         let Some(first_flight_message) = flight_message_stream.next().await else {

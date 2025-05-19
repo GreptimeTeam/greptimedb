@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use object_store::services::Fs;
 use object_store::util::{join_dir, with_instrument_layers};
-use object_store::ObjectStore;
+use object_store::{ErrorKind, ObjectStore};
 use smallvec::SmallVec;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
@@ -41,6 +41,10 @@ use crate::sst::parquet::{SstInfo, WriteOptions};
 pub type AccessLayerRef = Arc<AccessLayer>;
 /// SST write results.
 pub type SstInfoArray = SmallVec<[SstInfo; 2]>;
+
+pub const ATOMIC_WRITE_DIR: &str = "tmp/";
+/// For compatibility. Remove this after a major version release.
+pub const OLD_ATOMIC_WRITE_DIR: &str = ".tmp/";
 
 /// A layer to access SST files under the same directory.
 pub struct AccessLayer {
@@ -160,13 +164,18 @@ impl AccessLayer {
                 fulltext_index_config: request.fulltext_index_config,
                 bloom_filter_index_config: request.bloom_filter_index_config,
             };
+            // We disable write cache on file system but we still use atomic write.
+            // TODO(yingwen): If we support other non-fs stores without the write cache, then
+            // we may have find a way to check whether we need the cleaner.
+            let cleaner = TempFileCleaner::new(region_id, self.object_store.clone());
             let mut writer = ParquetWriter::new_with_object_store(
                 self.object_store.clone(),
                 request.metadata,
                 indexer_builder,
                 path_provider,
             )
-            .await;
+            .await
+            .with_file_cleaner(cleaner);
             writer
                 .write_all(request.source, request.max_sequence, write_opts)
                 .await?
@@ -213,9 +222,84 @@ pub struct SstWriteRequest {
     pub bloom_filter_index_config: BloomFilterConfig,
 }
 
+/// Cleaner to remove temp files on the atomic write dir.
+pub(crate) struct TempFileCleaner {
+    region_id: RegionId,
+    object_store: ObjectStore,
+}
+
+impl TempFileCleaner {
+    /// Constructs the cleaner for the region and store.
+    pub(crate) fn new(region_id: RegionId, object_store: ObjectStore) -> Self {
+        Self {
+            region_id,
+            object_store,
+        }
+    }
+
+    /// Removes the SST and index file from the local atomic dir by the file id.
+    pub(crate) async fn clean_by_file_id(&self, file_id: FileId) {
+        let sst_key = IndexKey::new(self.region_id, file_id, FileType::Parquet).to_string();
+        let index_key = IndexKey::new(self.region_id, file_id, FileType::Puffin).to_string();
+
+        Self::clean_atomic_dir_files(&self.object_store, &[&sst_key, &index_key]).await;
+    }
+
+    /// Removes the files from the local atomic dir by their names.
+    pub(crate) async fn clean_atomic_dir_files(
+        local_store: &ObjectStore,
+        names_to_remove: &[&str],
+    ) {
+        // We don't know the actual suffix of the file under atomic dir, so we have
+        // to list the dir. The cost should be acceptable as there won't be to many files.
+        let Ok(entries) = local_store.list(ATOMIC_WRITE_DIR).await.inspect_err(|e| {
+            if e.kind() != ErrorKind::NotFound {
+                common_telemetry::error!(e; "Failed to list tmp files for {:?}", names_to_remove)
+            }
+        }) else {
+            return;
+        };
+
+        // In our case, we can ensure the file id is unique so it is safe to remove all files
+        // with the same file id under the atomic write dir.
+        let actual_files: Vec<_> = entries
+            .into_iter()
+            .filter_map(|entry| {
+                if entry.metadata().is_dir() {
+                    return None;
+                }
+
+                // Remove name that matches files_to_remove.
+                let should_remove = names_to_remove
+                    .iter()
+                    .any(|file| entry.name().starts_with(file));
+                if should_remove {
+                    Some(entry.path().to_string())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        common_telemetry::warn!(
+            "Clean files {:?} under atomic write dir for {:?}",
+            actual_files,
+            names_to_remove
+        );
+
+        if let Err(e) = local_store.delete_iter(actual_files).await {
+            common_telemetry::error!(e; "Failed to delete tmp file for {:?}", names_to_remove);
+        }
+    }
+}
+
 pub(crate) async fn new_fs_cache_store(root: &str) -> Result<ObjectStore> {
-    let atomic_write_dir = join_dir(root, ".tmp/");
+    let atomic_write_dir = join_dir(root, ATOMIC_WRITE_DIR);
     clean_dir(&atomic_write_dir).await?;
+
+    // Compatible code. Remove this after a major release.
+    let old_atomic_temp_dir = join_dir(root, OLD_ATOMIC_WRITE_DIR);
+    clean_dir(&old_atomic_temp_dir).await?;
 
     let builder = Fs::default().root(root).atomic_write_dir(&atomic_write_dir);
     let store = ObjectStore::new(builder).context(OpenDalSnafu)?.finish();

@@ -145,6 +145,12 @@ pub(crate) async fn prepare_test_for_kafka_log_store(factory: &LogStoreFactory) 
 }
 
 pub(crate) async fn append_noop_record(client: &Client, topic: &str) {
+    let controller_client = client.controller_client().unwrap();
+    controller_client
+        .create_topic(topic, 1, 1, 5000)
+        .await
+        .unwrap();
+
     let partition_client = client
         .partition_client(topic, 0, UnknownTopicHandling::Retry)
         .await
@@ -659,6 +665,27 @@ impl TestEnv {
         Arc::new(write_cache)
     }
 
+    /// Creates a write cache from a path.
+    pub async fn create_write_cache_from_path(
+        &self,
+        path: &str,
+        capacity: ReadableSize,
+    ) -> WriteCacheRef {
+        let index_aux_path = self.data_home.path().join("index_aux");
+        let puffin_mgr = PuffinManagerFactory::new(&index_aux_path, 4096, None, None)
+            .await
+            .unwrap();
+        let intm_mgr = IntermediateManager::init_fs(index_aux_path.to_str().unwrap())
+            .await
+            .unwrap();
+
+        let write_cache = WriteCache::new_fs(path, capacity, None, puffin_mgr, intm_mgr)
+            .await
+            .unwrap();
+
+        Arc::new(write_cache)
+    }
+
     pub fn get_schema_metadata_manager(&self) -> SchemaMetadataManagerRef {
         self.schema_metadata_manager.clone()
     }
@@ -979,7 +1006,8 @@ pub(crate) fn column_metadata_to_column_schema(metadata: &ColumnMetadata) -> api
     }
 }
 
-/// Build rows with schema (string, f64, ts_millis).
+/// Build rows with schema (string, f64, ts_millis) in range `[start, end)`.
+/// `start`, `end` are in second resolution.
 pub fn build_rows(start: usize, end: usize) -> Vec<Row> {
     (start..end)
         .map(|i| api::v1::Row {
