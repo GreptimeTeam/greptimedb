@@ -23,6 +23,7 @@ use store_api::storage::TimeSeriesDistribution;
 
 use crate::cache::CacheStrategy;
 use crate::error::Result;
+use crate::extension::BoxedExtensionRange;
 use crate::memtable::{MemtableRange, MemtableRanges, MemtableStats};
 use crate::read::scan_region::ScanInput;
 use crate::sst::file::{overlaps, FileHandle, FileTimeRange};
@@ -46,7 +47,7 @@ pub(crate) struct SourceIndex {
 
 /// Index to access a row group.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct RowGroupIndex {
+pub struct RowGroupIndex {
     /// Index to the memtable/file.
     pub(crate) index: usize,
     /// Row group index in the file.
@@ -96,6 +97,7 @@ impl RangeMeta {
         let mut ranges = Vec::with_capacity(input.memtables.len() + input.files.len());
         Self::push_seq_mem_ranges(&input.memtables, &mut ranges);
         Self::push_seq_file_ranges(input.memtables.len(), &input.files, &mut ranges);
+        Self::push_extension_ranges(input.extension_ranges(), &mut ranges);
 
         let ranges = group_ranges_for_seq_scan(ranges);
         if compaction || input.distribution == Some(TimeSeriesDistribution::PerSeries) {
@@ -115,6 +117,7 @@ impl RangeMeta {
             &input.cache_strategy,
             &mut ranges,
         );
+        Self::push_extension_ranges(input.extension_ranges(), &mut ranges);
 
         ranges
     }
@@ -310,6 +313,24 @@ impl RangeMeta {
                     row_group_index: ALL_ROW_GROUPS,
                 }],
                 num_rows: file.meta_ref().num_rows as usize,
+            });
+        }
+    }
+
+    fn push_extension_ranges(ranges: &[BoxedExtensionRange], metas: &mut Vec<RangeMeta>) {
+        for range in ranges.iter() {
+            let index = metas.len();
+            metas.push(RangeMeta {
+                time_range: range.time_range(),
+                indices: smallvec![SourceIndex {
+                    index,
+                    num_row_groups: range.num_row_groups(),
+                }],
+                row_group_indices: smallvec![RowGroupIndex {
+                    index,
+                    row_group_index: ALL_ROW_GROUPS,
+                }],
+                num_rows: range.num_rows() as usize,
             });
         }
     }

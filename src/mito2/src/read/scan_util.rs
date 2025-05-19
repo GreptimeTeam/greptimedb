@@ -188,7 +188,6 @@ impl ScanMetricsSet {
             prepare_scan_cost,
             build_reader_cost,
             scan_cost,
-            convert_cost,
             yield_cost,
             num_batches,
             num_rows,
@@ -199,7 +198,6 @@ impl ScanMetricsSet {
         self.prepare_scan_cost += *prepare_scan_cost;
         self.build_reader_cost += *build_reader_cost;
         self.scan_cost += *scan_cost;
-        self.convert_cost += *convert_cost;
         self.yield_cost += *yield_cost;
         self.num_rows += *num_rows;
         self.num_batches += *num_batches;
@@ -400,7 +398,7 @@ impl PartitionMetricsList {
 
 /// Metrics while reading a partition.
 #[derive(Clone)]
-pub(crate) struct PartitionMetrics(Arc<PartitionMetricsInner>);
+pub struct PartitionMetrics(Arc<PartitionMetricsInner>);
 
 impl PartitionMetrics {
     pub(crate) fn new(
@@ -452,6 +450,11 @@ impl PartitionMetrics {
 
         let mut metrics = self.0.metrics.lock().unwrap();
         metrics.build_reader_cost += cost;
+    }
+
+    pub(crate) fn inc_convert_batch_cost(&self, cost: Duration) {
+        let mut metrics = self.0.metrics.lock().unwrap();
+        metrics.convert_cost += cost;
     }
 
     /// Merges [ScannerMetrics], `build_reader_cost`, `scan_cost` and `yield_cost`.

@@ -188,7 +188,10 @@ async fn test_merge_mode_compaction() {
 | a     |         | 13.0    | 1970-01-01T00:00:03 |
 +-------+---------+---------+---------------------+";
     // Scans in parallel.
-    let mut scanner = engine.scanner(region_id, ScanRequest::default()).unwrap();
+    let mut scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
     assert_eq!(2, scanner.num_files());
     assert_eq!(1, scanner.num_memtables());
     scanner.set_target_partitions(2);
