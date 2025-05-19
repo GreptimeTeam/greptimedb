@@ -99,6 +99,6 @@ harness = false
 required-features = ["test"]
 
 [[bench]]
-name = "run_bench"
+name = "bench_compaction_picker"
 harness = false
 required-features = ["test"]
