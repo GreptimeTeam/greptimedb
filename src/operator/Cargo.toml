@@ -68,5 +68,6 @@ tokio-util.workspace = true
 tonic.workspace = true
 
 [dev-dependencies]
+common-meta = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
 path-slash = "0.2"
