@@ -36,6 +36,7 @@ use crate::error::{EmptyRegionDirSnafu, JoinSnafu, ObjectStoreNotFoundSnafu, Res
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::manifest::storage::manifest_compress_type;
+use crate::metrics;
 use crate::read::Source;
 use crate::region::opener::new_manifest_dir;
 use crate::region::options::RegionOptions;
@@ -461,6 +462,19 @@ impl Compactor for DefaultCompactor {
             );
             return Ok(());
         }
+
+        let compaction_input_bytes = merge_output
+            .files_to_remove
+            .iter()
+            .map(|f| f.file_size)
+            .sum::<u64>();
+        let compaction_output_bytes = merge_output
+            .files_to_add
+            .iter()
+            .map(|f| f.file_size)
+            .sum::<u64>();
+        metrics::COMPACTION_INPUT_BYTES.observe(compaction_input_bytes as f64);
+        metrics::COMPACTION_OUTPUT_BYTES.observe(compaction_output_bytes as f64);
         self.update_manifest(compaction_region, merge_output)
             .await?;
 

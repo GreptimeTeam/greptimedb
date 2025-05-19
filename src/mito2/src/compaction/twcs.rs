@@ -142,17 +142,6 @@ impl Picker for TwcsPicker {
             return None;
         }
 
-        for o in &outputs {
-            let file_ranges = o
-                .inputs
-                .iter()
-                .map(|f| {
-                    let range = f.time_range();
-                    (range.0.value(), range.1.value())
-                })
-                .collect::<Vec<_>>();
-            info!("=== merging file: {:?}", file_ranges);
-        }
         let max_file_size = self.max_output_file_size.map(|v| v as usize);
         Some(PickerOutput {
             outputs,
