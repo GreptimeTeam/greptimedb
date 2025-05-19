@@ -468,8 +468,8 @@ mod tests {
         let empty_values = vec![""];
         let empty_input = Arc::new(StringVector::from_slice(&empty_values)) as VectorRef;
 
-        let ipv4_result = ipv4_func.eval(&ctx, &[empty_input.clone()]);
-        let ipv6_result = ipv6_func.eval(&ctx, &[empty_input.clone()]);
+        let ipv4_result = ipv4_func.eval(&ctx, std::slice::from_ref(&empty_input));
+        let ipv6_result = ipv6_func.eval(&ctx, std::slice::from_ref(&empty_input));
 
         assert!(ipv4_result.is_err());
         assert!(ipv6_result.is_err());
@@ -478,7 +478,7 @@ mod tests {
         let invalid_values = vec!["not an ip", "192.168.1.256", "zzzz::ffff"];
         let invalid_input = Arc::new(StringVector::from_slice(&invalid_values)) as VectorRef;
 
-        let ipv4_result = ipv4_func.eval(&ctx, &[invalid_input.clone()]);
+        let ipv4_result = ipv4_func.eval(&ctx, std::slice::from_ref(&invalid_input));
 
         assert!(ipv4_result.is_err());
     }

@@ -163,7 +163,7 @@ impl DfAccumulator for UddSketchState {
                 }
             }
             // meaning instantiate as `uddsketch_merge`
-            DataType::Binary => self.merge_batch(&[array.clone()])?,
+            DataType::Binary => self.merge_batch(std::slice::from_ref(array))?,
             _ => {
                 return not_impl_err!(
                     "UDDSketch functions do not support data type: {}",

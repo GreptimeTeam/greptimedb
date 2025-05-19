@@ -65,6 +65,7 @@ impl DataflowState {
     /// schedule all subgraph that need to run with time <= `as_of` and run_available()
     ///
     /// return true if any subgraph actually executed
+    #[allow(clippy::swap_with_temporary)]
     pub fn run_available_with_schedule(&mut self, df: &mut Dfir) -> bool {
         // first split keys <= as_of into another map
         let mut before = self

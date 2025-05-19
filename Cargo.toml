@@ -79,6 +79,7 @@ clippy.implicit_clone = "warn"
 clippy.result_large_err = "allow"
 clippy.large_enum_variant = "allow"
 clippy.doc_overindented_list_items = "allow"
+clippy.uninlined_format_args = "allow"
 rust.unknown_lints = "deny"
 rust.unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
 

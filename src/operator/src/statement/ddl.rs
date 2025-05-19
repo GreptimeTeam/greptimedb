@@ -185,7 +185,7 @@ impl StatementExecutor {
                 .contains_key(LOGICAL_TABLE_METADATA_KEY)
         {
             return self
-                .create_logical_tables(&[create_table.clone()], query_ctx)
+                .create_logical_tables(std::slice::from_ref(create_table), query_ctx)
                 .await?
                 .into_iter()
                 .next()
