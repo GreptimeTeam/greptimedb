@@ -263,13 +263,20 @@ pub fn merge_seq_files<T: Item>(input_files: &[T], max_file_size: Option<u64>) -
         return vec![];
     }
 
+    // Limit the number of files to process to 100 to control time complexity
+    let files_to_process = if input_files.len() > 100 {
+        &input_files[0..100]
+    } else {
+        input_files
+    };
+
     // Calculate target size based on max_file_size or average file size
     let target_size = match max_file_size {
         Some(size) => size as usize,
         None => {
             // Calculate 1.5*average_file_size if max_file_size is not provided
-            let total_size: usize = input_files.iter().map(|f| f.size()).sum();
-            (((total_size as f64) / (input_files.len() as f64)) * 1.5) as usize
+            let total_size: usize = files_to_process.iter().map(|f| f.size()).sum();
+            (((total_size as f64) / (files_to_process.len() as f64)) * 1.5) as usize
         }
     };
 
@@ -278,15 +285,15 @@ pub fn merge_seq_files<T: Item>(input_files: &[T], max_file_size: Option<u64>) -
     let mut best_score = f64::NEG_INFINITY;
 
     // Try different starting positions - iterate from end to start to prefer older files
-    for start_idx in (0..input_files.len()).rev() {
+    for start_idx in (0..files_to_process.len()).rev() {
         // Try different ending positions - also iterate from end to start
-        for end_idx in (start_idx + 1..input_files.len() + 1).rev() {
+        for end_idx in (start_idx + 1..files_to_process.len() + 1).rev() {
             // Skip if only one file in the group
             if end_idx - start_idx <= 1 {
                 continue;
             }
 
-            let group = &input_files[start_idx..end_idx];
+            let group = &files_to_process[start_idx..end_idx];
             let total_size: usize = group.iter().map(|f| f.size()).sum();
 
             // Skip if total size exceeds target size
@@ -305,7 +312,7 @@ pub fn merge_seq_files<T: Item>(input_files: &[T], max_file_size: Option<u64>) -
             // 1. File reduction (higher is better)
             // 2. Amplification factor (lower is better)
             // 3. Size efficiency (how close to target size)
-            let file_reduction_score = file_reduction as f64 / input_files.len() as f64;
+            let file_reduction_score = file_reduction as f64 / files_to_process.len() as f64;
             let amp_factor_score = (1.0 - amplification_factor) * 1.5; // Lower amplification is better
             let size_efficiency = (total_size as f64 / target_size as f64).min(1.0); // Reward using available space
 
