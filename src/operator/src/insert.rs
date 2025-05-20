@@ -164,6 +164,7 @@ impl Inserter {
             ctx,
             statement_executor,
             AutoCreateTableType::Physical,
+            false,
         )
         .await
     }
@@ -180,6 +181,7 @@ impl Inserter {
             ctx,
             statement_executor,
             AutoCreateTableType::Log,
+            false,
         )
         .await
     }
@@ -195,6 +197,7 @@ impl Inserter {
             ctx,
             statement_executor,
             AutoCreateTableType::Trace,
+            false,
         )
         .await
     }
@@ -205,12 +208,14 @@ impl Inserter {
         requests: RowInsertRequests,
         ctx: QueryContextRef,
         statement_executor: &StatementExecutor,
+        accommodate_existing_schema: bool,
     ) -> Result<Output> {
         self.handle_row_inserts_with_create_type(
             requests,
             ctx,
             statement_executor,
             AutoCreateTableType::LastNonNull,
+            accommodate_existing_schema,
         )
         .await
     }
@@ -222,6 +227,7 @@ impl Inserter {
         ctx: QueryContextRef,
         statement_executor: &StatementExecutor,
         create_type: AutoCreateTableType,
+        accommodate_existing_schema: bool,
     ) -> Result<Output> {
         // remove empty requests
         requests.inserts.retain(|req| {
@@ -241,7 +247,7 @@ impl Inserter {
                 &ctx,
                 create_type,
                 statement_executor,
-                false,
+                accommodate_existing_schema,
             )
             .await?;
 
@@ -804,7 +810,10 @@ impl Inserter {
     }
 
     /// Returns an alter table expression if it finds new columns in the request.
-    /// It always adds columns if not exist.
+    /// When `accommodate_existing_schema` is false, it always adds columns if not exist.
+    /// When `accommodate_existing_schema` is true, it may modify the input `req` to
+    /// accomodate it with existing schema. See [`create_or_alter_tables_on_demand`](Self::create_or_alter_tables_on_demand)
+    /// for more details.
     fn get_alter_table_expr_on_demand(
         &self,
         req: &mut RowInsertRequest,

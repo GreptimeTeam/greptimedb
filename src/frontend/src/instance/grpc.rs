@@ -430,7 +430,7 @@ impl Instance {
         ctx: QueryContextRef,
     ) -> Result<Output> {
         self.inserter
-            .handle_last_non_null_inserts(requests, ctx, self.statement_executor.as_ref())
+            .handle_last_non_null_inserts(requests, ctx, self.statement_executor.as_ref(), true)
             .await
             .context(TableOperationSnafu)
     }
