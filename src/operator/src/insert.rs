@@ -880,6 +880,10 @@ impl Inserter {
                 def.semantic_type != SemanticType::Timestamp as i32
                     && (def.semantic_type != SemanticType::Field as i32 && field_col_name.is_some())
             });
+
+            if add_columns.add_columns.is_empty() {
+                return Ok(None);
+            }
         }
 
         Ok(Some(AlterTableExpr {
@@ -1224,19 +1228,8 @@ mod tests {
         );
         let alter_expr = inserter
             .get_alter_table_expr_on_demand(&mut req, &table, &ctx, true)
-            .unwrap()
             .unwrap();
-
-        // Should not add timestamp or field columns
-        if let Some(api::v1::alter_table_expr::Kind::AddColumns(add_columns)) = alter_expr.kind {
-            for col in &add_columns.add_columns {
-                let sem = col.column_def.as_ref().unwrap().semantic_type;
-                assert_ne!(sem, SemanticType::Timestamp as i32);
-                assert_ne!(sem, SemanticType::Field as i32);
-            }
-        } else {
-            panic!("Expected AddColumns kind");
-        }
+        assert!(alter_expr.is_none());
 
         // The request's schema should have updated names for timestamp and field columns
         let req_schema = req.rows.as_ref().unwrap().schema.clone();
