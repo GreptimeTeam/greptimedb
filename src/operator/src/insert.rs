@@ -147,7 +147,7 @@ impl Inserter {
         statement_executor: &StatementExecutor,
     ) -> Result<Output> {
         let row_inserts = ColumnToRow::convert(requests)?;
-        self.handle_row_inserts(row_inserts, ctx, statement_executor)
+        self.handle_row_inserts(row_inserts, ctx, statement_executor, false)
             .await
     }
 
@@ -157,6 +157,7 @@ impl Inserter {
         mut requests: RowInsertRequests,
         ctx: QueryContextRef,
         statement_executor: &StatementExecutor,
+        accommodate_existing_schema: bool,
     ) -> Result<Output> {
         preprocess_row_insert_requests(&mut requests.inserts)?;
         self.handle_row_inserts_with_create_type(
@@ -164,7 +165,7 @@ impl Inserter {
             ctx,
             statement_executor,
             AutoCreateTableType::Physical,
-            false,
+            accommodate_existing_schema,
         )
         .await
     }
