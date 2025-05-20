@@ -256,6 +256,11 @@ impl DatanodeTableManager {
             })?
             .and_then(|r| DatanodeTableValue::try_from_raw_value(&r.value))?
             .region_info;
+
+        // If the region options are the same, we don't need to update it.
+        if region_info.region_options == new_region_options {
+            return Ok(Txn::new());
+        }
         // substitute region options only.
         region_info.region_options = new_region_options;
 
