@@ -21,7 +21,7 @@ use client::Output;
 use common_error::ext::BoxedError;
 use datatypes::timestamp::TimestampNanosecond;
 use pipeline::pipeline_operator::PipelineOperator;
-use pipeline::{Pipeline, PipelineInfo, PipelineVersion};
+use pipeline::{Pipeline, PipelineName, PipelineVersion};
 use servers::error::{
     AuthSnafu, Error as ServerError, ExecuteGrpcRequestSnafu, InFlightWriteBytesExceededSnafu,
     PipelineSnafu, Result as ServerResult,
@@ -70,7 +70,7 @@ impl PipelineHandler for Instance {
         content_type: &str,
         pipeline: &str,
         query_ctx: QueryContextRef,
-    ) -> ServerResult<PipelineInfo> {
+    ) -> ServerResult<PipelineName> {
         self.pipeline_operator
             .insert_pipeline(name, content_type, pipeline, query_ctx)
             .await

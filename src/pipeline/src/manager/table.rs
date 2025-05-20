@@ -46,7 +46,7 @@ use crate::error::{
     PipelineNotFoundSnafu, Result,
 };
 use crate::etl::{parse, Content, Pipeline};
-use crate::manager::{PipelineInfo, PipelineVersion};
+use crate::manager::{PipelineName, PipelineVersion};
 use crate::util::{generate_pipeline_cache_key, prepare_dataframe_conditions};
 
 pub(crate) const PIPELINE_TABLE_NAME: &str = "pipelines";
@@ -218,8 +218,8 @@ impl PipelineTable {
         name: &str,
         content_type: &str,
         pipeline: &str,
-    ) -> Result<Timestamp> {
-        let now = Timestamp::current_time(TimeUnit::Nanosecond);
+    ) -> Result<TimestampNanosecond> {
+        let now = TimestampNanosecond::new(Timestamp::current_time(TimeUnit::Nanosecond).value());
 
         let table_info = self.table.table_info();
 
@@ -233,7 +233,7 @@ impl PipelineTable {
                         ValueData::StringValue(schema.to_string()).into(),
                         ValueData::StringValue(content_type.to_string()).into(),
                         ValueData::StringValue(pipeline.to_string()).into(),
-                        ValueData::TimestampNanosecondValue(now.value()).into(),
+                        ValueData::TimestampNanosecondValue(now.0.value()).into(),
                     ],
                 }],
             }),
@@ -321,7 +321,7 @@ impl PipelineTable {
         name: &str,
         content_type: &str,
         pipeline: &str,
-    ) -> Result<PipelineInfo> {
+    ) -> Result<PipelineName> {
         let compiled_pipeline = Arc::new(Self::compile_pipeline(pipeline)?);
         // we will use the version in the future
         let version = self
@@ -334,21 +334,25 @@ impl PipelineTable {
                 compiled_pipeline.clone(),
             );
             self.pipelines.insert(
-                generate_pipeline_cache_key(schema, name, Some(TimestampNanosecond(version))),
+                generate_pipeline_cache_key(schema, name, Some(version)),
                 compiled_pipeline.clone(),
             );
 
             self.original_pipelines.insert(
                 generate_pipeline_cache_key(schema, name, None),
-                (pipeline.to_owned(), TimestampNanosecond(version)),
+                (pipeline.to_owned(), version),
             );
             self.original_pipelines.insert(
-                generate_pipeline_cache_key(schema, name, Some(TimestampNanosecond(version))),
-                (pipeline.to_owned(), TimestampNanosecond(version)),
+                generate_pipeline_cache_key(schema, name, Some(version)),
+                (pipeline.to_owned(), version),
             );
         }
 
-        Ok((version, compiled_pipeline))
+        Ok(PipelineName::new(
+            name.to_string(),
+            schema.to_string(),
+            Some(version),
+        ))
     }
 
     pub async fn delete_pipeline(

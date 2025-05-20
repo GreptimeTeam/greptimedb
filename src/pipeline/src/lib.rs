@@ -30,6 +30,6 @@ pub use etl::{
 };
 pub use manager::{
     pipeline_operator, table, util, IdentityTimeIndex, PipelineContext, PipelineDefinition,
-    PipelineInfo, PipelineRef, PipelineTableRef, PipelineVersion, PipelineWay, SelectInfo,
+    PipelineName, PipelineRef, PipelineTableRef, PipelineVersion, PipelineWay, SelectInfo,
     GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME, GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME,
 };

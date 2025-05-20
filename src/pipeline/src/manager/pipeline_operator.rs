@@ -30,7 +30,7 @@ use snafu::{OptionExt, ResultExt};
 use table::TableRef;
 
 use crate::error::{CatalogSnafu, CreateTableSnafu, PipelineTableNotFoundSnafu, Result};
-use crate::manager::{PipelineInfo, PipelineTableRef, PipelineVersion};
+use crate::manager::{PipelineName, PipelineTableRef, PipelineVersion};
 use crate::metrics::{
     METRIC_PIPELINE_CREATE_HISTOGRAM, METRIC_PIPELINE_DELETE_HISTOGRAM,
     METRIC_PIPELINE_RETRIEVE_HISTOGRAM,
@@ -229,7 +229,7 @@ impl PipelineOperator {
         content_type: &str,
         pipeline: &str,
         query_ctx: QueryContextRef,
-    ) -> Result<PipelineInfo> {
+    ) -> Result<PipelineName> {
         self.create_pipeline_table_if_not_exists(query_ctx.clone())
             .await?;
 

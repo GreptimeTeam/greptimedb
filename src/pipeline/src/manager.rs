@@ -40,8 +40,23 @@ pub mod util;
 /// When it used in cache key, it will be converted to i64 meaning the number of nanoseconds since the epoch.
 pub type PipelineVersion = Option<TimestampNanosecond>;
 
-/// Pipeline info. A tuple of timestamp and pipeline reference.
-pub type PipelineInfo = (Timestamp, PipelineRef);
+/// Unique reference to pipeline name.
+/// Note the version can be None while query, which means the latest version of the pipeline.
+pub struct PipelineName {
+    pub name: String,
+    pub schema: String,
+    pub version: PipelineVersion,
+}
+
+impl PipelineName {
+    pub fn new(name: String, schema: String, version: PipelineVersion) -> Self {
+        Self {
+            name,
+            schema,
+            version,
+        }
+    }
+}
 
 pub type PipelineTableRef = Arc<PipelineTable>;
 pub type PipelineRef = Arc<Pipeline>;

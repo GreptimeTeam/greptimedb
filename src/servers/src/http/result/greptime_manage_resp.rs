@@ -16,6 +16,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 use http::header::CONTENT_TYPE;
 use http::HeaderValue;
+use pipeline::PipelineName;
 use serde::{Deserialize, Serialize};
 
 use crate::http::header::{GREPTIME_DB_HEADER_EXECUTION_TIME, GREPTIME_DB_HEADER_FORMAT};
@@ -30,17 +31,19 @@ pub struct GreptimedbManageResponse {
 }
 
 impl GreptimedbManageResponse {
-    pub fn from_pipeline(
-        name: String,
-        version: String,
+    pub fn from_pipeline_name(
+        p_name: PipelineName,
         execution_time_ms: u64,
         pipeline: Option<String>,
     ) -> Self {
         GreptimedbManageResponse {
             manage_result: ManageResult::Pipelines {
                 pipelines: vec![PipelineOutput {
-                    name,
-                    version,
+                    name: p_name.name,
+                    version: p_name
+                        .version
+                        .map(|v| v.0.to_timezone_aware_string(None))
+                        .unwrap_or_default(),
                     pipeline,
                 }],
             },

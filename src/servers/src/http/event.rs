@@ -34,7 +34,9 @@ use datatypes::value::column_data_to_json;
 use headers::ContentType;
 use lazy_static::lazy_static;
 use pipeline::util::to_pipeline_version;
-use pipeline::{GreptimePipelineParams, PipelineContext, PipelineDefinition, PipelineMap};
+use pipeline::{
+    GreptimePipelineParams, PipelineContext, PipelineDefinition, PipelineMap, PipelineName,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Deserializer, Map, Value};
 use session::context::{Channel, QueryContext, QueryContextRef};
@@ -170,14 +172,15 @@ pub async fn query_pipeline(
     let query_ctx = Arc::new(query_ctx);
 
     let (pipeline, pipeline_version) = handler
-        .get_pipeline_str(&pipeline_name, version, query_ctx)
+        .get_pipeline_str(&pipeline_name, version, query_ctx.clone())
         .await?;
 
-    Ok(GreptimedbManageResponse::from_pipeline(
-        pipeline_name,
-        query_params
-            .version
-            .unwrap_or(pipeline_version.0.to_iso8601_string()),
+    Ok(GreptimedbManageResponse::from_pipeline_name(
+        PipelineName::new(
+            pipeline_name,
+            query_ctx.current_schema(),
+            Some(pipeline_version),
+        ),
         start.elapsed().as_millis() as u64,
         Some(pipeline),
     ))
@@ -220,10 +223,9 @@ pub async fn add_pipeline(
         .await;
 
     result
-        .map(|pipeline| {
-            GreptimedbManageResponse::from_pipeline(
-                pipeline_name,
-                pipeline.0.to_timezone_aware_string(None),
+        .map(|p_name| {
+            GreptimedbManageResponse::from_pipeline_name(
+                p_name,
                 start.elapsed().as_millis() as u64,
                 None,
             )
@@ -260,13 +262,12 @@ pub async fn delete_pipeline(
     let query_ctx = Arc::new(query_ctx);
 
     handler
-        .delete_pipeline(&pipeline_name, version, query_ctx)
+        .delete_pipeline(&pipeline_name, version, query_ctx.clone())
         .await
         .map(|v| {
             if v.is_some() {
-                GreptimedbManageResponse::from_pipeline(
-                    pipeline_name,
-                    version_str,
+                GreptimedbManageResponse::from_pipeline_name(
+                    PipelineName::new(pipeline_name, query_ctx.current_schema(), version),
                     start.elapsed().as_millis() as u64,
                     None,
                 )
