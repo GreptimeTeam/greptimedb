@@ -375,7 +375,12 @@ impl IndexConfig {
         let cache_size = cmp::min(sys_memory / MEM_CACHE_SIZE_FACTOR, ReadableSize::mb(128));
         self.result_cache_size = cmp::min(self.result_cache_size, cache_size);
         self.content_cache_size = cmp::min(self.content_cache_size, cache_size);
-        self.metadata_cache_size = cmp::min(self.metadata_cache_size, cache_size);
+
+        let metadata_cache_size = cmp::min(
+            sys_memory / SST_META_CACHE_SIZE_FACTOR,
+            ReadableSize::mb(64),
+        );
+        self.metadata_cache_size = cmp::min(self.metadata_cache_size, metadata_cache_size);
     }
 }
 
