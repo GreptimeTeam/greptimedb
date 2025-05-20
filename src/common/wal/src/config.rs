@@ -158,12 +158,7 @@ mod tests {
             provider = "kafka"
             broker_endpoints = ["127.0.0.1:9092"]
             max_batch_bytes = "1MB"
-            linger = "200ms"
             consumer_wait_timeout = "100ms"
-            backoff_init = "500ms"
-            backoff_max = "10s"
-            backoff_base = 2
-            backoff_deadline = "5mins"
             num_topics = 32
             num_partitions = 1
             selector_type = "round_robin"

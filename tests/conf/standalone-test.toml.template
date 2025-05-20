@@ -13,7 +13,6 @@ sync_write = false
 {{ else }}
 provider = "kafka"
 broker_endpoints = {kafka_wal_broker_endpoints | unescaped}
-linger = "5ms"
 {{ endif }}
 
 [storage]
