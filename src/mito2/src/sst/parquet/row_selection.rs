@@ -26,6 +26,8 @@ pub struct RowGroupSelection {
     selection_in_rg: BTreeMap<usize, RowSelectionWithCount>,
     /// Total number of rows in the selection.
     row_count: usize,
+    /// Total length of the selectors.
+    selector_len: usize,
 }
 
 /// A row selection with its count.
@@ -35,6 +37,8 @@ struct RowSelectionWithCount {
     selection: RowSelection,
     /// Number of rows in the selection.
     row_count: usize,
+    /// Length of the selectors.
+    selector_len: usize,
 }
 
 impl RowGroupSelection {
@@ -61,6 +65,7 @@ impl RowGroupSelection {
                 RowSelectionWithCount {
                     selection,
                     row_count: row_group_size,
+                    selector_len: 1,
                 },
             );
         }
@@ -68,6 +73,7 @@ impl RowGroupSelection {
         Self {
             selection_in_rg,
             row_count: total_row_count,
+            selector_len: row_group_count,
         }
     }
 
@@ -109,6 +115,7 @@ impl RowGroupSelection {
 
         // Step 2: Group ranges by row group ID and create row selections
         let mut total_row_count = 0;
+        let mut total_selector_len = 0;
         let selection_in_rg = row_group_ranges
             .chunk_by(|(row_group_id, _)| *row_group_id)
             .into_iter()
@@ -122,12 +129,15 @@ impl RowGroupSelection {
                 //    by the min() operation above
                 let selection = row_selection_from_row_ranges(ranges, row_group_size);
                 let row_count = selection.row_count();
+                let selector_len = selector_len(&selection);
                 total_row_count += row_count;
+                total_selector_len += selector_len;
                 (
                     row_group_id,
                     RowSelectionWithCount {
                         selection,
                         row_count,
+                        selector_len,
                     },
                 )
             })
@@ -136,6 +146,7 @@ impl RowGroupSelection {
         Self {
             selection_in_rg,
             row_count: total_row_count,
+            selector_len: total_selector_len,
         }
     }
 
@@ -161,18 +172,22 @@ impl RowGroupSelection {
 
         // Step 2: Create row selections for each row group
         let mut total_row_count = 0;
+        let mut total_selector_len = 0;
         let selection_in_rg = row_group_to_row_ids
             .into_iter()
             .map(|(row_group_id, row_ids)| {
                 let selection =
                     row_selection_from_sorted_row_ids(row_ids.into_iter(), row_group_size);
                 let row_count = selection.row_count();
+                let selector_len = selector_len(&selection);
                 total_row_count += row_count;
+                total_selector_len += selector_len;
                 (
                     row_group_id,
                     RowSelectionWithCount {
                         selection,
                         row_count,
+                        selector_len,
                     },
                 )
             })
@@ -181,6 +196,7 @@ impl RowGroupSelection {
         Self {
             selection_in_rg,
             row_count: total_row_count,
+            selector_len: total_selector_len,
         }
     }
 
@@ -201,17 +217,21 @@ impl RowGroupSelection {
         row_group_size: usize,
     ) -> Self {
         let mut total_row_count = 0;
+        let mut total_selector_len = 0;
         let selection_in_rg = row_ranges
             .into_iter()
             .map(|(row_group_id, ranges)| {
                 let selection = row_selection_from_row_ranges(ranges.into_iter(), row_group_size);
                 let row_count = selection.row_count();
+                let selector_len = selector_len(&selection);
                 total_row_count += row_count;
+                total_selector_len += selector_len;
                 (
                     row_group_id,
                     RowSelectionWithCount {
                         selection,
                         row_count,
+                        selector_len,
                     },
                 )
             })
@@ -220,6 +240,7 @@ impl RowGroupSelection {
         Self {
             selection_in_rg,
             row_count: total_row_count,
+            selector_len: total_selector_len,
         }
     }
 
@@ -262,6 +283,7 @@ impl RowGroupSelection {
     pub fn intersect(&self, other: &Self) -> Self {
         let mut res = BTreeMap::new();
         let mut total_row_count = 0;
+        let mut total_selector_len = 0;
 
         for (rg_id, x) in other.selection_in_rg.iter() {
             let Some(y) = self.selection_in_rg.get(rg_id) else {
@@ -269,13 +291,16 @@ impl RowGroupSelection {
             };
             let selection = x.selection.intersection(&y.selection);
             let row_count = selection.row_count();
+            let selector_len = selector_len(&selection);
             if row_count > 0 {
                 total_row_count += row_count;
+                total_selector_len += selector_len;
                 res.insert(
                     *rg_id,
                     RowSelectionWithCount {
                         selection,
                         row_count,
+                        selector_len,
                     },
                 );
             }
@@ -284,6 +309,7 @@ impl RowGroupSelection {
         Self {
             selection_in_rg: res,
             row_count: total_row_count,
+            selector_len: total_selector_len,
         }
     }
 
@@ -304,21 +330,27 @@ impl RowGroupSelection {
             RowSelectionWithCount {
                 selection,
                 row_count,
+                selector_len,
             },
         ) = self.selection_in_rg.pop_first()?;
 
         self.row_count -= row_count;
+        self.selector_len -= selector_len;
         Some((row_group_id, selection))
     }
 
     /// Removes a row group from the selection.
     pub fn remove_row_group(&mut self, row_group_id: usize) {
-        let Some(RowSelectionWithCount { row_count, .. }) =
-            self.selection_in_rg.remove(&row_group_id)
+        let Some(RowSelectionWithCount {
+            row_count,
+            selector_len,
+            ..
+        }) = self.selection_in_rg.remove(&row_group_id)
         else {
             return;
         };
         self.row_count -= row_count;
+        self.selector_len -= selector_len;
     }
 
     /// Returns true if the selection is empty.
@@ -336,6 +368,12 @@ impl RowGroupSelection {
         self.selection_in_rg
             .iter()
             .map(|(row_group_id, x)| (row_group_id, &x.selection))
+    }
+
+    /// Returns the memory usage of the selection.
+    pub fn mem_usage(&self) -> usize {
+        self.selector_len * size_of::<RowSelector>()
+            + self.selection_in_rg.len() * size_of::<RowSelectionWithCount>()
     }
 }
 
@@ -420,10 +458,31 @@ fn add_or_merge_selector(selectors: &mut Vec<RowSelector>, count: usize, is_skip
     selectors.push(new_selector);
 }
 
+/// Returns the length of the selectors in the selection.
+fn selector_len(selection: &RowSelection) -> usize {
+    selection.iter().size_hint().0
+}
+
 #[cfg(test)]
 #[allow(clippy::single_range_in_vec_init)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_selector_len() {
+        let selection = RowSelection::from(vec![RowSelector::skip(5), RowSelector::select(5)]);
+        assert_eq!(selector_len(&selection), 2);
+
+        let selection = RowSelection::from(vec![
+            RowSelector::select(5),
+            RowSelector::skip(5),
+            RowSelector::select(5),
+        ]);
+        assert_eq!(selector_len(&selection), 3);
+
+        let selection = RowSelection::from(vec![]);
+        assert_eq!(selector_len(&selection), 0);
+    }
 
     #[test]
     fn test_single_contiguous_range() {

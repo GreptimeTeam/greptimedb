@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 use datafusion_expr::{BinaryExpr, Expr as DfExpr, Operator};
 use datatypes::data_type::ConcreteDataType;
@@ -36,7 +36,7 @@ impl InvertedIndexApplierBuilder<'_> {
         };
 
         let predicate = Predicate::InList(InListPredicate {
-            list: HashSet::from_iter([Self::encode_lit(lit, data_type)?]),
+            list: BTreeSet::from_iter([Self::encode_lit(lit, data_type)?]),
         });
         self.add_predicate(column_id, predicate);
         Ok(())
@@ -64,7 +64,7 @@ impl InvertedIndexApplierBuilder<'_> {
         };
 
         let bytes = Self::encode_lit(lit, data_type.clone())?;
-        let mut inlist = HashSet::from_iter([bytes]);
+        let mut inlist = BTreeSet::from_iter([bytes]);
 
         if Self::collect_eq_list_inner(column_name, &data_type, or_list, &mut inlist)? {
             let predicate = Predicate::InList(InListPredicate { list: inlist });
@@ -82,7 +82,7 @@ impl InvertedIndexApplierBuilder<'_> {
         column_name: &str,
         data_type: &ConcreteDataType,
         expr: &DfExpr,
-        inlist: &mut HashSet<Bytes>,
+        inlist: &mut BTreeSet<Bytes>,
     ) -> Result<bool> {
         let DfExpr::BinaryExpr(BinaryExpr {
             left,
@@ -122,6 +122,8 @@ impl InvertedIndexApplierBuilder<'_> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
     use crate::error::Error;
     use crate::sst::index::inverted_index::applier::builder::tests::{
@@ -154,13 +156,13 @@ mod tests {
         assert_eq!(
             predicates[0],
             Predicate::InList(InListPredicate {
-                list: HashSet::from_iter([encoded_string("foo")])
+                list: BTreeSet::from_iter([encoded_string("foo")])
             })
         );
         assert_eq!(
             predicates[1],
             Predicate::InList(InListPredicate {
-                list: HashSet::from_iter([encoded_string("bar")])
+                list: BTreeSet::from_iter([encoded_string("bar")])
             })
         );
     }
@@ -187,7 +189,7 @@ mod tests {
         assert_eq!(
             predicates[0],
             Predicate::InList(InListPredicate {
-                list: HashSet::from_iter([encoded_string("abc")])
+                list: BTreeSet::from_iter([encoded_string("abc")])
             })
         );
     }
@@ -275,7 +277,7 @@ mod tests {
         assert_eq!(
             predicates[0],
             Predicate::InList(InListPredicate {
-                list: HashSet::from_iter([
+                list: BTreeSet::from_iter([
                     encoded_string("abc"),
                     encoded_string("foo"),
                     encoded_string("bar"),

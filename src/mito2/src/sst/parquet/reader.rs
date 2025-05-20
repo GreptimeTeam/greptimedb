@@ -36,6 +36,7 @@ use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 
+use crate::cache::index::result_cache::PredicateKey;
 use crate::cache::CacheStrategy;
 use crate::error::{
     ArrowReaderSnafu, InvalidMetadataSnafu, InvalidParquetSnafu, ReadDataPartSnafu,
@@ -48,7 +49,7 @@ use crate::metrics::{
 use crate::read::prune::{PruneReader, Source};
 use crate::read::{Batch, BatchReader};
 use crate::row_converter::build_primary_key_codec;
-use crate::sst::file::FileHandle;
+use crate::sst::file::{FileHandle, FileId};
 use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplierRef;
 use crate::sst::index::fulltext_index::applier::FulltextIndexApplierRef;
 use crate::sst::index::inverted_index::applier::InvertedIndexApplierRef;
@@ -59,6 +60,31 @@ use crate::sst::parquet::row_group::InMemoryRowGroup;
 use crate::sst::parquet::row_selection::RowGroupSelection;
 use crate::sst::parquet::stats::RowGroupPruningStats;
 use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, PARQUET_METADATA_KEY};
+
+const INDEX_TYPE_FULLTEXT: &str = "fulltext";
+const INDEX_TYPE_INVERTED: &str = "inverted";
+const INDEX_TYPE_BLOOM: &str = "bloom filter";
+
+macro_rules! handle_index_error {
+    ($err:expr, $file_handle:expr, $index_type:expr) => {
+        if cfg!(any(test, feature = "test")) {
+            panic!(
+                "Failed to apply {} index, region_id: {}, file_id: {}, err: {:?}",
+                $index_type,
+                $file_handle.region_id(),
+                $file_handle.file_id(),
+                $err
+            );
+        } else {
+            warn!(
+                $err; "Failed to apply {} index, region_id: {}, file_id: {}",
+                $index_type,
+                $file_handle.region_id(),
+                $file_handle.file_id()
+            );
+        }
+    };
+}
 
 /// Parquet SST reader builder.
 pub struct ParquetReaderBuilder {
@@ -346,24 +372,22 @@ impl ParquetReaderBuilder {
 
         let mut output = RowGroupSelection::new(row_group_size, num_rows as _);
 
-        self.prune_row_groups_by_fulltext_index(row_group_size, parquet_meta, &mut output, metrics)
+        self.prune_row_groups_by_minmax(read_format, parquet_meta, &mut output, metrics);
+        if output.is_empty() {
+            return output;
+        }
+
+        let fulltext_filtered = self
+            .prune_row_groups_by_fulltext_index(row_group_size, parquet_meta, &mut output, metrics)
             .await;
         if output.is_empty() {
             return output;
         }
 
-        let inverted_filtered = self
-            .prune_row_groups_by_inverted_index(row_group_size, &mut output, metrics)
+        self.prune_row_groups_by_inverted_index(row_group_size, &mut output, metrics)
             .await;
         if output.is_empty() {
             return output;
-        }
-
-        if !inverted_filtered {
-            self.prune_row_groups_by_minmax(read_format, parquet_meta, &mut output, metrics);
-            if output.is_empty() {
-                return output;
-            }
         }
 
         self.prune_row_groups_by_bloom_filter(row_group_size, parquet_meta, &mut output, metrics)
@@ -372,8 +396,15 @@ impl ParquetReaderBuilder {
             return output;
         }
 
-        self.prune_row_groups_by_fulltext_bloom(row_group_size, parquet_meta, &mut output, metrics)
+        if !fulltext_filtered {
+            self.prune_row_groups_by_fulltext_bloom(
+                row_group_size,
+                parquet_meta,
+                &mut output,
+                metrics,
+            )
             .await;
+        }
         output
     }
 
@@ -392,46 +423,42 @@ impl ParquetReaderBuilder {
             return false;
         }
 
-        let file_size_hint = self.file_handle.meta_ref().index_file_size();
-        let apply_res = match index_applier
-            .apply_fine(self.file_handle.file_id(), Some(file_size_hint))
-            .await
-        {
-            Ok(Some(res)) => res,
-            Ok(None) => {
-                return false;
-            }
-            Err(err) => {
-                if cfg!(any(test, feature = "test")) {
-                    panic!(
-                        "Failed to apply full-text index, region_id: {}, file_id: {}, err: {:?}",
-                        self.file_handle.region_id(),
-                        self.file_handle.file_id(),
-                        err
-                    );
-                } else {
-                    warn!(
-                        err; "Failed to apply full-text index, region_id: {}, file_id: {}",
-                        self.file_handle.region_id(), self.file_handle.file_id()
-                    );
-                }
+        let predicate_key = index_applier.predicate_key();
+        // Fast path: return early if the result is in the cache.
+        if self.index_result_cache_get(
+            predicate_key,
+            self.file_handle.file_id(),
+            output,
+            metrics,
+            INDEX_TYPE_FULLTEXT,
+        ) {
+            return true;
+        }
 
+        // Slow path: apply the index from the file.
+        let file_size_hint = self.file_handle.meta_ref().index_file_size();
+        let apply_res = index_applier
+            .apply_fine(self.file_handle.file_id(), Some(file_size_hint))
+            .await;
+        let selection = match apply_res {
+            Ok(Some(res)) => {
+                RowGroupSelection::from_row_ids(res, row_group_size, parquet_meta.num_row_groups())
+            }
+            Ok(None) => return false,
+            Err(err) => {
+                handle_index_error!(err, self.file_handle, INDEX_TYPE_FULLTEXT);
                 return false;
             }
         };
 
-        let selection = RowGroupSelection::from_row_ids(
-            apply_res,
-            row_group_size,
-            parquet_meta.num_row_groups(),
+        self.apply_index_result_and_update_cache(
+            predicate_key,
+            self.file_handle.file_id(),
+            selection,
+            output,
+            metrics,
+            INDEX_TYPE_FULLTEXT,
         );
-        let intersection = output.intersect(&selection);
-
-        metrics.rg_fulltext_filtered += output.row_group_count() - intersection.row_group_count();
-        metrics.rows_fulltext_filtered += output.row_count() - intersection.row_count();
-
-        *output = intersection;
-
         true
     }
 
@@ -449,44 +476,158 @@ impl ParquetReaderBuilder {
         let Some(index_applier) = &self.inverted_index_applier else {
             return false;
         };
-
         if !self.file_handle.meta_ref().inverted_index_available() {
             return false;
         }
-        let file_size_hint = self.file_handle.meta_ref().index_file_size();
-        let apply_output = match index_applier
-            .apply(self.file_handle.file_id(), Some(file_size_hint))
-            .await
-        {
-            Ok(output) => output,
-            Err(err) => {
-                if cfg!(any(test, feature = "test")) {
-                    panic!(
-                        "Failed to apply inverted index, region_id: {}, file_id: {}, err: {:?}",
-                        self.file_handle.region_id(),
-                        self.file_handle.file_id(),
-                        err
-                    );
-                } else {
-                    warn!(
-                        err; "Failed to apply inverted index, region_id: {}, file_id: {}",
-                        self.file_handle.region_id(), self.file_handle.file_id()
-                    );
-                }
 
+        let predicate_key = index_applier.predicate_key();
+        // Fast path: return early if the result is in the cache.
+        if self.index_result_cache_get(
+            predicate_key,
+            self.file_handle.file_id(),
+            output,
+            metrics,
+            INDEX_TYPE_INVERTED,
+        ) {
+            return true;
+        }
+
+        // Slow path: apply the index from the file.
+        let file_size_hint = self.file_handle.meta_ref().index_file_size();
+        let apply_res = index_applier
+            .apply(self.file_handle.file_id(), Some(file_size_hint))
+            .await;
+        let selection = match apply_res {
+            Ok(output) => {
+                RowGroupSelection::from_inverted_index_apply_output(row_group_size, output)
+            }
+            Err(err) => {
+                handle_index_error!(err, self.file_handle, INDEX_TYPE_INVERTED);
                 return false;
             }
         };
 
-        let selection =
-            RowGroupSelection::from_inverted_index_apply_output(row_group_size, apply_output);
-        let intersection = output.intersect(&selection);
+        self.apply_index_result_and_update_cache(
+            predicate_key,
+            self.file_handle.file_id(),
+            selection,
+            output,
+            metrics,
+            INDEX_TYPE_INVERTED,
+        );
+        true
+    }
 
-        metrics.rg_inverted_filtered += output.row_group_count() - intersection.row_group_count();
-        metrics.rows_inverted_filtered += output.row_count() - intersection.row_count();
+    async fn prune_row_groups_by_bloom_filter(
+        &self,
+        row_group_size: usize,
+        parquet_meta: &ParquetMetaData,
+        output: &mut RowGroupSelection,
+        metrics: &mut ReaderFilterMetrics,
+    ) -> bool {
+        let Some(index_applier) = &self.bloom_filter_index_applier else {
+            return false;
+        };
+        if !self.file_handle.meta_ref().bloom_filter_index_available() {
+            return false;
+        }
 
-        *output = intersection;
+        let predicate_key = index_applier.predicate_key();
+        // Fast path: return early if the result is in the cache.
+        if self.index_result_cache_get(
+            predicate_key,
+            self.file_handle.file_id(),
+            output,
+            metrics,
+            INDEX_TYPE_BLOOM,
+        ) {
+            return true;
+        }
 
+        // Slow path: apply the index from the file.
+        let file_size_hint = self.file_handle.meta_ref().index_file_size();
+        let rgs = parquet_meta
+            .row_groups()
+            .iter()
+            .enumerate()
+            .map(|(i, rg)| (rg.num_rows() as usize, output.contains_row_group(i)));
+        let apply_res = index_applier
+            .apply(self.file_handle.file_id(), Some(file_size_hint), rgs)
+            .await;
+        let selection = match apply_res {
+            Ok(apply_output) => RowGroupSelection::from_row_ranges(apply_output, row_group_size),
+            Err(err) => {
+                handle_index_error!(err, self.file_handle, INDEX_TYPE_BLOOM);
+                return false;
+            }
+        };
+
+        self.apply_index_result_and_update_cache(
+            predicate_key,
+            self.file_handle.file_id(),
+            selection,
+            output,
+            metrics,
+            INDEX_TYPE_BLOOM,
+        );
+        true
+    }
+
+    async fn prune_row_groups_by_fulltext_bloom(
+        &self,
+        row_group_size: usize,
+        parquet_meta: &ParquetMetaData,
+        output: &mut RowGroupSelection,
+        metrics: &mut ReaderFilterMetrics,
+    ) -> bool {
+        let Some(index_applier) = &self.fulltext_index_applier else {
+            return false;
+        };
+        if !self.file_handle.meta_ref().fulltext_index_available() {
+            return false;
+        }
+
+        let predicate_key = index_applier.predicate_key();
+        // Fast path: return early if the result is in the cache.
+        if self.index_result_cache_get(
+            predicate_key,
+            self.file_handle.file_id(),
+            output,
+            metrics,
+            INDEX_TYPE_FULLTEXT,
+        ) {
+            return true;
+        }
+
+        // Slow path: apply the index from the file.
+        let file_size_hint = self.file_handle.meta_ref().index_file_size();
+        let rgs = parquet_meta
+            .row_groups()
+            .iter()
+            .enumerate()
+            .map(|(i, rg)| (rg.num_rows() as usize, output.contains_row_group(i)));
+        let apply_res = index_applier
+            .apply_coarse(self.file_handle.file_id(), Some(file_size_hint), rgs)
+            .await;
+        let selection = match apply_res {
+            Ok(Some(apply_output)) => {
+                RowGroupSelection::from_row_ranges(apply_output, row_group_size)
+            }
+            Ok(None) => return false,
+            Err(err) => {
+                handle_index_error!(err, self.file_handle, INDEX_TYPE_FULLTEXT);
+                return false;
+            }
+        };
+
+        self.apply_index_result_and_update_cache(
+            predicate_key,
+            self.file_handle.file_id(),
+            selection,
+            output,
+            metrics,
+            INDEX_TYPE_FULLTEXT,
+        );
         true
     }
 
@@ -533,124 +674,55 @@ impl ParquetReaderBuilder {
         true
     }
 
-    async fn prune_row_groups_by_bloom_filter(
+    fn index_result_cache_get(
         &self,
-        row_group_size: usize,
-        parquet_meta: &ParquetMetaData,
+        predicate_key: &PredicateKey,
+        file_id: FileId,
         output: &mut RowGroupSelection,
         metrics: &mut ReaderFilterMetrics,
+        index_type: &str,
     ) -> bool {
-        let Some(index_applier) = &self.bloom_filter_index_applier else {
-            return false;
-        };
-
-        if !self.file_handle.meta_ref().bloom_filter_index_available() {
-            return false;
-        }
-
-        let file_size_hint = self.file_handle.meta_ref().index_file_size();
-        let apply_output = match index_applier
-            .apply(
-                self.file_handle.file_id(),
-                Some(file_size_hint),
-                parquet_meta
-                    .row_groups()
-                    .iter()
-                    .enumerate()
-                    .map(|(i, rg)| (rg.num_rows() as usize, output.contains_row_group(i))),
-            )
-            .await
-        {
-            Ok(apply_output) => apply_output,
-            Err(err) => {
-                if cfg!(any(test, feature = "test")) {
-                    panic!(
-                        "Failed to apply bloom filter index, region_id: {}, file_id: {}, err: {:?}",
-                        self.file_handle.region_id(),
-                        self.file_handle.file_id(),
-                        err
-                    );
-                } else {
-                    warn!(
-                        err; "Failed to apply bloom filter index, region_id: {}, file_id: {}",
-                        self.file_handle.region_id(), self.file_handle.file_id()
-                    );
-                }
-
-                return false;
+        if let Some(index_result_cache) = &self.cache_strategy.index_result_cache() {
+            let result = index_result_cache.get(predicate_key, file_id);
+            if let Some(result) = result {
+                apply_selection_and_update_metrics(output, &result, metrics, index_type);
+                return true;
             }
-        };
-
-        let selection = RowGroupSelection::from_row_ranges(apply_output, row_group_size);
-        let intersection = output.intersect(&selection);
-
-        metrics.rg_bloom_filtered += output.row_group_count() - intersection.row_group_count();
-        metrics.rows_bloom_filtered += output.row_count() - intersection.row_count();
-
-        *output = intersection;
-
-        true
+        }
+        false
     }
 
-    async fn prune_row_groups_by_fulltext_bloom(
+    fn apply_index_result_and_update_cache(
         &self,
-        row_group_size: usize,
-        parquet_meta: &ParquetMetaData,
+        predicate_key: &PredicateKey,
+        file_id: FileId,
+        result: RowGroupSelection,
         output: &mut RowGroupSelection,
         metrics: &mut ReaderFilterMetrics,
-    ) -> bool {
-        let Some(index_applier) = &self.fulltext_index_applier else {
-            return false;
-        };
+        index_type: &str,
+    ) {
+        apply_selection_and_update_metrics(output, &result, metrics, index_type);
 
-        if !self.file_handle.meta_ref().fulltext_index_available() {
-            return false;
+        if let Some(index_result_cache) = &self.cache_strategy.index_result_cache() {
+            index_result_cache.put(predicate_key.clone(), file_id, Arc::new(result));
         }
-
-        let file_size_hint = self.file_handle.meta_ref().index_file_size();
-        let apply_output = match index_applier
-            .apply_coarse(
-                self.file_handle.file_id(),
-                Some(file_size_hint),
-                parquet_meta
-                    .row_groups()
-                    .iter()
-                    .enumerate()
-                    .map(|(i, rg)| (rg.num_rows() as usize, output.contains_row_group(i))),
-            )
-            .await
-        {
-            Ok(Some(apply_output)) => apply_output,
-            Ok(None) => return false,
-            Err(err) => {
-                if cfg!(any(test, feature = "test")) {
-                    panic!(
-                        "Failed to apply fulltext index, region_id: {}, file_id: {}, err: {:?}",
-                        self.file_handle.region_id(),
-                        self.file_handle.file_id(),
-                        err
-                    );
-                } else {
-                    warn!(
-                        err; "Failed to apply fulltext index, region_id: {}, file_id: {}",
-                        self.file_handle.region_id(), self.file_handle.file_id()
-                    );
-                }
-
-                return false;
-            }
-        };
-
-        let selection = RowGroupSelection::from_row_ranges(apply_output, row_group_size);
-        let intersection = output.intersect(&selection);
-
-        metrics.rg_fulltext_filtered += output.row_group_count() - intersection.row_group_count();
-        metrics.rows_fulltext_filtered += output.row_count() - intersection.row_count();
-
-        *output = intersection;
-
-        true
     }
+}
+
+fn apply_selection_and_update_metrics(
+    output: &mut RowGroupSelection,
+    result: &RowGroupSelection,
+    metrics: &mut ReaderFilterMetrics,
+    index_type: &str,
+) {
+    let intersection = output.intersect(result);
+
+    let row_group_count = output.row_group_count() - intersection.row_group_count();
+    let row_count = output.row_count() - intersection.row_count();
+
+    metrics.update_index_metrics(index_type, row_group_count, row_count);
+
+    *output = intersection;
 }
 
 /// Metrics of filtering rows groups and rows.
@@ -728,6 +800,24 @@ impl ReaderFilterMetrics {
         READ_ROWS_IN_ROW_GROUP_TOTAL
             .with_label_values(&["bloom_filter_index_filtered"])
             .inc_by(self.rows_bloom_filtered as u64);
+    }
+
+    fn update_index_metrics(&mut self, index_type: &str, row_group_count: usize, row_count: usize) {
+        match index_type {
+            INDEX_TYPE_FULLTEXT => {
+                self.rg_fulltext_filtered += row_group_count;
+                self.rows_fulltext_filtered += row_count;
+            }
+            INDEX_TYPE_INVERTED => {
+                self.rg_inverted_filtered += row_group_count;
+                self.rows_inverted_filtered += row_count;
+            }
+            INDEX_TYPE_BLOOM => {
+                self.rg_bloom_filtered += row_group_count;
+                self.rows_bloom_filtered += row_count;
+            }
+            _ => {}
+        }
     }
 }
 
