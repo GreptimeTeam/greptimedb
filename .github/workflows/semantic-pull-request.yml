@@ -15,8 +15,6 @@ jobs:
   check:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
-      issues: write # Also required to add labels
       pull-requests: write  # Add permissions to modify PRs
     timeout-minutes: 10
     steps:
