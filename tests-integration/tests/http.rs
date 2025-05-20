@@ -1428,7 +1428,7 @@ transform:
         res.json::<serde_json::Value>().await["error"]
             .as_str()
             .unwrap(),
-        "Invalid request parameter: pipeline_name cannot start with greptime_"
+        "Invalid pipeline name: custom pipeline name cannot start with 'greptime_'"
     );
 
     let res = client
