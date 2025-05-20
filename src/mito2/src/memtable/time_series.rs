@@ -824,7 +824,10 @@ impl ValueBuilder {
                 } else {
                     let mut mutable_vector =
                         if let ConcreteDataType::String(_) = &self.field_types[idx] {
-                            FieldBuilder::String(StringBuilder::with_capacity(256, 4096))
+                            FieldBuilder::String(StringBuilder::with_capacity(
+                                num_rows.max(INITIAL_BUILDER_CAPACITY),
+                                0,
+                            ))
                         } else {
                             FieldBuilder::Other(
                                 self.field_types[idx]
