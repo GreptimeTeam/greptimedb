@@ -163,9 +163,11 @@ pub async fn query_pipeline(
         &pipeline_name,
         query_params.version.as_deref(),
         query_ctx.current_schema(),
-        true,
     )
     .context(PipelineSnafu)?;
+    p_name
+        .check_schema(&query_ctx.current_schema())
+        .context(PipelineSnafu)?;
 
     let (pipeline, pipeline_version) = handler.get_pipeline_str(&p_name, query_ctx.clone()).await?;
     p_name.set_timestamp(Some(pipeline_version));
@@ -192,9 +194,12 @@ pub async fn add_pipeline(
 
     // parse and check pipeline name
     let input_p_name =
-        PipelineName::from_name_and_version(&pipeline_name, None, query_ctx.current_schema(), true)
+        PipelineName::from_name_and_version(&pipeline_name, None, query_ctx.current_schema())
             .context(PipelineSnafu)?;
     input_p_name.check_internal_name().context(PipelineSnafu)?;
+    input_p_name
+        .check_schema(&query_ctx.current_schema())
+        .context(PipelineSnafu)?;
 
     ensure!(
         !payload.is_empty(),
@@ -246,9 +251,11 @@ pub async fn delete_pipeline(
         &pipeline_name,
         Some(&version_str),
         query_ctx.current_schema(),
-        true,
     )
     .context(PipelineSnafu)?;
+    p_name
+        .check_schema(&query_ctx.current_schema())
+        .context(PipelineSnafu)?;
 
     query_ctx.set_channel(Channel::Http);
     let query_ctx = Arc::new(query_ctx);
@@ -515,7 +522,6 @@ pub async fn pipeline_dryrun(
                         &check_pipeline_name_exists(params.pipeline_name)?,
                         params.pipeline_version.as_deref(),
                         query_ctx.current_schema(),
-                        false,
                     )
                     .context(PipelineSnafu)?;
 
@@ -559,7 +565,6 @@ pub async fn pipeline_dryrun(
                 &check_pipeline_name_exists(query_params.pipeline_name)?,
                 query_params.version.as_deref(),
                 query_ctx.current_schema(),
-                false,
             )
             .context(PipelineSnafu)?;
 

@@ -67,8 +67,7 @@ impl PipelineName {
     pub fn from_name_and_version(
         name: &str,
         version_str: Option<&str>,
-        schema: String,
-        check_schema: bool,
+        default_schema: String,
     ) -> Result<Self> {
         let version = to_pipeline_version(version_str)?;
 
@@ -84,23 +83,14 @@ impl PipelineName {
         match parts.len() {
             1 => Ok(Self {
                 name: name.to_string(),
-                schema,
+                schema: default_schema,
                 version,
             }),
-            2 => {
-                let p_schema = parts[0].to_string();
-                if check_schema {
-                    ensure!(
-                        p_schema == schema,
-                        PipelineSchemaDifferSnafu { p_schema, schema }
-                    );
-                }
-                Ok(Self {
-                    name: parts[1].to_string(),
-                    schema: p_schema,
-                    version,
-                })
-            }
+            2 => Ok(Self {
+                name: parts[1].to_string(),
+                schema: parts[0].to_string(),
+                version,
+            }),
             _ => InvalidPipelineNameSnafu {
                 reason: "pipeline name must be in the format of [<schema>.]<name>",
             }
@@ -115,6 +105,17 @@ impl PipelineName {
                 .starts_with(GREPTIME_INTERNAL_PIPELINE_NAME_PREFIX),
             InvalidPipelineNameSnafu {
                 reason: "custom pipeline name cannot start with 'greptime_'",
+            }
+        );
+        Ok(())
+    }
+
+    pub fn check_schema(&self, ctx_schema: &str) -> Result<()> {
+        ensure!(
+            self.schema == *ctx_schema,
+            PipelineSchemaDifferSnafu {
+                p_schema: self.schema.clone(),
+                schema: ctx_schema.to_string(),
             }
         );
         Ok(())
@@ -185,7 +186,7 @@ impl PipelineDefinition {
             ))
         } else {
             Ok(Self::ByNameAndValue(PipelineName::from_name_and_version(
-                name, version, schema, false,
+                name, version, schema,
             )?))
         }
     }
