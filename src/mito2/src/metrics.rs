@@ -70,8 +70,8 @@ lazy_static! {
         )
         .unwrap();
     /// Counter of scheduled failed flush jobs.
-    pub static ref FLUSH_ERRORS_TOTAL: IntCounter =
-        register_int_counter!("greptime_mito_flush_errors_total", "mito flush errors total").unwrap();
+    pub static ref FLUSH_FAILURE_TOTAL: IntCounter =
+        register_int_counter!("greptime_mito_flush_failure_total", "mito flush failure total").unwrap();
     /// Elapsed time of a flush job.
     pub static ref FLUSH_ELAPSED: HistogramVec = register_histogram_vec!(
             "greptime_mito_flush_elapsed",

@@ -33,7 +33,7 @@ use crate::error::{
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::metrics::{
-    FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_ERRORS_TOTAL, FLUSH_REQUESTS_TOTAL,
+    FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_FAILURE_TOTAL, FLUSH_REQUESTS_TOTAL,
     INFLIGHT_FLUSH_COUNT,
 };
 use crate::read::Source;
@@ -601,7 +601,7 @@ impl FlushScheduler {
     pub(crate) fn on_flush_failed(&mut self, region_id: RegionId, err: Arc<Error>) {
         error!(err; "Region {} failed to flush, cancel all pending tasks", region_id);
 
-        FLUSH_ERRORS_TOTAL.inc();
+        FLUSH_FAILURE_TOTAL.inc();
 
         // Remove this region.
         let Some(flush_status) = self.region_status.remove(&region_id) else {
