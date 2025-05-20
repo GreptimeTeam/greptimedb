@@ -843,8 +843,46 @@ impl StatementExecutor {
             }
         );
 
-        self.alter_logical_tables_procedure(alter_table_exprs, query_context)
-            .await?;
+        // group by physical table id
+        let mut groups: HashMap<TableId, Vec<AlterTableExpr>> = HashMap::new();
+        for expr in alter_table_exprs {
+            // Get table_id from catalog_manager
+            let catalog = if expr.catalog_name.is_empty() {
+                query_context.current_catalog()
+            } else {
+                &expr.catalog_name
+            };
+            let schema = if expr.schema_name.is_empty() {
+                query_context.current_schema()
+            } else {
+                expr.schema_name.to_string()
+            };
+            let table_name = &expr.table_name;
+            let table = self
+                .catalog_manager
+                .table(catalog, &schema, table_name, Some(&query_context))
+                .await
+                .context(CatalogSnafu)?
+                .with_context(|| TableNotFoundSnafu {
+                    table_name: format_full_table_name(catalog, &schema, table_name),
+                })?;
+            let table_id = table.table_info().ident.table_id;
+            let physical_table_id = self
+                .table_metadata_manager
+                .table_route_manager()
+                .get_physical_table_id(table_id)
+                .await
+                .context(TableMetadataManagerSnafu)?;
+            groups.entry(physical_table_id).or_default().push(expr);
+        }
+
+        // Submit procedure for each physical table
+        let mut handles = Vec::with_capacity(groups.len());
+        for (_physical_table_id, exprs) in groups {
+            let fut = self.alter_logical_tables_procedure(exprs, query_context.clone());
+            handles.push(fut);
+        }
+        let _results = futures::future::try_join_all(handles).await?;
 
         Ok(Output::new_with_affected_rows(0))
     }
