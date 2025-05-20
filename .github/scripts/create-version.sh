@@ -8,7 +8,7 @@ set -e
 # - If it's a nightly build, the version is 'nightly-YYYYMMDD-$(git rev-parse --short HEAD)', like 'nightly-20230712-e5b243c'.
 # create_version ${GIHUB_EVENT_NAME} ${NEXT_RELEASE_VERSION} ${NIGHTLY_RELEASE_PREFIX}
 function create_version() {
-  # Read from envrionment variables.
+  # Read from environment variables.
   if [ -z "$GITHUB_EVENT_NAME" ]; then
       echo "GITHUB_EVENT_NAME is empty" >&2
       exit 1
